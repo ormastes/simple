@@ -1,0 +1,76 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+# WHY THIS SPEC IS STRUCTURAL AND NOT BEHAVIOURAL
+#
+# A `expect("café,".char_code_at(3)).to_equal(233)` assertion here would pass
+# both before and after the fix, because `bin/simple test` executes the spec on
+# the RUST SEED -- and the seed's char_code_at (`s.chars().nth(idx)`) was always
+# correct. The defect lived in the pure-Simple interpreter's own
+# `eval_text_method` arm, which no spec in this tree executes: nothing outside
+# `src/compiler/10.frontend/core/interpreter/` imports the package, so the arm
+# is only reachable from inside a built compiler.
+#
+# That is exactly why a green suite never caught this. The behavioural evidence
+# for the fix was produced out-of-band by driving `core_interpret_expr` directly
+# (see doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md);
+# what this spec can durably hold is the SHAPE of the two source arms.
+
+describe "pure-Simple interpreter text.char_code_at is codepoint-indexed":
+    it "the live eval_text_method delegates to the codepoint-walking runtime":
+        # char_code_at is CHARACTER indexed in every other lane: the seed uses
+        # `s.chars().nth(idx)`, and the compiled lanes lower to
+        # __simple_rt_string_char_code_at, which walks UTF-8 widths.
+        #
+        # The interpreter used to slice ONE BYTE and re-decode it
+        # (`s.substring(idx, idx + 1)` -- byte-addressed), so on a multi-byte
+        # codepoint it decoded a bare continuation/lead byte. Measured before
+        # the fix: "café,".char_code_at(3) == 65533 (U+FFFD) instead of 233,
+        # and index 4 returned 65533 instead of 44 -- the whole tail shifted.
+        val ops = rt_file_read_text("src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl") ?? ""
+
+        expect(ops).to_contain("val idx = val_get_int(idx_val)")
+        # Must hand the raw index to the shared runtime walk.
+        expect(ops).to_contain("val_make_int(s.char_code_at(idx))")
+        # And must not reintroduce the one-byte-slice-then-redecode shape.
+        expect(ops).to_not_contain("val ch = s.substring(idx, idx + 1)")
+        expect(ops).to_not_contain("val first_ch = s.substring(0, 1)")
+
+    it "records that the duplicate eval_text_method has been removed":
+        # HISTORY: this arm used to exist in TWO files. eval_methods.spl held a
+        # 24-arm superset; _EvalOps/access_literal_assign_eval.spl held a 13-arm
+        # subset. The SUBSET was the one that ran -- the sole call site,
+        # call_method_eval.spl:586, lives in the same _EvalOps package, so the
+        # package-local definition shadowed the one __init__.spl re-exports.
+        # Proven by sabotage in both directions through core_interpret_expr.
+        #
+        # eval_methods.spl was entirely dead (all four of its functions were
+        # shadowed by strictly-larger _EvalOps versions, and its only callers
+        # were itself) and has been deleted. At least five bug docs had cited it
+        # as "the" self-hosted implementation, so leaving it in place kept
+        # misdirecting investigations.
+        #
+        # Full detail:
+        # doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md
+        val methods = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval_methods.spl") ?? ""
+        expect(methods).to_equal("")
+
+        val ops = rt_file_read_text("src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl") ?? ""
+        expect(ops).to_contain("fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64")
+        # The arms the dead superset used to hold exclusively now live here.
+        expect(ops).to_contain("method_name == \"byte_at\"")
+
+    it "leaves the deliberately byte-indexed neighbours alone":
+        # Not every index in this file is a character index. These stay BYTE
+        # indexed on purpose and agree with the seed:
+        #   len       -> byte length (seed: `s.len()`)
+        #   index_of  -> byte offset (seed: byte `windows` scan)
+        #   substring -> byte range  (seed explicitly documents byte indexing so
+        #                that a `len`/`index_of` result is valid input)
+        #   byte_at   -> raw byte    (documented divergence from char_code_at)
+        # Changing any of these to character indexing would desync them from
+        # each other, which is the mistake the seed's own comment warns about.
+        val ops = rt_file_read_text("src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl") ?? ""
+        expect(ops).to_contain("return val_make_int(s.len())")
+        expect(ops).to_contain("s.substring(s_start, s_end)")

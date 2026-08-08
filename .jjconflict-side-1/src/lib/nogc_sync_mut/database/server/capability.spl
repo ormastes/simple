@@ -1,0 +1,103 @@
+# Simple DB server tier — capability-checked access control
+#
+# DENY-WINS.  A grant is an explicit (table, op) pair.  Anything not explicitly
+# granted is denied.  There is no wildcard-deny escape hatch and no "admin"
+# bypass: an admin principal is simply one holding many grants.
+#
+# The check is a pure function of (capability, table, op) — no I/O, no store
+# access — so it is trivially testable and cannot be raced.
+
+# ============================================================================
+# Access kinds
+# ============================================================================
+
+val ACCESS_READ: text = "read"
+val ACCESS_WRITE: text = "write"
+
+# Map a protocol op onto the access it requires.
+# An op with no data reach ("" ) needs no table grant.
+fn op_access(op: text) -> text:
+    if op == "GET":
+        return ACCESS_READ
+    if op == "PUT" or op == "DEL":
+        return ACCESS_WRITE
+    ""
+
+# ============================================================================
+# DbCapability — the set of grants held by one principal
+# ============================================================================
+
+struct DbCapability:
+    principal: text
+    # key = "<table>:<access>" -> "1".  A Dict is used rather than a list so the
+    # check is O(1) and cannot be defeated by grant-list ordering.
+    grants: Dict<text, text>
+
+fn grant_key(table: text, access: text) -> text:
+    table + ":" + access
+
+fn empty_capability(principal: text) -> DbCapability:
+    DbCapability(principal: principal, grants: {})
+
+# Build a capability from explicit grants.  Read access is NOT implied by write
+# — a write-only principal genuinely cannot read.
+fn capability_with(principal: text, table_access_pairs: [text]) -> DbCapability:
+    var grants: Dict<text, text> = {}
+    for pair in table_access_pairs:
+        grants[pair] = "1"
+    DbCapability(principal: principal, grants: grants)
+
+fn capability_grant(capability: DbCapability, table: text, access: text) -> DbCapability:
+    # Returns a NEW capability.  Capabilities are values: never mutated in place,
+    # so a session cannot widen its own grants by aliasing.
+    var grants: Dict<text, text> = {}
+    for (key, value) in capability.grants:
+        grants[key] = value
+    grants[grant_key(table, access)] = "1"
+    DbCapability(principal: capability.principal, grants: grants)
+
+# The single authoritative check.  deny-wins: returns true ONLY on an explicit
+# grant match.
+fn capability_allows(capability: DbCapability, table: text, access: text) -> bool:
+    if access == "":
+        # Session-control ops (OPEN/BEGIN/COMMIT/PING/...) reach no data.
+        return true
+    if table == "":
+        # A data op with no table named is not "unrestricted" — it is denied.
+        return false
+    capability.grants.contains_key(grant_key(table, access))
+
+# Convenience: check a whole request shape at once.
+fn capability_allows_op(capability: DbCapability, op: text, table: text) -> bool:
+    capability_allows(capability, table, op_access(op))
+
+# ============================================================================
+# CapabilityTable — principal -> capability, the server's policy port
+# ============================================================================
+
+class CapabilityTable:
+    entries: Dict<text, DbCapability>
+
+    static fn new() -> CapabilityTable:
+        CapabilityTable(entries: {})
+
+    me register(capability: DbCapability):
+        # Extract -> mutate -> write back: never a mutating call through two
+        # field hops (interpreter drops those writes).
+        var entries = self.entries
+        entries[capability.principal] = capability
+        self.entries = entries
+
+    fn lookup(principal: text) -> DbCapability?:
+        if self.entries.contains_key(principal):
+            Some(self.entries[principal])
+        else:
+            nil
+
+    # Unknown principal => empty capability => every data op denied.
+    fn lookup_or_empty(principal: text) -> DbCapability:
+        match self.lookup(principal):
+            Some(capability):
+                capability
+            nil:
+                empty_capability(principal)

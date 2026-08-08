@@ -1,0 +1,349 @@
+# Structured VHDL generation primitives for the exec-core generator.
+#
+# Design rules (doc/01_research/hardware/riscv/python_rtl_generation_survey_2026-07-26.md,
+# doc/01_research/hardware/riscv/simple_grammar_vhdl_edsl_sufficiency_2026-07-26.md):
+# construction-API style — typed descriptor arrays are elaborated at generator
+# time into VHDL text. No Dict anywhere (determinism: seed Dict order is random
+# per process); arrays only. Per-section [text] arrays are joined once per
+# section (no whole-file push accumulation).
+
+struct VgGeneric:
+    name: text
+    ty: text
+    default_val: text
+
+struct VgPort:
+    pre_comments: [text]   # verbatim full lines emitted before the port line
+    name: text
+    dir: text              # "in" / "out"
+    ty: text
+    default_val: text      # "" when the port has no default
+
+struct VgAssign:
+    pre_comments: [text]
+    lhs: text
+    rhs: text
+
+struct VgConst:
+    pre_comments: [text]
+    name: text
+    ty: text
+    value: text
+
+struct VgArm:
+    pre_lines: [text]      # verbatim lines before the when-arm (comments/blanks)
+    code: text             # 7-bit opcode string, or "others"
+    inline: text           # non-empty => single-line arm: when <code> => <inline>
+    body: [text]           # verbatim arm body lines
+
+struct VgCsr:
+    sel: text              # e.g. "x\"f11\"" or "x\"b00\" | x\"c00\""
+    reg: text              # csr signal name
+    comment: text          # trailing comment (may be "")
+
+struct VgMemInit:
+    fn_name: text
+    ret_ty: text
+    file_name: text
+    line_var: text
+    word_var: text
+    mem_var: text
+    width: i64
+    fill_hex: text
+    fill_comment: text     # trailing comment on the fill line (may be "")
+    bound_const: text
+    aligned: bool
+
+# Per-core memory-map / layout geometry. Widths come from XlenConfig; the
+# address values and word counts live here.
+struct VgCoreGeometry:
+    entity_name: text
+    base_addr: i64
+    uart_addr: i64
+    rom_words: i64
+    data_rom_words: i64
+    scratch_base_word: i64
+    scratch_words: i64
+    mem_words: i64
+    aligned: bool          # rv64 golden aligns decl columns; rv32 does not
+    case_indent: i64       # indent of `case op is` in the decode FSM
+    csr_indent: i64        # indent of the CSR read-mux case
+
+# Variant-entity descriptors (flat/axi cores): the variant goldens use
+# GROUP-LOCAL column alignment (e.g. the AXI mem_* port group aligns to its own
+# width while the debug_* group does not), which a single `aligned` flag cannot
+# express. Each item carries its explicit field widths instead.
+struct VgGenericSpec:
+    pre_comments: [text]   # verbatim full lines emitted before the generic line
+    name: text
+    name_w: i64            # width of the name field before ": " (>= name.len())
+    ty: text
+    default_val: text
+
+struct VgPortSpec:
+    pre_comments: [text]
+    name: text
+    name_w: i64            # width of the name field before ": "
+    dir: text              # "in" / "out"
+    dir_w: i64             # width of the dir field before the type
+    ty: text
+    default_val: text      # "" when the port has no default
+
+fn no_lines() -> [text]:
+    var l: [text] = []
+    l
+
+fn vg_hex(v: i64, ndigits: i64) -> text:
+    val digits = "0123456789ABCDEF"
+    var result = ""
+    var i = ndigits - 1
+    while i >= 0:
+        val nibble = (v >> (i * 4)) & 0xF
+        result = result + digits[nibble].to_text()
+        i = i - 1
+    result
+
+fn vg_pad(s: text, n: i64) -> text:
+    var out = s
+    while out.len() < n:
+        out = out + " "
+    out
+
+fn vg_append(dst: [text], src: [text]) -> [text]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out = out.push(src[i])
+        i = i + 1
+    out
+
+fn vg_spaces(n: i64) -> text:
+    vg_pad("", n)
+
+# Re-emit a section shifted right by `delta` spaces (blank lines stay blank).
+# Lets a variant core reuse a base-core section that sits at a different
+# nesting depth (e.g. rv64 flat/axi decode arms are 2 deeper than the base).
+fn vg_reindent(lines: [text], delta: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < lines.len():
+        if lines[i] == "":
+            out = out.push("")
+        else:
+            out = out.push(vg_spaces(delta) + lines[i])
+        i = i + 1
+    out
+
+fn emit_library_header() -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    l = l.push("use ieee.std_logic_1164.all;")
+    l = l.push("use ieee.numeric_std.all;")
+    l = l.push("use std.textio.all;")
+    l = l.push("use ieee.std_logic_textio.all;")
+    l
+
+fn max_generic_name_len(gens: [VgGeneric]) -> i64:
+    var m = 0
+    var i = 0
+    while i < gens.len():
+        if gens[i].name.len() > m:
+            m = gens[i].name.len()
+        i = i + 1
+    m
+
+fn max_port_name_len(ports: [VgPort]) -> i64:
+    var m = 0
+    var i = 0
+    while i < ports.len():
+        if ports[i].name.len() > m:
+            m = ports[i].name.len()
+        i = i + 1
+    m
+
+fn emit_entity(name: text, gens: [VgGeneric], ports: [VgPort], aligned: bool) -> [text]:
+    var l: [text] = []
+    l = l.push("entity " + name + " is")
+    l = l.push("  generic (")
+    val gw = max_generic_name_len(gens)
+    var i = 0
+    while i < gens.len():
+        val g = gens[i]
+        var gname = g.name
+        if aligned:
+            gname = vg_pad(g.name, gw)
+        var line = "    " + gname + " : " + g.ty + " := " + g.default_val
+        if i < gens.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("  port (")
+    val pw = max_port_name_len(ports)
+    i = 0
+    while i < ports.len():
+        val p = ports[i]
+        l = vg_append(l, p.pre_comments)
+        var pname = p.name
+        var pdir = p.dir
+        if aligned:
+            pname = vg_pad(p.name, pw)
+            pdir = vg_pad(p.dir, 3)
+        var line = "    " + pname + " : " + pdir + " " + p.ty
+        if p.default_val != "":
+            line = line + " := " + p.default_val
+        if i < ports.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("end entity " + name + ";")
+    l
+
+# Variant sibling of emit_entity driven by explicit per-item field widths.
+fn emit_entity_spec(name: text, gens: [VgGenericSpec], ports: [VgPortSpec]) -> [text]:
+    var l: [text] = []
+    l = l.push("entity " + name + " is")
+    l = l.push("  generic (")
+    var i = 0
+    while i < gens.len():
+        val g = gens[i]
+        l = vg_append(l, g.pre_comments)
+        var line = "    " + vg_pad(g.name, g.name_w) + ": " + g.ty + " := " + g.default_val
+        if i < gens.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("  port (")
+    i = 0
+    while i < ports.len():
+        val p = ports[i]
+        l = vg_append(l, p.pre_comments)
+        var line = "    " + vg_pad(p.name, p.name_w) + ": " + vg_pad(p.dir, p.dir_w) + " " + p.ty
+        if p.default_val != "":
+            line = line + " := " + p.default_val
+        if i < ports.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("end entity " + name + ";")
+    l
+
+fn emit_constants(consts: [VgConst], aligned: bool) -> [text]:
+    var m = 0
+    var i = 0
+    while i < consts.len():
+        if consts[i].name.len() > m:
+            m = consts[i].name.len()
+        i = i + 1
+    var l: [text] = []
+    i = 0
+    while i < consts.len():
+        val c = consts[i]
+        l = vg_append(l, c.pre_comments)
+        var cname = c.name
+        if aligned:
+            cname = vg_pad(c.name, m)
+        l = l.push("  constant " + cname + " : " + c.ty + " := " + c.value + ";")
+        i = i + 1
+    l
+
+fn emit_regs_type(xlen: i64) -> text:
+    "  type regs_t is array(0 to 31) of unsigned(" + (xlen - 1).to_text() + " downto 0);"
+
+fn emit_state_type() -> text:
+    "  type state_t is (S_FETCH, S_EXEC, S_UART, S_DIVIDE, S_LOAD, S_STORE);"
+
+# Memory-init impure function. `prefix` is prepended to the .mem file name
+# (default "" emits the golden's relative form, e.g. "rv32_payload.mem";
+# harness runs may pass an absolute directory prefix ending in "/").
+fn emit_mem_init(d: VgMemInit, prefix: text) -> [text]:
+    var l: [text] = []
+    l = l.push("  impure function " + d.fn_name + " return " + d.ret_ty + " is")
+    var file_head = "file f"
+    var line_head = "variable " + d.line_var
+    var word_head = "variable " + d.word_var
+    var mem_head = "variable " + d.mem_var
+    var idx_head = "variable idx"
+    if d.aligned:
+        file_head = vg_pad(file_head, 13)
+        line_head = vg_pad(line_head, 13)
+        word_head = vg_pad(word_head, 13)
+        mem_head = vg_pad(mem_head, 13)
+        idx_head = vg_pad(idx_head, 13)
+    l = l.push("    " + file_head + " : text open read_mode is \"" + prefix + d.file_name + "\";")
+    l = l.push("    " + line_head + " : line;")
+    l = l.push("    " + word_head + " : std_logic_vector(" + (d.width - 1).to_text() + " downto 0);")
+    l = l.push("    " + mem_head + " : " + d.ret_ty + " := (others => x\"" + d.fill_hex + "\");" + d.fill_comment)
+    l = l.push("    " + idx_head + " : natural := 0;")
+    l = l.push("  begin")
+    l = l.push("    while not endfile(f) loop")
+    l = l.push("      readline(f, " + d.line_var + ");")
+    l = l.push("      hread(" + d.line_var + ", " + d.word_var + ");")
+    l = l.push("      if idx < " + d.bound_const + " then")
+    l = l.push("        " + d.mem_var + "(idx) := " + d.word_var + ";")
+    l = l.push("      end if;")
+    l = l.push("      idx := idx + 1;")
+    l = l.push("    end loop;")
+    l = l.push("    return " + d.mem_var + ";")
+    l = l.push("  end function;")
+    l
+
+fn emit_assigns(assigns: [VgAssign], aligned: bool) -> [text]:
+    var m = 0
+    var i = 0
+    while i < assigns.len():
+        if assigns[i].lhs.len() > m:
+            m = assigns[i].lhs.len()
+        i = i + 1
+    var l: [text] = []
+    i = 0
+    while i < assigns.len():
+        val a = assigns[i]
+        l = vg_append(l, a.pre_comments)
+        var lhs = a.lhs
+        if aligned:
+            lhs = vg_pad(a.lhs, m)
+        l = l.push("  " + lhs + " <= " + a.rhs + ";")
+        i = i + 1
+    l
+
+# Instruction-decode case: `case op is` + table-driven when-arms + `end case;`.
+# case_indent is the indent of the case/end-case keywords; arms sit 2 deeper.
+fn emit_decode_case(arms: [VgArm], case_indent: i64) -> [text]:
+    val ci = vg_spaces(case_indent)
+    val ai = vg_spaces(case_indent + 2)
+    var l: [text] = []
+    l = l.push(ci + "case op is")
+    var i = 0
+    while i < arms.len():
+        val a = arms[i]
+        l = vg_append(l, a.pre_lines)
+        var code_txt = "others"
+        if a.code != "others":
+            code_txt = "\"" + a.code + "\""
+        if a.inline != "":
+            l = l.push(ai + "when " + code_txt + " => " + a.inline)
+        else:
+            l = l.push(ai + "when " + code_txt + " =>")
+            l = vg_append(l, a.body)
+        i = i + 1
+    l = l.push(ci + "end case;")
+    l
+
+# Zicsr read-mux case, table-driven (shared by rv32's six funct3 arms and
+# rv64's combined arm).
+fn emit_csr_read_case(indent: i64, entries: [VgCsr]) -> [text]:
+    val ci = vg_spaces(indent)
+    var l: [text] = []
+    l = l.push(ci + "case unsigned(ins(31 downto 20)) is")
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        l = l.push(ci + "  when " + e.sel + " => r(rd) := " + e.reg + ";" + e.comment)
+        i = i + 1
+    l = l.push(ci + "  when others => r(rd) := (others => '0');")
+    l = l.push(ci + "end case;")
+    l

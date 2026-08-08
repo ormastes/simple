@@ -1,0 +1,200 @@
+#!/bin/sh
+# Hosted production WM CSS-override evidence.
+#
+# This deliberately drives the existing production fullscreen launcher twice:
+# once with the package default and once with a deterministic six-token CSS
+# fixture.  Its command input is the hosted composer's diagnostic command
+# channel; it is not Winit, OS, or physical input evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm-host-css-override-evidence}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+FIXTURE_PATH="$BUILD_DIR/glass-six-token-override.css"
+BASELINE_DIR="$BUILD_DIR/baseline"
+OVERRIDE_DIR="$BUILD_DIR/override"
+CANONICAL="$ROOT_DIR/scripts/check/check-wm-production-fullscreen-evidence.shs"
+
+# This wrapper owns only named children of a caller-selected build directory.
+# Refuse the filesystem root so a malformed BUILD_DIR cannot turn lane cleanup
+# into a broad host mutation.
+if [ "$BUILD_DIR" = / ] || [ "$BUILD_DIR" = . ] || [ "$BUILD_DIR" = .. ] || [ -z "$BUILD_DIR" ]; then
+    echo "wm_host_css_override_status=fail"
+    echo "wm_host_css_override_reason=unsafe-build-dir"
+    exit 1
+fi
+
+mkdir -p "$BUILD_DIR"
+rm -f "$EVIDENCE_ENV" "$REPORT_PATH" "$FIXTURE_PATH"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        printf 'unavailable\n'
+    fi
+}
+
+emit_failure() {
+    reason="$1"
+    {
+        echo "wm_host_css_override_status=fail"
+        echo "wm_host_css_override_reason=$reason"
+        echo "wm_host_css_override_fixture=$FIXTURE_PATH"
+        echo "wm_host_css_override_input_status=diagnostic-synthetic-compositor-command-channel-not-winit-or-physical"
+        echo "wm_host_css_override_baseline_report=$BASELINE_DIR/report.md"
+        echo "wm_host_css_override_override_report=$OVERRIDE_DIR/report.md"
+    } >"$EVIDENCE_ENV"
+    {
+        echo "# Hosted WM CSS Override Evidence"
+        echo
+        echo "- status: fail"
+        echo "- reason: $reason"
+        echo "- input: diagnostic synthetic compositor command channel; not Winit or physical input evidence"
+    } >"$REPORT_PATH"
+    cat "$EVIDENCE_ENV"
+}
+
+# Keep all six parser-owned WM tokens explicit and intentionally unlike the
+# package palette.  Do not replace this fixture with a package source file:
+# its stable text is part of the cross-run material-identity contract.
+printf '%s\n' \
+    ':root {' \
+    '  --wm-bg: #10263d;' \
+    '  --wm-fg: #f8fbff;' \
+    '  --wm-accent: #74d5ff;' \
+    '  --wm-surface: #1b3654;' \
+    '  --wm-surface-hover: #285070;' \
+    '  --wm-error: #ff6f91;' \
+    '}' >"$FIXTURE_PATH"
+
+run_production_lane() {
+    lane_dir="$1"
+    theme_file="$2"
+    rm -rf "$lane_dir"
+    mkdir -p "$lane_dir"
+    if [ -n "$theme_file" ]; then
+        SIMPLE_GUI_BACKEND= SIMPLE_WM_RASTER=simple-2d-winit-buffer \
+            SIMPLE_WM_THEME_FILE="$theme_file" \
+            BUILD_DIR="$lane_dir" REPORT_PATH="$lane_dir/report.md" \
+            sh "$CANONICAL" >"$lane_dir/driver.stdout" 2>"$lane_dir/driver.stderr"
+    else
+        SIMPLE_GUI_BACKEND= SIMPLE_WM_RASTER=simple-2d-winit-buffer \
+            BUILD_DIR="$lane_dir" REPORT_PATH="$lane_dir/report.md" \
+            sh "$CANONICAL" >"$lane_dir/driver.stdout" 2>"$lane_dir/driver.stderr"
+    fi
+}
+
+if ! run_production_lane "$BASELINE_DIR" ""; then
+    emit_failure baseline-production-launch-failed
+    exit 1
+fi
+if ! run_production_lane "$OVERRIDE_DIR" "$FIXTURE_PATH"; then
+    emit_failure override-production-launch-failed
+    exit 1
+fi
+
+baseline_env="$BASELINE_DIR/evidence.env"
+override_env="$OVERRIDE_DIR/evidence.env"
+[ -s "$baseline_env" ] && [ -s "$override_env" ] || {
+    emit_failure production-evidence-env-missing
+    exit 1
+}
+grep -Fxq 'wm_production_fullscreen_status=pass' "$baseline_env" || {
+    emit_failure baseline-production-evidence-not-pass
+    exit 1
+}
+grep -Fxq 'wm_production_fullscreen_status=pass' "$override_env" || {
+    emit_failure override-production-evidence-not-pass
+    exit 1
+}
+grep -Fxq 'wm_production_fullscreen_readback=presented-pixel-buffer' "$baseline_env" || {
+    emit_failure baseline-presented-buffer-missing
+    exit 1
+}
+grep -Fxq 'wm_production_fullscreen_readback=presented-pixel-buffer' "$override_env" || {
+    emit_failure override-presented-buffer-missing
+    exit 1
+}
+grep -Fqx "[theme-evidence] css_override_path=$FIXTURE_PATH installed=true" "$OVERRIDE_DIR/launch.log" || {
+    emit_failure css-override-installation-missing
+    exit 1
+}
+
+theme_evidence_line() {
+    grep -E '^\[theme-evidence\] id=[^ ]+ source_manifest_sha256=[0-9a-f]{64} material_sha256=[0-9a-f]{64} ' "$1" | tail -n 1 || true
+}
+field_from_theme_line() {
+    field="$1"
+    line="$2"
+    printf '%s\n' "$line" | awk -v key="$field" '{ for (i = 1; i <= NF; i++) { split($i, pair, "="); if (pair[1] == key) { print pair[2]; exit } } }'
+}
+
+baseline_line="$(theme_evidence_line "$BASELINE_DIR/launch.log")"
+override_line="$(theme_evidence_line "$OVERRIDE_DIR/launch.log")"
+[ -n "$baseline_line" ] && [ -n "$override_line" ] || {
+    emit_failure theme-material-evidence-missing
+    exit 1
+}
+baseline_material="$(field_from_theme_line material_sha256 "$baseline_line")"
+override_material="$(field_from_theme_line material_sha256 "$override_line")"
+baseline_source="$(field_from_theme_line source_manifest_sha256 "$baseline_line")"
+override_source="$(field_from_theme_line source_manifest_sha256 "$override_line")"
+[ "$baseline_material" != "$override_material" ] || {
+    emit_failure effective-material-identity-unchanged
+    exit 1
+}
+[ "$baseline_source" = "$override_source" ] || {
+    emit_failure package-source-identity-unexpectedly-changed
+    exit 1
+}
+
+baseline_capture="$BASELINE_DIR/windowed.ppm"
+override_capture="$OVERRIDE_DIR/windowed.ppm"
+[ -s "$baseline_capture" ] && [ -s "$override_capture" ] || {
+    emit_failure presented-buffer-capture-missing
+    exit 1
+}
+baseline_pixels_sha256="$(sha256_file "$baseline_capture")"
+override_pixels_sha256="$(sha256_file "$override_capture")"
+[ "$baseline_pixels_sha256" != unavailable ] && [ "$override_pixels_sha256" != unavailable ] || {
+    emit_failure presented-buffer-checksum-unavailable
+    exit 1
+}
+if cmp -s "$baseline_capture" "$override_capture"; then
+    emit_failure expected-presented-buffer-pixels-unchanged
+    exit 1
+fi
+
+{
+    echo "wm_host_css_override_status=pass"
+    echo "wm_host_css_override_reason=live-production-css-override-verified"
+    echo "wm_host_css_override_fixture=$FIXTURE_PATH"
+    echo "wm_host_css_override_fixture_sha256=$(sha256_file "$FIXTURE_PATH")"
+    echo "wm_host_css_override_input_status=diagnostic-synthetic-compositor-command-channel-not-winit-or-physical"
+    echo "wm_host_css_override_baseline_material_sha256=$baseline_material"
+    echo "wm_host_css_override_effective_material_sha256=$override_material"
+    echo "wm_host_css_override_source_manifest_sha256=$override_source"
+    echo "wm_host_css_override_baseline_presented_pixels_sha256=$baseline_pixels_sha256"
+    echo "wm_host_css_override_effective_presented_pixels_sha256=$override_pixels_sha256"
+    echo "wm_host_css_override_presented_pixels_changed=true"
+    echo "wm_host_css_override_baseline_report=$BASELINE_DIR/report.md"
+    echo "wm_host_css_override_override_report=$OVERRIDE_DIR/report.md"
+} >"$EVIDENCE_ENV"
+{
+    echo "# Hosted WM CSS Override Evidence"
+    echo
+    echo "- status: pass"
+    echo "- fixture: $FIXTURE_PATH"
+    echo "- override installation: verified from hosted entry evidence"
+    echo "- effective material: $baseline_material -> $override_material"
+    echo "- package source identity: preserved ($override_source)"
+    echo "- presented-buffer pixels: changed ($baseline_pixels_sha256 -> $override_pixels_sha256)"
+    echo "- input: diagnostic synthetic compositor command channel; not Winit or physical input evidence"
+} >"$REPORT_PATH"
+cat "$EVIDENCE_ENV"

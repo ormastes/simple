@@ -1,0 +1,219 @@
+use std.spipe.*
+use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.drivers.virtio.virtio_input_ops.{
+    BTN_LEFT,
+    BTN_MIDDLE,
+    BTN_RIGHT,
+    EV_KEY,
+    EV_REL,
+    EV_SYN,
+    KEY_LEFTALT,
+    KEY_LEFTCTRL,
+    KEY_RIGHTALT,
+    KEY_RIGHTCTRL,
+    KEY_Q,
+    KEY_VALUE_PRESS,
+    KEY_VALUE_RELEASE,
+    REL_X,
+    REL_Y,
+    REL_WHEEL,
+    SYN_REPORT
+}
+use os.kernel.arch.arm64.virtio_input.{
+    ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
+    ARM64_VIRTIO_INPUT_DEVICE_POINTER
+}
+
+fn poll_mouse_through_trait(input: Arm64VirtioInputBackend) -> i64:
+    if val mouse = input.poll_mouse():
+        return mouse.x * 1000 + mouse.y
+    -1
+
+describe "ARM64 VirtIO InputBackend":
+    it "retains keyboard press and release edges with distinct sequences":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
+            EV_KEY,
+            KEY_Q,
+            KEY_VALUE_PRESS,
+            1u32
+        )).to_equal(true)
+        val pressed = backend.poll_key()
+        if val event = pressed:
+            match event:
+                KeyEvent.Press(key):
+                    expect(key).to_equal(Key.Q)
+                _:
+                    fail_test("expected Q press")
+        else:
+            fail_test("expected a retained keyboard press")
+        expect(backend.delivered_key_sequence).to_equal(1)
+        expect(backend.delivered_key_code).to_equal(KEY_Q)
+        expect(backend.delivered_key_value).to_equal(KEY_VALUE_PRESS)
+        expect(backend.delivered_key_irq_status).to_equal(1u32)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
+            EV_KEY,
+            KEY_Q,
+            KEY_VALUE_RELEASE
+        )).to_equal(true)
+        val released = backend.poll_key()
+        if val event = released:
+            match event:
+                KeyEvent.Release(key):
+                    expect(key).to_equal(Key.Q)
+                _:
+                    fail_test("expected Q release")
+        else:
+            fail_test("expected a retained keyboard release")
+        expect(backend.delivered_key_sequence).to_equal(2)
+
+    it "aggregates and resets pointer frames while preserving the optional struct return":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_X, 5u32, 1u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_X, 7u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_Y, 4294967294u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_Y, 1u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_KEY, BTN_LEFT, KEY_VALUE_PRESS)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_KEY, BTN_RIGHT, KEY_VALUE_PRESS)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_KEY, BTN_MIDDLE, KEY_VALUE_RELEASE)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_SYN, SYN_REPORT, 0u32)).to_equal(true)
+
+        expect(poll_mouse_through_trait(backend)).to_equal(332239)
+        expect(backend.delivered_mouse_sequence).to_equal(1)
+        expect(backend.delivered_pointer_rel_x_seen).to_equal(true)
+        expect(backend.delivered_pointer_rel_x).to_equal(12)
+        expect(backend.delivered_pointer_rel_y_seen).to_equal(true)
+        expect(backend.delivered_pointer_rel_y).to_equal(-1)
+        expect(backend.delivered_pointer_left_edge).to_equal(true)
+        expect(backend.delivered_pointer_left_value).to_equal(KEY_VALUE_PRESS)
+        expect(backend.delivered_pointer_right_edge).to_equal(true)
+        expect(backend.delivered_pointer_right_value).to_equal(KEY_VALUE_PRESS)
+        expect(backend.delivered_pointer_middle_edge).to_equal(true)
+        expect(backend.delivered_pointer_middle_value).to_equal(KEY_VALUE_RELEASE)
+        expect(backend.delivered_pointer_type).to_equal(EV_SYN)
+        expect(backend.delivered_pointer_code).to_equal(SYN_REPORT)
+        expect(backend.delivered_pointer_irq_status).to_equal(1u32)
+
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_X, 4294967294u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_X, 1u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_Y, 4u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL, REL_Y, 4294967295u32)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_KEY, BTN_LEFT, KEY_VALUE_RELEASE)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_KEY, BTN_MIDDLE, KEY_VALUE_PRESS)).to_equal(true)
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_SYN, SYN_REPORT, 0u32)).to_equal(true)
+
+        expect(poll_mouse_through_trait(backend)).to_equal(331242)
+        expect(backend.delivered_mouse_sequence).to_equal(2)
+        expect(backend.delivered_pointer_rel_x_seen).to_equal(true)
+        expect(backend.delivered_pointer_rel_x).to_equal(-1)
+        expect(backend.delivered_pointer_rel_y_seen).to_equal(true)
+        expect(backend.delivered_pointer_rel_y).to_equal(3)
+        expect(backend.delivered_pointer_left_edge).to_equal(true)
+        expect(backend.delivered_pointer_left_value).to_equal(KEY_VALUE_RELEASE)
+        expect(backend.delivered_pointer_right_edge).to_equal(false)
+        expect(backend.delivered_pointer_middle_edge).to_equal(true)
+        expect(backend.delivered_pointer_middle_value).to_equal(KEY_VALUE_PRESS)
+
+        expect(backend.feed_raw_event(ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_SYN, SYN_REPORT, 0u32)).to_equal(true)
+        expect(poll_mouse_through_trait(backend)).to_equal(331242)
+        expect(backend.delivered_mouse_sequence).to_equal(3)
+        expect(backend.delivered_pointer_rel_x_seen).to_equal(false)
+        expect(backend.delivered_pointer_rel_x).to_equal(0)
+        expect(backend.delivered_pointer_rel_y_seen).to_equal(false)
+        expect(backend.delivered_pointer_rel_y).to_equal(0)
+        expect(backend.delivered_pointer_left_edge).to_equal(false)
+        expect(backend.delivered_pointer_right_edge).to_equal(false)
+        expect(backend.delivered_pointer_middle_edge).to_equal(false)
+
+    it "tracks left and right modifier edges independently":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
+            EV_KEY,
+            KEY_LEFTALT,
+            KEY_VALUE_PRESS
+        )).to_equal(true)
+        val pressed = backend.poll_key()
+        expect(pressed != nil).to_equal(true)
+        expect(backend.alt_held()).to_equal(true)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD,
+            EV_KEY,
+            KEY_LEFTALT,
+            KEY_VALUE_RELEASE
+        )).to_equal(true)
+        val released = backend.poll_key()
+        expect(released != nil).to_equal(true)
+        expect(backend.alt_held()).to_equal(false)
+
+    it "preserves Ctrl plus Alt through press and release sequences":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_LEFTCTRL, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(true)
+        expect(backend.alt_held()).to_equal(false)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTALT, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(true)
+        expect(backend.alt_held()).to_equal(true)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_LEFTCTRL, KEY_VALUE_RELEASE
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(false)
+        expect(backend.alt_held()).to_equal(true)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTALT, KEY_VALUE_RELEASE
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(false)
+        expect(backend.alt_held()).to_equal(false)
+
+    it "delivers signed wheel deltas only at SYN_REPORT":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL,
+            REL_WHEEL, 4294967294u32
+        )).to_equal(true)
+        expect(backend.poll_mouse() == nil).to_equal(true)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_SYN,
+            SYN_REPORT, 0u32
+        )).to_equal(true)
+        if val event = backend.poll_mouse():
+            expect(event.wheel).to_equal(-2)
+        else:
+            fail_test("expected wheel event after SYN_REPORT")
+
+    it "rejects invalid devices, keyboard record types, and occupied slots":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(99u32, EV_KEY, KEY_LEFTALT, KEY_VALUE_PRESS)).to_equal(false)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_REL,
+            REL_X, 1u32
+        )).to_equal(false)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTCTRL, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL,
+            REL_X, 1u32
+        )).to_equal(false)

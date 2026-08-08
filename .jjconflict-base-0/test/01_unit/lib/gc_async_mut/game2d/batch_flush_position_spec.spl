@@ -1,0 +1,50 @@
+# Regression: SpriteBatch.flush must place sprites at their world position.
+#
+# batch.spl used to convert the world position with `@extern fn _f64_to_i32`,
+# an extern with NO implementation anywhere in the runtime or compiler. Every
+# call returned nil, so the draw position was garbage. batch_spec.spl passed
+# 8/8 throughout because it never flushed to an engine and never checked a
+# pixel — this spec exists to make that coverage non-vacuous.
+# See doc/08_tracking/bug/game2d_f64_to_i32_extern_unregistered_2026-07-31.md
+
+use std.spec.*
+use std.game2d.batch.{SpriteBatch}
+use std.game2d.sprite.{Sprite}
+use std.gpu.engine2d.engine.{Engine2D}
+
+val W: i32 = 64
+val H: i32 = 64
+val BG: u32 = 0xFF000000u32
+
+describe "SpriteBatch.flush world positioning":
+
+    it "draws the sprite at its world position, not at the origin":
+        var engine = Engine2D.create_with_backend(W, H, "cpu_simd")
+        engine.clear(BG)
+        var batch = SpriteBatch.create(1)
+        batch.add(Sprite.create(1, 30.0, 20.0, 4, 4))
+        batch.flush(engine)
+        engine.present()
+        val px = engine.read_pixels()
+
+        # Inside the sprite footprint: must be the default white tint.
+        assert_true(px[20 * W + 30] != BG, "pixel at (30,20) should be painted")
+        assert_true(px[22 * W + 32] != BG, "pixel at (32,22) should be painted")
+        # A nil/zero position would have painted the top-left corner instead.
+        assert_true(px[0] == BG, "pixel at (0,0) must stay background")
+        assert_true(px[2 * W + 2] == BG, "pixel at (2,2) must stay background")
+
+    it "keeps a second sprite at its own distinct position":
+        var engine = Engine2D.create_with_backend(W, H, "cpu_simd")
+        engine.clear(BG)
+        var batch = SpriteBatch.create(1)
+        batch.add(Sprite.create(1, 5.0, 5.0, 3, 3))
+        batch.add(Sprite.create(1, 40.0, 40.0, 3, 3))
+        batch.flush(engine)
+        engine.present()
+        val px = engine.read_pixels()
+
+        assert_true(px[5 * W + 5] != BG, "first sprite should paint (5,5)")
+        assert_true(px[40 * W + 40] != BG, "second sprite should paint (40,40)")
+        # The gap between them proves they did not collapse onto one point.
+        assert_true(px[20 * W + 20] == BG, "gap at (20,20) must stay background")

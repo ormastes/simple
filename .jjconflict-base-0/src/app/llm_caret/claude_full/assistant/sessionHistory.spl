@@ -1,0 +1,210 @@
+val HISTORY_PAGE_SIZE: i64 = 100
+
+struct SDKMessage:
+    raw: text
+
+struct HistoryPage:
+    events: [SDKMessage]
+    firstId: text
+    hasMore: bool
+
+struct SessionEventsResponse:
+    data: [SDKMessage]
+    has_more: bool
+    first_id: text
+    last_id: text
+
+struct HistoryAuthCtx:
+    baseUrl: text
+    headers: text
+
+struct HistoryFetchRequest:
+    url: text
+    headers: text
+    params: text
+    timeout_ms: i64
+    label: text
+
+struct HistoryFetchResult:
+    status: i64
+    body: text
+
+fn createHistoryAuthCtx(sessionId: text, baseApiUrl: text, accessToken: text, orgUUID: text) -> HistoryAuthCtx:
+    HistoryAuthCtx(
+        baseUrl: baseApiUrl + "/v1/sessions/" + sessionId + "/events",
+        headers: "Authorization: Bearer " + accessToken + "\n" +
+            "anthropic-beta: ccr-byoc-2025-07-29\n" +
+            "x-organization-uuid: " + orgUUID
+    )
+
+fn fetchPage(ctx: HistoryAuthCtx, params: text, label: text, fetcher: fn(HistoryFetchRequest) -> HistoryFetchResult) -> HistoryPage?:
+    val result = fetcher(HistoryFetchRequest(
+        url: ctx.baseUrl,
+        headers: ctx.headers,
+        params: params,
+        timeout_ms: 15000,
+        label: label
+    ))
+    if result.status != 200:
+        return nil
+    val parsed = parseSessionEventsResponse(result.body)
+    HistoryPage(events: parsed.data, firstId: parsed.first_id, hasMore: parsed.has_more)
+
+fn fetchLatestEvents(ctx: HistoryAuthCtx, limit: i64, fetcher: fn(HistoryFetchRequest) -> HistoryFetchResult) -> HistoryPage?:
+    return fetchPage(ctx, latestEventsParams(limit), "fetchLatestEvents", fetcher)
+
+fn fetchOlderEvents(ctx: HistoryAuthCtx, beforeId: text, limit: i64, fetcher: fn(HistoryFetchRequest) -> HistoryFetchResult) -> HistoryPage?:
+    return fetchPage(ctx, olderEventsParams(beforeId, limit), "fetchOlderEvents", fetcher)
+
+fn latestEventsParams(limit: i64) -> text:
+    "limit=" + _effective_limit(limit).to_text() + "&anchor_to_latest=true"
+
+fn olderEventsParams(beforeId: text, limit: i64) -> text:
+    "limit=" + _effective_limit(limit).to_text() + "&before_id=" + beforeId
+
+fn parseSessionEventsResponse(raw: text) -> SessionEventsResponse:
+    SessionEventsResponse(
+        data: _parse_data_messages(raw),
+        has_more: _extract_json_bool(raw, "has_more"),
+        first_id: _extract_json_string_or_empty(raw, "first_id"),
+        last_id: _extract_json_string_or_empty(raw, "last_id")
+    )
+
+fn _effective_limit(limit: i64) -> i64:
+    if limit <= 0:
+        return HISTORY_PAGE_SIZE
+    limit
+
+fn _Q() -> text:
+    "\""
+
+fn _slice_text(s: text, start: i64, end: i64) -> text:
+    var out = ""
+    var i = 0
+    for ch in s:
+        if i >= end:
+            break
+        if i >= start:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _char_at(s: text, i: i64) -> text:
+    _slice_text(s, i, i + 1)
+
+fn _is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val search = key
+    var offset = 0
+    while offset + search.len() <= json.len():
+        if _slice_text(json, offset, offset + search.len()) != search:
+            offset = offset + 1
+            continue
+        var value_start = offset + search.len()
+        while value_start < json.len() and _char_at(json, value_start) != ":":
+            value_start = value_start + 1
+        if value_start < json.len():
+            value_start = value_start + 1
+            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+                value_start = value_start + 1
+            return value_start
+        offset = offset + search.len()
+    -1
+
+fn _extract_json_bool(json: text, key: text) -> bool:
+    _extract_json_value(json, key) == "true"
+
+fn _extract_json_string_or_empty(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0 or start >= json.len():
+        return ""
+    if _slice_text(json, start, start + 4) == "null":
+        return ""
+    if _char_at(json, start) != _Q():
+        return ""
+    var i = start + 1
+    var escaped = false
+    while i < json.len():
+        val ch = _char_at(json, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == _Q():
+            return _slice_text(json, start + 1, i)
+        i = i + 1
+    ""
+
+fn _extract_json_value(json: text, key: text) -> text:
+    val start = _find_json_value_start(json, key)
+    if start < 0:
+        return "null"
+    var end = start
+    while end < json.len():
+        val ch = _char_at(json, end)
+        if ch == "," or ch == "}" or ch == "]" or _is_ws(ch):
+            break
+        end = end + 1
+    _slice_text(json, start, end)
+
+fn _parse_data_messages(json: text) -> [SDKMessage]:
+    val array_start = _find_json_value_start(json, "data")
+    if array_start < 0 or array_start >= json.len():
+        return []
+    if _char_at(json, array_start) != "[":
+        return []
+    val body = _top_level_array_body(_slice_text(json, array_start, json.len())).trim()
+    if body == "":
+        return []
+    _split_top_level_items(body)
+
+fn _top_level_array_body(text_value: text) -> text:
+    var depth = 0
+    var in_string = false
+    var escaped = false
+    var i = 0
+    while i < text_value.len():
+        val ch = _char_at(text_value, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "[":
+                depth = depth + 1
+            elif ch == "]":
+                depth = depth - 1
+                if depth == 0:
+                    return _slice_text(text_value, 1, i)
+        i = i + 1
+    ""
+
+fn _split_top_level_items(body: text) -> [SDKMessage]:
+    var messages: [SDKMessage] = []
+    var depth = 0
+    var in_string = false
+    var escaped = false
+    var start = 0
+    var i = 0
+    while i < body.len():
+        val ch = _char_at(body, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{" or ch == "[":
+                depth = depth + 1
+            elif ch == "}" or ch == "]":
+                depth = depth - 1
+            elif ch == "," and depth == 0:
+                messages = messages + [SDKMessage(raw: _slice_text(body, start, i).trim())]
+                start = i + 1
+        i = i + 1
+    messages + [SDKMessage(raw: _slice_text(body, start, body.len()).trim())]

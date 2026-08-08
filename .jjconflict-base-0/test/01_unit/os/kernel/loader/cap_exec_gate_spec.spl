@@ -1,0 +1,123 @@
+"""
+# Exec Capability Gate Specification (WP-21)
+
+**Feature IDs:** #OS-P2-EXEC-CAP-GATE
+**Category:** Runtime / Security
+**Difficulty:** 2/5
+**Status:** Implemented (real logic); caller-identity threading still open
+**Plan:** doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md (WP-21)
+
+## Overview
+
+`src/os/kernel/loader/cap_exec_gate.spl`'s `exec_cap_check(caller, path)`
+previously built a fresh, empty `CapabilityManager` per call — its
+`records: [TaskCapRecord]` store starts empty and nothing ever populates it
+for an fs-exec caller, so any nonzero caller was unconditionally denied
+regardless of what capabilities it actually held. That made the gate
+impossible to prove correct: a deny-only spec against it would pass whether
+or not the underlying capability-matching logic works at all.
+
+`exec_cap_check_caps(caps: CapabilitySet, path: text)` is the real check,
+built on `CapabilitySet.has(...)` — the SAME model `TaskControlBlock.capabilities`
+and `spawn_authority.spl` already use in production, instead of a throwaway
+per-call record store. This spec proves BOTH directions: a caller pledged to
+a set lacking FileExec/ProcessSpawn is denied, and a caller holding both
+rights is allowed — the pair that makes either assertion meaningful.
+
+Caller-identity threading (mapping a real fs-exec `caller: i64` to its real
+`CapabilitySet` at the `fs_exec_spawn_as` call site) remains a separate, open
+gap — see `doc/08_tracking/bug/exec_cap_check_caller_identity_not_threaded_2026-08-07.md`.
+"""
+
+use std.spec.{describe, it, expect, step, assert_true, assert_false}
+use os.kernel.types.capability_types.{
+    CapabilitySet, CapabilityToken, CapabilityKind
+}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps, exec_cap_check}
+
+val EXEC_PATH: text = "/sys/apps/hello_world.smf"
+val EACCES: i32 = -13
+
+fn _token(kind: CapabilityKind) -> CapabilityToken:
+    CapabilityToken(
+        kind: kind,
+        generation: 1u64,
+        owner: 7u64,
+        token_id: 1u64,
+        parent_token_id: 0u64,
+        depth: 2
+    )
+
+fn _pledged(kinds: [CapabilityKind]) -> CapabilitySet:
+    var toks: [CapabilityToken] = []
+    for k in kinds:
+        toks.push(_token(k))
+    var set = CapabilitySet(caps: toks, is_pledged: false)
+    set.pledge(kinds)
+    set
+
+describe "exec_cap_check_caps (real capability logic, WP-21)", fn():
+    """Proves both directions of the real FileExec+ProcessSpawn check: deny
+    when either right is missing or path-scoped wrong, allow when both are
+    genuinely held."""
+    it "denies a caller pledged to a set with NEITHER right", fn():
+        step("build a deny-all pledged set")
+        val caps = CapabilitySet.empty()
+        step("check exec capability against it")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(EACCES)
+
+    it "denies a caller pledged to ProcessSpawn only (missing FileExec)", fn():
+        step("pledge only ProcessSpawn")
+        val caps = _pledged([CapabilityKind.ProcessSpawn])
+        step("check exec capability against it")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(EACCES)
+
+    it "denies a caller pledged to FileExec only (missing ProcessSpawn)", fn():
+        step("pledge only FileExec for the target path")
+        val caps = _pledged([CapabilityKind.FileExec(path_prefix: EXEC_PATH)])
+        step("check exec capability against it")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(EACCES)
+
+    it "denies FileExec pledged to a DIFFERENT path prefix", fn():
+        step("pledge FileExec + ProcessSpawn, but scoped to another path")
+        val caps = _pledged([
+            CapabilityKind.FileExec(path_prefix: "/sys/apps/other.smf"),
+            CapabilityKind.ProcessSpawn
+        ])
+        step("check exec capability against the real target path")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(EACCES)
+
+    it "allows a caller pledged to BOTH FileExec(path) and ProcessSpawn", fn():
+        step("pledge exactly the two required rights")
+        val caps = _pledged([
+            CapabilityKind.FileExec(path_prefix: EXEC_PATH),
+            CapabilityKind.ProcessSpawn
+        ])
+        step("check exec capability against it")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(0)
+
+    it "allows the unpledged ambient-full set", fn():
+        step("build the ambient-full set (root/boot only in production)")
+        val caps = CapabilitySet.full()
+        step("check exec capability against it")
+        val rc = exec_cap_check_caps(caps, EXEC_PATH)
+        expect(rc).to_equal(0)
+
+describe "exec_cap_check (scalar-caller ABI, unchanged scope)", fn():
+    """The scalar-caller entry point production callers actually use: caller
+    0 is the kernel-origin sentinel; every other caller is denied because no
+    real CapabilitySet is threadable at this ABI today (see module header)."""
+    it "passes the kernel-origin sentinel caller == 0", fn():
+        step("call with caller 0")
+        val rc = exec_cap_check(0, EXEC_PATH)
+        expect(rc).to_equal(0)
+
+    it "denies any nonzero caller (no capability set threadable at this ABI)", fn():
+        step("call with a nonzero caller id")
+        val rc = exec_cap_check(42, EXEC_PATH)
+        expect(rc).to_equal(EACCES)

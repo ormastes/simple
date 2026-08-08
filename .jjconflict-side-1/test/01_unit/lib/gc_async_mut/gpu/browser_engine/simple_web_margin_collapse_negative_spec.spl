@@ -1,0 +1,62 @@
+"""
+# Simple Web Negative Margin Collapsing Specification
+
+## Overview
+
+Proves that the pure-Simple HTML/CSS block layout collapses adjacent
+vertical margins per CSS 2.2 §8.3.1 (`max(positive margins) + min(negative
+margins)`) rather than a plain `max()`, which is only correct when every
+margin involved is non-negative.
+
+Two compounding defects were found and fixed together:
+
+1. `margin_token_vh_px()` in `simple_web_html_layout_renderer_foundation.spl`
+   fed a literal margin token straight into `parse_int()`, which only
+   accumulates digits and silently drops a leading `-`, so `-10px` parsed as
+   `10`. `resolve_vertical_margin_px()` in
+   `simple_web_html_layout_renderer_layout.spl` then additionally clamped any
+   remaining negative value (the -999..-1 range) to `0` — that range was
+   meant to be dead space, reachable only because `parse_int()` could never
+   itself return a negative value, so nothing distinguished "unset" from "a
+   genuine negative px margin".
+2. The block-flow collapse itself, at three sites in
+   `simple_web_html_layout_renderer_layout.spl`, inlined a plain `max()`
+   (`if a > b: a else: b`) instead of the correct CSS formula. A pure,
+   already-written (but until now unused) helper for that formula already
+   existed: `collapse_margins_signed()` in `layout_m14_types.spl`.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+fn _layout_field(html: text, id: text, field: text) -> i32:
+    val raw = simple_web_layout_debug_layout_by_id(html, 480, 240, id, field)
+    parse_int(raw)
+
+fn _positive_and_negative_html() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;\"><div id=\"a\" style=\"height:20px; margin-bottom:-10px;\"></div><div id=\"b\" style=\"height:20px; margin-top:20px;\"></div></body></html>"
+
+fn _both_negative_html() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;\"><div id=\"c\" style=\"height:20px; margin-bottom:-10px;\"></div><div id=\"d\" style=\"height:20px; margin-top:-20px;\"></div></body></html>"
+
+describe "Simple Web negative margin collapsing (CSS 2.2 8.3.1)":
+
+    it "combines a negative margin-bottom with a positive margin-top (max(0,20) + min(-10,0) = 10)":
+        step("Render a -10px margin-bottom block followed by a 20px margin-top block")
+        val html = _positive_and_negative_html()
+        expect(_layout_field(html, "a", "y")).to_equal(0)
+        expect(_layout_field(html, "a", "h")).to_equal(20)
+        # Plain max(-10, 20) would wrongly give 20 (b.y = 40). Correct CSS
+        # collapse is max(0,20) + min(-10,0) = 10, so b.y = 20 + 10 = 30.
+        expect(_layout_field(html, "b", "y")).to_equal(30)
+
+    it "takes the more-negative margin when both adjoining margins are negative (min(-10,-20) = -20)":
+        step("Render a -10px margin-bottom block followed by a -20px margin-top block")
+        val html = _both_negative_html()
+        expect(_layout_field(html, "c", "y")).to_equal(0)
+        expect(_layout_field(html, "c", "h")).to_equal(20)
+        # Plain max(-10, -20) would wrongly give -10 (d.y = 10). Correct CSS
+        # collapse is max(0,0) + min(-10,-20) = -20, so d.y = 20 - 20 = 0.
+        expect(_layout_field(html, "d", "y")).to_equal(0)

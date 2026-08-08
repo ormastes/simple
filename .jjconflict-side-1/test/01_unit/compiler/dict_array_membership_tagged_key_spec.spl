@@ -1,0 +1,127 @@
+"""
+# Dict / Array Membership Uses a Tagged Key Specification
+
+**Feature IDs:** #MIR-MEMBERSHIP-TAGGED-KEY
+**Category:** Compiler / codegen runtime ABI
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/dict_array_contains_raw_untagged_key_2026-08-02.md
+
+## Overview
+
+`d.has(k)`, `d.contains(k)`, `d.contains_key(k)`, `k in d` and
+`[..].contains(x)` must answer membership against the SAME tagged-value ABI the
+store path uses. `rt_contains(collection, value)` takes a tagged runtime value:
+`rt_core_dict_canon_key` reads the low 3 bits as a type tag, and the array arm
+compares elements with `rt_native_eq`. A raw untagged integer therefore
+canonicalises as an unrelated value and is compared against correctly-tagged
+stored keys, which produces wrong answers in BOTH directions -- a false
+negative for a present key and a false positive for an absent one.
+
+## Lane coverage warning -- READ BEFORE TRUSTING A GREEN RUN
+
+The defect these examples describe is **native-codegen only**. `simple test`
+executes the tree-walking interpreter, which is CORRECT here, so this spec is
+green on the interpreter both before and after the codegen fix and is NOT by
+itself an active gate for the native lane. It pins the contract, guards the
+interpreter against regressing to the native behaviour, and gives the native
+lane a ready-made source of truth: building these same cases with
+`native-build` and running the resulting ELF is what actually gates codegen
+(transcript in the bug doc above).
+
+Every expectation below is hand-computed, not captured from a run.
+"""
+
+use std.spec
+
+
+describe "Dict membership answers with a tagged key":
+    """
+    ## Present keys must be found
+
+    The store path tags the key (`lower_dict_key` -> `box_runtime_value`, i.e.
+    `k << 3` for a small int). A membership query that passes the raw `k`
+    canonicalises to a different slot and misses its own key.
+    """
+
+    it "finds every key it stored":
+        var b: {i64: i64} = {}
+        b[7] = 70
+        b[9] = 90
+        b[11] = 110
+        b[13] = 130
+        assert_true(b.has(7))
+        assert_true(b.has(9))
+        assert_true(b.has(11))
+        assert_true(b.has(13))
+
+    it "keeps index reads and keys() consistent with has()":
+        var b: {i64: i64} = {}
+        b[7] = 70
+        b[9] = 90
+        b[11] = 110
+        b[13] = 130
+        expect(b[7]).to_equal(70)
+        expect(b[9]).to_equal(90)
+        expect(b[11]).to_equal(110)
+        expect(b[13]).to_equal(130)
+        expect(b.keys().len()).to_equal(4)
+
+    it "reports absent keys as absent":
+        var b: {i64: i64} = {}
+        b[7] = 70
+        b[9] = 90
+        b[11] = 110
+        b[13] = 130
+        expect_not(b.has(5))
+        expect_not(b.has(6))
+
+    it "answers the in operator in both directions":
+        var b: {i64: i64} = {}
+        b[7] = 70
+        b[9] = 90
+        b[11] = 110
+        b[13] = 130
+        assert_true(9 in b)
+        expect_not(5 in b)
+
+    it "finds all 64 keys of a 64-key dict":
+        var v: {i64: i64} = {}
+        for i in range(0, 64):
+            v[i] = i
+        var missing = 0
+        for i in range(0, 64):
+            if not v.has(i):
+                missing = missing + 1
+        expect(missing).to_equal(0)
+        expect(v.keys().len()).to_equal(64)
+
+    it "finds both keys of a two-key dict holding 8 and 9":
+        var w: {i64: i64} = {}
+        w[8] = 80
+        w[9] = 90
+        assert_true(w.has(8))
+        assert_true(w.has(9))
+        expect_not(w.has(7))
+
+
+describe "Array membership answers with a tagged element":
+    """
+    ## `[..].contains(x)` must not silently answer false
+
+    An array `.contains` has no `rt_array_contains` implementation; the correct
+    destination is the receiver-dispatching `rt_contains`, whose array arm
+    compares with `rt_native_eq` and therefore also requires the needle tagged.
+    A raw needle made every element compare unequal -- `false` for present
+    elements, the exact silent-wrong-answer this spec forbids.
+    """
+
+    it "finds present elements and rejects absent ones":
+        val a = [10, 9, 30]
+        assert_true(a.contains(10))
+        assert_true(a.contains(9))
+        assert_true(a.contains(30))
+        expect_not(a.contains(7))

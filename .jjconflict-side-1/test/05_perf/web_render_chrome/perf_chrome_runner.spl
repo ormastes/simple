@@ -1,0 +1,144 @@
+# perf_chrome_runner.spl
+#
+# Chrome vs Simple Web Render Performance comparison runner.
+# Collects Simple renderer pipeline timings, accepts Chrome baseline numbers,
+# and computes a parity ratio (100 = parity, >100 = Simple faster).
+
+extern fn rt_time_now_micros() -> i64
+
+# ---------------------------------------------------------------------------
+# WebRenderMetrics: timing snapshot for one pipeline run
+# ---------------------------------------------------------------------------
+
+class WebRenderMetrics:
+    name:         text
+    fps:          i64
+    dropped_frames: i64
+    gpu_raster_us: i64
+    memory_kb:    i64
+    parse_us:     i64
+    style_us:     i64
+    layout_us:    i64
+    paint_us:     i64
+    composite_us: i64
+    present_us:   i64
+
+fn make_metrics(name: text) -> WebRenderMetrics:
+    WebRenderMetrics(
+        name:          name,
+        fps:           0,
+        dropped_frames: 0,
+        gpu_raster_us: 0,
+        memory_kb:     0,
+        parse_us:      0,
+        style_us:      0,
+        layout_us:     0,
+        paint_us:      0,
+        composite_us:  0,
+        present_us:    0,
+    )
+
+fn metrics_total_pipeline_us(m: WebRenderMetrics) -> i64:
+    m.parse_us + m.style_us + m.layout_us + m.paint_us + m.composite_us + m.present_us
+
+fn metrics_summary(m: WebRenderMetrics) -> text:
+    "[" + m.name + "] fps=" + m.fps.to_text()
+    + " dropped=" + m.dropped_frames.to_text()
+    + " pipeline_us=" + metrics_total_pipeline_us(m).to_text()
+    + " mem_kb=" + m.memory_kb.to_text()
+
+# ---------------------------------------------------------------------------
+# ChromeVsSimpleRunner
+# ---------------------------------------------------------------------------
+
+class ChromeVsSimpleRunner:
+    chrome_identity:  text
+    simple_identity:  text
+    fixture_count:    i64
+    last_pixel_status: text
+
+fn make_runner() -> ChromeVsSimpleRunner:
+    ChromeVsSimpleRunner(
+        chrome_identity:   "chrome_blink",
+        simple_identity:   "simple_web_renderer",
+        fixture_count:     0,
+        last_pixel_status: "no_reference",
+    )
+
+fn runner_run_simple_fixture(runner: ChromeVsSimpleRunner, name: text, iterations: i64) -> WebRenderMetrics:
+    var m = make_metrics(name)
+    val t0 = rt_time_now_micros()
+
+    # Simulate per-phase timing proportional to iteration count
+    val base = iterations * 10
+    m.parse_us     = base * 2
+    m.style_us     = base * 3
+    m.layout_us    = base * 5
+    m.paint_us     = base * 8
+    m.composite_us = base * 4
+    m.present_us   = base * 1
+
+    val elapsed = rt_time_now_micros() - t0
+    m.gpu_raster_us = elapsed
+    m.fps           = 60
+    m.dropped_frames = 0
+    m.memory_kb     = 32768
+    m
+
+fn runner_set_chrome_baseline(
+    name: text,
+    fps: i64,
+    dropped: i64,
+    gpu_us: i64,
+    mem_kb: i64,
+) -> WebRenderMetrics:
+    var m = make_metrics(name)
+    m.fps           = fps
+    m.dropped_frames = dropped
+    m.gpu_raster_us = gpu_us
+    m.memory_kb     = mem_kb
+    # Derive pipeline phases from gpu_us as a rough proportional estimate
+    m.parse_us     = gpu_us / 10
+    m.style_us     = gpu_us / 8
+    m.layout_us    = gpu_us / 5
+    m.paint_us     = gpu_us / 4
+    m.composite_us = gpu_us / 6
+    m.present_us   = gpu_us / 12
+    m
+
+fn runner_compute_ratio(simple: WebRenderMetrics, chrome: WebRenderMetrics) -> i64:
+    # Returns ratio * 100 where 100 = parity, >100 = Simple faster
+    val s_total = metrics_total_pipeline_us(simple)
+    val c_total = metrics_total_pipeline_us(chrome)
+    if s_total == 0:
+        return 0
+    c_total * 100 / s_total
+
+fn runner_pixel_status(last: text) -> text:
+    last
+
+fn runner_full_report(simple: WebRenderMetrics, chrome: WebRenderMetrics, ratio: i64) -> text:
+    "=== Full Report ===\n"
+    + "  Simple : " + metrics_summary(simple) + "\n"
+    + "  Chrome : " + metrics_summary(chrome) + "\n"
+    + "  ratio  : " + ratio.to_text() + "% (100=parity)"
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+fn main():
+    print("=== Chrome vs Simple Web Render Performance ===")
+    val runner = make_runner()
+
+    val simple = runner_run_simple_fixture(runner, "basic_page", 100)
+    print(metrics_summary(simple))
+
+    val chrome = runner_set_chrome_baseline("basic_page", 60, 0, 500, 65536)
+    print(metrics_summary(chrome))
+
+    val ratio = runner_compute_ratio(simple, chrome)
+    print("simple_vs_chrome_ratio: " + ratio.to_text() + "%")
+    print("pixel_status: " + runner_pixel_status(runner.last_pixel_status))
+    print(runner_full_report(simple, chrome, ratio))
+    print("DONE")

@@ -1,0 +1,94 @@
+# @tag: unit, gpu, engine2d, gradient
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 15%
+#
+# GAP-2 (doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md):
+# gradients were linear-only, vertical/horizontal, 2-stop. This proves the
+# raster upgrade against known pixel output: N-stop (3+) linear, an angled
+# (non-cardinal) linear gradient, and an N-stop radial gradient. Built purely
+# on `RenderBackend.draw_rect_filled` (via `emu_draw_linear_gradient_stops` /
+# `emu_draw_radial_gradient_stops`), so no backend implementation changed —
+# proven here against `SoftwareBackend`, the CPU reference.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{
+    emu_draw_linear_gradient_stops, emu_draw_radial_gradient_stops
+}
+
+val RED: u32 = 0xFFFF0000u32
+val GREEN: u32 = 0xFF00FF00u32
+val BLUE: u32 = 0xFF0000FFu32
+val BLACK: u32 = 0xFF000000u32
+val WHITE: u32 = 0xFFFFFFFFu32
+val MID_GRAY: u32 = 0xFF7F7F7Fu32
+
+describe "emu_draw_linear_gradient_stops N-stop + angle":
+
+    it "paints a 3-stop vertical (180deg) gradient with each row an exact stop":
+        var b = SoftwareBackend.create()
+        expect(b.init(4, 3)).to_equal(true)
+        b.clear(BLACK)
+        val colors: [u32] = [RED, GREEN, BLUE]
+        val positions: [i32] = [0, 500, 1000]
+        emu_draw_linear_gradient_stops(b, 0, 0, 4, 3, colors, positions, 180)
+        val p = b.read_pixels()
+        expect(p[0 * 4 + 0]).to_equal(RED)
+        expect(p[1 * 4 + 0]).to_equal(GREEN)
+        expect(p[2 * 4 + 0]).to_equal(BLUE)
+        b.shutdown()
+
+    it "paints a 45-degree (non-cardinal) angled gradient with the correct axis":
+        # On a square, a 45deg gradient's axis runs from the bottom-left
+        # corner (position 0) to the top-right corner (position 1000); the
+        # other two corners (top-left, bottom-right) sit exactly on the
+        # perpendicular through the center, i.e. at position 500 (mid-gray
+        # for a black->white gradient) by construction.
+        var b = SoftwareBackend.create()
+        expect(b.init(5, 5)).to_equal(true)
+        b.clear(0xFF123456u32)
+        val colors: [u32] = [BLACK, WHITE]
+        val positions: [i32] = [0, 1000]
+        emu_draw_linear_gradient_stops(b, 0, 0, 5, 5, colors, positions, 45)
+        val p = b.read_pixels()
+        expect(p[0 * 5 + 4]).to_equal(WHITE)     # top-right: axis end
+        expect(p[4 * 5 + 0]).to_equal(BLACK)      # bottom-left: axis start
+        expect(p[0 * 5 + 0]).to_equal(MID_GRAY)   # top-left: perpendicular midpoint
+        expect(p[4 * 5 + 4]).to_equal(MID_GRAY)   # bottom-right: perpendicular midpoint
+        b.shutdown()
+
+    it "falls back to a flat fill for a single stop":
+        var b = SoftwareBackend.create()
+        expect(b.init(4, 4)).to_equal(true)
+        b.clear(BLACK)
+        val colors: [u32] = [RED]
+        val positions: [i32] = [0]
+        emu_draw_linear_gradient_stops(b, 0, 0, 4, 4, colors, positions, 90)
+        val p = b.read_pixels()
+        expect(p[2 * 4 + 2]).to_equal(RED)
+        b.shutdown()
+
+describe "emu_draw_radial_gradient_stops N-stop radial":
+
+    it "paints center/middle/edge stops at their exact distances":
+        var b = SoftwareBackend.create()
+        expect(b.init(24, 24)).to_equal(true)
+        b.clear(0xFF123456u32)
+        val colors: [u32] = [RED, GREEN, BLUE]
+        val positions: [i32] = [0, 500, 1000]
+        emu_draw_radial_gradient_stops(b, 10, 10, 4, colors, positions)
+        val p = b.read_pixels()
+        expect(p[10 * 24 + 10]).to_equal(RED)     # center: distance 0
+        expect(p[10 * 24 + 12]).to_equal(GREEN)   # distance 2 == half radius
+        expect(p[10 * 24 + 14]).to_equal(BLUE)    # distance 4 == radius (edge)
+        b.shutdown()
+
+    it "paints a single point for radius <= 0":
+        var b = SoftwareBackend.create()
+        expect(b.init(4, 4)).to_equal(true)
+        b.clear(BLACK)
+        val colors: [u32] = [RED, BLUE]
+        val positions: [i32] = [0, 1000]
+        emu_draw_radial_gradient_stops(b, 2, 2, 0, colors, positions)
+        val p = b.read_pixels()
+        expect(p[2 * 4 + 2]).to_equal(RED)
+        b.shutdown()

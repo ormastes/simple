@@ -1,0 +1,97 @@
+"""Modeled NT thread/wait bridge over the Wine thread adapter contract."""
+
+use common.wine_thread_adapter.{wine_thread_adapter_gate}
+
+class WineNtThreadHandle:
+    handle: i64
+    entry: text
+    exit_code: i64
+    signaled: bool
+
+class WineNtThreadTable:
+    threads: [WineNtThreadHandle]
+    next_handle: i64
+    ready: bool
+    state: text
+    last_error: text
+
+class WineNtThreadWaitResult:
+    ok: bool
+    state: text
+    table: WineNtThreadTable
+    handle: i64
+    wait_status: text
+    exit_code: i64
+    last_error: text
+
+fn _thread(handle: i64, entry: text, exit_code: i64, signaled: bool) -> WineNtThreadHandle:
+    WineNtThreadHandle(handle: handle, entry: entry, exit_code: exit_code, signaled: signaled)
+
+fn _table(threads: [WineNtThreadHandle], next_handle: i64, ready: bool, state: text, last_error: text) -> WineNtThreadTable:
+    WineNtThreadTable(threads: threads, next_handle: next_handle, ready: ready, state: state, last_error: last_error)
+
+fn _result(ok: bool, state: text, table: WineNtThreadTable, handle: i64, wait_status: text, exit_code: i64, last_error: text) -> WineNtThreadWaitResult:
+    WineNtThreadWaitResult(ok: ok, state: state, table: table, handle: handle, wait_status: wait_status, exit_code: exit_code, last_error: last_error)
+
+fn _find_thread(threads: [WineNtThreadHandle], handle: i64) -> WineNtThreadHandle:
+    for thread in threads:
+        if thread.handle == handle:
+            return thread
+    _thread(0, "", -1, false)
+
+fn _with_error(table: WineNtThreadTable, error: text) -> WineNtThreadTable:
+    _table(table.threads, table.next_handle, table.ready, table.state, error)
+
+pub fn wine_nt_thread_wait_required_calls() -> [text]:
+    [
+        "CreateThread",
+        "WaitForSingleObject",
+        "GetLastError"
+    ]
+
+pub fn wine_nt_thread_table_new(thread_apis: text) -> WineNtThreadTable:
+    val gate = wine_thread_adapter_gate(thread_apis)
+    if not gate.ready:
+        return _table([], 0x80, false, gate.state, gate.state)
+    _table([], 0x80, true, "ready", "OK")
+
+pub fn wine_nt_create_thread(table: WineNtThreadTable, entry: text, exit_code: i64) -> WineNtThreadWaitResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", -1, table.last_error)
+    if entry == "":
+        val errored = _with_error(table, "ERROR_INVALID_PARAMETER")
+        return _result(false, "invalid-entrypoint", errored, 0, "", -1, errored.last_error)
+    val handle = table.next_handle
+    var threads = table.threads
+    threads.push(_thread(handle, entry, exit_code, true))
+    val updated = _table(threads, handle + 1, table.ready, table.state, "OK")
+    _result(true, "created", updated, handle, "", exit_code, "OK")
+
+pub fn wine_nt_create_pending_thread(table: WineNtThreadTable, entry: text) -> WineNtThreadWaitResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", -1, table.last_error)
+    if entry == "":
+        val errored = _with_error(table, "ERROR_INVALID_PARAMETER")
+        return _result(false, "invalid-entrypoint", errored, 0, "", -1, errored.last_error)
+    val handle = table.next_handle
+    var threads = table.threads
+    threads.push(_thread(handle, entry, -1, false))
+    val updated = _table(threads, handle + 1, table.ready, table.state, "OK")
+    _result(true, "created-pending", updated, handle, "", -1, "OK")
+
+pub fn wine_nt_wait_for_single_object(table: WineNtThreadTable, handle: i64, timeout_ms: i64) -> WineNtThreadWaitResult:
+    val thread = _find_thread(table.threads, handle)
+    if thread.handle == 0:
+        val errored = _with_error(table, "ERROR_INVALID_HANDLE")
+        return _result(false, "invalid-handle", errored, handle, "", -1, errored.last_error)
+    if thread.signaled:
+        val updated = _with_error(table, "OK")
+        return _result(true, "wait-completed", updated, handle, "WAIT_OBJECT_0", thread.exit_code, "OK")
+    if timeout_ms == 0:
+        val updated = _with_error(table, "OK")
+        return _result(true, "wait-timeout", updated, handle, "WAIT_TIMEOUT", -1, "OK")
+    val updated = _with_error(table, "ERROR_IO_PENDING")
+    _result(false, "wait-pending", updated, handle, "", -1, updated.last_error)
+
+pub fn wine_nt_get_last_error(table: WineNtThreadTable) -> text:
+    table.last_error

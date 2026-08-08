@@ -1,0 +1,93 @@
+# @tag: unit, os, simpleos, boot, rc_conf, screen
+"""
+# rc.conf Screen Configuration Keys
+
+**Feature IDs:** simpleos-config-screen-selection
+**Category:** OS / Boot / Configuration
+**Status:** In Progress
+**Plan:** doc/03_plan/os/simpleos/screens/ws_a_config_screen_selection_detail.md
+
+## Overview
+
+As an operator I want to pick which screen SimpleOS boots into by writing a
+single `screen_type` line in `/etc/rc.conf`, and I want a typo or a missing
+file to leave me with today's working window manager rather than a black
+screen. These scenarios exercise the pure normalization layer of the rc.conf
+reader, so they run without a mounted VFS while covering exactly the value
+handling the boot path depends on.
+"""
+
+use std.spec.*
+use os.kernel.boot.rc_conf.{
+    rc_conf_normalize_screen_type,
+    rc_conf_parse_screen_res,
+    rc_conf_normalize_screen_simd
+}
+
+describe "rc.conf screen_type normalization":
+
+    it "defaults to wm when the key (or the whole file) is absent":
+        step("Look up screen_type on a system that never staged rc.conf")
+        assert_equal(rc_conf_normalize_screen_type(nil), "wm")
+
+    it "accepts each of the four supported screen types":
+        step("Normalize every documented screen type")
+        assert_equal(rc_conf_normalize_screen_type("wm"), "wm")
+        assert_equal(rc_conf_normalize_screen_type("2d"), "2d")
+        assert_equal(rc_conf_normalize_screen_type("web"), "web")
+        assert_equal(rc_conf_normalize_screen_type("gui"), "gui")
+
+    it "trims surrounding space and lowercases the value":
+        step("Normalize a sloppily written value")
+        assert_equal(rc_conf_normalize_screen_type("  GUI "), "gui")
+
+    it "falls back to wm on an unrecognized value":
+        step("Ask for a screen type that does not exist")
+        assert_equal(rc_conf_normalize_screen_type("quake"), "wm")
+
+    it "falls back to wm on an empty value":
+        step("Write screen_type= with nothing after it")
+        assert_equal(rc_conf_normalize_screen_type(""), "wm")
+
+describe "rc.conf screen_res parsing":
+
+    it "uses the caller's defaults when the key is absent":
+        step("Parse a missing screen_res against the historical BGA mode")
+        val res = rc_conf_parse_screen_res(nil, 1024, 768)
+        assert_equal(res.0, 1024)
+        assert_equal(res.1, 768)
+
+    it "parses a WxH value":
+        step("Request a 1080p boot console")
+        val res = rc_conf_parse_screen_res("1920x1080", 1024, 768)
+        assert_equal(res.0, 1920)
+        assert_equal(res.1, 1080)
+
+    it "falls back to the defaults on malformed input":
+        step("Write junk into screen_res")
+        val res = rc_conf_parse_screen_res("junk", 1024, 768)
+        assert_equal(res.0, 1024)
+        assert_equal(res.1, 768)
+
+    it "rejects an out-of-range resolution":
+        step("Ask for a resolution beyond the 8192 guard")
+        val res = rc_conf_parse_screen_res("99999x99999", 1024, 768)
+        assert_equal(res.0, 1024)
+        assert_equal(res.1, 768)
+
+describe "rc.conf screen_simd normalization":
+
+    it "defaults to auto when unset":
+        assert_equal(rc_conf_normalize_screen_simd(nil), "auto")
+
+    it "accepts on and off":
+        assert_equal(rc_conf_normalize_screen_simd("on"), "on")
+        assert_equal(rc_conf_normalize_screen_simd("OFF"), "off")
+
+    it "accepts the explicit ISA kernel families WS-D pins":
+        assert_equal(rc_conf_normalize_screen_simd("sse2"), "sse2")
+        assert_equal(rc_conf_normalize_screen_simd("AVX2"), "avx2")
+        assert_equal(rc_conf_normalize_screen_simd(" neon "), "neon")
+
+    it "falls back to auto on an unrecognized value":
+        assert_equal(rc_conf_normalize_screen_simd("turbo"), "auto")

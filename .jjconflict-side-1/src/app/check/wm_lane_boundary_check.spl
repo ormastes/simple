@@ -1,0 +1,142 @@
+# Runnable gate for the WM/GUI/web/2D portable-lane dependency boundary.
+#
+# Reuses the lint rule itself (compiler.tools.lint.main.lint_wm_lane_boundary)
+# rather than reimplementing the scan — a gate that re-derives its own answer
+# can only ever prove that its copy agrees with itself.
+#
+# Contract enforced: if Simple 2D (rendering + event delivery) runs on
+# SimpleOS, the WM runs on SimpleOS. Nothing else may be a precondition.
+#
+# The lane currently carries a large known violation set (see
+# doc/04_architecture/ui/wm_gui_web_dependency_audit.md), so this gate is a
+# RATCHET, not an absolute bar: it fails on violations that are NOT in the
+# checked-in baseline. New host dependencies cannot be added; existing ones can
+# only be removed.
+#
+# Usage (normally via scripts/check/check-wm-lane-boundary.shs):
+#   simple run src/app/check/wm_lane_boundary_check.spl --scope-dirs
+#   simple run src/app/check/wm_lane_boundary_check.spl --baseline=<file> <paths...>
+#   simple run src/app/check/wm_lane_boundary_check.spl --write-baseline=<file> <paths...>
+#
+# Verdict is the LAST line of stdout and is always one of PASS / FAIL / ERROR.
+# ERROR (exit 2) means nothing was actually checked — this gate never reports a
+# vacuous pass.
+use compiler.tools.lint.main.{lint_wm_lane_boundary, wm_lane_scope_dirs}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _wmc_args() -> [text]:
+    val raw = rt_cli_get_args()
+    var all: [text] = []
+    if raw != nil:
+        all = raw
+    var args: [text] = []
+    var idx = 0
+    for a in all:
+        # Drop argv[0] and the script path the runner prepends.
+        if idx > 0 and not a.ends_with("wm_lane_boundary_check.spl"):
+            args.push(a)
+        idx = idx + 1
+    args
+
+fn _wmc_flag_value(args: [text], prefix: text) -> text:
+    for a in args:
+        if a.starts_with(prefix):
+            return a.slice(prefix.len())
+    ""
+
+fn _wmc_contains(entries: [text], needle: text) -> Bool:
+    for e in entries:
+        if e == needle:
+            return true
+    false
+
+fn _wmc_read_lines(path: text) -> [text]:
+    var out: [text] = []
+    if not rt_file_exists(path):
+        return out
+    val content = rt_file_read_text(path)
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t != "" and not t.starts_with("#"):
+            out.push(t)
+    out
+
+# One violation renders as `path:line:code`. Deliberately NOT including the
+# message: messages get reworded, and a baseline that churns on wording is a
+# baseline people delete.
+fn _wmc_scan(paths: [text]) -> [text]:
+    var found: [text] = []
+    for path in paths:
+        if not rt_file_exists(path):
+            continue
+        val content = rt_file_read_text(path)
+        for w in lint_wm_lane_boundary(path, content):
+            found.push("{path}:{w.line}:{w.code}")
+    found
+
+fn main() -> Int:
+    val args = _wmc_args()
+
+    # Scope roots come from the rule, so the shell wrapper and the rule can
+    # never disagree about what the lane is.
+    if _wmc_contains(args, "--scope-dirs"):
+        for d in wm_lane_scope_dirs():
+            print(d)
+        return 0
+
+    var paths: [text] = []
+    for a in args:
+        if not a.starts_with("--"):
+            paths.push(a)
+
+    if paths.len() == 0:
+        print("ERROR — nothing was checked: no input files given")
+        return 2
+
+    val found = _wmc_scan(paths)
+
+    val write_to = _wmc_flag_value(args, "--write-baseline=")
+    if write_to != "":
+        var body = "# WM/GUI/web/2D portable-lane violation baseline (path:line:code).\n"
+        body = body + "# Regenerate: scripts/check/check-wm-lane-boundary.shs --write-baseline\n"
+        body = body + "# This list may only SHRINK. See wm_lane_boundary_lints.spl.\n"
+        for e in found:
+            body = body + e + "\n"
+        if not rt_file_write_text(write_to, body):
+            print("ERROR — nothing was checked: could not write {write_to}")
+            return 2
+        print("PASS — baseline written: {found.len()} violation(s) over {paths.len()} file(s)")
+        return 0
+
+    val baseline_path = _wmc_flag_value(args, "--baseline=")
+    if baseline_path == "":
+        print("ERROR — nothing was checked: --baseline=<file> is required")
+        return 2
+    if not rt_file_exists(baseline_path):
+        print("ERROR — nothing was checked: baseline {baseline_path} does not exist")
+        return 2
+    val baseline = _wmc_read_lines(baseline_path)
+
+    var added: [text] = []
+    for e in found:
+        if not _wmc_contains(baseline, e):
+            added.push(e)
+    var removed: [text] = []
+    for e in baseline:
+        if not _wmc_contains(found, e):
+            removed.push(e)
+
+    for e in added:
+        print("NEW VIOLATION {e}")
+    for e in removed:
+        print("fixed (not in current scan) {e}")
+
+    if added.len() > 0:
+        print("FAIL — {added.len()} NEW portable-lane violation(s); {found.len()} total over {paths.len()} file(s) scanned")
+        return 1
+    print("PASS — {paths.len()} file(s) scanned, {found.len()} violation(s), all in baseline ({removed.len()} baseline entr(y/ies) now fixed)")
+    0

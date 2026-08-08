@@ -1,0 +1,104 @@
+# @req REQ-LLM-MSG-002 REQ-LLM-MSG-003 REQ-LLM-MSG-008 REQ-LLM-MSG-009 REQ-LLM-MSG-010 REQ-LLM-MSG-011 REQ-LLM-MSG-014 REQ-LLM-MSG-015 REQ-LLM-MSG-016
+"""Primitive services expose deterministic mutations for the pure-Simple SQL adapter."""
+
+use std.spec.*
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.application.room_service.*
+use app.llm_caret.messaging.application.message_service.*
+use app.llm_caret.messaging.application.profile_service.*
+use app.llm_caret.messaging.application.task_service.*
+
+fn room_message(id: text, room: text, seq: i64, body: text) -> RoomMessage:
+    RoomMessage(message_id: messaging_id("message", id), workspace_id: messaging_id("workspace", "w1"),
+        room_id: messaging_id("room", room), room_seq: seq, thread_root_id: "", reply_to_id: "",
+        sender_identity_id: messaging_id("identity", "human-1"), sender_agent_id: "", origin: MessageOrigin.Human,
+        body: body, mentions: [], command: "", audience: [], external_ref: "", correlation_id: id,
+        causation_id: "", hop_count: 0, created_at: seq, edited_at: 0)
+
+describe "primitive LLM Caret application services":
+    it "creates rooms with owner membership and enforces private membership":
+        step("Create a private room and atomically project its owner")
+        val created = create_room("r1", "w1", RoomKind.Private, "review", "code review", "private",
+            "mention", "milestones", "default", "human-1", 10)
+        expect(created.accepted).to_equal(true)
+        expect(created.memberships.len()).to_equal(1)
+        expect(created.memberships[0].role).to_equal("owner")
+        expect(identity_can_read(created.room, created.memberships, "human-2")).to_equal(false)
+
+        step("Membership addition is idempotent and grants private-room access")
+        val joined = add_room_member(created.room, created.memberships, "human-2", "member", 11)
+        val duplicate = add_room_member(created.room, joined.memberships, "human-2", "member", 12)
+        expect(joined.memberships.len()).to_equal(2)
+        expect(duplicate.memberships.len()).to_equal(2)
+        expect(identity_can_read(created.room, joined.memberships, "human-2")).to_equal(true)
+
+        step("Direct rooms require two distinct identities")
+        expect(create_direct_room("dm1", "w1", "human-1", "human-1", 12).error).to_equal("direct_room_requires_two_identities")
+        val direct = create_direct_room("dm1", "w1", "human-1", "agent-1", 12)
+        expect(direct.accepted).to_equal(true)
+        expect(direct.memberships.len()).to_equal(2)
+
+    it "prepares accepted messages, bounded history, and truthful local cursors":
+        step("Reject an empty body before persistence")
+        val rejected = prepare_message("m0", "w1", "r1", 1, "human-1", "", MessageOrigin.Human,
+            "  ", "", "", "c0", "", 0, 10)
+        expect(rejected.error).to_equal("message_body_required")
+
+        step("Produce the canonical message and acceptance receipt for storage")
+        val accepted = prepare_message("m1", "w1", "r1", 2, "human-1", "", MessageOrigin.Human,
+            " hello ", "", "", "c1", "", 0, 11)
+        expect(accepted.accepted).to_equal(true)
+        expect(accepted.message.body).to_equal("hello")
+        expect(accepted.message.room_seq).to_equal(2)
+        expect(accepted.receipt.detail).to_equal("server_accepted")
+
+        step("Page only the requested room after its sequence cursor")
+        val history = history_after([room_message("m1", "r1", 1, "one"),
+            room_message("other", "r2", 2, "other"), room_message("m3", "r1", 3, "three")], "r1", 1, 10)
+        expect(history.len()).to_equal(1)
+        expect(history[0].message_id.value).to_equal("m3")
+
+        step("Reject cursor claims beyond the canonical room sequence")
+        expect(advance_read_cursor("r1", "human-1", 4, 3).error).to_equal("cursor_out_of_range")
+        expect(advance_read_cursor("r1", "human-1", 3, 3).accepted).to_equal(true)
+
+    it "answers profile queries and emits structured join events":
+        step("Resolve an agent by a case-insensitive alias")
+        val profile = AgentProfile(agent_id: messaging_id("agent", "reviewer-1"), display_name: "Reviewer-Codex-01",
+            aliases: ["review"], provider: "codex", role_summary: "code review", capabilities: ["Simple", "tests"],
+            current_task_id: "T-9", status: AgentStatus.Running, owner_identity_id: "human-1",
+            room_ids: ["r1"], last_activity_at: 20)
+        val lookup = find_agent_profile([profile], "REVIEW")
+        expect(lookup.found).to_equal(true)
+        expect(profile_summary(lookup.profile).contains("State: running")).to_equal(true)
+
+        step("Announce stable identity, role, capabilities, and current task")
+        val announcement = agent_join_announcement(profile, "w1", "r1", "join-1", 4, 21)
+        expect(announcement.body).to_contain("Reviewer-Codex-01 joined")
+        expect(announcement.body).to_contain("Capabilities: Simple, tests")
+        expect(announcement.origin).to_equal(MessageOrigin.System)
+
+    it "keeps task lifecycle distinct from room messages and terminal states final":
+        step("Create a queued task from one origin message")
+        val created = create_task("T-1", "m1", "builder-1", "implement the service", 30)
+        expect(created.accepted).to_equal(true)
+        expect(created.task.state).to_equal(TaskState.Queued)
+
+        step("Require explicit requested input for waiting state")
+        val missing = transition_task(created.task, TaskState.WaitingInput, "needs approval", "", 31)
+        expect(missing.error).to_equal("required_input_missing")
+        val waiting = transition_task(created.task, TaskState.WaitingInput, "needs approval", "approve network", 31)
+        expect(waiting.accepted).to_equal(true)
+        val approved = approve_task(waiting.task, 32)
+        expect(approved.task.state).to_equal(TaskState.Running)
+
+        step("Reject attempts to restart a terminal task")
+        val completed = transition_task(approved.task, TaskState.Completed, "done", "", 33)
+        expect(completed.task.completed_at).to_equal(33)
+        expect(transition_task(completed.task, TaskState.Running, "again", "", 34).error).to_equal("task_already_terminal")
+
+    it "requires notify-all permission and never fans out progress updates":
+        step("Allow a human room owner but reject unprivileged and agent-update broadcasts")
+        expect(notify_all_allowed(["room_owner"], MessageOrigin.Human)).to_equal(true)
+        expect(notify_all_allowed([], MessageOrigin.Human)).to_equal(false)
+        expect(notify_all_allowed(["notify_all"], MessageOrigin.AgentUpdate)).to_equal(false)

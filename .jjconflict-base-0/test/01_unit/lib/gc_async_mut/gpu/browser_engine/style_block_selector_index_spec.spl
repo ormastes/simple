@@ -1,0 +1,180 @@
+# Equivalence coverage for the W2 selector index (bucketed candidate lookup)
+# against the pre-existing linear-scan rule application in style_block.spl.
+#
+# The index groups rules by a cheap discriminant (id / first class / tag of
+# the rule's subject simple selector) so each node only runs full
+# selector_matches against candidate rules instead of the whole ruleset.
+# Correctness requirement: apply_css_rules_to_tree (indexed) must style every
+# node IDENTICALLY to apply_css_rules_to_tree_linear (old linear scan) for
+# any ruleset/tree, since the index only prunes rules that provably cannot
+# match — it never changes which rules DO match.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_block.spl
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_children}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    CssRule, CssDecl, apply_css_rules_to_tree, apply_css_rules_to_tree_linear,
+    build_selector_rule_index, selector_bucket_discriminant, selector_index_candidates}
+
+fn el(tag: text, id: text, class_val: text) -> BeDomNode:
+    var attrs: Dict<text, text> = {}
+    if id != "":
+        attrs["id"] = id
+    if class_val != "":
+        attrs["class"] = class_val
+    BeDomNode(
+        node_id: 1,
+        tag_name: tag,
+        data: "",
+        attributes: attrs,
+        style: StyleProps.empty(),
+        children: [],
+        parent_id: -1,
+        event_listener_types: [],
+        event_listener_actions: [],
+        event_listener_capture: [])
+
+fn el_children(tag: text, id: text, class_val: text, kids: [BeDomNode]) -> BeDomNode:
+    var attrs: Dict<text, text> = {}
+    if id != "":
+        attrs["id"] = id
+    if class_val != "":
+        attrs["class"] = class_val
+    BeDomNode(
+        node_id: 1,
+        tag_name: tag,
+        data: "",
+        attributes: attrs,
+        style: StyleProps.empty(),
+        children: kids,
+        parent_id: -1,
+        event_listener_types: [],
+        event_listener_actions: [],
+        event_listener_capture: [])
+
+fn decl(prop: text, value: text) -> CssDecl:
+    CssDecl(property: prop, value: value)
+
+fn rule(selector: text, prop: text, value: text) -> CssRule:
+    CssRule(selector: selector, declarations: [decl(prop, value)])
+
+fn colors_flat(root: BeDomNode) -> [text]:
+    """Collects background-color style of root then every descendant, DFS order."""
+    var out: [text] = [root.style.background_color]
+    val kids = be_dom_get_children(root)
+    var i = 0
+    while i < kids.len():
+        val sub = colors_flat(kids[i])
+        var j = 0
+        while j < sub.len():
+            out.push(sub[j])
+            j = j + 1
+        i = i + 1
+    out
+
+fn build_tree() -> BeDomNode:
+    val leaf_a = el("span", "", "alpha beta")
+    val leaf_b = el("p", "target", "")
+    val leaf_c = el("em", "", "beta")
+    val mid = el_children("div", "", "container", [leaf_a, leaf_b])
+    el_children("section", "", "", [mid, leaf_c])
+
+describe "selector_bucket_discriminant":
+
+    it "buckets a plain id selector under id":
+        val kk = selector_bucket_discriminant("#target")
+        expect(kk[0]).to_equal("id")
+        expect(kk[1]).to_equal("target")
+
+    it "buckets a plain class selector under class":
+        val kk = selector_bucket_discriminant(".alpha")
+        expect(kk[0]).to_equal("class")
+        expect(kk[1]).to_equal("alpha")
+
+    it "buckets a compound tag.class under class (necessary-condition bucket)":
+        val kk = selector_bucket_discriminant("div.container")
+        expect(kk[0]).to_equal("class")
+        expect(kk[1]).to_equal("container")
+
+    it "buckets a plain tag selector under tag":
+        val kk = selector_bucket_discriminant("span")
+        expect(kk[0]).to_equal("tag")
+        expect(kk[1]).to_equal("span")
+
+    it "buckets universal selector under universal":
+        val kk = selector_bucket_discriminant("*")
+        expect(kk[0]).to_equal("universal")
+
+    it "buckets attribute selectors under universal (not cheaply discriminable)":
+        val kk = selector_bucket_discriminant("div[data-x]")
+        expect(kk[0]).to_equal("universal")
+
+    it "buckets a descendant combinator by its LAST simple selector":
+        val kk = selector_bucket_discriminant("section .alpha")
+        expect(kk[0]).to_equal("class")
+        expect(kk[1]).to_equal("alpha")
+
+    it "buckets a child combinator by its LAST simple selector":
+        val kk = selector_bucket_discriminant("div > #target")
+        expect(kk[0]).to_equal("id")
+        expect(kk[1]).to_equal("target")
+
+describe "selector_index_candidates":
+
+    it "returns empty-tag/empty-id/no-class candidates as only the universal bucket":
+        val rules = [rule("*", "color", "red")]
+        val idx = build_selector_rule_index(rules)
+        val cands = selector_index_candidates(idx, "div", "", [])
+        expect(cands.len()).to_equal(1)
+
+describe "selector index equivalence vs linear scan":
+
+    it "produces identical results for no matches":
+        val rules = [rule(".nowhere", "background-color", "red")]
+        val tree_a = build_tree()
+        val tree_b = build_tree()
+        apply_css_rules_to_tree_linear(tree_a, rules)
+        apply_css_rules_to_tree(tree_b, rules)
+        expect(colors_flat(tree_a)).to_equal(colors_flat(tree_b))
+
+    it "produces identical results across multiple candidate buckets (tag+class+id+universal)":
+        val rules = [
+            rule("*", "background-color", "gray"),
+            rule("div", "background-color", "blue"),
+            rule(".beta", "background-color", "green"),
+            rule("#target", "background-color", "yellow"),
+            rule("div.container", "background-color", "purple"),
+            rule("section .alpha", "background-color", "orange")]
+        val tree_a = build_tree()
+        val tree_b = build_tree()
+        apply_css_rules_to_tree_linear(tree_a, rules)
+        apply_css_rules_to_tree(tree_b, rules)
+        expect(colors_flat(tree_a)).to_equal(colors_flat(tree_b))
+
+    it "produces identical results with an empty ruleset":
+        val rules: [CssRule] = []
+        val tree_a = build_tree()
+        val tree_b = build_tree()
+        apply_css_rules_to_tree_linear(tree_a, rules)
+        apply_css_rules_to_tree(tree_b, rules)
+        expect(colors_flat(tree_a)).to_equal(colors_flat(tree_b))
+
+    it "produces identical results for a node with no class or id":
+        val rules = [
+            rule("em", "background-color", "pink"),
+            rule("*", "background-color", "gray")]
+        val tree_a = build_tree()
+        val tree_b = build_tree()
+        apply_css_rules_to_tree_linear(tree_a, rules)
+        apply_css_rules_to_tree(tree_b, rules)
+        expect(colors_flat(tree_a)).to_equal(colors_flat(tree_b))
+
+    it "matches the universal selector identically on both paths":
+        val rules = [rule("*", "background-color", "teal")]
+        val tree_a = build_tree()
+        val tree_b = build_tree()
+        apply_css_rules_to_tree_linear(tree_a, rules)
+        apply_css_rules_to_tree(tree_b, rules)
+        expect(colors_flat(tree_b)).to_equal(colors_flat(tree_a))

@@ -1,0 +1,31 @@
+use std.common.encoding.bencode.{_benc_text_to_bytes}
+
+# Multi-byte regression coverage for
+# src/lib/common/encoding/bencode.spl's _benc_text_to_bytes. Same bug
+# shape and same fix as protobuf_wire.spl's pb_text_to_bytes (see that
+# file's spec for the full explanation): the character-indexed `s[i]`
+# scan was bounded by `s.length()` (BYTE length) instead of character
+# count, running one iteration past the last valid character for any
+# multi-byte input and silently appending a spurious extra byte.
+#
+# NOTE: _benc_text_to_bytes has zero callers within bencode.spl itself
+# (confirmed dead code, same status as string.spl's charAt/charCodeAt in
+# this campaign's batch 1) -- fixed and tested directly since it's still
+# reachable/importable, not because any current caller depends on it.
+# bencode.spl's DECODE path (_benc_char_at, used pervasively through the
+# integer/string/list/dict decoders, all bounded by `data.length()`) has
+# the identical bug shape and is reachable from real bencode parsing
+# (e.g. .torrent file content) -- confirmed present, NOT fixed this pass
+# (5+ independent loop-bound sites deeply woven through a recursive
+# decoder; out of this pass's time budget, flagged in
+# doc/08_tracking/bug/bracket_slice_fix_pass_4_2026-07-29.md as the
+# priority follow-up).
+
+describe "_benc_text_to_bytes multi-byte":
+    it "café (codepoints <=255) converts to exactly 4 bytes, no spurious trailing byte":
+        val f = _benc_text_to_bytes("café")
+        expect(f).to_equal([99, 97, 102, 233])
+
+    it "pure ASCII of the same character count is unaffected (regression guard)":
+        val f = _benc_text_to_bytes("cafe")
+        expect(f).to_equal([99, 97, 102, 101])

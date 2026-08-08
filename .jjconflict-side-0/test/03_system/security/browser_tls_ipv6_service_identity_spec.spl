@@ -1,0 +1,67 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-021
+"""Bracketed IPv6 HTTPS authority and bare TLS service identity.
+
+This offline scenario exercises the canonical URL and H1 target preparation
+without opening DNS, sockets, or a TLS provider. Live certificate-chain and
+platform trust evidence remains a separate blocked gate.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    build_request_bytes, h1_tls_ipv6_literal_identity
+}
+
+describe "Browser TLS IPv6 service identity":
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-021
+    it "should separate IPv6 wire authority from the TLS peer identity":
+        step("Parse a bracketed IPv6 HTTPS authority")
+        val url = Url.parse_or_opaque(
+            "https://[2001:db8::1]:8443/resource?q=1"
+        )
+        expect(url.opaque).to_be(false)
+        expect(url.scheme).to_equal("https")
+        expect(url.host).to_equal("[2001:db8::1]")
+        expect(url.port).to_equal(8443)
+        expect(url.authority()).to_equal("[2001:db8::1]:8443")
+
+        step("Select the bare numeric TLS service identity")
+        val literal = h1_tls_ipv6_literal_identity(url.host)
+        if not literal.?:
+            fail("canonical IPv6 URL host did not produce a TLS identity")
+        val identity = literal.unwrap()
+        expect(identity).to_equal("2001:db8::1")
+        expect(identity.contains("[")).to_be(false)
+        expect(identity.contains("]")).to_be(false)
+        expect(h1_tls_ipv6_literal_identity("secure.test")).to_be_nil()
+
+        step("Reject malformed bracket forms from the literal fast path")
+        expect(h1_tls_ipv6_literal_identity("[::1")).to_be_nil()
+        expect(h1_tls_ipv6_literal_identity("::1]")).to_be_nil()
+        expect(h1_tls_ipv6_literal_identity("[]")).to_be_nil()
+        expect(h1_tls_ipv6_literal_identity("[not-an-ip]")).to_be_nil()
+        expect(h1_tls_ipv6_literal_identity("[::::]")).to_be_nil()
+        expect(h1_tls_ipv6_literal_identity("[2001:db8:::1]")).to_be_nil()
+
+        step("Preserve bracketed authority on the HTTP wire")
+        val request = FetchRequest(
+            method: "GET",
+            url: url,
+            headers: "Host: attacker.test\r\n",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "omit"
+        )
+        val wire = build_request_bytes(request)
+        expect(wire).to_start_with(
+            "GET /resource?q=1 HTTP/1.1\r\n" +
+            "Host: [2001:db8::1]:8443\r\n"
+        )
+        expect(wire.contains("attacker.test")).to_be(false)
+        expect(wire).to_contain("\r\nConnection: close\r\n")

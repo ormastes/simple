@@ -1,0 +1,75 @@
+"""
+# `var` rebind and register/list spill under the JIT — status lock-in (2026-08-07)
+
+Regression guard for a family of suspected default-engine (Cranelift JIT)
+miscompiles gathered under the session memory note
+`reference_native_list_rebind_and_spill_miscompiles.md` and the related
+freestanding-lane filings `native_scalar_spill_clobber_loop_intervening_calls_2026-07-20.md`
+and `native_tuple_spill_clobber_across_call_2026-07-19.md`: a `var` local
+reassigned in a loop, or reassigned after a long live range / heavy register
+pressure, was reported to read back a stale or corrupted value; a list `var`
+first bound to `[]` then rebound to a non-empty list was reported to apply a
+spurious bit-shift on later reads; a list mutated via `.push()` inside a
+`while` loop was reported to read stale data on a later iteration.
+
+## 2026-08-07 empirical re-check (deployed seed, x86_64-unknown-linux-gnu)
+
+Five minimal, lambda-free repros (sequential var rebind; 18-local register
+pressure with a rebound accumulator; empty-list-first-assignment rebind;
+scalar spill across intervening calls inside a loop; loop-carried list spill
+across `.push()` reallocation) were run both directly (`bin/simple run`,
+which engages the Cranelift JIT by default — confirmed by the absence of the
+runner's `JIT compilation failed, falling back to interpreter` log line) and
+under `SIMPLE_EXECUTION_MODE=interpret`. All five passed on both engines with
+identical output. See
+doc/08_tracking/bug/native_var_rebind_register_spill_2026-08-07.md for the
+full transcript. This spec locks that status in via the out-of-process
+engine-probe pattern (see f64_method_return_binop_spec.spl) so a future JIT
+regression in this family is caught by CI rather than rediscovered by hand.
+
+During development a genuinely SEPARATE, already-filed, still-open defect was
+found incidentally while stress-testing this family: an untyped `list`-typed
+parameter's element read (`fn f(v: list) -> i64: return v[0]`) reads back
+`40` instead of `5` for input `[5]` under the JIT (interpreter correct). This
+is the root cause already tracked in
+doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md
+(HIR `list` resolves to `Array{element: ANY}`; `lower_index_expr` skips
+UnboxInt for ANY-typed elements) and is a DIFFERENT mechanism from
+var/list-storage rebinding — it is deliberately excluded from this probe's
+pass count rather than folded in as a 6th case, so this spec does not go
+red for an unrelated, already-triaged, deliberately-deferred defect.
+
+Sabotage receipt (`_PASS` flipped to require an impossible `pass=6`, then
+restored):
+
+    correct  / interpret -> PASS (VAR_REBIND_SPILL_VERDICT: pass=5 fail=0)
+    correct  / jit        -> PASS (VAR_REBIND_SPILL_VERDICT: pass=5 fail=0)
+    sabotaged (pass=6 required) / both engines -> RED, "2 examples, 2 failures"
+
+Run with: bin/simple test test/01_unit/compiler/codegen/var_rebind_register_spill_spec.spl
+"""
+
+use std.spec
+use std.spec.engine_probe.{engine_stdout}
+
+val _PROBE = "test/01_unit/compiler/codegen/var_rebind_register_spill_jit_probe.spl"
+val _PASS = "VAR_REBIND_SPILL_VERDICT: pass=5 fail=0"
+
+describe "var rebind and list/register spill under load (out of process)":
+    """
+    As a compiler maintainer, I need var-rebind-under-spill guarded against a
+    NAMED engine, so a Cranelift regression in variable/list rebinding under
+    register or list-storage pressure cannot pass review behind a spec that
+    only ever ran on the interpreter.
+    """
+
+    it "passes the probe under the interpreter":
+        # Control column: the interpreter is not implicated by any of the
+        # historical filings, so this arm failing means the probe/harness
+        # broke, not codegen.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
+
+    it "passes the probe under the cranelift JIT":
+        # The arm that carries the weight for the previously-suspected
+        # default-engine defect family.
+        expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)

@@ -1,0 +1,57 @@
+# @cover src/app/ui.web/backend.spl
+# @cover src/app/ui.tauri/backend.spl
+# @cover src/lib/common/ui/web_render_api.spl
+# @tag: unit, ui, web_tauri_contract
+
+use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
+use common.ui.capability.{Capability, has_capability}
+use common.ui.state.{init_state}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WEB_RENDER_TARGET_TAURI, WebRenderRequest, web_render_capabilities_for_target, web_render_capability_summary, web_render_to_artifact}
+use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.web.backend.{WebBackend}
+use app.ui.tauri.backend.{TauriBackend, tauri_render_ipc_json}
+use app.ui.web.html.{generate_css}
+
+fn contract_state():
+    val root = panel("ui_contract_root", "Contract", [
+        text_widget("ui_contract_copy", "2D UI contract"),
+        button("ui_contract_action", "Apply", "apply")
+    ])
+    init_state(build_tree_with_title(root, "UI Contract", "dark"))
+
+describe "2D UI layer web and Tauri rendering contract":
+
+    it "feeds Simple web and Tauri through the same artifact shape":
+        val state = contract_state()
+        val body = render_html_tree(state.tree.root_node(), state)
+
+        val web = WebBackend.new(4100)
+        expect(web.render_html(state)).to_equal(body)
+        val web_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "", body, "", "", web.viewport_width(), web.viewport_height())
+        val web_artifact = web_render_to_artifact(web_req)
+        expect(web.generate_full_page(state)).to_equal(web_artifact.html)
+        expect(web_artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
+        expect(web_artifact.html).to_contain("<div id=\"app\">")
+        expect(web_artifact.html).to_contain("widget-button")
+        expect(web_artifact.ipc_json).to_equal("")
+        expect(web_artifact.capability_summary).to_equal(web_render_capability_summary(WEB_RENDER_TARGET_SIMPLE_WEB))
+        expect(has_capability(web.capabilities(), Capability.Mouse)).to_equal(has_capability(web_render_capabilities_for_target(WEB_RENDER_TARGET_SIMPLE_WEB), Capability.Mouse))
+        expect(has_capability(web.capabilities(), Capability.Touch)).to_equal(has_capability(web_render_capabilities_for_target(WEB_RENDER_TARGET_SIMPLE_WEB), Capability.Touch))
+
+        val tauri_result = TauriBackend.new(4101)
+        match tauri_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(tauri):
+                expect(tauri.render_html(state)).to_equal(body)
+                val tauri_req = WebRenderRequest.html(WEB_RENDER_TARGET_TAURI, "", body, generate_css(state.tree.theme_name()), "", tauri.viewport_width(), tauri.viewport_height())
+                val tauri_artifact = web_render_to_artifact(tauri_req)
+                expect(tauri.generate_full_page(state)).to_equal(tauri_artifact.html)
+                expect(tauri_render_ipc_json(state, tauri.viewport_width(), tauri.viewport_height())).to_equal(tauri_artifact.ipc_json)
+                expect(tauri_artifact.target).to_equal(WEB_RENDER_TARGET_TAURI)
+                expect(tauri_artifact.html).to_contain("<div id=\"app\">")
+                expect(tauri_artifact.html).to_contain("widget-button")
+                expect(tauri_artifact.ipc_json).to_contain("\"target\":\"tauri\"")
+                expect(tauri_artifact.capability_summary).to_equal(web_render_capability_summary(WEB_RENDER_TARGET_TAURI))
+                expect(has_capability(tauri.capabilities(), Capability.Mouse)).to_equal(has_capability(web_render_capabilities_for_target(WEB_RENDER_TARGET_TAURI), Capability.Mouse))
+                expect(has_capability(tauri.capabilities(), Capability.Touch)).to_equal(has_capability(web_render_capabilities_for_target(WEB_RENDER_TARGET_TAURI), Capability.Touch))

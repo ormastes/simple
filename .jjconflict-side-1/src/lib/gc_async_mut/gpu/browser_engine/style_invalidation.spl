@@ -1,0 +1,253 @@
+# Style invalidation layer — the dirty-bucket half of the design that
+# SelectorRuleIndex (style_block.spl) does not implement on its own.
+#
+# SelectorRuleIndex buckets rules by cheap discriminant (id / first class /
+# tag) so a node only checks candidate rules instead of the whole ruleset.
+# It always re-walks and re-matches every node on every apply, though.
+#
+# This module adds:
+#   - a per-node memoized "last-matched buckets" set (InvalidationState.memo,
+#     keyed by BeDomNode.node_id -> a joined "kind:key" token text)
+#   - a dirty-bucket side table (InvalidationState.dirty, keyed by the same
+#     "kind:key" tokens)
+#   - a mutation entry point that marks only the OLD and NEW relevant
+#     buckets dirty when a node's id/class/tag changes
+#   - an invalidation-aware re-style pass that only re-matches a node when
+#     its own discriminant changed since last time, or when one of the
+#     buckets it belongs to is dirty; everything else is left untouched.
+#
+# House rules followed: state lives in plain top-level fields (Dict<i64,text>
+# / Dict<text,bool> / i64 counter), no array-typed top-level fields, no
+# class-field-reference propagation tricks — callers pass `mut state` and
+# functions mutate its Dict fields in place (Dicts are reference-like here,
+# same idiom SelectorRuleIndex's own builder uses for its bucket Dicts).
+# SelectorRuleIndex's bucketing logic itself is NOT modified by this file.
+
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
+    be_dom_get_is_text, be_dom_set_children}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    CssRule, SelectorRuleIndex, selector_index_candidates}
+use std.gc_async_mut.gpu.browser_engine.style_block_resolve.{selector_matches}
+
+# =========================================================================
+# Invalidation state
+# =========================================================================
+
+pub class InvalidationState:
+    memo: Dict<i64, text>
+    dirty: Dict<text, bool>
+    rematch_count: i64
+
+pub fn new_invalidation_state() -> InvalidationState:
+    InvalidationState(memo: {}, dirty: {}, rematch_count: 0)
+
+pub fn invalidation_reset_counter(mut state: InvalidationState):
+    state.rematch_count = 0
+
+# =========================================================================
+# Bucket-key helpers
+# =========================================================================
+
+val UNIVERSAL_KEY: text = "universal"
+
+fn bucket_key_id(id: text) -> text:
+    "id:" + id
+
+fn bucket_key_class(c: text) -> text:
+    "class:" + c
+
+fn bucket_key_tag(tag: text) -> text:
+    "tag:" + tag
+
+fn join_keys(parts: [text]) -> text:
+    var sb = StringBuilder.new()
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            sb.push(" ")
+        sb.push(parts[i])
+        i = i + 1
+    sb.to_text()
+
+fn split_keys(s: text) -> [text]:
+    var parts: [text] = []
+    var seg_start = 0
+    var idx = 0
+    val len = s.len()
+    while idx < len:
+        if s.slice(idx, idx + 1) == " ":
+            if idx > seg_start:
+                parts.push(s.slice(seg_start, idx))
+            seg_start = idx + 1
+        idx = idx + 1
+    if len > seg_start:
+        parts.push(s.slice(seg_start, len))
+    parts
+
+pub fn node_bucket_keys(idx: SelectorRuleIndex, tag: text, id: text, classes: [text]) -> text:
+    """The set of bucket keys (as one joined text) a node with this
+    tag/id/classes actually falls into for the given index — the universal
+    bucket always applies, plus any id/tag/class bucket that exists in idx
+    and matches this node's discriminants. This is exactly the discriminant
+    set selector_index_candidates would draw candidate rules from, and is
+    what we memoize per node and diff against the dirty table."""
+    var parts: [text] = [UNIVERSAL_KEY]
+    if id.len() > 0 and idx.id_buckets.contains_key(id):
+        parts.push(bucket_key_id(id))
+    if tag.len() > 0 and idx.tag_buckets.contains_key(tag):
+        parts.push(bucket_key_tag(tag))
+    var ci = 0
+    while ci < classes.len():
+        val c = classes[ci]
+        if idx.class_buckets.contains_key(c):
+            parts.push(bucket_key_class(c))
+        ci = ci + 1
+    join_keys(parts)
+
+fn keys_contains(keys: [text], target: text) -> bool:
+    var i = 0
+    while i < keys.len():
+        if keys[i] == target:
+            return true
+        i = i + 1
+    false
+
+fn keys_intersect_dirty(keys_text: text, dirty: Dict<text, bool>) -> bool:
+    val parts = split_keys(keys_text)
+    var i = 0
+    while i < parts.len():
+        val k = parts[i]
+        i = i + 1
+        if dirty.contains_key(k):
+            return true
+    false
+
+# =========================================================================
+# Mutation entry point — call this whenever a node's id/class/tag changes
+# (e.g. from be_dom_set_attr("id", ...) / ("class", ...) at the DOM
+# mutation site). Marks only the buckets the node moved OUT of and INTO
+# as dirty; everything else in the tree is left alone.
+# =========================================================================
+
+pub fn invalidate_node_discriminant_change(
+        mut state: InvalidationState, idx: SelectorRuleIndex,
+        old_tag: text, old_id: text, old_classes: [text],
+        new_tag: text, new_id: text, new_classes: [text]):
+    # Only the buckets this node ENTERED or LEFT need to be marked dirty:
+    # every other node still in a shared bucket (e.g. a shared ".leaf"
+    # class bucket, or the universal bucket that every node always
+    # belongs to) never had its membership change, so marking a bucket
+    # dirty just because this node still belongs to it (in both old and
+    # new) would force every OTHER node sharing that bucket to rematch too
+    # — a false invalidation that defeats the whole optimization. The
+    # universal bucket in particular is checked unconditionally for every
+    # node regardless of dirty state (mirrors the non-invalidated indexed
+    # path), so it must never be marked dirty at all.
+    val old_keys = split_keys(node_bucket_keys(idx, old_tag, old_id, old_classes))
+    val new_keys = split_keys(node_bucket_keys(idx, new_tag, new_id, new_classes))
+    var i = 0
+    while i < old_keys.len():
+        val k = old_keys[i]
+        i = i + 1
+        if k != UNIVERSAL_KEY and not keys_contains(new_keys, k):
+            state.dirty[k] = true
+    var j = 0
+    while j < new_keys.len():
+        val k2 = new_keys[j]
+        j = j + 1
+        if k2 != UNIVERSAL_KEY and not keys_contains(old_keys, k2):
+            state.dirty[k2] = true
+
+# =========================================================================
+# Invalidation-aware restyle pass
+# =========================================================================
+
+# NOTE ON WRITE-BACK: be_dom_set_children is a pure constructor (it returns a
+# NEW BeDomNode with the given children — it does not mutate its argument in
+# place: `BeDomNode(node_id: node.node_id, ..., children: children, ...)`).
+# style_block.spl's own apply_rules_to_node / apply_rules_to_node_indexed
+# call it and discard the return value (`be_dom_set_children(node, new_kids)`
+# as a bare statement), which — combined with the interpreter's documented
+# copy-on-array-index semantics for class instances — means a fetched child's
+# re-styled CHILDREN never make it back into the tree in either of those
+# functions; only the child's OWN inline style survives (verified directly:
+# a `*` rule sets background-color on the root but leaves every descendant's
+# style at its default ""). This is a pre-existing defect in style_block.spl
+# outside SelectorRuleIndex's bucketing logic, which this task is scoped not
+# to touch; it is NOT introduced here. To keep this module's own restyle
+# path correct (and to give the correctness spec a real oracle instead of a
+# vacuously-matching broken one), apply_rules_to_node_invalidated instead
+# threads the return value of be_dom_set_children back through the
+# recursion, so callers must use the RETURNED root, not the argument.
+pub fn apply_css_rules_to_tree_invalidated(root: BeDomNode, rules: [CssRule], idx: SelectorRuleIndex, mut state: InvalidationState) -> BeDomNode:
+    val updated_root = apply_rules_to_node_invalidated(root, rules, idx, state, nil, 1, 1)
+    state.dirty = {}
+    updated_root
+
+fn apply_rules_to_node_invalidated(node: BeDomNode, rules: [CssRule], idx: SelectorRuleIndex, mut state: InvalidationState, parent: BeDomNode?, nth: i32, sibling_count: i32) -> BeDomNode:
+    if be_dom_get_is_text(node):
+        return node
+
+    val tag = be_dom_get_tag(node)
+    if tag == "style" or tag == "link" or tag == "meta" or tag == "title" or tag == "head":
+        return node
+
+    val node_id = be_dom_get_id(node)
+    val node_classes = be_dom_get_classes(node)
+    val keys = node_bucket_keys(idx, tag, node_id, node_classes)
+
+    var needs_rematch = true
+    if state.memo.contains_key(node.node_id):
+        val prev_keys = state.memo[node.node_id]
+        if prev_keys == keys and not keys_intersect_dirty(keys, state.dirty):
+            needs_rematch = false
+
+    if needs_rematch:
+        state.rematch_count = state.rematch_count + 1
+        val candidates = selector_index_candidates(idx, tag, node_id, node_classes)
+        var color_ci = 0
+        while color_ci < candidates.len():
+            val rule = rules[candidates[color_ci]]
+            color_ci = color_ci + 1
+            if selector_matches(rule.selector, node, parent, nth, sibling_count):
+                var dc_idx = 0
+                while dc_idx < rule.declarations.len():
+                    val decl = rule.declarations[dc_idx]
+                    dc_idx = dc_idx + 1
+                    if decl.property == "color":
+                        node.set_style(decl.property, decl.value)
+        var ci2 = 0
+        while ci2 < candidates.len():
+            val rule = rules[candidates[ci2]]
+            ci2 = ci2 + 1
+            if selector_matches(rule.selector, node, parent, nth, sibling_count):
+                var dc_idx2 = 0
+                while dc_idx2 < rule.declarations.len():
+                    val decl = rule.declarations[dc_idx2]
+                    dc_idx2 = dc_idx2 + 1
+                    if decl.property != "color":
+                        node.set_style(decl.property, decl.value)
+
+    state.memo[node.node_id] = keys
+
+    var child_nth = 1
+    val sb_kids = be_dom_get_children(node)
+    var child_count = 0
+    var count_idx = 0
+    while count_idx < sb_kids.len():
+        if not be_dom_get_is_text(sb_kids[count_idx]):
+            child_count = child_count + 1
+        count_idx = count_idx + 1
+    var new_kids: [BeDomNode] = []
+    var sc_idx = 0
+    while sc_idx < sb_kids.len():
+        var child = sb_kids[sc_idx]
+        sc_idx = sc_idx + 1
+        val updated_child = apply_rules_to_node_invalidated(child, rules, idx, state, node, child_nth, child_count)
+        new_kids.push(updated_child)
+        if not be_dom_get_is_text(child):
+            child_nth = child_nth + 1
+    be_dom_set_children(node, new_kids)

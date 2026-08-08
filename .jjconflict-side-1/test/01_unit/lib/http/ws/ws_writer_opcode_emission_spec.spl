@@ -1,0 +1,89 @@
+# WebSocket writer per-variant opcode emission regression spec.
+#
+# Pins the low nibble of byte 0 (the RFC 6455 §5.2 opcode field) emitted by
+# `ws_write_frame` for each of the six WsFrame variants.
+#
+# Why this spec exists: the READ path had a real defect (every frame parsed as
+# Text — see ws_opcode_dispatch_spec.spl and commit db14f0e). The mirror-image
+# hypothesis for the WRITE path — that `match frame:` with `case Text(t):` arms
+# takes the first arm for every variant because enum payload sub-patterns
+# "always match and never bind" on the compiled engines — was investigated by
+# execution on 2026-08-01 and REFUTED: the payload sub-patterns bind correctly
+# under both SIMPLE_EXECUTION_MODE=interpreter and =jit. This spec locks that
+# correct behaviour in so a future regression cannot land silently.
+#
+# ENGINE / TIER NOTES (both verified empirically, do not assume):
+#   - `use std.http.ws.*` resolves to the **nogc_async_mut** tier. Verified by
+#     sabotaging each tier's ws_writer.spl in turn: only the nogc_async_mut
+#     edit changed the observed opcode. nogc_sync_mut and gc_async_mut are
+#     byte-identical copies and gc_sync_mut is a 3-line re-export facade, so a
+#     defect fixed in only one of the three real copies would NOT be caught
+#     here. Fix all three together.
+#   - `bin/simple test` runs the tree-walk interpreter. `ws_write_frame` cannot
+#     be reached by native codegen at all: `compile --native` refuses it with
+#     "constructs that require the interpreter: [PatternMatch]" (match on an
+#     enum has no native lowering; this is global, not ws-specific). With
+#     SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1 the call silently returns nil, which
+#     the compiler warns about at build time.
+
+use std.spec.{describe, it, assert_equal}
+use std.http.ws.ws_frame.{
+    WsFrame, WsTextFrame, WsBinaryFrame, WsContinuationFrame,
+    WsCloseFrame, WsPingFrame, WsPongFrame
+}
+use std.http.ws.ws_writer.{ws_write_frame}
+
+# Low nibble of byte 0 = the opcode field. Returns -1 on empty output so a
+# regression that emits nothing is a visible failure rather than a silent 0.
+fn _opcode_of(frame: WsFrame) -> i64:
+    val out = ws_write_frame(frame, false, [])
+    if out.len() == 0:
+        return -1
+    out[0] & 0x0f
+
+fn _empty() -> [u8]:
+    var bytes: [u8] = []
+    bytes
+
+describe "WebSocket writer per-variant opcode emission":
+    it "emits opcode 0x1 for a Text frame":
+        val f = WsFrame.Text(WsTextFrame(
+            fin: true, rsv1: false, rsv2: false, rsv3: false, payload: _empty()))
+        assert_equal(_opcode_of(f), 0x1)
+
+    it "emits opcode 0x2 for a Binary frame":
+        val f = WsFrame.Binary(WsBinaryFrame(
+            fin: true, rsv1: false, rsv2: false, rsv3: false, payload: _empty()))
+        assert_equal(_opcode_of(f), 0x2)
+
+    it "emits opcode 0x0 for a Continuation frame":
+        val f = WsFrame.Continuation(WsContinuationFrame(
+            fin: true, rsv1: false, rsv2: false, rsv3: false, payload: _empty()))
+        assert_equal(_opcode_of(f), 0x0)
+
+    it "emits opcode 0x8 for a Close frame":
+        val f = WsFrame.Close(WsCloseFrame(
+            fin: true, has_status: false, code: 0, reason: _empty()))
+        assert_equal(_opcode_of(f), 0x8)
+
+    it "emits opcode 0x9 for a Ping frame":
+        val f = WsFrame.Ping(WsPingFrame(fin: true, payload: _empty()))
+        assert_equal(_opcode_of(f), 0x9)
+
+    it "emits opcode 0xa for a Pong frame":
+        val f = WsFrame.Pong(WsPongFrame(fin: true, payload: _empty()))
+        assert_equal(_opcode_of(f), 0xa)
+
+    # Discrimination guard: the six assertions above are only meaningful if the
+    # six variants actually produce six DIFFERENT opcodes. Under the refuted
+    # "first arm always wins" hypothesis every variant would emit 0x1, so this
+    # single assertion is what makes the whole block falsifiable.
+    it "emits a distinct opcode for every variant (not all Text)":
+        val text = WsFrame.Text(WsTextFrame(
+            fin: true, rsv1: false, rsv2: false, rsv3: false, payload: _empty()))
+        val binary = WsFrame.Binary(WsBinaryFrame(
+            fin: true, rsv1: false, rsv2: false, rsv3: false, payload: _empty()))
+        val pong = WsFrame.Pong(WsPongFrame(fin: true, payload: _empty()))
+        assert_equal(_opcode_of(text) != _opcode_of(binary), true)
+        assert_equal(_opcode_of(binary) != _opcode_of(pong), true)
+        assert_equal(_opcode_of(text) != _opcode_of(pong), true)

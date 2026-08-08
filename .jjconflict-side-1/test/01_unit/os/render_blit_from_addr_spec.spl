@@ -1,0 +1,126 @@
+# @cover src/os/gui/render.spl 70%
+# @req FR-SOS-PIXEL-BRIDGE
+#
+# The baremetal present path used to move a frame raw-address -> [u32] ->
+# shadow buffer, paying two full-frame FFI loops per frame (one rt_ptr_read_i64
+# per pixel to build the array, one rt_mmio_write_u32 per pixel to consume it)
+# plus an allocation no consumer needed. render_blit_frame_from_addr does the
+# same move in ONE rt_memcpy.
+#
+# Two properties are asserted, and BOTH are load-bearing:
+#   1. Equivalence  — the address path must land byte-identical pixels to the
+#                     array path, else it is a corruption, not an optimisation.
+#   2. Non-vacuity  — the address path must charge ZERO per-pixel FFI stores.
+#                     Without this, a silent regression to the scalar loop
+#                     would still pass property 1 and look like a win.
+#
+# !! THIS SPEC CANNOT EXECUTE IN THIS TREE, AND NEITHER CAN ITS PREDECESSOR !!
+# `src/os/gui/render.spl` depends on rt_mmio_read_u32 / rt_mmio_write_u32,
+# which are baremetal-image externs with no host definition. Measured
+# 2026-08-06 on the Rust seed (md5 ed53cc5f255e269ca27c4cd83b17aef9):
+#
+#   bin/simple test render_blit_from_addr_spec  -> 5 total, 0 passed, 5 failed
+#                                                  "unknown extern function:
+#                                                   rt_mmio_write_u32"
+#   bin/simple test render_pixel_bridge_spec    -> 2 total, 0 passed, 2 failed
+#                                                  (SAME error, PRE-EXISTING,
+#                                                   unrelated to this change)
+#   bin/simple run  <equivalent probe>          -> same error, both engines
+#
+# So `render_pixel_bridge_spec.spl` has never executed an assertion here
+# despite its `@cover src/os/gui/render.spl 70%` header -- that coverage claim
+# is vacuous. This spec is written to be correct when the externs resolve (in a
+# baremetal image or once host stubs exist); it is NOT evidence today, and the
+# change it guards is UNVERIFIED in this tree. Filed:
+# doc/08_tracking/bug/render_spl_specs_cannot_execute_mmio_externs_2026-08-06.md
+
+use std.spec.*
+use os.gui.render.{
+    render_init, render_blit_frame, render_blit_frame_from_addr,
+    px_read, px_write, render_shadow_buf,
+    render_blit_scalar_pixel_writes, render_blit_bulk_copies,
+    render_blit_counters_reset
+}
+
+describe "render_blit_frame_from_addr — bulk copy replaces the per-pixel loop":
+
+    it "lands the same pixels the array path lands":
+        # Stage a source frame by using one shadow buffer as the source, then
+        # re-init and copy it in. fb_addr = 0 keeps present() a no-op.
+        render_init(0, 2, 2)
+        val src = render_shadow_buf()
+        px_write(0, 0, 0xFF112233u64)
+        px_write(1, 0, 0xFF445566u64)
+        px_write(0, 1, 0xFF778899u64)
+        px_write(1, 1, 0xFFAABBCCu64)
+
+        # New shadow buffer; the old one is now just an address holding pixels.
+        render_init(0, 2, 2)
+        assert_true(render_shadow_buf() != src)
+        render_blit_frame_from_addr(src, 4, 2, 2)
+
+        val e00: u64 = 0xFF112233
+        val e10: u64 = 0xFF445566
+        val e01: u64 = 0xFF778899
+        val e11: u64 = 0xFFAABBCC
+        expect(px_read(0, 0)).to_equal(e00)
+        expect(px_read(1, 0)).to_equal(e10)
+        expect(px_read(0, 1)).to_equal(e01)
+        expect(px_read(1, 1)).to_equal(e11)
+
+    it "charges zero per-pixel FFI stores, and exactly one bulk copy":
+        render_init(0, 2, 2)
+        val src = render_shadow_buf()
+        px_write(0, 0, 0xFF010203u64)
+        px_write(1, 0, 0xFF040506u64)
+        px_write(0, 1, 0xFF070809u64)
+        px_write(1, 1, 0xFF0A0B0Cu64)
+
+        render_init(0, 2, 2)
+        render_blit_counters_reset()
+        render_blit_frame_from_addr(src, 4, 2, 2)
+
+        # THE GATE. 0 scalar stores is the whole point of this function.
+        val zero: u64 = 0
+        val one: u64 = 1
+        expect(render_blit_scalar_pixel_writes()).to_equal(zero)
+        expect(render_blit_bulk_copies()).to_equal(one)
+
+    it "proves the counter is live: the array path DOES charge per-pixel stores":
+        # Anti-vacuity control. If this example ever reports 0 too, the counter
+        # is broken and the gate above proves nothing.
+        render_init(0, 2, 2)
+        render_blit_counters_reset()
+        val pixels: [u32] = [0xFF112233u32, 0xFF445566u32, 0xFF778899u32, 0xFFAABBCCu32]
+        render_blit_frame(pixels, 2, 2)
+        val four: u64 = 4
+        val zero: u64 = 0
+        expect(render_blit_scalar_pixel_writes()).to_equal(four)
+        expect(render_blit_bulk_copies()).to_equal(zero)
+
+    it "clamps an over-large source to framebuffer capacity without overrun":
+        render_init(0, 4, 1)
+        val src = render_shadow_buf()
+        px_write(0, 0, 0xFF010101u64)
+        px_write(1, 0, 0xFF020202u64)
+        px_write(2, 0, 0xFF030303u64)
+        px_write(3, 0, 0xFF040404u64)
+
+        # Destination is only 2x1; asking for 4x1 must copy 2 pixels, not 4.
+        render_init(0, 2, 1)
+        render_blit_frame_from_addr(src, 4, 4, 1)
+        val a: u64 = 0xFF010101
+        val b: u64 = 0xFF020202
+        expect(px_read(0, 0)).to_equal(a)
+        expect(px_read(1, 0)).to_equal(b)
+
+    it "refuses a null source address instead of copying from address zero":
+        render_init(0, 2, 2)
+        px_write(0, 0, 0xFFDEAD00u64)
+        render_blit_counters_reset()
+        render_blit_frame_from_addr(0, 4, 2, 2)
+        # Nothing copied, nothing clobbered.
+        val zero: u64 = 0
+        val keep: u64 = 0xFFDEAD00
+        expect(render_blit_bulk_copies()).to_equal(zero)
+        expect(px_read(0, 0)).to_equal(keep)

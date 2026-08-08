@@ -1,0 +1,96 @@
+# Legacy in-memory Sv32 translation adapter.
+#
+# Production protected cores use the request/response walker and never import
+# this module.  It exists only for callers of the former RamState API.
+
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, mmu_tlb_lookup}
+use std.hardware.rv32i_rtl.mmu_sv32.{sv32_vpn1, sv32_vpn0, sv32_full_vpn, sv32_offset}
+use std.hardware.rv32i_rtl.mmu_sv32.{pte_ppn1, pte_ppn0, pte_ppn_full, pte_flags_extract}
+use std.hardware.rv32i_rtl.mmu_sv32.{fault_cause_for, ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.mmu_sv32.{PRIV_U, PRIV_S, PRIV_M}
+use std.hardware.rv32i_rtl.mmu_sv32.{PAGE_SIZE, PAGE_OFFSET_BITS, PTE_SIZE}
+use std.hardware.rv32i_rtl.mmu_sv32.{PTE_V_MASK, PTE_R_MASK, PTE_W_MASK, PTE_X_MASK, PTE_U_MASK}
+use std.hardware.soc_rtl.ram.{RamState, ram_read}
+
+struct MmuTranslateResult:
+    """Result of a legacy in-memory virtual-to-physical translation."""
+    paddr: u32
+    fault: bool
+    fault_cause: u32
+
+fn mmu_legacy_check_perms(flags: u32, access_type: u32, privilege: u32) -> bool:
+    if (flags & PTE_V_MASK) == 0:
+        return false
+    if (flags & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) == 0:
+        return false
+    if (flags & PTE_W_MASK) != 0 and (flags & PTE_R_MASK) == 0:
+        return false
+
+    val user_page = (flags & PTE_U_MASK) != 0
+    if privilege == PRIV_U and not user_page:
+        return false
+    if privilege == PRIV_S and user_page:
+        return false
+
+    if access_type == ACCESS_FETCH:
+        return (flags & PTE_X_MASK) != 0
+    if access_type == ACCESS_LOAD:
+        return (flags & PTE_R_MASK) != 0
+    if access_type == ACCESS_STORE:
+        return (flags & PTE_W_MASK) != 0
+    true
+
+fn mmu_legacy_fault(access_type: u32) -> MmuTranslateResult:
+    MmuTranslateResult(paddr: 0, fault: true,
+        fault_cause: fault_cause_for(access_type))
+
+fn mmu_translate(state: MmuState, vaddr: u32, access_type: u32,
+                 privilege: u32, ram: RamState) -> MmuTranslateResult:
+    """Preserve the former synchronous RamState translation API.
+
+    This adapter intentionally retains its old permission and u32-address
+    behavior.  New protected cores use memory32_start/memory32_cycle instead."""
+    if privilege == PRIV_M or state.satp_mode == 0:
+        return MmuTranslateResult(paddr: vaddr, fault: false, fault_cause: 0)
+
+    val vpn = sv32_full_vpn(vaddr)
+    val tlb_result = mmu_tlb_lookup(state, vpn)
+    if tlb_result.hit:
+        if not mmu_legacy_check_perms(tlb_result.flags, access_type, privilege):
+            return mmu_legacy_fault(access_type)
+        val paddr = (tlb_result.ppn << PAGE_OFFSET_BITS) | sv32_offset(vaddr)
+        return MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)
+
+    val vpn1 = sv32_vpn1(vaddr)
+    val vpn0 = sv32_vpn0(vaddr)
+    val offset = sv32_offset(vaddr)
+    val l1_pte_addr = (state.satp_ppn * PAGE_SIZE) + (vpn1 * PTE_SIZE)
+    val l1_pte = ram_read(ram, l1_pte_addr)
+    if (l1_pte & PTE_V_MASK) == 0:
+        return mmu_legacy_fault(access_type)
+
+    val l1_leaf = (l1_pte & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) != 0
+    if l1_leaf:
+        if pte_ppn0(l1_pte) != 0:
+            return mmu_legacy_fault(access_type)
+        val flags = pte_flags_extract(l1_pte)
+        if not mmu_legacy_check_perms(flags, access_type, privilege):
+            return mmu_legacy_fault(access_type)
+        val paddr = (pte_ppn1(l1_pte) << 22) | (vpn0 << 12) | offset
+        return MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)
+
+    val l0_table_ppn = pte_ppn_full(l1_pte)
+    val l0_pte_addr = (l0_table_ppn * PAGE_SIZE) + (vpn0 * PTE_SIZE)
+    val l0_pte = ram_read(ram, l0_pte_addr)
+    if (l0_pte & PTE_V_MASK) == 0:
+        return mmu_legacy_fault(access_type)
+    if (l0_pte & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) == 0:
+        return mmu_legacy_fault(access_type)
+
+    val flags = pte_flags_extract(l0_pte)
+    if not mmu_legacy_check_perms(flags, access_type, privilege):
+        return mmu_legacy_fault(access_type)
+    val paddr = (pte_ppn_full(l0_pte) << PAGE_OFFSET_BITS) | offset
+    MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)
+
+export MmuTranslateResult, mmu_translate

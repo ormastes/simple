@@ -1,0 +1,402 @@
+"""WebGPU Strict Smoke Tests
+
+@tag: rendering, engine2d, webgpu, strict
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl 70%
+@cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
+
+Proves that WebGPU backend diagnostics are explicit rather than silent, and
+that a strict webgpu create never hands back a differently-named backend.
+
+TWO DEFECTS WERE REPAIRED HERE — read both before adding assertions.
+
+(1) THIS SPEC WAS DEAD. It imported `probe_webgpu` from
+    std.gc_async_mut.gpu.engine2d.backend_webgpu. No such function exists, and
+    never has: `probe_webgpu` is a METHOD on engine3d's BackendProber
+    (src/lib/gc_async_mut/gpu/engine3d/backend_probe3d.spl:256) and has no
+    engine2d free-function counterpart. An unresolved `use` is only a WARN, so
+    the file compiled and every one of the 12 examples then died at call time on
+    "semantic: function `probe_webgpu` not found" — 12 examples, 12 failures, on
+    a clean tree, identically with and without fd pressure. Two further
+    assertions were fabricated against the same imaginary API: feature_gate was
+    asserted to equal "webgpu-real" (the real gate is "webgpu_runtime") and
+    selected_name was asserted to become "cpu" when unavailable (engine2d's
+    strict probe passes the canonical requested name straight through to
+    selected_name and never substitutes). All three are corrected against the
+    API that actually exists: Engine2D.probe_backend(w, h, "webgpu").
+
+(2) PROBE-THEN-CREATE TOCTOU
+    (doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md)
+    Every example in the last two contexts called probe_webgpu() and branched
+    its whole body on that stored answer. Engine2D.probe_backend runs a
+    create+init+shutdown and throws it away; Engine2D.create_with_backend_strict
+    is a SECOND, independent create with nothing cached in between, so the probe
+    answer was only a prediction. Both directions corrupted the gate: one
+    example asserted `result.is_ok()` MUST hold purely because the probe had
+    said ok (false red), and the rest skipped their entire body when the probe
+    said not-ok (vacuous green). Nothing is asserted from the probe any more:
+    the probe is checked for SELF-consistency only, a probe/create divergence is
+    DISCLOSED on a [toctou] line, and every other assertion reads the CREATE and
+    the READBACK.
+
+WHAT THIS SPEC CANNOT PROVE — the webgpu engine2d backend is SOFTWARE
+    backend_webgpu.spl:561 makes read_pixels_with_source() return
+    `engine2d_readback(self.buf, "cpu_mirror")` UNCONDITIONALLY — there is no
+    device path, no device_readback arm, and no sticky cpu_fallback_used flag;
+    the drawing primitives are the emu_draw_* software rasterizer. So webgpu on
+    engine2d can never be GPU-PROVEN on any host, and `cpu_mirror` here is the
+    backend's designed steady state, NOT the silent CPU reclassification that it
+    is on vulkan. That is why _assert_provenance_invariants below does NOT carry
+    vulkan_strict_spec's hard `source != "cpu_mirror"` tooth: applying the
+    owned-create tooth to a software-by-construction lane would be a guaranteed
+    false red, not a defect found. What IS binding here is the strictness of the
+    name, the honesty of the provenance fields, and pixel-exact software
+    rasterization parity — all of which run on every outcome.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn status_is_terminal_failure(probe: BackendProbeResult) -> bool:
+    """True when the probe status is Failed or Unavailable (not Initialized)."""
+    probe.status == BackendStatus.Failed or probe.status == BackendStatus.Unavailable
+
+fn color_red_u32() -> u32:
+    rgb(255, 0, 0)
+
+fn color_green_u32() -> u32:
+    rgb(0, 255, 0)
+
+fn expected_px() -> i64:
+    """Pixel count of the 16x16 framebuffer every example renders."""
+    (16 * 16).to_i64()
+
+fn probe_webgpu_backend() -> BackendProbeResult:
+    """Probe webgpu through the API that exists, without allocating an engine."""
+    Engine2D.probe_backend(16, 16, "webgpu")
+
+fn build_cpu_reference(w: i32, h: i32, bg: u32, fg: u32, rx: i32, ry: i32, rw: i32, rh: i32) -> [u32]:
+    """Build a CPU reference framebuffer for parity comparison."""
+    var buf = [bg; w * h]
+    var py = ry
+    while py < ry + rh:
+        var px = rx
+        while px < rx + rw:
+            if px >= 0 and px < w and py >= 0 and py < h:
+                buf[py * w + px] = fg
+            px = px + 1
+        py = py + 1
+    buf
+
+# --- readback provenance: the teeth, asserted on every outcome -------------
+#
+# The honest vocabulary is 14 labels in FOUR classes, not the 8 an earlier pass
+# assumed. `cache` is its own UNATTRIBUTED class: it is the only label that
+# carries a real frame whose provenance is unknown (a replay of last_pixels,
+# simple_web_engine2d_renderer.spl:172), so it may neither be credited as device
+# evidence nor assumed to be CPU.
+
+fn _device_proven(source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64) -> bool:
+    """True only when a real device demonstrably produced this frame."""
+    source == "device_readback" and handle > 0 and identity > 0 and
+        pixel_count == expected
+
+fn _source_is_device(source: text) -> bool:
+    """True for the readback sources that claim device provenance."""
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present" or source == "framebuffer_surface"
+
+fn _source_is_cpu(source: text) -> bool:
+    """True for the readback sources served by the CPU/software lane."""
+    source == "cpu_mirror" or source == "cpu_fallback"
+
+fn _source_is_unattributed(source: text) -> bool:
+    """True for a frame whose provenance is genuinely unknown.
+
+    `cache` replays a previously stored frame with no record of which lane
+    produced it, so it carries pixels but earns no provenance claim either way.
+    """
+    source == "cache"
+
+fn _source_is_no_frame(source: text) -> bool:
+    """True for the readback sources that produced no frame at all.
+
+    Every one of these carries an EMPTY pixel array, so no frame-content
+    assertion may run on them.
+    """
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested" or source == "device_identity_unknown" or
+        source == "preflight_rejected" or source == "unavailable" or
+        source == "none"
+
+fn _source_is_known(source: text) -> bool:
+    """True when the readback source is inside the honest vocabulary."""
+    _source_is_device(source) or _source_is_cpu(source) or
+        _source_is_unattributed(source) or _source_is_no_frame(source)
+
+fn _assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64):
+    """Fail closed on any readback that claims more provenance than it earned."""
+    if not _source_is_known(source):
+        print "[webgpu-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    # NOTE: vulkan_strict_spec additionally fails closed on source == "cpu_mirror",
+    # because a vulkan backend that degrades sets a sticky flag and reports
+    # "cpu_fallback" — so "cpu_mirror" there means a silent reclassification.
+    # The webgpu backend has no device arm at all (backend_webgpu.spl:561 always
+    # returns "cpu_mirror"), so that tooth is deliberately NOT applied here; it
+    # would fail on every host regardless of correctness.
+    if source == "device_readback":
+        expect(handle).to_be_greater_than(0)
+        expect(identity).to_be_greater_than(0)
+        expect(pixel_count).to_equal(expected)
+    if _source_is_cpu(source):
+        expect(_source_is_device(source)).to_equal(false)
+        expect(_device_proven(source, handle, identity, pixel_count, expected)).to_equal(false)
+    if _source_is_unattributed(source):
+        # An unattributed frame must not be laundered into device evidence.
+        expect(_device_proven(source, handle, identity, pixel_count, expected)).to_equal(false)
+
+fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64, expected: i64) -> bool:
+    """Disclose whether this example proved the GPU path, and return that fact."""
+    if _device_proven(source, handle, identity, pixel_count, expected):
+        print "[webgpu-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU path"
+    else if source == "cpu_mirror":
+        print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — the engine2d webgpu backend is software by construction (source=cpu_mirror); this example proves NOTHING about any GPU path"
+    else if source == "cpu_fallback":
+        print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); this example proves NOTHING about the GPU path"
+    else if _source_is_unattributed(source):
+        print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — replayed frame of unknown provenance (source={source}); this example proves NOTHING about the GPU path"
+    else:
+        print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU path"
+    false
+
+fn _assert_strict_failure_is_structured(label: text, failure: BackendProbeResult):
+    """Assert the invariants a failed STRICT webgpu create still owes.
+
+    Holds on every host, so it is unconditional on the failure path instead of
+    gated on what the probe predicted.
+    """
+    expect(failure.selected_name == "cpu" or failure.selected_name == "software").to_equal(false)
+    expect(failure.requested_name).to_equal("webgpu")
+    expect(status_is_terminal_failure(failure)).to_equal(true)
+    expect(failure.fallback_reason).to_not_equal("")
+    print "[webgpu-gpu] {label}: GPU BRANCH SKIPPED — the strict webgpu create failed at use time (selected={failure.selected_name}); this example proves NOTHING about the webgpu path"
+
+fn _frame_assertions_skipped(label: text, source: text):
+    """Disclose that no frame existed to assert rendering correctness against."""
+    print "[webgpu-gpu] {label}: FRAME ASSERTIONS SKIPPED — no frame was produced (source={source}); this example proves NOTHING about rendering correctness"
+
+fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
+    """Disclose a probe/create divergence — a host condition, never asserted."""
+    if probe_ready != created:
+        print "[toctou] {label}: probe predicted ready={probe_ready} but the independent create returned ok={created} — the prediction did not survive the gap; asserting on the CREATE, not the probe"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "WebGPU strict smoke tests":
+
+    context "probe diagnostics":
+
+        it "probe returns a typed BackendProbeResult":
+            val probe = probe_webgpu_backend()
+            val ok = probe.is_ok() or status_is_terminal_failure(probe)
+            expect(ok).to_equal(true)
+
+        it "probe reports requested_name as webgpu":
+            val probe = probe_webgpu_backend()
+            expect(probe.requested_name).to_equal("webgpu")
+
+        it "probe on unavailable carries non-empty fallback_reason":
+            val probe = probe_webgpu_backend()
+            if not probe.is_ok():
+                expect(status_is_terminal_failure(probe)).to_equal(true)
+                expect(probe.fallback_reason).to_not_equal("")
+
+        it "probe diagnostic_text is non-empty":
+            val probe = probe_webgpu_backend()
+            val txt = probe.diagnostic_text()
+            expect(txt.len()).to_be_greater_than(0)
+
+    context "probe self-consistency":
+
+        it "probe status and available flag agree":
+            # A claim about the probe OBJECT, not a prediction about any later
+            # create, so it stays a hard assertion.
+            val probe = probe_webgpu_backend()
+            val status_known = probe.status == BackendStatus.Initialized or status_is_terminal_failure(probe)
+            expect(status_known).to_equal(true)
+            expect(probe.available).to_equal(probe.status == BackendStatus.Initialized)
+
+        it "probe never substitutes a different backend under the webgpu name":
+            # engine2d's strict probe passes the canonical requested name
+            # through to selected_name. The OLD assertion here demanded
+            # selected_name == "cpu" when unavailable, which no code path can
+            # ever produce; the real invariant is the opposite one.
+            val probe = probe_webgpu_backend()
+            expect(probe.selected_name).to_equal("webgpu")
+            expect(probe.selected_name == "cpu" or probe.selected_name == "software").to_equal(false)
+
+        it "probe on success reports the webgpu api and wgsl shader format":
+            val probe = probe_webgpu_backend()
+            if probe.is_ok():
+                expect(probe.api_name).to_equal("webgpu")
+                expect(probe.shader_format).to_equal("wgsl")
+                expect(probe.available).to_equal(true)
+            else:
+                expect(probe.available).to_equal(false)
+
+    context "create_with_backend_strict webgpu strictness":
+
+        it "never hands back a non-webgpu engine":
+            # The create is attempted REGARDLESS of any probe. Both outcomes owe
+            # a strictness claim, so neither branch is a silent skip.
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if result.is_ok():
+                var engine = result.unwrap()
+                expect(engine.backend_name()).to_equal("webgpu")
+                expect(engine.width()).to_equal(16)
+                expect(engine.height()).to_equal(16)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-strictness", result.unwrap_err())
+
+        it "a failed strict create carries a terminal status and the requested name":
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if not result.is_ok():
+                val diag = result.unwrap_err()
+                expect(status_is_terminal_failure(diag)).to_equal(true)
+                expect(diag.requested_name).to_equal("webgpu")
+                expect(diag.fallback_reason).to_not_equal("")
+            else:
+                print "[webgpu-gpu] webgpu-typed-error: GPU BRANCH SKIPPED — the strict create succeeded, so the failure path was not exercised; this example proves NOTHING about the failure path"
+
+        it "the probe/create divergence is disclosed, never asserted":
+            # This is the one example that measures the probe/create gap: the
+            # probe answer is DISCLOSED, never asserted. The OLD version of this
+            # example asserted `result.is_ok()` MUST be true whenever the probe
+            # had said ok — the false-red half of the TOCTOU.
+            val probe = probe_webgpu_backend()
+            val probe_ready = probe.is_ok()
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            val created = result.is_ok()
+            _disclose_toctou("webgpu-gap", probe_ready, created)
+            if created:
+                var engine = result.unwrap()
+                expect(engine.backend_name()).to_equal("webgpu")
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-gap", result.unwrap_err())
+
+    context "off-screen render and readback":
+
+        it "readback provenance is honest and a full frame is returned":
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if result.is_ok():
+                var engine = result.unwrap()
+                engine.clear(color_red_u32())
+                engine.draw_rect_filled(4, 4, 8, 8, color_green_u32())
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("webgpu-readback", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("webgpu-readback", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("webgpu-readback", drawn.source)
+                else:
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels.len()).to_equal(256)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-readback", result.unwrap_err())
+
+        it "corner pixels are red after clear with red":
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val red = color_red_u32()
+                engine.clear(red)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("webgpu-clear", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("webgpu-clear", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("webgpu-clear", drawn.source)
+                else:
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    # Holds on whatever backend actually served the frame, so it
+                    # is asserted on every source that produced one.
+                    expect(pixels[0]).to_equal(red)
+                    expect(pixels[255]).to_equal(red)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-clear", result.unwrap_err())
+
+        it "clear then draw_rect_filled matches the CPU reference pixel-for-pixel":
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_red_u32()
+                val fg = color_green_u32()
+                engine.clear(bg)
+                engine.draw_rect_filled(4, 4, 8, 8, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("webgpu-rect-parity", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("webgpu-rect-parity", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("webgpu-rect-parity", drawn.source)
+                else:
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    val cpu_ref = build_cpu_reference(16, 16, bg, fg, 4, 4, 8, 8)
+                    var mismatch_count = 0
+                    var ci = 0
+                    while ci < 256:
+                        if pixels[ci] != cpu_ref[ci]:
+                            mismatch_count = mismatch_count + 1
+                        ci = ci + 1
+                    expect(mismatch_count).to_equal(0)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-rect-parity", result.unwrap_err())
+
+        it "a pixel inside the rect is the fill color and one outside is the background":
+            val result = Engine2D.create_with_backend_strict(16, 16, "webgpu")
+            if result.is_ok():
+                var engine = result.unwrap()
+                val bg = color_red_u32()
+                val fg = color_green_u32()
+                engine.clear(bg)
+                engine.draw_rect_filled(4, 4, 8, 8, fg)
+                val drawn = engine.read_pixels_with_source()
+                _assert_provenance_invariants("webgpu-rect-region", drawn.source,
+                    drawn.backend_handle, drawn.device_identity, drawn.pixel_count, expected_px())
+                _report_outcome("webgpu-rect-region", drawn.source, drawn.backend_handle,
+                    drawn.device_identity, drawn.pixel_count, expected_px())
+                if _source_is_no_frame(drawn.source):
+                    _frame_assertions_skipped("webgpu-rect-region", drawn.source)
+                else:
+                    engine.present()
+                    val pixels = engine.read_pixels()
+                    expect(pixels[6 * 16 + 6]).to_equal(fg)
+                    expect(pixels[0]).to_equal(bg)
+                engine.shutdown()
+            else:
+                _assert_strict_failure_is_structured("webgpu-rect-region", result.unwrap_err())
+
+            print "[webgpu-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[webgpu-gpu] <label>: GPU-PROVEN' lines above."
+            print "[webgpu-gpu] RUN VERDICT: the engine2d webgpu backend is SOFTWARE by construction (backend_webgpu.spl:561), so a GPU-PROVEN line is not expected on ANY host — a clean run attests strict naming, honest provenance and software rasterization parity, and nothing about a GPU."

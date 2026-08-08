@@ -1,0 +1,301 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)"
+. "$ROOT_DIR/scripts/check/lib/macos-gui-execution-history-boundary.shs"
+
+fixture_root="$(mktemp -d /tmp/macos-gui-history.XXXXXX)"
+cleanup() {
+    [ ! -e "${executed:-}" ] || chflags nouchg "$executed" 2>/dev/null || true
+    rm -rf "$fixture_root"
+}
+trap cleanup EXIT HUP INT TERM
+fixture_root="$(CDPATH= cd -- "$fixture_root" && pwd -P)"
+driver="$fixture_root/build/bootstrap/full/test/simple"
+collector="$fixture_root/simple_es_history_collector"
+provenance="$fixture_root/collector-provenance.env"
+policy="$fixture_root/collector-policy.env"
+mkdir -p "$(dirname -- "$driver")"
+printf 'admitted-driver\n' >"$driver"
+printf 'collector\n' >"$collector"
+printf 'provenance\n' >"$provenance"
+printf 'policy\n' >"$policy"
+chmod 700 "$driver" "$collector"
+driver_sha="$(macos_gui_history_sha256_file "$driver")"
+executed="$fixture_root/executed-driver-snapshot"
+cp "$driver" "$executed"
+chmod 500 "$executed"
+chflags uchg "$executed"
+
+write_receipt() {
+    receipt="$1"
+    events="$2"
+    event_count="${3:-$(wc -l <"$events" | tr -d ' ')}"
+    finalized="${4:-complete}"
+    team="${5:-TESTTEAM}"
+    entitlement="${6:-pass}"
+    signature="${7:-pass}"
+    event_sha="${8:-$(macos_gui_history_sha256_file "$events")}"
+    collector_sha="${9:-$(macos_gui_history_sha256_file "$collector")}"
+    provenance_sha="${10:-$(macos_gui_history_sha256_file "$provenance")}"
+    policy_sha="${11:-$(macos_gui_history_sha256_file "$policy")}"
+    {
+        echo schema=macos-es-execution-history-v3
+        echo observer_kind=endpointsecurity-es-v2
+        echo coverage=root-and-descendants-through-exit-gap-checked
+        echo finalized="$finalized"
+        echo status=pass
+        echo event_sequence_status=gap-free
+        echo root_pid=100
+        echo root_executable_path="$driver"
+        echo root_executable_sha256="$driver_sha"
+        echo root_executable_device="$(macos_gui_history_file_device "$driver")"
+        echo root_executable_inode="$(macos_gui_history_file_inode "$driver")"
+        echo executed_executable_path="$executed"
+        echo executed_executable_sha256="$(macos_gui_history_sha256_file "$executed")"
+        echo executed_executable_device="$(macos_gui_history_file_device "$executed")"
+        echo executed_executable_inode="$(macos_gui_history_file_inode "$executed")"
+        echo executed_executable_mode=500
+        echo executed_executable_immutable_status=pass
+        echo event_count="$event_count"
+        echo event_log_path="$events"
+        echo event_log_sha256="$event_sha"
+        echo collector_path="$collector"
+        echo collector_sha256="$collector_sha"
+        echo collector_provenance_path="$provenance"
+        echo collector_provenance_sha256="$provenance_sha"
+        echo collector_policy_path="$policy"
+        echo collector_policy_sha256="$policy_sha"
+        echo collector_signing_identifier=org.simplelang.gui-es-history
+        echo collector_team_identifier="$team"
+        echo collector_entitlement_status="$entitlement"
+        echo collector_code_signature_status="$signature"
+    } >"$receipt"
+}
+
+assert_rejected() {
+    name="$1"
+    events="$2"
+    receipt="$fixture_root/$name.env"
+    write_receipt "$receipt" "$events"
+    if macos_gui_history_verify_normalized \
+            "$receipt" "$driver" "$driver_sha"; then
+        echo "$name history was accepted" >&2
+        exit 1
+    fi
+}
+
+clean="$fixture_root/clean.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|exec|101|100|/usr/bin/true" \
+    "4|exec|101|100|/usr/bin/printf" \
+    "5|exit|101|100|" \
+    "6|exec|100|1|/usr/bin/true" \
+    "7|exit|100|1|" >"$clean"
+write_receipt "$fixture_root/clean.env" "$clean"
+macos_gui_history_verify_normalized \
+    "$fixture_root/clean.env" "$driver" "$driver_sha"
+
+chflags nouchg "$executed"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/clean.env" "$driver" "$driver_sha"; then
+    echo "mutable executed snapshot was accepted" >&2
+    exit 1
+fi
+chflags uchg "$executed"
+
+chflags nouchg "$executed"
+mv "$executed" "$executed.original"
+cp "$driver" "$executed"
+chmod 500 "$executed"
+chflags uchg "$executed"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/clean.env" "$driver" "$driver_sha"; then
+    echo "replacement executed snapshot inode was accepted" >&2
+    exit 1
+fi
+chflags nouchg "$executed"
+rm -f "$executed"
+mv "$executed.original" "$executed"
+chflags uchg "$executed"
+
+sequence_gap="$fixture_root/sequence-gap.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "3|exit|100|1|" >"$sequence_gap"
+assert_rejected sequence-gap "$sequence_gap"
+
+wrong_first="$fixture_root/wrong-first.events"
+printf '%s\n' \
+    "1|exec|101|100|/usr/bin/true" \
+    "2|exit|101|100|" >"$wrong_first"
+assert_rejected wrong-first "$wrong_first"
+
+orphan_exec="$fixture_root/orphan-exec.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|exec|101|100|/usr/bin/true" \
+    "3|exit|100|1|" >"$orphan_exec"
+assert_rejected orphan-exec "$orphan_exec"
+
+orphan_fork="$fixture_root/orphan-fork.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|999|101|" \
+    "3|exit|100|1|" >"$orphan_fork"
+assert_rejected orphan-fork "$orphan_fork"
+
+wrong_parent="$fixture_root/wrong-parent.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|exec|101|999|/usr/bin/true" \
+    "4|exit|100|1|" >"$wrong_parent"
+assert_rejected wrong-parent "$wrong_parent"
+
+child_without_exec="$fixture_root/child-without-exec.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|exit|101|100|" \
+    "4|exit|100|1|" >"$child_without_exec"
+assert_rejected child-without-exec "$child_without_exec"
+
+live_child_at_root_exit="$fixture_root/live-child-at-root-exit.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|exec|101|100|/usr/bin/true" \
+    "4|exit|100|1|" >"$live_child_at_root_exit"
+assert_rejected live-child-at-root-exit "$live_child_at_root_exit"
+
+after_root_exit="$fixture_root/after-root-exit.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|exit|100|1|" \
+    "3|exec|100|1|/usr/bin/true" >"$after_root_exit"
+assert_rejected after-root-exit "$after_root_exit"
+
+missing_root_exit="$fixture_root/missing-root-exit.events"
+printf '%s\n' "1|exec|100|1|$executed" >"$missing_root_exit"
+assert_rejected missing-root-exit "$missing_root_exit"
+
+duplicate_child="$fixture_root/duplicate-child.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|fork|100|101|" \
+    "4|exit|100|1|" >"$duplicate_child"
+assert_rejected duplicate-child "$duplicate_child"
+
+same_pid_seed="$fixture_root/same-pid-seed.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|exec|100|1|$fixture_root/src/compiler_rust/simple_seed" \
+    "3|exit|100|1|" >"$same_pid_seed"
+assert_rejected same-pid-seed "$same_pid_seed"
+
+short_seed_child="$fixture_root/short-seed-child.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|fork|100|101|" \
+    "3|exec|101|100|$fixture_root/build/wm-to-i64-bootstrap/stage3/simple" \
+    "4|exit|101|100|" \
+    "5|exit|100|1|" >"$short_seed_child"
+assert_rejected sub-50ms-seed-child "$short_seed_child"
+
+# A benign exec in the already-admitted root PID is normal exec-replacement
+# behavior, not prohibited delegation.  The v2 verifier must preserve it.
+same_pid_benign="$fixture_root/same-pid-benign.events"
+printf '%s\n' \
+    "1|exec|100|1|$executed" \
+    "2|exec|100|1|/usr/bin/true" \
+    "3|exit|100|1|" >"$same_pid_benign"
+write_receipt "$fixture_root/same-pid-benign.env" "$same_pid_benign"
+macos_gui_history_verify_normalized \
+    "$fixture_root/same-pid-benign.env" "$driver" "$driver_sha"
+
+write_receipt "$fixture_root/count.env" "$clean" 99
+if macos_gui_history_verify_normalized \
+        "$fixture_root/count.env" "$driver" "$driver_sha"; then
+    echo "wrong finalized event count was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/hash.env" "$clean" 7 complete TESTTEAM pass pass \
+    "$(printf wrong | shasum -a 256 | awk '{print $1}')"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/hash.env" "$driver" "$driver_sha"; then
+    echo "wrong event-log hash was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/finalized.env" "$clean" 7 partial
+if macos_gui_history_verify_normalized \
+        "$fixture_root/finalized.env" "$driver" "$driver_sha"; then
+    echo "partial history was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/team.env" "$clean" 7 complete unassigned
+if macos_gui_history_verify_normalized \
+        "$fixture_root/team.env" "$driver" "$driver_sha"; then
+    echo "unassigned signing team was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/entitlement.env" "$clean" 7 complete TESTTEAM fail
+if macos_gui_history_verify_normalized \
+        "$fixture_root/entitlement.env" "$driver" "$driver_sha"; then
+    echo "missing EndpointSecurity entitlement was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/signature.env" "$clean" 7 complete TESTTEAM pass fail
+if macos_gui_history_verify_normalized \
+        "$fixture_root/signature.env" "$driver" "$driver_sha"; then
+    echo "invalid collector signature was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/collector-hash.env" "$clean" 7 complete \
+    TESTTEAM pass pass "$(macos_gui_history_sha256_file "$clean")" \
+    "$(printf wrong | shasum -a 256 | awk '{print $1}')"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/collector-hash.env" "$driver" "$driver_sha"; then
+    echo "wrong collector hash was accepted" >&2
+    exit 1
+fi
+
+wrong_sha="$(printf wrong | shasum -a 256 | awk '{print $1}')"
+write_receipt "$fixture_root/provenance-hash.env" "$clean" 7 complete \
+    TESTTEAM pass pass "$(macos_gui_history_sha256_file "$clean")" \
+    "$(macos_gui_history_sha256_file "$collector")" "$wrong_sha"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/provenance-hash.env" "$driver" "$driver_sha"; then
+    echo "wrong collector provenance hash was accepted" >&2
+    exit 1
+fi
+
+write_receipt "$fixture_root/policy-hash.env" "$clean" 7 complete \
+    TESTTEAM pass pass "$(macos_gui_history_sha256_file "$clean")" \
+    "$(macos_gui_history_sha256_file "$collector")" \
+    "$(macos_gui_history_sha256_file "$provenance")" "$wrong_sha"
+if macos_gui_history_verify_normalized \
+        "$fixture_root/policy-hash.env" "$driver" "$driver_sha"; then
+    echo "wrong collector policy hash was accepted" >&2
+    exit 1
+fi
+
+set +e
+macos_gui_history_require_trust_root "$ROOT_DIR" >/dev/null 2>&1
+trust_status=$?
+set -e
+[ "$trust_status" = 125 ] || {
+    echo "unavailable tracked trust root did not fail with 125" >&2
+    exit 1
+}
+
+echo "macOS GUI execution history boundary: PASS"

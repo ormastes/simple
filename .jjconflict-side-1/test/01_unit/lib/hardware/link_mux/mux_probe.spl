@@ -1,0 +1,129 @@
+# Intensive probe for hardware/link_mux/mux.spl (LinkMux / LinkDemux).
+# Run-path probe: `bin/simple run`; expects "MUX PROBE: ALL PASS".
+# Covers: end-to-end mux->demux reassembly, payload chunking across max_frame,
+# fairness (a bulk log burst does NOT starve a JTAG frame), no cross-channel
+# leakage + in-order delivery, split-read reassembly, and bad-frame counting.
+use std.hardware.link_mux.frame.{DecodedFrame, frame_encode, frame_decode_stream}
+use std.hardware.link_mux.mux.{
+    TransportProfile, transport_sim_loopback, CH_LOG, CH_TERM, CH_JTAG, CH_CTRL,
+    LinkMux, mux_create, mux_push, mux_pending, mux_pump_frame, mux_pump_all,
+    MuxPumpResult, LinkDemux, demux_create, demux_feed, demux_peek, demux_drain,
+    DemuxDrainResult
+}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+fn bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if (a[i].to_i64() & 0xFF) != (b[i].to_i64() & 0xFF):
+            return false
+        i = i + 1
+    true
+
+fn make_seq(n: i64) -> [u8]:
+    var v: [u8] = []
+    var i = 0
+    while i < n:
+        v.push((i & 0xFF).to_u8())
+        i = i + 1
+    v
+
+fn make_const(n: i64, b: i64) -> [u8]:
+    var v: [u8] = []
+    var i = 0
+    while i < n:
+        v.push((b & 0xFF).to_u8())
+        i = i + 1
+    v
+
+fn main() -> i64:
+    var fails: i64 = 0
+    val prof = transport_sim_loopback()   # max_frame 64, 4 channels
+
+    # --- 1. End-to-end + chunking + no leak + ordering ---
+    var mux = mux_create(prof)
+    val log_payload = make_seq(200)        # > max_frame -> chunked across frames
+    var term_payload: [u8] = []
+    term_payload.push(0x68.to_u8())        # 'h'
+    term_payload.push(0x69.to_u8())        # 'i'
+    val jtag_payload = make_const(5, 0x5A)
+    mux = mux_push(mux, CH_LOG, log_payload)
+    mux = mux_push(mux, CH_TERM, term_payload)
+    mux = mux_push(mux, CH_JTAG, jtag_payload)
+    val pa = mux_pump_all(mux)
+    mux = pa.mux
+    val wire = pa.frame
+
+    var demux = demux_create(prof)
+    demux = demux_feed(demux, wire)
+    fails = fails + check("e2e log reassembled in order (chunked)", bytes_eq(demux_peek(demux, CH_LOG), log_payload))
+    fails = fails + check("e2e term recovered", bytes_eq(demux_peek(demux, CH_TERM), term_payload))
+    fails = fails + check("e2e jtag recovered", bytes_eq(demux_peek(demux, CH_JTAG), jtag_payload))
+    fails = fails + check("e2e ctrl empty (no leak)", demux_peek(demux, CH_CTRL).len() == 0)
+    fails = fails + check("e2e no bad frames", demux.bad_frames == 0)
+
+    # --- 2. Fairness: bulk LOG must not starve a JTAG frame ---
+    var m2 = mux_create(prof)
+    m2 = mux_push(m2, CH_LOG, make_const(4000, 0x4C))   # ~63 frames of LOG
+    m2 = mux_push(m2, CH_JTAG, make_const(4, 0x2A))     # one small JTAG burst
+    var frames_before_jtag = 0
+    var saw_jtag = false
+    var guard = 0
+    while guard < 200 and not saw_jtag:
+        val r = mux_pump_frame(m2)
+        m2 = r.mux
+        if r.frame.len() == 0:
+            guard = 999
+        else:
+            val decoded = frame_decode_stream(r.frame)
+            if decoded.len() == 1 and decoded[0].ok:
+                if decoded[0].chan == CH_JTAG:
+                    saw_jtag = true
+                else:
+                    frames_before_jtag = frames_before_jtag + 1
+        guard = guard + 1
+    fails = fails + check("fairness: jtag frame emitted", saw_jtag)
+    # served within a single round-robin sweep, NOT behind all ~63 LOG frames
+    fails = fails + check("fairness: jtag not starved (<= num_channels)", frames_before_jtag <= prof.num_channels)
+
+    # --- 3. Drain clears channel; peek then empty ---
+    val dr = demux_drain(demux, CH_LOG)
+    demux = dr.demux
+    fails = fails + check("drain returns log payload", bytes_eq(dr.bytes, log_payload))
+    fails = fails + check("drain clears channel", demux_peek(demux, CH_LOG).len() == 0)
+
+    # --- 4. Bad frame counted, good frame still routed (resync) ---
+    var d3 = demux_create(prof)
+    var junk: [u8] = []
+    junk.push(0xDE.to_u8())
+    junk.push(0xAD.to_u8())
+    junk.push(0.to_u8())          # delimiter -> a bogus body decoded -> bad
+    d3 = demux_feed(d3, junk)
+    val good = frame_encode(CH_TERM, make_const(2, 0x6F))
+    d3 = demux_feed(d3, good)
+    fails = fails + check("bad frame counted", d3.bad_frames >= 1)
+    fails = fails + check("good frame after garbage routed", bytes_eq(demux_peek(d3, CH_TERM), make_const(2, 0x6F)))
+
+    # --- 5. Byte-at-a-time feed (split reads) reassembles same as bulk ---
+    var d4 = demux_create(prof)
+    var bi = 0
+    while bi < wire.len():
+        var one: [u8] = []
+        one.push(wire[bi])
+        d4 = demux_feed(d4, one)
+        bi = bi + 1
+    fails = fails + check("split-read log matches bulk", bytes_eq(demux_peek(d4, CH_LOG), log_payload))
+    fails = fails + check("split-read jtag matches bulk", bytes_eq(demux_peek(d4, CH_JTAG), jtag_payload))
+
+    if fails == 0:
+        print("MUX PROBE: ALL PASS")
+        return 0
+    print("MUX PROBE: {fails} FAIL")
+    1

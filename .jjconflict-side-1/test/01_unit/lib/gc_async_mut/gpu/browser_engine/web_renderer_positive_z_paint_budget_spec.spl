@@ -1,0 +1,105 @@
+"""
+# Every Paint Pass, Including Positive-Z Absolute, Must Name Its Budget Exit
+
+## Overview
+
+The CPU software paint path runs six passes. Five of them
+(backgrounds, relative roots, absolute low-z, scrollbars, text) begin with
+
+    if _web_budget_expired_at(WEB_BUDGET_SITE_...): break
+
+Pass 4 -- the positive-z absolute boxes, walked in z-sorted order -- had **no
+guard at all**. It was the only member of the family that could not name an exit.
+
+It is bounded by `positive_z_count` rather than `node_count`, so it was never
+runaway, and that is exactly why the gap survived: "bounded" was read as "safe".
+Bounded is not free. Each iteration walks `content_paint_hidden_by_ancestor` and
+can rasterise a box shadow or gradient over the whole box area, and passes 5
+(scrollbars) and 6 (text) run *after* it. A page whose positive-z absolute boxes
+are large therefore burned the remainder of the paint slice in pass 4 and
+starved the text pass -- yielding a page-shaped frame with no text on it while
+attributing the degrade to `paint-scrollbars` or `paint-text`, which is the
+wrong phase. Asymmetry is how the next silent truncation hides.
+
+Pass 4 now names `paint-absolute-high-z`, the eleventh member of the family.
+
+## Why these arms are structural rather than timed
+
+The behavioural arm was measured and does work, but only outside a spec.
+Driving the renderer from `simple run` (JIT), a style-light / paint-heavy
+fixture of 24 large positive-z absolute boxes reports `paint-absolute-high-z`
+at **every budget from 240ms to 3000ms inclusive (10/10 sampled points)** --
+a stable plateau over a 12x range.
+
+Specs, however, execute interpreted, where the same fixture is ~100x slower:
+the transition moves above **24s** per render and the plateau becomes both
+expensive and load-sensitive (this host routinely runs 20+ concurrent `simple`
+processes). Gating on a tuned wall-clock budget there would produce a flaky
+gate, and a flaky gate is worse than none.
+
+So the timed arm is recorded as measured-but-not-gated, and the gate is the
+broader structural invariant instead: **every paint pass names a site, and the
+anonymous `_web_budget_expired()` exists nowhere.** That invariant is exactly
+what both defects violated -- pass 4 naming nothing, and the four style guards
+calling a name that no longer existed -- and unlike the timed arm it bites
+deterministically and instantly.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+val PAINT_SRC: text = "src/std/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl"
+val FOUNDATION_SRC: text = "src/std/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl"
+val CORE_SRC: text = "src/std/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl"
+val LAYOUT_SRC: text = "src/std/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl"
+
+fn _src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "paint pass budget exit naming":
+
+    it "reads the renderer sources it is about to assert on (guards against a vacuous pass)":
+        step("Each source is non-empty, so a failed read cannot make the arms below trivially true")
+        expect(_src(PAINT_SRC).len() > 10000).to_equal(true)
+        expect(_src(FOUNDATION_SRC).len() > 10000).to_equal(true)
+        expect(_src(CORE_SRC).len() > 10000).to_equal(true)
+
+    it "declares the positive-z paint site in the enumerated family":
+        step("The eleventh site constant exists alongside the original ten")
+        expect(_src(FOUNDATION_SRC)).to_contain("WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z: text = \"paint-absolute-high-z\"")
+
+    it "guards the positive-z absolute paint pass with that site":
+        step("Pass 4 tests the deadline and names itself")
+        expect(_src(PAINT_SRC)).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z)")
+
+    it "guards all six paint passes, leaving none anonymous or unguarded":
+        val paint = _src(PAINT_SRC)
+        step("Passes 1, 2 and 3")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_BACKGROUNDS)")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS)")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z)")
+        step("Pass 4 -- the one that previously had no guard")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z)")
+        step("Passes 5 and 6, which run after pass 4 and were the ones it starved")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_SCROLLBARS)")
+        expect(paint).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_PAINT_TEXT)")
+
+    it "wires every style guard to a named site instead of a function that does not exist":
+        val core = _src(CORE_SRC)
+        step("All four style sites are called, not merely declared")
+        expect(core).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_STYLE_CASCADE)")
+        expect(core).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_STYLE_SELECTOR_GROUPS)")
+        expect(core).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_STYLE_CANDIDATE_DECLS)")
+        expect(core).to_contain("_web_budget_expired_at(WEB_BUDGET_SITE_STYLE_IMPORTANT_DECLS)")
+
+    it "leaves no anonymous budget test anywhere in the renderer":
+        step("`_web_budget_expired()` takes no site and therefore cannot be attributed; it must not exist")
+        # It also does not exist as a definition, so any surviving call both
+        # drops the module to the interpreter and dies with E1002 when reached.
+        expect(_src(CORE_SRC).contains("_web_budget_expired():")).to_equal(false)
+        expect(_src(PAINT_SRC).contains("_web_budget_expired():")).to_equal(false)
+        expect(_src(LAYOUT_SRC).contains("_web_budget_expired():")).to_equal(false)
+        expect(_src(FOUNDATION_SRC).contains("fn _web_budget_expired():")).to_equal(false)

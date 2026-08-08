@@ -1,0 +1,277 @@
+# HTML Templates — generate Blink-renderable HTML for editor panels
+#
+# Each function produces an HTML string with inline dark-theme styles
+# that Blink can render directly in editor panel webviews.
+
+use std.nogc_sync_mut.editor.panels.hierarchy.{HierarchyEntry}
+use std.nogc_sync_mut.editor.panels.inspector.{ComponentSection, PropertyField, PropertyType}
+use std.nogc_sync_mut.editor.panels.asset_browser.{AssetEntry, AssetType}
+use std.nogc_sync_mut.editor.panels.audio_mixer.{MixerChannel}
+use std.nogc_sync_mut.editor.selection.{NodeId}
+
+# ============================================================================
+# editor_base_css — dark-theme CSS shared by all panels
+# ============================================================================
+
+fn editor_base_css() -> text:
+    var css = "<style>\n"
+    css = css + "* { margin: 0; padding: 0; box-sizing: border-box; }\n"
+    css = css + "body { background: #2b2b2b; color: #e0e0e0; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; }\n"
+    css = css + ".hierarchy, .inspector, .asset-browser, .audio-mixer, .toolbar { padding: 4px; }\n"
+    css = css + "ul { list-style: none; }\n"
+    css = css + "li { padding: 2px 4px; cursor: pointer; white-space: nowrap; }\n"
+    css = css + "li:hover { background: #3c3c3c; }\n"
+    css = css + ".selected { background: #3a6ea5; color: #ffffff; }\n"
+    css = css + ".expand { display: inline-block; width: 16px; text-align: center; cursor: pointer; }\n"
+    css = css + ".section { margin-bottom: 4px; border: 1px solid #3c3c3c; }\n"
+    css = css + ".section-header { background: #333333; padding: 4px 8px; cursor: pointer; font-weight: bold; }\n"
+    css = css + ".section-header:hover { background: #3c3c3c; }\n"
+    css = css + ".field { display: flex; align-items: center; padding: 2px 8px; }\n"
+    css = css + ".field label { flex: 0 0 120px; color: #aaaaaa; }\n"
+    css = css + ".field input { flex: 1; background: #1e1e1e; border: 1px solid #555; color: #e0e0e0; padding: 2px 4px; }\n"
+    css = css + ".field input[type=checkbox] { flex: 0; width: 16px; height: 16px; }\n"
+    css = css + ".field input[type=color] { flex: 0; width: 40px; height: 20px; padding: 0; border: none; }\n"
+    css = css + ".path { padding: 4px 8px; background: #333333; border-bottom: 1px solid #555; }\n"
+    css = css + ".grid { display: grid; grid-template-columns: repeat(auto-fill, 80px); gap: 4px; padding: 4px; }\n"
+    css = css + ".asset-card { text-align: center; padding: 8px 4px; border-radius: 4px; cursor: pointer; }\n"
+    css = css + ".asset-card:hover { background: #3c3c3c; }\n"
+    css = css + ".icon { font-size: 28px; }\n"
+    css = css + ".name { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n"
+    css = css + ".master { padding: 8px; border-bottom: 1px solid #555; display: flex; align-items: center; gap: 8px; }\n"
+    css = css + ".channel { display: inline-flex; flex-direction: column; align-items: center; padding: 8px; width: 64px; }\n"
+    css = css + ".channel input[type=range] { writing-mode: vertical-lr; height: 100px; }\n"
+    css = css + ".vu-container { display: flex; gap: 2px; height: 100px; align-items: flex-end; margin: 4px 0; }\n"
+    css = css + ".vu { width: 6px; background: #4caf50; }\n"
+    css = css + ".channel button { width: 24px; height: 20px; border: 1px solid #555; background: #333; color: #aaa; cursor: pointer; margin: 1px; font-size: 10px; }\n"
+    css = css + ".channel button.active { background: #e53935; color: #fff; }\n"
+    css = css + ".toolbar { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #333333; border-bottom: 1px solid #555; }\n"
+    css = css + ".toolbar button { background: #444; border: 1px solid #666; color: #e0e0e0; padding: 4px 8px; cursor: pointer; font-size: 12px; }\n"
+    css = css + ".toolbar button:hover { background: #555; }\n"
+    css = css + ".toolbar button.active { background: #3a6ea5; color: #fff; }\n"
+    css = css + ".toolbar .spacer { flex: 1; }\n"
+    css = css + "h3 { padding: 8px; background: #333; border-bottom: 1px solid #555; font-size: 14px; }\n"
+    css = css + "</style>\n"
+    css
+
+# ============================================================================
+# render_hierarchy_html
+# ============================================================================
+
+fn render_hierarchy_html(entries: [HierarchyEntry]) -> text:
+    var html = editor_base_css()
+    html = html + "<div class=\"hierarchy\">\n"
+    html = html + "<ul>\n"
+
+    for entry in entries:
+        var node_id_text = entry.node_id.id.to_text()
+        var pad = entry.depth * 16
+        var pad_text = pad.to_text()
+
+        var expand_icon = ""
+        if entry.has_children:
+            if entry.expanded:
+                expand_icon = "▼"
+            else:
+                expand_icon = "▶"
+
+        var sel_class = "name"
+        if entry.selected:
+            sel_class = "name selected"
+
+        html = html + "<li data-id=\"" + node_id_text + "\" style=\"padding-left:" + pad_text + "px\">"
+        html = html + "<span class=\"expand\">" + expand_icon + "</span>"
+        html = html + "<span class=\"" + sel_class + "\">" + entry.name + "</span>"
+        html = html + "</li>\n"
+
+    html = html + "</ul>\n"
+    html = html + "</div>\n"
+    html
+
+# ============================================================================
+# render_inspector_html
+# ============================================================================
+
+fn render_field_input(field: PropertyField) -> text:
+    var input_html = ""
+    match field.prop_type:
+        PropertyType.FloatProp =>
+            input_html = "<input type=\"number\" step=\"0.1\" value=\"" + field.value_text + "\">"
+        PropertyType.IntProp =>
+            input_html = "<input type=\"number\" step=\"1\" value=\"" + field.value_text + "\">"
+        PropertyType.TextProp =>
+            input_html = "<input type=\"text\" value=\"" + field.value_text + "\">"
+        PropertyType.BoolProp =>
+            var checked = ""
+            if field.value_text == "true":
+                checked = " checked"
+            input_html = "<input type=\"checkbox\"" + checked + ">"
+        PropertyType.ColorProp =>
+            input_html = "<input type=\"color\" value=\"" + field.value_text + "\">"
+    input_html
+
+fn render_inspector_html(sections: [ComponentSection], node_name: text) -> text:
+    var html = editor_base_css()
+    html = html + "<div class=\"inspector\">\n"
+    html = html + "<h3>" + node_name + "</h3>\n"
+
+    for section in sections:
+        html = html + "<div class=\"section\">\n"
+
+        var toggle_icon = "▶"
+        if section.expanded:
+            toggle_icon = "▼"
+
+        html = html + "<div class=\"section-header\">" + toggle_icon + " " + section.name + "</div>\n"
+
+        if section.expanded:
+            for field in section.fields:
+                var input_html = render_field_input(field)
+                html = html + "<div class=\"field\">"
+                html = html + "<label>" + field.display_name + "</label>"
+                html = html + input_html
+                html = html + "</div>\n"
+
+        html = html + "</div>\n"
+
+    html = html + "</div>\n"
+    html
+
+# ============================================================================
+# render_asset_browser_html
+# ============================================================================
+
+fn asset_icon(entry: AssetEntry) -> text:
+    if entry.is_directory:
+        return "📁"
+    match entry.asset_type:
+        AssetType.TextureAsset => "🖼"
+        AssetType.AudioAsset => "🔊"
+        AssetType.SceneAsset => "📄"
+        AssetType.ScriptAsset => "📝"
+        AssetType.UnknownAsset => "❓"
+
+fn render_asset_browser_html(entries: [AssetEntry], current_path: text) -> text:
+    var html = editor_base_css()
+    html = html + "<div class=\"asset-browser\">\n"
+    html = html + "<div class=\"path\">" + current_path + "</div>\n"
+    html = html + "<div class=\"grid\">\n"
+
+    for entry in entries:
+        var icon = asset_icon(entry)
+        html = html + "<div class=\"asset-card\" data-path=\"" + entry.path + "\">"
+        html = html + "<div class=\"icon\">" + icon + "</div>"
+        html = html + "<div class=\"name\">" + entry.name + "</div>"
+        html = html + "</div>\n"
+
+    html = html + "</div>\n"
+    html = html + "</div>\n"
+    html
+
+# ============================================================================
+# render_audio_mixer_html
+# ============================================================================
+
+fn render_audio_mixer_html(channels: [MixerChannel], master_volume: f64) -> text:
+    var master_pct = master_volume * 100.0
+    var master_pct_text = master_pct.to_text()
+
+    var html = editor_base_css()
+    html = html + "<div class=\"audio-mixer\">\n"
+
+    # Master channel
+    html = html + "<div class=\"master\">"
+    html = html + "<label>Master</label>"
+    html = html + "<input type=\"range\" min=\"0\" max=\"100\" value=\"" + master_pct_text + "\">"
+    html = html + "</div>\n"
+
+    # Individual channels
+    html = html + "<div style=\"display:flex;overflow-x:auto;\">\n"
+
+    for ch in channels:
+        var vol_pct = ch.volume * 100.0
+        var vol_text = vol_pct.to_text()
+        var level_left_pct = ch.level_left * 100.0
+        var level_left_text = level_left_pct.to_text()
+        var level_right_pct = ch.level_right * 100.0
+        var level_right_text = level_right_pct.to_text()
+
+        var mute_class = ""
+        if ch.muted:
+            mute_class = " active"
+        var solo_class = ""
+        if ch.solo:
+            solo_class = " active"
+
+        html = html + "<div class=\"channel\">\n"
+        html = html + "<label>" + ch.display_name + "</label>\n"
+        html = html + "<input type=\"range\" orient=\"vertical\" min=\"0\" max=\"100\" value=\"" + vol_text + "\">\n"
+
+        # VU meter bars
+        html = html + "<div class=\"vu-container\">"
+        html = html + "<div class=\"vu\" style=\"height:" + level_left_text + "%\"></div>"
+        html = html + "<div class=\"vu\" style=\"height:" + level_right_text + "%\"></div>"
+        html = html + "</div>\n"
+
+        # Mute / Solo buttons
+        html = html + "<div>"
+        html = html + "<button class=\"" + mute_class + "\">M</button>"
+        html = html + "<button class=\"" + solo_class + "\">S</button>"
+        html = html + "</div>\n"
+
+        html = html + "</div>\n"
+
+    html = html + "</div>\n"
+    html = html + "</div>\n"
+    html
+
+# ============================================================================
+# render_toolbar_html
+# ============================================================================
+
+fn render_toolbar_html(mode_name: text, gizmo_mode: text, is_playing: bool) -> text:
+    var html = editor_base_css()
+    html = html + "<div class=\"toolbar\">\n"
+
+    # Mode buttons
+    var mode_2d_class = "button"
+    var mode_3d_class = "button"
+    if mode_name == "2D":
+        mode_2d_class = "button active"
+    else:
+        mode_3d_class = "button active"
+
+    html = html + "<button class=\"" + mode_2d_class + "\">2D</button>"
+    html = html + "<button class=\"" + mode_3d_class + "\">3D</button>"
+
+    # Spacer
+    html = html + "<span class=\"spacer\"></span>"
+
+    # Gizmo mode buttons
+    var move_class = ""
+    var rotate_class = ""
+    var scale_class = ""
+    if gizmo_mode == "move":
+        move_class = " active"
+    if gizmo_mode == "rotate":
+        rotate_class = " active"
+    if gizmo_mode == "scale":
+        scale_class = " active"
+
+    html = html + "<button class=\"" + move_class + "\">W:Move</button>"
+    html = html + "<button class=\"" + rotate_class + "\">E:Rotate</button>"
+    html = html + "<button class=\"" + scale_class + "\">R:Scale</button>"
+
+    # Spacer
+    html = html + "<span class=\"spacer\"></span>"
+
+    # Play controls
+    var play_class = ""
+    var stop_class = ""
+    if is_playing:
+        play_class = " active"
+
+    html = html + "<button class=\"" + play_class + "\">▶ Play</button>"
+    html = html + "<button class=\"" + stop_class + "\">⏹ Stop</button>"
+
+    html = html + "\n</div>\n"
+    html

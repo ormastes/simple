@@ -1,0 +1,94 @@
+# Syscall-free NVMe I/O command construction shared by hosted and freestanding drivers.
+
+struct NvmeIoCommand:
+    opcode: u8
+    nsid: u32
+    prp1: u64
+    prp2: u64
+    cdw10: u32
+    cdw11: u32
+    cdw12: u32
+
+val NVME_TRANSFER_OPCODE_FLUSH: u8 = 0x00
+val NVME_TRANSFER_OPCODE_WRITE: u8 = 0x01
+val NVME_TRANSFER_OPCODE_READ: u8 = 0x02
+val NVME_TRANSFER_MAX_NLB_COUNT: u32 = 65536
+
+fn nvme_io_lba_range_reason(lba: u64, count: u32, sector_count: u64) -> text:
+    if count == 0u32:
+        return "nvme-io-zero-sector-count"
+    if count > NVME_TRANSFER_MAX_NLB_COUNT:
+        return "nvme-io-sector-count-too-large"
+    val count_u64 = count.to_u64()
+    if count_u64 > sector_count:
+        return "nvme-io-beyond-namespace-capacity"
+    val last_start = sector_count - count_u64
+    if lba > last_start:
+        return "nvme-io-beyond-namespace-capacity"
+    "ready"
+
+fn nvme_io_status_code(status_dw3: u32) -> u32:
+    (status_dw3 >> 17) & 0x7FFu32
+
+fn nvme_io_command(
+    opcode: u8,
+    nsid: u32,
+    lba: u64,
+    count: u32,
+    buf_phys: u64,
+    sector_count: u64
+) -> Result<NvmeIoCommand, text>:
+    if nsid == 0u32:
+        return Err("nvme-io-namespace-zero")
+    val reason = nvme_io_lba_range_reason(lba, count, sector_count)
+    if reason != "ready":
+        return Err(reason)
+    if buf_phys == 0u64:
+        return Err("nvme-io-dma-buffer-zero")
+    val lba_low = (lba & 0xFFFFFFFFu64).to_u32()
+    val lba_high = (lba >> 32).to_u32()
+    Ok(NvmeIoCommand(
+        opcode: opcode,
+        nsid: nsid,
+        prp1: buf_phys,
+        prp2: 0u64,
+        cdw10: lba_low,
+        cdw11: lba_high,
+        cdw12: count - 1u32
+    ))
+
+fn nvme_read_io_command_for_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64, sector_count: u64) -> Result<NvmeIoCommand, text>:
+    nvme_io_command(NVME_TRANSFER_OPCODE_READ, nsid, lba, count, buf_phys, sector_count)
+
+fn nvme_write_io_command_for_namespace(nsid: u32, lba: u64, count: u32, buf_phys: u64, sector_count: u64) -> Result<NvmeIoCommand, text>:
+    nvme_io_command(NVME_TRANSFER_OPCODE_WRITE, nsid, lba, count, buf_phys, sector_count)
+
+fn nvme_read_io_command(lba: u64, count: u32, buf_phys: u64, sector_count: u64) -> Result<NvmeIoCommand, text>:
+    nvme_read_io_command_for_namespace(1u32, lba, count, buf_phys, sector_count)
+
+fn nvme_write_io_command(lba: u64, count: u32, buf_phys: u64, sector_count: u64) -> Result<NvmeIoCommand, text>:
+    nvme_write_io_command_for_namespace(1u32, lba, count, buf_phys, sector_count)
+
+fn nvme_flush_io_command_for_namespace(nsid: u32) -> Result<NvmeIoCommand, text>:
+    if nsid == 0u32:
+        return Err("nvme-io-namespace-zero")
+    Ok(NvmeIoCommand(
+        opcode: NVME_TRANSFER_OPCODE_FLUSH,
+        nsid: nsid,
+        prp1: 0u64,
+        prp2: 0u64,
+        cdw10: 0u32,
+        cdw11: 0u32,
+        cdw12: 0u32
+    ))
+
+fn nvme_flush_io_command() -> NvmeIoCommand:
+    NvmeIoCommand(
+        opcode: NVME_TRANSFER_OPCODE_FLUSH,
+        nsid: 1u32,
+        prp1: 0u64,
+        prp2: 0u64,
+        cdw10: 0u32,
+        cdw11: 0u32,
+        cdw12: 0u32
+    )

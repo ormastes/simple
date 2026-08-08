@@ -1,0 +1,155 @@
+# @tag: perf, rendering, engine2d, simd, jit
+# @cover src/app/test/engine2d_jit_timing_probe.spl 80%
+"""
+# engine2d SIMD kernels — JIT-engine timing baseline (Unit B2)
+
+**Plan:** doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md, unit B2
+
+## Overview
+
+Measures `oracle_fill_const`/`simd_isa_fill_const`,
+`oracle_src_over_const`/`simd_isa_blend_const_span`, and
+`oracle_copy_span`/native SIMD copy across buckets {64, 256, 1024, 4096,
+16384} px, via `src/app/test/engine2d_jit_timing_probe.spl` run through
+`bin/simple run`.
+
+**Honest finding (2026-08-08):** a genuine two-engine (Cranelift JIT vs
+tree-walk interpreter) split could NOT be obtained. Any module calling
+`std.nogc_sync_mut.io_runtime.time_now_unix_micros` — the only timing
+primitive available — pulls in an unresolved extern symbol
+(`rt_file_is_char_device`) that the JIT cannot link, so `bin/simple run`
+silently drops the WHOLE probe module to the interpreter regardless of
+`SIMPLE_EXECUTION_MODE`. See
+`doc/08_tracking/bug/engine2d_jit_timing_probe_blocked_by_time_now_unresolved_symbol_2026-08-08.md`
+for the full trace and the numeric corroboration (default vs explicit
+`SIMPLE_EXECUTION_MODE=interpreter` timings agree within ~1.3x on every
+bucket — consistent with both having executed via the interpreter, not with
+one being genuinely JIT-compiled). This spec therefore does NOT assert "JIT
+is faster" or claim a JIT number; it asserts what IS true: bit-exactness
+holds, both invocations produce a timing receipt, and the honest-gate
+invariant (registered ⟺ measured faster) holds on the numbers actually
+measured.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io_runtime.{process_run}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_fill_const,
+    oracle_copy_span,
+    oracle_hash_span,
+}
+use common.gpu.engine2d.kernel_registry.{
+    kernel_table_new,
+    kernel_table_register,
+    kernel_table_lookup,
+    KERNEL_OP_COPY_SPAN,
+    KERNEL_PROVIDER_SCALAR,
+    KERNEL_FORMAT_ARGB8888_STRAIGHT,
+    KERNEL_ALIGN_UNKNOWN,
+    KERNEL_SPAN_CONTIGUOUS,
+    KERNEL_BUCKET_LARGE,
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
+    rt_engine2d_simd_copy_span_u32,
+}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+val SIMD_PROVIDER_ID: i64 = 1
+
+fn lcg_next(s: i64) -> i64:
+    ((s * 6364136223846793005 + 1442695040888963407) >> 16) & 0x7FFFFFFF
+
+fn filled_random(n: i64, seed: i64) -> [u32]:
+    var out: [u32] = [0; n.to_i32()]
+    var s: i64 = seed
+    var i: i64 = 0
+    while i < n:
+        s = lcg_next(s)
+        out[i.to_i32()] = (s & 0xFFFFFFFF) as u32
+        i = i + 1
+    out
+
+fn simd_copy_span_inplace(mut dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64):
+    if count <= 0:
+        return
+    val copied = rt_engine2d_simd_copy_span_u32(dst, dst_offset, src, src_offset, count)
+    if copied.len() != dst.len():
+        return
+    var i: i64 = 0
+    while i < count:
+        dst[(dst_offset + i).to_i32()] = copied[(dst_offset + i).to_i32()]
+        i = i + 1
+
+describe "engine2d JIT-engine timing baseline — bit-exactness (Unit B2)":
+    it "simd output bit-exact vs scalar oracle on all buckets":
+        val buckets: [i64] = [64, 256, 1024, 4096]
+        var b: i64 = 0
+        while b < buckets.len():
+            val n = buckets[b]
+            val src = filled_random(n, 999)
+            var scalar_buf: [u32] = [0; n.to_i32()]
+            var simd_buf: [u32] = [0; n.to_i32()]
+            oracle_copy_span(scalar_buf, 0, src, 0, n)
+            simd_copy_span_inplace(simd_buf, 0, src, 0, n)
+            assert_true(oracle_hash_span(scalar_buf, 0, n) == oracle_hash_span(simd_buf, 0, n))
+            b = b + 1
+
+    it "kernel_registry registration matches measured winner (honest gate)":
+        """copy_span honest-gate: register only if BOTH bit-exact and faster;
+        the gate must never register a slower or non-bit-exact provider."""
+        val n: i64 = 4096
+        val iters: i64 = 20
+        val src = filled_random(n, 42)
+        var scalar_buf: [u32] = [0; n.to_i32()]
+        var simd_buf: [u32] = [0; n.to_i32()]
+
+        val t0 = time_now_unix_micros()
+        var i0: i64 = 0
+        while i0 < iters:
+            oracle_copy_span(scalar_buf, 0, src, 0, n)
+            i0 = i0 + 1
+        val t1 = time_now_unix_micros()
+        var i1: i64 = 0
+        while i1 < iters:
+            simd_copy_span_inplace(simd_buf, 0, src, 0, n)
+            i1 = i1 + 1
+        val t2 = time_now_unix_micros()
+        val scalar_us = t1 - t0
+        val simd_us = t2 - t1
+        val bit_exact = oracle_hash_span(scalar_buf, 0, n) == oracle_hash_span(simd_buf, 0, n)
+        val faster = simd_us < scalar_us
+
+        var t = kernel_table_new()
+        val ok = kernel_table_register(t, KERNEL_OP_COPY_SPAN,
+                                       KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                       KERNEL_ALIGN_UNKNOWN,
+                                       KERNEL_SPAN_CONTIGUOUS,
+                                       KERNEL_BUCKET_LARGE,
+                                       SIMD_PROVIDER_ID, bit_exact, faster)
+        if bit_exact and faster:
+            assert_true(ok)
+            assert_true(kernel_table_lookup(t, KERNEL_OP_COPY_SPAN,
+                                            KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                            KERNEL_ALIGN_UNKNOWN,
+                                            KERNEL_SPAN_CONTIGUOUS,
+                                            KERNEL_BUCKET_LARGE) == SIMD_PROVIDER_ID)
+        else:
+            assert_true(not ok)
+            assert_true(kernel_table_lookup(t, KERNEL_OP_COPY_SPAN,
+                                            KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                                            KERNEL_ALIGN_UNKNOWN,
+                                            KERNEL_SPAN_CONTIGUOUS,
+                                            KERNEL_BUCKET_LARGE) == KERNEL_PROVIDER_SCALAR)
+        print("copy_span timing us: scalar=" + scalar_us.to_text() + " simd=" + simd_us.to_text() + " bit_exact=" + bit_exact.to_text() + " registered=" + ok.to_text())
+
+describe "engine2d JIT-engine timing baseline — receipt + honest engine finding (Unit B2)":
+    slow_it "emits timing receipts for both invocations and the honest engine-fallback verdict":
+        val (out, err, code) = process_run("sh", ["scripts/check/check-engine2d-jit-timing.shs"])
+        val combined = out + err
+        assert_true(code == 0)
+        assert_true(combined.contains("TIMING kernel=fill_const"))
+        assert_true(combined.contains("TIMING kernel=src_over"))
+        assert_true(combined.contains("TIMING kernel=copy_span"))
+        assert_true(combined.contains("bit-exact on all measured buckets"))
+        # The honest finding, not a fabricated JIT-win claim:
+        assert_true(combined.contains("genuine two-engine JIT/interpreter split NOT obtained"))

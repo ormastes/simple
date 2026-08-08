@@ -1,0 +1,426 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl 80%
+# @tag: unit, ui, draw_ir, engine2d
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_embedding_config,
+    draw_ir_no_rect,
+    draw_ir_style_prop
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
+use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
+    Engine2dDrawIrBoxShadowLayer,
+    engine2d_draw_ir_legacy_shadow_safe,
+    engine2d_draw_ir_render_legacy_shadow,
+    engine2d_draw_ir_typed_box_shadows,
+    engine2d_draw_ir_typed_shadow_geometry_safe
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val BG: u32 = 0xff000000u32
+val RED: u32 = 0xffff0000u32
+val GREEN: u32 = 0xff00ff00u32
+val BLUE: u32 = 0xff0000ffu32
+val YELLOW: u32 = 0xffffff00u32
+val HALF_RED: u32 = 0x80ff0000u32
+val HALF_RED_OVER_BG: u32 = 0xff800000u32
+
+describe "Engine2D Draw IR box effects":
+
+    it "paints a valid typed shadow when corner-radius keys are absent":
+        var engine = Engine2D.create_with_backend(32, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "typed-shadow-no-radius", 8, 8, 8, 8, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "0 0 {YELLOW}"),
+                draw_ir_style_prop("box-shadow-blur-radius", "0"),
+                draw_ir_style_prop(
+                    "box-shadow-layer-schema",
+                    "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "4"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-color", "{RED}")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "typed-shadow-no-radius", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 32, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[10 * 32 + 18]).to_equal(RED)
+        expect(result.pixels[10 * 32 + 14]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "clips nonuniform corners when the typed shadow schema is absent":
+        var engine = Engine2D.create_with_backend(24, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "nonuniform-corners-no-shadow", 4, 4, 12, 12, RED,
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "none"),
+                draw_ir_style_prop("border-radius", "0"),
+                draw_ir_style_prop("border-top-left-radius", "6"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "nonuniform-corners-no-shadow", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 24, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[4 * 24 + 4]).to_equal(BG)
+        expect(result.pixels[4 * 24 + 15]).to_equal(RED)
+        expect(result.pixels[10 * 24 + 10]).to_equal(RED)
+        engine.shutdown()
+
+    it "clips nonuniform corners when the typed shadow schema is malformed":
+        var engine = Engine2D.create_with_backend(24, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "nonuniform-corners-malformed-shadow", 4, 4, 12, 12, RED,
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "none"),
+                draw_ir_style_prop(
+                    "box-shadow-layer-schema",
+                    "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+                # The other five required layer fields are deliberately absent.
+                draw_ir_style_prop("border-radius", "0"),
+                draw_ir_style_prop("border-top-left-radius", "6"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "nonuniform-corners-malformed-shadow", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 24, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[4 * 24 + 4]).to_equal(BG)
+        expect(result.pixels[4 * 24 + 15]).to_equal(RED)
+        expect(result.pixels[10 * 24 + 10]).to_equal(RED)
+        engine.shutdown()
+
+    it "rejects huge typed fields and every overflow-prone shadow geometry":
+        val huge_positive = engine2d_draw_ir_typed_box_shadows([
+            draw_ir_style_prop(
+                "box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+            draw_ir_style_prop("box-shadow-layer-count", "1"),
+            draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-x", "65537"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-blur-radius", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-color", "{RED}")
+        ])
+        val huge_negative = engine2d_draw_ir_typed_box_shadows([
+            draw_ir_style_prop(
+                "box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+            draw_ir_style_prop("box-shadow-layer-count", "1"),
+            draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-x", "-65537"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-blur-radius", "65537"),
+            draw_ir_style_prop("box-shadow-layer-0-spread-radius", "-65537"),
+            draw_ir_style_prop("box-shadow-layer-0-color", "{RED}")
+        ])
+        val huge_blur = engine2d_draw_ir_typed_box_shadows([
+            draw_ir_style_prop(
+                "box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+            draw_ir_style_prop("box-shadow-layer-count", "1"),
+            draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-x", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-blur-radius", "65537"),
+            draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-color", "{RED}")
+        ])
+        val huge_spread = engine2d_draw_ir_typed_box_shadows([
+            draw_ir_style_prop(
+                "box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+            draw_ir_style_prop("box-shadow-layer-count", "1"),
+            draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-x", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-blur-radius", "0"),
+            draw_ir_style_prop("box-shadow-layer-0-spread-radius", "65537"),
+            draw_ir_style_prop("box-shadow-layer-0-color", "{RED}")
+        ])
+        expect(huge_positive.valid).to_equal(false)
+        expect(huge_negative.valid).to_equal(false)
+        expect(huge_blur.valid).to_equal(false)
+        expect(huge_spread.valid).to_equal(false)
+
+        val offset_overflow = Engine2dDrawIrBoxShadowLayer(
+            kind: "outer",
+            offset_x: 65536,
+            offset_y: 0,
+            blur_radius: 0,
+            spread_radius: 0,
+            color: RED)
+        val expanded_overflow = Engine2dDrawIrBoxShadowLayer(
+            kind: "outer",
+            offset_x: 0,
+            offset_y: 0,
+            blur_radius: 65536,
+            spread_radius: 65536,
+            color: RED)
+        val work_overflow = Engine2dDrawIrBoxShadowLayer(
+            kind: "outer",
+            offset_x: 0,
+            offset_y: 0,
+            blur_radius: 2048,
+            spread_radius: 0,
+            color: RED)
+        expect(engine2d_draw_ir_typed_shadow_geometry_safe(
+            [offset_overflow], 2147483600, 0, 16, 16)).to_equal(false)
+        expect(engine2d_draw_ir_typed_shadow_geometry_safe(
+            [expanded_overflow], 0, 0, 2147483647, 16)).to_equal(false)
+        expect(engine2d_draw_ir_typed_shadow_geometry_safe(
+            [work_overflow], 0, 0, 8, 8)).to_equal(false)
+
+    it "makes an unsafe visible legacy aggregate a no-op":
+        val unsafe_style = [
+            draw_ir_style_prop(
+                "box-shadow", "2147483647 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "2048")
+        ]
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            unsafe_style, 8, 8, 8, 8)).to_equal(false)
+
+        var engine = Engine2D.create_with_backend(32, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "unsafe-legacy-no-op", 8, 8, 8, 8, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), draw_ir_no_rect(),
+            unsafe_style)
+        val batch = draw_ir_batch(
+            "unsafe-legacy-no-op", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 32, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[10 * 32 + 4]).to_equal(BG)
+        expect(result.pixels[10 * 32 + 10]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "enforces the same exact legacy offset and blur bounds as typed shadows":
+        val positive_boundary = [
+            draw_ir_style_prop("box-shadow", "65536 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "0")
+        ]
+        val negative_boundary = [
+            draw_ir_style_prop("box-shadow", "-65536 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "0")
+        ]
+        val positive_overflow = [
+            draw_ir_style_prop("box-shadow", "65537 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "0")
+        ]
+        val negative_overflow = [
+            draw_ir_style_prop("box-shadow", "-65537 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "0")
+        ]
+        val blur_overflow = [
+            draw_ir_style_prop("box-shadow", "0 0 {RED}"),
+            draw_ir_style_prop("box-shadow-blur-radius", "65537")
+        ]
+
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            positive_boundary, 0, 0, 4, 4)).to_equal(true)
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            negative_boundary, 0, 0, 4, 4)).to_equal(true)
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            positive_overflow, -65537, 4, 4, 4)).to_equal(false)
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            negative_overflow, 65537, 4, 4, 4)).to_equal(false)
+        expect(engine2d_draw_ir_legacy_shadow_safe(
+            blur_overflow, 4, 4, 4, 4)).to_equal(false)
+
+        var engine = Engine2D.create_with_backend(16, 16, "cpu")
+        engine.clear(BG)
+        engine = engine2d_draw_ir_render_legacy_shadow(
+            engine, positive_overflow, -65537, 4, 4, 4)
+        engine = engine2d_draw_ir_render_legacy_shadow(
+            engine, negative_overflow, 65537, 4, 4, 4)
+        engine = engine2d_draw_ir_render_legacy_shadow(
+            engine, blur_overflow, 4, 4, 4, 4)
+        val pixels = engine.read_pixels()
+        expect(pixels[4 * 16 + 4]).to_equal(BG)
+        expect(pixels[7 * 16 + 7]).to_equal(BG)
+        engine.shutdown()
+
+    it "paints typed outer shadow layers back-to-front with spread geometry":
+        var engine = Engine2D.create_with_backend(32, 32, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "typed-outer-layers", 8, 8, 8, 8, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "0 0 {YELLOW}"),
+                draw_ir_style_prop("box-shadow-blur-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "4"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-color", "{RED}"),
+                draw_ir_style_prop("box-shadow-layer-1-kind", "outer"),
+                draw_ir_style_prop("box-shadow-layer-1-offset-x", "4"),
+                draw_ir_style_prop("box-shadow-layer-1-offset-y", "0"),
+                draw_ir_style_prop("box-shadow-layer-1-blur-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-1-spread-radius", "2"),
+                draw_ir_style_prop("box-shadow-layer-1-color", "{GREEN}"),
+                draw_ir_style_prop("border-top-left-radius", "0"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "typed-outer-layers", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 32, 32, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.rendered_command_count).to_equal(1)
+        # Layer 0 is CSS-frontmost and therefore covers layer 1 where they
+        # overlap. Layer 1 remains visible at its farther spread edge.
+        expect(result.pixels[10 * 32 + 18]).to_equal(RED)
+        expect(result.pixels[10 * 32 + 21]).to_equal(GREEN)
+        expect(result.pixels[10 * 32 + 14]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "paints typed inset shadow edges after the background without covering the center":
+        var engine = Engine2D.create_with_backend(24, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "typed-inset", 4, 4, 12, 12, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "none"),
+                draw_ir_style_prop("box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "inset"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-color", "{GREEN}"),
+                draw_ir_style_prop("border-top-left-radius", "0"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "typed-inset", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 24, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[10 * 24 + 4]).to_equal(GREEN)
+        expect(result.pixels[10 * 24 + 10]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "clips a typed box against four independently parsed corner radii":
+        var engine = Engine2D.create_with_backend(24, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "typed-four-corners", 4, 4, 12, 12, RED,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "none"),
+                draw_ir_style_prop("box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "0"),
+                draw_ir_style_prop("border-radius", "0"),
+                draw_ir_style_prop("border-top-left-radius", "6"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "typed-four-corners", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 24, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        expect(result.pixels[4 * 24 + 4]).to_equal(BG)
+        expect(result.pixels[4 * 24 + 15]).to_equal(RED)
+        expect(result.pixels[10 * 24 + 10]).to_equal(RED)
+        engine.shutdown()
+
+    it "falls back once to the legacy aggregate for a partial typed shadow schema":
+        var engine = Engine2D.create_with_backend(32, 24, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "typed-partial-fallback", 8, 8, 8, 8, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("box-shadow", "4 0 {HALF_RED}"),
+                draw_ir_style_prop("box-shadow-blur-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-schema", "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "4"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "0"),
+                # spread-radius is deliberately missing.
+                draw_ir_style_prop("box-shadow-layer-0-color", "{HALF_RED}"),
+                draw_ir_style_prop("border-top-left-radius", "0"),
+                draw_ir_style_prop("border-top-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "0"),
+                draw_ir_style_prop("border-bottom-left-radius", "0")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "typed-partial-fallback", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surf", "win", 0, 0, 32, 24, 1, 1000, false),
+            [command])
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+
+        # A second partial typed paint would blend HALF_RED twice and produce
+        # a different pixel. Exact equality proves one legacy fallback paint.
+        expect(result.pixels[10 * 32 + 18]).to_equal(HALF_RED_OVER_BG)
+        engine.shutdown()

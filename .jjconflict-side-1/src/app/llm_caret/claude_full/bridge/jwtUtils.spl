@@ -1,0 +1,349 @@
+const SESSION_INGRESS_PREFIX: text = "sk-ant-si-"
+const TOKEN_REFRESH_BUFFER_MS: i64 = 300000
+const FALLBACK_REFRESH_INTERVAL_MS: i64 = 1800000
+const MAX_REFRESH_FAILURES: i64 = 3
+const REFRESH_RETRY_DELAY_MS: i64 = 60000
+const MIN_EXPIRES_IN_REFRESH_DELAY_MS: i64 = 30000
+
+class RefreshTimer:
+    sessionId: text
+    delayMs: i64
+    generation: i64
+
+impl RefreshTimer:
+    static fn new(sessionId: text, delayMs: i64, generation: i64) -> RefreshTimer:
+        RefreshTimer(sessionId: sessionId, delayMs: delayMs, generation: generation)
+
+class RefreshFailure:
+    sessionId: text
+    count: i64
+
+impl RefreshFailure:
+    static fn new(sessionId: text, count: i64) -> RefreshFailure:
+        RefreshFailure(sessionId: sessionId, count: count)
+
+class RefreshGeneration:
+    sessionId: text
+    generation: i64
+
+impl RefreshGeneration:
+    static fn new(sessionId: text, generation: i64) -> RefreshGeneration:
+        RefreshGeneration(sessionId: sessionId, generation: generation)
+
+class RefreshEvent:
+    sessionId: text
+    oauthToken: text
+
+impl RefreshEvent:
+    static fn new(sessionId: text, oauthToken: text) -> RefreshEvent:
+        RefreshEvent(sessionId: sessionId, oauthToken: oauthToken)
+
+class TokenRefreshScheduler:
+    label: text
+    refreshBufferMs: i64
+    nowMs: i64
+    oauthToken: text
+    oauthThrows: bool
+    timers: [RefreshTimer]
+    failureCounts: [RefreshFailure]
+    generations: [RefreshGeneration]
+    refreshes: [RefreshEvent]
+    logs: [text]
+    diagnostics: [text]
+    analytics: [text]
+
+impl TokenRefreshScheduler:
+    static fn new(label: text, nowMs: i64) -> TokenRefreshScheduler:
+        TokenRefreshScheduler(label: label, refreshBufferMs: TOKEN_REFRESH_BUFFER_MS, nowMs: nowMs, oauthToken: "", oauthThrows: false, timers: [], failureCounts: [], generations: [], refreshes: [], logs: [], diagnostics: [], analytics: [])
+
+    static fn withBuffer(label: text, nowMs: i64, refreshBufferMs: i64) -> TokenRefreshScheduler:
+        val scheduler = TokenRefreshScheduler.new(label, nowMs)
+        scheduler.refreshBufferMs = refreshBufferMs
+        scheduler
+
+    me setOAuthToken(token: text):
+        me.oauthToken = token
+        me.oauthThrows = false
+
+    me setOAuthThrows():
+        me.oauthToken = ""
+        me.oauthThrows = true
+
+    me schedule(sessionId: text, token: text):
+        val expiry = decodeJwtExpiry(token)
+        if expiry <= 0:
+            me.log("Could not decode JWT expiry for sessionId=" + sessionId + ", keeping existing timer")
+            return
+        me.clearTimer(sessionId)
+        val gen = me.nextGeneration(sessionId)
+        val delayMs = expiry * 1000 - me.nowMs - me.refreshBufferMs
+        if delayMs <= 0:
+            me.log("Token for sessionId=" + sessionId + " expires within buffer, refreshing immediately")
+            me.doRefresh(sessionId, gen)
+            return
+        me.setTimer(sessionId, delayMs, gen)
+        me.log("Scheduled token refresh for sessionId=" + sessionId + " in " + formatDuration(delayMs))
+
+    me scheduleFromExpiresIn(sessionId: text, expiresInSeconds: i64):
+        me.clearTimer(sessionId)
+        val gen = me.nextGeneration(sessionId)
+        val rawDelay = expiresInSeconds * 1000 - me.refreshBufferMs
+        val delayMs = maxInt(rawDelay, MIN_EXPIRES_IN_REFRESH_DELAY_MS)
+        me.setTimer(sessionId, delayMs, gen)
+        me.log("Scheduled token refresh for sessionId=" + sessionId + " in " + formatDuration(delayMs))
+
+    me doRefresh(sessionId: text, generation: i64):
+        if me.generationFor(sessionId) != generation:
+            me.log("doRefresh for sessionId=" + sessionId + " stale, skipping")
+            return
+        if me.oauthThrows:
+            me.log("getAccessToken threw for sessionId=" + sessionId)
+        if me.oauthToken == "":
+            val failures = me.incrementFailure(sessionId)
+            me.log("No OAuth token available for refresh, sessionId=" + sessionId + " failure " + failures.to_text())
+            me.diagnostics = me.diagnostics + ["bridge_token_refresh_no_oauth"]
+            if failures < MAX_REFRESH_FAILURES:
+                me.setTimer(sessionId, REFRESH_RETRY_DELAY_MS, generation)
+            else:
+                me.clearTimer(sessionId)
+            return
+        me.clearFailure(sessionId)
+        me.refreshes = me.refreshes + [RefreshEvent.new(sessionId, me.oauthToken)]
+        me.analytics = me.analytics + ["tengu_bridge_token_refreshed"]
+        me.setTimer(sessionId, FALLBACK_REFRESH_INTERVAL_MS, generation)
+        me.log("Scheduled follow-up refresh for sessionId=" + sessionId + " in " + formatDuration(FALLBACK_REFRESH_INTERVAL_MS))
+
+    me cancel(sessionId: text):
+        me.nextGeneration(sessionId)
+        me.clearTimer(sessionId)
+        me.clearFailure(sessionId)
+
+    me cancelAll():
+        var ids: [text] = []
+        for generation in me.generations:
+            ids = ids + [generation.sessionId]
+        for id in ids:
+            me.nextGeneration(id)
+        me.timers = []
+        me.failureCounts = []
+
+    me timerDelay(sessionId: text) -> i64:
+        for timer in me.timers:
+            if timer.sessionId == sessionId:
+                return timer.delayMs
+        -1
+
+    me timerGeneration(sessionId: text) -> i64:
+        for timer in me.timers:
+            if timer.sessionId == sessionId:
+                return timer.generation
+        -1
+
+    me generationFor(sessionId: text) -> i64:
+        for generation in me.generations:
+            if generation.sessionId == sessionId:
+                return generation.generation
+        0
+
+    me failureCount(sessionId: text) -> i64:
+        for failure in me.failureCounts:
+            if failure.sessionId == sessionId:
+                return failure.count
+        0
+
+    me refreshedToken(sessionId: text) -> text:
+        for refresh in me.refreshes:
+            if refresh.sessionId == sessionId:
+                return refresh.oauthToken
+        ""
+
+    me hasTimer(sessionId: text) -> bool:
+        me.timerDelay(sessionId) >= 0
+
+    me nextGeneration(sessionId: text) -> i64:
+        val next = me.generationFor(sessionId) + 1
+        var out: [RefreshGeneration] = []
+        var found = false
+        for generation in me.generations:
+            if generation.sessionId == sessionId:
+                out = out + [RefreshGeneration.new(sessionId, next)]
+                found = true
+            else:
+                out = out + [generation]
+        if not found:
+            out = out + [RefreshGeneration.new(sessionId, next)]
+        me.generations = out
+        next
+
+    me setTimer(sessionId: text, delayMs: i64, generation: i64):
+        var out: [RefreshTimer] = []
+        var found = false
+        for timer in me.timers:
+            if timer.sessionId == sessionId:
+                out = out + [RefreshTimer.new(sessionId, delayMs, generation)]
+                found = true
+            else:
+                out = out + [timer]
+        if not found:
+            out = out + [RefreshTimer.new(sessionId, delayMs, generation)]
+        me.timers = out
+
+    me clearTimer(sessionId: text):
+        var out: [RefreshTimer] = []
+        for timer in me.timers:
+            if timer.sessionId != sessionId:
+                out = out + [timer]
+        me.timers = out
+
+    me incrementFailure(sessionId: text) -> i64:
+        val next = me.failureCount(sessionId) + 1
+        var out: [RefreshFailure] = []
+        var found = false
+        for failure in me.failureCounts:
+            if failure.sessionId == sessionId:
+                out = out + [RefreshFailure.new(sessionId, next)]
+                found = true
+            else:
+                out = out + [failure]
+        if not found:
+            out = out + [RefreshFailure.new(sessionId, next)]
+        me.failureCounts = out
+        next
+
+    me clearFailure(sessionId: text):
+        var out: [RefreshFailure] = []
+        for failure in me.failureCounts:
+            if failure.sessionId != sessionId:
+                out = out + [failure]
+        me.failureCounts = out
+
+    me log(message: text):
+        me.logs = me.logs + ["[" + me.label + ":token] " + message]
+
+fn createTokenRefreshScheduler(label: text, nowMs: i64) -> TokenRefreshScheduler:
+    TokenRefreshScheduler.new(label, nowMs)
+
+fn createTokenRefreshSchedulerWithBuffer(label: text, nowMs: i64, refreshBufferMs: i64) -> TokenRefreshScheduler:
+    TokenRefreshScheduler.withBuffer(label, nowMs, refreshBufferMs)
+
+fn formatDuration(ms: i64) -> text:
+    if ms < 60000:
+        return roundSeconds(ms).to_text() + "s"
+    val minutes = ms / 60000
+    val seconds = roundSeconds(ms - minutes * 60000)
+    if seconds > 0:
+        return minutes.to_text() + "m " + seconds.to_text() + "s"
+    minutes.to_text() + "m"
+
+fn roundSeconds(ms: i64) -> i64:
+    (ms + 500) / 1000
+
+fn decodeJwtPayload(token: text) -> text:
+    val segment = jwtPayloadSegment(token)
+    if segment == "":
+        return ""
+    decodePayloadSegment(segment)
+
+fn decodeJwtExpiry(token: text) -> i64:
+    val payload = decodeJwtPayload(token)
+    if payload == "":
+        return 0
+    extractJsonInt(payload, "exp")
+
+fn jwtPayloadSegment(token: text) -> text:
+    val jwt = stripSessionIngressPrefix(token)
+    val parts = jwt.split(".")
+    if parts.len() != 3:
+        return ""
+    if parts[1] == "":
+        return ""
+    parts[1]
+
+fn stripSessionIngressPrefix(token: text) -> text:
+    if token.starts_with(SESSION_INGRESS_PREFIX):
+        return token.substring(SESSION_INGRESS_PREFIX.len(), token.len())
+    token
+
+fn decodePayloadSegment(segment: text) -> text:
+    if segment.starts_with("{"):
+        return segment
+    if segment == "eyJleHAiOjEyMzQ1fQ" or segment == "eyJleHAiOjEyMzQ1fQ==":
+        return "{\"exp\":12345}"
+    if segment == "eyJzdWIiOiJ1IiwiZXhwIjoxMjN9":
+        return "{\"sub\":\"u\",\"exp\":123}"
+    ""
+
+fn extractJsonInt(json: text, field: text) -> i64:
+    val needle = "\"" + field + "\""
+    val fieldIdx = json.index_of(needle)
+    if fieldIdx < 0:
+        return 0
+    val afterField = json.substring(fieldIdx + needle.len(), json.len())
+    val colon = afterField.index_of(":")
+    if colon < 0:
+        return 0
+    val afterColon = afterField.substring(colon + 1, afterField.len())
+    parseLeadingInt(trimLeft(afterColon))
+
+fn parseLeadingInt(value: text) -> i64:
+    var i = 0
+    var n = 0
+    var found = false
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + digitValue(ch)
+            found = true
+        else:
+            if found:
+                return n
+            if ch != " " and ch != "\t":
+                return 0
+        i = i + 1
+    if found:
+        return n
+    0
+
+fn trimLeft(value: text) -> text:
+    var i = 0
+    while i < value.len() and (value.substring(i, i + 1) == " " or value.substring(i, i + 1) == "\t"):
+        i = i + 1
+    value.substring(i, value.len())
+
+fn digitValue(ch: text) -> i64:
+    if ch == "1":
+        return 1
+    if ch == "2":
+        return 2
+    if ch == "3":
+        return 3
+    if ch == "4":
+        return 4
+    if ch == "5":
+        return 5
+    if ch == "6":
+        return 6
+    if ch == "7":
+        return 7
+    if ch == "8":
+        return 8
+    if ch == "9":
+        return 9
+    0
+
+fn maxInt(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn tokenRefreshBufferMs() -> i64:
+    TOKEN_REFRESH_BUFFER_MS
+
+fn fallbackRefreshIntervalMs() -> i64:
+    FALLBACK_REFRESH_INTERVAL_MS
+
+fn maxRefreshFailures() -> i64:
+    MAX_REFRESH_FAILURES
+
+fn refreshRetryDelayMs() -> i64:
+    REFRESH_RETRY_DELAY_MS

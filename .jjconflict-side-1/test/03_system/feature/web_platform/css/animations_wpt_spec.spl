@@ -1,0 +1,883 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+"""# CSS Animation Frame Preservation
+
+Proves fractional last-valid declaration selection and saturating i64 clock
+boundaries, plus the supported keyframe subset at its start, negative-delay
+seek, midpoint, and filled end through web semantics, layout, canonical Draw
+IR, and exact expected-color Engine2D coverage/count. Web Animations
+compositing and unsupported properties remain outside this bounded profile.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    interpolate, ease_value, interpolate_length,
+    CSSValue, BrowserCssAnimationInstance
+}
+use std.common.animation.timing.{TimingFunction}
+use std.gc_async_mut.gpu.browser_engine.style_block.{extract_keyframes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir_result_at_time,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations,
+    simple_web_layout_reconcile_animation_instances,
+    simple_web_layout_animation_instances_next_ms
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage, browser_renderer_decoder_feed,
+    browser_renderer_decoder_new, browser_renderer_frame_decode
+}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 24
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: diff * (-1.0) else: diff
+    abs_diff < 0.01
+
+fn _interp_number_half() -> bool:
+    match interpolate(CSSValue.Number(v: 0.0), CSSValue.Number(v: 1.0), 0.5):
+        CSSValue.Number(v): approx(v, 0.5)
+        _: false
+
+fn _animation_html() -> text:
+    (
+        "<style>html,body{{margin:0}}@keyframes preserve{" +
+        "from{width:4px;height:4px;background-color:#dc2626}" +
+        "to{width:12px;height:4px;background-color:#2563eb}}" +
+        "#box{width:4px;height:4px;background-color:#dc2626;" +
+        "animation:preserve 1000ms linear forwards}</style>" +
+        "<div id='box'></div>"
+    )
+
+fn _single_midpoint_keyframe_html() -> text:
+    (
+        "<style>html,body{{margin:0}}@keyframes peak{" +
+        "0%{{opacity:1}}50%{background-color:#2563eb;width:auto}" +
+        "100%{{opacity:1}}" +
+        "#box{width:8px;height:8px;background-color:#ef4444;" +
+        "animation:peak 1000ms linear forwards}</style>" +
+        "<div id='box'></div>"
+    )
+
+fn _negative_delay_animation_html(delay: text) -> text:
+    (
+        "<style>html,body{{margin:0}}@keyframes preserve{" +
+        "from{width:4px;height:4px;background-color:#dc2626}" +
+        "to{width:12px;height:4px;background-color:#2563eb}}" +
+        "#box{width:4px;height:4px;background-color:#dc2626;" +
+        "animation:preserve 1s linear {delay} forwards}</style>" +
+        "<div id='box'></div>"
+    )
+
+fn _single_midpoint_animation_command_color(
+    html: text, time_ms: i64
+) -> u32:
+    val result = simple_web_layout_render_html_draw_ir_result_at_time(
+        html, WIDTH, HEIGHT, time_ms
+    )
+    for command in result.composition.batches[0].commands:
+        if command.component_id == "box":
+            return command.color
+    0u32
+
+fn _timing_function_html() -> text:
+    (
+        "<style>html,body{{margin:0}}@keyframes timing{" +
+        "from{{background-color:#dc2626}}to{{background-color:#2563eb}}}" +
+        "div{position:absolute;left:0;top:0;width:8px;height:8px;" +
+        "background-color:#dc2626}" +
+        "#cubic{animation:timing 1000ms cubic-bezier(0, 0, 1, 1) forwards}" +
+        "#jump-start{animation:timing 1000ms steps(4,jump-start) 100ms both}" +
+        "#jump-end{animation:timing 1000ms steps(4,jump-end) forwards}" +
+        "#reverse-before{animation:timing 1000ms steps(4,jump-end) 100ms " +
+        "reverse backwards}" +
+        "#reverse-after{animation:timing 1000ms steps(4,jump-start) " +
+        "reverse forwards}" +
+        "#alternate-before{animation:timing 1000ms steps(4,jump-start) " +
+        "100ms alternate backwards}" +
+        "#alternate-after{animation:timing 1000ms steps(4,jump-start) 2 " +
+        "alternate forwards}" +
+        "#alternate-reverse-before{animation:timing 1000ms " +
+        "steps(4,jump-end) 100ms alternate-reverse backwards}" +
+        "#alternate-reverse-after{animation:timing 1000ms " +
+        "steps(4,jump-end) 2 alternate-reverse forwards}" +
+        "#bad-x{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:cubic-bezier(-0.1,0,1,1)}" +
+        "#bad-finite{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:cubic-bezier(0,nan,1,1)}" +
+        "#bad-zero{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:steps(0,jump-end)}" +
+        "#bad-none{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:steps(1,jump-none)}" +
+        "#bad-list{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:linear,ease}" +
+        "#transition{transition-timing-function:linear;" +
+        "transition-timing-function:cubic-bezier(2,0,1,1)}" +
+        "#transition-shorthand{transition-timing-function:linear;" +
+        "transition:width 1000ms steps(4,jump-end);" +
+        "transition-timing-function:steps(0,jump-end)}</style>" +
+        "<div id='cubic'></div><div id='jump-start'></div>" +
+        "<div id='jump-end'></div><div id='reverse-before'></div>" +
+        "<div id='reverse-after'></div><div id='alternate-before'></div>" +
+        "<div id='alternate-after'></div>" +
+        "<div id='alternate-reverse-before'></div>" +
+        "<div id='alternate-reverse-after'></div><div id='bad-x'></div>" +
+        "<div id='bad-finite'></div><div id='bad-zero'></div>" +
+        "<div id='bad-none'></div><div id='bad-list'></div>" +
+        "<div id='transition'></div><div id='transition-shorthand'></div>"
+    )
+
+fn _timing_command_color(html: text, id: text, time_ms: i64) -> u32:
+    val instances = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+    val result = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, time_ms, instances
+        )
+    )
+    for command in result.composition.batches[0].commands:
+        if command.component_id == id:
+            return command.color
+    0u32
+
+fn _expect_completed_animation_reuse(html: text, expected_color: u32):
+    var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
+    expect(worker.handle(BrowserRendererMessage(
+        kind: "init", generation: 8, request_id: 2, payload: html
+    )).ok).to_be(true)
+    val completed = worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 8, request_id: 3, payload: "1000"
+    ))
+    expect(completed.ok).to_be(true)
+    val completed_message = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(8), completed.wire
+    )
+    expect(completed_message.status).to_equal("message")
+    val completed_frame = browser_renderer_frame_decode(
+        completed_message.message, WIDTH, HEIGHT
+    )
+    expect(completed_frame.ok).to_be(true)
+    expect(completed_frame.next_animation_ms).to_equal(-1)
+    var completed_color = 0u32
+    for command in completed_frame.composition.batches[0].commands:
+        if command.component_id == "box":
+            completed_color = command.color
+    expect(completed_color).to_equal(expected_color)
+    val completed_paints = worker.render_session.counters.paint_count
+    val completed_checksum = worker.render_session.composition_checksum()
+
+    val later = worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 8, request_id: 4, payload: "1016"
+    ))
+    expect(later.ok).to_be(true)
+    val later_message = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(8), later.wire
+    )
+    expect(later_message.status).to_equal("message")
+    val later_frame = browser_renderer_frame_decode(
+        later_message.message, WIDTH, HEIGHT
+    )
+    expect(later_frame.ok).to_be(true)
+    expect(later_frame.next_animation_ms).to_equal(-1)
+    expect(worker.render_session.counters.paint_count).to_equal(
+        completed_paints
+    )
+    expect(worker.render_session.composition_checksum()).to_equal(
+        completed_checksum
+    )
+    worker.close()
+
+fn _animation_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _animation_frame_fingerprint(
+    html: text, time_ms: i64, expected_color: u32
+) -> text:
+    val semantic = (
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_name"
+        ) + "," +
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_duration_ms"
+        ) + "," +
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_fill_mode"
+        )
+    )
+    val layout = (
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "w"
+        ) + "," +
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "h"
+        )
+    )
+    val result = simple_web_layout_render_html_draw_ir_result_at_time(
+        html, WIDTH, HEIGHT, time_ms
+    )
+    var draw = "missing"
+    var animation_name = "missing"
+    var animation_duration = "missing"
+    var background_color = "missing"
+    for command in result.composition.batches[0].commands:
+        if command.component_id == "box":
+            draw = (
+                command.component_id + ":" + command.x.to_string() + "," +
+                command.y.to_string() + "," + command.width.to_string() +
+                "," + command.height.to_string()
+            )
+            for property in command.computed_style:
+                if property.key == "animation-name":
+                    animation_name = property.value
+                elif property.key == "animation-duration":
+                    animation_duration = property.value
+                elif property.key == "background-color":
+                    background_color = property.value
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val rendered = raster.render_draw_ir_composition(
+        result.composition, []
+    )
+    raster.shutdown()
+    (
+        semantic + "|" + layout + "|" +
+        result.composition.batches[0].source.source_kind + "|" + draw +
+        "|" + animation_name + "," + animation_duration + "," +
+        background_color + "|" + result.animation_next_ms.to_string() +
+        "|" + rendered.skipped_command_count.to_string() + "|" +
+        _animation_color_count(
+            rendered.pixels, expected_color
+        ).to_string()
+    )
+
+fn setup_fractional_animation_boundary_fixture() -> text:
+    (
+        "<style>html,body{{margin:0}}@keyframes boundary{" +
+        "from{{background-color:#dc2626}}to{{background-color:#2563eb}}}" +
+        "#box{width:8px;height:8px;background-color:#16a34a;" +
+        "animation:boundary 1000ms linear 2 both;" +
+        "animation:boundary 1000ms linear -1;" +
+        "animation-iteration-count:.5;" +
+        "animation-iteration-count:-1}</style><div id='box'></div>"
+    )
+
+fn check_last_valid_animation_winner(html: text):
+    expect(simple_web_layout_debug_style_by_id(
+        html, "box", "animation_name"
+    )).to_equal("boundary")
+    expect(simple_web_layout_debug_style_by_id(
+        html, "box", "animation_duration_ms"
+    )).to_equal("1000")
+    expect(simple_web_layout_debug_style_by_id(
+        html, "box", "animation_iteration_count"
+    )).to_equal(".5")
+    expect(simple_web_layout_debug_style_by_id(
+        html, "box", "animation_fill_mode"
+    )).to_equal("both")
+    val instances = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+    expect(instances.len()).to_equal(1)
+    expect(instances[0].iteration_count).to_equal(0.5)
+    val names_html = (
+        "<style>#paused{animation:paused-banner 1000ms}" +
+        "#reverse{animation:reverse-card 1000ms}" +
+        "#forwards{animation:forwards-news 1000ms}" +
+        "#linear{animation:linear-news 1000ms}" +
+        "#news{animation:news 1000ms}" +
+        "#reset{animation-name:old;animation-duration:2000ms;" +
+        "animation-delay:200ms;animation-timing-function:ease-in;" +
+        "animation-iteration-count:3;animation-direction:reverse;" +
+        "animation-fill-mode:forwards;animation-play-state:paused;" +
+        "animation:news 1000ms linear .5 both running}</style>" +
+        "<div id='paused'></div><div id='reverse'></div>" +
+        "<div id='forwards'></div><div id='linear'></div>" +
+        "<div id='news'></div><div id='reset'></div>"
+    )
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "paused", "animation_name"
+    )).to_equal("paused-banner")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "paused", "animation_play_state"
+    )).to_equal("running")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reverse", "animation_direction"
+    )).to_equal("normal")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "forwards", "animation_fill_mode"
+    )).to_equal("none")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "linear", "animation_timing_function"
+    )).to_equal("ease")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "news", "animation_name"
+    )).to_equal("news")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "news", "animation_duration_ms"
+    )).to_equal("1000")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_name"
+    )).to_equal("news")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_duration_ms"
+    )).to_equal("1000")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_delay_ms"
+    )).to_equal("0")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_timing_function"
+    )).to_equal("linear")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_iteration_count"
+    )).to_equal(".5")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_direction"
+    )).to_equal("normal")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_fill_mode"
+    )).to_equal("both")
+    expect(simple_web_layout_debug_style_by_id(
+        names_html, "reset", "animation_play_state"
+    )).to_equal("running")
+    val edge_html = (
+        "<style>@keyframes edge{from{background-color:#dc2626}" +
+        "to{{background-color:#2563eb}}}" +
+        "#zero{width:8px;height:8px;animation:edge 1000ms linear 0 both}" +
+        "#forever{width:8px;height:8px;" +
+        "animation:edge 1000ms linear infinite}</style>" +
+        "<div id='zero'></div><div id='forever'></div>"
+    )
+    expect(simple_web_layout_debug_style_by_id(
+        edge_html, "zero", "animation_iteration_count"
+    )).to_equal("0")
+    expect(simple_web_layout_debug_style_by_id(
+        edge_html, "zero", "animation_fill_mode"
+    )).to_equal("both")
+    val edge_instances = simple_web_layout_reconcile_animation_instances(
+        edge_html, WIDTH, 0, 0, false, []
+    )
+    expect(edge_instances.len()).to_equal(2)
+    expect(edge_instances[0].iteration_count).to_equal(0.0)
+    expect(edge_instances[1].iteration_count).to_equal(-1.0)
+    expect(simple_web_layout_animation_instances_next_ms(
+        [edge_instances[0]], 0
+    )).to_equal(-1)
+    expect(simple_web_layout_animation_instances_next_ms(
+        [edge_instances[1]], 0
+    )).to_equal(16)
+    val edge_frame = simple_web_layout_render_html_draw_ir_result_at_time(
+        edge_html, WIDTH, HEIGHT, 500
+    )
+    var zero_color = 0u32
+    var infinite_color = 0u32
+    for command in edge_frame.composition.batches[0].commands:
+        if command.component_id == "zero":
+            zero_color = command.color
+        elif command.component_id == "forever":
+            infinite_color = command.color
+    expect(zero_color).to_equal(0xFFDC2626u32)
+    expect(infinite_color).to_equal(0xFF804488u32)
+
+fn check_saturating_animation_clock(html: text):
+    val baseline = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+    expect(baseline.len()).to_equal(1)
+    val min_time: i64 = -9223372036854775808
+    val max_time: i64 = 9223372036854775807
+    val running_at_min = BrowserCssAnimationInstance(
+        target_key: baseline[0].target_key,
+        signature: baseline[0].signature,
+        start_time_ms: min_time,
+        paused: false,
+        paused_elapsed_ms: 0,
+        duration_ms: 1000,
+        delay_ms: 0,
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
+    )
+    val paused_html = html.replace(
+        "animation-iteration-count:-1",
+        "animation-iteration-count:-1;animation-play-state:paused"
+    )
+    val paused = simple_web_layout_reconcile_animation_instances(
+        paused_html, WIDTH, max_time, max_time, false, [running_at_min]
+    )
+    expect(paused.len()).to_equal(1)
+    expect(paused[0].paused_elapsed_ms).to_equal(max_time)
+    val resumed = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, min_time, min_time, false, [BrowserCssAnimationInstance(
+            target_key: paused[0].target_key,
+            signature: baseline[0].signature,
+            start_time_ms: paused[0].start_time_ms,
+            paused: true,
+            paused_elapsed_ms: max_time,
+            duration_ms: 1000,
+            delay_ms: 0,
+            iteration_count: 0.5,
+            timing: TimingFunction.Linear
+        )]
+    )
+    expect(resumed.len()).to_equal(1)
+    expect(resumed[0].start_time_ms).to_equal(min_time)
+    val positive_add = BrowserCssAnimationInstance(
+        target_key: "positive-add",
+        signature: "positive-add",
+        start_time_ms: max_time - 8,
+        paused: false,
+        paused_elapsed_ms: 0,
+        duration_ms: max_time,
+        delay_ms: 16,
+        iteration_count: 2.0,
+        timing: TimingFunction.Linear
+    )
+    expect(simple_web_layout_animation_instances_next_ms(
+        [positive_add], max_time - 10
+    )).to_equal(max_time)
+    expect(simple_web_layout_animation_instances_next_ms(
+        [positive_add], max_time
+    )).to_equal(-1)
+    val negative_add = BrowserCssAnimationInstance(
+        target_key: "negative-add",
+        signature: "negative-add",
+        start_time_ms: min_time + 8,
+        paused: false,
+        paused_elapsed_ms: 0,
+        duration_ms: 100,
+        delay_ms: -16,
+        iteration_count: 1.0,
+        timing: TimingFunction.Linear
+    )
+    expect(simple_web_layout_animation_instances_next_ms(
+        [negative_add], min_time
+    )).to_equal(min_time + 16)
+
+fn check_bounded_animation_frame(html: text):
+    val baseline = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+    expect(baseline.len()).to_equal(1)
+    val min_time: i64 = -9223372036854775808
+    val max_time: i64 = 9223372036854775807
+    val future = BrowserCssAnimationInstance(
+        target_key: baseline[0].target_key,
+        signature: baseline[0].signature,
+        start_time_ms: max_time,
+        paused: false,
+        paused_elapsed_ms: 0,
+        duration_ms: 1000,
+        delay_ms: 0,
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
+    )
+    val past = BrowserCssAnimationInstance(
+        target_key: baseline[0].target_key,
+        signature: baseline[0].signature,
+        start_time_ms: min_time,
+        paused: false,
+        paused_elapsed_ms: 0,
+        duration_ms: 1000,
+        delay_ms: 0,
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
+    )
+    val first = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, min_time, [future]
+        )
+    )
+    val last = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, max_time, [past]
+        )
+    )
+    val paused_html = html.replace(
+        "animation-iteration-count:-1",
+        "animation-iteration-count:-1;animation-play-state:paused"
+    )
+    val paused_pair = simple_web_layout_reconcile_animation_instances(
+        paused_html, WIDTH, 250, 250, false, baseline
+    )
+    expect(paused_pair.len()).to_equal(1)
+    expect(paused_pair[0].paused).to_equal(true)
+    expect(paused_pair[0].paused_elapsed_ms).to_equal(250)
+    val resumed_pair = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 750, 750, false, paused_pair
+    )
+    expect(resumed_pair.len()).to_equal(1)
+    expect(resumed_pair[0].paused).to_equal(false)
+    expect(resumed_pair[0].start_time_ms).to_equal(500)
+    val paused_frame = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, 750, paused_pair
+        )
+    )
+    val resumed_frame = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, 750, resumed_pair
+        )
+    )
+    var first_commands = 0
+    var last_commands = 0
+    var paused_commands = 0
+    var resumed_commands = 0
+    for command in first.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.x).to_equal(0)
+            expect(command.y).to_equal(0)
+            expect(command.width).to_equal(8)
+            expect(command.height).to_equal(8)
+            expect(command.color).to_equal(0xFFDC2626u32)
+            first_commands = first_commands + 1
+    for command in last.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.x).to_equal(0)
+            expect(command.y).to_equal(0)
+            expect(command.width).to_equal(8)
+            expect(command.height).to_equal(8)
+            expect(command.color).to_equal(0xFF804488u32)
+            last_commands = last_commands + 1
+    for command in paused_frame.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.color).to_equal(0xFFAE3557u32)
+            paused_commands = paused_commands + 1
+    for command in resumed_frame.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.color).to_equal(0xFFAE3557u32)
+            resumed_commands = resumed_commands + 1
+    expect(first_commands).to_equal(1)
+    expect(last_commands).to_equal(1)
+    expect(paused_commands).to_equal(1)
+    expect(resumed_commands).to_equal(1)
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val first_pixels = raster.render_draw_ir_composition(
+        first.composition, []
+    )
+    val last_pixels = raster.render_draw_ir_composition(
+        last.composition, []
+    )
+    val paused_pixels = raster.render_draw_ir_composition(
+        paused_frame.composition, []
+    )
+    val resumed_pixels = raster.render_draw_ir_composition(
+        resumed_frame.composition, []
+    )
+    raster.shutdown()
+    expect(first_pixels.skipped_command_count).to_equal(0)
+    expect(last_pixels.skipped_command_count).to_equal(0)
+    expect(paused_pixels.skipped_command_count).to_equal(0)
+    expect(resumed_pixels.skipped_command_count).to_equal(0)
+    expect(_animation_color_count(
+        first_pixels.pixels, 0xFFDC2626u32
+    )).to_equal(64)
+    expect(_animation_color_count(
+        last_pixels.pixels, 0xFF804488u32
+    )).to_equal(64)
+    expect(_animation_color_count(
+        paused_pixels.pixels, 0xFFAE3557u32
+    )).to_equal(64)
+    expect(_animation_color_count(
+        resumed_pixels.pixels, 0xFFAE3557u32
+    )).to_equal(64)
+
+describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should apply bounded CSS timing functions to canonical Draw IR":
+        val html = _timing_function_html()
+        step("Resolve valid timing functions without rewriting them to ease")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "cubic", "animation_timing_function"
+        )).to_equal("cubic-bezier(0, 0, 1, 1)")
+
+        step("Sample cubic Bézier identity timing into canonical Draw IR")
+        expect(_timing_command_color(
+            html, "cubic", 500
+        )).to_equal(0xFF804488u32)
+
+        step("Sample step timing at exact jump boundaries")
+        expect(_timing_command_color(
+            html, "jump-start", 0
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "jump-start", 100
+        )).to_equal(0xFFAE3557u32)
+        expect(_timing_command_color(
+            html, "jump-end", 249
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "jump-end", 250
+        )).to_equal(0xFFAE3557u32)
+        expect(_timing_command_color(
+            html, "reverse-before", 0
+        )).to_equal(0xFF2563EBu32)
+        expect(_timing_command_color(
+            html, "reverse-after", 1000
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-before", 0
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-after", 2000
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-reverse-before", 0
+        )).to_equal(0xFF2563EBu32)
+        expect(_timing_command_color(
+            html, "alternate-reverse-after", 2000
+        )).to_equal(0xFF2563EBu32)
+
+        step("Ignore malformed nonfinite and out-of-range timing declarations")
+        for id in ["bad-x", "bad-finite", "bad-zero", "bad-none", "bad-list"]:
+            expect(simple_web_layout_debug_style_by_id(
+                html, id, "animation_timing_function"
+            )).to_equal("linear")
+            expect(_timing_command_color(
+                html, id, 500
+            )).to_equal(0xFF804488u32)
+        expect(simple_web_layout_debug_style_by_id(
+            html, "transition", "transition_timing_function"
+        )).to_equal("linear")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "transition-shorthand", "transition_timing_function"
+        )).to_equal("steps(4,jump-end)")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should synthesize implicit underlying endpoints for one midpoint keyframe":
+        val html = _single_midpoint_keyframe_html()
+        step("Open a one-midpoint keyframe animation over a red underlying style")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "box", "background_color"
+        )).to_equal("4293870660")
+
+        step("Render the implicit start endpoint through canonical Draw IR and Engine2D")
+        expect(_single_midpoint_animation_command_color(
+            html, 0
+        )).to_equal(0xFFEF4444u32)
+        expect(_animation_frame_fingerprint(
+            html, 0, 0xFFEF4444u32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+            "peak,1000ms,4293870660|16|0|64"
+        )
+
+        step("Advance to the authored midpoint without changing scheduler cadence")
+        expect(_single_midpoint_animation_command_color(
+            html, 500
+        )).to_equal(0xFF2563EBu32)
+        expect(_animation_frame_fingerprint(
+            html, 500, 0xFF2563EBu32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,32,8|" +
+            "peak,1000ms,4280640491|516|0|256"
+        )
+
+        step("Fill and reuse the implicit end endpoint after completion")
+        expect(_single_midpoint_animation_command_color(
+            html, 1000
+        )).to_equal(0xFFEF4444u32)
+        expect(_animation_frame_fingerprint(
+            html, 1000, 0xFFEF4444u32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+            "peak,1000ms,4293870660|-1|0|64"
+        )
+        _expect_completed_animation_reuse(html, 0xFFEF4444u32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve the fractional winner across clock bounds":
+        val html = setup_fractional_animation_boundary_fixture()
+        step("Parse the last valid animation declaration")
+        check_last_valid_animation_winner(html)
+        step("Advance across the integer clock boundary")
+        check_saturating_animation_clock(html)
+        step("Lower the bounded animation frame")
+        check_bounded_animation_frame(html)
+        step("Reject invalid tails without erasing the winner")
+        check_last_valid_animation_winner(html)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve the animation feature at its exact start frame":
+        step("Resolve the animation start in canonical web semantic and layout state")
+        step("Render the animation start through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            _animation_html(), 0, 0xFFDC2626u32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,4,4|" +
+            "preserve,1000ms,4292617766|16|0|16"
+        )
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve interpolated geometry and color at the midpoint":
+        step("Resolve the animation midpoint in canonical web semantic and layout state")
+        step("Render the animation midpoint through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            _animation_html(), 500, 0xFF804488u32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286596232|516|0|32"
+        )
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve the filled end frame without scheduling another frame":
+        step("Resolve the animation end in canonical web semantic and layout state")
+        step("Render the animation end through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            _animation_html(), 1000, 0xFF2563EBu32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
+            "preserve,1000ms,4280640491|-1|0|48"
+        )
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should seek a fractional negative delay before consecutive frames":
+        val html = _negative_delay_animation_html("-0.5s")
+        step("Resolve the signed fractional delay in canonical web semantic state")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "box", "animation_delay_ms"
+        )).to_equal("-500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-1.5s"),
+            "box", "animation_delay_ms"
+        )).to_equal("-1500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-500ms"),
+            "box", "animation_delay_ms"
+        )).to_equal("-500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-0.5ms"),
+            "box", "animation_delay_ms"
+        )).to_equal("-1")
+
+        step("Render consecutive sought frames through canonical Draw IR and Engine2D")
+        val midpoint = _animation_frame_fingerprint(
+            html, 0, 0xFF804488u32
+        )
+        val next = _animation_frame_fingerprint(
+            html, 16, 0xFF7D458Bu32
+        )
+        expect(midpoint).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286596232|16|0|32"
+        )
+        expect(next).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286399883|32|0|32"
+        )
+        expect(next == midpoint).to_equal(false)
+
+    # @manual: show
+    # @capture(protocol)
+    it "should reuse the completed animation Draw IR after its final frame":
+        step("Render the finite CSS animation through its scheduled final frame")
+        var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: _animation_html()
+        )).ok).to_be(true)
+        val completed = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "1000"
+        ))
+        expect(completed.ok).to_be(true)
+        val completed_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), completed.wire
+        )
+        expect(completed_message.status).to_equal("message")
+        val completed_frame = browser_renderer_frame_decode(
+            completed_message.message, WIDTH, HEIGHT
+        )
+        expect(completed_frame.ok).to_be(true)
+        expect(completed_frame.next_animation_ms).to_equal(-1)
+        expect(
+            completed_frame.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        val completed_paints = worker.render_session.counters.paint_count
+        val completed_checksum = worker.render_session.composition_checksum()
+
+        step("Advance past the completed frame without scheduling an identical repaint")
+        val later = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "1016"
+        ))
+        expect(later.ok).to_be(true)
+        val later_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), later.wire
+        )
+        expect(later_message.status).to_equal("message")
+        val later_frame = browser_renderer_frame_decode(
+            later_message.message, WIDTH, HEIGHT
+        )
+        expect(later_frame.ok).to_be(true)
+        expect(later_frame.next_animation_ms).to_equal(-1)
+        expect(
+            later_frame.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        expect(worker.render_session.counters.paint_count).to_equal(
+            completed_paints
+        )
+        expect(worker.render_session.composition_checksum()).to_equal(
+            completed_checksum
+        )
+        worker.close()
+
+    # @manual: folded
+    it "should retain linear length interpolation at the midpoint":
+        step("Check the bounded animation interpolation primitives")
+        expect(approx(
+            interpolate_length(0.0, 100.0, 0.5), 50.0
+        )).to_equal(true)
+
+    # @manual: folded
+    it "should retain linear timing identity":
+        step("Check the bounded animation interpolation primitives")
+        expect(approx(
+            ease_value(0.5, TimingFunction.Linear), 0.5
+        )).to_equal(true)
+
+    # @manual: folded
+    it "should retain the ease-in slow start":
+        step("Check the bounded animation interpolation primitives")
+        expect(ease_value(
+            0.5, TimingFunction.EaseIn
+        ) < 0.5).to_equal(true)
+
+    # @manual: folded
+    it "should interpolate number values at the midpoint":
+        step("Check the bounded animation interpolation primitives")
+        expect(_interp_number_half()).to_equal(true)
+
+    # @manual: folded
+    it "should parse the bounded keyframes block":
+        step("Parse supported CSS keyframes")
+        val registry = extract_keyframes(
+            "@keyframes fade { from { opacity: 0; } to { opacity: 1; } }"
+        )
+        expect(registry.entries.len()).to_be_greater_than(0)

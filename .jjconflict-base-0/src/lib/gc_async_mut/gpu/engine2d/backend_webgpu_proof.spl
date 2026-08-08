@@ -1,0 +1,172 @@
+# 2D Engine — WebGPU Proof Backend
+#
+# Makes stub mode explicit and adds adapter diagnostics.
+# Distinguishes real hardware WebGPU from stub/unavailable fallbacks.
+#
+# Usage:
+#   use std.gpu.engine2d.backend_webgpu_proof.{WebGpuMode, WebGpuAdapterInfo,
+#       WebGpuProofBackend}
+
+use std.gpu.engine2d.backend_webgpu_proof_runtime_ops.{
+    backend_webgpu_proof_create_device,
+    backend_webgpu_proof_adapter_name,
+    backend_webgpu_proof_adapter_backend,
+    backend_webgpu_proof_is_stub,
+    backend_webgpu_proof_submit,
+    backend_webgpu_proof_present,
+    backend_webgpu_proof_cleanup
+}
+
+# ============================================================================
+# WebGpuMode
+# ============================================================================
+
+class WebGpuMode:
+    mode: text  # "real", "stub", "unavailable"
+
+    static fn real() -> WebGpuMode:
+        WebGpuMode(mode: "real")
+
+    static fn stub() -> WebGpuMode:
+        WebGpuMode(mode: "stub")
+
+    static fn unavailable() -> WebGpuMode:
+        WebGpuMode(mode: "unavailable")
+
+# ============================================================================
+# WebGpuAdapterInfo
+# ============================================================================
+
+class WebGpuAdapterInfo:
+    adapter_name: text
+    vendor: text
+    backend_type: text  # "vulkan", "metal", "d3d12", "opengl", "null"
+    is_software: bool
+    available: bool
+    error_message: text
+
+    static fn probe() -> WebGpuAdapterInfo:
+        var handle = backend_webgpu_proof_create_device()
+        if handle == 0:
+            WebGpuAdapterInfo(
+                adapter_name: "none",
+                vendor: "none",
+                backend_type: "null",
+                is_software: false,
+                available: false,
+                error_message: "backend_webgpu_proof_create_device returned null handle"
+            )
+        else:
+            var name = backend_webgpu_proof_adapter_name(handle)
+            var backend = backend_webgpu_proof_adapter_backend(handle)
+            var stub = backend_webgpu_proof_is_stub(handle)
+            var _ignored = backend_webgpu_proof_cleanup(handle)
+            WebGpuAdapterInfo(
+                adapter_name: name,
+                vendor: name,
+                backend_type: backend,
+                is_software: stub,
+                available: true,
+                error_message: ""
+            )
+
+    fn is_real(self) -> bool:
+        if self.available == false:
+            false
+        else:
+            self.is_software == false
+
+    fn is_stub(self) -> bool:
+        if self.available == false:
+            false
+        else:
+            self.is_software
+
+    fn summary(self) -> text:
+        if self.available == false:
+            "unavailable: " + self.error_message
+        else:
+            self.adapter_name + " [" + self.backend_type + "]"
+
+# ============================================================================
+# WebGpuProofBackend
+# ============================================================================
+
+class WebGpuProofBackend:
+    handle: i64
+    mode: text
+    adapter_info: WebGpuAdapterInfo
+    initialized: bool
+    submit_count: i64
+    present_count: i64
+    last_error: text
+
+    static fn create() -> WebGpuProofBackend:
+        var info = WebGpuAdapterInfo.probe()
+        var m = "unavailable"
+        if info.available:
+            if info.is_software:
+                m = "stub"
+            else:
+                m = "real"
+        WebGpuProofBackend(
+            handle: 0,
+            mode: m,
+            adapter_info: info,
+            initialized: false,
+            submit_count: 0,
+            present_count: 0,
+            last_error: ""
+        )
+
+    fn init_adapter(self) -> text:
+        var h = backend_webgpu_proof_create_device()
+        if h == 0:
+            self.last_error = "adapter init failed"
+            self.initialized = false
+            "error: adapter init failed"
+        else:
+            self.handle = h
+            self.initialized = true
+            "ok"
+
+    fn create_device(self) -> text:
+        if self.initialized == false:
+            "error: adapter not initialized"
+        else:
+            "ok"
+
+    fn create_surface(self, width: i64, height: i64) -> text:
+        if self.initialized == false:
+            "error: not initialized"
+        else:
+            "ok: surface " + width + "x" + height
+
+    fn submit_commands(self, cmd_count: i64) -> text:
+        if self.initialized == false:
+            "error: not initialized"
+        else:
+            var result = backend_webgpu_proof_submit(self.handle, cmd_count)
+            self.submit_count = self.submit_count + 1
+            result
+
+    fn present(self) -> text:
+        if self.initialized == false:
+            "error: not initialized"
+        else:
+            var result = backend_webgpu_proof_present(self.handle)
+            self.present_count = self.present_count + 1
+            result
+
+    fn is_real_mode(self) -> bool:
+        self.mode == "real"
+
+    fn stats(self) -> text:
+        "mode=" + self.mode + " submits=" + self.submit_count + " presents=" + self.present_count
+
+    fn cleanup(self) -> text:
+        if self.initialized:
+            var _ignored = backend_webgpu_proof_cleanup(self.handle)
+            self.initialized = false
+            self.handle = 0
+        "ok"

@@ -1,0 +1,493 @@
+#!/bin/sh
+set -eu
+
+# Canonical producer for the artifacts consumed by the live ARM64 QMP input
+# gate. It builds once through the documented scenario and publishes a manifest
+# only when source, HEAD, compiler frontend, and output identities are stable.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+. scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
+. scripts/check/lib/qemu-frozen-source-admission.shs
+
+COMPILER=""
+COMPILER_REJECTION_REASON=""
+PINNED_COMPILER="${SIMPLEOS_ARM64_ATTESTED_COMPILER:-}"
+COMPILER_RECEIPT="${SIMPLEOS_ARM64_COMPILER_RECEIPT:-}"
+COMPILER_RECEIPT_SHA256=""
+KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
+DISK="build/os/fat32-arm64-desktop.img"
+DISK_PRODUCER="build/os/make_os_disk"
+BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
+FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
+BUILD_STAMP="${KERNEL}.build_stamp"
+BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
+BUILD_STATUS="${BUILD_LOG}.status.$$"
+GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
+BUILD_COMMAND=""
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
+MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v2"
+MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
+SELF_TEST_DIR=""
+
+cleanup() {
+    rm -f "$MANIFEST_TMP" "$GENERATED_LOG_CONFIG" "$BUILD_STATUS"
+    if [ -n "$SELF_TEST_DIR" ]; then
+        rm -f "$SELF_TEST_DIR/clean-simple" \
+            "$SELF_TEST_DIR/seed-simple" \
+            "$SELF_TEST_DIR/debug-simple" \
+            "$SELF_TEST_DIR/build.log"
+        rmdir "$SELF_TEST_DIR" >/dev/null 2>&1 || true
+    fi
+}
+on_signal() {
+    signal_code="$1"
+    cleanup
+    exit "$signal_code"
+}
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+fail_build() {
+    echo "arm64_desktop_engine2d_attested_build_status=fail"
+    echo "arm64_desktop_engine2d_attested_build_reason=$1"
+    exit 1
+}
+
+sha256_file() {
+    sha256_line="$(qemu_admission_sha256 "$1")" || return 1
+    sha256_value="${sha256_line%% *}"
+    case "$sha256_value" in
+        *[!0-9a-f]*|"") return 1 ;;
+    esac
+    [ "${#sha256_value}" -eq 64 ] || return 1
+    printf '%s\n' "$sha256_value"
+}
+
+write_self_test_native_header() {
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64)
+            printf '\317\372\355\376\014\000\000\001' >"$1"
+            ;;
+        Darwin:x86_64)
+            printf '\317\372\355\376\007\000\000\001' >"$1"
+            ;;
+        Linux:aarch64|Linux:arm64)
+            printf '\177ELF\002\001\000\000\000\000\000\000\000\000\000\000\000\000\267\000' >"$1"
+            ;;
+        Linux:x86_64)
+            printf '\177ELF\002\001\000\000\000\000\000\000\000\000\000\000\000\000\076\000' >"$1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    chmod +x "$1"
+}
+
+run_compiler_admission_self_test() {
+    SELF_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/simple-arm64-compiler-admission.XXXXXX")" ||
+        fail_build "compiler-admission-self-test-tempdir-failed"
+    clean_fixture="$SELF_TEST_DIR/clean-simple"
+    seed_fixture="$SELF_TEST_DIR/seed-simple"
+    debug_fixture="$SELF_TEST_DIR/debug-simple"
+    write_self_test_native_header "$clean_fixture" ||
+        fail_build "compiler-admission-self-test-host-unsupported"
+    cp "$clean_fixture" "$seed_fixture"
+    cp "$clean_fixture" "$debug_fixture"
+    printf '%s\n' \
+        'WARNING: this Rust-built Simple binary is a bootstrap seed only' \
+        >>"$seed_fixture"
+    printf '%s\n' 'debug build' >>"$debug_fixture"
+
+    arm64_guest_validate_native_compiler "$clean_fixture" ||
+        fail_build "compiler-admission-self-test-clean-rejected"
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = pass ] ||
+        fail_build "compiler-admission-self-test-clean-reason-invalid"
+    arm64_guest_validate_native_compiler "$debug_fixture" ||
+        fail_build "compiler-admission-self-test-debug-help-false-positive"
+    arm64_guest_validate_compiler_version_output "Simple v1.0.0-beta" ||
+        fail_build "compiler-admission-self-test-version-rejected"
+    if arm64_guest_validate_compiler_version_output \
+            "WARNING: this Rust-built Simple binary is a bootstrap seed only"; then
+        fail_build "compiler-admission-self-test-seed-accepted"
+    fi
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
+        compiler-version-invalid ] ||
+        fail_build "compiler-admission-self-test-seed-reason-invalid"
+    if arm64_guest_validate_compiler_version_output "debug build"; then
+        fail_build "compiler-admission-self-test-debug-accepted"
+    fi
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
+        compiler-version-invalid ] ||
+        fail_build "compiler-admission-self-test-debug-reason-invalid"
+
+    BUILD_LOG="$SELF_TEST_DIR/build.log"
+    printf '%s\n' 'native build completed without fallback' >"$BUILD_LOG"
+    reject_fabricated_build_receipts ||
+        fail_build "compiler-admission-self-test-clean-build-log-rejected"
+    for rejected_receipt in \
+        'FABRICATED-NEW kernel rt_missing' \
+        'FABRICATED kernel rt_missing' \
+        'WARNING: entry is unbaselined' \
+        'weak bodies that RETURN 0'
+    do
+        printf '%s\n' "$rejected_receipt" >"$BUILD_LOG"
+        if reject_fabricated_build_receipts; then
+            fail_build "compiler-admission-self-test-fabricated-receipt-accepted"
+        fi
+    done
+
+    echo "arm64_compiler_admission_clean_status=pass"
+    echo "arm64_compiler_admission_seed_rejection_status=pass"
+    echo "arm64_compiler_admission_debug_rejection_status=pass"
+    echo "arm64_compiler_admission_fabricated_receipt_rejection_status=pass"
+    echo "arm64_compiler_admission_self_test_status=pass"
+}
+
+receipt_field() {
+    receipt_key="$1"
+    receipt_count="$(grep -c "^${receipt_key}=" "$COMPILER_RECEIPT" || true)"
+    [ "$receipt_count" -eq 1 ] || return 1
+    sed -n "s/^${receipt_key}=//p" "$COMPILER_RECEIPT"
+}
+
+validate_pinned_compiler_receipt() {
+    [ -n "$COMPILER_RECEIPT" ] || {
+        COMPILER_REJECTION_REASON="compiler-receipt-missing"
+        return 1
+    }
+    [ -f "$COMPILER_RECEIPT" ] && [ ! -L "$COMPILER_RECEIPT" ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-unavailable"
+        return 1
+    }
+    receipt_schema="$(receipt_field schema)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_path="$(receipt_field compiler_path)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_sha256="$(receipt_field compiler_sha256)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_version="$(receipt_field compiler_version)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_native_smoke="$(receipt_field native_smoke_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_stub_fallback="$(receipt_field stub_fallback)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_fabricated="$(receipt_field fabricated_stub_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    receipt_measurement="$(receipt_field measurement_status)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-invalid"
+        return 1
+    }
+    [ "$receipt_schema" = "simpleos-arm64-compiler-receipt-v1" ] &&
+        [ -n "$PINNED_COMPILER" ] &&
+        [ "$receipt_path" = "$PINNED_COMPILER" ] &&
+        [ "$receipt_native_smoke" = pass ] &&
+        [ "$receipt_stub_fallback" = forbidden ] &&
+        [ "$receipt_fabricated" = none ] &&
+        [ "$receipt_measurement" = measured ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-policy-rejected"
+        return 1
+    }
+    actual_receipt_sha256="$(sha256_file "$PINNED_COMPILER")" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-sha256-failed"
+        return 1
+    }
+    actual_receipt_version="$("$PINNED_COMPILER" --version 2>/dev/null)" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-version-command-failed"
+        return 1
+    }
+    [ "$actual_receipt_sha256" = "$receipt_sha256" ] &&
+        [ "$actual_receipt_version" = "$receipt_version" ] || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-identity-mismatch"
+        return 1
+    }
+    COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" || {
+        COMPILER_REJECTION_REASON="pinned-compiler-receipt-sha256-failed"
+        return 1
+    }
+}
+
+reject_fabricated_build_receipts() {
+    [ -f "$BUILD_LOG" ] || return 1
+    if grep -Eiq \
+        '(^|[[:space:]])FABRICATED(-NEW)?([[:space:]]|$)|Fabricated freestanding stubs:|unbaselined|unmeasured([^[:alnum:]]|$)|weak bodies that RETURN 0|weak[- ](return[- ]?)?zero' \
+        "$BUILD_LOG"; then
+        return 1
+    fi
+    return 0
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    run_compiler_admission_self_test
+    exit 0
+fi
+
+# Invalidate every prior claim before compiler/source admission. A failed
+# preflight must not leave an older manifest pair available for consumption.
+rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST" "$MANIFEST_TMP" \
+    "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
+    fail_build "stale-attestation-invalidation-failed"
+
+resolve_compiler() {
+    compiler_os="$(uname -s)" || return 1
+    compiler_arch="$(uname -m)" || return 1
+    case "$compiler_os:$compiler_arch" in
+        Darwin:arm64)
+            compiler_candidate="bin/release/aarch64-apple-darwin-macho/simple"
+            ;;
+        Darwin:x86_64)
+            compiler_candidate="bin/release/x86_64-apple-darwin-macho/simple"
+            ;;
+        Linux:x86_64)
+            compiler_candidate="bin/release/x86_64-unknown-linux-gnu/simple"
+            ;;
+        Linux:aarch64|Linux:arm64)
+            compiler_candidate="bin/release/aarch64-unknown-linux-gnu/simple"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    if [ -n "$PINNED_COMPILER" ]; then
+        compiler_candidate="$PINNED_COMPILER"
+    fi
+    [ -x "$compiler_candidate" ] && [ -f "$compiler_candidate" ] ||
+        return 1
+    [ ! -L "$compiler_candidate" ] || return 1
+    if ! arm64_guest_validate_native_compiler "$compiler_candidate"; then
+        COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
+        return 1
+    fi
+    candidate_version_output="$("$compiler_candidate" --version 2>/dev/null)" || {
+        COMPILER_REJECTION_REASON="compiler-version-command-failed"
+        return 1
+    }
+    if ! arm64_guest_validate_compiler_version_output "$candidate_version_output"; then
+        COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
+        return 1
+    fi
+    PINNED_COMPILER="$compiler_candidate"
+    validate_pinned_compiler_receipt || return 1
+    COMPILER="$compiler_candidate"
+    COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
+    COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
+    BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
+}
+
+resolve_compiler ||
+    fail_build "${COMPILER_REJECTION_REASON:-canonical-pure-simple-compiler-unavailable}"
+[ -x "$COMPILER" ] || fail_build "canonical-compiler-missing"
+[ ! -L "$COMPILER" ] || fail_build "canonical-compiler-symlink-rejected"
+# The runner owns this transient source and recreates/removes it around every
+# build. Normalize stale crash residue before taking the pre-build snapshot.
+mkdir -p build/os/generated/generated
+rm -f "$GENERATED_LOG_CONFIG" ||
+    fail_build "stale-generated-log-config-remove-failed"
+if arm64_guest_source_dirty; then
+    fail_build "guest-source-worktree-dirty"
+else
+    SOURCE_DIRTY_CODE=$?
+    [ "$SOURCE_DIRTY_CODE" -eq 1 ] ||
+        fail_build "guest-source-git-status-failed"
+fi
+
+PRE_HEAD="$(git rev-parse --verify HEAD 2>/dev/null)" ||
+    fail_build "source-revision-unavailable"
+arm64_guest_source_snapshot ||
+    fail_build "pre-build-source-fingerprint-failed"
+PRE_SOURCE_FINGERPRINT="$ARM64_GUEST_SOURCE_FINGERPRINT"
+PRE_SOURCE_FILE_COUNT="$ARM64_GUEST_SOURCE_FILE_COUNT"
+SOURCE_ROOTS="$ARM64_GUEST_SOURCE_ROOTS"
+PRE_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
+    fail_build "canonical-compiler-sha256-failed"
+PRE_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
+    fail_build "canonical-entry-sha256-failed"
+PRE_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
+    fail_build "canonical-producer-script-sha256-failed"
+HOST_OS="$(uname -s)" || fail_build "host-os-unavailable"
+HOST_ARCH="$(uname -m)" || fail_build "host-arch-unavailable"
+HOST_KERNEL_RELEASE="$(uname -r)" || fail_build "host-kernel-release-unavailable"
+HOST_IDENTITY="$HOST_OS:$HOST_ARCH:$HOST_KERNEL_RELEASE"
+printf '%s\n' "$HOST_IDENTITY" | grep -q '[[:cntrl:]]' &&
+    fail_build "host-identity-not-manifest-safe"
+PRE_COMPILER_VERSION_OUTPUT="$("$COMPILER" --version 2>/dev/null)" ||
+    fail_build "canonical-compiler-version-command-failed"
+PRE_COMPILER_VERSION="$(printf '%s\n' "$PRE_COMPILER_VERSION_OUTPUT" |
+    sed -n '1p')"
+[ -n "$PRE_COMPILER_VERSION" ] ||
+    fail_build "canonical-compiler-version-missing"
+QEMU_ADMISSION_COMMAND="$BUILD_COMMAND"
+qemu_admission_begin arm64 \
+    "$ENTRY" \
+    "$COMPILER" "$QEMU_ADMISSION_COMMAND" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+    scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
+    scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
+    scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
+    scripts/check/lib/qemu-frozen-source-admission.shs ||
+    fail_build "frozen-source-admission-rejected"
+
+# A provenance-producing invocation must execute both native-build and the disk
+# producer. Existing kernel/disk/writer artifacts cannot serve as fresh proof.
+rm -f "$BUILD_LOG" "$BUILD_STATUS" || fail_build "build-log-reset-failed"
+set +e
+{
+    env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
+        -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 \
+        SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off \
+        SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
+        "$COMPILER" os build --scenario=arm64-desktop-engine2d
+    echo "$?" >"$BUILD_STATUS"
+} 2>&1 | tee "$BUILD_LOG"
+TEE_CODE=$?
+set -e
+[ "$TEE_CODE" -eq 0 ] || fail_build "canonical-scenario-build-log-capture-failed"
+[ -f "$BUILD_STATUS" ] || fail_build "canonical-scenario-build-status-missing"
+BUILD_CODE="$(sed -n '1p' "$BUILD_STATUS")"
+rm -f "$BUILD_STATUS"
+[ "$BUILD_CODE" -eq 0 ] ||
+    fail_build "canonical-scenario-build-failed"
+reject_fabricated_build_receipts ||
+    fail_build "fabricated-or-unmeasured-stub-receipt-rejected"
+# The runner creates this source before native-build but does not remove it on
+# its success path. Restore the same normalized state used by the pre-snapshot.
+rm -f "$GENERATED_LOG_CONFIG" ||
+    fail_build "generated-log-config-cleanup-failed"
+[ -f "$KERNEL" ] && [ -s "$KERNEL" ] && [ ! -L "$KERNEL" ] ||
+    fail_build "canonical-kernel-missing-after-build"
+[ -f "$DISK" ] && [ -s "$DISK" ] && [ ! -L "$DISK" ] ||
+    fail_build "canonical-desktop-disk-missing-after-build"
+[ -x "$DISK_PRODUCER" ] && [ -f "$DISK_PRODUCER" ] ||
+    fail_build "canonical-disk-producer-missing-after-build"
+
+POST_HEAD="$(git rev-parse --verify HEAD 2>/dev/null)" ||
+    fail_build "post-build-source-revision-unavailable"
+if arm64_guest_source_dirty; then
+    fail_build "guest-source-worktree-dirty-after-build"
+else
+    SOURCE_DIRTY_CODE=$?
+    [ "$SOURCE_DIRTY_CODE" -eq 1 ] ||
+        fail_build "guest-source-git-status-failed-after-build"
+fi
+arm64_guest_source_snapshot ||
+    fail_build "post-build-source-fingerprint-failed"
+POST_SOURCE_FINGERPRINT="$ARM64_GUEST_SOURCE_FINGERPRINT"
+POST_SOURCE_FILE_COUNT="$ARM64_GUEST_SOURCE_FILE_COUNT"
+POST_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
+    fail_build "post-build-compiler-sha256-failed"
+POST_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
+    fail_build "entry-changed-during-build"
+POST_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
+    fail_build "post-build-producer-script-sha256-failed"
+POST_COMPILER_VERSION_OUTPUT="$("$COMPILER" --version 2>/dev/null)" ||
+    fail_build "post-build-compiler-version-command-failed"
+POST_COMPILER_VERSION="$(printf '%s\n' "$POST_COMPILER_VERSION_OUTPUT" |
+    sed -n '1p')"
+POST_COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" ||
+    fail_build "post-build-compiler-receipt-sha256-failed"
+
+[ "$POST_HEAD" = "$PRE_HEAD" ] ||
+    fail_build "source-revision-changed-during-build"
+[ "$POST_SOURCE_FINGERPRINT" = "$PRE_SOURCE_FINGERPRINT" ] ||
+    fail_build "guest-source-changed-during-build"
+[ "$POST_SOURCE_FILE_COUNT" = "$PRE_SOURCE_FILE_COUNT" ] ||
+    fail_build "guest-source-file-count-changed-during-build"
+[ "$POST_COMPILER_SHA256" = "$PRE_COMPILER_SHA256" ] ||
+    fail_build "compiler-changed-during-build"
+[ "$POST_ENTRY_SHA256" = "$PRE_ENTRY_SHA256" ] ||
+    fail_build "entry-changed-during-build"
+[ "$POST_PRODUCER_SCRIPT_SHA256" = "$PRE_PRODUCER_SCRIPT_SHA256" ] ||
+    fail_build "producer-script-changed-during-build"
+[ "$POST_COMPILER_VERSION" = "$PRE_COMPILER_VERSION" ] ||
+    fail_build "compiler-version-changed-during-build"
+[ "$POST_COMPILER_RECEIPT_SHA256" = "$COMPILER_RECEIPT_SHA256" ] ||
+    fail_build "compiler-receipt-changed-during-build"
+validate_pinned_compiler_receipt ||
+    fail_build "post-build-compiler-receipt-revalidation-failed"
+
+KERNEL_SHA256="$(sha256_file "$KERNEL")" ||
+    fail_build "canonical-kernel-sha256-failed"
+DISK_SHA256="$(sha256_file "$DISK")" ||
+    fail_build "canonical-disk-sha256-failed"
+DISK_PRODUCER_SHA256="$(sha256_file "$DISK_PRODUCER")" ||
+    fail_build "canonical-disk-producer-sha256-failed"
+BUILD_LOG_SHA256="$(sha256_file "$BUILD_LOG")" ||
+    fail_build "canonical-build-log-sha256-failed"
+printf '%s\n' "$PRE_COMPILER_VERSION" | grep -q '[[:cntrl:]]' &&
+    fail_build "compiler-version-not-manifest-safe"
+
+umask 077
+{
+    echo "schema=$MANIFEST_SCHEMA"
+    echo "artifact_kind=simpleos-arm64-desktop-engine2d"
+    echo "bootstrap_status=not-claimed"
+    echo "physical_board_status=not-claimed"
+    echo "producer_script_path=$PRODUCER_SCRIPT"
+    echo "producer_script_sha256=$POST_PRODUCER_SCRIPT_SHA256"
+    echo "host_os=$HOST_OS"
+    echo "host_arch=$HOST_ARCH"
+    echo "host_kernel_release=$HOST_KERNEL_RELEASE"
+    echo "host_identity=$HOST_IDENTITY"
+    echo "source_revision=$PRE_HEAD"
+    echo "source_roots=$SOURCE_ROOTS"
+    echo "source_fingerprint=$PRE_SOURCE_FINGERPRINT"
+    echo "source_file_count=$PRE_SOURCE_FILE_COUNT"
+    echo "entry_path=$ENTRY"
+    echo "entry_sha256=$PRE_ENTRY_SHA256"
+    echo "kernel_path=$KERNEL"
+    echo "kernel_sha256=$KERNEL_SHA256"
+    echo "disk_path=$DISK"
+    echo "disk_sha256=$DISK_SHA256"
+    echo "disk_producer_path=$DISK_PRODUCER"
+    echo "disk_producer_sha256=$DISK_PRODUCER_SHA256"
+    echo "compiler_path=$COMPILER"
+    echo "compiler_sha256=$PRE_COMPILER_SHA256"
+    echo "compiler_version=$PRE_COMPILER_VERSION"
+    echo "compiler_format=$COMPILER_FORMAT"
+    echo "compiler_arch=$COMPILER_ARCH"
+    echo "compiler_receipt_path=$COMPILER_RECEIPT"
+    echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
+    echo "build_log_path=$BUILD_LOG"
+    echo "build_log_sha256=$BUILD_LOG_SHA256"
+    echo "build_command=$BUILD_COMMAND"
+    echo "build_environment=$BUILD_ENVIRONMENT"
+} >"$MANIFEST_TMP"
+mv "$MANIFEST_TMP" "$BUILD_MANIFEST"
+qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+    scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
+    scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
+    scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
+    scripts/check/lib/qemu-frozen-source-admission.shs || {
+    rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST"
+    fail_build "frozen-source-admission-rejected"
+}
+
+echo "arm64_desktop_engine2d_attested_build_status=pass"
+echo "arm64_desktop_engine2d_attested_build_manifest=$BUILD_MANIFEST"
+echo "arm64_desktop_engine2d_attested_frozen_source_admission=$FROZEN_BUILD_MANIFEST"
+echo "arm64_desktop_engine2d_attested_source_revision=$PRE_HEAD"
+echo "arm64_desktop_engine2d_attested_source_fingerprint=$PRE_SOURCE_FINGERPRINT"
+echo "arm64_desktop_engine2d_attested_source_file_count=$PRE_SOURCE_FILE_COUNT"

@@ -1,0 +1,61 @@
+# ITF CLI — GitHub Adapter — thin wrapper around the system `gh` CLI.
+#
+# `gh` is the sanctioned GitHub tool for this repo (see
+# tools/claude-plugin/repo-and-pull-req). We shell out to it instead of
+# reimplementing the GitHub REST/GraphQL API — gh already owns auth,
+# pagination, and API-version compatibility. This adapter owns process
+# invocation + actionable-error detection; cmd_github.spl owns table/JSON
+# formatting on top of `gh ... --json ...` output.
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.devhub.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_retry_wait}
+
+
+fn _gh_rate_limited(stderr: text) -> bool:
+    """True if `stderr` is gh's own rate-limit wording. gh doesn't expose an
+    HTTP status code to us (it's already been mapped to human text by the
+    time we see it), so — unlike the jira_curl/minio paths, which retry on
+    any 429/5xx — this only retries on gh's clear, specific rate-limit
+    phrasing. A generic gh failure (bad args, network down, not found) is
+    never retried since resending it wouldn't change the outcome."""
+    val lower = stderr.lower()
+    lower.contains("rate limit") or lower.contains("api rate limit exceeded")
+
+
+fn gh_run(args: [text]) -> (bool, text, text):
+    """Run `gh <args>`, returning (success, stdout, stderr). Retries
+    bounded (see app.devhub.retry) only when gh itself reports being
+    rate-limited."""
+    var attempt = 0
+    var result = ("", "", -1)
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        result = process_run("gh", args)
+        val stderr = result.1
+        val code = result.2
+        attempt = attempt + 1
+        if code == 0 or not _gh_rate_limited(stderr) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            return (code == 0, result.0, stderr)
+        itf_retry_wait(attempt - 1, "")
+    (result.2 == 0, result.0, result.1)
+
+
+fn gh_available() -> bool:
+    """True if the `gh` binary is on PATH and runnable."""
+    val (_stdout, _stderr, code) = process_run("gh", ["--version"])
+    code == 0
+
+
+fn gh_actionable_error(stderr: text) -> text:
+    """Map a gh failure into a message that tells the user what to do next.
+
+    Distinguishes "gh isn't installed" from "gh isn't authenticated" from a
+    generic API/usage error, so failures never surface as a bare exit code.
+    """
+    if not gh_available():
+        return "gh CLI not found on PATH. Install it: https://cli.github.com/"
+    val trimmed = stderr.trim()
+    if trimmed.contains("gh auth login") or trimmed.contains("not logged into") or trimmed.contains("authentication") or trimmed.contains("To use GitHub CLI"):
+        return "gh is not authenticated. Run: gh auth login"
+    if trimmed != "":
+        return "gh error: {trimmed}"
+    "gh error (no output — check `gh auth status`)"

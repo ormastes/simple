@@ -1,0 +1,404 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SPEC_DIR="$ROOT/test/03_system/app/nvme_firmware"
+SIM_SPEC="$SPEC_DIR/nvme_firmware_simulation_spec.spl"
+BASE_SPEC="$SPEC_DIR/nvme_base_spec_commands_spec.spl"
+NAND_SPEC="$SPEC_DIR/rv32_nvme_nand_read_level_spec.spl"
+AXI_SPEC="$SPEC_DIR/rv32_nvme_host_axi_mmio_spec.spl"
+COSMOS_SPEC="$SPEC_DIR/nvme_cosmos_openssd_boot_spec.spl"
+REMAINING_SPEC="$SPEC_DIR/nvme_firmware_remaining_gates_spec.spl"
+TARGET_CONFIG="$ROOT/examples/09_embedded/simpleos_nvme_fw/fw/openssd_config.spl"
+QEMU_RUNNER="$ROOT/scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs"
+REQUESTS="$ROOT/doc/08_tracking/feature/cosmos_nvme_firmware_remaining_requests_2026-07-28.md"
+TODO_DOC="$ROOT/doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md"
+PACKAGE="$ROOT/src/os/kernel/arch/arm32/cosmos/package_boot.shs"
+ESSENTIAL="$ROOT/scripts/check/check-bootstrap-essential-tools-smoke.shs"
+SIMPLE_BINARY=${SIMPLE_BINARY:-"$ROOT/bin/simple"}
+
+fail() {
+    echo "STATUS: FAIL nvme-firmware-remaining-gates: $1" >&2
+    exit 1
+}
+
+require_file() {
+    [ -f "$1" ] || fail "missing $2: $1"
+}
+
+require_text() {
+    grep -Fq "$2" "$1" || fail "$3"
+}
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{ print $1 }'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | awk '{ print $NF }'
+    else
+        fail "no SHA-256 tool available"
+    fi
+}
+
+manifest_value() {
+    awk -v key="$1" '
+        index($0, key "=") == 1 {
+            if (found) exit 2
+            print substr($0, length(key) + 2)
+            found = 1
+        }
+        END { if (!found) exit 1 }
+    ' "$2"
+}
+
+required_value() {
+    value=$(manifest_value "$1" "$2") ||
+        fail "manifest missing or duplicates $1"
+    [ -n "$value" ] || fail "manifest has empty $1"
+    printf '%s\n' "$value"
+}
+
+required_hash() {
+    value=$(required_value "$1" "$2")
+    case "$value" in
+        *[!0-9a-f]*) fail "manifest has invalid $1" ;;
+    esac
+    [ "${#value}" -eq 64 ] || fail "manifest has invalid $1"
+    printf '%s\n' "$value"
+}
+
+require_evidence_file() {
+    [ -f "$1" ] && [ -s "$1" ] && [ ! -L "$1" ] ||
+        fail "missing, empty, or linked $2: $1"
+}
+
+validate_identity() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.:+,-]*) fail "invalid $2" ;;
+    esac
+}
+
+check_bound_hash() {
+    expected=$(required_hash "$1" "$3")
+    actual=$(hash_file "$2")
+    [ "$actual" = "$expected" ] || fail "$1 hash mismatch"
+}
+
+check_target_matrix() {
+    require_file "$TARGET_CONFIG" "target configuration"
+    require_file "$REQUESTS" "remaining feature requests"
+    require_text "$TARGET_CONFIG" "TARGET_SIMPLE_SIM" "simulator profile missing"
+    require_text "$TARGET_CONFIG" "TARGET_OPENSSD_2CH8WAY" "OpenSSD 2Ch8Way profile missing"
+    require_text "$TARGET_CONFIG" "TARGET_OPENSSD_8CH8WAY" "OpenSSD 8Ch8Way profile missing"
+    require_text "$TARGET_CONFIG" "TARGET_RV32_QEMU_RAM_NAND" "QEMU target profile missing"
+    require_text "$TARGET_CONFIG" "scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs" "QEMU target runner missing"
+    require_text "$TARGET_CONFIG" "TARGET_RV32_KV260_AXI_RAM_NAND" "KV260/FPGA target profile missing"
+    require_text "$REQUESTS" "fail closed" "unknown-target fail-closed contract missing"
+    echo "TARGET simple-sim PROFILE_PRESENT"
+    echo "TARGET openssd-2ch8way PROFILE_PRESENT H2_POSTPONED"
+    echo "TARGET openssd-8ch8way PROFILE_PRESENT H2_POSTPONED"
+    echo "TARGET qemu PROFILE_IMPLEMENTED firmware-parity-no-axi-irq"
+    echo "TARGET kv260-fpga PROFILE_IMPLEMENTED H2_POSTPONED"
+}
+
+check_board_evidence() {
+    [ -d "$1" ] && [ ! -L "$1" ] || fail "invalid board campaign directory: $1"
+    command -v realpath >/dev/null 2>&1 || fail "missing realpath"
+    evidence_dir=$(realpath "$1") || fail "cannot canonicalize board campaign"
+    mode=${2:-production}
+    result="$evidence_dir/result.md"
+    manifest="$evidence_dir/manifest.txt"
+    inventory="$evidence_dir/inventory.txt"
+    commands="$evidence_dir/commands.log"
+    tools="$evidence_dir/tools.txt"
+    artifacts="$evidence_dir/artifacts.sha256"
+    package_manifest="$evidence_dir/boot.bin.manifest"
+    for item in \
+        "$result:board result matrix" \
+        "$manifest:board campaign manifest" \
+        "$inventory:board inventory" \
+        "$commands:command log" \
+        "$tools:tool inventory" \
+        "$artifacts:artifact hashes" \
+        "$package_manifest:boot package manifest"; do
+        path=${item%%:*}
+        label=${item#*:}
+        require_evidence_file "$path" "$label"
+    done
+
+    [ "$(required_value schema "$manifest")" = cosmos-board-campaign-v1 ] ||
+        fail "board campaign schema mismatch"
+    [ "$(required_value status "$manifest")" = pass ] ||
+        fail "board campaign status is not pass"
+    [ "$(required_value source.dirty "$manifest")" = false ] ||
+        fail "board campaign source is dirty"
+    case "$(required_value boot.mode "$manifest")" in sd|qspi) ;; *) fail "invalid boot.mode" ;; esac
+
+    board_serial=$(required_value board.serial "$manifest")
+    board_revision=$(required_value board.revision "$manifest")
+    source_commit=$(required_value source.commit "$manifest")
+    operator=$(required_value operator "$manifest")
+    reviewer=$(required_value reviewer "$manifest")
+    validate_identity "$board_serial" board.serial
+    validate_identity "$board_revision" board.revision
+    validate_identity "$operator" operator
+    validate_identity "$reviewer" reviewer
+    validate_identity "$(required_value power.fixture "$manifest")" power.fixture
+    validate_identity "$(required_value pcie.host "$manifest")" pcie.host
+    validate_identity "$(required_value pcie.bdf "$manifest")" pcie.bdf
+    validate_identity "$(required_value destructive.blocks "$manifest")" destructive.blocks
+    [ "$operator" != "$reviewer" ] || fail "operator and reviewer must differ"
+    case "$source_commit" in ''|*[!0-9a-f]*) fail "invalid source.commit" ;; esac
+    [ "${#source_commit}" -eq 40 ] || [ "${#source_commit}" -eq 64 ] ||
+        fail "invalid source.commit"
+    for key in started_utc completed_utc; do
+        required_value "$key" "$manifest" |
+            grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' ||
+            fail "invalid $key"
+    done
+
+    check_bound_hash evidence.inventory.sha256 "$inventory" "$manifest"
+    check_bound_hash evidence.commands.sha256 "$commands" "$manifest"
+    check_bound_hash evidence.tools.sha256 "$tools" "$manifest"
+    check_bound_hash evidence.artifacts.sha256 "$artifacts" "$manifest"
+    check_bound_hash evidence.result.sha256 "$result" "$manifest"
+    check_bound_hash package.manifest.sha256 "$package_manifest" "$manifest"
+
+    [ "$(required_value format "$package_manifest")" = cosmos-zynq-boot-v3 ] ||
+        fail "package manifest format mismatch"
+    [ "$(required_value board "$package_manifest")" = cosmos-plus-openssd ] ||
+        fail "package manifest board mismatch"
+    [ "$(required_value board.serial "$package_manifest")" = "$board_serial" ] ||
+        fail "package/campaign board serial mismatch"
+    [ "$(required_value board.revision "$package_manifest")" = "$board_revision" ] ||
+        fail "package/campaign board revision mismatch"
+    [ "$(required_value source.revision "$package_manifest")" = "$source_commit" ] ||
+        fail "package/campaign source mismatch"
+    [ "$(required_value source.dirty "$package_manifest")" = false ] ||
+        fail "package source is dirty"
+    [ "$(required_value boot.mode "$package_manifest")" = "$(required_value boot.mode "$manifest")" ] ||
+        fail "package/campaign boot mode mismatch"
+    for name in fsbl bitstream firmware boot; do
+        package_hash=$(required_hash "$name.sha256" "$package_manifest")
+        campaign_hash=$(required_hash "package.$name.sha256" "$manifest")
+        [ "$package_hash" = "$campaign_hash" ] ||
+            fail "package/campaign $name hash mismatch"
+    done
+
+    rows=$(awk -F '|' '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^BT-[0-9][0-9][0-9][[:space:]]*\|/ {
+            id = trim($1)
+            if (id < "BT-001" || id > "BT-006" || NF != 6 || seen[id]++) exit 2
+            for (i = 1; i <= 6; i++) field[i] = trim($i)
+            if (field[2] != "PASS" || field[3] == "" || field[4] == "" ||
+                field[5] == "" || field[6] == "") exit 2
+            print field[1] "\t" field[4] "\t" field[5] "\t" field[6]
+            count++
+        }
+        END { if (count != 6) exit 2 }
+    ' "$result") || fail "board result matrix must contain one PASS row for BT-001..BT-006"
+    printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r id raw expected raw_reviewer; do
+        case "$raw" in
+            /*|../*|*/../*|*/..) fail "$id has unsafe evidence path" ;;
+            *[!A-Za-z0-9_./:+,-]*) fail "$id has invalid evidence path" ;;
+        esac
+        raw_path="$evidence_dir/$raw"
+        require_evidence_file "$raw_path" "$id raw evidence"
+        case "$(realpath "$raw_path")" in "$evidence_dir"/*) ;; *) fail "$id evidence escapes campaign" ;; esac
+        case "$expected" in *[!0-9a-f]*) fail "$id has invalid evidence hash" ;; esac
+        [ "${#expected}" -eq 64 ] || fail "$id has invalid evidence hash"
+        [ "$(hash_file "$raw_path")" = "$expected" ] || fail "$id raw evidence hash mismatch"
+        [ "$raw_reviewer" = "$reviewer" ] || fail "$id reviewer mismatch"
+    done || fail "board result raw evidence is invalid"
+
+    [ "$mode" = self-test ] || sh "$PACKAGE" --verify-manifest "$package_manifest"
+    echo "STATUS: PASS cosmos-board-evidence-bundle"
+}
+
+replace_manifest_value() {
+    key=$1
+    value=$2
+    file=$3
+    awk -v key="$key" -v value="$value" '
+        index($0, key "=") == 1 { print key "=" value; next }
+        { print }
+    ' "$file" >"$file.tmp"
+    mv "$file.tmp" "$file"
+}
+
+refresh_campaign_hash() {
+    dir=$1
+    key=$2
+    file=$3
+    replace_manifest_value "$key" "$(hash_file "$dir/$file")" "$dir/manifest.txt"
+}
+
+make_self_test_campaign() {
+    dir=$1
+    mkdir -p "$dir/serial" "$dir/nand" "$dir/pcie" "$dir/smp-cache" \
+        "$dir/power-loss" "$dir/thermal-endurance"
+    printf '%s\n' 'board=self-test-board revision=A1 nand=64-targets' >"$dir/inventory.txt"
+    printf '%s\n' 'command=self-test exit=0' >"$dir/commands.log"
+    printf '%s\n' 'tool=self-test version=1' >"$dir/tools.txt"
+    printf '%s\n' 'artifacts are bound by boot.bin.manifest' >"$dir/artifacts.sha256"
+    source_commit=0123456789abcdef0123456789abcdef01234567
+    fsbl_hash=1111111111111111111111111111111111111111111111111111111111111111
+    bitstream_hash=2222222222222222222222222222222222222222222222222222222222222222
+    firmware_hash=3333333333333333333333333333333333333333333333333333333333333333
+    boot_hash=4444444444444444444444444444444444444444444444444444444444444444
+    cat >"$dir/boot.bin.manifest" <<EOF
+format=cosmos-zynq-boot-v3
+board=cosmos-plus-openssd
+board.serial=self-test-board
+board.revision=A1
+boot.mode=sd
+source.revision=$source_commit
+source.dirty=false
+fsbl.sha256=$fsbl_hash
+bitstream.sha256=$bitstream_hash
+firmware.sha256=$firmware_hash
+boot.sha256=$boot_hash
+EOF
+    : >"$dir/result.md"
+    index=1
+    for area in serial nand power-loss pcie smp-cache thermal-endurance; do
+        id=$(printf 'BT-%03d' "$index")
+        raw="$area/$id.log"
+        printf '%s verified\n' "$id" >"$dir/$raw"
+        printf '%s | PASS | self-test procedure | %s | %s | reviewer-bot\n' \
+            "$id" "$raw" "$(hash_file "$dir/$raw")" >>"$dir/result.md"
+        index=$((index + 1))
+    done
+    cat >"$dir/manifest.txt" <<EOF
+schema=cosmos-board-campaign-v1
+status=pass
+board.serial=self-test-board
+board.revision=A1
+source.commit=$source_commit
+source.dirty=false
+boot.mode=sd
+operator=operator-bot
+reviewer=reviewer-bot
+started_utc=2026-07-28T00:00:00Z
+completed_utc=2026-07-28T01:00:00Z
+power.fixture=relay-1
+pcie.host=host-1
+pcie.bdf=0000:01:00.0
+destructive.blocks=100-163
+package.fsbl.sha256=$fsbl_hash
+package.bitstream.sha256=$bitstream_hash
+package.firmware.sha256=$firmware_hash
+package.boot.sha256=$boot_hash
+package.manifest.sha256=$(hash_file "$dir/boot.bin.manifest")
+evidence.inventory.sha256=$(hash_file "$dir/inventory.txt")
+evidence.commands.sha256=$(hash_file "$dir/commands.log")
+evidence.tools.sha256=$(hash_file "$dir/tools.txt")
+evidence.artifacts.sha256=$(hash_file "$dir/artifacts.sha256")
+evidence.result.sha256=$(hash_file "$dir/result.md")
+EOF
+}
+
+expect_board_rejection() {
+    label=$1
+    dir=$2
+    if (check_board_evidence "$dir" self-test) >/dev/null 2>&1; then
+        fail "$label board evidence was accepted"
+    fi
+    echo "REJECTION $label PASS"
+}
+
+self_test() {
+    require_file "$SIM_SPEC" "simulation SSpec"
+    require_file "$BASE_SPEC" "base-command SSpec"
+    require_file "$NAND_SPEC" "RV32 NAND SSpec"
+    require_file "$AXI_SPEC" "RV32 AXI SSpec"
+    require_file "$COSMOS_SPEC" "Cosmos SSpec"
+    require_file "$REMAINING_SPEC" "remaining-gates SSpec"
+    require_file "$TODO_DOC" "remaining TODO document"
+    require_file "$PACKAGE" "Cosmos package wrapper"
+    require_file "$ESSENTIAL" "pure-Simple admission gate"
+    require_file "$QEMU_RUNNER" "QEMU firmware-parity runner"
+    check_target_matrix
+    sh "$PACKAGE" --self-test
+
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT INT TERM
+    make_self_test_campaign "$work/complete"
+    check_board_evidence "$work/complete" self-test >/dev/null
+
+    cp -R "$work/complete" "$work/missing"
+    sed '/^BT-006 /d' "$work/missing/result.md" >"$work/missing/result.md.tmp"
+    mv "$work/missing/result.md.tmp" "$work/missing/result.md"
+    refresh_campaign_hash "$work/missing" evidence.result.sha256 result.md
+    expect_board_rejection missing-bt "$work/missing"
+
+    cp -R "$work/complete" "$work/tampered"
+    printf '%s\n' tampered >>"$work/tampered/nand/BT-002.log"
+    expect_board_rejection tampered-log "$work/tampered"
+
+    cp -R "$work/complete" "$work/traversal"
+    sed 's#serial/BT-001.log#../outside.log#' "$work/traversal/result.md" >"$work/traversal/result.md.tmp"
+    mv "$work/traversal/result.md.tmp" "$work/traversal/result.md"
+    refresh_campaign_hash "$work/traversal" evidence.result.sha256 result.md
+    expect_board_rejection path-traversal "$work/traversal"
+
+    cp -R "$work/complete" "$work/duplicate"
+    printf '%s\n' 'status=pass' >>"$work/duplicate/manifest.txt"
+    expect_board_rejection duplicate-field "$work/duplicate"
+
+    cp -R "$work/complete" "$work/unreviewed"
+    replace_manifest_value reviewer operator-bot "$work/unreviewed/manifest.txt"
+    expect_board_rejection same-reviewer "$work/unreviewed"
+
+    cp -R "$work/complete" "$work/package-mismatch"
+    replace_manifest_value source.revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "$work/package-mismatch/boot.bin.manifest"
+    refresh_campaign_hash "$work/package-mismatch" package.manifest.sha256 boot.bin.manifest
+    expect_board_rejection package-source-mismatch "$work/package-mismatch"
+
+    echo "STATUS: PASS nvme-firmware-remaining-gates self-test"
+    echo "STATUS: POSTPONED uno-q-supplementary environment-unavailable"
+    echo "STATUS: POSTPONED cosmos-board BT-001..BT-006"
+}
+
+post_bootstrap() {
+    [ -x "$SIMPLE_BINARY" ] || fail "missing executable pure-Simple runtime: $SIMPLE_BINARY"
+    SIMPLE_BINARY="$SIMPLE_BINARY" sh "$ESSENTIAL"
+    sh "$PACKAGE" --self-test
+    for spec in "$SIM_SPEC" "$BASE_SPEC" "$NAND_SPEC" "$AXI_SPEC" "$COSMOS_SPEC" "$REMAINING_SPEC"; do
+        SIMPLE_LIB="$ROOT/src" "$SIMPLE_BINARY" test "$spec" \
+            --mode=interpreter --no-session-daemon --sequential --no-db \
+            --no-cache --assert-ran --fail-fast
+        SIMPLE_LIB="$ROOT/src" "$SIMPLE_BINARY" spipe-docgen "$spec" \
+            --output "$ROOT/doc/06_spec" --no-index
+    done
+    find "$ROOT/doc/06_spec" -name '*_spec.spl' -print -quit | grep -q . &&
+        fail "executable SSpec found under doc/06_spec"
+    echo "STATUS: PASS nvme-firmware-post-bootstrap-host"
+    echo "STATUS: POSTPONED cosmos-production pending-BT-001..BT-006"
+}
+
+uno_q_build() {
+    [ -x "$SIMPLE_BINARY" ] || fail "missing executable pure-Simple runtime: $SIMPLE_BINARY"
+    SIMPLE_BINARY="$SIMPLE_BINARY" sh "$ESSENTIAL"
+    sh "$ROOT/scripts/os/run_simpleos_stm32u585.shs" --build-only
+    echo "STATUS: PASS uno-q-supplementary-build"
+    echo "STATUS: NOT-APPLICABLE cosmos-production-acceptance"
+}
+
+case "${1:---self-test}" in
+    --self-test) self_test ;;
+    --post-bootstrap) post_bootstrap ;;
+    --uno-q-build) uno_q_build ;;
+    --board-evidence)
+        [ "$#" -eq 2 ] || fail "--board-evidence requires a campaign directory"
+        check_board_evidence "$2"
+        ;;
+    *)
+        echo "usage: $0 --self-test | --post-bootstrap | --uno-q-build | --board-evidence DIR" >&2
+        exit 2
+        ;;
+esac

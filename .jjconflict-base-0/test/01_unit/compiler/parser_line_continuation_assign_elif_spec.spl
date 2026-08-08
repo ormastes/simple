@@ -1,0 +1,192 @@
+"""
+# Parser: newline continuation after a plain `=` and after an `elif` trailing operator
+
+**Category:** Syntax / line continuation
+**Bugs:**
+- doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md
+- doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md
+- doc/08_tracking/bug/if_condition_operator_line_continuation_parse_2026-07-30.md
+- doc/08_tracking/bug/hosted_wm_entry_closure_unparseable_grammar_gaps_2026-08-01.md
+
+## Overview
+
+Two line-continuation shapes used to be rejected while their near-neighbours
+parsed, which is what makes them easy to reintroduce:
+
+1. **Assignment-statement RHS.** `val x =` NEWLINE `expr` parsed, but the plain
+   assignment `x =` NEWLINE `expr` did not — the assign-op consumer called a
+   fresh top-level expression parser, so the Newline arrived before any
+   continuation handling ran. Same for `self.f =` and for every compound
+   assign (`+= -= *= /= %=`).
+2. **`elif` condition with a trailing operator.** `if a and` NEWLINE `b:`
+   parsed, but the identical `elif a and` NEWLINE `b:` did not: the
+   `elif` / `else if` paths lacked the save-before / drain-after
+   `deferred_dedent_count` handling that the primary `if` path applied around
+   its block, so a stray Dedent leaked into the token stream. Both the *deep*
+   (continuation column > body column) and *shallow* shapes are covered.
+
+A parse error means this file does not load at all, so **the declarations
+below are themselves the grammar coverage** — every `fn` here is written in
+the shape being pinned. The `it` blocks assert the continued expressions still
+*evaluate* correctly, which is what a silent mis-association would break.
+
+## Syntax
+
+```simple
+c =
+    a + 1          # plain assignment, RHS on the next line
+
+elif a and
+     b:            # elif condition continued after a trailing operator
+```
+"""
+
+use std.spec
+
+struct Holder:
+    value: i64
+
+# --- Gap A: plain assignment statement, RHS on the following line ------------
+
+fn assign_local_continuation(a: i64) -> i64:
+    var c: i64 = 0
+    c =
+        a + 1
+    return c
+
+fn assign_field_continuation(a: i64) -> i64:
+    var h = Holder(value: 0)
+    h.value =
+        a * 2
+    return h.value
+
+fn assign_compound_continuation(a: i64) -> i64:
+    var c: i64 = 100
+    c +=
+        a + 1
+    c -=
+        1
+    c *=
+        2
+    return c
+
+# A `val` declaration in the same shape is the control: it always parsed, and
+# it must keep parsing next to the assignment forms.
+fn val_decl_continuation() -> i64:
+    val a =
+        40 + 2
+    return a
+
+# The statement AFTER a continued assignment must still parse — this is the
+# non-vacuity signal for the dedent drain. Without it the leaked Dedent breaks
+# whatever follows, not the assignment itself.
+fn assign_continuation_then_sibling(a: i64) -> i64:
+    var c: i64 = 0
+    c =
+        a + 1
+    val d = c * 10
+    return d
+
+# --- Gap B: elif condition continued after a trailing operator ---------------
+
+# Deep shape: the continuation line is indented DEEPER than the branch body.
+fn elif_deep_continuation(a: i64, b: i64) -> i64:
+    if a < 0:
+        return 1
+    elif a >
+         b:
+        return 2
+    return 3
+
+# Shallow shape: the continuation line is indented LESS than the branch body.
+fn elif_shallow_continuation(a: i64, b: i64) -> i64:
+    if a < 0:
+        return 1
+    elif a ==
+       b:
+        return 2
+    return 3
+
+# Logical operators, and a second `elif` so the loop re-entry is exercised.
+fn elif_logical_continuation(a: bool, b: bool) -> i64:
+    if a and b:
+        return 1
+    elif a or
+        b:
+        return 2
+    elif a and
+        b:
+        return 3
+    return 4
+
+# `else if` spelt out is a separate parse path from the `elif` keyword.
+fn else_if_continuation(a: i64, b: i64) -> i64:
+    if a < 0:
+        return 1
+    else if a >
+       b:
+        return 2
+    return 3
+
+# The real-world site: browser_session_runtime.spl carried a parenthesised
+# workaround for exactly this shape while 14 siblings did the same.
+fn dispatch_continuation(event_type: text, default_action: text) -> i64:
+    if event_type == "submit":
+        return 1
+    elif event_type == "click" and
+         default_action == "form-reset":
+        return 2
+    return 3
+
+# `while` is the sibling of the same mechanism.
+fn while_continuation(limit: i64) -> i64:
+    var i: i64 = 0
+    while i <
+          limit:
+        i =
+            i + 1
+    return i
+
+describe("assignment-statement RHS newline continuation"):
+    it("continues a plain local assignment onto the next line"):
+        assert_equal(assign_local_continuation(41), 42)
+
+    it("continues a field assignment onto the next line"):
+        assert_equal(assign_field_continuation(21), 42)
+
+    it("continues compound assignments onto the next line"):
+        assert_equal(assign_compound_continuation(1), 202)
+
+    it("keeps the val-declaration control parsing and evaluating"):
+        assert_equal(val_decl_continuation(), 42)
+
+    it("parses and runs the statement after a continued assignment"):
+        assert_equal(assign_continuation_then_sibling(41), 420)
+
+describe("elif condition trailing-operator continuation"):
+    it("takes the deep-shape elif branch when its condition holds"):
+        assert_equal(elif_deep_continuation(5, 2), 2)
+
+    it("falls through the deep-shape elif when its condition fails"):
+        assert_equal(elif_deep_continuation(2, 5), 3)
+
+    it("takes the shallow-shape elif branch when its condition holds"):
+        assert_equal(elif_shallow_continuation(7, 7), 2)
+
+    it("falls through the shallow-shape elif when its condition fails"):
+        assert_equal(elif_shallow_continuation(7, 8), 3)
+
+    it("evaluates a continued `or` elif and a following continued `and` elif"):
+        assert_equal(elif_logical_continuation(true, false), 2)
+        assert_equal(elif_logical_continuation(false, false), 4)
+
+    it("continues an `else if` condition"):
+        assert_equal(else_if_continuation(5, 2), 2)
+        assert_equal(else_if_continuation(2, 5), 3)
+
+    it("evaluates the real-world dispatch condition"):
+        assert_equal(dispatch_continuation("click", "form-reset"), 2)
+        assert_equal(dispatch_continuation("click", "submit"), 3)
+
+    it("continues a while condition and its body assignment"):
+        assert_equal(while_continuation(4), 4)

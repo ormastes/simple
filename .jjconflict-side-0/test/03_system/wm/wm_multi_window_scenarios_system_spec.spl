@@ -1,0 +1,233 @@
+# @cover src/os/compositor/host_compositor_core.spl
+# @req REQ-WM-SYS-005
+# @gui: headless
+"""
+As a WM developer I need proof that the compositor holds up under *multiple*
+windows and *bursts* of window operations, not just the single-window
+lifecycle covered by `wm_window_lifecycle_system_spec.spl`. Every example
+below drives a real headless `HostCompositor` with several pinned-colour
+windows at once -- an eight-window tile, a rapid 20-window create/close
+burst, a three-window overlap chain, and a ten-resize storm -- and reads the
+result back out of the real composited pixel buffer
+(`pure_simple_pixel_buffer()`) and the compositor's own damage bookkeeping
+(`skipped_frame_count`), never against "the calls didn't crash".
+"""
+use std.spec.*
+use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.wm_action_lifecycle.{wm_resize_action}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+fn _solid(width: i32, height: i32, color: u32) -> [u32]:
+    var pixels: [u32] = []
+    var i = 0
+    while i < width * height:
+        pixels.push(color)
+        i = i + 1
+    pixels
+
+fn _pixel_at(pixels: [u32], stride: i32, x: i32, y: i32) -> u32:
+    val idx = y * stride + x
+    if idx < 0 or idx >= pixels.len():
+        return 0u32
+    pixels[idx]
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        if pixels[i] == color:
+            count = count + 1
+        i = i + 1
+    count
+
+fn _checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        sum = sum + (pixels[i] as i64) * ((i + 1) as i64)
+        i = i + 1
+    sum
+
+fn _distinct_colors(pixels: [u32]) -> i32:
+    var seen: Dict<text, bool> = {}
+    var count = 0
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        val key = pixels[i].to_string()
+        # Never infer membership from Dict.get() under native codegen.
+        if not seen.contains_key(key):
+            seen[key] = true
+            count = count + 1
+        i = i + 1
+    count
+
+fn _fill_window(comp: HostCompositor, window_id: i64, w: i32, h: i32, color: u32, revision: i32):
+    val content_w = w - 8
+    val content_h = h - 36
+    comp.require_external_web_frame(window_id)
+    val frame = pixel_surface_content_frame(
+        "{window_id}", "", 0, 0, content_w, content_h,
+        _solid(content_w, content_h, color), revision, revision
+    )
+    comp.set_external_web_frame(window_id, frame)
+
+fn _create_window(
+    comp: HostCompositor, seq: i64, title: text, x: i32, y: i32, w: i32, h: i32, app_id: text
+) -> i64:
+    comp.apply_bridge_request(
+        seq, 10, COMP_CREATE_WINDOW.to_i64(), 0, title, x, y, w, h, "", 99, app_id
+    )
+    comp.windows[comp.windows.len() - 1].id
+
+# @manual_section "Multi-window scenarios"
+describe "WM multi-window scenarios":
+    """A headless compositor is driven through several multi-window
+    situations at once -- a tiled 8-window grid, a rapid 20-window
+    create/close burst, a 3-window overlap chain, and a 10-step resize
+    storm -- and every step is checked against real composited pixels or
+    the compositor's real damage bookkeeping, never against "the call
+    didn't crash"."""
+
+    slow_it "eight windows tile without pixel bleed between content rects":
+        step("Create a 4x2 grid of 8 non-overlapping, distinctly-coloured windows")
+        var compositor = HostCompositor.new_headless(Size.wh(940, 460))
+        val colors: [u32] = [
+            0xFFE6194Bu32, 0xFF3CB44Bu32, 0xFFFFE119u32, 0xFF4363D8u32,
+            0xFFF58231u32, 0xFF911EB4u32, 0xFF46F0F0u32, 0xFFF032E6u32
+        ]
+        val cols = 4
+        val win_w = 200
+        val win_h = 200
+        val gap = 30
+        var i = 0
+        while i < 8:
+            val col = i % cols
+            val row = i / cols
+            val x = col * (win_w + gap)
+            val y = row * (win_h + gap)
+            val window_id = _create_window(
+                compositor, (i + 1) as i64, "Tile {i}", x, y, win_w, win_h, "wm.tile.{i}"
+            )
+            _fill_window(compositor, window_id, win_w, win_h, colors[i], 1)
+            i = i + 1
+
+        step("Present and probe every window's content area for its own colour only")
+        compositor.render_frame()
+        val desktop = compositor.pure_simple_pixel_buffer()
+        val content_w = win_w - 8
+        val content_h = win_h - 36
+        val content_area = content_w * content_h
+        var j = 0
+        while j < 8:
+            val n = _count_color(desktop, colors[j])
+            expect(n).to_equal(content_area)
+            j = j + 1
+        print "wm_multi_tile content_area={content_area} windows=8"
+
+    slow_it "rapid create/close of 20 windows leaves a clean desktop":
+        step("Present an empty desktop and record its baseline pixels")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 480))
+        compositor.render_frame()
+        val baseline = compositor.pure_simple_pixel_buffer()
+        val baseline_checksum = _checksum(baseline)
+        val baseline_distinct = _distinct_colors(baseline)
+        val before_skipped = compositor.skipped_frame_count
+
+        step("Create and immediately close 20 windows without presenting between them")
+        var k = 0
+        while k < 20:
+            val window_id = _create_window(
+                compositor, (k + 1) as i64, "Burst {k}", 40, 40, 160, 140, "wm.burst.{k}"
+            )
+            _fill_window(compositor, window_id, 160, 140, 0xFF00FF00u32, 1)
+            compositor.destroy_window(window_id)
+            k = k + 1
+        expect(compositor.windows.len()).to_equal(0)
+
+        step("Present once: the burst carried real damage, so this frame must present")
+        compositor.render_frame()
+        expect(compositor.skipped_frame_count).to_equal(before_skipped)
+        val after = compositor.pure_simple_pixel_buffer()
+        expect(_checksum(after)).to_equal(baseline_checksum)
+        expect(_distinct_colors(after)).to_equal(baseline_distinct)
+
+        step("A further no-op present now correctly skips")
+        val skipped_before_noop = compositor.skipped_frame_count
+        compositor.render_frame()
+        expect(compositor.skipped_frame_count).to_equal(skipped_before_noop + 1)
+        print "wm_multi_burst windows={compositor.windows.len()} baseline_distinct={baseline_distinct} after_distinct={_distinct_colors(after)}"
+
+    slow_it "overlap chains render in creation order then in raise order":
+        step("Create three overlapping windows A, B, C in that order; C is created last")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        val color_a: u32 = 0xFFE6194Bu32
+        val color_b: u32 = 0xFF4363D8u32
+        val color_c: u32 = 0xFF3CB44Bu32
+        val a_id = _create_window(compositor, 1, "Chain A", 20, 20, 300, 300, "wm.chain.a")
+        _fill_window(compositor, a_id, 300, 300, color_a, 1)
+        val b_id = _create_window(compositor, 2, "Chain B", 80, 80, 300, 300, "wm.chain.b")
+        _fill_window(compositor, b_id, 300, 300, color_b, 1)
+        val c_id = _create_window(compositor, 3, "Chain C", 140, 140, 300, 300, "wm.chain.c")
+        _fill_window(compositor, c_id, 300, 300, color_c, 1)
+
+        step("Present: the triple-overlap point is owned by C, the last window created")
+        compositor.render_frame()
+        val overlap_x = 200
+        val overlap_y = 200
+        val before = compositor.pure_simple_pixel_buffer()
+        expect(_pixel_at(before, compositor.width, overlap_x, overlap_y)).to_equal(color_c)
+
+        step("Click a point that only A covers, below A's titlebar, to raise and focus A")
+        compositor.handle_mouse_move(40, 70)
+        compositor.handle_left_button(true)
+        compositor.handle_left_button(false)
+        compositor.render_frame()
+
+        step("A is now on top: the triple-overlap point flips from C's colour to A's")
+        val after = compositor.pure_simple_pixel_buffer()
+        val after_overlap = _pixel_at(after, compositor.width, overlap_x, overlap_y)
+        expect(after_overlap).to_equal(color_a)
+        assert_true(after_overlap != color_c)
+        print "wm_multi_chain before={_pixel_at(before, compositor.width, overlap_x, overlap_y)} after={after_overlap}"
+
+    slow_it "resize storms coalesce damage without dropping the final geometry":
+        step("Create and present a single window at its initial size")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        val probe_color: u32 = 0xFFF58231u32
+        val window_id = _create_window(compositor, 1, "Resize Storm", 20, 20, 208, 196, "wm.storm")
+        _fill_window(compositor, window_id, 208, 196, probe_color, 1)
+        compositor.render_frame()
+        val before_skipped = compositor.skipped_frame_count
+
+        step("Apply 10 resizes back-to-back with no presentation between them")
+        val widths: [i32] = [220, 300, 180, 260, 150, 240, 200, 280, 170, 300]
+        val heights: [i32] = [200, 260, 220, 300, 180, 220, 260, 240, 190, 220]
+        var r = 0
+        while r < 10:
+            compositor.apply_wm_action(wm_resize_action(window_id, widths[r], heights[r]))
+            r = r + 1
+        val final_w = widths[9]
+        val final_h = heights[9]
+        expect(compositor.windows[0].w).to_equal(final_w)
+        expect(compositor.windows[0].h).to_equal(final_h)
+
+        step("Match content to the final geometry and present exactly once")
+        val final_content_w = final_w - 8
+        val final_content_h = final_h - 36
+        expect(compositor.require_external_web_frame(window_id)).to_be(true)
+        _fill_window(compositor, window_id, final_w, final_h, probe_color, 2)
+        compositor.render_frame()
+
+        step("The coalesced storm still carried damage, so this frame presented, not skipped")
+        expect(compositor.skipped_frame_count).to_equal(before_skipped)
+        val after = compositor.pure_simple_pixel_buffer()
+        val final_count = _count_color(after, probe_color)
+        expect(final_count).to_equal(final_content_w * final_content_h)
+        expect(compositor.windows[0].w).to_equal(final_w)
+        expect(compositor.windows[0].h).to_equal(final_h)
+        print "wm_multi_resize_storm final_w={final_w} final_h={final_h} final_count={final_count}"

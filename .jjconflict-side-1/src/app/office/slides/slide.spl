@@ -1,0 +1,437 @@
+# Slide Model
+#
+# Types for presentation slides, elements, and layouts.
+
+use app.office.slides.layout_registry.{SlideLayoutDescriptor, slide_layout_registry_find}
+use std.editor.extensions.host.{extension_host_ensure_command_activated}
+
+# =========================================================================
+# Layout and Element Enums
+# =========================================================================
+
+enum SlideLayout:
+    TitleSlide
+    TitleContent
+    TwoColumn
+    Blank
+    SectionHeader
+
+enum SlideElementKind:
+    TextBox(content: text)
+    ImageEl(src: text, alt: text)
+    ShapeEl(shape_type: text, fill_color: text)
+    TableEl(rows: text)
+
+# =========================================================================
+# Core Structs
+# =========================================================================
+
+struct SlideElement:
+    id: text
+    kind: SlideElementKind
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+struct Slide:
+    id: text
+    layout: SlideLayout
+    elements: [SlideElement]
+    notes: text
+    background: text
+    transition: text
+
+struct Presentation:
+    title: text
+    slides: [Slide]
+    active_slide: i32
+    theme_name: text
+
+struct SlideEditResult:
+    accepted: bool
+    reason: text
+    slide: Slide
+    element_id: text
+    expected_value: text
+    actual_value: text
+    new_value: text
+    diff: text
+
+# =========================================================================
+# Presentation Helpers
+# =========================================================================
+
+fn empty_presentation(title: text) -> Presentation:
+    """Create a new presentation with one title slide."""
+    val first = title_slide("slide_0", title, "")
+    return Presentation(
+        title: title,
+        slides: [first],
+        active_slide: 0,
+        theme_name: "default"
+    )
+
+fn slide_count(pres: Presentation) -> i32:
+    """Return the number of slides in a presentation."""
+    var count: i32 = 0
+    for s in pres.slides:
+        count = count + 1
+    return count
+
+fn current_slide(pres: Presentation) -> Slide?:
+    """Return the currently active slide, or nil if out of range."""
+    if pres.active_slide < 0:
+        return nil
+    var idx: i32 = 0
+    for s in pres.slides:
+        if idx == pres.active_slide:
+            return s
+        idx = idx + 1
+    return nil
+
+fn slide_layout_display_name(layout: SlideLayout) -> text:
+    """Human-readable layout name."""
+    match layout:
+        SlideLayout.TitleSlide:
+            return "Title Slide"
+        SlideLayout.TitleContent:
+            return "Title + Content"
+        SlideLayout.TwoColumn:
+            return "Two Column"
+        SlideLayout.Blank:
+            return "Blank"
+        SlideLayout.SectionHeader:
+            return "Section Header"
+
+fn slide_layout_short_name(layout: SlideLayout) -> text:
+    """Short display name for thumbnails."""
+    match layout:
+        SlideLayout.TitleSlide:
+            return "Title"
+        SlideLayout.TitleContent:
+            return "Content"
+        SlideLayout.TwoColumn:
+            return "Two Column"
+        SlideLayout.Blank:
+            return "Blank"
+        SlideLayout.SectionHeader:
+            return "Section"
+
+fn slide_with_elements(id: text, layout: SlideLayout, elements: [SlideElement]) -> Slide:
+    """Create a slide with default notes, background, and transition."""
+    return Slide(
+        id: id,
+        layout: layout,
+        elements: elements,
+        notes: "",
+        background: "#FFFFFF",
+        transition: ""
+    )
+
+# =========================================================================
+# Slide Constructors
+# =========================================================================
+
+fn title_slide(id: text, title: text, subtitle: text) -> Slide:
+    """Create a title slide with a centered title and optional subtitle.
+    Placeholder geometry is delegated to the "title_slide" layout_registry
+    descriptor (falls back to the legacy hardcoded geometry if the registry
+    is ever empty)."""
+    var elements: [SlideElement] = []
+    var title_x: i32 = 100
+    var title_y: i32 = 150
+    var title_w: i32 = 760
+    var title_h: i32 = 80
+    var sub_x: i32 = 150
+    var sub_y: i32 = 250
+    var sub_w: i32 = 660
+    var sub_h: i32 = 50
+    if val desc = slide_layout_registry_find("title_slide"):
+        if desc.placeholders.len() > 0:
+            val tph = desc.placeholders[0]
+            title_x = tph.x
+            title_y = tph.y
+            title_w = tph.width
+            title_h = tph.height
+        if desc.placeholders.len() > 1:
+            val sph = desc.placeholders[1]
+            sub_x = sph.x
+            sub_y = sph.y
+            sub_w = sph.width
+            sub_h = sph.height
+    val title_el = SlideElement(
+        id: "{id}_title",
+        kind: SlideElementKind.TextBox(content: title),
+        x: title_x, y: title_y,
+        width: title_w, height: title_h
+    )
+    elements.push(title_el)
+    if subtitle != "":
+        val sub_el = SlideElement(
+            id: "{id}_subtitle",
+            kind: SlideElementKind.TextBox(content: subtitle),
+            x: sub_x, y: sub_y,
+            width: sub_w, height: sub_h
+        )
+        elements.push(sub_el)
+    slide_with_elements(id, SlideLayout.TitleSlide, elements)
+
+fn blank_slide(id: text) -> Slide:
+    """Create an empty blank slide."""
+    slide_with_elements(id, SlideLayout.Blank, [])
+
+fn content_slide(id: text, title: text, body: text) -> Slide:
+    """Create a title-and-content slide with title at top and body below.
+    Placeholder geometry is delegated to the "title_content" layout_registry
+    descriptor (falls back to the legacy hardcoded geometry if the registry
+    is ever empty)."""
+    var elements: [SlideElement] = []
+    var title_x: i32 = 50
+    var title_y: i32 = 30
+    var title_w: i32 = 860
+    var title_h: i32 = 60
+    var body_x: i32 = 50
+    var body_y: i32 = 110
+    var body_w: i32 = 860
+    var body_h: i32 = 400
+    if val desc = slide_layout_registry_find("title_content"):
+        if desc.placeholders.len() > 0:
+            val tph = desc.placeholders[0]
+            title_x = tph.x
+            title_y = tph.y
+            title_w = tph.width
+            title_h = tph.height
+        if desc.placeholders.len() > 1:
+            val bph = desc.placeholders[1]
+            body_x = bph.x
+            body_y = bph.y
+            body_w = bph.width
+            body_h = bph.height
+    val title_el = SlideElement(
+        id: "{id}_title",
+        kind: SlideElementKind.TextBox(content: title),
+        x: title_x, y: title_y,
+        width: title_w, height: title_h
+    )
+    elements.push(title_el)
+    val body_el = SlideElement(
+        id: "{id}_body",
+        kind: SlideElementKind.TextBox(content: body),
+        x: body_x, y: body_y,
+        width: body_w, height: body_h
+    )
+    elements.push(body_el)
+    slide_with_elements(id, SlideLayout.TitleContent, elements)
+
+fn two_column_slide(id: text) -> Slide:
+    """Create a two-column slide from the "two_column" layout_registry
+    descriptor (same geometry templates.spl's template_two_column already
+    produced)."""
+    var elements: [SlideElement] = []
+    if val desc = slide_layout_registry_find("two_column"):
+        for ph in desc.placeholders:
+            elements.push(SlideElement(
+                id: "{id}_{ph.kind}",
+                kind: SlideElementKind.TextBox(content: ph.default_text),
+                x: ph.x, y: ph.y,
+                width: ph.width, height: ph.height
+            ))
+    slide_with_elements(id, SlideLayout.TwoColumn, elements)
+
+fn section_header_slide(id: text) -> Slide:
+    """Create a section-header slide from the "section_header"
+    layout_registry descriptor (same geometry templates.spl's
+    template_section_header already produced)."""
+    var elements: [SlideElement] = []
+    if val desc = slide_layout_registry_find("section_header"):
+        for ph in desc.placeholders:
+            elements.push(SlideElement(
+                id: "{id}_{ph.kind}",
+                kind: SlideElementKind.TextBox(content: ph.default_text),
+                x: ph.x, y: ph.y,
+                width: ph.width, height: ph.height
+            ))
+    slide_with_elements(id, SlideLayout.SectionHeader, elements)
+
+# =========================================================================
+# Registry-Driven Layout Creation (by id, not by closed enum)
+# =========================================================================
+
+fn create_slide_from_layout_id(layout_id: text, id: text) -> Result<Slide, text>:
+    """Create a slide from a layout_registry id. The five builtin ids
+    ("title_slide", "title_content", "two_column", "blank",
+    "section_header") reuse this module's own constructors, so geometry is
+    byte-identical to the legacy enum-based path. Any other registered id
+    (e.g. a demo/extension layout registered by slides_ext.spl) is built
+    generically from its placeholder specs; SlideLayout stays a closed enum
+    (see layout_registry.spl), so a non-builtin slide is tagged
+    SlideLayout.Blank -- the registry id, not the enum tag, is the source of
+    truth for what layout it actually is."""
+    match layout_id:
+        "title_slide":
+            return Ok(title_slide(id, "Title", "Subtitle"))
+        "title_content":
+            return Ok(content_slide(id, "Title", "Content goes here"))
+        "two_column":
+            return Ok(two_column_slide(id))
+        "blank":
+            return Ok(blank_slide(id))
+        "section_header":
+            return Ok(section_header_slide(id))
+        _:
+            pass_do_nothing("fall through to generic placeholder-driven build below")
+    # Activate-before-read seam (doc/08_tracking/bug/
+    # builtin_extensions_activate_eagerly_2026-07-30.md fix direction #1,
+    # minimum alternative): a non-builtin layout id (e.g. the slides_ext.spl
+    # "title_diagram" demo) only exists in the registry once the extension
+    # that publishes it has activated. Idempotent after the first call.
+    extension_host_ensure_command_activated("slides.layout.titleDiagram")
+    if val desc = slide_layout_registry_find(layout_id):
+        var elements: [SlideElement] = []
+        for ph in desc.placeholders:
+            elements.push(SlideElement(
+                id: "{id}_{ph.kind}",
+                kind: SlideElementKind.TextBox(content: ph.default_text),
+                x: ph.x, y: ph.y,
+                width: ph.width, height: ph.height
+            ))
+        return Ok(slide_with_elements(id, SlideLayout.Blank, elements))
+    Err("unknown slide layout id: {layout_id}")
+
+# =========================================================================
+# Element Manipulation
+# =========================================================================
+
+fn add_text_box(slide: Slide, id: text, content: text, x: i32, y: i32, w: i32, h: i32) -> Slide:
+    """Add a text box element to a slide and return the updated slide."""
+    val el = SlideElement(
+        id: id,
+        kind: SlideElementKind.TextBox(content: content),
+        x: x, y: y,
+        width: w, height: h
+    )
+    add_slide_element(slide, el)
+
+fn add_slide_element(slide: Slide, el: SlideElement) -> Slide:
+    """Append an element to a slide and return the updated slide."""
+    var new_elements: [SlideElement] = []
+    for e in slide.elements:
+        new_elements.push(e)
+    new_elements.push(el)
+    return Slide(
+        id: slide.id,
+        layout: slide.layout,
+        elements: new_elements,
+        notes: slide.notes,
+        background: slide.background,
+        transition: slide.transition
+    )
+
+fn set_slide_notes(slide: Slide, notes: text) -> Slide:
+    """Return a copy of the slide with speaker notes set."""
+    return Slide(
+        id: slide.id,
+        layout: slide.layout,
+        elements: slide.elements,
+        notes: notes,
+        background: slide.background,
+        transition: slide.transition
+    )
+
+fn set_slide_transition(slide: Slide, transition: text) -> Slide:
+    """Return a copy of the slide with a transition set. Allowed values:
+    "fade", "wipe", "push", or "" for none."""
+    return Slide(
+        id: slide.id,
+        layout: slide.layout,
+        elements: slide.elements,
+        notes: slide.notes,
+        background: slide.background,
+        transition: transition
+    )
+
+fn slide_edit_diff(element_id: text, old_value: text, new_value: text) -> text:
+    "@@ slide element {element_id} @@\n- {old_value}\n+ {new_value}"
+
+fn slide_reject_diff(element_id: text, expected: text, actual: text, replacement: text) -> text:
+    "@@ slide element {element_id} @@\nexpected: {expected}\nactual: {actual}\nrejected: {replacement}"
+
+fn slide_update_text_checked(slide: Slide, element_id: text, expected: text, replacement: text) -> SlideEditResult:
+    """Update a text element only when the current content matches expected."""
+    var found = false
+    var actual = "<missing-element>"
+    var new_elements: [SlideElement] = []
+    for e in slide.elements:
+        if e.id == element_id:
+            found = true
+            match e.kind:
+                SlideElementKind.TextBox(content: content):
+                    actual = content
+                    if content == expected:
+                        new_elements.push(SlideElement(
+                            id: e.id,
+                            kind: SlideElementKind.TextBox(content: replacement),
+                            x: e.x,
+                            y: e.y,
+                            width: e.width,
+                            height: e.height
+                        ))
+                    else:
+                        new_elements.push(e)
+                _:
+                    actual = "<non-text-element>"
+                    new_elements.push(e)
+        else:
+            new_elements.push(e)
+    if not found:
+        return SlideEditResult(
+            accepted: false,
+            reason: "missing-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    if actual == "<non-text-element>":
+        return SlideEditResult(
+            accepted: false,
+            reason: "non-text-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    if actual != expected:
+        return SlideEditResult(
+            accepted: false,
+            reason: "stale-slide-element",
+            slide: slide,
+            element_id: element_id,
+            expected_value: expected,
+            actual_value: actual,
+            new_value: replacement,
+            diff: slide_reject_diff(element_id, expected, actual, replacement)
+        )
+    val updated = Slide(
+        id: slide.id,
+        layout: slide.layout,
+        elements: new_elements,
+        notes: slide.notes,
+        background: slide.background,
+        transition: slide.transition
+    )
+    SlideEditResult(
+        accepted: true,
+        reason: "updated",
+        slide: updated,
+        element_id: element_id,
+        expected_value: expected,
+        actual_value: actual,
+        new_value: replacement,
+        diff: slide_edit_diff(element_id, actual, replacement)
+    )

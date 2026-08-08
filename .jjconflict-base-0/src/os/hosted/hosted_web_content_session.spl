@@ -1,0 +1,1435 @@
+# Hosted-only semantic Web adapter. BrowserSession stays out of compositor core.
+
+use std.gc_async_mut.web.browser_session.{
+    BrowserSession, BrowserBookmarkSnapshot, BrowserRequest, BrowserResponse,
+    browser_bookmark_stored_title
+}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomNodeRoute
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_control_is_effectively_disabled
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_animation_instances_next_ms,
+    simple_web_layout_hit_test_index
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderSession
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, FetchResponse, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    build_request_bytes, h1_mock_response, parse_http_response_bytes
+}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.database.sql.types.{DbError}
+use os.hosted.browser_profile_store.{BrowserBookmarkStore}
+use os.hosted.hosted_browser_renderer_policy.{
+    hosted_browser_cors_response_headers, hosted_browser_network_error,
+    hosted_browser_network_origin, hosted_browser_redirect_status,
+    hosted_browser_remove_response_header, hosted_browser_response_header_value,
+    hosted_browser_transport_host
+}
+use std.common.web.browser_renderer_protocol.{
+    browser_text_input_overlay_empty
+}
+use common.ui.access.{WinTextActionRequest}
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.web.browser_session_url.{
+    browser_address_backspace, browser_address_draft_after_control_press
+}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_browser_http_job_start_public_limited(
+    scheme: text, host: text, port: i64, request: [u8], timeout_ms: i64,
+    max_response_bytes: i64
+) -> i64
+extern fn rt_browser_http_job_poll(handle: i64) -> i64
+extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
+extern fn rt_browser_http_job_take_error(handle: i64) -> text
+extern fn rt_browser_http_job_cancel(handle: i64) -> bool
+extern fn rt_browser_http_job_free(handle: i64) -> bool
+extern fn rt_time_now_monotonic_ms() -> i64
+
+fn _hosted_fetch_mode(
+    request: BrowserRequest, requester_origin: text
+) -> RequestMode:
+    if request.kind == "document":
+        return RequestMode.Navigate
+    if request.kind == "style" or request.kind == "script":
+        return RequestMode.NoCors
+    if (request.kind == "fetch" and requester_origin != "" and
+        hosted_browser_network_origin(request.url) != requester_origin):
+        return RequestMode.Cors
+    RequestMode.SameOrigin
+
+fn _hosted_fetch_headers(request: BrowserRequest) -> text:
+    var lines: [text] = []
+    var has_content_type = false
+    for raw_line in request.headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.to_lower().starts_with("content-type:"):
+            has_content_type = true
+        lines.push(line)
+    if request.content_type != "" and not has_content_type:
+        lines.push("Content-Type: {request.content_type}")
+    lines.join("\r\n")
+
+fn _hosted_has_cookie_header(headers: text) -> bool:
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == "cookie"):
+            return true
+    false
+
+fn _hosted_wasm_hex(data: [u8]) -> text:
+    var out = StringBuilder.new()
+    for byte in data:
+        val numeric = byte.to_i64()
+        val piece = numeric.to_hex()
+        out.push(if piece.len() == 1: "0{piece}" else: piece)
+    out.build()
+
+fn _hosted_semantic_target_id(
+    browser: BrowserSession, route: DomNodeRoute
+) -> text:
+    browser.author_id_for_route(route, route.generation) ?? ""
+
+struct HostedWebContentDispatch:
+    event_id: i64
+    wm_target_id: i64
+    semantic_target_id: text
+    callback_count: i64
+    mutation_revision: i64
+    reason: text
+
+class HostedWebContentSession:
+    window_id: i64
+    width: i32
+    height: i32
+    browser: BrowserSession
+    render_session: SimpleWebRenderSession
+    network: FetchEngine
+    mutation_revision: i64
+    failure_reason: text
+    last_target_route: DomNodeRoute?
+    pressed_target_route: DomNodeRoute?
+    pressed_compat_mouse_suppressed: bool
+    published_body_html: text
+    started_at_ms: i64
+    profile_enabled: bool
+    chrome_focus: text
+    pressed_chrome_control: text
+    address_replace_on_text: bool
+    network_job_handle: i64
+    network_job_request: BrowserRequest?
+    network_job_fetch_request: FetchRequest?
+    network_job_phase: text
+    network_job_actual_request: FetchRequest?
+    network_job_deadline_ms: i64
+
+    static fn create(window_id: i64, body_html: text, width: i32, height: i32) -> HostedWebContentSession:
+        var browser = BrowserSession.new()
+        browser.direct_hosted_cors_fetch_policy = true
+        val initial_url = if body_html.starts_with("about:"):
+            body_html
+        else:
+            "simple-wm://window/{window_id}"
+        val opened = browser.open_html(
+            initial_url,
+            "<html><body>{body_html}</body></html>"
+        )
+        var failure_reason = ""
+        if val Err(reason) = opened:
+            failure_reason = reason
+        val published_html = (
+            browser.current_style_html + browser.current_body_html
+        )
+        HostedWebContentSession(
+            window_id: window_id,
+            width: width,
+            height: height,
+            browser: browser,
+            render_session: SimpleWebRenderSession.create(),
+            network: FetchEngine.new(
+                Logger.new("hosted-browser-network", LogLevel.Error)
+            ),
+            mutation_revision: 0,
+            failure_reason: failure_reason,
+            last_target_route: nil,
+            pressed_target_route: nil,
+            pressed_compat_mouse_suppressed: false,
+            published_body_html: published_html,
+            started_at_ms: -1,
+            profile_enabled: false,
+            chrome_focus: "",
+            pressed_chrome_control: "",
+            address_replace_on_text: false,
+            network_job_handle: 0,
+            network_job_request: nil,
+            network_job_fetch_request: nil,
+            network_job_phase: "",
+            network_job_actual_request: nil,
+            network_job_deadline_ms: 0
+        )
+
+    me clear_page_pointer_compatibility_state():
+        self.pressed_target_route = nil
+        self.pressed_compat_mouse_suppressed = false
+
+    me _refresh_published_body_html():
+        self.published_body_html = (
+            self.browser.current_style_html + self.browser.current_body_html
+        )
+
+    me _finish_stale_dom_dispatch(reason: text, before_body_html: text):
+        self._cancel_orphaned_network_job()
+        self.last_target_route = nil
+        if reason == "stale_target" or
+           self.browser.current_body_html != before_body_html:
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+
+    me _target_at(x: i32, y: i32) -> Result<DomNodeRoute, text>:
+        val frame_generation = self.browser.document_generation()
+        val animation_time_ms = (
+            self.browser.monotonic_time_ms -
+            self.browser.animation_start_time_ms
+        )
+        val snapshot = self.browser.render_snapshot_since(
+            self.render_session.document_revision,
+            self.render_session.style_revision,
+            self.render_session.resource_revision
+        )
+        val document_html = match snapshot.document_html:
+            Some(html): html
+            nil: self.render_session.document_html
+        self.browser.prepare_css_animation_instances_with_html(
+            self.width, document_html
+        )
+        val layout = self.render_session.render(
+            snapshot,
+            self.width,
+            self.height,
+            animation_time_ms,
+            0,
+            browser_text_input_overlay_empty(),
+            self.browser.css_animation_instances,
+            self.browser.image_resources
+        )
+        val target_key = simple_web_layout_hit_test_index(
+            layout.hit_index, x, y
+        )
+        if target_key == "":
+            return Err("no-semantic-target")
+        self.browser.route_for_layout_target_key(
+            target_key, frame_generation
+        )
+
+    me _invalidate_retained_document():
+        self.render_session.document_revision = -1
+
+    me _commit_network_error(request: BrowserRequest, message: text):
+        self.network_job_deadline_ms = 0
+        if request.kind == "document":
+            self.clear_page_pointer_compatibility_state()
+            self.last_target_route = nil
+        val _ = self.browser.commit_network_response(
+            BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: 0,
+                headers: "",
+                body: "",
+                error: message
+            )
+        )
+
+    me _commit_network_response(
+        request: BrowserRequest, response: FetchResponse
+    ):
+        self.network_job_deadline_ms = 0
+        if request.kind == "document":
+            self.clear_page_pointer_compatibility_state()
+            self.last_target_route = nil
+        val body = if request.kind == "wasm":
+            _hosted_wasm_hex(response.body)
+        else:
+            response.body_text()
+        val _ = self.browser.commit_network_response(
+            BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: response.status.to_i32(),
+                # HSTS is transport state, never renderer-visible response
+                # state: mock/cache/CORS delivery must not renew it.
+                headers: hosted_browser_remove_response_header(
+                    response.headers, "strict-transport-security"
+                ),
+                body: body,
+                error: ""
+            )
+        )
+
+    me _finalize_network_response(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        response: FetchResponse
+    ):
+        match self.network.finalize_single_hop(fetch_request, response):
+            Ok(finalized):
+                self._commit_network_response(request, finalized)
+            Err(error):
+                self._commit_network_error(request, error.message)
+
+    me _apply_authenticated_runtime_https_hsts(
+        fetch_request: FetchRequest, response: FetchResponse
+    ):
+        if fetch_request.url.scheme != "https":
+            return
+        val hsts_header = hosted_browser_response_header_value(
+            response.headers, "strict-transport-security"
+        )
+        if hsts_header != "":
+            val _ = self.browser._apply_hsts_header(
+                hsts_header, fetch_request.url.to_text()
+            )
+
+    fn _filtered_cors_response(
+        response: FetchResponse, credentials: text
+    ) -> FetchResponse:
+        FetchResponse(
+            status: response.status,
+            headers: hosted_browser_cors_response_headers(
+                response.headers,
+                hosted_browser_redirect_status(response.status.to_i32()),
+                credentials
+            ),
+            body: response.body
+        )
+
+    me _commit_cached_cors_response(
+        request: BrowserRequest, response: FetchResponse
+    ):
+        self._commit_network_response(
+            request,
+            self._filtered_cors_response(response, request.credentials)
+        )
+
+    me _finalize_direct_cors_response(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        response: FetchResponse, authenticated_runtime_https: bool
+    ):
+        if authenticated_runtime_https:
+            self._apply_authenticated_runtime_https_hsts(
+                fetch_request, response
+            )
+        match self.network.finalize_single_hop(fetch_request, response):
+            Ok(finalized):
+                self._commit_cached_cors_response(request, finalized)
+            Err(error):
+                self._commit_network_error(request, error.message)
+
+    me _start_runtime_network_job(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        phase: text, actual_request: FetchRequest?
+    ):
+        val remaining_ms = (
+            self.network_job_deadline_ms - rt_time_now_monotonic_ms()
+        )
+        if remaining_ms <= 0:
+            self._commit_network_error(
+                request, "network-timeout: Network request timed out"
+            )
+            return
+        val url = fetch_request.url
+        val port = if url.port > 0:
+            url.port
+        elif url.scheme == "https":
+            443
+        else:
+            80
+        val handle = rt_browser_http_job_start_public_limited(
+            url.scheme,
+            hosted_browser_transport_host(url.host),
+            port,
+            rt_text_to_bytes(build_request_bytes(fetch_request)),
+            remaining_ms,
+            if phase == "preflight": 65536 else: 589824
+        )
+        if handle < 0:
+            self._commit_network_error(
+                request, "network: Network request failed"
+            )
+            return
+        self.network_job_handle = handle
+        self.network_job_request = Some(request)
+        self.network_job_fetch_request = Some(fetch_request)
+        self.network_job_phase = phase
+        self.network_job_actual_request = actual_request
+
+    me _start_direct_cors_actual(
+        request: BrowserRequest, actual_request: FetchRequest
+    ):
+        match self.network.prepare_single_hop_after_cors_preflight(
+            actual_request
+        ):
+            Err(error):
+                self._commit_network_error(request, error.message)
+            Ok(prepared):
+                if val Some(response) = prepared.response:
+                    self._commit_cached_cors_response(request, response)
+                    return
+                if val Some(mock_result) = h1_mock_response(prepared.request):
+                    match mock_result:
+                        Ok(response):
+                            self._finalize_direct_cors_response(
+                                request, prepared.request, response, false
+                            )
+                        Err(error):
+                            self._commit_network_error(request, error.message)
+                    return
+                self._start_runtime_network_job(
+                    request, prepared.request, "actual", nil
+                )
+
+    me _start_direct_cors(
+        request: BrowserRequest, fetch_request: FetchRequest
+    ):
+        val plan = self.network.build_cors_preflight(fetch_request)
+        if val Some(preflight_request) = plan.preflight_request:
+            if val Some(mock_result) = h1_mock_response(preflight_request):
+                match mock_result:
+                    Err(error):
+                        self._commit_network_error(request, error.message)
+                    Ok(response):
+                        val allowed = match self.network.validate_cors_preflight(
+                            plan.actual_request, response
+                        ):
+                            Err(_): false
+                            Ok(value): value
+                        if not allowed:
+                            self._commit_network_error(
+                                request, "network: CORS preflight denied"
+                            )
+                        else:
+                            self._start_direct_cors_actual(
+                                request, plan.actual_request
+                            )
+                return
+            self._start_runtime_network_job(
+                request, preflight_request, "preflight",
+                Some(plan.actual_request)
+            )
+            return
+        self._start_direct_cors_actual(request, plan.actual_request)
+
+    me cancel_network():
+        if self.network_job_handle > 0:
+            val _ = rt_browser_http_job_cancel(self.network_job_handle)
+            val _ = rt_browser_http_job_free(self.network_job_handle)
+        self.network_job_handle = 0
+        self.network_job_request = nil
+        self.network_job_fetch_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
+        self.network_job_deadline_ms = 0
+
+    me _cancel_orphaned_network_job():
+        if self.network_job_handle <= 0:
+            return
+        if self.network_job_request == nil:
+            self.cancel_network()
+            return
+        if not self.browser.has_inflight_request(
+            self.network_job_request.unwrap()
+        ):
+            self.cancel_network()
+
+    me _poll_network_job():
+        if self.network_job_request == nil or self.network_job_fetch_request == nil:
+            self.cancel_network()
+            return
+        val request = self.network_job_request.unwrap()
+        val fetch_request = self.network_job_fetch_request.unwrap()
+        val phase = self.network_job_phase
+        val actual_request = self.network_job_actual_request
+        if ((phase != "single" and phase != "preflight" and
+            phase != "actual") or
+            (phase == "preflight" and actual_request == nil)):
+            self.cancel_network()
+            return
+        self._cancel_orphaned_network_job()
+        if self.network_job_handle <= 0:
+            return
+        val state = rt_browser_http_job_poll(self.network_job_handle)
+        if state == 0:
+            return
+        val handle = self.network_job_handle
+        self.network_job_handle = 0
+        self.network_job_request = nil
+        self.network_job_fetch_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
+        if state < 0:
+            val _ = rt_browser_http_job_free(handle)
+            self._commit_network_error(
+                request, "network: Network request failed"
+            )
+            return
+        val error = rt_browser_http_job_take_error(handle)
+        val raw_response = rt_browser_http_job_take_response(handle)
+        val _ = rt_browser_http_job_free(handle)
+        if error != "":
+            self._commit_network_error(
+                request,
+                hosted_browser_network_error(
+                    Url.parse_or_opaque(request.url).scheme, error
+                )
+            )
+            return
+        match parse_http_response_bytes(raw_response):
+            Ok(response):
+                if phase == "preflight":
+                    val actual = actual_request.unwrap()
+                    val allowed = match self.network.validate_cors_preflight(
+                        actual, response
+                    ):
+                        Err(_): false
+                        Ok(value): value
+                    if not allowed:
+                        self._commit_network_error(
+                            request, "network: CORS preflight denied"
+                        )
+                    else:
+                        self._start_direct_cors_actual(request, actual)
+                elif phase == "actual":
+                    self._finalize_direct_cors_response(
+                        request, fetch_request, response,
+                        fetch_request.url.scheme == "https"
+                    )
+                elif phase == "single":
+                    self._apply_authenticated_runtime_https_hsts(
+                        fetch_request, response
+                    )
+                    self._finalize_network_response(
+                        request, fetch_request, response
+                    )
+                else:
+                    self._commit_network_error(
+                        request, "network: Invalid runtime response phase"
+                    )
+            Err(parse_error):
+                self._commit_network_error(
+                    request,
+                    hosted_browser_network_error(
+                        Url.parse_or_opaque(request.url).scheme,
+                        parse_error.message
+                    )
+                )
+
+    me _pump_network_once():
+        if self.network_job_handle > 0:
+            self._poll_network_job()
+            return
+        if val Some(request) = self.browser.take_pending_request():
+            val requester_origin = if request.initiator_origin != "":
+                request.initiator_origin
+            else:
+                Origin.from_url(
+                    Url.parse_or_opaque(self.browser.document_url)
+                ).to_text()
+            self.network.set_requester_origin(
+                requester_origin
+            )
+            val mode = _hosted_fetch_mode(request, requester_origin)
+            val fetch_request = FetchRequest(
+                url: Url.parse_or_opaque(request.url),
+                method: request.method,
+                headers: _hosted_fetch_headers(request),
+                body: rt_text_to_bytes(request.body),
+                mode: mode,
+                # BrowserSession owns the cookie jar and already attached the
+                # sanitized Cookie header for this exact request URL.
+                credentials: if mode == RequestMode.Cors:
+                    request.credentials
+                else:
+                    "omit"
+            )
+            self.network_job_deadline_ms = rt_time_now_monotonic_ms() + 5000
+            if mode == RequestMode.Cors:
+                if ((request.credentials != "omit" and
+                    request.credentials != "same-origin") or
+                    _hosted_has_cookie_header(fetch_request.headers)):
+                    self._commit_network_error(
+                        request, "network: Invalid direct CORS request"
+                    )
+                    self.network_job_deadline_ms = 0
+                    return
+                self._start_direct_cors(request, fetch_request)
+                return
+            match self.network.prepare_single_hop(fetch_request):
+                Err(error):
+                    self._commit_network_error(request, error.message)
+                Ok(prepared):
+                    if val Some(response) = prepared.response:
+                        self._commit_network_response(request, response)
+                        return
+                    if val Some(mock_result) = h1_mock_response(prepared.request):
+                        match mock_result:
+                            Ok(response):
+                                self._finalize_network_response(
+                                    request, prepared.request, response
+                                )
+                            Err(error):
+                                self._commit_network_error(
+                                    request, error.message
+                                )
+                        return
+                    self._start_runtime_network_job(
+                        request, prepared.request, "single", nil
+                    )
+
+    fn address_text() -> text:
+        if (
+            self.chrome_focus == "address" and
+            not self.address_replace_on_text
+        ):
+            return self.browser.address_draft
+        if self.browser.address_draft != "":
+            return self.browser.address_draft
+        if self.browser.pending_url != "":
+            return self.browser.pending_url
+        self.browser.current_url
+
+    me _chrome_action(
+        event_id: i64, control: text, action: text, value: text
+    ) -> HostedWebContentDispatch:
+        val before_document = (
+            self.browser.current_style_html + self.browser.current_body_html
+        )
+        val result = self.browser.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#{control}",
+            action: action,
+            text_value: value,
+            x: 0,
+            y: 0
+        ))
+        if result.ok:
+            self._cancel_orphaned_network_job()
+            if (
+                self.browser.current_style_html +
+                self.browser.current_body_html != before_document
+            ):
+                self._invalidate_retained_document()
+                self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: "browser:session#{control}",
+            callback_count: if result.ok: 1 else: 0,
+            mutation_revision: self.mutation_revision,
+            reason: if result.ok: "" else: result.message
+        )
+
+    me dispatch_chrome_pointer(
+        event_id: i64, control: text, down: bool
+    ) -> HostedWebContentDispatch:
+        self.clear_page_pointer_compatibility_state()
+        if down:
+            self.pressed_chrome_control = control
+            if control != "address" and control != "go":
+                val draft = browser_address_draft_after_control_press(
+                    control, self.browser.current_url,
+                    self.browser.address_draft
+                )
+                val _ = self.browser.apply_address_update("", draft, true)
+            if control == "address":
+                self.chrome_focus = "address"
+                self.address_replace_on_text = true
+            else:
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#{control}",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "chrome-pressed"
+            )
+        val pressed = self.pressed_chrome_control
+        self.pressed_chrome_control = ""
+        if pressed != control:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#{control}",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "chrome-release-target-mismatch"
+            )
+        if control == "address":
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "address-focused"
+            )
+        if control == "favorite" and not self.profile_enabled:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#favorite",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "profile-unavailable"
+            )
+        self._chrome_action(event_id, control, "click", "")
+
+    me advance_at(now_ms: i64) -> bool:
+        if self.failure_reason != "" or now_ms < 0:
+            return false
+        if self.started_at_ms < 0:
+            self.started_at_ms = now_ms
+        if self.browser.css_animation_reconcile_pending:
+            self.browser.prepare_css_animation_instances(self.width)
+        val before_time_ms = self.browser.monotonic_time_ms
+        val before_revisions = self.browser.render_revisions()
+        val before_title = self.browser.current_title
+        val before_animation_ms = max(
+            0_i64,
+            before_time_ms - self.browser.animation_start_time_ms
+        )
+        val animation_next_ms = simple_web_layout_animation_instances_next_ms(
+            self.browser.css_animation_instances, before_animation_ms
+        )
+        val _ = self.browser.advance_time(now_ms - self.started_at_ms)
+        self._pump_network_once()
+        val after_revisions = self.browser.render_revisions()
+        val current_animation_ms = max(
+            0_i64,
+            self.browser.monotonic_time_ms -
+                self.browser.animation_start_time_ms
+        )
+        val css_animation_changed = (
+            animation_next_ms >= 0 and
+            animation_next_ms <= current_animation_ms
+        )
+        val render_changed = (
+            before_revisions.document_revision !=
+                after_revisions.document_revision or
+            before_revisions.style_revision != after_revisions.style_revision or
+            before_revisions.resource_revision !=
+                after_revisions.resource_revision or
+            before_title != self.browser.current_title
+        )
+        if not render_changed and not css_animation_changed:
+            return false
+        if (
+            before_revisions.document_revision !=
+                after_revisions.document_revision or
+            before_revisions.style_revision != after_revisions.style_revision
+        ):
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+        self.mutation_revision = self.mutation_revision + 1
+        true
+
+    me dispatch_pointer_at(event_id: i64, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
+        self.chrome_focus = ""
+        self.address_replace_on_text = false
+        self.pressed_chrome_control = ""
+        if self.failure_reason != "":
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: self.failure_reason
+        )
+        val before = self.browser.current_body_html
+        val target_route = match self._target_at(x, y):
+            Ok(route): route
+            Err(reason):
+                self.clear_page_pointer_compatibility_state()
+                if reason == "stale_target":
+                    self._finish_stale_dom_dispatch(reason, before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: reason
+                )
+        val index = match self.browser.current_dom_identity_index():
+            Some(value): value
+            nil:
+                self.clear_page_pointer_compatibility_state()
+                self._finish_stale_dom_dispatch("stale_target", before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "stale_target"
+                )
+        if be_dom_control_is_effectively_disabled(
+            self.browser.dom_root(), index, target_route
+        ):
+            self.clear_page_pointer_compatibility_state()
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "disabled-control"
+            )
+        val callback_start = self.browser.dom_callback_count
+        if down:
+            self.pressed_target_route = Some(target_route)
+            val pointer_down = match self.browser.dispatch_dom_primary_pointer_down(
+                target_route
+            ):
+                Ok(value): value
+                Err(reason):
+                    self.clear_page_pointer_compatibility_state()
+                    self._finish_stale_dom_dispatch(reason, before)
+                    return HostedWebContentDispatch(
+                        event_id: event_id,
+                        wm_target_id: self.window_id,
+                        semantic_target_id: _hosted_semantic_target_id(
+                            self.browser, target_route
+                        ),
+                        callback_count: self.browser.dom_callback_count - callback_start,
+                        mutation_revision: self.mutation_revision,
+                        reason: reason
+                    )
+            self.pressed_compat_mouse_suppressed = (
+                pointer_down.suppress_compat_mouse
+            )
+            if pointer_down.mouse_default_action_allowed:
+                self.last_target_route = self.browser.focused_dom_route()
+            val callback_count = self.browser.dom_callback_count - callback_start
+            self._cancel_orphaned_network_job()
+            val changed = self.browser.current_body_html != before
+            if changed:
+                self._invalidate_retained_document()
+                self._refresh_published_body_html()
+                self.mutation_revision = self.mutation_revision + 1
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
+                callback_count: callback_count,
+                mutation_revision: self.mutation_revision,
+                reason: if changed: "" else: "pointer-pressed"
+            )
+        val pressed_target_route = self.pressed_target_route
+        val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
+        self.clear_page_pointer_compatibility_state()
+        val activate_click = match pressed_target_route:
+            Some(pressed_route): (
+                pressed_route.generation.value == target_route.generation.value and
+                pressed_route.node_id == target_route.node_id
+            )
+            nil: false
+        match self.browser.dispatch_dom_primary_pointer_up(
+            target_route, suppress_compat_mouse, activate_click
+        ):
+            Err(reason):
+                self._finish_stale_dom_dispatch(reason, before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: _hosted_semantic_target_id(
+                        self.browser, target_route
+                    ),
+                    callback_count: self.browser.dom_callback_count - callback_start,
+                    mutation_revision: self.mutation_revision,
+                    reason: reason
+                )
+            Ok(_): ()
+        val callback_count = self.browser.dom_callback_count - callback_start
+        self._cancel_orphaned_network_job()
+        self.last_target_route = self.browser.focused_dom_route()
+        val changed = self.browser.current_body_html != before
+        if changed:
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: _hosted_semantic_target_id(
+                self.browser, target_route
+            ),
+            callback_count: callback_count,
+            mutation_revision: self.mutation_revision,
+            reason: if changed:
+                ""
+            elif pressed_target_route == nil:
+                "pointer-release-without-press"
+            elif not activate_click:
+                "pointer-release-target-mismatch"
+            else:
+                "no-application-mutation"
+        )
+
+    me dispatch_text(event_id: i64, value: text) -> HostedWebContentDispatch:
+        if self.chrome_focus == "address":
+            val current = self.address_text()
+            match self.browser.apply_address_update(
+                current, value, self.address_replace_on_text
+            ):
+                Err(reason):
+                    return HostedWebContentDispatch(
+                        event_id: event_id,
+                        wm_target_id: self.window_id,
+                        semantic_target_id: "browser:session#address",
+                        callback_count: 0,
+                        mutation_revision: self.mutation_revision,
+                        reason: reason
+                    )
+                Ok(_): ()
+            self._cancel_orphaned_network_job()
+            self.mutation_revision = self.mutation_revision + 1
+            self.address_replace_on_text = false
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 1,
+                mutation_revision: self.mutation_revision,
+                reason: ""
+            )
+        val before = self.browser.current_body_html
+        val target_route = match self.last_target_route:
+            Some(route): route
+            nil:
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "no-focused-semantic-target"
+                )
+        if target_route.generation.value != self.browser.document_generation().value:
+            self._finish_stale_dom_dispatch("stale_target", before)
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "stale_target"
+            )
+        val callback_start = self.browser.dom_callback_count
+        val updated = self.browser.append_dom_text_input_route(
+            target_route, value
+        )
+        if val Err(reason) = updated:
+            self._finish_stale_dom_dispatch(reason, before)
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
+                callback_count:
+                    self.browser.dom_callback_count - callback_start,
+                mutation_revision: self.mutation_revision,
+                reason: reason
+            )
+        val callback_count = self.browser.dom_callback_count - callback_start
+        self._cancel_orphaned_network_job()
+        val active_route = self.browser.focused_dom_route()
+        self.last_target_route = active_route
+        val changed = self.browser.current_body_html != before
+        if changed:
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+        val active_semantic_target_id = match active_route:
+            Some(route): _hosted_semantic_target_id(self.browser, route)
+            nil: ""
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: active_semantic_target_id,
+            callback_count: callback_count,
+            mutation_revision: self.mutation_revision,
+            reason: if changed: "" else: "no-application-mutation"
+        )
+
+    me dispatch_key(
+        event_id: i64, keycode: i64, pressed: bool
+    ) -> HostedWebContentDispatch:
+        self.dispatch_key_with_shift(event_id, keycode, pressed, false)
+
+    me dispatch_key_with_shift(
+        event_id: i64, keycode: i64, pressed: bool, shift_key: bool
+    ) -> HostedWebContentDispatch:
+        if self.chrome_focus == "address":
+            if not pressed:
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "browser:session#address",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "key-up"
+                )
+            if keycode == 13:
+                val submitted = self._chrome_action(
+                    event_id, "address", "submit", ""
+                )
+                if submitted.callback_count > 0:
+                    self.chrome_focus = ""
+                    self.address_replace_on_text = false
+                return submitted
+            if keycode == 27:
+                self.browser.address_draft = self.browser.document_url
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "browser:session#address",
+                    callback_count: 1,
+                    mutation_revision: self.mutation_revision,
+                    reason: ""
+                )
+            if keycode == 8:
+                val current = self.address_text()
+                val shortened = match browser_address_backspace(
+                    current, self.address_replace_on_text
+                ):
+                    Err(reason):
+                        return HostedWebContentDispatch(
+                            event_id: event_id,
+                            wm_target_id: self.window_id,
+                            semantic_target_id: "browser:session#address",
+                            callback_count: 0,
+                            mutation_revision: self.mutation_revision,
+                            reason: reason
+                        )
+                    Ok(value): value
+                self.address_replace_on_text = false
+                return self._chrome_action(
+                    event_id, "address", "set_value", shortened
+                )
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "key-down"
+            )
+        val focused_route = self.browser.focused_dom_route()
+        self.last_target_route = focused_route
+        if focused_route == nil and keycode != 9:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "no-focused-semantic-target"
+            )
+        val before = self.browser.current_body_html
+        val callback_start = self.browser.dom_callback_count
+        val dispatched = self.browser.dispatch_dom_keyboard_code_event(
+            focused_route, keycode, pressed, shift_key
+        )
+        if val Err(reason) = dispatched:
+            self._finish_stale_dom_dispatch(reason, before)
+            val focused_semantic_target_id = match focused_route:
+                Some(route): _hosted_semantic_target_id(self.browser, route)
+                nil: ""
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: focused_semantic_target_id,
+                callback_count:
+                    self.browser.dom_callback_count - callback_start,
+                mutation_revision: self.mutation_revision,
+                reason: reason
+            )
+        val callback_count = self.browser.dom_callback_count - callback_start
+        self._cancel_orphaned_network_job()
+        val active_route = self.browser.focused_dom_route()
+        self.last_target_route = active_route
+        val changed = self.browser.current_body_html != before
+        if changed:
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+        val active_semantic_target_id = match active_route:
+            Some(route): _hosted_semantic_target_id(self.browser, route)
+            nil: ""
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: active_semantic_target_id,
+            callback_count: callback_count,
+            mutation_revision: self.mutation_revision,
+            reason: if changed:
+                ""
+            elif pressed:
+                "key-down"
+            else:
+                "key-up"
+        )
+
+    fn current_body_html() -> text:
+        self.published_body_html
+
+    fn render_to_pixels() -> [u32]:
+        self.browser.render_to_pixels(self.width, self.height).pixel_data
+
+    me close():
+        self.cancel_network()
+        self.render_session.close()
+        self.browser.close()
+
+class HostedWebContentRegistry:
+    sessions: [HostedWebContentSession]
+    bookmark_store: BrowserBookmarkStore?
+    profile_bookmarks: BrowserBookmarkSnapshot
+    profile_failure_reason: text
+
+    static fn create() -> HostedWebContentRegistry:
+        HostedWebContentRegistry(
+            sessions: [],
+            bookmark_store: nil,
+            profile_bookmarks: BrowserBookmarkSnapshot.create([]),
+            profile_failure_reason: ""
+        )
+
+    static fn create_with_default_bookmark_store() -> HostedWebContentRegistry:
+        match BrowserBookmarkStore.open_default():
+            Err(e):
+                var registry = HostedWebContentRegistry.create()
+                registry.profile_failure_reason = e.message()
+                registry
+            Ok(bookmark_store):
+                HostedWebContentRegistry.create_with_bookmark_store(
+                    bookmark_store
+                )
+
+    static fn create_with_bookmark_store(
+        bookmark_store: BrowserBookmarkStore
+    ) -> HostedWebContentRegistry:
+        var registry = HostedWebContentRegistry.create()
+        match bookmark_store.load_bookmarks():
+            Err(e):
+                var opened = bookmark_store
+                match opened.close():
+                    Err(close_error):
+                        registry.bookmark_store = Some(opened)
+                        registry.profile_failure_reason = (
+                            e.message() + "; close: " + close_error.message()
+                        )
+                    Ok(_):
+                        registry.profile_failure_reason = e.message()
+                registry
+            Ok(bookmarks):
+                registry.bookmark_store = Some(bookmark_store)
+                registry.profile_bookmarks = bookmarks
+                registry
+
+    me _session_index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return i
+            i = i + 1
+        -1
+
+    me _clear_pointer_state_except(retained_index: i32):
+        var i = 0
+        while i < self.sessions.len():
+            if i != retained_index:
+                var session = self.sessions[i]
+                session.clear_page_pointer_compatibility_state()
+                session.pressed_chrome_control = ""
+                self.sessions[i] = session
+            i = i + 1
+
+    me cancel_pointer_state():
+        self._clear_pointer_state_except(-1)
+
+    me _ensure(
+        window_id: i64, body_html: text, width: i32, height: i32,
+        profile_enabled: bool
+    ) -> i32:
+        val use_profile = (
+            profile_enabled and self.bookmark_store != nil and
+            self.profile_failure_reason == ""
+        )
+        val existing = self._session_index(window_id)
+        if existing >= 0:
+            var session = self.sessions[existing]
+            session.width = width
+            session.height = height
+            if use_profile and not session.profile_enabled:
+                session.profile_enabled = true
+                val _ = session.browser.load_bookmark_snapshot(
+                    self.profile_bookmarks
+                )
+            self.sessions[existing] = session
+            return existing
+        var session = HostedWebContentSession.create(
+            window_id, body_html, width, height
+        )
+        session.profile_enabled = use_profile
+        if use_profile:
+            val _ = session.browser.load_bookmark_snapshot(
+                self.profile_bookmarks
+            )
+        self.sessions.push(session)
+        self.sessions.len() - 1
+
+    me advance_window(
+        window_id: i64, body_html: text, width: i32, height: i32,
+        now_ms: i64, profile_enabled: bool
+    ) -> bool:
+        val index = self._ensure(
+            window_id, body_html, width, height, profile_enabled
+        )
+        var session = self.sessions[index]
+        val changed = session.advance_at(now_ms)
+        self.sessions[index] = session
+        changed
+
+    me dispatch_pointer(event_id: i64, window_id: i64, body_html: text, width: i32, height: i32, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
+        val index = self._ensure(
+            window_id, body_html, width, height, false
+        )
+        var session = self.sessions[index]
+        val receipt = session.dispatch_pointer_at(event_id, x, y, down)
+        self.sessions[index] = session
+        receipt
+
+    me dispatch_text(
+        event_id: i64, window_id: i64, value: text
+    ) -> HostedWebContentDispatch:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: 0,
+                reason: "no-hosted-web-session"
+            )
+        var session = self.sessions[index]
+        val receipt = session.dispatch_text(event_id, value)
+        self.sessions[index] = session
+        receipt
+
+    me dispatch_key(
+        event_id: i64, window_id: i64, keycode: i64, pressed: bool
+    ) -> HostedWebContentDispatch:
+        self.dispatch_key_with_shift(
+            event_id, window_id, keycode, pressed, false
+        )
+
+    me dispatch_key_with_shift(
+        event_id: i64,
+        window_id: i64,
+        keycode: i64,
+        pressed: bool,
+        shift_key: bool
+    ) -> HostedWebContentDispatch:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: 0,
+                reason: "no-hosted-web-session"
+            )
+        var session = self.sessions[index]
+        val receipt = session.dispatch_key_with_shift(
+            event_id, keycode, pressed, shift_key
+        )
+        self.sessions[index] = session
+        receipt
+
+    fn body_html(window_id: i64) -> text:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return self.sessions[i].current_body_html()
+            i = i + 1
+        ""
+
+    fn address_text(window_id: i64) -> text:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return self.sessions[i].address_text()
+            i = i + 1
+        ""
+
+    me dispatch_chrome_pointer(
+        event_id: i64, window_id: i64, control: text, down: bool
+    ) -> HostedWebContentDispatch:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: 0,
+                reason: "no-hosted-web-session"
+            )
+        self._clear_pointer_state_except(index)
+        var session = self.sessions[index]
+        var bookmarks_before = session.browser.bookmark_snapshot()
+        val committing_favorite = not down and control == "favorite"
+        val current_url = if committing_favorite:
+            session.browser.document_url
+        else:
+            ""
+        val current_title = if (
+            committing_favorite and
+            session.browser.current_title != current_url
+        ):
+            browser_bookmark_stored_title(session.browser.current_title)
+        else:
+            ""
+        val revision_before = session.mutation_revision
+        if (not down and control == "favorite" and
+            session.profile_enabled):
+            if self.bookmark_store == nil:
+                session.pressed_chrome_control = ""
+                self.sessions[index] = session
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: window_id,
+                    semantic_target_id: "browser:session#favorite",
+                    callback_count: 0,
+                    mutation_revision: revision_before,
+                    reason: "profile-unavailable"
+                )
+            var bookmark_store = self.bookmark_store.unwrap()
+            match bookmark_store.load_bookmarks():
+                Err(e):
+                    session.pressed_chrome_control = ""
+                    self.sessions[index] = session
+                    self.bookmark_store = Some(bookmark_store)
+                    self.profile_failure_reason = e.message()
+                    return HostedWebContentDispatch(
+                        event_id: event_id,
+                        wm_target_id: window_id,
+                        semantic_target_id: "browser:session#favorite",
+                        callback_count: 0,
+                        mutation_revision: revision_before,
+                        reason: self.profile_failure_reason
+                    )
+                Ok(latest):
+                    bookmarks_before = latest
+                    val _ = session.browser.load_bookmark_snapshot(latest)
+                    self.bookmark_store = Some(bookmark_store)
+        val browser_before_commit = session.browser
+        val receipt = session.dispatch_chrome_pointer(
+            event_id, control, down
+        )
+        self.sessions[index] = session
+        if not down and control == "favorite" and receipt.callback_count > 0:
+            var bookmark_store = self.bookmark_store.unwrap()
+            val url = current_url
+            match bookmark_store.toggle_bookmark_with_snapshot(
+                url, current_title
+            ):
+                Err(e):
+                    session.browser = browser_before_commit
+                    session.pressed_chrome_control = ""
+                    session.mutation_revision = revision_before
+                    self.sessions[index] = session
+                    self.bookmark_store = Some(bookmark_store)
+                    self.profile_failure_reason = e.message()
+                    return HostedWebContentDispatch(
+                        event_id: receipt.event_id,
+                        wm_target_id: receipt.wm_target_id,
+                        semantic_target_id: receipt.semantic_target_id,
+                        callback_count: 0,
+                        mutation_revision: revision_before,
+                        reason: self.profile_failure_reason
+                    )
+                Ok(mutation):
+                    val _ = session.browser.load_bookmark_snapshot(
+                        mutation.bookmarks
+                    )
+                    self.sessions[index] = session
+                    self.profile_bookmarks = mutation.bookmarks
+                    self.profile_failure_reason = ""
+                    self.bookmark_store = Some(bookmark_store)
+        receipt
+
+    me close_window(window_id: i64) -> bool:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return true
+        var closed = self.sessions[index]
+        closed.close()
+        var retained: [HostedWebContentSession] = []
+        var i = 0
+        while i < self.sessions.len():
+            if i != index:
+                retained.push(self.sessions[i])
+            i = i + 1
+        self.sessions = retained
+        true
+
+    me close() -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            var session = self.sessions[i]
+            session.close()
+            self.sessions[i] = session
+            i = i + 1
+        if self.bookmark_store != nil:
+            var bookmark_store = self.bookmark_store.unwrap()
+            match bookmark_store.close():
+                Err(e):
+                    self.bookmark_store = Some(bookmark_store)
+                    self.profile_failure_reason = e.message()
+                    return false
+                Ok(_):
+                    self.bookmark_store = nil
+        self.sessions = []
+        true

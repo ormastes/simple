@@ -1,0 +1,96 @@
+"""
+# Critical-Profile Match Coverage (WP-6, aerospace hardening)
+
+Guards the id-keyed `ResolvedMatchCoverage` (compiler.hir.match_coverage) and
+its critical-profile severity gate (compiler.semantics.match_exhaustiveness),
+landed for WP-6 of
+`doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
+
+Coverage is computed from VARIANT IDS (the same numeric discriminant MIR
+switch lowering already resolves per arm), never variant names -- two
+unrelated enums that each declare a same-named variant must not be able to
+satisfy each other's coverage. `match_coverage_requires_hard_error` is the
+only place this WP escalates severity, and it does so for exactly one rung:
+`critical` (and its `mission-critical` alias). moderate/strict/robust must
+come back false unconditionally -- MIR lowering's own `self.error(...)`
+warn-only diagnostic is untouched for those profiles.
+"""
+
+use std.spec
+use compiler.hir.match_coverage.{ResolvedMatchCoverage}
+use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
+
+# A small closed enum's coverage: ids 0/1/2 name Red/Green/Blue, mirroring
+# what switch_operators_calls.spl would resolve for `enum Color: Red, Green,
+# Blue` (enum_symbol_id is an arbitrary stand-in for the real HIR symbol id;
+# only its role as a stable key under comparison is exercised here).
+fn full_ids() -> [i64]:
+    [0, 1, 2]
+
+fn full_names() -> [text]:
+    ["Red", "Green", "Blue"]
+
+describe "ResolvedMatchCoverage — exhaustive match":
+
+    it "reports no missing variants when every id is covered":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1, 2], false)
+        expect(cov.is_exhaustive()).to_equal(true)
+        expect(cov.missing_variant_ids().len()).to_equal(0)
+
+    it "is not flagged as a hard error at ANY profile, including critical":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1, 2], false)
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_equal(false)
+        expect(match_coverage_requires_hard_error(cov, "moderate")).to_equal(false)
+
+describe "ResolvedMatchCoverage — missing-variant match under critical":
+
+    it "flags a hard error and cites the missing variant by name":
+        # Covers Red(0), Green(1); Blue(2) missing, no wildcard.
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_equal(true)
+        expect(cov.missing_variant_names().contains("Blue")).to_equal(true)
+        expect(cov.missing_variant_names().contains("Red")).to_equal(false)
+        expect(cov.missing_variant_names().contains("Green")).to_equal(false)
+
+    it "also escalates under the deprecated mission-critical alias":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "mission-critical")).to_equal(true)
+
+describe "ResolvedMatchCoverage — missing-variant match under moderate/strict":
+
+    it "does NOT escalate to a hard error under moderate":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "moderate")).to_equal(false)
+
+    it "does NOT escalate to a hard error under strict":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "strict")).to_equal(false)
+
+    it "does NOT escalate to a hard error under robust either (warn-only stays warn-only)":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(match_coverage_requires_hard_error(cov, "robust")).to_equal(false)
+
+    it "still reports the coverage as non-exhaustive regardless of profile":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0, 1], false)
+        expect(cov.is_exhaustive()).to_equal(false)
+
+describe "ResolvedMatchCoverage — wildcard arm present":
+
+    it "treats a wildcard as covering every remaining variant":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0], true)
+        expect(cov.is_exhaustive()).to_equal(true)
+        expect(cov.missing_variant_ids().len()).to_equal(0)
+
+    it "does not false-positive a hard error under critical when a wildcard is present":
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [0], true)
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_equal(false)
+
+describe "ResolvedMatchCoverage — id comparison, not name comparison":
+
+    it "does not let a same-named variant from a DIFFERENT id space satisfy coverage":
+        # Covered id 99 does not appear in all_variant_ids at all (simulates
+        # a same-named variant belonging to an unrelated enum) -- it must
+        # NOT be able to mark any of Red/Green/Blue as covered.
+        val cov = build_match_coverage(42, 42, "Color", full_ids(), full_names(), [99], false)
+        expect(cov.missing_variant_ids().len()).to_equal(3)
+        expect(match_coverage_requires_hard_error(cov, "critical")).to_equal(true)

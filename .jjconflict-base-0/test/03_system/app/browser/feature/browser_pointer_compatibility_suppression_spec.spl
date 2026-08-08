@@ -1,0 +1,90 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+"""# Primary Pointer Compatibility Suppression
+
+Canceling a primary `pointerdown` suppresses the compatibility `mousedown` and
+`mouseup` events without suppressing `pointerup` or the same-target `click`.
+The in-process hosted adapter and isolated renderer worker must expose the same
+event order and clear their per-press suppression state after release.
+"""
+
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{BrowserRendererMessage}
+use std.gc_async_mut.web.browser_session_runtime.*
+
+val POINTER_COMPATIBILITY_HTML = (
+    "<style>html,body{{margin:0}}button{display:block;margin:0;padding:0;" +
+    "border:0;width:40px;height:20px}</style>" +
+    "<button id='target' type='button'>Target</button><script>" +
+    "var target=document.getElementById('target');document.title='';" +
+    "target.addEventListener('pointerdown',function(event){" +
+    "document.title=document.title+'pointerdown,';" +
+    "event.preventDefault();});" +
+    "target.addEventListener('mousedown',function(event){" +
+    "document.title=document.title+'mousedown,';});" +
+    "target.addEventListener('pointerup',function(event){" +
+    "document.title=document.title+'pointerup,';});" +
+    "target.addEventListener('mouseup',function(event){" +
+    "document.title=document.title+'mouseup,';});" +
+    "target.addEventListener('click',function(event){" +
+    "document.title=document.title+'click,';});</script>"
+)
+
+describe "Primary pointer compatibility suppression":
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "should suppress compatibility mouse events after canceled pointerdown":
+        step("Open the same canceling button in hosted and isolated renderers")
+        var hosted = HostedWebContentSession.create(
+            901, POINTER_COMPATIBILITY_HTML, 80, 40
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: POINTER_COMPATIBILITY_HTML
+        )).ok).to_be(true)
+        expect(hosted.browser.current_title).to_equal("")
+        expect(worker.browser.current_title).to_equal("")
+
+        step("Press the primary pointer on both buttons")
+        val hosted_down = hosted.dispatch_pointer_at(1, 4, 4, true)
+        val worker_down = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t4\t4\t1"
+        ))
+        expect(hosted_down.semantic_target_id).to_equal("target")
+        expect(hosted_down.callback_count).to_equal(1)
+        expect(worker_down.ok).to_be(true)
+        expect(hosted.browser.current_title).to_equal("pointerdown,")
+        expect(worker.browser.current_title).to_equal("pointerdown,")
+        expect(hosted.pressed_compat_mouse_suppressed).to_be(true)
+        expect(worker.pressed_compat_mouse_suppressed).to_be(true)
+
+        step("Release the primary pointer over the original targets")
+        val hosted_up = hosted.dispatch_pointer_at(2, 4, 4, false)
+        val worker_up = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t4\t4\t0"
+        ))
+        expect(hosted_up.semantic_target_id).to_equal("target")
+        expect(hosted_up.callback_count).to_equal(2)
+        expect(worker_up.ok).to_be(true)
+
+        step("Observe pointer click order and suppressed compatibility mouse events")
+        val expected_events = "pointerdown,pointerup,click,"
+        expect(hosted.browser.current_title).to_equal(expected_events)
+        expect(worker.browser.current_title).to_equal(expected_events)
+        expect(hosted.browser.dom_callback_count).to_equal(3)
+        expect(worker.browser.dom_callback_count).to_equal(3)
+        expect(hosted.pressed_target_id).to_equal("")
+        expect(worker.pressed_target_id).to_equal("")
+        expect(hosted.pressed_compat_mouse_suppressed).to_be(false)
+        expect(worker.pressed_compat_mouse_suppressed).to_be(false)
+        expect(hosted.browser.pending_request_count()).to_equal(0)
+        expect(worker.browser.pending_request_count()).to_equal(0)
+        hosted.close()

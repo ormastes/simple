@@ -1,0 +1,63 @@
+# @session:mutating
+# @arch:riscv32
+use os.kernel.net.embedded_certs.{
+    get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
+}
+use os.kernel.net.tls_shim.{
+    get_baremetal_tls_info, baremetal_tls_platform_ready, baremetal_tls_blocker
+}
+use os.tls13.server.{
+    tls13_accept_client_hello_record_for_test,
+    Tls13ServerConfig, Tls13AcceptResult
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _sample_cert_der() -> [u8]:
+    [0x30u8, 0x03u8, 0x02u8, 0x01u8, 0x00u8]
+
+fn _sample_key_der() -> [u8]:
+    [0x30u8, 0x2eu8, 0x02u8, 0x01u8, 0x00u8]
+
+describe "SimpleOS baremetal TLS gate":
+    it "reports embedded certificate material once real DER is present":
+        expect(has_embedded_certs()).to_equal(true)
+        expect(get_embedded_cert_der().len().to_u64()).to_be_greater_than(256u64)
+        expect(get_embedded_key_der().len().to_u64()).to_equal(48u64)
+
+    it "exposes baremetal TLS info for embedded DER material":
+        val info = get_baremetal_tls_info()
+
+        expect(info.available).to_equal(true)
+        expect(info.cert_der.len().to_u64()).to_be_greater_than(256u64)
+        expect(info.key_der.len().to_u64()).to_equal(48u64)
+        expect(info.production_ready).to_equal(false)
+        expect(info.blocker).to_equal("placeholder_entropy")
+
+    it "keeps TLS production readiness blocked while platform shims are placeholders":
+        expect(baremetal_tls_platform_ready()).to_equal(false)
+        expect(baremetal_tls_blocker()).to_equal("placeholder_entropy")
+
+    it "keeps tls13_accept fail-closed without a ClientHello record":
+        val config = Tls13ServerConfig(
+            cert_chain: [_sample_cert_der()],
+            server_pkcs8: _sample_key_der(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+
+        match tls13_accept_client_hello_record_for_test([], config):
+            Tls13AcceptResult.Accepted(_ctx):
+                expect("accepted-before-record-io").to_equal("")
+            Tls13AcceptResult.Failed(reason):
+                expect(reason).to_equal("no_client_hello_record")
+
+    it "keeps the boot plan explicit about TLS production blockers":
+        val plan = rt_file_read_text("doc/plans/riscv_rtl_simpleos_boot.md")
+
+        expect(plan).to_contain("TLS Baremetal")
+        expect(plan).to_contain("Blocked, not complete")
+        expect(plan).to_contain("ClientHello record")
+        expect(plan).to_contain("offline-generated")
+        expect(plan).to_contain("deterministic placeholder")
+        expect(plan).to_contain("placeholder_entropy")

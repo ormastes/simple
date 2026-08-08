@@ -1,0 +1,58 @@
+"""Deterministic main/subagent routing before any optional selector model."""
+
+use app.llm_caret.messaging.domain.model.{AgentBinding, AgentProfile, RoomMessage}
+use app.llm_caret.messaging.application.command.{mentions_agent, parse_room_command}
+
+struct RoutingDecision:
+    routed: bool
+    agent_id: text
+    reason: text
+    selector_required: bool
+
+fn _eligible(bindings: [AgentBinding], room_id: text, agent_id: text) -> bool:
+    for binding in bindings:
+        if binding.room_id.value == room_id and binding.agent_id.value == agent_id:
+            return true
+    false
+
+fn _profile_for(profiles: [AgentProfile], agent_id: text) -> AgentProfile?:
+    for profile in profiles:
+        if profile.agent_id.value == agent_id:
+            return Some(profile)
+    nil
+
+pub fn route_message(message: RoomMessage, prior_messages: [RoomMessage], bindings: [AgentBinding],
+        profiles: [AgentProfile], room_owner_agent_id: text, main_agent_id: text) -> RoutingDecision:
+    val command = parse_room_command(message.body)
+    if command.target != "" and _eligible(bindings, message.room_id.value, command.target):
+        return RoutingDecision(routed: true, agent_id: command.target, reason: "explicit_command_target", selector_required: false)
+
+    for profile in profiles:
+        if _eligible(bindings, message.room_id.value, profile.agent_id.value) and
+                mentions_agent(message.body, profile.display_name, profile.aliases):
+            return RoutingDecision(routed: true, agent_id: profile.agent_id.value, reason: "explicit_mention", selector_required: false)
+
+    if message.reply_to_id != "":
+        for prior in prior_messages:
+            if prior.message_id.value == message.reply_to_id and prior.sender_agent_id != "" and
+                    _eligible(bindings, message.room_id.value, prior.sender_agent_id):
+                return RoutingDecision(routed: true, agent_id: prior.sender_agent_id, reason: "reply_target", selector_required: false)
+
+    var matches: [text] = []
+    val body = message.body.lower()
+    for profile in profiles:
+        if _eligible(bindings, message.room_id.value, profile.agent_id.value):
+            for capability in profile.capabilities:
+                if capability != "" and body.contains(capability.lower()) and not matches.contains(profile.agent_id.value):
+                    matches = matches + [profile.agent_id.value]
+    if matches.len() == 1:
+        return RoutingDecision(routed: true, agent_id: matches[0], reason: "unique_capability", selector_required: false)
+    if room_owner_agent_id != "" and _eligible(bindings, message.room_id.value, room_owner_agent_id):
+        return RoutingDecision(routed: true, agent_id: room_owner_agent_id, reason: "room_owner", selector_required: false)
+    if matches.len() > 1:
+        return RoutingDecision(routed: false, agent_id: "", reason: "multiple_capability_matches", selector_required: true)
+    if main_agent_id != "" and _eligible(bindings, message.room_id.value, main_agent_id):
+        return RoutingDecision(routed: true, agent_id: main_agent_id, reason: "main_agent_fallback", selector_required: false)
+    RoutingDecision(routed: false, agent_id: "", reason: "no_eligible_agent", selector_required: false)
+
+export RoutingDecision, route_message

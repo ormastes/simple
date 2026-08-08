@@ -1,0 +1,106 @@
+use std.spec
+use std.common.compress.{CompressionError}
+use std.common.compress.zstd_bits.{ZstdBitWriter}
+use std.common.compress.zstd_fse.{ZstdFseEncodeSlot, ZstdFseEncodeTable, _zstd_fse_encode_one_symbol, _zstd_fse_find_slot, zstd_fse_build_decode_table, zstd_fse_build_encode_table, zstd_fse_encode_symbols}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn table_with_slot(bits: i64) -> ZstdFseEncodeTable:
+    var bucket: [ZstdFseEncodeSlot] = [ZstdFseEncodeSlot(p: 0, bits: bits, baseline: 0)]
+    var slots: [[ZstdFseEncodeSlot]] = [bucket]
+    ZstdFseEncodeTable(table_log: 5, slots: slots)
+
+fn table_with_log(table_log: i64) -> ZstdFseEncodeTable:
+    var bucket: [ZstdFseEncodeSlot] = [ZstdFseEncodeSlot(p: 0, bits: 0, baseline: 0)]
+    var slots: [[ZstdFseEncodeSlot]] = [bucket]
+    ZstdFseEncodeTable(table_log: table_log, slots: slots)
+
+fn table_with_seed(seed: i64) -> ZstdFseEncodeTable:
+    var bucket: [ZstdFseEncodeSlot] = [ZstdFseEncodeSlot(p: seed, bits: 0, baseline: 0)]
+    var slots: [[ZstdFseEncodeSlot]] = [bucket]
+    ZstdFseEncodeTable(table_log: 5, slots: slots)
+
+fn empty_writer() -> ZstdBitWriter:
+    ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 0)
+
+describe "Zstd FSE encode table validation":
+    it "rejects oversized decode builder table logs before shifting":
+        val result = zstd_fse_build_decode_table(63, [16, 16])
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("table log"))
+            _:
+                check(false)
+
+    it "rejects oversized encode builder table logs before shifting":
+        val result = zstd_fse_build_encode_table(63, [16, 16])
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("table log"))
+            _:
+                check(false)
+
+    it "rejects negative slot bit widths before shifting":
+        val result = _zstd_fse_find_slot(table_with_slot(-1), 0, 0)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("slot bits"))
+            _:
+                check(false)
+
+    it "rejects oversized slot bit widths before shifting":
+        val result = _zstd_fse_find_slot(table_with_slot(63), 0, 0)
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("slot bits"))
+            _:
+                check(false)
+
+    it "rejects negative encode table logs before shifting":
+        val result = _zstd_fse_encode_one_symbol(table_with_log(-1), 0, 0, empty_writer())
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("table log"))
+            _:
+                check(false)
+
+    it "rejects oversized encode table logs before shifting":
+        val result = _zstd_fse_encode_one_symbol(table_with_log(63), 0, 0, empty_writer())
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("table log"))
+            _:
+                check(false)
+
+    it "rejects negative seed states before finalizing":
+        val result = zstd_fse_encode_symbols(table_with_seed(-1), [0])
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("seed state"))
+            _:
+                check(false)
+
+    it "rejects oversized seed states before finalizing":
+        val result = zstd_fse_encode_symbols(table_with_seed(32), [0])
+        check(result.is_err())
+        val err = result.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("seed state"))
+            _:
+                check(false)

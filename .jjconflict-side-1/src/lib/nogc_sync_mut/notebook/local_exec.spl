@@ -1,0 +1,125 @@
+# LocalExec — NotebookExecutor backing the `interpreter` (local) lane.
+#
+# Design:  doc/05_design/app/tools/notebook_lanes_architecture.md §4.2
+# Plan:    doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream K, K2)
+#
+# Ported verbatim from the pre-K2 src/app/jupyter_kernel/main.spl inline
+# accumulation/rollback/delta logic: bash-wrapped subprocess re-execution of
+# the whole accumulated cell history against a per-process temp file, with
+# stdout-delta tracking via a previous-output length. Behavior is
+# bit-identical to before K2 — only the storage moved from module-level vars
+# to instance fields on a NotebookExecutor so KernelSessionManager (K1) can
+# own the lifecycle instead of the kernel main loop.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+use app.io.mod.{process_run}
+use std.notebook.types.{LaneStatus, CellResult, SessionOpts, cell_result_ok, cell_result_error}
+use std.notebook.executor.{NotebookExecutor, NotebookExecutorFactory}
+
+fn local_exec_find_simple_runtime() -> text:
+    """Mirrors the pre-K2 main.spl find_simple_runtime() search order verbatim."""
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+# ============================================================================
+# LocalExec — accumulation + subprocess re-execution + delta output +
+# rollback-on-error, per NotebookExecutor (design §4.2).
+# ============================================================================
+
+class LocalExec:
+    code_all: text
+    code_prev: text
+    temp_path: text
+    prev_output_len: i64
+
+    static fn create() -> LocalExec:
+        LocalExec(code_all: "", code_prev: "", temp_path: "", prev_output_len: 0)
+
+impl NotebookExecutor for LocalExec:
+    fn mode_spec() -> text:
+        "interpreter"
+
+    fn probe() -> LaneStatus:
+        LaneStatus.Available
+
+    me start(opts: SessionOpts):
+        val pid = rt_getpid()
+        self.temp_path = "/tmp/simple_jupyter_{pid}.spl"
+
+    me execute_cell(code: text, cell_id: text) -> CellResult:
+        # Save previous state for rollback on error (pre-K2 behavior verbatim).
+        self.code_prev = self.code_all
+        self.code_all = self.code_all + code + "\n"
+
+        rt_file_write_text(self.temp_path, self.code_all)
+
+        val runtime = local_exec_find_simple_runtime()
+        if runtime == "":
+            self.code_all = self.code_prev
+            return cell_result_error("Simple runtime not found", 0)
+
+        # Use bash to redirect stdin from /dev/null — prevents subprocess
+        # from inheriting the kernel's stdin (which has JSON-lines data).
+        val (out, err, exit_code) = process_run("bash", ["-c", runtime + " run " + self.temp_path + " </dev/null 2>&1"])
+
+        if exit_code != 0:
+            # Rollback failed cell.
+            self.code_all = self.code_prev
+            # `err` is process_run's own stderr — usually empty, since the
+            # subprocess command redirects its own stderr into stdout
+            # (`2>&1`, see below) to avoid inheriting the kernel's stdin.
+            # CellResult.is_ok() treats an empty `error` as success (design
+            # §4.1's "error?" — empty means no error), so an empty `err` here
+            # must not be forwarded verbatim or a real failure would read as
+            # success. Fall back to a non-empty diagnostic in that case.
+            var error_text = err
+            if error_text.trim() == "":
+                error_text = "Cell execution failed (exit code {exit_code})"
+            return cell_result_error(error_text, 0)
+
+        # Only return NEW output (delta from previous execution).
+        var new_output = out
+        if self.prev_output_len > 0 and out.len() > self.prev_output_len:
+            new_output = out.substring(self.prev_output_len)
+        elif self.prev_output_len > 0 and out.len() <= self.prev_output_len:
+            new_output = ""
+        self.prev_output_len = out.len()
+
+        cell_result_ok(new_output, [], [], 0)
+
+    me interrupt():
+        pass_do_nothing("local lane runs synchronously via subprocess; the pre-K2 kernel had no interrupt path either — tracked for K3+ hardening, not a K2 behavior change")
+
+    me reset():
+        self.code_all = ""
+        self.code_prev = ""
+        self.prev_output_len = 0
+
+    me shutdown():
+        pass_do_nothing("pre-K2 main.spl never cleaned up SESSION_TEMP_PATH on shutdown either; preserved verbatim for bit-identical behavior")
+
+# ============================================================================
+# LocalExecFactory — one LocalExec per (session, mode_spec) cache entry.
+# ============================================================================
+
+class LocalExecFactory:
+    """Stateless factory — no per-instance fields; every session's LocalExec
+    is fresh from LocalExec.create()."""
+
+impl NotebookExecutorFactory for LocalExecFactory:
+    me create(mode_spec: text) -> NotebookExecutor:
+        LocalExec.create()

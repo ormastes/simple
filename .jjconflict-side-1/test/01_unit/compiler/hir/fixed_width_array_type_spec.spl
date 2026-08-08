@@ -1,0 +1,48 @@
+# @cover src/compiler/10.frontend/core/parser.spl 2%
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl 2%
+# @tag: unit, compiler, frontend, hir, array, fixed-width
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirFunction}
+
+fn expect_unsigned_array_param(fn_: HirFunction, index: i64, bits: i64):
+    match fn_.params[index].type_.kind:
+        case Array(element, _):
+            match element.kind:
+                case Int(actual_bits, signed):
+                    expect(actual_bits).to_equal(bits)
+                    expect(signed).to_equal(false)
+                case _:
+                    expect(false).to_equal(true)
+        case _:
+            expect(false).to_equal(true)
+
+describe "fixed-width array types survive frontend lowering":
+    it "preserves u8, u16, u32, and i32 element widths":
+        val source = "fn arrays(a: [u8], b: [u16], c: [u32], d: [i32]):\n    ()\n"
+        val parsed = parse_full_frontend(source, "fixed_width_arrays.spl", "fixed_width_arrays", Logger(level: 0))
+        var lowering = HirLowering.with_filename("fixed_width_arrays.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("arrays"):
+            val fn_ = hir.functions[fn_id]
+            expect_unsigned_array_param(fn_, 0, 8)
+            expect_unsigned_array_param(fn_, 1, 16)
+            expect_unsigned_array_param(fn_, 2, 32)
+            match fn_.params[3].type_.kind:
+                case Array(element, _):
+                    match element.kind:
+                        case Int(bits, signed):
+                            expect(bits).to_equal(32)
+                            expect(signed).to_equal(true)
+                        case _:
+                            expect(false).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)

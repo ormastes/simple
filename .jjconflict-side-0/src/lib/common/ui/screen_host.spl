@@ -1,0 +1,46 @@
+# ScreenHost — the DrawIrV3 presentation + input seam.
+#
+# One interface, four implementations (2d / gui / web / wm). Shared app logic
+# (e.g. `app.ui_showcase.showcase_core`) talks only to this trait, so the same
+# widget tree, the same reducer and the same DrawIR pipeline drive every
+# target and ONLY the host impl differs.
+#
+# Relation to `common.ui.backend.RenderBackend`: ADDITIVE, not a rename.
+# `RenderBackend` is a different contract — it renders `UIState` to a target
+# and emits `render_html(UIState) -> text`, and it has real implementors
+# (`src/os/compositor/fb_backend.spl`, `src/os/compositor/browser_backend.spl`)
+# that keep working unchanged. `ScreenHost` is a new, separate trait that
+# takes an already-produced `DrawIrV3Scene` value.
+#
+# Note there is a SECOND, unrelated trait also named `RenderBackend` under the
+# engine2d tree; this comment is about `common.ui.backend` only.
+#
+# Design notes on the five methods:
+# - No `init()`: a trait method with no receiver cannot carry per-host config,
+#   so construction is each impl's own `static fn open(...)`.
+# - `present_scene` returns `bool`; `false` means "host closed / present
+#   failed", which gives the shared loop a termination signal without needing
+#   a sixth method.
+# - `present_scene` takes the scene VALUE (produced by
+#   `widget_tree_to_draw_ir_cpu` then `draw_ir_v2_to_v3`). A host that wants
+#   the packed writer protocol converts inside its own impl; shared logic
+#   never sees a writer.
+
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use common.ui.host_input_event.{HostInputEvent}
+
+trait ScreenHost:
+    # Stable target identity: "2d" | "gui" | "web" | "wm".
+    fn host_name() -> text
+
+    # Current surface size in pixels, as (width, height).
+    fn size() -> (i32, i32)
+
+    # Present one frame. Returns false when the host is gone.
+    fn present_scene(scene: DrawIrV3Scene) -> bool
+
+    # Next pending input, or nil when the queue is drained.
+    fn poll_input() -> HostInputEvent?
+
+    # Release host resources.
+    fn shutdown()

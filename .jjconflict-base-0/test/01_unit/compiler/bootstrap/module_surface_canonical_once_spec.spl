@@ -1,0 +1,53 @@
+"""Source contract for canonicalize-once ModuleSurfaceBuilder callers."""
+
+use std.io_runtime.{file_read}
+
+describe "module surface canonical path ownership":
+    it "normalizes once in each source loop and passes canonical identity":
+        val driver = file_read(
+            "src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        val stream_start = driver.find(
+            "me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):")
+        val stream_end = driver.find("me parse_all_impl() -> (CompileContext, bool):")
+        val stream = if stream_start >= 0 and stream_end > stream_start:
+            driver.substring(stream_start, stream_end)
+        else:
+            ""
+        expect(stream).to_contain(
+            "val canonical_path = module_surface_canonical_path(source.path)")
+        expect(stream).to_contain("builder.has_canonical_path(canonical_path)")
+        expect(stream).to_contain(
+            "builder.add_alias_canonical(\n                    source, canonical_path)")
+        expect(stream).to_contain(
+            "builder, source, source_index, canonical_path")
+        expect(stream.contains("builder.has_path(source.path)")).to_equal(false)
+        expect(stream.contains("builder.add_alias(source)")).to_equal(false)
+
+        val surface = file_read(
+            "src/compiler/20.hir/hir_lowering/module_surface.spl")
+        val batch_start = surface.find(
+            "fn module_surfaces_from_modules(modules: Dict<text, ParserModule>")
+        val batch_end = surface.find("for alias in modules.keys():")
+        val batch = if batch_start >= 0 and batch_end > batch_start:
+            surface.substring(batch_start, batch_end)
+        else:
+            ""
+        expect(batch).to_contain(
+            "val canonical_path = module_surface_canonical_path(source.path)")
+        expect(batch).to_contain("builder.has_canonical_path(canonical_path)")
+        expect(batch).to_contain(
+            "builder.add_alias_canonical(source, canonical_path)")
+        expect(batch).to_contain("builder.add_parsed_canonical(")
+        expect(batch.contains("builder.has_path(source.path)")).to_equal(false)
+
+    it "keeps path-taking wrappers for adjacent callers":
+        val surface = file_read(
+            "src/compiler/20.hir/hir_lowering/module_surface.spl")
+        expect(surface).to_contain("me has_path(path: text) -> bool:")
+        expect(surface).to_contain(
+            "me add_parsed(module: ParserModule, source: SourceFile, source_index: i64)")
+        expect(surface).to_contain("me add_alias(source: SourceFile)")
+        expect(surface).to_contain(
+            "self.add_parsed_canonical(module, source, source_index, canonical_path)")
+        expect(surface).to_contain(
+            "self.add_alias_canonical(source, canonical_path)")

@@ -1,0 +1,210 @@
+# Async IPC Specification
+#
+# Tests the channel-based async IPC handler: reader pushes parsed events
+# to a channel, writer sends render messages, quit terminates the reader,
+# invalid JSON is handled gracefully, and channel close stops the reader.
+
+use std.nogc_async_mut.concurrent.channel.{Channel, channel_new}
+use std.nogc_async_mut.concurrent.thread.{thread_spawn, thread_sleep}
+use common.ui.widget.{UIEvent}
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render}
+use app.ui.ipc.async_handler.{ipc_writer_message}
+
+
+# ============================================================================
+# parse_ipc_message integration (channel push)
+# ============================================================================
+
+describe "IPC reader pushes parsed events to channel":
+    it "sends KeyPress event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"keypress\",\"key\":\"a\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "sends Quit event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "sends Action event parsed from JSON to channel":
+        val ch = channel_new()
+        val json = "{\"type\":\"action\",\"name\":\"save\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+    it "parses common WebRender input key envelopes":
+        val json = "{\"type\":\"input\",\"target\":\"tauri\",\"surface_id\":\"main\",\"event_type\":\"key\",\"target_id\":\"\",\"key\":\"Enter\",\"value\":\"\",\"x\":0,\"y\":0,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val event = parse_ipc_message(json)
+        match event:
+            UIEvent.KeyPress(key) =>
+                expect(key).to_equal("Enter")
+            _ =>
+                expect("expected key input envelope").to_equal("")
+
+    it "parses common WebRender input action and resize envelopes":
+        val action_json = "{\"type\":\"input\",\"target\":\"tauri\",\"surface_id\":\"main\",\"event_type\":\"action\",\"target_id\":\"\",\"key\":\"\",\"value\":\"save\",\"x\":0,\"y\":0,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val action_event = parse_ipc_message(action_json)
+        match action_event:
+            UIEvent.Action(name) =>
+                expect(name).to_equal("save")
+            _ =>
+                expect("expected action input envelope").to_equal("")
+
+        val resize_json = "{\"type\":\"input\",\"target\":\"tauri\",\"surface_id\":\"main\",\"event_type\":\"resize\",\"target_id\":\"\",\"key\":\"\",\"value\":\"\",\"x\":640,\"y\":480,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val resize_event = parse_ipc_message(resize_json)
+        match resize_event:
+            UIEvent.Resize(width, height) =>
+                expect(width).to_equal(640)
+                expect(height).to_equal(480)
+            _ =>
+                expect("expected resize input envelope").to_equal("")
+
+    it "parses Electron bridge common input envelopes":
+        val key_json = "{\"type\":\"input\",\"target\":\"electron\",\"surface_id\":\"main\",\"event_type\":\"key\",\"target_id\":\"\",\"key\":\"Enter\",\"value\":\"\",\"x\":0,\"y\":0,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val key_event = parse_ipc_message(key_json)
+        match key_event:
+            UIEvent.KeyPress(key) =>
+                expect(key).to_equal("Enter")
+            _ =>
+                expect("expected electron key input envelope").to_equal("")
+
+        val resize_json = "{\"type\":\"input\",\"target\":\"electron\",\"surface_id\":\"main\",\"event_type\":\"resize\",\"target_id\":\"\",\"key\":\"\",\"value\":\"\",\"x\":640,\"y\":480,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val resize_event = parse_ipc_message(resize_json)
+        match resize_event:
+            UIEvent.Resize(width, height) =>
+                expect(width).to_equal(640)
+                expect(height).to_equal(480)
+            _ =>
+                expect("expected electron resize input envelope").to_equal("")
+
+        val input_json = "{\"type\":\"input\",\"target\":\"electron\",\"surface_id\":\"main\",\"event_type\":\"input\",\"target_id\":\"name\",\"key\":\"\",\"value\":\"Ada\",\"x\":0,\"y\":0,\"dx\":0,\"dy\":0,\"button\":\"\"}"
+        val input_event = parse_ipc_message(input_json)
+        match input_event:
+            UIEvent.InputChange(target_id, value) =>
+                expect(target_id).to_equal("name")
+                expect(value).to_equal("Ada")
+            _ =>
+                expect("expected electron text input envelope").to_equal("")
+
+
+# ============================================================================
+# IPC writer sends render messages
+# ============================================================================
+
+describe "IPC writer sends render messages":
+    it "build_ipc_render wraps html in render JSON":
+        val html = "<div>Hello Async</div>"
+        val msg = build_ipc_render(html)
+        expect(msg).to_contain("\"type\":\"render\"")
+        expect(msg).to_contain("Hello Async")
+
+    it "writer preserves common WebRender artifact IPC JSON":
+        val msg = "{\"type\":\"render\",\"target\":\"electron\",\"surface_id\":\"main\",\"width\":1280,\"height\":720,\"html\":\"<div></div>\"}"
+        expect(ipc_writer_message(msg)).to_equal(msg)
+
+    it "writer wraps legacy raw HTML for compatibility":
+        val msg = ipc_writer_message("<div>Legacy</div>")
+        expect(msg).to_contain("\"type\":\"render\"")
+        expect(msg).to_contain("Legacy")
+
+    it "render channel can queue multiple messages":
+        val ch = channel_new()
+        ch.send("<p>First</p>")
+        ch.send("<p>Second</p>")
+        val first = ch.try_recv()
+        val second = ch.try_recv()
+        expect(first).to_equal("<p>First</p>")
+        expect(second).to_equal("<p>Second</p>")
+
+
+# ============================================================================
+# Quit message stops reader
+# ============================================================================
+
+describe "Quit message stops reader":
+    it "quit event is recognized by parse_ipc_message":
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        expect(event != nil).to_equal(true)
+
+    it "channel receives quit then reader can stop":
+        val ch = channel_new()
+        val json = "{\"type\":\"quit\"}"
+        val event = parse_ipc_message(json)
+        if event != nil:
+            ch.send(event)
+        # Simulate reader checking for quit
+        val received = ch.try_recv()
+        expect(received != nil).to_equal(true)
+
+
+# ============================================================================
+# Invalid JSON handled gracefully
+# ============================================================================
+
+describe "Invalid JSON handled gracefully":
+    it "returns nil for garbage input":
+        val event = parse_ipc_message("not json at all")
+        expect(event).to_equal(nil)
+
+    it "returns nil for empty string":
+        val event = parse_ipc_message("")
+        expect(event).to_equal(nil)
+
+    it "returns nil for unknown type":
+        val json = "{\"type\":\"foobar\",\"data\":\"xyz\"}"
+        val event = parse_ipc_message(json)
+        expect(event).to_equal(nil)
+
+    it "returns nil for partial JSON":
+        val event = parse_ipc_message("{\"type\":")
+        expect(event).to_equal(nil)
+
+    it "does not push nil events to channel":
+        val ch = channel_new()
+        val event = parse_ipc_message("garbage")
+        if event != nil:
+            ch.send(event)
+        val received = ch.try_recv()
+        expect(received).to_equal(nil)
+
+
+# ============================================================================
+# Channel close stops reader
+# ============================================================================
+
+describe "Channel close stops reader":
+    it "closed channel reports is_closed true":
+        val ch = channel_new()
+        ch.close()
+        expect(ch.is_closed()).to_equal(true)
+
+    it "can try_recv before close returns nil when empty":
+        val ch = channel_new()
+        val received = ch.try_recv()
+        expect(received).to_equal(nil)
+
+    it "can try_recv buffered message before close":
+        val ch = channel_new()
+        ch.send("buffered")
+        val received = ch.try_recv()
+        expect(received).to_equal("buffered")
+
+    it "closed channel is_closed returns true":
+        val ch = channel_new()
+        val before = ch.is_closed()
+        expect(before).to_equal(false)
+        ch.close()
+        val after = ch.is_closed()
+        expect(after).to_equal(true)

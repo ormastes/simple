@@ -1,0 +1,574 @@
+# Termination-analysis census — WP-14 of the aerospace hardening plan.
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+# Precedent (same reporting shape): flight_rule_census_scan.spl (WP-2),
+# noalloc_manifest_scan.spl.
+#
+# WHAT THIS IS: a read-only, text-based census of loop-bound classification,
+# recursion (self- and pairwise-mutual), and stack/queue capacity
+# checkability over owned-code `.spl` source. It is a fact extractor over
+# source text, not an AST/HIR/MIR pass and not a general termination
+# prover — that is explicitly out of scope for this WP (see plan doc).
+#
+# EVERY function that has a real body gets exactly one loop-bound verdict:
+#
+#   - "bounded"              — no loop in the body, OR every loop in the body
+#                               matches a recognized bounded pattern (a range
+#                               `for` loop whose endpoints are integer
+#                               literals or same-file `val NAME = <int
+#                               literal>` constants, or a `for` loop over a
+#                               variable declared with a fixed-capacity
+#                               collection type — FixedArray/FixedStack/
+#                               FixedMap/FixedSet/RingBuffer — or an inline
+#                               constructor call to one of those types).
+#   - "unbounded_terminating" — a loop this scanner can positively argue
+#                               terminates without a static bound. NO
+#                               detector for this bucket exists in this
+#                               scanner today (v1 scope) — it is expected to
+#                               be empty or near-empty. This is a stated
+#                               absence, not a silent gap: building a real
+#                               decreasing-counter/well-founded-measure
+#                               detector is out of scope for this WP.
+#   - "unknown"               — a `while` loop (no static-bound detector for
+#                               `while` exists at all in v1), or a `for` loop
+#                               over an iterable this scanner does not
+#                               recognize as bounded. Every "unknown" verdict
+#                               carries the function's own path/name/line and
+#                               a `detail` naming which loop made it unknown
+#                               — never a bare count.
+#
+# RECURSION is a SEPARATE report category from loop-bound verdicts (a
+# function can be both, e.g. "unknown" loop bound AND recursive). The call
+# graph is built by naive per-line identifier-immediately-followed-by-`(`
+# extraction, matched against a GLOBAL function-name table. A callee name
+# that is not unique across the scanned tree (more than one function shares
+# that bare name) is EXCLUDED from graph edges — ambiguous names are not
+# resolved, a stated limitation (undercounts recursion; ambiguous_names_count
+# is reported). This detector finds:
+#   - self-recursion (a function's body calls its own name), and
+#   - direct pairwise mutual recursion (A calls B's name AND B calls A's
+#     name).
+# It does NOT find 3+-node recursion cycles (A -> B -> C -> A) — that would
+# need a real SCC algorithm (Tarjan/Kosaraju) over the whole call graph,
+# which is out of scope for this WP's minimal footprint. Stated, not hidden.
+#
+# STACK FRAME / QUEUE-TASK CAPACITY: reported as a single "uncheckable"
+# category. A real static stack-frame-size estimate needs a target ABI and
+# per-type layout model this text scanner does not have; a real queue/task
+# capacity check needs to correlate a Fixed*/RingBuffer declared capacity
+# with the *specific* queue/task instance a scheduler enqueues against
+# (semantic, not textual). Neither is built in v1 — explicitly uncheckable,
+# not silently skipped.
+#
+# SCOPE: `src/**/*.spl`, excluding vendored/third-party runtime source per
+# CLAUDE.md "Owned-Code Scope" (same exclusion list as flight_rule_census_scan.spl):
+#   src/compiler_rust/vendor/**, src/runtime/vendor/**
+
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val SCAN_ROOT = "src"
+val VENDOR_PREFIXES = ["src/compiler_rust/vendor/", "src/runtime/vendor/"]
+val FIXED_TYPE_NAMES = ["FixedArray", "FixedStack", "FixedMap", "FixedSet", "RingBuffer"]
+val KEYWORDS = ["fn", "if", "while", "for", "match", "return", "pass", "class",
+    "struct", "trait", "enum", "use", "val", "var", "else", "break", "continue",
+    "me", "static", "not", "and", "or", "in", "true", "false", "nil", "pass_todo",
+    "pass_dn", "pass_do_nothing", "todo"]
+
+pub struct FnRecord:
+    path: text
+    name: text
+    line: i64
+    body_lines: [text]
+
+pub struct LoopVerdict:
+    path: text
+    fn_name: text
+    line: i64
+    verdict: text  # "bounded" | "unbounded_terminating" | "unknown"
+    detail: text
+
+pub struct SccRecord:
+    members: [text]  # fn name(s); size 1 => self-recursion, size 2 => mutual pair
+    self_loop: bool
+
+pub struct CapacityCheck:
+    category: text
+    classification: text  # always "uncheckable" in v1
+    reason: text
+
+pub struct TerminationReport:
+    files_scanned: i64
+    functions_scanned: i64
+    ambiguous_names_count: i64
+    loop_verdicts: [LoopVerdict]
+    sccs: [SccRecord]
+    capacity_checks: [CapacityCheck]
+    dominant_unknown: [text]  # top unknown-verdict functions by call-site mention count, formatted
+
+fn is_excluded(path: text) -> bool:
+    for prefix in VENDOR_PREFIXES:
+        if path.starts_with(prefix):
+            return true
+    false
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _is_fn_decl(line: text) -> bool:
+    val t = line.trim()
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+
+fn _fn_name(line: text) -> text:
+    val t = line.trim()
+    var rest = t
+    if rest.starts_with("static fn "):
+        rest = rest[10:rest.len()]
+    else if rest.starts_with("me fn "):
+        rest = rest[6:rest.len()]
+    else if rest.starts_with("fn "):
+        rest = rest[3:rest.len()]
+    else if rest.starts_with("me "):
+        rest = rest[3:rest.len()]
+    var idx = 0
+    while idx < rest.len() and rest[idx:idx + 1] != "(":
+        idx = idx + 1
+    rest[0:idx]
+
+fn _paren_delta(line: text) -> i64:
+    var delta = 0
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == "(":
+            delta = delta + 1
+        else if ch == ")":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn _is_int_literal(s: text) -> bool:
+    var v = s
+    if v.starts_with("-"):
+        v = v[1:v.len()]
+    if v.len() == 0:
+        return false
+    var i = 0
+    while i < v.len():
+        val ch = v[i:i + 1]
+        if not (ch >= "0" and ch <= "9"):
+            return false
+        i = i + 1
+    true
+
+fn _is_ident_start(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn _is_ident_char(ch: text) -> bool:
+    _is_ident_start(ch) or (ch >= "0" and ch <= "9")
+
+fn _is_keyword(name: text) -> bool:
+    for kw in KEYWORDS:
+        if kw == name:
+            return true
+    false
+
+fn _extract_call_names_from_line(line: text) -> [text]:
+    """Names immediately followed by `(` on this line, minus language
+    keywords. Naive: misses calls whose `(` is on a following line, and
+    misses a call preceded by whitespace before `(`. Stated limitation."""
+    var out: [text] = []
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val ch = line[i:i + 1]
+        if _is_ident_start(ch):
+            var j = i + 1
+            while j < n and _is_ident_char(line[j:j + 1]):
+                j = j + 1
+            if j < n and line[j:j + 1] == "(":
+                val name = line[i:j]
+                if not _is_keyword(name):
+                    out.push(name)
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn _decl_var_name(trimmed: text) -> text:
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed[4:trimmed.len()]
+    else if trimmed.starts_with("var "):
+        rest = trimmed[4:trimmed.len()]
+    else:
+        return ""
+    var idx = 0
+    while idx < rest.len() and _is_ident_char(rest[idx:idx + 1]):
+        idx = idx + 1
+    rest[0:idx]
+
+fn _contains_any_fixed_type(t: text) -> bool:
+    for tn in FIXED_TYPE_NAMES:
+        if t.contains(tn):
+            return true
+    false
+
+fn _scan_file_constants(lines: [text]) -> Dict<text, bool>:
+    """Same-file `val NAME = <int literal>` (optionally `pub val`) constants,
+    usable as a range endpoint. File-wide, not scope-aware — a stated
+    heuristic, same tier as the rest of this text-based scan."""
+    var m: Dict<text, bool> = {}
+    for line in lines:
+        var t = line.trim()
+        if t.starts_with("pub val "):
+            t = t[4:t.len()]
+        if t.starts_with("val "):
+            val eq_idx = t.find("=")
+            if eq_idx > 0:
+                var name_part = t[4:eq_idx].trim()
+                val colon_idx = name_part.find(":")
+                if colon_idx >= 0:
+                    name_part = name_part[0:colon_idx].trim()
+                val val_part = t[eq_idx + 1:t.len()].trim()
+                if _is_int_literal(val_part):
+                    m[name_part] = true
+    m
+
+fn _scan_file_fixed_vars(lines: [text]) -> Dict<text, bool>:
+    """Same-file `val`/`var NAME ... FixedArray/FixedStack/FixedMap/FixedSet/
+    RingBuffer ...` declarations, usable as a bounded loop iterable."""
+    var m: Dict<text, bool> = {}
+    for line in lines:
+        val t = line.trim()
+        if (t.starts_with("val ") or t.starts_with("var ")) and _contains_any_fixed_type(t):
+            val name = _decl_var_name(t)
+            if name != "":
+                m[name] = true
+    m
+
+fn _bound_ok(s: text, const_map: Dict<text, bool>) -> bool:
+    val v = s.trim()
+    if _is_int_literal(v):
+        return true
+    const_map.has(v)
+
+fn _is_bounded_iterable(iterable: text, const_map: Dict<text, bool>, fixed_map: Dict<text, bool>) -> bool:
+    if iterable.contains(".."):
+        val idx = iterable.find("..")
+        val left = iterable[0:idx].trim()
+        var right_start = idx + 2
+        if right_start < iterable.len() and iterable[right_start:right_start + 1] == "=":
+            right_start = right_start + 1
+        val right = iterable[right_start:iterable.len()].trim()
+        return _bound_ok(left, const_map) and _bound_ok(right, const_map)
+    if fixed_map.has(iterable):
+        return true
+    for tn in FIXED_TYPE_NAMES:
+        if iterable.starts_with(tn + "("):
+            return true
+    false
+
+fn extract_file_functions(path: text, content: text) -> [FnRecord]:
+    """Same header/body extraction shape as flight_rule_census_scan.spl's
+    scan_file_functions: naive paren-depth multi-line-signature handling,
+    indent-delimited body. Unlike that scanner, this one keeps the FULL body
+    (not just the first statement) because loop/call detection needs it."""
+    var out: [FnRecord] = []
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if _is_fn_decl(line):
+            val header_index = i
+            val name = _fn_name(line)
+            val header_indent = _indent_of(line)
+
+            var depth = _paren_delta(line)
+            var header_end = i
+            while depth > 0 and header_end + 1 < lines.len():
+                header_end = header_end + 1
+                depth = depth + _paren_delta(lines[header_end])
+
+            var body_lines: [text] = []
+            var j = header_end + 1
+            var has_body_block = false
+            while j < lines.len():
+                val body_line = lines[j]
+                val body_trim = body_line.trim()
+                if body_trim != "" and _indent_of(body_line) <= header_indent:
+                    break
+                if body_trim != "":
+                    has_body_block = true
+                body_lines.push(body_line)
+                j = j + 1
+
+            if has_body_block:
+                out.push(FnRecord(path: path, name: name, line: header_index + 1, body_lines: body_lines))
+            i = j
+            continue
+        i = i + 1
+    out
+
+fn classify_loop_verdict(rec: FnRecord, const_map: Dict<text, bool>, fixed_map: Dict<text, bool>) -> LoopVerdict:
+    var has_loop = false
+    var all_bounded = true
+    var detail = ""
+    for line in rec.body_lines:
+        val t = line.trim()
+        if t.starts_with("for ") and t.contains(" in ") and t.ends_with(":"):
+            has_loop = true
+            val in_idx = t.find(" in ")
+            val iterable = t[in_idx + 4:t.len() - 1].trim()
+            if not _is_bounded_iterable(iterable, const_map, fixed_map):
+                all_bounded = false
+                if detail == "":
+                    detail = "for-loop over unrecognized/unbounded iterable `{iterable}`"
+        else if t.starts_with("while ") and t.ends_with(":"):
+            has_loop = true
+            all_bounded = false
+            if detail == "":
+                detail = "while-loop with no static bound (unbounded-but-terminating detector not implemented in v1)"
+
+    if not has_loop:
+        return LoopVerdict(path: rec.path, fn_name: rec.name, line: rec.line,
+            verdict: "bounded", detail: "no loop in body")
+    if all_bounded:
+        return LoopVerdict(path: rec.path, fn_name: rec.name, line: rec.line,
+            verdict: "bounded", detail: "all loops statically bounded")
+    LoopVerdict(path: rec.path, fn_name: rec.name, line: rec.line,
+        verdict: "unknown", detail: detail)
+
+fn _list_contains(lst: [text], target: text) -> bool:
+    for x in lst:
+        if x == target:
+            return true
+    false
+
+pub fn scan_single_file_loops(path: text, content: text) -> [LoopVerdict]:
+    """Unit-test seam: classify loop verdicts for one synthetic file's
+    content directly, without touching disk or the rest of the tree."""
+    val lines = content.split("\n")
+    val const_map = _scan_file_constants(lines)
+    val fixed_map = _scan_file_fixed_vars(lines)
+    var out: [LoopVerdict] = []
+    for rec in extract_file_functions(path, content):
+        out.push(classify_loop_verdict(rec, const_map, fixed_map))
+    out
+
+pub fn scan_sources_recursion(sources: Dict<text, text>) -> [SccRecord]:
+    """Unit-test seam: run only the recursion/SCC detector over a small map
+    of path -> synthetic content, without touching disk."""
+    var all_recs: [FnRecord] = []
+    for path in sources.keys():
+        for rec in extract_file_functions(path, sources[path]):
+            all_recs.push(rec)
+    _detect_recursion(all_recs)
+
+fn _detect_recursion(all_recs: [FnRecord]) -> [SccRecord]:
+    var name_count: Dict<text, i64> = {}
+    for rec in all_recs:
+        val prev = if name_count.has(rec.name): name_count[rec.name] else: 0
+        name_count[rec.name] = prev + 1
+
+    var callee_by_name: Dict<text, [text]> = {}
+    var ambiguous_seen: Dict<text, bool> = {}
+    for rec in all_recs:
+        if name_count[rec.name] != 1:
+            ambiguous_seen[rec.name] = true
+            continue
+        var callees: [text] = []
+        for line in rec.body_lines:
+            for c in _extract_call_names_from_line(line):
+                callees.push(c)
+        callee_by_name[rec.name] = callees
+
+    var sccs: [SccRecord] = []
+    var self_reported: Dict<text, bool> = {}
+    var pair_reported: Dict<text, bool> = {}
+    for rec in all_recs:
+        if name_count[rec.name] != 1:
+            continue
+        val callees = callee_by_name[rec.name]
+        for callee_name in callees:
+            if callee_name == rec.name:
+                if not self_reported.has(rec.name):
+                    self_reported[rec.name] = true
+                    sccs.push(SccRecord(members: [rec.name], self_loop: true))
+                continue
+            if callee_by_name.has(callee_name):
+                val other_callees = callee_by_name[callee_name]
+                if _list_contains(other_callees, rec.name):
+                    val key1 = rec.name + "|" + callee_name
+                    val key2 = callee_name + "|" + rec.name
+                    if not pair_reported.has(key1) and not pair_reported.has(key2):
+                        pair_reported[key1] = true
+                        sccs.push(SccRecord(members: [rec.name, callee_name], self_loop: false))
+    sccs
+
+fn _indegree_by_name(all_recs: [FnRecord]) -> Dict<text, i64>:
+    """Approximate in-degree: raw count of call-site mentions of a name
+    across the whole scanned tree, not deduplicated per distinct caller.
+    Stated approximation, used only to rank "dominant" unknown functions."""
+    var m: Dict<text, i64> = {}
+    for rec in all_recs:
+        for line in rec.body_lines:
+            for c in _extract_call_names_from_line(line):
+                val prev = if m.has(c): m[c] else: 0
+                m[c] = prev + 1
+    m
+
+pub fn run_termination_census() -> TerminationReport:
+    var all_recs: [FnRecord] = []
+    var files_scanned = 0
+    for path in dir_walk(SCAN_ROOT):
+        if not path.ends_with(".spl"):
+            continue
+        if is_excluded(path):
+            continue
+        files_scanned = files_scanned + 1
+        val content = file_read(path)
+        val lines = content.split("\n")
+        val const_map = _scan_file_constants(lines)
+        val fixed_map = _scan_file_fixed_vars(lines)
+        for rec in extract_file_functions(path, content):
+            all_recs.push(rec)
+
+    # Re-derive per-file const/fixed maps for loop classification (the loop
+    # above only collected FnRecords; classification needs each record's
+    # OWN file's constant/fixed-var maps, so it is grouped by path here).
+    var loop_verdicts: [LoopVerdict] = []
+    var by_path: Dict<text, [FnRecord]> = {}
+    for rec in all_recs:
+        var lst: [FnRecord] = if by_path.has(rec.path): by_path[rec.path] else: []
+        lst.push(rec)
+        by_path[rec.path] = lst
+
+    for path in by_path.keys():
+        val content = file_read(path)
+        val lines = content.split("\n")
+        val const_map = _scan_file_constants(lines)
+        val fixed_map = _scan_file_fixed_vars(lines)
+        for rec in by_path[path]:
+            loop_verdicts.push(classify_loop_verdict(rec, const_map, fixed_map))
+
+    var name_count: Dict<text, i64> = {}
+    for rec in all_recs:
+        val prev = if name_count.has(rec.name): name_count[rec.name] else: 0
+        name_count[rec.name] = prev + 1
+    var ambiguous_names_count = 0
+    for name in name_count.keys():
+        if name_count[name] > 1:
+            ambiguous_names_count = ambiguous_names_count + 1
+
+    val sccs = _detect_recursion(all_recs)
+
+    # Dominant unknown call paths: rank "unknown"-verdict functions by
+    # call-site mention count (approximate in-degree, see
+    # _indegree_by_name), descending, top 5. This is the "which specific
+    # call path made it unknown" report the plan's acceptance line requires
+    # — not just a bare unknown count.
+    val indeg = _indegree_by_name(all_recs)
+    var unknown_verdicts: [LoopVerdict] = []
+    for v in loop_verdicts:
+        if v.verdict == "unknown":
+            unknown_verdicts.push(v)
+    var ranked: [LoopVerdict] = []
+    var used: Dict<text, bool> = {}
+    var picked = 0
+    while picked < 5:
+        var best_idx = -1
+        var best_score = -1
+        var idx = 0
+        for v in unknown_verdicts:
+            val key = "{v.path}#{v.fn_name}#{v.line}"
+            if not used.has(key):
+                val score = if indeg.has(v.fn_name): indeg[v.fn_name] else: 0
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+            idx = idx + 1
+        if best_idx < 0:
+            break
+        val chosen = unknown_verdicts[best_idx]
+        used["{chosen.path}#{chosen.fn_name}#{chosen.line}"] = true
+        ranked.push(chosen)
+        picked = picked + 1
+
+    var dominant_unknown: [text] = []
+    for v in ranked:
+        val score = if indeg.has(v.fn_name): indeg[v.fn_name] else: 0
+        dominant_unknown.push("{v.fn_name} ({v.path}:{v.line}) — {score} call-site mention(s) — {v.detail}")
+
+    val capacity_checks = [
+        CapacityCheck(category: "stack_frame_estimation", classification: "uncheckable",
+            reason: "no target-ABI/per-type stack layout model in this text scanner"),
+        CapacityCheck(category: "queue_task_capacity", classification: "uncheckable",
+            reason: "correlating a Fixed*/RingBuffer declared capacity with a specific scheduler queue/task instance needs semantic (type/flow) analysis this text scanner does not have"),
+    ]
+
+    TerminationReport(files_scanned: files_scanned, functions_scanned: all_recs.len(),
+        ambiguous_names_count: ambiguous_names_count, loop_verdicts: loop_verdicts,
+        sccs: sccs, capacity_checks: capacity_checks, dominant_unknown: dominant_unknown)
+
+pub fn format_human_table(report: TerminationReport) -> text:
+    var bounded_n = 0
+    var unbounded_terminating_n = 0
+    var unknown_n = 0
+    for v in report.loop_verdicts:
+        if v.verdict == "bounded":
+            bounded_n = bounded_n + 1
+        else if v.verdict == "unbounded_terminating":
+            unbounded_terminating_n = unbounded_terminating_n + 1
+        else:
+            unknown_n = unknown_n + 1
+
+    var lines: [text] = []
+    lines.push("Termination census (WP-14) — loop bounds, recursion SCC, capacity")
+    lines.push("Scope: src/**/*.spl, excluding vendor paths (see module header)")
+    lines.push("Files scanned: {report.files_scanned}, functions scanned: {report.functions_scanned}")
+    lines.push("Ambiguous function names excluded from the call graph: {report.ambiguous_names_count}")
+    lines.push("")
+    lines.push("Loop-bound verdicts: bounded={bounded_n} unbounded_terminating={unbounded_terminating_n} unknown={unknown_n}")
+    lines.push("")
+    lines.push("Dominant unknown call paths (top {report.dominant_unknown.len()}, ranked by call-site mention count):")
+    for d in report.dominant_unknown:
+        lines.push("  {d}")
+    lines.push("")
+    var self_n = 0
+    var pair_n = 0
+    for s in report.sccs:
+        if s.self_loop:
+            self_n = self_n + 1
+        else:
+            pair_n = pair_n + 1
+    lines.push("Recursion: {self_n} self-recursive function(s), {pair_n} mutual-recursion pair(s) (3+-cycles not detected in v1)")
+    lines.push("")
+    for c in report.capacity_checks:
+        lines.push("Capacity — {c.category}: {c.classification} ({c.reason})")
+    lines.join("\n")
+
+pub fn format_sdn(report: TerminationReport) -> text:
+    var bounded_n = 0
+    var unbounded_terminating_n = 0
+    var unknown_n = 0
+    for v in report.loop_verdicts:
+        if v.verdict == "bounded":
+            bounded_n = bounded_n + 1
+        else if v.verdict == "unbounded_terminating":
+            unbounded_terminating_n = unbounded_terminating_n + 1
+        else:
+            unknown_n = unknown_n + 1
+    var lines: [text] = []
+    lines.push("termination_census:")
+    lines.push("  files_scanned: {report.files_scanned}")
+    lines.push("  functions_scanned: {report.functions_scanned}")
+    lines.push("  bounded: {bounded_n}")
+    lines.push("  unbounded_terminating: {unbounded_terminating_n}")
+    lines.push("  unknown: {unknown_n}")
+    lines.push("  ambiguous_names_excluded: {report.ambiguous_names_count}")
+    lines.push("  scc_count: {report.sccs.len()}")
+    lines.join("\n")

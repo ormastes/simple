@@ -1,0 +1,740 @@
+# Absolute contract tests for the X25519MLKEM768 composition boundary.
+# @cover src/os/crypto/ml_kem.spl 98%
+# @cover src/os/crypto/x25519_mlkem768/hybrid.spl 100%
+# @cover src/os/crypto/x25519_mlkem768/execution_policy.spl 100%
+
+use std.spipe.*
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode, X25519MlKem768Config,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Operation,
+    X25519MlKem768Request, X25519MlKem768SimdAdmission,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION,
+    x25519_mlkem768_default_config, x25519_mlkem768_profile}
+use os.crypto.x25519_mlkem768.execution_policy.{x25519_mlkem768_resolve_backend}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_combine, x25519_mlkem768_keygen,
+    x25519_mlkem768_encapsulate, x25519_mlkem768_decapsulate,
+    x25519_mlkem768_keygen_simd_candidate,
+    x25519_mlkem768_encapsulate_simd_candidate,
+    x25519_mlkem768_decapsulate_simd_candidate,
+    x25519_mlkem768_keygen_cuda_candidate,
+    x25519_mlkem768_encapsulate_cuda_candidate,
+    x25519_mlkem768_decapsulate_cuda_candidate,
+    x25519_mlkem768_keygen_metal_candidate,
+    x25519_mlkem768_encapsulate_metal_candidate,
+    x25519_mlkem768_decapsulate_metal_candidate}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{X25519MlKem768CudaNttExecutor}
+use os.crypto.x25519_mlkem768.metal_ntt_provider.{X25519MlKem768MetalNttExecutor}
+use os.crypto.ml_kem.{
+    ml_kem_keygen, ml_kem_encaps, ml_kem_decaps,
+    ml_kem_keygen_checked, ml_kem_encaps_checked, ml_kem_decaps_checked}
+use os.crypto.ml_kem.{
+    ml_kem_768_encapsulation_key_valid, ml_kem_768_decapsulation_key_valid}
+use os.crypto.sha256.{sha256}
+use os.crypto.entropy.{crypto_entropy_validate_candidate_for_test,
+    CRYPTO_ENTROPY_MAX_REQUEST}
+use std.sffi.io.{file_read_text}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+describe "X25519MLKEM768 SIMD static evidence contract":
+    it "should pin one cross-backend NTT fixture (REQ-009 REQ-010 REQ-012)":
+        step("Compare every backend fixture digest and boundary coefficient")
+        val manifest = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/manifest.sdn")
+        val simple_fixture = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl")
+        val c_fixture = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/ntt_fixture.h")
+        val simd_probe = file_read_text(
+            "test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_c_test.c")
+        val cuda_probe = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/cuda_ntt_probe.c")
+        val vulkan_probe = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/vulkan_ntt_probe.c")
+        val metal_probe = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/metal_ntt_probe.swift")
+        expect(manifest).to_contain("id: \"ntt-v1-p97-i29-c17-q3329\"")
+        expect(simple_fixture).to_contain(
+            "polynomial * 97 + coefficient * 29 + 17")
+        expect(c_fixture).to_contain(
+            "x25519mlkem768_ntt_fixture_coefficient")
+        expect(simd_probe).to_contain(
+            "x25519mlkem768_ntt_fixture_coefficient(poly, i)")
+        expect(cuda_probe).to_contain(
+            "x25519mlkem768_ntt_fixture_coefficient(p, i)")
+        expect(vulkan_probe).to_contain(
+            "x25519mlkem768_ntt_fixture_coefficient(p, i)")
+        expect(metal_probe).to_contain(
+            "ntt-v1-p97-i29-c17-q3329")
+        expect(simd_probe.contains("i * 17 + poly * 101 + 3")).to_equal(false)
+
+    it "should separate correctness from promotion timing (NFR-009 NFR-010 NFR-011)":
+        step("Inspect correctness receipts independently from performance promotion")
+        val simd_runner = file_read_text(
+            "scripts/check/check-x25519mlkem768-cpu-simd.shs")
+        val scalar_runner = file_read_text(
+            "scripts/check/check-x25519mlkem768-scalar-perf.shs")
+        expect(simd_runner).to_contain(
+            "mlkem_cpu_simd_correctness_status=pass")
+        expect(simd_runner).to_contain(
+            "mlkem_cpu_simd_performance_status=fail")
+        expect(simd_runner).to_contain(
+            "focused-ntt-speedup-below-threshold")
+        expect(simd_runner).to_contain(
+            "mlkem_cpu_simd_promotion_status=not-proven")
+        expect(scalar_runner).to_contain(
+            "FIXTURE=\"$ROOT/test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl\"")
+        expect(scalar_runner).to_contain("oracle_fixture_sha256")
+
+    it "should keep GNU AVX2 attributes outside the MSVC branch (REQ-009)":
+        step("Inspect compiler guards around the AVX2 target attribute")
+        val source = file_read_text("src/runtime/runtime_simd_dispatch.c")
+        expect(source).to_contain(
+            "#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)")
+        expect(source).to_contain(
+            "#  define SIMPLE_RUNTIME_TARGET_AVX2 __attribute__((target(\"avx2\")))")
+        expect(source).to_contain("#  define SIMPLE_RUNTIME_TARGET_AVX2\n")
+        expect(source.contains("\n__attribute__((target(\"avx2\")))\n")).to_equal(false)
+        expect(source).to_contain("if (simd_detect_avx2())")
+
+    it "should give every ISA evidence row an exact resumable owner contract (REQ-015)":
+        step("Validate architecture evidence ownership and resumable commands")
+        val manifest = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/manifest.sdn")
+        expect(manifest).to_contain("MLKEM_SIMD_EXPECTED_BACKEND=1 sh scripts/check/check-x25519mlkem768-cpu-simd.shs")
+        expect(manifest).to_contain("MLKEM_SIMD_EXPECTED_BACKEND=2 MLKEM_SIMD_RUNNER='qemu-aarch64 -L /usr/aarch64-linux-gnu'")
+        expect(manifest).to_contain("vlen=128,elen=64")
+        expect(manifest).to_contain("vlen=256,elen=64")
+        expect(manifest).to_contain("vlen=512,elen=64")
+        expect(manifest).to_contain("owner: \"x86_64 AVX2 evidence operator\"")
+        expect(manifest).to_contain("owner: \"AArch64 NEON evidence operator\"")
+        expect(manifest).to_contain("owner: \"RISC-V RVV evidence operator\"")
+        expect(manifest).to_contain(
+            "reviewer: \"root Codex normal/highest-capability\"")
+
+fn _hex_digit(value: i64) -> text:
+    if value < 10:
+        return value.to_text()
+    if value == 10: "a"
+    elif value == 11: "b"
+    elif value == 12: "c"
+    elif value == 13: "d"
+    elif value == 14: "e"
+    else: "f"
+
+fn _bytes_hex(data: [u8]) -> text:
+    var out = ""
+    var i: i64 = 0
+    while i < data.len().to_i64():
+        val value = rt_bytes_u8_at(data, i)
+        out = out + _hex_digit((value >> 4) & 15) + _hex_digit(value & 15)
+        i = i + 1
+    out
+
+fn _list_bytes(data: list) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < data.len():
+        out.push(data.get(i).to_u8())
+        i = i + 1
+    out
+
+fn _nist_d() -> list:
+    [0xE5,0x82,0xB7,0xD7,0x5E,0x6C,0x80,0xB0,0x5A,0xE3,0x92,0xA1,0xFC,0x9F,0x71,0x53,
+     0xB1,0x23,0x90,0xFD,0x99,0x93,0x03,0x68,0xCC,0x67,0xA7,0x68,0xBA,0xEB,0xC8,0xA0]
+
+fn _nist_z() -> list:
+    [0x1C,0xDA,0xCB,0x87,0x40,0xC0,0xB8,0x7C,0x4A,0x37,0x95,0x75,0xF1,0x87,0xB3,0x67,
+     0xCB,0xFA,0x3B,0x30,0x0B,0xF5,0x91,0xB1,0x09,0xF7,0x98,0x16,0xE9,0xCB,0xE8,0xF0]
+
+fn _oracle_d() -> list:
+    [0x93,0x4d,0x60,0xb3,0x56,0x24,0xd7,0x40,0xb3,0x0a,0x7f,0x22,0x7a,0xf2,0xae,0x7c,
+     0x67,0x8e,0x4e,0x04,0xe1,0x3c,0x5f,0x50,0x9e,0xad,0xe2,0xb7,0x9a,0xea,0x77,0xe2]
+
+fn _oracle_z() -> list:
+    [0x3e,0x2a,0x2e,0xa6,0xc9,0xc4,0x76,0xfc,0x49,0x37,0xb0,0x13,0xc9,0x93,0xa7,0x93,
+     0xd6,0xc0,0xab,0x99,0x60,0x69,0x5b,0xa8,0x38,0xf6,0x49,0xda,0x53,0x9c,0xa3,0xd0]
+
+fn _bytes32(value: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        out.push(value)
+        i = i + 1
+    out
+
+fn _list32(value: i64) -> list:
+    var out: list = []
+    var i: i64 = 0
+    while i < 32:
+        out.push(value)
+        i = i + 1
+    out
+
+fn _zero_list(count: i64) -> list:
+    var out: list = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _required_candidate_config(
+        backend: X25519MlKem768Backend) -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: backend,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+fn _empty_simd_admission() -> X25519MlKem768SimdAdmission:
+    X25519MlKem768SimdAdmission(
+        encoded_provenance: "",
+        actual_binary_sha256: "",
+        actual_provenance_sha256: "")
+
+fn _fixture_hex_field(source: text, name: text) -> text:
+    val marker = name + ": \""
+    val marker_at = source.find(marker)
+    if marker_at < 0:
+        return ""
+    val start = marker_at + marker.len()
+    val tail = source.substring(start, source.len())
+    val finish = tail.find("\"")
+    if finish < 0:
+        return ""
+    tail.substring(0, finish)
+
+fn _hex_nibble(code: i64) -> i64:
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    if code >= 65 and code <= 70:
+        return code - 55
+    -1
+
+fn _hex_list(hex: text) -> list:
+    var out: list = []
+    if hex.len() % 2 != 0:
+        return out
+    var i: i64 = 0
+    while i < hex.len():
+        val hi = _hex_nibble(hex.char_code_at(i))
+        val lo = _hex_nibble(hex.char_code_at(i + 1))
+        if hi < 0 or lo < 0:
+            return []
+        out.push(hi * 16 + lo)
+        i = i + 2
+    out
+
+fn _lists_equal(a: list, b: list) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+fn _copy_list(values: list) -> list:
+    var out: list = []
+    var i: i64 = 0
+    while i < values.len():
+        out.push(values.get(i))
+        i = i + 1
+    out
+
+describe "X25519MLKEM768 absolute composition contract":
+    it "should expose the exact immutable versioned profile (REQ-001)":
+        step("Read the canonical X25519MLKEM768 profile")
+        val profile = x25519_mlkem768_profile()
+        expect(profile.fips_revision).to_equal("FIPS 203 ML-KEM-768")
+        expect(profile.tls_revision).to_equal("draft-ietf-tls-ecdhe-mlkem-05")
+        expect(profile.named_group).to_equal(0x11EC)
+        expect(profile.client_share_bytes).to_equal(1216)
+        expect(profile.server_share_bytes).to_equal(1120)
+        expect(profile.shared_secret_bytes).to_equal(64)
+        expect(profile.semantic_version).to_equal(
+            X25519_MLKEM768_IMPLEMENTATION_VERSION)
+        expect(profile.semantic_version).to_equal("0.3.0")
+        val config = x25519_mlkem768_default_config()
+        expect(config.implementation_version).to_equal("0.3.0")
+        expect(config.profile_version).to_equal(
+            X25519_MLKEM768_PROFILE_VERSION)
+        expect(config.profile_version).to_equal(
+            "fips203-2024+ecdhe-mlkem-05")
+        expect(config.minimum_batch).to_equal(1)
+        expect(config.verification_policy ==
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar).to_be(true)
+        val request = X25519MlKem768Request(
+            operation: X25519MlKem768Operation.BatchRoundTrip,
+            d: _list32(1), z: _list32(2), m: _list32(3),
+            x25519_private_key: _bytes32(4u8), peer_share: [],
+            batch_id: "absolute-contract", deterministic_test_input: true)
+        expect(request.operation ==
+            X25519MlKem768Operation.BatchRoundTrip).to_be(true)
+        expect(request.batch_id).to_equal("absolute-contract")
+
+    it "should match NIST ACVP ML-KEM-768 keyGen tcId 26 (REQ-002 REQ-013 REQ-014)":
+        step("Run deterministic key generation against the normalized ACVP vector")
+        val pair = ml_kem_keygen(_nist_d(), _nist_z())
+        val (ek, dk) = pair
+        expect(_bytes_hex(sha256(_list_bytes(ek)))).to_equal(
+            "4158f6afb5e516c99f1da07da8c651348422b17c1f4e9a08ad73fb1f91249b3e")
+        expect(_bytes_hex(sha256(_list_bytes(dk)))).to_equal(
+            "7aab35839207f72b310abe36e2daa1cc7ff6f7fa8941e439967cd47d9b437079")
+
+    it "should match pinned mlkem-native keygen encapsulation and decapsulation (REQ-002 REQ-013)":
+        step("Execute the pinned native oracle keygen encapsulation and decapsulation")
+        val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
+        val (ek, dk) = pair
+        expect(_bytes_hex(sha256(_list_bytes(ek)))).to_equal(
+            "c45a699a9efcb1a799578ce95f24b063b0b9ddc0879afdb3967fd9e1e3e8c247")
+        expect(_bytes_hex(sha256(_list_bytes(dk)))).to_equal(
+            "1dc4ab0188bfd90b41bbd91884e40a41ccd0f46e5d3754b615373c9656f6af39")
+        val encapsulated = ml_kem_encaps(ek, _oracle_d())
+        val (shared, ciphertext) = encapsulated
+        expect(_bytes_hex(sha256(_list_bytes(ciphertext)))).to_equal(
+            "0b99b2af81971943e4ef6e6f17f42be4f3caa9fea18da0f63df1d43639a74743")
+        expect(_bytes_hex(sha256(_list_bytes(shared)))).to_equal(
+            "340f07be0ffe3d996f44bb05f10eecaca6f494c77a3c353cb1872cacb834f596")
+        val recovered = ml_kem_decaps(dk, ciphertext)
+        expect(_bytes_hex(sha256(_list_bytes(recovered)))).to_equal(
+            "340f07be0ffe3d996f44bb05f10eecaca6f494c77a3c353cb1872cacb834f596")
+        var forged = ciphertext
+        forged[0] = forged.get(0) ^ 1
+        val implicit = ml_kem_decaps(dk, forged)
+        expect(implicit.len()).to_equal(32)
+        expect(_bytes_hex(sha256(_list_bytes(implicit))) ==
+            "340f07be0ffe3d996f44bb05f10eecaca6f494c77a3c353cb1872cacb834f596").to_equal(false)
+
+    it "should match every byte of the pinned mlkem-native outputs (REQ-002 REQ-012 REQ-013)":
+        step("Load the shared X25519MLKEM768 fixture")
+        val source = file_read_text(
+            "test/fixtures/crypto/x25519mlkem768/mlkem_native_fd58_vectors.sdn")
+        val expected_ek = _hex_list(_fixture_hex_field(
+            source, "encapsulation_key_hex"))
+        val expected_dk = _hex_list(_fixture_hex_field(
+            source, "decapsulation_key_hex"))
+        val expected_ct = _hex_list(_fixture_hex_field(source, "ciphertext_hex"))
+        val expected_ss = _hex_list(_fixture_hex_field(
+            source, "shared_secret_hex"))
+        expect(expected_ek.len()).to_equal(1184)
+        expect(expected_dk.len()).to_equal(2400)
+        expect(expected_ct.len()).to_equal(1088)
+        expect(expected_ss.len()).to_equal(32)
+        val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
+        val (ek, dk) = pair
+        val encapsulated = ml_kem_encaps(ek, _oracle_d())
+        val (shared, ciphertext) = encapsulated
+        val recovered = ml_kem_decaps(dk, ciphertext)
+        expect(_lists_equal(ek, expected_ek)).to_be(true)
+        expect(_lists_equal(dk, expected_dk)).to_be(true)
+        expect(_lists_equal(ciphertext, expected_ct)).to_be(true)
+        expect(_lists_equal(shared, expected_ss)).to_be(true)
+        expect(_lists_equal(recovered, expected_ss)).to_be(true)
+
+    it "should preserve caller-owned inputs while cleaning owned temporaries (REQ-002 NFR-005)":
+        step("Prepare independently owned ML-KEM seeds and message")
+        val d = _oracle_d()
+        val z = _oracle_z()
+        val message = _list32(0x5A)
+        val d_before = _copy_list(d)
+        val z_before = _copy_list(z)
+        val message_before = _copy_list(message)
+
+        step("Run key generation, encapsulation, and decapsulation")
+        val pair = match ml_kem_keygen_checked(d, z):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val (ek, dk) = pair
+        val ek_before = _copy_list(ek)
+        val dk_before = _copy_list(dk)
+        val encapsulated = match ml_kem_encaps_checked(ek, message):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val (server_secret, ciphertext) = encapsulated
+        val ciphertext_before = _copy_list(ciphertext)
+        val client_secret = match ml_kem_decaps_checked(dk, ciphertext):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+
+        step("Verify outputs and every caller-owned input remain intact")
+        expect(_lists_equal(server_secret, client_secret)).to_be(true)
+        expect(_lists_equal(d, d_before)).to_be(true)
+        expect(_lists_equal(z, z_before)).to_be(true)
+        expect(_lists_equal(message, message_before)).to_be(true)
+        expect(_lists_equal(ek, ek_before)).to_be(true)
+        expect(_lists_equal(dk, dk_before)).to_be(true)
+        expect(_lists_equal(ciphertext, ciphertext_before)).to_be(true)
+
+    it "should reject malformed normalized oracle fields (REQ-002)":
+        step("Corrupt normalized oracle field lengths before decoding")
+        expect(_fixture_hex_field("other: \"00\"", "missing")).to_equal("")
+        expect(_fixture_hex_field("value: \"00", "value")).to_equal("")
+        expect(_hex_list("0").len()).to_equal(0)
+        expect(_hex_list("0g").len()).to_equal(0)
+        expect(_hex_list("AF").get(0)).to_equal(175)
+        expect(_lists_equal([1], [1, 2])).to_equal(false)
+        expect(_lists_equal([1, 2], [1, 3])).to_equal(false)
+
+    it "should combine ML-KEM first and X25519 second into 64 bytes (REQ-003 REQ-004)":
+        step("Compose the two component secrets in protocol order")
+        val combined = x25519_mlkem768_combine(_list32(0xA5), _bytes32(0x5A))
+        match combined:
+            case Ok(secret):
+                expect(secret.len()).to_equal(64)
+                expect(secret.get(0)).to_equal(0xA5)
+                expect(secret.get(31)).to_equal(0xA5)
+                expect(secret.get(32)).to_equal(0x5A)
+                expect(secret.get(63)).to_equal(0x5A)
+            case Err(reason):
+                expect(reason).to_equal("unexpected composition failure")
+
+    it "should reject the prohibited all-zero X25519 shared secret (REQ-004 REQ-016 NFR-004)":
+        step("Present an all-zero X25519 component to checked composition")
+        val combined = x25519_mlkem768_combine(_list32(0xA5), _bytes32(0x00))
+        match combined:
+            case Ok(_): fail("all-zero X25519 secret was accepted")
+            case Err(reason): expect(reason).to_contain("all-zero")
+
+    it "should reject malformed component lengths (REQ-002 REQ-004 NFR-013)":
+        step("Present a malformed ML-KEM component length")
+        val combined = x25519_mlkem768_combine([], _bytes32(0x5A))
+        match combined:
+            case Ok(_): fail("malformed ML-KEM shared secret was accepted")
+            case Err(reason): expect(reason).to_contain("32 bytes")
+
+    it "should reject a malformed X25519 component length (REQ-002 REQ-004 NFR-013)":
+        step("Present a malformed X25519 component length")
+        val combined = x25519_mlkem768_combine(_list32(0xA5), [])
+        match combined:
+            case Ok(_): fail("malformed X25519 shared secret was accepted")
+            case Err(reason): expect(reason).to_contain("32 bytes")
+
+    it "should validate canonical ML-KEM keys and reject corruption (REQ-004 NFR-013)":
+        step("Validate canonical keys before flipping one encoded byte")
+        val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
+        val (ek, dk) = pair
+        expect(ml_kem_768_encapsulation_key_valid(ek)).to_be(true)
+        expect(ml_kem_768_decapsulation_key_valid(dk)).to_be(true)
+        var invalid_ek = ek
+        invalid_ek[0] = 0xFF
+        invalid_ek[1] = 0xFF
+        expect(ml_kem_768_encapsulation_key_valid(invalid_ek)).to_equal(false)
+        var invalid_dk = dk
+        invalid_dk[2336] = invalid_dk.get(2336) ^ 1
+        expect(ml_kem_768_decapsulation_key_valid(invalid_dk)).to_equal(false)
+
+    it "should reject malformed checked ML-KEM inputs (REQ-002 REQ-004 NFR-013)":
+        step("Submit malformed key ciphertext and seed lengths to checked APIs")
+        match ml_kem_keygen_checked([], _oracle_z()):
+            case Ok(_): fail("short ML-KEM d seed was accepted")
+            case Err(reason): expect(reason).to_contain("32 bytes")
+        match ml_kem_keygen_checked(_oracle_d(), []):
+            case Ok(_): fail("short ML-KEM z seed was accepted")
+            case Err(reason): expect(reason).to_contain("32 bytes")
+        val pair = ml_kem_keygen(_oracle_d(), _oracle_z())
+        val (ek, dk) = pair
+        match ml_kem_encaps_checked(ek, []):
+            case Ok(_): fail("short ML-KEM message was accepted")
+            case Err(reason): expect(reason).to_contain("32 bytes")
+        match ml_kem_encaps_checked([], _oracle_d()):
+            case Ok(_): fail("short ML-KEM encapsulation key was accepted")
+            case Err(reason): expect(reason).to_contain("invalid")
+        match ml_kem_decaps_checked(dk, []):
+            case Ok(_): fail("short ML-KEM ciphertext was accepted")
+            case Err(reason): expect(reason).to_contain("1088")
+        match ml_kem_decaps_checked([], _zero_list(1088)):
+            case Ok(_): fail("short ML-KEM decapsulation key was accepted")
+            case Err(reason): expect(reason).to_contain("invalid")
+
+    it "should reject malformed hybrid public inputs (REQ-003 REQ-004 NFR-013)":
+        step("Submit malformed hybrid public-share components")
+        val config = x25519_mlkem768_default_config()
+        match x25519_mlkem768_keygen(config, [], _oracle_d(), _oracle_z()):
+            case Ok(_): fail("short hybrid X25519 private key was accepted")
+            case Err(reason): expect(reason).to_contain("three 32-byte")
+        match x25519_mlkem768_keygen(config, _bytes32(1u8), [], _oracle_z()):
+            case Ok(_): fail("short hybrid ML-KEM d seed was accepted")
+            case Err(reason): expect(reason).to_contain("three 32-byte")
+        match x25519_mlkem768_encapsulate(
+                config, [], _bytes32(1u8), _oracle_d()):
+            case Ok(_): fail("short hybrid client share was accepted")
+            case Err(reason): expect(reason).to_contain("1216")
+        match x25519_mlkem768_encapsulate(
+                config, _zero_list(1216), [], _oracle_d()):
+            case Ok(_): fail("short hybrid server private key was accepted")
+            case Err(reason): expect(reason).to_contain("32-byte")
+        match x25519_mlkem768_decapsulate(
+                config, [], _bytes32(1u8), _zero_list(2400)):
+            case Ok(_): fail("short hybrid server share was accepted")
+            case Err(reason): expect(reason).to_contain("1120")
+        match x25519_mlkem768_decapsulate(
+                config, _zero_list(1120), [], _zero_list(2400)):
+            case Ok(_): fail("short hybrid client private key was accepted")
+            case Err(reason): expect(reason).to_contain("key sizes")
+
+    it "should reject candidate inputs before backend access (REQ-009 REQ-010 NFR-013)":
+        step("Exercise candidate input guards with invalid key material")
+        val simd = _required_candidate_config(X25519MlKem768Backend.Avx2)
+        match x25519_mlkem768_keygen_simd_candidate(
+                simd, _empty_simd_admission(), [], _oracle_d(), _oracle_z()):
+            case Ok(_): fail("SIMD accepted a short private key")
+            case Err(reason): expect(reason).to_contain("three 32-byte")
+        match x25519_mlkem768_encapsulate_simd_candidate(
+                simd, _empty_simd_admission(), [], _bytes32(1u8), _oracle_d()):
+            case Ok(_): fail("SIMD accepted a short client share")
+            case Err(reason): expect(reason).to_contain("1216")
+        match x25519_mlkem768_decapsulate_simd_candidate(
+                simd, _empty_simd_admission(), _zero_list(1120), [],
+                _zero_list(2400)):
+            case Ok(_): fail("SIMD accepted malformed client key material")
+            case Err(reason): expect(reason).to_contain("key sizes")
+
+        val cuda = _required_candidate_config(X25519MlKem768Backend.Cuda)
+        var cuda_executor = X25519MlKem768CudaNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx")
+        match x25519_mlkem768_keygen_cuda_candidate(
+                cuda, cuda_executor, [], _oracle_d(), _oracle_z()):
+            case Ok(_): fail("CUDA accepted a short private key")
+            case Err(reason): expect(reason).to_contain("three 32-byte")
+        match x25519_mlkem768_encapsulate_cuda_candidate(
+                cuda, cuda_executor, [], _bytes32(1u8), _oracle_d()):
+            case Ok(_): fail("CUDA accepted a short client share")
+            case Err(reason): expect(reason).to_contain("1216")
+        match x25519_mlkem768_decapsulate_cuda_candidate(
+                cuda, cuda_executor, _zero_list(1120), [], _zero_list(2400)):
+            case Ok(_): fail("CUDA accepted malformed client key material")
+            case Err(reason): expect(reason).to_contain("key sizes")
+        cuda_executor.shutdown()
+
+        val metal = _required_candidate_config(X25519MlKem768Backend.Metal)
+        var metal_executor = X25519MlKem768MetalNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
+        match x25519_mlkem768_keygen_metal_candidate(
+                metal, metal_executor, [], _oracle_d(), _oracle_z()):
+            case Ok(_): fail("Metal accepted a short private key")
+            case Err(reason): expect(reason).to_contain("three 32-byte")
+        match x25519_mlkem768_encapsulate_metal_candidate(
+                metal, metal_executor, [], _bytes32(1u8), _oracle_d()):
+            case Ok(_): fail("Metal accepted a short client share")
+            case Err(reason): expect(reason).to_contain("1216")
+        match x25519_mlkem768_decapsulate_metal_candidate(
+                metal, metal_executor, _zero_list(1120), [], _zero_list(2400)):
+            case Ok(_): fail("Metal accepted malformed client key material")
+            case Err(reason): expect(reason).to_contain("key sizes")
+        metal_executor.shutdown()
+
+describe "X25519MLKEM768 backend policy":
+    it "should resolve Automatic to the scalar oracle before promotion (REQ-007 REQ-011)":
+        step("Resolve Automatic under the unpromoted backend policy")
+        val resolved = x25519_mlkem768_resolve_backend(
+            x25519_mlkem768_default_config(), "keygen")
+        match resolved:
+            case Ok(evidence):
+                expect(evidence.selected_backend == X25519MlKem768Backend.ScalarCpu).to_be(true)
+                expect(evidence.requested_backend ==
+                    X25519MlKem768Backend.Automatic).to_be(true)
+                expect(evidence.implementation_version).to_equal(
+                    X25519_MLKEM768_IMPLEMENTATION_VERSION)
+                expect(evidence.profile_version).to_equal(
+                    X25519_MLKEM768_PROFILE_VERSION)
+                expect(evidence.configuration_digest.len()).to_equal(64)
+                expect(evidence.fallback_used).to_equal(false)
+            case Err(reason): expect(reason).to_equal("unexpected resolver failure")
+
+    it "should resolve forced scalar without fallback (REQ-007)":
+        step("Require the scalar backend and inspect its selection evidence")
+        val config = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.ScalarCpu,
+            selection_mode: X25519MlKem768SelectionMode.Require,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(config, "keygen"):
+            case Ok(evidence):
+                expect(evidence.fallback_used).to_equal(false)
+                expect(evidence.implementation_version).to_equal("0.3.0")
+                expect(evidence.profile_version).to_equal(
+                    X25519_MLKEM768_PROFILE_VERSION)
+                expect(evidence.configuration_digest.len()).to_equal(64)
+            case Err(reason): fail(reason)
+
+    it "should reject unsupported API versions and zero batch sizes (REQ-001)":
+        step("Present stale versions and invalid batch bounds")
+        val bad_version = X25519MlKem768Config(
+            implementation_version: "99.0.0",
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(bad_version, "keygen"):
+            case Ok(_): fail("unsupported API version was accepted")
+            case Err(reason): expect(reason).to_contain("version")
+        val legacy_version = X25519MlKem768Config(
+            implementation_version: "0.1.0",
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(legacy_version, "keygen"):
+            case Ok(_): fail("legacy API version was accepted")
+            case Err(reason): expect(reason).to_contain("version")
+        val bad_profile = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: "99.0.0",
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(bad_profile, "keygen"):
+            case Ok(_): fail("unsupported profile version was accepted")
+            case Err(reason): expect(reason).to_contain("profile version")
+        val unsupported_policy = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteOracle,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(unsupported_policy, "keygen"):
+            case Ok(_): fail("unsupported verification policy was accepted")
+            case Err(reason): expect(reason).to_contain("verification policy")
+        val bad_batch = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 0
+        )
+        match x25519_mlkem768_resolve_backend(bad_batch, "keygen"):
+            case Ok(_): fail("zero batch size was accepted")
+            case Err(reason): expect(reason).to_contain("positive")
+        val bad_minimum = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 0,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(bad_minimum, "keygen"):
+            case Ok(_): fail("zero minimum batch was accepted")
+            case Err(reason): expect(reason).to_contain("minimum_batch")
+        val below_minimum = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Automatic,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 4,
+            batch_size: 3
+        )
+        match x25519_mlkem768_resolve_backend(below_minimum, "keygen"):
+            case Ok(_): fail("batch below configured minimum was accepted")
+            case Err(reason): expect(reason).to_contain("below minimum_batch")
+
+    it "should fail closed for a forced unpromoted backend (REQ-007 REQ-008 NFR-013)":
+        step("Require an unavailable specialized backend")
+        val config = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Avx2,
+            selection_mode: X25519MlKem768SelectionMode.Require,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 1
+        )
+        match x25519_mlkem768_resolve_backend(config, "encapsulate"):
+            case Ok(_): fail("unpromoted forced backend was accepted")
+            case Err(reason): expect(reason).to_contain("no promoted native implementation")
+
+    it "should record an explicit fallback attempt (REQ-007 REQ-008)":
+        step("Suggest an unavailable backend and inspect fallback evidence")
+        val config = X25519MlKem768Config(
+            implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+            profile_version: X25519_MLKEM768_PROFILE_VERSION,
+            requested_backend: X25519MlKem768Backend.Cuda,
+            selection_mode: X25519MlKem768SelectionMode.Suggest,
+            verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+            minimum_batch: 1,
+            batch_size: 8
+        )
+        match x25519_mlkem768_resolve_backend(config, "encapsulate"):
+            case Ok(evidence):
+                expect(evidence.fallback_used).to_be(true)
+                expect(evidence.requested_backend ==
+                    X25519MlKem768Backend.Cuda).to_be(true)
+                expect(evidence.fallback_reason).to_contain("not promoted")
+                expect(evidence.attempts.len()).to_equal(2)
+                expect(evidence.batch_size).to_equal(8)
+                expect(evidence.implementation_version).to_equal("0.3.0")
+                expect(evidence.profile_version).to_equal(
+                    X25519_MLKEM768_PROFILE_VERSION)
+                expect(evidence.configuration_digest.len()).to_equal(64)
+            case Err(reason): expect(reason).to_equal("unexpected resolver failure")
+
+describe "X25519MLKEM768 production entropy boundary":
+    it "should reject invalid entropy request sizes (REQ-016 NFR-006 NFR-013)":
+        step("Request entropy below and above the exact supported length")
+        val zero_request_candidate: [u8] = [0x11u8]
+        match crypto_entropy_validate_candidate_for_test(
+                0u64, true, zero_request_candidate):
+            case Ok(_): fail("zero-length entropy request was accepted")
+            case Err(reason): expect(reason).to_contain("nonzero")
+        expect(zero_request_candidate[0u64]).to_equal(0u8)
+        val oversized_candidate: [u8] = [0x22u8]
+        match crypto_entropy_validate_candidate_for_test(
+                CRYPTO_ENTROPY_MAX_REQUEST + 1u64, true,
+                oversized_candidate):
+            case Ok(_): fail("oversized entropy request was accepted")
+            case Err(reason): expect(reason).to_contain("owner limit")
+        expect(oversized_candidate[0u64]).to_equal(0u8)
+
+    it "should reject malformed entropy providers (REQ-016 NFR-006 NFR-013)":
+        step("Return malformed or unauthenticated entropy candidates")
+        val unavailable_candidate: [u8] = _bytes32(1u8)
+        match crypto_entropy_validate_candidate_for_test(
+                32u64, false, unavailable_candidate):
+            case Ok(_): fail("unattested entropy provider was accepted")
+            case Err(reason): expect(reason).to_contain("unavailable")
+        expect(unavailable_candidate[0u64]).to_equal(0u8)
+        val short_candidate: [u8] = [0x33u8]
+        match crypto_entropy_validate_candidate_for_test(
+                32u64, true, short_candidate):
+            case Ok(_): fail("wrong-length entropy was accepted")
+            case Err(reason): expect(reason).to_contain("wrong length")
+        expect(short_candidate[0u64]).to_equal(0u8)
+
+    it "should accept every attested exact-length byte pattern (REQ-016 NFR-006)":
+        step("Accept exact-length candidates without biased output health tests")
+        match crypto_entropy_validate_candidate_for_test(32u64, true, _bytes32(0xA5u8)):
+            case Ok(bytes): expect(bytes.len()).to_equal(32u64)
+            case Err(reason): fail(reason)
+        match crypto_entropy_validate_candidate_for_test(1u64, true, [0u8]):
+            case Ok(bytes): expect(bytes[0u64]).to_equal(0u8)
+            case Err(reason): fail(reason)

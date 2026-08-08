@@ -1,0 +1,53 @@
+# codex-system-test
+# @tag: system, gpu, backend, artifact, environment
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_exists, file_read, process_run}
+
+val CHECK = "scripts/check/check-gpu-backend-layer-evidence.shs"
+
+describe "GPU backend layer artifact evidence":
+    it "keeps emission, validation, linking, and runtime admission separate":
+        step("emit artifact")
+        expect(file_exists(CHECK)).to_equal(true)
+        val checker = file_read(CHECK)
+        expect(checker).to_contain("layer_result \"$backend\" emit")
+        expect(checker).to_contain("producer-exit-")
+
+        step("validate artifact")
+        val (stdout, stderr, code) = process_run("/bin/sh", [CHECK, "--self-test"])
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("gpu_backend_layer_self_test=PASS")
+        expect(stdout).to_contain("cuda_validate_result=PASS")
+        expect(stdout).to_contain("cuda_validate_result=SKIP_UNAVAILABLE")
+        expect(stdout).to_contain("cuda_validate_result=FAIL")
+        expect(stdout).to_contain("cuda_validate_reason=verified-status-without-artifact")
+        expect(stdout).to_contain("cuda_validate_reason=missing-validator-tool")
+        expect(stdout).to_contain("cuda_validate_reason=source-emission-failed")
+        expect(stdout).to_contain("cuda_validate_reason=unknown-artifact-status")
+
+        step("link artifact")
+        expect(stdout).to_contain("cuda_link_result=PASS")
+        expect(stdout).to_contain("cuda_link_result=SKIP_UNAVAILABLE")
+        expect(stdout).to_contain("cuda_link_result=FAIL")
+
+        step("run or read back")
+        expect(stdout).to_contain("cuda_runtime_result=PASS")
+        expect(stdout).to_contain("cuda_runtime_result=SKIP_UNAVAILABLE")
+        expect(stdout).to_contain("cuda_runtime_reason=zero-exit-without-pass-receipt")
+        expect(stdout).to_contain("cuda_runtime_reason=runtime-check-failed")
+
+    it "rejects unknown command-line arguments with usage status":
+        val (_stdout, stderr, code) = process_run("/bin/sh", [CHECK, "--unknown-option"])
+        expect(code).to_equal(64)
+        expect(stderr).to_contain("unknown argument: --unknown-option")
+
+    it "identifies Metal, HIP, and OpenCL without inventing a Metal BackendKind":
+        val (stdout, _stderr, code) = process_run("/bin/sh", [CHECK, "--self-test"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("metal_layer=portable_compute_renderer")
+        expect(stdout).to_contain("metal_backend_kind=false")
+        expect(stdout).to_contain("hip_backend_kind_status=unimplemented")
+        expect(stdout).to_contain("opencl_backend_kind_status=implemented")
+        expect(stdout.contains("metal_backend_kind=true")).to_equal(false)

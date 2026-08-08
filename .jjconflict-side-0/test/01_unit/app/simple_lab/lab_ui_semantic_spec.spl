@@ -1,0 +1,109 @@
+"""
+Simple Lab UI semantic-state spec (Stream L, task L2).
+
+S1/S2-level per the repo's semantic UI contract convention
+(`src/lib/common/ui/semantic_contract.spl`, mirrored by
+`test/01_unit/app/ui/semantic_contract_spec.spl` and
+`test/01_unit/app/ui/semantic_backend_helpers_spec.spl`): drive the app
+through `SemanticUiCommand` + `semantic_ui_command_to_event`, read state back
+through `semantic_ui_snapshot_from_state_with_capabilities`'s element/prop
+list — never by poking the widget tree directly.
+
+Covers: cell add, cell source edit, cell run (through the in-process
+`KernelSessionManager`, K1, backed by the shared `LocalExec`/`LocalExecFactory`
+real executor in `std.notebook.local_exec` — K2's shared implementation,
+retired the earlier Lab-only `lab_executor.spl` stand-in), and output
+read-after-write.
+
+Design: doc/05_design/app/tools/notebook_lanes_architecture.md §7.1
+Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L2)
+"""
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{UIEvent}
+use common.ui.state.{init_state}
+use common.ui.semantic_contract.{
+    SEMANTIC_UI_STAGE_STATE,
+    SEMANTIC_UI_STATUS_AVAILABLE,
+    SemanticUiCommand,
+    SemanticUiSnapshot,
+    semantic_ui_snapshot_from_state_with_capabilities,
+    semantic_ui_command_to_event
+}
+use app.simple_lab.main.{SimpleLabApp}
+
+fn _lab_snapshot(app: SimpleLabApp) -> SemanticUiSnapshot:
+    val state = init_state(app.build_ui())
+    semantic_ui_snapshot_from_state_with_capabilities(state, SEMANTIC_UI_STAGE_STATE, SEMANTIC_UI_STATUS_AVAILABLE, [])
+
+fn _lab_prop(snapshot: SemanticUiSnapshot, widget_id: text, key: text) -> text:
+    for el in snapshot.elements:
+        if el.widget_id == widget_id:
+            for p in el.props:
+                if p.key == key:
+                    return p.value
+    ""
+
+fn _lab_element_exists(snapshot: SemanticUiSnapshot, widget_id: text) -> bool:
+    for el in snapshot.elements:
+        if el.widget_id == widget_id:
+            return true
+    false
+
+fn _lab_dispatch_action(app: SimpleLabApp, action_name: text):
+    """Fire a named action through the shared semantic command vocabulary
+    (`SemanticUiCommand.action` -> `UIEvent.Action`), not by calling app
+    internals directly.
+
+    Uses a nil-check, not `match ...: UIEvent.Action(name): ... _: ...`
+    against the `UIEvent?` result -- matching an Option-wrapped enum
+    directly against a variant pattern silently falls through to the
+    wildcard arm on this binary (same pre-existing gap already visible in
+    `test/01_unit/app/ui/semantic_contract_spec.spl`'s failing "maps
+    semantic commands to existing UI events" example); see
+    doc/08_tracking/bug/match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md."""
+    val command = SemanticUiCommand.action("main", action_name)
+    val event = semantic_ui_command_to_event(command)
+    assert_true(event != nil)
+    app.handle_event(event)
+
+fn _lab_dispatch_type(app: SimpleLabApp, target_id: text, value: text):
+    """Edit a cell's source through the shared semantic command vocabulary
+    (`SemanticUiCommand.type_text` -> `UIEvent.InputChange`). See the
+    nil-check note on `_lab_dispatch_action`."""
+    val command = SemanticUiCommand.type_text("main", target_id, value)
+    val event = semantic_ui_command_to_event(command)
+    assert_true(event != nil)
+    app.handle_event(event)
+
+describe "Simple Lab UI (semantic state, S1)":
+    it "starts with one empty cell":
+        val app = SimpleLabApp.create()
+        val snapshot = _lab_snapshot(app)
+        assert_true(_lab_element_exists(snapshot, "cell_0"))
+        assert_false(_lab_element_exists(snapshot, "cell_1"))
+        expect(_lab_prop(snapshot, "cell_0_editor", "value")).to_equal("")
+        expect(_lab_prop(snapshot, "cell_0_output", "content")).to_equal("")
+
+    it "adds a cell through the shared command vocabulary (read-after-write)":
+        val app = SimpleLabApp.create()
+        _lab_dispatch_action(app, "lab_add_cell")
+        val snapshot = _lab_snapshot(app)
+        assert_true(_lab_element_exists(snapshot, "cell_0"))
+        assert_true(_lab_element_exists(snapshot, "cell_1"))
+
+    it "edits a cell's source through InputChange (read-after-write)":
+        val app = SimpleLabApp.create()
+        _lab_dispatch_type(app, "cell_0_editor", "print(\"42 from Simple Lab\")")
+        val snapshot = _lab_snapshot(app)
+        expect(_lab_prop(snapshot, "cell_0_editor", "value")).to_equal("print(\"42 from Simple Lab\")")
+        expect(_lab_prop(snapshot, "cell_0_output", "content")).to_equal("")
+        expect(_lab_prop(snapshot, "cell_0_lane_badge", "content")).to_equal("not run")
+
+    it "runs a cell through KernelSessionManager and reads the captured output back":
+        val app = SimpleLabApp.create()
+        _lab_dispatch_type(app, "cell_0_editor", "print(\"42 from Simple Lab\")")
+        _lab_dispatch_action(app, "cell_run_0")
+        val snapshot = _lab_snapshot(app)
+        expect(_lab_prop(snapshot, "cell_0_output", "content")).to_contain("42 from Simple Lab")
+        expect(_lab_prop(snapshot, "cell_0_lane_badge", "content")).to_equal("available")

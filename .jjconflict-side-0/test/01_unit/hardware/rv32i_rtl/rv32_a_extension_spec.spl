@@ -1,0 +1,62 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.a_extension.{rv32a_decode, rv32a_compute, rv32a_lr_set}
+use std.hardware.rv32i_rtl.a_extension.{rv32a_sc_check_and_clear, rv32a_invalidate_store}
+use std.hardware.rv32i_rtl.a_extension.{Rv32AExternalWrite, rv32a_invalidate_amo, rv32a_invalidate_external_write}
+use std.hardware.rv32i_rtl.a_extension.{RV32A_AMO_ADD, RV32A_AMO_SWAP, RV32A_AMO_LR, RV32A_AMO_SC}
+use std.hardware.rv32i_rtl.a_extension.{RV32A_AMO_XOR, RV32A_AMO_OR, RV32A_AMO_AND}
+use std.hardware.rv32i_rtl.a_extension.{RV32A_AMO_MIN, RV32A_AMO_MAX, RV32A_AMO_MINU, RV32A_AMO_MAXU}
+
+fn amo_w(operation: u32, acquire: u32, release: u32, rs2: u32) -> u32:
+    (operation << 27) | (acquire << 26) | (release << 25) | (rs2 << 20) |
+        (2 << 12) | 0x2F
+
+describe "RV32A frozen helper lane":
+    it "decodes AMO.W operations and every aq/rl combination":
+        val ordered = rv32a_decode(amo_w(RV32A_AMO_ADD, 1, 1, 2))
+        expect(ordered.matched).to_be(true)
+        expect(ordered.operation).to_equal(RV32A_AMO_ADD)
+        expect(ordered.acquire).to_be(true)
+        expect(ordered.release).to_be(true)
+        expect(rv32a_decode(amo_w(RV32A_AMO_LR, 0, 1, 0)).matched).to_be(true)
+        expect(rv32a_decode(amo_w(RV32A_AMO_LR, 0, 0, 1)).matched).to_be(false)
+        expect(rv32a_decode(0x0000002F).matched).to_be(false)
+
+    it "computes every AMO.W operation at 32-bit signed and unsigned width":
+        expect(rv32a_compute(RV32A_AMO_SWAP, 1, 9)).to_equal(9)
+        expect(rv32a_compute(RV32A_AMO_ADD, 0xFFFFFFFF, 2)).to_equal(1)
+        expect(rv32a_compute(RV32A_AMO_XOR, 0xF0F0, 0x0FF0)).to_equal(0xFF00)
+        expect(rv32a_compute(RV32A_AMO_OR, 0xF000, 0x0F00)).to_equal(0xFF00)
+        expect(rv32a_compute(RV32A_AMO_AND, 0xF0F0, 0x0FF0)).to_equal(0x00F0)
+        expect(rv32a_compute(RV32A_AMO_MIN, 0x80000000, 1)).to_equal(0x80000000)
+        expect(rv32a_compute(RV32A_AMO_MAX, 0x80000000, 1)).to_equal(1)
+        expect(rv32a_compute(RV32A_AMO_MINU, 0xFFFFFFFF, 1)).to_equal(1)
+        expect(rv32a_compute(RV32A_AMO_MAXU, 0xFFFFFFFF, 1)).to_equal(0xFFFFFFFF)
+        expect(rv32a_compute(RV32A_AMO_LR, 7, 9)).to_equal(7)
+        expect(rv32a_compute(RV32A_AMO_SC, 7, 9)).to_equal(7)
+
+    it "tracks translated physical word reservations through every invalidator":
+        expect(rv32a_lr_set(0x1007).valid).to_be(false)
+        val reservation = rv32a_lr_set(0x1004)
+        expect(reservation.valid).to_be(true)
+        expect(reservation.physical_word_address).to_equal(0x1004)
+        val success = rv32a_sc_check_and_clear(reservation, 0x1004)
+        expect(success.store_allowed).to_be(true)
+        expect(success.reservation.valid).to_be(false)
+        expect(rv32a_sc_check_and_clear(reservation, 0x1008).store_allowed).to_be(false)
+        expect(rv32a_invalidate_store(reservation, 0x1006, 1).valid).to_be(false)
+        expect(rv32a_invalidate_amo(reservation, 0x1004).valid).to_be(false)
+        val external = Rv32AExternalWrite(valid: true, physical_address: 0x1004, size_bytes: 4)
+        expect(rv32a_invalidate_external_write(reservation, external).valid).to_be(false)
+
+    it "tracks LR/SC and invalidation above the RV32 virtual address width":
+        val high_address: i64 = 0x100001004
+        val reservation = rv32a_lr_set(high_address)
+        expect(reservation.valid).to_be(true)
+        expect(reservation.physical_word_address).to_equal(high_address)
+        expect(rv32a_sc_check_and_clear(reservation, high_address).store_allowed).to_be(true)
+        expect(rv32a_sc_check_and_clear(reservation, 0x1004).store_allowed).to_be(false)
+        expect(rv32a_invalidate_store(reservation, high_address + 2, 1).valid).to_be(false)
+        expect(rv32a_invalidate_amo(reservation, high_address).valid).to_be(false)
+        val external = Rv32AExternalWrite(valid: true,
+            physical_address: high_address, size_bytes: 4)
+        expect(rv32a_invalidate_external_write(reservation, external).valid).to_be(false)

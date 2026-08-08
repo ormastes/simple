@@ -1,0 +1,35 @@
+use std.spec.*
+use os.kernel.memory.memory_swap.{memory_swap_store_new}
+
+describe "SimpleOS memory swap owner":
+
+    it "round trips copied bytes and releases only after restore":
+        val store = memory_swap_store_new(true, 2)
+        var source: [u8] = [17, 34, 51, 68]
+        val written = store.write(41, 0, source)
+        source[0] = 255
+
+        expect(written.ok).to_equal(true)
+        expect(written.slot_id).to_equal(1)
+
+        val restored = store.read(written.slot_id, 41, 0)
+        expect(restored.ok).to_equal(true)
+        expect(restored.bytes).to_equal([17, 34, 51, 68])
+        expect(store.snapshot().occupied_slots).to_equal(1)
+
+        val released = store.release(written.slot_id, 41)
+        expect(released.ok).to_equal(true)
+        expect(store.snapshot().occupied_slots).to_equal(0)
+        expect(store.read(written.slot_id, 41, 0).reason).to_equal("missing-slot")
+
+    it "reports disabled full stale and checksum failures":
+        val disabled = memory_swap_store_new(false, 1)
+        expect(disabled.write(1, 0, [1]).reason).to_equal("swap-disabled")
+
+        val store = memory_swap_store_new(true, 1)
+        val written = store.write(1, 0, [1, 2, 3])
+        expect(store.write(2, 0, [4]).reason).to_equal("swap-full")
+        expect(store.read(written.slot_id, 2, 0).reason).to_equal("stale-mapping")
+        expect(store.corrupt_for_test(written.slot_id)).to_equal(true)
+        expect(store.read(written.slot_id, 1, 0).reason).to_equal("swap-checksum")
+        expect(store.release(written.slot_id, 2).reason).to_equal("not-owner")

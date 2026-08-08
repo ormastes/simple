@@ -1,0 +1,80 @@
+"""Shared, fail-closed contract for ProcessingIR backend artifacts and evidence."""
+
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+
+enum ProcessingBackendTarget:
+    VulkanSpirv
+    CudaPtx
+    MetalMsl
+    DirectXHlsl
+
+struct ProcessingBackendArtifact:
+    target: ProcessingBackendTarget
+    format: text
+    entry_point: text
+    source: text
+    binary: [u8]
+    semantic_key: text
+    valid: bool
+    reason: text
+
+struct ProcessingCompileEvidence:
+    target: ProcessingBackendTarget
+    artifact_valid: bool
+    compiler_succeeded: bool
+    validator_succeeded: bool
+    compiler_identity: text
+    validator_identity: text
+    reason: text
+
+struct ProcessingDeviceReadbackEvidence:
+    target: ProcessingBackendTarget
+    submitted: bool
+    device_origin: bool
+    oracle_match: bool
+    device_identity: i64
+    values: [u32]
+    reason: text
+
+fn processing_backend_target_name(target: ProcessingBackendTarget) -> text:
+    match target:
+        case ProcessingBackendTarget.VulkanSpirv: "vulkan-spirv"
+        case ProcessingBackendTarget.CudaPtx: "cuda-ptx"
+        case ProcessingBackendTarget.MetalMsl: "metal-msl"
+        case ProcessingBackendTarget.DirectXHlsl: "directx-hlsl"
+
+fn processing_backend_target_format(target: ProcessingBackendTarget) -> text:
+    match target:
+        case ProcessingBackendTarget.VulkanSpirv: "spirv"
+        case ProcessingBackendTarget.CudaPtx: "ptx"
+        case ProcessingBackendTarget.MetalMsl: "msl"
+        case ProcessingBackendTarget.DirectXHlsl: "hlsl"
+
+fn processing_backend_semantic_key(ir: ProcessingIr, target: ProcessingBackendTarget) -> text:
+    "processing-ir-v2|{processing_backend_target_name(target)}|op={ir.op}|count={ir.element_count}|value={ir.value}|width={ir.width}|height={ir.height}|stride={ir.stride}|x={ir.x}|y={ir.y}|rect_width={ir.rect_width}|rect_height={ir.rect_height}"
+
+fn processing_backend_artifact_reject(ir: ProcessingIr, target: ProcessingBackendTarget, reason: text) -> ProcessingBackendArtifact:
+    ProcessingBackendArtifact(
+        target: target, format: processing_backend_target_format(target),
+        entry_point: "", source: "", binary: [], semantic_key: processing_backend_semantic_key(ir, target),
+        valid: false, reason: reason)
+
+fn processing_backend_artifact_validate(ir: ProcessingIr, artifact: ProcessingBackendArtifact) -> text:
+    val validation = processing_ir_validate(ir)
+    if not validation.valid:
+        return validation.reason
+    if not artifact.valid or artifact.reason != "ok":
+        return if artifact.reason == "": "artifact-invalid" else: artifact.reason
+    if artifact.format != processing_backend_target_format(artifact.target):
+        return "artifact-format-mismatch"
+    if artifact.entry_point == "" or (artifact.source == "" and artifact.binary.len() == 0):
+        return "artifact-payload-missing"
+    if artifact.semantic_key != processing_backend_semantic_key(ir, artifact.target):
+        return "artifact-semantic-key-mismatch"
+    "ok"
+
+export ProcessingBackendTarget, ProcessingBackendArtifact
+export ProcessingCompileEvidence, ProcessingDeviceReadbackEvidence
+export processing_backend_target_name, processing_backend_target_format
+export processing_backend_semantic_key, processing_backend_artifact_reject
+export processing_backend_artifact_validate

@@ -1,0 +1,134 @@
+"""
+# No-GC Sync Mutex Backend
+
+Synchronous mutex runtime-hook owner for no-GC library families.
+Async compatibility modules should import or re-export this backend instead of
+declaring duplicate lock hooks.
+"""
+
+# --- SFFI declarations ---
+extern fn rt_mutex_new(initial: Any) -> Any
+extern fn rt_mutex_lock(mutex: Any) -> Any
+extern fn rt_mutex_try_lock(mutex: Any) -> Any
+extern fn rt_mutex_unlock(mutex: Any, new_value: Any) -> Any
+
+# --- Mutex ---
+# @tag:api
+#
+# Handle to a mutual exclusion lock protecting a value.
+# Only one thread can hold the lock at any time.
+
+class Mutex:
+    _handle: Any  # Runtime mutex handle (opaque)
+
+    # Runs `f` while holding the lock, then releases — the guard pattern.
+    #
+    # Locks, calls `f(current_value)`, stores `f`'s return as the new
+    # protected value, unlocks, and returns the new value. The lock is
+    # held only for the duration of `f`; use-after-unlock is impossible
+    # by construction (no lock token ever escapes).
+    #
+    # Chosen over a `defer`/`with`-based RAII guard because those are
+    # compiler-only features (skipped in interpreter mode; see bug #172:
+    # FlatAstBridge silently drops Defer statements) — this closure form
+    # behaves identically on both engines.
+    #
+    # Generic over `T`, NOT `Any`: an `Any`-typed closure parameter
+    # silently destroys the value passed through it (verified: calling
+    # a `fn(Any) -> Any` callback through an `Any`-typed higher-order
+    # parameter returns `nil` instead of the real value — see
+    # doc/08_tracking/bug/any_typed_closure_param_destroys_value_2026-07-28.md).
+    # `<T>` round-trips correctly; `Any` does not.
+    # @tag:api
+    fn with_lock<T>(f: fn(T) -> T) -> T:
+        val current = rt_mutex_lock(self._handle)
+        val updated = f(current)
+        rt_mutex_unlock(self._handle, updated)
+        updated
+
+    # DEPRECATED: prefer with_lock(f) — manual lock() with no matching
+    # unlock() leaks the lock forever (no RAII guard exists). Kept for
+    # compatibility; removal is a later profile decision.
+    #
+    # Acquires lock and returns protected value (blocking).
+    # Blocks current thread until lock is available.
+    # Must call unlock() to release - no automatic unlock.
+    # @tag:api
+    fn lock() -> Any:
+        rt_mutex_lock(self._handle)
+
+    # Non-blocking lock attempt - returns nil if lock held.
+    # Returns protected value if lock acquired successfully.
+    # If successful, must call unlock() to release.
+    # @tag:api
+    fn try_lock() -> Any:
+        rt_mutex_try_lock(self._handle)
+
+    # DEPRECATED: prefer with_lock(f) — see lock().
+    # Releases lock and updates protected value atomically.
+    # new_value becomes the new protected value.
+    # After unlock, other threads can acquire the lock.
+    # @tag:api
+    fn unlock(new_value: Any) -> Any:
+        rt_mutex_unlock(self._handle, new_value)
+
+# --- API ---
+
+# Creates a new mutex protecting the given initial value.
+# Lock starts in unlocked state - first lock() succeeds immediately.
+# @tag:api
+fn mutex_new(initial: Any) -> Mutex:
+    val handle = rt_mutex_new(initial)
+    Mutex(_handle: handle)
+
+# Free-function forms keep the Mutex value in an explicit argument. Use these
+# in pure-native paths until method-call lowering reliably preserves receivers.
+
+# Guard-pattern free function: locks, runs `f(current)`, stores the result as
+# the new protected value, unlocks, returns the new value. Preferred form.
+#
+# Calls `f(current)` DIRECTLY (no intermediate trampoline function) — mirrors
+# rwlock_with_read's shape below, which is the single-hop closure-call form
+# verified to round-trip values on both engines. A prior revision routed the
+# call through a `_mutex_apply(f, v) -> f(v)` trampoline "to keep the callback
+# invocation as the final expression of its own frame"; that EXTRA hop is what
+# actually hangs — a two-hop cross-module closure invocation while the real
+# native mutex lock is held reliably deadlocks the interpreter (single-hop
+# cross-module closure calls, and any-hop same-module closure calls, do not).
+# Minimal repro and full bisection:
+# doc/08_tracking/bug/cross_module_closure_call_hangs_under_held_native_lock_2026-07-28.md
+#
+# Generic over `T` — see with_lock above for why `Any` is rejected here.
+fn mutex_with_lock<T>(mutex: Mutex, f: fn(T) -> T) -> T:
+    val updated = f(rt_mutex_lock(mutex._handle))
+    rt_mutex_unlock(mutex._handle, updated)
+    updated
+
+# Guard-pattern variant for callers using the mutex purely as an exclusion
+# gate/semaphore (its "protected value" is a fixed placeholder, never real
+# data — see RwLock._write_gate). Locks the gate, runs `f()` (the gate's own
+# stored sentinel is never meaningful, so `f` takes no argument instead of an
+# ignored one), stores `keep_value` (NOT f's result) back into the mutex
+# slot, unlocks, and returns f's result to the caller. Same single-hop
+# direct-call shape as mutex_with_lock (see the comment there for why the
+# call must stay direct).
+#
+# Generic over `T` (f's real result type, e.g. the RwLock's protected value)
+# — `keep_value` stays `Any` on purpose: it is always the fixed gate
+# sentinel, never real data, so it never round-trips through user code.
+fn mutex_with_lock_keeping<T>(mutex: Mutex, keep_value: Any, f: fn() -> T) -> T:
+    rt_mutex_lock(mutex._handle)
+    val result = f()
+    rt_mutex_unlock(mutex._handle, keep_value)
+    result
+
+# DEPRECATED: prefer mutex_with_lock — manual lock/unlock pairing is unguarded.
+fn mutex_lock(mutex: Mutex) -> Any:
+    rt_mutex_lock(mutex._handle)
+
+fn mutex_try_lock(mutex: Mutex) -> Any:
+    rt_mutex_try_lock(mutex._handle)
+
+# DEPRECATED: prefer mutex_with_lock — see mutex_lock.
+fn mutex_unlock(mutex: Mutex, new_value: Any) -> Any:
+    rt_mutex_unlock(mutex._handle, new_value)

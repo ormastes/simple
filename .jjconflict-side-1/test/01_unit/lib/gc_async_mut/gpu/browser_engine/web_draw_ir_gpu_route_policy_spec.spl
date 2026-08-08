@@ -1,0 +1,77 @@
+# @tag: web, draw-ir, gpu, policy
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl
+
+use std.spec.{describe, context, it, expect}
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_draw_ir_gpu_route_last_evidence,
+    web_draw_ir_gpu_route_policy_consult_count,
+    web_draw_ir_gpu_route_policy_reset
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_gpu_paint_timing_evidence
+}
+
+describe "Draw IR GPU route policy receipts":
+
+    context "reset and copied evidence defaults":
+        it "starts unavailable without consulting a renderer":
+            web_draw_ir_gpu_route_policy_reset()
+            val evidence = web_draw_ir_gpu_route_last_evidence()
+            expect(web_draw_ir_gpu_route_policy_consult_count()).to_equal(0)
+            expect(evidence.backend_name).to_equal("")
+            expect(evidence.available).to_equal(false)
+            expect(evidence.sample_count).to_equal(0)
+            expect(evidence.should_offload).to_equal(false)
+            expect(evidence.reason).to_equal("timing-unavailable")
+
+        it "returns a value copy rather than a mutable cache object":
+            web_draw_ir_gpu_route_policy_reset()
+            val first = web_draw_ir_gpu_route_last_evidence()
+            first.backend_name = "changed"
+            val second = web_draw_ir_gpu_route_last_evidence()
+            expect(second.backend_name).to_equal("")
+            expect(second.reason).to_equal("timing-unavailable")
+
+    context "pure measured evidence":
+        it "requires three paired samples and a strict 100us margin":
+            val pending = web_gpu_paint_timing_evidence(
+                "vulkan", 900, 1000, 600, 700, 2, true, true, true)
+            val tie = web_gpu_paint_timing_evidence(
+                "vulkan", 900, 1000, 600, 900, 3, true, true, true)
+            val winner = web_gpu_paint_timing_evidence(
+                "vulkan", 900, 1000, 600, 800, 3, true, true, true)
+            expect(pending.available).to_equal(false)
+            expect(pending.reason).to_equal("timing-unavailable")
+            expect(tie.available).to_equal(true)
+            expect(tie.should_offload).to_equal(false)
+            expect(winner.available).to_equal(true)
+            expect(winner.should_offload).to_equal(true)
+            expect(winner.reason).to_equal("measured-gpu-faster")
+
+        it "fails closed on parity or device provenance failure":
+            val mismatch = web_gpu_paint_timing_evidence(
+                "cuda", 900, 1000, 600, 700, 3, false, true, true)
+            val unproven = web_gpu_paint_timing_evidence(
+                "metal", 900, 1000, 600, 700, 3, true, true, false)
+            val skipped = web_gpu_paint_timing_evidence(
+                "vulkan", 900, 1000, 600, 700, 3, true, true, true, false)
+            expect(mismatch.available).to_equal(false)
+            expect(mismatch.should_offload).to_equal(false)
+            expect(mismatch.reason).to_equal("pixel-mismatch")
+            expect(unproven.available).to_equal(false)
+            expect(unproven.should_offload).to_equal(false)
+            expect(unproven.reason).to_equal("device-proof-unavailable")
+            expect(skipped.available).to_equal(false)
+            expect(skipped.pixels_match).to_equal(true)
+            expect(skipped.commands_complete).to_equal(false)
+            expect(skipped.reason).to_equal("commands-skipped")
+
+    context "completed route recovery":
+        it "evicts failed device evidence so the next frame recalibrates":
+            val source = file_read(
+                "src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl")
+            expect(source).to_contain("_web_draw_ir_route_states.remove(invalidated)")
+            expect(source).to_contain(
+                "_web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(failed_evidence)")
+            expect(source.contains("_web_draw_ir_invalidate_state")).to_equal(false)

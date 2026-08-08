@@ -1,0 +1,151 @@
+# Dedicated host startup contract unit specification.
+
+use std.spec.{describe, it, expect}
+use common.platform.dedicated_host.{
+    DedicatedHost,
+    HOST_MAP_ANONYMOUS,
+    HOST_MAP_PRIVATE,
+    HOST_MAP_SHARED,
+    HOST_PROT_READ,
+    HOST_PROT_WRITE,
+    HostFilePreload,
+    HostMapRequest,
+    HostMappedRegion,
+    host_file_preload_error,
+    host_file_preload_success,
+    host_map_error,
+    host_map_is_anonymous_private,
+    host_mapped_region_releasable,
+    host_map_request,
+    host_map_request_error,
+    host_map_request_valid,
+    host_map_success,
+    host_protection_error
+}
+use app.startup.host_startup.{startup_before_main, startup_parse_file_arguments}
+use os.kernel.loader.artifact_manifest.{
+    ManifestArgument,
+    ManifestPreload,
+    manifest_for_kind,
+    manifest_kind_native_simple,
+    manifest_with_startup
+}
+
+class FakeDedicatedHost:
+    identity: text
+
+    static fn create() -> FakeDedicatedHost:
+        FakeDedicatedHost(identity: "fake")
+
+impl DedicatedHost for FakeDedicatedHost:
+    fn host_name() -> text: self.identity
+    fn page_size() -> i64: 4096
+    fn supports_file_backed_mmap() -> bool: true
+    fn supports_shared_writable_mmap() -> bool: false
+    me mmap(request: HostMapRequest) -> HostMappedRegion:
+        host_map_error(self.identity, -95, "not-used-by-startup-preload-spec")
+    me mprotect(region: HostMappedRegion, protection: i64) -> bool:
+        false
+    me munmap(region: HostMappedRegion) -> bool:
+        false
+    me preload_readonly_file(path: text, page_size: i64) -> HostFilePreload:
+        if path == "/missing":
+            return host_file_preload_error(path, self.identity, -2, "file-not-found")
+        val bytes: [u8] = [1u8, 2u8, 3u8, 4u8]
+        host_file_preload_success(path, bytes, page_size, self.identity, "fake-map", true)
+
+fn _file_argument(required: bool = true) -> ManifestArgument:
+    ManifestArgument(name: "-f", value_kind: "path", required: required, default_value: "")
+
+fn _preload(source_arg: text, fixed_path: text, required: bool = true, maximum_bytes: i64 = 64) -> ManifestPreload:
+    ManifestPreload(
+        source_arg: source_arg,
+        fixed_path: fixed_path,
+        mode: "map_read_only",
+        required: required,
+        maximum_bytes: maximum_bytes,
+        access: "read",
+        prefault: true,
+        hash_policy: "verify"
+    )
+
+describe "dedicated host mmap contract":
+    it "accepts a page-aligned POSIX private file mapping request":
+        val request = host_map_request(0, 8192, HOST_PROT_READ, HOST_MAP_PRIVATE, 7, 0)
+        expect(host_map_request_error(request, 4096)).to_equal("")
+        expect(host_map_request_valid(request, 4096)).to_equal(true)
+        expect(host_map_is_anonymous_private(request)).to_equal(false)
+
+    it "accepts the anonymous private subset implemented by SimpleOS":
+        val request = host_map_request(0, 4096, HOST_PROT_READ | HOST_PROT_WRITE, HOST_MAP_PRIVATE | HOST_MAP_ANONYMOUS)
+        expect(host_map_request_valid(request, 4096)).to_equal(true)
+        expect(host_map_is_anonymous_private(request)).to_equal(true)
+
+    it "rejects ambiguous sharing and unaligned file offsets":
+        val sharing = host_map_request(0, 4096, HOST_PROT_READ, HOST_MAP_PRIVATE | HOST_MAP_SHARED, 4, 0)
+        val offset = host_map_request(0, 4096, HOST_PROT_READ, HOST_MAP_PRIVATE, 4, 3)
+        expect(host_map_request_error(sharing, 4096)).to_equal("choose-exactly-one-private-or-shared")
+        expect(host_map_request_error(offset, 4096)).to_equal("offset-must-be-page-aligned")
+
+    it "rejects unknown flags and protects only owned live regions":
+        val unknown_flags = host_map_request(0, 4096, HOST_PROT_READ, HOST_MAP_PRIVATE | 0x4000, 4, 0)
+        val live = host_map_success("fake", "native-mmap", 4096, 4096)
+        val failed = host_map_error("fake", -1, "map-failed")
+        expect(host_map_request_error(unknown_flags, 4096)).to_equal("unknown-mapping-flags")
+        expect(host_protection_error(0x4000)).to_equal("unknown-protection-flags")
+        expect(host_mapped_region_releasable(live)).to_equal(true)
+        expect(host_mapped_region_releasable(failed)).to_equal(false)
+
+describe "lightweight manifest startup parser":
+    it "normalizes argv zero and parses only a declared file argument":
+        val parsed = startup_parse_file_arguments("hello", ["-f", "/sys/input.txt", "--app-option"], [_file_argument()])
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.program_args[0]).to_equal("hello")
+        expect(parsed.program_args.len()).to_equal(4)
+        expect(parsed.values.len()).to_equal(1)
+        expect(parsed.values[0].name).to_equal("-f")
+        expect(parsed.values[0].value).to_equal("/sys/input.txt")
+
+    it "fails closed for a duplicate or missing required file argument":
+        val duplicate = startup_parse_file_arguments("hello", ["-f", "a", "-f", "b"], [_file_argument()])
+        val missing = startup_parse_file_arguments("hello", [], [_file_argument()])
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.error).to_equal("duplicate-argument:-f")
+        expect(missing.ok).to_equal(false)
+        expect(missing.error).to_equal("missing-required-argument:-f")
+
+describe "manifest startup preloads complete before main admission":
+    it "loads a declared source argument through only the dedicated host":
+        val manifest = manifest_with_startup(
+            manifest_for_kind(manifest_kind_native_simple()),
+            [_file_argument()],
+            [_preload("-f", "")]
+        )
+        val result = startup_before_main(FakeDedicatedHost.create(), "hello", ["-f", "/sys/input.txt"], manifest)
+        expect(result.ok).to_equal(true)
+        expect(result.phase).to_equal("ready-before-main")
+        expect(result.preloads.len()).to_equal(1)
+        expect(result.preloads[0].path).to_equal("/sys/input.txt")
+        expect(result.preloads[0].byte_count).to_equal(4)
+        expect(result.preloads[0].native_mapping_used).to_equal(true)
+
+    it "blocks before main when a required preload fails":
+        val manifest = manifest_with_startup(
+            manifest_for_kind(manifest_kind_native_simple()),
+            [_file_argument()],
+            [_preload("-f", "")]
+        )
+        val result = startup_before_main(FakeDedicatedHost.create(), "hello", ["-f", "/missing"], manifest)
+        expect(result.ok).to_equal(false)
+        expect(result.phase).to_equal("blocked-before-main")
+        expect(result.error).to_equal("required-preload-failed:/missing:file-not-found")
+
+    it "enforces the manifest maximum bytes before main":
+        val manifest = manifest_with_startup(
+            manifest_for_kind(manifest_kind_native_simple()),
+            [],
+            [_preload("", "/fixed", true, 3)]
+        )
+        val result = startup_before_main(FakeDedicatedHost.create(), "hello", [], manifest)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("preload-maximum-bytes-exceeded:/fixed")

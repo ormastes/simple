@@ -1,0 +1,109 @@
+# DrawIR v3 Ports — frozen C0 contract: PackedDrawPort + backend capability
+# bitset for the GPU WebScene lane.
+#
+# Contract source (frozen; field names, bit assignments and method shapes are
+# authoritative):
+#   doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md
+#     §7 "Minimizing CPU fallback" (backend scheduling tiers / fallback
+#     hierarchy), §9 "Stable ports" (`GpuPackedDrawPort`, `GpuMediaSurfacePort`),
+#     §12 I1 "DrawIR v3 contract" (`PackedDrawPort`) and I6 "GPU count/scan/emit
+#     and Prepared2D" (no host readback).
+# Shared lane rules:
+#   doc/03_plan/platform/structural_compute/README.md
+#
+# WHY THIS EXISTS
+# The scene/patch submission surface between the DrawIR v3 arenas (I1-I3) and
+# every backend scheduling tier (W7/W8*, I10*) has to be frozen before those
+# groups can implement in parallel (isolation rule 2/3). This file is that
+# freeze: a sealed submit/present port plus a single capability bitset so a
+# scheduler can pick a tier (plan §7 Tier 0 portable compute passes, Tier 1
+# indirect dispatch, Tier 2 device-generated/indirect-command/work-graph/
+# persistent-kernel variants) without probing backend internals. Capability
+# bits are additive-only; a backend reports what it truly implements, and
+# `capabilities()` is the only signal a scheduler is allowed to route on
+# (plan §7 "Avoiding accidental fallback": no silent `SoftwareBackend` calls).
+#
+# `PackedDrawPort` never reads pixels back and never receives raw DOM/style/
+# layout state (plan §9 visibility rules: those pools stay private to
+# `GpuWebServiceCapsule`). Submission is scene-generation scoped so a stale
+# submit is rejectable by the same generation check used elsewhere in this
+# lane (`GpuSceneEpochPort` in `gpu_web_ports.spl`).
+#
+# After C0 is merged, this file is read-only until an explicit schema-version
+# change (isolation rule 3). Naming mirrors `DRAW_IR_V3_SCHEMA_VERSION` in
+# `draw_ir_v3.spl`.
+
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+
+pub val DRAW_IR_V3_PORTS_SCHEMA_VERSION: text = "simple-draw-ir-v3-ports-v1"
+pub val DRAW_IR_V3_PORTS_SCHEMA_ID: u32 = 1u32
+
+# ---------------------------------------------------------------------------
+# Backend capability bitset (plan §7 fallback hierarchy / backend scheduling
+# tiers). Single bits so a backend's supported set is one u32 OR of these.
+# ---------------------------------------------------------------------------
+
+# Tier 0: portable explicit compute passes.
+pub val DRAW_IR_V3_CAP_COMPUTE_PASSES: u32 = 1u32
+
+# Tier 1: indirect dispatch/draw.
+pub val DRAW_IR_V3_CAP_INDIRECT_DISPATCH: u32 = 2u32
+
+# Tier 2 variants (plan §7, one bit per device-generated-work mechanism).
+pub val DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS: u32 = 4u32
+pub val DRAW_IR_V3_CAP_INDIRECT_COMMAND_BUFFERS: u32 = 8u32
+pub val DRAW_IR_V3_CAP_WORK_GRAPHS: u32 = 16u32
+pub val DRAW_IR_V3_CAP_PERSISTENT_KERNEL: u32 = 32u32
+
+# Presentation/media capabilities (plan §9 `GpuMediaSurfacePort`, §7 "no
+# production pixel readback").
+pub val DRAW_IR_V3_CAP_DIRECT_PRESENT: u32 = 64u32
+pub val DRAW_IR_V3_CAP_ZERO_COPY_VIDEO: u32 = 128u32
+
+# ---------------------------------------------------------------------------
+# Frozen receipt record
+# ---------------------------------------------------------------------------
+
+# One submit/present receipt. `route` and `fallback_level` are numeric so a
+# receipt names exactly which backend tier ran and which fallback hierarchy
+# level (plan §7 L0-L5) applied, without ever carrying pixels or full scene
+# state back to the CPU.
+struct DrawIrV3SubmitReceipt:
+    scene_generation: u64
+    accepted: bool
+    route: u16
+    fallback_level: u16
+    elapsed_us: u64
+    deterministic_hash_lo: u64
+    deterministic_hash_hi: u64
+
+# ---------------------------------------------------------------------------
+# Stable ports (plan §9, §12 I1). Contract is method shape only — no state,
+# no defaults, no backend handles.
+# ---------------------------------------------------------------------------
+
+trait PackedDrawPort:
+    """Sealed DrawIR v3 scene/patch submission; no host readback on the healthy path."""
+    fn capabilities() -> u32
+    fn submit_scene(scene: DrawIrV3Scene) -> DrawIrV3SubmitReceipt
+    fn submit_patch(scene_generation: u64, patch_op_count: i64) -> DrawIrV3SubmitReceipt
+    fn present(scene_generation: u64) -> bool
+
+trait GpuMediaSurfacePort:
+    """Zero-copy device media surface registration; no decoded-pixel round trip (plan §5)."""
+    fn register_surface(resource_id: u32, width: u32, height: u32) -> bool
+    fn release_surface(resource_id: u32) -> bool
+
+trait DrawIrV3CpuOraclePort:
+    """CPU reference sink; test/shadow mode only."""
+    fn hash_scene(scene: DrawIrV3Scene) -> u64
+    fn count_commands(scene: DrawIrV3Scene) -> i64
+
+export DRAW_IR_V3_PORTS_SCHEMA_VERSION, DRAW_IR_V3_PORTS_SCHEMA_ID,
+    DRAW_IR_V3_CAP_COMPUTE_PASSES, DRAW_IR_V3_CAP_INDIRECT_DISPATCH,
+    DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS, DRAW_IR_V3_CAP_INDIRECT_COMMAND_BUFFERS,
+    DRAW_IR_V3_CAP_WORK_GRAPHS, DRAW_IR_V3_CAP_PERSISTENT_KERNEL,
+    DRAW_IR_V3_CAP_DIRECT_PRESENT, DRAW_IR_V3_CAP_ZERO_COPY_VIDEO,
+    DrawIrV3SubmitReceipt,
+    PackedDrawPort, GpuMediaSurfacePort, DrawIrV3CpuOraclePort
+

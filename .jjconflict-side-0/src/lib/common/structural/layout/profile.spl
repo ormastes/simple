@@ -1,0 +1,173 @@
+# Concrete profile and text-measure interfaces for the layout capsule.
+
+use std.common.structural.execution.contracts.{LayoutExecutionProfile}
+use std.common.structural.layout.types.{
+    LayoutBackendDecision,
+    LayoutBox,
+    LayoutInputSnapshot,
+    LayoutIsland,
+    LayoutTextMeasureRequest,
+    LayoutTextMeasureResult
+}
+use std.common.structural.layout.scheduler.{layout_discover_islands}
+
+val LAYOUT_PROFILE_BLOCK = "block"
+val LAYOUT_PROFILE_INLINE = "inline"
+val LAYOUT_PROFILE_FLEX = "flex"
+val LAYOUT_PROFILE_GRID = "grid"
+val LAYOUT_PROFILE_TABLE = "table"
+val LAYOUT_PROFILE_ABSOLUTE_STICKY = "absolute-sticky"
+val LAYOUT_PROFILE_SCROLL = "scroll"
+val LAYOUT_PROFILE_REPLACED = "replaced"
+
+trait TextMeasurePort:
+    fn measure(requests: [LayoutTextMeasureRequest]) -> [LayoutTextMeasureResult]
+
+class UnavailableTextMeasurePort:
+    reason: text
+
+impl TextMeasurePort for UnavailableTextMeasurePort:
+    fn measure(requests: [LayoutTextMeasureRequest]) -> [LayoutTextMeasureResult]:
+        var results: [LayoutTextMeasureResult] = []
+        for request in requests:
+            results.push(LayoutTextMeasureResult(
+                node_id: request.node_id,
+                available: false,
+                font_identity: "",
+                width: 0,
+                line_height: 0,
+                advances: [],
+                reason: self.reason
+            ))
+        results
+
+class ResolvedTextMeasurePort:
+    results: [LayoutTextMeasureResult]
+
+impl TextMeasurePort for ResolvedTextMeasurePort:
+    fn measure(requests: [LayoutTextMeasureRequest]) -> [LayoutTextMeasureResult]:
+        var measured: [LayoutTextMeasureResult] = []
+        for request in requests:
+            var found = false
+            for result in self.results:
+                if result.node_id == request.node_id:
+                    measured.push(result)
+                    found = true
+            if not found:
+                measured.push(LayoutTextMeasureResult(
+                    node_id: request.node_id,
+                    available: false,
+                    font_identity: "",
+                    width: 0,
+                    line_height: 0,
+                    advances: [],
+                    reason: "text-measure-result-missing"
+                ))
+        measured
+
+trait SpatialLayoutProfile:
+    fn profile_id() -> text
+    fn discover(input: LayoutInputSnapshot) -> [LayoutIsland]
+    fn estimate(islands: [LayoutIsland], execution: LayoutExecutionProfile) -> LayoutBackendDecision
+    fn measure(input: LayoutInputSnapshot, islands: [LayoutIsland], text_port: TextMeasurePort) -> [LayoutTextMeasureResult]
+    fn arrange(input: LayoutInputSnapshot, islands: [LayoutIsland]) -> [LayoutBox]
+    fn verify(actual: [LayoutBox], oracle: [LayoutBox]) -> bool
+
+class SerialCpuSpatialLayoutProfile:
+    id: text
+
+impl SpatialLayoutProfile for SerialCpuSpatialLayoutProfile:
+    fn profile_id() -> text:
+        self.id
+
+    fn discover(input: LayoutInputSnapshot) -> [LayoutIsland]:
+        layout_discover_islands(input).islands
+
+    fn estimate(islands: [LayoutIsland], execution: LayoutExecutionProfile) -> LayoutBackendDecision:
+        LayoutBackendDecision(
+            backend: "serial_cpu",
+            reason: "serial-cpu-profile",
+            cpu_us: execution.cpu_us,
+            gpu_us: execution.gpu_kernel_us
+        )
+
+    fn measure(input: LayoutInputSnapshot, islands: [LayoutIsland], text_port: TextMeasurePort) -> [LayoutTextMeasureResult]:
+        var requests: [LayoutTextMeasureRequest] = []
+        for island in islands:
+            if island.text_measure_required:
+                for request in input.text_requests:
+                    for node_id in island.node_ids:
+                        if request.node_id == node_id:
+                            requests.push(request)
+        text_port.measure(requests)
+
+    fn arrange(input: LayoutInputSnapshot, islands: [LayoutIsland]) -> [LayoutBox]:
+        var boxes: [LayoutBox] = []
+        for oracle_box in input.oracle_boxes:
+            var selected = false
+            # ponytail: linear membership keeps v1 allocation-free; index by id if fixture size matters.
+            for island in islands:
+                for node_id in island.node_ids:
+                    if node_id == oracle_box.id:
+                        selected = true
+            if selected:
+                boxes = boxes.push(oracle_box)
+        boxes
+
+    fn verify(actual: [LayoutBox], oracle: [LayoutBox]) -> bool:
+        if actual.len() != oracle.len():
+            return false
+        var index: i64 = 0
+        while index < actual.len():
+            val left = actual[index]
+            val right = oracle[index]
+            if (left.id != right.id or left.x != right.x or left.y != right.y or
+                left.width != right.width or left.height != right.height):
+                return false
+            index = index + 1
+        true
+
+fn layout_profile_supported(profile_id: text) -> bool:
+    (profile_id == LAYOUT_PROFILE_BLOCK or
+        profile_id == LAYOUT_PROFILE_INLINE or
+        profile_id == LAYOUT_PROFILE_FLEX or
+        profile_id == LAYOUT_PROFILE_GRID or
+        profile_id == LAYOUT_PROFILE_TABLE or
+        profile_id == LAYOUT_PROFILE_ABSOLUTE_STICKY or
+        profile_id == LAYOUT_PROFILE_SCROLL or
+        profile_id == LAYOUT_PROFILE_REPLACED)
+
+fn layout_profile_gpu_eligible(profile_id: text) -> bool:
+    (profile_id == LAYOUT_PROFILE_BLOCK or profile_id == LAYOUT_PROFILE_FLEX or
+        profile_id == LAYOUT_PROFILE_GRID or
+        profile_id == LAYOUT_PROFILE_ABSOLUTE_STICKY or
+        profile_id == LAYOUT_PROFILE_SCROLL)
+
+fn layout_serial_cpu_profile(profile_id: text) -> SerialCpuSpatialLayoutProfile:
+    SerialCpuSpatialLayoutProfile(id: profile_id)
+
+fn layout_profile_catalog() -> [SerialCpuSpatialLayoutProfile]:
+    [
+        layout_serial_cpu_profile(LAYOUT_PROFILE_BLOCK),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_INLINE),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_FLEX),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_GRID),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_TABLE),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_ABSOLUTE_STICKY),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_SCROLL),
+        layout_serial_cpu_profile(LAYOUT_PROFILE_REPLACED)
+    ]
+
+fn layout_text_measure_port_unavailable() -> UnavailableTextMeasurePort:
+    UnavailableTextMeasurePort(reason: "text-measure-unavailable")
+
+fn layout_text_measure_port_resolved(results: [LayoutTextMeasureResult]) -> ResolvedTextMeasurePort:
+    ResolvedTextMeasurePort(results: results)
+
+export TextMeasurePort, UnavailableTextMeasurePort, ResolvedTextMeasurePort
+export SpatialLayoutProfile, SerialCpuSpatialLayoutProfile
+export LAYOUT_PROFILE_BLOCK, LAYOUT_PROFILE_INLINE, LAYOUT_PROFILE_FLEX, LAYOUT_PROFILE_GRID
+export LAYOUT_PROFILE_TABLE, LAYOUT_PROFILE_ABSOLUTE_STICKY, LAYOUT_PROFILE_SCROLL, LAYOUT_PROFILE_REPLACED
+export layout_text_measure_port_unavailable, layout_text_measure_port_resolved
+export layout_profile_supported, layout_profile_gpu_eligible
+export layout_serial_cpu_profile, layout_profile_catalog

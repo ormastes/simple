@@ -1,0 +1,90 @@
+# @req REQ-001 REQ-006 REQ-007 REQ-011
+"""Shared ProcessingIR backend artifacts fail closed and invalidate on drawing semantics."""
+
+use std.spec.*
+use std.common.processing.processing_ir.*
+use std.common.processing.backend_contract.*
+
+describe "shared ProcessingIR backend contract":
+    it "should use one target vocabulary and deterministic artifact formats":
+        step("Select representative renderer processing kernels")
+        val ir = processing_ir_fill_u32(8, 42u32)
+        expect(processing_backend_target_name(ProcessingBackendTarget.VulkanSpirv)).to_equal("vulkan-spirv")
+        expect(processing_backend_target_format(ProcessingBackendTarget.VulkanSpirv)).to_equal("spirv")
+        expect(processing_backend_target_format(ProcessingBackendTarget.CudaPtx)).to_equal("ptx")
+        expect(processing_backend_target_format(ProcessingBackendTarget.MetalMsl)).to_equal("msl")
+        expect(processing_backend_target_format(ProcessingBackendTarget.DirectXHlsl)).to_equal("hlsl")
+        expect(processing_backend_semantic_key(ir, ProcessingBackendTarget.VulkanSpirv)).to_contain("processing-ir-v2")
+
+    it "should reject invalid payload format and semantic identity":
+        step("Lower shared ProcessingIR for the selected backend")
+        val ir = processing_ir_fill_u32(8, 42u32)
+        val wrong_format = ProcessingBackendArtifact(target: ProcessingBackendTarget.VulkanSpirv,
+            format: "ptx", entry_point: "processing_fill_u32", source: "payload", binary: [],
+            semantic_key: processing_backend_semantic_key(ir, ProcessingBackendTarget.VulkanSpirv),
+            valid: true, reason: "ok")
+        expect(processing_backend_artifact_validate(ir, wrong_format)).to_equal("artifact-format-mismatch")
+        val stale = ProcessingBackendArtifact(target: ProcessingBackendTarget.VulkanSpirv,
+            format: "spirv", entry_point: "processing_fill_u32", source: "payload", binary: [],
+            semantic_key: "stale", valid: true, reason: "ok")
+        expect(processing_backend_artifact_validate(ir, stale)).to_equal("artifact-semantic-key-mismatch")
+
+    it "should preserve half-open row-major drawing coordinates in the CPU oracle":
+        step("Translate drawing access for the destination backend")
+        val draw = processing_ir_fill_rect_u32(4, 3, 4, 1, 1, 2, 1, 0xaabbccddu32)
+        expect(processing_ir_validate(draw).reason).to_equal("ok")
+        val pixels = processing_ir_cpu_execute(draw)
+        expect(pixels).to_equal([
+            0u32, 0u32, 0u32, 0u32,
+            0u32, 0xaabbccddu32, 0xaabbccddu32, 0u32,
+            0u32, 0u32, 0u32, 0u32])
+        val moved = processing_ir_fill_rect_u32(4, 3, 4, 2, 1, 1, 1, 0xaabbccddu32)
+        expect(processing_backend_semantic_key(draw, ProcessingBackendTarget.VulkanSpirv) ==
+            processing_backend_semantic_key(moved, ProcessingBackendTarget.VulkanSpirv)).to_equal(false)
+
+    it "should reject out-of-bounds drawing access":
+        val draw = processing_ir_fill_rect_u32(4, 3, 4, 3, 1, 2, 1, 7u32)
+        expect(processing_ir_validate(draw).reason).to_equal("drawing-rectangle-out-of-bounds")
+
+    it "should exercise success branches for source and binary payloads":
+        step("Exercise success branches")
+        val ir = processing_ir_fill_u32(4, 3u32)
+        val source = ProcessingBackendArtifact(target: ProcessingBackendTarget.CudaPtx,
+            format: "ptx", entry_point: "processing_fill_u32", source: "ptx", binary: [],
+            semantic_key: processing_backend_semantic_key(ir, ProcessingBackendTarget.CudaPtx),
+            valid: true, reason: "ok")
+        val binary = ProcessingBackendArtifact(target: ProcessingBackendTarget.VulkanSpirv,
+            format: "spirv", entry_point: "main", source: "", binary: [3u8, 2u8, 35u8, 7u8],
+            semantic_key: processing_backend_semantic_key(ir, ProcessingBackendTarget.VulkanSpirv),
+            valid: true, reason: "ok")
+        expect(processing_backend_artifact_validate(ir, source)).to_equal("ok")
+        expect(processing_backend_artifact_validate(ir, binary)).to_equal("ok")
+
+    it "should exercise boundary branches for drawing extents and size":
+        step("Exercise boundary branches")
+        val invalid_extent = ProcessingIr(op: PROCESSING_IR_OP_FILL_RECT_U32,
+            element_count: 4, value: 1u32, width: 4, height: 1, stride: 3,
+            x: 0, y: 0, rect_width: 1, rect_height: 1)
+        val wrong_size = ProcessingIr(op: PROCESSING_IR_OP_FILL_RECT_U32,
+            element_count: 5, value: 1u32, width: 4, height: 1, stride: 4,
+            x: 0, y: 0, rect_width: 1, rect_height: 1)
+        val invalid_rect = ProcessingIr(op: PROCESSING_IR_OP_FILL_RECT_U32,
+            element_count: 4, value: 1u32, width: 4, height: 1, stride: 4,
+            x: -1, y: 0, rect_width: 1, rect_height: 1)
+        expect(processing_ir_validate(invalid_extent).reason).to_equal("invalid-drawing-extent")
+        expect(processing_ir_validate(wrong_size).reason).to_equal("drawing-size-mismatch")
+        expect(processing_ir_validate(invalid_rect).reason).to_equal("invalid-drawing-rectangle")
+
+    it "should exercise rejection branches for invalid artifact states":
+        step("Exercise rejection branches")
+        val ir = processing_ir_fill_u32(4, 3u32)
+        val invalid = ProcessingBackendArtifact(target: ProcessingBackendTarget.VulkanSpirv,
+            format: "spirv", entry_point: "main", source: "", binary: [1u8],
+            semantic_key: processing_backend_semantic_key(ir, ProcessingBackendTarget.VulkanSpirv),
+            valid: false, reason: "")
+        val missing_entry = ProcessingBackendArtifact(target: ProcessingBackendTarget.VulkanSpirv,
+            format: "spirv", entry_point: "", source: "", binary: [1u8],
+            semantic_key: processing_backend_semantic_key(ir, ProcessingBackendTarget.VulkanSpirv),
+            valid: true, reason: "ok")
+        expect(processing_backend_artifact_validate(ir, invalid)).to_equal("artifact-invalid")
+        expect(processing_backend_artifact_validate(ir, missing_entry)).to_equal("artifact-payload-missing")

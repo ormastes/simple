@@ -1,0 +1,95 @@
+"""Shared ProcessingIR backend selection, artifact, validation, and device evidence helpers."""
+
+use std.common.processing.processing_ir.{PROCESSING_IR_OP_FILL_RECT_U32, ProcessingIr, processing_ir_cpu_execute, processing_ir_outputs_equal, processing_ir_validate}
+use std.common.processing.backend_contract.*
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+use std.gc_async_mut.processing.cuda_fill_u32.{processing_cuda_artifact, processing_ir_execute_cuda}
+use std.gc_async_mut.processing.metal_fill_u32.{processing_ir_execute_metal_artifact}
+use std.gc_async_mut.processing.metal_msl_backend.{processing_metal_generate_artifact}
+use std.gpu.engine2d.backend_vulkan_spirv.{spirv_clear, spirv_rect_filled}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+fn processing_backend_host_probe(target: ProcessingBackendTarget) -> text:
+    # A positive device claim is deliberately deferred to the native executor.
+    processing_backend_target_name(target)
+
+fn compile_processing_backend_artifact(ir: ProcessingIr, target: ProcessingBackendTarget) -> ProcessingBackendArtifact:
+    val validation = processing_ir_validate(ir)
+    if not validation.valid:
+        return processing_backend_artifact_reject(ir, target, validation.reason)
+    if target == ProcessingBackendTarget.CudaPtx:
+        return processing_cuda_artifact(ir)
+    if target == ProcessingBackendTarget.MetalMsl:
+        return processing_metal_generate_artifact(ir)
+    val binary = if ir.op == 1: spirv_clear() else: spirv_rect_filled()
+    ProcessingBackendArtifact(
+        target: target, format: processing_backend_target_format(target),
+        entry_point: "main", source: "", binary: binary,
+        semantic_key: processing_backend_semantic_key(ir, target),
+        valid: binary.len() > 0, reason: if binary.len() == 0: "artifact-payload-missing" else: "ok")
+
+fn validate_processing_backend_artifact(ir: ProcessingIr, artifact: ProcessingBackendArtifact) -> ProcessingCompileEvidence:
+    val reason = processing_backend_artifact_validate(ir, artifact)
+    ProcessingCompileEvidence(
+        target: artifact.target, artifact_valid: reason == "ok",
+        compiler_succeeded: false, validator_succeeded: false,
+        compiler_identity: "", validator_identity: "", reason: reason)
+
+fn run_processing_backend_device_probe(ir: ProcessingIr, artifact: ProcessingBackendArtifact) -> ProcessingDeviceReadbackEvidence:
+    val artifact_reason = processing_backend_artifact_validate(ir, artifact)
+    if artifact_reason != "ok":
+        return ProcessingDeviceReadbackEvidence(target: artifact.target, submitted: false, device_origin: false, oracle_match: false, device_identity: 0, values: [], reason: artifact_reason)
+    var completed = false
+    var reason = "unsupported-backend"
+    var values: [u32] = []
+    var identity: i64 = 0
+    match artifact.target:
+        case ProcessingBackendTarget.VulkanSpirv:
+            if ir.op == PROCESSING_IR_OP_FILL_RECT_U32:
+                var backend = VulkanBackend.create()
+                if backend.init(ir.width.to_i32(), ir.height.to_i32()):
+                    backend.clear(0u32)
+                    backend.draw_rect_filled(ir.x.to_i32(), ir.y.to_i32(), ir.rect_width.to_i32(), ir.rect_height.to_i32(), ir.value)
+                    val readback = backend.read_pixels_with_source()
+                    completed = readback.source == "device_readback" and not backend.cpu_fallback_used and not backend.completion_unknown
+                    reason = if completed: "ok" else: "vulkan-device-readback-unproven"
+                    values = if completed: readback.pixels else: []
+                    identity = if completed: readback.backend_handle else: 0
+                    backend.shutdown()
+                else:
+                    reason = "vulkan-init-failed"
+            else:
+                val result = processing_ir_execute_vulkan(ir)
+                completed = result.completed
+                reason = result.reason
+                values = result.values
+                identity = result.device_identity
+        case ProcessingBackendTarget.CudaPtx:
+            val result = processing_ir_execute_cuda(ir)
+            completed = result.completed
+            reason = result.reason
+            values = result.values
+            identity = result.device_identity
+        case ProcessingBackendTarget.MetalMsl:
+            val result = processing_ir_execute_metal_artifact(ir, artifact.source, artifact.entry_point)
+            completed = result.completed
+            reason = result.reason
+            values = result.values
+            identity = result.device_identity
+        case ProcessingBackendTarget.DirectXHlsl:
+            reason = "directx-device-probe-unsupported"
+    val device_origin = completed and identity > 0
+    val parity = device_origin and processing_ir_outputs_equal(values, processing_ir_cpu_execute(ir))
+    ProcessingDeviceReadbackEvidence(
+        target: artifact.target, submitted: completed, device_origin: device_origin,
+        oracle_match: parity, device_identity: if device_origin: identity else: 0,
+        values: if device_origin: values else: [],
+        reason: if not device_origin: reason else: if parity: "ok" else: "oracle-mismatch")
+
+fn check_processing_backend_oracle_parity(ir: ProcessingIr, evidence: ProcessingDeviceReadbackEvidence) -> bool:
+    evidence.submitted and evidence.device_origin and evidence.device_identity > 0 and
+        evidence.reason == "ok" and processing_ir_outputs_equal(evidence.values, processing_ir_cpu_execute(ir))
+
+export processing_backend_host_probe, compile_processing_backend_artifact
+export validate_processing_backend_artifact, run_processing_backend_device_probe
+export check_processing_backend_oracle_parity

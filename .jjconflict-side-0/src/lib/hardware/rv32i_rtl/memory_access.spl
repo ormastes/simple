@@ -1,0 +1,237 @@
+# RV32 architectural memory frontend: Sv32 -> PMP -> physical request.
+#
+# A caller has exactly one outstanding operation. Translation/PMP/alignment
+# faults finish without issuing the final physical request.
+
+use std.hardware.rv32i_rtl.mmu_sv32.{MmuState, ACCESS_FETCH, ACCESS_LOAD, ACCESS_STORE}
+use std.hardware.rv32i_rtl.sv32_walker.{Sv32Walker32, sv32_walker32_reset}
+use std.hardware.rv32i_rtl.sv32_walker.{sv32_walker32_start, sv32_walker32_cycle}
+use std.hardware.rv32i_rtl.sv32_walker.{SV32_WALK_DONE, SV32_WALK_FAULT}
+use std.hardware.rv32i_rtl.pmp.{PmpEntries32, pmp32_gate_access, PMP32_NO_MATCH}
+use std.hardware.rv32i_rtl.pmp.{PMP32_CAUSE_INSN_ACCESS_FAULT, PMP32_CAUSE_LOAD_ACCESS_FAULT, PMP32_CAUSE_STORE_ACCESS_FAULT}
+use std.hardware.rv32i_rtl.trap.{CAUSE_MISALIGNED_FETCH, CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
+
+val MEMORY32_IDLE: u32 = 0
+val MEMORY32_WALK: u32 = 1
+val MEMORY32_REQUEST: u32 = 2
+val MEMORY32_WAIT: u32 = 3
+val MEMORY32_DONE: u32 = 4
+val MEMORY32_FAULT: u32 = 5
+
+struct MemoryAccessState32:
+    phase: u32
+    walker: Sv32Walker32
+    vaddr: u32
+    paddr: i64
+    access_type: u32
+    size_bytes: u32
+    privilege: u32
+    sum: bool
+    mxr: bool
+    write_data: u32
+    bus_write: bool
+    probe_only: bool
+    read_data: u32
+    fault_cause: u32
+    pmp_index: u32
+
+struct MemoryAccessCycle32:
+    state: MemoryAccessState32
+    mmu: MmuState
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: u32
+    bus_is_pte: bool
+    done: bool
+    fault: bool
+    read_data: u32
+    fault_cause: u32
+    fault_tval: u32
+    pmp_index: u32
+
+@hardware
+fn memory32_reset() -> MemoryAccessState32:
+    MemoryAccessState32(phase: MEMORY32_IDLE, walker: sv32_walker32_reset(),
+        vaddr: 0, paddr: 0, access_type: ACCESS_LOAD, size_bytes: 1,
+        privilege: 3, sum: false, mxr: false, write_data: 0, bus_write: false, probe_only: false, read_data: 0,
+        fault_cause: 0, pmp_index: PMP32_NO_MATCH)
+
+@hardware
+fn memory32_access_fault_cause(access_type: u32) -> u32:
+    if access_type == ACCESS_FETCH:
+        return PMP32_CAUSE_INSN_ACCESS_FAULT
+    if access_type == ACCESS_STORE:
+        return PMP32_CAUSE_STORE_ACCESS_FAULT
+    PMP32_CAUSE_LOAD_ACCESS_FAULT
+
+@hardware
+fn memory32_misaligned_cause(access_type: u32) -> u32:
+    if access_type == ACCESS_FETCH:
+        return CAUSE_MISALIGNED_FETCH
+    if access_type == ACCESS_STORE:
+        return CAUSE_STORE_MISALIGNED
+    CAUSE_LOAD_MISALIGNED
+
+@hardware
+fn memory32_fault(state: MemoryAccessState32, cause: u32, pmp_index: u32) -> MemoryAccessState32:
+    var out = state
+    out.phase = MEMORY32_FAULT
+    out.paddr = 0
+    out.fault_cause = cause
+    out.pmp_index = pmp_index
+    out
+
+@hardware
+fn memory32_size_valid(access_type: u32, size_bytes: u32) -> bool:
+    if access_type == ACCESS_FETCH:
+        return size_bytes == 2 or size_bytes == 4
+    size_bytes == 1 or size_bytes == 2 or size_bytes == 4
+
+@hardware
+fn memory32_aligned(vaddr: u32, access_type: u32, size_bytes: u32) -> bool:
+    if access_type == ACCESS_FETCH:
+        return (vaddr & 1) == 0
+    if size_bytes == 2:
+        return (vaddr & 1) == 0
+    if size_bytes == 4:
+        return (vaddr & 3) == 0
+    true
+
+@hardware
+fn memory32_after_translation(state: MemoryAccessState32, pmp: PmpEntries32) -> MemoryAccessState32:
+    val gate = pmp32_gate_access(pmp, state.paddr, state.size_bytes,
+        state.access_type, state.privilege, false, 0)
+    if not gate.bus_valid:
+        return memory32_fault(state, gate.fault_cause, gate.matched_index)
+    var out = state
+    out.paddr = gate.paddr
+    out.pmp_index = gate.matched_index
+    if out.probe_only:
+        out.phase = MEMORY32_DONE
+        return out
+    out.phase = MEMORY32_REQUEST
+    out
+
+@hardware
+fn memory32_start(mmu: MmuState, pmp: PmpEntries32, vaddr: u32,
+                  access_type: u32, size_bytes: u32, privilege: u32,
+                  sum: bool, mxr: bool, write_data: u32) -> MemoryAccessState32:
+    var out = memory32_reset()
+    out.vaddr = vaddr
+    out.access_type = access_type
+    out.size_bytes = size_bytes
+    out.privilege = privilege
+    out.sum = sum
+    out.mxr = mxr
+    out.write_data = write_data
+    out.bus_write = access_type == ACCESS_STORE
+
+    if access_type > ACCESS_STORE or not memory32_size_valid(access_type, size_bytes):
+        return memory32_fault(out, memory32_access_fault_cause(access_type), PMP32_NO_MATCH)
+    if not memory32_aligned(vaddr, access_type, size_bytes):
+        return memory32_fault(out, memory32_misaligned_cause(access_type), PMP32_NO_MATCH)
+
+    out.walker = sv32_walker32_start(mmu, pmp, vaddr, access_type, privilege, sum, mxr)
+    if out.walker.phase == SV32_WALK_FAULT:
+        return memory32_fault(out, out.walker.fault_cause, PMP32_NO_MATCH)
+    if out.walker.phase == SV32_WALK_DONE:
+        out.paddr = out.walker.paddr
+        return memory32_after_translation(out, pmp)
+    out.phase = MEMORY32_WALK
+    out
+
+@hardware
+fn memory32_start_probe(mmu: MmuState, pmp: PmpEntries32, vaddr: u32,
+                        access_type: u32, size_bytes: u32, privilege: u32,
+                        sum: bool, mxr: bool) -> MemoryAccessState32:
+    """Translate and PMP-check an access without ever issuing a final bus request."""
+    var out = memory32_start(mmu, pmp, vaddr, access_type, size_bytes,
+        privilege, sum, mxr, 0)
+    out.probe_only = true
+    if out.phase == MEMORY32_REQUEST:
+        out.phase = MEMORY32_DONE
+    out
+
+@hardware
+fn memory32_start_physical(pmp: PmpEntries32, vaddr: u32, paddr: i64,
+                           access_type: u32, size_bytes: u32, privilege: u32,
+                           write_data: u32) -> MemoryAccessState32:
+    """Reuse an already translated address, rechecking PMP without another walk."""
+    var out = memory32_reset()
+    out.vaddr = vaddr
+    out.paddr = paddr
+    out.access_type = access_type
+    out.size_bytes = size_bytes
+    out.privilege = privilege
+    out.write_data = write_data
+    out.bus_write = access_type == ACCESS_STORE
+    if access_type > ACCESS_STORE or not memory32_size_valid(access_type, size_bytes):
+        return memory32_fault(out, memory32_access_fault_cause(access_type), PMP32_NO_MATCH)
+    if not memory32_aligned(vaddr, access_type, size_bytes):
+        return memory32_fault(out, memory32_misaligned_cause(access_type), PMP32_NO_MATCH)
+    memory32_after_translation(out, pmp)
+
+@hardware
+fn memory32_cycle(state: MemoryAccessState32, mmu: MmuState, pmp: PmpEntries32,
+                  request_ready: bool, response_valid: bool, response_error: bool,
+                  response_data: u32) -> MemoryAccessCycle32:
+    var next = state
+    var next_mmu = mmu
+    var bus_valid = false
+    var bus_addr: i64 = 0
+    var bus_size: u32 = state.size_bytes
+    var bus_write = false
+    var bus_wdata: u32 = 0
+    var bus_is_pte = false
+
+    if state.phase == MEMORY32_WALK:
+        val walk = sv32_walker32_cycle(state.walker, mmu, pmp,
+            request_ready, response_valid, response_error, response_data)
+        next.walker = walk.walker
+        next_mmu = walk.mmu
+        bus_valid = walk.bus_valid
+        bus_addr = walk.bus_addr
+        bus_size = walk.bus_size
+        bus_is_pte = walk.bus_valid
+        if walk.done:
+            if walk.fault:
+                next = memory32_fault(next, walk.fault_cause, PMP32_NO_MATCH)
+            else:
+                next.paddr = walk.paddr
+                next = memory32_after_translation(next, pmp)
+
+    else if state.phase == MEMORY32_REQUEST:
+        bus_valid = true
+        bus_addr = state.paddr
+        bus_write = state.bus_write
+        bus_wdata = state.write_data
+        if request_ready:
+            if response_valid:
+                if response_error:
+                    next = memory32_fault(state, memory32_access_fault_cause(state.access_type), state.pmp_index)
+                else:
+                    next.phase = MEMORY32_DONE
+                    next.read_data = response_data
+            else:
+                next.phase = MEMORY32_WAIT
+
+    else if state.phase == MEMORY32_WAIT and response_valid:
+        if response_error:
+            next = memory32_fault(state, memory32_access_fault_cause(state.access_type), state.pmp_index)
+        else:
+            next.phase = MEMORY32_DONE
+            next.read_data = response_data
+
+    val done = next.phase == MEMORY32_DONE or next.phase == MEMORY32_FAULT
+    MemoryAccessCycle32(state: next, mmu: next_mmu, bus_valid: bus_valid,
+        bus_addr: bus_addr, bus_size: bus_size, bus_write: bus_write,
+        bus_wdata: bus_wdata, bus_is_pte: bus_is_pte, done: done,
+        fault: next.phase == MEMORY32_FAULT, read_data: next.read_data,
+        fault_cause: next.fault_cause, fault_tval: next.vaddr,
+        pmp_index: next.pmp_index)
+
+export MemoryAccessState32, MemoryAccessCycle32
+export memory32_reset, memory32_start, memory32_start_probe, memory32_cycle
+export MEMORY32_IDLE, MEMORY32_WALK, MEMORY32_REQUEST, MEMORY32_WAIT, MEMORY32_DONE, MEMORY32_FAULT

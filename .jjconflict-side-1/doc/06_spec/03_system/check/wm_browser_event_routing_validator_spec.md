@@ -1,0 +1,1627 @@
+# WM browser event-routing proof validator
+
+## Current motion boundary
+
+Animation metadata is insufficient. The Electron proof records initial and
+final computed opacity plus Web Animations `currentTime` across at least two
+`requestAnimationFrame` callbacks. The validator recomputes whether either
+value changed; a forged `css_animation_motion_observed=true` row cannot replace
+the numeric samples.
+
+The motion self-test keeps these operator-visible steps stable:
+
+- `Reject animation metadata without motion`
+- `Accept current Stage4 motion evidence`
+
+> Validates the standalone WM browser event-routing proof validator. The validator consumes the raw Electron probe JSON and fails closed when a stale or forged `pass=true` row omits Chromium event, timing, animation, payload, or UI details.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 33 | 33 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# WM browser event-routing proof validator
+
+Validates the standalone WM browser event-routing proof validator. The validator consumes the raw Electron probe JSON and fails closed when a stale or forged `pass=true` row omits Chromium event, timing, animation, payload, or UI details.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
+| Plan | doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/wm_browser_event_routing_validator_spec.spl` |
+| Updated | 2026-07-29 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Validates the standalone WM browser event-routing proof validator. The
+validator consumes the raw Electron probe JSON and fails closed when a stale or
+forged `pass=true` row omits Chromium event, timing, animation, payload, or UI
+details.
+
+**Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**NFR:** doc/02_requirements/nfr/simple_web_browser_engine_production_hardening.md
+**Research:** N/A
+
+This is a local evidence-contract regression specification.
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Claim boundary
+
+This specification validates proof structure and fail-closed policy.
+
+Fixture acceptance does not prove a live operator session occurred.
+
+Source inspection does not prove the renderer executed.
+
+Normalized evidence does not replace the raw retained artifact.
+
+Event counters alone do not prove event order.
+
+Event order alone does not prove input-to-paint progress.
+
+Animation-frame availability alone does not prove CSS animation semantics.
+
+Electron identity alone does not prove sandboxing.
+
+Launch flags alone do not prove runtime GPU or sandbox state.
+
+The conformance manifest accounts RED rows separately from executed rows.
+
+No conformance PASS can promote until trusted fresh-run admission exists.
+
+## Trust model
+
+The raw proof path must be a regular single-link file.
+
+The producer source path must be a regular single-link file.
+
+Expected and actual source byte sizes must agree.
+
+Required source markers must exist in the admitted producer.
+
+The proof must identify the WM browser event-routing surface.
+
+The proof must identify live Chromium and Electron versions.
+
+The renderer must report its actual sandbox signal.
+
+The main process must report GPU compositing and WebGL status.
+
+The production envelope must bind HTML and theme material hashes.
+
+The Simple composition receipt must bind its exact pixel artifact.
+
+Duplicate keys are rejected instead of taking the final occurrence.
+
+Symlinks and hardlinks are rejected at evidence boundaries.
+
+## Failure discrimination
+
+Missing proof fields are schema failures.
+
+String booleans are type failures.
+
+String or fractional counters are numeric type failures.
+
+Unsafe exponential integers are range failures.
+
+Wrong event order is a sequence failure.
+
+Zero or excessive timing is a progress failure.
+
+Wrong surface identity is a producer-boundary failure.
+
+Missing source markers are source-admission failures.
+
+Changed source size is a source-artifact failure.
+
+Wrong Electron or Chrome identity is a runtime-provenance failure.
+
+Missing sandbox or GPU signals is a runtime-evidence failure.
+
+An incomplete conformance row is inventory-accounting failure.
+
+A forged conformance PASS is an admission failure.
+
+These reasons remain distinct in normalized evidence.
+
+## Frozen displayed steps
+
+- `Confirm WM event proof is tied to the Electron event-routing surface`
+
+- `Confirm event routing proof requires structured frame order`
+
+- `Confirm event routing proof requires structured input-to-paint timing`
+
+- `Remove one required evidence binding from the pinned case row`
+
+- `Keep incomplete inventory distinct from executed conformance`
+
+- `Forge PASS status and a hash-consistent receipt around the pinned RED row`
+
+- `Keep claimed PASS unpromotable without a trusted fresh-run receipt schema`
+
+These spellings are retained for generated-manual stability.
+
+## Examples
+
+Example: a complete fixture has typed events, runtime identity, timing,
+animation, source, envelope, and composition evidence.
+
+Expected result: the standalone fixture validator accepts and normalizes it.
+
+Example: `renderer_sandboxed` is the string `"true"`.
+
+Expected result: structured boolean validation fails.
+
+Example: one event count is fractional.
+
+Expected result: structured integer validation fails.
+
+Example: the proof path is a symlink or a second hardlink.
+
+Expected result: artifact admission fails before content is trusted.
+
+Example: the producer source is missing a required event marker.
+
+Expected result: source admission fails.
+
+Example: the pinned conformance row is complete and `red-not-run`.
+
+Expected result: accounted count is one, executed count is zero, and the
+contract remains internally valid.
+
+Example: the same row is changed to `pass` with a hash-consistent caller-made
+receipt.
+
+Expected result: `conformance-pass-unpromotable:1`.
+
+## Current evidence state
+
+The pinned conformance manifest has one accounted Grid row.
+
+That row remains `red-not-run`.
+
+Its executed count is zero.
+
+The contract does not treat accounting as execution.
+
+The checker has no trusted fresh-run PASS receipt schema.
+
+No browser, Electron, RenderDoc, or target Simple runtime was launched while
+updating this authored manual prose.
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/wm_browser_event_routing_validator_spec.spl --mode=interpreter --clean --fail-fast
+```
+
+## Acceptance
+
+- Complete Electron WM event-routing JSON validates and emits normalized
+  `wm_browser_event_routing_*` rows.
+- `pass=true` JSON still fails when event counts, Chromium timing, animation,
+  payload details, or UI proof rows are missing or malformed.
+- The raw frame stream must include the canonical event sequence from host pointer, focus,
+  drag move, title command, maximize, text input, pointer down, and pointer up;
+  counts alone are not enough event-routing proof.
+- Aggregate window-command and input-event counts must match the canonical
+  frame stream so a forged proof cannot hide dropped or extra frames behind a
+  matching event sequence.
+- Chromium timing must include an explicit positive `performance.now()` delta;
+  `0` does not prove distinct timing samples, and multi-second timing does not
+  prove responsive event-loop progress.
+- Input handling must include an explicit positive input-to-paint measurement
+  sampled after a dispatched DOM interaction and a following animation frame;
+  multi-second latency fails the event contract.
+- Boolean readiness, timing, animation, and CSS probe fields must be real JSON
+  booleans; string values like `"true"` are not structured event proof and are
+  not re-emitted as normalized boolean rows.
+- Event counts, animation frame counts, traffic button counts, timing deltas,
+  and dispatched move coordinates must be real JSON numbers; stringified,
+  fractional, unsafe, or exponential integer values are not valid DOM
+  event-routing proof and are not re-emitted as normalized numeric rows.
+- Live numeric UI readback rows such as title font weight and title input width
+  must be real JSON numbers; stringified CSS measurements are not valid browser
+  style proof.
+- The proof must carry the live WM browser event-check surface identity and
+  source marker; a hand-authored JSON object with matching counters is not
+  sufficient.
+- The proof source marker must resolve to a single-link regular nonempty
+  producer source file with expected event, timing, and animation markers so
+  stale JSON cannot be paired with a missing, substituted, or aliased
+  event-check script.
+- The proof source validator must report both the expected producer `lstat`
+  size and the actual bytes read from that producer, and fail closed if those
+  sizes diverge.
+- The proof source validator and live shell wrapper must emit normalized
+  source artifact reason/status rows so production gates can distinguish a
+  valid producer file from substituted, missing, or aliased event-check source.
+- The proof must carry live Electron/Chromium runtime identity, including browser
+  engine, Electron user-agent, Electron process version, and Chrome process
+  version.
+- The renderer must report Electron's actual `process.sandboxed` signal, and
+  the main process must report enabled GPU compositing and WebGL from
+  `app.getGPUFeatureStatus()`; launch flags are not runtime evidence.
+- The probe must mirror a single-link canonical Aetheric production envelope,
+  including the generated HTML hash, snapshot fingerprints, glass witnesses,
+  and explicit non-synthetic/non-compatibility flags.
+- The proof JSON path itself must be a single regular file, never a symlink or
+  hardlink to stale or attacker-controlled event-routing evidence.
+- Production-envelope and Simple-composition receipts reject malformed or
+  duplicate keys instead of accepting the final occurrence.
+- The live shell evidence wrapper consumes the standalone validator instead of
+  trusting only the probe's top-level `pass` flag.
+- The live shell evidence wrapper keeps validation, proof-source, event,
+  timing, animation, payload, and UI diagnostic rows on early dependency
+  failures.
+
+## Scenarios
+
+### WM browser event-routing proof validator
+
+#### accepts complete event timing animation payload and UI proof
+
+-  fixture command
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 54 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-pass && mkdir -p build/test-wm-browser-event-validator-pass && " +
+    _fixture_command("build/test-wm-browser-event-validator-pass/proof.json", "") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-pass/proof.json > build/test-wm-browser-event-validator-pass/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read("build/test-wm-browser-event-validator-pass/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_target=electron")
+expect(evidence).to_contain("wm_browser_event_routing_surface_id=wm-browser-event-routing")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_reason=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_artifact_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_browser_engine=chromium")
+expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36")
+expect(evidence).to_contain("wm_browser_event_routing_electron_process_version=42.5.0")
+expect(evidence).to_contain("wm_browser_event_routing_chrome_process_version=142.0.0.0")
+expect(evidence).to_contain("wm_browser_event_routing_renderer_sandboxed=true")
+expect(evidence).to_contain("wm_browser_event_routing_gpu_compositing_status=enabled")
+expect(evidence).to_contain("wm_browser_event_routing_webgl_status=enabled")
+expect(evidence).to_contain("wm_browser_event_routing_production_envelope_schema=aetheric-host-web-gui-v1")
+expect(evidence).to_contain("wm_browser_event_routing_production_envelope_producer=production-html-webir-drawir-electron")
+expect(evidence).to_contain("wm_browser_event_routing_theme_id=aetheric_dark")
+expect(evidence).to_contain("wm_browser_event_routing_production_envelope_artifact_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_post_action_semantic_state=maximized-and-text-input")
+expect(evidence).to_contain("wm_browser_event_routing_window_cmd_count=4")
+expect(evidence).to_contain("wm_browser_event_routing_input_event_count=3")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=16.7")
+expect(evidence).to_contain("wm_browser_event_routing_input_to_paint_ms=18.4")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_available=true")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=2")
+expect(evidence).to_contain("wm_browser_event_routing_css_animation_probe=true")
+expect(evidence).to_contain("wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:move,window_cmd:title_command,window_cmd:maximize,input_event:text_input,input_event:pointer_down,input_event:pointer_up")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=native_event")
+expect(evidence).to_contain("wm_browser_event_routing_title_font_weight=700")
+expect(evidence).to_contain("wm_browser_event_routing_title_input_width_px=158")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_text=/tmp/project")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_text=Hello Simple")
+expect(evidence).to_contain("wm_browser_event_routing_font_text=WEB")
+expect(evidence).to_contain("wm_browser_event_routing_font_composition_id=html-layout")
+expect(evidence).to_contain("wm_browser_event_routing_font_identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100")
+expect(evidence).to_contain("wm_browser_event_routing_font_loaded=true")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_event_count=8")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_pixel_checksum=1785")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_nonbackground_pixels=1")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_artifact_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_simple_composition_run_id=fixture-run")
+```
+
+</details>
+
+#### rejects animation metadata without motion
+
+- `Reject animation metadata without motion`
+- Fixture: retains `animationName`, two animation frames, and caller-provided
+  motion booleans while making initial/final opacity and `currentTime` equal.
+- Expected: validator exits `1` with
+  `event-routing-performance-animation-contract-missing`.
+
+The accepted companion scenario above uses
+`expect_motion_evidence(evidence)` under the visible step
+`Accept current Stage4 motion evidence`. That helper checks the exact normalized
+initial/final opacity, initial/final `currentTime`, and
+`css_animation_motion_observed=true` rows.
+
+#### rejects a composition receipt from a different run
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-stale-run"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", "p.simple_composition_run_id=\"older-run\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-simple-composition-artifact-invalid")
+```
+
+</details>
+
+#### rejects duplicate Simple composition receipt keys
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-duplicate-receipt"
+val mutation = "fs.writeFileSync(srp,\"status=fail\\n\"+fs.readFileSync(srp,\"utf8\"))"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", mutation) +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-simple-composition-artifact-invalid")
+```
+
+</details>
+
+#### rejects a valid alternate receipt outside the configured proof path
+
+- Create a valid alternate receipt beside the configured receipt
+-  fixture command
+- Reject the proof when its receipt path differs from the configured path
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Create a valid alternate receipt beside the configured receipt")
+val root = "build/test-wm-browser-event-validator-receipt-path"
+val mutation = "const alt=path.join(dir,\"alternate.env\");fs.copyFileSync(srp,alt);p.simple_composition_receipt_path=alt"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", mutation) +
+    " && SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=" + root + "/simple-composition.env" +
+    " node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+step("Reject the proof when its receipt path differs from the configured path")
+expect(code).to_equal(1)
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-simple-composition-artifact-invalid")
+```
+
+</details>
+
+#### rejects a font frame receipt that is not correlated with the event stream
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-font-frame"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", "p.font_frame_event_count=7") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+val evidence = file_read(root + "/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-font-frame-correlation-missing")
+```
+
+</details>
+
+#### rejects pass true proof when required event counts are missing
+
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-counts"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", "p.focus_count=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
+    _fixture_command(root + "/window-count.json", "p.window_cmd_count=3") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/window-count.json > " + root + "/window-count.env; " +
+    _fixture_command(root + "/input-count.json", "p.input_event_count=4") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/input-count.json > " + root + "/input-count.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+val window_count = file_read(root + "/window-count.env")
+val input_count = file_read(root + "/input-count.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_focus_count=0")
+expect(window_count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(window_count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(window_count).to_contain("wm_browser_event_routing_window_cmd_count=3")
+expect(input_count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(input_count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(input_count).to_contain("wm_browser_event_routing_input_event_count=4")
+```
+
+</details>
+
+#### rejects pass true proof without the live event surface identity
+
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm WM event proof is tied to the Electron event-routing surface
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-surface"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/missing-target.json", "delete p.target") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/missing-target.json > " + root + "/missing-target.env; " +
+    _fixture_command(root + "/wrong-target.json", "p.target=\"browser\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-target.json > " + root + "/wrong-target.env; " +
+    _fixture_command(root + "/wrong-surface.json", "p.surface_id=\"electron-live-smoke\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-surface.json > " + root + "/wrong-surface.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing_target = file_read(root + "/missing-target.env")
+val wrong_target = file_read(root + "/wrong-target.env")
+val wrong_surface = file_read(root + "/wrong-surface.env")
+step("Confirm WM event proof is tied to the Electron event-routing surface")
+expect(missing_target).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing_target).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(missing_target).to_contain("wm_browser_event_routing_target=")
+expect(wrong_target).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(wrong_target).to_contain("wm_browser_event_routing_target=browser")
+expect(wrong_surface).to_contain("wm_browser_event_routing_validation_reason=event-routing-surface-identity-missing")
+expect(wrong_surface).to_contain("wm_browser_event_routing_surface_id=electron-live-smoke")
+```
+
+</details>
+
+#### rejects a forged or unmirrored Aetheric production envelope
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-production-envelope"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/wrong-theme.json", "p.theme_id=\"forged_theme\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-theme.json > " + root + "/wrong-theme.env; " +
+    _fixture_command(root + "/missing-envelope.json", "delete p.production_envelope_path") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/missing-envelope.json > " + root + "/missing-envelope.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+val wrong_theme = file_read(root + "/wrong-theme.env")
+val missing_envelope = file_read(root + "/missing-envelope.env")
+expect(wrong_theme).to_contain("wm_browser_event_routing_validation_reason=event-routing-production-envelope-mismatch")
+expect(missing_envelope).to_contain("wm_browser_event_routing_validation_reason=event-routing-production-envelope-missing")
+```
+
+</details>
+
+#### rejects pass true proof without the live event-check source marker
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm WM event proof must identify the live Chromium producer
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-source && mkdir -p build/test-wm-browser-event-validator-source && " +
+    _fixture_command("build/test-wm-browser-event-validator-source/missing.json", "delete p.proof_source") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-source/missing.json > build/test-wm-browser-event-validator-source/missing.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-source/wrong.json", "p.proof_source=\"tools/manual/event.json\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-source/wrong.json > build/test-wm-browser-event-validator-source/wrong.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read("build/test-wm-browser-event-validator-source/missing.env")
+val wrong = file_read("build/test-wm-browser-event-validator-source/wrong.env")
+step("Confirm WM event proof must identify the live Chromium producer")
+expect(missing).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-missing")
+expect(missing).to_contain("wm_browser_event_routing_proof_source=")
+expect(wrong).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(wrong).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-missing")
+expect(wrong).to_contain("wm_browser_event_routing_proof_source=tools/manual/event.json")
+```
+
+</details>
+
+#### rejects pass true proof when the live event-check source artifact is missing
+
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event proof source markers are bound to the producer source file
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-source-artifact"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/proof.json", "") +
+    " && cd " + root + " && node ../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/evidence.env")
+step("Confirm event proof source markers are bound to the producer source file")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-missing")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source=tools/web-render-backend/wm_event_check.js")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=missing")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_reason=missing")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_artifact_status=fail")
+```
+
+</details>
+
+#### rejects substituted live event-check source artifacts
+
+-  fixture command
+   - Expected: code equals `0`
+- Confirm event proof source evidence cannot be hardlinked, non-regular, or markerless
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-source-artifact-substituted"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/web-render-backend " + root + "/directory/tools/web-render-backend " + root + "/markerless/tools/web-render-backend && " +
+    _fixture_command(root + "/proof.json", "") +
+    " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp tools/web-render-backend/wm_event_check.js " + root + "/hardlink/original-wm-event-check.js && ln " + root + "/hardlink/original-wm-event-check.js " + root + "/hardlink/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/hardlink && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/directory/proof.json && mkdir -p " + root + "/directory/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/directory && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
+    "cp " + root + "/proof.json " + root + "/markerless/proof.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/web-render-backend/wm_event_check.js && " +
+    "cd " + root + "/markerless && node ../../../scripts/check/validate-wm-browser-event-routing-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
+    "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val hardlink = file_read(root + "/hardlink/hardlink.env")
+val directory = file_read(root + "/directory/directory.env")
+val markerless = file_read(root + "/markerless/markerless.env")
+step("Confirm event proof source evidence cannot be hardlinked, non-regular, or markerless")
+expect(hardlink).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(hardlink).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-hardlink")
+expect(hardlink).to_contain("wm_browser_event_routing_proof_source_file_status=hardlink")
+expect(hardlink).to_contain("wm_browser_event_routing_proof_source_file_reason=hardlink")
+expect(hardlink).to_contain("wm_browser_event_routing_proof_source_artifact_status=fail")
+expect(directory).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(directory).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-not-regular")
+expect(directory).to_contain("wm_browser_event_routing_proof_source_file_status=not-regular")
+expect(directory).to_contain("wm_browser_event_routing_proof_source_file_reason=not-regular")
+expect(directory).to_contain("wm_browser_event_routing_proof_source_artifact_status=fail")
+expect(markerless).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(markerless).to_contain("wm_browser_event_routing_validation_reason=event-routing-proof-source-marker-missing")
+expect(markerless).to_contain("wm_browser_event_routing_proof_source_file_status=marker-missing")
+expect(markerless).to_contain("wm_browser_event_routing_proof_source_file_reason=marker-missing")
+expect(markerless).to_contain("wm_browser_event_routing_proof_source_artifact_status=fail")
+```
+
+</details>
+
+#### rejects pass true proof without live Electron Chromium runtime evidence
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof identifies the live Electron Chromium runtime
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-runtime"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/engine.json > " + root + "/engine.env; " +
+    _fixture_command(root + "/ua.json", "p.electron_user_agent=\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/ua.json > " + root + "/ua.env; " +
+    _fixture_command(root + "/electron-version.json", "p.electron_process_version=\"\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/electron-version.json > " + root + "/electron-version.env; " +
+    _fixture_command(root + "/wrong-electron-version.json", "p.electron_process_version=\"43.0.0\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/wrong-electron-version.json > " + root + "/wrong-electron-version.env; " +
+    _fixture_command(root + "/chrome-version.json", "p.chrome_process_version=\"Chrome/142\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/chrome-version.json > " + root + "/chrome-version.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val engine = file_read(root + "/engine.env")
+val ua = file_read(root + "/ua.env")
+val electron_version = file_read(root + "/electron-version.env")
+val wrong_electron_version = file_read(root + "/wrong-electron-version.env")
+val chrome_version = file_read(root + "/chrome-version.env")
+step("Confirm event routing proof identifies the live Electron Chromium runtime")
+expect(engine).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(engine).to_contain("wm_browser_event_routing_validation_reason=event-routing-browser-runtime-missing")
+expect(engine).to_contain("wm_browser_event_routing_browser_engine=webkit")
+expect(ua).to_contain("wm_browser_event_routing_validation_reason=event-routing-browser-runtime-missing")
+expect(ua).to_contain("wm_browser_event_routing_electron_user_agent=Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36")
+expect(electron_version).to_contain("wm_browser_event_routing_validation_reason=event-routing-browser-runtime-missing")
+expect(electron_version).to_contain("wm_browser_event_routing_electron_process_version=")
+expect(wrong_electron_version).to_contain("wm_browser_event_routing_validation_reason=event-routing-browser-runtime-missing")
+expect(wrong_electron_version).to_contain("wm_browser_event_routing_electron_process_version=43.0.0")
+expect(chrome_version).to_contain("wm_browser_event_routing_validation_reason=event-routing-browser-runtime-missing")
+expect(chrome_version).to_contain("wm_browser_event_routing_chrome_process_version=Chrome/142")
+```
+
+</details>
+
+#### rejects missing or tampered runtime sandbox and GPU evidence
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-sandbox-gpu"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/sandbox-missing.json", "delete p.renderer_sandboxed") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/sandbox-missing.json > " + root + "/sandbox-missing.env; " +
+    _fixture_command(root + "/sandbox-false.json", "p.renderer_sandboxed=false") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/sandbox-false.json > " + root + "/sandbox-false.env; " +
+    _fixture_command(root + "/gpu-missing.json", "delete p.gpu_feature_status") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/gpu-missing.json > " + root + "/gpu-missing.env; " +
+    _fixture_command(root + "/gpu-software.json", "p.gpu_feature_status={gpu_compositing:\"disabled_software\",webgl:\"enabled\"}") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/gpu-software.json > " + root + "/gpu-software.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+val sandbox_missing = file_read(root + "/sandbox-missing.env")
+val sandbox_false = file_read(root + "/sandbox-false.env")
+val gpu_missing = file_read(root + "/gpu-missing.env")
+val gpu_software = file_read(root + "/gpu-software.env")
+expect(sandbox_missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-renderer-sandbox-missing")
+expect(sandbox_missing).to_contain("wm_browser_event_routing_renderer_sandboxed=")
+expect(sandbox_false).to_contain("wm_browser_event_routing_validation_reason=event-routing-renderer-sandbox-missing")
+expect(sandbox_false).to_contain("wm_browser_event_routing_renderer_sandboxed=false")
+expect(gpu_missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-gpu-runtime-missing")
+expect(gpu_missing).to_contain("wm_browser_event_routing_gpu_compositing_status=")
+expect(gpu_software).to_contain("wm_browser_event_routing_validation_reason=event-routing-gpu-runtime-missing")
+expect(gpu_software).to_contain("wm_browser_event_routing_gpu_compositing_status=disabled_software")
+```
+
+</details>
+
+#### rejects pass true proof when the frame sequence is missing or reordered
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof requires structured frame order
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-sequence && mkdir -p build/test-wm-browser-event-validator-sequence && " +
+    _fixture_command("build/test-wm-browser-event-validator-sequence/reordered.json", "p.event_sequence=[\"host_wm_pointer:down\",\"window_cmd:focus\",\"window_cmd:title_command\",\"window_cmd:move\",\"window_cmd:maximize\",\"input_event:text_input\",\"input_event:pointer_down\",\"input_event:pointer_up\"]") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-sequence/reordered.json > build/test-wm-browser-event-validator-sequence/reordered.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-sequence/string.json", "p.event_sequence=\"window_cmd:focus,window_cmd:move\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-sequence/string.json > build/test-wm-browser-event-validator-sequence/string.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val reordered = file_read("build/test-wm-browser-event-validator-sequence/reordered.env")
+val string_sequence = file_read("build/test-wm-browser-event-validator-sequence/string.env")
+step("Confirm event routing proof requires structured frame order")
+expect(reordered).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(reordered).to_contain("wm_browser_event_routing_validation_reason=event-routing-sequence-contract-missing")
+expect(reordered).to_contain("wm_browser_event_routing_event_sequence=host_wm_pointer:down,window_cmd:focus,window_cmd:title_command,window_cmd:move")
+expect(string_sequence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(string_sequence).to_contain("wm_browser_event_routing_validation_reason=event-routing-sequence-contract-missing")
+expect(string_sequence).to_contain("wm_browser_event_routing_event_sequence=")
+```
+
+</details>
+
+#### rejects pass true proof when Chromium timing or animation is malformed
+
+-  fixture command
+   - Expected: code equals `1`
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-animation && mkdir -p build/test-wm-browser-event-validator-animation && " +
+    _fixture_command("build/test-wm-browser-event-validator-animation/proof.json", "p.performance_now_delta_ms=\"not-a-number\";p.animation_frame_count=1") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-animation/proof.json > build/test-wm-browser-event-validator-animation/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-animation/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect_not(evidence.contains("wm_browser_event_routing_performance_now_delta_ms=not-a-number"))
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=1")
+```
+
+</details>
+
+#### rejects pass true proof when Chromium timing does not advance or exceeds budget
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-zero-timing && mkdir -p build/test-wm-browser-event-validator-zero-timing && " +
+    _fixture_command("build/test-wm-browser-event-validator-zero-timing/proof.json", "p.performance_now_delta_ms=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/proof.json > build/test-wm-browser-event-validator-zero-timing/evidence.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-zero-timing/slow.json", "p.performance_now_delta_ms=1001") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-zero-timing/slow.json > build/test-wm-browser-event-validator-zero-timing/slow.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-zero-timing/evidence.env")
+val slow = file_read("build/test-wm-browser-event-validator-zero-timing/slow.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_available=true")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=0")
+expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(slow).to_contain("wm_browser_event_routing_performance_now_delta_ms=1001")
+```
+
+</details>
+
+#### rejects pass true proof when input-to-paint latency is missing or malformed
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof requires structured input-to-paint timing
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-input-latency && mkdir -p build/test-wm-browser-event-validator-input-latency && " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/missing.json", "delete p.input_to_paint_ms") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/missing.json > build/test-wm-browser-event-validator-input-latency/missing.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/zero.json", "p.input_to_paint_ms=0") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/zero.json > build/test-wm-browser-event-validator-input-latency/zero.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/string.json", "p.input_to_paint_ms=\"18.4\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/string.json > build/test-wm-browser-event-validator-input-latency/string.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-input-latency/slow.json", "p.input_to_paint_ms=1001") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-input-latency/slow.json > build/test-wm-browser-event-validator-input-latency/slow.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val missing = file_read("build/test-wm-browser-event-validator-input-latency/missing.env")
+val zero = file_read("build/test-wm-browser-event-validator-input-latency/zero.env")
+val string_latency = file_read("build/test-wm-browser-event-validator-input-latency/string.env")
+val slow = file_read("build/test-wm-browser-event-validator-input-latency/slow.env")
+step("Confirm event routing proof requires structured input-to-paint timing")
+expect(missing).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(missing).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(missing).to_contain("wm_browser_event_routing_input_to_paint_ms=")
+expect(zero).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(zero).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(zero).to_contain("wm_browser_event_routing_input_to_paint_ms=0")
+expect(string_latency).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(string_latency).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(string_latency).to_contain("wm_browser_event_routing_input_to_paint_ms=")
+expect_not(string_latency.contains("wm_browser_event_routing_input_to_paint_ms=18.4"))
+expect(slow).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(slow).to_contain("wm_browser_event_routing_validation_reason=event-routing-interaction-latency-contract-missing")
+expect(slow).to_contain("wm_browser_event_routing_input_to_paint_ms=1001")
+```
+
+</details>
+
+#### rejects string booleans for readiness timing and animation proof
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm string booleans do not satisfy structured Electron event proof
+- expect not
+- expect not
+- expect not
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-string-booleans && mkdir -p build/test-wm-browser-event-validator-string-booleans && " +
+    _fixture_command("build/test-wm-browser-event-validator-string-booleans/ready.json", "p.ready=\"true\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/ready.json > build/test-wm-browser-event-validator-string-booleans/ready.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-booleans/perf.json", "p.performance_now_available=\"true\";p.animation_frame_available=\"true\";p.css_animation_probe=\"true\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-booleans/perf.json > build/test-wm-browser-event-validator-string-booleans/perf.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val ready = file_read("build/test-wm-browser-event-validator-string-booleans/ready.env")
+val perf = file_read("build/test-wm-browser-event-validator-string-booleans/perf.env")
+step("Confirm string booleans do not satisfy structured Electron event proof")
+expect(ready).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ready).to_contain("wm_browser_event_routing_validation_reason=event-routing-ready-missing")
+expect(ready).to_contain("wm_browser_event_routing_ready=")
+expect_not(ready.contains("wm_browser_event_routing_ready=true"))
+expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_available=")
+expect(perf).to_contain("wm_browser_event_routing_animation_frame_available=")
+expect(perf).to_contain("wm_browser_event_routing_css_animation_probe=")
+expect_not(perf.contains("wm_browser_event_routing_performance_now_available=true"))
+expect_not(perf.contains("wm_browser_event_routing_animation_frame_available=true"))
+expect_not(perf.contains("wm_browser_event_routing_css_animation_probe=true"))
+```
+
+</details>
+
+#### rejects stringified numeric event timing animation UI and payload proof
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm stringified numeric evidence is not accepted as live browser proof
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 61 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-string-numbers && mkdir -p build/test-wm-browser-event-validator-string-numbers && " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/count.json", "p.focus_count=\"1\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/count.json > build/test-wm-browser-event-validator-string-numbers/count.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/aggregate.json", "p.window_cmd_count=\"4\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/aggregate.json > build/test-wm-browser-event-validator-string-numbers/aggregate.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/perf.json", "p.performance_now_delta_ms=\"16.7\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/perf.json > build/test-wm-browser-event-validator-string-numbers/perf.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/frame.json", "p.animation_frame_count=\"2\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/frame.json > build/test-wm-browser-event-validator-string-numbers/frame.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/ui.json", "p.traffic_button_count=\"3\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/ui.json > build/test-wm-browser-event-validator-string-numbers/ui.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/font.json", "p.title_font_weight=\"700\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/font.json > build/test-wm-browser-event-validator-string-numbers/font.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/width.json", "p.title_input_width_px=\"158\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/width.json > build/test-wm-browser-event-validator-string-numbers/width.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-string-numbers/payload.json", "p.move_payload.x=\"86\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-string-numbers/payload.json > build/test-wm-browser-event-validator-string-numbers/payload.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val count = file_read("build/test-wm-browser-event-validator-string-numbers/count.env")
+val aggregate = file_read("build/test-wm-browser-event-validator-string-numbers/aggregate.env")
+val perf = file_read("build/test-wm-browser-event-validator-string-numbers/perf.env")
+val frame = file_read("build/test-wm-browser-event-validator-string-numbers/frame.env")
+val ui = file_read("build/test-wm-browser-event-validator-string-numbers/ui.env")
+val font = file_read("build/test-wm-browser-event-validator-string-numbers/font.env")
+val width = file_read("build/test-wm-browser-event-validator-string-numbers/width.env")
+val payload = file_read("build/test-wm-browser-event-validator-string-numbers/payload.env")
+step("Confirm stringified numeric evidence is not accepted as live browser proof")
+expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(count).to_contain("wm_browser_event_routing_focus_count=")
+expect_not(count.contains("wm_browser_event_routing_focus_count=1"))
+expect(aggregate).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(aggregate).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(aggregate).to_contain("wm_browser_event_routing_window_cmd_count=")
+expect_not(aggregate.contains("wm_browser_event_routing_window_cmd_count=4"))
+expect(perf).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(perf).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(perf).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect_not(perf.contains("wm_browser_event_routing_performance_now_delta_ms=16.7"))
+expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect_not(frame.contains("wm_browser_event_routing_animation_frame_count=2"))
+expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
+expect_not(ui.contains("wm_browser_event_routing_traffic_button_count=3"))
+expect(font).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(font).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(font).to_contain("wm_browser_event_routing_title_font_weight=")
+expect_not(font.contains("wm_browser_event_routing_title_font_weight=700"))
+expect(width).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(width).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(width).to_contain("wm_browser_event_routing_title_input_width_px=")
+expect_not(width.contains("wm_browser_event_routing_title_input_width_px=158"))
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect_not(payload.contains("wm_browser_event_routing_move_payload_x=86"))
+```
+
+</details>
+
+#### rejects pass true proof when payload details do not match dispatched DOM events
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-payload && mkdir -p build/test-wm-browser-event-validator-payload && " +
+    _fixture_command("build/test-wm-browser-event-validator-payload/proof.json", "p.move_payload.source=\"synthetic\";p.text_payload.event.text=\"\"") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-payload/proof.json > build/test-wm-browser-event-validator-payload/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-payload/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=synthetic")
+```
+
+</details>
+
+#### rejects pass true proof when UI readback details are missing
+
+-  fixture command
+   - Expected: code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-ui && mkdir -p build/test-wm-browser-event-validator-ui && " +
+    _fixture_command("build/test-wm-browser-event-validator-ui/proof.json", "p.titlebar_display=\"block\";p.traffic_button_count=2") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-ui/proof.json > build/test-wm-browser-event-validator-ui/evidence.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read("build/test-wm-browser-event-validator-ui/evidence.env")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(evidence).to_contain("wm_browser_event_routing_titlebar_display=block")
+```
+
+</details>
+
+#### rejects pass true proof when event counts or move coordinates are fractional
+
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm fractional event count and move payload values are rejected
+- expect not
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "rm -rf build/test-wm-browser-event-validator-fractional && mkdir -p build/test-wm-browser-event-validator-fractional && " +
+    _fixture_command("build/test-wm-browser-event-validator-fractional/counts.json", "p.pointer_down_count=1.5") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-fractional/counts.json > build/test-wm-browser-event-validator-fractional/counts.env; " +
+    _fixture_command("build/test-wm-browser-event-validator-fractional/payload.json", "p.move_payload.x=86.5") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js build/test-wm-browser-event-validator-fractional/payload.json > build/test-wm-browser-event-validator-fractional/payload.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val counts = file_read("build/test-wm-browser-event-validator-fractional/counts.env")
+val payload = file_read("build/test-wm-browser-event-validator-fractional/payload.env")
+step("Confirm fractional event count and move payload values are rejected")
+expect(counts).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(counts).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(counts).to_contain("wm_browser_event_routing_pointer_down_count=")
+expect_not(counts.contains("wm_browser_event_routing_pointer_down_count=1.5"))
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect_not(payload.contains("wm_browser_event_routing_move_payload_x=86.5"))
+```
+
+</details>
+
+#### rejects unsafe exponential integer event animation UI and payload proof without crashing
+
+-  fixture command
+-  fixture command
+-  fixture command
+-  fixture command
+   - Expected: code equals `1`
+- Confirm unsafe exponential integers fail as structured evidence, not BigInt crashes
+- expect not
+- expect not
+- expect not
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-unsafe-integers"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/count.json", "p.focus_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/count.json > " + root + "/count.env 2>&1; " +
+    _fixture_command(root + "/frame.json", "p.animation_frame_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/frame.json > " + root + "/frame.env 2>&1; " +
+    _fixture_command(root + "/ui.json", "p.traffic_button_count=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/ui.json > " + root + "/ui.env 2>&1; " +
+    _fixture_command(root + "/payload.json", "p.move_payload.x=1e21") +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/payload.json > " + root + "/payload.env 2>&1"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val count = file_read(root + "/count.env")
+val frame = file_read(root + "/frame.env")
+val ui = file_read(root + "/ui.env")
+val payload = file_read(root + "/payload.env")
+step("Confirm unsafe exponential integers fail as structured evidence, not BigInt crashes")
+expect(count).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(count).to_contain("wm_browser_event_routing_validation_reason=event-routing-contract-missing")
+expect(count).to_contain("wm_browser_event_routing_focus_count=")
+expect_not(count.contains("Cannot convert"))
+expect(frame).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(frame).to_contain("wm_browser_event_routing_validation_reason=event-routing-performance-animation-contract-missing")
+expect(frame).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect_not(frame.contains("Cannot convert"))
+expect(ui).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(ui).to_contain("wm_browser_event_routing_validation_reason=event-routing-ui-contract-missing")
+expect(ui).to_contain("wm_browser_event_routing_traffic_button_count=")
+expect_not(ui.contains("Cannot convert"))
+expect(payload).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(payload).to_contain("wm_browser_event_routing_validation_reason=event-routing-payload-contract-missing")
+expect(payload).to_contain("wm_browser_event_routing_move_payload_x=")
+expect_not(payload.contains("Cannot convert"))
+```
+
+</details>
+
+#### rejects symlinked WM event-routing proof JSON before reading event evidence
+
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof path cannot be a symlink
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-symlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/real.json", "") +
+    " && ln -s real.json " + root + "/proof-link.json" +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof-link.json > " + root + "/symlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/symlink.env")
+step("Confirm event routing proof path cannot be a symlink")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-symlink")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=unknown")
+expect_not(evidence.contains("wm_browser_event_routing_target=electron"))
+```
+
+</details>
+
+#### rejects hardlinked WM event-routing proof JSON before reading event evidence
+
+-  fixture command
+   - Expected: code equals `1`
+- Confirm event routing proof path cannot be a hardlink
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-validator-hardlink"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    _fixture_command(root + "/real.json", "") +
+    " && ln " + root + "/real.json " + root + "/proof-link.json" +
+    " && node scripts/check/validate-wm-browser-event-routing-proof.js " + root + "/proof-link.json > " + root + "/hardlink.env"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
+
+val evidence = file_read(root + "/hardlink.env")
+step("Confirm event routing proof path cannot be a hardlink")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=proof-json-hardlink")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=pass")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=fail")
+expect_not(evidence.contains("wm_browser_event_routing_target=electron"))
+```
+
+</details>
+
+#### keeps the live shell wrapper wired to the validator result
+
+- expect not
+- expect not
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val script = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
+val validator = file_read("scripts/check/validate-wm-browser-event-routing-proof.js")
+expect(script).to_contain("validate-wm-browser-event-routing-proof.js")
+expect(script).to_contain("validator_code")
+expect(script).to_contain("wm_browser_event_routing_validation_status")
+expect(script).to_contain("wm_browser_event_routing_validation_reason")
+expect(script).to_contain("wm_browser_event_routing_proof_symlink_status")
+expect(script).to_contain("wm_browser_event_routing_proof_hardlink_status")
+expect(script).to_contain("proof-json-hardlink-status-not-pass")
+expect(script).to_contain("wm_browser_event_routing_target")
+expect(script).to_contain("wm_browser_event_routing_surface_id")
+expect(script).to_contain("wm_browser_event_routing_proof_source")
+expect(script).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes")
+expect(script).to_contain("wm_browser_event_routing_proof_source_file_reason")
+expect(script).to_contain("wm_browser_event_routing_proof_source_artifact_status")
+expect(script).to_contain("proof source artifact:")
+expect(script).to_contain("event-routing-proof-source-artifact-status-not-pass")
+expect(script).to_contain("wm_browser_event_routing_browser_engine")
+expect(script).to_contain("wm_browser_event_routing_electron_user_agent")
+expect(script).to_contain("wm_browser_event_routing_electron_process_version")
+expect(script).to_contain("wm_browser_event_routing_chrome_process_version")
+expect(script).to_contain("AETHERIC_HOST_WEB_GUI_PROOF")
+expect(script).to_contain("check-aetheric-host-web-gui-evidence.shs")
+expect(script).to_contain("missing-aetheric-production-proof")
+expect(script).to_contain("wm_browser_event_routing_event_sequence")
+expect(script).to_contain("wm_browser_event_routing_focus_count")
+expect(script).to_contain("wm_browser_event_routing_input_to_paint_ms")
+expect(script).to_contain("wm_browser_event_routing_move_payload_source")
+expect(script).to_contain("wm_browser_event_routing_title_input_width_px")
+expect(script).to_contain("wm_browser_event_routing_close_button_background")
+expect(script).to_contain("missing-simple-web-font-run-id")
+expect(script).to_contain("SIMPLE_WEB_FONT_RUN_ID")
+expect(validator).to_contain("proof-json-hardlink")
+expect(validator).to_contain("fields.run_id === expectedRunId")
+expect(validator).to_contain("event-routing-proof-source-marker-missing")
+expect(validator).to_contain("event-routing-proof-source-size-mismatch")
+expect(validator).to_contain("out.input_to_paint_ms = inputToPaintMs")
+expect(validator).to_contain("productionEnvelopeArtifact")
+val producer = file_read("tools/web-render-backend/wm_event_check.js")
+expect(producer).to_contain("target: 'electron'")
+expect(producer).to_contain("surface_id: 'wm-browser-event-routing'")
+expect(producer).to_contain("browser_engine: 'chromium'")
+expect(producer).to_contain("fields.run_id !== EXPECTED_RUN_ID")
+expect(producer).to_contain("electron_user_agent: navigator.userAgent")
+expect(producer).to_contain("result.electron_process_version = process.versions.electron")
+expect(producer).to_contain("result.chrome_process_version = process.versions.chrome")
+expect(producer).to_contain("loadProductionEnvelope(root)")
+expect(producer).to_contain("data-aetheric-production-surface")
+expect(producer).to_contain("sandbox: true")
+expect(producer).to_contain("contextIsolation: true")
+expect(producer).to_contain("nodeIntegration: false")
+expect(producer).to_contain("process.sandboxed === true")
+expect(producer).to_contain("app.getGPUFeatureStatus()")
+expect_not(producer.contains("disableHardwareAcceleration"))
+expect_not(producer.contains("sandbox: false"))
+expect(producer).to_contain("out.title_font_weight = Number.parseFloat(titleStyle.fontWeight)")
+expect_not(producer.contains("out.title_font_weight = titleStyle.fontWeight"))
+```
+
+</details>
+
+#### keeps production launch policy and conformance contracts fail closed
+
+- expect not
+- expect not
+- expect not
+   - Expected: code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = file_read("scripts/check/check-wm-browser-event-routing-evidence.shs")
+expect_not(wrapper.contains("\"$ELECTRON_RESOLVED_BIN\" --no-sandbox"))
+expect_not(wrapper.contains("\"$ELECTRON_RESOLVED_BIN\" --disable-gpu"))
+expect_not(wrapper.contains("ELECTRON_DISABLE_SANDBOX=1 xvfb-run"))
+expect(wrapper).to_contain("diagnostic-launch-flags-not-production")
+expect(wrapper).to_contain("wm_browser_event_routing_renderer_sandboxed=$renderer_sandboxed")
+expect(wrapper).to_contain("wm_browser_event_routing_gpu_compositing_status=$gpu_compositing_status")
+expect(wrapper).to_contain("wm_browser_event_routing_webgl_status=$webgl_status")
+val command = "sh scripts/check/check-simple-web-browser-conformance-contract.shs"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+expect(stdout).to_contain("simple_web_browser_conformance_accounted_case_count=1")
+expect(stdout).to_contain("simple_web_browser_conformance_executed_case_count=0")
+expect(stdout).to_contain("simple_web_browser_conformance_status=not-run")
+expect(stdout).to_contain("simple_web_browser_conformance_contract=pass")
+```
+
+</details>
+
+#### rejects an incomplete pinned conformance row without promoting accounted coverage
+
+- Remove one required evidence binding from the pinned case row
+   - Expected: code equals `0`
+- Keep incomplete inventory distinct from executed conformance
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Remove one required evidence binding from the pinned case row")
+val root = "build/test-simple-web-conformance-incomplete-row"
+val command = "rm -rf " + root + " && mkdir -p " + root +
+    " && sed '/^case_001_evidence_spec_path=/d' test/fixtures/browser/conformance/pinned_manifest.env > " +
+    root + "/manifest.env && SIMPLE_WEB_CONFORMANCE_CONTRACT_TEST_MODE=1 SIMPLE_WEB_CONFORMANCE_TEST_MANIFEST=" +
+    root + "/manifest.env sh scripts/check/check-simple-web-browser-conformance-contract.shs || true"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Keep incomplete inventory distinct from executed conformance")
+expect(stdout).to_contain("simple_web_browser_conformance_contract=fail")
+expect(stdout).to_contain("reason=incomplete-case-row:1")
+expect_not(stdout.contains("simple_web_browser_conformance_contract=pass"))
+```
+
+</details>
+
+#### rejects a forged conformance PASS receipt until trusted execution admission exists
+
+- Forge PASS status and a hash-consistent receipt around the pinned RED row
+- " && receipt sha=$
+   - Expected: code equals `0`
+- Keep claimed PASS unpromotable without a trusted fresh-run receipt schema
+- expect not
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Forge PASS status and a hash-consistent receipt around the pinned RED row")
+val root = "build/test-simple-web-conformance-forged-pass"
+val command = "rm -rf " + root + " && mkdir -p " + root +
+    " && printf 'forged-pass-receipt\\n' > " + root + "/receipt.env" +
+    " && receipt_sha=$(sha256sum " + root + "/receipt.env | cut -d' ' -f1)" +
+    " && sed -e 's/^case_001_status=red-not-run$/case_001_status=pass/'" +
+    " -e 's/^case_001_execution_status=not-run$/case_001_execution_status=pass/'" +
+    " test/fixtures/browser/conformance/pinned_manifest.env > " + root + "/manifest.env" +
+    " && printf 'case_001_receipt_path=%s\\ncase_001_receipt_sha256=%s\\n' '" +
+    root + "/receipt.env' \"$receipt_sha\" >> " + root + "/manifest.env" +
+    " && SIMPLE_WEB_CONFORMANCE_CONTRACT_TEST_MODE=1 SIMPLE_WEB_CONFORMANCE_TEST_MANIFEST=" +
+    root + "/manifest.env sh scripts/check/check-simple-web-browser-conformance-contract.shs || true"
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Keep claimed PASS unpromotable without a trusted fresh-run receipt schema")
+expect(stdout).to_contain("simple_web_browser_conformance_contract=fail")
+expect(stdout).to_contain("reason=conformance-pass-unpromotable:1")
+expect_not(stdout.contains("simple_web_browser_conformance_contract=pass"))
+```
+
+</details>
+
+#### serializes the admitted envelope into the renderer without main-process captures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val command = "node -e 'const fs=require(\"fs\");const source=fs.readFileSync(\"tools/web-render-backend/wm_event_check.js\",\"utf8\");const start=source.indexOf(\"const result = await win.webContents.executeJavaScript\");const end=source.indexOf(\"const frameDir\",start);const renderer=source.slice(start,end);if(start<0||end<0||/\\benvelope\\./.test(renderer)||!source.includes(\"function serializeForRenderer(value)\")||!source.includes(\"serializeForRenderer(rendererEnvelope)\")||!renderer.includes(\"const productionEnvelope = Object.freeze(\")||!renderer.includes(\"productionEnvelope.theme_id\")){process.exit(1)}'"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+```
+
+</details>
+
+#### rejects an override of the canonical Aetheric admission checker
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-wrapper-checker-override"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "AETHERIC_HOST_WEB_GUI_CHECK_SCRIPT=/bin/true BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md " +
+    "sh scripts/check/check-wm-browser-event-routing-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val evidence = file_read(root + "/stdout.env")
+expect(evidence).to_contain("wm_browser_event_routing_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_reason=aetheric-production-checker-override-not-allowed")
+```
+
+</details>
+
+#### keeps wrapper diagnostics on early dependency failures
+
+- Confirm early WM event wrapper failure preserves normalized diagnostics
+- Confirm early WM event report surfaces artifact gate details
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-wm-browser-event-wrapper-early-fail"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+    "PATH=/bin:/usr/bin BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-wm-browser-event-routing-evidence.shs > " + root + "/stdout.env 2> " + root + "/stderr.log; exit 0"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+val evidence = file_read(root + "/stdout.env")
+step("Confirm early WM event wrapper failure preserves normalized diagnostics")
+expect(evidence).to_contain("wm_browser_event_routing_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_validation_status=fail")
+expect(evidence).to_contain("wm_browser_event_routing_validation_reason=missing-command:node")
+expect(evidence).to_contain("wm_browser_event_routing_proof_symlink_status=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_hardlink_status=")
+expect(evidence).to_contain("wm_browser_event_routing_target=")
+expect(evidence).to_contain("wm_browser_event_routing_surface_id=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_status=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_actual_size_bytes=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_file_reason=")
+expect(evidence).to_contain("wm_browser_event_routing_proof_source_artifact_status=")
+expect(evidence).to_contain("wm_browser_event_routing_browser_engine=")
+expect(evidence).to_contain("wm_browser_event_routing_electron_user_agent=")
+expect(evidence).to_contain("wm_browser_event_routing_electron_process_version=")
+expect(evidence).to_contain("wm_browser_event_routing_chrome_process_version=")
+expect(evidence).to_contain("wm_browser_event_routing_focus_count=")
+expect(evidence).to_contain("wm_browser_event_routing_move_count=")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_count=")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_count=")
+expect(evidence).to_contain("wm_browser_event_routing_pointer_down_count=")
+expect(evidence).to_contain("wm_browser_event_routing_pointer_up_count=")
+expect(evidence).to_contain("wm_browser_event_routing_event_sequence=")
+expect(evidence).to_contain("wm_browser_event_routing_performance_now_delta_ms=")
+expect(evidence).to_contain("wm_browser_event_routing_input_to_paint_ms=")
+expect(evidence).to_contain("wm_browser_event_routing_animation_frame_count=")
+expect(evidence).to_contain("wm_browser_event_routing_title_text=")
+expect(evidence).to_contain("wm_browser_event_routing_traffic_button_count=")
+
+val report = file_read(root + "/report.md")
+step("Confirm early WM event report surfaces artifact gate details")
+expect(report).to_contain("- proof source artifact:  /  / ")
+expect(evidence).to_contain("wm_browser_event_routing_title_input_width_px=")
+expect(evidence).to_contain("wm_browser_event_routing_close_button_background=")
+expect(evidence).to_contain("wm_browser_event_routing_expected_move_x=")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_x=")
+expect(evidence).to_contain("wm_browser_event_routing_move_payload_source=")
+expect(evidence).to_contain("wm_browser_event_routing_title_command_text=")
+expect(evidence).to_contain("wm_browser_event_routing_text_input_text=")
+expect(evidence).to_contain("wm_browser_event_routing_font_text=")
+expect(evidence).to_contain("wm_browser_event_routing_font_composition_id=")
+expect(evidence).to_contain("wm_browser_event_routing_font_identity=")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_correlation_id=")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_path=")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_pixel_checksum=")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_nonbackground_pixels=")
+expect(evidence).to_contain("wm_browser_event_routing_font_frame_artifact_status=")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 33 |
+| Active scenarios | 33 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- **Plan:** `doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md`
+- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
+
+
+</details>

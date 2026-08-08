@@ -1,0 +1,112 @@
+use std.spec.*
+use std.hardware.rv64gc_rtl.pmp.{PmpEntries64, pmp64_check_entry, pmp64_check16, pmp64_gate_access}
+
+fn empty_pmp_entries64() -> PmpEntries64:
+    PmpEntries64(
+        cfg_0: 0, cfg_1: 0, cfg_2: 0, cfg_3: 0,
+        cfg_4: 0, cfg_5: 0, cfg_6: 0, cfg_7: 0,
+        cfg_8: 0, cfg_9: 0, cfg_10: 0, cfg_11: 0,
+        cfg_12: 0, cfg_13: 0, cfg_14: 0, cfg_15: 0,
+        addr_0: 0, addr_1: 0, addr_2: 0, addr_3: 0,
+        addr_4: 0, addr_5: 0, addr_6: 0, addr_7: 0,
+        addr_8: 0, addr_9: 0, addr_10: 0, addr_11: 0,
+        addr_12: 0, addr_13: 0, addr_14: 0, addr_15: 0
+    )
+
+describe "RV64 production PMP owner":
+    it "ignores OFF entries":
+        val result = pmp64_check_entry(0, 0, 0, 0x400, 0x403, 1, 1)
+        expect(result.matched).to_equal(false)
+
+    it "matches TOR and denies a partial overlap":
+        val full = pmp64_check_entry(0x09, 0x100, 0x200, 0x400, 0x407, 1, 1)
+        val partial = pmp64_check_entry(0x09, 0x100, 0x200, 0x7FC, 0x803, 1, 1)
+        expect(full.matched).to_equal(true)
+        expect(full.allowed).to_equal(true)
+        expect(partial.matched).to_equal(true)
+        expect(partial.allowed).to_equal(false)
+
+    it "matches NA4 exactly":
+        val result = pmp64_check_entry(0x11, 0, 0x100, 0x400, 0x403, 1, 1)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(true)
+
+    it "decodes a sixteen byte NAPOT region without variable shifts":
+        val inside = pmp64_check_entry(0x19, 0, 0x101, 0x400, 0x407, 1, 1)
+        val outside = pmp64_check_entry(0x19, 0, 0x101, 0x410, 0x413, 1, 1)
+        expect(inside.matched).to_equal(true)
+        expect(inside.allowed).to_equal(true)
+        expect(outside.matched).to_equal(false)
+
+    it "lets all-ones NAPOT cover the implemented physical domain":
+        val result = pmp64_check_entry(0x19, 0, 0x003FFFFFFFFFFFFF, 0x00FFFFFFFFFFFFFF, 0x00FFFFFFFFFFFFFF, 1, 1)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(true)
+
+    it "applies R W and X permissions":
+        val read = pmp64_check_entry(0x19, 0, 0x101, 0x400, 0x403, 1, 1)
+        val write = pmp64_check_entry(0x1B, 0, 0x101, 0x400, 0x403, 2, 1)
+        val execute = pmp64_check_entry(0x1D, 0, 0x101, 0x400, 0x403, 0, 1)
+        expect(read.allowed).to_equal(true)
+        expect(write.allowed).to_equal(true)
+        expect(execute.allowed).to_equal(true)
+
+    it "bypasses unlocked M permissions but enforces locked reserved W without R":
+        val unlocked = pmp64_check_entry(0x1A, 0, 0x101, 0x400, 0x403, 1, 3)
+        val locked = pmp64_check_entry(0x9A, 0, 0x101, 0x400, 0x403, 1, 3)
+        expect(unlocked.allowed).to_equal(true)
+        expect(locked.allowed).to_equal(false)
+
+    it "keeps partial overlap fail closed for unlocked M mode":
+        val result = pmp64_check_entry(0x19, 0, 0x101, 0x40C, 0x413, 1, 3)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(false)
+
+    it "uses the lowest overlapping entry":
+        var entries = empty_pmp_entries64()
+        entries.cfg_0 = 0x18
+        entries.addr_0 = 0x101
+        entries.cfg_1 = 0x19
+        entries.addr_1 = 0x101
+        val result = pmp64_check16(entries, 0x400, 4, 1, 1)
+        expect(result.matched).to_equal(true)
+        expect(result.allowed).to_equal(false)
+        expect(result.matched_index).to_equal(0)
+
+    it "allows no-match M accesses and denies no-match S accesses":
+        val entries = empty_pmp_entries64()
+        val machine = pmp64_check16(entries, 0x400, 4, 1, 3)
+        val supervisor = pmp64_check16(entries, 0x400, 4, 1, 1)
+        expect(machine.matched).to_equal(false)
+        expect(machine.allowed).to_equal(true)
+        expect(machine.matched_index).to_equal(16)
+        expect(supervisor.allowed).to_equal(false)
+
+    it "denies zero oversized overflowing and invalid accesses":
+        val entries = empty_pmp_entries64()
+        val zero = pmp64_check16(entries, 0x400, 0, 1, 3)
+        val oversized = pmp64_check16(entries, 0x400, 9, 1, 3)
+        val overflow = pmp64_check16(entries, 0x00FFFFFFFFFFFFFF, 2, 1, 3)
+        val invalid_kind = pmp64_check16(entries, 0x400, 4, 3, 1)
+        val invalid_privilege = pmp64_check16(entries, 0x400, 4, 1, 2)
+        expect(zero.allowed).to_equal(false)
+        expect(oversized.allowed).to_equal(false)
+        expect(overflow.allowed).to_equal(false)
+        expect(invalid_kind.allowed).to_equal(false)
+        expect(invalid_privilege.allowed).to_equal(false)
+
+    it "suppresses bus issue for translation and PMP faults":
+        var entries = empty_pmp_entries64()
+        entries.cfg_0 = 0x19
+        entries.addr_0 = 0x101
+
+        val allowed = pmp64_gate_access(entries, 0x400, 4, 1, 1, false, 0)
+        val denied = pmp64_gate_access(entries, 0x400, 4, 2, 1, false, 0)
+        val page_fault = pmp64_gate_access(entries, 0x400, 4, 1, 1, true, 13)
+
+        expect(allowed.bus_valid).to_equal(true)
+        expect(allowed.fault).to_equal(false)
+        expect(denied.bus_valid).to_equal(false)
+        expect(denied.fault_cause).to_equal(7)
+        expect(page_fault.bus_valid).to_equal(false)
+        expect(page_fault.fault_cause).to_equal(13)

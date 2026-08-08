@@ -1,0 +1,39 @@
+# codex-unit-test
+"""Linux-only contract for the SimpleOS QEMU Vulkan DrawIR evidence gate.
+
+This deliberately exercises the small metrics fixture instead of the broad
+multi-host wrapper self-test.  It keeps the Linux requirement executable under
+host pressure while the production QEMU lane remains a separate live gate.
+"""
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+use std.io_runtime.{process_run}
+
+fn host_gpu_wrapper_source() -> text:
+    file_read_text("scripts/check/check-simpleos-qemu-host-gpu-2d.shs")
+
+fn run_linux_vulkan_metrics_contract() -> (text, text, i64):
+    process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-host-gpu-2d.shs", "--self-test-metrics"])
+
+describe "SimpleOS Linux QEMU Vulkan DrawIR contract":
+    it "requires Vulkan-only DrawIR readback evidence with twenty warm samples":
+        val source = host_gpu_wrapper_source()
+        expect(source).to_contain("BACKEND=vulkan")
+        expect(source).to_contain("vulkan:linux")
+        expect(source).to_contain("PROCESSING_BACKEND=vulkan")
+        expect(source).to_contain("HOST_GPU_WARM_SAMPLE_COUNT=$(sed -n")
+        expect(source).to_contain("[ \"$HOST_GPU_WARM_SAMPLE_COUNT\" = 20 ]")
+        expect(source).to_contain("RENDER_READBACK_P95_MAX_US=16700")
+        expect(source).to_contain("HOST_GPU_FIXTURE_SAMPLE")
+        expect(source).to_contain("render_latency_p95_us")
+        expect(source).to_contain("render_latency_evidence_valid")
+        expect(source).to_contain("HOST_GPU_DRAW_IR_OK")
+        expect(source).to_contain("HOST_GPU_FIXTURE_OK")
+        expect(source).to_contain("--processing-backend=vulkan")
+        expect(source).to_contain("--processing-verify-cpu")
+
+        val (out, err, code) = run_linux_vulkan_metrics_contract()
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("simpleos_qemu_host_gpu_2d_metrics_self_test=pass")

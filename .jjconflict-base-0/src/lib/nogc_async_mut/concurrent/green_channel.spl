@@ -1,0 +1,235 @@
+# Green Channel - scheduler-facing cooperative channel contract.
+#
+# This module is pure Simple and deliberately nonblocking. Empty receive records
+# a parked logical green task. Send wakes one parked receiver when present, or
+# buffers the value if capacity allows. A full channel reports backpressure
+# instead of blocking the carrier thread.
+
+pub struct GreenChannel:
+    capacity: i64
+    queued_values: [i64]
+    waiting_task_ids: [i64]
+    backpressure_count: i64
+    closed: bool
+
+pub struct GreenChannelRecvResult:
+    channel: GreenChannel
+    task_id: i64
+    value: i64
+    received: bool
+    parked: bool
+    channel_closed: bool
+    reason: text
+
+pub struct GreenChannelSendResult:
+    channel: GreenChannel
+    value: i64
+    receiver_task_id: i64
+    sent: bool
+    unparked: bool
+    backpressure: bool
+    sender_should_park: bool
+    channel_closed: bool
+    reason: text
+
+pub struct GreenChannelCloseResult:
+    channel: GreenChannel
+    woken_task_ids: [i64]
+
+fn green_channel_normalized_capacity(capacity: i64) -> i64:
+    if capacity < 1:
+        1
+    else:
+        capacity
+
+fn green_channel_tail_values(values: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 1
+    val count = values.len()
+    while i < count:
+        out.push(values[i])
+        i = i + 1
+    out
+
+fn green_channel_tail_tasks(task_ids: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 1
+    val count = task_ids.len()
+    while i < count:
+        out.push(task_ids[i])
+        i = i + 1
+    out
+
+pub fn green_channel_new(capacity: i64) -> GreenChannel:
+    """Create a bounded green channel contract."""
+    GreenChannel(
+        capacity: green_channel_normalized_capacity(capacity),
+        queued_values: [],
+        waiting_task_ids: [],
+        backpressure_count: 0,
+        closed: false
+    )
+
+pub fn green_channel_len(channel: GreenChannel) -> i64:
+    channel.queued_values.len()
+
+pub fn green_channel_waiting_count(channel: GreenChannel) -> i64:
+    channel.waiting_task_ids.len()
+
+pub fn green_channel_backpressure_count(channel: GreenChannel) -> i64:
+    channel.backpressure_count
+
+pub fn green_channel_is_closed(channel: GreenChannel) -> bool:
+    channel.closed
+
+pub fn green_channel_close(channel: GreenChannel) -> GreenChannel:
+    """Close the channel, waking all parked receivers with channel_closed=true.
+    Returns the updated channel (all waiting_task_ids are drained — caller
+    must wake each returned task ID via the scheduler before discarding them).
+    Use green_channel_close_drain to get the list of task IDs to wake."""
+    GreenChannel(
+        capacity: channel.capacity,
+        queued_values: channel.queued_values,
+        waiting_task_ids: [],
+        backpressure_count: channel.backpressure_count,
+        closed: true
+    )
+
+pub fn green_channel_close_drain(channel: GreenChannel) -> GreenChannelCloseResult:
+    """Close the channel and return both the closed channel state and the list
+    of previously-parked task IDs that must be woken by the scheduler."""
+    GreenChannelCloseResult(
+        channel: GreenChannel(
+            capacity: channel.capacity,
+            queued_values: channel.queued_values,
+            waiting_task_ids: [],
+            backpressure_count: channel.backpressure_count,
+            closed: true
+        ),
+        woken_task_ids: channel.waiting_task_ids
+    )
+
+pub fn green_channel_try_send(channel: GreenChannel, value: i64) -> GreenChannelSendResult:
+    """Try to send; returns channel_closed=true and sent=false if channel is closed.
+    Identical to green_channel_send — provided as an explicit try-send alias."""
+    green_channel_send(channel, value)
+
+pub fn green_channel_recv(channel: GreenChannel, task_id: i64) -> GreenChannelRecvResult:
+    """Receive one value or park the logical green task when empty.
+    If channel is closed and empty, returns immediately with channel_closed=true instead of parking."""
+    if channel.queued_values.len() > 0:
+        GreenChannelRecvResult(
+            channel: GreenChannel(
+                capacity: channel.capacity,
+                queued_values: green_channel_tail_values(channel.queued_values),
+                waiting_task_ids: channel.waiting_task_ids,
+                backpressure_count: channel.backpressure_count,
+                closed: channel.closed
+            ),
+            task_id: task_id,
+            value: channel.queued_values[0],
+            received: true,
+            parked: false,
+            channel_closed: false,
+            reason: "received_buffered_value"
+        )
+    elif channel.closed:
+        GreenChannelRecvResult(
+            channel: channel,
+            task_id: task_id,
+            value: 0,
+            received: false,
+            parked: false,
+            channel_closed: true,
+            reason: "channel_closed"
+        )
+    else:
+        var waiters = channel.waiting_task_ids
+        waiters.push(task_id)
+        GreenChannelRecvResult(
+            channel: GreenChannel(
+                capacity: channel.capacity,
+                queued_values: channel.queued_values,
+                waiting_task_ids: waiters,
+                backpressure_count: channel.backpressure_count,
+                closed: channel.closed
+            ),
+            task_id: task_id,
+            value: 0,
+            received: false,
+            parked: true,
+            channel_closed: false,
+            reason: "parked_on_empty_recv"
+        )
+
+pub fn green_channel_send(channel: GreenChannel, value: i64) -> GreenChannelSendResult:
+    """Send one value, waking a parked receiver or reporting nonblocking backpressure.
+    If channel is closed, returns immediately with sent=false and channel_closed=true."""
+    if channel.closed:
+        GreenChannelSendResult(
+            channel: channel,
+            value: value,
+            receiver_task_id: 0,
+            sent: false,
+            unparked: false,
+            backpressure: false,
+            sender_should_park: false,
+            channel_closed: true,
+            reason: "channel_closed"
+        )
+    elif channel.waiting_task_ids.len() > 0:
+        GreenChannelSendResult(
+            channel: GreenChannel(
+                capacity: channel.capacity,
+                queued_values: channel.queued_values,
+                waiting_task_ids: green_channel_tail_tasks(channel.waiting_task_ids),
+                backpressure_count: channel.backpressure_count,
+                closed: channel.closed
+            ),
+            value: value,
+            receiver_task_id: channel.waiting_task_ids[0],
+            sent: true,
+            unparked: true,
+            backpressure: false,
+            sender_should_park: false,
+            channel_closed: false,
+            reason: "unpark_receiver"
+        )
+    elif channel.queued_values.len() < channel.capacity:
+        var queued = channel.queued_values
+        queued.push(value)
+        GreenChannelSendResult(
+            channel: GreenChannel(
+                capacity: channel.capacity,
+                queued_values: queued,
+                waiting_task_ids: channel.waiting_task_ids,
+                backpressure_count: channel.backpressure_count,
+                closed: channel.closed
+            ),
+            value: value,
+            receiver_task_id: 0,
+            sent: true,
+            unparked: false,
+            backpressure: false,
+            sender_should_park: false,
+            channel_closed: false,
+            reason: "buffered_value"
+        )
+    else:
+        GreenChannelSendResult(
+            channel: GreenChannel(
+                capacity: channel.capacity,
+                queued_values: channel.queued_values,
+                waiting_task_ids: channel.waiting_task_ids,
+                backpressure_count: channel.backpressure_count + 1,
+                closed: channel.closed
+            ),
+            value: value,
+            receiver_task_id: 0,
+            sent: false,
+            unparked: false,
+            backpressure: true,
+            sender_should_park: false,
+            channel_closed: false,
+            reason: "bounded_backpressure"
+        )

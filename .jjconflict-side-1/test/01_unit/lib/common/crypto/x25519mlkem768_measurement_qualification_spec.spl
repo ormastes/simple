@@ -1,0 +1,426 @@
+# @tag: unit, crypto, x25519mlkem768, performance, qualification
+# @req REQ-008 REQ-009 REQ-010 REQ-012 REQ-015 NFR-009 NFR-010 NFR-017
+
+use std.spec.{describe, it, expect, step, fail}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768RunReceipt}
+use lib.common.crypto.x25519_mlkem768.pinned_public_receipt.{
+    X25519MlKem768PinnedSet, X25519MlKem768PinnedSetReceipt,
+    X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+    X25519_MLKEM768_PINNED_MLKEM_CT_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_X25519_SHA256,
+    X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+    X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256}
+use lib.common.crypto.x25519_mlkem768.matrix_receipt.{
+    X25519MlKem768MatrixAdmissionPhase, X25519MlKem768MatrixRow,
+    x25519_mlkem768_admit_full_backend_matrix}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768CaptureKind, X25519MlKem768MeasurementTarget,
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_qualify_measurement,
+    x25519_mlkem768_measurement_qualification_sha256,
+    x25519_mlkem768_measurement_qualification_valid,
+    x25519_mlkem768_render_measurement_qualification}
+use lib.common.platform_measurement_observation.{
+    PLATFORM_MEASUREMENT_OBSERVATION_SCHEMA,
+    PlatformMeasurementObservation, PlatformPeakMemoryMetric,
+    platform_measurement_observation_sha256}
+
+val _QUALIFICATION_SESSION_SHA256: text = "7" * 64
+val _QUALIFICATION_CLOCK_ID: text =
+    "monotonic-clock-v1|source=spec-clock|epoch=fixture|lane=unit-test"
+
+fn _qualification_gpu(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Cuda or
+    backend == X25519MlKem768EvidenceBackend.Vulkan or
+    backend == X25519MlKem768EvidenceBackend.Metal
+
+fn _qualification_simd(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Avx2 or
+    backend == X25519MlKem768EvidenceBackend.Neon or
+    backend == X25519MlKem768EvidenceBackend.Rvv
+
+fn _qualification_arch(backend: X25519MlKem768EvidenceBackend) -> text:
+    if backend == X25519MlKem768EvidenceBackend.Neon or
+            backend == X25519MlKem768EvidenceBackend.Metal:
+        return "aarch64"
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return "riscv64"
+    "x86_64"
+
+fn _qualification_set_a() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(
+        set_id: X25519MlKem768PinnedSet.MlKem,
+        first_output_label: "mlkem768-encapsulation-key",
+        second_output_label: "mlkem768-ciphertext",
+        first_output_bytes: 1184, second_output_bytes: 1088,
+        shared_secret_bytes: 32, recovered_secret_bytes: 32,
+        first_output_sha256: X25519_MLKEM768_PINNED_MLKEM_EK_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_MLKEM_CT_SHA256)
+
+fn _qualification_set_b() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(
+        set_id: X25519MlKem768PinnedSet.X25519,
+        first_output_label: "x25519-client-public",
+        second_output_label: "x25519-server-public",
+        first_output_bytes: 32, second_output_bytes: 32,
+        shared_secret_bytes: 32, recovered_secret_bytes: 32,
+        first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_X25519_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_SERVER_X25519_SHA256)
+
+fn _qualification_set_c() -> X25519MlKem768PinnedSetReceipt:
+    X25519MlKem768PinnedSetReceipt(
+        set_id: X25519MlKem768PinnedSet.Hybrid,
+        first_output_label: "x25519mlkem768-client-share",
+        second_output_label: "x25519mlkem768-server-share",
+        first_output_bytes: 1216, second_output_bytes: 1120,
+        shared_secret_bytes: 64, recovered_secret_bytes: 64,
+        first_output_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        second_output_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn _qualification_execution(
+        backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768RunReceipt:
+    val gpu = _qualification_gpu(backend)
+    val simd = _qualification_simd(backend)
+    X25519MlKem768RunReceipt(
+        schema: "x25519mlkem768-evidence-v1",
+        status: X25519MlKem768EvidenceStatus.Pass,
+        reason: "synthetic-branch-fixture-not-promotion-evidence",
+        scope: X25519MlKem768EvidenceScope.FullOperation,
+        requested_backend: backend, selected_backend: Some(backend),
+        mode: X25519MlKem768EvidenceMode.Native,
+        emulated: false, promotion_eligible: true,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        fixture_id: "mlkem-native-fd58+rfc7748-abc-v1",
+        fixture_manifest_sha256: "a" * 64,
+        fixture_source_sha256: "b" * 64,
+        runner_source_sha256: "c" * 64,
+        batch_size: 1,
+        client_share_bytes: 1216, server_share_bytes: 1120,
+        shared_secret_bytes: 64,
+        keygen_output_digest: "d" * 64,
+        encapsulate_output_digest: "e" * 64,
+        decapsulate_output_digest: "e" * 64,
+        scalar_roundtrip_match: true, fallback_used: false,
+        absolute_oracle_match: true,
+        simd_chunk_hits: if simd: 4 else: 0,
+        observed_rvv_vlen_bits:
+            if backend == X25519MlKem768EvidenceBackend.Rvv: 256 else: 0,
+        kernel_invocations: if gpu: 7 else: 0,
+        compiled: gpu, submitted: gpu,
+        fence_completed: gpu, device_readback: gpu,
+        artifact_sha256: if gpu or simd: "f" * 64 else: "",
+        device_identity: if gpu: "physical-device"
+        elif backend == X25519MlKem768EvidenceBackend.Avx2:
+            "native-avx2-candidate"
+        elif backend == X25519MlKem768EvidenceBackend.Neon:
+            "native-neon-candidate"
+        elif backend == X25519MlKem768EvidenceBackend.Rvv:
+            "native-rvv-candidate"
+        else: "pure-simple-scalar")
+
+fn _qualification_row(
+        backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768MatrixRow:
+    X25519MlKem768MatrixRow(
+        execution: _qualification_execution(backend),
+        admission_phase: X25519MlKem768MatrixAdmissionPhase.Executed,
+        runner_artifact_sha256: "9" * 64,
+        admitted_artifact_sha256:
+            if backend == X25519MlKem768EvidenceBackend.ScalarCpu:
+                "9" * 64
+            else:
+                "f" * 64,
+        host_os: if backend == X25519MlKem768EvidenceBackend.Metal:
+            "macos" else: "linux",
+        host_arch: _qualification_arch(backend),
+        pinned_workload_schema: "x25519mlkem768-pinned-workload-v3",
+        pinned_oracle_id: "mlkem-native-fd58+rfc7748",
+        set_a: Some(_qualification_set_a()),
+        set_b: Some(_qualification_set_b()),
+        set_c: Some(_qualification_set_c()),
+        public_wire_bytes: 2336,
+        client_share_sha256: X25519_MLKEM768_PINNED_CLIENT_SHARE_SHA256,
+        server_share_sha256: X25519_MLKEM768_PINNED_SERVER_SHARE_SHA256)
+
+fn _qualification_rows() -> [X25519MlKem768MatrixRow]:
+    [
+        _qualification_row(X25519MlKem768EvidenceBackend.ScalarCpu),
+        _qualification_row(X25519MlKem768EvidenceBackend.Avx2),
+        _qualification_row(X25519MlKem768EvidenceBackend.Neon),
+        _qualification_row(X25519MlKem768EvidenceBackend.Rvv),
+        _qualification_row(X25519MlKem768EvidenceBackend.Cuda),
+        _qualification_row(X25519MlKem768EvidenceBackend.Vulkan),
+        _qualification_row(X25519MlKem768EvidenceBackend.Metal)
+    ]
+
+fn _qualification_target(rows: [X25519MlKem768MatrixRow],
+        backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768MeasurementTarget:
+    val matrix = x25519_mlkem768_admit_full_backend_matrix(rows)
+    val index = if backend == X25519MlKem768EvidenceBackend.Avx2: 1
+        elif backend == X25519MlKem768EvidenceBackend.Neon: 2
+        elif backend == X25519MlKem768EvidenceBackend.Rvv: 3
+        elif backend == X25519MlKem768EvidenceBackend.Cuda: 4
+        elif backend == X25519MlKem768EvidenceBackend.Vulkan: 5
+        else: 6
+    val row = matrix.rows[index].source
+    val scalar_row = matrix.rows[0].source
+    X25519MlKem768MeasurementTarget(
+        backend: backend,
+        capture_kind: X25519MlKem768CaptureKind.NativePhysicalFullOperation,
+        fixture_id: row.execution.fixture_id,
+        fixture_manifest_sha256: row.execution.fixture_manifest_sha256,
+        fixture_source_sha256: row.execution.fixture_source_sha256,
+        runner_source_sha256: row.execution.runner_source_sha256,
+        runner_artifact_sha256: row.runner_artifact_sha256,
+        scalar_backend_artifact_sha256:
+            scalar_row.admitted_artifact_sha256,
+        backend_artifact_sha256: row.admitted_artifact_sha256,
+        accelerator_build_binding_sha256:
+            if _qualification_gpu(backend): "4" * 64 else: "",
+        host_os: row.host_os, host_arch: row.host_arch,
+        executor_identity: row.execution.device_identity,
+        scalar_backend_identity: scalar_row.execution.device_identity,
+        session_id: _QUALIFICATION_SESSION_SHA256,
+        monotonic_clock_id: _QUALIFICATION_CLOCK_ID,
+        workload_configuration_sha256: "5" * 64,
+        scalar_configuration_sha256: "3" * 64,
+        candidate_configuration_sha256: "6" * 64,
+        matrix_row_set_sha256: matrix.row_set_sha256)
+
+fn _qualification_observation(
+        target: X25519MlKem768MeasurementTarget
+        ) -> PlatformMeasurementObservation:
+    var value = PlatformMeasurementObservation(
+        schema: PLATFORM_MEASUREMENT_OBSERVATION_SCHEMA,
+        observation_sha256: "",
+        host_os: target.host_os, host_arch: target.host_arch,
+        runtime_lane: "unit-test", clock_source: "spec-clock",
+        clock_epoch_semantics: "fixture",
+        session_nonce_sha256: _QUALIFICATION_SESSION_SHA256,
+        observer_artifact_sha256: target.runner_artifact_sha256,
+        peak_memory_metric: PlatformPeakMemoryMetric.PeakResidentSetKiB,
+        peak_memory_kib: 8192)
+    value.observation_sha256 =
+        platform_measurement_observation_sha256(value)
+    value
+
+fn _qualification_admit(
+        rows: [X25519MlKem768MatrixRow],
+        target: X25519MlKem768MeasurementTarget
+        ) -> Result<X25519MlKem768MeasurementQualification, text>:
+    x25519_mlkem768_qualify_measurement(
+        rows, target, _qualification_observation(target))
+
+fn _qualification_rehash_observation(
+        value: PlatformMeasurementObservation
+        ) -> PlatformMeasurementObservation:
+    var changed = value
+    changed.observation_sha256 =
+        platform_measurement_observation_sha256(changed)
+    changed
+
+describe "X25519MLKEM768 matrix-bound measurement qualification":
+    it "mints a deterministic public-only CUDA qualification":
+        step("Re-admit all seven source rows inside the qualification owner")
+        val rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Cuda)
+        val result = _qualification_admit(rows, target)
+        match result:
+            case Err(reason): fail(reason)
+            case Ok(receipt):
+                expect(x25519_mlkem768_measurement_qualification_valid(
+                    receipt)).to_be(true)
+                expect(receipt.qualification_sha256.len()).to_equal(64)
+                expect(receipt.target.matrix_row_set_sha256).to_equal(
+                    x25519_mlkem768_admit_full_backend_matrix(
+                        rows).row_set_sha256)
+                val rendered =
+                    x25519_mlkem768_render_measurement_qualification(receipt)
+                expect(rendered.contains("shared_secret_sha256")).to_be(false)
+                expect(rendered.contains("recovered_secret_sha256")).to_be(false)
+                expect(rendered.contains(
+                    "accelerator_build_binding_sha256=" + "4" * 64
+                    )).to_be(true)
+
+    it "requires an exact lower-hex build binding only for GPU targets":
+        val rows = _qualification_rows()
+        var missing = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Cuda)
+        missing.accelerator_build_binding_sha256 = ""
+        expect(_qualification_admit(rows, missing).unwrap_err()).to_equal(
+            "accelerator-build-binding-sha256-required")
+
+        var malformed = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Vulkan)
+        malformed.accelerator_build_binding_sha256 = "A" * 64
+        expect(_qualification_admit(rows, malformed).unwrap_err()).to_equal(
+            "accelerator-build-binding-sha256-invalid")
+
+        var unexpected = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Neon)
+        unexpected.accelerator_build_binding_sha256 = "4" * 64
+        expect(_qualification_admit(rows, unexpected).unwrap_err()).to_equal(
+            "accelerator-build-binding-sha256-unexpected")
+
+    it "binds the GPU build binding into the qualification hash":
+        val rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Metal)
+        val receipt = _qualification_admit(rows, target).unwrap()
+        var changed = receipt
+        changed.target.accelerator_build_binding_sha256 = "8" * 64
+        expect(x25519_mlkem768_measurement_qualification_sha256(
+            changed) == receipt.qualification_sha256).to_be(false)
+        expect(x25519_mlkem768_measurement_qualification_valid(
+            changed)).to_be(false)
+
+    it "rejects every live observation binding mismatch":
+        val rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Cuda)
+        val base = _qualification_observation(target)
+
+        var bad_digest = base
+        bad_digest.observation_sha256 = "8" * 64
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, bad_digest).unwrap_err()).to_equal(
+            "platform-measurement-observation-mismatch")
+
+        var wrong_host = base
+        wrong_host.host_os = "freebsd"
+        wrong_host = _qualification_rehash_observation(wrong_host)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, wrong_host).is_err()).to_be(true)
+
+        var wrong_arch = base
+        wrong_arch.host_arch = "aarch64"
+        wrong_arch = _qualification_rehash_observation(wrong_arch)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, wrong_arch).is_err()).to_be(true)
+
+        var wrong_session = base
+        wrong_session.session_nonce_sha256 = "8" * 64
+        wrong_session = _qualification_rehash_observation(wrong_session)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, wrong_session).is_err()).to_be(true)
+
+        var wrong_artifact = base
+        wrong_artifact.observer_artifact_sha256 = "8" * 64
+        wrong_artifact = _qualification_rehash_observation(wrong_artifact)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, wrong_artifact).is_err()).to_be(true)
+
+        var wrong_clock = base
+        wrong_clock.clock_source = "different-clock"
+        wrong_clock = _qualification_rehash_observation(wrong_clock)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, wrong_clock).is_err()).to_be(true)
+
+        var guest_heap = base
+        guest_heap.peak_memory_metric =
+            PlatformPeakMemoryMetric.GuestHeapCommittedHighWaterKiB
+        guest_heap = _qualification_rehash_observation(guest_heap)
+        expect(x25519_mlkem768_qualify_measurement(
+            rows, target, guest_heap).is_err()).to_be(true)
+
+    it "rejects scalar and non-physical capture targets":
+        val rows = _qualification_rows()
+        var scalar_target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Cuda)
+        scalar_target.backend = X25519MlKem768EvidenceBackend.ScalarCpu
+        expect(_qualification_admit(
+            rows, scalar_target).unwrap_err()).to_equal(
+            "specialized-measurement-backend-required")
+        var synthetic_target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Avx2)
+        synthetic_target.capture_kind = X25519MlKem768CaptureKind.Synthetic
+        expect(_qualification_admit(
+            rows, synthetic_target).unwrap_err()).to_equal(
+            "native-physical-full-operation-capture-required")
+
+    it "rejects stale row-set and exact target binding":
+        val rows = _qualification_rows()
+        var stale = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Rvv)
+        stale.matrix_row_set_sha256 = "7" * 64
+        expect(_qualification_admit(
+            rows, stale).unwrap_err()).to_equal(
+            "matrix-row-set-sha256-mismatch")
+        var artifact = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Vulkan)
+        artifact.backend_artifact_sha256 = "8" * 64
+        expect(_qualification_admit(
+            rows, artifact).unwrap_err()).to_equal(
+            "measurement-target-row-binding-mismatch")
+        var scalar_artifact = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Vulkan)
+        scalar_artifact.scalar_backend_artifact_sha256 = "8" * 64
+        expect(_qualification_admit(
+            rows, scalar_artifact).unwrap_err()).to_equal(
+            "measurement-target-scalar-row-binding-mismatch")
+
+    it "rejects malformed session identity before matrix admission":
+        val rows = _qualification_rows()
+        var target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Neon)
+        target.session_id = "session\nstatus=pass"
+        expect(_qualification_admit(
+            rows, target).unwrap_err()).to_equal(
+            "measurement-target-text-field-invalid")
+
+    it "rejects a mutated typed public set during internal re-admission":
+        var rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Cuda)
+        var changed = _qualification_set_b()
+        changed.first_output_sha256 = "7" * 64
+        rows[4].set_b = Some(changed)
+        expect(_qualification_admit(
+            rows, target).unwrap_err()).to_equal(
+            "complete-admitted-matrix-required")
+
+    it "invalidates qualification after any retained field mutation":
+        val rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Metal)
+        val receipt = _qualification_admit(
+            rows, target).unwrap()
+        var changed = receipt
+        changed.target.monotonic_clock_id = "different-clock"
+        expect(x25519_mlkem768_measurement_qualification_valid(
+            changed)).to_be(false)
+
+    it "rejects semantically invalid qualification even after canonical rehash":
+        val rows = _qualification_rows()
+        val target = _qualification_target(
+            rows, X25519MlKem768EvidenceBackend.Avx2)
+        val receipt = _qualification_admit(
+            rows, target).unwrap()
+        var wrong_profile = receipt
+        wrong_profile.profile_version = "attacker-controlled-profile"
+        wrong_profile.qualification_sha256 =
+            x25519_mlkem768_measurement_qualification_sha256(wrong_profile)
+        expect(x25519_mlkem768_measurement_qualification_valid(
+            wrong_profile)).to_be(false)
+        var wrong_set = receipt
+        wrong_set.set_c.first_output_bytes = 1
+        wrong_set.qualification_sha256 =
+            x25519_mlkem768_measurement_qualification_sha256(wrong_set)
+        expect(x25519_mlkem768_measurement_qualification_valid(
+            wrong_set)).to_be(false)
+        var permuted_sets = receipt
+        val original_set_a = permuted_sets.set_a
+        permuted_sets.set_a = permuted_sets.set_b
+        permuted_sets.set_b = original_set_a
+        permuted_sets.qualification_sha256 =
+            x25519_mlkem768_measurement_qualification_sha256(permuted_sets)
+        expect(x25519_mlkem768_measurement_qualification_valid(
+            permuted_sets)).to_be(false)

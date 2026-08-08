@@ -1,0 +1,164 @@
+# CompileOptionsHash Specification
+#
+# Tests hash computation, validation, and serialization roundtrip
+# for compile options stored in SMF headers.
+#
+# **Feature IDs:** #CACHE-011 to #CACHE-020
+# **Category:** Infrastructure
+
+# ============================================================================
+# Mock CompileOptionsHash (self-contained for interpreter mode)
+# ============================================================================
+
+struct OptionsHash:
+    hash: i64
+    backend_kind: i64
+    opt_level: i64
+    target_arch: i64
+    flags: i64
+
+fn options_hash_zero() -> OptionsHash:
+    OptionsHash(hash: 0, backend_kind: 0, opt_level: 0, target_arch: 0, flags: 0)
+
+fn options_hash_is_zero(h: OptionsHash) -> bool:
+    h.hash == 0 and h.backend_kind == 0 and h.opt_level == 0 and h.target_arch == 0 and h.flags == 0
+
+fn backend_to_kind(backend: text) -> i64:
+    match backend:
+        case "auto": 0
+        case "llvm": 1
+        case "llvm-lib" | "llvmlib": 1
+        case "cranelift": 2
+        case "c": 3
+        case _: 0
+
+fn options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool) -> OptionsHash:
+    val bk = backend_to_kind(backend)
+    val opt = if opt_level < 0: 0 else: if opt_level > 3: 3 else: opt_level
+
+    # Deterministic hash from components (no char_at to avoid timeout)
+    var hash: i64 = bk * 100000 + opt * 10000
+    if release:
+        hash = hash + 1000
+    if debug_info:
+        hash = hash + 100
+    if gc_off:
+        hash = hash + 10
+    # Add backend discriminator
+    hash = hash + bk * 7919
+
+    var flags: i64 = 0
+    if debug_info:
+        flags = flags + 1
+    if gc_off:
+        flags = flags + 2
+    if release:
+        flags = flags + 4
+
+    OptionsHash(hash: hash, backend_kind: bk, opt_level: opt, target_arch: 0, flags: flags)
+
+fn options_to_bytes(h: OptionsHash) -> [i64]:
+    [h.hash, h.backend_kind, h.opt_level, h.target_arch, h.flags]
+
+fn options_from_bytes(bytes: [i64]) -> OptionsHash:
+    if bytes.len() < 5:
+        return options_hash_zero()
+    OptionsHash(hash: bytes[0], backend_kind: bytes[1], opt_level: bytes[2], target_arch: bytes[3], flags: bytes[4])
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "CompileOptionsHash":
+    describe "computation":
+        it "produces non-zero hash for valid options":
+            val h = options_hash_compute("llvm", 2, true, true, false)
+            expect(h.hash != 0).to_equal(true)
+            expect(h.backend_kind).to_equal(1)
+            expect(h.opt_level).to_equal(2)
+
+        it "different backends produce different hashes":
+            val h1 = options_hash_compute("llvm", 2, true, true, false)
+            val h2 = options_hash_compute("cranelift", 2, true, true, false)
+            expect(h1.hash != h2.hash).to_equal(true)
+            expect(h1.backend_kind).to_equal(1)
+            expect(h2.backend_kind).to_equal(2)
+
+        it "normalizes llvm-lib aliases to the llvm backend kind":
+            val h1 = options_hash_compute("llvm-lib", 2, true, true, false)
+            val h2 = options_hash_compute("llvmlib", 2, true, true, false)
+            val h3 = options_hash_compute("llvm", 2, true, true, false)
+            expect(h1.backend_kind).to_equal(1)
+            expect(h2.backend_kind).to_equal(1)
+            expect(h1.hash).to_equal(h3.hash)
+            expect(h2.hash).to_equal(h3.hash)
+
+        it "different opt levels produce different hashes":
+            val h1 = options_hash_compute("llvm", 0, false, true, false)
+            val h2 = options_hash_compute("llvm", 3, false, true, false)
+            expect(h1.hash != h2.hash).to_equal(true)
+
+        it "same options produce same hash":
+            val h1 = options_hash_compute("cranelift", 1, false, true, false)
+            val h2 = options_hash_compute("cranelift", 1, false, true, false)
+            expect(h1.hash).to_equal(h2.hash)
+            expect(h1.backend_kind).to_equal(h2.backend_kind)
+
+        it "clamps opt level to 0..3":
+            val h1 = options_hash_compute("llvm", -5, false, false, false)
+            val h2 = options_hash_compute("llvm", 99, false, false, false)
+            expect(h1.opt_level).to_equal(0)
+            expect(h2.opt_level).to_equal(3)
+
+    describe "flags":
+        it "sets debug_info flag":
+            val h = options_hash_compute("auto", 0, false, true, false)
+            expect(h.flags).to_equal(1)
+
+        it "sets gc_off flag":
+            val h = options_hash_compute("auto", 0, false, false, true)
+            expect(h.flags).to_equal(2)
+
+        it "sets release flag":
+            val h = options_hash_compute("auto", 0, true, false, false)
+            expect(h.flags).to_equal(4)
+
+        it "combines flags":
+            val h = options_hash_compute("auto", 0, true, true, true)
+            expect(h.flags).to_equal(7)
+
+    describe "zero":
+        it "creates zero hash":
+            val h = options_hash_zero()
+            expect(options_hash_is_zero(h)).to_equal(true)
+
+        it "computed hash is not zero":
+            val h = options_hash_compute("llvm", 2, true, true, false)
+            expect(options_hash_is_zero(h)).to_equal(false)
+
+    describe "serialization roundtrip":
+        it "roundtrips through bytes":
+            val original = options_hash_compute("cranelift", 2, true, true, false)
+            val bytes = options_to_bytes(original)
+            val restored = options_from_bytes(bytes)
+            expect(restored.hash).to_equal(original.hash)
+            expect(restored.backend_kind).to_equal(original.backend_kind)
+            expect(restored.opt_level).to_equal(original.opt_level)
+            expect(restored.flags).to_equal(original.flags)
+
+        it "handles empty bytes as zero":
+            val restored = options_from_bytes([])
+            expect(options_hash_is_zero(restored)).to_equal(true)
+
+    describe "validation":
+        it "matching hashes validate as fresh":
+            val stored = options_hash_compute("llvm", 2, true, true, false)
+            val current = options_hash_compute("llvm", 2, true, true, false)
+            expect(stored.hash).to_equal(current.hash)
+            expect(stored.backend_kind).to_equal(current.backend_kind)
+
+        it "different backends are detected":
+            val stored = options_hash_compute("llvm", 2, true, true, false)
+            val current = options_hash_compute("cranelift", 2, true, true, false)
+            expect(stored.hash != current.hash).to_equal(true)
+            expect(stored.backend_kind != current.backend_kind).to_equal(true)

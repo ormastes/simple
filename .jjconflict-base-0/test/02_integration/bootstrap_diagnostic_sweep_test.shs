@@ -1,0 +1,212 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+mkdir -p "$work/input" "$work/timeout-input" "$work/parent-input" "$work/explicit-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
+
+printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
+printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
+printf '%s\n' 'val match = 1' > "$work/input/second_failure.spl"
+printf '%s\n' 'fn timeout_one() -> i64: 1' > "$work/timeout-input/01_timeout.spl"
+printf '%s\n' 'fn timeout_failure(:' > "$work/timeout-input/02_failure.spl"
+printf '%s\n' 'fn timeout_two() -> i64: 1' > "$work/timeout-input/03_timeout.spl"
+printf '%s\n' 'fn timeout_success() -> i64: 1' > "$work/timeout-input/04_success.spl"
+printf '%s\n' 'fn parent_exit() -> i64: 1' > "$work/parent-input/parent_exit.spl"
+printf '%s\n' 'fn explicit_good() -> i64: 1' > "$work/explicit-input/explicit_good.spl"
+
+fake="$work/fake-simple"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ -n "${FAKE_CHILD_IDENTITIES:-}" ]; then printf "%s|%s\n" "${SIMPLE_BINARY:-}" "${SIMPLE_BIN:-}" >> "$FAKE_CHILD_IDENTITIES"; fi' \
+  'echo "$2" >> "$FAKE_INVOCATIONS"' \
+  'case "$2" in' \
+  '  *diagnostic_preflight.spl) if [ "${FAKE_FAIL_PREFLIGHT:-0}" = 1 ]; then echo "silent child failure" >&2; exit 1; fi; exit 0 ;;' \
+  '  *adjacent_good.spl) exit 0 ;;' \
+  '  *explicit_good.spl) exit 0 ;;' \
+  '  *exact_failure.spl) echo "error[E100]: exact parser failure" >&2; exit 1 ;;' \
+  '  *second_failure.spl) echo "error[E200]: adjacent semantic failure" >&2; exit 1 ;;' \
+  '  *01_timeout.spl|*03_timeout.spl|*parent_exit.spl)' \
+  '    trap "" TERM' \
+  '    (trap "" TERM; while :; do /bin/sleep 10; done) &' \
+  '    echo "$!" >> "$FAKE_DESCENDANTS"' \
+  '    while :; do /bin/sleep 10; done ;;' \
+  '  *02_failure.spl) echo "error[E300]: timeout-adjacent failure" >&2; exit 1 ;;' \
+  '  *04_success.spl) exit 0 ;;' \
+  'esac' \
+  'exit 2' > "$fake"
+chmod +x "$fake"
+
+# Exact preflight: no worker may start when the seed's delegated pure-Simple
+# child is absent from the canonical repo-relative path.
+missing_output="$work/missing-child.txt"
+set +e
+(cd "$work/missing-child" && FAKE_INVOCATIONS="$work/missing-invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >"$missing_output" 2>&1
+missing_status=$?
+set -e
+[ "$missing_status" -eq 2 ] || { echo "missing child did not fail preflight" >&2; exit 1; }
+grep -Fq 'diagnostic child compiler is not executable: bin/simple' "$missing_output"
+[ ! -e "$work/missing-invocations" ] || { echo "worker ran before child preflight" >&2; exit 1; }
+
+# Adjacent admitted-child path: an executable at bin/simple preserves normal
+# aggregation. The fake seed below does not delegate, so a minimal executable
+# fixture is sufficient for this harness contract.
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/repo/bin/simple"
+chmod +x "$work/repo/bin/simple"
+
+# An isolated worktree may intentionally use an admitted child from another
+# artifact directory. The override is absolute and is bound into both worker
+# identity variables instead of relying on cwd-relative bin/simple lookup.
+explicit_child="$work/explicit-simple"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$explicit_child"
+chmod +x "$explicit_child"
+set +e
+(cd "$work/missing-child" && \
+  FAKE_INVOCATIONS="$work/explicit-invocations" \
+  FAKE_CHILD_IDENTITIES="$work/explicit-identities" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --child-compiler="$explicit_child" \
+  --root="$work/explicit-input" --cache-dir="$work/explicit-cache" --jobs=1) \
+  >"$work/explicit-output.txt" 2>&1
+explicit_status=$?
+set -e
+[ "$explicit_status" -eq 0 ] || { echo "explicit child compiler override failed" >&2; exit 1; }
+[ "$(sort -u "$work/explicit-identities")" = "$explicit_child|$explicit_child" ] || {
+  echo "explicit child compiler identity was not bound" >&2
+  exit 1
+}
+
+output="$work/output.txt"
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >"$output" 2>&1
+status=$?
+set -e
+
+[ "$status" -eq 1 ] || { echo "expected aggregate failure exit 1, got $status" >&2; exit 1; }
+[ "$(wc -l < "$work/invocations" | tr -d ' ')" -eq 4 ] || { echo "preflight plus every independent file was not checked" >&2; exit 1; }
+grep -Fq 'diagnostic failure:'" $work/input/exact_failure.spl" "$output"
+grep -Fq 'error[E100]: exact parser failure' "$output"
+grep -Fq 'diagnostic failure:'" $work/input/second_failure.spl" "$output"
+grep -Fq 'error[E200]: adjacent semantic failure' "$output"
+grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2 timed_out=0' "$output"
+[ "$(find "$work/cache" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 3 ] || {
+  echo "workers did not receive isolated per-file caches" >&2
+  exit 1
+}
+touch "$work/cache/preserved-marker"
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations-second" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >/dev/null 2>&1
+second_status=$?
+set -e
+[ "$second_status" -eq 1 ]
+[ -f "$work/cache/preserved-marker" ] || { echo "diagnostic sweep cleared reusable cache state" >&2; exit 1; }
+
+# Exact timeout path: bounded workers are process-group isolated, descendants
+# are killed, later queue items still run, and grouped output remains sorted by
+# the deterministic source index rather than completion order.
+timeout_output="$work/timeout-output.txt"
+set +e
+(cd "$work/repo" && \
+  FAKE_INVOCATIONS="$work/timeout-invocations" \
+  FAKE_DESCENDANTS="$work/timeout-descendants" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/timeout-input" \
+  --cache-dir="$work/timeout-cache" --jobs=2 --timeout=1 --timeout-grace=1) \
+  >"$timeout_output" 2>&1
+timeout_status=$?
+set -e
+[ "$timeout_status" -eq 1 ] || { echo "timeouts did not count as aggregate failure" >&2; exit 1; }
+[ "$(wc -l < "$work/timeout-invocations" | tr -d ' ')" -eq 5 ] || {
+  echo "dynamic queue stopped after timeout" >&2
+  exit 1
+}
+grep -Fq 'diagnostic timeout:'" $work/timeout-input/01_timeout.spl" "$timeout_output"
+grep -Fq 'error: diagnostic timeout after 1s:'" $work/timeout-input/01_timeout.spl" "$timeout_output"
+grep -Fq 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output"
+grep -Fq 'error[E300]: timeout-adjacent failure' "$timeout_output"
+grep -Fq 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output"
+grep -Fq 'bootstrap diagnostic summary: checked=4 passed=1 failed=3 timed_out=2' "$timeout_output"
+first_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/01_timeout.spl" "$timeout_output" | cut -d: -f1)
+failure_line=$(grep -nF 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output" | cut -d: -f1)
+second_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output" | cut -d: -f1)
+[ "$first_timeout_line" -lt "$failure_line" ] && [ "$failure_line" -lt "$second_timeout_line" ] || {
+  echo "timeout/failure groups were not deterministic" >&2
+  exit 1
+}
+/bin/sleep 0.1
+while IFS= read -r descendant_pid; do
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    echo "timed-out descendant survived process-group cleanup: $descendant_pid" >&2
+    exit 1
+  fi
+done < "$work/timeout-descendants"
+
+# Parent termination must tear down every owned compiler process group rather
+# than leaving delegated pure-Simple descendants alive without a sweep owner.
+(cd "$work/repo" && exec env \
+  FAKE_INVOCATIONS="$work/parent-invocations" \
+  FAKE_DESCENDANTS="$work/parent-descendants" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/parent-input" \
+  --cache-dir="$work/parent-cache" --jobs=1 --timeout=30 --timeout-grace=1) \
+  >"$work/parent-output" 2>&1 &
+sweep_pid=$!
+parent_wait=0
+while [ ! -s "$work/parent-descendants" ] && [ "$parent_wait" -lt 100 ]; do
+  /bin/sleep 0.02
+  parent_wait=$((parent_wait + 1))
+done
+[ -s "$work/parent-descendants" ] || { echo "parent cleanup fixture never started" >&2; exit 1; }
+kill -TERM "$sweep_pid"
+set +e
+wait "$sweep_pid"
+parent_status=$?
+set -e
+[ "$parent_status" -eq 143 ] || { echo "terminated sweep returned $parent_status, expected 143" >&2; exit 1; }
+/bin/sleep 0.2
+while IFS= read -r descendant_pid; do
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    echo "parent-exit descendant survived cleanup: $descendant_pid" >&2
+    exit 1
+  fi
+done < "$work/parent-descendants"
+
+# Adjacent option validation must fail before dispatch.
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invalid-timeout-invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --timeout=0) >/dev/null 2>&1
+invalid_timeout_status=$?
+set -e
+[ "$invalid_timeout_status" -eq 2 ] || { echo "invalid timeout was accepted" >&2; exit 1; }
+[ ! -e "$work/invalid-timeout-invocations" ] || { echo "invalid timeout dispatched a worker" >&2; exit 1; }
+
+# An executable child that cannot complete the delegated known-good check is
+# infrastructure failure, not one failure per selected source file.
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/preflight-fail-invocations" \
+  FAKE_FAIL_PREFLIGHT=1 \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/preflight-fail-cache" --jobs=2) \
+  >"$work/preflight-fail-output.txt" 2>&1
+preflight_fail_status=$?
+set -e
+[ "$preflight_fail_status" -eq 2 ] || { echo "bad child did not fail preflight" >&2; exit 1; }
+[ "$(wc -l < "$work/preflight-fail-invocations" | tr -d ' ')" -eq 1 ] || {
+  echo "source workers ran after failed compiler/child preflight" >&2
+  exit 1
+}
+grep -Fq 'diagnostic compiler/child preflight failed with exit 1' \
+  "$work/preflight-fail-output.txt"
+
+echo "PASS bootstrap diagnostic sweep dynamic aggregation and timeout cleanup"

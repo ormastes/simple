@@ -1,0 +1,49 @@
+# Typed pipe-lambda parameters, added 2026-08-07.
+#
+# Regression spec for a parser gap found while a lane was writing lambda
+# specs: `|x: i64| x + 1` (typed pipe-lambda param) was rejected with
+# `Unexpected token: expected Pipe, found Colon`, while the untyped form
+# `|x| x + 1` parsed fine. Confirmed on 2026-08-07 that BOTH
+# `bin/simple run` (JIT, falls back to interpreter) and
+# `SIMPLE_EXECUTION_MODE=interpret bin/simple run` fail identically with the
+# same parse error -- the parser is a shared frontend, so this was not
+# engine-specific.
+#
+# Root cause: `parse_pipe_lambda_params`
+# (src/compiler_rust/parser/src/expressions/postfix.rs) and
+# `parse_remaining_lambda_params`
+# (src/compiler_rust/parser/src/expressions/helpers.rs) pushed every
+# `LambdaParam` with `ty: None` unconditionally and never checked for an
+# optional `: Type` after the parameter name -- unlike `fn` parameter list
+# parsing, which already supports `name: Type`. The `LambdaParam` AST node
+# already had a `ty: Option<Type>` field; only the parser never populated it
+# for the pipe-lambda form.
+#
+# Fix: both functions now optionally consume `: <Type>` (via the existing
+# `parse_type()`) after each pipe-lambda parameter name, mirroring `fn`
+# parameter parsing. Scope was deliberately limited to the `|...|` pipe-lambda
+# syntax; the backslash-lambda form (`\x: body`) already uses a bare trailing
+# `:` to end its parameter list and start the body, so adding `: Type` there
+# would be ambiguous and was left untouched.
+#
+# STATUS AT WRITE TIME: fixed only in the seed parser source
+# (src/compiler_rust/parser/**). The deployed `bin/simple` is currently the
+# unrebuilt Rust seed (see .claude/rules/bootstrap.md "KNOWN BLOCKER"), and
+# this task's constraints forbid running a bootstrap rebuild. The `simple-parser`
+# crate was confirmed to compile cleanly with the fix
+# (`cargo build -p simple-parser`), but the deployed binary does not yet
+# contain it, so this spec is expected to stay RED under `bin/simple test`
+# until the next seed/bootstrap rebuild picks up the parser change.
+
+describe "typed pipe-lambda parameters":
+    it "a single typed param parses and calls correctly":
+        val f = |x: i64| x + 1
+        expect(f(5)).to_equal(6)
+
+    it "multiple typed params parse and call correctly":
+        val g = |x: i64, y: i64| x + y
+        expect(g(3, 4)).to_equal(7)
+
+    it "untyped params still parse correctly (no regression)":
+        val h = |x| x + 1
+        expect(h(5)).to_equal(6)

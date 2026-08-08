@@ -1,0 +1,185 @@
+#!/bin/sh
+# Regression canary for the native-build object cache's fingerprint granularity.
+#
+# WHY THIS EXISTS: `bin/simple test` never routes through `native-build`/
+# `--native` codegen (see check-native-enum-match-payload.shs header for the
+# TestExecutionMode background), so only a script that drives `native-build`
+# directly and reads its cache receipt can fence this lane.
+#
+# Bug: doc/08_tracking/bug/native_object_cache_whole_build_fingerprint_granularity_2026-08-02.md
+#
+# Current known state (2026-08-08, independently re-verified against a fresh
+# 3-module fixture): `driver_native_build_cache_scope()` embeds
+# `driver_native_sources_fingerprint()` -- a hash of the ENTIRE loaded source
+# closure -- into the cache scope directory path
+# (`cache_scope_root = base_cache_scope_root/sources-{whole-closure-hash}`,
+# driver_aot_native_output.spl:266). Editing exactly ONE module changes that
+# closure hash, which changes the scope directory for EVERY module, so
+# `driver_native_build_filter_scoped_outputs()` rejects every previously
+# cached object as "not in scope" (driver_aot_native_output.spl:331-348) and
+# ALL objects rebuild -- not just the edited one. Measured on a 3-module
+# fixture (mod_a, mod_b, main): unchanged rebuild = 3 hits / 0 misses;
+# rebuild after editing exactly mod_b.spl = 0 hits / 3 misses.
+#
+# A prior audit (see bug doc) found the apparent one-line fix (drop the
+# closure hash) UNSAFE: per-object BuildCache entries record no
+# cross-module dependency interface hashes, so a narrower key cannot
+# currently distinguish "unrelated file changed" from "a dependency's public
+# shape changed". This script therefore asserts the CURRENT (known-broken)
+# behaviour as a canary: if a one-file edit ever starts reusing objects, the
+# whole-build-fingerprint defect has been fixed (or silently regressed to
+# something unsafe) and this gate should be promoted to a real assertion.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+FIXTURE_DIR="test/fixtures/native_object_cache_granularity"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-object-cache-granularity.$$}"
+SRC_DIR="$WORK_DIR/src"
+CACHE_DIR="$WORK_DIR/cache"
+
+test -x "$SIMPLE_BINARY"
+rm -rf "$WORK_DIR"
+mkdir -p "$SRC_DIR" "$CACHE_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+cp "$FIXTURE_DIR/mod_a.spl" "$FIXTURE_DIR/mod_b.spl" "$FIXTURE_DIR/main.spl" "$SRC_DIR/"
+
+fail=0
+
+run_build() {
+    log="$1"
+    out="$2"
+    env -u SIMPLE_BOOTSTRAP SIMPLE_COMPILER_TRACE=1 SIMPLE_NO_STUB_FALLBACK=1 \
+        "$SIMPLE_BINARY" native-build --source "$SRC_DIR" --entry "$SRC_DIR/main.spl" \
+        --cache-dir "$CACHE_DIR" -o "$out" >"$log" 2>&1
+}
+
+receipt() {
+    grep '^\[NATIVE\] cache:' "$1" | tail -1
+}
+
+# Top-level scope dirs encode `backend=...;...;compiler=<hash>+src<fp>`
+# (native_build_cache_scope_key, driver_build/incremental.spl:122-130). If
+# build 1 and build 2 land in the SAME top-level dir, there is exactly one
+# such dir after build 2; if compiler identity drifted between the two
+# builds, build 2 creates a second one. Counting (order-independent) rather
+# than comparing "the lexically-last dir" (order-dependent, and wrong: after
+# build 2 there may be two dirs and `sort | tail -1` does not reliably name
+# the one build 2 actually used) discriminates WHICH layer moved: 1 dir means
+# compiler identity held, so a reuse failure is Layer 2 (this row's target,
+# the whole-loaded-closure fingerprint) and worth a hard FAIL; 2 dirs means
+# Layer 1 (compiler-identity) drifted, most likely a concurrent sibling
+# session editing src/compiler in this shared checkout — WARN, not FAIL.
+top_scope_dir_count() {
+    find "$CACHE_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l
+}
+
+# --- Build 1: cold. Populates the cache.
+cold_log="$WORK_DIR/cold.log"
+if ! run_build "$cold_log" "$WORK_DIR/bin1"; then
+    echo "FAIL — cold native-build of the 3-module fixture did not succeed"
+    tail -40 "$cold_log"
+    exit 1
+fi
+
+# --- Build 2: identical rebuild, same --cache-dir. Must fully reuse.
+warm_log="$WORK_DIR/warm.log"
+if ! run_build "$warm_log" "$WORK_DIR/bin2"; then
+    echo "FAIL — warm (unchanged) native-build did not succeed"
+    tail -40 "$warm_log"
+    exit 1
+fi
+scope_dir_count="$(top_scope_dir_count)"
+warm_receipt="$(receipt "$warm_log")"
+warm_hits="$(printf '%s' "$warm_receipt" | sed -n 's/.*cache: \([0-9]*\) hits.*/\1/p')"
+# Fail-closed on an unparseable receipt: an EMPTY $warm_hits used to fall into
+# the WARN branch below and print a green verdict having measured NOTHING (the
+# trace format changed, or SIMPLE_COMPILER_TRACE stopped emitting). Absence of a
+# number is never evidence.
+case "$warm_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a '[NATIVE] cache: N hits' receipt from the warm build log"
+        echo "        (got: '$warm_receipt'). NOTHING was measured — the trace format changed"
+        echo "        or SIMPLE_COMPILER_TRACE stopped emitting. This is not a pass."
+        exit 2
+        ;;
+esac
+if [ "$warm_hits" -lt 3 ]; then
+    if [ "$scope_dir_count" -gt 1 ]; then
+        # Not a hard FAIL: `native_build_compiler_identity()` hashes ALL of
+        # src/compiler on every invocation (driver_build/incremental.spl), so
+        # in a shared checkout with other sessions/agents editing
+        # src/compiler concurrently, the compiler-identity half of the scope
+        # can drift between two builds seconds apart with nothing in THIS
+        # fixture having changed. That's a real, separately-tracked
+        # coarseness (Layer 1), not this row's target (Layer 2) — WARN, not
+        # FAIL, since it can't be distinguished from legitimate concurrent
+        # activity without exclusive repo access.
+        echo "WARN — unchanged rebuild did not fully reuse the cache, AND the"
+        echo "       compiler-identity scope drifted between builds with no"
+        echo "       edit by this script ($scope_dir_count top-level scope"
+        echo "       dirs in cache): '$warm_receipt'"
+        echo "       (consistent with a concurrent sibling session editing"
+        echo "       src/compiler; see native_build_compiler_identity())"
+    else
+        # Top-level scope held steady but reuse still wasn't full: this is
+        # NOT explained by compiler-identity drift and is a genuine anomaly
+        # worth failing on.
+        echo "FAIL — unchanged rebuild did not fully reuse the cache, and the"
+        echo "       compiler-identity scope dir did NOT change: '$warm_receipt'"
+        fail=1
+    fi
+else
+    echo "PASS — unchanged rebuild fully reused the cache: $warm_receipt"
+fi
+
+# --- Build 3: edit exactly ONE module (mod_b.spl), rebuild.
+cat > "$SRC_DIR/mod_b.spl" <<'EOF'
+fn mod_b_val() -> i64:
+    3
+
+export mod_b_val
+EOF
+onefile_log="$WORK_DIR/onefile.log"
+if ! run_build "$onefile_log" "$WORK_DIR/bin3"; then
+    echo "FAIL — native-build after a one-file edit did not succeed"
+    tail -40 "$onefile_log"
+    exit 1
+fi
+onefile_receipt="$(receipt "$onefile_log")"
+onefile_hits="$(printf '%s' "$onefile_receipt" | sed -n 's/.*cache: \([0-9]*\) hits.*/\1/p')"
+
+case "$onefile_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a '[NATIVE] cache: N hits' receipt from the one-file-edit"
+        echo "        build log (got: '$onefile_receipt'). NOTHING was measured; the KNOWN-OPEN"
+        echo "        verdict below would have been asserted against an absent number."
+        exit 2
+        ;;
+esac
+
+if [ "$onefile_hits" -gt 0 ]; then
+    # Hard-fail here on purpose: a gate that can never fail is no gate (see
+    # doc/08_tracking/bug/... "verification layer fail-open" family). This
+    # branch means the whole-build-fingerprint behaviour NARROWED — that is
+    # either the real fix landing (good, but must be verified safe before
+    # this script's assumptions are trusted) or an unsafe change that started
+    # reusing objects without the missing per-module dependency-interface
+    # hashing (bad, a correctness regression). Either way a human must look;
+    # exiting 0 here would silently absorb both cases.
+    echo "FAIL (promote-me) — a one-file edit reused $onefile_hits/3 objects ('$onefile_receipt')."
+    echo "       The whole-build-fingerprint defect in"
+    echo "       doc/08_tracking/bug/native_object_cache_whole_build_fingerprint_granularity_2026-08-02.md"
+    echo "       appears to have narrowed. Verify the change is SAFE (per-module"
+    echo "       dependency-interface hashing, not just a dropped closure hash)"
+    echo "       before rewriting this branch to a hard 'hits == 2' assertion."
+    fail=1
+else
+    echo "KNOWN-OPEN — a one-file edit reused 0/3 objects ('$onefile_receipt'):"
+    echo "             whole-build fingerprint granularity confirmed still present."
+fi
+
+exit "$fail"

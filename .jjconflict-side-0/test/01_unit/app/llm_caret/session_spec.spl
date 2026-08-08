@@ -1,0 +1,133 @@
+# LLM Caret Session Persistence Specification
+#
+# Exercises the REAL module (app.llm_caret.session): JSON encode/decode
+# round-trip (including messages with embedded braces/quotes, which the
+# brace-aware object scanner must survive), id/path helpers, and a real
+# save/load disk round-trip under an isolated HOME.
+
+use app.io.mod.{env_get, env_set, dir_remove_all}
+use app.llm_caret.types.{Message}
+use app.llm_caret.session.{
+    Session, new_session, session_path, save_session, load_session,
+    list_session_ids, gen_session_id, session_to_json, session_from_json,
+    parse_messages_array
+}
+
+val WS_ROOT = "build/tmp/llm_caret_session_test"
+
+fn _setup_home():
+    env_set("HOME", WS_ROOT)
+
+fn _restore_home(original: text):
+    env_set("HOME", original)
+
+describe "Session id/path helpers":
+    it "gen_session_id produces a non-empty, distinct-looking id":
+        val a = gen_session_id()
+        val b = gen_session_id()
+        assert_true(a != "")
+        expect(a).to_start_with("sess-")
+
+    it "session_path is under ~/.llm_caret/sessions/<id>.json":
+        val p = session_path("abc123")
+        expect(p).to_contain("/.llm_caret/sessions/abc123.json")
+
+    it "new_session starts with no messages and no provider session id":
+        val s = new_session("id1", "claude_cli", "claude-sonnet-4-20250514")
+        expect(s.id).to_equal("id1")
+        expect(s.messages.len()).to_equal(0)
+        expect(s.provider_session_id).to_equal("")
+
+describe "Session JSON round-trip":
+    it "round-trips a session with no messages":
+        val s = new_session("id2", "openai", "gpt-4o")
+        val json = session_to_json(s)
+        val back = session_from_json(json)
+        expect(back.id).to_equal("id2")
+        expect(back.provider).to_equal("openai")
+        expect(back.model).to_equal("gpt-4o")
+        expect(back.messages.len()).to_equal(0)
+
+    it "round-trips messages in order":
+        val s = Session(
+            id: "id3", provider: "claude_cli", model: "m",
+            provider_session_id: "psid-1",
+            messages: [Message(role: "user", content: "hi"), Message(role: "assistant", content: "hello!")],
+            updated_at_ms: 42
+        )
+        val json = session_to_json(s)
+        val back = session_from_json(json)
+        expect(back.provider_session_id).to_equal("psid-1")
+        expect(back.updated_at_ms).to_equal(42)
+        expect(back.messages.len()).to_equal(2)
+        expect(back.messages[0].role).to_equal("user")
+        expect(back.messages[0].content).to_equal("hi")
+        expect(back.messages[1].role).to_equal("assistant")
+        expect(back.messages[1].content).to_equal("hello!")
+
+    it "survives message content containing literal braces and quotes (tool output)":
+        # This is exactly the shape a bash tool_result can produce - the naive
+        # "split on }," approach would corrupt this; the brace-aware scanner
+        # (mirroring tools.spl's _extract_object_at) must not.
+        val tricky = "{\"nested\": \"value with \\\"quotes\\\" and } braces {\"}"
+        val s = Session(
+            id: "id4", provider: "claude_api", model: "m",
+            provider_session_id: "", messages: [Message(role: "user", content: tricky)],
+            updated_at_ms: 0
+        )
+        val json = session_to_json(s)
+        val back = session_from_json(json)
+        expect(back.messages.len()).to_equal(1)
+        expect(back.messages[0].content).to_equal(tricky)
+
+    it "parse_messages_array returns [] when there is no messages key":
+        expect(parse_messages_array("{}").len()).to_equal(0)
+
+describe "Session disk round-trip (isolated HOME)":
+    it "save_session then load_session returns the same data":
+        val original_home = env_get("HOME") ?? ""
+        dir_remove_all(WS_ROOT)
+        _setup_home()
+        val s = Session(
+            id: "disk-1", provider: "claude_cli", model: "claude-sonnet-4-20250514",
+            provider_session_id: "psid-disk", messages: [Message(role: "user", content: "hello")],
+            updated_at_ms: 99
+        )
+        val ok = save_session(s)
+        assert_true(ok)
+        val loaded = load_session("disk-1")
+        match loaded:
+            Some(back):
+                expect(back.id).to_equal("disk-1")
+                expect(back.provider_session_id).to_equal("psid-disk")
+                expect(back.messages.len()).to_equal(1)
+                expect(back.messages[0].content).to_equal("hello")
+            nil:
+                assert_true(false)
+        _restore_home(original_home)
+
+    it "load_session returns nil for an id that was never saved":
+        val original_home = env_get("HOME") ?? ""
+        _setup_home()
+        val loaded = load_session("never-existed-id")
+        match loaded:
+            Some(_):
+                assert_true(false)
+            nil:
+                assert_true(true)
+        _restore_home(original_home)
+
+    it "list_session_ids includes a saved session":
+        val original_home = env_get("HOME") ?? ""
+        _setup_home()
+        val s = new_session("disk-2", "openai", "gpt-4o")
+        save_session(s)
+        val ids = list_session_ids()
+        assert_true(ids.len() >= 1)
+        var found = false
+        for id in ids:
+            if id == "disk-2":
+                found = true
+        assert_true(found)
+        _restore_home(original_home)
+        dir_remove_all(WS_ROOT)

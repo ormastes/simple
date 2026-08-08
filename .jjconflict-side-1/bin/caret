@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+
+# Production launches a cached native Caret artifact. Running the source
+# entrypoint is an explicit debugging fallback so startup cannot silently
+# compile or interpret the full app on every invocation.
+native=""
+if [ -n "${SIMPLE_CARET_NATIVE:-}" ]; then
+  if [ ! -x "${SIMPLE_CARET_NATIVE}" ]; then
+    printf '%s\n' \
+      "error: SIMPLE_CARET_NATIVE is not executable: ${SIMPLE_CARET_NATIVE}" >&2
+    exit 127
+  fi
+  native="${SIMPLE_CARET_NATIVE}"
+else
+  for candidate in \
+    "${REPO_ROOT}/build/bootstrap/caret-package/caret" \
+    "${SCRIPT_DIR}/release/aarch64-apple-darwin/caret" \
+    "${SCRIPT_DIR}/release/aarch64-apple-darwin-macho/caret" \
+    "${SCRIPT_DIR}/release/x86_64-apple-darwin/caret" \
+    "${SCRIPT_DIR}/release/x86_64-apple-darwin-macho/caret" \
+    "${SCRIPT_DIR}/release/x86_64-unknown-linux-gnu/caret" \
+    "${SCRIPT_DIR}/release/linux-x86_64/caret" \
+    "${REPO_ROOT}/build/bootstrap/full/aarch64-apple-darwin/caret" \
+    "${REPO_ROOT}/build/bootstrap/full/x86_64-apple-darwin/caret" \
+    "${REPO_ROOT}/build/bootstrap/full/x86_64-unknown-linux-gnu/caret"
+  do
+    if [ -x "${candidate}" ]; then
+      native="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [ -n "${native}" ]; then
+  exec "${native}" "$@"
+fi
+
+messaging_supervisor=0
+if [ "${1:-}" = "messaging" ]; then
+  # The messaging CLI is a thin supervisor. Database-bearing operations select
+  # their own freshness-checked native/SMF workers and fail closed when those
+  # artifacts cannot be built. Interpreting this control plane therefore never
+  # interprets the PureDatabase hot path.
+  messaging_supervisor=1
+fi
+
+if [ "${messaging_supervisor}" != "1" ] && \
+   [ "${SIMPLE_CARET_ALLOW_SOURCE_FALLBACK:-0}" != "1" ]; then
+  {
+    printf '%s\n' "error: cached native Caret artifact not found"
+    printf '%s\n' "checked:"
+    printf '%s\n' "  SIMPLE_CARET_NATIVE"
+    printf '%s\n' "  ${REPO_ROOT}/build/bootstrap/caret-package/caret"
+    printf '%s\n' "  ${SCRIPT_DIR}/release/<target>/caret"
+    printf '%s\n' "  ${REPO_ROOT}/build/bootstrap/full/<target>/caret"
+    printf '%s\n' \
+      "source fallback disabled; set SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=1 only for debugging"
+    printf '%s\n' \
+      "hint: native-build src/app/llm_caret/main.spl to build/bootstrap/caret-package/caret"
+  } >&2
+  exit 127
+fi
+
+runtime=""
+for candidate in \
+  "${SIMPLE_BINARY:-}" \
+  "${REPO_ROOT}/bin/simple" \
+  "${REPO_ROOT}/bin/release/simple" \
+  "${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple" \
+  "${REPO_ROOT}/bin/release/linux-x86_64/simple"
+do
+  if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+    runtime="${candidate}"
+    break
+  fi
+done
+if [ -z "${runtime}" ]; then
+  printf '%s\n' "error: source fallback requested but no Simple runtime found" >&2
+  exit 127
+fi
+if [ "${messaging_supervisor}" = "1" ]; then
+  exec "${runtime}" run \
+    "${REPO_ROOT}/src/app/llm_caret/messaging/main.spl" "$@"
+fi
+exec "${runtime}" run "${REPO_ROOT}/src/app/llm_caret/main.spl" "$@"

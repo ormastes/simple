@@ -1,0 +1,290 @@
+# ============================================================================
+# Frozen Hash256 wire contract v1 — contract-freeze gate.
+#
+# Architecture §20.3 (receipt seed), §21.3 (StageReceipt roots), §26 (contract
+# freeze), §27 (lane ownership). Contract document:
+# doc/05_design/platform/structural_compute/hash256_contract_v1.md
+#
+# Like the ID-TAG, MAP, QUERY, RECEIPT and PLACE gates this proves three
+# separate things, because round-tripping alone is not enough for a frozen
+# contract:
+#
+#   1. EXACT BYTES — encoder output equals a hand-derived golden vector. This
+#      is what actually freezes the format. A round-trip test alone passes
+#      happily even when encoder and decoder have drifted TOGETHER, which is
+#      the defect shape seven waves of this freeze actually hit.
+#   2. ROUND TRIP — decode(encode(x)) reconstructs x, for the record.
+#   3. REJECTION — uppercase, mixed case, short, long, non-hex, empty and
+#      free-form spellings are refused rather than silently coerced, and a
+#      buffer that is not exactly 32 bytes is refused rather than truncated.
+#
+# For a digest the rejection half is the important one. A hash that encodes
+# under two spellings does not fail loudly — it makes a receipt unstable, and
+# §21's whole cross-mode determinism gate is built on receipts comparing equal.
+# ============================================================================
+
+use std.spec
+use std.common.structural.wire.{wire_put_u32, wire_to_hex}
+use std.common.structural.digest.hash256.{
+    HASH256_HEX_LEN,
+    HASH256_LEN,
+    HASH256_ZERO,
+    hash256_byte,
+    hash256_hex_nibble,
+    hash256_hex_of_byte,
+    hash256_hex_valid,
+    hash256_is_zero
+}
+use std.common.structural.digest.hash256_codec.{
+    decode_hash256,
+    encode_hash256,
+    hash256_hex_len,
+    hash256_put,
+    hash256_read,
+    hash256_region_valid
+}
+use test.fixtures.structural.hash256_golden_v1.{
+    GOLDEN_HASH256_EMBEDDED_BYTES,
+    GOLDEN_HASH256_EMBEDDED_PREFIX_U32,
+    GOLDEN_HASH256_HIGH_BIT_BYTES,
+    GOLDEN_HASH256_HIGH_BIT_HEX,
+    GOLDEN_HASH256_LADDER_ASC_BYTES,
+    GOLDEN_HASH256_LADDER_ASC_HEX,
+    GOLDEN_HASH256_LADDER_DESC_BYTES,
+    GOLDEN_HASH256_LADDER_DESC_HEX,
+    GOLDEN_HASH256_ONES_BYTES,
+    GOLDEN_HASH256_ONES_HEX,
+    GOLDEN_HASH256_REJECT_EMPTY,
+    GOLDEN_HASH256_REJECT_FREEFORM,
+    GOLDEN_HASH256_REJECT_LONG,
+    GOLDEN_HASH256_REJECT_MIXED_CASE,
+    GOLDEN_HASH256_REJECT_NON_HEX,
+    GOLDEN_HASH256_REJECT_SHORT,
+    GOLDEN_HASH256_REJECT_UPPERCASE,
+    GOLDEN_HASH256_ZERO_BYTES,
+    GOLDEN_HASH256_ZERO_HEX
+}
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+fn encoded_hex(digest: text) -> text:
+    val empty: [u8] = []
+    wire_to_hex(hash256_put(empty, digest))
+
+fn truncated(data: [u8], keep: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < keep and i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b
+
+fn appended(data: [u8], extra: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b.push(extra)
+    b
+
+# ----------------------------------------------------------------------------
+
+describe "Hash256 frozen widths":
+    it "pins 32 wire bytes and 64 host characters":
+        assert_equal(HASH256_LEN, 32)
+        assert_equal(HASH256_HEX_LEN, 64)
+        assert_equal(hash256_hex_len(), 64)
+
+    it "pins the zero digest as 64 zero characters, not an absence sentinel":
+        assert_equal(HASH256_ZERO.len(), 64)
+        assert_equal(HASH256_ZERO, GOLDEN_HASH256_ZERO_HEX)
+        assert_true(hash256_is_zero(HASH256_ZERO))
+        assert_false(hash256_is_zero(GOLDEN_HASH256_ONES_HEX))
+        # A legal digest that happens to be zero is still a digest: the zero
+        # value MUST encode, so it cannot double as "no digest".
+        assert_true(encode_hash256(HASH256_ZERO).ok)
+
+describe "Hash256 hex alphabet":
+    it "decodes 0-9 and a-f and nothing else":
+        assert_equal(hash256_hex_nibble(48), 0)
+        assert_equal(hash256_hex_nibble(57), 9)
+        assert_equal(hash256_hex_nibble(97), 10)
+        assert_equal(hash256_hex_nibble(102), 15)
+
+    it "rejects uppercase A-F rather than folding them":
+        assert_equal(hash256_hex_nibble(65), 0 - 1)
+        assert_equal(hash256_hex_nibble(70), 0 - 1)
+
+    it "rejects the characters immediately outside each range":
+        assert_equal(hash256_hex_nibble(47), 0 - 1)
+        assert_equal(hash256_hex_nibble(58), 0 - 1)
+        assert_equal(hash256_hex_nibble(96), 0 - 1)
+        assert_equal(hash256_hex_nibble(103), 0 - 1)
+
+    it "renders a byte as two lowercase characters, masked to 8 bits":
+        assert_equal(hash256_hex_of_byte(0), "00")
+        assert_equal(hash256_hex_of_byte(1), "01")
+        assert_equal(hash256_hex_of_byte(15), "0f")
+        assert_equal(hash256_hex_of_byte(128), "80")
+        assert_equal(hash256_hex_of_byte(255), "ff")
+        # A sign-extended i64 must not widen the spelling.
+        assert_equal(hash256_hex_of_byte(0 - 1), "ff")
+        assert_equal(hash256_hex_of_byte(256), "00")
+
+describe "Hash256 EXACT BYTES against hand-derived golden vectors":
+    it "encodes the zero digest as 32 zero bytes":
+        assert_equal(encoded_hex(GOLDEN_HASH256_ZERO_HEX),
+                     GOLDEN_HASH256_ZERO_BYTES)
+
+    it "encodes the all-ones digest as 32 0xff bytes":
+        assert_equal(encoded_hex(GOLDEN_HASH256_ONES_HEX),
+                     GOLDEN_HASH256_ONES_BYTES)
+
+    it "encodes the ascending ladder in digest order, high nibble first":
+        # THE byte-order vector. All 32 bytes distinct, so any permutation of
+        # the positions changes this string.
+        assert_equal(encoded_hex(GOLDEN_HASH256_LADDER_ASC_HEX),
+                     GOLDEN_HASH256_LADDER_ASC_BYTES)
+
+    it "is NOT the four-little-endian-u64-halves layout":
+        # The layout Hash128 uses, spelled out. If hash256_put ever routes
+        # through wire_put_u64 this assertion is the one that fires; the
+        # round-trip assertions below would not notice.
+        assert_false(encoded_hex(GOLDEN_HASH256_LADDER_ASC_HEX)
+                     == "0706050403020100"
+                        + "0f0e0d0c0b0a0908"
+                        + "1716151413121110"
+                        + "1f1e1d1c1b1a1918")
+
+    it "encodes the descending ladder, distinguishing a whole-run reversal":
+        assert_equal(encoded_hex(GOLDEN_HASH256_LADDER_DESC_HEX),
+                     GOLDEN_HASH256_LADDER_DESC_BYTES)
+
+    it "encodes the high-bit digest with no sign extension and no end swap":
+        assert_equal(encoded_hex(GOLDEN_HASH256_HIGH_BIT_HEX),
+                     GOLDEN_HASH256_HIGH_BIT_BYTES)
+
+    it "emits exactly 32 bytes for every vector":
+        assert_equal(encode_hash256(GOLDEN_HASH256_ZERO_HEX).bytes.len(), 32)
+        assert_equal(encode_hash256(GOLDEN_HASH256_ONES_HEX).bytes.len(), 32)
+        assert_equal(
+            encode_hash256(GOLDEN_HASH256_LADDER_ASC_HEX).bytes.len(), 32)
+        assert_equal(
+            encode_hash256(GOLDEN_HASH256_HIGH_BIT_HEX).bytes.len(), 32)
+
+describe "Hash256 as an embedded field":
+    it "follows a u32 with no length prefix, envelope or alignment padding":
+        var b: [u8] = []
+        b = wire_put_u32(b, GOLDEN_HASH256_EMBEDDED_PREFIX_U32)
+        b = hash256_put(b, GOLDEN_HASH256_LADDER_ASC_HEX)
+        assert_equal(wire_to_hex(b), GOLDEN_HASH256_EMBEDDED_BYTES)
+        assert_equal(b.len(), 36)
+
+    it "reads back from a non-zero offset":
+        var b: [u8] = []
+        b = wire_put_u32(b, GOLDEN_HASH256_EMBEDDED_PREFIX_U32)
+        b = hash256_put(b, GOLDEN_HASH256_LADDER_ASC_HEX)
+        assert_equal(hash256_read(b, 4), GOLDEN_HASH256_LADDER_ASC_HEX)
+
+    it "bounds a region in i64, so a large offset cannot wrap into 'fits'":
+        var b: [u8] = []
+        b = wire_put_u32(b, GOLDEN_HASH256_EMBEDDED_PREFIX_U32)
+        b = hash256_put(b, GOLDEN_HASH256_LADDER_ASC_HEX)
+        assert_true(hash256_region_valid(b, 4))
+        assert_false(hash256_region_valid(b, 5))
+        assert_false(hash256_region_valid(b, 0 - 1))
+        # 2^32 - 1: at 32-bit width `off + 32` wraps to 31 and reads as
+        # in-range. Computed in i64 it does not.
+        assert_false(hash256_region_valid(b, 4294967295))
+
+describe "Hash256 byte accessor":
+    it "maps byte i to characters 2i and 2i+1, high nibble first":
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 0), 0)
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 1), 1)
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 16), 16)
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 31), 31)
+        assert_equal(hash256_byte(GOLDEN_HASH256_HIGH_BIT_HEX, 0), 128)
+        assert_equal(hash256_byte(GOLDEN_HASH256_HIGH_BIT_HEX, 31), 1)
+
+    it "refuses an out-of-range index rather than reading past the spelling":
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 32), 0 - 1)
+        assert_equal(hash256_byte(GOLDEN_HASH256_LADDER_ASC_HEX, 0 - 1),
+                     0 - 1)
+
+describe "Hash256 round trip":
+    it "reconstructs every vector through encode then decode":
+        assert_equal(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_ZERO_HEX).bytes).value,
+            GOLDEN_HASH256_ZERO_HEX)
+        assert_equal(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_ONES_HEX).bytes).value,
+            GOLDEN_HASH256_ONES_HEX)
+        assert_equal(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_LADDER_ASC_HEX).bytes).value,
+            GOLDEN_HASH256_LADDER_ASC_HEX)
+        assert_equal(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_LADDER_DESC_HEX).bytes).value,
+            GOLDEN_HASH256_LADDER_DESC_HEX)
+        assert_equal(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_HIGH_BIT_HEX).bytes).value,
+            GOLDEN_HASH256_HIGH_BIT_HEX)
+
+describe "Hash256 REJECTION — spellings the contract refuses":
+    it "accepts exactly the frozen spelling":
+        assert_true(hash256_hex_valid(GOLDEN_HASH256_ZERO_HEX))
+        assert_true(hash256_hex_valid(GOLDEN_HASH256_ONES_HEX))
+        assert_true(hash256_hex_valid(GOLDEN_HASH256_LADDER_ASC_HEX))
+        assert_true(hash256_hex_valid(GOLDEN_HASH256_LADDER_DESC_HEX))
+        assert_true(hash256_hex_valid(GOLDEN_HASH256_HIGH_BIT_HEX))
+
+    it "rejects uppercase rather than folding it to one encoding":
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_UPPERCASE))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_UPPERCASE).ok)
+        assert_equal(
+            encode_hash256(GOLDEN_HASH256_REJECT_UPPERCASE).bytes.len(), 0)
+
+    it "rejects mixed case, which a naive to_lower fold would let past":
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_MIXED_CASE))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_MIXED_CASE).ok)
+
+    it "rejects a 63-character spelling instead of encoding a short field":
+        assert_equal(GOLDEN_HASH256_REJECT_SHORT.len(), 63)
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_SHORT))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_SHORT).ok)
+
+    it "rejects a 66-character spelling instead of truncating it":
+        assert_equal(GOLDEN_HASH256_REJECT_LONG.len(), 66)
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_LONG))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_LONG).ok)
+
+    it "rejects a non-hex character just past the alphabet":
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_NON_HEX))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_NON_HEX).ok)
+
+    it "rejects the empty and free-form spellings that exist in tree today":
+        # receipt_types.spl initialises input_hash to "" and
+        # staged_backend.spl writes Hash256(value: "staged_empty"). Both are
+        # refused: this is a real migration, recorded in the contract document.
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_EMPTY))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_EMPTY).ok)
+        assert_false(hash256_hex_valid(GOLDEN_HASH256_REJECT_FREEFORM))
+        assert_false(encode_hash256(GOLDEN_HASH256_REJECT_FREEFORM).ok)
+
+describe "Hash256 buffer rejection":
+    it "requires exactly 32 bytes":
+        val good = encode_hash256(GOLDEN_HASH256_LADDER_ASC_HEX).bytes
+        assert_true(decode_hash256(good).ok)
+        assert_false(decode_hash256(truncated(good, 31)).ok)
+        assert_false(decode_hash256(appended(good, 0)).ok)
+
+    it "rejects an empty buffer rather than returning the zero digest":
+        val empty: [u8] = []
+        assert_false(decode_hash256(empty).ok)
+        assert_equal(decode_hash256(empty).value, "")
+
+    it "returns a non-digest value on refusal, so ignoring ok cannot smuggle":
+        assert_false(hash256_hex_valid(decode_hash256(
+            encode_hash256(GOLDEN_HASH256_REJECT_UPPERCASE).bytes).value))

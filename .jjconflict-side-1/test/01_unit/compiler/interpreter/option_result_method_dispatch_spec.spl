@@ -1,0 +1,128 @@
+extern fn rt_file_read_text(path: text) -> text
+
+# The LIVE pure-Simple method dispatch table.
+#
+# Until 2026-08-01 the pure-Simple interpreter had NO Option/Result method
+# dispatch at all: `unwrap`, `unwrap_or`, `is_some`, `is_none`, `unwrap_err`,
+# `is_ok` and `is_err` matched no arm and fell through to
+# eval_set_error("no method '<name>' on <kind>").
+#
+# This was NOT a regression. Those arms only ever existed in
+# interpreter/eval_methods.spl, a file PROVEN DEAD by two-directional sabotage
+# and deleted in f97dfbbb8ee. The gap always existed; the dead file hid it.
+# See doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md
+val LIVE_DISPATCH_PATH = "src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl"
+
+fn live_dispatch_source() -> text:
+    rt_file_read_text(LIVE_DISPATCH_PATH) ?? ""
+
+fn arm_body(source: text, start_marker: text, end_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    if start < 0: return ""
+    val rest = source.substring(start, source.len())
+    val stop = rest.index_of(end_marker)
+    if stop < 0: return rest
+    rest.substring(0, stop)
+
+describe "interpreter Option/Result method dispatch":
+    it "unwrap yields the payload and unwrap_or falls back":
+        # NOTE ON ENGINE: this block executes on whichever engine runs the
+        # suite -- today that is the Rust seed child, NOT the pure-Simple
+        # interpreter. It pins the cross-lane contract the pure-Simple arms
+        # were written to match. The pure-Simple interpreter's own conformance
+        # was measured separately by driving core_interpret_expr with the seed
+        # as HOST over working-copy source; the structural blocks below are the
+        # regression pin for that measurement.
+        val some_v: i64? = 42
+        expect(some_v.unwrap_or(7)).to_equal(42)
+        val none_v: i64? = nil
+        expect(none_v.unwrap_or(7)).to_equal(7)
+
+    it "the LIVE dispatch routes Option/Result methods before the per-kind split":
+        # An Option has no value kind of its own in this interpreter -- there is
+        # no VAL_ENUM. Under the FLAT encoding a Some(text) IS a plain text, so
+        # if the Option check ran after the per-kind dispatch it would be
+        # swallowed by eval_text_method and rejected there. The check must
+        # therefore sit BEFORE `if kind == VAL_ARRAY:`.
+        val source = live_dispatch_source()
+        expect(source).to_contain("fn eval_option_result_method")
+        expect(source).to_contain("fn is_option_result_method")
+
+        val gate_pos = source.index_of("if is_option_result_method(method_name):")
+        expect(gate_pos).to_be_greater_than(-1)
+        val array_pos = source.index_of("if kind == VAL_ARRAY:")
+        expect(array_pos).to_be_greater_than(gate_pos)
+
+    it "discriminates on __tag, never on the struct name":
+        # The two producers of a boxed Option DISAGREE on the struct name:
+        # eval_enum_variant_call names it "Option::Some" / "Result::Ok"
+        # (Type::Variant) while eval_text_method's parse_int arm names it plain
+        # "Option". Only the `__tag` field is a reliable discriminator, which is
+        # what val_is_boxed_enum keys on. Measured, not assumed:
+        #   "1234".parse_int() => struct name='Option' __tag='Some'
+        val source = live_dispatch_source()
+        val tag_fn = arm_body(source, "fn option_result_tag", "fn option_result_payload")
+        expect(tag_fn).to_contain("val_is_boxed_enum")
+        expect(tag_fn).to_contain("__tag")
+        expect(tag_fn).to_not_contain("val_get_struct_name(receiver) ==")
+
+    it "unwrap on None/Err FAILS LOUDLY and never returns a plausible value":
+        # This is the whole point of the arm. Before it existed the live path
+        # errored loudly BY ACCIDENT (no arm matched). That property is now
+        # deliberate: every non-present branch must reach eval_set_error and
+        # return -1. A silent 0 / nil / receiver here is the exact shape of the
+        # P0 in doc/08_tracking/bug/deep_recheck_2026-07-05.md.
+        # Anchor inside eval_option_result_method: the literal
+        # `if method_name == "unwrap":` also appears earlier, in the
+        # is_option_result_method predicate list.
+        val source = arm_body(live_dispatch_source(),
+            "fn eval_option_result_method", "# ===== Array Methods =====")
+        val unwrap_body = arm_body(source,
+            "if method_name == \"unwrap\":",
+            "if method_name == \"unwrap_err\":")
+        expect(unwrap_body).to_contain("eval_set_error(\"called unwrap on None\")")
+        expect(unwrap_body).to_contain("called unwrap on Err")
+        expect(unwrap_body).to_not_contain("return val_make_int(0)")
+        expect(unwrap_body).to_not_contain("return val_make_nil()")
+
+        val unwrap_err_body = arm_body(source,
+            "if method_name == \"unwrap_err\":",
+            "if method_name == \"unwrap_or\":")
+        expect(unwrap_err_body).to_contain("eval_set_error")
+        expect(unwrap_err_body).to_not_contain("return val_make_nil()")
+
+    it "covers the full predicate set":
+        val source = live_dispatch_source()
+        val gate = arm_body(source, "fn is_option_result_method", "fn option_result_tag")
+        expect(gate).to_contain("\"unwrap\"")
+        expect(gate).to_contain("\"unwrap_or\"")
+        expect(gate).to_contain("\"unwrap_err\"")
+        expect(gate).to_contain("\"is_some\"")
+        expect(gate).to_contain("\"is_none\"")
+        expect(gate).to_contain("\"is_ok\"")
+        expect(gate).to_contain("\"is_err\"")
+
+    it "leaves a plain user struct on the user-method path":
+        # A non-enum VAL_STRUCT must NOT be diverted, so a user-defined
+        # Type__unwrap still wins on the struct-method path.
+        val source = live_dispatch_source()
+        expect(source).to_contain("val_is_boxed_enum(receiver) == false")
+
+describe "interpreter array reduce dispatch":
+    it "the LIVE array dispatch has a reduce arm using the map/filter closure convention":
+        # reduce(initial, fn(acc, item)). NOTE: unlike the Option arms above,
+        # this one is NOT behaviourally verified in the pure-Simple lane -- a
+        # closure cannot be driven through core_interpret_expr at all. The
+        # pre-existing `map` arm crashes there identically
+        # ("array index out of bounds: index is 0 but length is 0"), so the
+        # harness, not the arm, is the blocker. Verified by structural parity
+        # with map/filter/flat_map only.
+        val source = live_dispatch_source()
+        val body = arm_body(source,
+            "if method_name == \"reduce\" or method_name == \"fold\":",
+            "if method_name == \"any\":")
+        expect(body).to_contain("val_is_function")
+        expect(body).to_contain("eval_method_with_args")
+        expect(body).to_contain("[acc, item]")
+        # Misuse must be loud, not a silent identity return.
+        expect(body).to_contain("eval_set_error")

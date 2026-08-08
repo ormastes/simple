@@ -1,0 +1,40 @@
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn fail_probe(reason: text) -> i64:
+    print("module_surface_physical_alias_native_status=fail reason={reason}")
+    1
+
+fn main() -> i64:
+    val first_body = "fn shared() -> i64:\n    1\n"
+    val second_body = "fn shared() -> i64:\n    2\n"
+    val first = parse_and_build_module(first_body, "first.spl")
+    val second = parse_and_build_module(second_body, "second.spl")
+    if first.name != "first.spl":
+        return fail_probe("unexpected-first-path")
+
+    val modules = {
+        "first": first,
+        "second": second,
+        "first_alias": first
+    }
+    val sources = [
+        SourceFile(path: "first.spl", content: first_body, module_name: "first"),
+        SourceFile(path: "second.spl", content: second_body, module_name: "second")
+    ]
+    val result = module_surfaces_from_modules(modules, sources)
+    if result.is_err():
+        print("module_surface_physical_alias_native_status=fail reason={result.unwrap_err()}")
+        return 2
+
+    val surfaces = result.unwrap()
+    if surfaces.surfaces.len() != 2:
+        return fail_probe("surface-count")
+    if not surfaces.index_by_name.contains_key("first_alias"):
+        return fail_probe("missing-alias")
+    if surfaces.index_by_name["first_alias"] != 0:
+        return fail_probe("wrong-alias-index")
+
+    print("module_surface_physical_alias_native_status=pass surfaces=2 alias_index=0")
+    0

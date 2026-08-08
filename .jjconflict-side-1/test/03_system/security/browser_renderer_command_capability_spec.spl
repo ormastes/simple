@@ -1,0 +1,400 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021 NFR-WEB-BROWSER-010
+# @evidence-display: links
+"""# Browser renderer command capability
+
+Exercises the SBR2 capability codec and a deterministic model of the private
+hosted-parent issue/consume lifecycle. The 10,000-cycle receipt is a static
+counter model; it is not runtime latency, RSS, entropy, or pixel evidence.
+"""
+
+use std.spec.*
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource
+}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_COMMAND_CAPABILITY_BYTES,
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
+    BROWSER_RENDERER_MAX_SEQUENCE_ID,
+    BrowserRendererCapabilityMessage,
+    BrowserRendererEncodeResult,
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_capability_message_encode,
+    browser_renderer_capability_payload_message,
+    browser_renderer_command_capability_valid
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess
+}
+
+val _TOKEN: text = "0123456789abcdef0123456789abcdef"
+val _OTHER_TOKEN: text = "fedcba9876543210fedcba9876543210"
+
+class TrustedCapabilityOwnerFixture:
+    admitted: bool
+    generation: i64
+    staged_capability: text
+    staged_root: i64
+    staged_wire: i64
+    issued_capability: text
+    issued_root: i64
+    issued_wire: i64
+    retained_image_count: i64
+    issue_count: i64
+    failure_count: i64
+    consumed_count: i64
+    reject_count: i64
+
+    static fn create() -> TrustedCapabilityOwnerFixture:
+        TrustedCapabilityOwnerFixture(
+            admitted: true,
+            generation: 7,
+            staged_capability: "",
+            staged_root: 0,
+            staged_wire: 0,
+            issued_capability: "",
+            issued_root: 0,
+            issued_wire: 0,
+            retained_image_count: 2,
+            issue_count: 0,
+            failure_count: 0,
+            consumed_count: 0,
+            reject_count: 0
+        )
+
+    me stage(capability: text, root: i64, wire: i64) -> text:
+        if (not self.admitted or
+            not browser_renderer_command_capability_valid(capability) or
+            root <= 0 or wire <= 0):
+            self.failure_count = self.failure_count + 1
+            return "renderer-command-entropy-unavailable"
+        self.staged_capability = capability
+        self.staged_root = root
+        self.staged_wire = wire
+        "ok"
+
+    me finish_complete_write():
+        self.issued_capability = self.staged_capability
+        self.issued_root = self.staged_root
+        self.issued_wire = self.staged_wire
+        self.staged_capability = ""
+        self.staged_root = 0
+        self.staged_wire = 0
+        self.issue_count = self.issue_count + 1
+
+    me accept(
+        message: BrowserRendererCapabilityMessage,
+        reply_to_wire: i64
+    ) -> text:
+        if message.generation != self.generation:
+            self.reject_count = self.reject_count + 1
+            return "stale-generation"
+        if (self.issued_capability == "" or
+            message.command_capability != self.issued_capability or
+            message.root_command_request_id != self.issued_root):
+            self.reject_count = self.reject_count + 1
+            return "unissued-renderer-reply"
+        if reply_to_wire != self.issued_wire:
+            self.reject_count = self.reject_count + 1
+            return "wrong-renderer-wire"
+        self.issued_capability = ""
+        self.issued_root = 0
+        self.issued_wire = 0
+        self.consumed_count = self.consumed_count + 1
+        "ok"
+
+    me retire(clear_images: bool):
+        self.staged_capability = ""
+        self.staged_root = 0
+        self.staged_wire = 0
+        self.issued_capability = ""
+        self.issued_root = 0
+        self.issued_wire = 0
+        if clear_images:
+            self.retained_image_count = 0
+
+fn setup_trusted_capability_owner_fixture(
+) -> TrustedCapabilityOwnerFixture:
+    TrustedCapabilityOwnerFixture.create()
+
+fn _reply(
+    generation: i64,
+    root: i64,
+    wire: i64,
+    capability: text
+) -> BrowserRendererCapabilityMessage:
+    BrowserRendererCapabilityMessage(
+        kind: "frame",
+        generation: generation,
+        request_id: wire,
+        root_command_request_id: root,
+        command_capability: capability,
+        payload: "SBRF8"
+    )
+
+fn _retained_image() -> SimpleOsHostGpuImageResource:
+    SimpleOsHostGpuImageResource(
+        image_uri: "https://example.test/retained.png",
+        width: 1,
+        height: 1,
+        pixels: [0xFF336699u32],
+        pixel_checksum: 1
+    )
+
+fn check_trusted_capability_owner_admitted(
+    fixture: TrustedCapabilityOwnerFixture
+):
+    expect(fixture.admitted).to_be(true)
+    expect(browser_renderer_command_capability_valid(_TOKEN)).to_be(true)
+    expect(browser_renderer_command_capability_valid("")).to_be(false)
+    expect(browser_renderer_command_capability_valid(
+        "0123456789ABCDEF0123456789ABCDEF"
+    )).to_be(false)
+    expect(browser_renderer_command_capability_valid(
+        "00000000000000000000000000000000"
+    )).to_be(false)
+    val legacy = browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(7),
+        "SBR1\tframe\t7\t1\t0\n"
+    )
+    expect(legacy.status).to_equal("violation")
+    expect(browser_renderer_capability_message_encode(
+        "init",
+        BROWSER_RENDERER_MAX_SEQUENCE_ID,
+        BROWSER_RENDERER_MAX_SEQUENCE_ID,
+        BROWSER_RENDERER_MAX_SEQUENCE_ID,
+        "",
+        _TOKEN
+    ).ok).to_be(true)
+    expect(browser_renderer_capability_message_encode(
+        "init", 7, 0, 1, "", _TOKEN
+    ).ok).to_be(false)
+    expect(browser_renderer_capability_message_encode(
+        "init", 7, 9223372036854775807, 1, "", _TOKEN
+    ).ok).to_be(false)
+    val legacy_nested = BrowserRendererEncodeResult(
+        ok: true,
+        reason: "ok",
+        wire: "",
+        kind: "network_response",
+        payload: "SBRN1\tfixture"
+    )
+    val bound_nested = browser_renderer_capability_bind_encoded(
+        legacy_nested, 7, 1, 1, _TOKEN
+    )
+    val decoded_nested = browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(7), bound_nested.wire
+    )
+    expect(decoded_nested.message.payload).to_start_with("SBRN2\t")
+    expect(browser_renderer_capability_payload_message(
+        BrowserRendererCapabilityMessage(
+            kind: "network_response",
+            generation: 7,
+            request_id: 1,
+            root_command_request_id: 1,
+            command_capability: _TOKEN,
+            payload: "SBRN1\tlegacy"
+        )
+    ).payload).to_equal("")
+    val legacy_nested_wire = browser_renderer_capability_message_encode(
+        "network_response", 7, 1, 1, "SBRN1\tlegacy", _TOKEN
+    )
+    expect(legacy_nested_wire.ok).to_be(false)
+    expect(legacy_nested_wire.reason).to_equal("legacy-nested-schema")
+
+fn check_fresh_command_token_issued(
+    fixture: TrustedCapabilityOwnerFixture
+):
+    expect(fixture.stage(_TOKEN, 11, 11)).to_equal("ok")
+    expect(fixture.accept(_reply(7, 11, 2, _TOKEN), 11)).to_equal(
+        "unissued-renderer-reply"
+    )
+    val wire = browser_renderer_capability_message_encode(
+        "init", 7, 11, 11, "<p>control</p>", _TOKEN
+    )
+    expect(wire.ok).to_be(true)
+    val split_at = wire.wire.len() - 1
+    val before_final = browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(7),
+        wire.wire.slice(0, split_at)
+    )
+    expect(before_final.status).to_equal("need_more")
+    val complete = browser_renderer_capability_decoder_feed(
+        before_final.decoder,
+        wire.wire.slice(split_at, wire.wire.len())
+    )
+    expect(complete.status).to_equal("message")
+    expect(complete.message.root_command_request_id).to_equal(11)
+    expect(complete.message.command_capability).to_equal(_TOKEN)
+    fixture.finish_complete_write()
+    expect(fixture.issue_count).to_equal(1)
+
+fn check_unissued_command_token_rejected(
+    fixture: TrustedCapabilityOwnerFixture
+):
+    expect(fixture.accept(_reply(7, 11, 2, _OTHER_TOKEN), 11)).to_equal(
+        "unissued-renderer-reply"
+    )
+    expect(fixture.accept(_reply(7, 12, 2, _TOKEN), 11)).to_equal(
+        "unissued-renderer-reply"
+    )
+    expect(fixture.accept(_reply(7, 11, 2, _TOKEN), 12)).to_equal(
+        "wrong-renderer-wire"
+    )
+    expect(fixture.accept(_reply(8, 11, 2, _TOKEN), 11)).to_equal(
+        "stale-generation"
+    )
+    expect(fixture.accept(_reply(7, 11, 2, _TOKEN), 11)).to_equal("ok")
+    expect(fixture.accept(_reply(7, 11, 2, _TOKEN), 11)).to_equal(
+        "unissued-renderer-reply"
+    )
+    expect(fixture.consumed_count).to_equal(1)
+    expect(fixture.reject_count).to_equal(6)
+
+    var stopping = HostedBrowserRendererProcess.create(7, 64, 48)
+    stopping.state = "active"
+    val old_command = browser_renderer_capability_message_encode(
+        "advance", 7, 11, 11, "A1\t16", _TOKEN
+    )
+    stopping.expected_reply_to_request_id = 11
+    stopping.next_request_id = 11
+    stopping.command_deadline_ms = 1
+    stopping.pending_operation = "advance"
+    stopping.pending_wire = old_command.wire
+    stopping.pending_wire_offset = old_command.wire.len() - 1
+    stopping.pending_wire_reply_to_request_id = 11
+    stopping.pending_wire_is_command = true
+    stopping.active_command_capability = _TOKEN
+    stopping.active_root_command_request_id = 11
+    stopping.staged_command_capability = _TOKEN
+    stopping.staged_root_command_request_id = 11
+    stopping.staged_wire_request_id = 11
+    stopping.retained_image_resources = [_retained_image()]
+    expect(stopping.begin_stop(1000).is_ok()).to_be(true)
+    expect(stopping.stop_after_write).to_be(true)
+    expect(stopping.expected_reply_to_request_id).to_equal(11)
+    expect(stopping.pending_wire).to_equal(old_command.wire)
+    stopping.pending_wire_offset = stopping.pending_wire.len()
+    stopping._complete_pending_wire_write()
+    expect(stopping.issued_command_capability).to_equal(_TOKEN)
+    expect(stopping._begin_stop_after_write()).to_equal("")
+    expect(stopping.stop_after_write).to_be(false)
+    expect(stopping.expected_reply_to_request_id).to_equal(12)
+    val staged_stop_token = stopping.staged_command_capability
+    expect(staged_stop_token.len()).to_equal(32)
+    stopping.pending_wire_offset = stopping.pending_wire.len() - 1
+    expect(stopping._admit_renderer_reply(
+        _reply(7, 11, 2, _TOKEN),
+        11,
+        "stale-renderer-frame"
+    ).unwrap()).to_equal("stale")
+    expect(stopping.state).to_equal("active")
+    expect(stopping.staged_command_capability).to_equal(
+        staged_stop_token
+    )
+    expect(stopping.issued_command_capability).to_equal("")
+    expect(stopping.retained_image_resources.len()).to_equal(1)
+    val future = stopping._admit_renderer_reply(
+        _reply(7, 12, 3, staged_stop_token),
+        13,
+        "stale-renderer-frame"
+    )
+    expect(future.is_ok()).to_be(false)
+    expect(stopping.staged_command_capability).to_equal(
+        staged_stop_token
+    )
+    stopping.pending_wire_offset = stopping.pending_wire.len()
+    stopping._complete_pending_wire_write()
+    expect(stopping._admit_renderer_reply(
+        _reply(7, 12, 3, staged_stop_token),
+        12,
+        "stale-renderer-frame"
+    ).unwrap()).to_equal("current")
+    expect(stopping.issued_command_capability).to_equal("")
+    expect(stopping.retained_image_resources.len()).to_equal(1)
+
+    var replacing = HostedBrowserRendererProcess.create(7, 64, 48)
+    replacing.state = "active"
+    replacing.document_url = "https://example.test/current"
+    replacing.document_origin = "https://example.test"
+    replacing.site_lock = "https://example.test"
+    replacing.expected_reply_to_request_id = 21
+    replacing.next_request_id = 22
+    replacing.command_deadline_ms = 1
+    replacing.pending_operation = "advance"
+    replacing.active_command_capability = _TOKEN
+    replacing.active_root_command_request_id = 21
+    replacing.issued_command_capability = _TOKEN
+    replacing.issued_root_command_request_id = 21
+    replacing.issued_wire_request_id = 21
+    expect(replacing.begin_navigate(
+        "https://example.test/new", "GET", "", "", "", 1000
+    ).is_ok()).to_be(true)
+    expect(replacing._admit_renderer_reply(
+        _reply(7, 21, 4, _TOKEN),
+        21,
+        "stale-renderer-frame"
+    ).unwrap()).to_equal("stale")
+    expect(replacing.state).to_equal("active")
+    expect(replacing.navigation_permit.url).to_equal(
+        "https://example.test/new"
+    )
+
+fn check_all_capability_material_retired(
+    fixture: TrustedCapabilityOwnerFixture
+):
+    expect(fixture.stage(_TOKEN, 12, 12)).to_equal("ok")
+    fixture.finish_complete_write()
+    fixture.retire(false)
+    expect(fixture.staged_capability).to_equal("")
+    expect(fixture.issued_capability).to_equal("")
+    expect(fixture.retained_image_count).to_equal(2)
+    fixture.retire(true)
+    expect(fixture.retained_image_count).to_equal(0)
+
+    var cycles: i64 = 0
+    var model = TrustedCapabilityOwnerFixture.create()
+    while cycles < 10000:
+        val wire_id = cycles + 1
+        val staged = model.stage(_TOKEN, wire_id, wire_id)
+        if staged != "ok":
+            model.failure_count = model.failure_count + 1
+        model.finish_complete_write()
+        val accepted = model.accept(
+            _reply(7, wire_id, wire_id, _TOKEN), wire_id
+        )
+        if accepted != "ok":
+            model.failure_count = model.failure_count + 1
+        cycles = cycles + 1
+    expect(model.issue_count).to_equal(10000)
+    expect(model.failure_count).to_equal(0)
+    expect(model.consumed_count).to_equal(10000)
+    expect(model.reject_count).to_equal(0)
+    expect(model.staged_capability.len()).to_equal(0)
+    expect(model.issued_capability.len()).to_equal(0)
+    expect(BROWSER_RENDERER_COMMAND_CAPABILITY_BYTES).to_equal(32)
+    expect(
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
+        BROWSER_RENDERER_COMMAND_CAPABILITY_BYTES
+    ).to_equal(1048544)
+    expect(BROWSER_RENDERER_MAX_SEQUENCE_ID).to_equal(
+        9223372036854775806
+    )
+
+describe "REQ-WEB-BROWSER-014: renderer command capability":
+    it "should bind one-use SBR2 authority to each complete host wire":
+        val fixture = setup_trusted_capability_owner_fixture()
+
+        step("Admit the trusted capability owner")
+        check_trusted_capability_owner_admitted(fixture)
+
+        step("Issue one fresh command token")
+        check_fresh_command_token_issued(fixture)
+
+        step("Reject an unissued command token")
+        check_unissued_command_token_rejected(fixture)
+
+        step("Retire all capability material")
+        check_all_capability_material_retired(fixture)

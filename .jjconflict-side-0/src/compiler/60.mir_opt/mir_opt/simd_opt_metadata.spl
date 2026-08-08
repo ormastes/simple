@@ -1,0 +1,115 @@
+"""SIMD Optimization Plugin Metadata
+
+Defines the event struct and plugin hook consumed by auto_vectorize passes.
+When a loop is vectorized, the vectorization codegen calls
+plugin_hook_vectorize_event(kernel_id, changed) which:
+  1. Appends a ProviderEvent to g_provider_report.events
+  2. Increments g_provider_report.total_hits
+  3. If changed == true, also increments g_provider_report.total_changes
+     and g_simd_hits.vectorize_changes (in simd_provider.spl)
+
+Usage:
+    use compiler.mir_opt.mir_opt.simd_opt_metadata.{plugin_hook_vectorize_event, g_provider_report, reset_provider_report}
+"""
+
+# ============================================================================
+# Provider name constants
+# ============================================================================
+
+val PROVIDER_AUTO_VECTORIZE: text = "auto_vectorize"
+val PROVIDER_SIMD_LOWERING:  text = "simd_lowering"
+
+# ============================================================================
+# ProviderEvent — one vectorization decision record
+# ============================================================================
+
+class ProviderEvent:
+    """A single vectorization event emitted by the optimization pass.
+
+    kernel_id  — the SIMD kernel name: "fill" | "copy" | "alpha_blend" | "blit" | "scroll"
+    changed    — true if this invocation newly applied vectorization
+    provider   — which pass fired: PROVIDER_AUTO_VECTORIZE or PROVIDER_SIMD_LOWERING
+    """
+    kernel_id: text
+    changed:   bool
+    provider:  text
+
+fn make_provider_event(kid: text, ch: bool, prov: text) -> ProviderEvent:
+    ProviderEvent(kernel_id: kid, changed: ch, provider: prov)
+
+# ============================================================================
+# ProviderReport — per-frame accumulator
+# ============================================================================
+
+class ProviderReport:
+    """Accumulated metadata for one rendering frame.
+
+    active_providers  — list of provider names that fired this frame
+    events            — ordered list of ProviderEvent records
+    total_hits        — total number of vectorize events (== events.len())
+    total_changes     — number of events where changed == true
+    frame_id          — monotonically increasing frame counter
+    """
+    frame_id:         i64
+    active_providers: [text]
+    events:           [ProviderEvent]
+    total_hits:       i64
+    total_changes:    i64
+
+fn make_provider_report_empty() -> ProviderReport:
+    ProviderReport(
+        frame_id:         0,
+        active_providers: [],
+        events:           [],
+        total_hits:       0,
+        total_changes:    0
+    )
+
+var g_provider_report: ProviderReport = make_provider_report_empty()
+var _frame_counter: i64 = 0
+
+fn reset_provider_report():
+    """Call at frame boundary to start a fresh accumulator."""
+    _frame_counter = _frame_counter + 1
+    g_provider_report = ProviderReport(
+        frame_id:         _frame_counter,
+        active_providers: [],
+        events:           [],
+        total_hits:       0,
+        total_changes:    0
+    )
+
+# ============================================================================
+# Plugin hook — called by auto_vectorize_codegen.spl and simd_lowering pass
+# ============================================================================
+
+fn plugin_hook_vectorize_event(kernel_id: text, changed: bool):
+    """Record one vectorization decision for the current frame.
+
+    Called from auto_vectorize passes after a vectorization decision is made.
+    The provider is inferred from the current pass (auto_vectorize by default).
+    """
+    _plugin_hook_vectorize_event_from(kernel_id, changed, PROVIDER_AUTO_VECTORIZE)
+
+fn plugin_hook_vectorize_event_simd_lowering(kernel_id: text, changed: bool):
+    """Variant called by the simd_lowering pass."""
+    _plugin_hook_vectorize_event_from(kernel_id, changed, PROVIDER_SIMD_LOWERING)
+
+fn _plugin_hook_vectorize_event_from(kernel_id: text, changed: bool, provider: text):
+    val evt = make_provider_event(kernel_id, changed, provider)
+    g_provider_report.events.push(evt)
+    g_provider_report.total_hits = g_provider_report.total_hits + 1
+    if changed:
+        g_provider_report.total_changes = g_provider_report.total_changes + 1
+    _ensure_provider_listed(provider)
+
+fn _ensure_provider_listed(provider: text):
+    """Add provider to active_providers if not already present."""
+    var found: bool = false
+    var i: i32 = 0
+    while i < g_provider_report.active_providers.len():
+        if g_provider_report.active_providers[i] == provider:
+            found = true
+        i = i + 1
+    if not found:
+        g_provider_report.active_providers.push(provider)

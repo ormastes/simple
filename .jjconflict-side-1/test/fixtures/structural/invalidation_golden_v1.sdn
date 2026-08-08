@@ -1,0 +1,167 @@
+# Golden vectors — frozen DirtyMask / dependency-edge contract v1
+#
+# Language-neutral mirror of test/fixtures/structural/invalidation_golden_v1.spl.
+# Byte-for-byte identical to the Simple fixture; this copy exists so a Rust/C++
+# bridge or an external validator can check its encoder without linking Simple.
+#
+# Normative layout: doc/05_design/platform/structural_compute/
+#                   invalidation_contract_v1.md
+#
+# All `bytes` values are lowercase unseparated hex of the COMPLETE framed record
+# (8-byte envelope included).
+
+contract:
+  invalidation_schema_version: 1
+  byte_order: little-endian
+  envelope: magic_u32 | version_u16 | reserved_u16
+  dirty_mask_len: 4
+  dirty_mask_count: 21
+  dirty_mask_max_bit_index: 20
+  dirty_mask_known: 0x001fffff
+  invalidation_edge_len: 21
+  invalidation_edge_kind_count: 6
+  invalidation_edge_kind_max: 5
+
+magics:
+  dirty_mask: SDMK
+  invalidation_edge: SDEP
+  invalidation_edge_batch: SDBA
+
+dirty_mask_bit_indexes:
+  Source: 0
+  Token: 1
+  Parse: 2
+  SyntaxIndex: 3
+  Semantic: 4
+  Hir: 5
+  Mir: 6
+  Optimization: 7
+  Codegen: 8
+  Link: 9
+  DomStructure: 10
+  SelectorIndex: 11
+  Cascade: 12
+  ComputedStyle: 13
+  IntrinsicMeasure: 14
+  Layout: 15
+  Paint: 16
+  Composite: 17
+  HitTest: 18
+  Accessibility: 19
+  Resource: 20
+
+invalidation_edge_kind_discriminants:
+  SymbolExport: 0
+  CustomProperty: 1
+  SelectorMatch: 2
+  LayoutGeometry: 3
+  FontMetric: 4
+  LinkRelocation: 5
+
+# ----------------------------------------------------------------------------
+# DirtyMask — envelope(8) | mask u32
+# ----------------------------------------------------------------------------
+
+dirty_mask_vectors:
+  - name: GOLDEN_DIRTY_NONE
+    mask: 0x00000000
+    stages: []
+    bytes: 53444d4b0100000000000000
+  - name: GOLDEN_DIRTY_SOURCE
+    mask: 0x00000001
+    stages: [Source]
+    bytes: 53444d4b0100000001000000
+  - name: GOLDEN_DIRTY_LAYOUT_HITTEST
+    mask: 0x00048000
+    stages: [Layout, HitTest]
+    bytes: 53444d4b0100000000800400
+  - name: GOLDEN_DIRTY_INTRINSIC_CHAIN
+    mask: 0x0004c000
+    stages: [IntrinsicMeasure, Layout, HitTest]
+    bytes: 53444d4b0100000000c00400
+  - name: GOLDEN_DIRTY_ALL
+    mask: 0x001fffff
+    stages: all
+    bytes: 53444d4b01000000ffff1f00
+
+# ----------------------------------------------------------------------------
+# InvalidationEdge — envelope(8) | producer EntityRef 8 | consumer EntityRef 8
+#                    | kind u8 | invalidates u32
+#
+# An edge whose invalidation mask is empty is REJECTED, so there is no all-zero
+# InvalidationEdge on the wire.
+# ----------------------------------------------------------------------------
+
+invalidation_edge_vectors:
+  - name: GOLDEN_DEP_MIN
+    producer: {object_slot: 0, local_index: 0}
+    consumer: {object_slot: 0, local_index: 0}
+    kind: SymbolExport
+    invalidates: 0x00000001
+    bytes: 5344455001000000000000000000000000000000000000000001000000
+  - name: GOLDEN_DEP_BASIC
+    producer: {object_slot: 1, local_index: 2}
+    consumer: {object_slot: 3, local_index: 4}
+    kind: LayoutGeometry
+    invalidates: 0x00048000
+    bytes: 5344455001000000010000000200000003000000040000000300800400
+  - name: GOLDEN_DEP_MAX
+    producer: {object_slot: 4294967295, local_index: 4294967295}
+    consumer: {object_slot: 4294967295, local_index: 4294967295}
+    kind: LinkRelocation
+    invalidates: 0x001fffff
+    bytes: 5344455001000000ffffffffffffffffffffffffffffffff05ffff1f00
+  - name: GOLDEN_DEP_FONT
+    producer: {object_slot: 0, local_index: 7}
+    consumer: {object_slot: 0, local_index: 9}
+    kind: FontMetric
+    invalidates: 0x0004c000
+    bytes: 5344455001000000000000000700000000000000090000000400c00400
+
+# ----------------------------------------------------------------------------
+# InvalidationEdgeBatch — compressed sparse row over producers.
+#
+#   envelope(8) | version u32 | producer_count u32 | edge_count u32
+#   | has_reverse u8 | producer_offsets u32 * (producer_count + 1)
+#   | edges InvalidationEdge * edge_count
+#   | [ consumer_count u32 | consumer_index_count u32
+#   |   consumer_offsets u32 * (consumer_count + 1)
+#   |   consumer_edges u32 * consumer_index_count ]
+#
+# The bracketed tail is present only when has_reverse == 1.
+# consumer_edges holds INDICES into the forward edge list, never copies.
+# ----------------------------------------------------------------------------
+
+shared_edge_body:
+  # The three edges both batch vectors are built from (packed, unframed).
+  - {producer: {object_slot: 0, local_index: 0}, consumer: {object_slot: 0, local_index: 1}, kind: SymbolExport,   invalidates: 0x00000030}
+  - {producer: {object_slot: 0, local_index: 0}, consumer: {object_slot: 0, local_index: 2}, kind: CustomProperty, invalidates: 0x0001a000}
+  - {producer: {object_slot: 0, local_index: 1}, consumer: {object_slot: 0, local_index: 2}, kind: LayoutGeometry, invalidates: 0x00048000}
+  bytes: 000000000000000000000000010000000030000000000000000000000000000000020000000100a00100000000000100000000000000020000000300800400
+
+invalidation_edge_batch_vectors:
+  - name: GOLDEN_BATCH_EMPTY
+    version: 1
+    producer_count: 0
+    edge_count: 0
+    has_reverse: false
+    producer_offsets: [0]
+    bytes: 53444241010000000100000000000000000000000000000000
+  - name: GOLDEN_BATCH_FORWARD
+    version: 1
+    producer_count: 2
+    edge_count: 3
+    has_reverse: false
+    producer_offsets: [0, 2, 3]
+    bytes: 534442410100000001000000020000000300000000000000000200000003000000000000000000000000000000010000000030000000000000000000000000000000020000000100a00100000000000100000000000000020000000300800400
+  - name: GOLDEN_BATCH_REVERSE
+    version: 1
+    producer_count: 2
+    edge_count: 3
+    has_reverse: true
+    producer_offsets: [0, 2, 3]
+    consumer_count: 3
+    consumer_index_count: 3
+    consumer_offsets: [0, 0, 1, 3]
+    consumer_edges: [0, 1, 2]
+    bytes: 534442410100000001000000020000000300000001000000000200000003000000000000000000000000000000010000000030000000000000000000000000000000020000000100a00100000000000100000000000000020000000300800400030000000300000000000000000000000100000003000000000000000100000002000000

@@ -1,0 +1,330 @@
+# Custom Primitive Metadata — AC-1 and AC-2
+#
+# CustomPrimitiveInfo: metadata for newtype-over-primitive declarations.
+# PrimitiveTypeResolver: derives signedness/width/size from underlying type name.
+# CustomPrimitiveRegistry: flat 16-slot registry for lookup by name.
+
+# ============================================================================
+# PrimitiveTypeResolver
+# ============================================================================
+
+class PrimitiveTypeResolver:
+    """Resolves type properties from an underlying primitive type name."""
+
+impl PrimitiveTypeResolver:
+    static fn create() -> PrimitiveTypeResolver:
+        PrimitiveTypeResolver()
+
+    fn is_valid_underlying(underlying: text) -> bool:
+        if underlying == "u8":    return true
+        if underlying == "u16":   return true
+        if underlying == "u32":   return true
+        if underlying == "u64":   return true
+        if underlying == "i8":    return true
+        if underlying == "i16":   return true
+        if underlying == "i32":   return true
+        if underlying == "i64":   return true
+        if underlying == "bool":  return true
+        if underlying == "f32":   return true
+        if underlying == "f64":   return true
+        false
+
+    fn resolve_signedness(underlying: text) -> text:
+        if underlying == "u8":   return "unsigned"
+        if underlying == "u16":  return "unsigned"
+        if underlying == "u32":  return "unsigned"
+        if underlying == "u64":  return "unsigned"
+        if underlying == "i8":   return "signed"
+        if underlying == "i16":  return "signed"
+        if underlying == "i32":  return "signed"
+        if underlying == "i64":  return "signed"
+        "none"
+
+    fn resolve_bit_width(underlying: text) -> i32:
+        if underlying == "u8":   return 8
+        if underlying == "i8":   return 8
+        if underlying == "bool": return 8
+        if underlying == "u16":  return 16
+        if underlying == "i16":  return 16
+        if underlying == "u32":  return 32
+        if underlying == "i32":  return 32
+        if underlying == "f32":  return 32
+        if underlying == "u64":  return 64
+        if underlying == "i64":  return 64
+        if underlying == "f64":  return 64
+        0
+
+    fn resolve_byte_size(underlying: text) -> i32:
+        val bw = self.resolve_bit_width(underlying)
+        if bw == 8:  return 1
+        if bw == 16: return 2
+        if bw == 32: return 4
+        if bw == 64: return 8
+        0
+
+    fn is_integer_type(underlying: text) -> bool:
+        if underlying == "u8":  return true
+        if underlying == "u16": return true
+        if underlying == "u32": return true
+        if underlying == "u64": return true
+        if underlying == "i8":  return true
+        if underlying == "i16": return true
+        if underlying == "i32": return true
+        if underlying == "i64": return true
+        false
+
+    fn is_bool_type(underlying: text) -> bool:
+        underlying == "bool"
+
+    fn is_float_type(underlying: text) -> bool:
+        underlying == "f32" or underlying == "f64"
+
+# ============================================================================
+# PrimitiveAbiNames — canonical C / Rust / LLVM IR name mappings
+# ============================================================================
+
+class PrimitiveAbiNames:
+    """Maps underlying primitive type names to ABI-level names for C, Rust, and LLVM IR."""
+
+impl PrimitiveAbiNames:
+    static fn create() -> PrimitiveAbiNames:
+        PrimitiveAbiNames()
+
+    fn c_name(underlying: text) -> text:
+        if underlying == "u8":   return "uint8_t"
+        if underlying == "u16":  return "uint16_t"
+        if underlying == "u32":  return "uint32_t"
+        if underlying == "u64":  return "uint64_t"
+        if underlying == "i8":   return "int8_t"
+        if underlying == "i16":  return "int16_t"
+        if underlying == "i32":  return "int32_t"
+        if underlying == "i64":  return "int64_t"
+        if underlying == "f32":  return "float"
+        if underlying == "f64":  return "double"
+        if underlying == "bool": return "bool"
+        ""
+
+    fn rust_name(underlying: text) -> text:
+        if underlying == "u8":   return "u8"
+        if underlying == "u16":  return "u16"
+        if underlying == "u32":  return "u32"
+        if underlying == "u64":  return "u64"
+        if underlying == "i8":   return "i8"
+        if underlying == "i16":  return "i16"
+        if underlying == "i32":  return "i32"
+        if underlying == "i64":  return "i64"
+        if underlying == "f32":  return "f32"
+        if underlying == "f64":  return "f64"
+        if underlying == "bool": return "bool"
+        ""
+
+    fn llvm_name(underlying: text) -> text:
+        if underlying == "u8":   return "i8"
+        if underlying == "i8":   return "i8"
+        if underlying == "u16":  return "i16"
+        if underlying == "i16":  return "i16"
+        if underlying == "u32":  return "i32"
+        if underlying == "i32":  return "i32"
+        if underlying == "u64":  return "i64"
+        if underlying == "i64":  return "i64"
+        if underlying == "f32":  return "float"
+        if underlying == "f64":  return "double"
+        if underlying == "bool": return "i1"
+        ""
+
+# ============================================================================
+# CustomPrimitiveInfo
+# ============================================================================
+
+class CustomPrimitiveInfo:
+    """Metadata for a newtype-over-primitive declaration."""
+    name:           text
+    underlying:     text
+    signedness:     text
+    bit_width:      i32
+    byte_size:      i32
+    alignment:      i32
+    source_span:    text
+    is_transparent: bool
+
+impl CustomPrimitiveInfo:
+    static fn create(name: text, underlying: text, span: text) -> CustomPrimitiveInfo:
+        """Build a CustomPrimitiveInfo, auto-deriving layout from underlying."""
+        val r = PrimitiveTypeResolver.create()
+        CustomPrimitiveInfo(
+            name:           name,
+            underlying:     underlying,
+            signedness:     r.resolve_signedness(underlying),
+            bit_width:      r.resolve_bit_width(underlying),
+            byte_size:      r.resolve_byte_size(underlying),
+            alignment:      r.resolve_byte_size(underlying),
+            source_span:    span,
+            is_transparent: true
+        )
+
+    static fn empty() -> CustomPrimitiveInfo:
+        """Sentinel for 'not found'."""
+        CustomPrimitiveInfo(
+            name:           "",
+            underlying:     "",
+            signedness:     "none",
+            bit_width:      0,
+            byte_size:      0,
+            alignment:      0,
+            source_span:    "",
+            is_transparent: false
+        )
+
+    fn is_custom_primitive() -> bool:  true
+    fn underlying_primitive() -> text: self.underlying
+    fn bit_capacity() -> i32:          self.bit_width
+    fn abi_type() -> text:             self.underlying
+
+    fn is_integer() -> bool:
+        val r = PrimitiveTypeResolver.create()
+        r.is_integer_type(self.underlying)
+
+    fn is_bool() -> bool:
+        val r = PrimitiveTypeResolver.create()
+        r.is_bool_type(self.underlying)
+
+    fn is_float() -> bool:
+        val r = PrimitiveTypeResolver.create()
+        r.is_float_type(self.underlying)
+
+# ============================================================================
+# CustomPrimitiveRegistry — flat 16-slot registry
+# ============================================================================
+
+class CustomPrimitiveRegistry:
+    """Flat 16-slot registry mapping newtype names to CustomPrimitiveInfo."""
+    count: i32
+    n0:  text
+    n1:  text
+    n2:  text
+    n3:  text
+    n4:  text
+    n5:  text
+    n6:  text
+    n7:  text
+    n8:  text
+    n9:  text
+    n10: text
+    n11: text
+    n12: text
+    n13: text
+    n14: text
+    n15: text
+    p0:  CustomPrimitiveInfo
+    p1:  CustomPrimitiveInfo
+    p2:  CustomPrimitiveInfo
+    p3:  CustomPrimitiveInfo
+    p4:  CustomPrimitiveInfo
+    p5:  CustomPrimitiveInfo
+    p6:  CustomPrimitiveInfo
+    p7:  CustomPrimitiveInfo
+    p8:  CustomPrimitiveInfo
+    p9:  CustomPrimitiveInfo
+    p10: CustomPrimitiveInfo
+    p11: CustomPrimitiveInfo
+    p12: CustomPrimitiveInfo
+    p13: CustomPrimitiveInfo
+    p14: CustomPrimitiveInfo
+    p15: CustomPrimitiveInfo
+
+impl CustomPrimitiveRegistry:
+    static fn create() -> CustomPrimitiveRegistry:
+        val s = CustomPrimitiveInfo.empty()
+        CustomPrimitiveRegistry(
+            count: 0,
+            n0: "",  n1: "",  n2: "",  n3: "",
+            n4: "",  n5: "",  n6: "",  n7: "",
+            n8: "",  n9: "",  n10: "", n11: "",
+            n12: "", n13: "", n14: "", n15: "",
+            p0: s,   p1: s,   p2: s,   p3: s,
+            p4: s,   p5: s,   p6: s,   p7: s,
+            p8: s,   p9: s,   p10: s,  p11: s,
+            p12: s,  p13: s,  p14: s,  p15: s
+        )
+
+    me register(info: CustomPrimitiveInfo) -> bool:
+        """Store info. Returns false if all 16 slots are occupied."""
+        if self.count >= 16: return false
+        val idx = self.count
+        if idx == 0:
+            self.n0 = info.name
+            self.p0 = info
+        if idx == 1:
+            self.n1 = info.name
+            self.p1 = info
+        if idx == 2:
+            self.n2 = info.name
+            self.p2 = info
+        if idx == 3:
+            self.n3 = info.name
+            self.p3 = info
+        if idx == 4:
+            self.n4 = info.name
+            self.p4 = info
+        if idx == 5:
+            self.n5 = info.name
+            self.p5 = info
+        if idx == 6:
+            self.n6 = info.name
+            self.p6 = info
+        if idx == 7:
+            self.n7 = info.name
+            self.p7 = info
+        if idx == 8:
+            self.n8 = info.name
+            self.p8 = info
+        if idx == 9:
+            self.n9 = info.name
+            self.p9 = info
+        if idx == 10:
+            self.n10 = info.name
+            self.p10 = info
+        if idx == 11:
+            self.n11 = info.name
+            self.p11 = info
+        if idx == 12:
+            self.n12 = info.name
+            self.p12 = info
+        if idx == 13:
+            self.n13 = info.name
+            self.p13 = info
+        if idx == 14:
+            self.n14 = info.name
+            self.p14 = info
+        if idx == 15:
+            self.n15 = info.name
+            self.p15 = info
+        self.count = self.count + 1
+        true
+
+    fn lookup(name: text) -> CustomPrimitiveInfo:
+        """Return the info for name, or empty() if absent."""
+        if self.n0  == name: return self.p0
+        if self.n1  == name: return self.p1
+        if self.n2  == name: return self.p2
+        if self.n3  == name: return self.p3
+        if self.n4  == name: return self.p4
+        if self.n5  == name: return self.p5
+        if self.n6  == name: return self.p6
+        if self.n7  == name: return self.p7
+        if self.n8  == name: return self.p8
+        if self.n9  == name: return self.p9
+        if self.n10 == name: return self.p10
+        if self.n11 == name: return self.p11
+        if self.n12 == name: return self.p12
+        if self.n13 == name: return self.p13
+        if self.n14 == name: return self.p14
+        if self.n15 == name: return self.p15
+        CustomPrimitiveInfo.empty()
+
+    fn has(name: text) -> bool:
+        val found = self.lookup(name)
+        found.name != ""
+
+    fn summary() -> text:
+        "CustomPrimitiveRegistry(count: " + self.count.to_text() + "/16)"

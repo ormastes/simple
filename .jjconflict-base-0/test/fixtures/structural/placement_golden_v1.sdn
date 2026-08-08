@@ -1,0 +1,255 @@
+# Golden vectors — frozen PlacementRequest / PlacementPlan / lease-rules
+# contract v1
+#
+# Language-neutral mirror of test/fixtures/structural/placement_golden_v1.spl.
+# Byte-for-byte identical to the Simple fixture; this copy exists so a Rust/C++
+# bridge or an external validator can check its encoder without linking Simple.
+#
+# Normative layout: doc/05_design/platform/structural_compute/
+#                   placement_contract_v1.md
+#
+# All `bytes` values are lowercase unseparated hex of the COMPLETE framed record
+# (8-byte envelope included).
+
+contract:
+  placement_schema_version: 1
+  byte_order: little-endian
+  envelope: magic_u32 | version_u16 | reserved_u16
+  placement_request_len: 82
+  lease_grant_len: 32
+  placement_cost_len: 70
+  placement_plan_len: 142
+  placement_hash_len: 32
+  access_pattern_max: 4
+  persistence_policy_max: 3
+  lease_state_max: 4
+  residency_tier_max: 6
+  residency_tier_count: 7
+  absent_u32_sentinel: 0xffffffff
+  no_tier_filler: 0xff
+  confidence_milli_max: 1000
+
+magic:
+  PlacementRequest: SPRQ
+  LeaseGrant: SPLG
+  LeaseSet: SPLS
+  PlacementPlan: SPPL
+
+# Already frozen in src/lib/common/compute/placement_contracts/schema.spl and
+# REUSED here, not restated with new numbers.
+residency_tier_discriminants:
+  DeviceLocal: 0
+  DeviceShared: 1
+  HostPinned: 2
+  HostHot: 3
+  HostCold: 4
+  SsdCas: 5
+  Recomputable: 6
+
+# Declaration order in placement_contracts/semantic.spl is the wire order, the
+# same rule schema.spl applied to ResidencyTier.
+access_pattern_discriminants:
+  SequentialRead: 0
+  RandomRead: 1
+  ReadMostly: 2
+  ReadWrite: 3
+  WriteOnly: 4
+
+persistence_policy_discriminants:
+  Temporary: 0
+  Checkpoint: 1
+  Durable: 2
+  Recomputable: 3
+
+# DERIVED, not stated by the architecture — see the contract document's
+# "Underspecified in section 20" table. NOT monotone: never compared with >=.
+lease_state_discriminants:
+  Active: 0
+  Pinned: 1
+  InFlight: 2
+  Released: 3
+  Revoked: 4
+  live_range: 0..2
+  dead_range: 3..4
+  eviction_preventing: [1, 2]
+  monotone: false
+
+# DERIVED wire slot from section 3.4 "address reservation, physical allocation,
+# mapping, and ACCESS RIGHTS".
+lease_access_bits:
+  width: u8
+  READ: 1
+  WRITE: 2
+  known_mask: 3
+  reserved: bits 2..7 must be zero
+
+# ADOPTED VERBATIM from the EXEC lane's freeze
+# (src/lib/common/structural/execution/profile_types.spl, commit 2d06051444e).
+# Placement does NOT define a second meaning for this u64: section 20.2's
+# device_mask and section 21's allowed_devices are the same mask.
+device_mask_bits:
+  width: u64
+  CPU_SCALAR: 1
+  CPU_SIMD: 2
+  GPU: 4
+  STORAGE: 8
+  known_mask: 15
+  reserved: bits 4..63 must be zero
+  zero_mask: INVALID — a request permitting no executor can never run
+  device_tier_rule: required_tiers naming DeviceLocal or DeviceShared requires
+                    the GPU bit, since those are VRAM tiers
+
+residency_tier_set:
+  width: u8
+  bit_i: residency tier discriminant i
+  known_mask: 127
+  device_mask: 3
+  reserved: bit 7 must be zero
+
+# The rights each AccessPattern implies. ReadMostly still writes; only
+# WriteOnly drops the read right.
+access_pattern_required_rights:
+  SequentialRead: 1
+  RandomRead: 1
+  ReadMostly: 3
+  ReadWrite: 3
+  WriteOnly: 2
+
+placement_request_layout:
+  object_slot: u32
+  generation: u32
+  access: u8
+  required_tiers: u8
+  preferred_len: u8
+  preferred: u8 x 7, unused entries 0xff
+  persistence: u8
+  deadline_present: u8
+  reserved: u16 must be zero
+  expected_reuse_distance: u32
+  device_mask: u64
+  expected_first_use: u64
+  expected_last_use: u64
+  recompute_cost: u64
+  transfer_cost_hint: u64
+  affinity_group: u64
+  deadline_us: u64
+
+lease_grant_layout:
+  object_slot: u32
+  generation: u32
+  lease_epoch: u32
+  state: u8
+  access: u8
+  tier: u8
+  reserved: u8 must be zero
+  device_address: u64
+  length: u64
+
+lease_set_layout:
+  envelope: 8
+  lease_count: u32
+  grants: LeaseGrant * lease_count
+  order: strictly ascending by (object_slot, generation)
+
+placement_cost_layout:
+  cpu_work: u64
+  simd_work: u64
+  gpu_work: u64
+  host_to_device_bytes: u64
+  device_to_host_bytes: u64
+  ssd_read_bytes: u64
+  ssd_write_bytes: u64
+  synchronization_points: u32
+  predicted_latency_us: u64
+  confidence_milli: u16
+
+placement_plan_layout:
+  envelope: 8
+  reservations: u32 slot | u32 generation
+  transfers: u32 slot | u32 generation
+  evictions: u32 slot | u32 generation
+  prefetches: u32 slot | u32 generation
+  leases: u32 slot | u32 generation
+  estimated_cost: PlacementCost (70)
+  receipt_seed: 32 raw bytes
+
+# THE LEASE RULES, in the form an external validator must implement. Enforced
+# on ENCODE as well as DECODE, so an ill-formed lease has no byte encoding at
+# all.
+lease_rules:
+  live_states_require:
+    lease_epoch: != 0xffffffff
+    access: != 0
+    device_address: != 0
+    length: != 0
+    no_wrap: device_address + length <= 2^64 - 1, computed as remaining room
+  dead_states_require:
+    lease_epoch: == 0xffffffff
+    access: == 0
+    device_address: == 0
+    length: == 0
+  valid_at: state is live AND lease_epoch == caller_epoch
+  resident_view_valid_under: same object_slot AND valid_at(view.lease_epoch)
+                             AND window inside grant window
+  entity_ref_valid_under: same object_slot AND valid_at(snapshot_epoch)
+  epoch_comparison: EQUALITY, never >= — a lease epoch is an identity, not an
+                    ordering; a later epoch on the same slot is a DIFFERENT
+                    lease, possibly at a different address
+
+placement_request_rules:
+  required_tiers: must be non-empty and carry no reserved bit
+  preferred: subset of required_tiers, no duplicates, at most 7
+  device_mask: must pass device_mask_valid (non-zero, no reserved bit), and
+               must carry the GPU bit when required_tiers names a device tier
+  liveness: expected_first_use <= expected_last_use, compared UNSIGNED
+  deadline: deadline_us must be 0 when deadline_present is 0
+
+placement_plan_rules:
+  arena_absence: slot 0xffffffff requires generation 0
+  leases: mandatory, may not be 0xffffffff
+  confidence_milli: <= 1000
+  receipt_seed: exactly 64 lowercase hex characters
+
+vectors:
+  GOLDEN_REQUEST_MINIMAL:
+    len: 90
+    bytes: 53505251010000000100000001000000000800ffffffffffffff00000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  GOLDEN_REQUEST_FULL:
+    len: 90
+    bytes: 53505251010000004433221107000000030703000201ffffffff02010000010100000500000000000000100000000000000020000000000000004000000000000000800000000000000099000000000000008877665544332211
+  GOLDEN_REQUEST_UNSIGNED_EPOCH:
+    len: 90
+    bytes: 53505251010000000200000000000000042000ffffffffffffff01000000ffffffff080000000000000001000000000000000000000000000080ffffffffffffffff000000000000000000000000000000000000000000000000
+  GOLDEN_LEASE_ACTIVE:
+    len: 40
+    bytes: 53504c47010000000500000009000000010100000003000000100000007f00000010000000000000
+  GOLDEN_LEASE_PINNED_MAX:
+    len: 40
+    bytes: 53504c4701000000fefffffffffffffffeffffff010102000000ffffffffffffffff000000000000
+  GOLDEN_LEASE_REVOKED:
+    len: 40
+    bytes: 53504c47010000000500000009000000ffffffff0400000000000000000000000000000000000000
+  GOLDEN_LEASE_SET_EMPTY:
+    len: 12
+    bytes: 53504c530100000000000000
+  GOLDEN_LEASE_SET_PAIR:
+    len: 76
+    bytes: 53504c5301000000020000000500000009000000010100000003000000100000007f00000010000000000000fefffffffffffffffeffffff010102000000ffffffffffffffff000000000000
+  GOLDEN_PLAN_MINIMAL:
+    len: 150
+    bytes: 5350504c01000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff000000000300000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  GOLDEN_PLAN_FULL:
+    len: 150
+    bytes: 5350504c0100000010000000010000001100000002000000ffffffff00000000130000000400000014000000050000000100000000000000020000000000000003000000000000000400000000000000050000000000000006000000000000000700000000000000080000000900000000000000e8030123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+# NOTE ON THIS FILE
+#
+# The `bytes` values above are the same hand-derived vectors as the Simple
+# fixture, concatenated. Neither copy was captured from encoder output: the
+# fixture was written from the layout tables above and the spec then asserts
+# that the encoder MATCHES it. That direction is what makes a symmetric
+# encode/decode defect detectable — a round trip alone would pass one through.
+#
+# Verified: swapping device_address and length in BOTH the encoder and the
+# decoder left every round-trip assertion green and failed exactly the three
+# exact-byte lease assertions.

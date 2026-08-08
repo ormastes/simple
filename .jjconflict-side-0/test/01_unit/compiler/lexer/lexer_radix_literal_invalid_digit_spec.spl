@@ -1,0 +1,89 @@
+# Regression: octal/binary literals with out-of-radix digits used to lex
+# silently instead of erroring.
+#
+# `scan_number`'s octal branch validated digits with `is_digit` (accepts 0-9,
+# not 0-7), and `parse_int_literal_text` (primary_expr.spl:193) then
+# accumulated `oct_val*8 + int(oc)` over whatever the lexer handed it. So
+# `0o789` lexed as ONE valid INT token and silently evaluated to 521 (a
+# base-8 positional accumulation over base-10 digits -- meaningless in any
+# radix), with no diagnostic anywhere in the pipeline. The binary branch had
+# the opposite symptom: an out-of-range digit correctly stopped the digit
+# run, but silently, splitting one literal into two adjacent INT tokens
+# (`0b123` -> INT("0b1") + INT("23")) instead of erroring.
+#
+# See doc/08_tracking/bug/octal_literal_accepts_digits_8_9_silent_wrong_value_2026-08-08.md.
+#
+# Fix: both branches now consume the WHOLE decimal-digit run, track the
+# first out-of-radix digit, and -- if one was seen -- emit a single TOK_ERROR
+# (191) token carrying a real message instead of building an INT token or
+# splitting the run. `parse_primary_expr`'s existing fallback
+# (`_ParserPrimary/primary_expr.spl:958`) turns any unhandled TOK_ERROR into
+# a `parser_error`, so this reuses the same error-reporting channel the
+# lexer already uses for "unterminated string" -- no new plumbing needed.
+#
+# The valid-literal rows (including the existing suffix forms fixed by
+# b0f5308993) are re-asserted here as it's-not-broken discriminators: this
+# change must not affect any literal that was already correct.
+
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text}
+use compiler.frontend.core.tokens.{TOK_EOF, TOK_INT_LIT, TOK_SUFFIXED_INT, TOK_ERROR}
+
+describe "Lexer radix literal invalid-digit diagnostics":
+
+    # Render the first real token as `<kind>:<text>` (EOF/newline skipped).
+    fn lex_first(src: text) -> text:
+        var lx: CoreLexer = make_core_lexer(src)
+        for i in 0..5:
+            val r = core_lexer_next_token(lx)
+            lx = r.0
+            val k: i64 = r.1
+            if k == 0 or k == TOK_EOF:
+                return "EOF"
+            return k.to_text() + ":" + core_lexer_token_text(lx)
+        return "EOF"
+
+    # --- the bug: octal digits 8/9 must not silently produce an INT ---
+
+    it "flags an octal literal containing an 8 as a lex error, not a silent INT":
+        val out = lex_first("0o789")
+        expect(out).to_start_with(TOK_ERROR.to_text() + ":")
+
+    it "reports the offending digit and the literal text for 0o789":
+        val out = lex_first("0o789")
+        expect(out).to_contain("8")
+        expect(out).to_contain("0o789")
+
+    it "flags 0o8 (single bad digit) as a lex error":
+        val out = lex_first("0o8")
+        expect(out).to_start_with(TOK_ERROR.to_text() + ":")
+
+    # --- the sibling: binary digits 2-9 must not silently split the token ---
+
+    it "flags a binary literal containing a 2 as a lex error, not a silent split":
+        val out = lex_first("0b123")
+        expect(out).to_start_with(TOK_ERROR.to_text() + ":")
+
+    it "reports the offending digit and the literal text for 0b123":
+        val out = lex_first("0b123")
+        expect(out).to_contain("2")
+        expect(out).to_contain("0b123")
+
+    # --- must NOT regress valid literals (including suffixed forms) ---
+
+    it "still lexes a valid octal literal as a plain int":
+        expect(lex_first("0o644")).to_equal(TOK_INT_LIT.to_text() + ":0o644")
+
+    it "still lexes a valid octal literal with a type suffix":
+        expect(lex_first("0o644u32")).to_equal(TOK_SUFFIXED_INT.to_text() + ":0o644")
+
+    it "still lexes a valid binary literal as a plain int":
+        expect(lex_first("0b1010")).to_equal(TOK_INT_LIT.to_text() + ":0b1010")
+
+    it "still lexes a valid binary literal with a type suffix":
+        expect(lex_first("0b1010u64")).to_equal(TOK_SUFFIXED_INT.to_text() + ":0b1010")
+
+    it "still lexes a valid hex literal (unrelated radix, unaffected by this fix)":
+        expect(lex_first("0x1F")).to_equal(TOK_INT_LIT.to_text() + ":0x1F")
+
+    it "still lexes an octal literal with underscore separators":
+        expect(lex_first("0o7_5_5")).to_equal(TOK_INT_LIT.to_text() + ":0o7_5_5")

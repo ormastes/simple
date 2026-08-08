@@ -1,0 +1,33 @@
+"""
+# Claude Full PowerShell Path Validation Slice
+
+Focused coverage for public path-constraint and dangerous-removal routing from
+tools/PowerShellTool/pathValidation.ts.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.tools.PowerShellTool.pathValidation.*
+
+describe "Claude full powershell path validation parity":
+    it "should model passthrough read path routes":
+        step("Check passthrough routes")
+        expect(checkPathConstraintsRoute("Get-Content ./file.txt", false, false, false, false, false, false)).to_equal("passthrough")
+        expect(checkPathConstraintsRoute("Get-Content ./file.txt", true, true, false, false, false, false)).to_equal("passthrough")
+        expect(checkPathConstraintsRoute("Invoke-WebRequest https://example.test", true, false, false, false, false, false)).to_equal("passthrough")
+
+    it "should model deny routes":
+        step("Check deny routes")
+        expect(isDangerousRemovalRawPathRoute("Remove-Item /")).to_equal(true)
+        expect(dangerousRemovalDenyRoute("rm /etc")).to_equal("deny dangerous removal")
+        expect(checkPathConstraintsRoute("Remove-Item /", true, false, false, false, false, false)).to_equal("deny dangerous removal")
+        expect(checkPathConstraintsRoute("rm /etc", true, false, false, false, false, false)).to_equal("deny dangerous removal")
+        expect(checkPathConstraintsRoute("Get-Content /secret", true, false, true, false, false, false)).to_equal("deny blocked path")
+
+    it "should model ask routes":
+        step("Check ask routes")
+        expect(checkPathConstraintsRoute("Get-Content /outside", true, false, false, false, false, false)).to_equal("ask blocked path")
+        expect(checkPathConstraintsRoute("Set-Location /tmp; Get-Content x", true, false, false, true, false, false)).to_equal("ask cwd changing command")
+        expect(checkPathConstraintsRoute("'x' | Get-Content", true, false, false, false, true, false)).to_equal("ask pipeline path")
+        expect(checkPathConstraintsRoute("Get-Content $path", true, false, false, false, false, true)).to_equal("ask complex path")
+        expect(checkPathConstraintsRoute("Set-Content", true, false, false, false, false, false)).to_equal("ask write target")
+        expect(powershellPathValidationSourceLinesModeled()).to_equal(2049)

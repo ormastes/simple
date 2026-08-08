@@ -1,0 +1,310 @@
+# Extension runtime isolation & security (lane L6): canonical path
+# containment, default-deny permission enforcement, and crash-loop
+# containment wired at the ExtensionHost.dispatch_command seam.
+#
+# Lane F3 (2026-07-29) added the symlink-escape + nonexistent-path-fallback
+# cases below, exercising the real (non-lexical) symlink resolution that
+# path_canonicalize now performs for on-disk paths.
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.runtime.*
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+# ---- fixtures ----------------------------------------------------------------
+
+fn crash_test_manifest() -> ExtensionManifest:
+    extension_manifest_basic(
+        "crash-ext", "1.0.0", "",
+        ["onCommand:crash.run"],
+        [ExtensionCommand(id: "crash.run", title: "Crash Run", category: "Test")],
+        []
+    )
+
+var _crash_should_fail: bool = true
+
+fn crash_test_set_should_fail(v: bool):
+    _crash_should_fail = v
+
+fn crash_handler(payload: text) -> Result<text, text>:
+    if _crash_should_fail:
+        return Err("boom")
+    Ok("ok:" + payload)
+
+fn worker_handler(payload: text) -> Result<text, text>:
+    Ok("worker-ran:" + payload)
+
+fn worker_denied_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "worker-ext-denied", "1.0.0", "",
+        ["onCommand:worker.run"],
+        [ExtensionCommand(id: "worker.run", title: "Worker Run", category: "Test")],
+        []
+    )
+    m.host = "worker"
+    m
+
+fn worker_granted_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "worker-ext-granted", "1.0.0", "",
+        ["onCommand:worker.run"],
+        [ExtensionCommand(id: "worker.run", title: "Worker Run", category: "Test")],
+        []
+    )
+    m.host = "worker"
+    var perms = extension_permissions_none()
+    perms.process_spawn = true
+    m.permissions = perms
+    m
+
+fn sibling_hazard_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "sibling-ext", "1.0.0", "main.spl",
+        ["onCommand:sibling.run"],
+        [ExtensionCommand(id: "sibling.run", title: "Sibling Run", category: "Test")],
+        []
+    )
+    m
+
+fn good_root_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "good-ext", "1.0.0", "main.spl",
+        ["onCommand:good.run"],
+        [ExtensionCommand(id: "good.run", title: "Good Run", category: "Test")],
+        []
+    )
+    m
+
+describe "extension runtime: path containment":
+
+    it "reports a genuine child path as contained in its root":
+        expect(path_contained_in("/root/a", "/root")).to_equal(true)
+        expect(path_contained_in("/root", "/root")).to_equal(true)
+
+    it "does NOT report a string-prefix sibling as contained (the starts_with hazard)":
+        expect(path_contained_in("/root-evil/x", "/root")).to_equal(false)
+        expect(path_contained_in("/root-evil", "/root")).to_equal(false)
+
+    it "canonicalizes '.' and collapses resolvable '..' segments":
+        expect(path_canonicalize("/root/./a/../b")).to_equal("/root/b")
+        expect(path_canonicalize("/a/../../b")).to_equal("/b")
+        expect(path_canonicalize("a/./b/")).to_equal("a/b")
+
+    it "keeps an unresolvable leading '..' on a relative path (nothing to resolve against)":
+        expect(path_canonicalize("a/../../etc")).to_equal("../etc")
+
+    it "rejects an absolute manifest entry path":
+        match path_resolve_entry("/pkg/root", "/etc/passwd"):
+            case Ok(_):
+                expect("absolute entry").to_equal("should have been rejected")
+            case Err(reason):
+                expect(reason.contains("absolute")).to_equal(true)
+
+    it "rejects a relative manifest entry path that escapes the package root":
+        match path_resolve_entry("/pkg/root", "a/../../etc/passwd"):
+            case Ok(_):
+                expect("escaping entry").to_equal("should have been rejected")
+            case Err(reason):
+                expect(reason.contains("escapes")).to_equal(true)
+
+    it "resolves a genuine relative manifest entry path under the package root":
+        match path_resolve_entry("/pkg/root", "src/main.spl"):
+            case Ok(resolved):
+                expect(resolved).to_equal("/pkg/root/src/main.spl")
+            case Err(_):
+                expect("valid entry").to_equal("should have resolved")
+
+describe "extension runtime: default-deny permission enforcement":
+
+    it "denies a capability the manifest never granted":
+        val perms = extension_permissions_none()
+        match runtime_check_permission(perms, "process_spawn"):
+            case Ok(_):
+                expect("process_spawn").to_equal("should have been denied")
+            case Err(reason):
+                expect(reason.contains("process_spawn")).to_equal(true)
+                expect(reason.contains("denied")).to_equal(true)
+
+    it "denies an unrecognized capability name (default-deny, not default-allow)":
+        val perms = extension_permissions_none()
+        match runtime_check_permission(perms, "not_a_real_capability"):
+            case Ok(_):
+                expect("unknown capability").to_equal("should have been denied")
+            case Err(reason):
+                expect(reason.contains("denied")).to_equal(true)
+
+    it "grants a capability the manifest explicitly declares":
+        var perms = extension_permissions_none()
+        perms.workspace_write = true
+        match runtime_check_permission(perms, "workspace_write"):
+            case Ok(_):
+                pass_do_nothing
+            case Err(_):
+                expect("granted workspace_write").to_equal("should have been allowed")
+
+describe "extension runtime: process_spawn enforced at command dispatch for worker-placed extensions":
+
+    it "a worker extension without process_spawn cannot dispatch (default-deny)":
+        var host = ExtensionHost.new()
+        host.register_manifest(worker_denied_manifest(), "<test>")
+        host.register_command_handler("worker-ext-denied", "worker.run", "Worker Run", worker_handler)
+        match host.dispatch_command("worker.run", "x"):
+            case Ok(_):
+                expect("denied worker dispatch").to_equal("should have failed")
+            case Err(reason):
+                expect(reason.contains("process_spawn")).to_equal(true)
+                expect(reason.contains("denied")).to_equal(true)
+
+    it "a worker extension with process_spawn granted dispatches normally":
+        var host = ExtensionHost.new()
+        host.register_manifest(worker_granted_manifest(), "<test>")
+        host.register_command_handler("worker-ext-granted", "worker.run", "Worker Run", worker_handler)
+        match host.dispatch_command("worker.run", "x"):
+            case Ok(out):
+                expect(out).to_equal("worker-ran:x")
+            case Err(_):
+                expect("granted worker dispatch").to_equal("should have succeeded")
+
+describe "extension runtime: crash-loop containment":
+
+    it "disables an extension after 3 consecutive handler failures, then runtime_reenable clears it":
+        var host = ExtensionHost.new()
+        host.register_manifest(crash_test_manifest(), "<test>")
+        host.register_command_handler("crash-ext", "crash.run", "Crash Run", crash_handler)
+        crash_test_set_should_fail(true)
+
+        match host.dispatch_command("crash.run", "1"):
+            case Ok(_):
+                expect("failure 1").to_equal("should have failed")
+            case Err(msg):
+                expect(msg).to_equal("boom")
+        match host.dispatch_command("crash.run", "2"):
+            case Ok(_):
+                expect("failure 2").to_equal("should have failed")
+            case Err(msg):
+                expect(msg).to_equal("boom")
+        match host.dispatch_command("crash.run", "3"):
+            case Ok(_):
+                expect("failure 3").to_equal("should have failed")
+            case Err(msg):
+                expect(msg).to_equal("boom")
+
+        # 4th dispatch is short-circuited by crash containment, not the handler
+        match host.dispatch_command("crash.run", "4"):
+            case Ok(_):
+                expect("4th dispatch").to_equal("should have been blocked")
+            case Err(msg):
+                expect(msg.contains("disabled after repeated failures")).to_equal(true)
+        expect(host.is_active("crash-ext")).to_equal(true)
+
+        crash_test_set_should_fail(false)
+        host.runtime_reenable("crash-ext")
+        match host.dispatch_command("crash.run", "5"):
+            case Ok(out):
+                expect(out).to_equal("ok:5")
+            case Err(_):
+                expect("dispatch after reenable").to_equal("should have succeeded")
+
+    it "a successful dispatch resets the consecutive-failure counter":
+        var host = ExtensionHost.new()
+        host.register_manifest(crash_test_manifest(), "<test>")
+        host.register_command_handler("crash-ext", "crash.run", "Crash Run", crash_handler)
+
+        crash_test_set_should_fail(true)
+        host.dispatch_command("crash.run", "1")
+        host.dispatch_command("crash.run", "2")
+        crash_test_set_should_fail(false)
+        match host.dispatch_command("crash.run", "3"):
+            case Ok(out):
+                expect(out).to_equal("ok:3")
+            case Err(_):
+                expect("recovered dispatch").to_equal("should have succeeded")
+
+        # two more real failures after the reset should NOT yet disable (needs 3 in a row)
+        crash_test_set_should_fail(true)
+        host.dispatch_command("crash.run", "4")
+        match host.dispatch_command("crash.run", "5"):
+            case Ok(_):
+                expect("failure after reset").to_equal("should have failed")
+            case Err(msg):
+                expect(msg).to_equal("boom")
+
+describe "extension runtime: the starts_with path hazard is fixed at the runtime-dispatch seam":
+
+    it "rejects a string-prefix sibling directory as an allowed runtime root":
+        var host = ExtensionHost.new()
+        host.register_manifest(sibling_hazard_manifest(), "root-evil/ext")
+        host.register_command_handler("sibling-ext", "sibling.run", "Sibling Run", worker_handler)
+        host.set_runtime_policy(extension_runtime_policy_sandboxed(["root"]))
+        host.dispatch_external_command("sibling.run", "x")
+        expect(host.drain_invocation_queue()).to_equal(1)
+        val record = host.last_runtime_dispatch()
+        expect(record.status).to_equal("blocked-runtime")
+        expect(record.reason).to_equal("extension root not allowed")
+
+    it "allows a genuine subdirectory of the allowed root":
+        var host = ExtensionHost.new()
+        host.register_manifest(good_root_manifest(), "root/ext")
+        host.register_command_handler("good-ext", "good.run", "Good Run", worker_handler)
+        host.set_runtime_policy(extension_runtime_policy_sandboxed(["root"]))
+        host.dispatch_external_command("good.run", "x")
+        expect(host.drain_invocation_queue()).to_equal(1)
+        val record = host.last_runtime_dispatch()
+        expect(record.status).to_equal("ready-sandbox")
+
+describe "extension runtime: runtime-policy helper outputs (regression pin)":
+
+    it "extension_runtime_policy_default/_sandboxed/_external_process keep their current shape":
+        val default_policy = extension_runtime_policy_default()
+        expect(default_policy.enabled).to_equal(false)
+        expect(default_policy.allow_external_process).to_equal(false)
+        expect(default_policy.allowed_roots.len()).to_equal(0)
+
+        val sandboxed = extension_runtime_policy_sandboxed(["root/a", "root/b"])
+        expect(sandboxed.enabled).to_equal(true)
+        expect(sandboxed.allow_external_process).to_equal(false)
+        expect(sandboxed.allowed_roots.len()).to_equal(2)
+        expect(sandboxed.allowed_roots[0]).to_equal("root/a")
+
+        val external = extension_runtime_policy_external_process(["root/c"])
+        expect(external.enabled).to_equal(true)
+        expect(external.allow_external_process).to_equal(true)
+        expect(external.allowed_roots.len()).to_equal(1)
+        expect(external.allowed_roots[0]).to_equal("root/c")
+
+describe "extension runtime: real symlink resolution (lane F3)":
+
+    it "detects a symlink placed inside a sandboxed root that points outside it":
+        val root = "/tmp/l6f3_symlink_root"
+        val outside = "/tmp/l6f3_symlink_outside"
+        rt_dir_remove_all(root)
+        rt_dir_remove_all(outside)
+        val root_ok = rt_dir_create_all(root)
+        val outside_ok = rt_dir_create_all(outside)
+        if not (root_ok and outside_ok):
+            print("SKIP: could not create temp dirs for symlink-escape test")
+            expect(true).to_equal(true)
+        else:
+            val link_path = root + "/escape"
+            val symlink_status = rt_package_create_symlink(outside, link_path)
+            if symlink_status != 0:
+                print("SKIP: symlink creation unavailable on this platform/sandbox (status=" + symlink_status.to_text() + ") -- path_canonicalize's real-resolution branch is untested by this case here")
+                expect(true).to_equal(true)
+            else:
+                # A purely LEXICAL check would see "root/escape" as contained
+                # in "root"; real resolution must see through the symlink to
+                # its true (outside-root) target and reject it.
+                val resolved = path_canonicalize(link_path)
+                expect(resolved).to_equal(path_canonicalize(outside))
+                expect(path_contained_in(link_path, root)).to_equal(false)
+                expect(path_contained_in(resolved, root)).to_equal(false)
+            rt_dir_remove_all(root)
+            rt_dir_remove_all(outside)
+
+    it "still applies pure lexical normalization to a path that does not exist on disk":
+        expect(path_canonicalize("/l6f3-definitely-nonexistent-root/./a/../b")).to_equal("/l6f3-definitely-nonexistent-root/b")
+        expect(path_canonicalize("l6f3-nonexistent-relative/../../etc")).to_equal("../etc")

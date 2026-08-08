@@ -1,0 +1,121 @@
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use nogc_sync_mut.db.dbfs_engine.mvcc.{
+    MvccHeader, MvccTuple, MvccSnapshot, MvccTable,
+    MvccTxnHandle, MvccTxnManager,
+    mvcc_is_visible, mvcc_register_txn, mvcc_commit_txn, mvcc_abort_txn,
+    mvcc_get_txn_status
+}
+
+describe "MvccHeader":
+    it "creates with xmin set":
+        val h = MvccHeader.create(10)
+        expect h.xmin == 10
+        expect h.xmax == 0
+
+    it "marks deleted with xmax":
+        var h = MvccHeader.create(10)
+        h.mark_deleted(20)
+        expect h.xmax == 20
+
+describe "MvccTuple":
+    it "creates tuple with data":
+        val t = MvccTuple.create(5, "hello")
+        expect t.header.xmin == 5
+        expect t.data == "hello"
+
+    it "marks tuple deleted":
+        var t = MvccTuple.create(5, "hello")
+        t.delete(10)
+        expect t.header.xmax == 10
+
+describe "MvccSnapshot":
+    it "detects active transactions":
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [3, 5, 7])
+        expect snap.is_txn_active(3) == true
+        expect snap.is_txn_active(5) == true
+        expect snap.is_txn_active(2) == false
+
+describe "MVCC Visibility":
+    it "committed insert is visible":
+        val tuple = MvccTuple.create(1, "row1")
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [])
+        expect mvcc_is_visible(tuple, snap) == true
+
+    it "active insert is not visible":
+        val tuple = MvccTuple.create(5, "row1")
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [5])
+        expect mvcc_is_visible(tuple, snap) == false
+
+    it "future insert is not visible":
+        val tuple = MvccTuple.create(15, "row1")
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [])
+        expect mvcc_is_visible(tuple, snap) == false
+
+    it "deleted tuple is not visible":
+        var tuple = MvccTuple.create(1, "row1")
+        tuple.delete(5)
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [])
+        expect mvcc_is_visible(tuple, snap) == false
+
+    it "tuple deleted by active txn is still visible":
+        var tuple = MvccTuple.create(1, "row1")
+        tuple.delete(5)
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [5])
+        expect mvcc_is_visible(tuple, snap) == true
+
+describe "MvccTable":
+    it "inserts and scans tuples":
+        var table = MvccTable.new()
+        table.insert(1, "row1")
+        table.insert(1, "row2")
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [])
+        val visible = table.scan(snap)
+        expect visible.len() == 2
+
+    it "counts visible tuples":
+        var table = MvccTable.new()
+        table.insert(1, "a")
+        table.insert(1, "b")
+        table.insert(5, "c")
+        val snap = MvccSnapshot(xmin: 1, xmax: 4, active_txns: [])
+        expect table.count_visible(snap) == 2
+
+    it "delete hides tuple from scan":
+        var table = MvccTable.new()
+        table.insert(1, "row1")
+        table.insert(1, "row2")
+        table.delete_matching(2, "row1")
+        val snap = MvccSnapshot(xmin: 1, xmax: 10, active_txns: [])
+        expect table.count_visible(snap) == 1
+
+describe "MvccTxnManager":
+    it "assigns incrementing txn ids":
+        var mgr = MvccTxnManager.new()
+        val h1 = mgr.begin()
+        val h2 = mgr.begin()
+        expect h2.txn_id > h1.txn_id
+
+    it "tracks active transactions in snapshot":
+        var mgr = MvccTxnManager.new()
+        val h1 = mgr.begin()
+        val h2 = mgr.begin()
+        val snap = mgr.snapshot()
+        expect snap.is_txn_active(h1.txn_id) == true
+        expect snap.is_txn_active(h2.txn_id) == true
+
+    it "commit removes from active":
+        var mgr = MvccTxnManager.new()
+        val h1 = mgr.begin()
+        mgr.commit(h1.txn_id)
+        val snap = mgr.snapshot()
+        expect snap.is_txn_active(h1.txn_id) == false
+        expect mgr.get_status(h1.txn_id) == "committed"
+
+    it "abort removes from active":
+        var mgr = MvccTxnManager.new()
+        val h1 = mgr.begin()
+        mgr.abort(h1.txn_id)
+        val snap = mgr.snapshot()
+        expect snap.is_txn_active(h1.txn_id) == false
+        expect mgr.get_status(h1.txn_id) == "aborted"

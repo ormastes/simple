@@ -1,0 +1,131 @@
+"""
+# oci_import — "OCI at the edge" adapter Specification
+
+**Feature IDs:** #OS-CTR-MDSOC-OCI
+**Category:** Runtime / OS / Container / OCI import
+**Design:** doc/04_architecture/os/container/podman_mdsoc_container_arch.md
+           (§ sys_oci_import) + simpleos_production_host_master_plan §6.3.
+
+Absolute-oracle proof that the edge OCI import adapter is FAIL-CLOSED. A
+parsed/normalized OciConfigInput is converted to the manager's ContainerSpec
+only after the §6.3 safety checks pass; each of the six unsafe inputs is
+rejected with its own distinct error string.
+
+Properties proven:
+  - benign import: produces a ContainerSpec with the expected root + image
+    digest, caps that are a SUBSET of the policy ceiling, and isolated net
+    (no raw host-net cap emitted);
+  - never amplified: config caps outside the ceiling are dropped; a raw
+    host-net cap is stripped even if requested;
+  - six rejects, each with its distinct error: (a) `..` traversal,
+    (b) raw host bind mount, (c) device node, (d) lifecycle hooks,
+    (e) unpack bound exceeded, (f) missing digest;
+  - the traversal check is LOAD-BEARING: with it disabled the same malicious
+    config imports OK (fail-once proof the reject is caused by the check).
+"""
+
+use std.spec.{describe, it, expect}
+use os.services.container.container_manager.{ContainerSpec, caps_is_subset}
+use os.services.container.oci_import.{OciMount, OciConfigInput, OciPolicy, oci_policy_default, oci_import_checked, oci_import_checked_ex, spec_is_isolated_net}
+
+# Shared policy ceiling for these specs.
+fn ceiling() -> [text]:
+    ["cap.fs_read", "cap.fs_write", "cap.net_scoped", "cap.resource_domain"]
+
+# A benign, fully-valid OCI config (no bad mounts, digest present, no hooks).
+fn benign_input() -> OciConfigInput:
+    OciConfigInput(
+        image_ref: "registry.example/app:1.0",
+        root_path: "/c1",
+        entrypoint: "/usr/bin/app",
+        env: ["PATH=/usr/bin"],
+        mounts: [OciMount(src: "tmpfs", dest: "/tmp", mtype: "tmpfs")],
+        caps: ["cap.fs_read", "cap.net_scoped", "cap.host_net"],
+        uid: 1000u64,
+        gid: 1000u64,
+        hooks_present: false,
+        digest: "sha256:deadbeef",
+        unpack_count: 42u64,
+        unpack_size: 4096u64,
+        mem_budget: 8192u64
+    )
+
+describe "oci_import: benign config imports to a safe ContainerSpec":
+    it "produces the expected root, image digest, and isolated net":
+        val r = oci_import_checked(benign_input(), oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(true)
+        expect(r.spec.root).to_equal("/c1")
+        expect(r.spec.image_digest).to_equal("sha256:deadbeef")
+        expect(r.spec.budget).to_equal(8192u64)
+        # isolated net: the requested raw cap.host_net is NOT emitted.
+        expect(spec_is_isolated_net(r.spec)).to_equal(true)
+
+    it "produced caps are a SUBSET of the policy ceiling (never amplified)":
+        val r = oci_import_checked(benign_input(), oci_policy_default(ceiling()))
+        expect(caps_is_subset(r.spec.caps, ceiling())).to_equal(true)
+        # the two ceiling-permitted caps survive; host_net was stripped.
+        expect(r.spec.caps).to_contain("cap.fs_read")
+        expect(r.spec.caps).to_contain("cap.net_scoped")
+        expect(r.spec.caps.len()).to_equal(2)
+
+describe "oci_import: six fail-closed safety checks (§6.3)":
+    it "(a) rejects a mount destination with .. traversal":
+        var inp = benign_input()
+        inp.mounts = [OciMount(src: "tmpfs", dest: "/tmp/../../etc", mtype: "tmpfs")]
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("escapes container root")
+
+    it "(b) rejects a raw host bind mount when allow_host_mounts=false":
+        var inp = benign_input()
+        inp.mounts = [OciMount(src: "/host/etc", dest: "/etc", mtype: "bind")]
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("raw host bind mount")
+
+    it "(c) rejects a device node mount when allow_devices=false":
+        var inp = benign_input()
+        inp.mounts = [OciMount(src: "/dev/sda", dest: "/dev/sda", mtype: "device")]
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("device node mount")
+
+    it "(d) rejects lifecycle hooks when allow_hooks=false":
+        var inp = benign_input()
+        inp.hooks_present = true
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("lifecycle hooks")
+
+    it "(e) rejects an unpack size over the policy bound":
+        var inp = benign_input()
+        inp.unpack_size = 9999999999u64
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("unpack size/count")
+
+    it "(f) rejects a missing digest when require_digest=true":
+        var inp = benign_input()
+        inp.digest = ""
+        val r = oci_import_checked(inp, oci_policy_default(ceiling()))
+        expect(r.ok).to_equal(false)
+        expect(r.error).to_contain("missing or empty content digest")
+
+describe "oci_import: policy ceilings widen deliberately":
+    it "a raw host bind mount is admitted when allow_host_mounts=true":
+        var inp = benign_input()
+        inp.mounts = [OciMount(src: "/host/data", dest: "/data", mtype: "bind")]
+        var pol = oci_policy_default(ceiling())
+        pol.allow_host_mounts = true
+        val r = oci_import_checked(inp, pol)
+        expect(r.ok).to_equal(true)
+        expect(r.spec.root).to_equal("/c1")
+
+describe "oci_import: the traversal check is load-bearing (fail-once proof)":
+    it "the SAME malicious config imports OK once the .. check is disabled":
+        var inp = benign_input()
+        inp.mounts = [OciMount(src: "tmpfs", dest: "/tmp/../../etc", mtype: "tmpfs")]
+        # With check_traversal=false the reject disappears — proving the (a)
+        # test above fails when the check is removed, then is restored.
+        val r = oci_import_checked_ex(inp, oci_policy_default(ceiling()), false)
+        expect(r.ok).to_equal(true)

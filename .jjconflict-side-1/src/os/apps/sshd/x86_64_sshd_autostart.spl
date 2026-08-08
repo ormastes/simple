@@ -1,0 +1,36 @@
+# Reusable x86_64 sshd autostart for the boot/init path.
+#
+# Factors the "bring up virtio-net, then run the production SSH daemon on
+# port 22" sequence out of the gated `ssh_live_entry.spl` so any x86_64
+# boot/init path can start sshd, not only the dedicated live-lane entry.
+#
+# `x86_64_sshd_autostart_on_boot()` is BLOCKING: `SshDaemon.start()` runs the
+# accept loop until the daemon stops. Boot callers must invoke it as the
+# terminal service (after non-blocking init such as memory/POSIX/VFS/shell
+# setup), never before an interactive shell, and never in the q35 smoke boot
+# where it would hang the bounded lane.
+
+use os.kernel.boot.x86_64_services.{init_x86_64_network_service}
+use os.apps.sshd.sshd.{SshDaemon}
+
+extern fn serial_println(msg: text)
+
+pub fn x86_64_sshd_autostart_on_boot():
+    """Bring up virtio-net then run the production SSH daemon on port 22.
+
+    Returns early (non-fatal) when the network service is unavailable so a
+    boot path that opts into autostart does not wedge on a missing NIC.
+    """
+    val net_ok = init_x86_64_network_service()
+    if net_ok <= 0:
+        serial_println("[ssh-autostart] network unavailable; sshd not started")
+        return
+
+    serial_println("[ssh-autostart] Starting production SSH daemon on port 22")
+    serial_println("[ssh-live] production-daemon-starting port=22 hostfwd=2222")
+    var daemon = SshDaemon.new(22)
+    match daemon.start():
+        Ok(_):
+            serial_println("[ssh-autostart] production-daemon-stopped")
+        Err(err):
+            serial_println("[ssh-autostart] SSH daemon failed: {err}")

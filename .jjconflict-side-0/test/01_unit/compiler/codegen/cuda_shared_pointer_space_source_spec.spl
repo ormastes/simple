@@ -1,0 +1,72 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn cuda_backend_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/cuda_backend.spl") ?? ""
+
+fn ptx_builder_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/cuda/ptx_builder.spl") ?? ""
+
+describe "CUDA shared pointer space source contract":
+    it "tracks pointer spaces per function and propagates them through pointer values":
+        val source = cuda_backend_source()
+        expect(source).to_contain("pointer_spaces: Dict<i64, MemorySpace>")
+        expect(source).to_contain("self.pointer_spaces = {}")
+        expect(source).to_contain("self.pointer_spaces[local.id.id] = MemorySpace.Global")
+        expect(source).to_contain("self.compile_instruction(builder, inst, func)")
+        expect(source).to_contain("self.pointer_spaces[dest.id] = MemorySpace.Shared")
+        expect(source).to_contain("self.pointer_spaces[dest.id] = MemorySpace.Local")
+        expect(source).to_contain("self.propagate_pointer_space(dest, MirOperand.copy(src))")
+        expect(source).to_contain("self.propagate_pointer_space(dest, MirOperand.move(src))")
+        expect(source).to_contain("self.propagate_pointer_space(dest, operand)")
+        expect(source).to_contain("self.pointer_spaces[dest.id] = base_space")
+
+    it "selects pointer space for loads stores MIR atomics and atomic intrinsics":
+        val source = cuda_backend_source()
+        expect(source).to_contain("self.pointer_memory_space(ptr, self.pointer_spaces)?")
+        expect(source).to_contain("self.atomic_memory_space(ptr, self.pointer_spaces)?")
+        expect(source).to_contain("self.compile_intrinsic(builder, dest, name, args, func, self.pointer_spaces)")
+        expect(source).to_contain("self.atomic_memory_space(args[0], pointer_spaces)?")
+        expect(source).to_contain("self.validate_typed_atomic_intrinsic(func, dest, args")
+        expect(source).to_contain("CUDA typed atomic destination type does not match intrinsic")
+        expect(source).to_contain("CUDA F32 vector memory intrinsic requires an F32 pointer")
+        expect(source).to_contain("CUDA F32 vector memory intrinsic index must be U64")
+        expect(source).to_contain("CUDA vector loads require MIR vector result lowering")
+        expect(source).to_contain("if arg_count != required_args:")
+        expect(source).to_contain("if not requires_dest and dest.?:")
+        expect(source).to_contain("val space_vs4 = self.type_mapper.ptx_state_space")
+        expect(source).to_contain("val space_vs2 = self.type_mapper.ptx_state_space")
+        expect(source).to_contain("self.memory_address_reg(builder")
+
+    it "rejects untracked pointers and local-memory atomics":
+        val source = cuda_backend_source()
+        val start = source.find("fn pointer_memory_space(")
+        val finish = source.find("me propagate_pointer_space(")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val helper = source.substring(start, finish)
+        expect(helper).to_contain("pointer has no memory-space provenance")
+        expect(helper).to_contain("atomics require global or shared memory")
+        expect(source).to_contain("cvta.to.shared.u64")
+        expect(source).to_contain("CUDA multi-block shared/local pointer provenance requires CFG dataflow lowering")
+        expect(source).to_contain("CUDA atomic CAS operands and result must match pointer element type")
+        expect(source).to_contain("CUDA shared allocation type must match destination pointer element type")
+        expect(source).to_contain("CUDA local allocation type must match destination pointer element type")
+        expect(source).to_contain("type_bindings: {}, layout_phase: nil, is_kernel: true")
+        expect(source).to_contain("gpu_target: \"cuda\", gpu_backend_order: \"cuda\"")
+        expect(source).to_contain("self.compile_function_with_kind(builder, func, true)")
+        expect(source).to_contain("self.compile_function_with_kind(builder, func, false)")
+        expect(source).to_contain("func.is_kernel")
+
+    it "uses PTX bit-width suffixes for CAS exchange and bitwise atomics":
+        val source = ptx_builder_source()
+        expect(source).to_contain("me emit_atomic_cas")
+        expect(source).to_contain("me emit_atomic_exch")
+        expect(source).to_contain("me emit_atomic_and")
+        expect(source).to_contain("me emit_atomic_or")
+        expect(source).to_contain("me emit_atomic_xor")
+        expect(source).to_contain("self.atomic_bit_type(ty)")
+        expect(source).to_contain("case I64 | U64 | F64:")
+        expect(source).to_contain("val atomic_ty = if ty == PrimitiveType.I64: \".u64\"")
+        expect(source).to_not_contain(".and.b64")

@@ -1,0 +1,163 @@
+# @cover src/lib/nogc_async_mut/wm/host.spl 0%
+# @req REQ-WM-HOST-PLATFORM-005
+"""
+# WM/GUI Host Seam — FreeBSD Honest-Refusal Verification (Task #60, Lane B)
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+Task #60 was filed as "FreeBSD WM seam missing entirely." The real state,
+confirmed by reading `src/lib/nogc_async_mut/wm/host.spl`, is smaller: the
+honest-refusal vocabulary for FreeBSD was ALREADY implemented —
+`wm_host_2d_for("freebsd")` already returns `WmHost2dUnavailable` with an
+accurate reason. The only genuine defects were two docstring lies in
+`src/os/compositor/hosted_input_backend.spl` (lines 4 and 152) that listed
+FreeBSD alongside macOS/Linux/Windows as a supported winit host desktop, when
+no 2D backend exists for it. This lane fixed those two lines and this file
+verifies the fix, plus the seam's pre-existing refusal behaviour.
+
+Implementing a real FreeBSD 2D backend is an explicit non-goal of this lane
+(see `doc/03_plan/ui/wm_platform_honesty_agent_lanes.md`, Lane B) — a real
+backend would build on Linux SDL2/X11 arms that do not exist yet, so building
+FreeBSD's first would invert priority.
+
+## Scope and Preconditions
+
+This file's `describe` blocks run unconditionally on any host — they exercise
+the seam's IN-MEMORY refusal object, which makes no OS calls and needs no
+FreeBSD hardware. The in-VM runtime receipt (the seam's ACTUAL behaviour under
+a real FreeBSD kernel) is a separate artifact:
+`scripts/check/check-freebsd-wm-seam-refusal.shs`, which drives
+`scripts/check/check-freebsd-bootstrap-qemu.shs`'s QEMU/OVMF harness and
+prints `FREEBSD WM SEAM VERDICT: platform=... refusal=... reason=...` to its
+own transcript. This spec file only proves the Linux-observable half:
+the refusal object's shape and the absence of contradicting prose.
+
+## Compatibility and Limitations
+
+The anchored-grep sweep below is scoped to the WM/compositor source tree
+(`src/os/compositor`, `src/lib/nogc_async_mut/wm`, `src/os/services/wm`,
+`src/lib/common/window_protocol`, `src/os/desktop`) rather than the whole
+repo: FreeBSD is a legitimate build/package/linker target elsewhere (see
+`src/lib/nogc_sync_mut/platform.spl`, `src/app/setup/freebsd_ssh.spl`, the
+linker backend, etc.) and asserting "outside the refusal vocabulary" against
+that broader set would flag unrelated, honest platform-support code.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, shell_output}
+use nogc_async_mut.wm.host.{wm_host_2d_for, wm_host_2d_unavailable}
+
+
+# ============================================================================
+# Source-shape helper (same pattern as wm_host_false_success_guard_spec.spl)
+# ============================================================================
+
+fn source_contains(path: text, needle: text) -> bool:
+    val cmd = "/usr/bin/grep -qF -- '" + needle + "' " + path + " 2>/dev/null && echo YES || echo NO"
+    shell_output(cmd).contains("YES")
+
+# Files mentioning "freebsd" (case-insensitive) anywhere in the WM/compositor
+# source tree, ONE per line, empty string if none.
+fn wm_tree_freebsd_mentions() -> text:
+    val dirs = "src/os/compositor src/lib/nogc_async_mut/wm src/os/services/wm src/lib/common/window_protocol src/os/desktop"
+    val cmd = "/usr/bin/grep -rliI --include=*.spl -e freebsd " + dirs + " 2>/dev/null"
+    shell_output(cmd).trim()
+
+# Of those files, any that do NOT ALSO carry the refusal vocabulary anywhere
+# in the file (file-level, not line-level, since docstrings wrap across
+# lines). Empty output = every FreeBSD mention is paired with a refusal.
+fn wm_tree_unguarded_freebsd_claims() -> text:
+    val dirs = "src/os/compositor src/lib/nogc_async_mut/wm src/os/services/wm src/lib/common/window_protocol src/os/desktop"
+    val list_cmd = "/usr/bin/grep -rliI --include=*.spl -e freebsd " + dirs + " 2>/dev/null"
+    val guard = "WmHost2dUnavailable|no 2D backend|wm_host_2d_for\\(.freebsd.\\)|refus|not a .*backend"
+    val cmd = list_cmd + " | xargs -I{} sh -c 'grep -qiE \"" + guard + "\" {} || echo VIOLATION:{}'"
+    shell_output(cmd).trim()
+
+
+# ============================================================================
+# The refusal object's declared shape
+# ============================================================================
+
+describe "WM host seam — FreeBSD routes to the honest refusal":
+
+    it "wm_host_2d_for(\"freebsd\") identifies the platform truthfully":
+        val host = wm_host_2d_for("freebsd")
+        expect(host.platform).to_equal("freebsd")
+
+    it "the refusal reason names the missing backend, not a vague error":
+        val host = wm_host_2d_for("freebsd")
+        expect(host.reason.contains("backend")).to_equal(true)
+        # Non-vacuity: the reason must be platform-specific text, not empty.
+        expect(host.reason.len() > 10).to_equal(true)
+
+    it "wm_host_2d_unavailable constructs the same refusal shape directly":
+        val host = wm_host_2d_unavailable("freebsd", "no 2D backend exists for this platform")
+        expect(host.platform).to_equal("freebsd")
+        expect(host.reason.contains("backend")).to_equal(true)
+
+
+describe "WM host seam — all four seam methods refuse on FreeBSD, none report green":
+
+    it "surface_acquire refuses rather than returning a usable handle":
+        val host = wm_host_2d_for("freebsd")
+        val surface = host.surface_acquire(800u32, 600u32)
+        expect(surface.ok).to_equal(false)
+        expect(surface.state.contains("unavailable")).to_equal(true)
+
+    it "surface_present refuses rather than reporting a fake presentation":
+        val host = wm_host_2d_for("freebsd")
+        val status = host.surface_present(1u64, 100)
+        expect(status.ok).to_equal(false)
+        expect(status.state.contains("unavailable")).to_equal(true)
+
+    it "surface_release refuses rather than reporting a fake teardown":
+        val host = wm_host_2d_for("freebsd")
+        val status = host.surface_release(1u64)
+        expect(status.ok).to_equal(false)
+        expect(status.state.contains("unavailable")).to_equal(true)
+
+    it "event_poll refuses rather than reporting a fake empty-but-healthy queue":
+        val host = wm_host_2d_for("freebsd")
+        val poll = host.event_poll()
+        expect(poll.ok).to_equal(false)
+        expect(poll.state.contains("unavailable")).to_equal(true)
+
+
+# ============================================================================
+# No contradicting prose left in the WM/compositor tree
+# ============================================================================
+
+describe "WM host seam — no source in the WM tree claims FreeBSD support outside refusal vocabulary":
+
+    it "the seam file itself exists and mentions freebsd honestly":
+        expect(file_exists("src/lib/nogc_async_mut/wm/host.spl")).to_equal(true)
+        expect(source_contains("src/lib/nogc_async_mut/wm/host.spl", "WmHost2dUnavailable")).to_equal(true)
+
+    it "hosted_input_backend.spl no longer lists FreeBSD as a supported winit host desktop":
+        # EXPECTED GREEN after the Lane B fix: the two docstring lines (4, 152)
+        # used to read "(used on macOS, Linux, Windows, FreeBSD host
+        # desktops)" and "Used on host desktops (macOS, Linux, Windows,
+        # FreeBSD)" with no refusal qualifier anywhere near them. The fix
+        # keeps FreeBSD mentioned (it is still relevant context) but pairs it
+        # with the refusal fact instead of listing it as a working target.
+        val path = "src/os/compositor/hosted_input_backend.spl"
+        expect(source_contains(path, "no 2D backend")).to_equal(true)
+
+    it "every FreeBSD mention in the WM/compositor tree carries the refusal vocabulary":
+        # The general sweep: any file in the WM tree that says "freebsd" at
+        # all must ALSO say so somewhere in the same file. A file that merely
+        # lists FreeBSD alongside working platforms, with no refusal marker
+        # anywhere, is exactly the lie this lane fixes.
+        expect(wm_tree_unguarded_freebsd_claims()).to_equal("")
+
+    it "the sweep actually found files to check (non-vacuity)":
+        # Without this, a RED in the sweep above whose file list is empty
+        # (e.g. from a typo'd directory) would silently look identical to a
+        # real pass. At least host.spl and hosted_input_backend.spl must
+        # appear.
+        val mentions = wm_tree_freebsd_mentions()
+        expect(mentions.contains("host.spl")).to_equal(true)
+        expect(mentions.contains("hosted_input_backend.spl")).to_equal(true)

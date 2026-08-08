@@ -1,0 +1,52 @@
+"""
+Resource wrapper for TcpSocket — WP-J pilot migration
+
+Tests the TcpSocket wrapper class with resource ownership pattern:
+- Sentinel-based validity checks (-1 = invalid/closed fd)
+- Consuming close() method
+- Double-close guard (one-shot safety)
+- Borrow methods refuse to touch an invalid handle
+
+NOTE: close()/borrow paths on a VALID-looking fabricated fd are deliberately
+NOT tested — they call real C externs (rt_io_tcp_close etc.) on a bogus fd,
+which can close/corrupt the test runner's own descriptors. All guard proofs
+below use only the invalid sentinel (-1), which short-circuits before any
+extern call.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpSocket, tcp_socket_create_resource}
+
+describe "TcpSocket resource wrapper":
+    it "is_valid accepts a non-negative fd":
+        val sock = TcpSocket(fd: 7)
+        assert_true(sock.is_valid())
+
+    it "is_valid detects the invalid sentinel (-1)":
+        val sock = TcpSocket(fd: -1)
+        assert_false(sock.is_valid())
+
+    it "sentinel is -1 not 0 (fd 0 is a legal descriptor)":
+        val sock_zero = TcpSocket(fd: 0)
+        assert_true(sock_zero.is_valid())
+        val sock_neg = TcpSocket(fd: -1)
+        assert_false(sock_neg.is_valid())
+
+    it "close on invalid handle is safe and idempotent":
+        val sock = TcpSocket(fd: -1)
+        sock.close()
+        assert_equal(sock.fd, -1)
+        sock.close()
+        assert_equal(sock.fd, -1)
+
+    it "bind refuses an invalid handle":
+        val sock = TcpSocket(fd: -1)
+        assert_false(sock.bind("127.0.0.1:0"))
+
+    it "listen refuses an invalid handle":
+        val sock = TcpSocket(fd: -1)
+        assert_false(sock.listen(1))
+
+    it "local_addr returns nil on invalid handle":
+        val sock = TcpSocket(fd: -1)
+        assert_nil(sock.local_addr())

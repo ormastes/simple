@@ -1,0 +1,249 @@
+# CompileOptionsHash — Backend + compile options hash for SMF validation
+#
+# Stored in SMF header reserved[0..16] bytes (backward-compatible).
+# Old readers ignore reserved bytes; new readers validate backend match.
+#
+# Hash includes: backend, opt_level, target_arch, debug_info, gc_off, release, profile, allowed_families
+# Combined hash = first 8 bytes of sha256 over a canonical, sorted,
+# length-prefixed encoding (see _coh_component). Old-format hashes
+# (rt_hash_text era) and the legacy all-zero hash simply mismatch and
+# validate as a plain cache miss → rebuild, never an error.
+# Quick hash compare (O(1)) → if match, cross-check fields for collision detection.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{text_to_bytes}
+
+# ============================================================================
+# Backend Kind Constants
+# ============================================================================
+
+val BACKEND_AUTO: u8 = 0
+val BACKEND_LLVM: u8 = 1
+val BACKEND_CRANELIFT: u8 = 2
+val BACKEND_C: u8 = 3
+val BACKEND_WASM: u8 = 4
+val BACKEND_VHDL: u8 = 5
+val BACKEND_NATIVE: u8 = 6
+val BACKEND_BYL: u8 = 7
+
+# ============================================================================
+# CompileOptionsHash
+# ============================================================================
+
+struct CompileOptionsHash:
+    hash: i64
+    backend_kind: u8
+    opt_level: u8
+    target_arch: u8
+    flags: u8
+
+impl CompileOptionsHash:
+    fn to_text() -> text:
+        "CompileOptionsHash(hash: {self.hash}, backend: {self.backend_kind}, opt: {self.opt_level}, flags: {self.flags})"
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn compile_options_hash_zero() -> CompileOptionsHash:
+    CompileOptionsHash(hash: 0, backend_kind: 0, opt_level: 0, target_arch: 0, flags: 0)
+
+fn compile_options_hash_is_zero(h: CompileOptionsHash) -> bool:
+    h.hash == 0 and h.backend_kind == 0 and h.opt_level == 0 and h.target_arch == 0 and h.flags == 0
+
+# ============================================================================
+# Compute from CompileOptions fields
+# ============================================================================
+
+fn _coh_component(name: text, value: text) -> text:
+    # Length-prefixed name/value pair — delimiter content in a value cannot
+    # alias an adjacent component boundary.
+    "{name.len()}:{name}{value.len()}:{value}"
+
+fn _coh_text_lt(a: text, b: text) -> bool:
+    # Byte-lexicographic compare. Deliberately avoids text `<` (native backend
+    # historically lowered it as raw pointer compare — non-canonical order).
+    val ab = text_to_bytes(a)
+    val bb = text_to_bytes(b)
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        if ab[i] != bb[i]:
+            return ab[i] < bb[i]
+        i = i + 1
+    ab.len() < bb.len()
+
+fn _coh_sorted_text(values: [text]) -> [text]:
+    # Explicit selection sort — [text].sort() is a no-op under the seed interpreter
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if _coh_text_lt(result[j], result[i]):
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn _coh_sha256_prefix_i64(canonical: text) -> i64:
+    # First 8 digest bytes as little-endian i64 (matches to_bytes/from_bytes layout)
+    val digest = sha256_bytes(text_to_bytes(canonical))
+    var hash: i64 = 0
+    var i = 0
+    while i < 8:
+        hash = hash | (digest[i] << (8 * i))
+        i = i + 1
+    # Never collide with the legacy "missing options" all-zero hash
+    if hash == 0:
+        hash = 1
+    hash
+
+fn compile_options_hash_compute(backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> CompileOptionsHash:
+    # Build canonical string for hashing: fixed component order, each component
+    # length-prefixed, set-valued inputs sorted lexicographically first.
+    val bk = backend_text_to_kind(backend)
+    val opt = if opt_level < 0: 0 else: if opt_level > 3: 3 else: opt_level
+    val rel_str = if release: "1" else: "0"
+    val dbg_str = if debug_info: "1" else: "0"
+    val gc_str = if gc_off: "1" else: "0"
+    val sorted_families = _coh_sorted_text(allowed_families)
+    var families_str = ""
+    for family in sorted_families:
+        families_str = families_str + "{family.len()}:{family}"
+
+    var canonical = _coh_component("backend", backend)
+    canonical = canonical + _coh_component("opt", "{opt}")
+    canonical = canonical + _coh_component("release", rel_str)
+    canonical = canonical + _coh_component("debug", dbg_str)
+    canonical = canonical + _coh_component("gc", gc_str)
+    canonical = canonical + _coh_component("profile", profile)
+    canonical = canonical + _coh_component("families", families_str)
+    val hash = _coh_sha256_prefix_i64(canonical)
+
+    # Build flags bitfield
+    var flags: u8 = 0
+    if debug_info:
+        flags = flags | 0x01
+    if gc_off:
+        flags = flags | 0x02
+    if release:
+        flags = flags | 0x04
+
+    CompileOptionsHash(
+        hash: hash,
+        backend_kind: bk,
+        opt_level: opt as u8,
+        target_arch: 0,
+        flags: flags
+    )
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+fn compile_options_hash_validate(stored: CompileOptionsHash, current: CompileOptionsHash) -> CacheCheckResult:
+    use compiler.driver.cache.cache_types.{CacheCheckResult, cache_check_result_fresh, cache_check_result_stale, CACHE_FRESH}
+
+    # Zero hash means old SMF without options — always stale
+    if compile_options_hash_is_zero(stored):
+        return cache_check_result_stale(current.hash, 0, "SMF missing compile options hash (pre-validation era)")
+
+    # Quick hash compare
+    if stored.hash == current.hash:
+        # Cross-check individual fields for collision detection
+        if stored.backend_kind != current.backend_kind:
+            return cache_check_result_stale(current.hash, stored.hash, "hash collision: backend mismatch ({stored.backend_kind} vs {current.backend_kind})")
+        if stored.opt_level != current.opt_level:
+            return cache_check_result_stale(current.hash, stored.hash, "hash collision: opt_level mismatch ({stored.opt_level} vs {current.opt_level})")
+        if stored.flags != current.flags:
+            return cache_check_result_stale(current.hash, stored.hash, "hash collision: flags mismatch ({stored.flags} vs {current.flags})")
+        return cache_check_result_fresh(current.hash)
+
+    # Hash mismatch — determine specific reason
+    if stored.backend_kind != current.backend_kind:
+        return cache_check_result_stale(current.hash, stored.hash, "backend changed ({backend_kind_to_text(stored.backend_kind)} -> {backend_kind_to_text(current.backend_kind)})")
+    if stored.opt_level != current.opt_level:
+        return cache_check_result_stale(current.hash, stored.hash, "opt_level changed ({stored.opt_level} -> {current.opt_level})")
+    if stored.flags != current.flags:
+        return cache_check_result_stale(current.hash, stored.hash, "compile flags changed ({stored.flags} -> {current.flags})")
+    cache_check_result_stale(current.hash, stored.hash, "compile options changed")
+
+# ============================================================================
+# Serialization (16 bytes: 8 hash + 1 backend + 1 opt + 1 arch + 1 flags + 4 reserved)
+# ============================================================================
+
+fn compile_options_hash_to_bytes(h: CompileOptionsHash) -> [u8]:
+    var bytes: [u8] = []
+    # hash as 8 bytes (little-endian)
+    bytes.push((h.hash & 0xFF) as u8)
+    bytes.push(((h.hash >> 8) & 0xFF) as u8)
+    bytes.push(((h.hash >> 16) & 0xFF) as u8)
+    bytes.push(((h.hash >> 24) & 0xFF) as u8)
+    bytes.push(((h.hash >> 32) & 0xFF) as u8)
+    bytes.push(((h.hash >> 40) & 0xFF) as u8)
+    bytes.push(((h.hash >> 48) & 0xFF) as u8)
+    bytes.push(((h.hash >> 56) & 0xFF) as u8)
+    # fields
+    bytes.push(h.backend_kind)
+    bytes.push(h.opt_level)
+    bytes.push(h.target_arch)
+    bytes.push(h.flags)
+    # 4 bytes reserved padding
+    bytes.push(0)
+    bytes.push(0)
+    bytes.push(0)
+    bytes.push(0)
+    bytes
+
+fn compile_options_hash_from_bytes(bytes: [u8]) -> CompileOptionsHash:
+    if bytes.len() < 16:
+        return compile_options_hash_zero()
+
+    val b0 = bytes[0] as i64
+    val b1 = bytes[1] as i64
+    val b2 = bytes[2] as i64
+    val b3 = bytes[3] as i64
+    val b4 = bytes[4] as i64
+    val b5 = bytes[5] as i64
+    val b6 = bytes[6] as i64
+    val b7 = bytes[7] as i64
+    val hash = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+    CompileOptionsHash(
+        hash: hash,
+        backend_kind: bytes[8],
+        opt_level: bytes[9],
+        target_arch: bytes[10],
+        flags: bytes[11]
+    )
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn backend_text_to_kind(backend: text) -> u8:
+    match backend:
+        case "auto": BACKEND_AUTO
+        case "llvm": BACKEND_LLVM
+        case "llvm-lib" | "llvmlib": BACKEND_LLVM
+        case "cranelift": BACKEND_CRANELIFT
+        case "c" | "cpp": BACKEND_C
+        case "wasm": BACKEND_WASM
+        case "vhdl": BACKEND_VHDL
+        case "native": BACKEND_NATIVE
+        case "byl": BACKEND_BYL
+        case _: BACKEND_AUTO
+
+fn backend_kind_to_text(kind: u8) -> text:
+    match kind:
+        case 0: "auto"
+        case 1: "llvm"
+        case 2: "cranelift"
+        case 3: "c"
+        case 4: "wasm"
+        case 5: "vhdl"
+        case 6: "native"
+        case 7: "byl"
+        case _: "unknown"

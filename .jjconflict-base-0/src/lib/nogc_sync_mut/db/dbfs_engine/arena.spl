@@ -1,0 +1,167 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# DBFS in-memory arena store.
+#
+# This is the minimal byte-arena API needed by DbfsFsDriver. The fuller NVFS
+# arena remains example-owned because it includes compression, dedup, and NVMe
+# policy hooks outside DBFS' local filesystem contract.
+
+struct DbfsArenaMeta:
+    arena_id: i64
+    class_tag: i32
+    hint_bytes: i64
+    sealed: bool
+    discarded: bool
+    total_bytes: i64
+
+var _dbfs_arena_ids: [i64] = []
+var _dbfs_arena_metas: [DbfsArenaMeta] = []
+var _dbfs_arena_bufs: [[u8]] = []
+var _dbfs_next_arena_id: i64 = 1
+
+fn _dbfs_find_arena_idx(arena_id: i64) -> i64:
+    var i = 0
+    while i < _dbfs_arena_ids.len():
+        if _dbfs_arena_ids[i] == arena_id:
+            return i
+        i = i + 1
+    -1
+
+fn arena_create_impl(class_tag: i32, hint_bytes: i64) -> i64:
+    val arena_id = _dbfs_next_arena_id
+    _dbfs_next_arena_id = _dbfs_next_arena_id + 1
+
+    _dbfs_arena_ids.push(arena_id)
+    _dbfs_arena_metas.push(DbfsArenaMeta(
+        arena_id: arena_id,
+        class_tag: class_tag,
+        hint_bytes: hint_bytes,
+        sealed: false,
+        discarded: false,
+        total_bytes: 0
+    ))
+    _dbfs_arena_bufs.push([])
+    arena_id
+
+fn arena_append_impl(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    val _durability_tag = durability_tag
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _dbfs_arena_metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    var buf = _dbfs_arena_bufs[idx]
+    for byte in data:
+        buf.push(byte)
+    _dbfs_arena_bufs[idx] = buf
+
+    _dbfs_arena_metas[idx] = DbfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: meta.sealed,
+        discarded: meta.discarded,
+        total_bytes: meta.total_bytes + data.len() as i64
+    )
+    data.len() as i64
+
+fn arena_readv_impl(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return []
+    val meta = _dbfs_arena_metas[idx]
+    if meta.discarded:
+        return []
+    val src = _dbfs_arena_bufs[idx]
+    val src_len = src.len() as i64
+    if off < 0 or off >= src_len:
+        return []
+    var end = off + buf_len
+    if end > src_len:
+        end = src_len
+
+    var result: [u8] = []
+    var i = off
+    while i < end:
+        result.push(src[i])
+        i = i + 1
+    result
+
+fn arena_discard_impl(arena_id: i64) -> bool:
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _dbfs_arena_metas[idx]
+    _dbfs_arena_metas[idx] = DbfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: meta.sealed,
+        discarded: true,
+        total_bytes: meta.total_bytes
+    )
+    _dbfs_arena_bufs[idx] = []
+    true
+
+fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
+    val _generation = generation
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _dbfs_arena_metas[idx]
+    if meta.discarded:
+        return false
+    _dbfs_arena_metas[idx] = DbfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: true,
+        discarded: meta.discarded,
+        total_bytes: meta.total_bytes
+    )
+    true
+
+fn arena_is_sealed_impl(arena_id: i64) -> bool:
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return false
+    _dbfs_arena_metas[idx].sealed
+
+fn arena_clone_range_impl(src: i64, src_off: i64, dst: i64, dst_off: i64, len: i64) -> i64:
+    val _dst_off = dst_off
+    val src_idx = _dbfs_find_arena_idx(src)
+    val dst_idx = _dbfs_find_arena_idx(dst)
+    if src_idx < 0 or dst_idx < 0:
+        return -1
+    val src_meta = _dbfs_arena_metas[src_idx]
+    val dst_meta = _dbfs_arena_metas[dst_idx]
+    if src_meta.discarded or dst_meta.discarded:
+        return -3
+    if dst_meta.sealed:
+        return -2
+    if src_off < 0 or src_off + len > src_meta.total_bytes:
+        return -4
+    val data = arena_readv_impl(src, src_off, len)
+    if data.len() as i64 != len:
+        return -4
+    arena_append_impl(dst, data, 0)
+
+fn arena_preferred_granule_impl(arena_id: i64) -> i64:
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return -1
+    4096
+
+fn arena_total_bytes_impl(arena_id: i64) -> i64:
+    val idx = _dbfs_find_arena_idx(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _dbfs_arena_metas[idx]
+    if meta.discarded:
+        return -1
+    meta.total_bytes

@@ -1,0 +1,77 @@
+"""Slide master + placeholder-inheritance spec.
+
+Verifies the slide master model in `app.office.slides.master`: placeholders
+defined on a master carry position/size/font that every slide inherits; a
+slide supplies only content (title/body/page number); when content is
+missing the master's default_text is used; and the master renders to a
+compact PowerPoint-like `<p:sldMaster>` XML fragment.
+"""
+
+use std.spec
+use app.office.slides.master.{placeholder_new, master_new, master_add_placeholder, apply_master, master_placeholder_count, master_to_xml}
+
+describe "slide master: placeholder inheritance":
+    """A slide inherits position/size/font from the master's placeholders
+    and only supplies content; missing content falls back to the master's
+    default_text."""
+
+    it "inherits position and font from the master while using the slide's title/body/page":
+        var master = master_new("Default")
+        master = master_add_placeholder(master, placeholder_new("title", 0, 0, 720, 80, 44, "Title"))
+        master = master_add_placeholder(master, placeholder_new("body", 0, 100, 720, 400, 24, "Body"))
+        master = master_add_placeholder(master, placeholder_new("pageno", 680, 520, 40, 20, 12, "#"))
+        val lines = apply_master(master, "My Talk", "Point one", 3)
+
+        val title_line = lines[0]
+        expect(title_line).to_contain("My Talk")
+        expect(title_line).to_contain("44pt")
+        expect(title_line).to_contain("@0,0")
+
+        val body_line = lines[1]
+        expect(body_line).to_contain("Point one")
+        expect(body_line).to_contain("24pt")
+
+        val pageno_line = lines[2]
+        expect(pageno_line).to_contain("3")
+
+    it "falls back to the master's default_text when the slide's body is empty":
+        var master = master_new("Default")
+        master = master_add_placeholder(master, placeholder_new("title", 0, 0, 720, 80, 44, "Title"))
+        master = master_add_placeholder(master, placeholder_new("body", 0, 100, 720, 400, 24, "Body"))
+        master = master_add_placeholder(master, placeholder_new("pageno", 680, 520, 40, 20, 12, "#"))
+        val lines = apply_master(master, "My Talk", "", 3)
+        val body_line = lines[1]
+        expect(body_line).to_contain("Body")
+
+    it "counts the placeholders defined on the master":
+        var master = master_new("Default")
+        master = master_add_placeholder(master, placeholder_new("title", 0, 0, 720, 80, 44, "Title"))
+        master = master_add_placeholder(master, placeholder_new("body", 0, 100, 720, 400, 24, "Body"))
+        master = master_add_placeholder(master, placeholder_new("pageno", 680, 520, 40, 20, 12, "#"))
+        expect(master_placeholder_count(master)).to_equal(3)
+
+describe "slide master: XML rendering":
+    """The master renders to a compact `<p:sldMaster>` fragment carrying
+    every placeholder's kind."""
+
+    it "renders a <p:sldMaster> fragment containing all three placeholder kinds":
+        var master = master_new("Default")
+        master = master_add_placeholder(master, placeholder_new("title", 0, 0, 720, 80, 44, "Title"))
+        master = master_add_placeholder(master, placeholder_new("body", 0, 100, 720, 400, 24, "Body"))
+        master = master_add_placeholder(master, placeholder_new("pageno", 680, 520, 40, 20, 12, "#"))
+        val xml = master_to_xml(master)
+        expect(xml).to_contain("<p:sldMaster")
+        expect(xml).to_contain("type=\"title\"")
+        expect(xml).to_contain("type=\"body\"")
+        expect(xml).to_contain("type=\"pageno\"")
+
+    describe "deliberate-fail probe (fixed to green)":
+        """A probe that intentionally asserted the wrong count first, to
+        confirm the example is actually exercised, then corrected."""
+
+        it "has exactly three placeholders":
+            var master = master_new("Default")
+            master = master_add_placeholder(master, placeholder_new("title", 0, 0, 720, 80, 44, "Title"))
+            master = master_add_placeholder(master, placeholder_new("body", 0, 100, 720, 400, 24, "Body"))
+            master = master_add_placeholder(master, placeholder_new("pageno", 680, 520, 40, 20, 12, "#"))
+            expect(master_placeholder_count(master)).to_equal(3)

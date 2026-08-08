@@ -1,0 +1,46 @@
+# Regression test: module-level typed var declarations resolve correctly
+#
+# Phase 0A fix: HIR module_pass.rs extract_pattern_type()
+# Before fix: `var x: u64 = 42` at module level resolved as TypeId::ANY
+# causing Cranelift to emit rt_string_concat instead of iadd.
+# After fix: resolves as u64 → native integer arithmetic.
+#
+# CRITICAL: The variables below MUST be at module level (not inside it blocks)
+# to exercise the register_declarations_from_node path in module_pass.rs.
+#
+# @tag: compiler,regression,global
+
+# Module-level typed var — this is the exact pattern that was broken
+var g_addr: u64 = 0xFD000000
+var g_count: u64 = 100
+val g_offset: u64 = 0x1000
+var g_signed: i64 = -10
+
+# Module-level computation using globals — before fix, this generated
+# rt_string_concat instead of iadd because g_addr was TypeId::ANY
+fn compute_address() -> u64:
+    g_addr + g_offset
+
+fn increment_count() -> u64:
+    g_count + 1
+
+fn signed_add() -> i64:
+    g_signed + 20
+
+describe "Module-level typed variable declarations":
+    it "var g_addr: u64 preserves integer addition":
+        expect(compute_address()).to_equal(0xFD001000)
+
+    it "var g_count: u64 preserves integer arithmetic":
+        expect(increment_count()).to_equal(101)
+
+    it "val g_offset: u64 preserves value":
+        expect(g_offset).to_equal(0x1000)
+
+    it "var g_signed: i64 supports negative values":
+        expect(signed_add()).to_equal(10)
+
+    it "module-level var can be mutated":
+        g_count = 200
+        expect(g_count).to_equal(200)
+        g_count = 100

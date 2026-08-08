@@ -1,0 +1,392 @@
+# @cover src/app/devhub/cmd_email.spl 60%
+#
+# devhub `email` facade: fake-binary fixture spec. Drives handle_email()
+# end-to-end against a stub `mail` script (records argv to a log file,
+# emits canned output) pointed to via DEVHUB_MAIL_BIN — NEVER shells to the
+# real tools/mail-cli/bin/mail and NEVER touches a real mail server or
+# Microsoft Graph. Mirrors the write-shim-and-override recipe in
+# test/01_unit/app/devhub/cmd_github_spec.spl, except the fake binary is
+# pointed to directly via an env var instead of a PATH-prepend, since
+# cmd_email.spl's mail-cli resolution already has an env-var override seam
+# (DEVHUB_MAIL_BIN) built for exactly this.
+#
+# Assertions cover exit codes + the argv actually passed to `mail` (proves
+# subcommand routing, flag translation, and --account passthrough), plus
+# the honest "not yet supported" gap paths — both the outlook/Graph gaps
+# (adapter fns that don't exist yet) and the real mail-cli gaps (`label`
+# has no subcommand, `star` has no --off) that this facade must not paper
+# over. Also covers ~/.config/devhub/email.sdn parsing directly.
+
+use app.devhub.cmd_email.{handle_email, load_email_config, resolve_email_account}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val FIXTURE_DIR = "build/test-itf-email-fixture"
+val ARGV_LOG = "{FIXTURE_DIR}/argv.log"
+val HOME_DIR = "{FIXTURE_DIR}/home"
+
+
+fn shell_ok(cmd: text) -> bool:
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    exit_code == 0
+
+
+fn install_fake_mail(script_body: text) -> text:
+    """Write build/test-itf-email-fixture/mail (chmod +x); return its path."""
+    val _mk = rt_dir_create_all(FIXTURE_DIR)
+    val _rm = rt_file_delete(ARGV_LOG)
+    val path = "{FIXTURE_DIR}/mail"
+    val _write = rt_file_write_text(path, script_body)
+    val _chmod = shell_ok("/bin/chmod +x \"{path}\"")
+    path
+
+
+fn write_email_config(content: text) -> text:
+    """Write build/test-itf-email-fixture/home/.config/devhub/email.sdn;
+    return the fixture HOME dir."""
+    val dir = "{HOME_DIR}/.config/devhub"
+    val _mk = rt_dir_create_all(dir)
+    val _write = rt_file_write_text("{dir}/email.sdn", content)
+    HOME_DIR
+
+
+val EMAIL_SDN_FIXTURE = "default_account: \"work-gmail\"\n\naccounts:\n  work-gmail:\n    provider: gmail\n    email: \"me@company.com\"\n    password_cmd: \"true\"\n\n  work-outlook:\n    provider: outlook\n    tenant_id: \"\"\n    client_id: \"\"\n    client_secret_env: \"GRAPH_CLIENT_SECRET\"\n    shared_mailbox: \"\"\n\n  personal-outlook-imap:\n    provider: outlook_imap\n    email: \"me@outlook.com\"\n    password_cmd: \"true\"\n"
+
+
+fn run_email_with_fixtures(mail_bin_path: text, home_dir: text, args: [text]) -> (i64, text):
+    """Run handle_email(args) with DEVHUB_MAIL_BIN + HOME pointed at the
+    fixtures; always restores both afterward. Returns (exit_code,
+    argv_log_contents) — the log is "" if `mail` was never invoked."""
+    val original_bin = rt_env_get("DEVHUB_MAIL_BIN") ?? ""
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_bin = rt_env_set("DEVHUB_MAIL_BIN", mail_bin_path)
+    val _set_home = rt_env_set("HOME", home_dir)
+    val code = handle_email(args)
+    val _restore_bin = rt_env_set("DEVHUB_MAIL_BIN", original_bin)
+    val _restore_home = rt_env_set("HOME", original_home)
+    val log = rt_file_read_text(ARGV_LOG)
+    (code, if log == nil: "" else: log)
+
+
+val FAKE_MAIL_OK = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  version) echo 'mail-cli version 0.1.0 (fake)'; exit 0 ;;\n  inbox) echo '[{{\"from\":\"Alice <alice@x.com>\",\"subject\":\"Q3 planning\",\"date\":\"Mon, 01 Jul 2026 00:00:00 +0000\",\"uid\":\"101\",\"folder\":\"INBOX\"}}]'; exit 0 ;;\n  search) echo '[{{\"from\":\"Bob <bob@y.com>\",\"subject\":\"invoice\",\"date\":\"Tue, 02 Jul 2026 00:00:00 +0000\",\"uid\":\"202\"}}]'; exit 0 ;;\n  read) echo 'From: Alice <alice@x.com>'; exit 0 ;;\n  send) echo 'sent'; exit 0 ;;\n  reply) echo 'replied'; exit 0 ;;\n  forward) echo 'forwarded'; exit 0 ;;\n  star) echo 'starred'; exit 0 ;;\n  archive) echo 'archived'; exit 0 ;;\n  draft) echo 'draft ok'; exit 0 ;;\nesac\nexit 1\n"
+
+val FAKE_MAIL_NOT_FOUND = "#!/bin/sh\nexit 127\n"
+
+
+describe "email.sdn config parsing":
+
+    it "parses default_account and each account's provider/fields":
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", home)
+        val config = load_email_config()
+        val _restore = rt_env_set("HOME", original_home)
+
+        expect(config.default_account).to_equal("work-gmail")
+        expect(config.accounts.len()).to_equal(3)
+        expect(config.accounts[0].name).to_equal("work-gmail")
+        expect(config.accounts[0].provider).to_equal("gmail")
+        expect(config.accounts[0].email).to_equal("me@company.com")
+        expect(config.accounts[1].name).to_equal("work-outlook")
+        expect(config.accounts[1].provider).to_equal("outlook")
+        expect(config.accounts[1].client_secret_env).to_equal("GRAPH_CLIENT_SECRET")
+        expect(config.accounts[2].name).to_equal("personal-outlook-imap")
+        expect(config.accounts[2].provider).to_equal("outlook_imap")
+
+    it "resolve_email_account falls back to default_account when none requested":
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", home)
+        val config = load_email_config()
+        val (found, account) = resolve_email_account(config, "")
+        val _restore = rt_env_set("HOME", original_home)
+
+        expect(found).to_equal(true)
+        expect(account.name).to_equal("work-gmail")
+
+    it "resolve_email_account honours an explicit name":
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", home)
+        val config = load_email_config()
+        val (found, account) = resolve_email_account(config, "work-outlook")
+        val _restore = rt_env_set("HOME", original_home)
+
+        expect(found).to_equal(true)
+        expect(account.provider).to_equal("outlook")
+
+    it "resolve_email_account fails on an unknown name":
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", home)
+        val config = load_email_config()
+        val (found, _account) = resolve_email_account(config, "nope")
+        val _restore = rt_env_set("HOME", original_home)
+
+        expect(found).to_equal(false)
+
+    it "no config file at all -> no accounts, resolve fails":
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", "{FIXTURE_DIR}/no-such-home")
+        val config = load_email_config()
+        val (found, _account) = resolve_email_account(config, "")
+        val _restore = rt_env_set("HOME", original_home)
+
+        expect(config.accounts.len()).to_equal(0)
+        expect(found).to_equal(false)
+
+
+describe "handle_email — no account configured":
+
+    it "exits 1 with an actionable message, never a bare crash":
+        val original_home = rt_env_get("HOME") ?? ""
+        val _set = rt_env_set("HOME", "{FIXTURE_DIR}/no-such-home")
+        val code = handle_email(["inbox"])
+        val _restore = rt_env_set("HOME", original_home)
+        expect(code).to_equal(1)
+
+
+describe "handle_email — gmail backend (mail-cli subprocess)":
+
+    context "inbox":
+
+        it "forwards --unread/--limit and always requests --json + --account":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["inbox", "--unread", "--limit", "5"])
+            expect(code).to_equal(0)
+            expect(log.contains("inbox --json --unread --limit 5 --account work-gmail")).to_equal(true)
+
+        it "--label L maps to --folder L":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["inbox", "--label", "Work"])
+            expect(code).to_equal(0)
+            expect(log.contains("--folder Work")).to_equal(true)
+
+    context "read":
+
+        it "puts the id first in argv, then --account":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["read", "101"])
+            expect(code).to_equal(0)
+            expect(log.contains("read 101 --account work-gmail")).to_equal(true)
+
+        it "exits 1 with a usage error when no id is given":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["read"])
+            expect(code).to_equal(1)
+
+    context "search — Gmail-operator translation onto mail-cli's real flags":
+
+        it "translates from:/subject: into --from/--subject and drops unsupported operators with a warning":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["search", "from:alice subject:invoice is:unread hello"])
+            expect(code).to_equal(0)
+            expect(log.contains("--from alice")).to_equal(true)
+            expect(log.contains("--subject invoice")).to_equal(true)
+            expect(log.contains("hello")).to_equal(true)
+
+        it "after:YYYY/MM/DD becomes --since dd-Mon-yyyy":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["search", "after:2026/07/05"])
+            expect(code).to_equal(0)
+            expect(log.contains("--since 05-Jul-2026")).to_equal(true)
+
+    context "send / reply / forward":
+
+        it "send requires --to":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["send", "--subject", "hi"])
+            expect(code).to_equal(1)
+
+        it "send forwards to/subject/body/attach in order":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["send", "--to", "a@b.com", "--subject", "hi", "--body", "hello", "--attach", "f.txt"])
+            expect(code).to_equal(0)
+            expect(log.contains("send --to a@b.com --subject hi --body hello --attach f.txt --account work-gmail")).to_equal(true)
+
+        it "reply puts the id first, then --body":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["reply", "101", "--body", "thanks"])
+            expect(code).to_equal(0)
+            expect(log.contains("reply 101 --body thanks --account work-gmail")).to_equal(true)
+
+        it "forward requires --to":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["forward", "101"])
+            expect(code).to_equal(1)
+
+    context "star / archive":
+
+        it "star <id> maps directly to `mail star <id>`":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["star", "101"])
+            expect(code).to_equal(0)
+            expect(log.contains("star 101 --account work-gmail")).to_equal(true)
+
+        it "star --off gaps out honestly (mail-cli has no unstar CLI flag) — no subprocess call made":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["star", "101", "--off"])
+            expect(code).to_equal(1)
+            expect(log).to_equal("")
+
+        it "archive <id> maps directly to `mail archive <id>`":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["archive", "101"])
+            expect(code).to_equal(0)
+            expect(log.contains("archive 101 --account work-gmail")).to_equal(true)
+
+    context "label — only the STARRED/INBOX special cases are honestly reachable":
+
+        it "label --add STARRED maps to `mail star`":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["label", "101", "--add", "STARRED"])
+            expect(code).to_equal(0)
+            expect(log.contains("star 101")).to_equal(true)
+
+        it "label --remove INBOX maps to `mail archive` (drop-INBOX == archive)":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["label", "101", "--remove", "INBOX"])
+            expect(code).to_equal(0)
+            expect(log.contains("archive 101")).to_equal(true)
+
+        it "label --add of an arbitrary label gaps out honestly — no subprocess call made":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["label", "101", "--add", "Work"])
+            expect(code).to_equal(1)
+            expect(log).to_equal("")
+
+        it "exits 1 when neither --add nor --remove is given":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["label", "101"])
+            expect(code).to_equal(1)
+
+    context "draft":
+
+        it "draft list forwards to `mail draft list`":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, log) = run_email_with_fixtures(bin, home, ["draft", "list"])
+            expect(code).to_equal(0)
+            expect(log.contains("draft list --account work-gmail")).to_equal(true)
+
+        it "draft send requires an id":
+            val bin = install_fake_mail(FAKE_MAIL_OK)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["draft", "send"])
+            expect(code).to_equal(1)
+
+    context "mail-cli binary missing":
+
+        it "exits 1 with an actionable 'not found' error, never a bare crash":
+            val bin = install_fake_mail(FAKE_MAIL_NOT_FOUND)
+            val home = write_email_config(EMAIL_SDN_FIXTURE)
+            val (code, _log) = run_email_with_fixtures(bin, home, ["inbox"])
+            expect(code).to_equal(1)
+
+
+describe "handle_email — outlook_imap backend also shells to mail-cli":
+
+    it "inbox uses the same mail-cli subprocess path as gmail":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["inbox", "--account", "personal-outlook-imap"])
+        expect(code).to_equal(0)
+        expect(log.contains("--account personal-outlook-imap")).to_equal(true)
+
+
+describe "handle_email — outlook backend (Graph adapter, in-process, gap-honest)":
+
+    it "search gaps out with the doc's exact 'not yet supported' format — no subprocess call":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["search", "hello", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "send gaps out citing outlook_send_message":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["send", "--to", "a@b.com", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "reply gaps out citing outlook_reply_message":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["reply", "101", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "forward gaps out (needs compose+send)":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["forward", "101", "--to", "a@b.com", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "label gaps out citing outlook_set_categories":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["label", "101", "--add", "Work", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "star gaps out citing outlook_set_flag":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["star", "101", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "draft gaps out — no Graph draft functions exist":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["draft", "list", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "inbox is wired (Graph list exists) but fails fast + no network when tenant_id/client_id/shared_mailbox are unset":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["inbox", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+    it "archive is wired (outlook_move_message exists) but fails fast + no network when unconfigured":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, log) = run_email_with_fixtures(bin, home, ["archive", "101", "--account", "work-outlook"])
+        expect(code).to_equal(1)
+        expect(log).to_equal("")
+
+
+describe "unknown command":
+
+    it "exits 1 for an unknown top-level command":
+        val bin = install_fake_mail(FAKE_MAIL_OK)
+        val home = write_email_config(EMAIL_SDN_FIXTURE)
+        val (code, _log) = run_email_with_fixtures(bin, home, ["bogus"])
+        expect(code).to_equal(1)

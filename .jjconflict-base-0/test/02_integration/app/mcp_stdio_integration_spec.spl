@@ -1,0 +1,159 @@
+"""
+# MCP Protocol Runtime
+
+Wire-level protocol checks for the full Simple MCP server wrapper.
+
+## Requirements
+
+**Requirements:** N/A
+
+- The server accepts Content-Length framing and JSONL transport.
+- Initialize and tools/list return valid full-server responses.
+- Unknown tools return tool-level errors rather than JSON-RPC failures.
+
+## Plan
+
+Exercise initialize, tools/list, and an unknown tools/call request through the
+installed wrapper with the full tool set enabled.
+
+## Design
+
+The spec writes protocol input to a temporary file and drives the production
+stdio wrapper through a shell pipe.
+
+## Research
+
+N/A
+"""
+
+use std.spec.{describe, slow_it, expect, step}
+use std.common.spec.scenario_helpers.{capture_api_protocol_fields, capture_exec_detailed}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.process.{run}
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn mcp_jsonl(body: text) -> text:
+    body + "\n"
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn initialized_notification() -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn shutdown_request(id: text) -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"shutdown\",\"params\":{}}")
+
+fn generic_request(id: text, method: text, params_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"" + method + "\",\"params\":" + params_json + "}"
+    mcp_msg(body)
+
+fn parse_nonnegative_i64(value: text) -> i64:
+    var n: i64 = 0
+    var i: i64 = 0
+    if value.len() == 0:
+        return -1
+    while i < value.len():
+        val ch = value.char_at(i)
+        var digit: i64 = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1
+        n = n * 10 + digit
+        i = i + 1
+    n
+
+fn has_valid_content_length_frames(output: text) -> bool:
+    val parts = output.split("Content-Length:")
+    parts.len() >= 3 and not output.contains("Content-Length: 2305843009213693951")
+
+fn send_mcp(messages: text) -> text:
+    val tmp = "/tmp/mcp_protocol_runtime_input_" + messages.len().to_string() + ".txt"
+    file_write(tmp, messages)
+    val result = run("/bin/sh", ["-c", "cat " + tmp + " | SIMPLE_MCP_FULL=1 SIMPLE_MCP_TOOL_SET=all bin/simple_mcp_server 2>/dev/null"])
+    result.stdout
+
+fn send_mcp_core(messages: text) -> text:
+    val tmp = "/tmp/mcp_protocol_core_input_" + messages.len().to_string() + ".txt"
+    file_write(tmp, messages)
+    val result = run("/bin/sh", ["-c", "cat " + tmp + " | SIMPLE_MCP_FULL=0 bin/simple_mcp_server 2>/dev/null"])
+    result.stdout
+
+describe "MCP Protocol Runtime":
+    # @inline
+    slow_it "generates a correlated core wrapper from tracked setup source":
+        val contract = run("/bin/sh", ["scripts/check/check-mcp-wrapper-contract.shs"])
+        expect(contract.exit_code).to_equal(0)
+        expect(contract.stdout.contains("mcp_wrapper_source_contract=pass")).to_equal(true)
+
+    # @inline
+    # @capture(protocol)
+    slow_it "preserves numeric and string request ids in the production core wrapper":
+        # @step: Correlate a numeric initialize request id
+        step("Correlate a numeric initialize request id")
+        val numeric_init = "{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val numeric_output = send_mcp_core(mcp_msg(numeric_init))
+        expect(numeric_output.contains("\"id\":17")).to_equal(true)
+        expect(numeric_output.contains("\"id\":null")).to_equal(false)
+
+        # @step: Correlate a string tools/list request id
+        step("Correlate a string tools/list request id")
+        val string_list = "{\"jsonrpc\":\"2.0\",\"id\":\"request-alpha\",\"method\":\"tools/list\",\"params\":{}}"
+        val string_output = send_mcp_core(mcp_jsonl(string_list))
+        expect(string_output.contains("\"id\":\"request-alpha\"")).to_equal(true)
+        expect(string_output.contains("\"id\":null")).to_equal(false)
+
+    # @inline
+    # @capture(protocol)
+    slow_it "handles initialize, tools/list, and unknown-tool MCP startup flows":
+        # @step: Initialize the full MCP server
+        step("Initialize the full MCP server")
+        val single_output = send_mcp(init_request("1"))
+        expect(single_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(single_output.contains("\"simple-mcp-full\"")).to_equal(true)
+        expect(single_output.contains("\"error\":")).to_equal(false)
+
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}"
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
+        # @step: List tools over Content-Length framing
+        step("List tools over Content-Length framing")
+        val input = mcp_msg(init) + mcp_msg(initialized) + mcp_msg(req)
+        val output = send_mcp(input)
+        val output_frames_valid = has_valid_content_length_frames(output)
+        expect(output_frames_valid).to_equal(true)
+        expect(output.contains("Content-Length: 2305843009213693951")).to_equal(false)
+        expect(output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(output.contains("\"tools\":")).to_equal(true)
+        expect(output.contains("\"inputSchema\":")).to_equal(true)
+
+        # @step: List tools over JSONL framing
+        step("List tools over JSONL framing")
+        val jsonl_tools = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
+        val jsonl_output = send_mcp(jsonl_tools)
+        expect(jsonl_output.contains("\"protocolVersion\":\"2025-06-18\"")).to_equal(true)
+        expect(jsonl_output.contains("\"tools\":")).to_equal(true)
+        expect(jsonl_output.contains("\"inputSchema\":")).to_equal(true)
+        expect(jsonl_output.contains("\"name\":\"debug_create_session\"")).to_equal(true)
+        expect(jsonl_output.contains("\"error\":")).to_equal(false)
+
+        # @step: Return a tool-level error for an unknown tool
+        step("Return a tool-level error for an unknown tool")
+        val unknown_req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
+        val unknown_input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(unknown_req)
+        val unknown_output = send_mcp(unknown_input)
+        expect(unknown_output.contains("\"isError\":true")).to_equal(true)
+        expect(unknown_output.contains("Unknown tool")).to_equal(true)
+        expect(unknown_output.contains("\"error\":")).to_equal(false)

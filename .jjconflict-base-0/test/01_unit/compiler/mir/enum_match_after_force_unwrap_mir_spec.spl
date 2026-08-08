@@ -1,0 +1,64 @@
+# Regression spec for
+# doc/08_tracking/bug/enum_match_no_arm_when_entry_in_same_package_2026-08-06.md
+# (finding (b): the pure-Simple MIR lowering gap).
+#
+# `expr!` (force-unwrap, HirExprKind.Unwrap) had NO arm anywhere in MIR
+# lowering (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl). Before the
+# fix, `HirExprKind.Unwrap` fell to the file's `case _` default, which records
+# a compile error and hands back a fresh unit temp -- so any `!` on an Option
+# value never reached codegen with a real payload-extracting lowering.
+#
+# The doc's own measurement (via the Rust bootstrap seed's JIT, which mirrors
+# this shape but is out of scope to fix here) showed the observable symptom as
+# a silent match-fallthrough: `opt_e(E.A(x: 7))!` matched against `E.A(x)` /
+# `E.C` recognized no declared arm, landing on `case _`.
+#
+# The fix mirrors `.unwrap()`'s own proven MIR lowering
+# (method_calls_literals.spl, the "unwrap" method-call arm) exactly: branch on
+# `rt_is_some` (never truthiness), extract the payload via
+# `enum_payload_value` / `option_payload_or_self` / `decode_runtime_value`
+# depending on the physical Option lane, panic via `rt_panic` on the None
+# branch, and carry `struct_value_syms` provenance across so a struct-typed
+# payload is still field-addressable after `!`.
+#
+# This spec pins the CONTENT of the new arm (not merely its presence) using
+# the same `rt_file_read_text` structural-assertion pattern already
+# established for other MIR-lowering-only fixes (see
+# option_text_unwrap_pointer_spec.spl) -- sspec's default runner is the
+# tree-walk interpreter (doc/07_guide/infra/testing.md), which cannot reach
+# the JIT/native path `expr!` actually lowers through, so a behavioral
+# `match`+`!` assertion in-process would not exercise this code at all.
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "MIR lowering of the `!` force-unwrap operator (HirExprKind.Unwrap)":
+    it "has a dedicated Unwrap arm in the MIR expression dispatcher":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("case Unwrap(base):")
+
+    it "branches on rt_is_some, not truthiness, before extracting the payload":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("val is_some_uw_res = b_uw_chk.emit_call(is_some_uw_op, [mir_operand_copy(uw_base_local)], MirType.bool())")
+
+    it "extracts the Some-branch payload the same way `.unwrap()` does (enum_payload_value / option_payload_or_self / decode_runtime_value)":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("var some_val_uw = self.option_payload_or_self(uw_base_local)")
+        expect(source).to_contain("some_val_uw = self.enum_payload_value(some_val_uw, uw_result_type)")
+
+    it "panics via rt_panic on the None branch instead of silently reading the wrapper's own tag":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("val panic_msg_uw = b_none_uw.emit_const_str(\"called `!` force-unwrap on a nil Option\")")
+        expect(source).to_contain("MirConstValue.Str(\"rt_panic\")")
+
+    it "carries struct-name provenance across so a struct-typed payload stays field-addressable after `!`":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(source).to_contain("if self.struct_value_syms.contains(uw_base_local.id):")
+        expect(source).to_contain("self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[uw_base_local.id]")
+
+    it "declares the Unwrap arm before the loud default `case _` fallback (which predicted a compile error, not the measured silent fallthrough)":
+        val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val unwrap_idx = source.index_of("case Unwrap(base):")
+        val default_idx = source.index_of("# Loud-fail, but with a REAL local.")
+        expect(unwrap_idx).to_be_greater_than(-1)
+        expect(default_idx).to_be_greater_than(-1)
+        expect(unwrap_idx).to_be_less_than(default_idx)

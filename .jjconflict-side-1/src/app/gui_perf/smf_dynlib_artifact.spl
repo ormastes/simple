@@ -1,0 +1,214 @@
+# Pure GUI SMF dynlib artifact helpers.
+#
+# Builds a role-2 SMF envelope around a native host shared library. The
+# resulting artifact is loadable by the GUI perf probe through the SMF path; the
+# extracted shared library is opened once before the hot measurement loop.
+
+use std.crypto.sha256.{sha256_bytes}
+use std.crypto.types.{bytes_to_hex}
+
+val GUI_SMF_MAGIC_0: u8 = 83
+val GUI_SMF_MAGIC_1: u8 = 77
+val GUI_SMF_MAGIC_2: u8 = 70
+val GUI_SMF_MAGIC_3: u8 = 0
+val GUI_SMF_HEADER_TRAILER_SIZE: i64 = 128
+
+class GuiSmfArtifactContract:
+    status: text
+    artifact_path: text
+    sha256_hex: text
+    size_bytes: i64
+    smf_role: i64
+    arch_code: i64
+    embedded_dynlib: bool
+    symbol_name: text
+    qemu_status: text
+    qemu_reason: text
+    macos_status: text
+    macos_reason: text
+
+class GuiSmfParsedHeader:
+    header_offset: i64
+    stub_size: i64
+    smf_data_offset: i64
+    role: i64
+    arch: i64
+    abi: i64
+
+fn gui_smf_dynlib_arch_code(host_arch: text) -> u8:
+    match host_arch:
+        case "x86_64":
+            1u8
+        case "amd64":
+            1u8
+        case "aarch64":
+            3u8
+        case "arm64":
+            3u8
+        case _:
+            0u8
+
+fn _push_u32_le(out: [u8], value: i64) -> [u8]:
+    var bytes = out
+    bytes.push((value % 256).to_u8())
+    bytes.push(((value / 256) % 256).to_u8())
+    bytes.push(((value / 65536) % 256).to_u8())
+    bytes.push(((value / 16777216) % 256).to_u8())
+    bytes
+
+fn _push_zeroes_until(out: [u8], target_len: i32) -> [u8]:
+    var bytes = out
+    while bytes.len() < target_len:
+        bytes.push(0u8)
+    bytes
+
+fn _bytes_u8_to_i64(bytes: [u8]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        out.push(bytes[i] as i64)
+        i = i + 1
+    out
+
+fn _gui_smf_magic_at(bytes: [u8], off: i64) -> bool:
+    if off < 0 or off + 4 > bytes.len():
+        return false
+    bytes[off as i32] == GUI_SMF_MAGIC_0 and
+    bytes[(off + 1) as i32] == GUI_SMF_MAGIC_1 and
+    bytes[(off + 2) as i32] == GUI_SMF_MAGIC_2 and
+    bytes[(off + 3) as i32] == GUI_SMF_MAGIC_3
+
+fn _gui_smf_read_u32_le(bytes: [u8], off: i64) -> i64:
+    if off < 0 or off + 4 > bytes.len():
+        return 0
+    (bytes[off as i32] as i64) +
+    ((bytes[(off + 1) as i32] as i64) * 256) +
+    ((bytes[(off + 2) as i32] as i64) * 65536) +
+    ((bytes[(off + 3) as i32] as i64) * 16777216)
+
+fn gui_smf_parse_header(bytes: [u8]) -> GuiSmfParsedHeader?:
+    if bytes.len() < GUI_SMF_HEADER_TRAILER_SIZE:
+        return nil
+    val off = bytes.len() as i64 - GUI_SMF_HEADER_TRAILER_SIZE
+    if not _gui_smf_magic_at(bytes, off):
+        return nil
+    Some(GuiSmfParsedHeader(
+        header_offset: off,
+        stub_size: _gui_smf_read_u32_le(bytes, off + 52),
+        smf_data_offset: _gui_smf_read_u32_le(bytes, off + 56),
+        role: bytes[(off + 60) as i32] as i64,
+        arch: bytes[(off + 61) as i32] as i64,
+        abi: bytes[(off + 62) as i32] as i64
+    ))
+
+fn gui_smf_artifact_contract(path: text, bytes: [u8], symbol_name: text) -> GuiSmfArtifactContract:
+    """Return a contract-only evidence record for a GUI SMF dynlib artifact."""
+    val digest = bytes_to_hex(sha256_bytes(_bytes_u8_to_i64(bytes)))
+    gui_smf_artifact_contract_with_sha256(path, bytes, symbol_name, digest)
+
+fn gui_smf_artifact_contract_with_sha256(path: text, bytes: [u8], symbol_name: text, digest: text) -> GuiSmfArtifactContract:
+    """Return a contract evidence record with a caller-provided artifact digest."""
+    val header = gui_smf_parse_header(bytes)
+    if header == nil:
+        return GuiSmfArtifactContract(
+            status: "fail",
+            artifact_path: path,
+            sha256_hex: digest,
+            size_bytes: bytes.len() as i64,
+            smf_role: -1,
+            arch_code: 0,
+            embedded_dynlib: false,
+            symbol_name: symbol_name,
+            qemu_status: "not-run",
+            qemu_reason: "live-qemu-not-executed",
+            macos_status: "not-run",
+            macos_reason: "requires-macos-arm64"
+        )
+    val parsed = header.unwrap()
+    val embedded = parsed.role == 2 and parsed.stub_size > 0 and parsed.stub_size <= bytes.len() as i64
+    val release_arch = parsed.arch == 3
+    val release_symbol = symbol_name == "gui_dynlib_hot_probe_tick"
+    val release_ready = embedded and release_arch and release_symbol
+    GuiSmfArtifactContract(
+        status: if release_ready: "pass" else: "fail",
+        artifact_path: path,
+        sha256_hex: digest,
+        size_bytes: bytes.len() as i64,
+        smf_role: parsed.role,
+        arch_code: parsed.arch,
+        embedded_dynlib: embedded,
+        symbol_name: symbol_name,
+        qemu_status: "not-run",
+        qemu_reason: "live-qemu-not-executed",
+        macos_status: "not-run",
+        macos_reason: "requires-macos-arm64"
+    )
+
+fn gui_smf_artifact_contract_missing(path: text, symbol_name: text) -> GuiSmfArtifactContract:
+    GuiSmfArtifactContract(
+        status: "missing",
+        artifact_path: path,
+        sha256_hex: "",
+        size_bytes: 0,
+        smf_role: -1,
+        arch_code: 0,
+        embedded_dynlib: false,
+        symbol_name: symbol_name,
+        qemu_status: "not-run",
+        qemu_reason: "live-qemu-not-executed",
+        macos_status: "not-run",
+        macos_reason: "requires-macos-arm64"
+    )
+
+fn gui_smf_artifact_contract_with_qemu(contract: GuiSmfArtifactContract, qemu_status: text, qemu_reason: text) -> GuiSmfArtifactContract:
+    GuiSmfArtifactContract(
+        status: contract.status,
+        artifact_path: contract.artifact_path,
+        sha256_hex: contract.sha256_hex,
+        size_bytes: contract.size_bytes,
+        smf_role: contract.smf_role,
+        arch_code: contract.arch_code,
+        embedded_dynlib: contract.embedded_dynlib,
+        symbol_name: contract.symbol_name,
+        qemu_status: qemu_status,
+        qemu_reason: qemu_reason,
+        macos_status: contract.macos_status,
+        macos_reason: contract.macos_reason
+    )
+
+fn gui_smf_artifact_contract_row(contract: GuiSmfArtifactContract) -> text:
+    "GUI_SMF_ARTIFACT_CONTRACT " +
+    "status=" + contract.status +
+    " artifact=" + contract.artifact_path +
+    " sha256=" + contract.sha256_hex +
+    " size=" + contract.size_bytes.to_text() +
+    " smf_role=" + contract.smf_role.to_text() +
+    " arch=" + contract.arch_code.to_text() +
+    " embedded_dynlib=" + contract.embedded_dynlib.to_text() +
+    " symbol=" + contract.symbol_name +
+    " qemu_status=" + contract.qemu_status +
+    " qemu_reason=" + contract.qemu_reason +
+    " macos_status=" + contract.macos_status +
+    " macos_reason=" + contract.macos_reason
+
+fn gui_smf_wrap_native_library(dynlib_bytes: [u8], arch_code: u8) -> [u8]:
+    """Wrap native shared-library bytes in a role-2 SMF trailer envelope."""
+    var out: [u8] = []
+    var i = 0
+    while i < dynlib_bytes.len():
+        out.push(dynlib_bytes[i])
+        i = i + 1
+    val stub_len = out.len() as i64
+    out.push(GUI_SMF_MAGIC_0)
+    out.push(GUI_SMF_MAGIC_1)
+    out.push(GUI_SMF_MAGIC_2)
+    out.push(GUI_SMF_MAGIC_3)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + 44)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + 52)
+    out = _push_u32_le(out, stub_len)
+    out = _push_u32_le(out, stub_len)
+    out.push(2u8)
+    out.push(arch_code)
+    out.push(0u8)
+    out = _push_zeroes_until(out, dynlib_bytes.len() + (GUI_SMF_HEADER_TRAILER_SIZE as i32))
+    out

@@ -1,0 +1,85 @@
+#!/bin/sh
+# Regression gate for AOT (`--native` / LLVM) payload-bearing enum `match`.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk interpreter
+# and has no AOT mode (TestExecutionMode has Native/Process/Safe/Container
+# variants but "Native" there means unsandboxed *process execution*, not the
+# LLVM AOT backend) -- so no `*_spec.spl` can ever observe this lane. Only a
+# script that actually drives `simple compile --native` can fence it.
+#
+# Bug: doc/08_tracking/bug/match_on_enum_native_lowering_status_2026-08-07.md
+#
+# Current known state (2026-08-07): payload-FREE enum match compiles and runs
+# correctly under `--native`. Payload-BEARING enum match (tuple/struct-payload
+# variant patterns) is refused fail-closed with a "requires the interpreter"
+# diagnostic naming the `[PatternMatch]` construct. This script asserts BOTH
+# halves so a regression in either direction is caught:
+#   - payload-free case regressing from PASS to FAIL would be a new defect.
+#   - payload-bearing case flipping from FAIL to PASS would be the gap closing
+#     (reported loudly as a NOTE so this gate gets promoted to a hard assert).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-enum-match-payload.$$}"
+PAYLOAD_FIXTURE="test/fixtures/native_enum_match_payload/main.spl"
+FREE_FIXTURE="test/fixtures/native_enum_match_payload/payload_free.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+fail=0
+
+# --- Control: payload-free enum match must still compile and run correctly.
+free_bin="$WORK_DIR/payload-free"
+free_log="$WORK_DIR/payload-free.log"
+if ! env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$FREE_FIXTURE" --native -o "$free_bin" >"$free_log" 2>&1; then
+    echo "FAIL — payload-free enum match no longer compiles under --native (was working)"
+    sed -n '1,20p' "$free_log"
+    fail=1
+else
+    free_out="$(timeout 20 "$free_bin" 2>>"$free_log" || true)"
+    expected_free="$(printf 'kind-A\nkind-B\nkind-C')"
+    if [ "$free_out" != "$expected_free" ]; then
+        echo "FAIL — payload-free enum match --native output regressed"
+        echo "  expected: $expected_free"
+        echo "  actual:   $free_out"
+        fail=1
+    fi
+fi
+
+# --- Known-open gap: payload-bearing enum match is refused under --native.
+payload_bin="$WORK_DIR/payload-bearing"
+payload_log="$WORK_DIR/payload-bearing.log"
+payload_rc=0
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$PAYLOAD_FIXTURE" --native -o "$payload_bin" >"$payload_log" 2>&1 || payload_rc=$?
+
+if [ "$payload_rc" -eq 0 ]; then
+    echo "NOTE — payload-bearing enum match now COMPILES under --native; the"
+    echo "       open gap in"
+    echo "       doc/08_tracking/bug/match_on_enum_native_lowering_status_2026-08-07.md"
+    echo "       has closed. Promote this branch to a hard assertion on the"
+    echo "       runtime output (circle:2.5 / rect:3.0x4.0 / point) instead of"
+    echo "       accepting either outcome."
+    payload_out="$(timeout 20 "$payload_bin" 2>>"$payload_log" || true)"
+    echo "  observed output: $payload_out"
+else
+    if grep -q 'cannot compile to standalone native binary' "$payload_log" \
+        && grep -q 'describe_shape' "$payload_log" \
+        && grep -q 'PatternMatch' "$payload_log"; then
+        echo "KNOWN-OPEN — payload-bearing enum match still fail-closed under --native (expected diagnostic present)"
+    else
+        echo "FAIL — payload-bearing enum match --native compile failed for an UNEXPECTED reason (not the known PatternMatch refusal)"
+        sed -n '1,20p' "$payload_log"
+        fail=1
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+
+echo "PASS — native-build enum match: payload-free correct, payload-bearing gap unchanged"

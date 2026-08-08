@@ -1,0 +1,38 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "SimpleOS direct FAT32 image integrity":
+    it "uses valid FAT32 geometry and redundant metadata":
+        step("Inspect dynamic FAT32 geometry and metadata writers")
+        val source = file_read("scripts/os/make_os_disk.c")
+        expect(source).to_contain("FAT32_MIN_DATA_CLUSTERS = 65525")
+        expect(source).to_contain("geometry_for_cluster_size")
+        expect(source).to_contain("write_fat32_fsinfo")
+        expect(source).to_contain("memcpy(g_image + (size_t)6 * SECTOR_SIZE, g_image, SECTOR_SIZE)")
+        expect(source).to_contain("write_fat32_fsinfo((size_t)7 * SECTOR_SIZE)")
+        expect(source).to_contain("memcpy(g_image + 71, \"SIMPLEOS   \", 11)")
+        expect(source).to_contain("memcpy(g_image + 82, \"FAT32   \", 8)")
+
+    it "owns directory chains and duplicate file chains independently":
+        step("Inspect directory allocation, dot entries, and file copies")
+        val source = file_read("scripts/os/make_os_disk.c")
+        expect(source).to_contain("int efi_cluster = alloc_directory()")
+        expect(source).to_contain("reserve_root_directory()")
+        expect(source).to_contain("put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster)")
+        expect(source).to_contain("write_directory(tmp_cluster, tmp, tmp_n)")
+        expect(source).to_contain("int hello_c_cluster = alloc_clusters(clang_c.data, clang_c.len)")
+        expect(source).to_contain("int simple_root_cluster = simple_payload.len ? alloc_clusters")
+        expect(source.contains("steam_manifest_cluster")).to_equal(false)
+        expect(source.contains("steam_marker_cluster")).to_equal(false)
+
+    it "provides reproducible fsck, mtools, manifest, and raw-chain evidence":
+        step("Inspect the focused integrity checker")
+        val checker = file_read("scripts/check/check-make-os-disk-fat32-integrity.shs")
+        expect(checker).to_contain("x86_64 fs-exec")
+        expect(checker).to_contain("x86_64 desktop-fonts")
+        expect(checker).to_contain("fsck.fat -vn")
+        expect(checker).to_contain("mdir -i")
+        expect(checker).to_contain("mtype -i")
+        expect(checker).to_contain("mshowfat -i")
+        expect(checker).to_contain("NotoEmoji[wght].ttf")
+        expect(checker).to_contain("duplicate files unexpectedly share a FAT chain")

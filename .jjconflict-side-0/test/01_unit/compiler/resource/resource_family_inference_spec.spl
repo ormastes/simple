@@ -1,0 +1,296 @@
+"""
+# SFFI Family Convention Inference Engine — Pure Logic Tests
+
+**WP-D:** Convention inference engine (pure logic, no compiler wiring)
+
+Tests cover both:
+- Happy path: families that infer cleanly
+- Ambiguous/degenerate cases that MUST return "cannot infer" (fail-closed rules)
+
+The engine classifies families by verb patterns alone: acquire (open, create, new,
+alloc, acquire, copy, clone), release (close, destroy, free, release, unref,
+dispose), retain (retain, ref, add_ref).
+
+Fail-closed rules:
+1. Ambiguous/duplicate destructor → error
+2. No recognized release fn → error (do NOT auto-create owning resource)
+3. Multiple candidate receiver params → error (require explicit annotation)
+"""
+
+use std.spec
+use std.collections
+use compiler.semantics.resource_families
+
+describe "resource family convention inference":
+    it "infers rt_file_* family with clear acquire/release":
+        val result = resource_families.infer_family_conventions("rt_file", [
+            "rt_file_open",
+            "rt_file_read",
+            "rt_file_write",
+            "rt_file_close",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("open")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("close")
+
+    it "infers rt_image_* with load acquire, free release":
+        val result = resource_families.infer_family_conventions("rt_image", [
+            "rt_image_load",
+            "rt_image_width",
+            "rt_image_height",
+            "rt_image_free",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("load")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("free")
+
+    it "fails-closed: two release verbs is ambiguous, never guess":
+        val result = resource_families.infer_family_conventions("rt_ambig", [
+            "rt_ambig_create",
+            "rt_ambig_close",
+            "rt_ambig_free",
+            "rt_ambig_read",
+        ])
+
+        expect(result.is_success()).to_equal(false)
+        match result.error:
+            case nil:
+                expect(true).to_equal(false)
+            case err:
+                expect(err.contains("ambiguous_destructor")).to_equal(true)
+
+    it "fails-closed: no release verb errors, doesn't auto-create owning resource":
+        val result = resource_families.infer_family_conventions("rt_norelease", [
+            "rt_norelease_create",
+            "rt_norelease_read",
+            "rt_norelease_write",
+        ])
+
+        expect(result.is_success()).to_equal(false)
+        match result.error:
+            case nil:
+                expect(true).to_equal(false)
+            case err:
+                expect(err.contains("no_release_verb")).to_equal(true)
+
+    it "classifies retain/release pair for foreign RC candidate":
+        val result = resource_families.infer_family_conventions("rt_cuda_primary_ctx", [
+            "rt_cuda_primary_ctx_retain",
+            "rt_cuda_primary_ctx_release",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.retain_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("retain")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("release")
+
+    it "picks first acquire verb when multiple candidates exist":
+        val result = resource_families.infer_family_conventions("rt_data", [
+            "rt_data_new",
+            "rt_data_create",
+            "rt_data_process",
+            "rt_data_free",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("new")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("free")
+
+    it "classifies mixed acquire/method/release functions":
+        val result = resource_families.infer_family_conventions("rt_socket", [
+            "rt_socket_create",
+            "rt_socket_send",
+            "rt_socket_recv",
+            "rt_socket_close",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        expect(result.functions.len()).to_equal(4)
+
+        val send_fn = result.functions[1]
+        expect(send_fn.verb).to_equal("send")
+        expect(send_fn.category).to_equal("method")
+
+    it "empty family fails (no release verb)":
+        val result = resource_families.infer_family_conventions("rt_empty", [])
+
+        expect(result.is_success()).to_equal(false)
+        match result.error:
+            case nil:
+                expect(true).to_equal(false)
+            case err:
+                expect(err.contains("no_release_verb")).to_equal(true)
+
+    it "only-methods family fails (no release)":
+        val result = resource_families.infer_family_conventions("rt_onlymethod", [
+            "rt_onlymethod_read",
+            "rt_onlymethod_write",
+            "rt_onlymethod_flush",
+        ])
+
+        expect(result.is_success()).to_equal(false)
+        match result.error:
+            case nil:
+                expect(true).to_equal(false)
+            case err:
+                expect(err.contains("no_release_verb")).to_equal(true)
+
+    it "strips family prefix correctly from function names":
+        val result = resource_families.infer_family_conventions("rt_http_client", [
+            "rt_http_client_create",
+            "rt_http_client_send_request",
+            "rt_http_client_destroy",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("create")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("destroy")
+
+    it "recognizes validity verbs but does not confuse with acquire/release":
+        val result = resource_families.infer_family_conventions("rt_buffer", [
+            "rt_buffer_alloc",
+            "rt_buffer_is_valid",
+            "rt_buffer_valid",
+            "rt_buffer_free",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("alloc")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("free")
+
+    it "census sample: CudaContext (create/destroy)":
+        val result = resource_families.infer_family_conventions("rt_cuda_ctx", [
+            "rt_cuda_ctx_create",
+            "rt_cuda_ctx_set_current",
+            "rt_cuda_ctx_synchronize",
+            "rt_cuda_ctx_destroy",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("create")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("destroy")
+
+    it "census sample: TorchTensor (new/free)":
+        val result = resource_families.infer_family_conventions("rt_torch_torchtensor", [
+            "rt_torch_torchtensor_new",
+            "rt_torch_torchtensor_size",
+            "rt_torch_torchtensor_data",
+            "rt_torch_torchtensor_free",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.acquire_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("new")
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("free")
+
+    it "deduplicates identical release verbs (not ambiguous)":
+        val result = resource_families.infer_family_conventions("rt_dup", [
+            "rt_dup_open",
+            "rt_dup_close",
+            "rt_dup_close",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        match result.release_verb:
+            case nil:
+                expect(true).to_equal(false)
+            case verb:
+                expect(verb).to_equal("close")
+
+    it "detects foreign RC candidate (has acquire, release, and retain)":
+        val result = resource_families.infer_family_conventions("rt_cuda_primary_ctx", [
+            "rt_cuda_primary_ctx_acquire",
+            "rt_cuda_primary_ctx_retain",
+            "rt_cuda_primary_ctx_release",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        val rc_result = resource_families.classify_rc_strategy(result)
+        expect(rc_result.is_candidate).to_equal(true)
+
+    it "not an RC candidate without retain (unique ownership)":
+        val result = resource_families.infer_family_conventions("rt_file", [
+            "rt_file_open",
+            "rt_file_close",
+        ])
+
+        expect(result.is_success()).to_equal(true)
+        val rc_result = resource_families.classify_rc_strategy(result)
+        expect(rc_result.is_candidate).to_equal(false)
+
+    it "reports all unique release verbs when ambiguous":
+        val result = resource_families.infer_family_conventions("rt_multi", [
+            "rt_multi_create",
+            "rt_multi_close",
+            "rt_multi_free",
+            "rt_multi_destroy",
+            "rt_multi_free",
+            "rt_multi_close",
+        ])
+
+        expect(result.is_success()).to_equal(false)
+        expect(result.release_verbs_found.len()).to_equal(3)

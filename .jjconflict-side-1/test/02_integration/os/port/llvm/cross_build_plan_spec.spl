@@ -1,0 +1,214 @@
+## Static smoke test for Wave 2's --print-plan scaffolding in
+## src/os/port/llvm/build.spl.
+##
+## The executable `--cross --print-plan` path is covered by the current
+## evidence report. This spec keeps a static backstop for the constants,
+## function definitions, CLI flags, and per-target expansion patterns that
+## Wave 2 introduced.
+##
+## Run:
+##   bin/simple test test/integration/os/port/llvm/cross_build_plan_spec.spl
+
+use std.text
+use std.process
+use std.spec
+use os.port.llvm.build.{canonical_simpleos_triple, cross_target_supported, is_simpleos_triple}
+
+val BUILD_SPL = "src/os/port/llvm/build.spl"
+val CROSS_VERIFIER = "src/compiler/90.tools/verify/cross_builds.spl"
+
+fn build_source() -> text:
+    process.run("cat", [BUILD_SPL]).stdout
+
+fn verifier_source() -> text:
+    process.run("cat", [CROSS_VERIFIER]).stdout
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+describe "SimpleOS LLVM cross-build --print-plan scaffolding":
+    """Static checks on build.spl for Wave 2's multi-target scaffolding."""
+
+    it "defines CROSS_SUPPORTED_TARGETS with 5 triples":
+        """CROSS_SUPPORTED_TARGETS constant must be declared."""
+        val src = build_source()
+        check(src.contains("val CROSS_SUPPORTED_TARGETS"))
+
+    it "includes x86_64-unknown-simpleos triple":
+        """x86_64 triple must appear in the supported-targets list."""
+        val src = build_source()
+        check(src.contains("x86_64-unknown-simpleos"))
+
+    it "includes aarch64-unknown-simpleos triple":
+        val src = build_source()
+        check(src.contains("aarch64-unknown-simpleos"))
+
+    it "includes riscv64gc-unknown-simpleos triple":
+        val src = build_source()
+        check(src.contains("riscv64gc-unknown-simpleos"))
+
+    it "includes riscv32imac-unknown-simpleos triple":
+        val src = build_source()
+        check(src.contains("riscv32imac-unknown-simpleos"))
+
+    it "includes armv7-unknown-simpleos triple":
+        val src = build_source()
+        check(src.contains("armv7-unknown-simpleos"))
+
+    it "maps triples via cross_llvm_arch_for":
+        val src = build_source()
+        check(src.contains("fn cross_llvm_arch_for"))
+
+    it "maps armv7 to LLVM ARM":
+        val src = build_source()
+        check(src.contains("triple.starts_with(\"armv7\")"))
+        check(src.contains("\"ARM\""))
+
+    it "normalizes runner separator before --cross dispatch":
+        val src = build_source()
+        check(src.contains("args[0] == \"--\""))
+        check(src.contains("args = args.slice(1, args.len())"))
+
+    it "defines cross_build_print_plan":
+        val src = build_source()
+        check(src.contains("fn cross_build_print_plan"))
+
+    it "defines cross_build_stage_for_target":
+        val src = build_source()
+        check(src.contains("fn cross_build_stage_for_target"))
+
+    it "cross_build_status iterates all targets":
+        val src = build_source()
+        check(src.contains("fn cross_build_status"))
+        check(src.contains("for triple in CROSS_SUPPORTED_TARGETS"))
+
+    it "exposes --targets CLI flag":
+        val src = build_source()
+        check(src.contains("--targets"))
+
+    it "parses --targets as comma-separated triples":
+        val src = build_source()
+        check(src.contains("override.split(\",\")"))
+        # Each CSV entry is normalized onto the canonical triple as it is
+        # collected, so downstream build dirs / env vars use one vocabulary.
+        check(src.contains("selected.push(canonical_simpleos_triple(trimmed))"))
+
+    it "exposes --all CLI flag":
+        val src = build_source()
+        check(src.contains("--all"))
+
+    it "exposes --print-plan CLI flag":
+        val src = build_source()
+        check(src.contains("--print-plan"))
+
+    it "per-target stage passes SIMPLEOS_TARGET_TRIPLE env var":
+        val src = build_source()
+        check(src.contains("SIMPLEOS_TARGET_TRIPLE"))
+
+    it "per-target build dir is cross-<triple>":
+        val src = build_source()
+        check(src.contains("cross-"))
+
+    it "rejects unsupported target overrides instead of skipping them":
+        val src = build_source()
+        check(src.contains("fn cross_target_supported"))
+        check(src.contains("if not cross_target_supported(triple):"))
+        check(src.contains("Unsupported SimpleOS target"))
+        check(!src.contains("Skip non-SimpleOS triple"))
+
+    it "requires compiler-rt to produce an archive before installation":
+        val src = build_source()
+        check(src.contains("val archive_probe = process.run"))
+        check(src.contains("-type f -name 'libclang_rt.builtins*.a' -print -quit"))
+        check(src.contains("find {{rt_dir}} -name 'libclang_rt.builtins*.a' -exec cp"))
+        check(src.contains("archive_probe.stdout.trim() == \"\""))
+        check(src.contains("No builtins archive produced"))
+
+    it "makes cross-binary verification fail closed":
+        val src = verifier_source()
+        # `{join2}` / `{join}` must be escaped as `{{...}}` — an unescaped brace
+        # is string interpolation and fails with "variable `join2` not found".
+        check(src.contains("use std.path.{{join2}}"))
+        check(!src.contains("use std.path.{{join}}"))
+        check(src.contains("FAIL (unknown target)"))
+        check(!src.contains("SKIP (unknown target)"))
+        check(src.contains("seed:    MISSING ({{seed_bin}})\"\n        return false"))
+        check(src.contains("simple:  NOT BUILT (run cross_compile.spl first)\"\n        return false"))
+        check(src.contains("qemu:    FAIL or no --help support\"\n                return false"))
+        check(src.contains("wine:    FAIL or no --help support\"\n                return false"))
+        check(src.contains("qemu:    FAIL (QEMU not installed)\"\n            return false"))
+        check(src.contains("wine:    FAIL (Wine not installed)\"\n            return false"))
+        check(!src.contains("qemu:    SKIP (QEMU not installed)"))
+        check(!src.contains("wine:    SKIP (Wine not installed)"))
+        check(src.contains("# Wine test for Windows\n    if (not quick and\n        not native_host and"))
+        check(src.contains("process_run_timeout(full_bin, [\"--help\"], 10000)"))
+        check(src.contains("target == \"macos-arm64\""))
+        check(src.contains("target == \"windows-x86_64\""))
+        check(src.contains("target == \"windows-x86\""))
+        check(src.contains("native:  FAIL or no --help support\"\n            return false"))
+        check(src.contains("{{qemu_cmd}} {{full_bin}} --help"))
+        check(src.contains("wine {{full_bin}} --help"))
+        check(!src.contains("{{qemu_cmd}} {{seed_bin}} --help"))
+        check(!src.contains("wine {{seed_bin}} --help"))
+
+describe "SimpleOS LLVM triple vocabulary":
+    """Behavioural checks (not source-text) that build.spl speaks ONE triple
+    vocabulary: canonical `<arch>-unknown-simpleos`, with the `<arch>-simpleos`
+    selector form accepted and normalized onto it — while the fail-closed
+    `-simpleos` compiler-rt gate still refuses everything it should."""
+
+    it "normalizes the selector form onto the canonical triple":
+        """`x86_64-simpleos` is a documented spelling; it must not be rejected."""
+        expect(canonical_simpleos_triple("x86_64-simpleos")).to_equal("x86_64-unknown-simpleos")
+        expect(canonical_simpleos_triple("aarch64-simpleos")).to_equal("aarch64-unknown-simpleos")
+        expect(canonical_simpleos_triple("riscv64gc-simpleos")).to_equal("riscv64gc-unknown-simpleos")
+        expect(canonical_simpleos_triple("riscv32imac-simpleos")).to_equal("riscv32imac-unknown-simpleos")
+
+    it "leaves an already-canonical triple untouched":
+        """Normalization must be idempotent — no double vendor field."""
+        expect(canonical_simpleos_triple("x86_64-unknown-simpleos")).to_equal("x86_64-unknown-simpleos")
+        expect(canonical_simpleos_triple("armv7-unknown-simpleos")).to_equal("armv7-unknown-simpleos")
+
+    it "accepts both spellings of every supported triple":
+        """The core reconciliation: one vocabulary, two accepted input forms."""
+        assert_true(cross_target_supported("x86_64-unknown-simpleos"))
+        assert_true(cross_target_supported("x86_64-simpleos"))
+        assert_true(cross_target_supported("aarch64-unknown-simpleos"))
+        assert_true(cross_target_supported("aarch64-simpleos"))
+        assert_true(cross_target_supported("riscv64gc-simpleos"))
+        assert_true(cross_target_supported("riscv32imac-simpleos"))
+        assert_true(cross_target_supported("armv7-unknown-simpleos"))
+
+    it "still refuses host triples":
+        """The gate exists to stop a baremetal compiler-rt overwriting a host
+        toolchain — hosted triples must never be granted compiler-rt."""
+        assert_false(is_simpleos_triple("x86_64-unknown-linux-gnu"))
+        assert_false(cross_target_supported("x86_64-unknown-linux-gnu"))
+        assert_false(cross_target_supported("aarch64-apple-darwin"))
+        assert_false(cross_target_supported("x86_64-pc-windows-msvc"))
+
+    it "still refuses the empty triple":
+        """Fail-closed: an unset/blank target is refused, not defaulted."""
+        assert_false(is_simpleos_triple(""))
+        assert_false(cross_target_supported(""))
+
+    it "treats -simpleos as a suffix, not a substring":
+        """`simpleos-x86_64` and `x86_64-simpleos-foo` contain the token but do
+        not end in it; both must be refused."""
+        assert_false(is_simpleos_triple("simpleos-x86_64"))
+        assert_false(cross_target_supported("simpleos-x86_64"))
+        assert_false(is_simpleos_triple("x86_64-simpleos-foo"))
+        assert_false(cross_target_supported("x86_64-simpleos-foo"))
+
+    it "refuses an unknown arch that merely ends in -simpleos":
+        """Shape gate passes, allowlist must still reject — normalization is a
+        widening of accepted spellings, never of accepted architectures."""
+        assert_true(is_simpleos_triple("wat-simpleos"))
+        assert_false(cross_target_supported("wat-simpleos"))
+        assert_false(cross_target_supported("mips64-unknown-simpleos"))
+
+    it "normalization cannot launder a refused triple into acceptance":
+        """Anything failing the shape gate passes through unrewritten."""
+        expect(canonical_simpleos_triple("x86_64-unknown-linux-gnu")).to_equal("x86_64-unknown-linux-gnu")
+        expect(canonical_simpleos_triple("simpleos-x86_64")).to_equal("simpleos-x86_64")
+        expect(canonical_simpleos_triple("")).to_equal("")

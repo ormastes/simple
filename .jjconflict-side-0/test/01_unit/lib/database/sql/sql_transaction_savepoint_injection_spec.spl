@@ -1,0 +1,136 @@
+"""
+# SQL Transaction Savepoint Name Injection Specification
+
+**Feature IDs:** #DB-005
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+`Transaction.savepoint` / `release_savepoint` / `rollback_to` take a caller
+supplied savepoint name and place it directly into SQL text. The native
+runtime primitive behind those calls (`rt_sqlite_execute` in
+`src/runtime/runtime_sqlite.c`) is `sqlite3_exec`, which executes **every**
+`;`-separated statement in the string. An unvalidated name is therefore a
+multi-statement SQL injection sink: `"sp1; DROP TABLE users; --"` appends a
+DROP to the transaction.
+
+Every sibling module in this package (`query_builder`, `repository`,
+`schema`, `sql_gen`) already routes identifiers through
+`escape.quote_ident`; the savepoint family was the one path that did not.
+
+These specs pin the fix: a savepoint name must be validated as a plain SQL
+identifier and **rejected before any SQL is constructed or dispatched**. The
+oracle is the error message — a rejected name reports `invalid savepoint
+name`, whereas an unvalidated name is handed to the engine and fails (if at
+all) with an engine-level parse error instead.
+"""
+
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+
+fn _err_text(result: Result<(), DbError>) -> text:
+    """Render the error side of a savepoint result as text, or "<ok>"."""
+    if val Err(e) = result:
+        return "{e}"
+    "<ok>"
+
+fn _rejected_by_validator(result: Result<(), DbError>) -> bool:
+    """True when the name was refused by the identifier validator.
+
+    Distinguishes a name refused *before* any SQL was built from a name that
+    was accepted and then failed inside the SQL engine.
+    """
+    _err_text(result).contains("invalid savepoint name")
+
+describe "Transaction savepoint name validation":
+    """
+    ## Savepoint names are identifiers, not SQL fragments
+
+    A savepoint name comes from application code and may be derived from user
+    input (a request id, a tenant name, a retry label). It must never be able
+    to add statements to the transaction.
+    """
+
+    context "names carrying extra SQL are rejected before dispatch":
+        it "rejects a savepoint name containing a statement terminator":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.savepoint("sp1; DROP TABLE users; --"))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+        it "rejects a rollback_to name containing a statement terminator":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.rollback_to("sp1; DROP TABLE users; --"))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+        it "rejects a release_savepoint name containing a statement terminator":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.release_savepoint("sp1; DROP TABLE users; --"))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+        it "rejects a savepoint name containing a comment introducer":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.savepoint("sp1 -- "))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+        it "rejects a savepoint name containing a quote character":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.savepoint("sp1\" OR \"1"))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+        it "rejects an empty savepoint name":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val msg = _err_text(tx.savepoint(""))
+            tx.rollback()
+            expect(msg).to_contain("invalid savepoint name")
+
+    context "ordinary identifier names are not refused by the validator":
+        """
+        The validator must not become an over-tight filter that breaks
+        legitimate savepoint names. These assert only what the validator
+        controls: a plain identifier passes it and reaches the engine.
+
+        Whether the engine then honours SAVEPOINT is a separate concern --
+        the Rust bootstrap seed's in-process SQL engine does not implement
+        SAVEPOINT at all, which is why these do not assert overall success.
+        """
+        it "passes a plain identifier through savepoint and release":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val sp = _rejected_by_validator(tx.savepoint("sp_ok"))
+            val rel = _rejected_by_validator(tx.release_savepoint("sp_ok"))
+            tx.rollback()
+            assert_false(sp)
+            assert_false(rel)
+
+        it "passes a plain identifier through savepoint and rollback_to":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val sp = _rejected_by_validator(tx.savepoint("sp_two"))
+            val back = _rejected_by_validator(tx.rollback_to("sp_two"))
+            tx.rollback()
+            assert_false(sp)
+            assert_false(back)
+
+        it "passes an identifier with digits and underscores":
+            var db = Database.memory()?
+            var tx = db.begin()?
+            val sp = _rejected_by_validator(tx.savepoint("sp_retry_42"))
+            tx.rollback()
+            assert_false(sp)

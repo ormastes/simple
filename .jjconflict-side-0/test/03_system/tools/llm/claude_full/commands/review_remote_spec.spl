@@ -1,0 +1,45 @@
+"""
+# Claude Full Review Remote Command
+
+Checks reviewRemote command parity for remote-only code review.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.commands.review.reviewRemote.*
+
+describe "Claude full reviewRemote command":
+    it "exposes hidden remote review command metadata":
+        val command = reviewRemoteCommand()
+        expect(command.typeName).to_equal("local-jsx")
+        expect(command.name).to_equal("review")
+        expect(command.argumentHint).to_equal("[pull-request-url-or-number]")
+        expect(command.loadPath).to_equal("./reviewRemote.js")
+        expect(command.immediate).to_equal(true)
+        expect(command.hidden).to_equal(true)
+        expect(reviewRemoteCommandName()).to_equal("review")
+        expect(reviewRemoteLoadPath()).to_equal("./reviewRemote.js")
+
+    it "maps setup gates before starting review":
+        expect(reviewRemoteNextStep(ReviewRemoteState.new(false, "sess", "12", "main", "feature", "diff", 1, false, false))).to_equal("signin")
+        expect(reviewRemoteNextStep(ReviewRemoteState.new(true, "", "12", "main", "feature", "diff", 1, false, false))).to_equal("remote-session")
+        expect(reviewRemoteNextStep(ReviewRemoteState.new(true, "sess", "", "main", "feature", "diff", 1, false, false))).to_equal("pull-request")
+        expect(reviewRemoteNextStep(ReviewRemoteState.new(true, "sess", "12", "main", "feature", "", 0, false, false))).to_equal("load-diff")
+        expect(reviewRemoteStatusLabel(ReviewRemoteState.new(true, "sess", "12", "main", "feature", "diff", 1, false, false))).to_equal("Ready to review")
+
+    it "builds the review prompt and respects viewer-only mode":
+        val state = ReviewRemoteState.new(true, "sess", "https://github.com/acme/repo/pull/12", "main", "feature", "3 files changed", 3, false, true)
+        val result = callReviewRemote(state)
+        expect(result.ok).to_equal(true)
+        expect(result.stepName).to_equal("review")
+        expect(result.shouldStartRemote).to_equal(true)
+        expect(result.allowMutationTools).to_equal(false)
+        expect(result.prompt).to_contain("main...feature")
+        expect(result.prompt).to_contain("3 files changed")
+        expect(result.prompt).to_contain("bugs, risks, regressions, and missing tests")
+
+    it "reports network failures and source coverage":
+        val failure = callReviewRemote(ReviewRemoteState.new(true, "sess", "12", "main", "feature", "diff", 1, true, false))
+        expect(failure.ok).to_equal(false)
+        expect(failure.stepName).to_equal("network")
+        expect(failure.shouldStartRemote).to_equal(false)
+        expect(reviewRemoteSourceLinesModeled()).to_equal(316)

@@ -1,0 +1,64 @@
+"""
+`simple sbom` CLI handler spec.
+
+Mission-critical robustness campaign, lane SBOM2 sbom-cli-wiring. Tests the
+`run_sbom` handler function directly (not by exec'ing bin/simple, which is
+the Rust seed and won't have this lane's .spl changes) against a small
+fixture directory: does it produce an SBOM JSON file containing the
+discovered file entries, and is repeated generation byte-for-byte
+deterministic.
+"""
+
+use std.spec
+use app.cli.sbom_command.{run_sbom}
+use std.io_runtime.{file_write, read_file, mkdir_p, file_exists}  # NOTE: never `app.io` — see project memory.
+
+val TMP_ROOT: text = "/tmp/sstack_sbom_cli_test_root"
+val TMP_OUT_DIR: text = "/tmp/sstack_sbom_cli_test_out"
+
+fn setup_fixture():
+    mkdir_p(TMP_ROOT)
+    mkdir_p(TMP_OUT_DIR)
+    file_write("{TMP_ROOT}/a.spl", "fn a():\n    pass\n")
+    file_write("{TMP_ROOT}/b.spl", "fn b():\n    pass\n")
+    file_write("{TMP_ROOT}/c.spl", "fn c():\n    pass\n")
+
+describe "sbom CLI handler — generates SBOM JSON":
+
+    it "produces an output file containing the discovered file entries":
+        setup_fixture()
+        val out_path = "{TMP_OUT_DIR}/sbom_entries.spdx.json"
+        val code = run_sbom([TMP_ROOT, "--out={out_path}"])
+        expect(code).to_equal(0)
+        expect(file_exists(out_path)).to_equal(true)
+        val json = read_file(out_path)
+        expect(json).to_contain("\"spdxVersion\": \"SPDX-2.3\"")
+        expect(json).to_contain("a.spl")
+        expect(json).to_contain("b.spl")
+        expect(json).to_contain("c.spl")
+        expect(json).to_contain("\"checksumValue\"")
+        expect(json).to_contain("\"algorithm\": \"SHA256\"")
+
+    it "honors --name= and --version= overrides":
+        setup_fixture()
+        val out_path = "{TMP_OUT_DIR}/sbom_name.spdx.json"
+        val code = run_sbom([TMP_ROOT, "--out={out_path}", "--name=my.pkg", "--version=9.9.9"])
+        expect(code).to_equal(0)
+        val json = read_file(out_path)
+        expect(json).to_contain("\"name\": \"my.pkg\"")
+        expect(json).to_contain("my.pkg-9.9.9")
+
+describe "sbom CLI handler — determinism (certification requirement)":
+
+    it "generating twice from identical inputs is byte-for-byte identical":
+        setup_fixture()
+        val out_path_1 = "{TMP_OUT_DIR}/sbom_run1.spdx.json"
+        val out_path_2 = "{TMP_OUT_DIR}/sbom_run2.spdx.json"
+        val code_1 = run_sbom([TMP_ROOT, "--out={out_path_1}"])
+        val code_2 = run_sbom([TMP_ROOT, "--out={out_path_2}"])
+        expect(code_1).to_equal(0)
+        expect(code_2).to_equal(0)
+        val json_1 = read_file(out_path_1)
+        val json_2 = read_file(out_path_2)
+        expect(json_1).to_equal(json_2)
+        expect(json_1.len() > 0).to_equal(true)

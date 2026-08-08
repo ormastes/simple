@@ -1,0 +1,225 @@
+# Focused deterministic branches omitted by the broad backend matrix.
+# Coverage is static/unmeasured until the current parser/compiler conflicts clear.
+# @tag: unit, crypto, x25519mlkem768, branch, fail-closed
+
+use std.spec.{describe, it, expect, fail}
+use std.sffi.io.{file_hash_sha256}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use os.crypto.x25519_mlkem768.execution_policy.{
+    x25519_mlkem768_resolve_vulkan_candidate}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen_cuda_candidate,
+    x25519_mlkem768_encapsulate_cuda_candidate,
+    x25519_mlkem768_decapsulate_cuda_candidate,
+    x25519_mlkem768_keygen_metal_candidate,
+    x25519_mlkem768_encapsulate_metal_candidate,
+    x25519_mlkem768_decapsulate_metal_candidate,
+    x25519_mlkem768_keygen_vulkan_candidate,
+    x25519_mlkem768_encapsulate_vulkan_candidate,
+    x25519_mlkem768_decapsulate_vulkan_candidate}
+use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
+    X25519MlKem768CudaNttExecutor, x25519_mlkem768_cuda_ntt_execute}
+use os.crypto.x25519_mlkem768.metal_ntt_provider.{
+    X25519MlKem768MetalNttExecutor, x25519_mlkem768_metal_ntt_execute}
+use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
+    X25519MlKem768VulkanNttExecutor, x25519_mlkem768_vulkan_ntt_execute}
+
+val _BRANCH_INVALID_SPIRV =
+    "test/fixtures/crypto/x25519mlkem768/invalid_magic.spv"
+val _BRANCH_INVALID_CUBIN =
+    "test/fixtures/crypto/x25519mlkem768/not_a_module.cubin"
+val _BRANCH_INVALID_METALLIB =
+    "test/fixtures/crypto/x25519mlkem768/not_a_library.metallib"
+
+fn _branch_list(count: i64) -> list:
+    var out: list = []
+    var index: i64 = 0
+    while index < count:
+        out.push((index * 29 + 17) % 3329)
+        index = index + 1
+    out
+
+fn _branch_bytes32() -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < 32:
+        out.push((index + 1).to_u8())
+        index = index + 1
+    out
+
+fn _branch_config(backend: X25519MlKem768Backend) -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: backend,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy:
+            X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+describe "X25519MLKEM768 deterministic branch contract":
+    it "should reject non-multiple batches before GPU initialization":
+        step("Submit a one-coefficient batch to every GPU provider")
+        val malformed = [17]
+        var cuda = X25519MlKem768CudaNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx")
+        val cuda_result = x25519_mlkem768_cuda_ntt_execute(cuda, malformed)
+        expect(cuda_result.completed).to_be(false)
+        expect(cuda_result.reason).to_equal("cuda-ntt-input-size-invalid")
+        cuda.shutdown()
+
+        var metal = X25519MlKem768MetalNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
+        match x25519_mlkem768_metal_ntt_execute(metal, malformed):
+            case Ok(_): fail("Metal accepted a non-multiple batch")
+            case Err(reason):
+                expect(reason).to_equal("metal-ntt-input-size-invalid")
+        metal.shutdown()
+
+        var vulkan = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "missing-forward.spv", "", "missing-inverse.spv", "")
+        match x25519_mlkem768_vulkan_ntt_execute(vulkan, malformed):
+            case Ok(_): fail("Vulkan accepted a non-multiple batch")
+            case Err(reason):
+                expect(reason).to_equal("vulkan-ntt-input-size-invalid")
+        vulkan.shutdown()
+
+    it "should reject unpinned CUDA and Metal binary bytes before hardware":
+        step("Submit compiled artifacts without their pinned digests")
+        val fixture = _branch_list(256)
+        var cuda = X25519MlKem768CudaNttExecutor.create_binary(
+            _BRANCH_INVALID_CUBIN, "")
+        val cuda_result = x25519_mlkem768_cuda_ntt_execute(cuda, fixture)
+        expect(cuda_result.completed).to_be(false)
+        expect(cuda_result.reason).to_equal("cuda-ntt-binary-digest-mismatch")
+        cuda.shutdown()
+
+        var metal = X25519MlKem768MetalNttExecutor.create_binary(
+            _BRANCH_INVALID_METALLIB, "")
+        match x25519_mlkem768_metal_ntt_execute(metal, fixture):
+            case Ok(_): fail("Metal accepted an unpinned metallib")
+            case Err(reason):
+                expect(reason).to_equal("metal-ntt-binary-digest-mismatch")
+        metal.shutdown()
+
+    it "should reject CUDA source without both entry points after digest admission":
+        step("Admit a digest-matched source that lacks CUDA entry points")
+        var executor = X25519MlKem768CudaNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
+        executor.expected_source_digest = executor.source_digest
+        val result = x25519_mlkem768_cuda_ntt_execute(
+            executor, _branch_list(256))
+        expect(result.completed).to_be(false)
+        expect(result.reason).to_equal("cuda-ntt-artifact-invalid")
+        executor.shutdown()
+
+    it "should reject Vulkan digest and magic failures before initialization":
+        step("Exercise digest mismatch and invalid SPIR-V magic independently")
+        val fixture = _branch_list(256)
+        var mismatch = X25519MlKem768VulkanNttExecutor.create_binaries(
+            _BRANCH_INVALID_SPIRV, "wrong-forward-digest",
+            _BRANCH_INVALID_SPIRV, "wrong-inverse-digest")
+        match x25519_mlkem768_vulkan_ntt_execute(mismatch, fixture):
+            case Ok(_): fail("Vulkan accepted mismatched SPIR-V digests")
+            case Err(reason):
+                expect(reason).to_equal("vulkan-ntt-binary-digest-mismatch")
+        mismatch.shutdown()
+
+        val digest = file_hash_sha256(_BRANCH_INVALID_SPIRV)
+        var invalid_magic = X25519MlKem768VulkanNttExecutor.create_binaries(
+            _BRANCH_INVALID_SPIRV, digest,
+            _BRANCH_INVALID_SPIRV, digest)
+        match x25519_mlkem768_vulkan_ntt_execute(invalid_magic, fixture):
+            case Ok(_): fail("Vulkan accepted invalid SPIR-V magic")
+            case Err(reason):
+                expect(reason).to_equal("vulkan-ntt-binary-magic-invalid")
+        invalid_magic.shutdown()
+
+    it "should reject Vulkan use after shutdown before artifact access":
+        step("Close the executor before submitting a valid-size batch")
+        var executor = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "missing-forward.spv", "", "missing-inverse.spv", "")
+        executor.shutdown()
+        match x25519_mlkem768_vulkan_ntt_execute(
+                executor, _branch_list(256)):
+            case Ok(_): fail("Vulkan executor ran after shutdown")
+            case Err(reason):
+                expect(reason).to_equal("vulkan-ntt-executor-closed")
+
+    it "should reject a non-Vulkan backend in the Vulkan resolver":
+        step("Request CUDA through the Vulkan-only candidate resolver")
+        match x25519_mlkem768_resolve_vulkan_candidate(
+                _branch_config(X25519MlKem768Backend.Cuda), "keygen"):
+            case Ok(_): fail("Vulkan resolver accepted CUDA")
+            case Err(reason):
+                expect(reason).to_equal(
+                    "requested backend is not the Vulkan candidate")
+
+    it "should reject secondary GPU key-material guards before provider access":
+        step("Submit malformed secondary key material to CUDA and Metal candidates")
+        val private_key = _branch_bytes32()
+        val seed = _branch_list(32)
+        val client_share = _branch_list(1216)
+        val server_share = _branch_list(1120)
+
+        var cuda = X25519MlKem768CudaNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx")
+        match x25519_mlkem768_keygen_cuda_candidate(
+                _branch_config(X25519MlKem768Backend.Cuda), cuda,
+                private_key, [], seed):
+            case Ok(_): fail("CUDA keygen accepted a short seed")
+            case Err(reason): expect(reason).to_contain("three 32-byte inputs")
+        match x25519_mlkem768_encapsulate_cuda_candidate(
+                _branch_config(X25519MlKem768Backend.Cuda), cuda,
+                client_share, [], seed):
+            case Ok(_): fail("CUDA encapsulation accepted a short private key")
+            case Err(reason): expect(reason).to_contain("32-byte inputs")
+        match x25519_mlkem768_decapsulate_cuda_candidate(
+                _branch_config(X25519MlKem768Backend.Cuda), cuda,
+                server_share, private_key, []):
+            case Ok(_): fail("CUDA decapsulation accepted a short key")
+            case Err(reason): expect(reason).to_contain("invalid key sizes")
+        cuda.shutdown()
+
+        var metal = X25519MlKem768MetalNttExecutor.create(
+            "src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt.metal")
+        match x25519_mlkem768_keygen_metal_candidate(
+                _branch_config(X25519MlKem768Backend.Metal), metal,
+                private_key, [], seed):
+            case Ok(_): fail("Metal keygen accepted a short seed")
+            case Err(reason): expect(reason).to_contain("three 32-byte inputs")
+        match x25519_mlkem768_encapsulate_metal_candidate(
+                _branch_config(X25519MlKem768Backend.Metal), metal,
+                client_share, [], seed):
+            case Ok(_): fail("Metal encapsulation accepted a short private key")
+            case Err(reason): expect(reason).to_contain("32-byte inputs")
+        match x25519_mlkem768_decapsulate_metal_candidate(
+                _branch_config(X25519MlKem768Backend.Metal), metal,
+                server_share, private_key, []):
+            case Ok(_): fail("Metal decapsulation accepted a short key")
+            case Err(reason): expect(reason).to_contain("invalid key sizes")
+        metal.shutdown()
+
+        var vulkan = X25519MlKem768VulkanNttExecutor.create_binaries(
+            "missing-forward.spv", "", "missing-inverse.spv", "")
+        match x25519_mlkem768_keygen_vulkan_candidate(
+                _branch_config(X25519MlKem768Backend.Vulkan), vulkan,
+                private_key, [], seed):
+            case Ok(_): fail("Vulkan keygen accepted a short seed")
+            case Err(reason): expect(reason).to_contain("three 32-byte inputs")
+        match x25519_mlkem768_encapsulate_vulkan_candidate(
+                _branch_config(X25519MlKem768Backend.Vulkan), vulkan,
+                client_share, [], seed):
+            case Ok(_): fail("Vulkan encapsulation accepted a short private key")
+            case Err(reason): expect(reason).to_contain("32-byte inputs")
+        match x25519_mlkem768_decapsulate_vulkan_candidate(
+                _branch_config(X25519MlKem768Backend.Vulkan), vulkan,
+                server_share, private_key, []):
+            case Ok(_): fail("Vulkan decapsulation accepted a short key")
+            case Err(reason): expect(reason).to_contain("invalid key sizes")
+        vulkan.shutdown()

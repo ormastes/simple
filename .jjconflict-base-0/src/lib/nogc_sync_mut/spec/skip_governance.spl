@@ -1,0 +1,243 @@
+# Skip governance (WP-9, 2026-08-07)
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# `skip_ref(id)` resolves a skip id into a REAL SDN-tracked record
+# (category/reason/owner/requirement/alternative_evidence/venue/expiry/issue)
+# read from doc/08_tracking/skip/<id>.sdn. Under the `critical` profile the
+# validators here REJECT (a real diagnostic, not a warning that gets
+# ignored): `skip_it` (carries no metadata at all), bare `pending` (same),
+# free-text-only reasons (a string with no structured record behind it),
+# "weak" reasons (empty/short/filler-word), expired records, and ownerless
+# records. Under non-critical profiles every one of these passes exactly as
+# before (see `_gate`) — this file does not tighten anyone's default.
+#
+# The defect this file replaces: `decorators.spl` used to substitute the
+# fabricated string "Condition not met" / "Condition matched" whenever a
+# caller gave no real reason (skip_governance_probe_spec.spl and
+# decorators_skip_governance_spec.spl assert those exact literals are GONE).
+# A skip with no real reason must be REJECTED under `critical`, not silently
+# handed a plausible-looking placeholder — the same fail-open shape found in
+# stub bodies, enum coverage, and the noalloc manifest.
+#
+# Severity is NOT a new hand-rolled table: `_is_critical` below routes
+# through the WP-3 canonical resolver
+# (`compiler.common.assurance.policy.strictness_for_profile_name` +
+# `compiler.common.assurance.policy_schema.AssuranceStrictness`), the same
+# resolver `driver_safety_severity.spl` uses for the safety pass.
+
+use compiler.common.assurance.policy.strictness_for_profile_name
+use compiler.common.assurance.policy_schema.AssuranceStrictness
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ================================================================
+# SkipRecord — the SDN-tracked shape
+# ================================================================
+
+pub struct SkipRecord:
+    id: text
+    category: text              # required
+    reason: text                 # required
+    owner: text                   # required
+    requirement: text             # optional — REQ-MC-* or other requirement id
+    alternative_evidence: text    # optional
+    venue: text                   # optional — where else this got coverage
+    expiry: text                  # required, "YYYY-MM-DD"
+    issue: text                   # required — tracking link
+
+pub enum SkipRejectReason:
+    Pass          # not rejected
+    SkipIt
+    BarePending
+    FreeTextOnly
+    Weak
+    Expired
+    Ownerless
+
+pub struct SkipValidation:
+    ok: bool
+    reason: SkipRejectReason
+    message: text
+
+# ================================================================
+# skip_ref(id) — resolve a real SDN-tracked record
+# ================================================================
+#
+# Absence of a registered `<id>.sdn` file is itself an unregistered, ownerless,
+# free-text-only record — NOT a fabricated placeholder — so the validator
+# rejects it under `critical` for the true reason, and non-critical profiles
+# pass it through exactly as an unresolved skip does today.
+
+pub fn skip_ref(id: text) -> SkipRecord:
+    skip_ref_in_dir(id, "doc/08_tracking/skip")
+
+# Directory-parameterized form so specs can point at a fixture directory
+# instead of the real tracking tree.
+# @tag(id=skip_id, dir=directory_path)
+pub fn skip_ref_in_dir(id: text, dir: text) -> SkipRecord:
+    val path = "{dir}/{id}.sdn"
+    if not rt_file_exists(path):
+        return _empty_skip_record(id)
+    _parse_skip_sdn(id, rt_file_read_text(path))
+
+fn _empty_skip_record(id: text) -> SkipRecord:
+    SkipRecord(
+        id: id, category: "", reason: "", owner: "",
+        requirement: "", alternative_evidence: "", venue: "",
+        expiry: "", issue: ""
+    )
+
+# ================================================================
+# SDN parsing (flat `key: value` lines — repo convention, not JSON/YAML)
+# ================================================================
+
+fn _sdn_field(lines: [text], key: text) -> text:
+    val prefix = key + ":"
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.starts_with("#"):
+            continue
+        if line.starts_with(prefix):
+            return line[prefix.len()..].trim()
+    ""
+
+fn _parse_skip_sdn(id: text, sdn_text: text) -> SkipRecord:
+    val lines = sdn_text.split("\n")
+    SkipRecord(
+        id: id,
+        category: _sdn_field(lines, "category"),
+        reason: _sdn_field(lines, "reason"),
+        owner: _sdn_field(lines, "owner"),
+        requirement: _sdn_field(lines, "requirement"),
+        alternative_evidence: _sdn_field(lines, "alternative_evidence"),
+        venue: _sdn_field(lines, "venue"),
+        expiry: _sdn_field(lines, "expiry"),
+        issue: _sdn_field(lines, "issue")
+    )
+
+# ================================================================
+# Weak-reason predicate (same shape as REQC001's `_is_weak_rationale`,
+# `src/compiler/35.semantics/lint/required_comment.spl:106`)
+# ================================================================
+
+fn is_weak_reason(msg: text) -> bool:
+    val t = msg.trim().lower()
+    if t == "":
+        return true
+    if t.len() < 10:
+        return true
+    if t == "todo" or t == "fix" or t == "later" or t == "unknown":
+        return true
+    if t == "because" or t == "n/a" or t == "na":
+        return true
+    # The two placeholders this WP removes from decorators.spl. Listed
+    # explicitly so a future reintroduction of the same fail-open shape is
+    # still caught by the weak-reason gate, not just by the removal itself.
+    if t == "condition not met" or t == "condition matched":
+        return true
+    false
+
+# ================================================================
+# Expiry
+# ================================================================
+# "YYYY-MM-DD" compares correctly as YYYYMMDD once dashes are stripped.
+# A malformed or missing expiry is NOT proven unexpired, so it is treated as
+# expired (fail-closed) rather than silently passing.
+
+fn _yyyymmdd(date: text) -> i64:
+    val d = date.trim().replace("-", "")
+    if d.len() != 8:
+        return -1
+    d.to_i64() ?? -1
+
+fn _today_yyyymmdd() -> i64:
+    val result = rt_process_run("/bin/sh", ["-c", "date +%Y%m%d"])
+    val stdout = result[0]
+    val code = result[2]
+    if code != 0:
+        return -1
+    stdout.trim().to_i64() ?? -1
+
+fn is_expired(expiry: text) -> bool:
+    val parsed = _yyyymmdd(expiry)
+    if parsed < 0:
+        return true
+    val today = _today_yyyymmdd()
+    if today < 0:
+        return true
+    parsed < today
+
+# ================================================================
+# Severity gate — routed through the WP-3 canonical resolver, not a new table
+# ================================================================
+
+fn _is_critical(profile: text) -> bool:
+    strictness_for_profile_name(profile).at_least(AssuranceStrictness.Critical)
+
+fn _gate(profile: text, reason: SkipRejectReason, message: text) -> SkipValidation:
+    if _is_critical(profile):
+        return SkipValidation(ok: false, reason: reason, message: message)
+    SkipValidation(ok: true, reason: SkipRejectReason.Pass, message: message)
+
+fn _pass() -> SkipValidation:
+    SkipValidation(ok: true, reason: SkipRejectReason.Pass, message: "")
+
+# ================================================================
+# Public validators
+# ================================================================
+
+# `skip_it` carries zero metadata by construction — reject unconditionally
+# under critical.
+pub fn validate_skip_it(profile: text) -> SkipValidation:
+    _gate(profile, SkipRejectReason.SkipIt,
+        "skip_it() carries no SDN-tracked reason, owner, or expiry — use skip_ref(id) with a registered doc/08_tracking/skip/<id>.sdn record")
+
+# Bare `pending(name)` carries zero metadata by construction — reject
+# unconditionally under critical.
+pub fn validate_bare_pending(profile: text) -> SkipValidation:
+    _gate(profile, SkipRejectReason.BarePending,
+        "pending(name) carries no SDN-tracked metadata — use skip_ref(id) with a registered doc/08_tracking/skip/<id>.sdn record")
+
+# `skip(name, reason)` — a bare string reason with no structured record
+# behind it. Weak/empty reasons are reported as Weak (more specific);
+# anything else non-empty is still FreeTextOnly under critical because it is
+# not SDN-tracked (no owner/expiry/issue).
+# @tag(reason=skip_reason, profile=assurance_profile_name)
+pub fn validate_free_text_skip(reason: text, profile: text) -> SkipValidation:
+    if is_weak_reason(reason):
+        return _gate(profile, SkipRejectReason.Weak,
+            "skip reason is weak or empty: \"{reason}\"")
+    _gate(profile, SkipRejectReason.FreeTextOnly,
+        "skip reason \"{reason}\" is free text with no SDN-tracked category/owner/expiry/issue — use skip_ref(id) with a registered record instead")
+
+# Full validation of a resolved SkipRecord (from `skip_ref`/`skip_ref_in_dir`).
+pub fn validate_skip_ref_record(record: SkipRecord, profile: text) -> SkipValidation:
+    if (record.category == "" and record.reason == "" and record.owner == "" and
+        record.issue == "" and record.expiry == ""):
+        return _gate(profile, SkipRejectReason.FreeTextOnly,
+            "skip id \"{record.id}\" has no registered SDN record (category/reason/owner/expiry/issue all empty) — add doc/08_tracking/skip/{record.id}.sdn")
+    if record.owner == "":
+        return _gate(profile, SkipRejectReason.Ownerless,
+            "skip id \"{record.id}\" SDN record has no owner field")
+    if is_weak_reason(record.reason):
+        return _gate(profile, SkipRejectReason.Weak,
+            "skip id \"{record.id}\" SDN record reason is weak or missing: \"{record.reason}\"")
+    if record.expiry == "" or is_expired(record.expiry):
+        return _gate(profile, SkipRejectReason.Expired,
+            "skip id \"{record.id}\" SDN record has no valid unexpired expiry (expiry=\"{record.expiry}\")")
+    if record.category == "":
+        return _gate(profile, SkipRejectReason.FreeTextOnly,
+            "skip id \"{record.id}\" SDN record has no category field")
+    if record.issue == "":
+        return _gate(profile, SkipRejectReason.FreeTextOnly,
+            "skip id \"{record.id}\" SDN record has no issue field")
+    _pass()
+
+# Convenience: resolve + validate an id against the real tracking directory.
+# @tag(id=skip_id, profile=assurance_profile_name)
+pub fn validate_skip_ref(id: text, profile: text) -> SkipValidation:
+    validate_skip_ref_record(skip_ref(id), profile)

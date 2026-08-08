@@ -1,0 +1,81 @@
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+# Lane NIL1 `convert-nodes-loud-fallback` (mission-critical robustness
+# campaign, 2026-07-29). See doc/08_tracking/bug/
+# spawn_call_expr_silently_becomes_nillit_2026-07-29.md.
+#
+# `convert_flat_expr` / `convert_flat_stmt` (the flat-AST -> tree-AST bridge
+# used by every `parse_full_frontend` call) each ended in a generic "we don't
+# recognize this node kind" fallback that silently substituted a bare
+# `ExprKind.NilLit` / no-op `Stmt` and recorded NO diagnostic anywhere. Every
+# prior instance of this exact fallback firing on a real node kind (slice-
+# index, cast, assign, compound-assign, range, spread, dict-lit, block-bodied
+# lambda -- see convert_nodes.spl's own accumulated comment trail) was
+# independently rediscovered via a silent-wrong-answer user report, because
+# the fallback itself never recorded anything. Lane G8 found one more,
+# unpatched instance: `spawn(...)` call expressions (EXPR_SPAWN, tag 39,
+# reserved-keyword-headed) have no dispatch arm at all and silently vanish
+# (callee + every argument discarded, zero diagnostic).
+#
+# Fix (this lane): the fallback ITSELF now calls `parser_error(...)` (the
+# same channel `core/parser.spl` uses for every other diagnostic), which sets
+# `par_had_error` -- what `parser_has_errors()` surfaces and what
+# `parse_full_frontend`/the driver actually gate on. The NilLit/no-op shape
+# is still returned afterward (error recovery, not a hard stop).
+#
+# HARNESS NOTE (matches enum_match_unknown_variant_diagnostic_spec.spl /
+# iso_parse_pipeline_spec.spl): the parse step is inlined in each `it` block
+# on purpose -- routing it through a shared module-level helper fn has
+# previously been shown (same interpreter struct-mutation-visibility family)
+# to lose recorded parser/lowering state when read back afterward.
+#
+# REGRESSION-RISK NOTE (probed before landing, not just asserted): grepped
+# the owned tree (excluding vendor/doc/comments) for every OTHER unhandled
+# tag this same fallback now also catches -- STMT_COMPTIME, STMT_RECEIVE,
+# STMT_BIND, STMT_LAZY_VAL_DECL, STMT_ASM_ASSERT, STMT_LABELED_LOOP,
+# STMT_STATIC_FOR, EXPR_AWAIT, EXPR_YIELD, EXPR_ASYNC_BLOCK, EXPR_DO_BLOCK,
+# EXPR_ATOM, EXPR_NEW. Real (non-comment, non-docstring) hits: zero, except
+# EXPR_SPAWN itself (this bug) and one `static_for` occurrence
+# (`10.frontend/core/interpreter/test_interp.spl`, itself fed through the
+# SEPARATE tree-walk `core_interpret()` path, never through this bridge). The
+# 3 named regression specs (iso_parse_pipeline_spec.spl 3/3,
+# enum_match_unknown_variant_diagnostic_spec.spl 3/3,
+# capability_system_spec.spl 40/40) all still pass unchanged after this fix.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+
+describe "convert_nodes.spl generic node-kind fallback is loud, not silent":
+    it "records a parser error for a real spawn(...) call expression (EXPR_SPAWN, previously silent NilLit)":
+        val src = "class Worker:\n" +
+            "    id: i64\n" +
+            "\n" +
+            "fn boot(w: Worker):\n" +
+            "    spawn(w)\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_nil1_spawn.spl", "fixture_nil1_spawn", Logger(level: 0))
+        assert_true(parser_has_errors())
+
+    it "records zero parser errors for an ordinary program using only well-handled node kinds":
+        val src = "fn add(a: i64, b: i64) -> i64:\n" +
+            "    val sum = a + b\n" +
+            "    if sum > 10:\n" +
+            "        return sum\n" +
+            "    sum\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    var total = 0\n" +
+            "    for i in 0..5:\n" +
+            "        total += add(i, 1)\n" +
+            "    total\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_nil1_ok.spl", "fixture_nil1_ok", Logger(level: 0))
+        assert_false(parser_has_errors())
+
+    it "records a parser error for a real static_for statement (STMT_STATIC_FOR, another unhandled kind with no dispatch arm)":
+        val src = "fn sum_all(values: [i64]) -> i64:\n" +
+            "    var total = 0\n" +
+            "    static_for item in values:\n" +
+            "        total = total + item\n" +
+            "    total\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_nil1_staticfor.spl", "fixture_nil1_staticfor", Logger(level: 0))
+        assert_true(parser_has_errors())

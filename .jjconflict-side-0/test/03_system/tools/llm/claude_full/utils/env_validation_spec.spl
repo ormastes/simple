@@ -1,0 +1,72 @@
+"""
+# Claude Full env validation
+
+Pure Simple coverage for bounded integer env parsing.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.envValidation.*
+
+describe "Claude full env validation":
+    it "uses the default when the env value is absent or empty":
+        step("Check absent and empty values")
+        expect(validateBoundedIntEnvVar("TEST_LIMIT", nil, 8, 20).effective).to_equal(8)
+        expect(validateBoundedIntEnvVar("TEST_LIMIT", nil, 8, 20).status).to_equal("valid")
+        expect(validateBoundedIntEnvVar("TEST_LIMIT", Some(""), 8, 20).effective).to_equal(8)
+        expect(validateBoundedIntEnvVar("TEST_LIMIT", Some(""), 8, 20).message).to_be_nil()
+        expect(validateBoundedIntEnvVar("TEST_LIMIT", Some(""), 8, 20).debugMessage).to_be_nil()
+
+    it "accepts positive integer prefixes":
+        step("Check parseInt-style prefix parsing")
+        val clean = validateBoundedIntEnvVar("TEST_LIMIT", Some("12"), 8, 20)
+        expect(clean.effective).to_equal(12)
+        expect(clean.status).to_equal("valid")
+        expect(clean.message).to_be_nil()
+
+        val prefixed = validateBoundedIntEnvVar("TEST_LIMIT", Some("  +15ms"), 8, 20)
+        expect(prefixed.effective).to_equal(15)
+        expect(prefixed.status).to_equal("valid")
+
+    it "rejects invalid and non-positive values":
+        step("Check invalid fallback")
+        val invalid = validateBoundedIntEnvVar("TEST_LIMIT", Some("abc"), 8, 20)
+        expect(invalid.effective).to_equal(8)
+        expect(invalid.status).to_equal("invalid")
+        expect(invalid.message).to_equal(Some("Invalid value \"abc\" (using default: 8)"))
+        expect(invalid.debugMessage).to_equal(Some("TEST_LIMIT Invalid value \"abc\" (using default: 8)"))
+
+        val zero = validateBoundedIntEnvVar("TEST_LIMIT", Some("0"), 8, 20)
+        expect(zero.effective).to_equal(8)
+        expect(zero.status).to_equal("invalid")
+
+        val negative = validateBoundedIntEnvVar("TEST_LIMIT", Some("-4"), 8, 20)
+        expect(negative.effective).to_equal(8)
+        expect(negative.status).to_equal("invalid")
+
+    it "caps values above the upper limit":
+        step("Check capping")
+        val capped = validateBoundedIntEnvVar("TEST_LIMIT", Some("40"), 8, 20)
+        expect(capped.effective).to_equal(20)
+        expect(capped.status).to_equal("capped")
+        expect(capped.message).to_equal(Some("Capped from 40 to 20"))
+        expect(capped.debugMessage).to_equal(Some("TEST_LIMIT Capped from 40 to 20"))
+
+        val huge = validateBoundedIntEnvVar("TEST_LIMIT", Some("999999999999999999999"), 8, 20)
+        expect(huge.effective).to_equal(20)
+        expect(huge.status).to_equal("capped")
+        expect(huge.message).to_equal(Some("Capped from 1e+21 to 20"))
+
+        val belowScientific = validateBoundedIntEnvVar("TEST_LIMIT", Some("100000000000000000000"), 8, 20)
+        expect(belowScientific.message).to_equal(Some("Capped from 100000000000000000000 to 20"))
+
+        val roundedBelowScientific = validateBoundedIntEnvVar("TEST_LIMIT", Some("149999999999999999999"), 8, 20)
+        expect(roundedBelowScientific.message).to_equal(Some("Capped from 150000000000000000000 to 20"))
+
+        val maxI64Overflow = validateBoundedIntEnvVar("TEST_LIMIT", Some("9223372036854775808"), 8, 20)
+        expect(maxI64Overflow.message).to_equal(Some("Capped from 9223372036854776000 to 20"))
+
+        val sameDoubleBucket = validateBoundedIntEnvVar("TEST_LIMIT", Some("9223372036854776808"), 8, 20)
+        expect(sameDoubleBucket.message).to_equal(Some("Capped from 9223372036854776000 to 20"))
+
+        val u64Max = validateBoundedIntEnvVar("TEST_LIMIT", Some("18446744073709551615"), 8, 20)
+        expect(u64Max.message).to_equal(Some("Capped from 18446744073709552000 to 20"))

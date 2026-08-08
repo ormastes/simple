@@ -1,0 +1,103 @@
+"""Calc text/logic/info functions spec.
+
+The everyday-Excel text tail (SUBSTITUTE/REPLACE/REPT/SEARCH/FIND/CHAR/CODE/
+PROPER/CLEAN/TEXTJOIN), logic (IFERROR/IFS/SWITCH/CHOOSE), and info predicates
+(ISTEXT/ISNUMBER/ISBLANK/ISERROR/ISERR/ISNA/N/T). Every expected value is
+verified against Excel semantics, including the fail-closed #ERR cases.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    """Evaluate a formula in an otherwise-empty sheet (A2 stays blank)."""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "a")
+    sh.set_value("A3", "b")
+    sh.set_value("C1", "5")
+    sh.set_value("C2", "hello")
+    sh.set_value("C3", "\tworld")
+    sh.set_value("B1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("B1"))
+
+describe "Calc text functions — substitute/replace/rept":
+    it "SUBSTITUTE replaces all or a chosen instance":
+        expect(_eval("=SUBSTITUTE(\"abcabc\", \"a\", \"x\")")).to_equal("xbcxbc")
+        expect(_eval("=SUBSTITUTE(\"abcabc\", \"a\", \"x\", 2)")).to_equal("abcxbc")
+
+    it "REPLACE overwrites a 1-based character span":
+        expect(_eval("=REPLACE(\"abcdef\", 2, 3, \"XY\")")).to_equal("aXYef")
+
+    it "REPT repeats text N times":
+        expect(_eval("=REPT(\"ab\", 3)")).to_equal("ababab")
+        # An empty formula result renders as the raw formula, so wrap it to make
+        # the empty string observable.
+        expect(_eval("=\"[\"&REPT(\"x\", 0)&\"]\"")).to_equal("[]")
+
+describe "Calc text functions — search/find":
+    it "SEARCH is case-insensitive and 1-based":
+        expect(_eval("=SEARCH(\"BC\", \"abcabc\")")).to_equal("2")
+
+    it "FIND is case-sensitive and fails closed when absent":
+        expect(_eval("=FIND(\"bc\", \"abcabc\")")).to_equal("2")
+        expect(_eval("=FIND(\"BC\", \"abcabc\")")).to_contain("#ERR")
+        expect(_eval("=SEARCH(\"zz\", \"abcabc\")")).to_contain("#ERR")
+
+describe "Calc text functions — char/code/proper/clean":
+    it "CHAR and CODE round-trip ASCII":
+        expect(_eval("=CHAR(65)")).to_equal("A")
+        expect(_eval("=CODE(\"A\")")).to_equal("65")
+
+    it "PROPER title-cases each word":
+        expect(_eval("=PROPER(\"hello wORLD\")")).to_equal("Hello World")
+
+    it "CLEAN strips control characters":
+        expect(_eval("=CLEAN(C3)")).to_equal("world")
+
+describe "Calc text functions — textjoin":
+    it "TEXTJOIN over a range honours ignore_empty":
+        expect(_eval("=TEXTJOIN(\"-\", TRUE, A1:A3)")).to_equal("a-b")
+        expect(_eval("=TEXTJOIN(\"-\", FALSE, A1:A3)")).to_equal("a--b")
+
+describe "Calc logic functions":
+    it "IFERROR substitutes the fallback on an error":
+        expect(_eval("=IFERROR(1/0, 42)")).to_equal("42")
+        expect(_eval("=IFERROR(10, 42)")).to_equal("10")
+
+    it "CHOOSE indexes 1-based and fails closed out of range":
+        expect(_eval("=CHOOSE(2, \"a\", \"b\", \"c\")")).to_equal("b")
+        expect(_eval("=CHOOSE(9, \"a\", \"b\")")).to_contain("#ERR")
+
+    it "SWITCH matches a case or the trailing default":
+        expect(_eval("=SWITCH(3, 1, \"one\", 3, \"three\", \"other\")")).to_equal("three")
+        expect(_eval("=SWITCH(7, 1, \"one\", 3, \"three\", \"other\")")).to_equal("other")
+        expect(_eval("=SWITCH(7, 1, \"one\", 3, \"three\")")).to_contain("#ERR")
+
+    it "IFS returns the first true branch and fails closed with none":
+        expect(_eval("=IFS(FALSE(), 1, TRUE(), 2)")).to_equal("2")
+        expect(_eval("=IFS(FALSE(), 1, FALSE(), 2)")).to_contain("#ERR")
+
+describe "Calc info predicates":
+    it "ISNUMBER / ISTEXT / ISBLANK classify values":
+        expect(_eval("=ISNUMBER(5)")).to_equal("TRUE")
+        expect(_eval("=ISNUMBER(\"x\")")).to_equal("FALSE")
+        expect(_eval("=ISTEXT(\"x\")")).to_equal("TRUE")
+        expect(_eval("=ISTEXT(5)")).to_equal("FALSE")
+        expect(_eval("=ISBLANK(A2)")).to_equal("TRUE")
+        expect(_eval("=ISBLANK(A1)")).to_equal("FALSE")
+
+    it "ISERROR / ISERR / ISNA distinguish error kinds":
+        expect(_eval("=ISERROR(1/0)")).to_equal("TRUE")
+        expect(_eval("=ISERROR(5)")).to_equal("FALSE")
+        expect(_eval("=ISERR(1/0)")).to_equal("TRUE")
+        expect(_eval("=ISNA(1/0)")).to_equal("FALSE")
+        expect(_eval("=ISNA(5)")).to_equal("FALSE")
+
+    it "N and T coerce by type":
+        expect(_eval("=N(5)")).to_equal("5")
+        expect(_eval("=N(\"hello\")")).to_equal("0")
+        expect(_eval("=T(\"x\")")).to_equal("x")
+        expect(_eval("=\"[\"&T(5)&\"]\"")).to_equal("[]")

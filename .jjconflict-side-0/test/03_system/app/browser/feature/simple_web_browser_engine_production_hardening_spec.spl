@@ -1,0 +1,2686 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-001 REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-020 REQ-WEB-BROWSER-021 NFR-WEB-BROWSER-002 NFR-WEB-BROWSER-003 NFR-WEB-BROWSER-004 NFR-WEB-BROWSER-009
+# @evidence-display: links
+"""# Production Simple Browser User Flow
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
+
+## Overview
+
+Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
+Draw IR, and Engine2D paths, then drives page controls and browser chrome
+through structured UI access. Helpers fail closed until production evidence
+exists.
+
+## Examples
+
+The bookmark-title scenario admits a bounded renderer witness, commits it
+through the parent profile owner, restarts both renderer and profile-backed
+window, and lists the restored title or derived URL fallback.
+"""
+use std.spec.*
+use std.env.variables.{env_get}
+use std.io_runtime.{file_hash_sha256}
+use app.io.mod.{thread_sleep_ms}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_process.{
+    HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+    HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererEntry, HostedBrowserRendererRegistry
+}
+use os.hosted.browser_profile_store.{
+    BrowserBookmarkStore, BrowserProfileStore,
+    hosted_browser_parent_toggle_bookmark
+}
+use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderCounters
+}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_hit_test_index,
+    simple_web_layout_render_html_draw_ir_with_images,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage, BrowserRendererNetworkDecodeResult,
+    browser_renderer_bookmark_snapshot_decode,
+    browser_renderer_decoder_feed,
+    browser_renderer_decoder_new,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_encode,
+    browser_renderer_navigation_decode,
+    browser_renderer_navigation_encode,
+    browser_renderer_resize_encode,
+    browser_renderer_scroll_encode,
+    browser_text_input_overlay_empty
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource
+}
+use std.common.image.png_encode.{encode_argb_to_png}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserSession
+}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, set_mock_registry
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH,
+    be_dom_find_by_tag, be_dom_serialize_html
+}
+use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
+use common.ui.window_scene.{WmContentFrame}
+use os.hosted.hosted_browser_renderer_policy.{
+    HostedBrowserNavigationPermit
+}
+
+extern fn rt_file_delete(path: text) -> bool
+
+val BOOKMARK_TITLE_PROFILE_PATH = (
+    "/tmp/simple_web_browser_bookmark_title_spec.sqlite3"
+)
+val BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH = (
+    "/tmp/simple_web_browser_bookmark_title_in_process_spec.sqlite3"
+)
+val BOOKMARK_TITLE_512 = "a".repeat(510) + "é"
+val BOOKMARK_TITLE_513 = "a".repeat(511) + "é"
+
+fn _remove_bookmark_title_profile(path: text):
+    rt_file_delete(path)
+    rt_file_delete(path + "-wal")
+    rt_file_delete(path + "-shm")
+
+fn setup_hosted_bookmark_title_profile():
+    _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
+    _remove_bookmark_title_profile(BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH)
+    var mocks = MockResponseRegistry.create()
+    mocks.register(
+        "https://accepted-title.test/", 200,
+        "<title>{BOOKMARK_TITLE_512}</title><p>accepted</p>"
+    )
+    mocks.register(
+        "https://fallback-title.test/", 200,
+        "<title>{BOOKMARK_TITLE_513}</title><p>fallback</p>"
+    )
+    set_mock_registry(mocks)
+
+fn check_bookmark_title_witness_admission(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    expected_title: text
+):
+    expect(registry.bookmark_stored_title(window_id)).to_equal(
+        expected_title
+    )
+
+fn check_restarted_bookmark_listing(
+    registry: HostedWebContentRegistry
+):
+    val snapshot = registry.profile_bookmarks
+    expect(snapshot.entries.len()).to_equal(2)
+    var accepted_profile_count = 0
+    var fallback_profile_count = 0
+    for entry in snapshot.entries:
+        if entry.first == "https://accepted-title.test/":
+            accepted_profile_count = accepted_profile_count + 1
+            expect(entry.second).to_equal(BOOKMARK_TITLE_512)
+        elif entry.first == "https://fallback-title.test/":
+            fallback_profile_count = fallback_profile_count + 1
+            expect(entry.second).to_equal("")
+    expect(accepted_profile_count).to_equal(1)
+    expect(fallback_profile_count).to_equal(1)
+    var browser = BrowserSession.new_without_runtime()
+    expect(browser.load_bookmark_snapshot(snapshot)).to_equal(2)
+    val ui = browser.ui_access_snapshot()
+    var accepted_ui_count = 0
+    var fallback_ui_count = 0
+    for node in ui.nodes:
+        for prop in node.props:
+            if (prop.key == "href" and
+                prop.value == "https://accepted-title.test/"):
+                accepted_ui_count = accepted_ui_count + 1
+                expect(node.text_value).to_equal(BOOKMARK_TITLE_512)
+                expect(prop.value).to_equal(
+                    "https://accepted-title.test/"
+                )
+            elif (prop.key == "href" and
+                  prop.value == "https://fallback-title.test/"):
+                fallback_ui_count = fallback_ui_count + 1
+                expect(node.text_value).to_equal(
+                    "https://fallback-title.test/"
+                )
+                expect(prop.value).to_equal(
+                    "https://fallback-title.test/"
+                )
+    expect(accepted_ui_count).to_equal(1)
+    expect(fallback_ui_count).to_equal(1)
+
+fn _open_in_process_bookmark_document(
+    registry: HostedWebContentRegistry,
+    url: text,
+    event_id: i64,
+    now_ms: i64
+):
+    val _ = registry.dispatch_chrome_pointer(
+        event_id, 95, "address", true
+    )
+    val _ = registry.dispatch_chrome_pointer(
+        event_id + 1, 95, "address", false
+    )
+    val _ = registry.dispatch_text(event_id + 2, 95, url)
+    val _ = registry.dispatch_key(event_id + 3, 95, 13, true)
+    val _ = registry.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, now_ms, true
+    )
+    val _ = registry.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, now_ms + 1, true
+    )
+
+fn check_in_process_registry_profile_reopen(
+    sandbox_snapshot: BrowserBookmarkSnapshot
+):
+    val profile = match BrowserProfileStore.open(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    ):
+        Err(error):
+            fail(error.message())
+        Ok(opened):
+            opened
+    var first = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(profile)
+    )
+    val _ = first.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, 200000, true
+    )
+    _open_in_process_bookmark_document(
+        first, "https://accepted-title.test/", 200, 200001
+    )
+    val _ = first.dispatch_chrome_pointer(210, 95, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        211, 95, "favorite", false
+    ).reason).to_equal("")
+    _open_in_process_bookmark_document(
+        first, "https://fallback-title.test/", 220, 200003
+    )
+    val _ = first.dispatch_chrome_pointer(230, 95, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        231, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(first.close()).to_be(true)
+
+    val restarted_profile = match BrowserProfileStore.open(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    ):
+        Err(error):
+            fail(error.message())
+        Ok(opened):
+            opened
+    var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(restarted_profile)
+    )
+    val _ = restarted.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, 200010, true
+    )
+    _open_in_process_bookmark_document(
+        restarted, "https://accepted-title.test/", 240, 200011
+    )
+    val _ = restarted.dispatch_chrome_pointer(
+        250, 95, "favorite", true
+    )
+    expect(restarted.dispatch_chrome_pointer(
+        251, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(1)
+    val _ = restarted.dispatch_chrome_pointer(
+        252, 95, "favorite", true
+    )
+    expect(restarted.dispatch_chrome_pointer(
+        253, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+    var accepted_count = 0
+    var fallback_count = 0
+    var accepted_title = ""
+    var fallback_title = ""
+    for entry in restarted.profile_bookmarks.entries:
+        if entry.first == "https://accepted-title.test/":
+            accepted_count = accepted_count + 1
+            accepted_title = entry.second
+        elif entry.first == "https://fallback-title.test/":
+            fallback_count = fallback_count + 1
+            fallback_title = entry.second
+    expect(accepted_count).to_equal(1)
+    expect(fallback_count).to_equal(1)
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(
+        sandbox_snapshot.entries.len()
+    )
+    var sandbox_accepted_count = 0
+    var sandbox_fallback_count = 0
+    for entry in sandbox_snapshot.entries:
+        if entry.first == "https://accepted-title.test/":
+            sandbox_accepted_count = sandbox_accepted_count + 1
+            expect(accepted_title).to_equal(entry.second)
+        elif entry.first == "https://fallback-title.test/":
+            sandbox_fallback_count = sandbox_fallback_count + 1
+            expect(fallback_title).to_equal(entry.second)
+    expect(sandbox_accepted_count).to_equal(1)
+    expect(sandbox_fallback_count).to_equal(1)
+    expect(restarted.close()).to_be(true)
+    _remove_bookmark_title_profile(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    )
+
+fn _retained_png_hex(pixel: u32) -> text:
+    var out = ""
+    for byte in encode_argb_to_png([pixel], 1, 1):
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
+fn _expect_retained_stage_counts(
+    counters: SimpleWebRenderCounters,
+    serialize_count: i64,
+    parse_count: i64,
+    css_count: i64,
+    style_count: i64,
+    layout_count: i64,
+    paint_count: i64,
+    composition_revision: i64
+):
+    expect(counters.serialize_count).to_equal(serialize_count)
+    expect(counters.parse_count).to_equal(parse_count)
+    expect(counters.css_count).to_equal(css_count)
+    expect(counters.style_count).to_equal(style_count)
+    expect(counters.layout_count).to_equal(layout_count)
+    expect(counters.paint_count).to_equal(paint_count)
+    expect(counters.composition_revision).to_equal(composition_revision)
+
+fn _bounded_serialization_fixture(siblings: i32) -> text:
+    var parts: [text] = [
+        "<main id='bounded' style='width:16px;height:16px;" +
+        "background-color:#123456'>"
+    ]
+    var i = 0
+    while i < siblings:
+        parts.push("<span class='item'>x</span>")
+        i = i + 1
+    parts.push("</main>")
+    parts.join("")
+
+fn _bounded_serialization_output_length(siblings: i32) -> i64:
+    val prefix = (
+        "<html><head></head><body><main id=\"bounded\" " +
+        "style=\"width:16px;height:16px;background-color:#123456\">"
+    )
+    val item = "<span class=\"item\">x</span>"
+    val suffix = "</main></body></html>"
+    prefix.len().to_i64() + item.len().to_i64() * siblings.to_i64() +
+        suffix.len().to_i64()
+
+val SUBPROCESS_ANIMATION_HTML = (
+    "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{{background-color:#2563eb}}}#stage{width:32px;height:24px;" +
+    "animation:Pulse 16ms linear forwards}</style>" +
+    "<script type='text/simple'>title \"SimpleReady\"\n" +
+    "body_html '<div id=\"stage\"></div>'</script>" +
+    "<script>requestAnimationFrame(function(){" +
+    "var stage=document.getElementById('stage');" +
+    "stage.style.backgroundColor='#2563eb';" +
+    "document.title='Animated';});</script>"
+)
+
+val CALLABLE_EVENT_HTML = (
+    "<html><body><div id='outer'><button id='run' " +
+    "onclick=\"document.title=document.title+'inline,'\">Run</button></div>" +
+    "<a id='blocked' href='/escaped'>Blocked</a>" +
+    "<button id='halt'>Halt</button><button id='probe'>Probe</button>" +
+    "<button id='mutate'>Mutate</button>" +
+    "<script type='text/simple'>title \"simple,\"</script><script>" +
+    "function note(label){return function(event){" +
+    "document.title=document.title+label+',';};}" +
+    "var outer=document.getElementById('outer');" +
+    "var run=document.getElementById('run');" +
+    "var blocked=document.getElementById('blocked');" +
+    "var halt=document.getElementById('halt');" +
+    "var probe=document.getElementById('probe');" +
+    "var mutate=document.getElementById('mutate');" +
+    "window.addEventListener('click',note('window-capture'),true);" +
+    "document.addEventListener('click',note('document-capture'),true);" +
+    "outer.addEventListener('click',note('outer-capture'),true);" +
+    "run.addEventListener('click',note('target-capture'),true);" +
+    "run.addEventListener('click',note('target-bubble'));" +
+    "outer.addEventListener('click',note('outer-bubble'));" +
+    "document.addEventListener('click',note('document-bubble'));" +
+    "window.addEventListener('click',note('window-bubble'));" +
+    "var removed=note('removed');var churn=0;" +
+    "while(churn<300){blocked.addEventListener('click',removed);" +
+    "blocked.removeEventListener('click',removed);churn=churn+1;}" +
+    "blocked.addEventListener('click',function(event){" +
+    "document.title=document.title+'cancel,';event.preventDefault();});" +
+    "blocked.addEventListener('click',note('after-cancel'));" +
+    "halt.addEventListener('click',function(event){" +
+    "document.title=document.title+'halt-first,';" +
+    "event.stopImmediatePropagation();});" +
+    "halt.addEventListener('click',note('halt-after'));" +
+    "var lastEvent=null;var semantic='';" +
+    "probe.addEventListener('probe',function(event){" +
+    "semantic=(this===probe)+':'+(event.currentTarget===probe)+':'+" +
+    "event.eventPhase;lastEvent=event;event.preventDefault();});" +
+    "var late=function(event){document.title=document.title+'late,';};" +
+    "var added=function(event){document.title=document.title+'added,';};" +
+    "mutate.addEventListener('mutate',function(event){" +
+    "mutate.removeEventListener('mutate',late);" +
+    "mutate.addEventListener('mutate',added);" +
+    "document.title=document.title+'mutate,';});" +
+    "mutate.addEventListener('mutate',late);" +
+    "requestAnimationFrame(function(){" +
+    "document.title=document.title+'raf,';});</script></body></html>"
+)
+
+val RETAINED_SIMPLE_SCRIPT_CALLBACK_HTML = (
+    "<html><body><div id='box'>initial</div>" +
+    "<script type='text/simple'>" +
+    "callback 41|title \"frame\"\n" +
+    "callback 42|body_html '<div id=\"box\">timeout</div>'\n" +
+    "callback 43|style_html '<style>#box{width:8px;height:8px;" +
+    "background-color:#2563eb}</style>'\n" +
+    "callback 44|title \"cancelled\"\n" +
+    "animation_frame 41\n" +
+    "timeout 41 10\n" +
+    "timeout 42 10\n" +
+    "interval 43 15\n" +
+    "timeout 44 20\n" +
+    "cancel_timer 4\n" +
+    "unsafe_eval title \"bypass\"</script></body></html>"
+)
+
+val IMMEDIATE_SIMPLE_SCRIPT_STYLE_HTML = (
+    "<html><head><style>#box{width:8px;height:8px;" +
+    "background-color:#ef4444}</style></head>" +
+    "<body><div id='box'></div><script type='text/simple'>" +
+    "style_html '<style>#box{{background-color:#2563eb}}</style>'" +
+    "</script></body></html>"
+)
+
+fn _count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn _repeat_browser_text(value: text, count: i64) -> text:
+    var repeated = ""
+    var index: i64 = 0
+    while index < count:
+        repeated = repeated + value
+        index = index + 1
+    repeated
+
+fn _browser_draw_ir_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var index: i32 = 0
+    while index < commands.len():
+        if commands[index].component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _browser_draw_ir_text_index(
+    commands: [DrawIrCommand], value: text
+) -> i32:
+    var index: i32 = 0
+    while index < commands.len():
+        if commands[index].kind == "text" and
+            commands[index].text_value == value:
+            return index
+        index = index + 1
+    -1
+
+fn _browser_draw_ir_style_value(
+    command: DrawIrCommand, key: text
+) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    ""
+
+fn _expect_bounded_serialization_draw_ir(
+    composition: DrawIrComposition
+):
+    expect(composition.batches.len()).to_be_greater_than(0)
+    expect(composition.batches[0].source.source_kind).to_equal("html_ast")
+    val commands = composition.batches[0].commands
+    val bounded_index = _browser_draw_ir_command_index(commands, "bounded")
+    expect(bounded_index).to_be_greater_than(-1)
+    expect(commands[bounded_index].kind).to_equal("rect")
+    expect(commands[bounded_index].x).to_equal(0)
+    expect(commands[bounded_index].y).to_equal(0)
+    expect(commands[bounded_index].width).to_equal(16)
+    expect(commands[bounded_index].height).to_equal(16)
+    expect(commands[bounded_index].color).to_equal(0xFF123456u32)
+
+fn _animation_hot_path_fixture(properties: i32) -> text:
+    if properties != 16 and properties != 32:
+        fail("animation hot-path fixture requires 16 or 32 properties")
+    val names = [
+        "width", "height", "min-width", "max-width",
+        "min-height", "max-height", "top", "right",
+        "bottom", "left", "margin-top", "margin-right",
+        "margin-bottom", "margin-left", "padding-top", "padding-right",
+        "padding-bottom", "padding-left", "border-top-width",
+        "border-right-width", "border-bottom-width", "border-left-width",
+        "border-top-left-radius", "border-top-right-radius",
+        "border-bottom-right-radius", "border-bottom-left-radius", "color",
+        "background-color", "border-top-color", "border-right-color",
+        "border-bottom-color", "border-left-color"
+    ]
+    val from_values = [
+        "16px", "16px", "0px", "64px", "0px", "64px", "0px", "0px",
+        "0px", "0px", "0px", "0px", "0px", "0px", "0px", "0px",
+        "0px", "0px", "0px", "0px", "0px", "0px", "0px", "0px",
+        "0px", "0px", "#111111", "#222222", "#333333", "#444444",
+        "#555555", "#666666"
+    ]
+    val to_values = [
+        "17px", "17px", "1px", "63px", "1px", "63px", "1px", "1px",
+        "1px", "1px", "1px", "1px", "1px", "1px", "1px", "1px",
+        "1px", "1px", "1px", "1px", "1px", "1px", "1px", "1px",
+        "1px", "1px", "#777777", "#888888", "#999999", "#aaaaaa",
+        "#bbbbbb", "#cccccc"
+    ]
+    var from_fragments: [text] = []
+    var to_fragments: [text] = []
+    var property_index = 0
+    while property_index < properties:
+        from_fragments.push(
+            names[property_index] + ":" + from_values[property_index]
+        )
+        to_fragments.push(
+            names[property_index] + ":" + to_values[property_index]
+        )
+        property_index = property_index + 1
+    (
+        "<html style='margin:0'><head><style>html,body{{margin:0}}" +
+        "#bounded{width:16px;height:16px;background-color:#123456}" +
+        "#hot,#event{{display:none}}#hot{animation:HotPath 100ms linear " +
+        "infinite}@keyframes HotPath{from{" + from_fragments.join(";") +
+        "}to{" + to_fragments.join(";") + "}}</style></head>" +
+        "<body style='margin:0'><main id='bounded'></main>" +
+        "<div id='hot'></div><button id='event' onclick=\"document.title=" +
+        "'event-" + properties.to_text() + "'\">event</button></body></html>"
+    )
+
+fn _animation_hot_path_old_comparisons(properties: i32) -> i64:
+    val count = properties.to_i64()
+    count * (count - 1) / 2 + count * count
+
+fn _expect_animation_hot_path_frame(
+    worker: HostedBrowserRendererWorkerSession
+) -> i64:
+    val result = worker.render_session.current_result.unwrap()
+    _expect_bounded_serialization_draw_ir(result.composition)
+    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
+    val rendered = raster.render_draw_ir_composition(result.composition, [])
+    raster.shutdown()
+    expect(rendered.rendered_command_count).to_be_greater_than(0)
+    expect(rendered.skipped_command_count).to_equal(0)
+    expect(rendered.pixels.len()).to_equal(64 * 48)
+    var checksum: i64 = 0
+    var bounded_pixels = 0
+    var white_pixels = 0
+    var mismatched_pixels = 0
+    var y = 0
+    while y < 48:
+        var x = 0
+        while x < 64:
+            val expected = if x < 16 and y < 16:
+                0xFF123456u32
+            else:
+                0xFFFFFFFFu32
+            val pixel = rendered.pixels[y * 64 + x]
+            checksum = checksum + pixel.to_i64()
+            if pixel == 0xFF123456u32:
+                bounded_pixels = bounded_pixels + 1
+            if pixel == 0xFFFFFFFFu32:
+                white_pixels = white_pixels + 1
+            if pixel != expected:
+                mismatched_pixels = mismatched_pixels + 1
+            x = x + 1
+        y = y + 1
+    expect(bounded_pixels).to_equal(16 * 16)
+    expect(white_pixels).to_equal((64 * 48) - (16 * 16))
+    expect(mismatched_pixels).to_equal(0)
+    expect(checksum).to_equal(
+        (0xFF123456u32).to_i64() * (16 * 16) +
+        (0xFFFFFFFFu32).to_i64() * ((64 * 48) - (16 * 16))
+    )
+    checksum
+
+fn _current_animation_property_work(
+    worker: HostedBrowserRendererWorkerSession
+) -> i64:
+    val result = worker.render_session.current_result.unwrap()
+    result.animation_property_work_count
+
+fn _await_browser_animation(
+    renderer: HostedBrowserRendererProcess
+) -> HostedBrowserRendererResult?:
+    var attempts: i64 = 0
+    while attempts < 250:
+        match renderer.poll():
+            Some(frame):
+                return Some(frame)
+            nil:
+                thread_sleep_ms(1)
+        attempts = attempts + 1
+    nil
+
+fn _await_browser_registry_ready(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    body_html: text
+) -> bool:
+    var attempts: i64 = 0
+    while attempts < 500:
+        val state = registry.advance_window(
+            window_id, "", body_html, 64, 48,
+            attempts * 1000, 100000, true
+        )
+        if state == "frame":
+            return true
+        if state == "failed":
+            return false
+        thread_sleep_ms(1)
+        attempts = attempts + 1
+    false
+
+fn _open_hosted_bookmark_document(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    url: text,
+    event_id: i64,
+    body_html: text
+):
+    expect(registry.dispatch_chrome_pointer(
+        event_id, window_id, "address", true
+    ).reason).to_equal("chrome-pressed")
+    expect(registry.dispatch_chrome_pointer(
+        event_id + 1, window_id, "address", false
+    ).reason).to_equal("address-focused")
+    expect(registry.dispatch_text(
+        event_id + 2, window_id, url
+    ).callback_count).to_equal(1)
+    expect(registry.dispatch_key_with_shift(
+        event_id + 3, window_id, 13, true, false
+    ).callback_count).to_equal(1)
+    expect(_await_browser_registry_ready(
+        registry, window_id, body_html
+    )).to_be(true)
+
+fn _close_browser_animation_evidence(
+    renderer: HostedBrowserRendererProcess,
+    raster: Engine2dCompositorBackend
+):
+    val closed = renderer.close()
+    raster.shutdown()
+    if not closed:
+        fail("browser renderer cleanup failed")
+
+# @inline
+fn _production_browser_fixture():
+    step("Launch the production Simple browser")
+
+# @inline
+fn _open_conformance_page():
+    step("Open the conformance page")
+
+# @inline
+fn _check_canonical_draw_ir():
+    step("Render HTML and CSS through canonical Draw IR")
+
+# @inline
+fn _advance_browser_clock():
+    step("Run JavaScript and advance the browser clock")
+
+# @inline
+fn _operate_page_controls():
+    step("Operate page controls")
+
+# @inline
+fn _operate_browser_navigation():
+    step("Operate browser navigation controls")
+
+fn _require_production_browser_evidence():
+    fail("REQ-WEB-BROWSER-001..009: production browser evidence not implemented")
+
+describe "Production Simple browser user flow":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should anchor fixed CSS image backgrounds to the viewport":
+        step("Render HTML and CSS through canonical Draw IR")
+        val repeat_html = (
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<div id='fixed' style='margin-left:3px;width:4px;height:2px;" +
+            "background-color:#00ff00;background-image:url(image://stripe);" +
+            "background-attachment:fixed;background-repeat:repeat;" +
+            "background-position:left top'></div>" +
+            "<div style='height:8px'></div></body></html>"
+        )
+        val scroll_html = repeat_html.replace(
+            "background-attachment:fixed", "background-attachment:scroll"
+        )
+        val no_repeat_html = repeat_html.replace(
+            "background-repeat:repeat", "background-repeat:no-repeat"
+        )
+        val local_html = repeat_html.replace(
+            "background-attachment:fixed", "background-attachment:local"
+        )
+        val stripe = simpleos_host_gpu_image_resource(
+            "image://stripe", 2, 1, [0xFFFF0000u32, 0xFF0000FFu32]
+        )
+        val images = [stripe]
+        val fixed_composition =
+            simple_web_layout_render_html_draw_ir_with_images(
+                repeat_html, 8, 4, images
+            )
+        val fixed_commands = fixed_composition.batches[0].commands
+        val fixed_index = _browser_draw_ir_command_index(
+            fixed_commands, "fixed_background_image"
+        )
+        expect(fixed_index).to_be_greater_than(-1)
+        val fixed = fixed_commands[fixed_index]
+        expect(fixed.x).to_equal(3)
+        expect(fixed.y).to_equal(0)
+        expect(fixed.width).to_equal(4)
+        expect(fixed.height).to_equal(2)
+        expect(fixed.clip_rect.x).to_equal(3)
+        expect(fixed.clip_rect.width).to_equal(4)
+        expect(_browser_draw_ir_style_value(
+            fixed, "background-tile-x"
+        )).to_equal("0")
+        expect(_browser_draw_ir_style_value(
+            fixed, "background-tile-y"
+        )).to_equal("0")
+
+        step("Scroll the document under the viewport-fixed tile")
+        val scrolled_fixed =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
+                repeat_html, 8, 4, 0, 1,
+                browser_text_input_overlay_empty(), images
+            )
+        expect(scrolled_fixed.resolved_scroll_y).to_equal(1)
+        val scrolled_fixed_commands =
+            scrolled_fixed.composition.batches[0].commands
+        val scrolled_fixed_index = _browser_draw_ir_command_index(
+            scrolled_fixed_commands, "fixed_background_image"
+        )
+        expect(scrolled_fixed_index).to_be_greater_than(-1)
+        val scrolled_fixed_command =
+            scrolled_fixed_commands[scrolled_fixed_index]
+        expect(_browser_draw_ir_style_value(
+            scrolled_fixed_command, "background-tile-y"
+        )).to_equal("0")
+        expect(_browser_draw_ir_style_value(
+            scrolled_fixed_command, "background-shape-y"
+        )).to_equal("-1")
+        val scrolled_element =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
+                scroll_html, 8, 4, 0, 1,
+                browser_text_input_overlay_empty(), images
+            )
+        val scrolled_element_commands =
+            scrolled_element.composition.batches[0].commands
+        val scrolled_element_index = _browser_draw_ir_command_index(
+            scrolled_element_commands, "fixed_background_image"
+        )
+        expect(scrolled_element_index).to_be_greater_than(-1)
+        expect(_browser_draw_ir_style_value(
+            scrolled_element_commands[scrolled_element_index],
+            "background-tile-y"
+        )).to_equal("-1")
+
+        step("Read back fixed repeat and no-repeat edge pixels")
+        val renderer = BrowserRenderer.create(8, 4)
+        val fixed_pixels = renderer.render_html_to_pixels_with_images(
+            repeat_html, images
+        ).pixel_data
+        val scroll_pixels = renderer.render_html_to_pixels_with_images(
+            scroll_html, images
+        ).pixel_data
+        val no_repeat_pixels = renderer.render_html_to_pixels_with_images(
+            no_repeat_html, images
+        ).pixel_data
+        val first_box_pixel = fixed.y * 8 + fixed.x
+        expect(fixed_pixels[first_box_pixel]).to_equal(0xFF0000FFu32)
+        expect(scroll_pixels[first_box_pixel]).to_equal(0xFFFF0000u32)
+        expect(no_repeat_pixels[first_box_pixel]).to_equal(0xFF00FF00u32)
+
+        step("Keep local attachment outside the supported profile")
+        val local_commands =
+            simple_web_layout_render_html_draw_ir_with_images(
+                local_html, 8, 4, images
+            ).batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            local_commands, "fixed_background_image"
+        )).to_equal(-1)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should admit two CSS URL backgrounds and lower both through canonical Draw IR":
+        step("Admit the bounded two URL CSS background profile")
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://assets.test/front.png", _retained_png_hex(0xFFFF0000u32)
+        )
+        session.register_resource(
+            "https://assets.test/back.png", _retained_png_hex(0xFF0000FFu32)
+        )
+        match session.open_html(
+            "https://example.test/layers",
+            "<style>#layers{width:4px;height:2px;background-color:#00ff00;" +
+            "background-image:url(https://assets.test/front.png),url(https://assets.test/back.png);" +
+            "background-repeat:no-repeat}</style><div id='layers'></div>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("two URL background fixture failed to open: {reason}")
+        expect(session.image_resources.len()).to_equal(2)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            session.render_html_document(), 8, 4, session.image_resources
+        )
+        val commands = composition.batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            commands, "layers_background_image_1"
+        )).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(
+            commands, "layers_background_image_0"
+        )).to_be_greater_than(_browser_draw_ir_command_index(
+            commands, "layers_background_image_1"
+        ))
+
+        step("Deny the whole pair when CSP denies image admission")
+        var denied = BrowserSession.new()
+        denied.register_resource(
+            "https://assets.test/front.png", _retained_png_hex(0xFFFF0000u32)
+        )
+        denied.register_resource(
+            "https://assets.test/back.png", _retained_png_hex(0xFF0000FFu32)
+        )
+        match denied.open_html(
+            "https://example.test/layers-denied",
+            "<meta http-equiv='Content-Security-Policy' content=\"img-src 'none'\">" +
+            "<style>#layers{width:4px;height:2px;background-color:#00ff00;" +
+            "background-image:url(https://assets.test/front.png),url(https://assets.test/back.png)}</style>" +
+            "<div id='layers'></div>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("CSP two URL background fixture failed to open: {reason}")
+        expect(denied.image_resources.len()).to_equal(0)
+        val denied_commands = simple_web_layout_render_html_draw_ir_with_images(
+            denied.render_html_document(), 8, 4, denied.image_resources
+        ).batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            denied_commands, "layers_background_image_1"
+        )).to_equal(-1)
+        expect(_browser_draw_ir_command_index(
+            denied_commands, "layers_background_image_0"
+        )).to_equal(-1)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should preserve semantic parentage clipping and stacking in canonical Draw IR":
+        step("Lower web semantic parentage and CSS stacking to canonical Draw IR")
+        val html = (
+            "<html style='margin:0'><body id='page' style='margin:0'>" +
+            "<section id='clip' style='position:relative;overflow:hidden;" +
+            "width:16px;height:12px'>" +
+            "<div id='top' style='position:absolute;left:0;top:0;z-index:3;" +
+            "width:24px;height:12px;background:#f59e0b'></div>" +
+            "<div id='bottom' style='position:absolute;left:0;top:0;z-index:1;" +
+            "width:24px;height:12px;background:#1d4ed8'></div>" +
+            "<div id='middle' style='position:absolute;left:0;top:0;z-index:2;" +
+            "width:24px;height:12px;background:#22c55e'></div>" +
+            "</section></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            html, 32, 24, []
+        )
+        expect(composition.batches.len()).to_be_greater_than(0)
+        val commands = composition.batches[0].commands
+        val page_index = _browser_draw_ir_command_index(commands, "page")
+        val clip_index = _browser_draw_ir_command_index(commands, "clip")
+        val bottom_index = _browser_draw_ir_command_index(commands, "bottom")
+        val middle_index = _browser_draw_ir_command_index(commands, "middle")
+        val top_index = _browser_draw_ir_command_index(commands, "top")
+        if (page_index < 0 or clip_index < 0 or bottom_index < 0 or
+            middle_index < 0 or top_index < 0):
+            fail("REQ-WEB-BROWSER-004: semantic Draw IR command missing")
+
+        step("Inspect stable IDs parent links clip geometry and paint order")
+        expect(commands[clip_index].parent_id).to_equal("page")
+        expect(commands[bottom_index].parent_id).to_equal("clip")
+        expect(commands[middle_index].parent_id).to_equal("clip")
+        expect(commands[top_index].parent_id).to_equal("clip")
+        expect(commands[top_index].clip_rect.x).to_equal(0)
+        expect(commands[top_index].clip_rect.y).to_equal(0)
+        expect(commands[top_index].clip_rect.width).to_equal(16)
+        expect(commands[top_index].clip_rect.height).to_equal(12)
+        expect(_browser_draw_ir_style_value(
+            commands[top_index], "z-index"
+        )).to_equal("3")
+        expect(bottom_index).to_be_less_than(middle_index)
+        expect(middle_index).to_be_less_than(top_index)
+
+        step("Round-trip semantic parent links through the hosted SBRF gate")
+        val wire = browser_renderer_frame_encode(composition, 7, 1)
+        expect(wire.ok).to_equal(true)
+        if not wire.ok:
+            fail("REQ-WEB-BROWSER-004: hosted Draw IR encode rejected")
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), wire.wire
+        )
+        expect(message.status).to_equal("message")
+        val hosted = browser_renderer_frame_decode(message.message, 32, 24)
+        expect(hosted.ok).to_equal(true)
+        if not hosted.ok:
+            fail("REQ-WEB-BROWSER-004: hosted Draw IR decode rejected")
+        val hosted_commands = hosted.composition.batches[0].commands
+        val hosted_top_index = _browser_draw_ir_command_index(
+            hosted_commands, "top"
+        )
+        if hosted_top_index < 0:
+            fail("REQ-WEB-BROWSER-004: hosted semantic command missing")
+        expect(hosted_commands[hosted_top_index].parent_id).to_equal("clip")
+
+        step("Replay the same canonical composition through Engine2D")
+        val raster = Engine2dCompositorBackend.create_named(32, 24, "software")
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels.len()).to_equal(32 * 24)
+        expect(_count_color(
+            rendered.pixels, 0xFFF59E0Bu32
+        )).to_equal(16 * 12)
+        expect(_count_color(
+            rendered.pixels, 0xFF1D4ED8u32
+        )).to_equal(0)
+        expect(_count_color(
+            rendered.pixels, 0xFF22C55Eu32
+        )).to_equal(0)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(draw_ir)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should normalize split overflow axes before Draw IR clipping":
+        step("Resolve visible y against every non-visible x cascade winner")
+        val html = (
+            "<style>.hidden{overflow-x:hidden}.auto{overflow-x:auto}" +
+            ".scroll{overflow-x:scroll}.two-axis{overflow:hidden visible}" +
+            ".none-author{scrollbar-width:none}" +
+            ".none-important{scrollbar-width:none!important}</style>" +
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<div id='hidden-omitted' class='hidden' style='width:24px;height:12px'>" +
+            "<div id='red' style='width:24px;height:24px;background:#ff0000'></div></div>" +
+            "<div id='hidden-visible' class='hidden' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='auto-omitted' class='auto' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='auto-visible' class='auto' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='scroll-omitted' class='scroll' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='scroll-visible' class='scroll' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='hidden-y' class='hidden' style='overflow-y:hidden;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='two-axis' class='two-axis' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='none-author' class='hidden none-author' style='width:24px;height:12px'><div id='none-author-child' style='height:24px'></div></div>" +
+            "<div id='none-inline' class='hidden' style='scrollbar-width:none;width:24px;height:12px'><div id='none-inline-child' style='height:24px'></div></div>" +
+            "<div id='none-important' class='hidden none-important' style='scrollbar-width:auto;width:24px;height:12px'><div id='none-important-child' style='height:24px'></div></div>" +
+            "<div id='none-inline-important' class='hidden' style='scrollbar-width:none!important;width:24px;height:12px'><div id='none-inline-important-child' style='height:24px;background:#ff0000'></div></div>" +
+            "<div id='none-parent' class='none-author' style='width:24px;height:12px'><div id='none-child' style='overflow-y:scroll;width:24px;height:12px'><div style='height:24px'></div></div></div>" +
+            "</body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            html, 32, 168, []
+        )
+        val commands = composition.batches[0].commands
+        expect(_browser_draw_ir_command_index(commands, "hidden-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "hidden-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "auto-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "auto-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "scroll-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "scroll-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "two-axis_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track")).to_equal(-1)
+        expect(_browser_draw_ir_command_index(commands, "none-author_scrollbar_track")).to_equal(-1)
+        expect(_browser_draw_ir_command_index(commands, "none-inline_scrollbar_track")).to_equal(-1)
+        expect(_browser_draw_ir_command_index(commands, "none-important_scrollbar_track")).to_equal(-1)
+        expect(_browser_draw_ir_command_index(commands, "none-inline-important_scrollbar_track")).to_equal(-1)
+        expect(_browser_draw_ir_command_index(commands, "none-child_scrollbar_track")).to_be_greater_than(-1)
+
+        step("Clip the child in canonical Draw IR and Engine2D")
+        val red_index = _browser_draw_ir_command_index(commands, "red")
+        expect(red_index).to_be_greater_than(-1)
+        expect(commands[red_index].clip_rect.height).to_equal(12)
+        for child_id in [
+            "none-author-child", "none-inline-child",
+            "none-important-child", "none-inline-important-child"
+        ]:
+            val child_index = _browser_draw_ir_command_index(commands, child_id)
+            expect(child_index).to_be_greater_than(-1)
+            expect(commands[child_index].clip_rect.height).to_equal(12)
+        val raster = Engine2dCompositorBackend.create_named(32, 168, "software")
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.pixels[1 + 12 * 32]).to_equal(0xFFFFFFFFu32)
+        expect(rendered.pixels[1 + 144 * 32]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "should deliver retained callable listeners through one DOM event path":
+        step("Deliver JavaScript and Simple Script listeners on the live DOM")
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/events", CALLABLE_EVENT_HTML
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("event fixture failed to open: {reason}")
+        expect(session.current_title).to_equal("simple,")
+
+        step("Dispatch capture target and bubble listeners through window and document")
+        val ordered = session.dispatch_dom_event(
+            "run", "click", true, true
+        )
+        expect(ordered.actions.len()).to_equal(9)
+        expect(session.current_title).to_equal(
+            "simple," +
+            "window-capture,document-capture,outer-capture," +
+            "target-capture,inline,target-bubble,outer-bubble," +
+            "document-bubble,window-bubble,"
+        )
+
+        step("Cancel defaults and compact removed listeners")
+        val canceled = session.dispatch_dom_event(
+            "blocked", "click", true, true
+        )
+        expect(canceled.default_action).to_equal("navigate:/escaped")
+        expect(canceled.event.default_prevented).to_equal(true)
+        expect(canceled.default_action_allowed).to_equal(false)
+        expect(session.pending_request_count()).to_equal(0)
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,cancel,after-cancel," +
+            "document-bubble,window-bubble,"
+        )
+        val halted = session.dispatch_dom_event(
+            "halt", "click", true, true
+        )
+        expect(halted.actions.len()).to_equal(3)
+        expect(halted.event.immediate_propagation_stopped).to_equal(true)
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,halt-first,"
+        )
+        step("Expose modern Event receiver phase and mutation semantics")
+        val semantic = session.dispatch_dom_event(
+            "probe", "probe", false, false
+        )
+        expect(semantic.event.default_prevented).to_equal(false)
+        match session.eval_script("semantic"):
+            Ok(JsValue.String(value)):
+                expect(value).to_equal("true:true:2")
+            Ok(_):
+                fail("event semantic probe returned a non-string")
+            Err(reason):
+                fail("event semantic probe failed: {reason}")
+        match session.eval_script(
+            "lastEvent.currentTarget===null&&lastEvent.eventPhase===0"
+        ):
+            Ok(JsValue.Boolean(value)):
+                expect(value).to_equal(true)
+            Ok(_):
+                fail("event reset probe returned a non-boolean")
+            Err(reason):
+                fail("event reset probe failed: {reason}")
+        val mutation_first = session.dispatch_dom_event(
+            "mutate", "mutate", false, true
+        )
+        expect(mutation_first.actions.len()).to_equal(2)
+        expect(session.current_title).to_end_with("mutate,")
+        val mutation_second = session.dispatch_dom_event(
+            "mutate", "mutate", false, true
+        )
+        expect(mutation_second.actions.len()).to_equal(2)
+        expect(session.current_title).to_end_with("mutate,mutate,added,")
+        expect(session.dom_callback_count).to_equal(23)
+
+        step("Keep requestAnimationFrame alive beside DOM listener delivery")
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_end_with(
+            "mutate,mutate,added,raf,"
+        )
+
+    # @manual: show
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    it "should fail closed for synchronous JavaScript-originated dispatchEvent":
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/script-dispatch",
+            "<html><body><script>document.title='unchanged';" +
+            "window.addEventListener('probe',function(event){" +
+            "document.title='unexpected';});" +
+            "window.__dispatchResult=window.dispatchEvent({" +
+            "type:'probe',bubbles:true,cancelable:true});" +
+            "</script></body></html>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("dispatchEvent fail-closed fixture failed: {reason}")
+        expect(session.current_title).to_equal("unchanged")
+        match session.eval_script("window.__dispatchResult"):
+            Ok(JsValue.Boolean(value)):
+                expect(value).to_equal(false)
+            Ok(_):
+                fail("dispatchEvent result probe returned a non-boolean")
+            Err(reason):
+                fail("dispatchEvent result probe failed: {reason}")
+        expect(session.warnings.join("|")).to_contain(
+            "synchronous script dispatchEvent is unsupported"
+        )
+
+    # @manual: show
+    # @capture(html)
+    # @capture(text)
+    # @capture(artifact)
+    # @capture(gui)
+    it "should render the supported HTML and CSS profile through canonical Draw IR":
+        _production_browser_fixture()
+        _open_conformance_page()
+        _check_canonical_draw_ir()
+        _require_production_browser_evidence()
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @capture(gui)
+    it "should animate JavaScript timers requestAnimationFrame and CSS on one clock":
+        _production_browser_fixture()
+        _advance_browser_clock()
+        _check_canonical_draw_ir()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var renderer = HostedBrowserRendererProcess.create(1, 64, 48)
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val started = renderer.start(artifact, 2000)
+        if not started.ok:
+            raster.shutdown()
+            fail("browser renderer launch failed: {started.reason}")
+        val initial = renderer.render(
+            "init", SUBPROCESS_ANIMATION_HTML, 2000
+        )
+        if not initial.ok:
+            _close_browser_animation_evidence(renderer, raster)
+            fail("browser renderer initial frame failed: {initial.reason}")
+        val first = raster.render_draw_ir_composition(
+            initial.composition, []
+        )
+        match renderer.begin_advance(16, 2000):
+            Err(reason):
+                _close_browser_animation_evidence(renderer, raster)
+                fail("browser renderer animation start failed: {reason}")
+            Ok(started_advance):
+                if not started_advance:
+                    _close_browser_animation_evidence(renderer, raster)
+                    fail("browser renderer animation did not start")
+        val advanced = match _await_browser_animation(renderer):
+            Some(frame):
+                frame
+            nil:
+                _close_browser_animation_evidence(renderer, raster)
+                fail("browser renderer animation poll exhausted")
+        if not advanced.ok:
+            _close_browser_animation_evidence(renderer, raster)
+            fail("browser renderer animation frame failed: {advanced.reason}")
+        val second = raster.render_draw_ir_composition(
+            advanced.composition, []
+        )
+        val initial_red = _count_color(first.pixels, 0xFFEF4444u32)
+        val advanced_blue = _count_color(second.pixels, 0xFF2563EBu32)
+        val changed = not _pixels_equal(first.pixels, second.pixels)
+        _close_browser_animation_evidence(renderer, raster)
+        expect(initial.composition.batches.len()).to_be_greater_than(0)
+        expect(
+            initial.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        expect(first.rendered_command_count).to_be_greater_than(0)
+        expect(first.pixels.len()).to_equal(64 * 48)
+        expect(initial_red).to_be_greater_than(0)
+        expect(second.rendered_command_count).to_be_greater_than(0)
+        expect(second.pixels.len()).to_equal(64 * 48)
+        expect(advanced_blue).to_be_greater_than(0)
+        expect(changed).to_equal(true)
+        expect(advanced.next_animation_ms).to_equal(-1)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    it "should retain Simple Script callbacks on the canonical animation clock":
+        step("Register callbacks without invoking the denied ambient ScriptRunner")
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/simple-callbacks",
+            RETAINED_SIMPLE_SCRIPT_CALLBACK_HTML
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("Simple Script callback fixture failed to open: {reason}")
+        expect(session.simple_script_callback_count()).to_equal(0)
+        expect(session.current_title).to_equal(
+            "https://example.test/simple-callbacks"
+        )
+
+        step("Keep rAF pending before the document refresh boundary")
+        expect(session.advance_time(5)).to_equal(0)
+        expect(session.current_title).to_equal(
+            "https://example.test/simple-callbacks"
+        )
+
+        step("Reuse one retained callback identity for timeout")
+        expect(session.advance_time(10)).to_equal(2)
+        expect(session.current_title).to_equal("frame")
+        expect(session.current_body_html).to_contain("timeout")
+
+        step("Apply style from an interval and keep a canceled callback inert")
+        expect(session.advance_time(15)).to_equal(1)
+        expect(session.current_style_html).to_contain("#2563eb")
+        val styled = session.render_to_pixels(16, 16)
+        expect(_count_color(
+            styled.pixels, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        val applied_style_revision = session.style_revision
+        expect(session.advance_time(30)).to_equal(2)
+        expect(session.current_title).to_equal("frame")
+        expect(session.style_revision).to_equal(applied_style_revision)
+        expect(session.simple_script_callback_count()).to_equal(5)
+        expect(session.warnings).to_contain(
+            "simple script unsupported command: unsafe_eval title \"bypass\""
+        )
+
+    # @manual: show
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-018
+    it "should reclaim retained Simple Script document owners on navigation and close":
+        step("Open retained Simple Script state and bind one document owner")
+        var session = BrowserSession.new()
+        val retained_executor = session.simple_script_executor
+        match session.open_html(
+            "https://example.test/retained-close",
+            RETAINED_SIMPLE_SCRIPT_CALLBACK_HTML
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("Simple Script close fixture failed to open: {reason}")
+        expect(
+            session.simple_script_executor._runner.dom_root
+        ).to_be(session.current_dom)
+        expect(session.simple_script_executor.has_callback(41)).to_equal(true)
+        expect(
+            session.simple_script_executor._callback_sources
+        ).to_contain("title \"frame\"")
+        expect(session.advance_time(5)).to_equal(0)
+        expect(session.simple_script_callback_count()).to_equal(0)
+        session.simple_script_executor.log("log", "document-owned", 0)
+        expect(
+            session.simple_script_executor.console_buffer().entries().len()
+        ).to_be_greater_than(0)
+
+        step("Navigate to a fresh page and reset document-owned script state")
+        match session.open_html(
+            "https://example.test/replaced", "<main>replaced</main>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("Simple Script replacement fixture failed to open: {reason}")
+        expect(session.simple_script_executor).to_be(retained_executor)
+        expect(
+            session.simple_script_executor._runner.dom_root
+        ).to_be(session.current_dom)
+        expect(
+            session.simple_script_executor._runner.event_loop
+        ).to_be(session.simple_script_executor.event_loop())
+        expect(
+            session.simple_script_executor.event_loop().pending_timer_count()
+        ).to_equal(0)
+        expect(
+            session.simple_script_executor.event_loop().pending_raf_count()
+        ).to_equal(0)
+        expect(session.simple_script_callback_count()).to_equal(0)
+        expect(session.simple_script_executor.has_callback(41)).to_equal(false)
+        expect(
+            session.simple_script_executor._callback_sources.len()
+        ).to_equal(0)
+        expect(
+            session.simple_script_executor.console_buffer().entries().len()
+        ).to_equal(0)
+
+        step("Retain fresh callback timer animation and console state")
+        expect(
+            session.simple_script_executor.register_callback(
+                91, "title \"fresh\""
+            )
+        ).to_equal(true)
+        expect(
+            session.simple_script_executor.schedule_timeout(91, 0, 1000)
+        ).to_equal(1)
+        expect(
+            session.simple_script_executor.schedule_animation_frame(91, 0, 0)
+        ).to_equal(true)
+        val fresh_callbacks = session.simple_script_executor.tick(16000)
+        expect(fresh_callbacks.len()).to_equal(1)
+        expect(fresh_callbacks[0]).to_equal("title \"fresh\"")
+        expect(session.simple_script_callback_count()).to_equal(1)
+        expect(
+            session.simple_script_executor.schedule_animation_frame(
+                91, 16000, 0
+            )
+        ).to_equal(true)
+        session.simple_script_executor.log("log", "fresh-document-owned", 0)
+        expect(session.simple_script_executor.has_callback(91)).to_equal(true)
+        expect(
+            session.simple_script_executor.event_loop().pending_timer_count()
+        ).to_equal(1)
+        expect(
+            session.simple_script_executor.event_loop().pending_raf_count()
+        ).to_equal(1)
+        expect(
+            session.simple_script_executor.console_buffer().entries().len()
+        ).to_be_greater_than(0)
+
+        step("Close the page and reclaim browser resources")
+        session.close()
+        expect(session.simple_script_executor).to_be(retained_executor)
+        expect(
+            session.simple_script_executor._runner.dom_root
+        ).to_be(session.current_dom)
+        expect(
+            session.simple_script_executor._runner.event_loop
+        ).to_be(session.simple_script_executor.event_loop())
+        expect(
+            session.simple_script_executor.event_loop().pending_timer_count()
+        ).to_equal(0)
+        expect(
+            session.simple_script_executor.event_loop().pending_raf_count()
+        ).to_equal(0)
+        expect(session.simple_script_callback_count()).to_equal(0)
+        expect(session.simple_script_executor.has_callback(41)).to_equal(false)
+        expect(session.simple_script_executor.has_callback(91)).to_equal(false)
+        expect(
+            session.simple_script_executor._callback_sources.len()
+        ).to_equal(0)
+        expect(
+            session.simple_script_executor.console_buffer().entries().len()
+        ).to_equal(0)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    it "should retain immediate Simple Script style through finalization":
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/simple-style",
+            IMMEDIATE_SIMPLE_SCRIPT_STYLE_HTML
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("immediate Simple Script style failed to open: {reason}")
+        expect(session.current_style_html).to_contain(
+            "background-color:#ef4444"
+        )
+        expect(session.current_style_html).to_end_with(
+            "<style>#box{{background-color:#2563eb}}</style>"
+        )
+        expect(session.current_style_html.split(
+            "<style>#box{{background-color:#2563eb}}</style>"
+        ).len()).to_equal(2)
+        val styled = session.render_to_pixels(16, 16)
+        expect(_count_color(
+            styled.pixels, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        expect(_count_color(
+            styled.pixels, 0xFFEF4444u32
+        )).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+    # @req REQ-WEB-BROWSER-018
+    it "should reuse parsed layout work across unchanged animation frames":
+        step("Reuse parsed layout work across unchanged animation frames")
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initial = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='stable'>unchanged</main>"
+        ))
+        expect(initial.ok).to_be(true)
+        val counters = worker.render_session.counters
+        val before_serialize = counters.serialize_count
+        val before_parse = counters.parse_count
+        val before_css = counters.css_count
+        val before_style = counters.style_count
+        val before_layout = counters.layout_count
+        val before_paint = counters.paint_count
+        val before_reuse = counters.reuse_count
+        val before_composition_revision = counters.composition_revision
+        expect(before_serialize).to_equal(1)
+        expect(before_parse).to_equal(1)
+        expect(before_css).to_equal(1)
+        expect(before_style).to_equal(1)
+        expect(before_layout).to_equal(1)
+        expect(before_paint).to_equal(1)
+        expect(before_reuse).to_equal(0)
+        expect(before_composition_revision).to_equal(1)
+
+        val unchanged = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        ))
+        expect(unchanged.ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(before_serialize)
+        expect(after.parse_count).to_equal(before_parse)
+        expect(after.css_count).to_equal(before_css)
+        expect(after.style_count).to_equal(before_style)
+        expect(after.layout_count).to_equal(before_layout)
+        expect(after.paint_count).to_equal(before_paint)
+        expect(after.reuse_count).to_equal(before_reuse + 1)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        step("Close the page and reclaim browser resources")
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-008
+    it "should retire cached frame resources before a site replacement is ready":
+        step("Render one retained browser frame through the shared compositor")
+        var worker = HostedBrowserRendererWorkerSession.create(16, 16)
+        val initial = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 81, request_id: 2,
+            payload: "<main>lifecycle</main>"
+        ))
+        val frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(81), initial.wire
+            ).message,
+            16, 16
+        )
+        expect(frame.ok).to_be(true)
+        var raster = Engine2dCompositorBackend.create_named(
+            16, 16, "software"
+        )
+        val rendered = raster.render_draw_ir_composition_resources_revision(
+            frame.composition, frame.image_resources, 81,
+            frame.composition_revision
+        )
+        expect(rendered.pixels.len()).to_equal(16 * 16)
+        expect(raster.revision_render_count).to_equal(1)
+
+        step("Route the retained generation through a cross-site replacement")
+        var renderer = HostedBrowserRendererProcess.create(81, 16, 16)
+        renderer.state = "active"
+        renderer.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: "https://replacement.test/page",
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: "",
+            redirect_count: 0
+        )
+        renderer.site_lock = "https://old.test"
+        renderer.site_swap_pending = true
+        renderer.site_swap_site = "https://replacement.test"
+        renderer.retained_image_resources = [simpleos_host_gpu_image_resource(
+            "asset://lifecycle", 1, 1, [0xFF2563EBu32]
+        )]
+        var entry = HostedBrowserRendererEntry.create(
+            81, renderer, raster, 0, ""
+        )
+        entry.ready = true
+        entry.pending_frame = WmContentFrame(
+            window_id: "81",
+            scene_revision: 1,
+            content_revision: 1,
+            origin_kind: "web",
+            width: 16,
+            height: 16,
+            pixels: rendered.pixels,
+            checksum: 1u64,
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0
+        )
+        var registry = HostedBrowserRendererRegistry.create(
+            "/bin/true", ""
+        )
+        registry.entries.push(entry)
+        val routed = registry._accept_polled_result(
+            0,
+            HostedBrowserRendererResult(
+                ok: false,
+                reason: HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+                next_animation_ms: -1,
+                producer_generation: 81,
+                composition_revision: 1,
+                composition: frame.composition,
+                image_resources: [],
+                cpu_composited_count: 0,
+                cpu_composited_sha256: "",
+                solid_material_count: 0,
+                solid_material_sha256: "",
+                diagnostics: ""
+            ),
+            "", "", 0, 0
+        )
+        expect(routed).to_equal("none")
+        val retired = registry.entries[0]
+        expect(retired.ready).to_be(false)
+        expect(retired.renderer.state).to_equal("starting")
+        expect(retired.renderer_closed).to_be(false)
+        expect(retired.pending_frame.pixels.len()).to_equal(0)
+        expect(retired.renderer.retained_image_resources.len()).to_equal(0)
+        expect(retired.raster.revision_cache_resources.len()).to_equal(0)
+        expect(retired.raster.revision_cache_result).to_be_nil()
+        val _ = registry.close()
+        worker.close()
+
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-018
+    it "should invalidate only dirty retained browser render stages":
+        step("Invalidate document and title changes conservatively")
+        var document_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(document_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<title>before</title><main>first</main>"
+        )).ok).to_be(true)
+        val initial_checksum = (
+            document_worker.render_session.composition_checksum()
+        )
+        expect(document_worker.browser.eval_script(
+            "document.title = 'after'"
+        ).is_ok()).to_be(true)
+        expect(document_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        _expect_retained_stage_counts(
+            document_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2
+        )
+        expect(
+            document_worker.render_session.composition_checksum()
+        ).to_equal(initial_checksum)
+        expect(document_worker.browser.eval_script(
+            "document.body.innerHTML = '<main>second</main>'"
+        ).is_ok()).to_be(true)
+        expect(document_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+        _expect_retained_stage_counts(
+            document_worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3
+        )
+        expect(
+            document_worker.render_session.composition_checksum() ==
+            initial_checksum
+        ).to_be(false)
+
+        step("Invalidate stylesheet and viewport stages")
+        var style_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(style_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main style='width:32px;height:8px'>style</main>"
+        )).ok).to_be(true)
+        style_worker.browser.current_style_html = (
+            "<style>main{{color:#2563eb}}</style>"
+        )
+        style_worker.browser._advance_style_revision()
+        expect(style_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        expect(_current_animation_property_work(style_worker)).to_equal(0)
+        _expect_retained_stage_counts(
+            style_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2
+        )
+        val resize = browser_renderer_resize_encode(7, 4, 96, 48)
+        expect(style_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resize.wire
+        ).message).ok).to_be(true)
+        expect(_current_animation_property_work(style_worker)).to_equal(0)
+        _expect_retained_stage_counts(
+            style_worker.render_session.counters, 2, 2, 3, 3, 3, 3, 3
+        )
+
+        step("Repaint changed image pixels without rebuilding semantic stages")
+        var image_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        image_worker.browser.register_resource(
+            "https://assets.test/pixel.png",
+            _retained_png_hex(0xFF123456u32)
+        )
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<img src='https://assets.test/pixel.png'>"
+        )).ok).to_be(true)
+        val image_uri = image_worker.browser.image_resources[0].image_uri
+        val image_checksum = (
+            image_worker.render_session.composition_checksum()
+        )
+        image_worker.browser.image_resources = [
+            simpleos_host_gpu_image_resource(
+                image_uri, 1, 1, [0xFFABCDEFu32]
+            )
+        ]
+        image_worker.browser._advance_resource_revision()
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        expect(_current_animation_property_work(image_worker)).to_equal(0)
+        _expect_retained_stage_counts(
+            image_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
+        )
+        expect(
+            image_worker.render_session.composition_checksum()
+        ).to_equal(image_checksum)
+
+        step("Reuse parsed layout work across unchanged animation frames")
+        step("Render HTML and CSS through canonical Draw IR")
+        var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
+        )).ok).to_be(true)
+        val animation_checksum = (
+            animation_worker.render_session.composition_checksum()
+        )
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        _expect_retained_stage_counts(
+            animation_worker.render_session.counters, 1, 1, 1, 2, 1, 2, 2
+        )
+        expect(
+            animation_worker.render_session.composition_checksum() ==
+            animation_checksum
+        ).to_be(false)
+
+        var width_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(width_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}#stage{width:8px;height:24px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='stage'></div>"
+        )).ok).to_be(true)
+        val width_raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val width_before_pixels = width_raster.render_draw_ir_composition(
+            width_worker.render_session.current_result.unwrap().composition,
+            []
+        ).pixels
+        val width_checksum = (
+            width_worker.render_session.composition_checksum()
+        )
+        expect(simple_web_layout_hit_test_index(
+            width_worker.render_session.current_result.unwrap().hit_index,
+            20, 4
+        )).to_equal("path:")
+        expect(width_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        _expect_retained_stage_counts(
+            width_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2
+        )
+        expect(simple_web_layout_hit_test_index(
+            width_worker.render_session.current_result.unwrap().hit_index,
+            20, 4
+        )).to_equal("id:stage")
+        val width_after_pixels = width_raster.render_draw_ir_composition(
+            width_worker.render_session.current_result.unwrap().composition,
+            []
+        ).pixels
+        width_raster.shutdown()
+        expect(
+            _pixels_equal(width_before_pixels, width_after_pixels)
+        ).to_be(false)
+        expect(
+            width_worker.render_session.composition_checksum() ==
+            width_checksum
+        ).to_be(false)
+
+        step("Repaint scroll and caret overlays from retained raw layout")
+        var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(scroll_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main style='height:160px'>scroll</main>"
+        )).ok).to_be(true)
+        val scroll_checksum = (
+            scroll_worker.render_session.composition_checksum()
+        )
+        val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)
+        expect(scroll_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), scroll.wire
+        ).message).ok).to_be(true)
+        expect(_current_animation_property_work(scroll_worker)).to_equal(0)
+        _expect_retained_stage_counts(
+            scroll_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
+        )
+        expect(
+            scroll_worker.render_session.composition_checksum() ==
+            scroll_checksum
+        ).to_be(false)
+        var caret_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<input id='field' data-focused value='caret'>"
+        )).ok).to_be(true)
+        val caret_checksum = (
+            caret_worker.render_session.composition_checksum()
+        )
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "600"
+        )).ok).to_be(true)
+        expect(_current_animation_property_work(caret_worker)).to_equal(0)
+        _expect_retained_stage_counts(
+            caret_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
+        )
+        expect(
+            caret_worker.render_session.composition_checksum() ==
+            caret_checksum
+        ).to_be(false)
+
+        step("Replace navigation state without retaining prior documents")
+        var navigation_worker = (
+            HostedBrowserRendererWorkerSession.create(64, 48)
+        )
+        expect(navigation_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='page'>page-0</main>"
+        )).ok).to_be(true)
+        val retained_nodes = (
+            navigation_worker.render_session.counters.retained_node_count
+        )
+        val retained_styles = (
+            navigation_worker.render_session.counters.retained_style_count
+        )
+        val retained_boxes = (
+            navigation_worker.render_session.counters.retained_box_count
+        )
+        val retained_commands = (
+            navigation_worker.render_session.counters.retained_command_count
+        )
+        var replacement: i64 = 1
+        while replacement <= 4:
+            expect(navigation_worker.browser.open_html(
+                "simple-renderer://replacement-{replacement}",
+                "<main id='page'>page-{replacement}</main>"
+            ).is_ok()).to_be(true)
+            expect(navigation_worker.handle(BrowserRendererMessage(
+                kind: "advance", generation: 7,
+                request_id: replacement + 2,
+                payload: (replacement * 16).to_text()
+            )).ok).to_be(true)
+            expect(
+                navigation_worker.render_session.counters.retained_node_count
+            ).to_equal(retained_nodes)
+            expect(
+                navigation_worker.render_session.counters.retained_style_count
+            ).to_equal(retained_styles)
+            expect(
+                navigation_worker.render_session.counters.retained_box_count
+            ).to_equal(retained_boxes)
+            expect(
+                navigation_worker.render_session.counters.retained_command_count
+            ).to_equal(retained_commands)
+            replacement = replacement + 1
+        _expect_retained_stage_counts(
+            navigation_worker.render_session.counters, 5, 5, 5, 5, 5, 5, 5
+        )
+        step("Close the page and reclaim browser resources")
+        navigation_worker.close()
+        expect(
+            navigation_worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            navigation_worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            navigation_worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            navigation_worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-008
+    it "should bound per-frame CSS animation property work":
+        step("Load the bounded browser fixture")
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 92, request_id: 2,
+            payload: _animation_hot_path_fixture(16)
+        )).ok).to_be(true)
+        val retained_nodes = (
+            worker.render_session.counters.retained_node_count
+        )
+        val retained_styles = (
+            worker.render_session.counters.retained_style_count
+        )
+        val retained_boxes = (
+            worker.render_session.counters.retained_box_count
+        )
+        val retained_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        val initial_draw_ir_checksum = (
+            worker.render_session.composition_checksum()
+        )
+        val initial_pixel_checksum = _expect_animation_hot_path_frame(worker)
+        val initial_result = worker.render_session.current_result.unwrap()
+        expect(initial_result.animation_property_work_count).to_equal(16 * 2)
+
+        step("Exercise repeated navigation animation and events")
+        var observed_16_work: i64 = -1
+        var observed_32_work: i64 = -1
+        var observed_paint_frames: i64 = 0
+        var replacement: i64 = 1
+        while replacement <= 4:
+            val property_count = if replacement % 2 == 1: 32 else: 16
+            val frame_time_ms = replacement * 16
+            val animation_request_id = replacement * 2 + 1
+            match worker.browser.open_html(
+                "simple-renderer://animation-hot-path-{replacement}",
+                _animation_hot_path_fixture(property_count)
+            ):
+                Ok(_): ()
+                Err(reason): fail(
+                    "animation hot-path replacement failed: {reason}"
+                )
+            val dispatch = worker.browser.dispatch_dom_event(
+                "event", "click", true, true
+            )
+            expect(dispatch.event.default_prevented).to_be(false)
+            expect(worker.browser.current_title).to_equal(
+                "event-{property_count}"
+            )
+            expect(worker.handle(BrowserRendererMessage(
+                kind: "advance", generation: 92,
+                request_id: animation_request_id,
+                payload: frame_time_ms.to_text()
+            )).ok).to_be(true)
+            val current_result = worker.render_session.current_result.unwrap()
+            val property_work = current_result.animation_property_work_count
+            expect(property_work).to_be_less_than(
+                property_count.to_i64() * 2 + 1
+            )
+            if property_count == 16:
+                observed_16_work = property_work
+            else:
+                observed_32_work = property_work
+            expect(
+                worker.render_session.counters.retained_node_count
+            ).to_equal(retained_nodes)
+            expect(
+                worker.render_session.counters.retained_style_count
+            ).to_equal(retained_styles)
+            expect(
+                worker.render_session.counters.retained_box_count
+            ).to_equal(retained_boxes)
+            expect(
+                worker.render_session.counters.retained_command_count
+            ).to_equal(retained_commands)
+            expect(worker.render_session.composition_checksum()).to_equal(
+                initial_draw_ir_checksum
+            )
+            expect(_expect_animation_hot_path_frame(worker)).to_equal(
+                initial_pixel_checksum
+            )
+
+            # A resource revision with no changed resource material forces a
+            # retained paint-only frame at the same animation clock. It must
+            # preserve output/owners while reporting no animation apply work.
+            worker.browser._advance_resource_revision()
+            expect(worker.handle(BrowserRendererMessage(
+                kind: "advance", generation: 92,
+                request_id: animation_request_id + 1,
+                payload: frame_time_ms.to_text()
+            )).ok).to_be(true)
+            val paint_result = worker.render_session.current_result.unwrap()
+            expect(paint_result.animation_property_work_count).to_equal(0)
+            expect(worker.render_session.composition_checksum()).to_equal(
+                initial_draw_ir_checksum
+            )
+            expect(_expect_animation_hot_path_frame(worker)).to_equal(
+                initial_pixel_checksum
+            )
+            expect(
+                worker.render_session.counters.retained_node_count
+            ).to_equal(retained_nodes)
+            expect(
+                worker.render_session.counters.retained_style_count
+            ).to_equal(retained_styles)
+            expect(
+                worker.render_session.counters.retained_box_count
+            ).to_equal(retained_boxes)
+            expect(
+                worker.render_session.counters.retained_command_count
+            ).to_equal(retained_commands)
+            observed_paint_frames = observed_paint_frames + 1
+            replacement = replacement + 1
+
+        step("Measure retained state and work growth")
+        expect(_animation_hot_path_old_comparisons(16)).to_equal(376)
+        expect(_animation_hot_path_old_comparisons(32)).to_equal(1520)
+        expect(observed_16_work).to_equal(16 * 2)
+        expect(observed_32_work).to_equal(32 * 2)
+        expect(observed_paint_frames).to_equal(4)
+        expect(_current_animation_property_work(worker)).to_equal(0)
+        expect(observed_16_work).to_be_less_than(
+            _animation_hot_path_old_comparisons(16)
+        )
+        expect(observed_32_work).to_be_less_than(
+            _animation_hot_path_old_comparisons(32)
+        )
+
+        step("Prove stable Draw IR output within the resource ceiling")
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        expect(worker.render_session.composition_checksum()).to_equal(
+            initial_draw_ir_checksum
+        )
+        expect(_expect_animation_hot_path_frame(worker)).to_equal(
+            initial_pixel_checksum
+        )
+        expect(retained_nodes).to_be_greater_than(0)
+        expect(retained_nodes).to_be_less_than(65537)
+        expect(retained_styles).to_be_greater_than(0)
+        expect(retained_styles).to_be_less_than(65537)
+        expect(retained_boxes).to_be_greater_than(0)
+        expect(retained_boxes).to_be_less_than(65537)
+        expect(retained_commands).to_be_greater_than(0)
+        expect(retained_commands).to_be_less_than(65537)
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+        expect(worker.render_session.current_result).to_be_nil()
+
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-008
+    it "should serialize bounded replacements with stable Draw IR":
+        step("Load the bounded browser fixture")
+        val smaller = _bounded_serialization_fixture(2048)
+        val larger = _bounded_serialization_fixture(4096)
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 91, request_id: 2, payload: smaller
+        )).ok).to_be(true)
+        val smaller_nodes = (
+            worker.render_session.counters.retained_node_count
+        )
+
+        step("Exercise repeated layout navigation or animation")
+        match worker.browser.open_html(
+            "simple-renderer://document", larger
+        ):
+            Ok(_): ()
+            Err(reason): fail("larger bounded fixture failed: {reason}")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 91, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val retained_nodes = worker.render_session.counters.retained_node_count
+        val retained_styles = (
+            worker.render_session.counters.retained_style_count
+        )
+        val retained_boxes = worker.render_session.counters.retained_box_count
+        val retained_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        val serialized_output_length = be_dom_serialize_html(
+            worker.browser.current_dom
+        ).len().to_i64()
+        expect(serialized_output_length).to_equal(
+            _bounded_serialization_output_length(4096)
+        )
+        expect(serialized_output_length).to_be_less_than(
+            BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH + 1
+        )
+        match worker.browser.open_html(
+            "simple-renderer://document", larger
+        ):
+            Ok(_): ()
+            Err(reason): fail("repeated bounded fixture failed: {reason}")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 91, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+
+        step("Measure retained state and work growth")
+        expect(retained_nodes).to_be_greater_than(smaller_nodes)
+        expect(retained_nodes).to_be_less_than(smaller_nodes * 3)
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(retained_nodes)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(retained_styles)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(retained_boxes)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(retained_commands)
+        _expect_retained_stage_counts(
+            worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3
+        )
+
+        step("Prove stable Draw IR output within the resource ceiling")
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        expect(be_dom_serialize_html(
+            worker.browser.current_dom
+        ).len().to_i64()).to_equal(serialized_output_length)
+        expect(retained_nodes).to_be_greater_than(4096)
+        expect(retained_nodes).to_be_less_than(65537)
+        expect(retained_styles).to_be_greater_than(0)
+        expect(retained_styles).to_be_less_than(65537)
+        expect(retained_boxes).to_be_greater_than(0)
+        expect(retained_boxes).to_be_less_than(65537)
+        expect(retained_commands).to_be_greater_than(0)
+        expect(retained_commands).to_be_less_than(65537)
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    it "should route pointer keyboard focus text and form events in browser order":
+        _production_browser_fixture()
+        _operate_page_controls()
+        step("Verify semantic state event history and rendered output")
+        _require_production_browser_evidence()
+
+    # @manual: folded
+    it "should cancel a default action after capture target and bubble dispatch":
+        _production_browser_fixture()
+        step("Cancel a default action after capture target and bubble dispatch")
+        _require_production_browser_evidence()
+
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
+    # @manual: show
+    # @capture(text)
+    # @capture(protocol)
+    # @capture(gui)
+    it "should operate address back forward stop reload home bookmark and links":
+        _production_browser_fixture()
+        _operate_browser_navigation()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+        step("Cancel address editing and reject a stale cross-window release")
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://home.test/"
+        )
+        expect(registry.ensure(
+            81, "<main>first</main>", 64, 48, 0, 100000
+        )).to_equal("none")
+        expect(registry.ensure(
+            82, "<main>second</main>", 64, 48, 0, 100000
+        )).to_equal("none")
+        expect(registry.address_text(81)).to_equal("about:blank")
+        expect(registry.address_text(82)).to_equal("about:blank")
+        expect(registry.address_text(82).contains("<")).to_equal(false)
+        expect(registry.address_text(82).contains(">")).to_equal(false)
+        expect(_await_browser_registry_ready(
+            registry, 81, "<main>first</main>"
+        )).to_be(true)
+        expect(_await_browser_registry_ready(
+            registry, 82, "<main>second</main>"
+        )).to_be(true)
+        val stale_press = registry.dispatch_chrome_pointer(
+            1, 81, "back", true
+        )
+        val current_press = registry.dispatch_chrome_pointer(
+            2, 82, "address", true
+        )
+        val stale_release = registry.dispatch_chrome_pointer(
+            3, 81, "back", false
+        )
+        val current_release = registry.dispatch_chrome_pointer(
+            4, 82, "address", false
+        )
+        expect(stale_press.reason).to_equal("chrome-pressed")
+        expect(current_press.reason).to_equal("chrome-pressed")
+        expect(stale_release.callback_count).to_equal(0)
+        expect(stale_release.reason).to_equal(
+            "chrome-release-target-mismatch"
+        )
+        expect(current_release.reason).to_equal("address-focused")
+
+        step("Keep a newer same-window control armed after a late release")
+        val same_back = registry.dispatch_chrome_pointer(
+            10, 82, "back", true
+        )
+        val same_address = registry.dispatch_chrome_pointer(
+            11, 82, "address", true
+        )
+        val late_back = registry.dispatch_chrome_pointer(
+            12, 82, "back", false
+        )
+        expect(same_back.reason).to_equal("chrome-pressed")
+        expect(same_address.reason).to_equal("chrome-pressed")
+        expect(late_back.callback_count).to_equal(0)
+        expect(late_back.reason).to_equal(
+            "chrome-release-target-mismatch"
+        )
+        expect(registry.pressed_window_id).to_equal(82)
+        expect(registry.dispatch_chrome_pointer(
+            13, 82, "address", false
+        ).reason).to_equal("address-focused")
+
+        step("Replace page and chrome presses without accepting late releases")
+        val page_first = registry.dispatch_pointer(
+            14, 81, 4, 4, true
+        )
+        expect(page_first.callback_count).to_equal(1)
+        expect(registry.dispatch_chrome_pointer(
+            15, 81, "address", true
+        ).reason).to_equal("chrome-pressed")
+        val late_page = registry.dispatch_pointer(
+            16, 81, 4, 4, false
+        )
+        expect(late_page.callback_count).to_equal(0)
+        expect(late_page.reason).to_equal(
+            "pointer-release-target-mismatch"
+        )
+        expect(registry.pressed_window_id).to_equal(81)
+        expect(registry.dispatch_chrome_pointer(
+            17, 81, "address", false
+        ).reason).to_equal("address-focused")
+
+        expect(registry.dispatch_chrome_pointer(
+            18, 82, "back", true
+        ).reason).to_equal("chrome-pressed")
+        val page_replacement = registry.dispatch_pointer(
+            19, 82, 4, 4, true
+        )
+        expect(page_replacement.callback_count).to_equal(1)
+        val late_chrome = registry.dispatch_chrome_pointer(
+            20, 82, "back", false
+        )
+        expect(late_chrome.callback_count).to_equal(0)
+        expect(late_chrome.reason).to_equal(
+            "chrome-release-target-mismatch"
+        )
+        expect(registry.pressed_window_id).to_equal(82)
+        expect(registry.dispatch_pointer(
+            21, 82, 4, 4, false
+        ).callback_count).to_equal(1)
+
+        expect(registry.dispatch_text(
+            22, 82, "https://draft.test/"
+        ).callback_count).to_equal(1)
+        val canceled = registry.dispatch_key_with_shift(
+            23, 82, 27, true, false
+        )
+        expect(canceled.callback_count).to_equal(1)
+        expect(registry.address_text(82)).to_equal("about:blank")
+        expect(registry.address_text(82).contains("<")).to_equal(false)
+        expect(registry.address_text(82).contains(">")).to_equal(false)
+        val favorite_press = registry.dispatch_chrome_pointer(
+            24, 82, "favorite", true
+        )
+        val favorite_release = registry.dispatch_chrome_pointer(
+            25, 82, "favorite", false
+        )
+        expect(favorite_press.reason).to_equal("chrome-pressed")
+        expect(favorite_release.reason).to_equal("favorite-parent")
+        expect(favorite_release.callback_count).to_equal(0)
+
+        step("Commit address back forward stop reload and home commands")
+        var address = HostedBrowserRendererProcess.create(31, 64, 48)
+        address.state = "active"
+        expect(address.begin_navigate(
+            "https://address.test/", "GET", "", "", "", 2000
+        ).is_ok()).to_be(true)
+        val address_wire = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(31), address.pending_wire
+        )
+        val address_command = browser_renderer_navigation_decode(
+            address_wire.message
+        )
+        expect(address_command.action).to_equal("open")
+        expect(address_command.url).to_equal("https://address.test/")
+        expect(address.navigation_permit.active).to_be(true)
+
+        var back = HostedBrowserRendererProcess.create(32, 64, 48)
+        back.state = "active"
+        back.history_urls = [
+            "https://history.test/one", "https://history.test/two"
+        ]
+        back.history_index = 1
+        expect(back.begin_go_back(2000).is_ok()).to_be(true)
+        val back_command = browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(32), back.pending_wire
+            ).message
+        )
+        expect(back_command.action).to_equal("back")
+        expect(back_command.url).to_equal("https://history.test/one")
+        expect(back.history_index).to_equal(1)
+        expect(back.pending_history_index).to_equal(0)
+
+        var forward = HostedBrowserRendererProcess.create(33, 64, 48)
+        forward.state = "active"
+        forward.history_urls = [
+            "https://history.test/one", "https://history.test/two"
+        ]
+        forward.history_index = 0
+        expect(forward.begin_go_forward(2000).is_ok()).to_be(true)
+        val forward_command = browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(33), forward.pending_wire
+            ).message
+        )
+        expect(forward_command.action).to_equal("forward")
+        expect(forward_command.url).to_equal("https://history.test/two")
+        expect(forward.history_index).to_equal(0)
+        expect(forward.pending_history_index).to_equal(1)
+
+        var stopped = HostedBrowserRendererProcess.create(34, 64, 48)
+        stopped.state = "active"
+        expect(stopped.begin_navigate(
+            "https://late.test/", "GET", "", "", "", 2000
+        ).is_ok()).to_be(true)
+        stopped.pending_document_commit_url = "https://late.test/"
+        expect(stopped.begin_stop(2000).is_ok()).to_be(true)
+        val stop_command = browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(34), stopped.pending_wire
+            ).message
+        )
+        expect(stop_command.action).to_equal("stop")
+        expect(stopped.navigation_permit.active).to_be(false)
+        expect(stopped.pending_document_commit_url).to_equal("")
+
+        var reload = HostedBrowserRendererProcess.create(35, 64, 48)
+        reload.state = "active"
+        reload.document_url = "https://reload.test/page"
+        expect(reload.begin_reload(2000).is_ok()).to_be(true)
+        expect(browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(35), reload.pending_wire
+            ).message
+        ).action).to_equal("reload")
+        expect(reload.pending_history_action).to_equal("replace")
+
+        var home = HostedBrowserRendererProcess.create(36, 64, 48)
+        home.state = "active"
+        expect(home.set_home_url(
+            "https://home.test/"
+        )).to_be(true)
+        expect(home.begin_go_home(2000).is_ok()).to_be(true)
+        expect(browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(36), home.pending_wire
+            ).message
+        ).action).to_equal("home")
+
+        step("Route bookmark and page-link navigation without forged authority")
+        var bookmark = HostedBrowserRendererProcess.create(37, 64, 48)
+        bookmark.state = "active"
+        expect(bookmark.begin_bookmark_snapshot(
+            BrowserBookmarkSnapshot.create([
+                Pair(
+                    first: "https://saved.test/",
+                    second: "Saved"
+                )
+            ]), 2000
+        ).is_ok()).to_be(true)
+        val bookmark_command = browser_renderer_bookmark_snapshot_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(37), bookmark.pending_wire
+            ).message
+        )
+        expect(bookmark_command.ok).to_be(true)
+        expect(bookmark_command.urls[0]).to_equal("https://saved.test/")
+
+        var link = HostedBrowserRendererProcess.create(38, 64, 48)
+        link.document_url = "https://source.test/page"
+        link.document_origin = "https://source.test"
+        expect(link.authorize_renderer_navigation(
+            BrowserRendererNetworkDecodeResult(
+                ok: true, reason: "", reply_to_request_id: 1,
+                request_id: "link-1", kind: "document",
+                url: "https://destination.test/", method: "GET",
+                headers: "", body: "", content_type: "",
+                credentials: "include", script_cookie_writes: [],
+                status: 0, error: ""
+            )
+        )).to_be(true)
+        expect(link.navigation_permit.url).to_equal(
+            "https://destination.test/"
+        )
+
+        step("Deny a late command from another renderer generation")
+        val wrong_generation = browser_renderer_navigation_encode(
+            99, 1, "open", "https://late.test/", "GET", "", "", ""
+        )
+        val denied = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(38), wrong_generation.wire
+        )
+        expect(denied.status).to_equal("violation")
+        val teardown_press = registry.dispatch_chrome_pointer(
+            26, 81, "back", true
+        )
+        expect(teardown_press.reason).to_equal("chrome-pressed")
+        expect(registry.pressed_window_id).to_equal(81)
+        expect(registry.close()).to_be(true)
+        expect(registry.pressed_window_id).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+    it "should persist bounded page titles across renderer and profile restart":
+        setup_hosted_bookmark_title_profile()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://accepted-title.test/"
+        )
+        val body_html = "<main>bookmark title witness</main>"
+        expect(registry.ensure(
+            93, body_html, 64, 48, 0, 100000
+        )).to_equal("none")
+        expect(_await_browser_registry_ready(
+            registry, 93, body_html
+        )).to_be(true)
+        _open_hosted_bookmark_document(
+            registry, 93, "https://accepted-title.test/", 100, body_html
+        )
+        expect(registry.bookmark_stored_title(93)).to_equal(
+            BOOKMARK_TITLE_512
+        )
+        check_bookmark_title_witness_admission(
+            registry, 93, BOOKMARK_TITLE_512
+        )
+        val admitted_title = registry.bookmark_stored_title(93)
+        step("Open bounded titled documents through hosted chrome")
+        expect(admitted_title).to_equal(BOOKMARK_TITLE_512)
+
+        var profile = match BrowserProfileStore.open(
+            BOOKMARK_TITLE_PROFILE_PATH
+        ):
+            Err(error):
+                fail(error.message())
+            Ok(opened):
+                opened
+        val _ = registry.dispatch_chrome_pointer(
+            110, 93, "favorite", true
+        )
+        expect(registry.dispatch_chrome_pointer(
+            111, 93, "favorite", false
+        ).reason).to_equal("favorite-parent")
+        val first_commit = hosted_browser_parent_toggle_bookmark(
+            profile,
+            "https://accepted-title.test/",
+            registry.bookmark_stored_title(93)
+        )
+        expect(first_commit.ok).to_be(true)
+        expect(first_commit.enabled).to_be(true)
+        expect(first_commit.bookmarks.entries[0].second).to_equal(
+            BOOKMARK_TITLE_512
+        )
+        profile = first_commit.profile
+        _open_hosted_bookmark_document(
+            registry, 93, "https://fallback-title.test/", 120, body_html
+        )
+        check_bookmark_title_witness_admission(registry, 93, "")
+        val _ = registry.dispatch_chrome_pointer(
+            130, 93, "favorite", true
+        )
+        expect(registry.dispatch_chrome_pointer(
+            131, 93, "favorite", false
+        ).reason).to_equal("favorite-parent")
+        val second_commit = hosted_browser_parent_toggle_bookmark(
+            profile,
+            "https://fallback-title.test/",
+            registry.bookmark_stored_title(93)
+        )
+        expect(second_commit.ok).to_be(true)
+        expect(second_commit.enabled).to_be(true)
+        expect(second_commit.bookmarks.entries[1].second).to_equal("")
+        profile = second_commit.profile
+        val accepted_persisted_title = (
+            first_commit.bookmarks.entries[0].second
+        )
+        val fallback_persisted_title = (
+            second_commit.bookmarks.entries[1].second
+        )
+        step("Commit bookmarks through the parent profile owner")
+        expect(accepted_persisted_title).to_equal(BOOKMARK_TITLE_512)
+        expect(fallback_persisted_title).to_equal("")
+
+        expect(registry.next_generation).to_be_greater_than(2)
+        expect(registry.close()).to_be(true)
+        profile.close()?
+        var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(
+                BrowserProfileStore.open(BOOKMARK_TITLE_PROFILE_PATH)?
+            )
+        )
+        val _ = restarted.advance_window(
+            94, "<main>restarted</main>", 64, 48, 100000, true
+        )
+        val restarted_count = restarted.profile_bookmarks.entries.len()
+        step("Restart the renderer generation and profile-backed window")
+        expect(registry.next_generation).to_be_greater_than(2)
+        expect(restarted_count).to_equal(2)
+
+        expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+        check_restarted_bookmark_listing(restarted)
+        check_in_process_registry_profile_reopen(
+            restarted.profile_bookmarks
+        )
+        var restored_title = ""
+        var restored_fallback = ""
+        var restored_accepted_count = 0
+        var restored_fallback_count = 0
+        for entry in restarted.profile_bookmarks.entries:
+            if entry.first == "https://accepted-title.test/":
+                restored_accepted_count = restored_accepted_count + 1
+                restored_title = entry.second
+            elif entry.first == "https://fallback-title.test/":
+                restored_fallback_count = restored_fallback_count + 1
+                restored_fallback = entry.second
+        step("List persisted bookmarks with safe titles")
+        expect(restored_accepted_count).to_equal(1)
+        expect(restored_fallback_count).to_equal(1)
+        expect(restored_title).to_equal(BOOKMARK_TITLE_512)
+        expect(restored_fallback).to_equal("")
+        expect(restarted.close()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())
+        _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
+
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
+    # @manual: show
+    # @capture(protocol)
+    it "should enforce one UTF-8 byte bound for every browser address editor":
+        _production_browser_fixture()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://example.com/"
+        )
+        expect(registry.ensure(
+            92, "<div>secondary</div>", 64, 48, 0, 100000
+        )).to_equal("none")
+
+        step("Accept an address draft of exactly 2048 UTF-8 bytes")
+        val focused = registry.dispatch_chrome_pointer(
+            1, 92, "address", true
+        )
+        val released = registry.dispatch_chrome_pointer(
+            2, 92, "address", false
+        )
+        val exact = _repeat_browser_text("a", 2048)
+        val accepted = registry.dispatch_text(3, 92, exact)
+        expect(focused.reason).to_equal("chrome-pressed")
+        expect(released.reason).to_equal("address-focused")
+        expect(accepted.callback_count).to_equal(1)
+        expect(accepted.reason).to_equal("")
+        expect(registry.address_text(92)).to_equal(exact)
+        val committed = registry.document_url(92)
+
+        step("Reject a 2049-byte multibyte draft without mutating state")
+        val _ = registry.dispatch_chrome_pointer(
+            4, 92, "address", true
+        )
+        val _ = registry.dispatch_chrome_pointer(
+            5, 92, "address", false
+        )
+        val oversized = _repeat_browser_text("a", 2047) + "é"
+        val rejected = registry.dispatch_text(6, 92, oversized)
+        expect(rejected.semantic_target_id).to_equal(
+            "browser:parent#address"
+        )
+        expect(rejected.callback_count).to_equal(0)
+        expect(rejected.reason).to_equal("address-too-long")
+        expect(registry.address_text(92)).to_equal(exact)
+        expect(registry.document_url(92)).to_equal(committed)
+        expect(registry.close()).to_be(true)
+
+    # @manual: folded
+    it "should report unsupported content without fake success":
+        _production_browser_fixture()
+        step("Open unsupported and malformed compatibility fixtures")
+        _require_production_browser_evidence()
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should render br as one forced inline line break":
+        step("Render forced HTML line breaks through canonical Draw IR")
+        val html = (
+            "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
+            "<span id='alpha'>alpha</span><br id='break'>" +
+            "<span id='beta'>beta</span></div>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 160, 64, []
+        ).batches[0].commands
+        val alpha_index = _browser_draw_ir_text_index(commands, "alpha")
+        val beta_index = _browser_draw_ir_text_index(commands, "beta")
+        expect(alpha_index).to_be_greater_than(-1)
+        expect(beta_index).to_be_greater_than(alpha_index)
+        val alpha = commands[alpha_index]
+        val beta = commands[beta_index]
+        expect(_browser_draw_ir_style_value(
+            alpha, "display"
+        )).to_equal("inline")
+        expect(_browser_draw_ir_style_value(
+            beta, "line-height"
+        )).to_equal("20")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "break", "display"
+        )).to_equal("inline")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "break", "w"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "break", "h"
+        )).to_equal("20")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "beta", "x"
+        )).to_equal(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "alpha", "x"
+        ))
+        val alpha_y = simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "alpha", "y"
+        ).to_i32()
+        val beta_y = simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "beta", "y"
+        ).to_i32()
+        expect(beta_y - alpha_y).to_equal(20)
+        val hidden_break_html = (
+            "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
+            "<span id='hidden-alpha'>alpha</span>" +
+            "<br style='display:none'>" +
+            "<span id='hidden-beta'>beta</span></div>"
+        )
+        val hidden_alpha_y = simple_web_layout_debug_layout_by_id(
+            hidden_break_html, 160, 64, "hidden-alpha", "y"
+        ).to_i32()
+        val hidden_beta_y = simple_web_layout_debug_layout_by_id(
+            hidden_break_html, 160, 64, "hidden-beta", "y"
+        ).to_i32()
+        expect(hidden_beta_y).to_equal(hidden_alpha_y)
+
+        step("Read back the forced-line pixels after semantic geometry")
+        val renderer = BrowserRenderer.create(160, 64)
+        val forced_pixels = renderer.render_html_to_pixels(html).pixel_data
+        val inline_pixels = renderer.render_html_to_pixels(
+            "<div style='margin:0;padding:0;font-size:16px;" +
+            "line-height:20px'>alpha beta</div>"
+        ).pixel_data
+        expect(forced_pixels.len()).to_equal(160 * 64)
+        expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007
+    it "should retain the canonical document tree while rendering its body":
+        step("Load one explicit head and body through the canonical tree builder")
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/canonical-tree",
+            "<!DOCTYPE html><html><head>" +
+            "<meta name='fixture' content='whatwg-tree'>" +
+            "<title>Canonical Tree</title></head>" +
+            "<body style='margin:0'><div id='canonical-tree-visible' " +
+            "style='width:24px;height:24px;background-color:#00ff00'>" +
+            "tree-visible</div></body></html>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("canonical tree fixture failed to open: {reason}")
+
+        step("Retain head metadata and title in the installed semantic document")
+        val heads = be_dom_find_by_tag(session.current_dom, "head")
+        expect(heads.len()).to_equal(1)
+        expect(be_dom_find_by_tag(heads[0], "meta").len()).to_equal(1)
+        expect(be_dom_find_by_tag(heads[0], "title").len()).to_equal(1)
+        expect(session.current_title).to_equal("Canonical Tree")
+
+        step("Lower the same body through canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            session.render_html_document(), 32, 32, session.image_resources
+        )
+        expect(_browser_draw_ir_text_index(
+            composition.batches[0].commands, "tree-visible"
+        )).to_be_greater_than(-1)
+
+        step("Execute the same composition through Engine2D pixels")
+        val raster = Engine2dCompositorBackend.create_named(
+            32, 32, "software"
+        )
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.pixels.len()).to_equal(32 * 32)
+        expect(_count_color(
+            rendered.pixels, 0xFF00FF00u32
+        )).to_be_greater_than(0)

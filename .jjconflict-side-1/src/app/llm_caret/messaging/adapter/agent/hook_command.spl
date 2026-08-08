@@ -1,0 +1,72 @@
+"""Bounded, redacted, durable provider-hook ingestion."""
+
+use app.io.mod.{env_get, current_time_ms}
+use std.io_runtime.{mkdir_p}
+use std.crypto.sha256.{sha256_text}
+use app.llm_caret.redact.{redact, redact_env_values}
+use app.llm_caret.json_helpers.{extract_json_string}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredHookCorrelation}
+use app.llm_caret.messaging.application.context_builder.{build_context_bundle}
+use app.llm_caret.messaging.adapter.agent.hook_response.{provider_hook_response}
+
+extern fn stdin_read_char() -> text
+
+fn hook_payload(limit: i64) -> text:
+    var payload = ""
+    while payload.len() < limit:
+        val ch = stdin_read_char()
+        if ch == "": return payload
+        payload = payload + ch
+    payload
+
+fn hook_room_context(store: PureSqlMessagingStore, task_id: text,
+        room_id: text, agent_id: text) -> text:
+    if task_id == "" or room_id == "" or agent_id == "": return ""
+    var origin_message_id = ""
+    for task in store.tasks():
+        if task.task_id == task_id and task.assigned_agent_id == agent_id:
+            origin_message_id = task.origin_message_id
+    if origin_message_id == "": return ""
+    val trigger = store.message(origin_message_id)
+    if trigger.message_id.value == "" or trigger.room_id.value != room_id: return ""
+    val bundle = build_context_bundle("hook-" + task_id, task_id, agent_id, room_id,
+        trigger, store.message_history(room_id, 0, 256), store.profiles(), "", "", "",
+        [], 32768, 2, "hook-v1", "redact-v1")
+    if not bundle.accepted: return ""
+    redact_env_values(redact(bundle.text_content))
+
+fn run_hook_command(provider: text, event_name: text) -> i64:
+    if provider != "claude" and provider != "codex" and provider != "gemini":
+        print "ERROR unsupported hook provider: " + provider
+        return 2
+    val payload = redact_env_values(redact(hook_payload(1048576)))
+    val database = env_get("LLM_CARET_MESSAGING_DB") ?? ".simple/state/llm-caret-messaging.db"
+    val slash = database.last_index_of("/")
+    if slash > 0: mkdir_p(database.substring(0, slash))
+    var store = PureSqlMessagingStore.open(database)
+    val now = current_time_ms()
+    val event_id = "hook-" + sha256_text(provider + ":" + event_name + ":" + payload + ":" + now.to_text())
+    val queued = store.enqueue_hook_event(event_id, provider, event_name, payload, now)
+    var task_id = env_get("LLM_CARET_TASK_ID") ?? ""
+    var room_id = env_get("LLM_CARET_ROOM_ID") ?? ""
+    var agent_id = env_get("LLM_CARET_AGENT_ID") ?? ""
+    if task_id == "": task_id = extract_json_string(payload, "llm_caret_task_id")
+    if room_id == "": room_id = extract_json_string(payload, "llm_caret_room_id")
+    if agent_id == "": agent_id = extract_json_string(payload, "llm_caret_agent_id")
+    var additional_context = ""
+    if queued.ok and task_id != "" and room_id != "" and agent_id != "":
+        val correlated = store.put_hook_correlation(StoredHookCorrelation(event_id: event_id,
+            task_id: task_id, room_id: room_id, agent_id: agent_id))
+        if not correlated.ok:
+            store.close()
+            print "ERROR " + correlated.error
+            return 1
+        additional_context = hook_room_context(store, task_id, room_id, agent_id)
+    store.close()
+    if not queued.ok:
+        print "ERROR " + queued.error
+        return 1
+    print provider_hook_response(provider, event_name, additional_context)
+    0
+
+export run_hook_command, hook_room_context

@@ -1,0 +1,558 @@
+# Special-function numeric kernels — Lanczos gamma, incomplete beta/gamma,
+# error function, factorials/combinatorics.
+#
+# Extracted from the battle-tested kernels inlined in
+# src/app/office/sheets/formula.spl (Excel GAMMA/BETA.DIST/GAMMADIST/ERF/
+# COMBIN family). The numeric algorithms are copied verbatim — same
+# coefficients, same iteration counts, same convergence thresholds — so
+# results are bit-identical to the formula-engine originals. Only the
+# public names and argument ORDER were changed for a clean library API
+# (several formula.spl kernels take `x` first, e.g. `_betainc(x, a, b)`;
+# the public wrappers here use the more conventional `(a, b, x)`/`(a, x)`
+# parameter order and just reorder the call).
+#
+# Pure functions only (src/lib/common tier): no I/O, no externs, no shared
+# state. The exp/ln/sqrt/sin building blocks are the same self-contained
+# Taylor/Newton kernels formula.spl uses (NOT the SFFI math_exp/math_pow in
+# math.spl), because those require a bootstrap rebuild to resolve under the
+# interpreter — this module must work in interpreter mode too.
+#
+# Error-handling convention: lib functions return f64, never Excel-style
+# `#NUM!`/`#ERR` strings (that mapping is the caller's job). Each function's
+# docstring below states its domain and what it returns for out-of-domain
+# input; the choice generally mirrors what the formula.spl kernel itself
+# does when called without the dispatcher's upfront domain guard (which is
+# a deliberate, documented quirk — see individual docstrings).
+#
+# Import path: use std.math.special.{gamma_ln, gamma_fn, ...}
+
+# --- Internal building blocks (private; self-contained, no externs) ---
+
+val _PI: f64 = 3.141592653589793
+
+fn _exp_f64(x: f64) -> f64:
+    """e^x via argument halving + Taylor series, squared back up."""
+    var v = x
+    var squarings = 0
+    while v > 0.5 or v < -0.5:
+        v = v / 2.0
+        squarings = squarings + 1
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n <= 18:
+        term = term * v / n.to_f64()
+        sum = sum + term
+        n = n + 1
+    while squarings > 0:
+        sum = sum * sum
+        squarings = squarings - 1
+    sum
+
+fn _ln_f64(x: f64) -> f64:
+    """Natural log via binary normalization + atanh series. x must be > 0."""
+    var m = x
+    var e = 0
+    while m >= 2.0:
+        m = m / 2.0
+        e = e + 1
+    while m < 1.0:
+        m = m * 2.0
+        e = e - 1
+    val z = (m - 1.0) / (m + 1.0)
+    val z2 = z * z
+    var term = z
+    var sum = 0.0
+    var k = 1
+    while k <= 30:
+        sum = sum + term / k.to_f64()
+        term = term * z2
+        k = k + 2
+    2.0 * sum + e.to_f64() * 0.6931471805599453
+
+fn _sqrt_f64(x: f64) -> f64:
+    """Square root via Newton's method. Assumes x >= 0."""
+    if x == 0.0:
+        return 0.0
+    var g = x
+    var i = 0
+    while i < 40:
+        g = 0.5 * (g + (x / g))
+        i = i + 1
+    g
+
+fn _sin_f64(x: f64) -> f64:
+    """Sine via range reduction to [-pi, pi] + Taylor series."""
+    var v = x
+    val two_pi = 2.0 * _PI
+    while v > _PI:
+        v = v - two_pi
+    while v < 0.0 - _PI:
+        v = v + two_pi
+    var term = v
+    var sum = v
+    var n = 1
+    while n <= 10:
+        term = 0.0 - term * v * v / ((2 * n).to_f64() * (2 * n + 1).to_f64())
+        sum = sum + term
+        n = n + 1
+    sum
+
+fn _cos_f64_internal(x: f64) -> f64:
+    """Cosine via sin(x + pi/2)."""
+    _sin_f64(x + _PI / 2.0)
+
+fn _atan_f64(x: f64) -> f64:
+    """Arctangent: series for |x|<=1, identity atan(x)=pi/2-atan(1/x) beyond."""
+    if x > 1.0:
+        return _PI / 2.0 - _atan_f64(1.0 / x)
+    if x < -1.0:
+        return 0.0 - _PI / 2.0 - _atan_f64(1.0 / x)
+    val x2 = x * x
+    var sum = 0.0
+    var term = x / (1.0 + x2)
+    var mult = 1.0
+    var n = 0
+    while n < 40:
+        sum = sum + term * mult
+        val k = (n + 1).to_f64()
+        mult = mult * (2.0 * k) / (2.0 * k + 1.0) * (x2 / (1.0 + x2))
+        n = n + 1
+    sum
+
+fn _atan2_f64(y: f64, x: f64) -> f64:
+    """Two-argument arctangent with full quadrant handling (result in (-pi, pi])."""
+    if x > 0.0:
+        return _atan_f64(y / x)
+    if x < 0.0:
+        if y >= 0.0:
+            return _atan_f64(y / x) + _PI
+        return _atan_f64(y / x) - _PI
+    if y > 0.0:
+        return _PI / 2.0
+    if y < 0.0:
+        return 0.0 - _PI / 2.0
+    0.0
+
+fn _fabs(x: f64) -> f64:
+    """Absolute value of an f64."""
+    if x < 0.0:
+        return 0.0 - x
+    x
+
+fn _fact_i64(n: i64) -> f64:
+    """Factorial kernel: product 2..n. NOT domain-guarded — see factorial()."""
+    var out = 1.0
+    var i: i64 = 2
+    while i <= n:
+        out = out * i.to_f64()
+        i = i + 1
+    out
+
+# --- gamma / log-gamma ---
+
+pub fn gamma_ln(x: f64) -> f64:
+    """Natural log of the gamma function via the Lanczos g=7 approximation.
+
+    Domain: x > 0. Not guarded — for x <= 0 the Lanczos series is evaluated
+    anyway and the result is numerically meaningless (matches the original
+    formula.spl `_gammaln` kernel, which is only ever called on positive
+    arguments internally). Use gamma_fn() if you need the x <= 0 case, which
+    applies the reflection formula instead."""
+    val xx = x - 1.0
+    var a = 0.99999999999980993
+    a = a + 676.5203681218851 / (xx + 1.0)
+    a = a - 1259.1392167224028 / (xx + 2.0)
+    a = a + 771.32342877765313 / (xx + 3.0)
+    a = a - 176.61502916214059 / (xx + 4.0)
+    a = a + 12.507343278686905 / (xx + 5.0)
+    a = a - 0.13857109526572012 / (xx + 6.0)
+    a = a + 9.9843695780195716e-6 / (xx + 7.0)
+    a = a + 1.5056327351493116e-7 / (xx + 8.0)
+    val t = xx + 7.5
+    0.5 * _ln_f64(2.0 * _PI) + (xx + 0.5) * _ln_f64(t) - t + _ln_f64(a)
+
+pub fn gamma_fn(x: f64) -> f64:
+    """Gamma function Gamma(x) via exp(gamma_ln(x)) for x > 0, and the
+    reflection formula pi / (sin(pi*x) * Gamma(1-x)) for x <= 0 (same as the
+    formula.spl `GAMMA` dispatcher's Excel GAMMA() path).
+
+    Domain: all reals except 0 and negative integers (poles). Behavior on
+    invalid input: returns 0.0 at a pole (sentinel value, mirroring the
+    codebase's existing convention in `_powf`, which also returns 0.0 for
+    an out-of-domain base). Callers needing an Excel-style `#NUM!` must
+    range-check x themselves before calling."""
+    if x > 0.0:
+        return _exp_f64(gamma_ln(x))
+    if x == x.to_i64().to_f64():
+        return 0.0
+    val s = _sin_f64(_PI * x)
+    _PI / (s * _exp_f64(gamma_ln(1.0 - x)))
+
+pub fn beta_fn(a: f64, b: f64) -> f64:
+    """Beta function B(a,b) = Gamma(a)*Gamma(b)/Gamma(a+b), via gamma_ln for
+    numerical stability (same log-space technique the formula.spl
+    `_betainc` normalization uses; there is no separate beta_fn kernel in
+    formula.spl, this composes gamma_ln directly).
+
+    Domain: a > 0, b > 0. Behavior on invalid input: not guarded — passing
+    a <= 0 or b <= 0 routes through gamma_ln's out-of-domain behavior
+    (numerically meaningless, no crash)."""
+    _exp_f64(gamma_ln(a) + gamma_ln(b) - gamma_ln(a + b))
+
+# --- error function ---
+
+pub fn erf(x: f64) -> f64:
+    """Error function via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
+
+    Domain: all reals (erf is odd; negative arguments reflect the |x|
+    computation). No invalid input case."""
+    val ax = if x < 0.0: 0.0 - x else: x
+    val t = 1.0 / (1.0 + 0.3275911 * ax)
+    val poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    val e = 1.0 - poly * _exp_f64(0.0 - ax * ax)
+    if x < 0.0:
+        return 0.0 - e
+    e
+
+pub fn erfc(x: f64) -> f64:
+    """Complementary error function, erfc(x) = 1 - erf(x) (same identity the
+    formula.spl `ERFC` dispatch case uses — not a separately-tuned kernel).
+
+    Domain: all reals. No invalid input case."""
+    1.0 - erf(x)
+
+# --- incomplete beta ---
+
+fn _betacf(a: f64, b: f64, x: f64) -> f64:
+    """Continued fraction for the incomplete beta function via Lentz (NR §6.4).
+
+    100 iterations, tiny=1e-30, eps=3e-14."""
+    val fpmin = 1e-30
+    val eps = 3e-14
+    val qab = a + b
+    val qap = a + 1.0
+    val qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if _fabs(d) < fpmin:
+        d = fpmin
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 100:
+        val fm = m.to_f64()
+        val m2 = 2.0 * fm
+        var aa = fm * (b - fm) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + fm) * (qab + fm) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        val del = d * c
+        h = h * del
+        if _fabs(del - 1.0) < eps:
+            break
+        m = m + 1
+    h
+
+fn _betainc_x_first(x: f64, a: f64, b: f64) -> f64:
+    """Regularized incomplete beta I_x(a,b) via Lentz continued fractions
+    (NR §6.4). Kept with formula.spl's original x-first argument order as
+    the private core; incomplete_beta() below reorders for the public API."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    val bt = _exp_f64(gamma_ln(a + b) - gamma_ln(a) - gamma_ln(b) + a * _ln_f64(x) + b * _ln_f64(1.0 - x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+pub fn incomplete_beta(a: f64, b: f64, x: f64) -> f64:
+    """Regularized incomplete beta I_x(a,b) = B(x;a,b)/B(a,b), via Lentz
+    continued fractions (NR §6.4), with the symmetry
+    I_x(a,b) = 1 - I_{1-x}(b,a) used when x > (a+1)/(a+b+2) for convergence.
+    Same algorithm as formula.spl's `_betainc`, just called (a, b, x) instead
+    of formula.spl's (x, a, b).
+
+    Domain: a > 0, b > 0, x in [0, 1]. Behavior on invalid input: x <= 0.0
+    returns 0.0, x >= 1.0 returns 1.0 (clamped, not an error) — matches the
+    formula.spl kernel exactly. a <= 0 or b <= 0 is not guarded and is
+    numerically meaningless (undefined gamma_ln input)."""
+    _betainc_x_first(x, a, b)
+
+pub fn incomplete_beta_inv(a: f64, b: f64, p: f64) -> f64:
+    """Inverse of incomplete_beta in x, by bisection on [0,1], 60 iterations
+    (same as formula.spl's `_betainc_inv`, called (a, b, p) instead of
+    formula.spl's (p, a, b)).
+
+    Domain: a > 0, b > 0, p in (0, 1). Behavior on invalid input: p <= 0 or
+    p >= 1 still runs the 60-iteration bisection (not guarded) and converges
+    to 0.0 or 1.0 respectively rather than signaling an error."""
+    var lo = 0.0
+    var hi = 1.0
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if incomplete_beta(a, b, mid) > p:
+            hi = mid
+        else:
+            lo = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
+# --- incomplete gamma ---
+
+fn _gammainc_series(a: f64, x: f64) -> f64:
+    """Lower regularized incomplete gamma P(a,x) via series (NR §6.2), for x < a+1."""
+    val eps = 3e-14
+    val gln = gamma_ln(a)
+    var ap = a
+    var sum = 1.0 / a
+    var del = sum
+    var n = 1
+    while n <= 300:
+        ap = ap + 1.0
+        del = del * x / ap
+        sum = sum + del
+        if _fabs(del) < _fabs(sum) * eps:
+            break
+        n = n + 1
+    sum * _exp_f64(0.0 - x + a * _ln_f64(x) - gln)
+
+fn _gammainc_cf(a: f64, x: f64) -> f64:
+    """Upper regularized incomplete gamma Q(a,x) via continued fraction (NR §6.2), x >= a+1."""
+    val fpmin = 1e-30
+    val eps = 3e-14
+    val gln = gamma_ln(a)
+    var b = x + 1.0 - a
+    var c = 1.0 / fpmin
+    var d = 1.0 / b
+    var h = d
+    var i = 1
+    while i <= 300:
+        val fi = i.to_f64()
+        val an = 0.0 - fi * (fi - a)
+        b = b + 2.0
+        d = an * d + b
+        if _fabs(d) < fpmin:
+            d = fpmin
+        c = b + an / c
+        if _fabs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        val del = d * c
+        h = h * del
+        if _fabs(del - 1.0) < eps:
+            break
+        i = i + 1
+    _exp_f64(0.0 - x + a * _ln_f64(x) - gln) * h
+
+pub fn incomplete_gamma_p(a: f64, x: f64) -> f64:
+    """Regularized lower incomplete gamma P(a,x): series for x < a+1, continued
+    fraction otherwise (NR §6.2). Same algorithm and argument order as
+    formula.spl's `_gammainc_p`.
+
+    Domain: a > 0, x >= 0. Behavior on invalid input: x <= 0.0 returns 0.0
+    (matches the formula.spl kernel exactly, not an error). a <= 0 is not
+    guarded and is numerically meaningless."""
+    if x <= 0.0:
+        return 0.0
+    if x < a + 1.0:
+        return _gammainc_series(a, x)
+    1.0 - _gammainc_cf(a, x)
+
+pub fn incomplete_gamma_p_inv(a: f64, p: f64) -> f64:
+    """Inverse of incomplete_gamma_p in x: bracket-expand (doubling, up to 200
+    times) then bisect (60 iterations). Same as formula.spl's `_gammainc_inv`,
+    called (a, p) instead of formula.spl's (p, a).
+
+    Domain: a > 0, p in (0, 1). Behavior on invalid input: not guarded;
+    p <= 0 converges toward 0.0, p >= 1 may exhaust the 200-step bracket
+    expansion without bracketing p (returns whatever `hi` reached)."""
+    var hi = 1.0
+    var guard = 0
+    while incomplete_gamma_p(a, hi) < p and guard < 200:
+        hi = hi * 2.0
+        guard = guard + 1
+    var lo = 0.0
+    var it = 0
+    while it < 60:
+        val mid = (lo + hi) / 2.0
+        if incomplete_gamma_p(a, mid) > p:
+            hi = mid
+        else:
+            lo = mid
+        it = it + 1
+    (lo + hi) / 2.0
+
+# --- elementary kernels (public wrappers over the internal building blocks) ---
+
+pub fn exp_f64(x: f64) -> f64:
+    """e^x via argument halving + Taylor series. Same kernel formula.spl and
+    this module use internally (`_exp_f64`); exported for callers that need
+    the elementary function without duplicating the kernel.
+
+    Domain: any finite x (very large |x| loses precision per normal f64
+    semantics; no guard is applied)."""
+    _exp_f64(x)
+
+pub fn ln_f64(x: f64) -> f64:
+    """Natural log via binary normalization + atanh series. Same kernel
+    formula.spl and this module use internally (`_ln_f64`).
+
+    Domain: x > 0. Behavior on invalid input: NOT guarded — x <= 0.0 sends
+    the normalization loop spinning or returns garbage; callers must
+    range-check first (matches the internal kernel's contract)."""
+    _ln_f64(x)
+
+pub fn sqrt_f64(x: f64) -> f64:
+    """Square root via Newton's method (40 iterations). Same kernel
+    formula.spl and this module use internally (`_sqrt_f64`).
+
+    Domain: x >= 0. Behavior on invalid input: NOT guarded — negative x
+    does not converge; callers must range-check first (matches the internal
+    kernel's contract)."""
+    _sqrt_f64(x)
+
+# --- power / factorial / combinatorics ---
+
+pub fn powf(base: f64, exp: f64) -> f64:
+    """base^exp for base > 0 via exp(exp * ln(base)) — supports fractional
+    exponents (integer-only power loops truncate the exponent and cannot
+    express roots). Same as formula.spl's `_powf`.
+
+    Domain: base > 0. Behavior on invalid input: base <= 0.0 (including
+    base == 0.0) returns 0.0 regardless of exp — this is a deliberate
+    quirk inherited unchanged from formula.spl: powf(-2.0, 2.0) returns
+    0.0, NOT 4.0, even though -2^2 is mathematically well-defined. Callers
+    needing correct behavior for negative bases with integer exponents must
+    handle that case themselves before calling powf()."""
+    if base <= 0.0:
+        return 0.0
+    _exp_f64(exp * _ln_f64(base))
+
+pub fn factorial(n: i64) -> f64:
+    """n! via iterative product 2..n. Same as formula.spl's `_fact_i64`.
+
+    Domain: 0 <= n <= 170 (170! is close to f64's max magnitude; 171!
+    overflows). Behavior on invalid input: NOT guarded — for n < 0 the
+    accumulation loop's condition (i=2 <= n) is false immediately, so this
+    returns 1.0 (not a domain error, and not mathematically meaningful).
+    For n > 170 it silently overflows to +inf per normal f64 semantics.
+    Callers needing Excel's FACT() domain error must range-check first."""
+    _fact_i64(n)
+
+pub fn factorial2(n: i64) -> f64:
+    """Double factorial n!! = n*(n-2)*(n-4)*...  Same loop as formula.spl's
+    inlined `FACTDOUBLE` case.
+
+    Domain: n >= 0. Behavior on invalid input: NOT guarded — for n <= 1
+    (including negative n) the loop body never executes, so this returns
+    1.0 rather than a domain error."""
+    var dn = n
+    var dacc = 1.0
+    while dn > 1:
+        dacc = dacc * dn.to_f64()
+        dn = dn - 2
+    dacc
+
+pub fn combin(n: i64, k: i64) -> f64:
+    """Combinations without repetition, C(n,k) = n! / (k! * (n-k)!). Same
+    formula as formula.spl's `COMBIN` dispatch case.
+
+    Domain: 0 <= k <= n <= 170 (formula.spl's dispatcher additionally
+    enforces this range before calling; this library function does not).
+    Behavior on invalid input: NOT guarded — because factorial() returns
+    1.0 for negative n (see above), calling combin() with k > n silently
+    produces a mathematically WRONG (not erroring) result rather than a
+    domain error. Callers must validate 0 <= k <= n <= 170 themselves."""
+    factorial(n) / (factorial(k) * factorial(n - k))
+
+pub fn combina(n: i64, k: i64) -> f64:
+    """Combinations with repetition, C(n+k-1, k). Same formula and the same
+    k == 0 special case as formula.spl's `COMBINA` dispatch case (needed
+    because n + k - 1 can be -1 when n == 0 and k == 0).
+
+    Domain: n >= 0, k >= 0 (and n > 0 or k == 0), n + k - 1 <= 170.
+    Behavior on invalid input: NOT guarded beyond the k == 0 special case;
+    other out-of-domain combinations inherit factorial()'s and combin()'s
+    quirks above (silently wrong rather than erroring)."""
+    if k == 0:
+        return 1.0
+    val m = n + k - 1
+    factorial(m) / (factorial(k) * factorial(m - k))
+
+# --- Trigonometric functions ---
+
+pub fn fabs(x: f64) -> f64:
+    """Absolute value of f64. Same kernel special.spl and formula.spl use
+    internally (`_fabs`); exported for callers that need the elementary
+    function without duplicating the kernel.
+
+    Domain: any finite x. No invalid input case."""
+    _fabs(x)
+
+pub fn sin_f64(x: f64) -> f64:
+    """Sine via range reduction to [-pi, pi] + Taylor series. Same kernel
+    formula.spl and this module use internally (`_sin_f64`); exported for
+    callers that need the elementary function without duplicating the kernel.
+
+    Domain: any finite x (very large |x| loses precision per normal f64
+    semantics; no guard is applied)."""
+    _sin_f64(x)
+
+pub fn cos_f64(x: f64) -> f64:
+    """Cosine via sin(x + pi/2), same as formula.spl's internal `_cos_f64`.
+
+    Domain: any finite x (very large |x| loses precision per normal f64
+    semantics; no guard is applied)."""
+    _cos_f64_internal(x)
+
+pub fn tan_f64(x: f64) -> f64:
+    """Tangent via sin(x)/cos(x).
+
+    Domain: all finite x except odd multiples of pi/2 (where cos(x) = 0 and
+    result diverges). Behavior on invalid input: NOT guarded — near asymptotes,
+    the result may be very large or sign-flipped per normal floating-point
+    division semantics."""
+    _sin_f64(x) / _cos_f64_internal(x)
+
+pub fn atan_f64(x: f64) -> f64:
+    """Arctangent via Euler series for |x|<=1, recursion identity
+    atan(x)=pi/2-atan(1/x) for |x|>1. Same algorithm as formula.spl's
+    internal `_atan_f64`.
+
+    Domain: any finite x. No invalid input case."""
+    _atan_f64(x)
+
+pub fn atan2_f64(y: f64, x: f64) -> f64:
+    """Two-argument arctangent with full quadrant handling. Same algorithm as
+    formula.spl's internal `_atan2_f64`. Result in (-pi, pi].
+
+    Domain: any finite x, y. No invalid input case."""
+    _atan2_f64(y, x)
+
+pub fn fact_i64(n: i64) -> f64:
+    """n! via iterative product 2..n. Same kernel as factorial(); provided
+    as an explicit i64 -> f64 conversion for callers expecting that signature.
+
+    Domain: 0 <= n <= 170 (170! is close to f64's max magnitude; 171!
+    overflows). Behavior on invalid input: NOT guarded — for n < 0 the
+    accumulation loop's condition (i=2 <= n) is false immediately, so this
+    returns 1.0 (not a domain error, and not mathematically meaningful).
+    For n > 170 it silently overflows to +inf per normal f64 semantics.
+    Callers needing Excel's FACT() domain error must range-check first."""
+    _fact_i64(n)

@@ -1,0 +1,70 @@
+"""Markdown WYSIWYG view spec.
+
+Verifies the "md tool: WYSIWYG beside line-by-line edit" slice — a side-by-side
+view-model pairing each editable markdown source line with its rendered styled
+preview, plus per-line edit-and-re-render. Pure model→view transform over the
+shared office style resolver, so the IDE TUI and GUI can both consume it.
+"""
+
+use std.spec
+use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_line_count, wysiwyg_source_pane, wysiwyg_preview_pane, wysiwyg_update_line, wysiwyg_update_line_checked}
+
+describe "markdown WYSIWYG view: source and preview panes":
+    """A view pairs source lines with rendered previews from one document."""
+
+    it "has one row per source line":
+        val view = build_wysiwyg_view("alpha\nbeta\ngamma")
+        expect(wysiwyg_line_count(view)).to_equal(3)
+
+    it "preserves the source in the source pane":
+        val view = build_wysiwyg_view("alpha\nbeta")
+        val pane = wysiwyg_source_pane(view)
+        expect(pane).to_equal("alpha\nbeta")
+
+    it "renders styled HTML in the preview pane":
+        val view = build_wysiwyg_view("hello")
+        val pane = wysiwyg_preview_pane(view)
+        expect(pane).to_start_with("<div class=\"wysiwyg-preview\">")
+        expect(pane).to_contain("line-height: 1.5;")
+        expect(pane).to_contain(">hello</p>")
+
+describe "markdown WYSIWYG view: beside-the-line editing":
+    """Editing one line updates only that row's source and preview."""
+
+    it "edits a single line's source":
+        val view = build_wysiwyg_view("first\nsecond")
+        val edited = wysiwyg_update_line(view, 1, "changed")
+        val pane = wysiwyg_source_pane(edited)
+        expect(pane).to_equal("first\nchanged")
+
+    it "re-renders only the edited line's preview":
+        val view = build_wysiwyg_view("first\nsecond")
+        val edited = wysiwyg_update_line(view, 1, "changed")
+        val preview = wysiwyg_preview_pane(edited)
+        expect(preview).to_contain(">first</p>")
+        expect(preview).to_contain(">changed</p>")
+
+    it "accepts checked edits only when expected source matches actual source":
+        val view = build_wysiwyg_view("first\nsecond")
+        val result = wysiwyg_update_line_checked(view, 1, "second", "changed")
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("updated")
+        expect(result.diff).to_equal("@@ line 1 @@\n- second\n+ changed")
+        expect(wysiwyg_source_pane(result.view)).to_equal("first\nchanged")
+
+    it "rejects stale checked edits with expected and actual source":
+        val view = build_wysiwyg_view("first\nactual")
+        val result = wysiwyg_update_line_checked(view, 1, "expected", "changed")
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("stale-line")
+        expect(result.actual_source).to_equal("actual")
+        expect(result.diff).to_equal("@@ line 1 @@\nexpected: expected\nactual: actual\nrejected: changed")
+        expect(wysiwyg_source_pane(result.view)).to_equal("first\nactual")
+
+    it "rejects checked edits for missing lines":
+        val view = build_wysiwyg_view("first")
+        val result = wysiwyg_update_line_checked(view, 3, "expected", "changed")
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("line-not-found")
+        expect(result.actual_source).to_equal("<missing>")
+        expect(wysiwyg_source_pane(result.view)).to_equal("first")

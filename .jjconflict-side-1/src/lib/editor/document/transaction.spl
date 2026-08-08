@@ -1,0 +1,50 @@
+# Document Transaction
+#
+# A DocumentTransaction is an ordered list of byte-offset edits applied to a
+# TextDocumentModel. Applying a transaction can always produce its inverse
+# (edit.old_text swapped back in) so DocumentRegistry can push it onto an
+# undo stack. Skeleton only -- no operational-transform rebasing, no
+# collaboration; depth arrives with lane L1. Part of the S3 document-service
+# skeleton; see
+# doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md
+# section S3.
+
+use std.editor.document.model.*
+
+struct DocumentEdit:
+    start: i64
+    end_ex: i64
+    new_text: text
+    old_text: text
+
+struct DocumentTransaction:
+    edits: [DocumentEdit]
+
+fn document_transaction_new(edits: [DocumentEdit]) -> DocumentTransaction:
+    DocumentTransaction(edits: edits)
+
+fn document_edit_inverse(edit: DocumentEdit) -> DocumentEdit:
+    """The edit that undoes `edit`: puts old_text back where new_text landed."""
+    DocumentEdit(
+        start: edit.start,
+        end_ex: edit.start + edit.new_text.len(),
+        new_text: edit.old_text,
+        old_text: edit.new_text
+    )
+
+fn document_transaction_inverse(tx: DocumentTransaction) -> DocumentTransaction:
+    """Inverse of the whole transaction, edits reversed so undoing re-applies
+    them in the correct relative order."""
+    var inverted: [DocumentEdit] = []
+    var i = tx.edits.len() - 1
+    while i >= 0:
+        inverted.push(document_edit_inverse(tx.edits[i]))
+        i = i - 1
+    DocumentTransaction(edits: inverted)
+
+fn document_transaction_apply(tx: DocumentTransaction, model: TextDocumentModel) -> TextDocumentModel:
+    """Apply every edit in order, threading the model through each replace."""
+    var current = model
+    for edit in tx.edits:
+        current = text_document_model_apply_replace(current, edit.start, edit.end_ex, edit.new_text)
+    current

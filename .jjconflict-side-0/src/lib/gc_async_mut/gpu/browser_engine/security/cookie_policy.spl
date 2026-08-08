@@ -1,0 +1,372 @@
+"""
+# Cookie Policy
+
+Enforcement for the RFC 6265bis cookie attributes that `net/cookie_store.spl`
+parses but never acted on: `Secure`, `HttpOnly`, `SameSite`, domain and path
+matching, the `__Host-` / `__Secure-` name prefixes, and expiry.
+
+Reuses the existing `Cookie` / `SameSite` entities and the existing
+`common.web.public_suffix.is_public_suffix` table — no second cookie model and
+no second suffix list.
+
+## Relation to `CookieStore.domain_matches`
+
+`CookieStore.domain_matches` implements the *jar key* rule, where a leading dot
+marks a subdomain-covering key. `domain_matches` here implements RFC 6265 §5.1.3,
+where `Domain=example.com` (dot or no dot) covers `sub.example.com`. The store's
+variant is left as-is; this module is the authority for accept/send decisions.
+
+Deny-wins throughout: any check that cannot be satisfied rejects the cookie.
+"""
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie, SameSite}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
+    is_opaque,
+    is_tuple_origin,
+    is_potentially_trustworthy,
+    schemeful_site_key,
+    same_site
+}
+use std.gc_async_mut.http.types.{is_safe_method}
+use common.web.host_policy.{is_ip_host_literal}
+use common.web.public_suffix.{is_public_suffix}
+use common.time_utils.{days_in_month, timestamp_from_components}
+
+pub class CookieVerdict:
+    """Outcome of a Set-Cookie admission check."""
+    accepted: bool
+    reason: text
+
+    static fn accept() -> CookieVerdict:
+        return CookieVerdict(accepted: true, reason: "ok")
+
+    static fn reject(reason: text) -> CookieVerdict:
+        return CookieVerdict(accepted: false, reason: reason)
+
+pub fn canonical_domain(raw: text) -> text:
+    """Lowercase a cookie Domain attribute and drop the RFC 6265 leading dot."""
+    var domain = raw.trim().to_lower()
+    while domain.starts_with("."):
+        domain = domain.slice(1, domain.len())
+    if domain.ends_with("."):
+        return ""
+    return domain
+
+pub fn domain_matches(cookie_domain: text, request_host: text) -> bool:
+    """RFC 6265 §5.1.3 domain-match, dot-insensitive on the cookie side."""
+    val domain = canonical_domain(cookie_domain)
+    val host = request_host.trim().to_lower()
+    if domain.len() == 0 or host.len() == 0:
+        return false
+    if domain == host:
+        return true
+    if is_ip_host_literal(host):
+        return false
+    if not host.ends_with("." + domain):
+        return false
+    # An IP-literal host never domain-matches a shorter suffix.
+    return not host.starts_with("[")
+
+pub fn path_matches(cookie_path: text, request_path: text) -> bool:
+    """RFC 6265 §5.1.4 path-match."""
+    if not cookie_path.starts_with("/"):
+        return false
+    var path = request_path
+    if not path.starts_with("/"):
+        path = "/"
+    if cookie_path == path:
+        return true
+    if cookie_path == "/":
+        return true
+    if not path.starts_with(cookie_path):
+        return false
+    if cookie_path.ends_with("/"):
+        return true
+    return path.slice(cookie_path.len(), cookie_path.len() + 1) == "/"
+
+pub fn is_expired(cookie: Cookie, now: i64) -> bool:
+    """`expires_at == 0` is a session cookie and never expires on the clock."""
+    if cookie.expires_at == 0:
+        return false
+    return cookie.expires_at <= now
+
+fn _same_site_is_none(cookie: Cookie) -> bool:
+    match cookie.same_site:
+        SameSite.None:
+            return true
+        SameSite.Strict:
+            return false
+        SameSite.Lax:
+            return false
+    return false
+
+fn _cookie_name_is_ascii_token(name: text) -> bool:
+    """RFC 6265bis cookie-name: a non-empty ASCII HTTP token."""
+    if name.len() == 0:
+        return false
+    for ch in name.chars():
+        val code = ch.code_point()
+        val alpha = (code >= 65 and code <= 90) or (
+            code >= 97 and code <= 122
+        )
+        val digit = code >= 48 and code <= 57
+        val symbol = (
+            code == 33 or code == 35 or code == 36 or code == 37 or
+            code == 38 or code == 39 or code == 42 or code == 43 or
+            code == 45 or code == 46 or code == 94 or code == 95 or
+            code == 96 or code == 124 or code == 126
+        )
+        if not alpha and not digit and not symbol:
+            return false
+    return true
+
+pub fn validate_set_cookie(cookie: Cookie, origin: Origin, now: i64) -> CookieVerdict:
+    """Decide whether `origin` may set `cookie`. Deny-wins.
+
+    Rejects, in order: opaque/malformed origins, empty or non-token names,
+    `SameSite=None` without `Secure`, `Secure` from a non-secure origin,
+    `__Host-`/`__Secure-` prefix violations, a `Domain` that is a public suffix
+    (so nothing can set a cookie for `com` or `co.uk`), a `Domain` that does not
+    cover the request host, a relative path, and cookies that are already
+    expired.
+    """
+    if is_opaque(origin) or not is_tuple_origin(origin):
+        return CookieVerdict.reject("opaque-or-malformed-origin")
+
+    val name = cookie.name.trim()
+    if name.len() == 0:
+        return CookieVerdict.reject("empty-name")
+    if not _cookie_name_is_ascii_token(name):
+        return CookieVerdict.reject("invalid-name")
+
+    if _same_site_is_none(cookie) and not cookie.secure:
+        return CookieVerdict.reject("samesite-none-requires-secure")
+
+    if cookie.partitioned and not cookie.secure:
+        return CookieVerdict.reject("partitioned-requires-secure")
+
+    if cookie.secure and not is_potentially_trustworthy(origin):
+        return CookieVerdict.reject("secure-attribute-requires-secure-origin")
+
+    val domain = canonical_domain(cookie.domain)
+
+    if name.starts_with("__Host-"):
+        if not cookie.secure:
+            return CookieVerdict.reject("host-prefix-requires-secure")
+        if cookie.domain.trim().len() != 0:
+            return CookieVerdict.reject("host-prefix-forbids-domain")
+        if cookie.path != "/":
+            return CookieVerdict.reject("host-prefix-requires-root-path")
+    elif name.starts_with("__Secure-"):
+        if not cookie.secure:
+            return CookieVerdict.reject("secure-prefix-requires-secure")
+
+    if cookie.domain.trim().len() != 0:
+        if domain.len() == 0:
+            return CookieVerdict.reject("malformed-domain")
+        if is_public_suffix(domain):
+            return CookieVerdict.reject("domain-is-public-suffix")
+        if not domain_matches(domain, origin.host):
+            return CookieVerdict.reject("domain-not-host-suffix")
+
+    if not cookie.path.starts_with("/"):
+        return CookieVerdict.reject("path-must-be-absolute")
+
+    if is_expired(cookie, now):
+        return CookieVerdict.reject("already-expired")
+
+    return CookieVerdict.accept()
+
+pub fn cookie_partition_key(top_level_origin: Origin) -> text:
+    """Canonical schemeful-site partition key for the top-level owner."""
+    if is_opaque(top_level_origin) or not is_tuple_origin(top_level_origin):
+        return ""
+    return schemeful_site_key(top_level_origin)
+
+pub fn effective_domain(cookie: Cookie, origin: Origin) -> text:
+    """Jar key for an accepted cookie: the Domain attribute, else host-only."""
+    val domain = canonical_domain(cookie.domain)
+    if domain.len() > 0:
+        return domain
+    return origin.host.trim().to_lower()
+
+pub fn script_visible(cookie: Cookie) -> bool:
+    """`HttpOnly` cookies are never handed to script (`document.cookie`)."""
+    return not cookie.http_only
+
+fn same_site_allows(
+    same_site: SameSite,
+    is_same_site_request: bool,
+    is_top_level_navigation: bool,
+    is_safe_method: bool
+) -> bool:
+    """Apply SameSite delivery rules to one request."""
+    if is_same_site_request:
+        return true
+    match same_site:
+        SameSite.None:
+            return true
+        SameSite.Strict:
+            return false
+        SameSite.Lax:
+            return is_top_level_navigation and is_safe_method
+    return false
+
+pub fn cookie_applies(
+    cookie: Cookie,
+    origin: Origin,
+    request_path: text,
+    site_for_cookies: Origin?,
+    method: text,
+    is_top_level_navigation: bool,
+    now: i64
+) -> bool:
+    """Should `cookie` be attached to a request to `origin` + `request_path`?
+
+    Deny-wins. A `Secure` cookie never leaves a non-secure channel, an expired
+    cookie is never sent, and `SameSite` gates cross-site delivery:
+    `Strict` same-site only, `Lax` same-site plus safe top-level navigations,
+    `None` anywhere — but `None` is only reachable at all because
+    `validate_set_cookie` already forced `Secure` on it. A missing client site
+    follows RFC6265bis: requests with no client are same-site.
+    """
+    if is_opaque(origin) or not is_tuple_origin(origin):
+        return false
+    if is_expired(cookie, now):
+        return false
+    if cookie.secure and not is_potentially_trustworthy(origin):
+        return false
+    if not domain_matches(effective_domain(cookie, origin), origin.host):
+        return false
+    if not path_matches(cookie.path, request_path):
+        return false
+    if _same_site_is_none(cookie) and not cookie.secure:
+        return false
+    var is_same_site_request = true
+    if val Some(site) = site_for_cookies:
+        is_same_site_request = same_site(site, origin)
+    return same_site_allows(
+        cookie.same_site,
+        is_same_site_request,
+        is_top_level_navigation,
+        is_safe_method(method)
+    )
+
+fn _digits_to_i64(raw: text) -> i64?:
+    """Parse an optionally-signed decimal, rejecting malformed input."""
+    val body = raw.trim()
+    if body.len() == 0:
+        return nil
+    var negative = false
+    var start = 0
+    if body.starts_with("-"):
+        negative = true
+        start = 1
+    elif body.starts_with("+"):
+        start = 1
+    if start >= body.len() or body.len() - start > 18:
+        return nil
+    var acc = 0
+    var i = start
+    while i < body.len():
+        val code = body.char_code_at(i)
+        if code < 48 or code > 57:
+            return nil
+        acc = acc * 10 + (code - 48)
+        i = i + 1
+    if negative:
+        return Some(0 - acc)
+    return Some(acc)
+
+pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
+    """Resolve `Expires`/`Max-Age` into `expires_at`, with Max-Age precedence.
+
+    `Max-Age<=0` means delete-now, encoded as an expiry one second in the past
+    so `is_expired` and `validate_set_cookie` both see it. Malformed attributes
+    are ignored.
+    """
+    var max_age: i64? = nil
+    var expires_at = cookie.expires_at
+    val parts = header.split(";")
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        i = i + 1
+        val lowered = part.to_lower()
+        if lowered.starts_with("max-age="):
+            if val Some(seconds) = _digits_to_i64(part.slice(8, part.len())):
+                max_age = Some(seconds)
+        elif lowered.starts_with("expires="):
+            if val Some(expiry) = _parse_rfc1123(part.slice(8, part.len())):
+                # Zero is reserved for session cookies; epoch-or-earlier dates
+                # must remain an explicit expired value.
+                expires_at = if expiry <= 0: -1 else: expiry
+    if val Some(seconds) = max_age:
+        var expiry = now + seconds
+        if seconds <= 0:
+            expiry = now - 1
+        return Cookie {
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path,
+            secure: cookie.secure,
+            http_only: cookie.http_only,
+            same_site: cookie.same_site,
+            partitioned: cookie.partitioned,
+            partition_key: cookie.partition_key,
+            expires_at: expiry
+        }
+    if expires_at == cookie.expires_at:
+        return cookie
+    return Cookie {
+        name: cookie.name, value: cookie.value, domain: cookie.domain,
+        path: cookie.path, secure: cookie.secure, http_only: cookie.http_only,
+        same_site: cookie.same_site, partitioned: cookie.partitioned,
+        partition_key: cookie.partition_key, expires_at: expires_at
+    }
+
+fn _month_number(raw: text) -> i64:
+    val month = raw.to_lower()
+    if month == "jan": return 1
+    if month == "feb": return 2
+    if month == "mar": return 3
+    if month == "apr": return 4
+    if month == "may": return 5
+    if month == "jun": return 6
+    if month == "jul": return 7
+    if month == "aug": return 8
+    if month == "sep": return 9
+    if month == "oct": return 10
+    if month == "nov": return 11
+    if month == "dec": return 12
+    return 0
+
+fn _valid_weekday(raw: text) -> bool:
+    val day = raw.to_lower()
+    return (day == "sun," or day == "mon," or day == "tue," or
+        day == "wed," or day == "thu," or day == "fri," or day == "sat,")
+
+fn _parse_rfc1123(raw: text) -> i64?:
+    val fields = raw.trim().split(" ")
+    if fields.len() != 6 or not _valid_weekday(fields[0]) or fields[5].to_lower() != "gmt":
+        return nil
+    val month = _month_number(fields[2])
+    val clock = fields[4].split(":")
+    if month == 0 or clock.len() != 3:
+        return nil
+    val day = _digits_to_i64(fields[1])
+    val year = _digits_to_i64(fields[3])
+    val hour = _digits_to_i64(clock[0])
+    val minute = _digits_to_i64(clock[1])
+    val second = _digits_to_i64(clock[2])
+    if not day.? or not year.? or not hour.? or not minute.? or not second.?:
+        return nil
+    if (year! < 1601 or year! > 9999 or day! < 1 or
+        day! > days_in_month(year!, month) or hour! < 0 or hour! > 23 or
+        minute! < 0 or minute! > 59 or second! < 0 or second! > 59):
+        return nil
+    return Some(timestamp_from_components(
+        year!, month, day!, hour!, minute!, second!, 0
+    ) / 1000000)

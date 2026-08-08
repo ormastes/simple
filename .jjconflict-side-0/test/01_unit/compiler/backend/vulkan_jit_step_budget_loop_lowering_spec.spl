@@ -1,0 +1,118 @@
+# @cover src/lib/gc_async_mut/gpu_lane/vulkan_jit_lane_executor.spl 70%
+# vulkan_jit lane executor -- step-budget loop lowering emitter unit spec
+# (Task C2).
+# @tag: unit, gpu, vulkan, jit, spirv
+#
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md §6.3
+# ("No unbounded loops in emitted SPIR-V: the JIT lane's lowering must
+# thread the same step budget through generated loops (decrement +
+# conditional SYS_EXIT(0xDEAD...) path)").
+#
+# This spec is pure text/host logic -- no Vulkan driver, no GPU -- so it
+# runs deterministically on every host, matching the design's mandate that
+# "portable gates (... static validation) remain mandatory" even when a
+# live device is absent.
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.vulkan_jit_lane_executor.{
+    build_while_true_budget_loop_spirv, emit_step_budget_decrement_check}
+use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
+use std.io_runtime.{shell, file_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+describe "vulkan_jit lane -- step-budget decrement/exhaustion-check emission (design §6.3)":
+    """
+    Asserts that lowering a `while true` loop body to SPIR-V injects a
+    step-budget decrement (OpLoad, OpISub by 1, OpStore) and an
+    exhaustion check (OpIEqual against zero) -- the exact instruction
+    sequence design §6.3 requires so an emitted loop can never actually
+    run unbounded on the device.
+    """
+    it "emits OpLoad -> OpISub -> OpStore -> OpIEqual for the budget word, in that order":
+        step("Build a minimal SPIR-V module and inject the budget-decrement sequence")
+        var b = SpirvBuilder.create([1, 0])
+        val void_t = b.emit_type_void()
+        val fn_t = b.emit_type_function(void_t, [])
+        val uint_t = b.emit_type_int(32, false)
+        val bool_t = b.emit_type_bool()
+        val budget_ptr_t = b.emit_type_pointer("Function", uint_t)
+        val budget_ptr = b.emit_variable(budget_ptr_t, "Function")
+        val _main_id = b.emit_function(void_t, fn_t, "None")
+        val _entry = b.emit_label()
+
+        val ids = emit_step_budget_decrement_check(b, uint_t, bool_t, budget_ptr)
+        b.emit_return()
+        b.emit_function_end()
+
+        step("Assert the generated assembly contains the decrement+check sequence in order")
+        val asm = b.build()
+        val load_idx = asm.find("OpLoad")
+        val isub_idx = asm.find("OpISub")
+        val store_idx = asm.find("OpStore")
+        val iequal_idx = asm.find("OpIEqual")
+
+        assert_true(load_idx >= 0)
+        assert_true(isub_idx >= 0)
+        assert_true(store_idx >= 0)
+        assert_true(iequal_idx >= 0)
+        assert_true(load_idx < isub_idx)
+        assert_true(isub_idx < store_idx)
+        assert_true(store_idx < iequal_idx)
+
+        step("Assert the decrement subtracts exactly 1 (a fresh OpConstant ... 1 feeds OpISub)")
+        assert_true(asm.contains("= OpConstant %{uint_t} 1"))
+
+    it "the exhaustion check compares the decremented budget against zero, not the pre-decrement value":
+        var b = SpirvBuilder.create([1, 0])
+        val uint_t = b.emit_type_int(32, false)
+        val bool_t = b.emit_type_bool()
+        val budget_ptr_t = b.emit_type_pointer("Function", uint_t)
+        val budget_ptr = b.emit_variable(budget_ptr_t, "Function")
+
+        val ids = emit_step_budget_decrement_check(b, uint_t, bool_t, budget_ptr)
+
+        val asm = b.build()
+        val iequal_line_start = asm.find("OpIEqual")
+        val decremented_ref = "%{ids.decremented_budget}"
+        step("The OpIEqual operands must reference the post-decrement id, not the loaded id")
+        assert_true(iequal_line_start >= 0)
+        val tail = asm[iequal_line_start:asm.len()]
+        assert_true(tail.contains(decremented_ref))
+
+describe "vulkan_jit lane -- while-true loop kernel wires the budget check into real control flow (design §6.3)":
+    """
+    `build_while_true_budget_loop_spirv` is the standalone kernel shape:
+    a structured loop header block that decrements the budget every
+    iteration and branches to a bounded exit block (writes the GMB-1
+    timeout sentinel 0xDEAD0000) instead of an unconditional back-branch,
+    so the loop cannot run forever on the device regardless of step count.
+    """
+    it "contains the budget-decrement sequence AND a conditional branch out of the loop":
+        val asm = build_while_true_budget_loop_spirv()
+
+        step("Budget-decrement sequence present")
+        assert_true(asm.contains("OpLoad"))
+        assert_true(asm.contains("OpISub"))
+        assert_true(asm.contains("OpIEqual"))
+
+        step("Conditional branch-out (never an unconditional OpBranch back into the loop alone)")
+        assert_true(asm.contains("OpBranchConditional"))
+        assert_true(asm.contains("OpSelectionMerge"))
+
+        step("The GMB-1 timeout sentinel 0xDEAD0000 is written on the exhausted path")
+        assert_true(asm.contains("3735097344"))
+
+    it "assembles cleanly with spirv-as when the tool is present on this host (host-aware optional)":
+        step("Probe for spirv-as; SKIP the assembly check (not the sequence assertions above) if absent")
+        val has_tool = shell("command -v spirv-as >/dev/null 2>&1").exit_code == 0
+        if not has_tool:
+            step("skip: spirv-as not found on this host")
+            assert_true(true)
+        else:
+            val asm = build_while_true_budget_loop_spirv()
+            val asm_path = "build/tmp/vulkan_jit_step_budget_loop_unit_spec.spvasm"
+            val bin_path = "build/tmp/vulkan_jit_step_budget_loop_unit_spec.spv"
+            assert_true(file_write(asm_path, asm))
+            val (stdout, stderr, exit_code) = process_run_bounded(
+                "spirv-as", [asm_path, "-o", bin_path], 30000, 65536)
+            expect(exit_code).to_equal(0)

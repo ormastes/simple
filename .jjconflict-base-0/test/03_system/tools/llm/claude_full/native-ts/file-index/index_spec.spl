@@ -1,0 +1,61 @@
+"""
+# Claude Full File Index
+
+Checks dedupe, fuzzy search, top-level cache, and scoring behavior.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.native_ts.file_index.index.*
+
+describe "Claude full FileIndex":
+    it "should dedupe and index non-empty paths":
+        step("Load a file list with duplicates and empties")
+        val index = FileIndex.new()
+        index.loadFromFileList(["src/App.ts", "", "src/App.ts", "test/App.test.ts"])
+        expect(index.paths).to_equal(["src/App.ts", "test/App.test.ts"])
+        expect(index.readyCount).to_equal(2)
+        expect(index.lowerPaths[0]).to_equal("src/app.ts")
+        expect(index.pathLens[0]).to_equal(10)
+
+    it "should return top-level entries for empty query":
+        step("Search with an empty query")
+        val index = FileIndex.new()
+        index.loadFromFileList(["src/App.ts", "docs/readme.md", "a/file.txt", "src/main.ts"])
+        val results = index.search("", 3)
+        expect(results[0].path).to_equal("a")
+        expect(results[1].path).to_equal("src")
+        expect(results[2].path).to_equal("docs")
+
+    it "should fuzzy search case-insensitively for lowercase queries":
+        step("Search lowercase query against mixed-case paths")
+        val index = FileIndex.new()
+        index.loadFromFileList(["src/QueryEngine.ts", "src/file_index.ts", "README.md"])
+        val results = index.search("qe", 2)
+        expect(results[0].path).to_equal("src/QueryEngine.ts")
+        expect(results.len()).to_equal(1)
+
+    it "should fuzzy search case-sensitively when query has uppercase":
+        step("Search uppercase query")
+        val index = FileIndex.new()
+        index.loadFromFileList(["src/queryEngine.ts", "src/QueryEngine.ts"])
+        val results = index.search("QE", 2)
+        expect(results.len()).to_equal(1)
+        expect(results[0].path).to_equal("src/QueryEngine.ts")
+
+    it "should apply test path position penalty":
+        step("Rank non-test result before test result")
+        val index = FileIndex.new()
+        index.loadFromFileList(["src/App.ts", "test/App.test.ts"])
+        val results = index.search("App", 2)
+        expect(results[0].path).to_equal("src/App.ts")
+        expect(results[0].score).to_equal(0)
+        expect(results[1].score).to_equal(525)
+
+    it "should expose scoring helpers and constants":
+        step("Check boundary, camel, bitmap, and top-level helpers")
+        expect(scoreBonusAt("src/App.ts", 4, false)).to_equal(8)
+        expect(scoreBonusAt("src/fooBar.ts", 7, false)).to_equal(6)
+        expect(firstPathSegment("native\\file.ts")).to_equal("native")
+        expect(yieldToEventLoop()).to_equal("yield")
+        expect(chunkMs()).to_equal(4)
+        expect(fileIndexSourceLinesModeled()).to_equal(370)

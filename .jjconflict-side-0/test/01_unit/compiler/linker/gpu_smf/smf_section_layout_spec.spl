@@ -1,0 +1,183 @@
+# ============================================================================
+# SMF section address layout (link_manager wave 8, Lane LAYOUT) —
+# smf_section_layout.spl spec.
+#
+# Seven claims:
+#   1. MIXED ALIGNMENTS — 1/8/16/4096 hand-computed from base 0; offsets
+#      come back in input order.
+#   2. ZERO-SIZE SECTIONS — occupy no bytes but are still aligned; two
+#      zero-size sections share one aligned address.
+#   3. NONZERO BASE — layout starts at align_up(base, first alignment);
+#      total_size is measured from base_addr, not from 0.
+#   4. EMPTY INPUT — ok with no offsets and total_size 0.
+#   5. REJECTS — length mismatch, negative base, negative size,
+#      alignment 0 / negative / non-power-of-two: each yields ok false,
+#      EMPTY offsets, total_size 0 (no partial addresses leak).
+#   6. OVERFLOW AT EXACTLY THE i64 BOUNDARY — cursor may reach i64 max
+#      exactly (ok), one byte further rejects; align_up round-up to
+#      2^63 rejects while the last representable multiple is accepted;
+#      overflow at a LATER step (not the first) also rejects.
+#   7. RED SENTINEL — one expected offset deliberately flipped, shown red,
+#      reverted (see lane report; blob hash identical after revert).
+# ============================================================================
+
+use std.spec
+use compiler.backend.linker.gpu_smf.smf_section_layout.{
+    SmfLayoutResult,
+    smf_layout_sections
+}
+
+# i64 max, duplicated as a literal so the spec's boundary arithmetic is
+# hand-checkable: 2^63 - 1.
+val I64_MAX: i64 = 9223372036854775807
+
+# ----------------------------------------------------------------------------
+# 1. Mixed alignments, hand-computed
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections mixed alignments":
+    it "lays out 1/8/16/4096-aligned sections from base 0 as hand-computed":
+        # cursor 0  -> align 1    -> off 0,    +5  -> cursor 5
+        # cursor 5  -> align 8    -> off 8,    +3  -> cursor 11
+        # cursor 11 -> align 16   -> off 16,   +10 -> cursor 26
+        # cursor 26 -> align 4096 -> off 4096, +1  -> cursor 4097
+        val r = smf_layout_sections(0, [5, 3, 10, 1], [1, 8, 16, 4096])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(4)
+        expect(r.offsets[0]).to_equal(0)
+        expect(r.offsets[1]).to_equal(8)
+        expect(r.offsets[2]).to_equal(16)
+        expect(r.offsets[3]).to_equal(4096)
+        expect(r.total_size).to_equal(4097)
+
+# ----------------------------------------------------------------------------
+# 2. Zero-size sections still align
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections zero-size sections":
+    it "aligns zero-size sections without consuming bytes":
+        # cursor 0  -> align 1  -> off 0,  +4 -> cursor 4
+        # cursor 4  -> align 16 -> off 16, +0 -> cursor 16
+        # cursor 16 -> align 16 -> off 16, +0 -> cursor 16 (shares address)
+        # cursor 16 -> align 1  -> off 16, +2 -> cursor 18
+        val r = smf_layout_sections(0, [4, 0, 0, 2], [1, 16, 16, 1])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(4)
+        expect(r.offsets[0]).to_equal(0)
+        expect(r.offsets[1]).to_equal(16)
+        expect(r.offsets[2]).to_equal(16)
+        expect(r.offsets[3]).to_equal(16)
+        expect(r.total_size).to_equal(18)
+
+# ----------------------------------------------------------------------------
+# 3. Nonzero base
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections nonzero base":
+    it "starts at the aligned base and measures total_size from base_addr":
+        # cursor 100 -> align 8  -> off 104, +8 -> cursor 112
+        # cursor 112 -> align 16 -> off 112, +4 -> cursor 116
+        val r = smf_layout_sections(100, [8, 4], [8, 16])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(2)
+        expect(r.offsets[0]).to_equal(104)
+        expect(r.offsets[1]).to_equal(112)
+        expect(r.total_size).to_equal(16)
+
+# ----------------------------------------------------------------------------
+# 4. Empty input
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections empty input":
+    it "returns ok with no offsets and zero total_size":
+        val r = smf_layout_sections(64, [], [])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+# ----------------------------------------------------------------------------
+# 5. Reject paths
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections rejects":
+    it "rejects a sizes/alignments length mismatch":
+        val r = smf_layout_sections(0, [8], [])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects a negative base address":
+        val r = smf_layout_sections(-1, [8], [8])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects a negative size at any position":
+        val r = smf_layout_sections(0, [8, -1], [8, 8])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects alignment zero":
+        val r = smf_layout_sections(0, [8], [0])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects a negative alignment":
+        val r = smf_layout_sections(0, [8], [-8])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects a non-power-of-two alignment":
+        val r = smf_layout_sections(0, [8], [3])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+# ----------------------------------------------------------------------------
+# 6. Overflow at exactly the i64 boundary
+# ----------------------------------------------------------------------------
+
+describe "smf_layout_sections i64 boundary":
+    it "accepts a layout whose final cursor is exactly i64 max":
+        # off = I64_MAX - 1, +1 -> cursor = I64_MAX exactly: still in range.
+        val r = smf_layout_sections(I64_MAX - 1, [1], [1])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(1)
+        expect(r.offsets[0]).to_equal(I64_MAX - 1)
+        expect(r.total_size).to_equal(1)
+
+    it "rejects one byte past i64 max on the size advance":
+        # off = I64_MAX - 1, size 2: off > I64_MAX - 2 -> reject before add.
+        val r = smf_layout_sections(I64_MAX - 1, [2], [1])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "accepts the last representable 8-aligned address":
+        # I64_MAX - 7 == 2^63 - 8, already 8-aligned; the align_up guard's
+        # add reaches I64_MAX exactly and must not fire.
+        val r = smf_layout_sections(I64_MAX - 7, [0], [8])
+        expect(r.ok).to_be(true)
+        expect(r.offsets.len()).to_equal(1)
+        expect(r.offsets[0]).to_equal(I64_MAX - 7)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects when align_up would round up past i64 max":
+        # I64_MAX - 6: next multiple of 8 is 2^63 -> unrepresentable; the
+        # guard fires BEFORE the add (I64_MAX - 6 > I64_MAX - 7).
+        val r = smf_layout_sections(I64_MAX - 6, [0], [8])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)
+
+    it "rejects overflow at a later step, not just the first":
+        # Step 0 consumes the whole range (off 0, size I64_MAX -> cursor
+        # I64_MAX); step 1 then needs one more byte -> reject, no partial
+        # offsets survive.
+        val r = smf_layout_sections(0, [I64_MAX, 1], [1, 1])
+        expect(r.ok).to_be(false)
+        expect(r.offsets.len()).to_equal(0)
+        expect(r.total_size).to_equal(0)

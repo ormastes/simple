@@ -1,0 +1,70 @@
+# codex-system-test
+# @req REQ-017 REQ-018
+# @evidence-display: links
+"""# SimpleOS Render Evidence Protocol
+
+Uses the pure-Simple QMP and serial adapters to correlate a live guest render
+receipt with one captured frame; no inline Python or tolerant baseline exists.
+"""
+use std.spec.*
+use common.renderdoc.simpleos_render_target_evidence.{
+    simpleos_render_target_status,
+    validate_simpleos_render_target_evidence
+}
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BackendRenderReceiptHeader,
+    BackendRenderReceiptEvent,
+    BackendRenderReceiptTrailer,
+    backend_render_receipt_header_valid,
+    backend_render_receipt_event_valid,
+    backend_render_receipt_trailer_valid
+}
+use os.compositor.screenshot_compare.{compare_exact}
+use test.helpers.simpleos_render_evidence_fixture.{
+    SIMPLEOS_EVIDENCE_HASH,
+    simpleos_target_evidence
+}
+
+fn require_live_qemu_receipt_capture():
+    expect("blocked: guest receipt emitter/parser and fresh pure-Simple Stage 4 QEMU run are required").to_equal("available")
+
+describe "SimpleOS QMP and serial render evidence":
+    # @capture(protocol)
+    it "should negotiate QMP and capture a live nonblank guest frame":
+        step("Connect and negotiate QMP capabilities")
+        step("Wait for the guest render receipt")
+        step("Request the matching screendump")
+        require_live_qemu_receipt_capture()
+    # @manual: folded
+    it "should correlate firmware boot run and frame identities":
+        step("Join the serial receipt and capture identities")
+        val evidence = simpleos_target_evidence(
+            "qemu", "x86_64", "", "", "boot-1", "frame-1",
+            SIMPLEOS_EVIDENCE_HASH, 0)
+        expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("pass")
+        expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
+    # @manual: folded
+    it "should reject corrupt reordered or truncated serial events":
+        step("Submit invalid receipt event streams")
+        val corrupt = BackendRenderReceiptHeader(
+            version: 1u32, arch_code: 1u32, runtime_code: 1u32, backend_code: 1u32,
+            firmware_hash_word0: 0u64, firmware_hash_word1: 0u64,
+            firmware_hash_word2: 0u64, firmware_hash_word3: 0u64, boot_id: 1u64,
+            frame_id: 1u64, surface_handle: 1u64, width: 4u32, height: 4u32,
+            stride: 16u32, format_code: 1u32)
+        val reordered = BackendRenderReceiptEvent(
+            sequence: 2u32, operation_code: 1u32, resource_id: 1u64,
+            state_before: 0u32, state_after: 1u32, value_hash: 1u64)
+        val truncated = BackendRenderReceiptTrailer(
+            event_count: 1u32, frame_complete: true, pixel_hash_word0: 1u64,
+            pixel_hash_word1: 0u64, pixel_hash_word2: 0u64,
+            pixel_hash_word3: 0u64, nonblank_pixel_count: 1u64, reason_code: 0u32)
+        expect(backend_render_receipt_header_valid(corrupt)).to_be(false)
+        expect(backend_render_receipt_event_valid(reordered, 1u32)).to_be(false)
+        expect(backend_render_receipt_trailer_valid(truncated, 2u32)).to_be(false)
+    # @manual: folded
+    it "should reject any nonzero framebuffer mismatch":
+        step("Change one captured framebuffer pixel")
+        val result = compare_exact([0xff112233u32], [0xff112234u32], 1, 1)
+        expect(result.exact_match).to_be(false)
+        expect(result.different_pixels).to_equal(1)

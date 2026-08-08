@@ -1,0 +1,95 @@
+# window_event_adapter.spl — Unified 2D interaction core: input transport
+# bridge (lane L3 / decision D4 of
+# doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md).
+#
+# Maps the normalized scalar window-event contract (`WindowEventRecord`,
+# `common/io/window_event.spl` — the ring hosted/SimpleOS backends and the
+# winit bridge enqueue into) onto the interaction core's `PointerEvent2D`.
+# Non-pointer records (key, text, focus, resize, close) are filtered out;
+# WINDOW_EVENT_WHEEL gets its first consumer (POINTER_WHEEL, deltas in
+# `delta_x`/`delta_y`).
+#
+# Unit convention: WindowEventRecord carries milli-units (x_milli,
+# delta_x_milli); PointerEvent2D carries whole units. This adapter divides
+# by 1000 (truncating toward zero), matching how hit_stack consumes whole
+# pixel coordinates.
+#
+# The mapping result is a plain struct with a `matched` flag rather than an
+# Option: Option payloads have known engine divergence landmines (see
+# memory ref: JIT Option<i64> payload-3/none collision), and every caller
+# needs the filter branch anyway.
+
+use std.common.io.window_event.{
+    WindowEventRecord,
+    WindowEventLoop,
+    WINDOW_EVENT_NONE,
+    WINDOW_EVENT_POINTER_MOVE,
+    WINDOW_EVENT_POINTER_BUTTON,
+    WINDOW_EVENT_WHEEL,
+    WINDOW_ACTION_PRESS
+}
+use std.common.engine.interaction.pointer_event.{
+    PointerEvent2D, POINTER_DOWN, POINTER_UP, POINTER_MOVE, POINTER_WHEEL
+}
+
+struct WindowPointerMap:
+    """Result of pointer_event_from_window_record. `matched == false`
+    means the record is not a pointer record (key/text/focus/resize/close/
+    none); `event` then holds an inert placeholder that must not be
+    dispatched."""
+    matched: bool
+    event: PointerEvent2D
+
+fn _placeholder_event() -> PointerEvent2D:
+    PointerEvent2D.create(0, POINTER_MOVE, 0, 0, 0, -1)
+
+fn pointer_event_from_window_record(rec: WindowEventRecord) -> WindowPointerMap:
+    """Map one WindowEventRecord to a PointerEvent2D.
+
+    - POINTER_BUTTON + PRESS   -> POINTER_DOWN (button id from rec.key)
+    - POINTER_BUTTON + RELEASE -> POINTER_UP   (button id from rec.key)
+    - POINTER_MOVE             -> POINTER_MOVE
+    - WHEEL                    -> POINTER_WHEEL (delta_x/delta_y from
+                                  rec.delta_*_milli / 1000)
+    - everything else          -> matched == false
+
+    pointer_id is the source window handle (one pointer per window until a
+    multi-touch contract lands); target starts unresolved (-1) — the
+    caller resolves it via hit_stack/effective_target before dispatch."""
+    val x = (rec.x_milli / 1000).to_i32()
+    val y = (rec.y_milli / 1000).to_i32()
+    if rec.kind == WINDOW_EVENT_POINTER_BUTTON:
+        var kind = POINTER_UP
+        if rec.action == WINDOW_ACTION_PRESS:
+            kind = POINTER_DOWN
+        val ev = PointerEvent2D.create(rec.window_handle, kind, x, y, rec.key.to_i32(), -1)
+        return WindowPointerMap(matched: true, event: ev)
+    if rec.kind == WINDOW_EVENT_POINTER_MOVE:
+        val ev = PointerEvent2D.create(rec.window_handle, POINTER_MOVE, x, y, 0, -1)
+        return WindowPointerMap(matched: true, event: ev)
+    if rec.kind == WINDOW_EVENT_WHEEL:
+        var ev = PointerEvent2D.create(rec.window_handle, POINTER_WHEEL, x, y, 0, -1)
+        ev.delta_x = (rec.delta_x_milli / 1000).to_i32()
+        ev.delta_y = (rec.delta_y_milli / 1000).to_i32()
+        return WindowPointerMap(matched: true, event: ev)
+    WindowPointerMap(matched: false, event: _placeholder_event())
+
+fn drain_pointer_events(events: WindowEventLoop) -> [PointerEvent2D]:
+    """Drain every queued record from the loop's ring, keeping only the
+    pointer-mappable ones in queue order. Non-pointer records are consumed
+    and discarded (they belong to the key/text/lifecycle lanes, not this
+    adapter). Mirrors the poll path SimpleWindowBackend.poll_event uses
+    (src/lib/nogc_sync_mut/io/simple_window.spl)."""
+    var out: [PointerEvent2D] = []
+    var guard = events.queued_count()
+    while guard > 0:
+        val rec = events.poll()
+        if rec.kind == WINDOW_EVENT_NONE:
+            return out
+        val mapped = pointer_event_from_window_record(rec)
+        if mapped.matched:
+            out.push(mapped.event)
+        guard = guard - 1
+    out
+
+export WindowPointerMap, pointer_event_from_window_record, drain_pointer_events

@@ -1,0 +1,73 @@
+# JS Web Render Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: bun
+- scene: wm-image-taskbar-command
+- dimensions: 96x64
+- iterations per trial: 5
+- trials: 3
+- simple checksum: 225350
+- baseline checksum: 225350
+- mismatch count: 0
+- blur/tolerance used: false
+- best simple frame us: 59
+- best baseline frame us: 1158
+
+## Simple Output
+- ## trial 1
+- renderer=pure-simple-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=59
+- blur_or_tolerance_used=false
+- ## trial 2
+- renderer=pure-simple-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=59
+- blur_or_tolerance_used=false
+- ## trial 3
+- renderer=pure-simple-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=61
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- renderer=bun-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=1241
+- blur_or_tolerance_used=false
+- ## trial 2
+- renderer=bun-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=1228
+- blur_or_tolerance_used=false
+- ## trial 3
+- renderer=bun-exact-fixture
+- width=96
+- height=64
+- iterations=5
+- checksum=225350
+- total_checksum=1126750
+- frame_us=1158
+- blur_or_tolerance_used=false

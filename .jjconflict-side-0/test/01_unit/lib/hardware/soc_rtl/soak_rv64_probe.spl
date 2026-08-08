@@ -1,0 +1,199 @@
+# Probe: RV64 hard-job soak on the soc_top_64 .spl RTL model.
+#
+# Loads the Adler-32 soak payload built by scripts/fpga/soak_rv64_hard_job.shs
+# (examples/09_embedded/fpga_riscv/payload/soak_rv64.bin) into DRAM @ 0x8000_0000
+# via ram64_load_bytes, runs the real core64 datapath in chunks (soc_top_64_run),
+# and — driving the M-extension divider two `remu` per iteration — verifies the
+# core's final Adler-32 golden matches the host reference.
+#
+# This mirrors the RV32 GHDL soak (scripts/fpga/soak_rv32_hard_job.shs) for the
+# RV64 model.  Everything is functional free-function style (like soc_rtl): no
+# `me` methods that write back into a self array-of-struct field (seed JIT bug
+# seed_jit_me_method_array_of_struct_writeback_nil_receiver_2026-07-23.md).
+#
+# Run under the interpreter (the JIT has known bugs; interp is the oracle):
+#   SIMPLE_EXECUTION_MODE=interpreter \
+#   RV64_SOAK_BIN=<bin> RV64_SOAK_GOLDEN=<8hex> RV64_SOAK_MAX_TICKS=<n> \
+#   bin/simple run test/01_unit/lib/hardware/soc_rtl/soak_rv64_probe.spl
+#
+# Env (all optional; defaults serve a standalone run of the default COUNT):
+#   RV64_SOAK_BIN        path to the objcopy'd payload .bin
+#   RV64_SOAK_GOLDEN     host-computed Adler-32 golden, 8 uppercase hex chars
+#   RV64_SOAK_MAX_TICKS  livelock guard: max datapath ticks before FAIL
+#   RV64_SOAK_RAM_BYTES  DRAM size (default 0x10000 = 64 KiB; payload is tiny)
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc_top_64_run, SocRunResult}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_load_bytes}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_env_get(key: text) -> text
+extern fn rt_time_now_micros() -> i64
+
+# Default golden for the default COUNT baked into the runner (COUNT=4600).
+# The runner always passes RV64_SOAK_GOLDEN so this default only matters for a
+# bare standalone invocation with the default-count .bin present.
+val DEFAULT_GOLDEN = "92B4EF9D"
+val DEFAULT_BIN = "build/fpga/soak_rv64/soak_rv64.bin"
+
+fn env_str(key: text, dflt: text) -> text:
+    val v = rt_env_get(key) ?? ""
+    if v.len() == 0:
+        return dflt
+    v
+
+fn env_int(key: text, dflt: i64) -> i64:
+    val v = rt_env_get(key) ?? ""
+    if v.len() == 0:
+        return dflt
+    v.parse_int() ?? dflt
+
+val HEXD: [text] = ["0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F"]
+
+fn hexval(c: i64) -> i64:
+    """ASCII hex char -> 0..15, or -1 if not an uppercase-hex digit."""
+    if c >= 0x30 and c <= 0x39:
+        return c - 0x30
+    if c >= 0x41 and c <= 0x46:
+        return c - 0x41 + 10
+    -1
+
+fn to_hex8(v: i64) -> text:
+    """32-bit value -> 8 uppercase hex chars, MSB first."""
+    var out = ""
+    var s = 28
+    while s >= 0:
+        out = out + HEXD[(v >> s) & 15]
+        s = s - 4
+    out
+
+fn find_sentinel(tx: [i64]) -> i64:
+    """Index of the '~' (0x7E) golden terminator in the UART log, or -1."""
+    var p = -1
+    var i = 0
+    while i < tx.len():
+        if (tx[i] & 0xFF) == 0x7E:
+            p = i
+        i = i + 1
+    p
+
+fn extract_core_hex(tx: [i64]) -> text:
+    """The 8 hex chars immediately preceding the '~' sentinel, as uppercase
+    text; "" when the pattern is absent or malformed."""
+    val p = find_sentinel(tx)
+    if p < 8:
+        return ""
+    var out = ""
+    var j = p - 8
+    while j < p:
+        val h = hexval(tx[j] & 0xFF)
+        if h < 0:
+            return ""
+        out = out + HEXD[h]
+        j = j + 1
+    out
+
+fn has_done_prefix(tx: [i64]) -> bool:
+    """True when 'DONE=' precedes the 8-hex golden before the sentinel."""
+    val p = find_sentinel(tx)
+    if p < 13:
+        return false
+    val want: [i64] = [68, 79, 78, 69, 61]   # D O N E =
+    var k = 0
+    while k < 5:
+        if (tx[p - 13 + k] & 0xFF) != want[k]:
+            return false
+        k = k + 1
+    true
+
+fn count_progress(tx: [i64]) -> i64:
+    """Number of 'P' (0x50) progress markers in the UART log."""
+    var n = 0
+    var i = 0
+    while i < tx.len():
+        if (tx[i] & 0xFF) == 0x50:
+            n = n + 1
+        i = i + 1
+    n
+
+fn main() -> i64:
+    val bin_path = env_str("RV64_SOAK_BIN", DEFAULT_BIN)
+    val golden = env_str("RV64_SOAK_GOLDEN", DEFAULT_GOLDEN)
+    val ram_bytes = env_int("RV64_SOAK_RAM_BYTES", 0x10000)
+    val max_ticks = env_int("RV64_SOAK_MAX_TICKS", 200000000)
+    val chunk = 4000
+
+    print("=== RV64 hard-job soak probe (soc_top_64) ===")
+    print("bin={bin_path} golden={golden} ram_bytes={ram_bytes} max_ticks={max_ticks}")
+
+    val bytes = rt_file_read_bytes(bin_path) ?? []
+    if bytes.len() == 0:
+        print("FAIL: payload .bin not found or empty: {bin_path}")
+        print("SOAK_RV64: FAIL")
+        return 1
+    print("payload bytes = {bytes.len()}")
+
+    var soc = soc_top_64_init(ram_bytes)
+    var ram = soc.ram
+    ram = ram64_load_bytes(ram, 0, bytes)
+    soc.ram = ram
+    soc.core.pc = 0x8000_0000    # bootrom would land here; jump straight in
+
+    val t0 = rt_time_now_micros()
+    var total: i64 = 0
+    var trapped = false
+    var trap_cause: i64 = 0
+    var trap_pc: i64 = 0
+    var core_hex = ""
+    while total < max_ticks and not trapped and core_hex.len() == 0:
+        val r = soc_top_64_run(soc, chunk)
+        soc = r.soc
+        total = total + r.ticks
+        if r.trapped:
+            trapped = true
+            trap_cause = soc.core.csr_m.mcause
+            trap_pc = soc.core.pc
+        core_hex = extract_core_hex(soc.uart_tx)
+        if r.ticks == 0:
+            # core halted with no sentinel — stop (avoid infinite loop)
+            total = max_ticks
+    val t1 = rt_time_now_micros()
+    val wall_us = t1 - t0
+    var tps: i64 = 0
+    if wall_us > 0:
+        tps = (total * 1000000) / wall_us
+
+    val markers = count_progress(soc.uart_tx)
+    val done_ok = has_done_prefix(soc.uart_tx)
+
+    print("--- metrics ---")
+    print("CORE_TICKS={total}")
+    print("TICKS_PER_SEC={tps}")
+    print("PROGRESS_MARKERS={markers}")
+    print("UART_TX_LEN={soc.uart_tx.len()}")
+    print("FINAL_PC={soc.core.pc}")
+    if trapped:
+        print("TRAPPED=1 mcause={trap_cause} pc={trap_pc}")
+    else:
+        print("TRAPPED=0")
+    print("CORE_GOLDEN={core_hex}")
+    print("HOST_GOLDEN={golden}")
+
+    var fails = 0
+    if trapped:
+        print("FAIL: core raised a trap (mcause={trap_cause} pc={trap_pc}) — decode/memory/M-ext gap")
+        fails = fails + 1
+    if core_hex.len() == 0:
+        print("FAIL: no 'DONE=XXXXXXXX~' sentinel within {max_ticks} ticks (livelock/stall/hang)")
+        fails = fails + 1
+    else:
+        if not done_ok:
+            print("FAIL: golden not preceded by 'DONE=' marker (UART garbage)")
+            fails = fails + 1
+        if core_hex != golden:
+            print("FAIL: golden mismatch — core={core_hex} host={golden} (ALU/M-ext miscompute)")
+            fails = fails + 1
+
+    if fails == 0:
+        print("SOAK_RV64: ALL PASS")
+        return 0
+    print("SOAK_RV64: FAIL ({fails})")
+    1

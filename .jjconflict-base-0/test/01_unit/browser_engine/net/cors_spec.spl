@@ -1,0 +1,509 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/cors.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/entity/cors_types.spl 80%
+"""
+# CORS Specification
+
+**Feature IDs:** #M16-AC5
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Verifies CorsChecker logic: needs_preflight detection, is_simple_method,
+preflight OPTIONS construction, and validate_preflight response checking.
+No network calls — pure logic tests on entity types and checker functions.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.net.cors.{
+    CorsChecker, needs_preflight, is_simple_method, create_preflight,
+    cors_unsafe_request_header_names
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types.{PreflightResult}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, HttpMethod, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url, Origin}
+
+
+# ============================================================================
+# Simple Method Detection
+# ============================================================================
+
+describe "is_simple_method":
+    """
+    ## RFC-defined simple CORS methods
+
+    GET, POST, and HEAD are simple methods that do not require a preflight.
+    All other methods require preflight.
+    """
+
+    it "AC-5: GET is a simple method":
+        val result = is_simple_method("GET")
+        expect(result).to_equal(true)
+
+    it "AC-5: POST is a simple method":
+        val result = is_simple_method("POST")
+        expect(result).to_equal(true)
+
+    it "AC-5: HEAD is a simple method":
+        val result = is_simple_method("HEAD")
+        expect(result).to_equal(true)
+
+    it "AC-5: PUT is not a simple method":
+        val result = is_simple_method("PUT")
+        expect(result).to_equal(false)
+
+    it "AC-5: DELETE is not a simple method":
+        val result = is_simple_method("DELETE")
+        expect(result).to_equal(false)
+
+    it "AC-5: PATCH is not a simple method":
+        val result = is_simple_method("PATCH")
+        expect(result).to_equal(false)
+
+
+# ============================================================================
+# Preflight Detection
+# ============================================================================
+
+describe "needs_preflight":
+    """
+    ## Preflight requirement detection
+
+    A request needs a preflight when:
+    - method is non-simple (PUT, DELETE, PATCH, etc.), or
+    - request mode is cors and the request has custom headers, or
+    - Content-Type is non-simple (application/json triggers preflight)
+    """
+
+    it "AC-5: cross-origin GET does not need preflight":
+        val req = make_cors_request("GET", "application/x-www-form-urlencoded")
+        val result = needs_preflight(req, make_other_origin())
+        expect(result).to_equal(false)
+
+    it "AC-5: cross-origin GET with a custom header needs preflight":
+        step("Classify a non-safelisted author request header")
+        var req = make_cors_request("GET", "")
+        req.headers = "X-Admin-Action: delete"
+        expect(needs_preflight(req, make_other_origin())).to_equal(true)
+
+    it "AC-5: aggregate safelisted values cross at 1025 bytes":
+        step("Exercise the aggregate safelisted value boundary")
+        val value = "a".repeat(128)
+        var at_limit = ""
+        var index = 0
+        while index < 8:
+            at_limit = at_limit + "Accept: {value}\r\n"
+            index = index + 1
+        var req = make_cors_request("GET", "")
+        req.headers = at_limit
+        expect(needs_preflight(req, make_other_origin())).to_equal(false)
+        expect(cors_unsafe_request_header_names(req.headers)).to_equal("")
+
+        req.headers = at_limit + "Content-Language: e\r\n"
+        expect(needs_preflight(req, make_other_origin())).to_equal(true)
+        expect(cors_unsafe_request_header_names(req.headers)).to_equal(
+            "accept, content-language"
+        )
+
+    it "AC-5: safelist limits count UTF-8 bytes":
+        step("Hold a multibyte Accept value at the 128-byte boundary")
+        val two_byte = "é"
+        val at_limit = two_byte.repeat(64)
+        val over_limit = two_byte.repeat(65)
+        expect(cors_unsafe_request_header_names(
+            "Accept: {at_limit}\r\n"
+        )).to_equal("")
+        expect(cors_unsafe_request_header_names(
+            "Accept: {over_limit}\r\n"
+        )).to_equal("accept")
+
+        step("Count multibyte values toward the 1024-byte aggregate")
+        var aggregate = ""
+        var index = 0
+        while index < 8:
+            aggregate = aggregate + "Accept: {at_limit}\r\n"
+            index = index + 1
+        expect(cors_unsafe_request_header_names(aggregate)).to_equal("")
+        expect(cors_unsafe_request_header_names(
+            aggregate + "Content-Language: e\r\n"
+        )).to_equal("accept, content-language")
+
+    it "AC-5: aggregate escalation includes a safelisted Range":
+        step("Exercise Range on both sides of the aggregate boundary")
+        val accept_value = "a".repeat(127)
+        var headers = ""
+        var index = 0
+        while index < 8:
+            headers = headers + "Accept: {accept_value}\r\n"
+            index = index + 1
+        expect(cors_unsafe_request_header_names(
+            headers + "Range: bytes=0-\r\n"
+        )).to_equal("")
+        expect(cors_unsafe_request_header_names(
+            headers + "Range: bytes=0-0\r\n"
+        )).to_equal("accept, range")
+
+    it "AC-5: Range safelist accepts only ordered single ranges":
+        step("Accept an open range and reject reversed, suffix, and multiple ranges")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=0-\r\n"
+        )).to_equal("")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=5-5\r\n"
+        )).to_equal("")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=5-4\r\n"
+        )).to_equal("range")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=-5\r\n"
+        )).to_equal("range")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=0-1, 4-5\r\n"
+        )).to_equal("range")
+
+    it "AC-5: duplicate Range lines combine before safelist validation":
+        step("Reject two individually valid Range lines as a multiple range")
+        expect(cors_unsafe_request_header_names(
+            "Range: bytes=0-\r\nRange: bytes=1-2\r\n"
+        )).to_equal("range")
+
+    it "AC-5: cross-origin PUT needs preflight":
+        val req = make_cors_request("PUT", "application/json")
+        val result = needs_preflight(req, make_other_origin())
+        expect(result).to_equal(true)
+
+    it "AC-5: cross-origin DELETE needs preflight":
+        val req = make_cors_request("DELETE", "")
+        val result = needs_preflight(req, make_other_origin())
+        expect(result).to_equal(true)
+
+    it "AC-5: cross-origin POST with application/json needs preflight":
+        val req = make_cors_request("POST", "application/json")
+        val result = needs_preflight(req, make_other_origin())
+        expect(result).to_equal(true)
+
+    it "AC-5: same-origin request does not need preflight":
+        val req = make_cors_request("PUT", "application/json")
+        val result = needs_preflight(req, make_same_origin())
+        expect(result).to_equal(false)
+
+    it "AC-5: cross-origin PATCH needs preflight":
+        val req = make_cors_request("PATCH", "application/json")
+        val result = needs_preflight(req, make_other_origin())
+        expect(result).to_equal(true)
+
+
+# ============================================================================
+# Preflight REQUEST Construction
+# ============================================================================
+
+describe "create_preflight":
+    """
+    ## OPTIONS preflight request construction
+
+    create_preflight builds an OPTIONS request with the required
+    Access-Control-Request-Method and Access-Control-Request-Headers headers.
+    """
+
+    it "AC-5: preflight uses OPTIONS method":
+        val original = make_cors_request("PUT", "application/json")
+        val pf = create_preflight(original)
+        expect(pf.method).to_equal("OPTIONS")
+
+    it "AC-5: preflight includes Access-Control-Request-Method":
+        val original = make_cors_request("PUT", "application/json")
+        val pf = create_preflight(original)
+        expect(pf.headers).to_contain("Access-Control-Request-Method")
+
+    it "AC-5: preflight emits exact sorted unsafe author header names":
+        step("Build OPTIONS metadata from author request headers")
+        var original = make_cors_request("GET", "")
+        original.headers = (
+            "X-Admin-Action: delete\r\n" +
+            "Authorization: Bearer secret\r\n" +
+            "Accept: text/plain\r\n" +
+            "Origin: https://app.example.com\r\n"
+        )
+        val preflight = create_preflight(original)
+        expect(preflight.headers).to_contain(
+            "Access-Control-Request-Headers: " +
+            "authorization, x-admin-action\r\n"
+        )
+        expect(preflight.headers.contains(
+            "Access-Control-Request-Headers: accept"
+        )).to_equal(false)
+
+    it "AC-5: Access-Control-Request-Method value matches original method":
+        val original = make_cors_request("DELETE", "")
+        val pf = create_preflight(original)
+        expect(pf.headers).to_contain("DELETE")
+
+    it "AC-5: preflight URL matches original URL":
+        val original = make_cors_request("PUT", "application/json")
+        val pf = create_preflight(original)
+        expect(pf.url.host).to_equal(original.url.host)
+
+
+# ============================================================================
+# Preflight RESPONSE Validation
+# ============================================================================
+
+describe "CorsChecker.validate_preflight":
+    """
+    ## Preflight response validation
+
+    validate_preflight checks that the server's Access-Control-Allow-* headers
+    permit the original request method and origin.
+    """
+
+    it "AC-5: response allowing method returns Allowed":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight(
+            make_preflight_response("PUT", "https://app.example.com")
+        )
+        val is_allowed = (result == PreflightResult.Allowed)
+        expect(is_allowed).to_equal(true)
+
+    it "AC-5: response denying method returns Denied":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight(
+            make_preflight_response("GET", "https://app.example.com")
+        )
+        val is_denied = (result == PreflightResult.Denied)
+        expect(is_denied).to_equal(true)
+
+    it "AC-5: response with wrong origin returns Denied":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight(
+            make_preflight_response("PUT", "https://other.example.com")
+        )
+        val is_denied = (result == PreflightResult.Denied)
+        expect(is_denied).to_equal(true)
+
+    it "AC-5: duplicate allow-origin headers fail closed in either order":
+        val checker = make_checker("https://app.example.com")
+        val variants = [
+            "Access-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Origin: https://attacker.example\r\nAccess-Control-Allow-Methods: PUT\r\n",
+            "Access-Control-Allow-Origin: https://attacker.example\r\nAccess-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Methods: PUT\r\n",
+            "Access-Control-Allow-Origin:\r\nAccess-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Methods: PUT\r\n",
+            "Access-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Origin:\r\nAccess-Control-Allow-Methods: PUT\r\n"
+        ]
+        for headers in variants:
+            expect(
+                checker.validate_preflight(headers) == PreflightResult.Denied
+            ).to_equal(true)
+            expect(checker.can_read_body(
+                make_target_url(), headers, "omit"
+            )).to_equal(false)
+
+    it "AC-5: repeated list-valued CORS headers remain combined":
+        step("Combine repeated grants without widening Authorization")
+        val checker = make_checker("https://app.example.com")
+        val methods = "Access-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Methods: PATCH\r\nAccess-Control-Allow-Methods: PUT\r\n"
+        val headers = "Access-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Allow-Headers: X-Trace-Id\r\n"
+        val wildcard_headers = "Access-Control-Allow-Origin: https://app.example.com\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Headers: *\r\n"
+
+        expect(
+            checker.validate_preflight_method(
+                methods, "PUT"
+            ) == PreflightResult.Allowed
+        ).to_equal(true)
+        expect(checker.validate_preflight_headers(
+            headers, "content-type, x-trace-id"
+        ) == PreflightResult.Allowed).to_equal(true)
+        expect(checker.validate_preflight_headers(
+            wildcard_headers, "authorization"
+        ) == PreflightResult.Denied).to_equal(true)
+
+    it "AC-5: an unset requester origin fails closed":
+        val checker = make_checker("")
+        val result = checker.validate_preflight(
+            make_preflight_response("PUT", "https://attacker.example")
+        )
+        expect(result == PreflightResult.Denied).to_equal(true)
+
+    it "AC-5: response with wildcard origin returns Allowed":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight(
+            make_wildcard_preflight_response("PUT")
+        )
+        val is_allowed = (result == PreflightResult.Allowed)
+        expect(is_allowed).to_equal(true)
+
+    it "AC-5: method-specific response allows the requested method":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight_method(
+            make_preflight_response("PUT, PATCH", "https://app.example.com"),
+            "PATCH"
+        )
+        val is_allowed = (result == PreflightResult.Allowed)
+        expect(is_allowed).to_equal(true)
+
+    it "AC-5: method-specific response denies an omitted requested method":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight_method(
+            make_preflight_response("PUT", "https://app.example.com"),
+            "DELETE"
+        )
+        val is_denied = (result == PreflightResult.Denied)
+        expect(is_denied).to_equal(true)
+
+    it "AC-5: safelisted method needs no allow-methods token":
+        step("Validate a header-triggered GET preflight without ACAM")
+        val checker = make_checker("https://app.example.com")
+        val response = (
+            "Access-Control-Allow-Origin: https://app.example.com\r\n"
+        )
+        expect(checker.validate_preflight_method_with_credentials(
+            response, "GET", "omit"
+        ) == PreflightResult.Allowed).to_equal(true)
+
+    it "AC-5: allow-methods wildcard depends on credentials mode":
+        step("Apply ACAM wildcard to non-simple method credentials")
+        val checker = make_checker("https://app.example.com")
+        val response = (
+            "Access-Control-Allow-Origin: https://app.example.com\r\n" +
+            "Access-Control-Allow-Methods: *\r\n"
+        )
+        expect(checker.validate_preflight_method_with_credentials(
+            response, "PUT", "omit"
+        ) == PreflightResult.Allowed).to_equal(true)
+        expect(checker.validate_preflight_method_with_credentials(
+            response + "Access-Control-Allow-Credentials: true\r\n",
+            "PUT", "include"
+        ) == PreflightResult.Denied).to_equal(true)
+
+    it "AC-5: wildcard origin denies credentialed method-specific preflight":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight_method_with_credentials(
+            make_wildcard_preflight_response("PUT"),
+            "PUT",
+            "include"
+        )
+        val is_denied = (result == PreflightResult.Denied)
+        expect(is_denied).to_equal(true)
+
+    it "AC-5: credentialed preflight requires explicit credentials grant":
+        val checker = make_checker("https://app.example.com")
+        val denied = checker.validate_preflight_method_with_credentials(
+            make_preflight_response("PUT", "https://app.example.com"),
+            "PUT",
+            "include"
+        )
+        expect(denied == PreflightResult.Denied).to_equal(true)
+        val allowed = checker.validate_preflight_method_with_credentials(
+            make_preflight_response(
+                "PUT", "https://app.example.com"
+            ) + "Access-Control-Allow-Credentials: true\r\n",
+            "PUT",
+            "include"
+        )
+        expect(allowed == PreflightResult.Allowed).to_equal(true)
+
+    it "AC-5: header-specific response allows every requested header token":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight_headers(
+            make_header_preflight_response("Content-Type, X-Trace-Id", "https://app.example.com"),
+            "content-type, x-trace-id"
+        )
+        val is_allowed = (result == PreflightResult.Allowed)
+        expect(is_allowed).to_equal(true)
+
+    it "AC-5: header-specific response denies omitted requested headers":
+        val checker = make_checker("https://app.example.com")
+        val result = checker.validate_preflight_headers(
+            make_header_preflight_response("Content-Type", "https://app.example.com"),
+            "content-type, x-trace-id"
+        )
+        val is_denied = (result == PreflightResult.Denied)
+        expect(is_denied).to_equal(true)
+
+    it "AC-5: wildcard allow-headers requires explicit Authorization":
+        step("Distinguish ordinary custom headers from Authorization")
+        val checker = make_checker("https://app.example.com")
+        val wildcard = make_header_preflight_response(
+            "*", "https://app.example.com"
+        )
+        expect(checker.validate_preflight_headers(
+            wildcard, "x-api-key"
+        ) == PreflightResult.Allowed).to_equal(true)
+        expect(checker.validate_preflight_headers(
+            wildcard,
+            "authorization, x-api-key"
+        ) == PreflightResult.Denied).to_equal(true)
+        expect(checker.validate_preflight_headers(
+            make_header_preflight_response(
+                "Authorization, X-Api-Key", "https://app.example.com"
+            ),
+            "authorization, x-api-key"
+        ) == PreflightResult.Allowed).to_equal(true)
+
+    it "AC-5: credentialed allow-headers wildcard is literal":
+        step("Require explicit custom header grants with credentials")
+        val checker = make_checker("https://app.example.com")
+        val response = (
+            "Access-Control-Allow-Origin: https://app.example.com\r\n" +
+            "Access-Control-Allow-Credentials: true\r\n" +
+            "Access-Control-Allow-Headers: *\r\n"
+        )
+        expect(checker.validate_preflight_headers_with_credentials(
+            response, "x-api-key", "include"
+        ) == PreflightResult.Denied).to_equal(true)
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_cors_request(method: text, content_type: text) -> FetchRequest:
+    return FetchRequest {
+        method: method,
+        url: make_target_url(),
+        headers: content_type_header(content_type),
+        body: [],
+        mode: RequestMode.Cors,
+        credentials: "omit"
+    }
+
+fn make_target_url() -> Url:
+    return Url {
+        scheme: "https",
+        host: "api.example.com",
+        port: 443,
+        path: "/resource",
+        query: "",
+        fragment: ""
+    }
+
+fn make_same_origin():
+    return Origin {
+        scheme: "https",
+        host: "api.example.com",
+        port: 443
+    }
+
+fn make_other_origin():
+    return Origin {
+        scheme: "https",
+        host: "app.example.com",
+        port: 443
+    }
+
+fn content_type_header(ct: text) -> text:
+    if ct == "":
+        return ""
+    return "Content-Type: " + ct
+
+fn make_checker(origin: text) -> CorsChecker:
+    return CorsChecker.new(origin)
+
+fn make_preflight_response(allowed_method: text, allowed_origin: text) -> text:
+    return "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: " + allowed_origin + "\r\nAccess-Control-Allow-Methods: " + allowed_method + "\r\n"
+
+fn make_wildcard_preflight_response(allowed_method: text) -> text:
+    return "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: " + allowed_method + "\r\n"
+
+fn make_header_preflight_response(allowed_headers: text, allowed_origin: text) -> text:
+    return "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: " + allowed_origin + "\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: " + allowed_headers + "\r\n"

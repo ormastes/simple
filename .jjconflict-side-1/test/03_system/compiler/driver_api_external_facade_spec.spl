@@ -1,0 +1,177 @@
+# @cover src/compiler/80.driver/driver_api.spl 80%
+# Driver API External Facade - End-to-End Tests
+#
+# Verifies the lightweight external `compiler.driver.driver_api` facade:
+# - direct imports do not hang
+# - single-file helper wrappers produce artifacts or success results
+# - multi-source native helper fails fast instead of hanging
+
+use std.spec
+
+use compiler.driver.driver_api.{
+    compile_to_smf, check_file, parse_sdn_file, aot_c_file,
+    aot_llvm_file, aot_llvm_native_file, aot_native_file_with_backend,
+    aot_cuda_file, aot_vhdl_file, aot_native_project_with_backend,
+    compile_file
+}
+
+val NL = "\n"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn delete_file(path: text) -> bool:
+    rt_file_delete(path)
+
+describe "Driver API External Facade":
+
+    it "compile_to_smf writes an smf artifact for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_compile_to_smf.spl"
+        val out_path = "/tmp/sml_driver_api_compile_to_smf.smf"
+        delete_file(out_path)
+        write_file(src_path, "fn main(): 7")
+
+        val result = compile_to_smf(src_path, out_path)
+
+        expect(result.is_ok()).to_equal(true)
+        expect(rt_file_exists(out_path)).to_equal(true)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "check_file returns success for a valid source file":
+        val src_path = "/tmp/sml_driver_api_check_ok.spl"
+        write_file(src_path, "fn main(): 1 + 2")
+
+        val result = check_file(src_path)
+
+        expect(result.is_success()).to_equal(true)
+        delete_file(src_path)
+
+    it "parse_sdn_file returns success for a readable sdn file":
+        val sdn_path = "/tmp/sml_driver_api_parse_ok.sdn"
+        val content = "root:" + NL + "  name: \"driver-api\""
+        write_file(sdn_path, content)
+
+        val result = parse_sdn_file(sdn_path)
+
+        expect(result.is_success()).to_equal(true)
+        delete_file(sdn_path)
+
+    it "aot_c_file writes an empty c backend artifact file for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_aot_c.spl"
+        val out_path = "/tmp/sml_driver_api_aot_c.cpp"
+        delete_file(out_path)
+        write_file(src_path, "fn main(): 9")
+
+        val result = aot_c_file(src_path, out_path)
+
+        expect(result.is_success()).to_equal(true)
+        expect(rt_file_exists(out_path)).to_equal(true)
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file writes a VHDL artifact for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_aot_vhdl.spl"
+        val out_path = "/tmp/sml_driver_api_aot_vhdl.vhd"
+        delete_file(out_path)
+        write_file(src_path, "fn add(a: i32, b: i32) -> i32:\n    a + b")
+
+        val result = aot_vhdl_file(src_path, out_path)
+
+        expect(result.is_success()).to_equal(true)
+        expect(rt_file_exists(out_path)).to_equal(true)
+        expect(rt_file_read_text(out_path)).to_contain("entity add is")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_native_project_with_backend fails fast with a clear runtime error":
+        val src_path = "/tmp/sml_driver_api_project_fail.spl"
+        val out_path = "/tmp/sml_driver_api_project_fail.bin"
+        write_file(src_path, "fn main(): 11")
+
+        val result = aot_native_project_with_backend(["/tmp"], src_path, out_path, "llvm-lib", false, false, 0)
+
+        expect(result.is_success()).to_equal(false)
+        expect(result.get_errors().join("\n")).to_contain("not supported")
+
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "backend helper symbols import cleanly for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_backend_helpers.spl"
+        val llvm_out_path = "/tmp/sml_driver_api_backend_helpers.ll"
+        val cuda_out_path = "/tmp/sml_driver_api_backend_helpers.cu"
+        write_file(src_path, "fn main(): 13")
+        delete_file(llvm_out_path)
+        delete_file(cuda_out_path)
+
+        val llvm_result = aot_llvm_file(src_path, llvm_out_path)
+        val cuda_result = aot_cuda_file(src_path, cuda_out_path)
+
+        expect(llvm_result.is_success()).to_equal(true)
+        expect(rt_file_exists(llvm_out_path)).to_equal(true)
+        expect(cuda_result.is_success()).to_equal(true)
+        expect(rt_file_exists(cuda_out_path)).to_equal(true)
+
+        delete_file(src_path)
+        delete_file(llvm_out_path)
+        delete_file(cuda_out_path)
+
+    it "grouped compile helper imports resolve cleanly for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_grouped_compile.spl"
+        val smf_out_path = "/tmp/sml_driver_api_grouped_compile.smf"
+        val c_out_path = "/tmp/sml_driver_api_grouped_compile.cpp"
+        val sdn_path = "/tmp/sml_driver_api_grouped_compile.sdn"
+        write_file(src_path, "fn main(): 17")
+        write_file(sdn_path, "root:" + NL + "  name: \"grouped-compile\"")
+        delete_file(smf_out_path)
+        delete_file(c_out_path)
+
+        val compile_result = compile_file(src_path)
+        val smf_result = compile_to_smf(src_path, smf_out_path)
+        val check_result = check_file(src_path)
+        val sdn_result = parse_sdn_file(sdn_path)
+        val c_result = aot_c_file(src_path, c_out_path)
+
+        expect(compile_result.is_success()).to_equal(true)
+        expect(smf_result.is_ok()).to_equal(true)
+        expect(rt_file_exists(smf_out_path)).to_equal(true)
+        expect(check_result.is_success()).to_equal(true)
+        expect(sdn_result.is_success()).to_equal(true)
+        expect(sdn_result.get_value()).to_contain("grouped-compile")
+        expect(c_result.is_success()).to_equal(true)
+        expect(rt_file_exists(c_out_path)).to_equal(true)
+
+        delete_file(src_path)
+        delete_file(smf_out_path)
+        delete_file(c_out_path)
+        delete_file(sdn_path)
+
+    it "grouped backend helper imports resolve cleanly for a direct external caller":
+        val src_path = "/tmp/sml_driver_api_grouped_backend.spl"
+        val llvm_native_out_path = "/tmp/sml_driver_api_grouped_backend_llvm_native.bin"
+        val native_out_path = "/tmp/sml_driver_api_grouped_backend_native.bin"
+        val _vhdl_emit2 = aot_vhdl_file
+        write_file(src_path, "fn add(a: i32, b: i32) -> i32:\n    a + b")
+        delete_file(llvm_native_out_path)
+        delete_file(native_out_path)
+
+        val llvm_native_result = aot_llvm_native_file(src_path, llvm_native_out_path)
+        val native_result = aot_native_file_with_backend(src_path, native_out_path, "llvm-lib", false, 0)
+
+        expect(llvm_native_result.is_success()).to_equal(false)
+        expect(rt_file_exists(llvm_native_out_path)).to_equal(false)
+        expect(native_result.is_success()).to_equal(false)
+        expect(rt_file_exists(native_out_path)).to_equal(false)
+
+        delete_file(src_path)
+        delete_file(llvm_native_out_path)
+        delete_file(native_out_path)

@@ -1,0 +1,196 @@
+# Simple DB server tier — per-session transaction scoping (write overlay)
+#
+# ISOLATION MODEL (increment 1, stated honestly):
+#   read-committed + per-session write overlay + commit-time optimistic version
+#   check.
+#
+#   * A write inside a txn goes ONLY into that session's overlay.  It is
+#     invisible to every other session until COMMIT.
+#   * A read inside a txn sees overlay-then-store, so a session reads its own
+#     writes; a peer session reads only the committed store.
+#   * COMMIT replays the overlay into the embedded SDN store.  Each write
+#     carries the row version observed when the overlay entry was created; if
+#     the store moved past that version the whole commit aborts (no lost
+#     update, all-or-nothing).
+#   * ROLLBACK drops the overlay.  Nothing reaches the store.
+#
+#   NOT serializable, NOT MVCC snapshot isolation.  Read skew is possible.
+#   See .spipe/db_server_tier/state.md for the next increment.
+#
+# This module owns NO storage.  Replay goes through std.database.core's
+# SdnTable/SdnDatabase API — there is no second storage engine here.
+
+use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
+
+# ============================================================================
+# Write records
+# ============================================================================
+
+val WRITE_PUT: text = "put"
+val WRITE_DEL: text = "del"
+
+struct TxnWrite:
+    table: text
+    key: text
+    kind: text
+    fields: Dict<text, text>
+    # Row version observed in the store when this overlay entry was created.
+    # -1 means "row did not exist" (insert intent).
+    base_version: i64
+
+fn overlay_key(table: text, key: text) -> text:
+    # Newline cannot appear in a table name or a protocol-parsed key, so this
+    # composite key is unambiguous.
+    table + "\n" + key
+
+# ============================================================================
+# TxnState — one open transaction's private overlay
+# ============================================================================
+
+struct TxnState:
+    open: bool
+    writes: [TxnWrite]
+    # overlay_key -> index into writes (last write wins)
+    slots: Dict<text, i64>
+
+fn closed_txn() -> TxnState:
+    TxnState(open: false, writes: [], slots: {})
+
+fn begin_txn() -> TxnState:
+    TxnState(open: true, writes: [], slots: {})
+
+# Record a write.  Returns a NEW TxnState (values, not in-place mutation) so a
+# caller that forgets to write the component back cannot silently half-apply.
+fn txn_record(state: TxnState, write: TxnWrite) -> TxnState:
+    var writes = state.writes
+    var slots: Dict<text, i64> = {}
+    for (k, v) in state.slots:
+        slots[k] = v
+    val slot = overlay_key(write.table, write.key)
+    if slots.contains_key(slot):
+        val existing: i64 = slots[slot]
+        # Keep the ORIGINAL base_version: the optimistic check must be against
+        # what this txn first observed, not against its own intermediate write.
+        val prior: TxnWrite = writes[existing]
+        val merged = TxnWrite(
+            table: write.table,
+            key: write.key,
+            kind: write.kind,
+            fields: write.fields,
+            base_version: prior.base_version
+        )
+        writes[existing] = merged
+    else:
+        slots[slot] = writes.len()
+        writes.push(write)
+    TxnState(open: state.open, writes: writes, slots: slots)
+
+# Look a key up in the overlay only.  nil = not touched by this txn.
+fn txn_lookup(state: TxnState, table: text, key: text) -> TxnWrite?:
+    val slot = overlay_key(table, key)
+    if not state.slots.contains_key(slot):
+        return nil
+    val index: i64 = state.slots[slot]
+    if index < 0 or index >= state.writes.len():
+        return nil
+    Some(state.writes[index])
+
+fn txn_write_count(state: TxnState) -> i64:
+    state.writes.len()
+
+# ============================================================================
+# Commit replay
+# ============================================================================
+
+struct CommitOutcome:
+    ok: bool
+    applied: i64
+    conflict_key: text
+    message: text
+
+fn commit_ok(applied: i64) -> CommitOutcome:
+    CommitOutcome(ok: true, applied: applied, conflict_key: "", message: "")
+
+fn commit_conflict(key: text, message: text) -> CommitOutcome:
+    CommitOutcome(ok: false, applied: 0, conflict_key: key, message: message)
+
+# Current version of a row in the store, or -1 when absent.
+fn store_version(store: SdnDatabase, table_name: text, key: text) -> i64:
+    match store.get_table(table_name):
+        Some(table):
+            val typed: SdnTable = table
+            match typed.get_row(key):
+                Some(row):
+                    val typed_row: SdnRow = row
+                    typed_row._version
+                nil:
+                    -1
+        nil:
+            -1
+
+# Read a committed row from the store (ignores every overlay).
+fn store_read(store: SdnDatabase, table_name: text, key: text) -> SdnRow?:
+    match store.get_table(table_name):
+        Some(table):
+            val typed: SdnTable = table
+            match typed.get_row(key):
+                Some(row):
+                    val typed_row: SdnRow = row
+                    # A soft-deleted row reads as absent.
+                    if typed_row.get("valid") == Some("false"):
+                        return nil
+                    Some(typed_row)
+                nil:
+                    nil
+        nil:
+            nil
+
+# Phase 1: verify every overlay entry still matches the version it observed.
+fn txn_precheck(store: SdnDatabase, state: TxnState) -> CommitOutcome:
+    for write in state.writes:
+        val typed: TxnWrite = write
+        val current = store_version(store, typed.table, typed.key)
+        if current != typed.base_version:
+            return commit_conflict(
+                typed.key,
+                "version moved for {typed.table}/{typed.key}: saw {typed.base_version}, store has {current}"
+            )
+    commit_ok(state.writes.len())
+
+# Phase 2: apply.  Only reached when the precheck passed, so the whole overlay
+# lands or none of it does.
+fn txn_apply(store: SdnDatabase, state: TxnState) -> CommitOutcome:
+    var applied = 0
+    for write in state.writes:
+        val typed: TxnWrite = write
+        # Extract -> mutate -> write back.  A mutating call through
+        # store.tables[name].add_row(...) loses the write on the interpreter.
+        match store.get_table_mut(typed.table):
+            Some(table_value):
+                var table: SdnTable = table_value
+                if typed.kind == WRITE_DEL:
+                    table.mark_deleted(typed.key)
+                else:
+                    var row = SdnRow(fields: {}, _version: typed.base_version + 1)
+                    for (column, value) in typed.fields:
+                        row.set(column, value)
+                    row.set("id", typed.key)
+                    row.set("valid", "true")
+                    if typed.base_version < 0:
+                        table.add_row(row)
+                    else:
+                        table.update_row(typed.key, row)
+                store.set_table(typed.table, table)
+                applied = applied + 1
+            nil:
+                return commit_conflict(typed.key, "table vanished: {typed.table}")
+    commit_ok(applied)
+
+# The full two-phase commit of one session's overlay.
+fn txn_commit(store: SdnDatabase, state: TxnState) -> CommitOutcome:
+    if not state.open:
+        return commit_conflict("", "no open transaction")
+    val precheck = txn_precheck(store, state)
+    if not precheck.ok:
+        return precheck
+    txn_apply(store, state)

@@ -1,0 +1,136 @@
+# @cover src/os/services/sched_service.spl 80%
+"""
+# SchedService Specification (G1)
+
+**Feature IDs:** #G1
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+User-space scheduler policy service. Validates task registration,
+unregistration, CPU-usage accumulation, runaway-driver demotion,
+nice clamping, and priority recommendation.
+"""
+
+use std.spec
+use os.services.sched_service.{SchedService, SCHED_DRIVER, SCHED_NORMAL, PRIO_REALTIME, PRIO_HIGH, PRIO_NORMAL, PRIO_LOW, NICE_MIN, NICE_MAX, sched_set_priority_count_value}
+
+describe "SchedService register":
+    it "register_task returns the first live entity (id 0, generation 1)":
+        """The first allocated slot is id 0.
+
+        (The old `id > 0` expectation was wrong: EntityAllocator hands out id 0
+        first. It only "passed" while two-hop mutation loss hid allocator state.)
+        """
+        var svc = SchedService.new()
+        val e = svc.sched_register_task(1, SCHED_NORMAL, PRIO_NORMAL, 0)
+        expect(e.id).to_equal(0)
+        expect(e.generation).to_equal(1)
+        expect(e.is_null()).to_equal(false)
+
+    it "registered task has correct recommend_priority":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(2, SCHED_NORMAL, PRIO_HIGH, 0)
+        expect(svc.sched_recommend_priority(2)).to_equal(PRIO_HIGH)
+
+describe "SchedService unregister":
+    it "unregister_task returns true for registered task":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(3, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val ok = svc.sched_unregister_task(3)
+        expect(ok).to_equal(true)
+
+    it "recommend_priority returns -1 after unregister":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(4, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val _ok = svc.sched_unregister_task(4)
+        expect(svc.sched_recommend_priority(4)).to_equal(-1)
+
+describe "SchedService record_usage":
+    it "record_usage returns true for registered task":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(5, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val ok = svc.sched_record_usage(5, 10)
+        expect(ok).to_equal(true)
+
+describe "SchedService runaway driver demotion":
+    it "driver task above threshold is demoted after sched_tick":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(6, SCHED_DRIVER, PRIO_HIGH, 0)
+        val _ok = svc.sched_record_usage(6, 101)
+        val _tick = svc.sched_tick()
+        # priority should be demoted from PRIO_HIGH (1) to PRIO_NORMAL (2)
+        expect(svc.sched_recommend_priority(6)).to_equal(PRIO_NORMAL)
+
+describe "SchedService nice clamping":
+    it "nice value above 19 is clamped to 19":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(7, SCHED_NORMAL, PRIO_NORMAL, 100)
+        # nice is clamped at register time; verify via sched_set_nice
+        val ok = svc.sched_set_nice(7, 50)
+        expect(ok).to_equal(true)
+        # recommend_priority stays the same (nice doesn't change priority directly)
+        expect(svc.sched_recommend_priority(7)).to_equal(PRIO_NORMAL)
+
+    it "nice min/max constants are correct":
+        expect(NICE_MIN).to_equal(-20)
+        expect(NICE_MAX).to_equal(19)
+
+describe "SchedService cross-entity identity (two-hop mutation-loss regression)":
+    """Regression for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+
+    Before the extract-mutate-writeback fix, `self.world.base.spawn()` returned
+    Entity(id: 0, generation: 1) for every task, so a second task aliased the
+    first and per-task priority/usage/nice state collapsed onto one slot.
+    """
+
+    it "three task registrations get distinct entity ids 0, 1, 2":
+        var svc = SchedService.new()
+        val t0 = svc.sched_register_task(11, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val t1 = svc.sched_register_task(22, SCHED_DRIVER, PRIO_HIGH, 5)
+        val t2 = svc.sched_register_task(33, SCHED_NORMAL, PRIO_LOW, (-5))
+        expect(t0.id).to_equal(0)
+        expect(t1.id).to_equal(1)
+        expect(t2.id).to_equal(2)
+        expect(t0.generation).to_equal(1)
+        expect(t1.generation).to_equal(1)
+        expect(t2.generation).to_equal(1)
+
+    it "per-task priorities stay isolated across three tasks":
+        var svc = SchedService.new()
+        val _t0 = svc.sched_register_task(11, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val _t1 = svc.sched_register_task(22, SCHED_DRIVER, PRIO_HIGH, 5)
+        val _t2 = svc.sched_register_task(33, SCHED_NORMAL, PRIO_LOW, (-5))
+        expect(svc.sched_recommend_priority(11)).to_equal(PRIO_NORMAL)
+        expect(svc.sched_recommend_priority(22)).to_equal(PRIO_HIGH)
+        expect(svc.sched_recommend_priority(33)).to_equal(PRIO_LOW)
+        expect(svc.sched_recommend_priority(99)).to_equal(-1)
+
+    it "task 11 at entity id 0 is still reachable (id-0 is not a not-found sentinel)":
+        """find_entity_for_task used to return Entity(id: 0) for 'not found',
+        which aliased the first registered task once identity was fixed."""
+        var svc = SchedService.new()
+        val _t0 = svc.sched_register_task(11, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val _t1 = svc.sched_register_task(22, SCHED_NORMAL, PRIO_HIGH, 0)
+        expect(svc.sched_set_nice(11, 7)).to_equal(true)
+        expect(svc.sched_record_usage(11, 10)).to_equal(true)
+        expect(svc.sched_unregister_task(11)).to_equal(true)
+        expect(svc.sched_recommend_priority(11)).to_equal(-1)
+        expect(svc.sched_recommend_priority(22)).to_equal(PRIO_HIGH)
+        expect(svc.sched_unregister_task(11)).to_equal(false)
+
+    it "runaway demotion hits only the offending driver task":
+        var svc = SchedService.new()
+        val _t0 = svc.sched_register_task(11, SCHED_DRIVER, PRIO_NORMAL, 0)
+        val _t1 = svc.sched_register_task(22, SCHED_DRIVER, PRIO_NORMAL, 0)
+        val _t2 = svc.sched_register_task(33, SCHED_DRIVER, PRIO_NORMAL, 0)
+        # Only task 22 runs away past DRIVER_RUNAWAY_THRESHOLD (100).
+        expect(svc.sched_record_usage(22, 150)).to_equal(true)
+        val before = sched_set_priority_count_value()
+        val _tick = svc.sched_tick()
+        expect(sched_set_priority_count_value()).to_equal(before + 1)
+        expect(svc.sched_recommend_priority(22)).to_equal(PRIO_LOW)
+        expect(svc.sched_recommend_priority(11)).to_equal(PRIO_NORMAL)
+        expect(svc.sched_recommend_priority(33)).to_equal(PRIO_NORMAL)

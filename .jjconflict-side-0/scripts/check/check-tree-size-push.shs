@@ -1,0 +1,869 @@
+#!/bin/sh
+# Refuse to push a commit whose TREE is structurally wrong.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# `main` was wiped to near-zero files TWICE in 24 hours (2026-07-31 / 2026-08-01;
+# 118c636ead8 took it from 109,375 files to 4). EVERY existing guard passed both
+# times. The conflict-tree guard only looks for `.jjconflict*` entries, so a tree
+# truncated for any OTHER reason — a git index truncated by ENOSPC, an API
+# `base_tree` landing that silently inherited an already-wiped base — sails
+# straight through it. The only thing that ever caught a wipe was a human running
+#
+#     git ls-tree -r --name-only $C | wc -l
+#
+# and noticing the number. `5f1b96ad9a8` hardened the two conflict guards and
+# recorded this as still open: "no automated tree-size gate — both wipes would
+# have been caught by one." This is that gate.
+#
+# A second, subtler corruption was observed in the same window: a tree of 109,815
+# files — HIGHER than the healthy 109,543 — because `src/` listed the `lib` entry
+# TWICE (same mode, same sha, which git's tree format forbids) while seven other
+# `src/` subdirectories were missing entirely, including all 185 files of
+# `src/runtime`, leaving `src/` with 9 entries instead of 15. A floor-only size
+# check is blind to that. Hence four independent checks, all fail-closed:
+#
+#   1. SIZE BAND  — reject a tree far too small (the wipe) AND far too large
+#                   (the duplicate-entry corruption), relative to the base the
+#                   push replaces, PLUS an absolute floor/ceiling so a tip that
+#                   merely INHERITED an already-wiped base — delta zero, band
+#                   happy — is still caught. Both wipes propagated that way.
+#   2. DUPLICATES — no path may appear twice in the recursive listing. Two
+#                   identical tree entries expand to two identical path lists,
+#                   so this catches the observed `src/lib` duplication at any
+#                   depth. `git fsck` is authoritative but takes >2 minutes on
+#                   this repo, which is why it is not the gate; use it for
+#                   investigation, this for gating.
+#   3. src/ ENTRY BAND — `git ls-tree $C:src | wc -l` must stay in band. This is
+#                   the single strongest signal available: it is one cheap call,
+#                   and it fired on the real corruption (9 vs 15).
+#   4. LOAD-BEARING PATHS — named directories must hold at least N files. In the
+#                   observed corruption `src/runtime` held 0 against 185, which
+#                   makes it a proven canary.
+#
+# ---------------------------------------------------------------------------
+# THE NUMBERS, AND HOW TO RE-DERIVE THEM
+# ---------------------------------------------------------------------------
+# All measured 2026-08-01 against origin/main 502af609d9a5. Re-derive any of them
+# with the command shown beside it.
+#
+#   total files      109,557    git ls-tree -r --name-only $C | wc -l
+#   src/ entries          15    git ls-tree --name-only $C:src | wc -l
+#   src/runtime          185    git ls-tree -r --name-only $C -- src/runtime | wc -l
+#   src/os             1,622    (same, -- src/os)
+#   src/lib            7,456    (same, -- src/lib)
+#   src/app            2,678    (same, -- src/app)
+#   src/compiler       1,591    (same, -- src/compiler)
+#   scripts, doc       large and stable; see CFG_PATHS floors below
+#
+# `src/std` holds ONE file. It is deliberately NOT a canary: a single file passes
+# any non-empty test trivially and would survive nearly any corruption. Canaries
+# are chosen for SIZE and STABILITY, and asserted with a MINIMUM COUNT, never
+# with "> 0". Every floor below sits at roughly 60-80% of the measured value, so
+# only STRUCTURAL loss trips it and ordinary deletion never does.
+#
+# Churn, measured across the 30 commits ending at 502af609d9a5:
+#   tree size    109,539 .. 109,564
+#   per commit   +1 / +2 / +4 typical; the largest single move was -25, a
+#                legitimate dead-package deletion. Churn is single-digit to low
+#                tens in BOTH directions.
+#
+# Corruption deltas, for separation:
+#   wipe                109,375 ->       4     (delta -109,371)
+#   duplicate-entry     109,543 -> 109,815     (delta    +272)
+#
+# CFG_TOL_PERMILLE = 15 per 10,000 = 0.15% => +-164 files at 109,557. That is
+# ~6.5x the largest real churn (25) and ~40% BELOW the corruption delta (272), so
+# the band separates both hazards from normal work with room on both sides.
+#
+# A lane that legitimately moves more than the band allows must STATE its
+# expected post-count with `--expect-files <n>`, which recentres the band on the
+# stated number and prints it in the verdict. That RECORDS the expectation in the
+# command line and the log rather than bypassing the check: the absolute band,
+# the duplicate check, the src/ entry band and every load-bearing floor still
+# apply. There is no flag that turns a check off, and no environment variable
+# overrides any threshold — if a threshold is genuinely wrong, edit it here, to
+# the newly MEASURED boundary, in the same commit as the work. Do not relax it to
+# make a run green.
+#
+# ---------------------------------------------------------------------------
+# CONTRACT (matches scripts/check/check-no-conflict-tree-push.shs, 5f1b96ad9a8)
+# ---------------------------------------------------------------------------
+#   * The verdict is ALWAYS on stdout and ALWAYS first-word-tagged PASS / FAIL /
+#     ERROR, so even a `| tail` misuse shows it.
+#   * "PASS — <n> commit(s) checked" with n > 0 ALWAYS. The count is the point:
+#     it makes a vacuous run visible. There is no "OK".
+#   * "ERROR — nothing was checked" (exit 2) whenever the guard could not do its
+#     job. cwd outside a git repo is an ERROR, never a pass — a `git archive`
+#     worktree under /dev/shm has no .git and is exactly where the previous
+#     fail-open happened.
+#   * No `git` call's exit status is discarded. That single mistake caused all
+#     three fail-opens fixed in 5f1b96ad9a8.
+#   * Nothing this script cares about is read through a pipe: output goes to a
+#     FILE and the file is read.
+#   * Everything is quoted. `for f in $paths` word-splits on filenames containing
+#     spaces and caused a live miss from the correct cwd with the correct range.
+#   * grep is pinned to /usr/bin/grep — the interactive default here is ugrep and
+#     the two have silently disagreed.
+#
+# NON-VACUITY: --selftest runs automatically before every scan and is FATAL. It
+# builds 16 throwaway fixtures in a temp repo — truncated tree, duplicate entry
+# (same-sha AND differing-sha), missing src/runtime, shrunken src/, oversize,
+# inherited-wipe, band-jump, and healthy controls — and asserts each verdict.
+# A guard that cannot fail on its
+# motivating case is worse than none.
+#
+# ISOLATION: the fixtures are built in a temp repo of the selftest's OWN making
+# and MUST NOT touch the repo being guarded. Until 2026-08-01 they did: `git -C
+# <tmp>` does not override an inherited GIT_DIR, so running this guard from the
+# repo's own plumbing landing flow wrote the fixture identity into the SHARED
+# .git/config (main commit 30743ecd6749 is authored `selftest <selftest@local>`
+# because of it), flipped core.bare = true when GIT_DIR carried a trailing slash
+# — which makes THIS guard and both siblings ERROR out and pushes go unguarded —
+# and dumped every fixture object into the shared store as unreachable garbage.
+# Fixture 15 ('env-isolation') runs a fixture build under exactly that hostile
+# GIT_DIR against a decoy repo and fails if the decoy's config, core.bare or
+# object count moves by one byte.
+#
+# Usage:
+#   check-tree-size-push.shs                       # default range main@origin..@-
+#   check-tree-size-push.shs '<base>..<tip>'       # explicit range
+#   check-tree-size-push.shs --expect-files 109531 '<base>..<tip>'
+#   check-tree-size-push.shs --rev-list-args A --not --remotes=origin
+#   check-tree-size-push.shs --selftest            # fixtures only, no scan
+#
+# Exit 0 = safe to push, 1 = structurally wrong tree found, 2 = could not
+# determine (ERROR — nothing was checked).
+
+set -u
+
+SELF=check-tree-size-push
+
+# Pin grep: the interactive default on this machine is ugrep, not GNU grep.
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+# --- tuneables: see "THE NUMBERS, AND HOW TO RE-DERIVE THEM" before changing --
+CFG_TOL_PERMILLE=15                 # per 10,000 => 15 = 0.15% = +-164 at 109,557
+CFG_ABS_MIN=90000                   # ~18% below the measured 109,557
+CFG_ABS_MAX=150000
+CFG_SRC_MIN=13                      # measured 15; the corruption showed 9
+CFG_SRC_MAX=25
+# "<path>:<min files>" — floors at ~60-80% of measured, see table above.
+CFG_PATHS='src/runtime:150 src/os:1200 src/lib:5000 src/compiler:1200 src/app:2000 scripts:500 doc:1000'
+
+TMPROOT=""
+cleanup() { [ -n "$TMPROOT" ] && rm -rf "$TMPROOT"; }
+trap cleanup EXIT INT TERM
+
+die() {
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked (exit $code)"
+    exit "$code"
+}
+
+# ---------------------------------------------------------------------------
+# inspect_commit <repo> <commit>
+#   Sets IC_FILES, IC_DUPS, IC_DUPLIST. Returns 1 and sets IC_ERR if any git call
+#   failed — a git failure is never a clean result.
+# ---------------------------------------------------------------------------
+inspect_commit() {
+    ic_repo=$1
+    ic_commit=$2
+    IC_ERR=""
+    IC_FILES=0
+    IC_DUPS=0
+    IC_DUPLIST=""
+
+    ic_list="$TMPROOT/ls.out"
+    git -C "$ic_repo" ls-tree -r --name-only "$ic_commit" >"$ic_list" 2>"$TMPROOT/ls.err"
+    ic_st=$?
+    if [ "$ic_st" -ne 0 ]; then
+        IC_ERR="git ls-tree -r failed (status $ic_st) on $ic_commit"
+        return 1
+    fi
+
+    IC_FILES=$(wc -l <"$ic_list")
+    IC_FILES=$(printf '%s' "$IC_FILES" | tr -d ' ')
+
+    # Duplicate entries. The corruption axis is "the same NAME appears twice at
+    # the same tree level", and the SHAs of the two entries need not match.
+    #
+    # `ls-tree -r` (blobs only) only exposes that when the two entries expand to
+    # the same path list — i.e. when they are byte-identical trees. Two `src/lib`
+    # entries holding DIFFERENT subtrees expand to disjoint paths and produce
+    # ZERO duplicate lines. PROVED 2026-08-02 with a `git mktree` fixture:
+    # same-sha duplicate -> 2 dup lines, different-sha duplicate -> 0, both at a
+    # subtree and at the root. That is the same defect class as the fixed-width
+    # `^<<<<<<< ` conflict-marker regex: an exact-string assumption that a real
+    # variant walks straight past.
+    #
+    # `-t` additionally emits the TREE entries themselves, so a name repeated at
+    # a level is listed twice regardless of what is under it. Duplicate BLOBs are
+    # already caught by either listing. IC_FILES stays on the blob-only listing so
+    # the size band keeps counting files, not files+directories.
+    git -C "$ic_repo" ls-tree -r -t --name-only "$ic_commit" >"$TMPROOT/lst.out" 2>/dev/null
+    ic_st=$?
+    if [ "$ic_st" -ne 0 ]; then
+        IC_ERR="git ls-tree -r -t failed (status $ic_st) on $ic_commit"
+        return 1
+    fi
+    sort "$TMPROOT/lst.out" >"$TMPROOT/sorted.out" || { IC_ERR="sort failed on $ic_commit"; return 1; }
+    uniq -d "$TMPROOT/sorted.out" >"$TMPROOT/dup.out" || { IC_ERR="uniq failed on $ic_commit"; return 1; }
+    IC_DUPS=$(wc -l <"$TMPROOT/dup.out")
+    IC_DUPS=$(printf '%s' "$IC_DUPS" | tr -d ' ')
+    IC_DUPLIST=$(head -n 5 "$TMPROOT/dup.out")
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# path_count <repo> <commit> <path>  -> echoes file count, returns git's status
+# ---------------------------------------------------------------------------
+path_count() {
+    pc_out="$TMPROOT/pc.out"
+    git -C "$1" ls-tree -r --name-only "$2" -- "$3" >"$pc_out" 2>/dev/null
+    pc_st=$?
+    [ "$pc_st" -ne 0 ] && return "$pc_st"
+    pc_n=$(wc -l <"$pc_out")
+    printf '%s' "$pc_n" | tr -d ' '
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# src_entry_count <repo> <commit>
+#   Echoes the number of entries directly under src/. Echoes -1 when src/ is
+#   absent from the tree (a violation, not an error — a wiped tree has no src).
+#   Returns non-zero only when git failed for some OTHER reason.
+# ---------------------------------------------------------------------------
+src_entry_count() {
+    se_out="$TMPROOT/se.out"
+    git -C "$1" ls-tree --name-only "$2" -- src >"$se_out" 2>/dev/null
+    se_st=$?
+    [ "$se_st" -ne 0 ] && return "$se_st"
+    if [ ! -s "$se_out" ]; then
+        printf '%s' "-1"
+        return 0
+    fi
+    git -C "$1" ls-tree --name-only "$2:src" >"$se_out" 2>/dev/null
+    se_st=$?
+    [ "$se_st" -ne 0 ] && return "$se_st"
+    se_n=$(wc -l <"$se_out")
+    printf '%s' "$se_n" | tr -d ' '
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# evaluate_commit <repo> <commit> <base_files or -1>
+#   Applies all four checks, printing one "  - REASON" line per violation to
+#   stderr. Returns 0 clean, 1 violated, 2 could-not-determine (IC_ERR set).
+# ---------------------------------------------------------------------------
+evaluate_commit() {
+    ev_repo=$1
+    ev_commit=$2
+    ev_base=$3
+    ev_bad=0
+
+    inspect_commit "$ev_repo" "$ev_commit" || return 2
+    EV_FILES=$IC_FILES
+
+    # --- check 1a: absolute band (catches a tip that INHERITED a wiped base) --
+    if [ "$IC_FILES" -lt "$CFG_ABS_MIN" ]; then
+        echo "  - TREE TOO SMALL: $IC_FILES file(s); absolute floor is $CFG_ABS_MIN" >&2
+        ev_bad=1
+    fi
+    if [ "$IC_FILES" -gt "$CFG_ABS_MAX" ]; then
+        echo "  - TREE TOO LARGE: $IC_FILES file(s); absolute ceiling is $CFG_ABS_MAX" >&2
+        ev_bad=1
+    fi
+
+    # --- check 1b: relative band against the base this push replaces ---------
+    if [ "$ev_base" -ge 0 ]; then
+        ev_tol=$(( ev_base * CFG_TOL_PERMILLE / 10000 ))
+        [ "$ev_tol" -lt 1 ] && ev_tol=1
+        ev_delta=$(( IC_FILES - ev_base ))
+        ev_abs=$ev_delta
+        [ "$ev_abs" -lt 0 ] && ev_abs=$(( 0 - ev_abs ))
+        if [ "$ev_abs" -gt "$ev_tol" ]; then
+            echo "  - TREE SIZE OUT OF BAND: $IC_FILES file(s) vs base $ev_base (delta $ev_delta, tolerance +-$ev_tol)" >&2
+            ev_bad=1
+        fi
+    fi
+
+    # --- check 2: duplicate tree entries -------------------------------------
+    if [ "$IC_DUPS" -ne 0 ]; then
+        echo "  - DUPLICATE TREE ENTRIES: $IC_DUPS duplicated path(s), e.g.:" >&2
+        printf '%s\n' "$IC_DUPLIST" >"$TMPROOT/duphead.out"
+        while IFS= read -r ev_d; do
+            [ -n "$ev_d" ] && echo "      $ev_d" >&2
+        done <"$TMPROOT/duphead.out"
+        ev_bad=1
+    fi
+
+    # --- check 3: src/ entry band --------------------------------------------
+    ev_srcn=$(src_entry_count "$ev_repo" "$ev_commit")
+    ev_st=$?
+    if [ "$ev_st" -ne 0 ]; then
+        IC_ERR="git ls-tree failed (status $ev_st) reading src/ of $ev_commit"
+        return 2
+    fi
+    if [ "$ev_srcn" -lt 0 ]; then
+        echo "  - src/ IS ABSENT from the tree entirely" >&2
+        ev_bad=1
+    elif [ "$ev_srcn" -lt "$CFG_SRC_MIN" ] || [ "$ev_srcn" -gt "$CFG_SRC_MAX" ]; then
+        echo "  - src/ ENTRY COUNT OUT OF BAND: $ev_srcn entries, band is $CFG_SRC_MIN..$CFG_SRC_MAX" >&2
+        ev_bad=1
+    fi
+
+    # --- check 4: load-bearing paths -----------------------------------------
+    # CFG_PATHS is a literal, space-separated, colon-joined list defined in this
+    # file, so splitting it on a pinned IFS is safe. Every value derived FROM it
+    # is quoted at every use.
+    ev_old_ifs=$IFS
+    IFS=' '
+    for ev_spec in $CFG_PATHS; do
+        IFS=$ev_old_ifs
+        if [ -z "$ev_spec" ]; then IFS=' '; continue; fi
+        ev_path=${ev_spec%%:*}
+        ev_min=${ev_spec##*:}
+        ev_n=$(path_count "$ev_repo" "$ev_commit" "$ev_path")
+        ev_st=$?
+        if [ "$ev_st" -ne 0 ]; then
+            IFS=$ev_old_ifs
+            IC_ERR="git ls-tree failed (status $ev_st) on $ev_commit -- $ev_path"
+            return 2
+        fi
+        if [ "$ev_n" -lt "$ev_min" ]; then
+            echo "  - LOAD-BEARING PATH EMPTY/SHORT: '$ev_path' has $ev_n file(s), needs >= $ev_min" >&2
+            ev_bad=1
+        fi
+        IFS=' '
+    done
+    IFS=$ev_old_ifs
+
+    return "$ev_bad"
+}
+
+# ===========================================================================
+# SELFTEST — runs before every scan, FATAL. 14 fixtures.
+# ===========================================================================
+SELFTEST_EXPECTED=16
+
+# --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
+# Every git call that BUILDS a fixture must go through st_git/st_git_init.
+#
+# The fixtures used to be built with a bare `git -C "$st_dir" ...` plus
+#     git -C "$st_dir" config user.email selftest@local
+# which looks local but is not. `-C <dir>` only changes the working directory;
+# it does NOT override an inherited GIT_DIR. The mandated landing flow in this
+# repo exports GIT_DIR/GIT_INDEX_FILE, so a lane that ran this guard from such a
+# shell had EVERY fixture write redirected into the SHARED repo. Three separate
+# production symptoms, one cause (all reproduced 2026-08-01):
+#
+#   1. IDENTITY  — `git config user.*` wrote to the SHARED .git/config, so every
+#      later commit in that clone was authored `selftest <selftest@local>`.
+#      Commit 30743ecd6749 on main carries exactly that author.
+#   2. core.bare — with GIT_DIR ending in a slash ('.../.git/') or '/.', the
+#      `git init` below RE-INITIALISES the shared repo and writes
+#      core.bare = true. While true, `git rev-parse --is-inside-work-tree` is
+#      false in every worktree, so this guard and both sibling guards refuse to
+#      run ("ERROR — nothing was checked") and pushes go UNGUARDED.
+#   3. OBJECTS   — hash-object -w / commit-tree / mktree wrote every throwaway
+#      fixture object into the shared object store, where nothing references
+#      them: "too many unreachable loose objects" on fetch.
+#
+# So: strip every GIT_* variable that can RELOCATE a write, and pass the fixture
+# identity per-process so no config file is ever written. Fixture 15
+# ('env-isolation') proves this holds, by running a fixture build under a
+# deliberately hostile GIT_DIR and asserting the decoy repo is untouched.
+ST_ENV_STRIP='GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_CONFIG
+GIT_CONFIG_COUNT GIT_CEILING_DIRECTORIES GIT_ATTR_NOSYSTEM GIT_TEMPLATE_DIR
+GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE
+GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE'
+
+st_env() {
+    # Echo nothing; exec `env -u ... <identity> git "$@"` with a hermetic
+    # environment. ST_INDEX, when set, is the ONLY index the fixture may touch.
+    st_e_unset=''
+    for st_e_v in $ST_ENV_STRIP; do
+        st_e_unset="$st_e_unset -u $st_e_v"
+    done
+    # shellcheck disable=SC2086  # st_e_unset is a built list of -u FLAGS, not data
+    env $st_e_unset \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_AUTHOR_NAME=selftest   GIT_AUTHOR_EMAIL=selftest@local \
+        GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@local \
+        GIT_AUTHOR_DATE='@0 +0000' GIT_COMMITTER_DATE='@0 +0000' \
+        ${ST_INDEX:+GIT_INDEX_FILE="$ST_INDEX"} \
+        git "$@"
+}
+
+st_git() {
+    # st_git <repo> <git-args>...  — always operates on <repo>, never on an
+    # inherited GIT_DIR.
+    st_g_repo=$1
+    shift
+    st_env -C "$st_g_repo" "$@"
+}
+
+st_git_init() {
+    # st_git_init <dir> — creates a REAL repo at <dir>. Must not be `git -C`:
+    # `git init <path>` with GIT_DIR set re-inits the repo GIT_DIR names.
+    st_env init -q "$1"
+}
+
+st_mktree() {
+    # st_mktree <repo> <files-per-dir> <dir>...   -> echoes a commit sha
+    st_repo=$1
+    st_n=$2
+    shift 2
+    st_idx="$TMPROOT/st.index"
+    rm -f "$st_idx"
+    st_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_repo" hash-object -w --stdin) || return 1
+    for st_d in "$@"; do
+        st_i=0
+        while [ "$st_i" -lt "$st_n" ]; do
+            ST_INDEX="$st_idx" st_git "$st_repo" update-index --add \
+                --cacheinfo "100644,$st_blob,$st_d/f$st_i.txt" >/dev/null || return 1
+            st_i=$(( st_i + 1 ))
+        done
+    done
+    st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
+    st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+}
+
+st_mkdirtree() {
+    # st_mkdirtree <repo> <count> <name-prefix> -> echoes a TREE sha holding
+    # <prefix>0.txt .. <prefix>N-1.txt. Two calls with different prefixes give
+    # two trees with different shas AND disjoint path sets — the shape needed to
+    # prove the duplicate-entry check does not depend on the two entries being
+    # byte-identical.
+    st_md_repo=$1; st_md_n=$2; st_md_p=$3
+    st_md_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_md_repo" hash-object -w --stdin) || return 1
+    st_md_i=0
+    : >"$TMPROOT/md.in"
+    while [ "$st_md_i" -lt "$st_md_n" ]; do
+        printf '100644 blob %s\t%s%s.txt\n' "$st_md_blob" "$st_md_p" "$st_md_i" >>"$TMPROOT/md.in"
+        st_md_i=$(( st_md_i + 1 ))
+    done
+    st_git "$st_md_repo" mktree <"$TMPROOT/md.in"
+}
+
+st_env_isolation_fixture() {
+    # Fixture 15. Build a DECOY repo, export a hostile GIT_DIR pointing at it in
+    # the exact shape proven to flip core.bare ('<path>/.git/', trailing slash),
+    # then build a fixture. If fixture writes are hermetic the decoy is byte-for
+    # byte untouched. Reverting st_env/st_git/st_git_init turns this RED.
+    ei_decoy="$TMPROOT/decoy"
+    ei_probe="$TMPROOT/probe"
+    rm -rf "$ei_decoy" "$ei_probe"
+    st_git_init "$ei_decoy" >/dev/null 2>&1 || return 1
+    ei_bare_before=$(st_git "$ei_decoy" config --get core.bare 2>&1)
+    ei_cfg_before=$(cksum <"$ei_decoy/.git/config") || return 1
+    ei_obj_before=$(find "$ei_decoy/.git/objects" -type f | wc -l) || return 1
+
+    # HOSTILE caller environment — exactly what the landing flow exports.
+    (
+        GIT_DIR="$ei_decoy/.git/"
+        GIT_INDEX_FILE="$ei_decoy/.git/hostile.index"
+        export GIT_DIR GIT_INDEX_FILE
+        TMPROOT="$TMPROOT" ST_NONCE="$ST_NONCE"
+        st_git_init "$ei_probe" >/dev/null 2>&1 || exit 1
+        st_mktree "$ei_probe" 2 src/runtime src/os >/dev/null || exit 1
+    ) || return 1
+
+    ei_bad=0
+    [ -d "$ei_probe/.git" ] || {
+        echo "  - fixture repo got NO .git of its own: writes were redirected" >&2; ei_bad=1; }
+    ei_bare_after=$(st_git "$ei_decoy" config --get core.bare 2>&1)
+    [ "$ei_bare_after" = "$ei_bare_before" ] || {
+        echo "  - decoy core.bare changed: '$ei_bare_before' -> '$ei_bare_after'" >&2; ei_bad=1; }
+    ei_cfg_after=$(cksum <"$ei_decoy/.git/config")
+    [ "$ei_cfg_after" = "$ei_cfg_before" ] || {
+        echo "  - decoy .git/config was MODIFIED by the fixture build" >&2
+        st_git "$ei_decoy" config --list >&2; ei_bad=1; }
+    ei_obj_after=$(find "$ei_decoy/.git/objects" -type f | wc -l)
+    [ "$ei_obj_after" -eq "$ei_obj_before" ] || {
+        echo "  - decoy object store grew: $ei_obj_before -> $ei_obj_after loose object(s)" >&2
+        ei_bad=1; }
+    return "$ei_bad"
+}
+
+selftest() {
+    # Unique per run, so a leak detected by fixture 15 is THIS run's leak and
+    # never a stale object from an earlier poisoned run.
+    ST_NONCE="$$-$(date +%s 2>/dev/null)-${RANDOM:-0}"
+    st_dir="$TMPROOT/selftest"
+    mkdir -p "$st_dir" || return 1
+    st_git_init "$st_dir" >/dev/null 2>&1 || return 1
+    [ -d "$st_dir/.git" ] || {
+        echo "SELFTEST FAIL: fixture repo '$st_dir' has no .git — git init was redirected" >&2
+        return 1
+    }
+
+    # Fixture thresholds: small, so fixtures stay cheap and each one isolates the
+    # check it is meant to prove. PRODUCTION thresholds are exercised by the real
+    # scan that follows.
+    st_s_min=$CFG_ABS_MIN;  st_s_max=$CFG_ABS_MAX
+    st_s_tol=$CFG_TOL_PERMILLE; st_s_paths=$CFG_PATHS
+    st_s_smin=$CFG_SRC_MIN; st_s_smax=$CFG_SRC_MAX
+    CFG_ABS_MIN=100
+    CFG_ABS_MAX=400
+    CFG_TOL_PERMILLE=150            # 1.5%: tolerance 3 against a base of 200
+    CFG_SRC_MIN=4
+    CFG_SRC_MAX=6
+    CFG_PATHS='src/runtime:5 src/os:5'
+
+    st_ran=0
+    st_fail=0
+
+    st_assert() {
+        # st_assert <name> <commit> <base|-1> <want 0=pass 1=fail>
+        st_name=$1; st_commit=$2; st_base=$3; st_want=$4
+        evaluate_commit "$st_dir" "$st_commit" "$st_base" 2>"$TMPROOT/st.err"
+        st_got=$?
+        st_ran=$(( st_ran + 1 ))
+        if [ "$st_got" -ne "$st_want" ]; then
+            echo "SELFTEST FAIL: fixture '$st_name' expected verdict $st_want, got $st_got" >&2
+            cat "$TMPROOT/st.err" >&2
+            st_fail=1
+        fi
+    }
+
+    # healthy: 200 files, src/ has 4 entries, runtime and os hold 40 each
+    st_healthy=$(st_mktree "$st_dir" 40 src/runtime src/os src/lib src/std doc) || return 1
+    # truncated: the wipe case — 4 files total
+    st_trunc=$(st_mktree "$st_dir" 1 src/runtime src/os src/lib src/std) || return 1
+    # missing src/runtime: right size, right src/ entry count, canary gone
+    st_norun=$(st_mktree "$st_dir" 50 src/os src/lib src/std src/hardware) || return 1
+    # shrunken src/: right size, canaries intact, only 2 entries under src/
+    st_srcsm=$(st_mktree "$st_dir" 100 src/runtime src/os) || return 1
+    # small-but-shapely: 20 files, yet EVERY other check is satisfied — src/ has
+    # 4 entries, both canaries clear their floors, no duplicates. Only the
+    # ABSOLUTE floor can catch this, which is the shape of an inherited wipe:
+    # base and tip agree, so the relative band is happy too. Added 2026-08-01
+    # after a sabotage run proved no other fixture isolated the absolute floor —
+    # neutering it left the selftest GREEN.
+    st_small=$(st_mktree "$st_dir" 5 src/runtime src/os src/lib src/std) || return 1
+    # oversize: 500 files, above the absolute ceiling
+    st_over=$(st_mktree "$st_dir" 100 src/runtime src/os src/lib src/std doc) || return 1
+
+    # duplicate-entry fixture: `src/lib` listed TWICE, mirroring the observed
+    # corruption. `git mktree` writes the entries verbatim, duplicates included —
+    # git's own plumbing will not otherwise produce an invalid tree.
+    st_lib=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/lib")     || return 1
+    st_run=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/runtime") || return 1
+    st_osd=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/os")      || return 1
+    st_std=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/std")     || return 1
+    {
+        printf '040000 tree %s\tlib\n'     "$st_lib"
+        printf '040000 tree %s\tlib\n'     "$st_lib"
+        printf '040000 tree %s\tos\n'      "$st_osd"
+        printf '040000 tree %s\truntime\n' "$st_run"
+        printf '040000 tree %s\tstd\n'     "$st_std"
+    } >"$TMPROOT/mktree.src"
+    st_srctree=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.src") || return 1
+    printf '040000 tree %s\tsrc\n' "$st_srctree" >"$TMPROOT/mktree.top"
+    st_toptree=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top") || return 1
+    st_dupc=$(st_git "$st_dir" commit-tree "$st_toptree" -m dupfixture </dev/null) || return 1
+
+    # differing-sha duplicate fixture (2026-08-02): `src/lib` listed twice again,
+    # but the two entries hold DISJOINT subtrees (q0..q19 and z0..z19), so the
+    # blob-only `ls-tree -r` listing shows no repeated path at all. Everything
+    # else is deliberately healthy — 200 files, 5 entries under src/, both
+    # canaries at 40 — so ONLY the duplicate check can fail this. Reverting
+    # inspect_commit to the blob-only listing turns this fixture GREEN, which is
+    # exactly the miss being closed.
+    st_libq=$(st_mkdirtree "$st_dir" 20 q) || return 1
+    st_libz=$(st_mkdirtree "$st_dir" 20 z) || return 1
+    st_docd=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:doc") || return 1
+    {
+        printf '040000 tree %s\tlib\n'     "$st_libq"
+        printf '040000 tree %s\tlib\n'     "$st_libz"
+        printf '040000 tree %s\tos\n'      "$st_osd"
+        printf '040000 tree %s\truntime\n' "$st_run"
+        printf '040000 tree %s\tstd\n'     "$st_std"
+    } >"$TMPROOT/mktree.src2"
+    st_srctree2=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.src2") || return 1
+    {
+        printf '040000 tree %s\tdoc\n' "$st_docd"
+        printf '040000 tree %s\tsrc\n' "$st_srctree2"
+    } >"$TMPROOT/mktree.top2"
+    st_toptree2=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top2") || return 1
+    st_dupdiff=$(st_git "$st_dir" commit-tree "$st_toptree2" -m dupdiff </dev/null) || return 1
+
+    # --- 12 fixtures that MUST FAIL ---------------------------------------
+    st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
+    st_assert truncated-vs-base   "$st_trunc"   200 1   # the wipe, healthy base
+    st_assert inherited-wipe      "$st_trunc"   4   1   # base ALSO wiped: delta 0
+    st_assert absolute-floor-only "$st_small"   20  1   # ONLY the abs floor fires
+    st_assert missing-src-runtime "$st_norun"   -1  1   # proven canary at 0
+    st_assert src-entries-shrunk  "$st_srcsm"   -1  1   # src/ 2 entries, band 4..6
+    st_assert duplicate-entry     "$st_dupc"    -1  1   # src/lib listed twice
+    st_assert duplicate-vs-base   "$st_dupc"    200 1   # ... independent of base
+    st_assert duplicate-diff-shas "$st_dupdiff" 200 1   # src/lib twice, DISJOINT
+    st_assert oversize-absolute   "$st_over"    -1  1   # 500 > ceiling 400
+    st_assert oversize-vs-base    "$st_over"    200 1
+    st_assert band-jump           "$st_healthy" 160 1   # +40 vs tolerance 2
+
+    # --- 3 fixtures that MUST PASS ----------------------------------------
+    st_assert healthy-no-base     "$st_healthy" -1  0
+    st_assert healthy-exact-base  "$st_healthy" 200 0
+    st_assert healthy-small-churn "$st_healthy" 198 0   # delta 2 == tolerance 2
+
+    # --- 1 fixture that proves the HARNESS ITSELF cannot escape ------------
+    # Not a verdict fixture: it asserts the selftest cannot mutate a repo it
+    # does not own, under the exact hostile environment that produced the
+    # 2026-08-01 shared-config poisoning. Counts toward SELFTEST_EXPECTED so a
+    # harness that skips it is visible.
+    st_ran=$(( st_ran + 1 ))
+    if ! st_env_isolation_fixture; then
+        echo "SELFTEST FAIL: fixture 'env-isolation' — fixture writes ESCAPED into a repo the selftest does not own" >&2
+        st_fail=1
+    fi
+
+    CFG_ABS_MIN=$st_s_min;  CFG_ABS_MAX=$st_s_max
+    CFG_TOL_PERMILLE=$st_s_tol; CFG_PATHS=$st_s_paths
+    CFG_SRC_MIN=$st_s_smin; CFG_SRC_MAX=$st_s_smax
+
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (12 must-fail, 3 must-pass, 1 env-isolation)"
+    return 0
+}
+
+# ===========================================================================
+# MAIN
+# ===========================================================================
+TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — cannot mktemp" >&2
+                          echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+
+# Snapshot the settings of the REAL repo that a leaking selftest was PROVED to
+# corrupt (2026-08-01), so a regression is reported here and not discovered days
+# later in `git log`. Skipped, not faked, when cwd is not in a repo — the
+# hermetic decoy in fixture 15 covers that case unconditionally.
+real_gitdir=$(git rev-parse --git-common-dir 2>/dev/null) || real_gitdir=""
+real_bare_before=''; real_user_before=''
+if [ -n "$real_gitdir" ] && [ -e "$real_gitdir" ]; then
+    real_bare_before=$(git config --get core.bare 2>&1)
+    real_user_before=$(git config --get user.email 2>&1)/$(git config --get user.name 2>&1)
+fi
+
+# The selftest runs in a SUBSHELL with every GIT_* location variable unset. Two
+# reasons, both load-bearing:
+#   * `-C <dir>` does not override an inherited GIT_DIR, so a caller that
+#     exported one (the mandated plumbing landing flow does) would otherwise
+#     redirect fixture reads AND writes at the real repo.
+#   * selftest() temporarily overwrites the CFG_* thresholds; a subshell makes
+#     it impossible for a fixture threshold to survive into the real scan.
+if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+             GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+             GIT_CONFIG GIT_CONFIG_COUNT
+       selftest ); then
+    echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
+    echo "$SELF: ERROR — nothing was checked (exit 2)"
+    exit 2
+fi
+
+if [ -n "$real_bare_before" ] || [ -n "$real_user_before" ]; then
+    real_bare_after=$(git config --get core.bare 2>&1)
+    real_user_after=$(git config --get user.email 2>&1)/$(git config --get user.name 2>&1)
+    if [ "$real_bare_after" != "$real_bare_before" ] || [ "$real_user_after" != "$real_user_before" ]; then
+        echo "$SELF: ERROR — the selftest MUTATED the repository at $real_gitdir" >&2
+        echo "  core.bare: '$real_bare_before' -> '$real_bare_after'" >&2
+        echo "  user:      '$real_user_before' -> '$real_user_after'" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        exit 2
+    fi
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "$SELF: PASS — $SELFTEST_EXPECTED fixture(s) checked (selftest only, scan skipped)"
+    exit 0
+fi
+
+expect_files=-1
+if [ "${1:-}" = "--expect-files" ]; then
+    shift
+    [ "$#" -gt 0 ] || die 2 "--expect-files needs a number"
+    expect_files=$1
+    case "$expect_files" in
+        ''|*[!0-9]*) die 2 "--expect-files '$expect_files' is not a non-negative integer" ;;
+    esac
+    shift
+fi
+
+range="${1:-}"
+explicit=0
+rawmode=0
+[ -n "$range" ] && explicit=1
+case "$range" in
+    --rev-list-args)
+        rawmode=1
+        shift
+        [ "$#" -gt 0 ] || die 2 "--rev-list-args needs arguments"
+        ;;
+    --*)
+        die 2 "unknown option '$range'; raw mode is '--rev-list-args <args>...'"
+        ;;
+esac
+
+# --- 1. cwd must be inside a git repository ---------------------------------
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push.
+  A 'git archive' worktree under /dev/shm or /run/user/1000 has no .git and
+  CANNOT be checked from — cd to the real clone and re-run."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+# --- 2. cross-check: are we checking the repo this script ships in? ---------
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || script_dir=""
+script_root=""
+if [ -n "$script_dir" ]; then
+    script_root=$(CDPATH= cd -- "$script_dir/../.." 2>/dev/null && pwd -P) || script_root=""
+fi
+if [ -n "$script_root" ] && [ "$script_root" != "$toplevel" ]; then
+    if [ -e "$script_root/.git" ]; then
+        die 2 "repository mismatch.
+  This script lives in the git repo at: $script_root
+  but cwd resolves to the git repo at:  $toplevel
+  Refusing to report on a different repository than the one being guarded."
+    fi
+    echo "$SELF: WARNING — script at $script_dir is outside the repo being checked ($toplevel)" >&2
+fi
+
+# --- 3. resolve the range, fail closed --------------------------------------
+base_rev=""
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve main@origin..@- via jj (is jj available and is this a jj workspace?).
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<tip-sha>'."
+    fi
+    range="$base..$tip"
+    base_rev="$base"
+elif [ "$rawmode" -eq 0 ]; then
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git, which is not
+  what this guard is for. Pass '<base>..<tip>'." ;;
+    esac
+fi
+
+# --- 4. both endpoints must exist as commits in THIS repo -------------------
+if [ "$rawmode" -eq 0 ]; then
+    left=${range%%..*}
+    right=${range#*..}
+    right=${right#.}          # tolerate the A...B form
+    [ -n "$left" ]  || die 2 "range '$range' has an empty left endpoint"
+    [ -n "$right" ] || die 2 "range '$range' has an empty right endpoint"
+    for ep in "$left" "$right"; do
+        git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+            || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel.
+  Either you are in the wrong clone, or the commit was never fetched here."
+    done
+    base_rev="$left"
+fi
+
+# --- 5. establish the reference count for the relative band -----------------
+# Normally the base is the range's left endpoint: exactly the tree the push
+# replaces. `--expect-files` overrides it with a STATED number, which is printed
+# in the verdict so the expectation is on the record. In raw rev-list mode (a
+# brand-new ref) there is no base; the relative band is then unavailable and the
+# verdict SAYS SO. The absolute band still applies, and that is the check which
+# catches a wipe, so this is a narrowing rather than a fail-open.
+base_files=-1
+base_source=""
+if [ "$expect_files" -ge 0 ]; then
+    base_files=$expect_files
+    base_source="stated via --expect-files"
+elif [ -n "$base_rev" ]; then
+    if inspect_commit "$toplevel" "$base_rev"; then
+        base_files=$IC_FILES
+        base_source="measured at base $base_rev"
+    else
+        die 2 "cannot measure the base commit '$base_rev': $IC_ERR"
+    fi
+fi
+
+# --- 6. enumerate the range, checking git's exit status ---------------------
+if [ "$rawmode" -eq 1 ]; then
+    revs=$(git rev-list "$@" 2>/dev/null)
+    rl=$?
+    range="rev-list-args: $*"
+else
+    revs=$(git rev-list "$range" 2>/dev/null)
+    rl=$?
+fi
+[ "$rl" -eq 0 ] || die 2 "git rev-list '$range' failed with status $rl"
+
+n=0
+for rev in $revs; do n=$((n + 1)); done
+
+if [ "$n" -eq 0 ]; then
+    if [ "$explicit" -eq 1 ]; then
+        die 2 "explicit range '$range' resolved to 0 commits.
+  You asked this guard to check a range and there is nothing in it. That is a
+  caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
+  a clean result, so it is reported as a failure rather than a pass."
+    fi
+    echo "$SELF: NOTHING TO PUSH — $range is empty; NO COMMITS WERE CHECKED"
+    exit 0
+fi
+
+# --- 7. the actual check ----------------------------------------------------
+found=0
+checked=0
+for rev in $revs; do
+    evaluate_commit "$toplevel" "$rev" "$base_files"
+    st=$?
+    if [ "$st" -eq 2 ]; then
+        die 2 "cannot verify commit $rev: ${IC_ERR:-unknown git failure}"
+    fi
+    checked=$(( checked + 1 ))
+    if [ "$st" -ne 0 ]; then
+        echo "STRUCTURALLY WRONG TREE: $rev $(git log -1 --format=%s "$rev" 2>/dev/null)" >&2
+        found=$(( found + 1 ))
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    die 2 "the scan loop examined 0 commits although the range held $n — the harness did not run"
+fi
+
+if [ "$found" -ne 0 ]; then
+    cat >&2 <<'EOF'
+
+DO NOT PUSH. The commits above have structurally wrong trees. `main` has been
+wiped to near-zero files twice this way, each time with every other guard green.
+
+Investigate before doing anything else:
+  git ls-tree -r --name-only <sha> | wc -l      # the number a human spots
+  git ls-tree <sha>:src                         # duplicate / missing entries
+  git fsck --no-dangling <sha>                  # authoritative, but >2min here
+
+If the tree is genuinely correct and merely large, either re-run stating the
+expected count (--expect-files <n>, which is recorded in the verdict), or raise
+the threshold in this script TO THE MEASURED BOUNDARY in the same commit. Do not
+relax it to make a run green.
+EOF
+    echo "$SELF: FAIL — $checked commit(s) checked in $range, $found structurally wrong"
+    exit 1
+fi
+
+if [ "$base_files" -ge 0 ]; then
+    echo "$SELF: PASS — $checked commit(s) checked in $range, reference $base_files file(s) ($base_source), 0 structural faults (repo $toplevel)"
+else
+    echo "$SELF: PASS — $checked commit(s) checked in $range, no reference count available so absolute band only, 0 structural faults (repo $toplevel)"
+fi
+exit 0

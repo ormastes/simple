@@ -1,0 +1,124 @@
+# @tag: system, gpu, cuda, processing-ir, native, source-contract
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read}
+
+val PROBE = "src/app/test/processing_cuda_fill_probe.spl"
+val WRAPPER = "scripts/check/check-processing-cuda-fill-native.shs"
+val CUDA = "src/lib/gc_async_mut/cuda.spl"
+val EXECUTOR = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
+val PLATFORM = "src/app/simpleos_gpu_host/platform_all.spl"
+val PLATFORM_CONTRACT = "src/app/simpleos_gpu_host/platform_contract.spl"
+val DAEMON = "src/app/simpleos_gpu_host/daemon_runner.spl"
+val ENTRY = "src/app/simpleos_gpu_host/main.spl"
+
+describe "direct CUDA ProcessingIR native evidence contract":
+    it "requires the exact shared 64-element fill fixture":
+        val source = file_read(PROBE)
+        expect(file_exists(PROBE)).to_equal(true)
+        expect(source).to_contain("processing_ir_execute_cuda_with_executor(")
+        expect(source).to_contain("val count: i64 = if large or warm: 1048576 else: 64")
+        expect(source).to_contain("expected_checksum: u64 = if large or warm: 17730434498560 else: 1082179840")
+        expect(source).to_contain("checksum == expected_checksum and mismatches == 0")
+        expect(source).to_contain("for actual in result.values:")
+        expect(source).to_contain("checksum = checksum + actual.to_u64()")
+        expect(source.contains("result.values[index]")).to_equal(false)
+
+    it "keeps the policy-threshold workload on the same direct executor":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        expect(source).to_contain("((large or warm or recover) and args.len() != 2)")
+        expect(source).to_contain("if started_nanos <= 0: return 0")
+        expect(source).to_contain("val elapsed_us = _elapsed_us(started)")
+        expect(source).to_contain("elapsed_us > 0")
+        expect(wrapper).to_contain("large) PROBE_ARG=--large; COUNT=1048576; CHECKSUM=17730434498560")
+        expect(wrapper).to_contain("warm) PROBE_ARG=--warm; COUNT=1048576; CHECKSUM=17730434498560")
+        expect(wrapper).to_contain("mode=$MODE completed=true count=$COUNT")
+        expect(wrapper).to_contain("elapsed_us=[1-9][0-9]*")
+        expect(wrapper).to_contain("warm_improved=true")
+
+    it "requires same-session recovery after deterministic CUDA failures":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        expect(source).to_contain("val recover_readback = args.contains(\"--recover=readback\")")
+        expect(source).to_contain("val recover_submit = args.contains(\"--recover=submit\")")
+        expect(source).to_contain("val recover_mismatch = args.contains(\"--recover=mismatch\")")
+        expect(source).to_contain("\"submit\", \"cuda:submit\", \"cuda-submit-failed\"")
+        expect(source).to_contain("\"mismatch\", \"cuda:mismatch\", \"checksum-mismatch\"")
+        expect(source).to_contain("\"readback\", \"cuda:readback\", \"cuda-readback-failed\"")
+        expect(source).to_contain("failed.reason == expected_reason and failed.values.len() == 0")
+        expect(source).to_contain("recovered.device_identity == before.device_identity")
+        expect(source).to_contain("recovered.backend_handle == before.backend_handle")
+        expect(source).to_contain("executor.shutdown()")
+        expect(wrapper).to_contain("recovery) RECOVERY_PHASE=readback; RECOVERY_REASON=cuda-readback-failed")
+        expect(wrapper).to_contain("RECOVERY_PHASE=\nRECOVERY_REASON=")
+        expect(wrapper).to_contain("recovery-submit) RECOVERY_PHASE=submit; RECOVERY_REASON=cuda-submit-failed")
+        expect(wrapper).to_contain("recovery-mismatch) RECOVERY_PHASE=mismatch; RECOVERY_REASON=checksum-mismatch")
+        expect(wrapper).to_contain("PROCESSING_CUDA_RECOVERY status=pass phase=$RECOVERY_PHASE")
+        expect(wrapper).to_contain(
+            "receipt_count=$(printf '%s\\n' \"$output\" | grep -Ec '^PROCESSING_CUDA_RECOVERY ' || true)")
+        expect(wrapper).to_contain(
+            "if [ \"$receipt_count\" -ne 1 ] || [ \"$valid\" -ne 1 ]; then")
+        expect(wrapper).to_contain("failed_reason=$RECOVERY_REASON failed_count=0 failed_handle=0 failed_identity=0")
+        expect(wrapper).to_contain("recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
+        expect(wrapper).to_contain("identity_stable=true cpu_fallback=false")
+
+    it "reuses one CUDA session for the measured warm request":
+        val source = file_read(PROBE)
+        val executor = file_read(EXECUTOR)
+        val platform = file_read(PLATFORM)
+        val platform_contract = file_read(PLATFORM_CONTRACT)
+        val daemon = file_read(DAEMON)
+        val entry = file_read(ENTRY)
+        expect(source).to_contain("var executor = ProcessingCudaExecutor.create()")
+        expect(source).to_contain("val cold = processing_ir_execute_cuda_with_executor(")
+        expect(source).to_contain(
+            "cold_reason=" + "{" + "cold.reason} cold_count=" + "{" + "cold.values.len()}")
+        expect(source).to_contain("val result = processing_ir_execute_cuda_with_executor(")
+        expect(source).to_contain("executor.shutdown()")
+        expect(executor).to_contain("if self.session.module_cache > 0:")
+        expect(executor).to_contain("executor.session.launch_kernel_args(")
+        expect(executor).to_contain("self.session.shutdown()")
+        expect(executor).to_contain("reason: \"cuda-readback-size-mismatch\"")
+        expect(executor).to_contain("return \"cuda-executor-closed\"")
+        expect(executor).to_contain("self.session.activate()")
+        expect(executor).to_contain("if not dispatch_ok:\n        executor.session.shutdown()")
+        expect(executor).to_contain("if not copied:\n        executor.session.shutdown()")
+        expect(source).to_contain("val warm_improved = not warm or elapsed_us < cold_us")
+        expect(source).to_contain("cold_checksum == expected_checksum and cold_mismatches == 0")
+        expect(source).to_contain("result.device_identity == cold_identity")
+        expect(platform).to_contain("cuda_executor: ProcessingCudaExecutor")
+        expect(platform).to_contain("_execute_processing(self.cuda_executor, ir, backend)")
+        expect(platform_contract).to_contain("fn shutdown()")
+        expect(daemon).to_contain("platform.shutdown()")
+        expect(entry).to_contain("SimpleOsGpuHostAllPlatform.create()")
+
+    it "requires device provenance and rejects fallback":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        val executor = file_read(EXECUTOR)
+        expect(source).to_contain("result.backend_handle > 0 and result.device_identity > 0")
+        expect(executor).to_contain("cuda_memcpy_dtoh(")
+        expect(executor).to_contain("rt_u32s_from_raw(host_ptr, ir.element_count)")
+        expect(executor.contains("values.push(raw_read_i32")).to_equal(false)
+        expect(executor.contains("processing_ir_execute_cpu")).to_equal(false)
+        expect(wrapper).to_contain("backend=cuda readback_source=device_readback")
+        expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
+        expect(wrapper).to_contain(
+            "before_count=64 before_checksum=1082179840 before_exact=true")
+        expect(wrapper).to_contain(
+            "recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
+        expect(wrapper).to_contain("cpu_fallback=false")
+        expect(wrapper).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
+        expect(wrapper).to_contain("probe_rc=$?")
+        expect(wrapper).to_contain("exit \"$probe_rc\"")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=probe-failed")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=invalid-receipt")
+
+    it "uses length-tracked native PTX and kernel-name ABIs":
+        val source = file_read(CUDA)
+        expect(source).to_contain("if rt_is_interpreter_runtime()")
+        expect(source).to_contain("fn cuda_ctx_set_current(ctx: i64) -> i64:")
+        expect(source).to_contain("rt_cuda_module_load_data_bytes(rt_array_data_ptr_u8(bytes)")
+        expect(source).to_contain("rt_cuda_launch_kernel_name(")
+        expect(source).to_contain("rt_array_data_ptr_u8(name_bytes)")

@@ -1,0 +1,61 @@
+# @cover src/lib/gc_async_mut/processing/cuda_drawing_translation.spl 80%
+# @tag: unit, processing-ir, drawing, cuda, vulkan, directx
+# @req REQ-006 REQ-007 REQ-011 REQ-012
+
+use std.spec.{describe, it, step, expect}
+use std.common.processing.processing_ir.{processing_ir_fill_u32, processing_ir_fill_rect_u32}
+use std.common.processing.backend_contract.{ProcessingBackendTarget}
+use std.gc_async_mut.processing.cuda_drawing_translation.{translate_cuda_drawing_access}
+
+describe "CUDA drawing-access translation":
+    it "should preserve binding zero and row-major half-open pixel semantics in DirectX HLSL":
+        step("Exercise success branches")
+        val ir = processing_ir_fill_rect_u32(8, 6, 10, 2, 1, 3, 4, 0xAABBCCDDu32)
+        val artifact = translate_cuda_drawing_access(ir, ProcessingBackendTarget.DirectXHlsl)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.reason).to_equal("ok")
+        expect(artifact.format).to_equal("hlsl")
+        expect(artifact.entry_point).to_equal("processing_fill_rect_u32")
+        expect(artifact.source).to_contain("RWStructuredBuffer<uint> output : register(u0)")
+        expect(artifact.source).to_contain("cbuffer DrawParams : register(b0)")
+        expect(artifact.source).to_contain("px < rect_x + rect_width")
+        expect(artifact.source).to_contain("py < rect_y + rect_height")
+        expect(artifact.source).to_contain("output[py * stride + px]")
+        expect(artifact.source).to_contain("inside ? pixel_value : 0u")
+
+    it "should route CUDA drawing access through the shared validated Vulkan binary artifact":
+        val ir = processing_ir_fill_rect_u32(8, 6, 8, 1, 2, 4, 3, 7u32)
+        val artifact = translate_cuda_drawing_access(ir, ProcessingBackendTarget.VulkanSpirv)
+        expect(artifact.target).to_equal(ProcessingBackendTarget.VulkanSpirv)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.reason).to_equal("ok")
+        expect(artifact.format).to_equal("spirv")
+        expect(artifact.entry_point).to_equal("main")
+        expect(artifact.binary.len()).to_be_greater_than(0)
+
+    it "should accept a full-canvas rectangle at the exact half-open boundary":
+        step("Exercise boundary branches")
+        val ir = processing_ir_fill_rect_u32(4, 3, 4, 0, 0, 4, 3, 0xFFFFFFFFu32)
+        val artifact = translate_cuda_drawing_access(ir, ProcessingBackendTarget.DirectXHlsl)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.reason).to_equal("ok")
+        expect(artifact.source).to_contain("px < rect_x + rect_width")
+        expect(artifact.source).to_contain("py < rect_y + rect_height")
+
+    it "should reject non-drawing and unsupported destination translations":
+        step("Exercise rejection branches")
+        val fill = processing_ir_fill_u32(64, 7u32)
+        val non_drawing = translate_cuda_drawing_access(fill, ProcessingBackendTarget.DirectXHlsl)
+        expect(non_drawing.valid).to_equal(false)
+        expect(non_drawing.reason).to_equal("unsupported-cuda-drawing-op")
+        val rect = processing_ir_fill_rect_u32(4, 4, 4, 0, 0, 4, 4, 7u32)
+        val lossy = translate_cuda_drawing_access(rect, ProcessingBackendTarget.MetalMsl)
+        expect(lossy.valid).to_equal(false)
+        expect(lossy.reason).to_equal("unsupported-cuda-drawing-translation-target")
+
+    it "should reject invalid coordinates before producing backend source":
+        val invalid = processing_ir_fill_rect_u32(4, 4, 4, 3, 3, 2, 2, 7u32)
+        val artifact = translate_cuda_drawing_access(invalid, ProcessingBackendTarget.DirectXHlsl)
+        expect(artifact.valid).to_equal(false)
+        expect(artifact.reason).to_equal("drawing-rectangle-out-of-bounds")
+        expect(artifact.source).to_equal("")

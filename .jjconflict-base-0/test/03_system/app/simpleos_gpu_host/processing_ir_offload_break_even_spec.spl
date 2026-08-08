@@ -1,0 +1,236 @@
+# @tag: system, gpu, processing-ir, offload, performance, linux
+#
+# This is an evidence consumer, not a synthetic benchmark. The receipt must
+# be produced by a native CUDA/Vulkan ProcessingIR run. Missing evidence is a
+# failure on Linux; non-Linux hosts are explicitly postponed. Every row must
+# use the same CPU/GPU workload and prove exact device readback.
+
+use std.spec.{describe, it, expect, pending, fail_test}
+use std.io_runtime.{file_exists, file_read, process_run}
+use std.common.text.{parse_i64}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.env.platform.{is_linux}
+
+val OFFLOAD_CHECK = "scripts/check/check-processing-ir-offload-break-even.shs"
+val DEFAULT_RECEIPT = "build/simpleos_gpu_host/offload_break_even/evidence.env"
+
+fn receipt_path() -> text:
+    val configured = env_get("SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT") ?? ""
+    if configured == "": DEFAULT_RECEIPT else: configured
+
+fn value_of(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    var matches: i64 = 0
+    var value = ""
+    for line in receipt.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            matches = matches + 1
+            value = trimmed.slice(prefix.len(), trimmed.len())
+    if matches == 1: value else: ""
+
+fn number_of(receipt: text, key: text) -> i64:
+    val raw = value_of(receipt, key)
+    if raw == "":
+        return -1
+    parse_i64(raw)
+
+fn row_key(index: i64, field: text) -> text:
+    "processing_ir_offload_row_" + index.to_text() + "_" + field
+
+fn row_number(receipt: text, index: i64, field: text) -> i64:
+    number_of(receipt, row_key(index, field))
+
+fn row_text(receipt: text, index: i64, field: text) -> text:
+    value_of(receipt, row_key(index, field))
+
+describe "ProcessingIR GPU offload break-even evidence":
+    if not is_linux():
+        it "requires a Linux CUDA/Vulkan measurement host":
+            pending("Linux ProcessingIR offload measurement is postponed to the Linux host")
+        return
+
+    it "keeps the offload receipt validator honest":
+        expect(file_exists(OFFLOAD_CHECK)).to_equal(true)
+        val (_stdout, _stderr, code) = process_run(
+            "/bin/sh",
+            ["-c", "sh " + OFFLOAD_CHECK + " --self-test"]
+        )
+        expect(code).to_equal(0)
+
+    it "requires measured rows and rejects slower GPU offload below break-even":
+        val path = receipt_path()
+        if not file_exists(path):
+            fail_test("missing native ProcessingIR offload receipt: " + path)
+            return
+        val (_validator_out, _validator_err, validator_code) = process_run(
+            "/bin/sh",
+            [OFFLOAD_CHECK, "--validate", path]
+        )
+        expect(validator_code).to_equal(0)
+        val receipt = file_read(path)
+
+        expect(value_of(receipt, "processing_ir_offload_status")).to_equal("pass")
+        expect(value_of(receipt, "processing_ir_offload_schema")).to_equal("processing-ir-offload-v1")
+        expect(value_of(receipt, "processing_ir_offload_execution")).to_equal("processing_ir")
+        val backend = value_of(receipt, "processing_ir_offload_backend")
+        expect(backend == "cuda" or backend == "vulkan" or backend == "cuda+vulkan").to_equal(true)
+        expect(value_of(receipt, "processing_ir_offload_evidence_kind")).to_equal("live")
+        expect(value_of(receipt, "processing_ir_offload_aggregate")).to_equal("median")
+        expect(value_of(receipt, "processing_ir_offload_timing_unit")).to_equal("us")
+        expect(value_of(receipt, "processing_ir_offload_rss_source")).to_equal("procfs")
+
+        val cpu_workload = value_of(receipt, "processing_ir_offload_cpu_workload_id")
+        val gpu_workload = value_of(receipt, "processing_ir_offload_gpu_workload_id")
+        expect(cpu_workload.len()).to_be_greater_than(0)
+        expect(cpu_workload).to_equal(gpu_workload)
+        val output_only = cpu_workload == "fill_u32_v1"
+        expect(cpu_workload == "alpha_u32_v1" or output_only).to_equal(true)
+        if output_only:
+            expect(value_of(receipt, "processing_ir_offload_workload_kind")).to_equal("output_only")
+            expect(value_of(receipt, "processing_ir_offload_break_even_found")).to_equal("false")
+            expect(value_of(receipt, "processing_ir_offload_executor_timing")).to_equal("allocation_us+launch_sync_us+readback_us+conversion_cleanup_us")
+            expect(value_of(receipt, "processing_ir_offload_device_name").len()).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_device_uuid").len()).to_equal(32)
+            expect(number_of(receipt, "processing_ir_offload_device_identity")).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_source_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_artifact_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_raw_samples_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_provenance_manifest_path").len()).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_provenance_manifest_sha256").len()).to_equal(64)
+            expect(number_of(receipt, "processing_ir_offload_coverage_max_batch")).to_be_greater_than(1048575)
+
+        val warmup = number_of(receipt, "processing_ir_offload_warmup_samples")
+        val samples = number_of(receipt, "processing_ir_offload_measured_samples")
+        val rows = number_of(receipt, "processing_ir_offload_row_count")
+        expect(warmup).to_be_greater_than(2)
+        expect(samples).to_be_greater_than(4)
+        if output_only:
+            expect(rows).to_be_greater_than(2)
+        else:
+            expect(rows).to_be_greater_than(3)
+
+        val cpu_rss = number_of(receipt, "processing_ir_offload_cpu_rss_kb")
+        val gpu_rss = number_of(receipt, "processing_ir_offload_gpu_rss_kb")
+        val peak_rss = number_of(receipt, "processing_ir_offload_peak_rss_kb")
+        val communication = number_of(receipt, "processing_ir_offload_communication_overhead_us")
+        expect(cpu_rss).to_be_greater_than(0)
+        expect(gpu_rss).to_be_greater_than(0)
+        expect(peak_rss).to_be_greater_than(0)
+        expect(communication).to_be_greater_than(-1)
+
+        var previous_batch: i64 = -1
+        var first_fast_batch: i64 = -1
+        var slower_rows: i64 = 0
+        var faster_rows: i64 = 0
+        var first_transfer_bytes: i64 = -1
+        var first_command_count: i64 = -1
+        var varied_transfer_size = false
+        var varied_command_count = false
+        var saw_batched = false
+        var saw_per_command = false
+        var previous_mode = ""
+        var i: i64 = 0
+        while i < rows:
+            val batch = row_number(receipt, i, "batch")
+            val workload = row_text(receipt, i, "workload_id")
+            val cpu = row_number(receipt, i, "cpu_us")
+            val upload = row_number(receipt, i, "upload_us")
+            val device = row_number(receipt, i, "device_us")
+            val readback = row_number(receipt, i, "readback_us")
+            val transfer = row_number(receipt, i, "transfer_us")
+            val total = row_number(receipt, i, "total_us")
+            val upload_bytes = row_number(receipt, i, "upload_bytes")
+            val readback_bytes = row_number(receipt, i, "readback_bytes")
+            val command_count = row_number(receipt, i, "command_count")
+            val decision = row_text(receipt, i, "decision")
+            val submission_mode = row_text(receipt, i, "submission_mode")
+            val readback_source = row_text(receipt, i, "readback_source")
+            val readback_exact = row_text(receipt, i, "readback_exact")
+            val mismatch_count = row_number(receipt, i, "readback_mismatch_count")
+
+            expect(workload).to_equal(cpu_workload)
+            expect(cpu).to_be_greater_than(0)
+            expect(device).to_be_greater_than(0)
+            expect(readback).to_be_greater_than(0)
+            expect(transfer).to_be_greater_than(0)
+            expect(total).to_be_greater_than(0)
+            expect(readback_bytes).to_be_greater_than(0)
+            expect(command_count).to_be_greater_than(0)
+            expect(transfer).to_equal(upload + readback)
+            expect(readback_source).to_equal("device_readback")
+            expect(readback_exact).to_equal("true")
+            expect(mismatch_count).to_equal(0)
+            if output_only:
+                expect(upload).to_equal(0)
+                expect(upload_bytes).to_equal(0)
+                expect(submission_mode).to_equal("output_only")
+                expect(row_number(receipt, i, "executor_allocation_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_launch_sync_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_conversion_cleanup_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_total_us")).to_equal(total)
+            else:
+                expect(upload).to_be_greater_than(0)
+                expect(upload_bytes).to_be_greater_than(0)
+                expect(submission_mode == "batched" or submission_mode == "per_command").to_equal(true)
+            if not output_only and batch == previous_batch:
+                expect(submission_mode == previous_mode).to_equal(false)
+            else:
+                expect(batch).to_be_greater_than(previous_batch)
+
+            if not output_only and first_transfer_bytes < 0:
+                first_transfer_bytes = upload_bytes + readback_bytes
+            elif not output_only and first_transfer_bytes != upload_bytes + readback_bytes:
+                varied_transfer_size = true
+            if not output_only and first_command_count < 0:
+                first_command_count = command_count
+            elif not output_only and first_command_count != command_count:
+                varied_command_count = true
+            if not output_only and submission_mode == "batched":
+                saw_batched = true
+            elif not output_only:
+                saw_per_command = true
+
+            if total >= cpu:
+                slower_rows = slower_rows + 1
+                expect(decision).to_equal("cpu")
+            else:
+                expect(output_only).to_equal(false)
+                faster_rows = faster_rows + 1
+                if first_fast_batch < 0:
+                    first_fast_batch = batch
+                expect(decision).to_equal("gpu")
+            previous_batch = batch
+            previous_mode = submission_mode
+            i = i + 1
+
+        val measured_break_even = number_of(receipt, "processing_ir_offload_break_even_batch")
+        if output_only:
+            expect(slower_rows).to_equal(rows)
+            expect(faster_rows).to_equal(0)
+            expect(measured_break_even).to_equal(0)
+            expect(number_of(receipt, "processing_ir_offload_coverage_max_batch")).to_equal(row_number(receipt, rows - 1, "batch"))
+        else:
+            expect(slower_rows).to_be_greater_than(0)
+            expect(faster_rows).to_be_greater_than(0)
+            expect(measured_break_even).to_equal(first_fast_batch)
+            expect(varied_transfer_size).to_equal(true)
+            expect(varied_command_count).to_equal(true)
+            expect(saw_batched).to_equal(true)
+            expect(saw_per_command).to_equal(true)
+
+        # A policy must never choose GPU for a measured round-trip that is
+        # slower than its CPU baseline; total_us includes every measured phase.
+        if not output_only:
+            var below_threshold: i64 = 0
+            i = 0
+            while i < rows:
+                val batch = row_number(receipt, i, "batch")
+                val total = row_number(receipt, i, "total_us")
+                val cpu = row_number(receipt, i, "cpu_us")
+                if batch < measured_break_even:
+                    below_threshold = below_threshold + 1
+                    expect(total >= cpu).to_equal(true)
+                    expect(row_text(receipt, i, "decision")).to_equal("cpu")
+                i = i + 1
+            expect(below_threshold).to_be_greater_than(0)

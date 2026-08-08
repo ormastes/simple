@@ -1,0 +1,110 @@
+"""Frozen extended feature ports and sidecar mapper contracts (§11.1/§11.2)."""
+
+use std.common.structural.identity.entity_id.{SnapshotId, ArtifactId}
+use std.common.structural.execution.contracts.{StageReceipt}
+use compiler.common.structural_contracts.sidecars.{ShardRef, TagShardRef, OriginShardRef, QueryIndexShardRef, ProfileShardRef, DiagnosticArenaRef}
+
+val COMPILER_PORT_CONTRACT_VERSION: i64 = 1
+
+# Immutable view descriptors over primary IR arenas. Views carry identity and
+# counts only; payload access goes through the owning stage.
+struct AstView:
+    snapshot: SnapshotId
+    arena_slot: u32
+    generation: u32
+    node_count: i64
+    root_count: i64
+    digest: text
+
+struct MirOptView:
+    snapshot: SnapshotId
+    arena_slot: u32
+    generation: u32
+    function_count: i64
+    instruction_count: i64
+    digest: text
+
+struct ObjectFileView:
+    artifact: ArtifactId
+    symbol_count: i64
+    section_count: i64
+    digest: text
+
+struct ParsingOutputPort:
+    ast: AstView
+    tags: TagShardRef
+    origins: OriginShardRef
+    indexes: QueryIndexShardRef
+    diagnostics: DiagnosticArenaRef
+    receipt: StageReceipt
+
+struct OptimizationInputPort:
+    mir: MirOptView
+    tags: TagShardRef
+    origins: OriginShardRef
+    profile: ProfileShardRef?
+    query_indexes: QueryIndexShardRef
+    receipt: StageReceipt
+
+struct MutationReceipt:
+    plan_digest: text
+    applied_count: i64
+    rejected_count: i64
+    conflict_count: i64
+    deterministic_hash: text
+
+struct OptimizationOutputPort:
+    mir: MirOptView
+    tags: TagShardRef
+    origins: OriginShardRef
+    mutation: MutationReceipt
+    remarks: DiagnosticArenaRef
+    receipt: StageReceipt
+
+struct PlacementHintShardRef:
+    shard: ShardRef
+
+struct LinkingInputPort:
+    objects: [ObjectFileView]
+    tags: TagShardRef
+    origins: OriginShardRef
+    placement_hints: PlacementHintShardRef
+    receipt: StageReceipt
+
+# One mapper per MDSOC transform boundary (§11.2). Deterministic: same input
+# shards + same boundary => identical output digests.
+enum TransformBoundary:
+    LexingToParsing
+    ParsingToDesugaring
+    TypingToHir
+    HirToMir
+    MirToOptimizer
+    MirToBackend
+    BackendToLinker
+
+enum SidecarErrorCode:
+    StaleShard
+    GenerationMismatch
+    ColumnLengthMismatch
+    UnknownBoundary
+    MappingIncomplete
+
+struct SidecarError:
+    code: SidecarErrorCode
+    boundary: TransformBoundary
+    message: text
+
+struct SidecarBundle:
+    tags: TagShardRef
+    origins: OriginShardRef
+    indexes: QueryIndexShardRef
+    profile: ProfileShardRef?
+
+trait SidecarMapper:
+    fn boundary() -> TransformBoundary
+    fn map(input: SidecarBundle, from_snapshot: SnapshotId, to_snapshot: SnapshotId) -> Result<SidecarBundle, SidecarError>
+
+export COMPILER_PORT_CONTRACT_VERSION, AstView, MirOptView, ObjectFileView
+export ParsingOutputPort, OptimizationInputPort, MutationReceipt, OptimizationOutputPort
+export PlacementHintShardRef, LinkingInputPort
+export TransformBoundary, SidecarErrorCode, SidecarError, SidecarBundle, SidecarMapper

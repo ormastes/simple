@@ -1,0 +1,72 @@
+# spec_vacuity_scan_spec
+#
+# Unit-level proof for the WP-23 spec-vacuity census scanner
+# (src/compiler/90.tools/verify/spec_vacuity_scan.spl): bare-`assert`
+# detection, zero-assertion `it`-block detection, and the comma-shape
+# parser-crash-class tripwire — driven over small synthetic source strings,
+# no disk I/O, no dependency on the real repo tree's current state.
+
+use std.spec
+use compiler.tools.verify.spec_vacuity_scan.{scan_file_content}
+
+describe "spec_vacuity_scan — bare assert detection":
+
+    it "flags a bare `assert <cond>` line":
+        val src = "describe \"x\":\n    it \"y\":\n        assert 1 == 2\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.bare_asserts.len()).to_equal(1)
+
+    it "does not flag assert(...) paren-call form":
+        val src = "it \"y\":\n    assert(1 == 1)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.bare_asserts.len()).to_equal(0)
+
+    it "does not flag assert_true(...)":
+        val src = "it \"y\":\n    assert_true(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.bare_asserts.len()).to_equal(0)
+
+    it "does not flag assert!(...) macro form":
+        val src = "it \"y\":\n    assert!(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.bare_asserts.len()).to_equal(0)
+
+describe "spec_vacuity_scan — zero-assertion it blocks":
+
+    it "flags an it block with no assertion call at all":
+        val src = "describe \"x\":\n    it \"does nothing\":\n        val a = 1\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.it_blocks_scanned).to_equal(1)
+        expect(r.empty_it_blocks.len()).to_equal(1)
+
+    it "does not flag an it block using expect(...)":
+        val src = "describe \"x\":\n    it \"checks\":\n        expect(1).to_equal(1)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.empty_it_blocks.len()).to_equal(0)
+
+    it "does not flag an it block using an expect_* helper (expect_not regression)":
+        val src = "describe \"x\":\n    it \"checks\":\n        expect_not(false)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.empty_it_blocks.len()).to_equal(0)
+
+    it "does not flag an it block using assert_true":
+        val src = "describe \"x\":\n    it \"checks\":\n        assert_true(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.empty_it_blocks.len()).to_equal(0)
+
+describe "spec_vacuity_scan — comma-shape tripwire (3695df74c59 crash class)":
+
+    it "flags describe \"...\", fn(): as the shape the parser used to reject":
+        val src = "describe \"x\", fn():\n    it \"y\":\n        assert_true(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.comma_shape_hits.len()).to_equal(1)
+
+    it "flags it \"...\", fn(): the same way":
+        val src = "describe \"x\":\n    it \"y\", fn():\n        assert_true(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.comma_shape_hits.len()).to_equal(1)
+
+    it "does not flag a plain describe \"...\": with no comma":
+        val src = "describe \"x\":\n    it \"y\":\n        assert_true(true)\n"
+        val r = scan_file_content("f.spl", src)
+        expect(r.comma_shape_hits.len()).to_equal(0)

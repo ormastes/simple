@@ -1,0 +1,50 @@
+# ECS Query helpers — iteration over one component column
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.change_detection.{ChangeTracker}
+
+fn for_each<T>(store: ComponentStore<T>, alloc: EntityAllocator, body: fn(Entity, T)):
+    """Visit every live (entity, component) pair in store."""
+    val n = store.len()
+    var i: i32 = 0
+    while i < n:
+        val id = store.entity_at(i)
+        val gen = alloc.generations[id]
+        body(Entity(id: id, generation: gen), store.dense[i])
+        i = i + 1
+
+fn for_each_changed<T>(
+    store: ComponentStore<T>,
+    alloc: EntityAllocator,
+    tracker: ChangeTracker,
+    body: fn(Entity, T)
+):
+    """Visit only entities whose component was modified since tracker.last_seen_tick."""
+    val n = store.len()
+    var i: i32 = 0
+    while i < n:
+        val slot_tick = store.tick_at(i)
+        if tracker.is_changed_since(slot_tick):
+            val id = store.entity_at(i)
+            val gen = alloc.generations[id]
+            body(Entity(id: id, generation: gen), store.dense[i])
+        i = i + 1
+
+fn for_each_pair<A, B>(
+    primary: ComponentStore<A>,
+    secondary: ComponentStore<B>,
+    alloc: EntityAllocator,
+    body: fn(Entity, A, B)
+):
+    """Visit entities that have both A and B. Iterates the primary store."""
+    val n = primary.len()
+    var i: i32 = 0
+    while i < n:
+        val id = primary.entity_at(i)
+        val gen = alloc.generations[id]
+        val e = Entity(id: id, generation: gen)
+        val b_slot = secondary.get_slot(e)
+        if b_slot >= 0:
+            body(e, primary.dense[i], secondary.dense[b_slot])
+        i = i + 1

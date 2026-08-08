@@ -1,0 +1,46 @@
+# Regression: VectorDatabase.delete must persist the soft-delete flag.
+#
+# `SdnDatabase.get_table` yields `SdnTable?`. A `me` (mutating) method invoked
+# through an OPTION-typed binding mutates a temporary unwrap that is then
+# discarded, so `entries_table.mark_deleted(id)` silently did nothing and the
+# row stayed `valid=1` forever. The fix destructures with `if val Some(x) =`
+# and writes the table back via `set_table`.
+#
+# See doc/08_tracking/bug/
+#   me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+
+use std.database.vector.store.{VectorDatabase}
+use std.database.vector.types.{default_vector_config}
+
+fn valid_flag_after(path: text, do_delete: bool) -> text:
+    var cfg = default_vector_config(3)
+    val created = VectorDatabase.create(path, cfg)
+    match created:
+        Err(e): return "create-failed"
+        Ok(db):
+            var meta: Dict<text, text> = {}
+            meta["k"] = "v"
+            val ins = db.insert("a", [1.0, 2.0, 3.0], meta)
+            match ins:
+                Err(e2): return "insert-failed"
+                Ok(_): pass_dn
+            if do_delete:
+                val del = db.delete("a")
+                match del:
+                    Err(e3): return "delete-failed"
+                    Ok(_): pass_dn
+            if val Some(t) = db.meta_db.get_table("entries"):
+                if val Some(row) = t.get_row("a"):
+                    if val Some(v) = row.get("valid"):
+                        return v
+                    return "no-valid-column"
+                return "row-missing"
+            return "table-missing"
+
+describe "VectorDatabase soft delete write-back":
+    it "keeps valid=1 for a live row":
+        expect(valid_flag_after("/tmp/optwb_vec_live", false)).to_equal("1")
+
+    it "persists valid=false into the stored table after delete":
+        # Pre-fix this returned "1": mark_deleted ran on a discarded unwrap.
+        expect(valid_flag_after("/tmp/optwb_vec_del", true)).to_equal("false")

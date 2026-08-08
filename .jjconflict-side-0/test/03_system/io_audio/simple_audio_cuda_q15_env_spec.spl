@@ -1,0 +1,29 @@
+# @req REQ-004 REQ-005 REQ-007
+"""Native CUDA audio execution evidence; unavailable hosts report an explicit gate."""
+
+use std.spec.*
+use std.common.test_env_gate.{test_env_cuda_available, test_env_gate_skip}
+use std.gc_async_mut.engine.audio.simple_audio_cuda_q15.*
+
+describe "Simple audio CUDA Q15 environment":
+    if not test_env_cuda_available():
+        it "env_skip: CUDA audio execution not requested or unavailable":
+            expect(test_env_gate_skip("SIMPLE_CUDA_TEST")).to_contain("Skipped")
+        return
+
+    it "runs convolution on CUDA and proves device readback parity":
+        var executor = SimpleAudioCudaQ15Executor.create()
+        val result = simple_audio_q15_execute_cuda(executor, [32768u32, 16384u32, 4294959104u32], [16384u32, 8192u32])
+        expect(result.completed).to_equal(true)
+        expect(result.reason).to_equal("device-readback")
+        expect(result.backend_handle).to_be_greater_than(0)
+        expect(result.device_identity).to_be_greater_than(0)
+        expect(result.readback_checksum).to_be_greater_than(0)
+        expect(result.normalized_error_millionths).to_be_less_than(11)
+        expect(result.readback_count).to_equal(4)
+        expect(result.readback_sample(0)).to_equal(16384)
+        expect(result.readback_sample(1)).to_equal(16384)
+        expect(result.readback_sample(2)).to_equal(0)
+        expect(result.readback_sample(3)).to_equal(-2048)
+        result.release_readback()
+        executor.shutdown()

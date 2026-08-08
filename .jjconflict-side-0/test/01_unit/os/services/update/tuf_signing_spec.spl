@@ -1,0 +1,287 @@
+# @cover src/os/services/update/tuf_signing.spl 80%
+"""
+# TUF REAL Signature Verification Specification
+
+**Category:** Update security
+**Status:** Real cryptography (Ed25519 + SHA-256), not a model
+
+## Overview
+
+`tuf_metadata.spl` models the TUF trust structure but assumes signatures were
+verified elsewhere. `tuf_signing.spl` removes that assumption: signatures are
+checked with real Ed25519 (`os.crypto.ed25519`, pure Simple, KAT-verified
+byte-for-byte against RFC 8032 §7.1) over an explicitly defined canonical byte
+encoding, and only key-ids whose signatures ACTUALLY VERIFIED reach the
+structural verifier.
+
+## Absolute oracles
+
+- The canonical encoding is byte-exact and self-delimiting (pinned hex).
+- SHA-256 of a fixed artifact equals its published digest (pinned hex).
+- A correctly signed, in-date, non-rollback update is ACCEPTED.
+- **Deliberate-red calibration 1** — flipping ONE byte of the signed payload
+  (bumping root's version) must make a real signature stop verifying.
+- **Deliberate-red calibration 2** — presenting a signature made by a DIFFERENT
+  key, over the very same payload, must be rejected as a forgery.
+- Untrusted keys are rejected BEFORE any cryptography runs.
+- Threshold counts DISTINCT verified signers: two copies of one key's signature
+  do not satisfy threshold 2.
+- Every pre-existing defense (rollback, freeze, snapshot consistency) still
+  fires on top of real signatures.
+
+## Cost note
+
+Ed25519 here runs on the interpreter (the JIT bails with
+`Unknown type: u128`), so each sign or verify costs several seconds. Keys and
+signatures are therefore built ONCE at module level and reused.
+"""
+
+use std.spec
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.services.update.tuf_metadata.{
+    RoleMetadata,
+    CurrentVersions,
+    TargetEntry,
+    TUF_ACCEPTED,
+    TUF_UNTRUSTED_KEY,
+    TUF_BAD_THRESHOLD,
+    TUF_EXPIRED,
+    TUF_ROLLBACK,
+    TUF_SNAPSHOT_MISMATCH
+}
+use os.services.update.tuf_signing.{
+    RoleSignature,
+    SignedRole,
+    TrustedKey,
+    TUF_BAD_SIGNATURE,
+    TUF_MALFORMED_SIG,
+    TUF_DIGEST_MISMATCH,
+    u64le,
+    text_bytes,
+    canonical_role_bytes,
+    canonical_target_bytes,
+    bytes_to_hex_lower,
+    compute_target_digest,
+    verify_target_digest,
+    verify_target,
+    verify_update_signed
+}
+
+# ----------------------------------------------------------------------------
+# Key material — deterministic seeds so the spec is reproducible
+# ----------------------------------------------------------------------------
+
+fn seed_of(n: u64) -> [u8]:
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        s = s.push(((i * 7 + n * 31 + 3) % 251).to_u8())
+        i = i + 1
+    return s
+
+# This file performs NO Ed25519 operations. Every case below is either pure byte
+# arithmetic (canonicalization), pure SHA-256 (target digests), or a rejection
+# that `check_role_signatures` reaches BEFORE any cryptography runs. Keeping it
+# crypto-free is what lets all 15 cases fit the runner's ~60 s wall; the cases
+# that genuinely need signatures live in the two sibling files named at the
+# bottom of this file.
+#
+# Because no verification is ever reached, key material here is shape-only:
+# a well-formed 32-byte public key and a well-formed 64-byte signature that are
+# never actually verified against anything.
+
+fn filler(n: u64, tag: u64) -> [u8]:
+    """A well-formed byte array of length `n` — correct SHAPE, no real crypto."""
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        s = s.push(((i * 7 + tag * 31 + 3) % 251).to_u8())
+        i = i + 1
+    return s
+
+val PUB_A: [u8] = filler(32, 1)
+val PUB_B: [u8] = filler(32, 2)
+val SHAPED_SIG: [u8] = filler(64, 9)
+
+# "kA" is root-trusted; "kB" exists in the keyring but is NOT delegated by root.
+val KEYRING: List<TrustedKey> = [
+    TrustedKey(key_id: "kA", public_key: PUB_A),
+    TrustedKey(key_id: "kB", public_key: PUB_B)
+]
+
+# ----------------------------------------------------------------------------
+# Metadata fixtures
+# ----------------------------------------------------------------------------
+
+fn mk_role(role: text, ver: u64, thr: u64, signers: List<text>,
+           deleg: List<text>, rtv: u64) -> RoleMetadata:
+    return RoleMetadata(
+        role: role,
+        version: ver,
+        expires_at: 2000,
+        threshold: thr,
+        signer_key_ids: signers,
+        signatures_present: [],
+        delegated_key_ids: deleg,
+        recorded_targets_version: rtv)
+
+val M_ROOT: RoleMetadata = mk_role("root", 5, 1, ["kA"], ["kA"], 0)
+val M_TS:   RoleMetadata = mk_role("timestamp", 6, 1, ["kA"], [], 0)
+val M_SNAP: RoleMetadata = mk_role("snapshot", 4, 1, ["kA"], [], 11)
+val M_TGT:  RoleMetadata = mk_role("targets", 11, 1, ["kA"], [], 0)
+
+val CURRENT: CurrentVersions = CurrentVersions(root: 5, timestamp: 6, snapshot: 4, targets: 11)
+
+# ----------------------------------------------------------------------------
+# Shape-only signed roles — never verified, because every case that uses them
+# rejects on the ROOT role before `verify_update_signed` reaches cryptography.
+# ----------------------------------------------------------------------------
+
+fn shaped(meta: RoleMetadata, key_id: text, sig: [u8]) -> SignedRole:
+    return SignedRole(meta: meta, signatures: [RoleSignature(key_id: key_id, sig: sig)])
+
+val S_TS:   SignedRole = shaped(M_TS,   "kA", SHAPED_SIG)
+val S_SNAP: SignedRole = shaped(M_SNAP, "kA", SHAPED_SIG)
+val S_TGT:  SignedRole = shaped(M_TGT,  "kA", SHAPED_SIG)
+
+# ============================================================================
+
+describe "TUF canonical signing payload":
+    """The bytes actually signed are byte-exact and self-delimiting."""
+
+    it "u64le encodes little-endian in a fixed 8 bytes":
+        """Fixed width means a length prefix can never be ambiguous."""
+        val probe = u64le(1)
+        assert_eq(bytes_to_hex_lower(probe), "0100000000000000")
+        assert_eq(bytes_to_hex_lower(u64le(258)), "0201000000000000")
+
+    it "text_bytes produces ASCII bytes, not a fail-open constant":
+        """`to_char_code` silently yields 0x1b; `ord` is the correct idiom."""
+        val probe = text_bytes("root")
+        assert_eq(bytes_to_hex_lower(probe), "726f6f74")
+        assert_eq(text_bytes("").len(), 0)
+
+    it "canonical_role_bytes matches its documented grammar byte-for-byte":
+        """Pinned: TUF1 | lp(role) | version | expires | threshold | rtv | lists."""
+        val probe = canonical_role_bytes(mk_role("root", 3, 1, ["k1"], ["k1"], 0))
+        val expected = "54554631" +
+            "0400000000000000" + "726f6f74" +
+            "0300000000000000" +
+            "d007000000000000" +
+            "0100000000000000" +
+            "0000000000000000" +
+            "0100000000000000" + "0200000000000000" + "6b31" +
+            "0100000000000000" + "0200000000000000" + "6b31"
+        assert_eq(bytes_to_hex_lower(probe), expected)
+
+    it "the signed payload excludes signatures_present":
+        """A signature cannot cover itself — adding one must not change bytes."""
+        val base = mk_role("targets", 11, 1, ["kA"], [], 0)
+        val withsig = RoleMetadata(
+            role: "targets", version: 11, expires_at: 2000, threshold: 1,
+            signer_key_ids: ["kA"], signatures_present: ["kA"],
+            delegated_key_ids: [], recorded_targets_version: 0)
+        assert_eq(bytes_to_hex_lower(canonical_role_bytes(base)),
+                  bytes_to_hex_lower(canonical_role_bytes(withsig)))
+
+    it "length-prefixing prevents key-id concatenation ambiguity":
+        """['ab','c'] and ['a','bc'] must not collide onto the same bytes."""
+        val one = canonical_role_bytes(mk_role("r", 1, 1, ["ab", "c"], [], 0))
+        val two = canonical_role_bytes(mk_role("r", 1, 1, ["a", "bc"], [], 0))
+        assert_true(bytes_to_hex_lower(one) != bytes_to_hex_lower(two))
+
+    it "role name is domain-separated from the other roles":
+        """Same numbers, different role, must yield a different payload."""
+        val a = canonical_role_bytes(mk_role("snapshot", 4, 1, ["kA"], [], 11))
+        val b = canonical_role_bytes(mk_role("targets", 4, 1, ["kA"], [], 11))
+        assert_true(bytes_to_hex_lower(a) != bytes_to_hex_lower(b))
+
+    it "target entries use a distinct TUFT tag":
+        """Role signatures can never be replayed as target signatures."""
+        val probe = canonical_target_bytes(
+            TargetEntry(name: "img", length: 4, digest: "ab", version: 7))
+        assert_eq(bytes_to_hex_lower(probe).substring(0, 8), "54554654")
+
+describe "TUF real target digests (SHA-256)":
+    """Artifact bytes are really hashed and compared to the signed digest."""
+
+    it "compute_target_digest matches the published SHA-256 vector":
+        """SHA-256 of 01 02 03 04 — an absolute external oracle."""
+        val probe = compute_target_digest([1u8, 2u8, 3u8, 4u8])
+        assert_eq(probe, "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a")
+
+    it "a matching artifact passes digest verification":
+        """Correct length and correct digest is accepted."""
+        val art = [1u8, 2u8, 3u8, 4u8]
+        val entry = TargetEntry(name: "img", length: 4, digest: compute_target_digest(art), version: 7)
+        assert_true(verify_target_digest(art, entry))
+        assert_true(verify_target(art, entry).accepted)
+
+    it "RED: one flipped artifact byte is caught by the digest":
+        """The core value of real hashing — tampered payload is detected."""
+        val entry = TargetEntry(
+            name: "img", length: 4,
+            digest: compute_target_digest([1u8, 2u8, 3u8, 4u8]), version: 7)
+        assert_false(verify_target_digest([1u8, 2u8, 3u8, 5u8], entry))
+        val out = verify_target([1u8, 2u8, 3u8, 5u8], entry)
+        assert_false(out.accepted)
+        assert_eq(out.reason_code, TUF_DIGEST_MISMATCH)
+
+    it "a length that disagrees with the bytes is rejected":
+        """Metadata that does not describe this artifact fails regardless of hash."""
+        val art = [1u8, 2u8, 3u8, 4u8]
+        val entry = TargetEntry(name: "img", length: 5, digest: compute_target_digest(art), version: 7)
+        assert_false(verify_target_digest(art, entry))
+
+    it "an empty or truncated recorded digest can never match":
+        """Fail closed — a missing digest is not a wildcard."""
+        val art = [1u8, 2u8, 3u8, 4u8]
+        assert_false(verify_target_digest(art, TargetEntry(name: "i", length: 4, digest: "", version: 1)))
+        assert_false(verify_target_digest(art, TargetEntry(name: "i", length: 4, digest: "9f64a747", version: 1)))
+
+describe "TUF cheap rejections happen before any cryptography":
+    """Untrusted or malformed input is denied without running a verification."""
+
+    # Each case below puts the offending signature on the ROOT role, which
+    # `verify_update_signed` checks FIRST. That is the point being asserted:
+    # the rejection happens before Ed25519 is ever invoked, so these cases cost
+    # no cryptography and the shape-only key material is never verified.
+
+    it "a signer key outside root's trusted set is rejected":
+        """kB has keyring material but root never delegated it — denied first."""
+        val bad_root = shaped(M_ROOT, "kB", SHAPED_SIG)
+        val out = verify_update_signed(bad_root, S_TS, S_SNAP, S_TGT, KEYRING, CURRENT, 100)
+        assert_false(out.accepted)
+        assert_eq(out.reason_code, TUF_UNTRUSTED_KEY)
+
+    it "a key-id with no keyring entry is untrusted, not trusted-by-default":
+        """No public key means it cannot be verified — fail closed, never open."""
+        val ring: List<TrustedKey> = [TrustedKey(key_id: "kB", public_key: PUB_B)]
+        val root_ok = shaped(M_ROOT, "kA", SHAPED_SIG)
+        val out = verify_update_signed(root_ok, S_TS, S_SNAP, S_TGT, ring, CURRENT, 100)
+        assert_false(out.accepted)
+        assert_eq(out.reason_code, TUF_UNTRUSTED_KEY)
+
+    it "a wrong-length signature is rejected as malformed":
+        """Shape is checked before Ed25519 is invoked."""
+        val bad_root = shaped(M_ROOT, "kA", [1u8, 2u8, 3u8])
+        val out = verify_update_signed(bad_root, S_TS, S_SNAP, S_TGT, KEYRING, CURRENT, 100)
+        assert_false(out.accepted)
+        assert_eq(out.reason_code, TUF_MALFORMED_SIG)
+
+# ----------------------------------------------------------------------------
+# Deliberately NOT in this file — runtime budget, not lack of coverage.
+#
+# A spec gets roughly 60 s of wall clock (the shared test daemon's
+# `session_startup_timeout_ms`, which `--no-session-daemon --timeout=N` does not
+# lift), and every Ed25519 operation costs ~2.8 s because the JIT bails with
+# `HIR lowering error: Unknown type: u128` and the primitive runs interpreted.
+# With all cases in one file the runner reported "no examples executed".
+#
+# The remaining cases therefore live in sibling files:
+#   tuf_forgery_spec.spl         — RED calibration 1 (tampered payload byte) and
+#                                  RED calibration 2 (signature from another key)
+#   tuf_signed_defenses_spec.spl — distinct-signer thresholding, and the
+#                                  rollback / freeze defenses re-proven on top of
+#                                  real signatures
+# ----------------------------------------------------------------------------

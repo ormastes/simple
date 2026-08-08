@@ -1,0 +1,212 @@
+# GPU Lane Common — routing/probing helpers for remote(cuda(...)) and
+# remote(vulkan(...)) composite specs.
+#
+# Task A3 of doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md.
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md §7-8.
+#
+# This module owns:
+#   - the `GpuLaneExecutor` trait (prepare/run_program/teardown) that the
+#     real CUDA (B2-B4) and Vulkan (C2-C3) lane executors will implement —
+#     those tasks depend on this one and land later;
+#   - host-aware probing: driver/ICD presence -> `skip:`-style
+#     TestFileResult (skipped: 1) identical in shape to the existing ghdl/
+#     t32/ch32v307 lanes in test_executor_composite_jit_generic.spl;
+#   - one-time `rt_*` extern symbol probing at session start, so an
+#     unresolved symbol reports `blocked: <symbol>` instead of silently
+#     falling through (the B0-style gap this task exists to prevent);
+#   - the single `GPU_LANE_TIMEOUT_MS` watchdog knob (design §7).
+#
+# The routing logic (`route_gpu_lane`) is a pure function over already-probed
+# inputs so it can be unit-tested without touching the real driver/interpreter
+# — see gpu_lane_common_spec.spl. The `*_probe_*` functions do the real I/O
+# and are intentionally thin wrappers around it.
+
+use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{shell, file_write, env_get}
+
+# =========================================================================
+# GPU_LANE_TIMEOUT_MS watchdog (design §7) — the one place this is read.
+# =========================================================================
+
+val GPU_LANE_TIMEOUT_MS_DEFAULT: i64 = 30000
+
+fn gpu_lane_timeout_ms() -> i64:
+    """Read GPU_LANE_TIMEOUT_MS, falling back to the design-doc default."""
+    val raw = env_get("GPU_LANE_TIMEOUT_MS")
+    if raw == "":
+        return GPU_LANE_TIMEOUT_MS_DEFAULT
+    val ms = raw.trim().to_i64() ?? 0
+    if ms > 0: ms else: GPU_LANE_TIMEOUT_MS_DEFAULT
+
+# =========================================================================
+# *_LIVE_REQUIRED contract (design §7)
+# =========================================================================
+
+fn gpu_live_required_env(backend: text) -> text:
+    """Name of the *_LIVE_REQUIRED env var that gates `skip` for `backend`."""
+    if backend == "cuda" or backend == "cudagdb":
+        return "CUDA_LIVE_REQUIRED"
+    if backend == "vulkan":
+        return "VULKAN_LIVE_REQUIRED"
+    ""
+
+fn gpu_live_required(backend: text) -> bool:
+    """True when the operator has pinned this backend to require a live device
+    (design §7: never converted to SKIP once required or detected)."""
+    val name = gpu_live_required_env(backend)
+    if name == "":
+        return false
+    env_get(name) == "1"
+
+# =========================================================================
+# Required rt_* symbols per backend (probed once at session start).
+# =========================================================================
+
+fn gpu_required_symbols(backend: text) -> [text]:
+    """Representative rt_* externs each backend's session setup calls first.
+    Kept intentionally small: this is a session-start capability probe, not
+    an exhaustive registry mirror — B2-B4/C2-C3 extend it as they land real
+    call sites."""
+    if backend == "cuda" or backend == "cudagdb":
+        return ["rt_cuda_init", "rt_cuda_module_load_data_bytes"]
+    if backend == "vulkan":
+        return ["rt_vulkan_alloc_buffer", "rt_vulkan_begin_compute"]
+    []
+
+fn gpu_driver_probe_cmd(backend: text) -> text:
+    """Shell command used to detect a live driver/ICD for `backend`."""
+    if backend == "cuda" or backend == "cudagdb":
+        return "command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1"
+    if backend == "vulkan":
+        return "command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1"
+    ""
+
+# =========================================================================
+# GpuLaneExecutor trait (design §8) — implemented by the B2-B4/C2-C3 lanes.
+# =========================================================================
+
+trait GpuLaneExecutor:
+    fn prepare(session_id: text) -> Result<bool, text>
+    fn run_program(blob: [u8]) -> Result<[u8], text>
+    fn teardown() -> bool
+
+# =========================================================================
+# Pure routing decision (unit-testable — no shell/interpreter calls here).
+# =========================================================================
+
+fn route_gpu_lane(file_path: text, setup_ms: i64, remote_backend: text,
+                       driver_present: bool, missing_symbol: text) -> TestFileResult:
+    """Decide skip / blocked / not-yet-implemented for a cuda|vulkan lane,
+    given already-probed driver presence and symbol resolution."""
+    if missing_symbol != "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "blocked: {missing_symbol}", timed_out: false, cached: false)
+
+    if not driver_present:
+        if gpu_live_required(remote_backend):
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: 0, setup_ms: setup_ms,
+                error: "{remote_backend} lane unavailable: driver/ICD not detected and {gpu_live_required_env(remote_backend)}=1", timed_out: false, cached: false)
+        return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0,
+            duration_ms: 0, setup_ms: setup_ms,
+            error: "skip: {remote_backend} lane unavailable: driver/ICD not detected", timed_out: false, cached: false)
+
+    # Driver present and every probed symbol resolved: the real B2-B4/C2-C3
+    # executors are not landed yet, so route to a clearly-labeled failure
+    # rather than a silent no-op.
+    TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+        duration_ms: 0, setup_ms: setup_ms,
+        error: "{remote_backend} lane executor not yet implemented (see B2/B3/C2/C3)", timed_out: false, cached: false)
+
+fn gpu_lane_id_for(base_runtime: text, remote_backend: text) -> text:
+    """Map (base_runtime, remote_backend) to the concrete lane-executor id
+    ('cuda_jit'/'cuda_vm'/'vulkan_jit'/'vulkan_vm') that
+    doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md documents as
+    landed (B2/B3/C2/C3). '' means no concrete executor is wired for this
+    combination yet (e.g. cuda_vm_resident, cudagdb, or an unrecognized
+    base_runtime) — callers keep the generic route_gpu_lane
+    not-yet-implemented fallback for those.
+
+    This module cannot import the gc_async_mut-tier executor classes
+    themselves without creating a circular import (each of them imports
+    THIS module for the `GpuLaneExecutor` trait) — so this is a pure text
+    mapping only; the actual construct-and-drive step lives in
+    test_executor_composite.spl, which has no such constraint."""
+    if remote_backend == "cuda":
+        if base_runtime == "jit":
+            return "cuda_jit"
+        if base_runtime == "interpreter":
+            return "cuda_vm"
+        return ""
+    if remote_backend == "vulkan":
+        if base_runtime == "jit":
+            return "vulkan_jit"
+        if base_runtime == "interpreter":
+            return "vulkan_vm"
+        return ""
+    ""
+
+# =========================================================================
+# Real probes (I/O) — thin wrappers that feed route_gpu_lane.
+# =========================================================================
+
+fn probe_gpu_driver_present(backend: text) -> bool:
+    """Real driver/ICD presence check via shell."""
+    val cmd = gpu_driver_probe_cmd(backend)
+    if cmd == "":
+        return false
+    val result = shell(cmd)
+    result.exit_code == 0
+
+fn probe_gpu_symbol(symbol: text) -> bool:
+    """True when `symbol` is a registered extern in the deployed interpreter.
+    Declares and calls a zero-arg extern of the given name in a throwaway
+    probe file; the interpreter surfaces an unresolved symbol as
+    'unknown extern function: <name>' (see
+    src/compiler_rust/compiler/src/interpreter_extern/capability_gap.rs) —
+    any other outcome (including a runtime error from mismatched real arity)
+    means the symbol IS registered."""
+    val probe_path = "build/tmp/gpu_lane_symbol_probe_{symbol}.spl"
+    val source = "extern fn {symbol}() -> i64\n\nfn main() -> i64:\n    {symbol}()\n"
+    if not file_write(probe_path, source):
+        # Cannot even stage the probe — do not silently claim "resolved".
+        return false
+    val binary = find_simple_binary()
+    val timeout_ms = gpu_lane_timeout_ms()
+    val (stdout, stderr, _exit_code) = process_run_bounded(binary, [probe_path], timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val combined = stdout + stderr
+    not combined.contains("unknown extern function: {symbol}")
+
+fn probe_gpu_symbols(backend: text) -> text:
+    """Probe every required symbol for `backend`; return the name of the
+    first unresolved one, or "" when all resolve."""
+    for symbol in gpu_required_symbols(backend):
+        if not probe_gpu_symbol(symbol):
+            return symbol
+    ""
+
+fn run_test_file_gpu_lane(file_path: text, options: TestOptions, remote_backend: text, target: text) -> TestFileResult:
+    """Top-level routing hook for `remote_backend in {cuda, vulkan}`.
+    Runs the host-aware probes once (symbols first, so an interpreter gap is
+    never masked by a driver-absent skip) and dispatches through
+    route_gpu_lane."""
+    val setup_start = time_now_unix_micros()
+    val missing_symbol = probe_gpu_symbols(remote_backend)
+    val driver_present = if missing_symbol != "": false else: probe_gpu_driver_present(remote_backend)
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+    route_gpu_lane(file_path: file_path, setup_ms: setup_ms, remote_backend: remote_backend,
+        driver_present: driver_present, missing_symbol: missing_symbol)
+
+export GPU_LANE_TIMEOUT_MS_DEFAULT
+export gpu_lane_timeout_ms
+export gpu_live_required_env, gpu_live_required
+export gpu_required_symbols, gpu_driver_probe_cmd
+export GpuLaneExecutor
+export route_gpu_lane
+export gpu_lane_id_for
+export run_test_file_gpu_lane

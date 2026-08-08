@@ -1,0 +1,545 @@
+# codex-impl
+# Reusable web route GPU offload profiles.
+
+use std.web_db_offload.web_route.{
+    WebGpuRouteKind,
+    WebGpuRouteAccumulatedExecution,
+    WebGpuRouteOffloadExecution,
+    web_gpu_route_work_kind,
+    web_gpu_route_estimated_payload_bytes,
+    web_gpu_route_offload_execute_accumulating,
+    web_gpu_route_offload_execute_scheduled,
+    web_gpu_route_offload_execute_scheduled_with_generation,
+    web_gpu_route_offload_execute,
+    web_gpu_route_profile_allows_gpu,
+    web_gpu_route_offload_used_gpu
+}
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbRuntimeSnapshot}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_complete_submission,
+    gpu_wdb_queue_initial
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_library_snapshot,
+    gpu_wdb_library_with_targets
+}
+use std.web_db_offload.scheduler.{
+    GpuWdbBatchAccumulator,
+    GpuWdbBatchFlushExecution,
+    GpuWdbScheduleClass,
+    gpu_wdb_batch_accumulator_flush_registered
+}
+use std.web_db_offload.device_backend.{
+    GpuWdbDeviceBackend,
+    GpuWdbDeviceRunResult,
+    gpu_wdb_run_device_batch
+}
+
+struct WebGpuOffloadProfile:
+    name: text
+    registry: GpuWdbLibraryRegistry
+    queue_state: GpuWdbQueueState
+    budget: GpuWdbBudget
+    gpu_available: bool
+    cpu_fallback_available: bool
+
+struct WebGpuProfileAdvancedExecution:
+    profile: WebGpuOffloadProfile
+    execution: WebGpuRouteOffloadExecution
+
+struct WebGpuProfileAdvancedFlush:
+    profile: WebGpuOffloadProfile
+    flush: GpuWdbBatchFlushExecution
+
+struct WebGpuProfileDeviceExecution:
+    profile: WebGpuOffloadProfile
+    execution: WebGpuRouteOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+struct WebGpuProfileValidatedDeviceExecution:
+    profile: WebGpuOffloadProfile
+    execution: WebGpuRouteOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+    gpu_candidate_validated: bool
+    validation_reason: text
+
+fn web_gpu_profile_execution_with_authority(execution: WebGpuRouteOffloadExecution,
+                                            status: i64,
+                                            body: text,
+                                            gpu_dispatched: bool,
+                                            cpu_authoritative: bool,
+                                            gpu_candidate_validated: bool,
+                                            validation_reason: text) -> WebGpuRouteOffloadExecution:
+    WebGpuRouteOffloadExecution(
+        route: execution.route,
+        route_kind: execution.route_kind,
+        work_kind: execution.work_kind,
+        profile: execution.profile,
+        payload_bytes: execution.payload_bytes,
+        item_count: execution.item_count,
+        submission: execution.submission,
+        state_after: execution.state_after,
+        cpu_status: status,
+        cpu_body: body,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: cpu_authoritative,
+        schedule_action: execution.schedule_action,
+        gpu_candidate_validated: gpu_candidate_validated,
+        validation_reason: validation_reason
+    )
+
+fn web_gpu_profile_with_queue_state(profile: WebGpuOffloadProfile,
+                                    state: GpuWdbQueueState) -> WebGpuOffloadProfile:
+    WebGpuOffloadProfile(
+        name: profile.name,
+        registry: profile.registry,
+        queue_state: state,
+        budget: profile.budget,
+        gpu_available: profile.gpu_available,
+        cpu_fallback_available: profile.cpu_fallback_available
+    )
+
+fn web_gpu_profile_complete_submission(profile: WebGpuOffloadProfile,
+                                       submission: GpuWdbQueueSubmission) -> WebGpuOffloadProfile:
+    web_gpu_profile_with_queue_state(
+        profile,
+        gpu_wdb_complete_submission(profile.queue_state, submission)
+    )
+
+fn web_gpu_profile_budget(max_queue_depth: i64, max_batch_bytes: i64,
+                          min_gpu_batch_bytes: i64) -> GpuWdbBudget:
+    GpuWdbBudget(
+        max_queue_depth: max_queue_depth,
+        max_batch_bytes: max_batch_bytes,
+        min_gpu_batch_bytes: min_gpu_batch_bytes
+    )
+
+fn web_gpu_profile(name: text, backend: text, generation: i64,
+                   stream_count: i64, targets: [text],
+                   budget: GpuWdbBudget, gpu_available: bool,
+                   cpu_fallback_available: bool) -> WebGpuOffloadProfile:
+    WebGpuOffloadProfile(
+        name: name,
+        registry: gpu_wdb_library_with_targets(backend, generation, targets),
+        queue_state: gpu_wdb_queue_initial(stream_count),
+        budget: budget,
+        gpu_available: gpu_available,
+        cpu_fallback_available: cpu_fallback_available
+    )
+
+fn web_gpu_profile_inference(backend: text, generation: i64,
+                             stream_count: i64) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        "web-inference",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_web_inference_batch"],
+        web_gpu_profile_budget(128, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn web_gpu_profile_embedding(backend: text, generation: i64,
+                             stream_count: i64) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        "web-embedding",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_web_embedding_batch"],
+        web_gpu_profile_budget(128, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn web_gpu_profile_rank(backend: text, generation: i64,
+                        stream_count: i64) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        "web-rank",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_web_rank_batch"],
+        web_gpu_profile_budget(96, 32 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn web_gpu_profile_transform(backend: text, generation: i64,
+                             stream_count: i64) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        "web-transform",
+        backend,
+        generation,
+        stream_count,
+        ["gpu_web_transform_batch"],
+        web_gpu_profile_budget(64, 64 * 1024 * 1024, 8192),
+        true,
+        true
+    )
+
+fn web_gpu_profile_all(backend: text, generation: i64,
+                       stream_count: i64) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        "web-all-gpu",
+        backend,
+        generation,
+        stream_count,
+        [
+            "gpu_web_inference_batch",
+            "gpu_web_embedding_batch",
+            "gpu_web_rank_batch",
+            "gpu_web_transform_batch"
+        ],
+        web_gpu_profile_budget(128, 64 * 1024 * 1024, 4096),
+        true,
+        true
+    )
+
+fn web_gpu_profile_cpu_only(name: text) -> WebGpuOffloadProfile:
+    web_gpu_profile(
+        name,
+        "none",
+        0,
+        1,
+        [],
+        web_gpu_profile_budget(64, 16 * 1024 * 1024, 4096),
+        false,
+        true
+    )
+
+fn web_gpu_profile_execute(profile: WebGpuOffloadProfile,
+                           route: text,
+                           route_kind: WebGpuRouteKind,
+                           item_count: i64,
+                           bytes_per_item: i64,
+                           cpu_status: i64,
+                           cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_profile_execute_advancing(profile: WebGpuOffloadProfile,
+                                     route: text,
+                                     route_kind: WebGpuRouteKind,
+                                     item_count: i64,
+                                     bytes_per_item: i64,
+                                     cpu_status: i64,
+                                     cpu_body: text) -> WebGpuProfileAdvancedExecution:
+    val execution = web_gpu_profile_execute(
+        profile,
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        cpu_status,
+        cpu_body
+    )
+    WebGpuProfileAdvancedExecution(
+        profile: web_gpu_profile_with_queue_state(profile, execution.state_after),
+        execution: execution
+    )
+
+fn web_gpu_profile_execute_device(profile: WebGpuOffloadProfile,
+                                  route: text,
+                                  route_kind: WebGpuRouteKind,
+                                  item_count: i64,
+                                  bytes_per_item: i64,
+                                  cpu_status: i64,
+                                  cpu_body: text,
+                                  backend: GpuWdbDeviceBackend,
+                                  expected_generation: i64,
+                                  started_us: i64,
+                                  finished_us: i64,
+                                  measured_device_time_us: i64,
+                                  timing_source: text) -> WebGpuProfileDeviceExecution:
+    val execution = web_gpu_profile_execute(
+        profile,
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        cpu_status,
+        cpu_body
+    )
+    val device_result = gpu_wdb_run_device_batch(
+        profile.queue_state,
+        backend,
+        web_gpu_route_work_kind(route_kind),
+        web_gpu_route_estimated_payload_bytes(item_count, bytes_per_item),
+        item_count,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    WebGpuProfileDeviceExecution(
+        profile: web_gpu_profile_with_queue_state(profile, device_result.submission.state),
+        execution: execution,
+        device_result: device_result
+    )
+
+fn web_gpu_profile_execute_device_validated(profile: WebGpuOffloadProfile,
+                                            route: text,
+                                            route_kind: WebGpuRouteKind,
+                                            item_count: i64,
+                                            bytes_per_item: i64,
+                                            cpu_status: i64,
+                                            cpu_body: text,
+                                            backend: GpuWdbDeviceBackend,
+                                            expected_generation: i64,
+                                            gpu_candidate_status: i64,
+                                            gpu_candidate_body: text,
+                                            started_us: i64,
+                                            finished_us: i64,
+                                            measured_device_time_us: i64,
+                                            timing_source: text) -> WebGpuProfileValidatedDeviceExecution:
+    val base = web_gpu_profile_execute_device(
+        profile,
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        cpu_status,
+        cpu_body,
+        backend,
+        expected_generation,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    if not base.device_result.production_device_claim:
+        return WebGpuProfileValidatedDeviceExecution(
+            profile: base.profile,
+            execution: web_gpu_profile_execution_with_authority(base.execution, cpu_status, cpu_body, false, true, false, "production-device-not-measured"),
+            device_result: base.device_result,
+            gpu_candidate_validated: false,
+            validation_reason: "production-device-not-measured"
+        )
+    if cpu_status == gpu_candidate_status and cpu_body == gpu_candidate_body:
+        return WebGpuProfileValidatedDeviceExecution(
+            profile: base.profile,
+            execution: web_gpu_profile_execution_with_authority(base.execution, gpu_candidate_status, gpu_candidate_body, true, false, true, "production-gpu-web-response-match"),
+            device_result: base.device_result,
+            gpu_candidate_validated: true,
+            validation_reason: "production-gpu-web-response-match"
+        )
+    WebGpuProfileValidatedDeviceExecution(
+        profile: base.profile,
+        execution: web_gpu_profile_execution_with_authority(base.execution, cpu_status, cpu_body, false, true, false, "production-gpu-web-response-mismatch"),
+        device_result: base.device_result,
+        gpu_candidate_validated: false,
+        validation_reason: "production-gpu-web-response-mismatch"
+    )
+
+fn web_gpu_profile_execution_allows_gpu(execution: WebGpuRouteOffloadExecution) -> bool:
+    web_gpu_route_profile_allows_gpu(execution)
+
+fn web_gpu_profile_execution_used_gpu(execution: WebGpuRouteOffloadExecution) -> bool:
+    web_gpu_route_offload_used_gpu(execution)
+
+fn web_gpu_profile_execute_scheduled(profile: WebGpuOffloadProfile,
+                                     route: text,
+                                     route_kind: WebGpuRouteKind,
+                                     item_count: i64,
+                                     bytes_per_item: i64,
+                                     schedule_class: GpuWdbScheduleClass,
+                                     allow_defer: bool,
+                                     cpu_status: i64,
+                                     cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute_scheduled(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget,
+        schedule_class,
+        allow_defer,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_profile_execute_scheduled_advancing(profile: WebGpuOffloadProfile,
+                                               route: text,
+                                               route_kind: WebGpuRouteKind,
+                                               item_count: i64,
+                                               bytes_per_item: i64,
+                                               schedule_class: GpuWdbScheduleClass,
+                                               allow_defer: bool,
+                                               cpu_status: i64,
+                                               cpu_body: text) -> WebGpuProfileAdvancedExecution:
+    val execution = web_gpu_profile_execute_scheduled(
+        profile,
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        schedule_class,
+        allow_defer,
+        cpu_status,
+        cpu_body
+    )
+    WebGpuProfileAdvancedExecution(
+        profile: web_gpu_profile_with_queue_state(profile, execution.state_after),
+        execution: execution
+    )
+
+fn web_gpu_profile_execute_scheduled_for_generation(profile: WebGpuOffloadProfile,
+                                                    route: text,
+                                                    route_kind: WebGpuRouteKind,
+                                                    item_count: i64,
+                                                    bytes_per_item: i64,
+                                                    schedule_class: GpuWdbScheduleClass,
+                                                    allow_defer: bool,
+                                                    expected_generation: i64,
+                                                    cpu_status: i64,
+                                                    cpu_body: text) -> WebGpuRouteOffloadExecution:
+    web_gpu_route_offload_execute_scheduled_with_generation(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        expected_generation,
+        profile.cpu_fallback_available,
+        profile.budget,
+        schedule_class,
+        allow_defer,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_profile_execute_scheduled_for_generation_advancing(profile: WebGpuOffloadProfile,
+                                                              route: text,
+                                                              route_kind: WebGpuRouteKind,
+                                                              item_count: i64,
+                                                              bytes_per_item: i64,
+                                                              schedule_class: GpuWdbScheduleClass,
+                                                              allow_defer: bool,
+                                                              expected_generation: i64,
+                                                              cpu_status: i64,
+                                                              cpu_body: text) -> WebGpuProfileAdvancedExecution:
+    val execution = web_gpu_profile_execute_scheduled_for_generation(
+        profile,
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        schedule_class,
+        allow_defer,
+        expected_generation,
+        cpu_status,
+        cpu_body
+    )
+    WebGpuProfileAdvancedExecution(
+        profile: web_gpu_profile_with_queue_state(profile, execution.state_after),
+        execution: execution
+    )
+
+fn web_gpu_profile_execute_accumulating(profile: WebGpuOffloadProfile,
+                                        route: text,
+                                        route_kind: WebGpuRouteKind,
+                                        item_count: i64,
+                                        bytes_per_item: i64,
+                                        schedule_class: GpuWdbScheduleClass,
+                                        accumulator: GpuWdbBatchAccumulator,
+                                        cpu_status: i64,
+                                        cpu_body: text) -> WebGpuRouteAccumulatedExecution:
+    web_gpu_route_offload_execute_accumulating(
+        route,
+        route_kind,
+        item_count,
+        bytes_per_item,
+        profile.queue_state,
+        profile.registry,
+        profile.gpu_available,
+        profile.cpu_fallback_available,
+        profile.budget,
+        schedule_class,
+        accumulator,
+        cpu_status,
+        cpu_body
+    )
+
+fn web_gpu_profile_flush_accumulator(profile: WebGpuOffloadProfile,
+                                     accumulator: GpuWdbBatchAccumulator,
+                                     generation_current: bool) -> GpuWdbBatchFlushExecution:
+    gpu_wdb_batch_accumulator_flush_registered(
+        accumulator,
+        profile.queue_state,
+        profile.registry,
+        GpuWdbRuntimeSnapshot(
+            queue_depth: profile.queue_state.queue_depth,
+            gpu_available: profile.gpu_available,
+            generation_current: generation_current,
+            cpu_fallback_available: profile.cpu_fallback_available
+        ),
+        profile.budget
+    )
+
+fn web_gpu_profile_flush_accumulator_advancing(profile: WebGpuOffloadProfile,
+                                               accumulator: GpuWdbBatchAccumulator,
+                                               generation_current: bool) -> WebGpuProfileAdvancedFlush:
+    val flush = web_gpu_profile_flush_accumulator(profile, accumulator, generation_current)
+    WebGpuProfileAdvancedFlush(
+        profile: web_gpu_profile_with_queue_state(profile, flush.submission.state),
+        flush: flush
+    )
+
+fn web_gpu_profile_flush_accumulator_for_generation(profile: WebGpuOffloadProfile,
+                                                    accumulator: GpuWdbBatchAccumulator,
+                                                    expected_generation: i64) -> GpuWdbBatchFlushExecution:
+    gpu_wdb_batch_accumulator_flush_registered(
+        accumulator,
+        profile.queue_state,
+        profile.registry,
+        gpu_wdb_library_snapshot(
+            profile.queue_state,
+            profile.registry,
+            expected_generation,
+            profile.gpu_available,
+            profile.cpu_fallback_available
+        ),
+        profile.budget
+    )
+
+fn web_gpu_profile_flush_accumulator_for_generation_advancing(profile: WebGpuOffloadProfile,
+                                                              accumulator: GpuWdbBatchAccumulator,
+                                                              expected_generation: i64) -> WebGpuProfileAdvancedFlush:
+    val flush = web_gpu_profile_flush_accumulator_for_generation(profile, accumulator, expected_generation)
+    WebGpuProfileAdvancedFlush(
+        profile: web_gpu_profile_with_queue_state(profile, flush.submission.state),
+        flush: flush
+    )
+
+fn web_gpu_profile_flush_accumulator_current(profile: WebGpuOffloadProfile,
+                                             accumulator: GpuWdbBatchAccumulator) -> GpuWdbBatchFlushExecution:
+    web_gpu_profile_flush_accumulator_for_generation(profile, accumulator, profile.registry.generation)
+
+fn web_gpu_profile_flush_accumulator_current_advancing(profile: WebGpuOffloadProfile,
+                                                       accumulator: GpuWdbBatchAccumulator) -> WebGpuProfileAdvancedFlush:
+    web_gpu_profile_flush_accumulator_for_generation_advancing(profile, accumulator, profile.registry.generation)

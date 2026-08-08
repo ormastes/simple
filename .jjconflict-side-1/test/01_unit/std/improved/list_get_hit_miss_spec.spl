@@ -1,0 +1,49 @@
+"""
+# `list.get(i)` hit/miss/`??` vs index-read parity
+
+Regression spec for the previously-filed defect
+`doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md`,
+where `xs.get(i)` returned the boxed slot word (`value << 3`) instead of the
+decoded value on the JIT/native lane, while `xs[i]` was correct.
+
+**Verified 2026-08-07 (both `bin/simple run` under the default JIT and
+`SIMPLE_EXECUTION_MODE=interpret`):** the hit-value shift defect is FIXED.
+`a.get(0)` on `[5, 7]` now returns `5`, not `40`; `xs.get(1)` on `[10, 20,
+30]` returns `20`, matching `xs[1]`.
+
+**Caveat:** `bin/simple test` (the runner this spec executes under) hard-defaults
+to the tree-walk interpreter, not the Cranelift JIT (see
+`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`). This spec
+therefore does NOT exercise the JIT lane where the original defect lived --
+it only guards the interpreter lane and the value-level semantics (`??`
+default). JIT-lane confirmation must be re-done manually via `bin/simple run`
+until the spec suite can select the JIT engine.
+"""
+
+use std.spec
+
+describe "list.get hit/miss vs index-read":
+    it "hit: get(i) matches xs[i] for an in-bounds index":
+        val xs = [10, 20, 30]
+        expect(xs.get(1) ?? -1).to_equal(xs[1])
+        expect(xs.get(1) ?? -1).to_equal(20)
+
+    it "hit: original bug-doc repro (literal, mutated, and pushed-into lists)":
+        var a = [5, 7]
+        expect(a.get(0) ?? -1).to_equal(a[0])
+        expect(a.get(0) ?? -1).to_equal(5)
+        a[1] = 9
+        expect(a.get(1) ?? -1).to_equal(a[1])
+        expect(a.get(1) ?? -1).to_equal(9)
+        var b: [i64] = []
+        b.push(42)
+        expect(b.get(0) ?? -1).to_equal(b[0])
+        expect(b.get(0) ?? -1).to_equal(42)
+
+    it "miss: get(i) on an out-of-bounds index is None (?? falls back)":
+        val xs = [10, 20, 30]
+        expect(xs.get(9) ?? -1).to_equal(-1)
+
+    it "miss: negative-ish out-of-bounds index also falls back":
+        val xs = [10, 20, 30]
+        expect(xs.get(100) ?? -7).to_equal(-7)

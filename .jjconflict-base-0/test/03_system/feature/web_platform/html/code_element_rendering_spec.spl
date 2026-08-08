@@ -1,0 +1,197 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""Selected `<code>` UA monospace rendering through WebIR, Draw IR, and Engine2D.
+
+Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{
+    system_dom_identity_index, system_dom_route
+}
+
+val WIDTH: i32 = 128
+val HEIGHT: i32 = 32
+val SAMPLE: text = "iiiiWWWW"
+
+fn _code_fixture(tag: text, family: text) -> text:
+    val style = if family == "":
+        ""
+    else:
+        " style='font-family:" + family + "'"
+    (
+        "<style>html,body{margin:0;background:#fff;font-size:16px}</style>" +
+        "<body id='body'><" + tag + " id='target'" + style + ">" +
+        SAMPLE + "</" + tag + "></body>"
+    )
+
+fn _code_node_index(nodes: [HNode], component_id: text) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing code Web semantic node: {component_id}")
+    -1
+
+fn _code_command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing code Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+fn _code_text_command(composition: DrawIrComposition) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text" and command.text_value == SAMPLE:
+                return command
+    fail("missing code Draw IR text command")
+    composition.batches[0].commands[0]
+
+fn _code_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing code Draw IR computed style: {key}")
+    ""
+
+fn _code_geometry(result: SimpleWebLayoutDrawIrResult) -> [i32]:
+    val index = _code_node_index(result.hit_index.nodes, "target")
+    [
+        result.hit_index.boxes.bx[index], result.hit_index.boxes.by[index],
+        result.hit_index.boxes.bw[index], result.hit_index.boxes.bh[index]
+    ]
+
+fn _code_pixels(result: SimpleWebLayoutDrawIrResult) -> [u32]:
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val frame = raster.render_draw_ir_composition(result.composition, [])
+    raster.shutdown()
+    expect(frame.skipped_command_count).to_equal(0)
+    expect(frame.pixels.len()).to_equal(WIDTH * HEIGHT)
+    frame.pixels
+
+fn _code_pixel_difference_count(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        fail("code pixel frames must have equal dimensions")
+    var count = 0
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            count = count + 1
+        index = index + 1
+    count
+
+describe "Production code element rendering":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+    it "should lower the code UA monospace face through Draw IR to pixels":
+        val default_html = _code_fixture("code", "")
+        val explicit_html = _code_fixture("span", "monospace")
+        val override_html = _code_fixture("code", "sans-serif")
+        val normal_html = _code_fixture("span", "sans-serif")
+
+        step("Parse code as an inline body child")
+        val root = html_tree_builder_build(default_html)
+        val identity_index = system_dom_identity_index(root)
+        val body_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "body")
+        )
+        val code_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "target")
+        )
+        expect(be_dom_get_tag(
+            code_path[code_path.len() - 1]
+        )).to_equal("code")
+        expect(code_path[
+            code_path.len() - 2
+        ].node_id).to_equal(body_path[body_path.len() - 1].node_id)
+
+        step("Resolve the code user-agent monospace family")
+        val selected = simple_web_layout_render_html_draw_ir_result(
+            default_html, WIDTH, HEIGHT
+        )
+        val explicit = simple_web_layout_render_html_draw_ir_result(
+            explicit_html, WIDTH, HEIGHT
+        )
+        val overridden = simple_web_layout_render_html_draw_ir_result(
+            override_html, WIDTH, HEIGHT
+        )
+        val normal = simple_web_layout_render_html_draw_ir_result(
+            normal_html, WIDTH, HEIGHT
+        )
+        val selected_style = selected.hit_index.styles[
+            _code_node_index(selected.hit_index.nodes, "target")
+        ]
+        val explicit_style = explicit.hit_index.styles[
+            _code_node_index(explicit.hit_index.nodes, "target")
+        ]
+        val override_style = overridden.hit_index.styles[
+            _code_node_index(overridden.hit_index.nodes, "target")
+        ]
+        expect(selected_style.display).to_equal("inline")
+        expect(selected_style.font_family).to_equal("monospace")
+        expect(explicit_style.font_family).to_equal("monospace")
+        expect(override_style.font_family).to_equal("sans-serif")
+        expect(_code_geometry(selected)).to_equal(_code_geometry(explicit))
+        expect(
+            _code_geometry(selected)[2] == _code_geometry(overridden)[2]
+        ).to_be(false)
+
+        step("Emit canonical code text Draw IR")
+        val selected_box = _code_command(selected.composition, "target")
+        val selected_text = _code_text_command(selected.composition)
+        val explicit_text = _code_text_command(explicit.composition)
+        val override_text = _code_text_command(overridden.composition)
+        expect(_code_style(selected_box, "tag")).to_equal("code")
+        expect(_code_style(selected_box, "display")).to_equal("inline")
+        expect(_code_style(selected_box, "font-family")).to_equal("monospace")
+        expect(selected_text.parent_id).to_equal("target")
+        expect([selected_text.x, selected_text.y]).to_equal([0, 0])
+        expect(_code_style(
+            selected_text, "font-family"
+        )).to_equal(_code_style(explicit_text, "font-family"))
+        expect(_code_style(
+            selected_text, "font-identity"
+        ) == "").to_be(false)
+        expect(_code_style(
+            selected_text, "font-identity"
+        )).to_equal(_code_style(explicit_text, "font-identity"))
+        expect(_code_style(
+            selected_text, "font-identity"
+        ) == _code_style(override_text, "font-identity")).to_be(false)
+
+        step("Render monospace code through Engine2D")
+        val selected_pixels = _code_pixels(selected)
+        val explicit_pixels = _code_pixels(explicit)
+        val override_pixels = _code_pixels(overridden)
+        val normal_pixels = _code_pixels(normal)
+        expect(_code_pixel_difference_count(
+            selected_pixels, explicit_pixels
+        )).to_equal(0)
+        expect(_code_pixel_difference_count(
+            selected_pixels, override_pixels
+        )).to_be_greater_than(0)
+        expect(_code_pixel_difference_count(
+            override_pixels, normal_pixels
+        )).to_equal(0)

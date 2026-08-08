@@ -1,0 +1,46 @@
+# Positive behavioural probe for the `guard` capability-matrix row
+# (src/lib/common/mem_infra/config.spl `mem_infra_matrix`).
+#
+# A guard page is only real if touching freed memory TRAPS. Source code that
+# calls `mmap`/`mprotect` somewhere is not evidence; an observable SIGSEGV is.
+# So this fixture deliberately commits a use-after-free and reports which side
+# of the fault it reached:
+#
+#   * guard active  -> the `rt_ptr_write_u8` after `rt_free` hits a PROT_NONE
+#                      page, the process dies with SIGSEGV (exit 139) and the
+#                      "uaf_probe: survived" line is NEVER printed.
+#   * guard absent  -> the write lands on ordinary freed heap, and the
+#                      "uaf_probe: survived" line IS printed with exit 0.
+#
+# `SIMPLE_MEM_GUARD_RATE=1` samples EVERY allocation, so a backend that
+# honours the knob must trap on the first iteration. Run it with the knob
+# unset to get the sabotage control: every backend must then survive.
+#
+# Used by test/01_unit/compiler/interp/mem_guard_backend_parity_spec.spl.
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+# Byte offset of the use-after-free touch. Deliberately 32, NOT 0: glibc
+# reuses the first 16 bytes of a freed chunk for its tcache/fastbin link
+# (`next`, `key`), so touching offset 0 corrupts the allocator and aborts with
+# "malloc(): unaligned fastbin chunk detected" — a real UAF signal, but one
+# that looks like a crash and so cannot be told apart from a guard-page trap.
+# Offset 32 is inside the 64-byte user block but past that metadata, so an
+# unguarded backend survives cleanly and a guarded one still faults (the guard
+# PROT_NONEs the WHOLE slot, every offset).
+val TOUCH_OFFSET = 32
+
+fn main() -> i64:
+    print "uaf_probe: start"
+    val p = rt_alloc(64)
+    if p == 0:
+        print "uaf_probe: alloc failed"
+        return 1
+    rt_ptr_write_u8(p, TOUCH_OFFSET, 65)
+    rt_free(p)
+    # The use-after-free. Under a working guard page this write faults.
+    rt_ptr_write_u8(p, TOUCH_OFFSET, 66)
+    print "uaf_probe: survived use-after-free write"
+    0

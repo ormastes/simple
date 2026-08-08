@@ -1,0 +1,30 @@
+#!/bin/sh
+# Fail-closed gate: SimpleOS native-surface policy.
+#
+# Fails if any native source (.c/.s/.S) appears in a covered arch/libc
+# subsystem without being declared in the per-lane boot-source manifests
+# (boot_c_sources / boot_asm_sources / grandfathered_native_sources in
+# src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl) or LIBC_NATIVE_SOURCES.
+#
+# Why: the native linker auto-globs EVERY .c/.S in an entry's boot/ dir, so a
+# stray wrapper or a cross-arch symlink (e.g. boot/glass_render.c -> x86_64, or
+# a freestanding_runtime.c that #includes a 100 KB runtime) gets silently
+# compiled into a minimal kernel — bloating it and breaking boot. This gate
+# turns that whole footgun class into a hard, declared-allowlist failure.
+# Root cause + history: doc/08_tracking/bug/riscv64_cranelift_smf_fs_boot_regression_2026-06-14.md
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [ -n "${SIMPLE_BIN:-}" ]; then
+    SIMPLE="$SIMPLE_BIN"
+elif [ -x src/compiler_rust/target/debug/simple ]; then
+    SIMPLE="src/compiler_rust/target/debug/simple"
+else
+    SIMPLE="./bin/simple"
+fi
+
+# native_surface_policy_verify.spl prints the offending files and exits non-zero
+# (panic) on any undeclared native source; exec propagates that exit code.
+exec "$SIMPLE" run src/os/port/native_surface_policy_verify.spl

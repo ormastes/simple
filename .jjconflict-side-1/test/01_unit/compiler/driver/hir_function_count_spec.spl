@@ -1,0 +1,74 @@
+"""
+# HIR Function Count Unit Spec
+
+Uses the native-safe dictionary key-array count path required by Stage4.
+
+`driver_dict_entry_count` is deliberately NOT generic: the native build path
+has no monomorphization (#158 Phase B), so a `<K, V>` signature is a hard stop
+for Stage-3 self-host. It therefore takes the one instantiation the driver
+actually uses, `Dict<SymbolId, HirFunction>`, and this spec exercises it at
+that exact type rather than at a convenience type the production path never
+passes.
+"""
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.driver_hir_pipeline_lowering.{driver_dict_entry_count}
+
+# Minimal HirFunction value. Only the dict key/entry identity matters to the
+# counter; every other field is a well-formed empty default.
+fn stub_hir_function(id: i64, name: text) -> HirFunction:
+    val span = Span.empty()
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: [],
+        params: [],
+        return_type: HirType(kind: HirTypeKind.Unit, span: span),
+        body: HirBlock(
+            stmts: [],
+            has: false,
+            value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span),
+            span: span
+        ),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: span,
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+describe "driver native dictionary count":
+    it "counts an empty function table without direct Dict len":
+        val entries: Dict<SymbolId, HirFunction> = {}
+        expect(driver_dict_entry_count(entries)).to_equal(0)
+
+    it "counts a populated function table through its typed keys":
+        var entries: Dict<SymbolId, HirFunction> = {}
+        entries[SymbolId(id: 1)] = stub_hir_function(1, "main")
+        entries[SymbolId(id: 2)] = stub_hir_function(2, "helper")
+        expect(driver_dict_entry_count(entries)).to_equal(2)
+
+    it "tracks replacement without inflating the entry count":
+        var entries: Dict<SymbolId, HirFunction> = {}
+        entries[SymbolId(id: 1)] = stub_hir_function(1, "main")
+        entries[SymbolId(id: 1)] = stub_hir_function(1, "main_redefined")
+        expect(driver_dict_entry_count(entries)).to_equal(1)

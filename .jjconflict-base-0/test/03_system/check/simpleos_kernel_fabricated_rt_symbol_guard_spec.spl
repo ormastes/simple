@@ -1,0 +1,595 @@
+# Guard: a SimpleOS guest kernel must contain no NEW fabricated `rt_*` symbol.
+#
+# WHY THIS EXISTS
+#   The freestanding SimpleOS link binds any `rt_*` symbol that has no real
+#   baremetal implementation to a fabricated body that just returns a constant
+#   -- `xor %eax,%eax; ret` (zero) or `mov $0x3,%eax; ret` (the runtime's nil
+#   tag). There is no link error and no runtime diagnostic. The guest then
+#   reads 0/empty far downstream of the cause and presents as a mysterious hang
+#   or a blank screen rather than as an error.
+#
+#   Damage already found and fixed this way: `rt_array_copy` made every
+#   array-typed variable read return empty; three `rt_engine2d_simd_*` blitters
+#   made every framebuffer span write a no-op (a blank screen); the memory
+#   barriers were absent so drivers had no MMIO ordering; every u32 array
+#   element read 0; a clock returned a constant. Until this spec there was NO
+#   test that caught a new instance.
+#
+# WHAT IT CHECKS
+#   Every defined `rt_*` symbol in the kernel image is classified from its
+#   actual machine code. A symbol is FABRICATED when its whole body is a
+#   constant return: after the frame prologue/epilogue and dead argument
+#   spills, nothing remains but `xor %eax,%eax` or `mov $imm,%eax` (or nothing
+#   at all). Binding is irrelevant to this test -- `rt_stdout_flush`,
+#   `rt_stderr_flush` and `rt_pool_safepoint` are strong `T` symbols whose
+#   bodies are exactly that, and they are just as dangerous as the weak ones.
+#   Separately, weak-bound `rt_*` symbols are reported, because weak binding is
+#   the mechanism by which a fabricated body gets substituted at link time.
+#
+#   Both found sets are asserted to be a SUBSET of an allowlist. A subset check
+#   (not a count) means a NEW fabrication fails immediately while known ones can
+#   be retired from the list one at a time.
+#
+# WHY THE ALLOWLIST IS BY EXACT NAME
+#   A prefix allowlist is itself a fail-open mechanism. An `rt_simd_*` prefix
+#   rule nearly hid `rt_engine2d_simd_*` -- the real framebuffer span blitters,
+#   where nil means a blank screen. `rt_engine2d_rocm_*` is likewise NOT
+#   covered by an `rt_rocm_` prefix. Every entry below is spelled out in full.
+#
+# HONESTY
+#   This spec needs a prebuilt kernel ELF and binutils. When either is missing
+#   it SKIPS with the reason. It never passes by doing nothing -- a test that
+#   passes because it did nothing is precisely the bug class being eliminated.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+
+use std.spec.{describe, it, expect, skip}
+
+# The x86_64 guest kernel produced by scripts/check/check-simpleos-wm-fullscreen-evidence.shs.
+# The allowlists below are the measured baseline of THIS image, so the path is
+# pinned rather than configurable. To audit a different image, edit this
+# constant and re-baseline. (An env-var override was tried first and removed:
+# rt_env_get does not see the caller's environment under `simple test`, so the
+# knob silently audited the default image anyway -- a fail-open of exactly the
+# kind this spec exists to prevent.)
+val KERNEL_ELF: text = "build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf"
+
+# The image is an ELF32 container holding x86-64 code, so objdump's autodetect
+# picks 32-bit and mis-decodes every REX prefix (each 0x48 becomes `dec %eax`).
+# Force the real architecture. Change this when re-baselining on a non-x86 image.
+val OBJDUMP_ARCH: text = "i386:x86-64"
+
+# A pure constant-return body cannot exceed ~37 bytes: 4 (prologue) + 1 (push)
+# + 24 (six 4-byte register spills) + 5 (mov $imm,%eax) + 4 (add $imm,%rsp)
+# + 1 (pop) + 1 (ret). 48 is that bound with margin. Anything larger is doing
+# real work and is skipped without disassembly, purely to keep the spec fast.
+val MAX_FABRICATED_BODY_BYTES: i64 = 48
+
+fn allow_vulkan() -> [text]:
+    # Host Vulkan ICD shims. A freestanding guest has no Vulkan loader, driver or WSI; nothing on the guest display path calls these -- the guest renders through Engine2D span blitters, not Vulkan.
+    [
+        "rt_vulkan_alloc_buffer",
+        "rt_vulkan_begin_compute",
+        "rt_vulkan_bind_buffer",
+        "rt_vulkan_bind_descriptors",
+        "rt_vulkan_bind_pipeline",
+        "rt_vulkan_compile_glsl",
+        "rt_vulkan_compile_spirv",
+        "rt_vulkan_compile_spirv_raw",
+        "rt_vulkan_copy_from_buffer_raw",
+        "rt_vulkan_copy_to_buffer",
+        "rt_vulkan_copy_to_buffer_raw",
+        "rt_vulkan_create_compute_pipeline",
+        "rt_vulkan_create_descriptor_set",
+        "rt_vulkan_dependency_quarantine_lock",
+        "rt_vulkan_dependency_quarantine_unlock",
+        "rt_vulkan_destroy_descriptor_set",
+        "rt_vulkan_destroy_fence",
+        "rt_vulkan_destroy_pipeline",
+        "rt_vulkan_destroy_shader",
+        "rt_vulkan_device_count",
+        "rt_vulkan_device_driver_identity",
+        "rt_vulkan_device_name",
+        "rt_vulkan_device_type",
+        "rt_vulkan_discard_command",
+        "rt_vulkan_dispatch",
+        "rt_vulkan_end_compute",
+        "rt_vulkan_fence_submission_supported",
+        "rt_vulkan_free_buffer",
+        "rt_vulkan_get_device",
+        "rt_vulkan_get_last_error",
+        "rt_vulkan_init",
+        "rt_vulkan_is_available",
+        "rt_vulkan_push_constants",
+        "rt_vulkan_push_constants_raw",
+        "rt_vulkan_read_buffer_bytes",
+        "rt_vulkan_select_device",
+        "rt_vulkan_submit_and_wait_fence",
+        "rt_vulkan_wait_fence",
+        "rt_vulkan_wait_idle"
+    ]
+
+fn allow_cuda() -> [text]:
+    # Host CUDA driver-API shims. No NVIDIA driver exists in the guest; every guest GPU path checks rt_cuda_available() first, which inertly reports "unavailable".
+    [
+        "rt_cuda_available",
+        "rt_cuda_ctx_create",
+        "rt_cuda_ctx_destroy",
+        "rt_cuda_device_count",
+        "rt_cuda_device_name",
+        "rt_cuda_init",
+        "rt_cuda_launch_kernel_name",
+        "rt_cuda_mem_alloc",
+        "rt_cuda_memcpy_dtoh",
+        "rt_cuda_memcpy_htod",
+        "rt_cuda_mem_free",
+        "rt_cuda_module_get_function",
+        "rt_cuda_module_load_data",
+        "rt_cuda_module_load_data_bytes",
+        "rt_cuda_module_unload",
+        "rt_cuda_sync"
+    ]
+
+fn allow_metal() -> [text]:
+    # Apple Metal shims. Metal is macOS/iOS-only and cannot exist in an x86_64 SimpleOS guest at all; these are unreachable by construction.
+    [
+        "rt_metal_alloc_buffer",
+        "rt_metal_buffer_download",
+        "rt_metal_buffer_upload",
+        "rt_metal_commit_command_buffer",
+        "rt_metal_compile_shader",
+        "rt_metal_create_command_buffer",
+        "rt_metal_create_command_queue",
+        "rt_metal_create_compute_encoder",
+        "rt_metal_create_compute_pipeline",
+        "rt_metal_create_device",
+        "rt_metal_destroy_command_buffer",
+        "rt_metal_destroy_command_queue",
+        "rt_metal_destroy_compute_encoder",
+        "rt_metal_destroy_device",
+        "rt_metal_destroy_pipeline",
+        "rt_metal_destroy_shader",
+        "rt_metal_device_count",
+        "rt_metal_dispatch_compute",
+        "rt_metal_end_compute_encoder",
+        "rt_metal_free_buffer",
+        "rt_metal_get_last_error",
+        "rt_metal_init",
+        "rt_metal_is_available",
+        "rt_metal_run_compute_frame",
+        "rt_metal_set_buffer",
+        "rt_metal_set_bytes",
+        "rt_metal_wait_completed"
+    ]
+
+fn allow_rocm() -> [text]:
+    # AMD ROCm/HIP shims. No ROCm runtime in the guest; identity probe inertly reports no device.
+    [
+        "rt_rocm_compile_hsaco",
+        "rt_rocm_device_count",
+        "rt_rocm_device_identity",
+        "rt_rocm_device_memory",
+        "rt_rocm_device_name",
+        "rt_rocm_free",
+        "rt_rocm_get_device",
+        "rt_rocm_get_function",
+        "rt_rocm_init",
+        "rt_rocm_is_available",
+        "rt_rocm_launch_kernel",
+        "rt_rocm_malloc",
+        "rt_rocm_memset",
+        "rt_rocm_synchronize",
+        "rt_rocm_unload_module"
+    ]
+
+fn allow_oneapi() -> [text]:
+    # Intel oneAPI/Level-Zero shims. No Level-Zero loader in the guest.
+    [
+        "rt_oneapi_compile_opencl",
+        "rt_oneapi_compile_spirv",
+        "rt_oneapi_create_queue",
+        "rt_oneapi_destroy_queue",
+        "rt_oneapi_device_count",
+        "rt_oneapi_free",
+        "rt_oneapi_get_function",
+        "rt_oneapi_init",
+        "rt_oneapi_is_available",
+        "rt_oneapi_malloc_device",
+        "rt_oneapi_memset",
+        "rt_oneapi_queue_wait",
+        "rt_oneapi_submit_kernel",
+        "rt_oneapi_unload_module"
+    ]
+
+fn allow_opencl() -> [text]:
+    # OpenCL ICD shims. rt_opencl_is_available() inertly reports unavailable, so no caller proceeds to the other entry points.
+    [
+        "rt_opencl_build_program",
+        "rt_opencl_create_context",
+        "rt_opencl_create_kernel",
+        "rt_opencl_create_program",
+        "rt_opencl_create_queue",
+        "rt_opencl_enqueue_ndrange",
+        "rt_opencl_finish",
+        "rt_opencl_is_available",
+        "rt_opencl_mem_alloc",
+        "rt_opencl_mem_free",
+        "rt_opencl_platform_count",
+        "rt_opencl_read_buffer",
+        "rt_opencl_release_context",
+        "rt_opencl_release_kernel",
+        "rt_opencl_release_program",
+        "rt_opencl_release_queue",
+        "rt_opencl_set_kernel_arg_buffer",
+        "rt_opencl_set_kernel_arg_i64",
+        "rt_opencl_write_buffer",
+        "rt_opencl_write_buffer_at"
+    ]
+
+fn allow_directx() -> [text]:
+    # DirectX adapter-identity shim. Windows-only API, unreachable in a SimpleOS guest.
+    [
+        "rt_directx_hardware_adapter_identity"
+    ]
+
+fn allow_host_gpu_queue() -> [text]:
+    # Host-side GPU submission queue used only by the host-tools build to record work for an out-of-guest GPU; the guest has no host queue to talk to.
+    [
+        "rt_host_gpu_queue_completed_count",
+        "rt_host_gpu_queue_drain",
+        "rt_host_gpu_queue_emit_payload_text",
+        "rt_host_gpu_queue_last_backend_handle",
+        "rt_host_gpu_queue_last_payload_hash",
+        "rt_host_gpu_queue_last_payload_size",
+        "rt_host_gpu_queue_last_payload_text",
+        "rt_host_gpu_queue_last_status",
+        "rt_host_gpu_queue_submitted_count"
+    ]
+
+fn allow_arm_virtio() -> [text]:
+    # aarch64 virtio-blk MMIO shims. This is the x86_64 guest kernel; the aarch64 transport is not wired here. NOTE: these become correctness-class the moment an aarch64 guest is built -- retire them from this list then.
+    # MUST stay identical to the exact-name `rt_arm_virtio_blk_*` arm in
+    # `simpleos_rt_symbol_is_optional_backend`
+    # (src/compiler/70.backend/backend/llvm_native_link.spl). Both lists are the
+    # MMIO transport / capability probes ONLY. The sector data path
+    # (_dma_base, _prepare_read, _read_sector_direct, _sector_bytes, _status_u8,
+    # _wait_completion, _read_prefix, _read_hello_smf) is deliberately absent
+    # from both: `virtio_blk_arm_read_sector_bytes` reads status 0 as SUCCESS
+    # (VIRTIO_BLK_S_OK), so a zero-returning fake reports a successful read of
+    # an empty buffer and FAT32 metadata mis-parses silently. Never add one of
+    # those here to make a build pass -- define the symbol instead.
+    # doc/08_tracking/bug/rt_arm_virtio_blk_prefix_allowlist_defeats_fabrication_guard_2026-07-28.md
+    [
+        "rt_arm_virtio_blk_configure_queue",
+        "rt_arm_virtio_blk_mmio_read_u32",
+        "rt_arm_virtio_blk_mmio_read_u64",
+        "rt_arm_virtio_blk_mmio_write_u32",
+        "rt_arm_virtio_blk_queue_base",
+        "rt_arm_virtio_blk_set_mmio_base"
+    ]
+
+fn debt_sqlite() -> [text]:
+    # OUTSTANDING: SQLite bindings are fabricated. Any guest DB call silently succeeds and returns nil.
+    [
+        "rt_sqlite_begin",
+        "rt_sqlite_bind_float",
+        "rt_sqlite_bind_int",
+        "rt_sqlite_bind_null",
+        "rt_sqlite_bind_text",
+        "rt_sqlite_changes",
+        "rt_sqlite_commit",
+        "rt_sqlite_error_message",
+        "rt_sqlite_execute",
+        "rt_sqlite_finalize",
+        "rt_sqlite_prepare",
+        "rt_sqlite_query_done",
+        "rt_sqlite_query_next",
+        "rt_sqlite_reset",
+        "rt_sqlite_rollback"
+    ]
+
+fn debt_opengl() -> [text]:
+    # OUTSTANDING: OpenGL draw calls are fabricated no-ops -- a guest GL path would draw nothing.
+    [
+        "rt_opengl_bind_fbo",
+        "rt_opengl_clear",
+        "rt_opengl_clear_scissor",
+        "rt_opengl_create_fbo",
+        "rt_opengl_destroy",
+        "rt_opengl_destroy_fbo",
+        "rt_opengl_draw_circle",
+        "rt_opengl_draw_gradient_rect",
+        "rt_opengl_draw_image",
+        "rt_opengl_draw_line",
+        "rt_opengl_draw_rect",
+        "rt_opengl_draw_rounded_rect",
+        "rt_opengl_draw_triangle",
+        "rt_opengl_flush",
+        "rt_opengl_init",
+        "rt_opengl_is_available",
+        "rt_opengl_read_pixels",
+        "rt_opengl_set_scissor"
+    ]
+
+fn debt_webgpu() -> [text]:
+    # OUTSTANDING: WebGPU surface/init fabricated.
+    [
+        "rt_webgpu_create_surface",
+        "rt_webgpu_init",
+        "rt_webgpu_is_available"
+    ]
+
+fn debt_intel_engine2d() -> [text]:
+    # OUTSTANDING: Intel Engine2D argument setters are fabricated no-ops.
+    [
+        "rt_intel_engine2d_download_pixels",
+        "rt_intel_engine2d_set_args_blit",
+        "rt_intel_engine2d_set_args_circle",
+        "rt_intel_engine2d_set_args_clear",
+        "rt_intel_engine2d_set_args_gradient",
+        "rt_intel_engine2d_set_args_line",
+        "rt_intel_engine2d_set_args_rect",
+        "rt_intel_engine2d_set_args_rounded_rect",
+        "rt_intel_engine2d_set_args_triangle",
+        "rt_intel_engine2d_upload_host_buf",
+        "rt_intel_engine2d_upload_pixels"
+    ]
+
+fn debt_rocm_engine2d() -> [text]:
+    # OUTSTANDING: ROCm Engine2D pixel upload/download fabricated. Named rt_engine2d_rocm_* -- NOT matched by an rt_rocm_ prefix, which is exactly why this list is by exact name.
+    [
+        "rt_engine2d_rocm_download_pixels",
+        "rt_engine2d_rocm_upload_host_buf",
+        "rt_engine2d_rocm_upload_pixels"
+    ]
+
+fn debt_font() -> [text]:
+    # OUTSTANDING and high risk: glyph lookup, metrics and bitmaps all fabricated -- guest text renders as nothing. Sibling class to the rt_engine2d_simd_* blank-screen bug already fixed.
+    [
+        "rt_font_bitmap_free",
+        "rt_font_bitmap_get_pixel",
+        "rt_font_bitmap_height",
+        "rt_font_bitmap_width",
+        "rt_font_bitmap_xoff",
+        "rt_font_bitmap_yoff",
+        "rt_font_free",
+        "rt_font_glyph_advance",
+        "rt_font_glyph_bitmap",
+        "rt_font_glyph_index",
+        "rt_font_load",
+        "rt_font_load_bytes"
+    ]
+
+fn debt_simd() -> [text]:
+    # OUTSTANDING: SIMD capability probes report false and the NEON hit counter reports 0. Adjacent to the rt_engine2d_simd_* blitters that caused the blank screen -- do NOT collapse these into an rt_simd_ prefix rule.
+    [
+        "rt_gui_simd_fill_enabled",
+        "rt_simd_engine2d_neon_hits",
+        "rt_simd_has_avx2",
+        "rt_simd_has_neon",
+        "rt_simd_has_rvv",
+        "rt_simd_has_sse"
+    ]
+
+fn debt_tls() -> [text]:
+    # OUTSTANDING: TLS client connect/read/write fabricated. Security-relevant: a guest TLS connect appears to succeed.
+    [
+        "rt_tls_client_close",
+        "rt_tls_client_connect",
+        "rt_tls_client_read",
+        "rt_tls_client_write"
+    ]
+
+fn debt_sync() -> [text]:
+    # OUTSTANDING: mutexes are no-ops and the remaining barriers/safepoint are inert. Same class as the MMIO-ordering barrier bug already fixed.
+    [
+        "rt_load_barrier",
+        "rt_mutex_lock",
+        "rt_mutex_new",
+        "rt_mutex_unlock",
+        "rt_pool_safepoint",
+        "rt_store_barrier"
+    ]
+
+fn debt_core() -> [text]:
+    # OUTSTANDING core runtime: rt_free leaks, rt_string_join returns nil, rt_env_get/rt_file_exists always report absent, the flushes drop buffered output. rt_stdout_flush/rt_stderr_flush are strong T aliases at one address -- proof that strong binding is not evidence of a real body.
+    [
+        "rt_cstring_to_text",
+        "rt_dma_bytes_to_array",
+        "rt_env_get",
+        "rt_file_exists",
+        "rt_file_hash_sha256",
+        "rt_free",
+        "rt_is_interpreter_runtime",
+        "rt_log_target_semihost_write_bytes",
+        "rt_stderr_flush",
+        "rt_stdout_flush",
+        "rt_string_join"
+    ]
+
+# Weak-bound `rt_*` symbols whose body is REAL. Weak binding here is a
+# deliberate override point, not a fabrication -- each body was disassembled
+# and confirmed to do real work. They are listed separately from the
+# fabricated set on purpose: if any of them ever degrades into a constant
+# return it moves into the fabricated set, where it is NOT allowlisted, and
+# this spec fails. That is the fail-open this split exists to close.
+fn allow_weak_real_bodies() -> [text]:
+    [
+        "rt_memcpy",
+        "rt_memset",
+        "rt_dma_alloc",
+        "rt_dma_phys_of"
+    ]
+
+fn fabrication_allowlist() -> [text]:
+    allow_vulkan() + allow_cuda() + allow_metal() + allow_rocm() +
+        allow_oneapi() + allow_opencl() + allow_directx() +
+        allow_host_gpu_queue() + allow_arm_virtio() +
+        debt_sqlite() + debt_opengl() + debt_webgpu() +
+        debt_intel_engine2d() + debt_rocm_engine2d() + debt_font() +
+        debt_simd() + debt_tls() + debt_sync() + debt_core()
+
+# ---------------------------------------------------------------- helpers
+
+fn tool_available(tool: text) -> bool:
+    val result = rt_process_run(tool, ["--version"])
+    result.2 == 0
+
+# Collapse runs of whitespace so nm/objdump column padding stops mattering.
+fn squeeze(raw: text) -> text:
+    var kept: [text] = []
+    for part in raw.replace("\t", " ").split(" "):
+        if part != "":
+            kept = kept.push(part)
+    kept.join(" ")
+
+fn membership_blob(names: [text]) -> text:
+    " " + names.join(" ") + " "
+
+fn blob_has(blob: text, name: text) -> bool:
+    (blob.index_of(" " + name + " ")) >= 0
+
+# Pull the mnemonic out of an `objdump -d` line, which looks like
+#   "  8009120:\t55                   \tpush   %rbp"
+# Byte-continuation lines have only two tab fields and carry no mnemonic.
+fn instruction_of(line: text) -> text:
+    val parts = line.split("\t")
+    if parts.len() < 3:
+        return ""
+    squeeze(parts[parts.len() - 1])
+
+# True when the instruction cannot make the function do anything observable:
+# frame setup/teardown, stack adjustment, a dead spill of an argument into the
+# frame that is never read back, or loading a constant into the return
+# register. Anything else -- a call, a branch, a real load, arithmetic on data
+# -- means the function does real work.
+fn is_inert(ins: text) -> bool:
+    if ins == "ret":
+        return true
+    if ins == "leave":
+        return true
+    if ((ins == "endbr64") or (ins == "endbr32")):
+        return true
+    if ins.starts_with("nop"):
+        return true
+    if ins.starts_with("int3"):
+        return true
+    if ((ins.starts_with("push %r")) or (ins.starts_with("pop %r"))):
+        return true
+    if ins == "mov %rsp,%rbp":
+        return true
+    if ((ins == "xor %eax,%eax") or (ins == "xor %rax,%rax")):
+        return true
+    if (ins.starts_with("mov $0x") and (ins.ends_with(",%eax") or ins.ends_with(",%rax"))):
+        return true
+    if (ins.starts_with("movabs $0x") and ins.ends_with(",%rax")):
+        return true
+    if ((ins.starts_with("sub $0x") or ins.starts_with("add $0x")) and ins.ends_with(",%rsp")):
+        return true
+    # Dead argument spill: `mov %rdi,-0x8(%rbp)`.
+    if (ins.starts_with("mov %") and ins.ends_with("(%rbp)") and ((ins.index_of(",-0x")) >= 0)):
+        return true
+    false
+
+fn is_constant_return(elf: text, start: i64, size: i64) -> bool:
+    val stop = start + size
+    val result = rt_process_run("objdump",
+        ["-m", OBJDUMP_ARCH, "-d",
+         "--start-address=" + start.to_text(),
+         "--stop-address=" + stop.to_text(),
+         elf])
+    if result.2 != 0:
+        return false
+    var seen = 0
+    for line in result.0.split("\n"):
+        val ins = instruction_of(line)
+        if ins == "":
+            continue
+        seen = seen + 1
+        if not is_inert(ins):
+            return false
+    # An empty disassembly proves nothing, so never call it fabricated.
+    seen > 0
+
+# ---------------------------------------------------------------- the spec
+
+describe "SimpleOS guest kernel fabricated rt_* symbol guard":
+    val elf = KERNEL_ELF
+    val have_nm: bool = tool_available("nm")
+    val have_objdump: bool = tool_available("objdump")
+    val have_elf: bool = rt_file_exists(elf)
+
+    if not have_elf:
+        skip("rejects any fabricated rt_* symbol outside the allowlist",
+            "no prebuilt guest kernel at " + elf +
+            " -- build it with scripts/check/check-simpleos-wm-fullscreen-evidence.shs;" +
+            " NOT passing by default")
+        skip("keeps weak-bound rt_* symbols confined to deliberate override points",
+            "no prebuilt guest kernel at " + elf)
+    else:
+        if ((not have_nm) or (not have_objdump)):
+            skip("rejects any fabricated rt_* symbol outside the allowlist",
+                "binutils nm/objdump not on PATH -- cannot classify symbol bodies;" +
+                " NOT passing by default")
+            skip("keeps weak-bound rt_* symbols confined to deliberate override points",
+                "binutils nm/objdump not on PATH")
+        else:
+            # nm -t d prints value and size in decimal, which objdump's
+            # --start-address/--stop-address accept directly.
+            val nm_result = rt_process_run("nm", ["-S", "-t", "d", elf])
+            val allow_fabricated = membership_blob(fabrication_allowlist())
+            val allow_weak = membership_blob(allow_weak_real_bodies())
+
+            var inspected = 0
+            var fabricated_total = 0
+            var new_fabricated: [text] = []
+            var new_weak: [text] = []
+
+            for raw_line in nm_result.0.split("\n"):
+                val parts = squeeze(raw_line).split(" ")
+                # Defined symbols print 4 columns: value size type name.
+                # Undefined ones print fewer and are irrelevant here.
+                if parts.len() != 4:
+                    continue
+                val name = parts[3]
+                if not name.starts_with("rt_"):
+                    continue
+                val binding = parts[2]
+                val start = parts[0].to_i64() ?? -1
+                val size = parts[1].to_i64() ?? -1
+                if ((start < 0) or (size <= 0)):
+                    continue
+
+                var fabricated: bool = false
+                if size <= MAX_FABRICATED_BODY_BYTES:
+                    inspected = inspected + 1
+                    fabricated = is_constant_return(elf, start, size)
+
+                if fabricated:
+                    fabricated_total = fabricated_total + 1
+                    if not blob_has(allow_fabricated, name):
+                        new_fabricated = new_fabricated.push(name)
+                else:
+                    if binding == "W":
+                        if not blob_has(allow_weak, name):
+                            new_weak = new_weak.push(name)
+
+            it "proves it actually inspected the kernel image":
+                # Without this the two assertions below could pass on an empty
+                # symbol table -- the same do-nothing pass this spec exists to
+                # forbid.
+                print "    audited image: {elf}"
+                print "    rt_* bodies disassembled: {inspected}, fabricated: {fabricated_total}"
+                expect(nm_result.2).to_equal(0)
+                expect(inspected).to_be_greater_than(0)
+                expect(fabricated_total).to_be_greater_than(0)
+
+            it "rejects any fabricated rt_* symbol outside the allowlist":
+                # Subset assertion, never a count: a NEW fabrication fails here
+                # while a fixed one can be deleted from the allowlist alone.
+                expect(new_fabricated.join(" ")).to_equal("")
+
+            it "keeps weak-bound rt_* symbols confined to deliberate override points":
+                expect(new_weak.join(" ")).to_equal("")

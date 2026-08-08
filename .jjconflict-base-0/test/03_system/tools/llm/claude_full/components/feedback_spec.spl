@@ -1,0 +1,43 @@
+"""
+# Claude Full Feedback Component
+
+Checks feedback prompt, validation, transcript consent, and submit lifecycle helpers.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.Feedback.*
+
+describe "Claude full feedback component":
+    it "should validate rating contact and transcript consent":
+        step("Build an open feedback state")
+        val empty = FeedbackState.open("session-1", "transcript-1")
+        expect(feedbackPromptVisible(empty)).to_equal(true)
+        expect(feedbackCanSubmit(empty)).to_equal(false)
+        expect(feedbackSubmitDisabledReason(empty)).to_contain("rating is required")
+
+        step("Normalize contact and enable submit")
+        val ready = empty.withRating(5).withComment(" Great answer ").withContact("DEV@EXAMPLE.COM").withTranscriptSharing(true)
+        expect(ready.contact).to_equal("dev@example.com")
+        expect(feedbackCanSubmit(ready)).to_equal(true)
+        expect(ready.payload().summary()).to_contain("transcript=shared")
+
+    it "should model submit success and retryable failure":
+        step("Submit valid feedback")
+        val ready = FeedbackState.open("session-2", "transcript-2").withRating(4).withComment("useful")
+        val submitted = submitFeedback(ready)
+        expect(submitted.submitted).to_equal(true)
+        expect(feedbackStatus(submitted)).to_equal("submitted")
+        expect(submitted.summary()).to_contain("Feedback sent")
+
+        step("Surface retryable failure")
+        val failed = failFeedbackSubmit(ready.markSubmitting(), "network unavailable")
+        expect(failed.submitting).to_equal(false)
+        expect(feedbackStatus(failed)).to_equal("error")
+        expect(failed.render()).to_contain("network unavailable")
+
+    it "should expose modeled source parity":
+        step("Check source helpers")
+        expect(feedbackModeledSourceFile()).to_equal("src/components/Feedback.tsx")
+        expect(feedbackSourceLinesModeled()).to_equal(591)
+        expect(feedbackModeledStateCount()).to_equal(4)
+        expect(feedbackModeledActionCount()).to_equal(5)

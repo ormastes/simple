@@ -1,0 +1,56 @@
+# Regression: GPU status wrappers must not accept POSITIVE CUDA errors as success.
+#
+# ORACLE (external -- CUDA Driver API `enum CUresult` in cuda.h, not taken from
+# the code under test):
+#     CUDA_SUCCESS                = 0
+#     CUDA_ERROR_INVALID_VALUE    = 1
+#     CUDA_ERROR_OUT_OF_MEMORY    = 2
+#     CUDA_ERROR_NOT_INITIALIZED  = 3
+# Every error enumerator is non-zero, so "did it fail?" is `status != 0`.
+#
+# The runtime hooks behind these wrappers are inconsistent about sign: some
+# negate the driver status (cuda_driver_status()), some return it raw. Before
+# this fix each wrapper inlined its own `result < 0` test, so every raw-positive
+# driver failure was handed to callers as Ok(()). Reproduced live on a 2x NVIDIA
+# box: cuda_init() returned 3 while gpu_init() returned Ok.
+
+use std.gc_async_mut.gpu_ops.{gpu_status, gpu_free}
+use std.gc_async_mut.gpu_types.{GpuPtr, GpuError}
+
+fn is_ok(r: Result<(), GpuError>) -> bool:
+    match r:
+        case Ok(_):
+            true
+        case Err(e):
+            false
+
+describe "gpu_ops CUDA status sign":
+    it "treats CUDA_SUCCESS (0) as success":
+        # Control: passes both before and after the fix. Proves the predicate is
+        # not simply reporting failure for everything.
+        expect(is_ok(gpu_status(0))).to_equal(true)
+
+    it "treats a POSITIVE CUresult as failure":
+        # The regression. `< 0` accepted all three of these as success.
+        expect(is_ok(gpu_status(1))).to_equal(false)
+        expect(is_ok(gpu_status(2))).to_equal(false)
+        expect(is_ok(gpu_status(3))).to_equal(false)
+
+    it "treats a NEGATED CUresult as failure":
+        # Control: passes both before and after the fix. The other runtime hooks
+        # return the status pre-negated and must keep working.
+        expect(is_ok(gpu_status(-1))).to_equal(false)
+        expect(is_ok(gpu_status(-3))).to_equal(false)
+
+    it "preserves the reported status code in the error":
+        match gpu_status(3):
+            case Ok(_):
+                expect("no error raised for CUDA_ERROR_NOT_INITIALIZED").to_equal("an error")
+            case Err(e):
+                expect(e.code).to_equal(3)
+
+    it "still succeeds on the null-pointer short circuit (control)":
+        # Control: gpu_free short-circuits before any driver call, so this is Ok
+        # in both directions and shows the suite is not uniformly red.
+        val nullp = GpuPtr(device_ptr: 0, size: 0, is_valid: false)
+        expect(is_ok(gpu_free(nullp))).to_equal(true)

@@ -1,0 +1,310 @@
+#!/bin/sh
+set -eu
+
+# check-simpleos-wm-host-seam-evidence.shs
+#
+# Proves the WM host seam's portability contract on SimpleOS:
+#
+#     if Simple 2D (surface + event delivery) runs on SimpleOS,
+#     then the WM runs on SimpleOS.
+#
+# It boots SimpleOS on REAL FIRMWARE (OVMF pflash -> GRUB EFI app -> multiboot),
+# per .claude/rules/board-runnable.md. QEMU `-kernel` pass semantics and
+# `isa-debug-exit` are FORBIDDEN and are not used anywhere below: the guest's
+# verdict is read from the serial log and from an external QMP screendump, never
+# from a QEMU exit code.
+#
+# What is actually verified (each is a value a broken path cannot produce):
+#   1. `wm_host_2d_frame` — the portable WM frame step, unmodified, with no
+#      platform branch in it — runs to completion over `WmHost2dSimpleOs`.
+#   2. Pixels are read back OUT of the hardware framebuffer in-guest
+#      (`read_pixel` -> `mmio_read32`) and equal the exact ARGB written.
+#   3. An external QMP screendump of the QEMU display is that same exact
+#      colour, so the evidence does not depend on the guest telling the truth.
+#   4. Real keystrokes injected over QMP arrive through `event_poll` as PS/2
+#      bytes, so event delivery is proven live rather than assumed.
+#
+# The unbacked routing (`wm_host_2d_for("simpleos")`) is asserted to still
+# REFUSE in the same run: routing with no framebuffer in it cannot produce a
+# surface, and a green frame from it would mean the honesty rule had been lost.
+#
+# Usage:
+#   sh scripts/check/check-simpleos-wm-host-seam-evidence.shs
+#
+# Env knobs:
+#   SIMPLEOS_SEAM_SKIP_BUILD=1   reuse the existing kernel ELF
+#   SIMPLEOS_SEAM_EXPECT_ARGB    expected ARGB (default 4281171410 = 0xFF2D7DD2)
+#   OVMF_CODE / OVMF_VARS_SRC    firmware paths
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_host_seam}"
+KERNEL_PATH="${SIMPLEOS_SEAM_KERNEL:-build/os/simpleos_wm_host_seam.elf}"
+ENTRY_PATH="examples/09_embedded/simple_os/arch/x86_64/wm_host_seam_entry.spl"
+BACKEND_PATH="src/os/services/wm/wm_host_2d_simpleos.spl"
+SEAM_PATH="src/lib/nogc_async_mut/wm/host.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/release/x86_64-unknown-linux-gnu/simple}"
+EXPECT_ARGB="${SIMPLEOS_SEAM_EXPECT_ARGB:-4281171410}"
+EXPECT_R=45
+EXPECT_G=125
+EXPECT_B=210
+MARKER_TIMEOUT_SECS="${SIMPLEOS_SEAM_MARKER_TIMEOUT_SECS:-120}"
+
+SERIAL_LOG="$BUILD_DIR/serial.log"
+BUILD_LOG="$BUILD_DIR/native-build.log"
+QMP_LOG="$BUILD_DIR/qmp.log"
+PPM_PATH="$ROOT_DIR/$BUILD_DIR/seam-display.ppm"
+# AF_UNIX paths are capped at ~108 bytes; keep this short and outside the tree.
+QMP_SOCKET="${SIMPLEOS_SEAM_QMP_SOCKET:-/tmp/simpleos_seam_$$.sock}"
+QEMU_PID=""
+
+mkdir -p "$BUILD_DIR"
+
+verdict() {
+    printf 'simpleos_wm_host_seam_status=%s\n' "$1"
+    printf 'simpleos_wm_host_seam_reason=%s\n' "$2"
+    printf 'SIMPLEOS WM HOST SEAM VERDICT: %s — %s\n' "$1" "$2"
+}
+
+cleanup() {
+    if [ -n "$QEMU_PID" ]; then
+        kill "$QEMU_PID" >/dev/null 2>&1 || true
+    fi
+    rm -f "$QMP_SOCKET"
+}
+trap cleanup EXIT INT TERM
+
+fail_now() {
+    verdict fail "$1"
+    exit 1
+}
+
+# --- Preconditions ---------------------------------------------------------
+command -v "$QEMU_BIN" >/dev/null 2>&1 || fail_now "qemu-missing"
+command -v grub-mkstandalone >/dev/null 2>&1 || fail_now "grub-mkstandalone-missing"
+command -v nc >/dev/null 2>&1 || fail_now "nc-missing"
+[ -x "$SIMPLE_BIN" ] || fail_now "simple-binary-missing"
+[ -f "$ENTRY_PATH" ] || fail_now "entry-missing"
+[ -f "$BACKEND_PATH" ] || fail_now "backend-missing"
+
+# The seam must still carry the routing this lane depends on. Files in this
+# repo have been silently reverted mid-session, so check content, not mtime.
+grep -q 'wm_host_2d_for_backed' "$SEAM_PATH" || fail_now "seam-missing-wm_host_2d_for_backed"
+grep -q 'ps2_event_source_init' "$BACKEND_PATH" || fail_now "backend-missing-ps2-init"
+
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+[ -f "$OVMF_CODE" ] || fail_now "ovmf-code-missing"
+[ -f "$OVMF_VARS_SRC" ] || fail_now "ovmf-vars-missing"
+
+objcopy_prefix() {
+    for prefix in /usr/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /opt/homebrew/opt/llvm/bin; do
+        if [ -x "$prefix/llvm-objcopy" ]; then
+            printf '%s\n' "$prefix"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# --- Build the guest kernel ------------------------------------------------
+need_build=0
+if [ "${SIMPLEOS_SEAM_SKIP_BUILD:-0}" = "1" ]; then
+    need_build=0
+elif [ ! -f "$KERNEL_PATH" ]; then
+    need_build=1
+elif [ "$ENTRY_PATH" -nt "$KERNEL_PATH" ] || [ "$BACKEND_PATH" -nt "$KERNEL_PATH" ] || [ "$SEAM_PATH" -nt "$KERNEL_PATH" ]; then
+    need_build=1
+fi
+
+if [ "$need_build" = "1" ]; then
+    obj_prefix="$(objcopy_prefix || true)"
+    [ -n "$obj_prefix" ] || fail_now "llvm-objcopy-missing"
+    mkdir -p build/os/generated/generated
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'EOF'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+EOF
+    set +e
+    PATH="$obj_prefix:$PATH" \
+    SIMPLE_BOOTSTRAP=1 \
+    SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_BINARY="$SIMPLE_BIN" \
+        "$SIMPLE_BIN" native-build \
+            --source build/os/generated \
+            --source src/os \
+            --source src/lib \
+            --source examples/09_embedded/simple_os \
+            --backend cranelift \
+            --cpu x86-64-v1 \
+            --opt-level=none \
+            --log off \
+            --timeout "${SIMPLEOS_SEAM_BUILD_TIMEOUT_SECS:-870}" \
+            --entry-closure \
+            --entry "$ENTRY_PATH" \
+            --target x86_64-unknown-none \
+            -o "$KERNEL_PATH" \
+            --linker-script "$LINKER_SCRIPT" >"$BUILD_LOG" 2>&1
+    build_code=$?
+    set -e
+    [ "$build_code" -eq 0 ] && [ -f "$KERNEL_PATH" ] || fail_now "native-build-failed"
+fi
+
+# --- Package as a UEFI boot app (real firmware, no -kernel) ----------------
+UEFI_BUILD="$BUILD_DIR/uefi"
+ESP="$UEFI_BUILD/esp"
+OVMF_VARS="$UEFI_BUILD/OVMF_VARS_4M.fd"
+rm -rf "$UEFI_BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat >"$UEFI_BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS WM host-seam evidence (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$ESP/EFI/BOOT/BOOTX64.EFI" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$UEFI_BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL_PATH" >"$BUILD_DIR/grub.log" 2>&1 \
+    || fail_now "grub-mkstandalone-failed"
+[ -f "$ESP/EFI/BOOT/BOOTX64.EFI" ] || fail_now "no-BOOTX64.EFI"
+
+# --- Boot on OVMF pflash ---------------------------------------------------
+rm -f "$SERIAL_LOG" "$PPM_PATH" "$QMP_SOCKET"
+"$QEMU_BIN" \
+    -no-user-config \
+    -monitor none \
+    -net none \
+    -machine q35 \
+    -cpu qemu64 \
+    -m 2G \
+    -serial "file:$SERIAL_LOG" \
+    -display none \
+    -no-reboot \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -vga std \
+    -qmp "unix:$QMP_SOCKET,server,nowait" \
+    >"$BUILD_DIR/qemu.stdout.log" 2>"$BUILD_DIR/qemu.stderr.log" &
+QEMU_PID=$!
+
+i=0
+while [ ! -S "$QMP_SOCKET" ] && [ "$i" -lt 200 ]; do
+    kill -0 "$QEMU_PID" >/dev/null 2>&1 || fail_now "qemu-exited-before-qmp"
+    i=$((i + 1))
+    sleep 0.1
+done
+[ -S "$QMP_SOCKET" ] || fail_now "qmp-socket-timeout"
+
+# Wait for the guest to reach the input loop.
+waited=0
+while [ "$waited" -lt "$MARKER_TIMEOUT_SECS" ]; do
+    if grep -aq 'awaiting-input' "$SERIAL_LOG" 2>/dev/null; then
+        break
+    fi
+    kill -0 "$QEMU_PID" >/dev/null 2>&1 || fail_now "qemu-exited-before-input-marker"
+    waited=$((waited + 1))
+    sleep 1
+done
+grep -aq 'awaiting-input' "$SERIAL_LOG" 2>/dev/null || fail_now "awaiting-input-marker-timeout"
+
+# --- Inject real keystrokes and capture the display over QMP ---------------
+{
+    printf '{"execute":"qmp_capabilities"}\n'
+    sleep 1
+    for k in a b c spc ret; do
+        printf '{"execute":"send-key","arguments":{"keys":[{"type":"qcode","data":"%s"}]}}\n' "$k"
+        sleep 0.5
+    done
+    printf '{"execute":"screendump","arguments":{"filename":"%s"}}\n' "$PPM_PATH"
+    sleep 4
+} | timeout 40 nc -U "$QMP_SOCKET" >"$QMP_LOG" 2>&1 || true
+
+grep -q '"error"' "$QMP_LOG" && fail_now "qmp-command-error"
+[ -f "$PPM_PATH" ] || fail_now "screendump-produced-no-ppm"
+
+# --- Wait for the guest's own verdict --------------------------------------
+waited=0
+while [ "$waited" -lt "$MARKER_TIMEOUT_SECS" ]; do
+    if grep -aq 'SEAM PASSED\|SEAM FAILED' "$SERIAL_LOG" 2>/dev/null; then
+        break
+    fi
+    kill -0 "$QEMU_PID" >/dev/null 2>&1 || break
+    waited=$((waited + 1))
+    sleep 1
+done
+
+# --- Assertions ------------------------------------------------------------
+grep -aq '\[grub-uefi\] multiboot loading' "$SERIAL_LOG" || fail_now "no-uefi-grub-boot-evidence"
+grep -aq '\[BOOT64\] call _start' "$SERIAL_LOG" || fail_now "no-kernel-entry-evidence"
+
+# The unbacked routing must still refuse.
+grep -aq 'unbacked surface_ok=0' "$SERIAL_LOG" || fail_now "unbacked-routing-did-not-refuse"
+# The backed routing must report real backing.
+grep -aq 'backing kind=mmio-scanout' "$SERIAL_LOG" || fail_now "backend-reported-no-real-backing"
+# The portable WM frame must complete over the seam.
+grep -aq 'steps=acquire(acquired) present(presented)' "$SERIAL_LOG" || fail_now "wm-frame-did-not-complete"
+grep -aq 'release(released)' "$SERIAL_LOG" || fail_now "wm-frame-did-not-release"
+# In-guest framebuffer readback must equal the exact ARGB written.
+grep -aq "pixel-verdict pass value=$EXPECT_ARGB" "$SERIAL_LOG" || fail_now "in-guest-pixel-readback-mismatch"
+# Real keystrokes must have arrived through event_poll.
+grep -aq '\[seam\] event n=1' "$SERIAL_LOG" || fail_now "no-event-delivered-through-seam"
+grep -aq '\[seam\] contract simple-2d-runs=true wm-runs=true' "$SERIAL_LOG" || fail_now "guest-did-not-affirm-contract"
+grep -aq 'SEAM PASSED' "$SERIAL_LOG" || fail_now "guest-verdict-not-passed"
+
+# --- External pixel evidence: the QMP screendump ---------------------------
+# PPM P6 header is "P6\n<w> <h>\n255\n". Read geometry, then sample three
+# pixels far apart so one stuck word cannot fake a full-surface write.
+ppm_geom="$(head -c 32 "$PPM_PATH" | tr '\n' ' ' | awk '{print $2, $3}')"
+ppm_w="$(printf '%s' "$ppm_geom" | cut -d' ' -f1)"
+ppm_h="$(printf '%s' "$ppm_geom" | cut -d' ' -f2)"
+[ "$ppm_w" -gt 0 ] 2>/dev/null || fail_now "ppm-unreadable"
+hdr_len=$(( 3 + ${#ppm_w} + 1 + ${#ppm_h} + 1 + 4 ))
+
+sample_px() {
+    off=$(( hdr_len + ( $2 * ppm_w + $1 ) * 3 ))
+    od -An -tu1 -j "$off" -N 3 "$PPM_PATH" | tr -s ' ' | sed 's/^ //'
+}
+p_tl="$(sample_px 0 0)"
+p_mid="$(sample_px $(( ppm_w / 2 )) $(( ppm_h / 2 )))"
+p_br="$(sample_px $(( ppm_w - 1 )) $(( ppm_h - 1 )))"
+want="$EXPECT_R $EXPECT_G $EXPECT_B"
+[ "$p_tl" = "$want" ] || fail_now "ppm-top-left-mismatch:$p_tl"
+[ "$p_mid" = "$want" ] || fail_now "ppm-middle-mismatch:$p_mid"
+[ "$p_br" = "$want" ] || fail_now "ppm-bottom-right-mismatch:$p_br"
+
+ppm_sha="$(sha256sum "$PPM_PATH" | cut -d' ' -f1)"
+event_total="$(grep -a 'event-total' "$SERIAL_LOG" | tail -1)"
+
+printf 'simpleos_wm_host_seam_firmware=ovmf-pflash-grub-efi-multiboot\n'
+printf 'simpleos_wm_host_seam_kernel_flag_used=false\n'
+printf 'simpleos_wm_host_seam_isa_debug_exit_used=false\n'
+printf 'simpleos_wm_host_seam_ppm=%s\n' "$PPM_PATH"
+printf 'simpleos_wm_host_seam_ppm_geometry=%sx%s\n' "$ppm_w" "$ppm_h"
+printf 'simpleos_wm_host_seam_ppm_rgb=%s\n' "$p_tl"
+printf 'simpleos_wm_host_seam_ppm_sha256=%s\n' "$ppm_sha"
+printf 'simpleos_wm_host_seam_argb=%s\n' "$EXPECT_ARGB"
+printf 'simpleos_wm_host_seam_events=%s\n' "$event_total"
+verdict pass "wm-frame-ran-over-simpleos-seam-with-verified-pixels-and-live-events"

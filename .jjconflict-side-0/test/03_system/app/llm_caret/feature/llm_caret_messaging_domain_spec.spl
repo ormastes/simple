@@ -1,0 +1,240 @@
+"""# LLM Caret Messaging Domain Contract
+
+## Overview
+
+This executable manual verifies the transport-neutral messaging model and the
+pure application policies that are available today. It demonstrates stable
+agent naming, canonical commands and mentions, deterministic routing, bounded
+previous-message context, truthful receipt labels, loop prevention, and
+capability-driven fallback.
+
+This is deliberately narrower than the complete messaging feature. It does not
+claim primitive server, PureDatabase durability, email enrollment, hooks, MCP,
+plugin installation, or live-platform interoperability evidence. Those rows
+remain blocked in the system-test plan until their real production endpoints
+exist; no simulator result may promote them to PASS.
+
+**Requirements:** `doc/02_requirements/feature/llm_caret_messaging.md`
+
+**Plan:** `doc/03_plan/sys_test/llm_caret_messaging.md`
+
+**Design:** `doc/05_design/app/tools/llm_caret_messaging.md`
+
+**Research:** `doc/01_research/app/llm_caret/messaging_platforms.md`
+
+## Syntax and examples
+
+The visible manual uses the frozen phrases `Create and bind a room`, `Route a
+message to an agent`, `Inject the bounded context bundle`, and `Observe task
+and receipt transitions`. Each scenario calls a public production function and
+asserts its concrete result with canonical SSpec matchers. Fixtures create
+canonical `RoomMessage` and `RouteCandidate` values only; they do not replace
+the behavior under test.
+
+Receipt examples always pair state with evidence. A local cursor renders as
+`[read:local]`, native evidence as `[read:native]`, successful agent injection
+as `[consumed]`, terminal handling as `[handled]`, and delivery failure as
+`[delivery-failed]`. Capability examples select native, emulated, primitive
+sidecar, or an exact unsupported error without branching on a platform name.
+
+## Evidence boundary
+
+The executable source imports only `messaging/domain` and
+`messaging/application` modules. Passing scenarios therefore prove those pure
+contracts. They do not prove network delivery, persistence across a process
+restart, external human-read state, credential scope, webhook authentication,
+or third-party service compatibility.
+"""
+
+use std.spec
+use app.llm_caret.messaging.domain.capability.{CapabilityLevel, capability_level_name}
+use app.llm_caret.messaging.domain.model.{MessagingId, MessageOrigin, RoomMessage, AgentHandler, messaging_id, messaging_id_valid}
+use app.llm_caret.messaging.domain.receipt.{ReceiptState, ReceiptEvidence, MessageReceipt, receipt_tag}
+use app.llm_caret.messaging.application.naming.{agent_name_reserved, allocate_agent_name}
+use app.llm_caret.messaging.application.command.{mentions_agent, keyword_matches, parse_room_command}
+use app.llm_caret.messaging.application.policy.{RouteCandidate, plan_capability_fallback, route_message, select_previous_context, loop_guard}
+
+fn room_message(id: text, seq: i64, origin: MessageOrigin, body: text, thread: text, sender_agent: text, hops: i64) -> RoomMessage:
+    RoomMessage(
+        message_id: messaging_id("message", id),
+        workspace_id: messaging_id("workspace", "workspace-1"),
+        room_id: messaging_id("room", "development"),
+        room_seq: seq,
+        thread_root_id: thread,
+        reply_to_id: "",
+        sender_identity_id: messaging_id("identity", "identity-1"),
+        sender_agent_id: sender_agent,
+        origin: origin,
+        body: body,
+        mentions: [],
+        command: "",
+        audience: [],
+        external_ref: "",
+        correlation_id: "correlation-1",
+        causation_id: "",
+        hop_count: hops,
+        created_at: seq,
+        edited_at: 0
+    )
+
+fn candidate(id: text, handler: AgentHandler, mentioned: bool, replied: bool, assigned: bool, capability: bool, owner: bool) -> RouteCandidate:
+    RouteCandidate(agent_id: id, handler: handler, mentioned: mentioned, replied_to: replied, assigned: assigned, capability_match: capability, room_owner: owner)
+
+describe "LLM Caret messaging domain and application contracts":
+    describe "REQ-LLM-MSG-004: stable agent naming":
+        it "should retain an available explicit name":
+            step("Route a message to an agent")
+            expect(allocate_agent_name("Reviewer", "", "reviewer", "codex", [])).to_equal("reviewer")
+
+        it "should retain a persisted profile name across allocation":
+            step("Route a message to an agent")
+            expect(allocate_agent_name("", "Builder-Claude-07", "builder", "claude", [])).to_equal("builder-claude-07")
+
+        it "should reject reserved and colliding names with the lowest free ordinal":
+            step("Route a message to an agent")
+            expect(agent_name_reserved("SYSTEM")).to_equal(true)
+            expect(allocate_agent_name("system", "", "reviewer", "codex", ["reviewer-codex-01"])).to_equal("reviewer-codex-02")
+
+    describe "REQ-LLM-MSG-005 and REQ-LLM-MSG-008: mentions and previous-message commands":
+        it "should normalize canonical names and aliases":
+            step("Route a message to an agent")
+            expect(mentions_agent("Please ask @Reviewer-Codex-01", "reviewer-codex-01", [])).to_equal(true)
+            expect(mentions_agent("Please ask @review", "reviewer-codex-01", ["review"])).to_equal(true)
+            expect(keyword_matches("Can you INSPECT this?", ["inspect"])).to_equal(true)
+
+        it "should ignore escaped and fenced mentions":
+            step("Route a message to an agent")
+            expect(mentions_agent("\\@reviewer-codex-01", "reviewer-codex-01", [])).to_equal(false)
+            expect(mentions_agent("```\n@reviewer-codex-01\n```", "reviewer-codex-01", [])).to_equal(false)
+
+        it "should parse target and previous-message references":
+            step("Route a message to an agent")
+            val parsed = parse_room_command("/ask @reviewer ^ review this")
+            expect(parsed.name).to_equal("ask")
+            expect(parsed.target).to_equal("reviewer")
+            expect(parsed.reference).to_equal("^")
+            expect(parsed.body).to_equal("review this")
+
+    describe "REQ-LLM-MSG-006: deterministic main and subagent routing":
+        it "should prefer one explicit mention before every weaker signal":
+            step("Route a message to an agent")
+            val decision = route_message([
+                candidate("reviewer", AgentHandler.Subagent, true, false, false, false, false),
+                candidate("builder", AgentHandler.Main, false, false, true, true, true)
+            ])
+            expect(decision.agent_id).to_equal("reviewer")
+            expect(decision.reason).to_equal("mentioned")
+
+        it "should use the main handler when deterministic signals are absent":
+            step("Route a message to an agent")
+            val decision = route_message([candidate("builder", AgentHandler.Main, false, false, false, false, false)])
+            expect(decision.agent_id).to_equal("builder")
+            expect(decision.reason).to_equal("main_fallback")
+
+        it "should reject an ambiguous signal when no main fallback exists":
+            step("Route a message to an agent")
+            val decision = route_message([
+                candidate("one", AgentHandler.Subagent, true, false, false, false, false),
+                candidate("two", AgentHandler.Advisor, true, false, false, false, false)
+            ])
+            expect(decision.agent_id).to_equal("")
+            expect(decision.reason).to_equal("agent_unavailable")
+
+    describe "REQ-LLM-MSG-007: bounded previous context":
+        it "should include two prior relevant messages and the trigger in chronological order":
+            step("Inject the bounded context bundle")
+            val trigger = room_message("m-4", 4, MessageOrigin.Human, "trigger", "", "", 0)
+            val selected = select_previous_context([
+                room_message("m-1", 1, MessageOrigin.Human, "old", "", "", 0),
+                room_message("m-2", 2, MessageOrigin.Human, "previous one", "", "", 0),
+                room_message("m-3", 3, MessageOrigin.Human, "previous two", "", "", 0)
+            ], trigger, 2)
+            expect(selected.len()).to_equal(3)
+            expect(selected[0].message_id.value).to_equal("m-2")
+            expect(selected[2].message_id.value).to_equal("m-4")
+
+        it "should exclude status updates from room fallback context":
+            step("Inject the bounded context bundle")
+            val trigger = room_message("m-3", 3, MessageOrigin.Human, "trigger", "", "", 0)
+            val selected = select_previous_context([
+                room_message("m-1", 1, MessageOrigin.Human, "question", "", "", 0),
+                room_message("m-2", 2, MessageOrigin.AgentUpdate, "running", "", "builder", 0)
+            ], trigger, 2)
+            expect(selected.len()).to_equal(2)
+            expect(selected[0].message_id.value).to_equal("m-1")
+
+        it "should not include messages outside the trigger thread":
+            step("Inject the bounded context bundle")
+            val trigger = room_message("m-4", 4, MessageOrigin.Human, "trigger", "thread-a", "", 0)
+            val selected = select_previous_context([
+                room_message("m-1", 1, MessageOrigin.Human, "other", "thread-b", "", 0),
+                room_message("m-2", 2, MessageOrigin.Human, "same", "thread-a", "", 0)
+            ], trigger, 2)
+            expect(selected.len()).to_equal(2)
+            expect(selected[0].message_id.value).to_equal("m-2")
+
+    describe "REQ-LLM-MSG-003 and REQ-LLM-MSG-008: truthful receipt tags":
+        it "should distinguish local and native read evidence":
+            step("Observe task and receipt transitions")
+            val local = MessageReceipt(message_id: "m-1", identity_id: "human-1", state: ReceiptState.Read, evidence: ReceiptEvidence.LocalCursor, occurred_at: 1, detail: "")
+            val native = MessageReceipt(message_id: "m-1", identity_id: "human-1", state: ReceiptState.Read, evidence: ReceiptEvidence.Native, occurred_at: 2, detail: "")
+            expect(receipt_tag(local)).to_equal("[read:local]")
+            expect(receipt_tag(native)).to_equal("[read:native]")
+
+        it "should distinguish agent consumption from terminal handling":
+            step("Observe task and receipt transitions")
+            val consumed = MessageReceipt(message_id: "m-1", identity_id: "agent-1", state: ReceiptState.ConsumedByAgent, evidence: ReceiptEvidence.Synthetic, occurred_at: 1, detail: "")
+            val handled = MessageReceipt(message_id: "m-1", identity_id: "agent-1", state: ReceiptState.Handled, evidence: ReceiptEvidence.Synthetic, occurred_at: 2, detail: "")
+            expect(receipt_tag(consumed)).to_equal("[consumed]")
+            expect(receipt_tag(handled)).to_equal("[handled]")
+
+        it "should expose delivery failure without presenting it as read":
+            step("Observe task and receipt transitions")
+            val failed = MessageReceipt(message_id: "m-1", identity_id: "human-1", state: ReceiptState.Failed, evidence: ReceiptEvidence.Unknown, occurred_at: 1, detail: "rate limit")
+            expect(receipt_tag(failed)).to_equal("[delivery-failed]")
+
+    describe "REQ-LLM-MSG-014: loop prevention":
+        it "should allow a fresh human trigger":
+            step("Route a message to an agent")
+            val decision = loop_guard(room_message("m-1", 1, MessageOrigin.Human, "build", "", "", 0), "builder", false, 4, false)
+            expect(decision.allowed).to_equal(true)
+            expect(decision.reason).to_equal("ok")
+
+        it "should reject mirrored self messages and duplicate events":
+            step("Route a message to an agent")
+            val message = room_message("m-1", 1, MessageOrigin.AgentAnswer, "done", "", "builder", 1)
+            expect(loop_guard(message, "builder", false, 4, false).reason).to_equal("self_mirror")
+            expect(loop_guard(message, "reviewer", true, 4, false).reason).to_equal("duplicate_event")
+
+        it "should reject progress triggers and exhausted handoffs":
+            step("Route a message to an agent")
+            val progress = room_message("m-1", 1, MessageOrigin.AgentUpdate, "running", "", "builder", 1)
+            expect(loop_guard(progress, "reviewer", false, 4, false).reason).to_equal("progress_non_triggering")
+            val exhausted = room_message("m-2", 2, MessageOrigin.AgentAnswer, "handoff", "", "builder", 4)
+            expect(loop_guard(exhausted, "reviewer", false, 4, false).reason).to_equal("handoff_limit")
+
+    describe "REQ-LLM-MSG-017: capability-driven fallback":
+        it "should select native, emulated, and primitive-sidecar actions from capability truth":
+            step("Create and bind a room")
+            expect(plan_capability_fallback(CapabilityLevel.Native, "private_message").action).to_equal("native:private_message")
+            expect(plan_capability_fallback(CapabilityLevel.Emulated, "thread").action).to_equal("emulated:thread")
+            expect(plan_capability_fallback(CapabilityLevel.PrimitiveSidecar, "room_create").action).to_equal("primitive_sidecar:room_create")
+
+        it "should return an exact capability error for unsupported behavior":
+            step("Create and bind a room")
+            val plan = plan_capability_fallback(CapabilityLevel.Unsupported, "private_message")
+            expect(plan.action).to_equal("")
+            expect(plan.error).to_equal("capability_not_supported:private_message")
+
+        it "should expose stable serialized capability level names":
+            step("Create and bind a room")
+            expect(capability_level_name(CapabilityLevel.Native)).to_equal("native")
+            expect(capability_level_name(CapabilityLevel.PrimitiveSidecar)).to_equal("primitive_sidecar")
+
+    describe "Supporting evidence: typed identifier validation":
+        it "should normalize the identifier kind and reject empty or spaced values":
+            step("Create and bind a room")
+            val valid = messaging_id(" ROOM ", "room-1")
+            expect(valid.kind).to_equal("room")
+            expect(messaging_id_valid(valid)).to_equal(true)
+            expect(messaging_id_valid(MessagingId(kind: "room", value: "room 1"))).to_equal(false)

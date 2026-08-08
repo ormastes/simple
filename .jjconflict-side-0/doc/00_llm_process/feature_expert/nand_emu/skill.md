@@ -1,0 +1,130 @@
+# NAND Emulator (nand_emu) Feature Expert
+
+## Role
+
+Own process knowledge for the K9F8G08X0M-compatible NAND chip emulator:
+the per-cell threshold-voltage (Vt) byte model, its command FSM, the
+address-shrink profiles, and its role as an alternate NAND backend for the
+NVMe firmware's FIL seam.
+
+## Pipeline Links
+
+- Research (source of truth for the device contract):
+  [doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md](../../../../doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md)
+  — §1 datasheet contract, §3 Vt model + lazy drift, §4 address shrink,
+  §7 FSM/physics pseudocode, §8 scenario suite.
+- NVMe seam plan:
+  [doc/03_plan/hardware/nvme_fw_emulated_nand_plan_tldr.md](../../../../doc/03_plan/hardware/nvme_fw_emulated_nand_plan_tldr.md)
+
+## Code Map
+
+- Module: `src/lib/hardware/nand_emu/` — `nand_types.spl` (all shared `Ne*`
+  types, defined ONCE here; interp struct-registry collisions forbid
+  redefinition), `geometry.spl`, `vt_array.spl`, `physics.spl`, `cmd_fsm.spl`,
+  `status.spl`, `edc.spl`, `badblock.spl`, `fault.spl`, `chip.spl` (NeChip
+  pin-level composer), `rtl/pin_frontend.spl` (VHDL-2008 subset spike).
+- Specs: `src/lib/hardware/nand_emu/test/*_spec.spl` — `scenario_spec.spl` is
+  the user-facing manual (doc §8 subset).
+- NVMe adapter: `examples/09_embedded/simpleos_nvme_fw/fw/fil_nand_emu.spl`
+  (+ `fil_nand_emu_check.spl`) — opt-in drop-in for the `fil_nand.Nand` seam
+  (same API as `fil_nand_device.spl`); NOT the default backend.
+- RV32 controller-policy model:
+  `examples/09_embedded/simpleos_nvme_fw/fw_rv32/{entry,logic_nand_read_level}.spl`.
+  Its 256-byte `.nandram` stores active, neighbor, SECDED, and alternate-remap
+  state. `scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` proves those ordinary
+  loads/stores cross full AXI4 into RAM and observes prevention/recovery over
+  AXI4-Lite before the physical BRAM/JTAG gate. A recorded GHDL run observed 847
+  reads and 460 writes in `.nandram`; it is historical after later `entry.spl`
+  changes. The 229-byte KV260 USER4 capture is also historical until a fresh
+  retained source-matched ELF/bitstream/transcript bundle passes the gates.
+
+## Design Invariants (do not regress)
+
+- One byte per cell: `Vt(code) = (code-128) × 25 mV`; SLC read rule
+  `bit = 1 iff code < vref` (erased mean 88, PV 148, default vref 128).
+- Lazy drift: retention/disturb applied AT SENSE TIME from page/block meta
+  counters; materialized into stored Vt only on program/erase (doc §3.4).
+- Per-cell noise derived from `splitmix32(row ^ (col<<3) ^ bit ^ CHIP_SEED)` —
+  deterministic, replayable; never store per-cell sigma.
+- v1 scope: MODEL timing only (emulated-ns counter, no wall clock), SLC,
+  single-plane command set; two-plane/2KB-compat bytes are recognized and
+  logged as violations, never faked.
+- Unsupported/illegal sequences → NeViolation events, never silent guessing.
+- Do not claim the RV32 scalar `.nandram` lane has per-cell Vt, retention-time,
+  wear, or analog fidelity; those remain owned by this `nand_emu` module. Do
+  not claim its USER4 transcript is host NVMe-over-AXI MMIO.
+
+## Known Landmines
+
+- JIT/HIR cannot infer struct-typed field `NeChip.geometry` when lowering a
+  spec `main` — interpreter fallback is correct and expected; see
+  doc/08_tracking/bug/jit_hir_struct_field_type_infer_2026-07-18.md.
+- Seed test-runner daemon hangs at init; run specs single-file via
+  `timeout 300 bin/simple run <spec>` (guide caveat).
+
+## Recovery / prevention lane (2026-07-19)
+
+- Taxonomy of NAND SSD recovery+prevention algorithms:
+  `doc/01_research/hardware/nand_recovery/nand_ssd_recovery_prevention_taxonomy.md`
+- Local gap analysis (what fw has / lacks, with file:line):
+  `doc/01_research/hardware/nand_recovery/nand_recovery_gap_analysis_local.md`
+  — historical pre-v1 gap snapshot. The full firmware wiring listed below has
+  since closed its unwired ladder/reclaim/retire rows.
+- Architecture (THE LAW: shared logic layer-neutral, placeable on FTL or FIL
+  unless it needs L2P/hotness/GC state): `rel_*` module family below `fil`
+  (depends only on nvme_types), pure verdict-returning policies + thin
+  RelFilMount/RelFtlMount adapters:
+  `doc/04_architecture/hardware/nand_recovery/reliability_engine_architecture.md`
+- Detail design (v1 SLC-validatable set: ladder, ROR-lite, FCR/DEAR-lite,
+  STRAW-lite, SREA-lite, wiring pass):
+  `doc/05_design/hardware/nand_recovery/recovery_algorithms_design.md`
+- Landed prerequisite seams: `FilRead.corrected`, `fil.read_at_vref`, and the
+  NandEmu wrapper re-export of `vt_histogram`/`read_margin`.
+
+## Implementation status (2026-07-19: v1 engine LIVE)
+
+- All lanes landed green: `fw/nd_types.spl` (typed NAND dimensions — NdChannel/
+  NdWay/NdBank/NdPlane/NdBlock/NdWordline/NdPage value types + NdAddr; only
+  channel/block/page are live in address math, others typed-but-decorative per
+  `doc/01_research/hardware/nand_recovery/typed_nand_addressing_local.md`),
+  `rel_types`, `rel_health`, `rel_vref`, `rel_disturb`, `rel_wear`,
+  `rel_refresh`, `rel_ladder` + per-module `*_check.spl` (absolute oracles).
+- L8 wiring: ladder mounts in `Fil.read_with_ladder` (production reads recover
+  drifted pages: proven depth-2 recovery at cal −16 via `ftl.read`);
+  `rel_tick_select` enforces ONE reclaim-class step/tick (GC>refresh>scrub>WL)
+  in `nvme_controller.io_process` + `firmware.service_tick`; erase-reset trio +
+  retire→`alloc_spare` wired. Gaps A2/A7 of the gap analysis closed;
+  `rel_wiring_check.spl` is the integration oracle set.
+- RV32 has a separate scalar `.nandram` implementation in
+  `fw_rv32/{entry,logic_nand_read_level}.spl`: read-count prevention, bounded
+  read-level retry, SECDED/FCR, retirement, alternate-slot verification, and
+  remap are exercised by QEMU and AXI GHDL. It is not the per-cell analog
+  `hardware.nand_emu` model or a full `rel_*` FTL port.
+- Emulator address math consolidated onto geometry.spl canon (ne_block_of/
+  ne_page_in_block/ne_block_first_row); chip.spl `self.` info-lint is a parser
+  FALSE POSITIVE (self.field is the body convention — do not "fix" it).
+
+## Four-core rv32 + coroutine discipline (2026-07-19)
+
+Wave-3/4 wave delivers 4-core partition (hart0=HIL, hart1=FTL, hart2=FIL,
+hart3=NAND-emu) with typed-index IPC and explicit coroutine-like resume
+states. Related docs:
+
+- Design: `doc/05_design/hardware/nvme_fw_multicore/fourcore_ipc_index_handle_design.md`
+  (shm layout, SPSC rings, pool allocator, boot gate)
+- Coroutine discipline: `doc/05_design/hardware/nvme_fw_coroutine/coroutine_statemachine_design.md`
+  (9 states, legality rules, statement-like authoring pattern)
+- Research: `doc/01_research/hardware/nvme_fw_coroutine/embedded_coroutine_statemachine_research.md`
+  (gen/yield evaluation — both are broken on baremetal)
+
+Host checks landed green (all 7 rc-calibrated). QEMU proof blocked by:
+- Compiler bug 1: emit-object stage4 MIR error on smp-flatten (seed regression),
+  `doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md`.
+- Compiler bug 2: LLVM Yield silent no-op on bare-metal, making gen/yield
+  unusable (workaround: explicit state dispatch in entry_smp.spl),
+  `doc/08_tracking/bug/llvm_backend_yield_silent_noop_2026-07-19.md`.
+
+## Related
+
+Layer experts: [backend](../../layer_expert/backend/skill.md) (VHDL subset),
+NVMe firmware guide `doc/07_guide/hardware/nvme_firmware/`.

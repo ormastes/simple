@@ -1,0 +1,70 @@
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+
+fn count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn main() -> i64:
+    var session = BrowserSession.new()
+    match session.open_html(
+        "https://example.test/animation",
+        "<!DOCTYPE html><html><head><style>#stage { width: 32px; height: 24px; background-color: #ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ var stage = document.getElementById('stage'); stage.style.backgroundColor = '#2563eb'; document.title = 'Animated'; });</script></body></html>"
+    ):
+        Err(e):
+            print "FAIL open: {e}"
+            return 1
+        Ok(_):
+            pass_dn("page opened")
+
+    val first = session.render_to_pixels(64, 48)
+    if session.current_title != "SimpleReady" or count_color(first.pixel_data, 0xFFEF4444u32) == 0:
+        print "FAIL initial Simple Script/CSS frame"
+        return 1
+    if session.advance_time(15) != 0 or session.advance_time(16) != 1:
+        print "FAIL deterministic JavaScript timer"
+        return 1
+    val second = session.render_to_pixels(64, 48)
+    if session.current_title != "Animated" or count_color(second.pixel_data, 0xFF2563EBu32) == 0:
+        print "FAIL animated JavaScript/CSS frame"
+        return 1
+
+    var css_session = BrowserSession.new()
+    match css_session.open_html(
+        "https://example.test/css-animation",
+        "<!DOCTYPE html><html><head><style>@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #stage { width: 32px; height: 24px; animation-name: Pulse; animation-duration: 1000ms; animation-timing-function: linear; animation-fill-mode: forwards; }</style></head><body><div id='stage'></div></body></html>"
+    ):
+        Err(e):
+            print "FAIL CSS animation open: {e}"
+            return 1
+        Ok(_):
+            pass_dn("CSS animation page opened")
+    val css_first = css_session.render_to_pixels(64, 48)
+    val mid_timers = css_session.advance_time(500)
+    val css_middle = css_session.render_to_pixels(64, 48)
+    val end_timers = css_session.advance_time(1000)
+    val css_last = css_session.render_to_pixels(64, 48)
+    if (
+        count_color(css_first.pixel_data, 0xFFEF4444u32) == 0 or
+        pixels_equal(css_first.pixel_data, css_middle.pixel_data) or
+        pixels_equal(css_middle.pixel_data, css_last.pixel_data) or
+        mid_timers != 0 or end_timers != 0 or
+        count_color(css_last.pixel_data, 0xFF2563EBu32) == 0
+    ):
+        print "FAIL CSS keyframe start/mid/end frames"
+        return 1
+    print "PASS browser-script-css-animation simple-js=2 css-keyframes=3 frames=5"
+    0

@@ -1,0 +1,42 @@
+# DrawIR v3 direct writer V2 (F3) — free-function producer API over
+# `UiSceneColumnArenaV2`. Per the verified interpreter propagation rules
+# (see `ui_scene_arena.spl` module doc): a class instance passed as a plain
+# FUNCTION parameter and mutated inside the call DOES propagate to the
+# caller, so every function here takes the arena as a parameter and writes
+# through it directly. There is no writer object, no writer-local column,
+# and no commit copy — `arena.commit_copy_bytes` stays 0 by construction.
+
+use nogc_sync_mut.ui.ui_scene_column_arena_v2.{
+    UiSceneColumnArenaV2,
+    UI_SCENE_V2_OK,
+    UI_SCENE_V2_PARTITION_OVERFLOW,
+    UI_SCENE_V2_BAD_PARTITION
+}
+
+# Write one row of `words` into a leased partition at partition-relative
+# `row`. The words array is the CALLER's own storage (typically a reused
+# scratch row); values are streamed into the arena word-by-word — the arena
+# itself never allocates or copies a column.
+fn ui_scene_v2_write_row(arena: UiSceneColumnArenaV2, part_idx: i64, row: u32, words: [u32]) -> i64:
+    var col: u32 = 0
+    val n = words.len()
+    var i = 0
+    while i < n:
+        val verdict = arena.write_word_value(part_idx, row, col, words[i])
+        if verdict != UI_SCENE_V2_OK:
+            return verdict
+        col = col + 1
+        i = i + 1
+    UI_SCENE_V2_OK
+
+# Incremental single-field update of a stable row — the retained-scene hot
+# path: one word store, one dirty range, nothing else.
+fn ui_scene_v2_update_word(arena: UiSceneColumnArenaV2, part_idx: i64, row: u32, col: u32, value: u32) -> i64:
+    arena.write_word_value(part_idx, row, col, value)
+
+# Seal the back generation and swap. Returns the arena verdict code.
+fn ui_scene_v2_commit(arena: UiSceneColumnArenaV2) -> i64:
+    arena.seal_back()
+    arena.try_swap()
+
+export ui_scene_v2_write_row, ui_scene_v2_update_word, ui_scene_v2_commit

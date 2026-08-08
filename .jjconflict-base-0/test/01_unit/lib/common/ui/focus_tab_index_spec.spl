@@ -1,0 +1,68 @@
+# @cover src/lib/common/ui/event.spl 80%
+# @req FR-UI-TAB-INDEX
+#
+# Focus traversal honors an optional `tab_index` widget prop: widgets with a
+# tab_index are ordered by it; those without keep declaration position; ties
+# break by declaration order (stable). Covers forward and reverse walks.
+
+use std.spec.*
+use common.ui.widget.{WidgetNode, UIState}
+use common.ui.builder.{column, button, build_tree}
+use common.ui.event.{focus_next, focus_prev, get_focusable_ordered}
+
+fn tab_state() -> UIState:
+    val root = column("tabroot", [
+        button("tab_a", "A", "act_a"),
+        button("tab_b", "B", "act_b"),
+        button("tab_c", "C", "act_c"),
+    ])
+    val tree = build_tree(root)
+    # Declaration order is a, b, c but tab_index reorders them to b(1), c(2), a(3).
+    WidgetNode(id: "tab_a").set_prop("tab_index", "3")
+    WidgetNode(id: "tab_b").set_prop("tab_index", "1")
+    WidgetNode(id: "tab_c").set_prop("tab_index", "2")
+    UIState.new(tree)
+
+fn index_of(ids: [text], target: text) -> i32:
+    var i = 0
+    for id in ids:
+        if id == target:
+            return i
+        i = i + 1
+    -1
+
+describe "focus traversal honors tab_index":
+
+    it "orders widgets by tab_index (1,2,3) not declaration order":
+        val order = get_focusable_ordered(tab_state().tree)
+        val pb = index_of(order, "tab_b")
+        val pc = index_of(order, "tab_c")
+        val pa = index_of(order, "tab_a")
+        assert_true(pb < pc)
+        assert_true(pc < pa)
+
+    it "focus_next steps through the widgets in tab order":
+        # Focus tab_b, then Next should land on tab_c (next tab_index), then tab_a.
+        var s = tab_state()
+        s = UIState(tree: s.tree, mode: s.mode, focused_id: "tab_b", command_buffer: s.command_buffer)
+        s = focus_next(s)
+        expect(s.focused_id).to_equal("tab_c")
+        s = focus_next(s)
+        expect(s.focused_id).to_equal("tab_a")
+
+    it "focus_prev reverses the tab order":
+        var s = tab_state()
+        s = UIState(tree: s.tree, mode: s.mode, focused_id: "tab_a", command_buffer: s.command_buffer)
+        s = focus_prev(s)
+        expect(s.focused_id).to_equal("tab_c")
+        s = focus_prev(s)
+        expect(s.focused_id).to_equal("tab_b")
+
+    it "widgets without tab_index keep declaration position as their key":
+        # No tab_index props at all: order equals declaration order.
+        val root = column("plainroot", [
+            button("plain_a", "A", "a"),
+            button("plain_b", "B", "b"),
+        ])
+        val order = get_focusable_ordered(build_tree(root))
+        assert_true(index_of(order, "plain_a") < index_of(order, "plain_b"))

@@ -1,0 +1,540 @@
+# zstd/huffman.spl — Huffman decoder for zstd (RFC 8878 §3.1.1.3)
+#
+# Zstd Huffman decoding overview:
+#   1. Parse weight table (direct or FSE-compressed)
+#   2. Infer last symbol weight; build canonical table (max 11 bits)
+#   3. Decode literals via 1-stream or 4-stream reverse-bit readers
+#
+# Known issue addressed here:
+#   - Issue 3: compressed-literal size_fmt 0..3 uses (10,10)/(10,10)/(14,14)/(18,18)
+#              bit pairs; distinct from Raw/RLE helper.
+#   - Issue 6: peek(max_bits) → consume(actual_bits) pattern.
+#
+# FSE weight path (header_byte >= 128) is stubbed — returns Err(Unsupported)
+# until Team 4a lands zstd/fse.spl.
+
+use std.common.compress.types.{CompressionError}
+use std.nogc_sync_mut.compression.zstd.bit_reader.{
+    ZstdBitReader, ZstdBitsResult, ZstdBytesResult,
+    ZstdRevBitReader, ZstdRevBitsResult,
+    zstd_br_init, zstd_br_read, zstd_br_read_bytes, zstd_br_align,
+    zstd_rbr_init, zstd_rbr_read
+}
+
+# ---------------------------------------------------------------------------
+# Huffman table entry
+# ---------------------------------------------------------------------------
+
+struct HuffEntry:
+    symbol:    i64   # decoded byte value (0..255)
+    num_bits:  i64   # code length in bits (1..11), 0 = absent
+
+# Huffman lookup table: 2048 entries (2^11)
+struct HuffTable:
+    entries:  [HuffEntry]   # indexed by bit-reversed code prefix
+    max_bits: i64            # maximum code length used (1..11)
+
+# ---------------------------------------------------------------------------
+# Canonical Huffman table construction from weights
+#
+# RFC 8878 §3.1.1.3.1:
+#   weight[sym] = 0  → symbol not present
+#   weight[sym] > 0  → Number_of_Bits[sym] = max_bits + 1 - weight[sym]
+#   Last symbol weight is inferred: 2^max_w - sum(2^(w-1) for w>0)
+# ---------------------------------------------------------------------------
+
+fn huff_build_table(weights: [i64]) -> Result<HuffTable, CompressionError>:
+    val num_syms = weights.len()
+    if num_syms == 0:
+        return Err(CompressionError.CorruptData("zstd huffman: empty weight table"))
+
+    # Find max weight to determine max_bits
+    var max_w = 0
+    var i = 0
+    while i < num_syms:
+        if weights[i] > max_w:
+            max_w = weights[i]
+        i = i + 1
+
+    if max_w == 0:
+        return Err(CompressionError.CorruptData("zstd huffman: all weights are zero"))
+
+    # Compute the sum of 2^(w-1) for all given symbols with w > 0
+    var weight_sum = 0
+    var j = 0
+    while j < num_syms:
+        val w = weights[j]
+        if w > 0:
+            weight_sum = weight_sum + (1 << (w - 1))
+        j = j + 1
+
+    # Next power of 2 >= weight_sum (must be exactly a power of two)
+    val target = 1 << max_w
+    val remainder = target - weight_sum
+    if remainder <= 0:
+        return Err(CompressionError.CorruptData("zstd huffman: weight_sum exceeds target"))
+
+    # Infer last symbol weight from remainder
+    # remainder must be a power of 2; log2(remainder) + 1 = last weight
+    var r = remainder
+    var last_w = 0
+    while r > 1:
+        r = r >> 1
+        last_w = last_w + 1
+    last_w = last_w + 1   # weight = log2(remainder) + 1
+
+    # Check remainder is a clean power of 2
+    if (1 << (last_w - 1)) != remainder:
+        return Err(CompressionError.CorruptData("zstd huffman: remainder not power of 2"))
+
+    # Build combined weight array (given weights + inferred last symbol)
+    var all_weights: [i64] = []
+    var k = 0
+    while k < num_syms:
+        all_weights.push(weights[k])
+        k = k + 1
+    all_weights.push(last_w)
+
+    val total_syms = all_weights.len()
+    val max_bits = max_w   # max_bits = max_w (weight == max_w+1-num_bits, so min num_bits=1)
+
+    # Count how many symbols have each code length
+    var count: [i64] = []
+    var ci = 0
+    while ci <= max_bits:
+        count.push(0)
+        ci = ci + 1
+
+    var si = 0
+    while si < total_syms:
+        val w = all_weights[si]
+        if w > 0:
+            val nb = max_bits + 1 - w
+            if nb >= 1:
+                count[nb] = count[nb] + 1
+        si = si + 1
+
+    # Assign canonical starting codes per code length
+    var next_code: [i64] = []
+    var nc = 0
+    while nc <= max_bits:
+        next_code.push(0)
+        nc = nc + 1
+
+    var code = 0
+    var len = 1
+    while len <= max_bits:
+        code = (code + count[len - 1]) << 1
+        next_code[len] = code
+        len = len + 1
+
+    # Build lookup table: 2^max_bits entries
+    val table_size = 1 << max_bits
+    var entries: [HuffEntry] = []
+    var ti = 0
+    while ti < table_size:
+        entries.push(HuffEntry(symbol: 0, num_bits: 0))
+        ti = ti + 1
+
+    var sym = 0
+    while sym < total_syms:
+        val w = all_weights[sym]
+        if w > 0:
+            val nb = max_bits + 1 - w
+            if nb >= 1:
+                val base_code = next_code[nb]
+                next_code[nb] = next_code[nb] + 1
+                # Fan-out: each nb-bit canonical code covers 2^(max_bits-nb) table slots.
+                # The table is indexed by the max_bits bits read MSB-first from the stream.
+                # A shorter code occupies all indices where the upper nb bits = base_code.
+                # Those indices are: base_code << (max_bits - nb) ... through fan-1 more.
+                val fan = 1 << (max_bits - nb)
+                var fi = 0
+                while fi < fan:
+                    val idx = (base_code << (max_bits - nb)) | fi
+                    if idx < table_size:
+                        entries[idx] = HuffEntry(symbol: sym, num_bits: nb)
+                    fi = fi + 1
+        sym = sym + 1
+
+    Ok(HuffTable(entries: entries, max_bits: max_bits))
+
+# ---------------------------------------------------------------------------
+# Huffman literal section sizes (RFC 8878 §3.1.1.3.1.1)
+#
+# Compressed literal header (lit_block_type = 2 or 3):
+#   size_fmt 00: 3 bytes total — 10-bit regen, 10-bit compressed (spread across bytes)
+#   size_fmt 01: 4 bytes total — 10-bit regen, 10-bit compressed
+#   size_fmt 10: 4 bytes total — 14-bit regen, 14-bit compressed
+#   size_fmt 11: 5 bytes total — 18-bit regen, 18-bit compressed
+#   (first byte already consumed by caller; remaining bytes read here)
+#
+# Returns (regen_size, compressed_size, updated_reader)
+# ---------------------------------------------------------------------------
+
+struct ZstdHuffLitSizeResult:
+    regen_size:      i64
+    compressed_size: i64
+    num_streams:     i64    # 1 or 4
+    reader:          ZstdBitReader
+
+fn zstd_lit_compressed_size(
+    hdr_byte: i64,
+    size_fmt:  i64,
+    r: ZstdBitReader
+) -> Result<ZstdHuffLitSizeResult, CompressionError>:
+    # RFC 8878 §3.1.1.3.1.1 compressed literal header layout.
+    # hdr_byte bits[3:2] = size_fmt, bits[1:0] = block_type (already parsed by caller).
+    # Remaining bits of hdr_byte and subsequent bytes carry regen+compressed sizes.
+    #
+    # size_fmt 00: 3-byte header, 1 stream,  10-bit regen + 10-bit compressed
+    # size_fmt 01: 3-byte header, 4 streams, 10-bit regen + 10-bit compressed
+    # size_fmt 10: 4-byte header, 4 streams, 14-bit regen + 14-bit compressed
+    # size_fmt 11: 5-byte header, 4 streams, 18-bit regen + 18-bit compressed
+    #
+    # Packing for 10+10 (3 bytes = 24 bits, 4 bits from hdr_byte[7:4]):
+    #   regen[9:0]      = hdr_byte[7:4] | (b1[5:0] << 4)
+    #   compressed[9:0] = (b1[7:6] << 0) | (b2 << 2)    (10 bits)
+
+    if size_fmt == 0:
+        # 1-stream, 3-byte header, 10+10 bits
+        val b1r = zstd_br_read(r, 8)?
+        val b2r = zstd_br_read(b1r.reader, 8)?
+        val b1 = b1r.value
+        val b2 = b2r.value
+        val regen      = ((hdr_byte >> 4) & 0xF) | ((b1 & 0x3F) << 4)
+        val compressed = ((b1 >> 6) & 0x3) | (b2 << 2)
+        return Ok(ZstdHuffLitSizeResult(
+            regen_size:      regen,
+            compressed_size: compressed,
+            num_streams:     1,
+            reader:          b2r.reader
+        ))
+
+    if size_fmt == 1:
+        # 4-stream, 3-byte header, 10+10 bits (same packing as size_fmt 00)
+        val b1r = zstd_br_read(r, 8)?
+        val b2r = zstd_br_read(b1r.reader, 8)?
+        val b1 = b1r.value
+        val b2 = b2r.value
+        val regen      = ((hdr_byte >> 4) & 0xF) | ((b1 & 0x3F) << 4)
+        val compressed = ((b1 >> 6) & 0x3) | (b2 << 2)
+        return Ok(ZstdHuffLitSizeResult(
+            regen_size:      regen,
+            compressed_size: compressed,
+            num_streams:     4,
+            reader:          b2r.reader
+        ))
+
+    if size_fmt == 2:
+        # 4-stream, 4-byte header, 14+14 bits
+        # regen[13:0]      = hdr_byte[7:4] | (b1 << 4) | ((b2 & 0x3) << 12)
+        # compressed[13:0] = ((b2 >> 2) & 0x3F) | (b3 << 6)
+        val b1r = zstd_br_read(r, 8)?
+        val b2r = zstd_br_read(b1r.reader, 8)?
+        val b3r = zstd_br_read(b2r.reader, 8)?
+        val b1 = b1r.value
+        val b2 = b2r.value
+        val b3 = b3r.value
+        val regen      = ((hdr_byte >> 4) & 0xF) | (b1 << 4) | ((b2 & 0x3) << 12)
+        val compressed = ((b2 >> 2) & 0x3F) | (b3 << 6)
+        return Ok(ZstdHuffLitSizeResult(
+            regen_size:      regen,
+            compressed_size: compressed,
+            num_streams:     4,
+            reader:          b3r.reader
+        ))
+
+    # size_fmt == 3: 4-stream, 5-byte header, 18+18 bits
+    # regen[17:0]      = hdr_byte[7:4] | (b1 << 4) | ((b2 & 0x3F) << 12)
+    # compressed[17:0] = ((b2 >> 6) & 0x3) | (b3 << 2) | (b4 << 10)
+    val b1r = zstd_br_read(r, 8)?
+    val b2r = zstd_br_read(b1r.reader, 8)?
+    val b3r = zstd_br_read(b2r.reader, 8)?
+    val b4r = zstd_br_read(b3r.reader, 8)?
+    val b1 = b1r.value
+    val b2 = b2r.value
+    val b3 = b3r.value
+    val b4 = b4r.value
+    val regen      = ((hdr_byte >> 4) & 0xF) | (b1 << 4) | ((b2 & 0x3F) << 12)
+    val compressed = ((b2 >> 6) & 0x3) | (b3 << 2) | (b4 << 10)
+    Ok(ZstdHuffLitSizeResult(
+        regen_size:      regen,
+        compressed_size: compressed,
+        num_streams:     4,
+        reader:          b4r.reader
+    ))
+
+# ---------------------------------------------------------------------------
+# Weight table parsing (RFC 8878 §3.1.1.3.1)
+#
+# First byte of the Huffman description:
+#   header[7:0] = Number_of_Symbols if < 128 (direct weight encoding)
+#   header[7:0] >= 128 → FSE-compressed weights (size = header - 127 bytes)
+# ---------------------------------------------------------------------------
+
+struct ZstdWeightsResult:
+    weights: [i64]        # weight per symbol (length = number_of_symbols)
+    reader:  ZstdBitReader
+
+fn zstd_parse_weights(r: ZstdBitReader) -> Result<ZstdWeightsResult, CompressionError>:
+    val h = zstd_br_read(r, 8)?
+    val header = h.value
+    var cur = h.reader
+
+    if header >= 128:
+        # FSE-compressed weights — stub until Team 4a lands fse.spl
+        return Err(CompressionError.Unsupported("zstd huffman FSE weights (team4a pending)"))
+
+    # Direct weight encoding: header = number_of_symbols (1..255)
+    # Weights are 4-bit nibbles packed 2-per-byte, LSB first
+    val num_syms = header
+    if num_syms == 0:
+        return Err(CompressionError.CorruptData("zstd huffman: 0 symbols"))
+
+    val num_nibble_bytes = (num_syms + 1) / 2
+    val raw = zstd_br_read_bytes(cur, num_nibble_bytes)?
+    cur = raw.reader
+
+    var weights: [i64] = []
+    var sym = 0
+    while sym < num_syms:
+        val byte_idx = sym / 2
+        val nibble_byte = raw.bytes[byte_idx].to_i64()
+        var w = 0
+        if (sym & 1) == 0:
+            w = nibble_byte & 0xF
+        else:
+            w = (nibble_byte >> 4) & 0xF
+        weights.push(w)
+        sym = sym + 1
+
+    Ok(ZstdWeightsResult(weights: weights, reader: cur))
+
+# ---------------------------------------------------------------------------
+# Decode a single stream using the Huffman table
+# Issue 6 addressed: peek(max_bits), consume(actual_bits)
+# ---------------------------------------------------------------------------
+
+struct ZstdHuffStreamResult:
+    symbols: [i64]
+
+fn huff_decode_stream(
+    stream_data: [u8],
+    expected_out: i64,
+    table: HuffTable
+) -> Result<ZstdHuffStreamResult, CompressionError>:
+    val rbr = zstd_rbr_init(stream_data)?
+    var reader = rbr
+    var symbols: [i64] = []
+
+    while symbols.len() < expected_out:
+        if reader.bits_left < 1:
+            return Err(CompressionError.TruncatedInput("zstd huffman stream exhausted"))
+
+        # Issue 6 fix: peek max_bits, look up entry, then consume only entry.num_bits.
+        # We must peek exactly max_bits to get a valid table index.
+        # If fewer bits remain than max_bits, that is an error (well-formed streams
+        # always have enough bits for all expected symbols).
+        if reader.bits_left < table.max_bits:
+            return Err(CompressionError.TruncatedInput("zstd huffman: stream too short for symbol"))
+
+        # Step 1: peek max_bits from the original reader position
+        val pr = zstd_rbr_read(reader, table.max_bits)?
+        val idx = pr.value
+
+        if idx >= table.entries.len():
+            return Err(CompressionError.CorruptData("zstd huffman: table index out of range"))
+
+        val entry = table.entries[idx]
+        if entry.num_bits == 0:
+            return Err(CompressionError.CorruptData("zstd huffman: invalid code (absent symbol)"))
+
+        # Step 2: consume only entry.num_bits from the original reader (not pr.reader)
+        val cr = zstd_rbr_read(reader, entry.num_bits)?
+        reader = cr.reader
+        symbols.push(entry.symbol)
+
+    Ok(ZstdHuffStreamResult(symbols: symbols))
+
+# ---------------------------------------------------------------------------
+# 4-stream decoder (RFC 8878 §3.1.1.3.1.1 size_fmt 1/2/3)
+#
+# Layout: [jump1_lo][jump1_hi][jump2_lo][jump2_hi][jump3_lo][jump3_hi]
+#         [stream1...][stream2...][stream3...][stream4...]
+# ---------------------------------------------------------------------------
+
+fn huff_decode_4streams(
+    compressed_data: [u8],
+    regen_size:      i64,
+    table:           HuffTable
+) -> Result<[i64], CompressionError>:
+    if compressed_data.len() < 6:
+        return Err(CompressionError.TruncatedInput("zstd huffman 4-stream jump table"))
+
+    # Read 3 × u16 LE jump sizes
+    val sz1 = compressed_data[0].to_i64() | (compressed_data[1].to_i64() << 8)
+    val sz2 = compressed_data[2].to_i64() | (compressed_data[3].to_i64() << 8)
+    val sz3 = compressed_data[4].to_i64() | (compressed_data[5].to_i64() << 8)
+    val total = compressed_data.len() - 6
+    val sz4 = total - sz1 - sz2 - sz3
+
+    if sz4 <= 0:
+        return Err(CompressionError.CorruptData("zstd huffman 4-stream: invalid jump table"))
+
+    # Compute per-stream output sizes
+    val out_each = (regen_size + 3) / 4
+    val out4 = regen_size - (3 * out_each)
+
+    # Extract sub-slices for each stream
+    val off1 = 6
+    val off2 = off1 + sz1
+    val off3 = off2 + sz2
+    val off4 = off3 + sz3
+
+    if off4 + sz4 > compressed_data.len():
+        return Err(CompressionError.TruncatedInput("zstd huffman 4-stream: data truncated"))
+
+    var s1: [u8] = []
+    var s2: [u8] = []
+    var s3: [u8] = []
+    var s4: [u8] = []
+
+    var ci = off1
+    while ci < off1 + sz1:
+        s1.push(compressed_data[ci])
+        ci = ci + 1
+    ci = off2
+    while ci < off2 + sz2:
+        s2.push(compressed_data[ci])
+        ci = ci + 1
+    ci = off3
+    while ci < off3 + sz3:
+        s3.push(compressed_data[ci])
+        ci = ci + 1
+    ci = off4
+    while ci < off4 + sz4:
+        s4.push(compressed_data[ci])
+        ci = ci + 1
+
+    val r1 = huff_decode_stream(s1, out_each, table)?
+    val r2 = huff_decode_stream(s2, out_each, table)?
+    val r3 = huff_decode_stream(s3, out_each, table)?
+    val r4 = huff_decode_stream(s4, out4, table)?
+
+    var out: [i64] = []
+    var oi = 0
+    while oi < r1.symbols.len():
+        out.push(r1.symbols[oi])
+        oi = oi + 1
+    oi = 0
+    while oi < r2.symbols.len():
+        out.push(r2.symbols[oi])
+        oi = oi + 1
+    oi = 0
+    while oi < r3.symbols.len():
+        out.push(r3.symbols[oi])
+        oi = oi + 1
+    oi = 0
+    while oi < r4.symbols.len():
+        out.push(r4.symbols[oi])
+        oi = oi + 1
+
+    Ok(out)
+
+# ---------------------------------------------------------------------------
+# Top-level: decode Huffman literal section
+#
+# Called from blocks.spl when lit_block_type == 2 (new tree) or 3 (treeless).
+# Returns (decoded literals as [u8], advanced reader, new or carried HuffTable).
+# ---------------------------------------------------------------------------
+
+struct ZstdHuffLiteralsResult:
+    literals:  [u8]
+    reader:    ZstdBitReader
+    table:     HuffTable
+
+fn zstd_decode_huffman_literals(
+    hdr_byte:   i64,
+    size_fmt:   i64,
+    treeless:   i64,    # 0 = new tree, 1 = reuse previous table
+    prev_table: HuffTable,
+    r:          ZstdBitReader
+) -> Result<ZstdHuffLiteralsResult, CompressionError>:
+
+    # Parse size fields (regen + compressed)
+    val sz = zstd_lit_compressed_size(hdr_byte, size_fmt, r)?
+    val regen_size      = sz.regen_size
+    val compressed_size = sz.compressed_size
+    val num_streams     = sz.num_streams
+    var cur = sz.reader
+
+    # Read compressed payload
+    val payload = zstd_br_read_bytes(cur, compressed_size)?
+    cur = payload.reader
+    val cdata = payload.bytes
+
+    # Determine table to use
+    var table = prev_table
+    if treeless == 0:
+        # New tree: parse weights from cdata
+        val sub = zstd_br_init(cdata)
+        val wr = zstd_parse_weights(sub)?
+        val t = huff_build_table(wr.weights)?
+        table = t
+
+        # Compressed data after weights header is the literals bitstream
+        # We need to separate the weight bytes from the literal bitstreams.
+        # weights reader position gives us the offset.
+        # Recompute: weight bytes used = num_nibble_bytes + 1 (the header byte)
+        # Then literal streams start after that offset within cdata.
+        # Since zstd_parse_weights consumed from a sub-reader of cdata,
+        # we need to know how many bytes it consumed. Use wr.reader.byte_pos.
+        val weight_bytes_used = wr.reader.byte_pos
+        var lit_cdata: [u8] = []
+        var lci = weight_bytes_used
+        while lci < cdata.len():
+            lit_cdata.push(cdata[lci])
+            lci = lci + 1
+
+        var symbols: [i64] = []
+        if num_streams == 1:
+            val sr = huff_decode_stream(lit_cdata, regen_size, table)?
+            symbols = sr.symbols
+        else:
+            val sr = huff_decode_4streams(lit_cdata, regen_size, table)?
+            symbols = sr
+
+        var lits: [u8] = []
+        var si = 0
+        while si < symbols.len():
+            lits.push(symbols[si].to_u8())
+            si = si + 1
+
+        return Ok(ZstdHuffLiteralsResult(
+            literals: lits,
+            reader:   cur,
+            table:    table
+        ))
+
+    # Treeless: reuse previous table
+    # Entire cdata is the literals bitstream
+    var symbols: [i64] = []
+    if num_streams == 1:
+        val sr = huff_decode_stream(cdata, regen_size, table)?
+        symbols = sr.symbols
+    else:
+        val sr = huff_decode_4streams(cdata, regen_size, table)?
+        symbols = sr
+
+    var lits: [u8] = []
+    var si = 0
+    while si < symbols.len():
+        lits.push(symbols[si].to_u8())
+        si = si + 1
+
+    Ok(ZstdHuffLiteralsResult(
+        literals: lits,
+        reader:   cur,
+        table:    table
+    ))

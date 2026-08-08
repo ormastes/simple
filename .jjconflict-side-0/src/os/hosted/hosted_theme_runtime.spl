@@ -1,0 +1,184 @@
+"""Exact canonical theme handoff for hosted browser worker processes.
+
+The parent owns revision and canonical install wire.  The worker validates a
+copied wire and acknowledges only derived scalar identity.  CSS remains owned
+by the accepted package snapshot and the compositor projection.
+"""
+
+use common.ui.theme_package_wire.{
+    ThemePackageInstallProjection,
+    theme_package_install_wire_v1_decode,
+    theme_package_install_wire_v1_utf8_byte_len,
+    theme_package_install_wire_v1_within_bound
+}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+}
+
+# Reserve a fixed upper bound for the version/revision header. The actual
+# header is smaller, and the final encoded payload is checked again below.
+pub val HOSTED_THEME_INIT_MAX_WIRE_BYTES: i64 = (
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES - 64
+)
+
+pub class HostedThemeReady:
+    revision: i64
+    theme_id: text
+    source_manifest_sha256: text
+    material_sha256: text
+
+fn _hosted_theme_init_header(revision: i64) -> text:
+    "hosted-theme-init-v1\t{revision}\n"
+
+fn hosted_theme_init_encode(
+    revision: i64, wire_text: text
+) -> Result<text, text>:
+    if revision <= 0:
+        return Err("invalid-theme-revision")
+    if theme_package_install_wire_v1_utf8_byte_len(wire_text) > (
+        HOSTED_THEME_INIT_MAX_WIRE_BYTES
+    ):
+        return Err("theme-wire-exceeds-renderer-transport")
+    if not theme_package_install_wire_v1_within_bound(wire_text):
+        return Err("invalid-theme-wire")
+    match theme_package_install_wire_v1_decode(wire_text):
+        Err(_):
+            return Err("invalid-theme-wire")
+        Ok(_):
+            val payload = _hosted_theme_init_header(revision) + wire_text
+            if theme_package_install_wire_v1_utf8_byte_len(payload) > (
+                BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+            ):
+                return Err("theme-wire-exceeds-renderer-transport")
+            Ok(payload)
+
+fn hosted_theme_init_revision(payload: text) -> i64:
+    val newline = payload.index_of("\n")
+    if newline <= 0:
+        return 0
+    val fields = payload.slice(0, newline).split("\t")
+    if fields.len() != 2 or fields[0] != "hosted-theme-init-v1":
+        return 0
+    val revision = fields[1].to_i64() ?? 0
+    if revision <= 0 or revision.to_text() != fields[1]:
+        return 0
+    revision
+
+fn hosted_theme_init_wire(payload: text) -> text:
+    if theme_package_install_wire_v1_utf8_byte_len(payload) > (
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+    ):
+        return ""
+    if hosted_theme_init_revision(payload) <= 0:
+        return ""
+    val newline = payload.index_of("\n")
+    val wire_text = payload.slice(newline + 1, payload.len())
+    if not theme_package_install_wire_v1_within_bound(wire_text):
+        return ""
+    match theme_package_install_wire_v1_decode(wire_text):
+        Err(_):
+            ""
+        Ok(_):
+            wire_text
+
+fn _hosted_theme_projection(
+    revision: i64, wire_text: text
+) -> ThemePackageInstallProjection?:
+    if revision <= 0 or
+        not theme_package_install_wire_v1_within_bound(wire_text):
+        return nil
+    match theme_package_install_wire_v1_decode(wire_text):
+        Err(_):
+            nil
+        Ok(projection):
+            Some(projection)
+
+fn hosted_theme_ready_encode(
+    revision: i64, wire_text: text
+) -> Result<text, text>:
+    val projection = _hosted_theme_projection(revision, wire_text)
+    if projection == nil:
+        return Err("invalid-theme-wire")
+    val snapshot = projection.unwrap().snapshot
+    if (snapshot.id.contains("\t") or snapshot.id.contains("\n") or
+        snapshot.source_manifest_sha256.contains("\t") or
+        snapshot.material_sha256.contains("\t")):
+        return Err("invalid-theme-identity")
+    Ok(
+        "hosted-theme-ready-v1\t{revision}\t{snapshot.id}\t" +
+        snapshot.source_manifest_sha256 + "\t" +
+        snapshot.material_sha256
+    )
+
+fn hosted_theme_ready_decode(payload: text) -> HostedThemeReady?:
+    val fields = payload.split("\t")
+    if fields.len() != 5 or fields[0] != "hosted-theme-ready-v1":
+        return nil
+    val revision = fields[1].to_i64() ?? 0
+    if (revision <= 0 or revision.to_text() != fields[1] or
+        fields[2] == "" or fields[3].len() != 64 or
+        fields[4].len() != 64):
+        return nil
+    HostedThemeReady(
+        revision: revision,
+        theme_id: fields[2],
+        source_manifest_sha256: fields[3],
+        material_sha256: fields[4]
+    )
+
+fn hosted_theme_ready_matches(
+    revision: i64, wire_text: text, ready: HostedThemeReady
+) -> bool:
+    val projection = _hosted_theme_projection(revision, wire_text)
+    if projection == nil:
+        return false
+    val snapshot = projection.unwrap().snapshot
+    (ready.revision == revision and
+        ready.theme_id == snapshot.id and
+        ready.source_manifest_sha256 ==
+            snapshot.source_manifest_sha256 and
+        ready.material_sha256 == snapshot.material_sha256)
+
+fn hosted_theme_ready_payload_matches(
+    revision: i64, wire_text: text, payload: text
+) -> bool:
+    val ready = hosted_theme_ready_decode(payload)
+    if ready == nil:
+        return false
+    hosted_theme_ready_matches(
+        revision, wire_text, ready.unwrap()
+    )
+
+fn hosted_theme_wire_valid(
+    revision: i64, wire_text: text
+) -> bool:
+    _hosted_theme_projection(revision, wire_text) != nil
+
+fn hosted_theme_id(revision: i64, wire_text: text) -> text:
+    val projection = _hosted_theme_projection(revision, wire_text)
+    if projection == nil:
+        return ""
+    projection.unwrap().snapshot.id
+
+fn hosted_theme_source_manifest_sha256(
+    revision: i64, wire_text: text
+) -> text:
+    val projection = _hosted_theme_projection(revision, wire_text)
+    if projection == nil:
+        return ""
+    projection.unwrap().snapshot.source_manifest_sha256
+
+fn hosted_theme_material_sha256(
+    revision: i64, wire_text: text
+) -> text:
+    val projection = _hosted_theme_projection(revision, wire_text)
+    if projection == nil:
+        return ""
+    projection.unwrap().snapshot.material_sha256
+
+export hosted_theme_init_encode, hosted_theme_init_revision
+export hosted_theme_init_wire, hosted_theme_wire_valid
+export hosted_theme_id, hosted_theme_source_manifest_sha256
+export hosted_theme_material_sha256
+export HOSTED_THEME_INIT_MAX_WIRE_BYTES
+export hosted_theme_ready_encode, hosted_theme_ready_payload_matches

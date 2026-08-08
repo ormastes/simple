@@ -1,0 +1,77 @@
+# @cover src/lib/common/memory/packed_span.spl 80%
+# @tag: unit, memory, packed_span, render_perf
+
+use std.spec
+use common.memory.packed_span.{
+    PackedSpanRegistry,
+    BufferSpanRef,
+    packed_span_make,
+    PACKED_SPAN_OK,
+    PACKED_SPAN_STALE_GENERATION,
+    PACKED_SPAN_BAD_SLOT,
+    PACKED_SPAN_OUT_OF_BOUNDS,
+    PACKED_SPAN_BAD_STRIDE,
+    PACKED_SPAN_EMPTY
+}
+
+describe "packed span registry (F2)":
+    it "resolves a valid in-bounds span":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        assert_true(slot >= 0)
+        val gen = reg.generation_of(slot)
+        val r = packed_span_make(slot, gen, 0, 1024, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+
+    it "resolves an offset window inside the buffer":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 2048, 512, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+
+    it "refuses a stale generation after invalidate":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 8, 4)
+        assert_true(reg.invalidate(slot))
+        assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
+
+    it "refuses a wrong generation even on a live slot":
+        val reg = PackedSpanRegistry.create(4)
+        val slot = reg.register(64)
+        val r = packed_span_make(slot, reg.generation_of(slot) + 1, 0, 4, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
+
+    it "refuses an unknown slot":
+        val reg = PackedSpanRegistry.create(2)
+        val r = packed_span_make(7, 1, 0, 4, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_BAD_SLOT)
+
+    it "refuses a window past the end of the buffer":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(100)
+        val r = packed_span_make(slot, reg.generation_of(slot), 96, 2, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OUT_OF_BOUNDS)
+
+    it "refuses a zero stride":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = BufferSpanRef(object_slot: slot as u32, object_generation: reg.generation_of(slot), byte_offset: 0, byte_length: 16, element_count: 16, element_stride: 0)
+        assert_true(reg.resolve(bad) == PACKED_SPAN_BAD_STRIDE)
+
+    it "refuses a count*stride / byte_length mismatch":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = BufferSpanRef(object_slot: slot as u32, object_generation: reg.generation_of(slot), byte_offset: 0, byte_length: 15, element_count: 4, element_stride: 4)
+        assert_true(reg.resolve(bad) == PACKED_SPAN_BAD_STRIDE)
+
+    it "reports an empty span as empty, not ok":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 0, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_EMPTY)
+
+    it "fails closed when the registry is full":
+        val reg = PackedSpanRegistry.create(1)
+        assert_true(reg.register(16) == 0)
+        assert_true(reg.register(16) == -1)

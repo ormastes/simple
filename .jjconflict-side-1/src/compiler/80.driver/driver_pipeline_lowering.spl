@@ -1,0 +1,289 @@
+# CompilerDriver MIR lowering and diagnostic methods.
+#
+use compiler.hir.hir.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.hir.hir_types.{SymbolTable}
+use driver_types.{CompileContext}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_log_helpers.{log_debug, log_phase, log_build_progress}
+use compiler.driver.driver_source_loading.{
+    _driver_is_bootstrap_entry_source
+}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+extern fn rt_env_get(key: text) -> text
+
+# Diagnostics-plumbing: MirLowering.errors was silently dropped on the
+# native-build worker path (nothing outside 70.backend read it), so a bare
+# `nosuchfn(1)` call or an unsupported construct produced broken MIR that
+# only surfaced later as an llc crash / nil-callee far from the real cause.
+# Format each MirError the same way jit_interpreter.spl / compiler.spl
+# already report them (message, plus file:line:col when the span is known).
+fn _format_mir_error(err: MirError) -> text:
+    # Staged native Option payloads can be malformed. Diagnostics must still
+    # report the original failure instead of crashing while formatting a span.
+    "MIR lowering error: {err.message}"
+
+# MirLowering.errors mixes genuine "this MIR is broken" failures with
+# recoverable/informational entries the lowering pipeline pushes through the
+# same channel and then continues past (e.g. `lower_type` falling back to
+# MirType.I64 for a HIR type it can't map 1:1 — commonly HirTypeKind.Infer,
+# since this pipeline has no expression type-inference pass; or the asm
+# target-match "note:"-prefixed advisories in asm_and_targets.spl). Treating
+# every entry as fatal regresses currently-passing builds: confirmed
+# empirically that native-smoke-matrix cases (8) enum_match and (13)
+# dict_index both hit "unsupported MIR type kind: ..." on every
+# currently-passing build and still produce correct output.
+#
+# So this allowlists the specific message shapes that name an actually
+# unresolved symbol/construct with no fallback — the class of bug this fix
+# targets (a bare `nosuchfn(1)` call, or a first-class lambda value passed
+# where only a direct call is supported) — and leaves everything else as a
+# non-fatal warning.
+#
+# silentfactory audit (2026-07-14): widened this allowlist after reading
+# every self.error(...) call site in 50.mir/_MirLoweringExpr/expr_dispatch.spl
+# and switch_operators_calls.spl. Added, each confirmed unreachable by any
+# currently-passing native-smoke-matrix case (verified empirically, not just
+# by inspection):
+#   - "undefined variable" (was "undefined variable:" only — the Var(symbol)
+#     case in expr_dispatch.spl pushes the bare, colon-less "undefined
+#     variable" string with no name, so it fell through this prefix check
+#     entirely and silently produced an i64 nil temp).
+#   - "unsupported array/string slice index" — a[start:end] has no native
+#     lowering; was silently producing a garbage value.
+#   - "B5b" — every int-literal `match` Phase-2 diagnostic in
+#     lower_int_match's arm loop (non-IntLit literal/Or, Tuple/Array/Struct/
+#     Range/Error pattern kinds, missing wildcard default, duplicate
+#     default arms) shares this prefix; none of these pattern shapes appear
+#     in the matrix's enum_match/result_try_op cases, which route through
+#     lower_enum_match instead and never reach this arm loop.
+#   - "match default binding has no resolved symbol" — an internal
+#     invariant violation (the `if val default_symbol = default_binding`
+#     bind succeeded but the value is nil), never a normal fallback.
+#   - "enum match:" — bare/ambiguous/unknown variant and unsupported arm
+#     pattern in lower_enum_match; the function's own comment already says
+#     "emit a LOUD error instead of silently falling through", it just
+#     wasn't wired to this allowlist. Matrix's enum_match/result_try_op
+#     cases use fully-qualified, registered variants and never hit this.
+#   - "enum construction: unregistered enum" — lower_enum_lit only runs for
+#     the explicit `EnumName.Variant(...)` HIR shape with a resolved Named
+#     type; Ok/Err/Option construction is gated separately (see the
+#     enum_variant_index.has("Result"/"Option") checks in
+#     switch_operators_calls.spl) and never reaches this function, so
+#     result_try_op is unaffected.
+#   - "unsupported struct field initializer" — a Lambda literal (or other
+#     value lower_expr can't handle) in field-initializer position; that
+#     call site's own comment says the fix's whole point is "a clean loud
+#     build failure, never a crash". Matrix's struct_field case only ever
+#     passes int literals.
+#
+# iterators lane (2026-07-14): added "for-in over non-array iterables" —
+# lower_for_iterator (mir_lowering_stmts.spl, #143) already records this via
+# self.error(...) AND emits a belt-and-braces rt_panic call for any `for x in
+# c:` where `c` is neither a Range nor a runtime array (e.g. `for ch in
+# some_string:` — bug #143 confirmed still unimplemented natively). Without
+# this prefix in the allowlist, the message was downgraded to a warning, the
+# build silently SUCCEEDED, and the failure only surfaced as a runtime PANIC
+# when the binary ran — the exact "silent success, loud crash later" shape
+# this allowlist exists to prevent for every other unsupported-construct
+# message. Verified empirically against the full native-smoke-matrix (all 15
+# cases still PASS): no passing case iterates a non-array/non-range
+# collection, so this cannot regress currently-working native-build output.
+#
+# DEPRECATED (2026-07-28) — do not add new prefixes to this list.
+# ---------------------------------------------------------------------------
+# Fatality is now a property the *call site* declares: `MirError.fatal`, set by
+# `MirLowering.error_fatal(...)` (50.mir/_MirLowering/asm_and_targets.spl).
+# This list survives only as a fallback for the 50.mir sites not yet migrated
+# and for any out-of-tree producer of MirError.
+#
+# Why it is deprecated: it makes control flow depend on diagnostic *wording*
+# maintained in a different layer, so a reworded message silently changes build
+# semantics — with no test, type, or compiler error to catch it. Two live
+# casualties found on 2026-07-28, both silent:
+#   * "unsupported Result {operation} payload type" — the entry below spells
+#     "…unwrap payload type", so `.unwrap()` was fatal but `.unwrap_err()` was
+#     NOT (`_err` breaks `starts_with`) and its payload lowered to const 0.
+#   * "enum construction: missing runtime identity for '…'" — the entry below
+#     spells "enum construction: unregistered enum", so a missing runtime enum
+#     identity fell through and lowered to the sentinel enum id -1.
+# Both are now fatal via `error_fatal` at the site, independent of wording.
+#
+# The mechanism is also structurally unable to cover asm `compile_error("…")`
+# arms: those carry *user-authored* text (`arm.error_message`), which no
+# allowlist in this layer can ever enumerate.
+#
+# New fatal sites: call `self.error_fatal(...)` in 50.mir. Nothing here.
+fn _mir_error_is_fatal(message: text) -> bool:
+    message.starts_with("undefined variable") or
+        message.starts_with("unresolved method call:") or
+        message.starts_with("unsupported MIR expression:") or
+        message.starts_with("match guards (case x if cond:) are not supported") or
+        message.starts_with("unsupported array/string slice index") or
+        message.starts_with("B5b") or
+        message.starts_with("match default binding has no resolved symbol") or
+        message.starts_with("enum match:") or
+        message.starts_with("enum construction: unregistered enum") or
+        message.starts_with("unsupported struct field initializer") or
+        message.starts_with("unsupported Result unwrap payload type") or
+        message.starts_with("for-in over non-array iterables")
+
+fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
+    # `err.fatal` is the site's own explicit declaration and takes precedence.
+    # `_mir_error_is_fatal(err.message)` is the deprecated message-text fallback
+    # kept so the 99 already-fatal sites behave exactly as before.
+    for err in errors:
+        if err.fatal or _mir_error_is_fatal(err.message):
+            ctx.add_error(_format_mir_error(err))
+        else:
+            ctx.add_warning(_format_mir_error(err))
+
+impl CompilerDriver:
+    # --------------------------------------------------------------------------
+    # MIR Lowering
+    # --------------------------------------------------------------------------
+
+    me lower_to_mir() -> bool:
+        val skip_mir_lower = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
+        if skip_mir_lower == "1":
+            print "[bootstrap] skipping MIR lowering"
+            var skip_idx = 0
+            while skip_idx < self.ctx.sources.len():
+                val src_skip = self.ctx.sources[skip_idx]
+                val name_skip = src_skip.module_name
+                val mir_skip = MirModule(
+                    name: name_skip,
+                    functions: {},
+                    statics: {},
+                    constants: {},
+                    types: {}
+                )
+                self.ctx.mir_modules[name_skip] = mir_skip
+                if name_skip == "app.cli.bootstrap_main":
+                    self.ctx.set_bootstrap_entry_mir(name_skip, mir_skip)
+                skip_idx = skip_idx + 1
+            return self.ctx.errors.len() == 0
+
+        val target_context = driver_mir_target_context(self.ctx.options)
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+            val bootstrap_hir = self.ctx.hir_modules["app.cli.bootstrap_main"]
+            if bootstrap_hir == nil:
+                self.ctx.errors.push("MIR lowering missing HIR module for app.cli.bootstrap_main during bootstrap")
+                log_phase("aot:lower_to_mir:missing_hir module=app.cli.bootstrap_main")
+                return false
+            log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
+            var bootstrap_lowering = MirLowering.new_for_target(bootstrap_hir.symbols, target_context)
+            var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
+            self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+            _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
+            log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
+            return self.ctx.errors.len() == 0
+
+        if self.ctx.sources.len() > 0:
+            # Mirror phase-2 parse_all_impl (driver.spl): under --entry-closure
+            # every source in ctx.sources is a real module reachable from the
+            # entry point (parsed fully in phase 2), not just the bootstrap
+            # main file. Without this flag here, every non-main module fell
+            # through to the empty MirModule stub below, producing "MIR module
+            # has no functions" for the first such module the AOT backend
+            # tried to compile on its own (e.g. std.io_runtime).
+            val native_entry_closure_mir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+            var direct_idx = 0
+            # Canonical constructor — do NOT hand-duplicate MirLowering(...) here.
+            # A duplicated copy drifted 8 fields behind the class and the seed
+            # interpreter silently nil-fills omitted struct-init fields, which
+            # broke native-build on every struct construction
+            # (native_build_entry_struct_construction_buildfail_2026-07-20).
+            # Guard: test/03_system/native/struct_construct_native.spl.
+            var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+            # Crossmodule field-index prepass: the entry module is lowered
+            # BEFORE the dependency modules it imports, so without this an
+            # imported struct's field order was unknown while lowering the
+            # entry and resolve_field_index silently defaulted to index 0
+            # (SEGV on `state.driver.width` across modules). Register every
+            # module's name-keyed struct layout before lowering any module.
+            var direct_prescan_idx = 0
+            while direct_prescan_idx < self.ctx.sources.len():
+                val src_prescan = self.ctx.sources[direct_prescan_idx]
+                val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
+                if prescan_hir != nil:
+                    direct_lowering.prescan_module_struct_names(prescan_hir)
+                direct_prescan_idx = direct_prescan_idx + 1
+            while direct_idx < self.ctx.sources.len():
+                val src_direct = self.ctx.sources[direct_idx]
+                val name_direct = src_direct.module_name
+                var mir_direct = if native_entry_closure_mir or _driver_is_bootstrap_entry_source(src_direct.path, name_direct) or (rt_env_get("SIMPLE_UNSTUB_HIR") ?? "") == "1":
+                    log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
+                    val direct_hir = self.ctx.hir_modules[name_direct]
+                    if direct_hir == nil:
+                        self.ctx.errors.push("MIR lowering missing HIR module for {name_direct} ({src_direct.path})")
+                        log_phase("aot:lower_to_mir:missing_hir idx={direct_idx} module={name_direct} path={src_direct.path}")
+                        return false
+                    direct_lowering.symbols = direct_hir.symbols
+                    var lowered_entry = direct_lowering.lower_module(direct_hir)
+                    lowered_entry.name = name_direct
+                    log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
+                    lowered_entry
+                else:
+                    MirModule(
+                        name: name_direct,
+                        functions: {},
+                        statics: {},
+                        constants: {},
+                        types: {}
+                    )
+                self.ctx.mir_modules[name_direct] = mir_direct
+                if name_direct == "app.cli.bootstrap_main":
+                    self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
+                direct_idx = direct_idx + 1
+                if direct_idx % 64 == 0 or direct_idx == self.ctx.sources.len():
+                    log_build_progress("mir", "modules", direct_idx,
+                        self.ctx.sources.len(), name_direct,
+                        4, 6, 0, 0, "running")
+            _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
+            return self.ctx.errors.len() == 0
+
+        # Canonical constructor — this was a SECOND hand-duplicated
+        # MirLowering(...) copy, drifted even further behind the class (same 8
+        # missing fields as the --entry-closure copy fixed in
+        # native_build_entry_struct_construction_buildfail_2026-07-20, so the
+        # nil-fill landmine was still live on this fallback path).
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+
+        # BUG-001 diagnostic: log module count entering MIR lowering
+        log_debug("[lower_to_mir] lowering to MIR")
+        var lower_trace_count = 0
+        if self.ctx.sources.len() <= 0:
+            # Same crossmodule struct prepass as the --entry-closure loop
+            # above: register all modules' struct layouts before lowering
+            # any module on the shared MirLowering instance.
+            for prescan_module in self.ctx.hir_modules:
+                lowering.prescan_module_struct_names(prescan_module)
+            for hir_module in self.ctx.hir_modules:
+                val name = hir_module.name
+                var mir_module = lowering.lower_module(hir_module)
+                mir_module.name = name
+                self.ctx.mir_modules[name] = mir_module
+                if name == "app.cli.bootstrap_main":
+                    self.ctx.set_bootstrap_entry_mir(name, mir_module)
+            _driver_collect_mir_errors(self.ctx, lowering.errors)
+            log_debug("[lower_to_mir] MIR done")
+            return self.ctx.errors.len() == 0
+        for src3 in self.ctx.sources:
+            val name = src3.module_name
+            val mir_module = MirModule(
+                name: name,
+                functions: {},
+                statics: {},
+                constants: {},
+                types: {}
+            )
+            self.ctx.mir_modules[name] = mir_module
+            if name == "app.cli.bootstrap_main":
+                self.ctx.set_bootstrap_entry_mir(name, mir_module)
+
+        log_debug("[lower_to_mir] MIR done")
+        self.ctx.errors.len() == 0

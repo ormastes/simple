@@ -1,0 +1,164 @@
+# ============================================================================
+# common/structural/invalidation/dirty_mask.spl — FROZEN DirtyMask contract v1
+#
+# Architecture: doc/04_architecture/compiler/mdsoc/
+#   mdsoc_plus_tagged_structural_compute_architecture.md §9.1 (Dirty mask),
+#   §9.3 (Dependency edges), §26 (contract freeze), §27 (INVALIDATE lane owns
+#   structural/invalidation).
+#
+# Freezes the first half of artifact group 6 of §26: "DirtyMask and dependency
+# edge format". The second half is in invalidation_edge.spl.
+#
+# Conventions are inherited unchanged from the ID-TAG lane (wave 0a) and used
+# identically by the MAP lane (wave 0b): all integers little-endian, fixed
+# width, no padding, no alignment; every enum is a u8 discriminant; every
+# top-level record carries the 8-byte wire envelope; an unknown discriminant or
+# a set reserved bit is a HARD REJECT, never a silent default. See
+# common/structural/wire.spl.
+#
+# The `DirtyMask` STRUCT is NOT redeclared here. It already exists in this
+# lane's contracts.spl and is imported by six modules (the layout lane, the
+# gpu_web browser engine, and their specs). Two declarations of one wire type is
+# precisely how two lanes come to disagree about a bit position while both
+# report success, so this module imports the existing struct and adds the frozen
+# wire vocabulary to it.
+#
+# DIVERGENCE RESOLVED. contracts.spl also carries four layout-lane constants —
+# DIRTY_INTRINSIC_MEASURE, DIRTY_LAYOUT, DIRTY_HIT_TEST, DIRTY_RESOURCE — which
+# were originally packed at 1/2/4/8, i.e. bits 0..3, and so did NOT sit on the
+# §9.1 positions frozen below (bits 14, 15, 18, 20). The layout lane had packed
+# the four stages it cared about into the low bits before the contract freeze
+# existed, which made bit 0 mean IntrinsicMeasure there and Source here.
+#
+# They are now renumbered onto the canonical bits and are value-identical to the
+# DIRTY_BIT_* constants below. The renumber was performed while it was still
+# legal — no golden vector had ever been authored in the layout vocabulary and
+# no layout-built mask had ever reached an encoder — so it changed no wire byte.
+# The contract spec asserts the equality both ways and also asserts that a mask
+# composed from the layout constants encodes to the canonical golden bytes, so
+# the two vocabularies cannot drift apart again without a gate failure.
+#
+# FROZEN: bit positions are wire values. A bit is never reused and never
+# renumbered; new stages take the next free bit and a version bump.
+# ============================================================================
+
+use std.common.structural.invalidation.contracts.{DirtyMask}
+
+val INVALIDATION_SCHEMA_VERSION: i64 = 1
+
+# ----------------------------------------------------------------------------
+# DirtyMask bit vocabulary (§9.1)
+#
+# §9.1 gives the flag set as a `flags DirtyMask:` block with 21 named members
+# and no explicit numbering. Frozen as given, in declaration order, starting at
+# bit 0. The ordering is not arbitrary in the architecture: it runs the compiler
+# pipeline (Source..Link) and then the document/render pipeline
+# (DomStructure..Accessibility), so a stage's bit index is monotone in the order
+# work actually happens, and `mask < (1 << n)` means "nothing past stage n is
+# dirty".
+#
+# 21 bits do not fit a u16, so the smallest fixed width that holds the frozen
+# flag set is u32 — the same derivation the MAP lane used for MappingKindSet.
+# Bits 21..31 are RESERVED and MUST be zero.
+# ----------------------------------------------------------------------------
+
+val DIRTY_BIT_SOURCE: i64 = 1
+val DIRTY_BIT_TOKEN: i64 = 2
+val DIRTY_BIT_PARSE: i64 = 4
+val DIRTY_BIT_SYNTAX_INDEX: i64 = 8
+val DIRTY_BIT_SEMANTIC: i64 = 16
+val DIRTY_BIT_HIR: i64 = 32
+val DIRTY_BIT_MIR: i64 = 64
+val DIRTY_BIT_OPTIMIZATION: i64 = 128
+val DIRTY_BIT_CODEGEN: i64 = 256
+val DIRTY_BIT_LINK: i64 = 512
+val DIRTY_BIT_DOM_STRUCTURE: i64 = 1024
+val DIRTY_BIT_SELECTOR_INDEX: i64 = 2048
+val DIRTY_BIT_CASCADE: i64 = 4096
+val DIRTY_BIT_COMPUTED_STYLE: i64 = 8192
+val DIRTY_BIT_INTRINSIC_MEASURE: i64 = 16384
+val DIRTY_BIT_LAYOUT: i64 = 32768
+val DIRTY_BIT_PAINT: i64 = 65536
+val DIRTY_BIT_COMPOSITE: i64 = 131072
+val DIRTY_BIT_HIT_TEST: i64 = 262144
+val DIRTY_BIT_ACCESSIBILITY: i64 = 524288
+val DIRTY_BIT_RESOURCE: i64 = 1048576
+
+val DIRTY_MASK_LEN: i64 = 4
+val DIRTY_MASK_COUNT: i64 = 21
+val DIRTY_MASK_MAX_BIT_INDEX: i64 = 20
+val DIRTY_MASK_EMPTY: i64 = 0
+
+# Bits 0..20 set. This constant is what pins DIRTY_MASK_COUNT at 21: adding a
+# 22nd stage without a version bump changes the golden bytes.
+val DIRTY_MASK_KNOWN: i64 = 2097151
+
+fn dirty_mask_valid(raw: i64) -> bool:
+    """True when no reserved bit is set.
+
+    `raw` is deliberately i64, not u32. A u32-typed argument would let a caller
+    that already truncated hand in a value this function cannot tell apart from
+    a legitimate one; taking the wide type means an out-of-range mask is
+    REJECTED here rather than silently narrowed at the call boundary. The
+    non-negative test is what makes that real: a u64 bit pattern with the top
+    bit set arrives as a negative i64 and fails, instead of passing the mask
+    test after sign-extension folded its high bits away.
+    """
+    raw >= 0 and (raw & DIRTY_MASK_KNOWN) == raw
+
+fn dirty_bit_of_index(index: i64) -> i64:
+    """Bit value for stage `index` (§9.1 declaration order). Returns 0 for an
+    out-of-range index rather than shifting, because `1 << 64` is not defined
+    consistently across the engines and a silently-wrapped bit would alias a
+    real stage."""
+    if index < 0 or index > DIRTY_MASK_MAX_BIT_INDEX:
+        return 0
+    1 << index
+
+fn dirty_mask_of_bits(bits: [i64]) -> i64:
+    var m = DIRTY_MASK_EMPTY
+    var i = 0
+    while i < bits.len():
+        m = m | bits[i]
+        i = i + 1
+    m
+
+fn dirty_mask_contains(mask: i64, bit: i64) -> bool:
+    (mask & bit) == bit and bit != 0
+
+fn dirty_mask_union(a: i64, b: i64) -> i64:
+    a | b
+
+fn dirty_mask_intersect(a: i64, b: i64) -> i64:
+    a & b
+
+fn dirty_mask_is_empty(mask: i64) -> bool:
+    mask == DIRTY_MASK_EMPTY
+
+fn dirty_mask_raw(m: DirtyMask) -> i64:
+    m.bits
+
+fn dirty_mask_equal(a: DirtyMask, b: DirtyMask) -> bool:
+    """Explicit field-wise equality, not engine struct equality, which differs
+    between the interpreter and native codegen for nested structs."""
+    a.bits == b.bits
+
+fn dirty_mask_from_raw(raw: i64) -> DirtyMask:
+    """Caller MUST gate on `dirty_mask_valid` first; this stays total so it can
+    be used inside a decoder that has already validated (same rule as
+    mapping_kind_from_u8)."""
+    DirtyMask.from_bits(raw)
+
+export INVALIDATION_SCHEMA_VERSION
+export DIRTY_BIT_SOURCE, DIRTY_BIT_TOKEN, DIRTY_BIT_PARSE, DIRTY_BIT_SYNTAX_INDEX
+export DIRTY_BIT_SEMANTIC, DIRTY_BIT_HIR, DIRTY_BIT_MIR, DIRTY_BIT_OPTIMIZATION
+export DIRTY_BIT_CODEGEN, DIRTY_BIT_LINK, DIRTY_BIT_DOM_STRUCTURE
+export DIRTY_BIT_SELECTOR_INDEX, DIRTY_BIT_CASCADE, DIRTY_BIT_COMPUTED_STYLE
+export DIRTY_BIT_INTRINSIC_MEASURE, DIRTY_BIT_LAYOUT, DIRTY_BIT_PAINT
+export DIRTY_BIT_COMPOSITE, DIRTY_BIT_HIT_TEST, DIRTY_BIT_ACCESSIBILITY
+export DIRTY_BIT_RESOURCE
+export DIRTY_MASK_LEN, DIRTY_MASK_COUNT, DIRTY_MASK_MAX_BIT_INDEX
+export DIRTY_MASK_EMPTY, DIRTY_MASK_KNOWN
+export dirty_mask_valid, dirty_bit_of_index, dirty_mask_of_bits
+export dirty_mask_contains, dirty_mask_union, dirty_mask_intersect
+export dirty_mask_is_empty, dirty_mask_raw, dirty_mask_equal, dirty_mask_from_raw

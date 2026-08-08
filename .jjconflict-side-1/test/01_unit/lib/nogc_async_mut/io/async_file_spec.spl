@@ -1,0 +1,111 @@
+# Async File I/O Specification
+#
+# Covers src/lib/nogc_async_mut/io/file.spl: errno translation, filesystem
+# metadata via stat, and the AsyncDir directory operations.
+#
+# HISTORY: this file previously held 17 examples, every one of them named
+# "documents <something>", whose entire body was a commented-out snippet
+# followed by `pass`. It imported nothing, so all 17 reported green while
+# executing none of the async file layer. Prose belongs in a comment or a guide;
+# an `it` block that executes nothing is a spec that cannot fail.
+#
+# The async read/write paths (AsyncFile.open/read/write/fsync) take an IoDriver
+# and resolve through the event loop, so they are not reachable from an
+# in-process spec. They are deliberately not covered here rather than being
+# re-stubbed. ThreadPool is also uncovered: it is unusable because of a name
+# collision filed as
+# doc/08_tracking/bug/threadpool_duplicate_export_collapses_type_2026-08-02.md
+
+use std.spec
+use std.nogc_async_mut.io.file.{errno_to_io_error, stat, AsyncDir}
+use std.io.types.{IoError, IoErrorKind}
+
+describe "async file — errno translation":
+    it "maps ENOENT to NotFound":
+        val e = errno_to_io_error(0 - 2)
+        expect(e.kind == IoErrorKind.NotFound).to_equal(true)
+        expect(e.message).to_equal("file not found")
+
+    it "maps EACCES to PermissionDenied":
+        val e = errno_to_io_error(0 - 13)
+        expect(e.kind == IoErrorKind.PermissionDenied).to_equal(true)
+        expect(e.message).to_equal("permission denied")
+
+    it "maps EEXIST to AlreadyExists":
+        val e = errno_to_io_error(0 - 17)
+        expect(e.kind == IoErrorKind.AlreadyExists).to_equal(true)
+        expect(e.message).to_equal("already exists")
+
+    it "maps EISDIR to InvalidInput":
+        val e = errno_to_io_error(0 - 21)
+        expect(e.kind == IoErrorKind.InvalidInput).to_equal(true)
+        expect(e.message).to_equal("is a directory")
+
+    it "maps ENOSPC to Other with a no-space message":
+        val e = errno_to_io_error(0 - 28)
+        expect(e.kind == IoErrorKind.Other).to_equal(true)
+        expect(e.message).to_equal("no space left on device")
+
+    it "falls back to Other for an unrecognised errno":
+        val e = errno_to_io_error(0 - 99)
+        expect(e.kind == IoErrorKind.Other).to_equal(true)
+
+    it "distinguishes the mapped kinds from one another":
+        val not_found = errno_to_io_error(0 - 2)
+        val denied = errno_to_io_error(0 - 13)
+        val exists = errno_to_io_error(0 - 17)
+        expect(not_found.kind == denied.kind).to_equal(false)
+        expect(denied.kind == exists.kind).to_equal(false)
+        expect(not_found.kind == exists.kind).to_equal(false)
+
+describe "async file — stat":
+    it "fails on a path that does not exist":
+        val r = stat("/nonexistent/definitely/missing/path")
+        expect(r.is_err()).to_equal(true)
+
+    it "succeeds on an existing directory":
+        val r = stat("/tmp")
+        expect(r.is_ok()).to_equal(true)
+
+    it "reports a directory as a directory and not a file":
+        val r = stat("/tmp")
+        expect(r.is_ok()).to_equal(true)
+        match r:
+            case Ok(st):
+                expect(st.is_dir).to_equal(true)
+                expect(st.is_file).to_equal(false)
+            case Err(e):
+                expect("stat /tmp failed").to_equal("stat /tmp to succeed")
+
+describe "async file — AsyncDir":
+    it "lists an existing directory":
+        val r = AsyncDir.readdir("/tmp")
+        expect(r.is_ok()).to_equal(true)
+
+    it "fails to list a directory that does not exist":
+        val r = AsyncDir.readdir("/nonexistent/definitely/missing/dir")
+        expect(r.is_err()).to_equal(true)
+
+    it "creates a directory, sees it in the listing, then removes it":
+        val path = "/tmp/vaclane_async_file_spec_dir"
+        val made = AsyncDir.mkdir(path, 493)
+        expect(made.is_ok()).to_equal(true)
+        val after_create = stat(path)
+        expect(after_create.is_ok()).to_equal(true)
+        val removed = AsyncDir.remove(path)
+        expect(removed.is_ok()).to_equal(true)
+        val after_remove = stat(path)
+        expect(after_remove.is_err()).to_equal(true)
+
+    it "reports a newly created directory as a directory":
+        val path = "/tmp/vaclane_async_file_spec_dir2"
+        val made = AsyncDir.mkdir(path, 493)
+        expect(made.is_ok()).to_equal(true)
+        val st = stat(path)
+        match st:
+            case Ok(info):
+                expect(info.is_dir).to_equal(true)
+            case Err(e):
+                expect("stat of created dir failed").to_equal("it to succeed")
+        val removed = AsyncDir.remove(path)
+        expect(removed.is_ok()).to_equal(true)

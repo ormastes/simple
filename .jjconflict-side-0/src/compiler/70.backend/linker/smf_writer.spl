@@ -1,0 +1,745 @@
+# SMF Writer
+#
+# Simple Module Format writer for creating SMF files from compiled code.
+# Handles sections, symbols, relocations, and string tables.
+#
+# Port of rust/compiler/src/linker/smf_writer.rs
+
+use compiler.backend.linker.smf_header.{SmfHeader}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SMF_MAGIC: i64 = 0x534D4600      # "SMF\0"
+val SMF_VERSION_MAJOR: i64 = 1
+val SMF_VERSION_MINOR: i64 = 1
+val SMF_FLAG_EXECUTABLE: i64 = 0x1
+
+val SECTION_FLAG_READ: i64 = 0x1
+val SECTION_FLAG_WRITE: i64 = 0x2
+val SECTION_FLAG_EXEC: i64 = 0x4
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum DataSectionKind:
+    """Lean: inductive DataSectionKind | mutable | readonly"""
+    Mutable
+    ReadOnly
+
+impl DataSectionKind:
+    fn is_readonly() -> bool:
+        match self:
+            case ReadOnly: true
+            case _: false
+
+    fn to_section_type() -> SectionType:
+        match self:
+            case Mutable: SectionType.Data
+            case ReadOnly: SectionType.RoData
+
+    fn to_flags() -> i64:
+        match self:
+            case ReadOnly: SECTION_FLAG_READ
+            case Mutable: SECTION_FLAG_READ + SECTION_FLAG_WRITE
+
+enum SectionType:
+    Code
+    Data
+    RoData
+    Bss
+    SymTab
+    StrTab
+    RelTab
+    Note
+    Debug
+    # FR-DRIVER-0004: `.drv_manifest` section. Payload is a DRVS record
+    # (magic 0x44525653, 64-byte header + 8 * device_count bytes) produced
+    # by the compiler's @driver / @native_lib codegen glue and decoded by
+    # std.driver.loader::decode_manifest. Wire byte = 14, matching the
+    # authoritative Rust enum at src/compiler_rust/common/src/smf/section.rs.
+    DrvManifest
+    # Startup launch metadata section. Payload is the same SDN text used by
+    # native sidecars, embedded for SMF/script launchers. Wire byte = 15.
+    LaunchMeta
+
+impl SectionType:
+    fn name() -> text:
+        match self:
+            case Code: ".text"
+            case Data: ".data"
+            case RoData: ".rodata"
+            case Bss: ".bss"
+            case SymTab: ".symtab"
+            case StrTab: ".strtab"
+            case RelTab: ".rela"
+            case Note: ".note"
+            case Debug: ".debug"
+            case DrvManifest: ".drv_manifest"
+            case LaunchMeta: ".launch_meta"
+
+    """Map to wire byte value (Rust-runtime compatible)."""
+    fn to_wire_u8() -> u8:
+        match self:
+            case Code: 1
+            case Data: 2
+            case RoData: 3
+            case Bss: 4
+            case RelTab: 5
+            case StrTab: 6
+            case Note: 7
+            case Debug: 8
+            case SymTab: 9
+            case DrvManifest: 14
+            case LaunchMeta: 15
+
+enum SmfWriterSymbolBinding:
+    Local
+    Global
+    Weak
+
+impl SmfWriterSymbolBinding:
+    """Map to wire byte value (matches _SmfReaderMemory/symbol_parser.spl parse_binding)."""
+    fn to_wire_u8() -> u8:
+        match self:
+            case Local: 0
+            case Global: 1
+            case Weak: 2
+
+enum SmfWriterSymbolType:
+    NoType
+    Function
+    Object
+    Section
+
+impl SmfWriterSymbolType:
+    """Map to wire byte value (matches _SmfReaderMemory/symbol_parser.spl parse_sym_type).
+
+    NOTE: the reader's SymbolType has 6 variants (Function/Data/Type/Trait/Actor/
+    Constant); this writer-side enum only has 4. NoType and Function both wire to
+    0 (Function) -- the reader treats unrecognised type bytes as Function anyway,
+    so this is not a silent-corruption risk, just a coarser writer-side vocabulary.
+    """
+    fn to_wire_u8() -> u8:
+        match self:
+            case NoType: 0
+            case Function: 0
+            case Object: 1
+            case Section: 2
+
+enum RelocationType:
+    Abs64
+    Rel32
+    PltRel32
+    GotRel32
+    Abs32
+
+impl RelocationType:
+    """Map to wire byte value for SMF reloc section."""
+    fn to_wire_u8() -> u8:
+        match self:
+            case Abs64: 1
+            case Rel32: 2
+            case PltRel32: 3
+            case GotRel32: 4
+            case Abs32: 5
+
+enum SmfWriteError:
+    IoError(text)
+    InvalidData(text)
+
+impl SmfWriteError:
+    fn message() -> text:
+        match self:
+            case IoError(msg): "IO error: {msg}"
+            case InvalidData(msg): "Invalid data: {msg}"
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct SmfWriterSymbol:
+    name: text
+    binding: SmfWriterSymbolBinding
+    sym_type: SmfWriterSymbolType
+    section_index: i64
+    value: i64
+    size: i64
+    layout_phase: i64           # 0=startup, 1=first_frame, 2=steady, 3=cold
+    is_event_loop_anchor: bool
+    layout_pinned: bool
+
+struct SmfRelocation:
+    offset: i64
+    symbol_index: i64
+    reloc_type: RelocationType
+    addend: i64
+
+struct SmfSection:
+    name: text
+    section_type: SectionType
+    flags: i64
+    data: [i64]        # Byte array
+    alignment: i64
+
+# ============================================================================
+# SMF Writer
+# ============================================================================
+
+class SmfWriter:
+    """Creates SMF files from compiled code."""
+    sections: [SmfSection]
+    symbols: [SmfWriterSymbol]
+    relocations: [SmfRelocation]
+    string_table: [i64]         # Byte array
+    string_offsets: {text: i64}
+
+impl SmfWriter:
+    static fn create() -> SmfWriter:
+        SmfWriter(sections: [], symbols: [], relocations: [],
+                  string_table: [0], string_offsets: {})
+
+    me add_string(s: text) -> i64:
+        """Add a string to the string table, returning its offset."""
+        if self.string_offsets.has(s):
+            return self.string_offsets[s]
+        val offset = self.string_table.len()
+        val name_bytes = s.bytes()
+        var i = 0
+        while i < name_bytes.len():
+            self.string_table = self.string_table.push(name_bytes[i] as i64)
+            i = i + 1
+        self.string_table = self.string_table.push(0)
+        self.string_offsets[s] = offset
+        offset
+
+    me add_code_section(name: text, code: [i64]) -> i64:
+        val section = SmfSection(name: name, section_type: SectionType.Code,
+            flags: SECTION_FLAG_READ + SECTION_FLAG_EXEC,
+            data: code, alignment: 16)
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_data_section(name: text, data: [i64], kind: DataSectionKind) -> i64:
+        val section = SmfSection(name: name, section_type: kind.to_section_type(),
+            flags: kind.to_flags(), data: data, alignment: 8)
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_bss_section(name: text, size: i64) -> i64:
+        val zeroes: [i64] = []
+        val section = SmfSection(name: name, section_type: SectionType.Bss,
+            flags: SECTION_FLAG_READ + SECTION_FLAG_WRITE,
+            data: zeroes, alignment: 8)
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_symbol(symbol: SmfWriterSymbol) -> i64:
+        self.symbols = self.symbols.push(symbol)
+        self.symbols.len() - 1
+
+    me add_relocation(reloc: SmfRelocation):
+        self.relocations = self.relocations.push(reloc)
+
+    me add_note_section(name: text, data: [i64]) -> i64:
+        val section = SmfSection(name: name, section_type: SectionType.Note,
+            flags: SECTION_FLAG_READ, data: data, alignment: 4)
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_driver_manifest_section(data: [u8]) -> i64:
+        """Add the `.drv_manifest` section carrying a DRVS manifest record."""
+        var payload: [i64] = []
+        for b in data:
+            payload.push(b as i64)
+        val section = SmfSection(
+            name: SectionType.DrvManifest.name(),
+            section_type: SectionType.DrvManifest,
+            flags: SECTION_FLAG_READ,
+            data: payload,
+            alignment: 8
+        )
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_launch_metadata_section(data: [u8]) -> i64:
+        """Add the `.launch_meta` section carrying startup launch metadata."""
+        var payload: [i64] = []
+        for b in data:
+            payload.push(b as i64)
+        val section = SmfSection(
+            name: SectionType.LaunchMeta.name(),
+            section_type: SectionType.LaunchMeta,
+            flags: SECTION_FLAG_READ,
+            data: payload,
+            alignment: 4
+        )
+        self.sections = self.sections.push(section)
+        self.sections.len() - 1
+
+    me add_assurance_note_section(note: AssuranceObjectNoteV1) -> i64:
+        """Add the per-object assurance note (WP-20 remainder, v1/placeholder
+        schema -- see AssuranceObjectNoteV1's doc comment) as a `.note`
+        section, real payload bytes via AssuranceObjectNoteV1.to_bytes().
+        Mirrors add_launch_metadata_section's shape; reuses the existing
+        SectionType.Note attachment point rather than adding a new wire type."""
+        val bytes = note.to_bytes()
+        var payload: [i64] = []
+        for b in bytes:
+            payload.push(b as i64)
+        self.add_note_section(".assurance_note", payload)
+
+    fn section_count() -> i64:
+        self.sections.len()
+
+    fn symbol_count() -> i64:
+        self.symbols.len()
+
+    me write() -> Result<[i64], SmfWriteError>:
+        """Serialize to real SMF v1.1 binary bytes, pure Simple, no SFFI.
+
+        Byte layout matches the already-proven, in-tree pure-Simple pair:
+        `smf_header.SmfHeader` (128-byte header, written as a trailer at EOF-128,
+        same as `compiler.driver.smf_writer.build_smf_with_templates_internal`)
+        and `_SmfReaderMemory` (the working reader: 64-byte section entries,
+        56-byte symbol entries, string table immediately after the symbol
+        table). This is NOT the six-extern `rt_smf_reader_*` reader
+        (smf_reader.spl) -- that one is unimplemented and out of scope; see
+        doc/08_tracking/bug/smf_reader_bridge_silent_nil.md. `SmfReaderMemory`
+        is the reader this writer is built to round-trip with.
+
+        File layout (data-first, header-trailer):
+          [section payloads, in order, each aligned to its declared alignment]
+          [reloc payload, if any relocations were added]
+          [section table: 64 bytes/entry]
+          [symbol table: 56 bytes/entry]
+          [string table: raw bytes, offset 0 = empty string]
+          [128-byte SmfHeader trailer]
+        """
+        if self.sections.len() == 0:
+            return Err(SmfWriteError.InvalidData("No sections to write"))
+
+        # Linker-compatibility structural check: every relocation must reference
+        # a symbol that actually exists in this builder's symbol table.
+        var ri_check = 0
+        while ri_check < self.relocations.len():
+            val reloc = self.relocations[ri_check]
+            if reloc.symbol_index < 0 or reloc.symbol_index >= self.symbols.len():
+                return Err(SmfWriteError.InvalidData("relocation {ri_check} references out-of-range symbol_index {reloc.symbol_index} (symbol_count={self.symbols.len()})"))
+            ri_check = ri_check + 1
+
+        # Assign string-table offsets for every symbol name up front (also
+        # populates self.string_table with real bytes -- see add_string()).
+        var name_offsets: [i64] = []
+        var ni = 0
+        while ni < self.symbols.len():
+            name_offsets.push(self.add_string(self.symbols[ni].name))
+            ni = ni + 1
+
+        val has_reloc_section = self.relocations.len() > 0
+        var reloc_bytes: [u8] = []
+        if has_reloc_section:
+            reloc_bytes = self.serialize_relocations()
+
+        var section_count = self.sections.len()
+        if has_reloc_section:
+            section_count = section_count + 1
+
+        # 1. Compute section payload offsets (data-first, offset 0).
+        var section_offsets: [i64] = []
+        var cursor: i64 = 0
+        var soi = 0
+        while soi < self.sections.len():
+            val section = self.sections[soi]
+            val align = if section.alignment > 0: section.alignment else: 1
+            cursor = smf_align_up(cursor, align)
+            section_offsets.push(cursor)
+            cursor = cursor + section.data.len()
+            soi = soi + 1
+
+        var reloc_offset: i64 = 0
+        if has_reloc_section:
+            cursor = smf_align_up(cursor, 8)
+            reloc_offset = cursor
+            cursor = cursor + reloc_bytes.len()
+
+        val section_table_offset = cursor
+        val section_table_size = section_count * 64
+        val symbol_table_offset = section_table_offset + section_table_size
+        val symbol_count = self.symbols.len()
+        val symbol_table_size = symbol_count * 56
+
+        # 2. Entry point: prefer spl_main/_spl_main, then main/_main, else 0.
+        var entry_point: i64 = 0
+        var epi = 0
+        while epi < self.symbols.len():
+            val symbol = self.symbols[epi]
+            if symbol.name == "spl_main" or symbol.name == "_spl_main":
+                entry_point = symbol.value
+            epi = epi + 1
+        if entry_point == 0:
+            var epi2 = 0
+            while epi2 < self.symbols.len():
+                val symbol = self.symbols[epi2]
+                if symbol.name == "main" or symbol.name == "_main":
+                    entry_point = symbol.value
+                epi2 = epi2 + 1
+
+        var exported_count: i64 = 0
+        var eci = 0
+        while eci < self.symbols.len():
+            val is_local = match self.symbols[eci].binding:
+                case SmfWriterSymbolBinding.Local: true
+                case _: false
+            if not is_local:
+                exported_count = exported_count + 1
+            eci = eci + 1
+
+        var buf: [i64] = []
+
+        # 3. Section payloads.
+        var pos: i64 = 0
+        var wsi = 0
+        while wsi < self.sections.len():
+            val section = self.sections[wsi]
+            val target_off = section_offsets[wsi]
+            while pos < target_off:
+                buf.push(0)
+                pos = pos + 1
+            var di = 0
+            while di < section.data.len():
+                buf.push(section.data[di])
+                di = di + 1
+            pos = pos + section.data.len()
+            wsi = wsi + 1
+
+        if has_reloc_section:
+            while pos < reloc_offset:
+                buf.push(0)
+                pos = pos + 1
+            var rbi = 0
+            while rbi < reloc_bytes.len():
+                buf.push(reloc_bytes[rbi] as i64)
+                rbi = rbi + 1
+            pos = pos + reloc_bytes.len()
+
+        # 4. Section table (64-byte entries).
+        var tsi = 0
+        while tsi < self.sections.len():
+            val section = self.sections[tsi]
+            val entry = smf_build_section_entry_bytes(
+                section.section_type.to_wire_u8(), section.flags,
+                section_offsets[tsi], section.data.len(), section.alignment, section.name)
+            var tei = 0
+            while tei < entry.len():
+                buf.push(entry[tei] as i64)
+                tei = tei + 1
+            tsi = tsi + 1
+
+        if has_reloc_section:
+            val entry = smf_build_section_entry_bytes(
+                SectionType.RelTab.to_wire_u8(), 0, reloc_offset, reloc_bytes.len(), 8, ".rela")
+            var rei = 0
+            while rei < entry.len():
+                buf.push(entry[rei] as i64)
+                rei = rei + 1
+
+        # 5. Symbol table (56-byte entries).
+        var symi = 0
+        while symi < self.symbols.len():
+            val entry = smf_build_symbol_entry_bytes(self.symbols[symi], name_offsets[symi])
+            var sei = 0
+            while sei < entry.len():
+                buf.push(entry[sei] as i64)
+                sei = sei + 1
+            symi = symi + 1
+
+        # 6. String table (already real bytes, offset 0 = empty string).
+        var sti = 0
+        while sti < self.string_table.len():
+            buf.push(self.string_table[sti])
+            sti = sti + 1
+
+        # 7. Header, written as a 128-byte trailer (v1.1 design, matches
+        # compiler.driver.smf_writer and _SmfReaderMemory's dual offset-0/
+        # trailer lookup).
+        var header: SmfHeader = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        header.set_executable(true)
+        header.section_count = section_count as u32
+        header.section_table_offset = section_table_offset as u64
+        header.symbol_table_offset = symbol_table_offset as u64
+        header.symbol_count = symbol_count as u32
+        header.exported_count = exported_count as u32
+        header.entry_point = entry_point as u64
+
+        val header_bytes = header.to_bytes()
+        var hi = 0
+        while hi < header_bytes.len():
+            buf.push(header_bytes[hi] as i64)
+            hi = hi + 1
+
+        Ok(buf)
+
+    """Serialize relocations to a byte array for the Reloc section.
+
+    Each entry is 24 bytes:
+      offset: u64 (8) | symbol_index: u32 (4) | reloc_type: u8 (1) | pad: 3 | addend: i64 (8)
+    """
+    fn serialize_relocations() -> [u8]:
+        var buf: [u8] = []
+        for reloc in self.relocations:
+            # offset (u64, 8 bytes)
+            for b in u64_to_bytes_u8(reloc.offset):
+                buf.push(b)
+            # symbol_index (u32, 4 bytes)
+            for b in u32_to_bytes_u8(reloc.symbol_index):
+                buf.push(b)
+            # reloc_type (u8, 1 byte)
+            buf.push(reloc.reloc_type.to_wire_u8())
+            # padding (3 bytes)
+            buf.push(0)
+            buf.push(0)
+            buf.push(0)
+            # addend (i64, 8 bytes)
+            for b in u64_to_bytes_u8(reloc.addend):
+                buf.push(b)
+        buf
+
+# ============================================================================
+# Byte serialization helpers (u8 output)
+# ============================================================================
+
+fn u32_to_bytes_u8(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8
+    ]
+
+fn u64_to_bytes_u8(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8,
+        ((value >> 32) & 0xFF) as u8,
+        ((value >> 40) & 0xFF) as u8,
+        ((value >> 48) & 0xFF) as u8,
+        ((value >> 56) & 0xFF) as u8
+    ]
+
+# ============================================================================
+# write() helpers
+# ============================================================================
+
+"""Round `offset` up to the next multiple of `align` (align <= 1 is a no-op)."""
+fn smf_align_up(offset: i64, align: i64) -> i64:
+    if align <= 1:
+        offset
+    else:
+        val rem = offset % align
+        if rem == 0: offset else: offset + (align - rem)
+
+"""FNV-1a hash, matching Rust's `hash_name` (common/src/smf/symbol.rs) and
+the pure-Simple equivalent `smf_name_hash` (compiler.driver.smf_writer)."""
+fn smf_fnv1a_hash_u32(s: text) -> i64:
+    var hash: i64 = 2166136261
+    val name_bytes = s.bytes()
+    var i = 0
+    while i < name_bytes.len():
+        hash = hash ^ (name_bytes[i] as i64)
+        hash = (hash * 16777619) & 0xFFFFFFFF
+        i = i + 1
+    hash & 0xFFFFFFFF
+
+"""Build one 64-byte SMF section-table entry (56 bytes of content, padded to 64
+to match the `section_entry_size = 64` layout `_SmfReaderMemory` and
+`compiler.driver.smf_writer.build_section_entry` both use):
+  section_type (1) | pad (3) | flags (4) | offset (8) | size (8) |
+  virtual_size (8) | alignment (8) | name (16) | pad (8) = 64 bytes.
+"""
+fn smf_build_section_entry_bytes(section_type_byte: u8, flags: i64, offset: i64, size: i64, alignment: i64, name: text) -> [u8]:
+    var buf: [u8] = []
+    buf.push(section_type_byte)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    for b in u32_to_bytes_u8(flags):
+        buf.push(b)
+    for b in u64_to_bytes_u8(offset):
+        buf.push(b)
+    for b in u64_to_bytes_u8(size):
+        buf.push(b)
+    for b in u64_to_bytes_u8(size):
+        buf.push(b)
+    for b in u64_to_bytes_u8(alignment):
+        buf.push(b)
+    val name_bytes = name.bytes()
+    var i = 0
+    while i < 16:
+        if i < name_bytes.len():
+            buf.push(name_bytes[i])
+        else:
+            buf.push(0)
+        i = i + 1
+    while buf.len() < 64:
+        buf.push(0)
+    buf
+
+"""Build one 56-byte SMF symbol-table entry, matching the Rust repr(C)
+`SmfSymbol` (common/src/smf/symbol.rs) and `_SmfReaderMemory/symbol_parser.spl`:
+  name_offset (4) | name_hash (4) | sym_type (1) | binding (1) | visibility (1) |
+  flags (1) | pad (4) | value (8) | size (8) | type_id (4) | version (4) |
+  template_param_count (1) | reserved[3] (3, low 2 bytes = section_index LE) |
+  pad (4) | template_offset (8) = 56 bytes.
+"""
+fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u8]:
+    var buf: [u8] = []
+    for b in u32_to_bytes_u8(name_offset):
+        buf.push(b)
+    for b in u32_to_bytes_u8(smf_fnv1a_hash_u32(symbol.name)):
+        buf.push(b)
+    buf.push(symbol.sym_type.to_wire_u8())
+    buf.push(symbol.binding.to_wire_u8())
+    val visibility: i64 = if symbol.section_index != 0: 1 else: 0
+    buf.push(visibility as u8)
+    var flags: i64 = symbol.layout_phase & 0x03
+    if symbol.is_event_loop_anchor:
+        flags = flags | 0x04
+    if symbol.layout_pinned:
+        flags = flags | 0x08
+    buf.push(flags as u8)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    for b in u64_to_bytes_u8(symbol.value):
+        buf.push(b)
+    for b in u64_to_bytes_u8(symbol.size):
+        buf.push(b)
+    for b in u32_to_bytes_u8(0):
+        buf.push(b)
+    for b in u32_to_bytes_u8(0):
+        buf.push(b)
+    buf.push(0)
+    buf.push((symbol.section_index & 0xff) as u8)
+    buf.push(((symbol.section_index >> 8) & 0xff) as u8)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    buf.push(0)
+    for b in u64_to_bytes_u8(0):
+        buf.push(b)
+    buf
+
+# ============================================================================
+# AssuranceObjectNoteV1 (WP-20 remainder) -- v1 / PLACEHOLDER, NOT FINAL.
+# ============================================================================
+#
+# This is a deliberately minimal first-cut per-object assurance note attached
+# via the existing `SectionType.Note` attachment point (see
+# `add_assurance_note_section` above). There is no prior design doc for this
+# schema anywhere under `doc/04_architecture/` or `doc/05_design/` -- grepped,
+# zero hits -- so there is no hidden ground truth being discovered here. This
+# schema is a proposal, scoped to what THIS session's landed work already
+# produces:
+#
+#   - artifact_sha256_hex: content-hash identity of the built artifact,
+#     reusing WP-19's `manifest_sha256_hex` concept
+#     (src/os/kernel/loader/artifact_manifest.spl) rather than inventing a new
+#     identity scheme. This module does not import that kernel-layer file
+#     (layering: 70.backend must not depend on os/kernel); callers compute the
+#     hex digest the same way (SHA-256, two hex chars per byte, MSB nibble
+#     first) and pass it in as plain text.
+#   - assurance_profile: the canonical profile name text as produced by WP-3's
+#     `compiler.common.assurance.policy_names.normalize_profile_name`
+#     (critical/moderate/strict/robust) -- not a new string enum.
+#   - build_timestamp_unix: when the artifact was produced, unix seconds.
+#     `AssuranceStampV1` (stamp.spl, WP-0, frozen) carries no wall-clock time
+#     field, so this is new, not a duplicate.
+#   - obligations_checked/obligations_complied/obligations_violated: a
+#     COMPACT summary of this session's flight-rule census output (WP-16,
+#     `90.tools/verify/flight_rule_census_scan.spl`'s `CensusReport`) -- three
+#     counts, not the full per-site report re-embedded. This module does not
+#     import the census scanner (layering: 70.backend must not depend on
+#     90.tools); callers sum `RuleCensus.comply` / `.violate` over rules whose
+#     `classification == "checked"` and pass the three totals in.
+#
+# This note is NOT `AssuranceStampV1`: the stamp is a build-determinism
+# identity (policy/rule-set/compiler/source hashes + diagnostic counts) meant
+# to gate whether two objects may be linked together; this note is a smaller,
+# attached-to-one-object record of artifact identity + profile + when it was
+# built + how many flight-rule obligations were checked. Future work may
+# revise this schema once real certification requirements are defined -- it
+# is explicitly not a complete or final assurance-note design.
+struct AssuranceObjectNoteV1:
+    artifact_sha256_hex: text
+    assurance_profile: text
+    build_timestamp_unix: i64
+    obligations_checked: i64
+    obligations_complied: i64
+    obligations_violated: i64
+
+impl AssuranceObjectNoteV1:
+    static fn create(artifact_sha256_hex: text, assurance_profile: text,
+            build_timestamp_unix: i64, obligations_checked: i64,
+            obligations_complied: i64, obligations_violated: i64) -> AssuranceObjectNoteV1:
+        AssuranceObjectNoteV1(
+            artifact_sha256_hex: artifact_sha256_hex,
+            assurance_profile: normalize_profile_name(assurance_profile),
+            build_timestamp_unix: build_timestamp_unix,
+            obligations_checked: obligations_checked,
+            obligations_complied: obligations_complied,
+            obligations_violated: obligations_violated
+        )
+
+    """Real byte serialization, v1 wire layout (all integers little-endian,
+    via the same u32_to_bytes_u8/u64_to_bytes_u8 helpers WP-20's SmfWriter.write()
+    uses):
+
+        offset 0            magic "AON1"                 4 bytes
+        offset 4            version (u32) = 1             4 bytes
+        offset 8            hash_len (u32)                4 bytes
+        offset 12           artifact_sha256_hex bytes     hash_len bytes
+        offset 12+hash_len  profile_len (u32)              4 bytes
+        offset 16+hash_len  assurance_profile bytes        profile_len bytes
+        offset 16+hash_len+profile_len   build_timestamp_unix (u64)   8 bytes
+        + 8                 obligations_checked (u64)      8 bytes
+        + 8                 obligations_complied (u64)     8 bytes
+        + 8                 obligations_violated (u64)     8 bytes
+
+    Total length = 16 + hash_len + profile_len + 32.
+    """
+    fn to_bytes() -> [u8]:
+        var out: [u8] = []
+        out.push(65)   # 'A'
+        out.push(79)   # 'O'
+        out.push(78)   # 'N'
+        out.push(49)   # '1'
+        for b in u32_to_bytes_u8(1):
+            out.push(b)
+        val hash_bytes = self.artifact_sha256_hex.bytes()
+        for b in u32_to_bytes_u8(hash_bytes.len()):
+            out.push(b)
+        for b in hash_bytes:
+            out.push(b)
+        val profile_bytes = self.assurance_profile.bytes()
+        for b in u32_to_bytes_u8(profile_bytes.len()):
+            out.push(b)
+        for b in profile_bytes:
+            out.push(b)
+        for b in u64_to_bytes_u8(self.build_timestamp_unix):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_checked):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_complied):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_violated):
+            out.push(b)
+        out

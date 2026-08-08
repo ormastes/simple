@@ -1,0 +1,157 @@
+"""
+# Lazy Module Loader Bridge (W2-A2, AC-4 smoke)
+
+Drives src/compiler/10.frontend/core/interpreter/module_loader_lazy.spl
+directly (no load_module wiring needed):
+- outline scan of real modules records the declaration surface only,
+- the module is registered through the existing deferred mechanism
+  (so the first symbol use materializes it via try_force_any_deferred_for),
+- per-function body spans slice back to the exact function source text that
+  the materializer parses on first call.
+
+Each scenario runs inside a module-level helper returning "" on success or
+an error description; the it blocks assert on that single value. (In
+interpreter mode, `it` closures observe stale module state and expects on
+non-local expressions can be hollow, so all stateful work happens in
+ordinary functions.)
+
+NOTE: actually running the self-hosted parser/eval (force -> load_module ->
+parse) is not possible from interpreter-mode specs (same limitation as
+test/02_integration/compiler/core_interpreter_intensive_spec.spl); the full
+load-equivalence and benchmark coverage is task W2-A1 in compiled mode.
+"""
+
+use compiler.core.interpreter.module_loader_core.{
+    is_deferred_module,
+    module_is_loaded,
+    module_loader_init
+}
+use compiler.core.interpreter.module_loader_lazy.{
+    lazy_fn_slice,
+    lazy_fn_span_end,
+    lazy_fn_span_start,
+    lazy_in_fallback,
+    lazy_loader_reset,
+    lazy_module_count,
+    lazy_module_decl_names,
+    lazy_module_fn_count,
+    lazy_module_known,
+    lazy_parse_enabled,
+    load_module_lazy
+}
+
+fn spec_current_file() -> text:
+    "test/01_unit/compiler/interpreter/module_loader_lazy_spec.spl"
+
+fn names_contain(names: [text], wanted: text) -> i64:
+    var found = 0
+    for name in names:
+        if name == wanted:
+            found = 1
+    found
+
+fn check_defers_ctype() -> text:
+    module_loader_init()
+    lazy_loader_reset()
+
+    val ok = load_module_lazy("std.ctype", spec_current_file())
+    if ok != 1:
+        return "load_module_lazy(std.ctype) returned " + ok.to_text()
+
+    val deferred = is_deferred_module("std.ctype")
+    if deferred != 1:
+        return "std.ctype not deferred"
+    val loaded = module_is_loaded("std.ctype")
+    if loaded != 0:
+        return "std.ctype unexpectedly fully loaded"
+    val known = lazy_module_known("std.ctype")
+    if known != 1:
+        return "std.ctype missing from lazy registry"
+
+    # std.ctype has exactly 16 top-level functions.
+    val fn_count = lazy_module_fn_count("std.ctype")
+    if fn_count != 16:
+        return "fn_count=" + fn_count.to_text() + " (want 16)"
+    val decl_names = lazy_module_decl_names("std.ctype")
+    if names_contain(decl_names, "to_upper") != 1:
+        return "to_upper missing from declaration surface"
+    if names_contain(decl_names, "is_digit") != 1:
+        return "is_digit missing from declaration surface"
+
+    val span_start = lazy_fn_span_start("std.ctype", "to_upper")
+    val span_end = lazy_fn_span_end("std.ctype", "to_upper")
+    if span_start <= 0:
+        return "span_start=" + span_start.to_text()
+    if span_end <= span_start:
+        return "span_end=" + span_end.to_text()
+    ""
+
+fn check_slice_to_upper() -> text:
+    val slice = lazy_fn_slice("std.ctype", "to_upper")
+    if not slice.starts_with("fn to_upper(ch: i64) -> i64:"):
+        return "slice missing signature: [" + slice + "]"
+    if not slice.contains("ch - 32"):
+        return "slice missing body"
+    if slice.contains("fn to_lower"):
+        return "slice leaked fn to_lower"
+    if slice.contains("fn is_space"):
+        return "slice leaked fn is_space"
+    ""
+
+fn check_text_advanced() -> text:
+    # std.text_advanced: single fn with a multi-line docstring and
+    # quote/escape-heavy body — exercises the scanner's string handling.
+    val ok = load_module_lazy("std.text_advanced", spec_current_file())
+    if ok != 1:
+        return "load_module_lazy(std.text_advanced) returned " + ok.to_text()
+    val deferred = is_deferred_module("std.text_advanced")
+    if deferred != 1:
+        return "std.text_advanced not deferred"
+    val loaded = module_is_loaded("std.text_advanced")
+    if loaded != 0:
+        return "std.text_advanced unexpectedly fully loaded"
+
+    val fn_count = lazy_module_fn_count("std.text_advanced")
+    if fn_count != 1:
+        return "fn_count=" + fn_count.to_text() + " (want 1)"
+    val decl_names = lazy_module_decl_names("std.text_advanced")
+    if names_contain(decl_names, "escape_json") != 1:
+        return "escape_json missing from declaration surface"
+
+    val slice = lazy_fn_slice("std.text_advanced", "escape_json")
+    if not slice.starts_with("fn escape_json(s: text) -> text:"):
+        return "escape_json slice missing signature: [" + slice + "]"
+    if not slice.contains("r.replace"):
+        return "escape_json slice missing body"
+    if not slice.contains("Escapes:"):
+        return "escape_json slice missing docstring"
+    ""
+
+fn check_mode_gates() -> text:
+    val enabled = lazy_parse_enabled()
+    if enabled != 0:
+        return "lazy_parse_enabled=" + enabled.to_text() + " (want 0; SIMPLE_LAZY_PARSE unset)"
+    val in_fallback = lazy_in_fallback()
+    if in_fallback != 0:
+        return "lazy_in_fallback=" + in_fallback.to_text()
+    val mod_count = lazy_module_count()
+    if mod_count != 2:
+        return "lazy_module_count=" + mod_count.to_text() + " (want 2)"
+    ""
+
+describe "lazy module loader bridge":
+    it "outline-scans a real module and defers it with its declaration surface":
+        val err = check_defers_ctype()
+        expect(err).to_equal("")
+
+    it "records body spans that slice to the exact function source":
+        val err = check_slice_to_upper()
+        expect(err).to_equal("")
+
+    it "scans a module with docstrings and quote-heavy literal bodies":
+        val err = check_text_advanced()
+        expect(err).to_equal("")
+
+    it "keeps the default mode gates off":
+        val err = check_mode_gates()
+        expect(err).to_equal("")

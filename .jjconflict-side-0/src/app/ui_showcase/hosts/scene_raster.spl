@@ -1,0 +1,209 @@
+# Shared DrawIrV3 -> ARGB software rasterizer for the showcase hosts.
+#
+# WHY THIS FILE EXISTS: there is no DrawIrV3 rasterizer anywhere in the tree
+# (`grep -rln DrawIrV3Scene src/lib src/app` finds writers, producers, oracles
+# and routes -- no pixel path). Every one of the pixel-producing hosts (2d,
+# gui, wm) needs the same walk, so it lives here ONCE rather than three times.
+# It sits under `hosts/` and not beside `showcase_core.spl` because the strict
+# tier must stay backend-free; this file imports nothing but `common.ui.*`, so
+# it is honest in either tier and is placed here purely so the hosts can share
+# it without the strict module growing a pixel dependency.
+#
+# SCOPE, stated plainly: RECT fills + RECT borders + 5x7 bitmap text. No
+# paths, no images, no clipping, no transforms, no alpha blending (fills are
+# written opaque). That is enough to make the showcase's panels, scrollbars
+# and probe-pane labels visibly distinct -- which is what the "capture is
+# nonblank / >= 2 distinct pixel values" acceptance check actually measures --
+# and it deliberately does not pretend to be a general renderer. A host that
+# needs more should get a real rasterizer, not more code in here.
+
+use common.ui.draw_ir_v3.{
+    DrawIrV3Scene, DrawIrV3Command,
+    draw_ir_v3_geometry_at, draw_ir_v3_paint_at, draw_ir_v3_text_run_at,
+    draw_ir_v3_glyph_at, draw_ir_v3_has_flag,
+    DRAW_IR_V3_KIND_RECT, DRAW_IR_V3_KIND_TEXT, DRAW_IR_V3_KIND_EDGE,
+    DRAW_IR_V3_FLAG_HIDDEN, DRAW_IR_V3_NO_ID
+}
+use common.ui.glyph_bitmap_5x7.{glyph_row_bits}
+
+val RASTER_BG: u32 = 4279505940u32       # 0xFF101214 -- the glass_dark ground
+val RASTER_GLYPH_W: i32 = 5
+val RASTER_GLYPH_H: i32 = 7
+
+# =========================================================================
+# Surface
+# =========================================================================
+
+class RasterSurface:
+    var width: i32
+    var height: i32
+    var pixels: [u32]
+
+    static fn new(width: i32, height: i32, bg: u32) -> RasterSurface:
+        var px: [u32] = []
+        val n = width.to_i64() * height.to_i64()
+        var i: i64 = 0
+        while i < n:
+            px.push(bg)
+            i = i + 1
+        RasterSurface(width: width, height: height, pixels: px)
+
+    me put(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return
+        self.pixels[y.to_i64() * self.width.to_i64() + x.to_i64()] = color
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        var yy = y
+        val y_end = y + h
+        val x_end = x + w
+        while yy < y_end:
+            var xx = x
+            while xx < x_end:
+                self.put(xx, yy, color)
+                xx = xx + 1
+            yy = yy + 1
+
+    me stroke_rect(x: i32, y: i32, w: i32, h: i32, thickness: i32, color: u32):
+        if thickness <= 0 or w <= 0 or h <= 0:
+            return
+        var t = thickness
+        if t > w:
+            t = w
+        if t > h:
+            t = h
+        self.fill_rect(x, y, w, t, color)
+        self.fill_rect(x, y + h - t, w, t, color)
+        self.fill_rect(x, y, t, h, color)
+        self.fill_rect(x + w - t, y, t, h, color)
+
+    me draw_glyph(gi: i32, x: i32, y: i32, color: u32):
+        """One 5x7 cell from the shared bitmap font. `y` is the glyph's TOP,
+        so callers converting from a text baseline subtract the cell height
+        themselves -- there is exactly one baseline convention in this file
+        (see _raster_text_run) and it lives at the call site."""
+        if gi < 0:
+            return
+        var row = 0
+        while row < RASTER_GLYPH_H:
+            val bits = glyph_row_bits(gi, row)
+            var col = 0
+            while col < RASTER_GLYPH_W:
+                val mask = 1 << (RASTER_GLYPH_W - 1 - col)
+                if (bits & mask) != 0:
+                    self.put(x + col, y + row, color)
+                col = col + 1
+            row = row + 1
+
+# =========================================================================
+# Scene walk
+# =========================================================================
+
+fn _raster_rect(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3Command):
+    val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
+    if not geom.present or geom.width <= 0 or geom.height <= 0:
+        return
+    val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
+    if not paint.present:
+        return
+    surface.fill_rect(geom.x, geom.y, geom.width, geom.height, paint.fill_color)
+    val stroke_px = paint.stroke_width_milli / 1000
+    if stroke_px > 0:
+        surface.stroke_rect(geom.x, geom.y, geom.width, geom.height, stroke_px, paint.stroke_color)
+
+fn _raster_text_run(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3Command):
+    val run = draw_ir_v3_text_run_at(scene.text_runs, cmd.text_run_id)
+    if not run.present or run.glyph_count == 0u32:
+        return
+    val start = run.glyph_start.to_i64()
+    val count = run.glyph_count.to_i64()
+    var i: i64 = 0
+    while i < count:
+        val gid = start + i
+        val glyph = draw_ir_v3_glyph_at(scene.text_runs, gid as u32)
+        if glyph.present:
+            # Glyph ids in this pipeline are charset indices into the shared
+            # 5x7 font (common.ui.glyph_bitmap_5x7), the same table the
+            # browser glyph path uses -- no second font mapping is invented
+            # here. Glyph y is a BASELINE, so the cell top is baseline - h.
+            surface.draw_glyph(glyph.glyph_id.to_i64() as i32, glyph.x, glyph.y - RASTER_GLYPH_H, run.color)
+        i = i + 1
+
+fn raster_scene_into(surface: RasterSurface, scene: DrawIrV3Scene) -> i64:
+    """Paint `scene` onto `surface`. Returns the number of commands that
+    actually produced pixels -- a caller can therefore tell an empty scene
+    from a painted one WITHOUT inspecting pixels, which is what keeps a
+    stubbed present from reporting a plausible frame."""
+    var painted: i64 = 0
+    var i: i64 = 0
+    val n = scene.commands.len().to_i64()
+    while i < n:
+        val cmd = scene.commands[i]
+        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+            if cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE:
+                if cmd.geometry_id != DRAW_IR_V3_NO_ID:
+                    _raster_rect(surface, scene, cmd)
+                    painted = painted + 1
+            else if cmd.kind == DRAW_IR_V3_KIND_TEXT:
+                if cmd.text_run_id != DRAW_IR_V3_NO_ID:
+                    _raster_text_run(surface, scene, cmd)
+                    painted = painted + 1
+        i = i + 1
+    painted
+
+fn raster_scene_argb(scene: DrawIrV3Scene, width: i32, height: i32) -> [u32]:
+    """Convenience: fresh surface, painted, pixels out."""
+    val surface = RasterSurface.new(width, height, RASTER_BG)
+    raster_scene_into(surface, scene)
+    surface.pixels
+
+# =========================================================================
+# Capture helpers (used by the 2d host's framebuffer dump)
+# =========================================================================
+
+fn raster_distinct_pixel_count(pixels: [u32], cap: i64) -> i64:
+    """Number of distinct pixel values, counted up to `cap`. The acceptance
+    bar for a capture is >= 2, so a small cap is enough and the scan stops
+    early instead of walking a whole framebuffer."""
+    var seen: [u32] = []
+    var i: i64 = 0
+    val n = pixels.len().to_i64()
+    while i < n:
+        val p = pixels[i]
+        var known = false
+        var j: i64 = 0
+        val m = seen.len().to_i64()
+        while j < m:
+            if seen[j] == p:
+                known = true
+                j = m
+            else:
+                j = j + 1
+        if not known:
+            seen.push(p)
+            if seen.len().to_i64() >= cap:
+                return seen.len().to_i64()
+        i = i + 1
+    seen.len().to_i64()
+
+fn raster_to_ppm_bytes(pixels: [u32], width: i32, height: i32) -> [u8]:
+    """Binary P6 PPM. ARGB in, RGB out, alpha dropped."""
+    var out: [u8] = []
+    val header = "P6\n{width} {height}\n255\n"
+    var hi = 0
+    while hi < header.len():
+        out.push((header.char_code_at(hi) & 255) as u8)
+        hi = hi + 1
+    var i: i64 = 0
+    val n = width.to_i64() * height.to_i64()
+    while i < n:
+        val c: i64 = pixels[i].to_i64()
+        out.push(((c >> 16) & 255) as u8)
+        out.push(((c >> 8) & 255) as u8)
+        out.push((c & 255) as u8)
+        i = i + 1
+    out
+
+export RasterSurface, RASTER_BG, RASTER_GLYPH_W, RASTER_GLYPH_H
+export raster_scene_into, raster_scene_argb
+export raster_distinct_pixel_count, raster_to_ppm_bytes

@@ -1,0 +1,44 @@
+# @cover src/lib/nogc_sync_mut/spec/skip_governance.spl
+# Probe: does importing skip_governance (which pulls
+# compiler.common.assurance.policy -> policy_schema -> flight_rules) work
+# from inside std.spec's package, and does the basic resolve+validate path
+# behave as designed? Run this BEFORE trusting the fuller spec suite.
+
+use std.spec
+use std.spec.skip_governance.{
+    SkipRecord, SkipValidation, skip_ref_in_dir,
+    validate_skip_it, validate_bare_pending, validate_free_text_skip,
+    validate_skip_ref_record
+}
+
+describe "skip_governance import graph and basic behavior":
+    it "loads and resolves an unregistered id to an empty record":
+        val rec = skip_ref_in_dir("nonexistent-id-xyz", "test/01_unit/lib/std/spec/fixtures/skip")
+        expect(rec.id).to_equal("nonexistent-id-xyz")
+        expect(rec.owner).to_equal("")
+
+    it "flags short/empty reasons as weak (via validate_free_text_skip)":
+        expect(validate_free_text_skip("", "critical").ok).to_equal(false)
+        expect(validate_free_text_skip("todo", "critical").ok).to_equal(false)
+        expect(validate_free_text_skip("Condition not met", "critical").ok).to_equal(false)
+        expect(validate_free_text_skip("Deferred pending FPGA rev-C bring-up, see ISSUE-42", "critical").ok).to_equal(false)
+
+    it "rejects skip_it under critical, passes under moderate":
+        val crit = validate_skip_it("critical")
+        expect(crit.ok).to_equal(false)
+        val mod = validate_skip_it("moderate")
+        expect(mod.ok).to_equal(true)
+
+    it "flags a stale expiry as expired (via validate_skip_ref_record)":
+        val stale = SkipRecord(
+            id: "x", category: "hw", reason: "Real HW dependency, tracked separately",
+            owner: "team", requirement: "", alternative_evidence: "", venue: "",
+            expiry: "2000-01-01", issue: "ISSUE-1"
+        )
+        expect(validate_skip_ref_record(stale, "critical").ok).to_equal(false)
+        val fresh = SkipRecord(
+            id: "y", category: "hw", reason: "Real HW dependency, tracked separately",
+            owner: "team", requirement: "", alternative_evidence: "", venue: "",
+            expiry: "2999-01-01", issue: "ISSUE-1"
+        )
+        expect(validate_skip_ref_record(fresh, "critical").ok).to_equal(true)

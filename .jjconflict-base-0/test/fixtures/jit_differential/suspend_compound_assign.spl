@@ -1,0 +1,33 @@
+# Sibling half of jit_struct_field_compound_assign_loads_zero_2026-07-27.
+#
+# `HirStmt::Assign` carries no operator field, so hir/lower/stmt_lowering.rs's
+# `compound_assign_binop` must fold `x op= v` into `x = x op v`. The 2026-08-01
+# fix mapped only the five PLAIN forms (`+= -= *= /= %=`) and returned None for
+# the four SUSPENSION compound forms (`~+= ~-= ~*= ~/=`), so those kept dropping
+# the operator and silently stored a bare RHS on the JIT/native path.
+#
+# Measured at 19f3241f568 before the fix: JIT printed sadd=2 ssub=2 smul=3
+# sdiv=4 (exactly the right-hand sides), exit 0, no diagnostic, zero JIT
+# fallbacks -- while the interpreter printed the correct 7/3/15/5. The
+# interpreter had folded these four all along in
+# interpreter/node_exec.rs::exec_augmented_assignment, where the `is_suspend`
+# await decision is computed independently of `bin_op`; the fix makes the JIT
+# match that reference rather than inventing semantics.
+#
+# `~=` (SuspendAssign) is deliberately NOT folded -- it is a bare
+# await-assignment with no arithmetic operator, same as plain `=`.
+#
+# Expected (both engines, correct): sadd=7 ssub=3 smul=15 sdiv=5
+struct S:
+    n: i64
+
+fn main():
+    var a = S(n: 5)
+    a.n ~+= 2
+    var b = S(n: 5)
+    b.n ~-= 2
+    var c = S(n: 5)
+    c.n ~*= 3
+    var d = S(n: 20)
+    d.n ~/= 4
+    print("sadd={a.n} ssub={b.n} smul={c.n} sdiv={d.n}")

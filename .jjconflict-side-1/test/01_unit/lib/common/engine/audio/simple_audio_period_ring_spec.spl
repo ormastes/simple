@@ -1,0 +1,38 @@
+# @req REQ-003 REQ-005 REQ-008 REQ-014 NFR-008 NFR-009
+use std.spec.*
+use std.common.engine.audio.simple_audio_period_ring.{SimpleAudioPeriodRing}
+
+describe "bounded audio period ring":
+    it "clamps capacity and cycles one period through device ownership":
+        var ring = SimpleAudioPeriodRing.create(1)
+        expect(ring.capacity).to_equal(2)
+        expect(ring.prepare(0, 7u64, 11u64)).to_equal("prepared")
+        expect(ring.submit(0, 7u64)).to_equal("submitted")
+        expect(ring.complete(0, 7u64)).to_equal("completed")
+        expect(ring.release(0, 7u64)).to_equal("released")
+        expect(ring.live_count).to_equal(0)
+        expect(ring.high_water).to_equal(1)
+
+    it "rejects invalid indices state transitions and stale generations":
+        var ring = SimpleAudioPeriodRing.create(4)
+        expect(ring.prepare(-1, 1u64, 1u64)).to_equal("invalid-index")
+        expect(ring.submit(0, 1u64)).to_equal("stale-generation")
+        expect(ring.prepare(0, 2u64, 1u64)).to_equal("prepared")
+        expect(ring.prepare(0, 2u64, 2u64)).to_equal("invalid-state")
+        expect(ring.submit(0, 1u64)).to_equal("stale-generation")
+        expect(ring.complete(0, 2u64)).to_equal("invalid-state")
+        expect(ring.cancel(0, 2u64)).to_equal("cancelled")
+        expect(ring.cancel(0, 3u64)).to_equal("invalid-state")
+
+    it "tracks high water and cancels all live periods on shutdown":
+        var ring = SimpleAudioPeriodRing.create(100)
+        expect(ring.capacity).to_equal(64)
+        expect(ring.prepare(0, 1u64, 1u64)).to_equal("prepared")
+        expect(ring.prepare(1, 1u64, 2u64)).to_equal("prepared")
+        expect(ring.submit(1, 1u64)).to_equal("submitted")
+        expect(ring.high_water).to_equal(2)
+        expect(ring.shutdown()).to_equal(2)
+        expect(ring.live_count).to_equal(0)
+        expect(ring.states[0]).to_equal("free")
+        expect(ring.states[1]).to_equal("free")
+        expect(ring.prepare(0, 3u64, 3u64)).to_equal("shutdown")

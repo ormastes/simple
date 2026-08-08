@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-checkers.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "release_checker_contract_test: FAIL: $*" >&2
+    exit 1
+}
+
+# Executable budgets: portable runtime role, over-budget rejection, missing skip.
+printf '1234' > "$TMP/simple-runtime"
+SIMPLE_SIZE_BUDGET_SIMPLE=4 sh "$ROOT/scripts/check-executable-size-budgets.shs" "$TMP/simple-runtime" >/dev/null
+if SIMPLE_SIZE_BUDGET_SIMPLE=3 sh "$ROOT/scripts/check-executable-size-budgets.shs" "$TMP/simple-runtime" >/dev/null 2>&1; then
+    fail "oversized runtime accepted"
+fi
+sh "$ROOT/scripts/check-executable-size-budgets.shs" --skip-missing "$TMP/missing" >/dev/null
+mkdir -p "$TMP/simple-bootstrap-size/bin" "$TMP/fake-tools"
+printf 'runtime' > "$TMP/simple-bootstrap-size/bin/simple-runtime"
+printf '%s\n' '#!/bin/sh' 'echo "ELF 64-bit LSB executable, not stripped"' > "$TMP/fake-tools/file"
+chmod +x "$TMP/fake-tools/file"
+if PATH="$TMP/fake-tools:$PATH" SIMPLE_SIZE_BUDGET_SIMPLE=100 sh "$ROOT/scripts/check-executable-size-budgets.shs" "$TMP/simple-bootstrap-size/bin/simple-runtime" >/dev/null 2>&1; then
+    fail "unstripped release runtime accepted"
+fi
+
+# Payloads: tiny authoritative font fixture, directory/tar success, byte tamper rejection.
+mkdir -p "$TMP/font-source/family" "$TMP/simple-bootstrap-test-linux-x86_64/assets/fonts/family"
+printf 'font-bytes' > "$TMP/font-source/family/test.ttf"
+cp "$TMP/font-source/family/test.ttf" "$TMP/simple-bootstrap-test-linux-x86_64/assets/fonts/family/test.ttf"
+cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$TMP/simple-bootstrap-test-linux-x86_64/"
+RELEASE_PAYLOAD_FONT_SOURCE_DIR="$TMP/font-source" sh "$ROOT/scripts/check_release_payload.shs" --dir "$TMP/simple-bootstrap-test-linux-x86_64" >/dev/null
+tar -czf "$TMP/simple-bootstrap-test-linux-x86_64.spk" -C "$TMP" simple-bootstrap-test-linux-x86_64
+RELEASE_PAYLOAD_FONT_SOURCE_DIR="$TMP/font-source" sh "$ROOT/scripts/check_release_payload.shs" --tar "$TMP/simple-bootstrap-test-linux-x86_64.spk" >/dev/null
+printf 'tampered' > "$TMP/simple-bootstrap-test-linux-x86_64/assets/fonts/family/test.ttf"
+if RELEASE_PAYLOAD_FONT_SOURCE_DIR="$TMP/font-source" sh "$ROOT/scripts/check_release_payload.shs" --dir "$TMP/simple-bootstrap-test-linux-x86_64" >/dev/null 2>&1; then
+    fail "tampered font accepted"
+fi
+
+mkdir -p "$TMP/unsafe/root" "$TMP/unsafe/sibling"
+cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$TMP/unsafe/root/"
+printf 'sibling' > "$TMP/unsafe/sibling/file"
+tar -czf "$TMP/unsafe-siblings.tar.gz" -C "$TMP/unsafe" root sibling
+if sh "$ROOT/scripts/check_release_payload.shs" --tar "$TMP/unsafe-siblings.tar.gz" >/dev/null 2>&1; then
+    fail "multiple archive roots accepted"
+fi
+ln -s ../../outside "$TMP/unsafe/root/escape"
+tar -czf "$TMP/unsafe-symlink.tar.gz" -C "$TMP/unsafe" root
+if sh "$ROOT/scripts/check_release_payload.shs" --tar "$TMP/unsafe-symlink.tar.gz" >/dev/null 2>&1; then
+    fail "escaping archive symlink accepted"
+fi
+mkdir -p "$TMP/exact-dotdot/safe"
+printf 'x' > "$TMP/exact-dotdot/safe/file"
+tar -czf "$TMP/exact-dotdot.tar.gz" --transform='s#safe/file#..#' -C "$TMP/exact-dotdot" safe/file
+if sh "$ROOT/scripts/check_release_payload.shs" --tar "$TMP/exact-dotdot.tar.gz" >/dev/null 2>&1; then
+    fail "exact dot-dot archive path accepted"
+fi
+
+# SimpleOS: fake the canonical Simple CLI and prove smoke/full scenario selection.
+FAKE_SIMPLE="$TMP/simple"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$*" >> "$SIMPLEOS_TEST_LOG"' > "$FAKE_SIMPLE"
+chmod +x "$FAKE_SIMPLE"
+export SIMPLEOS_TEST_LOG="$TMP/simpleos.log"
+: > "$SIMPLEOS_TEST_LOG"
+SIMPLEOS_BOOTSTRAP_SIMPLE_BIN="$FAKE_SIMPLE" sh "$ROOT/scripts/check-simpleos-bootstrap-qemu.shs" --smoke >/dev/null
+[ "$(cat "$SIMPLEOS_TEST_LOG")" = 'os test --scenario=x64-nvme-fat32' ] || fail "smoke scenario mismatch"
+: > "$SIMPLEOS_TEST_LOG"
+SIMPLEOS_BOOTSTRAP_SIMPLE_BIN="$FAKE_SIMPLE" sh "$ROOT/scripts/check-simpleos-bootstrap-qemu.shs" --full >/dev/null
+[ "$(wc -l < "$SIMPLEOS_TEST_LOG" | tr -d ' ')" -eq 2 ] || fail "full scenario count mismatch"
+grep -F -x 'os test --scenario=x64-nvme-fat32' "$SIMPLEOS_TEST_LOG" >/dev/null || fail "full missing smoke scenario"
+grep -F -x 'os test --scenario=x64-full-stack' "$SIMPLEOS_TEST_LOG" >/dev/null || fail "full missing full-stack scenario"
+
+# MCP: use an offline checked release archive and stage both package binaries.
+VERSION=$(node -p "require('$ROOT/tools/mcp-registry/package.json').version")
+ASSET="simple-bootstrap-$VERSION-linux-x86_64.spk"
+mkdir -p "$TMP/mcp-assets/root/bin" "$TMP/packages/tools/mcp-registry" "$TMP/packages/tools/lsp-mcp-registry"
+printf 'mcp-native' > "$TMP/mcp-assets/root/bin/simple_mcp_server"
+printf 'lsp-native' > "$TMP/mcp-assets/root/bin/simple_lsp_mcp_server"
+cp "$ROOT/tools/mcp-registry/package.json" "$ROOT/tools/mcp-registry/server.json" "$TMP/packages/tools/mcp-registry/"
+cp "$ROOT/tools/lsp-mcp-registry/package.json" "$ROOT/tools/lsp-mcp-registry/server.json" "$TMP/packages/tools/lsp-mcp-registry/"
+tar -czf "$TMP/mcp-assets/$ASSET" -C "$TMP/mcp-assets" root
+(cd "$TMP/mcp-assets" && sha256sum "$ASSET" > "$ASSET.sha256")
+SIMPLE_MCP_PACKAGE_ROOT="$TMP/packages" SIMPLE_MCP_RELEASE_ASSET_DIR="$TMP/mcp-assets" sh "$ROOT/scripts/check-mcp-release-assets.shs" tools/mcp-registry >/dev/null
+SIMPLE_MCP_PACKAGE_ROOT="$TMP/packages" SIMPLE_MCP_RELEASE_ASSET_DIR="$TMP/mcp-assets" sh "$ROOT/scripts/check-mcp-release-assets.shs" tools/lsp-mcp-registry >/dev/null
+[ "$(cat "$TMP/packages/tools/mcp-registry/native/simple_mcp_server")" = mcp-native ] || fail "MCP native binary not staged"
+[ "$(cat "$TMP/packages/tools/lsp-mcp-registry/native/simple_lsp_mcp_server")" = lsp-native ] || fail "LSP MCP native binary not staged"
+printf 'bad checksum  %s\n' "$ASSET" > "$TMP/mcp-assets/$ASSET.sha256"
+if SIMPLE_MCP_PACKAGE_ROOT="$TMP/packages" SIMPLE_MCP_RELEASE_ASSET_DIR="$TMP/mcp-assets" sh "$ROOT/scripts/check-mcp-release-assets.shs" tools/mcp-registry >/dev/null 2>&1; then
+    fail "bad MCP checksum accepted"
+fi
+
+echo "release_checker_contract_test: PASS"

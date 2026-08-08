@@ -1,0 +1,360 @@
+use std.gpu.engine2d.engine.{Engine2D}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
+use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use common.ui.render_opt.property_trees.{PropertyTrees}
+
+extern fn rt_env_get(key: text) -> text?
+
+var _engine2d_compositor_next_id: i32 = 1
+var _engine2d_compositor_override_enabled: bool = false
+var _engine2d_compositor_override_id: i32 = 0
+var _engine2d_compositor_override_width: i32 = 0
+var _engine2d_compositor_override_height: i32 = 0
+var _engine2d_compositor_override_pixels: [u32] = []
+val _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION: i64 = 9223372036854775806
+
+fn _engine2d_compositor_gpu_backend(selected: text) -> bool:
+    selected != "software" and selected != "cpu" and selected != "cpu_simd"
+
+fn _engine2d_compositor_transfer_profile() -> text:
+    (rt_env_get("SIMPLE_ONE_CALL_UPLOAD") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_BULK_UPLOAD") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_ONE_CALL_READBACK") ?? "")
+
+fn _engine2d_compositor_clear_override(owner_id: i32):
+    if owner_id > 0 and _engine2d_compositor_override_id != owner_id:
+        return
+    _engine2d_compositor_override_enabled = false
+    _engine2d_compositor_override_id = 0
+    _engine2d_compositor_override_width = 0
+    _engine2d_compositor_override_height = 0
+    _engine2d_compositor_override_pixels = []
+
+# WM raster backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend for
+# the compositor raster lane (e.g. "metal"); default "software" keeps the
+# historical CPU behavior. CPU stays the default until GPU parity + perf are
+# proven — see test/02_integration/rendering/engine2d_gpu_offload_evidence.spl.
+fn host_wm_render_backend_key() -> text:
+    val raw = (rt_env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
+    if raw == "":
+        return "software"
+    raw
+
+class Engine2dCompositorBackend:
+    id: i32
+    # ponytail: retained for read-only evidence callers; make private when
+    # Simple field visibility can prevent mutation bypasses.
+    engine: Engine2D
+    w: i32
+    h: i32
+    last_backend: text
+    last_readback_source: text
+    last_backend_handle: i64
+    last_readback_checksum: i64
+    last_readback_completed: bool
+    last_readback_width: i32
+    last_readback_height: i32
+    last_readback_stride: i32
+    last_readback_format: text
+    last_composition_id: text
+    last_scene_key: text
+    last_web_content_image_count: i32
+    # ponytail: one exact retained frame per compositor; add a bounded history
+    # only if alternating unchanged producer revisions are measured in practice.
+    revision_cache_producer_generation: i64 = -1
+    revision_cache_composition_revision: i64 = -1
+    revision_cache_backend: text = ""
+    revision_cache_transfer_profile: text = ""
+    revision_cache_composition: DrawIrComposition? = nil
+    revision_cache_resources: [SimpleOsHostGpuImageResource] = []
+    revision_cache_result: Engine2dDrawIrAdvResult? = nil
+    revision_reuse_count: i64 = 0
+    revision_render_count: i64 = 0
+    # Explicit damage-reporting sink (WS-D3 §9 fix). `get_pixel_buffer()`
+    # returns a live alias, so callers (glass_dispatch.spl, text_render.spl)
+    # call `report_damage()` with the region they just touched instead of
+    # damage tracking trying to infer it from the aliased buffer. Reuses the
+    # O0/O1 `PropertyTrees` damage sink as a plain rect accumulator — no
+    # transform/clip/effect nodes are registered here, only `push_damage`.
+    damage: PropertyTrees = PropertyTrees.create()
+
+    static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
+        val id = _engine2d_compositor_next_id
+        _engine2d_compositor_next_id = _engine2d_compositor_next_id + 1
+        Engine2dCompositorBackend(
+            id: id,
+            engine: engine,
+            w: engine.width(),
+            h: engine.height(),
+            last_backend: engine.backend_name(),
+            last_readback_source: "unavailable",
+            last_backend_handle: 0,
+            last_readback_checksum: 0,
+            last_readback_completed: false,
+            last_readback_width: 0,
+            last_readback_height: 0,
+            last_readback_stride: 0,
+            last_readback_format: "",
+            last_composition_id: "",
+            last_scene_key: "",
+            last_web_content_image_count: 0
+        )
+
+    # Backend-by-name factory — the WM "gpu process" fix: ONE persistent
+    # Engine2D session (device/queue/framebuffer created once, reused across
+    # every composed frame; call shutdown() on exit — never a per-frame
+    # create). "metal" uses the GPU-only fast session (1x1 CPU mirror, device
+    # framebuffer is the source of truth, single-hop readback); every other
+    # name falls through create_with_backend_fast() to the regular
+    # create_with_backend() path unchanged.
+    static fn create_named(width: i32, height: i32, backend_name: text) -> Engine2dCompositorBackend:
+        val engine = Engine2D.create_with_backend_fast(width, height, backend_name)
+        Engine2dCompositorBackend.create(engine)
+
+    static fn create_from_env(width: i32, height: i32) -> Engine2dCompositorBackend:
+        Engine2dCompositorBackend.create_named(width, height, host_wm_render_backend_key())
+
+    # The compositor owns the resolved session; child Web/WM producers must
+    # consume this concrete name instead of independently reinterpreting auto.
+    fn selected_backend() -> text:
+        self.engine.backend_name()
+
+    fn get_pixel_buffer() -> [u32]:
+        if _engine2d_compositor_override_enabled and _engine2d_compositor_override_id == self.id and _engine2d_compositor_override_width == self.w and _engine2d_compositor_override_height == self.h:
+            return _engine2d_compositor_override_pixels
+        self.engine.read_pixels()
+
+    me damage_rect_count() -> i64:
+        self.damage.damage_len
+
+    me damage_rect_at(idx: i64) -> (i32, i32, i32, i32):
+        (self.damage.damage_x[idx].to_i32(), self.damage.damage_y[idx].to_i32(), self.damage.damage_w[idx].to_i32(), self.damage.damage_h[idx].to_i32())
+
+    me clear_damage():
+        self.damage.clear_damage()
+
+    fn invalidate_revision_cache():
+        self.revision_cache_producer_generation = -1
+        self.revision_cache_composition_revision = -1
+        self.revision_cache_backend = ""
+        self.revision_cache_transfer_profile = ""
+        self.revision_cache_composition = nil
+        self.revision_cache_resources = []
+        self.revision_cache_result = nil
+
+    fn invalidate_frame_receipt():
+        self.invalidate_revision_cache()
+        self.last_readback_checksum = 0
+        self.last_readback_completed = false
+        self.last_readback_width = 0
+        self.last_readback_height = 0
+        self.last_readback_stride = 0
+        self.last_readback_format = ""
+        self.last_composition_id = ""
+        self.last_scene_key = ""
+        self.last_web_content_image_count = 0
+
+    fn set_pixel_buffer_override(pixels: [u32]):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(0)
+        _engine2d_compositor_override_id = self.id
+        _engine2d_compositor_override_width = self.w
+        _engine2d_compositor_override_height = self.h
+        _engine2d_compositor_override_pixels = pixels
+        _engine2d_compositor_override_enabled = true
+
+    fn retained_pixel_buffer_override_count() -> i64:
+        if _engine2d_compositor_override_id == self.id:
+            return _engine2d_compositor_override_pixels.len().to_i64()
+        0
+
+    me render_draw_ir_composition(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
+        """Execute one canonical Draw IR frame on this persistent session and
+        return its validated readback candidate to the hosted presenter."""
+        _engine2d_compositor_clear_override(self.id)
+        self.invalidate_frame_receipt()
+        self.revision_render_count = self.revision_render_count + 1
+        var web_content_image_count = 0
+        var batch_index = 0
+        # cpu-lane-loop-ok: walks DrawIR batches once per composition; bound is the batch count, the CPU lane consumes DrawIR per batch by design
+        while batch_index < composition.batches.len():
+            val batch = composition.batches[batch_index]
+            if batch.source.style_key == "wm.content":
+                var command_index = 0
+                # cpu-lane-loop-ok: walks the commands of one DrawIR batch; bound is that batch command count
+                while command_index < batch.commands.len():
+                    if batch.commands[command_index].kind == DRAW_IR_COMMAND_IMAGE:
+                        web_content_image_count = web_content_image_count + 1
+                    command_index = command_index + 1
+            batch_index = batch_index + 1
+        val selected = self.engine.backend_name()
+        val gpu_available = _engine2d_compositor_gpu_backend(selected)
+        val result = engine2d_draw_ir_adv_composition_with_images(self.engine, composition, gpu_available, images)
+        self.last_backend = result.selected_backend
+        self.last_readback_source = result.readback_source
+        self.last_backend_handle = result.backend_handle
+        self.last_readback_checksum = result.readback_checksum
+        if not result.fallback_required and result.skipped_command_count == 0 and result.rendered_command_count > 0 and result.pixels.len() == self.w * self.h:
+            self.last_readback_completed = true
+            self.last_readback_width = self.w
+            self.last_readback_height = self.h
+            self.last_readback_stride = self.w * 4
+            self.last_readback_format = "argb8888"
+            self.last_composition_id = result.unit_id
+            self.last_scene_key = composition.scene_key
+            self.last_web_content_image_count = web_content_image_count
+        result
+
+    me render_draw_ir_composition_resources(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource]
+    ) -> Engine2dDrawIrAdvResult:
+        """Resolve validated wire resources only at the Engine2D boundary."""
+        var images: [Engine2dResolvedDrawIrImage] = []
+        # cpu-lane-loop-ok: resolves one host image resource per DrawIR resource entry; bound is the composition resource count
+        for resource in resources:
+            images.push(engine2d_resolved_draw_ir_image(
+                resource.image_uri,
+                resource.width,
+                resource.height,
+                resource.pixels
+            ))
+        self.render_draw_ir_composition(composition, images)
+
+    me render_draw_ir_composition_resources_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> Engine2dDrawIrAdvResult:
+        """Reuse one complete result for one exact producer revision tuple."""
+        val cacheable = (
+            producer_generation >= 0 and
+            composition_revision >= 0 and
+            composition_revision < _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION
+        )
+        val selected = self.engine.backend_name()
+        val transfer_profile = _engine2d_compositor_transfer_profile()
+        if (
+            cacheable and
+            self.revision_cache_producer_generation == producer_generation and
+            self.revision_cache_composition_revision == composition_revision and
+            self.revision_cache_backend == selected and
+            self.revision_cache_transfer_profile == transfer_profile and
+            self.revision_cache_resources == resources
+        ):
+            if val Some(cached_composition) = self.revision_cache_composition:
+                if cached_composition == composition:
+                    if val Some(cached) = self.revision_cache_result:
+                        self.revision_reuse_count = self.revision_reuse_count + 1
+                        return cached
+
+        val result = self.render_draw_ir_composition_resources(
+            composition, resources)
+        val device_proven = (
+            not _engine2d_compositor_gpu_backend(selected) or
+            (result.readback_source == "device_readback" and
+             result.backend_handle > 0 and result.device_identity > 0)
+        )
+        if (
+            cacheable and not result.fallback_required and
+            result.skipped_command_count == 0 and
+            result.rendered_command_count > 0 and
+            result.pixels.len() == self.w * self.h and device_proven
+        ):
+            self.revision_cache_producer_generation = producer_generation
+            self.revision_cache_composition_revision = composition_revision
+            self.revision_cache_backend = selected
+            self.revision_cache_transfer_profile = transfer_profile
+            self.revision_cache_composition = Some(composition)
+            self.revision_cache_resources = resources
+            self.revision_cache_result = Some(result)
+        result
+
+    # Honest frame provenance (greppable): for the metal lane this must say
+    # source=device_readback — a cpu_mirror source means the GPU lane silently
+    # fell back and must never be presented as GPU rendering.
+    fn frame_provenance() -> text:
+        "backend={self.last_backend};source={self.last_readback_source};handle={self.last_backend_handle};checksum={self.last_readback_checksum};composition_id={self.last_composition_id};scene_key={self.last_scene_key};web_content_image_count={self.last_web_content_image_count};completed={self.last_readback_completed};width={self.last_readback_width};height={self.last_readback_height};stride={self.last_readback_stride};format={self.last_readback_format}"
+
+    fn font_provenance() -> text:
+        val identity = self.engine.selected_font_identity()
+        if identity == "":
+            return "identity=bitmap-default;target={self.engine.font_execution_target()}"
+        "identity={identity};target={self.engine.font_execution_target()}"
+
+    me shutdown():
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.shutdown()
+
+impl CompositorBackend for Engine2dCompositorBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.clear(color)
+        self.engine.present()
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.draw_rect_filled(x, y, w, h, color)
+        self.engine.present()
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.draw_text_bg(x, y, text_str, fg, bg, 16)
+        self.engine.present()
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.draw_text(x, y, "{ch}", fg, bg)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.draw_rect_filled(x, y, 1, 1, color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
+        self.engine.draw_image(x, y, w, h, pixels)
+        self.engine.present()
+
+    me present():
+        self.engine.present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.engine.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+    # Explicit damage-reporting contract (WS-D3 §9 fix). Clips to backend
+    # bounds and drops empty/degenerate rects — a mutator racing past the
+    # edge, or reporting a 0-area region, must not corrupt the damage
+    # signal for everyone else.
+    me report_damage(x: i32, y: i32, w: i32, h: i32):
+        val cx = if x < 0: 0 else: x
+        val cy = if y < 0: 0 else: y
+        val cx2raw = x + w
+        val cy2raw = y + h
+        val cx2 = if cx2raw > self.w: self.w else: cx2raw
+        val cy2 = if cy2raw > self.h: self.h else: cy2raw
+        if cx2 <= cx or cy2 <= cy:
+            return
+        self.damage.push_damage(cx.to_u32(), cy.to_u32(), (cx2 - cx).to_u32(), (cy2 - cy).to_u32())

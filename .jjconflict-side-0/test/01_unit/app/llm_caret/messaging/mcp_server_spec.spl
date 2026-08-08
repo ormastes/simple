@@ -1,0 +1,143 @@
+# @req REQ-LLM-MSG-003 REQ-LLM-MSG-007 REQ-LLM-MSG-009 REQ-LLM-MSG-011 REQ-LLM-MSG-014 REQ-LLM-MSG-015 REQ-LLM-MSG-016
+"""The dedicated MCP core exposes all canonical chat operations safely."""
+
+use std.spec.*
+use app.llm_caret.messaging.mcp.types.*
+use app.llm_caret.messaging.mcp.server.*
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.application.room_service.{create_room}
+use app.llm_caret.messaging.application.task_service.{TaskState}
+use app.llm_caret.messaging.domain.model.*
+use std.io_runtime.{file_delete, getpid}
+
+fn principal(scopes: [text]) -> AuthPrincipal:
+    AuthPrincipal(authenticated: true, identity_id: "human-1", workspace_id: "ws-1",
+        scopes: scopes, expires_at: 1000)
+
+fn request(tool: ChatTool, scopes: [text], key: text) -> ChatToolRequest:
+    ChatToolRequest(tool: tool, principal: principal(scopes), workspace_id: "ws-1", room_id: "room-1",
+        identity_id: "human-1", target_identity_id: "human-2", agent_id: "builder-1",
+        message_id: "message-1", task_id: "task-1", artifact_id: "artifact-1",
+        context_bundle_id: "context-1", body: "build feature",
+        detail: "text/plain", idempotency_key: key, after_seq: 0, limit: 20, occurred_at: 10,
+        task_state: TaskState.Running, origin: MessageOrigin.Human)
+
+fn server_with_room() -> MessagingMcpServer:
+    val server = MessagingMcpServer.memory()
+    val created = create_room("room-1", "ws-1", RoomKind.Channel, "development", "", "public",
+        "mention", "milestones", "bounded", "human-1", 1)
+    expect(created.accepted).to_equal(true)
+    expect(server.register_room(created.room, created.memberships)).to_equal(true)
+    server.register_profile(AgentProfile(agent_id: messaging_id("agent", "builder-1"), display_name: "builder-claude-01",
+        aliases: ["builder"], provider: "claude", role_summary: "implementation", capabilities: ["code"],
+        current_task_id: "", status: AgentStatus.Idle, owner_identity_id: "human-1", room_ids: ["room-1"],
+        last_activity_at: 1))
+    server
+
+describe "LLM Caret messaging MCP server":
+    it "joins, leaves, sends, reads, and records truthful local read evidence":
+        val server = server_with_room()
+        step("Join and send through scoped mutation calls with stable keys")
+        expect(server.dispatch(request(ChatTool.Join, ["room:write"], "join-key-001")).ok).to_equal(true)
+        val sent = server.dispatch(request(ChatTool.Send, ["room:write"], "send-key-001"))
+        expect(sent.ok).to_equal(true)
+        expect(sent.evidence).to_equal("accepted")
+
+        step("Read only a bounded canonical page and advance a local cursor")
+        val read = server.dispatch(request(ChatTool.Read, ["room:read"], ""))
+        expect(read.messages.len()).to_equal(1)
+        var marked_request = request(ChatTool.MarkRead, ["room:read"], "cursor-key-001")
+        marked_request.after_seq = 1
+        val marked = server.dispatch(marked_request)
+        expect(marked.evidence).to_equal("local_cursor")
+        expect(server.dispatch(request(ChatTool.Leave, ["room:write"], "leave-key-001")).ok).to_equal(true)
+        server.close()
+
+    it "queries profiles and builds bounded context without transcript reconstruction":
+        val server = server_with_room()
+        server.dispatch(request(ChatTool.Send, ["room:write"], "send-key-ctx1"))
+
+        step("Resolve a canonical profile by agent identity")
+        val who = server.dispatch(request(ChatTool.Who, ["profile:read"], ""))
+        expect(who.profiles.len()).to_equal(1)
+        expect(who.profiles[0].display_name).to_equal("builder-claude-01")
+
+        step("Cap injection context even when a caller requests an excessive page")
+        var context_request = request(ChatTool.GetContext, ["room:read"], "")
+        context_request.limit = 5000
+        val context = server.dispatch(context_request)
+        expect(context.ok).to_equal(true)
+        expect(context.evidence).to_equal("bounded_context_manifest")
+        expect(context.messages.len()).to_be_less_than(33)
+        server.close()
+
+    it "opens private rooms and protects notify-all with scope and origin policy":
+        val server = server_with_room()
+        step("Create a canonical primitive direct room when requested")
+        var direct = request(ChatTool.OpenPrivate, ["dm:write"], "direct-key-01")
+        direct.room_id = "direct-1"
+        expect(server.dispatch(direct).evidence).to_equal("primitive_direct_room")
+
+        step("Reject broadcast without room management and reject agent progress loops")
+        expect(server.dispatch(request(ChatTool.NotifyAll, ["room:write"], "notify-key-1")).status).to_equal(403)
+        var update = request(ChatTool.NotifyAll, ["room:write", "room:manage"], "notify-key-2")
+        update.origin = MessageOrigin.AgentUpdate
+        expect(server.dispatch(update).error).to_equal("agent_update_cannot_notify_all")
+        server.close()
+
+    it "assigns tasks, publishes artifacts, and transitions significant state":
+        val server = server_with_room()
+        step("Assign a stateful task independently from its origin message")
+        val assigned = server.dispatch(request(ChatTool.Assign, ["agent:control"], "assign-key-01"))
+        expect(assigned.ok).to_equal(true)
+        expect(assigned.tasks[0].state).to_equal(TaskState.Queued)
+
+        step("Publish a durable artifact and update the task state")
+        val artifact = server.dispatch(request(ChatTool.PublishArtifact, ["agent:control"], "artifact-key1"))
+        expect(artifact.artifacts[0].artifact_id).to_equal("artifact-1")
+        val updated = server.dispatch(request(ChatTool.TaskUpdate, ["agent:control"], "update-key-01"))
+        expect(updated.tasks[0].state).to_equal(TaskState.Running)
+        server.close()
+
+    it "fails closed on scopes, unstable mutation keys, and duplicate calls":
+        val server = server_with_room()
+        step("Require the exact tool scope and a stable bounded idempotency key")
+        expect(server.dispatch(request(ChatTool.Send, ["room:read"], "send-key-auth")).error).to_equal("scope_required:room:write")
+        expect(server.dispatch(request(ChatTool.Send, ["room:write"], "tiny")).error).to_equal("stable_idempotency_key_required")
+
+        step("Return a truthful replay result without applying a mutation twice")
+        expect(server.dispatch(request(ChatTool.Join, ["room:write"], "replay-key-01")).duplicate).to_equal(false)
+        expect(server.dispatch(request(ChatTool.Join, ["room:write"], "replay-key-01")).duplicate).to_equal(true)
+        server.close()
+
+    it "recovers MCP memberships, profiles, tasks, artifacts, manifests, and idempotency after restart":
+        val path = "/tmp/llm_caret_mcp_restart_" + getpid().to_text() + ".db"
+        file_delete(path)
+        var server = MessagingMcpServer.open(path)
+        val created = create_room("room-1", "ws-1", RoomKind.Channel, "development", "", "public",
+            "mention", "milestones", "bounded", "human-1", 1)
+        expect(server.register_room(created.room, created.memberships)).to_equal(true)
+        server.register_profile(AgentProfile(agent_id: messaging_id("agent", "builder-1"),
+            display_name: "builder-claude-01", aliases: ["builder"], provider: "claude",
+            role_summary: "implementation", capabilities: ["code"], current_task_id: "",
+            status: AgentStatus.Idle, owner_identity_id: "human-1", room_ids: ["room-1"],
+            last_activity_at: 1))
+        expect(server.dispatch(request(ChatTool.Assign, ["agent:control"], "durable-assign-1")).ok).to_equal(true)
+        expect(server.dispatch(request(ChatTool.PublishArtifact, ["agent:control"], "durable-artifact-1")).ok).to_equal(true)
+        expect(server.dispatch(request(ChatTool.Send, ["room:write"], "durable-send-01")).ok).to_equal(true)
+        expect(server.dispatch(request(ChatTool.GetContext, ["room:read"], "")).ok).to_equal(true)
+        expect(server.store.context_manifest_count()).to_equal(1)
+        expect(server.close()).to_equal(true)
+
+        step("Reopen the same PureDatabase file and recover every MCP projection")
+        server = MessagingMcpServer.open(path)
+        expect(server.dispatch(request(ChatTool.Who, ["profile:read"], "")).profiles.len()).to_equal(1)
+        expect(server.tasks.len()).to_equal(1)
+        expect(server.artifacts.len()).to_equal(1)
+        expect(server.memberships.len()).to_be_greater_than(0)
+        expect(server.store.context_manifest_count()).to_equal(1)
+        val replay = server.dispatch(request(ChatTool.Assign, ["agent:control"], "durable-assign-1"))
+        expect(replay.duplicate).to_equal(true)
+        expect(replay.resource_id).to_equal("task-1")
+        expect(server.close()).to_equal(true)
+        file_delete(path)

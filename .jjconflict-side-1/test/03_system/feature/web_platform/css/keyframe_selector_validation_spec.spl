@@ -1,0 +1,233 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+"""# CSS Keyframe Selector Validation
+
+Proves that each comma-separated keyframe selector list is validated
+atomically before any declarations are inserted. Invalid and empty members
+discard their whole block without changing valid duplicate-offset cascade or
+implicit-endpoint animation behavior.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    BrowserCssAnimationInstance
+}
+use std.gc_async_mut.gpu.browser_engine.style_block.{extract_keyframes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations,
+    simple_web_layout_reconcile_animation_instances
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_time_with_animations
+}
+
+val WIDTH: i32 = 8
+val HEIGHT: i32 = 8
+val RED: u32 = 0xFFDC2626u32
+val BLUE: u32 = 0xFF2563EBu32
+
+fn _animation_html(keyframes: text) -> text:
+    (
+        "<style>html,body{{margin:0}}" + keyframes +
+        "#box{width:8px;height:8px;background-color:#dc2626;" +
+        "animation-name:tint;animation-duration:1000ms;" +
+        "animation-timing-function:linear;animation-fill-mode:both;" +
+        "animation-play-state:paused}</style><div id='box'></div>"
+    )
+
+fn _mixed_invalid_html() -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        "from{{background-color:#dc2626}}" +
+        "from,bogus{{background-color:#2563eb}}" +
+        "to{{background-color:#16a34a}}}"
+    )
+
+fn _trailing_comma_html() -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        "from{{background-color:#dc2626}}" +
+        "from,{{background-color:#2563eb}}" +
+        "to{{background-color:#16a34a}}}"
+    )
+
+fn _removed_invalid_html() -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        "from{{background-color:#dc2626}}" +
+        "to{{background-color:#16a34a}}}"
+    )
+
+fn _duplicate_zero_html() -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        "from{{background-color:#dc2626}}" +
+        "0%{{background-color:#2563eb}}" +
+        "to{{background-color:#16a34a}}}"
+    )
+
+fn _implicit_endpoint_html() -> text:
+    _animation_html(
+        "@keyframes tint{50%{background-color:#2563eb}}"
+    )
+
+fn _repeated_selector_list(selector: text, count: i32) -> text:
+    var out = ""
+    var index = 0
+    while index < count:
+        if index > 0:
+            out = out + ","
+        out = out + selector
+        index = index + 1
+    out
+
+fn _quota_html(selector_count: i32) -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        _repeated_selector_list("from", selector_count) +
+        "{{background-color:#2563eb}}}"
+    )
+
+fn _remaining_budget_html(final_selectors: text) -> text:
+    _animation_html(
+        "@keyframes tint{" +
+        _repeated_selector_list("from", 255) +
+        "{{background-color:#dc2626}}" +
+        final_selectors + "{{background-color:#2563eb}}}"
+    )
+
+fn _instances(html: text) -> [BrowserCssAnimationInstance]:
+    simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+
+fn _draw_color(html: text) -> u32:
+    val result = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, 0, _instances(html)
+        )
+    )
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == "box":
+                return command.color
+    fail("missing Draw IR command: box")
+    0u32
+
+fn _pixels(html: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_time_with_animations(
+        html, WIDTH, HEIGHT, "software", 0, _instances(html)
+    )
+
+describe "CSS keyframe selector validation":
+    it "should discard an invalid selector list before inserting its block":
+        step("Validate normalized and malformed selector tables atomically")
+        val selectors: [text] = [
+            "  FrOm , TO  ",
+            "0%,100%",
+            ".5%,1e2%",
+            "bogus",
+            "1..0%",
+            "1e%",
+            "50 %",
+            "NaN%",
+            "Infinity%",
+            "1e309%",
+            "-1%",
+            "100.1%",
+            "",
+            ",from",
+            "from,",
+            "from,,to",
+            "from,bogus"
+        ]
+        val expected_frame_counts: [i32] = [
+            2, 2, 2,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]
+        var selector_index = 0
+        while selector_index < selectors.len():
+            val registry = extract_keyframes(
+                "@keyframes probe{" + selectors[selector_index] +
+                "{{opacity:1}}}"
+            )
+            expect(registry.entries.len()).to_equal(1)
+            expect(registry.entries[0].frames.len()).to_equal(
+                expected_frame_counts[selector_index]
+            )
+            selector_index = selector_index + 1
+        val normalized_registry = extract_keyframes(
+            "@keyframes probe{  FrOm , TO  {opacity:1}}"
+        )
+        expect(normalized_registry.entries[0].frames[0].offset).to_equal(0.0)
+        expect(normalized_registry.entries[0].frames[1].offset).to_equal(1.0)
+        val endpoint_registry = extract_keyframes(
+            "@keyframes probe{0%,100%{opacity:1}}"
+        )
+        expect(endpoint_registry.entries[0].frames[0].offset).to_equal(0.0)
+        expect(endpoint_registry.entries[0].frames[1].offset).to_equal(1.0)
+        val numeric_registry = extract_keyframes(
+            "@keyframes probe{.5%,1e2%{opacity:1}}"
+        )
+        expect(numeric_registry.entries[0].frames[0].offset).to_equal(0.005)
+        expect(numeric_registry.entries[0].frames[1].offset).to_equal(1.0)
+
+        val exactly_bounded = extract_keyframes(
+            "@keyframes quota{" +
+            _repeated_selector_list("from", 256) + "{{opacity:1}}}"
+        )
+        val over_bounded = extract_keyframes(
+            "@keyframes quota{" +
+            _repeated_selector_list("from", 257) + "{{opacity:1}}}"
+        )
+        val remaining_rejected = extract_keyframes(
+            "@keyframes quota{" +
+            _repeated_selector_list("from", 255) +
+            "{{opacity:0}}from,to{{opacity:1}}}"
+        )
+        val remaining_control = extract_keyframes(
+            "@keyframes quota{" +
+            _repeated_selector_list("from", 255) +
+            "{{opacity:0}}to{{opacity:1}}}"
+        )
+        expect(exactly_bounded.entries[0].frames.len()).to_equal(1)
+        expect(exactly_bounded.entries[0].frames[0].offset).to_equal(0.0)
+        expect(over_bounded.entries[0].frames.len()).to_equal(0)
+        expect(remaining_rejected.entries[0].frames.len()).to_equal(1)
+        expect(remaining_rejected.entries[0].frames[0].offset).to_equal(0.0)
+        expect(remaining_control.entries[0].frames.len()).to_equal(2)
+        expect(remaining_control.entries[0].frames[1].offset).to_equal(1.0)
+
+        step("Reconcile the retained paused animation scheduler state")
+        val mixed_instances = _instances(_mixed_invalid_html())
+        val trailing_instances = _instances(_trailing_comma_html())
+        expect(mixed_instances.len()).to_equal(1)
+        expect(mixed_instances[0].paused).to_be(true)
+        expect(mixed_instances[0].paused_elapsed_ms).to_equal(0)
+        expect(mixed_instances[0].duration_ms).to_equal(1000)
+        expect(trailing_instances.len()).to_equal(1)
+
+        step("Lower atomic rejection and valid controls through canonical Draw IR")
+        expect(_draw_color(_mixed_invalid_html())).to_equal(RED)
+        expect(_draw_color(_trailing_comma_html())).to_equal(RED)
+        expect(_draw_color(_removed_invalid_html())).to_equal(RED)
+        expect(_draw_color(_duplicate_zero_html())).to_equal(BLUE)
+        expect(_draw_color(_implicit_endpoint_html())).to_equal(RED)
+        expect(_draw_color(_quota_html(256))).to_equal(BLUE)
+        expect(_draw_color(_quota_html(257))).to_equal(RED)
+        expect(_draw_color(_remaining_budget_html("from,to"))).to_equal(RED)
+        expect(_draw_color(_remaining_budget_html("to"))).to_equal(RED)
+
+        step("Render exact Engine2D pixels for rejection and control frames")
+        val removed_pixels = _pixels(_removed_invalid_html())
+        val mixed_pixels = _pixels(_mixed_invalid_html())
+        val trailing_pixels = _pixels(_trailing_comma_html())
+        val duplicate_pixels = _pixels(_duplicate_zero_html())
+        val implicit_pixels = _pixels(_implicit_endpoint_html())
+        expect(mixed_pixels).to_equal(removed_pixels)
+        expect(trailing_pixels).to_equal(removed_pixels)
+        expect(mixed_pixels).to_contain(RED)
+        expect(trailing_pixels).to_contain(RED)
+        expect(duplicate_pixels).to_contain(BLUE)
+        expect(implicit_pixels).to_contain(RED)
