@@ -22,7 +22,12 @@
 #       content + "\n    new_row"
 #   })
 
-use std.io (file_exists, file_read, file_atomic_write, file_copy, file_lock, file_unlock, getpid, hostname, time_now_unix_micros)
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_atomic_write,
+    file_copy, file_lock, file_unlock}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
 
 # =========================================================================
 # Configuration
@@ -358,9 +363,6 @@ impl AtomicTable:
             Ok(value): value
             Err(err): return Err(err)
 
-        # Parse table using std.sdn
-        use std.sdn.{parse, SdnValue}
-
         val parse_result = parse(content)
         if not parse_result.is_ok():
             match parse_result:
@@ -405,12 +407,12 @@ impl AtomicTable:
             return Err("Row has {row.len()} values, expected {self.columns.len()}")
 
         # Serialize row
-        val values = row.map(
-            if _.contains(",") or _.contains(" "):
-                "\"{_}\""
+        var values: [text] = []
+        for value in row:
+            if value.contains(",") or value.contains(" "):
+                values.push("\"{value}\"")
             else:
-                _
-        )
+                values.push(value)
         val row_line = "    {values.join(\", \")}\n"
 
         # Atomic append
@@ -437,8 +439,6 @@ impl AtomicTable:
                 Err(err): return Err(err)
 
         # Parse content and update self.columns, self.rows
-        use std.sdn.{parse, SdnValue}
-
         val content = match content_result:
             Ok(value): value
             Err(err): return Err(err)
@@ -485,8 +485,6 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
             1, "Task 1", "done"
             2, "Task 2", "pending"
     """
-    use std.sdn.{SdnValue}
-
     # SDN file should be a dict with table_name as key
     match sdn_value:
         case SdnValue.Dict(d):
@@ -522,8 +520,6 @@ fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([tex
 
 fn sdn_value_to_text(value: SdnValue) -> text:
     """Convert SdnValue to text representation."""
-    use std.sdn.{SdnValue}
-
     match value:
         case SdnValue.Null: ""
         case SdnValue.Bool(b): if b: "true" else: "false"
