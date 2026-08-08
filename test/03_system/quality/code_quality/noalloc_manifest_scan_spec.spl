@@ -26,6 +26,18 @@ val PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\n
 val FAMILY_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_family_import_probe_spec_fixture.spl"
 val FAMILY_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\n@noalloc\nfn probe_family_import_spec_fixture() -> i64:\n    heap_init(0, 0)\n    1\n"
 
+# Follow-up to WP-12a: proves NoallocViolationKind.TransitiveCall is reachable
+# THROUGH the real driver. Before this fix, `run_noalloc_manifest_scan`
+# hardcoded `allocates: false` for every registered manifest entry — even
+# though `scan_noalloc_functions` already computed each callee's own
+# direct-alloc expr_tags ("new"/"interpolation") and simply dropped them at
+# registration time. A non-@noalloc helper whose own body performs a direct
+# `new` allocation must register `allocates: true`, so an @noalloc caller of
+# that helper is flagged via TransitiveCall (noalloc_checker.spl:449), not
+# only via the family-prefix FamilyImport path WP-12a already covered.
+val TRANSITIVE_PROBE_PATH = "src/lib/nogc_async_mut_noalloc/collections/_transitive_call_probe_spec_fixture.spl"
+val TRANSITIVE_PROBE_SOURCE = "# spec-owned sabotage fixture — deleted after each run\n\nfn helper_allocates_directly_spec_fixture() -> i64:\n    val bad = new BadThing()\n    1\n\n@noalloc\nfn probe_transitive_call_spec_fixture() -> i64:\n    helper_allocates_directly_spec_fixture()\n"
+
 describe "noalloc manifest scan":
 
     it "reports a clean run when no @noalloc violation exists":
@@ -50,3 +62,12 @@ describe "noalloc manifest scan":
         expect(result.0).to_contain("family-import")
         expect(result.0).to_contain("heap_init")
         expect(result.0).to_contain("allocating family")
+
+    it "catches a real TransitiveCall violation (@noalloc fn calling a non-@noalloc helper that itself directly allocates) end-to-end":
+        file_write(TRANSITIVE_PROBE_PATH, TRANSITIVE_PROBE_SOURCE)
+        val result = rt_process_run("bin/simple", ["run", "scripts/audit/noalloc_manifest_scan.spl"])
+        file_delete(TRANSITIVE_PROBE_PATH)
+
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("transitive-call")
+        expect(result.0).to_contain("helper_allocates_directly_spec_fixture")
