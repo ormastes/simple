@@ -110,7 +110,10 @@ round-trip today (`doc/00_llm_process/feature_expert/resource_ownership/skill.md
 but no production `.spl` source can use it yet — `bin/simple` is still the Rust
 seed, which reparses a source file's own syntax and doesn't know this grammar.
 See `doc/07_guide/platform/ffi/sffi.md` § Opaque Handle Pattern for the
-wrapping shape to use today.
+wrapping shape to use today. Two real hand-written examples using that shape:
+`Image` (`src/lib/nogc_sync_mut/io/image_sffi.spl`) and `FileLock`
+(`src/lib/nogc_sync_mut/sffi/io.spl`) — both a plain `class` with an
+invalid-sentinel check and a consuming `close()` guarding against double-close.
 
 ---
 
@@ -217,33 +220,6 @@ val path = 'C:\Users\name'          # Backslashes are literal
 # r"..." prefix also works
 val pattern = r"no\escape"
 ```
-
-### Literal Braces in an Interpolated String (CSS/JSON footgun)
-
-A double-quoted string interpolates `{...}` by default, so literal braces
-(CSS rules, JSON snippets) must be escaped or moved to a raw string —
-otherwise `"body {color:#fff}"` is parsed as an interpolation of a variable
-named `color` and fails with a location-less
-`semantic: variable 'color' not found` (interpreter/test engines) or, worse,
-silently corrupts the printed text with no diagnostic at all (`bin/simple
-run`'s JIT/native default). This is content-dependent: whether a given
-`{...}` span happens to parse as an expression determines which of the two
-failure modes you get, so don't rely on any unescaped shape working.
-
-```simple
-# Preferred: raw string — `{` and `}` are always literal, no escaping needed
-val rule = '.t{color:#ffffff}'
-val rule2 = r".t{color:#ffffff}"
-
-# Secondary: double the braces inside an interpolated string
-val rule3 = ".t{{color:#ffffff}}"    # renders as .t{color:#ffffff}
-```
-
-Use a raw string (`'...'` or `r"..."`) for any literal CSS/JSON-shaped text.
-Use `{{`/`}}` only when the same string also needs real interpolation
-alongside literal braces. See
-`doc/08_tracking/bug/string_interpolation_css_brace_footgun_2026-07-03.md`
-for the full investigation and per-engine failure-mode matrix.
 
 ### Typed String Literals
 
