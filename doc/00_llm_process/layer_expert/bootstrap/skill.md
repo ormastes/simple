@@ -306,6 +306,33 @@ top of Stage 3 self-host claims.
   here is what upgrades it. Related layer:
   [llvm_toolchain_port](../llvm_toolchain_port/skill.md).
 
+## 2026-08-08 Stage 2 restored; Stage 3 monomorphize SIGSEGV still open
+
+**Stage 2 was down, now fixed (`e7df6e01`):** an incomplete
+`Mailbox`→`PriorityMailbox` rename (`a019ba19aa6`) left two defects: it
+resurrected a dead `__init__.spl` "Re-exported from mailbox.spl" block that a
+prior commit (`983058c5ff39`) had deleted, and left
+`actor_scheduler.spl` with 3 stale `Mailbox` references (import, field type,
+constructor call) to a type that no longer existed. Stage 2 died with `llvm
+global load referenced undeclared symbol 'Mailbox'`. Fixed by renaming the 3
+references and dropping the resurrected re-export block (verified: fresh
+worktree, `build_stage2.sh` → exit 0, 794 compiled, 0 failed, linked ELF
+125109 KB). Trap for future renames: **the frontend does not reject
+undeclared field/type references at the point of use** — this class of defect
+only surfaces downstream as an HIR-consumer/LLVM-global error, not a
+parse/type error at the rename site. See
+`doc/08_tracking/bug/stage2_mailbox_priorimailbox_rename_incomplete_blocks_build_2026-08-08.md`
+and `doc/08_tracking/bug/actor_scheduler_mailbox_new_unresolvable_after_rename_2026-08-08.md`.
+
+**Stage 3 `phase=monomorphize` SIGSEGV on `method=len` is a separate, still-OPEN
+blocker** (diagnosis in flight as of this writing; no dedicated bug doc filed
+yet under `doc/08_tracking/bug/` — do not assume one exists, and do not
+conflate this with the WP-3.5 byteorder/cache-validator blocker documented
+above, which is a different crash signature at the same phase). Anyone
+resuming Stage 3 self-host work should re-check for a doc under
+`stage3_monomorphize` or `method_len` naming before starting a fresh
+diagnosis, since the fix may have landed since this note was written.
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill

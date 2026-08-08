@@ -207,6 +207,24 @@ parse 12.6 → 2.26 objects/char, per-file time flat (was quadratic).
 Details: [bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20](../../../08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md),
 research: [ast_memory_management_survey_2026-07-24](../../../01_research/compiler/parser/ast_memory_management_survey_2026-07-24.md).
 
+## JIT named-fn-as-value guard: extern-fn variant still open (2026-08-08)
+
+`45e0e8d6` fixed Defect 2 of the JIT closure-ABI family (named function used
+as a bare value bypassing the lambda-only guard, silently miscompiling via
+`compile_indirect_call` — see
+[mir_lowering layer expert](../mir_lowering/skill.md) for the full writeup of
+that fix and its verification; not duplicated here to avoid drift between the
+two copies).
+
+**Still OPEN — extern fn as value** (filed by `c7a07467` as
+`doc/08_tracking/bug/jit_extern_fn_as_value_still_miscompiles_2026-08-08.md`):
+`first_named_fn_value_load` (`src/compiler_rust/compiler/src/codegen/jit.rs`)
+only checks `mir.functions` (defined fns), not `mir.extern_fn_names`. Loading
+an **extern** fn's name as a value still reaches the same closure-ABI
+miscompile Defect 2 fixed for ordinary functions. Anyone extending the guard
+should widen the lookup to cover both sets rather than adding a second
+parallel check.
+
 ## Update Rule
 
 After backend regressions, FFI fixes, or linker changes, refresh this skill
