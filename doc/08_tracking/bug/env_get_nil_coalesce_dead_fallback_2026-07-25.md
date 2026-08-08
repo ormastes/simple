@@ -174,8 +174,8 @@ Note the chain-grep cannot see two-step usage (`val v = env_get(K)` then
 ### Why the ROOT was NOT changed — and this is the key constraint
 
 Making shape B return `""` (or fixing `rt_env_get`) looks like the right root
-fix and is **not safe**: **36 call sites rely on the nil leak to apply a
-NON-EMPTY `??` default** — e.g. `env_get("SIMPLE_BINARY") ?? "bin/simple"`,
+fix and is **not safe**: **22 of 36 pattern-matched call sites are VERIFIED leak-dependent** and would
+silently regress to `""` — e.g. `env_get("SIMPLE_BINARY") ?? "bin/simple"`,
 `env_get("CLAUDE_BASE_API_URL") ?? "https://api.anthropic.com"`,
 `env_get("PWD") ?? "."`. Guarding the wrapper silently turns all 36 into `""`.
 
@@ -201,3 +201,39 @@ Edit-visibility for every measurement above was proven by injecting a
 `SABOTAGE_MARKER_Q7` into `io_runtime.spl`'s guard and observing it in probe
 output (then reverting; blob restored to `f47b2a2715d0`) — ruling out the
 bundled-stdlib trap.
+
+### 2026-08-08 addendum — the 36 figure resolved by import (corrects the above)
+
+The "36 sites" above was first obtained by **text pattern only**
+(`env_get(...) ?? "non-empty"`), without resolving each `use` line. Resolving
+them the same way the 15 chain sites were resolved splits the 36 three ways —
+and the split matters, because roughly a third are not leak-dependent at all but
+are **already-broken instances of the 07-25 dead-fallback half of this very
+bug**:
+
+| sites | resolves to | shape | status |
+|---|---|---|---|
+| 20 | `app.io.mod` → re-exports `std.nogc_sync_mut.io.env_ops.env_get` | B unguarded | **leak-dependent** — guarding the wrapper WOULD regress these |
+| 2 | `std.nogc_sync_mut.io.env_ops.env_get` (direct) | B unguarded | **leak-dependent** |
+| 10 | `std.io_runtime.env_get` | A **guarded** | **ALREADY BROKEN** — `??` is a DEAD fallback here, silently yielding `""` instead of the stated default |
+| 4 | module-local / wildcard | mixed (`src/config.spl` is honest shape C) | correct or n/a |
+
+So the accurate statement is **22 of 36 verified leak-dependent**, not 36. The
+decision not to change the root still stands on those 22 — but the figure in the
+commit message for the `_get_temp_dir` fix (`f889cf1d`) says 36 and should be
+read as 22.
+
+The 10 dead-fallback sites are NEW, previously uncounted instances of the
+07-25 defect and are still OPEN:
+
+- `src/app/mcp/startup_log.spl` (3)
+- `src/app/simple_lsp_mcp/startup_log.spl` (3)
+- `src/app/ui.web/server.spl` (2)
+- `src/app/game.rollball/game.spl` (2)
+
+Each reads as if it applies a non-empty default and in fact yields `""`. They
+need `env_get_or(key, default)` (or an explicit `if x == ""` test), not `??`.
+
+Method note: resolve the `use` line before classifying ANY `env_get` site. A
+pattern count across `env_get` is meaningless on its own, because the same
+spelling resolves to three different contracts.
