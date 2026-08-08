@@ -1,9 +1,35 @@
 # Generic GPU-lane runner routing is not wired to the real B2/C2 executors
 
 **Filed:** 2026-08-07, during Task E2 (`doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md`)
-**Status:** OPEN
+**Status:** FIXED 2026-08-08 (see `doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md`
+§2026-08-08 for the full writeup)
 **Severity:** Medium — no test currently claims otherwise, but the gap is
 easy to miss because the real executors DO exist.
+
+## Fix (2026-08-08)
+
+`test_executor_composite.run_test_file_gpu_lane_dispatch` (new — replaces the
+old direct call to `run_test_file_gpu_lane` in `run_test_file_remote`) now
+constructs and drives the matching `CudaJitLaneExecutor`/`CudaVmExecutor`/
+`VulkanJitLaneExecutor`/`VulkanVmExecutor` once the host-aware driver/symbol
+probes are satisfied, using a new pure `gpu_lane_common.gpu_lane_id_for(base,
+backend)` mapping to pick the lane. `route_gpu_lane` itself is unchanged (kept
+as the skip:/blocked:/not-yet-implemented pure decision, still the fallback
+for `cuda_vm_resident`/`cudagdb`, which have no concrete executor yet).
+Verified live on this host via Vulkan (driver present): `vulkan_jit_hello_spec.spl`
+and `vulkan_vm_executor_conformance_spec.spl` both pass independently,
+confirming the executors this now wires to are real. CUDA could not be
+verified end-to-end on this host due to the separate, already-filed
+`cuda_lane_probe_misses_device_unavailable_2026-08-08.md` runtime defect — the
+new dispatch surfaces that honestly as a FAIL rather than masking it.
+
+Also noticed but explicitly NOT fixed here (separate, pre-existing,
+out-of-scope defect): `run_test_file_composite` dispatches on `base == "jit"`
+before checking `platform == "remote"`, so `jit(remote(cuda/vulkan(...)))`
+specs never reach `run_test_file_remote` (and thus never reach this dispatch)
+through the composite entry point — only `interpreter(remote(cuda/vulkan(...)))`
+specs do today. Filing this as a follow-up is recommended but was out of
+scope for this change (minimal-diff requirement).
 
 ## Summary
 
