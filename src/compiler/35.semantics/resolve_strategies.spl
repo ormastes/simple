@@ -201,13 +201,20 @@ impl MethodResolver:
                     if supertrait_result.is_err():
                         continue
 
-                    # Found a matching impl with satisfied obligations
-                    return Some(MethodResolution(
-                        trait_name: Some(trait_name),
-                        impl_block: Some(impl_block),
-                        method_name: method,
-                        is_generic: impl_block.type_params.len() > 0
-                    ))
+                    # Found a matching impl with satisfied obligations.
+                    # `MethodResolution` (20.hir/hir_types.spl) is an ENUM, not
+                    # a struct: its only shapes are InstanceMethod / TraitMethod
+                    # / FreeFunction / StaticMethod / Unresolved. Constructing a
+                    # `trait_name`/`impl_block`/`method_name`/`is_generic` field
+                    # bag here produced a value no consumer can match on, so a
+                    # solver-resolved trait method was unusable by MIR lowering
+                    # (50.mir) and by the interpreter backend (70.backend).
+                    # Return the TraitMethod variant instead.
+                    if val method_sym = self.symbols.lookup_trait_method_raw(trait_name.id.id, method):
+                        return Some(MethodResolution.TraitMethod(trait_name.id, method_sym))
+                    # Trait declares the method but no symbol backs it; keep
+                    # scanning the remaining candidate traits.
+                    continue
 
         # No trait method found via solver
         nil
