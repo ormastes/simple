@@ -492,3 +492,70 @@ primitive receiver with `Runtime error: Function 'str.marker_probe' not found`
 (rc=70). The native file reports `MIR lowering error: unresolved method call:
 mark` twice (rc=1) — once per primitive impl — while the same file runs correctly
 under interpret (`f32 = 1006`, `text = 1001`).
+
+## Recipe re-application attempt, 2026-08-08 — edit 2 LANDED, edits 1/3/4 BLOCKED
+
+A follow-up lane re-applied the recipe from a **detached worktree pinned to
+`origin/main`** (the shared working copy was carrying 23 unrelated in-flight
+compiler edits from parallel sessions, including `expr_dispatch.spl` +86 —
+measuring there would have been measuring someone else's tree).
+
+### Edit 2 landed: `af3ad25e761e412325a1e8802fa42407d2b6d960`
+
+`try_trait_method_with_solver` now returns
+`MethodResolution.TraitMethod(trait_name.id, method_sym)` via
+`lookup_trait_method_raw`, instead of the
+`MethodResolution(trait_name:, impl_block:, method_name:, is_generic:)` field
+bag. Confirmed against the enum at `20.hir/hir_types.spl:129`: its only shapes
+are `InstanceMethod` / `TraitMethod` / `FreeFunction` / `StaticMethod` /
+`Unresolved`. No struct form exists, so the old value was unmatched by every
+consumer.
+
+### CORRECTION to this doc's blast-radius claim — it is LATENT, not active
+
+This doc previously said the field bag meant "**every** solver-resolved trait
+method was returning an unconsumable resolution". That overstates it. Measured:
+
+- The only resolver entry point wired into the driver is `resolve_methods`
+  (`80.driver/driver_hir_pipeline_lowering.spl:220`,
+  `driver_hir_pipeline_passes.spl:30`).
+- It builds its resolver via `create_method_resolver` →
+  `create_trait_solver_for_resolution` (`35.semantics/resolve.spl:148`), a
+  `TraitSolver` constructed with **every map empty** — `traits: {}`,
+  `impls: {}`, `impls_by_type: {}` — and never populated afterwards.
+- `try_trait_method_with_solver` is gated by
+  `if self.trait_solver.trait_methods.has(method)`, which on an empty dict is
+  always false. The malformed construction was therefore **never executed**.
+- The one entry point that could supply a populated solver,
+  `resolve_methods_with_solver` (`resolve.spl:812`), is a **stub**: it returns
+  `(module, [])` and ignores the solver entirely.
+
+Probes at (A) solver entry, (B) the solver success path, and (C) the
+no-symbol bail in `try_trait_method` recorded **0 hits each**, on both the
+primitive fixture and a struct-receiver control.
+
+So the correct statement is: the solver-resolved set is currently **empty**;
+the field bag was a landmine in unreachable code, standing directly in front of
+any work that populates the solver. Fixing it is a prerequisite for recipe edit
+1, not a fix for an observable miscompile today.
+
+This also explains the recipe's own row "after edits 1+2 only → 2, no change":
+edit 1 falls through to a solver that has nothing registered in it, so it
+returns nil regardless.
+
+### Edits 1, 3, 4 NOT landed — the oracle no longer exists
+
+`bin/simple native-build` is **broken for every input** at `origin/main` as of
+2026-08-08, including a two-line hello-world. The recipe's RED signal
+(`unresolved method call: mark` ×2) cannot be reproduced, so neither RED nor
+GREEN is obtainable for the dispatch half. Filed separately:
+`doc/08_tracking/bug/native_build_nil_deref_total_outage_2026-08-08.md`.
+
+### Measurement trap that affects this doc's own numbers
+
+`native-build` truncates the **middle** of stderr (`OUTPUT_LIMIT = 12000` in
+`src/app/cli/native_build_main.spl:61`; head 6000 + tail 6000). Compiler
+diagnostics land in the discarded middle, so `grep -c` over native-build output
+is **fail-open** — 0 can mean "truncated", not "absent". The counts in this
+doc's recipe table were taken through that truncation and should be re-measured
+with the limit raised before being trusted.
