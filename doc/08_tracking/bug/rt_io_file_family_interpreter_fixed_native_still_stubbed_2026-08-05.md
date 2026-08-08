@@ -2,12 +2,17 @@
 
 Date: 2026-08-05
 Lane: IO-REWIRE follow-up
-Status: PARTIALLY FIXED. Interpreter engine now works end-to-end and is
-verified with a real disk round-trip. Native/JIT engine is UNCHANGED —
-confirmed still stubbed, with a precise repro below. This is expected per the
-ordering hazard already on record in `stubs.rs` and the original bug doc; it
-is not a new defect, it is a status update plus a concrete positive
-confirmation (the earlier report predates any verification run).
+Status: PARTIALLY FIXED, re-verified 2026-08-08 (see follow-up section below
+— now with a landed fence, `scripts/check/check-rt-io-file-native-jit-stub.shs`).
+Interpreter engine now works end-to-end and is verified with a real disk
+round-trip, including an out-of-process on-disk check. JIT engine is
+UNCHANGED — confirmed still stubbed today with the same zero-syscall
+signature. AOT (`native-build`) was NOT re-verified 2026-08-08 (build did not
+complete under heavy concurrent load); treat as presumed-still-broken, not
+confirmed. This is expected per the ordering hazard already on record in
+`stubs.rs` and the original bug doc; it is not a new defect, it is a status
+update plus a concrete positive confirmation (the earlier report predates any
+verification run).
 
 Supersedes/updates:
 `doc/08_tracking/bug/rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md`
@@ -133,3 +138,93 @@ other concurrent lane.
   declaration + 16 `insert_simple!` registrations.
 - `test/01_unit/lib/io/rt_io_file_family_check.spl` — fixed to call the real
   `FileHandle`/`File` API surface instead of a surface that never existed.
+
+## 2026-08-08 follow-up: re-verified, JIT still stubbed, fence landed
+
+Source: `doc/09_report/infra/aot_lane_regression_fence_audit_2026-08-07.md`
+rank #4 (no fence, false-green-spec risk).
+
+**Interpreter**: re-confirmed PASS this session with a fresh minimal fixture
+(`test/fixtures/rt_io_file_roundtrip/main.spl`, not the SdnRow/DB probe or the
+original `rt_io_file_family_check.spl`) — real disk round-trip, AND verified
+the written file from the shell (`wc -c` / `cat`) *after* the process exited,
+which the original 2026-08-05 report did not do (it only checked the
+in-process VERDICT line).
+
+**JIT (`bin/simple run`, no `SIMPLE_EXECUTION_MODE` override — this is always
+JIT per `.claude/rules/testing.md`, never AOT)**: still fails identically to
+the 2026-08-05 repro. `FileHandle.open(path, FileMode.WriteOnly)` returns
+failure, and `strace -f -e trace=openat,open` across the whole process tree
+shows **zero** syscalls referencing the target path — the call still never
+reaches the real Rust implementation.
+
+**New data point this session — the archive is no longer stale, but JIT is
+still broken anyway:**
+```
+nm -g --defined-only bin/release/x86_64-unknown-linux-gnu/libsimple_runtime.a | grep rt_io_file
+```
+now lists **all 16** `rt_io_file_*` symbols (`open, read, read_all, read_line,
+write, write_all, seek, flush, close, set_permissions, meta_size, meta_flags,
+meta_modified, meta_created, exists, delete`). This contradicts the
+2026-08-05 claim that "the deployed `target/bootstrap/libsimple_runtime.a`
+predates them" — that specific archive path doesn't even exist any more; the
+archive actually deployed at `bin/release/x86_64-unknown-linux-gnu/` (the one
+`bin/simple` is symlinked to, confirmed via `readlink -f bin/simple`) already
+carries the real symbols. **Despite that, JIT still fails exactly as before.**
+This means the redeploy-ordering story in `stubs.rs:195-221` is not the
+(entire) explanation for the JIT failure — JIT symbol resolution evidently
+does not resolve against this archive the same way `native-build`'s linker
+does. Do not assume redeploying the archive / dropping the RT_KEEP allowlist
+entries alone would fix the JIT lane; the JIT dispatch path needs its own
+investigation (out of scope for this fencing pass).
+
+Also clarified the RT_KEEP mechanism itself while investigating: it is **not**
+a stub-fabrication trigger. `check_no_fake_rt_stubs` in
+`src/compiler_rust/compiler/src/linker/native_binary/stubs.rs` only
+allowlists a symbol name out of the "must be real or fail closed" guard; if
+the symbol is genuinely defined in the runtime archive (as confirmed via
+`nm` above), whether it's also listed in `RT_KEEP` is irrelevant to normal
+`native-build` linking. This narrows where JIT's stub is actually coming
+from — it isn't this file's guard.
+
+**AOT (`native-build`, true LLVM codegen)**: attempted directly twice this
+session (`env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple
+native-build --entry-closure ...` against both the minimal fixture and the
+original `rt_io_file_family_check.spl`). Neither completed — the box was
+running many other agents' concurrent `native-build` full-stdlib compiles at
+the same time, each observed taking 10+ CPU-minutes; both of this session's
+attempts were still running (no error, no output binary) when this session
+had to move on, and one was lost to a harness-level backgrounding/redirect
+interaction that silently truncated its log. **AOT status is UNVERIFIED this
+session** — treat it as presumed-still-broken (same lane as JIT historically)
+but not independently re-confirmed today. Re-run under a quieter box:
+```
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build \
+  --source test/fixtures --entry-closure \
+  --entry test/fixtures/rt_io_file_roundtrip/main.spl \
+  --cache-dir <tmp>/cache --output <tmp>/bin
+```
+
+**False-green spec check**: grepped `test/` and `doc/06_spec/` for
+`rt_io_file` — the only test-shaped hit is
+`test/01_unit/lib/io/rt_io_file_family_check.spl`, which is **not** a
+`*_spec.spl` file and is therefore not collected by `bin/simple test` at all.
+The audit's row 4 "false-green spec risk" was correctly flagged as
+prospective risk, not an observed false green — there is currently no green
+spec claiming to cover this defect. The risk is real (someone could add a
+`*_spec.spl` wrapping this file and it would silently only prove the
+interpreter lane), just not yet materialized.
+
+**Fence landed**: `scripts/check/check-rt-io-file-native-jit-stub.shs` +
+`test/fixtures/rt_io_file_roundtrip/main.spl`. Hard-asserts the interpreter
+round-trip including an out-of-process on-disk verification (file exists,
+correct size, correct content, checked via `wc -c`/`cat` from the shell after
+the binary exits — not just the in-process VERDICT line). Treats the JIT
+failure as `KNOWN-OPEN` with the exact zero-syscall signature, and emits a
+loud `NOTE` (plus fails if unaccompanied by a real on-disk file) if the JIT
+lane ever starts passing, so the gap closing gets noticed instead of quietly
+absorbed. Sabotage-verified in both directions this session: corrupting the
+fixture's written content flips the script to `FAIL`/exit 1 with a clear
+message; corrupting the shell-side on-disk expectation (independently of the
+fixture) also flips to `FAIL`/exit 1; restoring either returns to `PASS`/exit
+0.

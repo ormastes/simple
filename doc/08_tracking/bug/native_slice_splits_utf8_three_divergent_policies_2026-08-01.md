@@ -533,3 +533,79 @@ to a file, and `xxd` it. Compare the **lengths**, not the glyphs.
 - `byte_at_reads_zero_from_slice_result_2026-07-28.md`
 - `bracket_slice_byte_index_survey_2026-07-29.md` and fix passes 1–6
 - `text_find_native_exposure_audit_2026-07-31.md`
+
+## Fence added 2026-08-08 — `check-native-utf8-slice.shs`
+
+Added `scripts/check/check-native-utf8-slice.shs` and fixture
+`test/fixtures/native_utf8_slice/main.spl` (probe string `s = "aé€𝄞z"`,
+identical to the "Reproduce" section above). This closes the false-green gap
+named in `doc/09_report/infra/aot_lane_regression_fence_audit_2026-08-07.md`
+row 5.
+
+**What the pre-existing partial fence (`check-utf8-slice-audit-live.shs`)
+covers and what it misses, confirmed by reading it:** it only proves the
+`SIMPLE_UTF8_SLICE_AUDIT` counting instrument is compiled into the checked
+binary (a `strings` grep) and that its `self_test` liveness line fires under
+plain `run`. It never drives `native-build` or `compile --native`, and it
+never inspects the LEN or bytes of any slice result — so a suite pointing at
+it would believe the native lane's *slicing policy* is covered when only a
+diagnostic *counter* is. That is the false-green gap this session closed.
+
+**New fence, `check-native-utf8-slice.shs`, pins six things, all verified
+today (2026-08-08) against the live binary at `bin/simple`:**
+
+1. Aligned control `s[0:3]` (cuts on a codepoint boundary): `len=3` on both
+   the default (Cranelift JIT) engine and `SIMPLE_EXECUTION_MODE=interpret`.
+   Hard-asserted (not KNOWN-OPEN) — this is the true-positive control.
+2. `s[0:2]` (bracket slice, splits `é`): **KNOWN-OPEN** — both engines return
+   raw, unvalidated bytes, `len=2`. Correct-should-be: a hard error, per this
+   doc's "Semantics decision" section.
+3. `.slice(0,2)`: **KNOWN-OPEN** — interpreter returns lossy-U+FFFD (`len=4`),
+   JIT returns raw bytes (`len=2`). The two engines disagree with each other
+   *and* with policy 2's bracket-slice raw-bytes value.
+4. `.substring(0,2)`: same divergence as `.slice`, **KNOWN-OPEN**.
+5. `simple compile <fixture> --native`: **KNOWN-OPEN**, still fails closed
+   with the exact diagnostic
+   `cannot compile to standalone native binary: 1 function(s) contain
+   constructs that require the interpreter: - main: [CollectionOps]` — this
+   reproduces the bug doc's "Engine-reachability caveat" verbatim, so the
+   native raw-bytes policy remains unreachable through this command.
+6. `simple native-build --source ... --entry-closure --entry <fixture>`:
+   **a new, previously-undocumented finding.** This command does NOT give the
+   same clean diagnostic as (5). It also fails (rc≠0, so no wrong binary is
+   ever produced) but with an opaque, unrelated-looking internal error:
+   `error: semantic: undefined field 'kind': cannot access field on value of
+   type 'nil'`, raised inside MIR lowering right after
+   `[mir-lower-expr] method-dispatch-before method=slice` /
+   `[mir-method-call] start method=slice argc=2` — i.e. triggered by the
+   bracket-slice-to-`.slice()` desugar, not by any UTF-8-specific code.
+   Reproduced on a minimal 3-line ASCII-only control (`s[0:2]` on `"abc"`,
+   isolated in its own source directory) — so this is a general
+   `native-build`-vs-`.slice()` defect, not specific to multi-byte input or to
+   this fixture. A no-slice control (`print(s)`, same shape) compiles and runs
+   correctly under `native-build`, isolating the trigger to the slice call.
+   Recorded as **KNOWN-OPEN**, distinct from (5), because a fix to either path
+   is independently visible: `native-build` could start emitting the same
+   clean `[CollectionOps]` diagnostic (still closed, wording unified) or could
+   start compiling (gap fully closed) — the script's three-way branch reports
+   either outcome as a `NOTE` rather than a silent pass.
+
+**Sabotage-verified (2026-08-08, both directions performed and confirmed):**
+mutated the fixture's aligned-control line from `s[0:3]` to `s[0:2]`, re-ran
+the script — result `FAIL — aligned control s[0:3] regressed (expected len=3
+on both engines) / JIT len=2  interpret len=2`, exit 1. Restored the line to
+`s[0:3]`, re-ran — full `PASS` on all six checks, exit 0, and the file's
+content was diffed back to the original 18-line fixture to confirm no residual
+mutation. The assertion is load-bearing, not vacuous.
+
+**Explicit scope statement — what this fence does NOT establish:** `--native`
+and `native-build` both remain UNREACHABLE for the raw-bytes native slicing
+policy itself (rows 5–6 above only pin the *refusal*, not a slice value
+produced by either native path) — exactly as the bug doc's "Engine-reachability
+caveat" already stated; this session did not change that. The fence also
+covers only the Cranelift JIT and the interpreter for the three slicing
+policies (rows 1–4); LLVM-without-`--native` and the C runtime's
+`spl_str_slice`/`spl_str_slice_legacy` legacy duplicates remain unmeasured, as
+they were before. No fix was attempted for the underlying divergence or for
+the `native-build` opaque-error defect — per the task's explicit scope, the
+891-site migration decision from "Stage 3 migration" above stands unchanged.
