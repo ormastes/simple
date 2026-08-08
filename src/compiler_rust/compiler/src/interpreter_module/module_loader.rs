@@ -933,9 +933,42 @@ pub fn load_and_merge_module(
         Err(total) => {
             decrement_load_depth();
             warn!(total, max = limit, path = ?module_path, "Total module count limit exceeded");
+            // Make this unmistakably a HARNESS/LOADER abort, never a test result.
+            // Historically this surfaced as a bare `error: runtime: ...` with no
+            // `SPEC FILE VERDICT` line, which reads exactly like the spec under
+            // test failing. It is not: nothing under test ever ran.
+            eprintln!(
+                "\n\
+                 ========================================================================\n\
+                 HARNESS ABORT (module loader) — this is NOT a test/spec failure.\n\
+                 Nothing under test was executed; no verdict was produced.\n\
+                 ------------------------------------------------------------------------\n\
+                 Module-load budget exhausted: reached {} unique modules, limit is {}.\n\
+                 Last module attempted: {}\n\
+                 NOTE: the module named above is simply the LAST one in the import\n\
+                 graph. It is almost never the cause — the cause is the size of the\n\
+                 whole transitive graph reaching the ceiling.\n\
+                 ------------------------------------------------------------------------\n\
+                 Mitigation now:  SIMPLE_MODULE_LIMIT={} <your command>\n\
+                 Diagnose:        SIMPLE_LOADER_TRACE=1 <your command> 2>&1 \\\n\
+                 \x20                 | grep -c '^\\[loader-trace\\] loaded:'\n\
+                 (Do NOT set SIMPLE_MODULE_LIMIT=0; 0 means unlimited and the guard\n\
+                 exists to stop the loader OOMing the machine.)\n\
+                 ========================================================================\n",
+                total,
+                limit,
+                module_path.display(),
+                limit.saturating_mul(2).max(2000),
+            );
             return Err(CompileError::Runtime(format!(
-                "Module count limit ({}) exceeded loading {:?}. Too many transitive imports.",
-                limit, module_path
+                "HARNESS ABORT (module loader, not a test failure): module-load budget \
+                 exhausted at {} unique modules (limit {}) while loading {:?}. \
+                 That module is the LAST in the import graph, not the cause. \
+                 Retry with SIMPLE_MODULE_LIMIT={} and diagnose with SIMPLE_LOADER_TRACE=1.",
+                total,
+                limit,
+                module_path,
+                limit.saturating_mul(2).max(2000),
             )));
         }
     };

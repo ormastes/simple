@@ -49,7 +49,18 @@ fn module_rss_warn_bytes() -> u64 {
 }
 
 /// Default maximum modules that can be loaded.
-const DEFAULT_MODULE_LIMIT: usize = 800;
+///
+/// 800 was a knife-edge, not a budget. Measured 2026-08-08 with
+/// `SIMPLE_LOADER_TRACE=1`, the `simple test <spec>` light-daemon-client entry
+/// (`src/app/test_runner_new/test_runner_client.spl`) loads **787-800 unique
+/// modules with ZERO repeat loads** — so `simple test` was running at 98-100%
+/// of this ceiling and tipped over whenever the graph grew by one module.
+/// Two specs measured back to back: 789 and 800. That is the whole story behind
+/// the intermittent `Module count limit (800) exceeded loading
+/// light_protocol.spl` failures; light_protocol.spl is merely the LAST module
+/// in that graph, never the cause.
+/// See doc/08_tracking/bug/module_count_limit_800_intermittent_simple_test_2026-08-08.md
+const DEFAULT_MODULE_LIMIT: usize = 4000;
 
 /// Maximum modules that can be loaded (0 = unlimited).
 /// Read from SIMPLE_MODULE_LIMIT.
