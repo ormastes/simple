@@ -451,3 +451,147 @@ vulkan_compositor_backend,frame_pacer,dirty_rect,engine2d_baremetal_core,
 closure}.sdn` (7 per-spec artifacts), `/tmp/c3_close_cov/rollup_4specs_baseline.txt`,
 `/tmp/c3_close_cov/rollup_6specs.txt`, `/tmp/c3_close_cov/rollup_7specs_final.txt`
 (raw unioned dumps backing the three ratios in the table above).
+
+## Re-measurement after `<entry>` fix (deployed) — 2026-08-08
+
+Context: `doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md`
+landed a fix for root cause 1 (`Node::Impl` block methods never got
+module-owner tagged, so any branch/line inside an `impl X:` block attributed
+to the `<entry>` sentinel instead of the real file). Root cause 2
+(entry-script top-level functions still get no owner) is **deferred, not
+fixed** — residual `<entry>` rows from that cause still exist in this
+re-measurement. Binary redeployed 2026-08-08 00:53
+(`bin/release/x86_64-unknown-linux-gnu/simple`, 58,893,800 bytes).
+
+### Method
+
+Re-ran the same 7 C3 specs individually, foreground, one `SIMPLE_COVERAGE_OUTPUT`
+per spec, per the original methodology:
+
+```
+SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<distinct>.sdn bin/simple run \
+  src/app/test_runner_new/test_runner_single.spl <spec> \
+  --no-session-daemon --sequential
+```
+
+then `bin/simple spl-coverage rollup --file <7 artifacts>` to union, then
+hand-parsed the raw `decisions |id, file, line, column, true_count,
+false_count|` rows directly (`covered = true_count>0 and false_count>0`) —
+reproduced the tool's `total_decisions: 239` / `covered_decisions: 77`
+exactly (239 real data rows counted after excluding the trailing blank line
+the dump ends with).
+
+All 7 specs still pass: surface 10/10, parity 8/8, vulkan **29/29** (was
+21/21 — file grew independently, unrelated to this fix; total lines for
+`vulkan_compositor_backend.spl` also grew 9→26), frame_pacer 6/6, dirty_rect
+30/30, engine2d_baremetal_core_spec 19/19, compositor_decision_closure_spec
+6/6.
+
+### (a) Line coverage per compositor file — before vs. after
+
+Single-spec `coverage: <file> N% (X/Y lines)` printed lines, before = original
+2026-08-07 report's numbers (or the "before" row from its follow-up section);
+after = same spec re-run today with the deployed fixed binary. Where the
+report gave a union-of-multiple-specs number, the union is used on both
+sides for a fair comparison.
+
+| file | before | after (single spec, same spec as before) | delta |
+|---|---|---|---|
+| `compositor_engine2d.spl` (surface spec) | 57% (66/115) | 57% (66/115) | **0** — free-function-dominant file, `impl` fix doesn't touch it |
+| `engine2d_baremetal_core.spl` (parity spec alone) | 11.96% (25/209) | **64% (135/209)** | **+52 pts** |
+| `engine2d_baremetal_core.spl` (union: parity+new+closure specs) | 13.88% (29/209, 2026-08-08 correction) | **85.6% (179/209)** | **+71.7 pts** |
+| `vulkan_compositor_backend.spl` | 66% (6/9) | 84% (22/26) — denominator changed (file grew independently), not purely attributable to this fix | n/a (denominator moved) |
+| `dirty_rect.spl` | 92.1% (35/38) | 92% (35/38) | **0** — free-function file (`IRect`/`DirtyRegion` are struct field ops, not `impl` methods this fix touches), confirms the "only impl-heavy files move" prediction |
+| `frame_pacer.spl` | "no coverage line emitted" (below print threshold) | still no per-spec coverage line printed; union rollup shows 6 lines covered against a 158-line file | unchanged behavior — same non-report quirk as before, not evidently the same bug family |
+
+**Confirmed prediction: the fix is impl-method-file-specific.**
+`engine2d_baremetal_core.spl` (impl-heavy — `Engine2DBaremetalCore` methods
+like `draw_rect_stroked`, `draw_circle_stroked`, `draw_image`,
+`draw_codes12_block`) is the file that moved dramatically — the single
+`parity` spec alone went from 11.96% to 64% with **zero new test code**,
+purely from correct attribution. `compositor_engine2d.spl` and
+`dirty_rect.spl`, which are free-function/struct-op-dominant, did not move at
+all — exactly matching the task's expectation ("the fix only helps
+impl-method files; free-function files won't change").
+
+`display_backend_core.spl` and `engine2d_baremetal_rect_core.spl` remain at
+**0 covered lines** in the union — still no dedicated spec exercises either
+file (confirmed again this session), same gap as the original report.
+
+### (b) Decision (branch) coverage ratio — new C3 numbers, hand-verified
+
+Full union (7 specs, all files transitively pulled in, matching the original
+report's scope):
+
+```
+total_decisions: 239
+covered_decisions: 77   → 32.2% (was 233/74 = 31.8% on 2026-08-07)
+```
+
+Hand-verified by parsing all 239 raw decision rows and counting
+`true_count>0 and false_count>0`: reproduces 77 exactly.
+
+**This ratio barely moved (31.8%→32.2%), and that is the expected, honest
+result** — a branch's hit/miss status (true_count, false_count) does not
+change when its file-attribution label changes from `<entry>` to a real
+path. The `<entry>` fix relabels rows; it does not make more branches
+execute. The interesting change is in the per-file breakdown, not the
+aggregate.
+
+**Restricted to `src/os/compositor/` real-path rows only** (the number the
+original report called out specifically):
+
+```
+total = 74, covered = 52 → 70.3%   (was 23 real-path rows, 18 covered, 78.3%)
+```
+
+Per-file breakdown of the 74:
+
+| file | decisions total | covered | ratio |
+|---|---|---|---|
+| `compositor_engine2d.spl` | 10 | 9 | 90% |
+| `engine2d_baremetal_core.spl` | 52 | 32 | 61.5% |
+| `vulkan_compositor_backend.spl` | 7 | 6 | 85.7% |
+| `dirty_rect.spl` | 4 | 4 | 100% |
+| `frame_pacer.spl` | 1 | 1 | 100% |
+
+**The percentage went DOWN (78.3%→70.3%) even though both numerator and
+denominator roughly tripled.** This is the honest, correct direction, not a
+regression: the old 23-row set was a small, cherry-picked-by-accident subset
+— rows that happened to already carry a real path (because they weren't
+inside an `impl` block). The 51 newly-real rows revealed by the fix
+(mostly from `engine2d_baremetal_core.spl`'s `impl` block, which the fix
+newly attributes) include a substantial number of genuinely uncovered
+branches — `engine2d_baremetal_core.spl` alone is 61.5% covered at the
+decision level even though its line coverage looks like 85.6% (union); line
+and decision coverage measure different things, and this file still has real
+decision-level gaps worth targeting next (e.g. the previously-documented
+"genuinely unreachable" rows in the original report should be re-audited
+against the new real-path row set, since some of what was `<entry>` before
+may now show up as reachable-but-untested rather than unreachable).
+
+### `<entry>` residual count — root cause 2 still open
+
+**3 `<entry>` rows remain** in the 239-row union (was 49/233 = 21.0% before
+the fix; now 3/239 = 1.3%) — a real, large drop, consistent with root cause 1
+being fixed. The 3 residual rows:
+
+```
+3179026103, <entry>, 106, 21, 24, 11
+1168717216, <entry>, 104, 21, 11, 24
+3996283373, <entry>, 104, 9, 1, 0
+```
+
+All three are at lines 104/106, column 9/21 — consistent with root cause 2
+(entry-script top-level functions, i.e. code in the spec file itself, e.g. an
+`it` block or helper `fn` defined directly in one of the 7 `*_spec.spl`
+files rather than in an imported module). This matches the deferred/documented
+scope of root cause 2 in the bug tracking doc — not re-investigated further
+here, since it's explicitly out of scope for this measurement pass.
+
+### Artifacts (this session, local scratch — not committed)
+
+`/tmp/c3_remeasure/{surface,parity,vulkan,frame_pacer,dirty_rect,ebc_new,closure}.sdn`
+(7 per-spec artifacts), `/tmp/c3_remeasure/rollup_full.txt` (raw unioned dump
+backing all ratios above), `/tmp/c3_remeasure/decisions_only.txt` (extracted
+decision-row section used for the hand-verification counts).
