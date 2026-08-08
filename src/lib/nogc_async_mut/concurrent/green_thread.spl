@@ -20,15 +20,22 @@
 # the closure at spawn time. The scheduler's green_run_one / green_run_all execute
 # pending tasks one-by-one.
 #
-# ERROR CAPTURE IS NOT IMPLEMENTED. GreenTask carries has_error/error_reason and
-# green_task_error() reads them, but green_run_one() calls t.thunk() directly and
-# hardcodes has_error: false — there is no mechanism here to catch a failing
-# thunk (the thunk type is fn() -> i64, not a Result), so green_task_error()
-# can only ever return "". An earlier version of this header claimed errors were
-# recorded as a per-task death reason mirroring the W2-5 TaskDeathRecord pattern
-# in async_host/scheduler.spl; that is not implemented here. Implementing it
-# needs the thunk signature widened to a Result, or a runtime-level catch.
-# Tracked: doc/08_tracking/bug/green_task_error_is_a_dead_export_that_can_only_return_empty_2026-08-08.md
+# ERROR CAPTURE: the thunk type is fn() -> i64, not a Result, so green_run_one
+# cannot observe a failing thunk by inspecting its return value (a negative i64
+# is a legitimate value-level result, not an error — see the "bad result"
+# scenario in green_spawn_deferred_spec.spl). Unlike async_host/scheduler.spl's
+# W2-5 TaskDeathRecord (populated by the RUNTIME after observing a Result-typed
+# future), a plain fn() -> i64 thunk has no channel for the SCHEDULER to detect
+# failure. Instead, green_fail(reason) gives the TASK BODY itself an explicit
+# self-report channel: calling it inside a thunk marks that task's run as
+# errored. green_run_one() resets the report slot before invoking the thunk and
+# reads it back after; if set, the task is recorded has_error: true with that
+# reason and green_task_error() returns it. A thunk that never calls
+# green_fail() is has_error: false regardless of its return value, exactly as
+# the deferred-execution spec's "bad result" scenario documents.
+# Previously tracked as a dead export:
+# doc/08_tracking/bug/green_task_error_is_a_dead_export_that_can_only_return_empty_2026-08-08.md
+# (resolved by wiring the self-report channel described above).
 #
 # THUNK STORAGE: fn() -> i64 stored in a class field works in interpreter mode
 # (empirically verified 2026-06-11: probe storing make_value fn in ThunkHolder.thunk,
@@ -112,8 +119,14 @@ class GreenThreadHandle:
 var GREEN_SCHEDULER: GreenScheduler = GreenScheduler(next_id: 1, ready_count: 0, done_count: 0, value_ready: 0, value_done: 0)
 var GREEN_TASKS: [GreenTask] = []
 
+# Self-report slot for the currently-running thunk. Reset to "" by
+# green_run_one() immediately before invoking a thunk; a thunk body that wants
+# to mark its own run as failed calls green_fail(reason), which writes here.
+# Read back once the thunk returns — see the ERROR CAPTURE header note above.
+var GREEN_CURRENT_ERROR: text = ""
+
 export GreenThreadHandle
-export green_spawn, green_spawn_eager, green_spawn_value
+export green_spawn, green_spawn_eager, green_spawn_value, green_fail
 export green_task_error, green_ready_count, green_run_one, green_run_all
 
 fn green_spawn(task: fn() -> i64) -> GreenThreadHandle:
@@ -147,6 +160,18 @@ fn green_spawn_value(result: i64) -> GreenThreadHandle:
     GREEN_SCHEDULER.ready_count = GREEN_SCHEDULER.ready_count + 1
     GreenThreadHandle(task_id: task_id, value_mode: 1, value_order: value_order, value_result: result)
 
+fn green_fail(reason: text) -> i64:
+    """Report the currently-running green thunk as errored with `reason`.
+
+    Call from inside a green_spawn thunk body. green_run_one() records this
+    against the task that was running when the call happened and surfaces it
+    via green_task_error(). Returns 0 for convenience as a thunk tail
+    expression (e.g. `fn bad() -> i64: return green_fail("boom")`); the
+    returned i64 is otherwise not treated specially.
+    """
+    GREEN_CURRENT_ERROR = reason
+    0
+
 fn green_task_error(task_id: usize) -> text:
     """Return the per-task death reason if the task errored, empty string otherwise."""
     var i: usize = 0
@@ -177,16 +202,18 @@ fn green_run_one() -> bool:
         i = i + 1
     if found:
         val t = GREEN_TASKS[found_idx]
-        var ran_result: i64 = 0
-        var ran_ok: bool = true
-        ran_result = t.thunk()
+        GREEN_CURRENT_ERROR = ""
+        val ran_result: i64 = t.thunk()
+        val reported_error = GREEN_CURRENT_ERROR
+        GREEN_CURRENT_ERROR = ""
+        val ran_failed = reported_error != ""
         var updated = GreenTask(
             task_id: t.task_id,
             thunk: t.thunk,
             result: ran_result,
-            has_result: ran_ok,
-            has_error: false,
-            error_reason: ""
+            has_result: not ran_failed,
+            has_error: ran_failed,
+            error_reason: reported_error
         )
         var new_tasks: [GreenTask] = []
         var j: usize = 0

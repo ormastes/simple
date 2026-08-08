@@ -1,8 +1,25 @@
 # `green_task_error` is an exported API that can only ever return `""`
 
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-08-08
 - **Found:** 2026-08-08, adversarial review of `7168c6d1c2b2`
 - **File:** `src/lib/nogc_async_mut/concurrent/green_thread.spl`
+
+## Resolution
+
+Wired a third option not enumerated below: a **self-report channel**. A
+module-level `GREEN_CURRENT_ERROR: text` slot is reset by `green_run_one()`
+immediately before invoking a thunk; the new export `green_fail(reason)` lets
+the thunk body itself write to that slot. `green_run_one()` reads it back
+after the thunk returns and records `has_error`/`error_reason` on the
+`GreenTask` accordingly, so `green_task_error()` now returns a real value for
+any task whose body called `green_fail(...)`. Tasks that don't call it are
+`has_error: false` regardless of return value, preserving the existing
+"bad result is value-level, not an error" test in
+`green_spawn_deferred_spec.spl`. No thunk-signature change, so no blast radius
+on the many existing `green_spawn(fn() -> i64)` call sites. Two new specs
+added: "green_fail marks the task errored and green_task_error returns the
+reason" and "green_task_error returns empty for a task that never called
+green_fail".
 
 `7168c6d1c2b2` itself is correct — reviewed and endorsed, see below. This is a
 separate pre-existing defect found while reviewing it.

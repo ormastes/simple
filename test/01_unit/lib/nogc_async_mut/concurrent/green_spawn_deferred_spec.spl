@@ -3,6 +3,7 @@ use std.concurrent.green_thread.{
     green_spawn,
     green_spawn_value,
     green_task_error,
+    green_fail,
     green_ready_count,
     green_run_one,
     green_run_all
@@ -36,6 +37,11 @@ fn sibling_body() -> i64:
 # the scheduler loop continues after any result value.
 fn bad_result_body() -> i64:
     -99
+
+# A task that self-reports failure via the explicit green_fail() channel
+# (as opposed to bad_result_body above, which just returns a low value).
+fn failing_body() -> i64:
+    return green_fail("failing_body: deliberate failure")
 
 describe "green_spawn deferred execution (E6)":
     it "spawn does not execute the body immediately":
@@ -98,6 +104,23 @@ describe "green_spawn deferred execution (E6)":
         # green_task_error returns empty for non-fatal value-level "error"
         val err_reason = green_task_error(h_bad.id())
         expect(err_reason).to_equal("")
+
+    it "green_fail marks the task errored and green_task_error returns the reason":
+        val h_fail = green_spawn(failing_body)
+        val h_sibling = green_spawn(sibling_body)
+        green_run_all()
+        assert_true(h_fail.is_done())
+        assert_true(h_sibling.is_done())
+        # Sibling must be unaffected by the failing task.
+        expect(h_sibling.join()).to_equal(77)
+        val reason = green_task_error(h_fail.id())
+        expect(reason).to_equal("failing_body: deliberate failure")
+
+    it "green_task_error returns empty for a task that never called green_fail":
+        val h_ok = green_spawn(deferred_body_inc)
+        green_run_all()
+        assert_true(h_ok.is_done())
+        expect(green_task_error(h_ok.id())).to_equal("")
 
     it "green_spawn_value still works alongside deferred tasks":
         val h_value = green_spawn_value(55)
