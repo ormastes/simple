@@ -101,19 +101,50 @@ Build exits **1** with:
 error: bootstrap entry lowered to 0 MIR instructions (ret-0 stub module)
 ```
 
-`d=-1` is the discriminant actually read; every expected variant discriminant is
-a multi-gigabyte garbage value (ASLR-shaped — the "number that changes between
-runs" signature of a lost type). The same signature appears throughout the
-Stage-3 log:
+### Precision note on the probe numbers — read before citing them
+
+That probe line is a pre-existing `TEMP-PROBE` left in the tree by an earlier
+lane (`function_lowering.spl:785-799`, comment: "remove before landing"). It sits
+in the `case _:` **wildcard arm of a `match` on `HirTypeKind`**, and it calls
+`rt_enum_discriminant()` — both on the value that reached the arm and on nine
+freshly-constructed reference variants.
+
+**The individual discriminant values are NOT trustworthy evidence.** If
+`rt_enum_discriminant` is itself unreliable under native codegen, then `d=-1` and
+the nine multi-gigabyte reference values are artefacts of the probe, not
+measurements of the defect. Do not cite `d=-1` as a proven discriminant read.
+
+What the probe *does* establish reliably, independent of the numbers:
+
+1. A `HirTypeKind` value **reaches the wildcard arm** of that match — i.e. the
+   match failed to select any of the named variants.
+2. That arm calls `self.error_fatal("unsupported MIR type kind [wildcard-arm]...")`
+   (`:799`) and then degrades the type to `MirType.i64()` (`:800`).
+3. On the bootstrap lane that `error_fatal` is **dropped** (see fail-open 1
+   below), so the degradation is silent.
+
+The consistent reading across all three artefacts is therefore: **enum matching
+over HIR/MIR type and instruction enums is failing to select the correct variant
+in the natively-built stage2, falling to wildcard/unresolved arms, and lowering
+degrades to control flow with no values.** The identical signature appears in the
+Stage-3 log's method resolution:
 
 ```
 [mir-method-call] resolution-enter method=slice disc=1851930204 unresolved=true
 ```
 
-So: **stage2 reads enum discriminants as garbage, every `match` over a
-MIR/HIR/type enum falls to the wildcard arm, and lowering emits nothing.** The
-3,629 `const-0 placeholder` substitutions across 538 names are a *symptom* of
-this, not an independent defect — and so is the 15-`rt_panic`-only call set.
+The 3,629 `const-0 placeholder` substitutions across 538 names and the
+15-`rt_panic`-only call set are *symptoms* of this same wildcard fallthrough, not
+independent defects.
+
+**Still unproven, and the next thing to establish:** whether the failure is in
+the discriminant *load*, in the variant *constants*, or in the match dispatch
+itself — and whether it is a stage2 codegen defect or a source defect. The
+obvious control (build the same reproducer with the Rust seed) is **not
+available**: the seed at `src/compiler_rust/target/bootstrap/simple` reports
+`native backend 'llvm' is not available in this build; rebuild the Rust driver
+with --features llvm or use --backend cranelift`. A `--backend cranelift` or
+interpreter control run is the cheapest remaining discriminator.
 
 Probe sites:
 - `src/compiler/50.mir/_MirLowering/function_lowering.spl:798` (the `d=-1` probe)
