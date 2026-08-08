@@ -15,10 +15,18 @@
 `doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md` designs
 "prevention mocks" — mocks whose purpose is to fail a test when a forbidden
 call path is taken — at three scopes: per-test (`it`), per-file (spec file),
-and directory-wide. The per-test and per-file scopes are specifiable with the
-current architecture (a spec-DSL-level guard, checked at the end of
-`_execute_it` in `src/lib/nogc_sync_mut/spec.spl`). **Directory-wide scope is
-not specifiable today**, because:
+and directory-wide. Per-test scope is specifiable and landed: `prevent(mockfn,
+reason)` / `prevent_at_most(mockfn, n, reason)` in
+`src/lib/nogc_sync_mut/spec.spl`, checked IMMEDIATELY at the call site (NOT
+"checked at the end of `_execute_it`" — that deferred-arming design was
+attempted and found impossible under this interpreter; see
+`doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`).
+Per-file scope (`prevent_file`) landed only as a documented alias for
+`prevent` — true auto-checked file scope turns out to have the **same root
+cause** as this record's directory-wide gap: module-level spec state does not
+persist from one `it` example to the next under this runner, so a guard
+"armed once at the top of the file" cannot be auto-checked after every
+example either. **Directory-wide scope is not specifiable today**, because:
 
 - The test runner reads a single **repo-level** config file,
   `config/simple.test.sdn`. The loader is

@@ -28,62 +28,82 @@ API), at per-test, per-file, and directory-wide scope.
   `VerificationResult`, `MockPolicy`), `mock/verification.spl`
   (`verify_called`, `verify_called_with`, `Matcher`, `CallAnalyzer`),
   `mock/spy.spl` (`Spy`).
-- Source (planned, not yet landed as of 2026-08-07): `src/lib/nogc_sync_mut/src/testing/mock/prevention.spl`
-  (`ForbiddenCallGuard`, `check_guards` — unit U1) and
-  `src/lib/nogc_sync_mut/spec.spl` (`prevent`/`prevent_at_most`/`prevent_file`
-  DSL — unit U2). Other `src/lib/*/spec.spl` (`gc_async_mut`, `gc_sync_mut`,
-  `nogc_async_mut`) re-export from `nogc_sync_mut` and need the mirrored diff
-  if they turn out to be full copies rather than re-exports (checked at U2
-  time).
-- Planned spec: `test/01_unit/lib/std/testing/prevention_mock_spec.spl` (U3).
-- Planned adoption specs (U5): `test/01_unit/compiler/di/di_lock_spec.spl`,
+- Source (landed, unit U1): `src/lib/nogc_sync_mut/src/testing/mock/prevention.spl`
+  (`ForbiddenCallGuard`, `check_guards`).
+- Source (landed, unit U2): `src/lib/nogc_sync_mut/spec.spl`
+  (`prevent`/`prevent_at_most`/`prevent_file` DSL — immediate-check
+  semantics, not the originally-planned deferred-arming design; see
+  `doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`).
+- Spec (landed, unit U3): `test/01_unit/lib/std/testing/prevention_mock_spec.spl`.
+- Adoption specs (landed, unit U5): `test/01_unit/compiler/di/di_lock_spec.spl`,
   `test/01_unit/app/devhub/adapter_bitbucket_spec.spl`,
   `test/01_unit/lib/common/mock_verification_spec.spl`.
 
 ## Status (2026-08-07)
 
-- **U4 (this entry, plus the guide and tracking record) is landed.**
-  Doc-only: describes what exists today (the manual `verify_called(m, 0)`
-  idiom, fail-open), what's planned (`prevent`/`prevent_file` DSL, U1-U3),
-  and documents the directory-wide scope as genuinely unspecifiable with the
-  current test-runner architecture.
-- **U1 (`ForbiddenCallGuard`/`check_guards`), U2 (`prevent`/`prevent_file`
-  DSL in `spec.spl`), U3 (spec + sabotage recipe), and U5 (adoption in 3
-  specs) are NOT YET LANDED.** Verified 2026-08-07: no `prevention.spl` file
-  under `src/lib/nogc_sync_mut/src/testing/mock/`, and no `prevent` symbol in
-  `src/lib/nogc_sync_mut/spec.spl`.
-- `.claude/skills/spipe.md` § "Prevention mocks" carries the same
-  today-vs-planned framing for agents reading that skill file directly.
+- **All five units (U1-U5) are landed.** `ForbiddenCallGuard`/`check_guards`
+  exist at `src/lib/nogc_sync_mut/src/testing/mock/prevention.spl`; `prevent`/
+  `prevent_at_most`/`prevent_file` exist in `src/lib/nogc_sync_mut/spec.spl`
+  and check IMMEDIATELY against the mock's current state at the call site
+  (deferred "arm early, auto-check at end of `_execute_it`" was attempted
+  and found impossible under this interpreter — a class instance stored in
+  an array/field/closure is copied by value; full repro in
+  `doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`).
+  `prevent_file` is consequently a documented alias for `prevent`, not true
+  auto-checked file scope.
+- Directory-wide scope remains genuinely unspecifiable with the current
+  test-runner architecture — same root cause as file-scope above
+  (module-level spec state does not persist across `it` examples). Convention
+  (`_prevention.spl` helper, opt-in) documented in the guide; gap tracked in
+  the tracking record above.
+- The guide (`doc/07_guide/infra/testing/prevention_mocks.md`) and
+  `.claude/skills/spipe.md` § "Prevention mocks" carry the same landed-DSL,
+  immediate-check framing for agents reading those files directly.
 
 ## Scope verdicts (from the plan)
 
 | Scope | Specifiable? | Mechanism |
 |-------|-------------|-----------|
-| per-test (`it`) | YES (once U1+U2 land) | `prevent(...)` registered in `it`, auto-checked at end of `_execute_it` |
-| per-file | YES (once U2 lands) | `prevent_file(...)` at spec top level; checked after every `it` |
+| per-test (`it`) | YES (landed) | `prevent(mockfn, reason)` called AFTER the code under test; checks immediately, same-mechanism-as-`expect` |
+| per-file | Partial (landed as an alias) | `prevent_file(mockfn, reason)` behaves exactly like `prevent()` — call it explicitly in every example (or `before_each`/`after_each`) to approximate file-wide coverage; true auto-checked file scope is NOT achievable (module-level state does not persist across `it` examples) |
 | directory-wide | NO | No per-directory test-runner config/fixture hook exists; convention (`_prevention.spl` helper, opt-in) documented instead — see tracking record above |
 
 ## Gotchas
 
-1. **The prevention idiom already exists manually and is fail-open.**
-   `verify_called(m, 0)` asserted at the end of an `it` works today with zero
-   new code — but nothing auto-checks it, so a forgotten assertion silently
-   passes an example that took the forbidden path.
-2. **No call interception.** A prevention mock (planned or manual) only
-   observes calls routed through it by composition/DI. It cannot see a
-   direct `rt_file_write_text` or a raw socket call unless the dependency is
-   injected at that seam, or an env-level identity probe
-   (`src/lib/nogc_sync_mut/engine_probe.spl`) is used instead for
-   engine-identity-class checks.
+1. **The manual `verify_called(m, 0)` idiom still works and is still
+   fail-open** (nothing auto-checks it) — prefer the `prevent()` DSL, which
+   fails loudly by design. `mock_verification_spec.spl` dogfoods the manual
+   form in both directions (0 calls → true, 1 call → false) as a regression
+   guard on the idiom itself.
+2. **No call interception.** A prevention mock only observes calls routed
+   through it by composition/DI. It cannot see a direct `rt_file_write_text`
+   or a raw socket call unless the dependency is injected at that seam, or an
+   env-level identity probe (`src/lib/nogc_sync_mut/engine_probe.spl`) is
+   used instead for engine-identity-class checks. `adapter_bitbucket_spec.spl`
+   documents a case with no fetcher-injection point at all — the guard there
+   records the invariant rather than intercepting a real call.
 3. **`VerificationResult` fields are `passed: bool` / `error_message: text`**
    (built via `.success()` / `.failure(message)`,
    `src/lib/nogc_sync_mut/src/testing/mock/builder.spl:173-190`) — not
-   `ok`/`message`. Anyone implementing U1's `ForbiddenCallGuard.check()` must
-   match these exact field names.
+   `ok`/`message`. `ForbiddenCallGuard.check()` matches these exact field
+   names.
 4. **`find_config_file` walks cwd-relative current/parent/grandparent, not
    per-spec-directory** (`src/lib/nogc_sync_mut/test_runner/test_config.spl:297-302`)
    — this is the concrete reason directory-wide scope has no runner hook to
    attach to.
+5. **Call `prevent`/`prevent_at_most`/`prevent_file` AFTER the code under
+   test has run, never at the top of the `it` body** — see gotcha 1 in the
+   guide's ordering-contract section; violating this silently makes the
+   guard permanently green regardless of what actually happened.
+6. **Import explicitly, fully-qualified**:
+   `use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}`.
+   `use std.spec.*` does not reliably resolve every `pub fn` in `spec.spl`
+   (Defect 3 in the bug doc above) — a pre-existing wildcard-import gap, not
+   specific to this DSL.
+7. **A guard wired to a mock no code path can reach is vacuous, not
+   evidence** — always sabotage-verify a new adoption (force the call, or
+   lower an `at_most` budget below the real count) before trusting it; see
+   "Don't land a guard you can't drive red" in the guide.
 
 ## Update Rule
 
@@ -101,5 +121,3 @@ current handoff notes.
   verification commands.
 - Update this file after each pipeline stage before handing off to the next
   stage.
-- When U1-U3 land, update the "Status" section above and move their entries
-  out of "planned, not yet landed."

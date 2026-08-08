@@ -29,9 +29,9 @@ The full pure-Simple mock library lives at
 - `mock/spy.spl` — `Spy` (`method_called`, `method_call_count`,
   `total_calls`).
 
-**The prevention idiom exists today, but it is manual and fail-open.** There
-is no dedicated prevention API yet — you express "this must never be called"
-by asserting `verify_called(m, 0)` at the end of the `it` body:
+**The manual idiom still works** and remains useful when you want to inline
+the check without an import: assert `verify_called(m, 0)` at the end of the
+`it` body:
 
 ```simple
 val m = MockFunction.new("legacy_write")
@@ -40,29 +40,65 @@ val result = verify_called(m, 0)
 assert_true(result.passed)
 ```
 
-Nothing auto-verifies this. If the assertion is forgotten, the example stays
-green even if the forbidden call happened — the check is fail-open by
-construction.
+Nothing auto-verifies this form. If the assertion is forgotten, the example
+stays green even if the forbidden call happened — this idiom is fail-open by
+construction. Prefer the DSL below, which fails loudly by design.
 
-## Planned: `prevent` / `prevent_file` DSL
+## Landed: `prevent` / `prevent_at_most` / `prevent_file` DSL (2026-08-07)
 
-A first-class `prevent(mockfn, reason)` / `prevent_at_most(mockfn, n, reason)`
-/ `prevent_file(mockfn, reason)` API, auto-checked at the end of every `it`,
-is designed in
-`doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md` (units
-U1-U3) but **not yet implemented** as of 2026-08-07 — `src/lib/nogc_sync_mut/spec.spl`
-has no `prevent` symbol and
-`src/lib/nogc_sync_mut/src/testing/mock/prevention.spl` does not exist yet.
-When it lands, the two specifiable scopes will be:
+`src/lib/nogc_sync_mut/src/testing/mock/prevention.spl` adds
+`ForbiddenCallGuard` (`.new(mockfn, reason)`, `.at_most(mockfn, n, reason)`)
+and `check_guards(guards)`. `src/lib/nogc_sync_mut/spec.spl` wraps those as a
+first-class spec DSL — one line instead of the three-line manual idiom above:
 
-- **Per-test (`it`):** `prevent(mockfn, reason)` called inside the `it` body;
-  the guard is checked and cleared at the end of that one example.
-- **Per-file:** `prevent_file(mockfn, reason)` called at the top of the spec
-  file; the guard is checked after *every* example in that file and is not
-  cleared between examples (reset the mock's own call log in `before_each` if
-  per-example isolation is wanted).
+```simple
+use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
+use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}
 
-Until U1-U3 land, use the manual `verify_called(m, 0)` idiom above.
+it "never hits the network":
+    val m = MockFunction.new("real_http_send")
+    # ... exercise the code under test, injecting `m` at the seam ...
+    prevent(m, "unit specs must not hit the network")
+```
+
+**Import explicitly, fully-qualified.** `use std.spec.*` (the wildcard form
+most of the suite relies on) does not reliably expose every `pub fn` in
+`spec.spl`, including long-standing ones — a pre-existing wildcard-import
+gap unrelated to this DSL. Always import
+`use std.nogc_sync_mut.spec.{prevent, prevent_at_most, prevent_file}`
+explicitly. Details: Defect 3 in
+`doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`.
+
+**Ordering contract — call `prevent`/`prevent_at_most`/`prevent_file` AFTER
+the code under test has run, never at the top of the `it` body.** The
+original design here called for "arm early, auto-check at the end of
+`_execute_it`" (the two bullets a previous revision of this guide described
+as the planned per-test/per-file scopes). That design is impossible under
+this interpreter: a `MockFunction` stored in an array, class field, or
+closure is copied by value, so a guard armed before the forbidden call
+always reports zero calls — a fail-open DSL. Full repro:
+`doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`.
+
+All three functions instead check **immediately** against the mock's current
+state at the call site — the same mechanism as a failed `expect`:
+
+- **`prevent(mockfn, reason)`** — fails the example right now if `mockfn` has
+  been called (`max_allowed: 0`).
+- **`prevent_at_most(mockfn, n, reason)`** — budget variant; fails if called
+  more than `n` times.
+- **`prevent_file(mockfn, reason)`** — a documented alias for `prevent`, NOT
+  true auto-checked file scope (module-level spec state does not persist
+  across `it` examples under this runner — same root cause as the
+  directory-wide gap below). Call it explicitly in every example (or from
+  `before_each`/`after_each` with a mock rebuilt each time) to approximate
+  file-wide coverage.
+
+Adoption examples: `test/01_unit/compiler/di/di_lock_spec.spl` (guarded
+DI-mutation-while-locked seam), `test/01_unit/lib/common/mock_verification_spec.spl`
+(dogfoods the manual idiom), `test/01_unit/app/devhub/adapter_bitbucket_spec.spl`
+(documents a seam with no fetcher-injection point — the guard records the
+invariant rather than intercepting a real call; see "What prevention mocks
+cannot see" below).
 
 ## What prevention mocks cannot see
 
@@ -103,11 +139,12 @@ the spec directory that exports a single function, e.g.:
 
 ```simple
 # test/01_unit/some/dir/_prevention.spl
-use std.spec.prevent_file
-use std.testing.MockFunction
+use std.nogc_sync_mut.spec.{prevent_file}
+use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
 
 pub fn arm_dir_prevention():
-    """Call this as the first line of every spec body in this directory."""
+    """Call this as the first line of every spec body in this directory,
+    AFTER the code under test has run (see the ordering contract above)."""
     val m = MockFunction.new("forbidden_seam")
     prevent_file(m, "this directory's specs must not touch <seam>")
 ```
@@ -121,10 +158,31 @@ The runner-support gap that would make this automatic and non-optional is
 tracked in
 `doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md`.
 
+## Don't land a guard you can't drive red
+
+A `prevent`/`prevent_at_most`/`prevent_file` call that is wired to a mock no
+code path can ever reach is decorative, not evidence — it will always report
+zero calls whether or not the invariant it names actually holds. Before
+landing an adoption, sabotage it: temporarily force the guarded seam to be
+called (or lower an `at_most` budget below the real call count) and confirm
+the example goes RED with a `forbidden call: ...` message naming the mock and
+reason, then restore. If a spec has no injectable seam for the call you want
+to prevent (see "What prevention mocks cannot see" above), either find a real
+seam (a function parameter the code under test actually threads through,
+not a closure capture reached only via another function's call stack — closures
+captured across a call boundary hit the same by-value-copy defect as deferred
+arming) or document the guard's non-interceptive, invariant-recording purpose
+explicitly at the call site, as `adapter_bitbucket_spec.spl` does — do not
+claim it intercepts a call it structurally cannot see.
+
 ## See also
 
 - `doc/03_plan/infra/testing/sspec_prevention_mock_plan_2026-08-07.md` — the
   full design (all five units).
+- `doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md`
+  — why the DSL checks immediately instead of arming early.
+- `doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md` —
+  directory-wide scope gap.
 - `doc/07_guide/infra/security/mock_policy_system_test_ban.md` — mock-creation
   ban policy (a different kind of prevention).
 - `.claude/skills/spipe.md` § "Prevention mocks" — agent-facing summary.
