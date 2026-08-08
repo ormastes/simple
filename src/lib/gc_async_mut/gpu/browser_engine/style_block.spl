@@ -36,11 +36,6 @@ use std.gc_async_mut.gpu.browser_engine.style_block_parse.{
     extract_style_blocks, extract_keyframes, parse_css_rules,
     collect_css_vars, resolve_css_vars_in_rules}
 use std.gc_async_mut.gpu.browser_engine.style_block_resolve.{selector_matches}
-use std.gc_async_mut.gpu.browser_engine.style_property_id.{
-    declaration_from_name_value, apply_declarations, property_id_from_name,
-    PROPERTY_ID_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
-    computed_style_hot_from, renderer_default_style}
 
 # =========================================================================
 # CSS Rule types
@@ -74,18 +69,8 @@ pub fn css_decls_contain(decls: [CssDecl], property: text, value: text) -> bool:
 # =========================================================================
 
 fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]) -> BeDomNode:
-    var w0_stats: Dict<text, i64> = {}
-    apply_css_rules_to_tree_with_w0_stats(root, rules, w0_stats)
-
-# T1 (W0 wiring): the production entrypoint above and this function share the
-# exact same recursive path (apply_rules_to_node_indexed) -- there is no
-# separate "test-only" cascade. Exposed publicly so a spec can pass its own
-# counter dict and observe that the live cascade really reaches
-# apply_declarations for every known-PropertyId declaration it matches, not
-# just style_property_id.spl's own isolated unit tests.
-pub fn apply_css_rules_to_tree_with_w0_stats(root: BeDomNode, rules: [CssRule], mut w0_stats: Dict<text, i64>) -> BeDomNode:
     val idx = build_selector_rule_index(rules)
-    apply_rules_to_node_indexed(root, rules, idx, nil, 1, 1, w0_stats)
+    apply_rules_to_node_indexed(root, rules, idx, nil, 1, 1)
 
 pub fn apply_css_rules_to_tree_linear(root: BeDomNode, rules: [CssRule]) -> BeDomNode:
     """Reference (pre-index) linear-scan path, kept for equivalence testing
@@ -311,7 +296,7 @@ pub fn selector_index_candidates(idx: SelectorRuleIndex, tag: text, id: text, cl
         si = si + 1
     out
 
-fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorRuleIndex, parent: BeDomNode?, nth: i32, sibling_count: i32, mut w0_stats: Dict<text, i64>) -> BeDomNode:
+fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorRuleIndex, parent: BeDomNode?, nth: i32, sibling_count: i32) -> BeDomNode:
     if be_dom_get_is_text(node):
         return node
 
@@ -322,19 +307,6 @@ fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorR
     val node_id = be_dom_get_id(node)
     val node_classes = be_dom_get_classes(node)
     val candidates = selector_index_candidates(idx, tag, node_id, node_classes)
-
-    # W0 wiring (T1): route every matched declaration whose property has a
-    # known PropertyId through the real apply_declarations, alongside (not
-    # instead of) the existing text-keyed node.set_style write. `w0_hot` is
-    # a per-node scratch ComputedStyleHot that is never read back -- the DOM
-    # style text values below remain the single source of truth for
-    # rendering, exactly as before this change (see plan §0: the string
-    # cascade was already O(k)-ish, so this does not change measured
-    # per-node cost in kind, only proves apply_declarations is reachable
-    # from the live cascade instead of being an orphan). Sabotaging
-    # apply_declarations to a no-op must make w0_stats["touched"] stop
-    # growing, which is what the cascade-level spec asserts.
-    var w0_hot = computed_style_hot_from(renderer_default_style())
 
     var color_ci = 0
     while color_ci < candidates.len():
@@ -347,9 +319,6 @@ fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorR
                 dc_idx = dc_idx + 1
                 if decl.property == "color":
                     node.set_style(decl.property, decl.value)
-                    if property_id_from_name(decl.property) != PROPERTY_ID_UNKNOWN:
-                        val w0_decl = declaration_from_name_value(decl.property, decl.value, false)
-                        w0_hot = apply_declarations(w0_hot, [w0_decl], w0_stats)
     var ci2 = 0
     while ci2 < candidates.len():
         val rule = rules[candidates[ci2]]
@@ -361,9 +330,6 @@ fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorR
                 dc_idx2 = dc_idx2 + 1
                 if decl.property != "color":
                     node.set_style(decl.property, decl.value)
-                    if property_id_from_name(decl.property) != PROPERTY_ID_UNKNOWN:
-                        val w0_decl2 = declaration_from_name_value(decl.property, decl.value, false)
-                        w0_hot = apply_declarations(w0_hot, [w0_decl2], w0_stats)
 
     var child_nth = 1
     val sb_kids = be_dom_get_children(node)
@@ -378,7 +344,7 @@ fn apply_rules_to_node_indexed(node: BeDomNode, rules: [CssRule], idx: SelectorR
     while sc_idx < sb_kids.len():
         var child = sb_kids[sc_idx]
         sc_idx = sc_idx + 1
-        val updated_child = apply_rules_to_node_indexed(child, rules, idx, node, child_nth, child_count, w0_stats)
+        val updated_child = apply_rules_to_node_indexed(child, rules, idx, node, child_nth, child_count)
         new_kids.push(updated_child)
         if not be_dom_get_is_text(child):
             child_nth = child_nth + 1

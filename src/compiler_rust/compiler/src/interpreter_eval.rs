@@ -703,35 +703,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "generic"
                                 || name == "flatten_struct_output"
                                 || name == "noalloc"
-                                // Allocation/mangling/GPU-kernel compiler directives --
-                                // real in-tree usage confirmed (test/01_unit/compiler/parser/alloc_attr_spec.spl,
-                                // src/os/runtime/baremetal/runtime_minimal.spl,
-                                // src/compiler_rust/lib/std/examples/graphics/vulkan/image_blur.spl)
-                                // and none of them are runtime decorator functions.
-                                || name == "alloc"
-                                || name == "no_alloc"
-                                || name == "no_mangle"
-                                || name == "gpu"
                             {
                                 continue;
                             }
                         }
 
-                        // Evaluate the decorator expression. A bare `@X` that is neither
-                        // a recognised compiler-directive decorator (skip-listed above)
-                        // nor a function/value named `X` in scope is almost always a
-                        // typo'd or never-implemented annotation. Before 2026-08-08 this
-                        // fell through to the generic "variable not found" error from
-                        // deep inside expression evaluation, which does not name the
-                        // decorator or explain that decorator resolution is what failed.
-                        // Give it a decorator-specific diagnostic instead -- this is the
-                        // general fix for
-                        // doc/08_tracking/bug/unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md.
-                        // Genuine runtime decorators (e.g. `@double_result` defined by
-                        // the user in the same module, see
-                        // test/03_system/feature/usage/decorators_spec.spl) are
-                        // unaffected: this only fires when the identifier lookup itself
-                        // fails.
+                        // Evaluate the decorator expression
                         let decorator_fn = evaluate_expr(
                             &decorator.name,
                             &mut env,
@@ -739,25 +716,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             &mut classes,
                             &enums,
                             &impl_methods,
-                        )
-                        .map_err(|e| {
-                            if let Expr::Identifier(name) = &decorator.name {
-                                CompileError::semantic_with_context(
-                                    format!(
-                                        "unknown decorator `@{}` on function `{}`",
-                                        name, f.name
-                                    ),
-                                    ErrorContext::new()
-                                        .with_code(codes::UNDEFINED_VARIABLE)
-                                        .with_help(format!(
-                                            "`{}` is not a recognised compiler annotation and no function named `{}` is in scope to use as a runtime decorator -- fix the typo, register `{}` as a compiler annotation, or define a `fn {}(f)` runtime decorator",
-                                            name, name, name, name
-                                        )),
-                                )
-                            } else {
-                                e
-                            }
-                        })?;
+                        )?;
 
                         // If decorator has arguments, call it first to get the actual decorator
                         let actual_decorator = if let Some(args) = &decorator.args {

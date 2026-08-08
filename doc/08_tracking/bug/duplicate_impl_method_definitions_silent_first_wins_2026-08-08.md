@@ -541,3 +541,88 @@ any deletions (none made — no pair has the full 3-engine-plus-content-
 subsumption bar this doc requires before deleting a loser copy);
 `lower_dict_lit`'s and `_call_function`'s closer diffs (still only
 whole-body-differs, not line-level, for those two).
+
+## 11. Fourth pass (2026-08-08) — remaining 14 divergent pairs classified
+
+Worked the remaining 14 of 15 divergent pairs from §8 (all except
+`_execute_intrinsic`, closed in §10). Two techniques replaced per-pair
+native-build marker probes (too expensive to run 14 times in one session):
+
+1. **Mechanism-level generalization of registration order** (proven, not
+   inferred): §2's Rust snippet shows `impl_methods.entry(type_name)` is
+   populated once per **file**, by iterating that file's *whole* `impl
+   Type:` block. Confirmed this pass that every twin file in every pair
+   checked has **exactly one** `impl Type:` block (`grep -c "^impl Type"`
+   per file, all = 1). Consequence: registration order is a property of
+   **which file loads first**, not of the individual method — so a
+   winner/loser proof for ONE method in a twin-file pair (e.g.
+   `lower_tuple_lit` in §7) applies to **every other method in that same
+   pair** without re-probing, *provided* both files are actually reachable
+   at all (see next point).
+2. **Reachability-by-import-graph** (the mechanism §9/§10 already used for
+   `MirInterpreter`): for several pairs, one file has **zero importers**
+   anywhere in `src/compiler` other than its own header — meaning its
+   `impl` block is never loaded into any real compiler run, so the
+   "registration race" never happens; the other file's copy is simply the
+   only one that exists at runtime. This is a stronger, static claim than a
+   dynamic marker probe and was cross-checked against `grep -rln
+   "<module-path>" src/compiler` for each candidate orphan.
+
+### Classification table (14 pairs, `_execute_intrinsic` excluded — done in §10)
+
+| impl type | method | copy A | copy B | class | verdict / winner |
+|---|---|---|---|---|---|
+| `QuantifierContext` | `reset` | `higher_rank_poly_phase5b.spl` | `higher_rank_poly_types.spl` | **winner-is-fine** | A (`phase5b.spl`) has **zero importers** anywhere in `src/compiler` (only a stale mention in `PHASE_FILES.md`) — orphan file, never loaded. B is the sole live copy and already has the extra `self.inference_counter = 0` reset A lacks. |
+| `ScopeTracker` | `enter_scope`/`exit_scope` | same pair | same pair | **winner-is-fine** (by extension) | Same orphan-file reasoning as `reset` — not independently body-diffed this pass (sampled originally as identical), but per §8 these two methods were not in the divergent list; included here only to note the same reachability finding applies to the whole `phase5b.spl` file, not just `reset`. |
+| `ProceedContext` | `mark_proceed_called` | `aop_proceed_minimal.spl` | `aop_proceed.spl` | **cosmetic** | Diff is a docstring-only addition (`"""Record that proceed() was called."""`); behavior identical. Demote to the identical bucket. |
+| `ObjectProvider` | `add_library` | `linker/object_provider.spl` | `loader/object_provider.spl` | **dangerous, unresolved** | Both declare their own `class ObjectProvider` (name-collision caveat from §3) — but this pass found they are **cross-imported into the same process**: `linker/object_provider_adapter.spl` imports `compiler.loader.object_provider.{ObjectProvider,...}` (the loader's class) while `loader/module_loader.spl` imports `compiler.backend.linker.object_provider.{ObjectProvider,...}` (the linker's class). Since `impl_methods` is keyed by the bare string `"ObjectProvider"`, both `impl` blocks genuinely can collide in one interpreter session, not just "coincidentally same name." Bodies differ substantially: linker's copy (8 lines) checks `result.is_ok()` and dedups into `self.config.libraries`; loader's copy (2 lines) is a bare `self.getter.add_library(lib_path)` passthrough with no error handling or config tracking. **Registration-order winner NOT traced this pass** (time-boxed out) — flagged as the top remaining open item alongside `_call_function` below. |
+| `MirToLlvm` | `emit_runtime_declarations` | `_MirToLlvm/asm_constraints_helpers.spl` | `mir_to_llvm_helpers.spl` | **winner-is-fine** | `mir_to_llvm.spl` (the only module that constructs `MirToLlvm`) explicitly imports `_MirToLlvm.asm_constraints_helpers.*`; `mir_to_llvm_helpers.spl` has **zero importers** anywhere in `src/compiler` — confirmed orphan. Independently corroborated by an existing code comment at `src/compiler/80.driver/driver_bootstrap.spl:282-283` (`bootstrap_is_runtime_declared_name`'s docstring) stating "Names `emit_runtime_declarations()` (`asm_constraints_helpers.spl`) always statically pre-declares..." — written by an earlier engineer who observed exactly this at build time. The orphan copy's body isn't even a subsumption/superset of the winner's — it's unrelated matrix/broadcast-op stub declarations, a different abandoned feature attempt. |
+| `MirToLlvm` | `add_string_global` | same pair | same pair | **winner-is-fine** | Same reachability as above. Winner has an extra `SIMPLE_BOOTSTRAP=1`-gated branch (`llvm_bootstrap_string_globals_add`) the orphan lacks. |
+| `MirLowering` | `lower_tuple_lit` | `literals.spl` | `method_calls_literals.spl` | **winner-is-fine** (already proven, §7) | `method_calls_literals.spl` wins under native-build (both dead under interpreter/JIT — tuple construction never reaches MIR lowering there). |
+| `MirLowering` | `lower_dict_lit` | `literals.spl` | `method_calls_literals.spl` | **needs follow-up** | Same twin pair as `lower_tuple_lit`/`lower_array_lit`, so by the mechanism proof above `method_calls_literals.spl` wins here too — but the 89-vs-81-line body divergence was not diffed line-by-line this pass (still an open item carried from §8). |
+| `MirLowering` | `lower_array_lit` | `literals.spl` | `method_calls_literals.spl` | **RESOLVED — real correctness gap, already being fixed** | Full line-by-line diff (this pass): the two 79/80-line bodies differ by **exactly one line** — `literals.spl` (loser, dead under native-build per the same-pair proof) calls `self.error_fatal(...)`; `method_calls_literals.spl` (winner) called `self.error(...)`. Read `error()`/`error_fatal()`'s own docstrings at `src/compiler/50.mir/_MirLowering/asm_and_targets.spl:264-286`: `error_fatal`'s docstring explicitly says "Use this at every site that continues past the error and emits a placeholder operand (a const 0/3...)" — which is **exactly** what this call site does (`operands.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), ...)))` right after the error call). So the winning copy was using the deprecated non-fatal path at a site its own sibling function's docstring identifies as a must-be-fatal pattern: an array literal with an unlowerable element (e.g. certain lambda-literal elements) silently continued with a placeholder `0` instead of aborting the build — same family as the tuple-OOB `error`-vs-`error_fatal` defect from `21e3950b7da` the task brief named. **Not fixed by this pass** — re-reading the file mid-investigation found `method_calls_literals.spl:3188` **already changed to `self.error_fatal(...)` in the uncommitted working copy**, alongside two sibling `error`→`error_fatal` promotions in `expr_dispatch.spl` (lines ~1999, ~3846) — a concurrent session's live edit, not this session's. Per the "don't touch a file another session is mid-flight on" rule, this pass did not touch `method_calls_literals.spl`, `expr_dispatch.spl`, or `module_lowering.spl` (all three show as modified in `git status` from other in-flight work) and is not claiming credit for that fix — only confirming, independently, that the fix is correct and addresses a real gap. |
+| `MirInterpreter` | `_pop_call_stack` | `mir_interp_ops.spl` | `mir_interpreter.spl` | **winner-is-fine** | Same reachability finding as §9/§10's `_execute_intrinsic`: no caller constructs `MirInterpreter(` outside `mir_interpreter.spl` itself, so `mir_interp_ops.spl`'s `impl MirInterpreter:` block is never loaded by any consumer found. Winner's extra `self.previous_block = frame.previous_block` restore is a strict improvement (needed for the same predecessor-block SSA-phi tracking `_execute_intrinsic`'s fix depends on). |
+| `MirInterpreter` | `execute_const` | `mir_interp_ops.spl` | `mir_interpreter.spl` | **needs follow-up (low risk)** | Same reachability — loser is dead. Winner inlines an explicit `match value: case Int/Float/Bool/_` instead of loser's `self._eval_const(value)` call; not diffed further whether `_eval_const` handles strictly more/fewer cases (time-boxed out). Low risk regardless since the loser cannot execute under any consumer found. |
+| `MirInterpreter` | `_call_function` | `mir_interp_ops.spl` | `mir_interpreter.spl` | **loser-has-a-fix, NOT ported — flagged as the second-highest-priority open item** | Loser (`mir_interp_ops.spl`, dead per reachability) has a deep-copy anti-corruption guard: it copies `self.locals` and `self.blocks` key-by-key into `saved_locals`/`saved_blocks` before pushing the call-stack frame, with a comment citing "module-level array variables get corrupted after `.len()` calls" and pointing at a `doc/bug/bug_report_module_var_array_init.md` (not found at that exact path this pass — closest match is `doc/08_tracking/bug/interp_module_var_array_get_method_2026-07-04.md`, not confirmed identical). Winner (`mir_interpreter.spl`) stores `self.locals`/`self.blocks` **by reference** into the `CallFrame` instead (no copy), but adds `previous_block` tracking the loser lacks. Because the winner is the *only* reachable copy (same reachability proof as every other `MirInterpreter` method), the open question is whether the corruption bug the loser's comment describes is currently reproducible against the *winner's* by-reference approach for any of `MirInterpreter`'s live consumers (the five specs listed in §10). **Not verified either way this pass** — this needs the same marker-plus-spec-run rigor §9/§10 gave `_execute_intrinsic` before any port is made; porting blind risks reintroducing the by-reference behavior's own possible upsides (e.g. intentional shared-mutation semantics) without proof either copy is actually wrong for the winner's reachable call sites. |
+| `MacroRegistry` | `register_macro` | `10.frontend/parser/macro_registry.spl` | `30.types/macro_def.spl` | **likely winner-is-fine, not fully confirmed** | `macro_registry.spl` has no importer found in `src/compiler` beyond its own `parser/__init__.spl` re-export comment (no downstream consumer located in the scoped search this pass ran) — suggestive of the same orphan pattern as `higher_rank_poly_phase5b.spl`/`mir_to_llvm_helpers.spl`, in which case `macro_def.spl`'s copy (which additionally assigns a per-macro `hygiene_scope` — a real macro-hygiene feature the orphan lacks) is the sole live implementation. **Not proven to the marker-evidence bar** — the repo-wide (not `src/compiler`-scoped) importer search for `macro_registry` timed out mid-session and was not re-run; treat this verdict as high-confidence but unconfirmed. |
+| `IncrementalState` | `mark_dirty` | `incremental_builder.spl` | `incremental.spl` | **dangerous, unresolved** | Confirmed both files' classes ARE loaded together in the same process: `src/compiler/80.driver/__init__.spl` re-exports `IncrementalState` from `incremental.spl` *and* separately re-exports `IncrementalBuilder`/`CompilationStatus`/etc. from `incremental_builder.spl` in the same barrel file — any consumer of `compiler.driver.*` pulls both modules in. This is the same live-collision shape as `ObjectProvider` above, not a coincidental-name-only case. Bodies are meaningfully different in behavior, not just cosmetics: `incremental.spl`'s copy marks only **direct** dependents dirty via a status dict (`self.statuses[dependent] = CompilationStatus.Dirty`, one level, no recursion); `incremental_builder.spl`'s copy marks **transitive** dependents via a recursive `self.mark_dirty(dep)` cascade over a `dirty_files` list. Whether incremental rebuilds correctly invalidate multi-hop dependency chains depends entirely on which of these two wins — a real correctness question for the incremental-build cache. **Registration order NOT traced this pass** — flagged as equally high-priority as `ObjectProvider.add_library` and `MirInterpreter._call_function`. |
+| `AssocTypeProjection` | `set_resolved` | `25.traits/associated_types.spl` | `30.types/associated_types_solvers.spl` | **dangerous, unresolved — strongest name-collision-not-behavior-bug evidence found this pass** | Checked the `resolved` field's declared type in both classes: `25.traits/associated_types.spl:13` declares `resolved: HirType?` (an Option) and its `set_resolved` correctly does `self.resolved = Some(ty)`, read elsewhere via `if val Some(resolved_type) = projection.resolved:`. `30.types/associated_types_solvers.spl:300`(approx) declares `resolved: text` (a **completely different, incompatible field type** — not even `HirType`) with `self.resolved = ty` (no `Some()` wrap, correct for *its own* field type). These are two genuinely unrelated classes that happen to share a name — the field-type mismatch makes this the clearest evidence yet for the §3 caveat's suspicion. **However**, because `impl_methods` registration is keyed by the bare string `"AssocTypeProjection"` (§2), if both modules are ever loaded into the same interpreter session, one class's instances could have the OTHER class's `set_resolved` win, assigning a raw `text` into a field declared `HirType?` (or vice versa) — a type-shape violation the interpreter would not statically catch. Whether both modules are ever co-loaded (25.traits/__init__.spl re-exports the traits-package one; the types/associated_types_solvers.spl one's importers were not traced this pass) is the open question — **not resolved**, flagged for follow-up alongside the two items above. |
+
+### Summary of new findings this pass
+
+- **Registration-order generalization confirmed mechanistically** (not just
+  empirically): one `impl Type:` block per file → registration order is a
+  per-file property, so a winner/loser proof for one method transfers to
+  every other method in the same twin-file pair. No pair broke this pattern
+  (all twin files checked had exactly one `impl` block each).
+- **Reachability (not registration race) decides 8 of the 14 pairs**:
+  `QuantifierContext`/`ScopeTracker` (phase5b.spl orphaned),
+  `MirToLlvm.emit_runtime_declarations`/`add_string_global`
+  (mir_to_llvm_helpers.spl orphaned), `MirInterpreter._pop_call_stack`
+  (mir_interp_ops.spl unreachable, same proof as `_execute_intrinsic`), and
+  likely `MacroRegistry.register_macro` (unconfirmed). In all of these the
+  "loser" file's `impl` block is never loaded by any consumer found in
+  `src/compiler`, so there is no live registration race at all — the
+  duplicate is dead weight, not a defect in practice.
+- **`lower_array_lit`'s `error_fatal`/`error` divergence is a confirmed
+  live correctness gap** in the same family as the `21e3950b7da` tuple-OOB
+  defect, and is already being fixed by a concurrent session (found
+  uncommitted in the working copy; not this pass's edit, not landed by this
+  pass).
+- **Three pairs are flagged as genuinely dangerous and unresolved**, all
+  sharing the same shape (both twin files' classes ARE co-loaded in the
+  same process, unlike the reachability-cleared pairs above):
+  `ObjectProvider.add_library` (cross-imported linker↔loader),
+  `IncrementalState.mark_dirty` (both re-exported from the same
+  `80.driver/__init__.spl` barrel, direct-only vs. transitive dirty-marking
+  — a real incremental-rebuild correctness question), and
+  `MirInterpreter._call_function` (loser has an anti-corruption deep-copy
+  fix for a cited module-var-array-corruption bug that the sole-reachable
+  winner lacks — not verified whether the winner is actually exposed to
+  that bug). `AssocTypeProjection.set_resolved` adds a fourth data point
+  that the "same name, different type" pattern is real (confirmed
+  incompatible field types), with the co-loading question still open.
+- **No source files were edited by this pass.** The only relevant edit
+  found in the working tree (`lower_array_lit`'s `error`→`error_fatal`
+  promotion) was made by a different, concurrent session and was
+  deliberately left untouched.

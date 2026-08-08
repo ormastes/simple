@@ -61,21 +61,3 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/float_layout_spec.spl`
   (11 of 18 examples)
-
-## 2026-08-08 update (U3.7 `web_css_positioning_spec.spl`, REQ-WEB-CSS-007)
-
-Confirmed independently via the Draw IR tree (not pixel counts) in
-`test/03_system/gui/web_css/web_css_positioning_spec.spl`:
-
-- `it "float: left takes a box out of flow with text wrap"` — two
-  `float:left` siblings stack vertically (`y` offsets by height) instead of
-  sitting side by side (`x` offset by width); a paragraph's text run
-  following a float starts *below* the float (`y=37`) instead of wrapping
-  *beside* it at the float's own top (`x=10, y=0`). RED-by-design, left RED.
-- `it "clear moves a block below preceding content"` — because floated
-  boxes never leave normal flow, a following block-level sibling already
-  lands below a float with or without `clear` (both give `y=20` for a 20px
-  float, whereas real CSS gives `y=0` without `clear` since block boxes
-  ignore floats for their own flow position). `clear` therefore has no
-  currently-observable effect, independent of this file's own float gap.
-  RED-by-design, left RED — same root cause, not a separate bug.
