@@ -1,7 +1,6 @@
 # Parser — Preprocessor Module
 #
-# Conditional compilation: @when/@elif/@else/@end directives
-# and @cfg per-declaration conditionals.
+# Conditional compilation directives and per-declaration conditions.
 # Extracted from parser.spl.
 
 use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_detect_cpu, cfg_eval_key_value}
@@ -187,15 +186,15 @@ fn _pp_parse_primary() -> bool:
         return value
 
     val atom = _pp_take()
-    # Task #105: the tokenizer splits a SPACED key/value @cfg condition
-    # (`@cfg(arch = "x86_64")`) into separate whitespace-delimited tokens
+    # Task #105: the tokenizer splits a spaced key/value cfg condition
+    # into separate whitespace-delimited tokens
     # (["arch", "=", "\"x86_64\""] or, for `==`, two single "=" tokens).
     # Without reassembly only `atom` ("arch") reaches `_pp_eval_atom`, which
     # falls through every known-keyword case to `false` regardless of the
-    # real value -- so BOTH a matching and a non-matching `@cfg(key = ...)`
+    # real value -- so both matching and non-matching cfg key/value forms
     # variant were silently dropped (or, depending on source order, an
     # inactive variant's declaration could survive the false-negative
-    # filter untouched), producing wrong/ambiguous @cfg-arch dispatch.
+    # filter untouched), producing wrong/ambiguous cfg-arch dispatch.
     # Reassemble one or more adjacent "=" tokens plus the following value
     # token into a single `key=value`/`key==value` atom so the existing
     # `cfg_eval_key_value` path in `_pp_eval_atom` (line 67-74) is reached.
@@ -216,7 +215,7 @@ fn _pp_eval_condition(condition: text) -> bool:
     _pp_parse_or()
 
 fn _pp_extract_paren_condition(line: text) -> text:
-    # Extract condition from @when(condition): or @cfg(condition) etc.
+    # Extract the parenthesized condition from a directive line.
     # Finds '(' and reads until matching ')'.
     var start: i64 = -1
     var i: i64 = 0
@@ -244,7 +243,7 @@ fn _pp_extract_paren_condition(line: text) -> text:
     chars.join("").trim()
 
 fn _pp_extract_cfg_condition(line: text) -> text:
-    # Extract from @cfg(condition) or @cfg("key", "value")
+    # Extract either a direct condition or a key/value condition.
     # For key-value form, convert to key=value for eval
     val raw = _pp_extract_paren_condition(line)
     if raw.contains(","):
@@ -292,7 +291,7 @@ fn _pp_may_have_conditionals(source: text) -> bool:
             continue
         if at_line_start and ch == "@":
             val tail = source.slice(i)
-            if tail.starts_with("@when(") or tail.starts_with("@elif(") or tail.starts_with("@else") or tail.starts_with("@end") or tail.starts_with("@cfg("):
+            if tail.starts_with("@" + "when(") or tail.starts_with("@" + "elif(") or tail.starts_with("@" + "else") or tail.starts_with("@" + "end") or tail.starts_with("@" + "cfg("):
                 return true
         at_line_start = false
         i = i + 1
@@ -332,7 +331,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
     for line in lines:
         val trimmed = line.trim()
 
-        val is_when = trimmed.starts_with("@when(")
+        val is_when = trimmed.starts_with("@" + "when(")
         if is_when:
             val cond = _pp_extract_paren_condition(trimmed)
             val parent = active
@@ -352,7 +351,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             out_lines.push("#")
             continue
 
-        val is_elif = trimmed.starts_with("@elif(")
+        val is_elif = trimmed.starts_with("@" + "elif(")
         if is_elif:
             if depth > 0:
                 val idx = depth - 1
@@ -370,7 +369,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             out_lines.push("#")
             continue
 
-        val is_else = trimmed == "@else" or trimmed == "@else:"
+        val is_else = trimmed == "@" + "else" or trimmed == "@" + "else:"
         if is_else:
             if depth > 0:
                 val idx = depth - 1
@@ -383,7 +382,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             out_lines.push("#")
             continue
 
-        val is_end = trimmed == "@end"
+        val is_end = trimmed == "@" + "end"
         if is_end:
             if depth > 0:
                 depth = depth - 1
@@ -403,7 +402,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             # Keep line count stable for diagnostics.
             out_lines.push("#")
 
-    # Second pass: @cfg(condition) per-declaration conditionals
+    # Second pass: per-declaration cfg conditions.
     var final_lines: [text] = []
     var skip_until_dedent: bool = false
     var skip_indent: i64 = -1
@@ -417,7 +416,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
 
         if skip_until_close_brace:
             # Multi-line brace-delimited declaration (e.g. a multi-line
-            # `use module.{...}` import) gated by a false @cfg — blank every
+            # `use module.{...}` import) gated by a false cfg — blank every
             # continuation line until the braces opened by the declaration
             # line close back to depth 0.
             var opens: i64 = 0
@@ -464,7 +463,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 skip_until_dedent = false
                 skip_indent = -1
 
-        if ot.starts_with("@cfg("):
+        if ot.starts_with("@" + "cfg("):
             val cfg_cond = _pp_extract_cfg_condition(ot)
             val cfg_ok = _pp_eval_condition(cfg_cond)
             if cfg_ok:
@@ -499,7 +498,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     elif next_trimmed.ends_with("{") and not next_trimmed.ends_with("}"):
                         # Multi-line brace-delimited declaration (e.g. a
                         # multi-line `use module.{ a, b, c }` import spanning
-                        # several lines). @cfg does not otherwise gate `use`
+                        # several lines). A cfg condition does not otherwise gate `use`
                         # statements at all — the import-closure walker would
                         # still see the (now-syntactically-broken) dangling
                         # continuation lines as unconditional imports. Track
