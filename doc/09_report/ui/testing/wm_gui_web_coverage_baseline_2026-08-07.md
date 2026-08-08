@@ -1369,3 +1369,148 @@ blocks): `8588c5ce51c82e7e3cd7e4ce18d2c4aec69c9974`. Baseline artifact reused
 unmodified from the prior session at `/tmp/paintcov/baseline.sdn` (not
 re-generated); this round's new-spec artifact at
 `/tmp/paintcov2/newspec2.sdn`.
+
+## `simple_web_html_layout_renderer_core.spl` — HNode/Rules fixture closure (session N+4) — 2026-08-08
+
+Continuation of the "U4.4 `simple_web_html_layout_renderer_core.spl` —
+:root custom-property closure (session N+2)" unit above, which measured
+75.08% (1558/2075) and named `compute_styles_with_material`,
+`_pseudo_ctx_matches`, `_extract_css_vw_with_rule_limit`, and
+`_css_scan_rules_simple` as the largest remaining gaps, each thought to need
+an `HNode`/`SelectorContext`/`Rules` fixture. This session extends the
+landed `test/01_unit/lib/gc_async_mut/gpu/browser_engine/core_coverage_closure_spec.spl`
+(not a new file) with four new `describe` blocks, 31 new `it` examples
+(47 total in the file, up from 16), all real hand-traced oracles
+(`assert_true`/`assert_false`/`assert_equal`/`match`), no smoke tests.
+
+### Correction to the prior session's premise
+
+`_extract_css_vw_with_rule_limit` and `_css_scan_rules_simple` turned out NOT
+to need `HNode`/`Rules` fixtures at all — both take only `text`/`i32`
+parameters (HTML/CSS source and a limit) and are exercised directly with
+crafted strings. Only `_pseudo_ctx_matches` (needs `[HNode]` +
+`SelectorContext`) and `compute_styles_with_material` (needs `[HNode]` +
+`Rules` + `HtmlChildIndex`) actually needed the fixture machinery.
+
+### Fixtures used
+
+- `_pseudo_ctx_matches`: a 4-node tree `root(0,-1) -> {a(1,0), b(2,0)}`,
+  `a(1) -> {c(3,1)}` built with `mk_node`/`build_child_index`/
+  `build_selector_context` from `simple_web_html_layout_renderer_foundation.spl`
+  — the same constructors `paint_primitives_coverage_closure_spec.spl` and
+  `containment_layout_contain_wired_spec.spl` already use. Every pseudo-class
+  branch's expected boolean was hand-traced against `_child_position`/
+  `_sibling_count`/`_node_is_empty`/`_nth_child_matches`/`_has_option_matches`
+  (lines 1166-1253) given that exact tree shape.
+- `compute_styles_with_material`: the real
+  `parse_html -> extract_css_vw -> build_child_index -> compute_styles_with_material`
+  pipeline (the same sequence `simple_web_html_layout_renderer.spl` lines
+  1796-1809 use in production), with the `data-wm-theme-*` fixture shape
+  reused from `simple_web_material_witness_spec.spl`'s `_cpu_material_node`/
+  `_solid_material_node` helpers. Expected admission outcomes hand-traced
+  against the `cpu_admitted`/`solid_admitted` boolean expressions at lines
+  2925-2950.
+- `_extract_css_vw_with_rule_limit` / `_css_scan_rules_simple`: crafted
+  HTML/CSS text only — `@media`/`@supports`/`@layer`/unknown-at-rule wrapper
+  kinds, `<template>` stripping, and a brace-density hostile-input case
+  (100 `{` characters against `rule_cap=1` -> `structural_cap=66`, tripping
+  the `excessive_structure` truncation branch at lines ~482-493) traced
+  against `_media_group_applies` (min-width semantics, line ~421) and
+  `style/supports.spl` `_eval_single` (line 228, `display: block` is a
+  definite-true query, an unknown property name is a definite-false query).
+
+New-file-alone artifact (all 47 examples, `Results: 47 total, 47 passed, 0
+failed`): `coverage: .../simple_web_html_layout_renderer_core.spl 50%
+(1058/2075 lines)` (`/tmp/corecov_new.sdn`).
+
+### Baseline reproduced this session (not assumed from the report)
+
+Both baseline specs the report's union methodology depends on were re-run
+fresh this session, each with its own `SIMPLE_COVERAGE_OUTPUT` path
+(`SIMPLE_COVERAGE_OUTPUT` is overwritten per spec-file sub-process, not
+accumulated):
+
+- `simple_web_html_layout_renderer_coverage_spec.spl` alone: `Results: 39
+  total, 39 passed, 0 failed`, `coverage: .../core.spl 54% (1127/2075
+  lines)` (`/tmp/corecov_base_full.sdn`).
+- `simple_web_html_layout_renderer_core_pure_helpers_coverage_closure_spec.spl`
+  alone: `coverage: .../core.spl 27% (571/2075 lines)`
+  (`/tmp/corecov_base_pure.sdn`).
+
+Per-line union of these two (hit lines only, parsed from the `.sdn`'s
+`lines |file, line, hit_count|` section — the file also has `functions` and
+`decisions` sections whose row shapes differ and must be excluded, a real
+parsing hazard this session hit and fixed before trusting any number below):
+**1411/2075 = 68.00%**, reproducing the report's recorded 68.05%
+(1412/2075) baseline to within 1 line — the same small run-to-run variance
+the report already attributes to a transient extra passing test.
+
+### Combined measurement
+
+Three-way per-line union (`base_full` ∪ `base_pure` ∪ the extended
+47-example spec, same hit-line-in-the-`lines`-section method):
+**1669/2075 = 80.43%** — a **+258-line / +12.4-percentage-point** gain over
+the reproduced 68.00% two-baseline union, and a **+111-line / +5.35-point**
+gain over the report's last recorded 75.08% (1558/2075) checkpoint.
+
+**Before (report's last checkpoint): 75.08% (1558/2075). After (this
+session, full union): 80.43% (1669/2075).** Still short of the >=90%
+(1868/2075) U4.4 target — a further **199 lines** would be needed.
+
+### Uncovered-line sample — is 90% reachable under this collector?
+
+A random sample of 30 of the 1,429 physical lines outside the union (from
+the file's 3,098 physical lines; 2,075 of those are collector-instrumented,
+so 1,023 of the 1,429 are lines the collector never instruments at all —
+blank lines, comments, bare `fn` signatures, and multi-line condition
+continuations, per the collector limitation this unit was told to expect
+and not chase) was hand-classified against the source:
+
+- **7/30 pure comments** (never instrumented) — e.g. lines 93, 130, 277,
+  464, 2579, 2744, 2886.
+- **~5/30 bare `fn` signatures or wrapped condition/argument continuations**
+  (documented collector gap — `fn selector_bucket_value(...)`  line 1586,
+  `fn style_rule_candidates(...)` line 1889, a wrapped `CssVarResolution`
+  return-type continuation at line 219, a multi-line `elif`/boolean
+  continuation at lines 1336/1991/2643/2732).
+- **~18/30 genuinely-reachable, genuinely-uncovered logic** — e.g. the
+  cycle-detection `true` branch in `_css_resolve_vars` (line 297), the
+  `CssVarResolution.Cycle` match arm (line 345), the `@-wrapper Unsupported`
+  push in `_css_scan_rules_simple` (line 575), functional-pseudo comma
+  splitting in `_pseudo_ctx_matches` (line 980), `style_rule_candidates`
+  internals (line 2021), `overflow-x` axis resolution in
+  `_normalize_final_overflow_axes` (line 2475), and several
+  `[web-style-producer]` print/diagnostic lines gated on states this
+  session's fixtures did not reach (lines 2908, 2982).
+
+Reading this sample honestly: roughly 40% of the sampled gap is the
+documented collector artifact (comments/signatures/continuations never
+instrumented), and roughly 60% is real, reachable-but-untested logic —
+mostly deeper branches inside the four closed functions (multi-level
+`var()` cycles, additional `@-wrapper` kinds, functional pseudo-class
+argument parsing, and the print-diagnostics inside
+`compute_styles_with_material`'s per-node loop that only fire under
+specific budget/trace/rejection states). **90% is not proven unreachable**
+by this sample, but it is not close either — closing it would need several
+more rounds of fixture work (nested/cyclic `var()` graphs, more `:has()`
+and functional-pseudo shapes, and material-admission fixtures for every
+`cpu_admitted`/`solid_admitted` rejection branch), not a single follow-up
+unit.
+
+### Sabotage check
+
+Every one of the 31 new assertions has a hand-derived expected value traced
+against the source (see "Fixtures used" above for the specific line ranges
+cited per function) rather than a first-run capture; two assertions
+(`_extract_css_vw_with_rule_limit`'s single-rule declaration text) initially
+used the pre-`;`-normalization expectation and failed on the first run
+(`expected color:red, got color:red;`), which is itself sabotage-equivalent
+evidence the oracles are real and not copied from output — both were
+corrected to match the traced `css_declaration_priority_split` normalization
+behavior, then re-ran green.
+
+### Provenance / disk
+
+Artifacts: `/tmp/corecov_base_full.sdn`, `/tmp/corecov_base_pure.sdn`,
+`/tmp/corecov_new.sdn`. Extended spec sha (`git hash-object`, whole file,
+all 7 `describe` blocks): `3e4d7a04646d55c41644c7a4f76dd3b5056690b0`.

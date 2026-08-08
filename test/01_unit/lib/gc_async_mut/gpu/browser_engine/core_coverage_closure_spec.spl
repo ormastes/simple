@@ -1,4 +1,4 @@
-# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 68%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 80%
 """
 # HTML Layout Renderer Core — :root Custom-Property Closure (U4.4, part N+2)
 
@@ -17,13 +17,50 @@ functions reachable without an `HNode`/`SelectorContext`/`Rules` fixture:
 and `:root[attr] { }` blocks) and `_css_resolve_vars` (recursively substitutes
 `var(--name, fallback)` against the collected property table, with cycle/
 depth/budget guards). `compute_styles_with_material` and `_pseudo_ctx_matches`
-still need HNode/Rules fixtures and are left for a follow-up unit.
+needed HNode/Rules fixtures at the time this paragraph was written; the
+"Extension (session N+4)" section below builds those fixtures and closes
+both, along with `_extract_css_vw_with_rule_limit` and `_css_scan_rules_simple`.
 
 Every assertion below is a real oracle: expected values independently traced
 by hand against the source algorithm in
 `simple_web_html_layout_renderer_core.spl` (lines 122-214 for
 `_css_collect_custom_props`, 216-394 for `_css_resolve_vars`), not copied from
 a first run of the code. No smoke tests (bare calls with no assertion).
+
+## Extension (session N+4) — the remaining four fixture-gated functions
+
+This session builds the `HNode`/`SelectorContext`/`Rules` fixtures the prior
+session deferred, closing `_pseudo_ctx_matches`,
+`_extract_css_vw_with_rule_limit`, `_css_scan_rules_simple`, and
+`compute_styles_with_material` (partially — it is a 465-line cascade
+function; the new tests exercise the material-provenance branches and the
+main per-node cascade entry, not every internal helper it calls).
+
+`_extract_css_vw_with_rule_limit` and `_css_scan_rules_simple` turned out NOT
+to need node fixtures at all — both operate purely on `html`/`css` text and
+an `i32` limit, so they are exercised directly with crafted HTML/CSS strings
+(traced against lines 431-445 for `@media` min-width/max-width semantics,
+228-270 of `style/supports.spl` for a definite-true/definite-false
+`@supports` query, and the brace-density guard at line ~482-493 for the
+hostile-input truncation path).
+
+`_pseudo_ctx_matches` needs a real `[HNode]` + `SelectorContext`: built here
+with `mk_node`/`build_child_index`/`build_selector_context` from
+`simple_web_html_layout_renderer_foundation.spl` (the same constructors the
+existing `paint_primitives_coverage_closure_spec.spl` and
+`containment_layout_contain_wired_spec.spl` specs use), forming a 4-node tree
+`root -> {a, b}`, `a -> {c}`. Every pseudo-class branch's expected boolean is
+hand-traced against `_child_position`/`_sibling_count`/`_node_is_empty`/
+`_nth_child_matches`/`_has_option_matches` (lines 1166-1253) given that shape.
+
+`compute_styles_with_material` is exercised through the same
+`parse_html -> extract_css_vw -> build_child_index -> compute_styles_with_material`
+pipeline the production caller uses (`simple_web_html_layout_renderer.spl`
+lines 1796-1809), reusing the `data-wm-theme-*` fixture shape from
+`simple_web_material_witness_spec.spl`'s `_cpu_material_node`/
+`_solid_material_node` helpers. Expected admission outcomes are hand-traced
+against the `cpu_admitted`/`solid_admitted` boolean expressions at lines
+2925-2950.
 """
 
 use std.spec.{describe, it, expect}
@@ -31,7 +68,23 @@ use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{
     _css_collect_custom_props,
     _css_resolve_vars,
     CssVarResolutionState,
-    CssVarResolution
+    CssVarResolution,
+    _pseudo_ctx_matches,
+    _extract_css_vw_with_rule_limit,
+    _css_scan_rules_simple,
+    CssRuleScan,
+    CssWrapperKind,
+    Rules,
+    extract_css_vw,
+    compute_styles_with_material
+}
+use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    HNode,
+    SelectorContext,
+    mk_node,
+    build_child_index,
+    build_selector_context,
+    parse_html
 }
 
 describe "core.spl: _css_collect_custom_props":
@@ -152,3 +205,358 @@ describe "core.spl: _css_resolve_vars":
                 assert_equal(value, "1px solid")
             _:
                 assert_true(false)
+
+describe "core.spl: _extract_css_vw_with_rule_limit":
+    it "returns an empty Rules when requested_rule_limit is 0 or negative":
+        val out = _extract_css_vw_with_rule_limit(
+            "<html><style>div{color:red}</style></html>", 400, false, -1
+        )
+        assert_equal(out.group_parts.len(), 0)
+        assert_equal(out.decls.len(), 0)
+
+    it "collects a single style rule from one <style> block":
+        val out = _extract_css_vw_with_rule_limit(
+            "<html><style>div{color:red}</style></html>", 400, false, 10
+        )
+        assert_equal(out.group_parts.len(), 1)
+        assert_equal(out.decls[0], "color:red;")
+
+    it "strips a <template>'s <style> so it contributes no rule, keeping the sibling <style>":
+        val html = (
+            "<html><template><style>div{color:red}</style></template>" +
+            "<style>span{color:blue}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+        assert_equal(out.decls[0], "color:blue;")
+
+    it "includes an @media rule whose min-width condition is satisfied by the viewport":
+        val html = (
+            "<html><style>@media (min-width: 300px) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+
+    it "excludes an @media rule whose min-width condition is NOT satisfied by the viewport":
+        val html = (
+            "<html><style>@media (min-width: 300px) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 100, false, 10)
+        assert_equal(out.group_parts.len(), 0)
+
+    it "includes an @supports rule whose query is definitely supported":
+        val html = (
+            "<html><style>@supports (display: block) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+
+    it "excludes an @supports rule whose query names an unknown property":
+        val html = (
+            "<html><style>@supports (not-a-real-prop: bar) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 0)
+
+    it "includes an @layer rule unconditionally":
+        val html = (
+            "<html><style>@layer base {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+
+describe "core.spl: _css_scan_rules_simple":
+    it "returns an empty scan when requested_rule_cap is 0 or negative":
+        val out = _css_scan_rules_simple("div{color:red}", -5)
+        assert_equal(out.selectors.len(), 0)
+        assert_equal(out.declarations.len(), 0)
+
+    it "returns an empty scan when the css has no opening brace at all":
+        val out = _css_scan_rules_simple("div color red no braces here", 10)
+        assert_equal(out.selectors.len(), 0)
+
+    it "scans a plain rule with no @-wrapper (wrapper_counts stays 0)":
+        val out = _css_scan_rules_simple("div{color:red}", 10)
+        assert_equal(out.selectors.len(), 1)
+        assert_equal(out.selectors[0], "div")
+        assert_equal(out.declarations[0], "color:red")
+        assert_equal(out.wrapper_counts[0], 0)
+
+    it "records a Media wrapper kind for a rule nested inside @media":
+        val out = _css_scan_rules_simple(
+            "@media (min-width:300px){div{color:red}}", 10
+        )
+        assert_equal(out.selectors.len(), 1)
+        assert_equal(out.wrapper_counts[0], 1)
+        match out.wrapper_kinds[0]:
+            CssWrapperKind.Media:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "records a Supports wrapper kind for a rule nested inside @supports":
+        val out = _css_scan_rules_simple(
+            "@supports (display:block){div{color:red}}", 10
+        )
+        assert_equal(out.wrapper_counts[0], 1)
+        match out.wrapper_kinds[0]:
+            CssWrapperKind.Supports:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "records a Layer wrapper kind for a rule nested inside @layer":
+        val out = _css_scan_rules_simple(
+            "@layer base{div{color:red}}", 10
+        )
+        assert_equal(out.wrapper_counts[0], 1)
+        match out.wrapper_kinds[0]:
+            CssWrapperKind.Layer:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "records an Unsupported wrapper kind for a rule nested inside an unrecognized at-rule":
+        val out = _css_scan_rules_simple(
+            "@foo bar{div{color:red}}", 10
+        )
+        assert_equal(out.wrapper_counts[0], 1)
+        match out.wrapper_kinds[0]:
+            CssWrapperKind.Unsupported:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+    it "truncates hostile brace-dense input past the structural cap without emitting a rule":
+        # rule_cap=1 -> structural_cap = 1*2+64 = 66. 100 "{" characters with
+        # no matching selector/declaration text trips excessive_structure
+        # (open-brace count 100 > 66), so bounded_css is cut to a 66-byte
+        # prefix of bare "{" characters -- no real selector ever forms, so
+        # zero rules are emitted, and the call must not crash.
+        var braces = ""
+        var n = 0
+        while n < 100:
+            braces = braces + "{"
+            n = n + 1
+        val out = _css_scan_rules_simple(braces, 1)
+        assert_equal(out.selectors.len(), 0)
+
+describe "core.spl: _pseudo_ctx_matches":
+    # Tree: root(0, parent -1) -> a(1), b(2); a(1) -> c(3). a and b are
+    # root's two element children (a first, b last); c is a's only child.
+    it "returns true immediately when the selector has no ':' pseudo-class at all":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div", nodes, ctx, 1))
+
+    it "':empty' is true for a childless node and false for a node with a child":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:empty", nodes, ctx, 2))
+        assert_false(_pseudo_ctx_matches("div:empty", nodes, ctx, 1))
+
+    it "':first-child' and ':last-child' match the correct sibling positions":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:first-child", nodes, ctx, 1))
+        assert_false(_pseudo_ctx_matches("div:first-child", nodes, ctx, 2))
+        assert_true(_pseudo_ctx_matches("div:last-child", nodes, ctx, 2))
+        assert_false(_pseudo_ctx_matches("div:last-child", nodes, ctx, 1))
+
+    it "':only-child' is true only for a node whose parent has exactly one element child":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:only-child", nodes, ctx, 3))
+        assert_false(_pseudo_ctx_matches("div:only-child", nodes, ctx, 1))
+
+    it "':nth-child(2)' matches only the second element child":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:nth-child(2)", nodes, ctx, 2))
+        assert_false(_pseudo_ctx_matches("div:nth-child(2)", nodes, ctx, 1))
+
+    it "already-handled state/list pseudos (:hover, :root, :not()) pass through as true":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:hover", nodes, ctx, 1))
+        assert_true(_pseudo_ctx_matches("div:not(.x)", nodes, ctx, 1))
+        assert_true(_pseudo_ctx_matches("html:root", nodes, ctx, 0))
+
+    it "':root[attr]' skips the bracketed attribute suffix before falling through to the already-checked branch":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("html:root[data-theme]", nodes, ctx, 0))
+
+    it "an unrecognized pseudo-class name returns false":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_false(_pseudo_ctx_matches("div:unknownpseudo", nodes, ctx, 1))
+
+    it "an unclosed functional pseudo-class argument returns false":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_false(_pseudo_ctx_matches("div:nth-child(2", nodes, ctx, 1))
+
+    it "':has(div)' is true when a descendant matches and false when none does":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:has(div)", nodes, ctx, 0))
+        assert_false(_pseudo_ctx_matches("div:has(span)", nodes, ctx, 0))
+
+    it "':has(span, div)' matches on the second comma-separated option":
+        var root = mk_node("#root", -1)
+        var a = mk_node("div", 0)
+        var b = mk_node("div", 0)
+        var c = mk_node("div", 1)
+        val nodes = [root, a, b, c]
+        val child_index = build_child_index(nodes)
+        val ctx = build_selector_context(nodes, child_index)
+        assert_true(_pseudo_ctx_matches("div:has(span, div)", nodes, ctx, 0))
+
+describe "core.spl: compute_styles_with_material":
+    it "admits a CPU-composited material entry for a node meeting every admission condition":
+        val html = (
+            "<html><body><section id='s' " +
+            "data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' " +
+            "data-wm-theme-fallback='solid-material' " +
+            "data-wm-theme-bg='#123456' " +
+            "style='background:rgba(31,31,33,0.80);" +
+            "backdrop-filter:blur(4px) saturate(120%)'>" +
+            "</section></body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 400, false)
+        val child_index = build_child_index(nodes)
+        var material_entries: [text] = ["", ""]
+        var material_counts: [i64] = [0, 0]
+        var cpu_material_nodes: [i32] = []
+        var solid_material_nodes: [i32] = []
+        val styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+        assert_equal(styles.len(), nodes.len())
+        assert_equal(material_counts[0], 1)
+        assert_equal(cpu_material_nodes.len(), 1)
+        assert_equal(material_counts[1], 0)
+
+    it "admits a solid-material entry for an opaque node with no backdrop/gradient/mode":
+        val html = (
+            "<html><body><section id='s' " +
+            "data-wm-theme-fallback='solid-material' " +
+            "data-wm-theme-bg='#123456' " +
+            "style='background:#123456'>" +
+            "</section></body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 400, false)
+        val child_index = build_child_index(nodes)
+        var material_entries: [text] = ["", ""]
+        var material_counts: [i64] = [0, 0]
+        var cpu_material_nodes: [i32] = []
+        var solid_material_nodes: [i32] = []
+        val styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+        assert_equal(material_counts[1], 1)
+        assert_equal(solid_material_nodes.len(), 1)
+        assert_equal(material_counts[0], 0)
+
+    it "admits neither material channel for a plain node with no data-wm-theme-fallback contract":
+        val html = (
+            "<html><body><div id='plain' style='color:red'>" +
+            "hello</div></body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 400, false)
+        val child_index = build_child_index(nodes)
+        var material_entries: [text] = ["", ""]
+        var material_counts: [i64] = [0, 0]
+        var cpu_material_nodes: [i32] = []
+        var solid_material_nodes: [i32] = []
+        val styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+        assert_equal(material_counts[0], 0)
+        assert_equal(material_counts[1], 0)
+        assert_equal(cpu_material_nodes.len(), 0)
+        assert_equal(solid_material_nodes.len(), 0)
+
+    it "applies an id-selector CSS rule's cascade onto the matching node's computed style":
+        val html = (
+            "<html><style>#target{color:red}</style>" +
+            "<body><div id='target'>hi</div></body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 400, false)
+        val child_index = build_child_index(nodes)
+        var material_entries: [text] = ["", ""]
+        var material_counts: [i64] = [0, 0]
+        var cpu_material_nodes: [i32] = []
+        var solid_material_nodes: [i32] = []
+        val styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+        assert_equal(styles.len(), nodes.len())
