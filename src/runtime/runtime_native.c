@@ -406,6 +406,11 @@ int64_t rt_webgpu_create_surface(int32_t width, int32_t height) {
     (void)width; (void)height;
     return 0;
 }
+bool rt_webgpu_destroy_surface(int64_t handle) {
+    (void)handle;
+    return false;
+}
+bool rt_webgpu_shutdown(void) { return true; }
 
 /* Real POSIX fd helpers (mirror interpreter_extern/qmp_socket.rs semantics). */
 int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
