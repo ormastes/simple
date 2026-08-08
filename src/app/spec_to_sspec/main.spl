@@ -65,15 +65,24 @@ fn _step_label(trimmed: text) -> text:
     # Escape any embedded quote so the generated string literal stays valid.
     label.replace("\"", "'")
 
-# Look ahead from an `it` header (index i): find the body indent, and decide
-# whether the block both (a) contains a real assertion and (b) lacks a step().
-# Returns the body indent to use, or "" when no injection is warranted.
+fn _has_evidence(trimmed: text) -> bool:
+    # Mirrors the SSDOC EVD-001 detector (source_facts.spl): a scenario is
+    # evidence-bearing when it retains a capture_*/@capture/evidence() call.
+    trimmed.contains("capture_") or trimmed.contains("@capture") or
+        trimmed.contains("evidence(")
+
+# Look ahead from an `it` header (index i): inject a step ONLY when the scenario
+# already has a real assertion AND retained evidence. Steps are the manual-flow
+# idiom for observable scenarios; injecting them into assertion-only pure-function
+# specs would just trade SSDOC-BEH-001 for SSDOC-EVD-001 (the assertion IS the
+# evidence there), so we leave those alone rather than regress the score.
 fn _scan_scenario(lines: [text], from: i64) -> text:
     val header_indent = _leading_ws(lines[from])
     var k = from + 1
     var body_indent = ""
     var has_assert = false
     var has_step = false
+    var has_evidence = false
     while k < lines.len():
         val line = lines[k]
         if line.trim() == "":
@@ -89,8 +98,10 @@ fn _scan_scenario(lines: [text], from: i64) -> text:
             has_step = true
         if _is_assertion(trimmed):
             has_assert = true
+        if _has_evidence(trimmed):
+            has_evidence = true
         k = k + 1
-    if has_step or not has_assert:
+    if has_step or not has_assert or not has_evidence:
         return ""
     body_indent
 
