@@ -323,17 +323,34 @@ should be re-verified on the self-hosted binary when one is available.
 > (`via_param=64` on the default lane vs `8` under `interpret`), confirming the
 > default lane really is the JIT and not a silent interpreter fallback.
 >
-> **Still NOT discharged:** the AES probe itself was not run through native
-> codegen — its `native-build` was still compiling when the session window
-> closed (load average ~60–92 from ~21 concurrent `native-build` processes
-> across parallel agent sessions). Treat the **native/self-hosted half of this
-> caveat as open for AES specifically**.
+> **Still NOT discharged — and the reason is a hard blocker, not a timeout.**
 >
-> That said, native-build is **working, merely slow**: a sibling probe
-> (`.nvprobe/scope_id.spl`) built and ran successfully in the same window
-> (`RC=0`) and showed pure-Simple codegen to be correct where the seed JIT is
-> not. So the remaining gap here is queue time, not a broken lane — do not
-> re-file this as a native-build outage (see `a9c8effc054`).
+> **Correction (same day, supersedes an earlier draft of this note).** A previous
+> version of this update said the AES native build "was still compiling when the
+> session window closed". That was **wrong**. The build actually **failed**,
+> `RC=1`, with:
+>
+> ```
+> error: MIR lowering error: unresolved method call: to_u8
+> error: MIR lowering error: unresolved method call: join
+> ```
+>
+> `.to_u8()` is used throughout this very crypto path — `aes/modes.spl:31`
+> (`_i64_to_u8`, the [i64]→[u8] bridge every CBC/CTR entry point calls) and 28
+> times in `crypto/aes_gcm.spl`. So **the typed AES path cannot be lowered to
+> native by the pure-Simple driver at all.** This caveat is not merely untested
+> on the native lane; it is currently **untestable** there.
+>
+> Reproduced on a minimal, dependency-free entry (no AES, no stdlib crypto) to
+> prove the gap is general rather than an artifact of this module or probe —
+> both methods work correctly under the interpreter and fail identically under
+> `native-build`. Filed as
+> `native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md`.
+>
+> Native-build itself is **not** broken — a sibling probe (`scope_id`) built and
+> ran successfully (`RC=0`) in the same window. Do not re-file this as a
+> native-build outage (see `a9c8effc054`); the blocker is two specific
+> unimplemented method lowerings.
 >
 > Note these AES functions take `[i64]` parameters, which is the *safe* container
 > spelling for the tagged-element defect; the `list<T>` spelling is the broken one.
