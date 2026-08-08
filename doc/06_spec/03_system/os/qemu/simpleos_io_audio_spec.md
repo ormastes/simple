@@ -1,6 +1,6 @@
-# simpleos_io_audio_spec
+# SimpleOS QEMU input and audio
 
-> SimpleOS receives ordered input and transfers application PCM through pure-Simple QEMU drivers.
+> This operator-facing system check proves that prepared SimpleOS QEMU guests
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# simpleos_io_audio_spec
+# SimpleOS QEMU input and audio
 
-SimpleOS receives ordered input and transfers application PCM through pure-Simple QEMU drivers.
+This operator-facing system check proves that prepared SimpleOS QEMU guests
 
 ## At a Glance
 
@@ -19,11 +19,55 @@ SimpleOS receives ordered input and transfers application PCM through pure-Simpl
 |-------|-------|
 | Category | Hardware & OS |
 | Status | Active |
+| Requirements | doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md |
+| Plan | doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md |
+| Design | doc/05_design/simpleos_qemu_host_gpu_2d.md |
+| Research | doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md |
 | Source | `test/03_system/os/qemu/simpleos_io_audio_spec.spl` |
 | Updated | 2026-08-08 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-SimpleOS receives ordered input and transfers application PCM through pure-Simple QEMU drivers.
+## Purpose and Audience
+
+This operator-facing system check proves that prepared SimpleOS QEMU guests
+receive ordered VirtIO input and complete non-silent PCM playback and capture
+through pure-Simple guest drivers. It is for SimpleOS driver, compositor, and
+release maintainers validating x86_64, AArch64, and RISC-V environments.
+
+## Scope and Preconditions
+
+The canonical checker owns guest artifact admission, QEMU device arguments,
+boot, event injection, and audio receipt validation. A deployed source-matched
+pure-Simple compiler and the QEMU binaries/devices named by the selected
+environment profile must be available. Host substitutes and Rust bootstrap
+seed artifacts are rejected.
+
+**Requirements:** doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md
+**Plan:** doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md
+**Architecture:** doc/04_architecture/simpleos_qemu_host_gpu_2d.md
+**Design:** doc/05_design/simpleos_qemu_host_gpu_2d.md
+**Research:** doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md
+
+## Primary Workflow and Evidence
+
+Run preflight first, then the live checker. Preflight may produce only typed
+`Ready` admission: it never proves guest execution. Live evidence requires the
+guest receipt rows for x86_64 VirtIO-snd and HDA plus AArch64 and RISC-V
+VirtIO-snd. The self-test proves stale, host-substitute, and incomplete
+receipts fail closed.
+
+## Recovery and Troubleshooting
+
+If preflight is blocked, use its stable reason to install the missing QEMU
+binary/device or deploy the admitted pure-Simple guest artifact. A live failure
+must be diagnosed from the retained serial log and checker reason; do not
+downgrade to readiness or a host-generated receipt.
+
+## Compatibility and Limitations
+
+This spec proves the input/audio slice. It does not promote Vulkan rendering;
+the separate Draw IR/Vulkan gate must provide live device execution and
+device-origin readback before the combined environment can pass.
 
 ## Scenarios
 
@@ -34,7 +78,7 @@ SimpleOS receives ordered input and transfers application PCM through pure-Simpl
 - Boot the guest with the selected virtual devices
    - Log capture: after_step
    - Evidence: log output verified by 4 expected checks
-   - Expected: code equals `0`
+   - Expected: code equals `CHECK_SUCCESS`
    - Expected: err equals ``
    - Expected: admission.status equals `UiEnvironmentAdmissionStatus.Ready`
    - Expected: admission.reason equals `live-guest-proof-required`
@@ -42,7 +86,7 @@ SimpleOS receives ordered input and transfers application PCM through pure-Simpl
    - Log capture: after_step
    - Evidence: log output verified by 3 expected checks
    - Expected: profile.required_evidence equals `UiEnvironmentEvidenceClass.LiveGuest`
-   - Expected: code equals `0`
+   - Expected: code equals `CHECK_SUCCESS`
    - Expected: err equals ``
 - Inject keyboard pointer and controller events
    - Log capture: after_step
@@ -57,16 +101,17 @@ SimpleOS receives ordered input and transfers application PCM through pure-Simpl
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Boot the guest with the selected virtual devices")
 val (out, err, code) = run_io_audio_qemu_check("--preflight")
-expect(code).to_equal(0)
+# oracle: the canonical checker uses process success only after all prerequisites pass.
+expect(code).to_equal(CHECK_SUCCESS)
 expect(err).to_equal("")
 expect(out).to_contain("simpleos_io_audio_qemu_preflight=pass")
-val profile = simpleos_qemu_2d_environment_profiles()[0]
+val profile = simpleos_qemu_2d_environment_profiles()[X86_PROFILE_INDEX]
 val admission = validate_ui_environment_evidence(
     profile,
     ui_environment_evidence(
@@ -83,9 +128,9 @@ expect(admission.promotion_eligible).to_be(false)
 
 step("Open the event and audio endpoints")
 val (out, err, code) = run_io_audio_qemu_check("--live")
-val profile = simpleos_qemu_2d_environment_profiles()[0]
+val profile = simpleos_qemu_2d_environment_profiles()[X86_PROFILE_INDEX]
 expect(profile.required_evidence).to_equal(UiEnvironmentEvidenceClass.LiveGuest)
-expect(code).to_equal(0)
+expect(code).to_equal(CHECK_SUCCESS)
 expect(err).to_equal("")
 step("Inject keyboard pointer and controller events")
 expect(out).to_contain("simpleos_io_audio_qemu_row=pass arch=x86_64 backend=virtio-snd")
@@ -106,7 +151,9 @@ expect(out).to_contain("simpleos_io_audio_qemu_row=pass arch=riscv64 backend=vir
 #### rejects host substitutes stale artifacts and incomplete receipts
 
 - Validate guest and pure-Simple provenance
-   - Expected: code equals `0`
+   - Log capture: after_step
+   - Evidence: log output verified by 2 expected checks
+   - Expected: code equals `CHECK_SUCCESS`
    - Expected: err equals ``
 
 
@@ -119,7 +166,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Validate guest and pure-Simple provenance")
 val (out, err, code) = run_io_audio_qemu_check("--self-test")
-expect(code).to_equal(0)
+expect(code).to_equal(CHECK_SUCCESS)
 expect(err).to_equal("")
 expect(out).to_contain("simpleos_io_audio_qemu_self_test=pass")
 ```
@@ -138,6 +185,14 @@ expect(out).to_contain("simpleos_io_audio_qemu_self_test=pass")
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md`
+- **Plan:** `doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md`
+- **Design:** `doc/05_design/simpleos_qemu_host_gpu_2d.md`
+- **Research:** `doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md`
 
 
 </details>
