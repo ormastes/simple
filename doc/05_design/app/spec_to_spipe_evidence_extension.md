@@ -36,12 +36,12 @@ interpret. The plan's assumption — "evidence must be additive-only via a
 versioned extension namespace" — is consistent with the real frozen contract;
 it is not invented agreement.
 
-### A naming collision the plan did not surface
+### A naming collision the plan did not surface — resolved as `.ext.v1`
 
 `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md:38` and the
-plan both name the new spec-to-spipe extension namespace
-`simple.sspec.evidence.v1`. But that exact string is **already in use** as a
-top-level schema tag for an unrelated record:
+plan both named the new spec-to-spipe extension namespace
+`simple.sspec.evidence.v1`. That exact string is **already in use, landed, and
+pushed** as a top-level schema tag for an unrelated record:
 `src/lib/common/spec/evidence/model.spl:19`:
 
 ```
@@ -53,18 +53,27 @@ per-run evidence-capture manifest (`spec_path`, `spec_sha256`, `provider_id`,
 `artifact_sha256`, ...). That record has no relationship to
 `SpecImportManifest` or its `SpecExtensionField` list — it is produced by the
 *runtime* evidence-capture pipeline (`EvidenceRequest -> ... -> EvidenceManifest`)
-described in the same design doc, not by spec-to-spipe import. Reusing the
-identical dotted string for two different schema roles (a runtime capture
-manifest tag vs. an import-time extension namespace) means a consumer that
-greps or dispatches on `"simple.sspec.evidence.v1"` cannot tell which record
-it has without also checking the enclosing structure. **This design keeps the
-same namespace string** (it is what the plan and both upstream design docs
-already commit to), but flags the collision explicitly and requires every
-extension field emitted here to declare `kind` so a reader can disambiguate
-without relying on the namespace string alone. If this proves confusing in
-practice, the fix is a new dedicated namespace (e.g.
-`simple.sspec.evidence.import.v1`) — that is a naming-only change and does not
-touch the frozen core.
+described in the same design doc, not by spec-to-spipe import. Its value is
+also asserted directly by
+`test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl`, so
+`model.spl:19` is not just prior art — it is a pinned, test-covered constant
+that this lane must not touch or reinterpret.
+
+**Resolution: this lane uses a distinct namespace,
+`simple.sspec.evidence.ext.v1`** (`SPIPE_EVIDENCE_EXTENSION_NAMESPACE` in the
+code file), not `simple.sspec.evidence.v1`. Reusing the identical dotted
+string for two different schema roles (a runtime capture manifest tag vs. an
+import-time extension namespace) would mean a consumer that greps or
+dispatches on the bare string cannot tell which record it has without also
+checking enclosing structure — exactly the failure mode this lane exists to
+catch, not reproduce. The two strings are deliberately siblings, not the same
+value: `simple.sspec.evidence.v1` (runtime `EvidenceManifest.schema`, owned by
+`model.spl`, versioned by the typed-evidence lane) and
+`simple.sspec.evidence.ext.v1` (spec-to-spipe `SpecExtensionField` payload
+envelope, owned by this file, versioned by the spec-to-spipe importer lane).
+They evolve independently: a schema bump on one side (e.g. a v2 runtime
+manifest) has no bearing on the other's version number, and neither namespace
+string may be interpreted as implying compatibility with the other.
 
 ### Where this attaches
 
@@ -72,7 +81,7 @@ Extension nodes attach as `SpecExtensionField` entries in two frozen
 attachment points, per `spec_to_spipe_ir.md:38-44`:
 
 1. On the relevant `SpecLedgerEntry` (`spec_to_spipe_ir.md:46-52`) for each
-   generated semantic node below, keyed `namespace: "simple.sspec.evidence.v1"`.
+   generated semantic node below, keyed `namespace: "simple.sspec.evidence.ext.v1"`.
 2. On `SpecImportManifest` itself, one summary field recording the extension
    schema id and count, so a consumer can detect "this import carries evidence
    extension data" without scanning every ledger entry.
@@ -143,7 +152,7 @@ required by `SpecImportManifest`:
    (`src/lib/common/spec/evidence/model.spl:453`) per `InteractionCase`, plus
    the `OracleSpec` it will be checked against.
 3. A source map + disposition ledger: the existing `SpecLedgerEntry` list,
-   now additionally carrying the `simple.sspec.evidence.v1` extension fields —
+   now additionally carrying the `simple.sspec.evidence.ext.v1` extension fields —
    no separate ledger file.
 4. A QA manual and a user manual (`ManualBlock` list, `EvidenceAudience.qa`
    and `EvidenceAudience.user` respectively) via `ManualProjectionHint`.
@@ -191,6 +200,22 @@ importer fails closed rather than emit a shifted id.
 
 This document does not implement an adapter, does not claim any source has
 been converted, and does not modify `SpecImportManifest`, `SpecExtensionField`,
-or any other Phase-0 frozen record. It also does not resolve the
-`simple.sspec.evidence.v1` naming collision noted above beyond flagging it —
-that decision belongs to the A0 architecture owner.
+or any other Phase-0 frozen record. The naming collision noted above is
+resolved within this lane's own two owned files by using
+`simple.sspec.evidence.ext.v1` instead of `simple.sspec.evidence.v1`; it does
+not touch `model.spl` or its pinned `EVIDENCE_MANIFEST_SCHEMA` constant, which
+is out of scope for this lane and already covered by
+`test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl`.
+
+## Known engine quirk — consume `extension_wellformed_reason`, not the bare bool
+
+Under the current bootstrap-seed engine, `extension_is_wellformed(...)` was
+observed to print as `nil` at a call site even though the equivalent
+text-returning `extension_wellformed_reason(...)` printed correctly ("" on
+success, a reason string on failure) for the same input. This looks like a
+pre-existing seed bool-return quirk, not a defect introduced by this module,
+and is not chased further here. Until it is independently confirmed fixed on
+the self-hosted binary, callers should gate on
+`extension_wellformed_reason(extension) == ""` rather than on the bare
+`extension_is_wellformed(...)` bool, so a later reader does not build a
+pass/fail gate on a value that can print as `nil`.
