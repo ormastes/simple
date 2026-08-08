@@ -41,6 +41,20 @@ count is zero before returning.
 use std.spec.*
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DRAW_IR_COMMAND_EDGE,
+    DRAW_IR_EDGE_BEZIER,
+    DRAW_IR_EDGE_STRAIGHT,
+    draw_edge,
+    draw_ir_batch,
+    draw_ir_edge_command,
+    draw_ir_embedding_config,
+    draw_ir_path_command,
+    draw_ir_point,
+    draw_ir_style_prop
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_count}
 
@@ -211,6 +225,96 @@ describe "Engine2D Vulkan backend compute matches the reference":
         expect(vk.cpu_fallback_used).to_be(false)
         expect(pixel_mismatches(readback.pixels, expected)).to_equal(0)
         vk.shutdown()
+
+    it "DrawIR straight EDGE and linear PATH use one Vulkan session with exact device-readback parity":
+        val w: i32 = 16
+        val h: i32 = 12
+        val bg: u32 = 0xFF101018u32
+        val red: u32 = 0xFFFF4040u32
+        val green: u32 = 0xFF40C0A0u32
+
+        # Strict creation is the provenance gate: this test must never accept
+        # Engine2D's ordinary CPU fallback as GPU evidence.
+        val created = Engine2D.create_with_backend_strict(w, h, "vulkan")
+        if not created.is_ok():
+            expect(vulkan_sffi_device_count()).to_equal(0)
+            return
+        var engine = created.unwrap()
+        engine.clear(bg)
+
+        # EDGE is a single shared-line primitive; PATH is deliberately
+        # multi-segment to prove the batch executes every linear segment on
+        # the same persistent Vulkan Engine2D/session.
+        val edge = draw_ir_edge_command(draw_edge(
+            "device-edge", "left", "right", DRAW_IR_EDGE_STRAIGHT,
+            [draw_ir_point(1, 1), draw_ir_point(5, 3)],
+            [draw_ir_style_prop("stroke-color", "{red}"),
+             draw_ir_style_prop("stroke-width", "1")]
+        ))
+        val path = draw_ir_path_command(
+            "device-path",
+            [draw_ir_point(8, 2), draw_ir_point(8, 5), draw_ir_point(12, 5)],
+            [draw_ir_style_prop("stroke-color", "{green}"),
+             draw_ir_style_prop("stroke-width", "1")]
+        )
+        val batch = draw_ir_batch(
+            "vulkan-linear-primitives", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "scene", 0, 0, w, h, 0, 1000, false),
+            [edge, path]
+        )
+
+        # SoftwareBackend is the exact independent CPU oracle for the shared
+        # width-1 Bresenham primitive, not a second DrawIR/raster path.
+        var cpu = SoftwareBackend.create()
+        cpu.init(w, h)
+        cpu.clear(bg)
+        cpu.draw_line(1, 1, 5, 3, red, 1)
+        cpu.draw_line(8, 2, 8, 5, green, 1)
+        cpu.draw_line(8, 5, 12, 5, green, 1)
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, true)
+        expect(engine.backend_name()).to_equal("vulkan")
+        expect(result.selected_backend).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.fallback_required).to_be(false)
+        expect(result.readback_source).to_equal("device_readback")
+        expect(result.backend_handle).to_be_greater_than(0)
+        expect(result.device_identity).to_be_greater_than(0)
+        expect(pixel_mismatches(result.pixels, cpu.read_pixels())).to_equal(0)
+        engine.shutdown()
+
+    it "DrawIR curved EDGE fails closed before Vulkan dispatch":
+        val w: i32 = 12
+        val h: i32 = 12
+        val bg: u32 = 0xFF101018u32
+        val red: u32 = 0xFFFF4040u32
+        val created = Engine2D.create_with_backend_strict(w, h, "vulkan")
+        if not created.is_ok():
+            expect(vulkan_sffi_device_count()).to_equal(0)
+            return
+        var engine = created.unwrap()
+        engine.clear(bg)
+        val curved = draw_ir_edge_command(draw_edge(
+            "curve-rejected", "left", "right", DRAW_IR_EDGE_BEZIER,
+            [draw_ir_point(1, 1), draw_ir_point(8, 8)],
+            [draw_ir_style_prop("stroke-color", "{red}"),
+             draw_ir_style_prop("stroke-width", "1")]
+        ))
+        val batch = draw_ir_batch(
+            "vulkan-curve-rejected", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "scene", 0, 0, w, h, 0, 1000, false),
+            [curved]
+        )
+
+        val result = engine2d_draw_ir_adv_batch(engine, batch, true)
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.fallback_required).to_be(true)
+        expect(result.fallback_reason).to_contain(DRAW_IR_COMMAND_EDGE)
+        expect(result.readback_source).to_equal("device_readback")
+        expect(result.pixels[1 * w + 1]).to_equal(bg)
+        engine.shutdown()
 
     it "Vulkan draw_image uploads source pixels into the device framebuffer":
         val w: i32 = 16
