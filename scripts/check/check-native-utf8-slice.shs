@@ -1,0 +1,195 @@
+#!/bin/sh
+# Regression gate for the AOT/JIT-vs-interpreter UTF-8 mid-codepoint slicing
+# divergence.
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk interpreter
+# and has no AOT/JIT-observing mode, so no `*_spec.spl` can pin the JIT or
+# `--native` lane's slicing policy. The pre-existing partial fence,
+# `check-utf8-slice-audit-live.shs`, only proves the SIMPLE_UTF8_SLICE_AUDIT
+# *instrument* is compiled into the binary and its self_test line fires via
+# plain `run` -- it never drives `native-build`/`compile --native`, and it
+# never asserts on the three divergent slicing POLICIES themselves. That is
+# the false-green gap: a suite can point at that script and believe the
+# native lane's slicing behaviour is covered when only the counter is.
+#
+# Bug: doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md
+#
+# Probe string s = "aé€𝄞z" (11 bytes: 61 | c3a9 | e282ac | f09d849e | 7a).
+# Slicing at offset 2 lands inside the 2-byte "é" codepoint. This script pins
+# the CURRENT (known-wrong) behaviour of all three named policies plus the
+# native-build/compile --native reachability gap, so any future change to any
+# engine is caught here instead of silently landing unfenced. The correct
+# eventual behaviour is a hard ERROR on a mid-codepoint slice (see bug doc,
+# "Semantics decision") -- none of the values pinned below are asserted as
+# correct; they are pinned as KNOWN-OPEN so a fix is visible as a NOTE, not a
+# silent pass.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-native-utf8-slice.$$}"
+FIXTURE="test/fixtures/native_utf8_slice/main.spl"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+fail=0
+
+field() {
+    # field <file> <tag> <index>  -- pipe-delimited "tag|len|value" lines
+    grep "^$2|" "$1" | head -n1 | cut -d'|' -f"$3"
+}
+
+# ---------------------------------------------------------------------------
+# Part A -- default (JIT) engine vs interpreter, via plain `run`. This is the
+# part `check-utf8-slice-audit-live.shs` cannot see: it never inspects the
+# LEN of a slice result, only whether the audit counter fired.
+# ---------------------------------------------------------------------------
+jit_out="$WORK_DIR/jit_out.txt"
+interp_out="$WORK_DIR/interp_out.txt"
+
+timeout 60 env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$FIXTURE" >"$jit_out" 2>"$WORK_DIR/jit_err.txt" || true
+timeout 60 env -u SIMPLE_BOOTSTRAP SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BINARY" run "$FIXTURE" >"$interp_out" 2>"$WORK_DIR/interp_err.txt" || true
+
+jit_ctl_len="$(field "$jit_out" bracket_ctl 2)"
+jit_cut_len="$(field "$jit_out" bracket_cut 2)"
+jit_slice_len="$(field "$jit_out" slice_cut 2)"
+jit_substr_len="$(field "$jit_out" substring_cut 2)"
+
+interp_ctl_len="$(field "$interp_out" bracket_ctl 2)"
+interp_cut_len="$(field "$interp_out" bracket_cut 2)"
+interp_slice_len="$(field "$interp_out" slice_cut 2)"
+interp_substr_len="$(field "$interp_out" substring_cut 2)"
+
+# Aligned control: cutting on a codepoint boundary must agree, byte-exact,
+# on both engines. This is the true-positive control -- if this ever
+# disagrees, the probe itself is broken, not just the mid-codepoint policy.
+if [ "$jit_ctl_len" != "3" ] || [ "$interp_ctl_len" != "3" ]; then
+    echo "FAIL — aligned control s[0:3] regressed (expected len=3 on both engines)"
+    echo "  JIT len=$jit_ctl_len  interpret len=$interp_ctl_len"
+    fail=1
+else
+    echo "PASS — aligned control s[0:3]: len=3 on both engines (probe is live)"
+fi
+
+# Policy 1 -- bracket slice `s[0:2]`: BOTH engines currently return raw bytes
+# with NO validation, splitting the codepoint. This produces genuinely
+# invalid UTF-8 (stored bytes `61 c3`; stdout sanitizes to U+FFFD on print,
+# so the LEN is the only reliable witness -- never eyeball the glyph).
+if [ "$jit_cut_len" = "2" ] && [ "$interp_cut_len" = "2" ]; then
+    echo "KNOWN-OPEN — bracket slice s[0:2]: both engines return raw invalid-UTF-8 bytes (len=2, correct-should-be: hard error, not a length)"
+else
+    echo "NOTE — bracket slice s[0:2] policy changed (JIT len=$jit_cut_len, interpret len=$interp_cut_len, were 2/2)."
+    echo "       If this is now a hard error (fix landed) or a validated policy,"
+    echo "       promote this branch to a hard assertion; do not silently accept"
+    echo "       an unexamined new value."
+fi
+
+# Policy 2 -- `.slice()`/`.substring()`: the two engines DISAGREE with each
+# other AND with the bracket-slice policy above. Interpreter invents a
+# replacement character (lossy U+FFFD, len grows to 4); JIT returns the same
+# raw invalid bytes as the bracket case (len stays 2). This 3-way split
+# (bracket-both-raw, slice-interp-lossy, slice-jit-raw) is the actual
+# regression-risk surface named in the bug doc title.
+if [ "$interp_slice_len" = "4" ] && [ "$jit_slice_len" = "2" ]; then
+    echo "KNOWN-OPEN — .slice(0,2): interpret=lossy-U+FFFD (len=4), JIT=raw-bytes (len=2) — engines disagree (correct-should-be: hard error on both)"
+else
+    echo "NOTE — .slice(0,2) divergence changed (interpret len=$interp_slice_len, JIT len=$jit_slice_len, were 4/2)."
+    echo "       Promote to a hard assertion once the new behaviour is understood."
+fi
+
+if [ "$interp_substr_len" = "4" ] && [ "$jit_substr_len" = "2" ]; then
+    echo "KNOWN-OPEN — .substring(0,2): interpret=lossy-U+FFFD (len=4), JIT=raw-bytes (len=2) — same divergence as .slice"
+else
+    echo "NOTE — .substring(0,2) divergence changed (interpret len=$interp_substr_len, JIT len=$jit_substr_len, were 4/2)."
+    echo "       Promote to a hard assertion once the new behaviour is understood."
+fi
+
+# ---------------------------------------------------------------------------
+# Part B -- native-lane reachability. Two distinct native-facing commands
+# exist and, as of 2026-08-07, they fail in TWO DIFFERENT ways for the same
+# underlying reason (a slice expression forces the interpreter). Both must be
+# pinned separately: a change in either one is independently significant.
+# ---------------------------------------------------------------------------
+
+# B1 -- `compile --native` (LLVM AOT): fails closed with a clean, specific
+# diagnostic naming the CollectionOps construct. This matches the bug doc's
+# "Engine-reachability caveat" verbatim.
+native_log="$WORK_DIR/compile_native.log"
+native_rc=0
+env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" compile "$FIXTURE" --native -o "$WORK_DIR/native_bin" >"$native_log" 2>&1 || native_rc=$?
+
+if [ "$native_rc" -eq 0 ]; then
+    echo "NOTE — 'compile --native' now COMPILES a slice-containing function; the"
+    echo "       [CollectionOps] fail-closed gate in"
+    echo "       doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md"
+    echo "       has closed. This makes the raw-bytes native policy REACHABLE for the"
+    echo "       first time -- promote this branch to a hard byte-level assertion on"
+    echo "       the produced binary's output instead of accepting either outcome."
+elif grep -q 'cannot compile to standalone native binary' "$native_log" && grep -q 'CollectionOps' "$native_log"; then
+    echo "KNOWN-OPEN — 'compile --native' still fails closed on slice with the expected [CollectionOps] diagnostic (native raw-bytes policy remains unreachable via this command)"
+else
+    echo "FAIL — 'compile --native' failed for an UNEXPECTED reason (not the known CollectionOps refusal)"
+    tail -n 20 "$native_log"
+    fail=1
+fi
+
+# B2 -- `native-build` (the whole-program AOT pipeline this repo's own
+# check-native-*.shs scripts use): does NOT give the same clean diagnostic.
+# It fails (rc != 0, so no wrong binary is ever produced) but with an OPAQUE
+# internal-looking error -- "undefined field 'kind': cannot access field on
+# value of type 'nil'" -- fired inside MIR lowering of the desugared
+# `.slice()` call, not the `[CollectionOps]` compilability-gate message from
+# B1. This is a genuinely different bug (an unhelpful diagnostic on a
+# different code path) and is recorded here, not silently folded into B1,
+# because a future fix could clean up either path independently.
+mkdir -p "$WORK_DIR/nb_src"
+cp "$FIXTURE" "$WORK_DIR/nb_src/main.spl"
+nb_log="$WORK_DIR/native_build.log"
+nb_rc=0
+# 900s, not 180s: a full native-build of this fixture was measured at ~435s on a
+# loaded box (2026-08-08). At 180s the build was killed and the timeout was
+# reported through the catch-all FAIL branch as an "UNEXPECTED reason" -- i.e. a
+# closed gap read as an unexplained defect. A timeout is its own branch below.
+timeout 900 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+    --source "$WORK_DIR/nb_src" --entry-closure --entry "$WORK_DIR/nb_src/main.spl" \
+    --cache-dir "$WORK_DIR/nb_cache" --output "$WORK_DIR/nb_bin" >"$nb_log" 2>&1 || nb_rc=$?
+
+if [ "$nb_rc" -eq 124 ]; then
+    echo "ERROR — 'native-build' TIMED OUT (900s). NOTHING was measured on this leg;"
+    echo "        this is not evidence about the slice policy either way. Re-run on a"
+    echo "        less loaded host (check 'uptime' -- this box routinely sits at load"
+    echo "        60+ with parallel agent sessions)."
+    exit 2
+elif [ "$nb_rc" -eq 0 ]; then
+    # fail=1 on purpose: the pinned state is "native-build REFUSES slice code".
+    # It no longer does, so the final summary line must not print PASS. A gate
+    # whose premise has been falsified is red until a human re-pins it.
+    echo "FAIL (promote-me) — 'native-build' now COMPILES a slice-containing whole"
+    echo "       program; this fence's pinned KNOWN-OPEN premise (that the native"
+    echo "       lane refuses slice code) is FALSIFIED. Run the produced binary at"
+    echo "       $WORK_DIR/nb_bin and promote this branch to a hard byte-level"
+    echo "       assertion on its output — a mid-codepoint cut on a 2-byte character"
+    echo "       is expected to yield length 2 under the native raw-bytes policy."
+    fail=1
+elif grep -q "undefined field 'kind'" "$nb_log"; then
+    echo "KNOWN-OPEN — 'native-build' still fails on slice, but with an OPAQUE internal error (\"undefined field 'kind': cannot access field on value of type 'nil'\" in MIR lowering of the desugared .slice() call) instead of the clean [CollectionOps] diagnostic B1 gives. Fixing this to emit the same clean diagnostic (or to compile) is the open work."
+elif grep -q 'cannot compile to standalone native binary' "$nb_log" && grep -q 'CollectionOps' "$nb_log"; then
+    echo "FAIL (promote-me) — 'native-build' now gives the SAME clean [CollectionOps] diagnostic as 'compile --native' (opaque-error gap closed). Promote this branch to match B1's KNOWN-OPEN wording."
+    fail=1
+else
+    echo "FAIL — 'native-build' failed for an UNEXPECTED reason (rc=$nb_rc; neither the known opaque error nor the CollectionOps refusal)"
+    # Strip [mir-*] trace spam: an unfiltered tail is 20 lines of lowering noise
+    # and tells the reader nothing about why the build failed.
+    grep -vE '^\[mir-' "$nb_log" | tail -n 20
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+
+echo "PASS — native-lane UTF-8 mid-codepoint slice divergence: all three policies and both native-facing commands match their pinned KNOWN-OPEN state"

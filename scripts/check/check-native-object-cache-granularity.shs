@@ -95,7 +95,19 @@ fi
 scope_dir_count="$(top_scope_dir_count)"
 warm_receipt="$(receipt "$warm_log")"
 warm_hits="$(printf '%s' "$warm_receipt" | sed -n 's/.*cache: \([0-9]*\) hits.*/\1/p')"
-if [ -z "$warm_hits" ] || [ "$warm_hits" -lt 3 ]; then
+# Fail-closed on an unparseable receipt: an EMPTY $warm_hits used to fall into
+# the WARN branch below and print a green verdict having measured NOTHING (the
+# trace format changed, or SIMPLE_COMPILER_TRACE stopped emitting). Absence of a
+# number is never evidence.
+case "$warm_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a '[NATIVE] cache: N hits' receipt from the warm build log"
+        echo "        (got: '$warm_receipt'). NOTHING was measured — the trace format changed"
+        echo "        or SIMPLE_COMPILER_TRACE stopped emitting. This is not a pass."
+        exit 2
+        ;;
+esac
+if [ "$warm_hits" -lt 3 ]; then
     if [ "$scope_dir_count" -gt 1 ]; then
         # Not a hard FAIL: `native_build_compiler_identity()` hashes ALL of
         # src/compiler on every invocation (driver_build/incremental.spl), so
@@ -140,7 +152,16 @@ fi
 onefile_receipt="$(receipt "$onefile_log")"
 onefile_hits="$(printf '%s' "$onefile_receipt" | sed -n 's/.*cache: \([0-9]*\) hits.*/\1/p')"
 
-if [ -n "$onefile_hits" ] && [ "$onefile_hits" -gt 0 ]; then
+case "$onefile_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a '[NATIVE] cache: N hits' receipt from the one-file-edit"
+        echo "        build log (got: '$onefile_receipt'). NOTHING was measured; the KNOWN-OPEN"
+        echo "        verdict below would have been asserted against an absent number."
+        exit 2
+        ;;
+esac
+
+if [ "$onefile_hits" -gt 0 ]; then
     # Hard-fail here on purpose: a gate that can never fail is no gate (see
     # doc/08_tracking/bug/... "verification layer fail-open" family). This
     # branch means the whole-build-fingerprint behaviour NARROWED — that is
