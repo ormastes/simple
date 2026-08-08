@@ -94,6 +94,19 @@ examples):
 fills column-first"` examples (previously `"...(RED-by-design)"`) now
 assert the real named-area / column-first geometry and pass.
 
+**Follow-up fix (2026-08-08):** `normalized_grid_area`
+(`simple_web_html_layout_renderer_declarations.spl`) was lowercasing the
+`grid-area` ident (`raw.trim().lower()`) while `normalized_grid_template_areas`
+preserved the template cells' case verbatim — so `grid-area: Sidebar` never
+matched a template cell `"Sidebar"` and silently fell to auto-placement.
+CSS grid-area/named-line idents are case-sensitive (only the `auto` keyword
+is case-insensitive). Fixed by dropping `.lower()` from the returned value
+and comparing only the `auto` check case-insensitively. New example
+`"grid-template-areas/grid-area matching is case-sensitive"` in
+`web_css_grid_spec.spl` covers a mixed-case `"Header Header"` template
+against `grid-area:Header`, asserting placement (not auto-placement
+fallback). Full suite: 7/7 passing.
+
 ## 2026-08-07 triage note (web_css RED sweep)
 
 Scope estimate: **large** — two independent unimplemented subsystems bundled
