@@ -67,6 +67,20 @@ pub enum LowerError {
     )]
     SelfMutationInImmutableMethod { func_name: String },
 
+    /// A bare `field = value` (no `self.`) inside a method body, where `field`
+    /// is a declared field of the receiver's class. Without this the HIR
+    /// lowering minted a *fresh local* that shadows the field, so the write was
+    /// silently discarded and `self.field` kept its old value — the JIT half of
+    /// doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md.
+    /// The AST interpreter already rejects this shape
+    /// (interpreter/node_exec.rs); this variant makes the lowering-based
+    /// engines (Cranelift JIT, LLVM/native) agree instead of losing the write.
+    /// Wording is deliberately kept in lockstep with the interpreter's message.
+    #[error(
+        "invalid assignment: `{field}` is a field of `{class}`; a bare `{field} = ...` creates a new local and leaves `self.{field}` unchanged. Write `self.{field} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
+    )]
+    ImplicitSelfFieldAssignment { field: String, class: String },
+
     /// CTR-032: Impure function call in contract expression
     #[error(
         "Impure function call '{func_name}' in contract expression. Only #[pure] functions can be called in contracts"

@@ -1,11 +1,12 @@
 # Implicit-self field ASSIGNMENT in `me` methods silently no-ops — while the linter recommends it
 
 **Date:** 2026-07-17
-**Status:** PARTIALLY FIXED (re-triaged 2026-08-08). The **interpreter lane is
-FIXED** via fix direction 2 — a bare field assignment inside a `me` method is
-now a hard semantic error with an on-point diagnostic, so the silent data loss
-is gone there. The **seed JIT lane still silently no-ops** with no diagnostic.
-Do not close until the JIT lane agrees. Evidence: "Re-triage 2026-08-08" below.
+**Status:** FIXED IN SOURCE 2026-08-08 — both lanes now hard-error. The JIT half
+(the last open half) was closed by moving the check into HIR lowering, upstream
+of every lowering-based engine. Guard:
+`scripts/check/check-implicit-self-field-assignment.shs`. Pending the next seed
+redeploy the guard is RED against the stale deployed `bin/simple` and GREEN
+against a freshly built seed — see "Fix 2026-08-08" below.
 **Severity:** high (silent data-loss class; the tooling actively steers users into it)
 
 ## Symptom
@@ -151,3 +152,74 @@ JIT does — the same structural hazard catalogued in
 error. Since the diagnostic already exists on the interpreter side, the durable
 fix is to move the check into a front-end/semantic pass that runs before either
 lowering, so both engines inherit it rather than each implementing it.
+
+## Fix 2026-08-08 — JIT lane closed in HIR lowering
+
+Done exactly as the paragraph above prescribes: the check now lives in **HIR
+lowering**, upstream of both the Cranelift JIT and the LLVM/native backends, so
+every lowering-based engine inherits it instead of each re-implementing it. The
+AST interpreter keeps its own guard (it does not go through HIR); the two
+messages are deliberately worded in lockstep.
+
+- `src/compiler_rust/compiler/src/hir/lower/error.rs` — new
+  `LowerError::ImplicitSelfFieldAssignment { field, class }`.
+- `src/compiler_rust/compiler/src/hir/lower/memory_check.rs` — new
+  `check_implicit_self_field_assignment`.
+- `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` — called from the
+  `Node::Assignment` arm **before** `lower_expr(&assign.target)`. Order is
+  load-bearing: lowering a bare unbound identifier in assignment position is
+  precisely what mints the shadowing local, so a check placed afterwards would
+  inspect the freshly-created local and see nothing wrong.
+
+**The check is NOT gated on `lenient_types`, and that was the whole bug on this
+lane.** The first revision copied the sibling `check_self_mutation_in_fn_method`
+and skipped when `lenient_types` was set. It built clean and changed nothing:
+the probe still printed `implicit -> false`. `pipeline/execution.rs:989` — the
+`bin/simple run` / JIT lane — calls `set_lenient_types(true)`, so the guard had
+self-disabled on exactly the engine that had the defect. `lenient_types` means
+"unknown TYPES degrade to ANY"; it is a different question from "this name is a
+declared field of a class we resolved concretely". Soundness here comes from the
+concrete-class requirement, not from leniency.
+
+Scoping, chosen so no working code breaks: only inside a method (`ctx.has_self`)
+— implicit local declaration is untouched in free functions; only when the name
+has no existing local/parameter binding — a local that shadows a field keeps
+shadowing it and stays re-assignable; only when the receiver's class type is
+**concrete**. `TypeId::ANY` is skipped deliberately, because `get_field_info`
+falls back to a fuzzy whole-tree field search for ANY, which would let an
+unrelated struct elsewhere in the repo turn an ordinary local into a hard error.
+
+### Evidence, both directions
+
+`scripts/check/check-implicit-self-field-assignment.shs`. It asserts three
+things per engine, not just "exits non-zero": the implicit form is rejected, the
+diagnostic **names the field** (an anonymous error is not an acceptable fix),
+and — the sabotage sentinel — `self.flag = true` still compiles and still sets
+the field, so a compiler that rejected all assignment cannot pass. It also fails
+on the literal string `implicit -> false`, the exact silent-no-op signature.
+
+    # RED — stale deployed bin/simple (pre-fix binary):
+    FAIL — engine 'jit': implicit field assignment SILENTLY NO-OPPED — the
+    program ran to completion and printed 'implicit -> false', so the write to
+    `flag` was discarded with no diagnostic
+
+    # GREEN — freshly built seed carrying the fix:
+    SIMPLE_BIN=src/compiler_rust/target/release/simple sh \
+      scripts/check/check-implicit-self-field-assignment.shs
+    PASS — 2 engine setting(s) checked: interpreter,jit — implicit `field = ...`
+    in a method is a hard error naming the field, and explicit `self.field = ...`
+    still works
+
+The RED run is against a real pre-fix binary, and the intermediate
+`lenient_types`-gated revision is itself a third data point: it was a real build
+of a real code change that the guard correctly refused to pass.
+
+**Why a shell guard and not a `*_spec.spl`:** `bin/simple test` runs the AST
+interpreter, which has rejected this shape since `941605d43d9`. The broken lane
+was `bin/simple run` (JIT). No assertion writable in the spec DSL can observe
+it — the suite cannot reach that engine. Same structural gap as
+`run_vs_test_harness_divergence_2026-07-28.md`.
+
+**Not yet closed:** `bin/release/<triple>/simple` still predates this fix, so
+the guard is red until the next seed redeploy. The fix is in source and proven
+on a built binary; redeploying the shared binary was out of scope for this lane.

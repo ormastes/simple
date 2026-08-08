@@ -279,6 +279,15 @@ impl Lowerer {
             }
 
             Node::Assignment(assign) => {
+                // MUST run BEFORE lowering the target: lowering a bare, unbound
+                // identifier in assignment position is exactly what mints the
+                // fresh local that shadows the receiver's field and swallows the
+                // write. Checking afterwards would inspect the already-created
+                // local and see nothing wrong.
+                if let ast::ast::Expr::Identifier(name) = &assign.target {
+                    self.check_implicit_self_field_assignment(name, ctx)?;
+                }
+
                 let target = self.lower_expr(&assign.target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
 

@@ -339,6 +339,76 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Reject a bare `field = value` (no `self.`) inside a method body when
+    /// `field` is a declared field of the receiver's class.
+    ///
+    /// WHY THIS EXISTS. `self.field` READS already error on every lane, but the
+    /// ASSIGNMENT form fell through to the implicit-local-declaration path: the
+    /// lowering minted a fresh local shadowing the field, the write went into
+    /// that local, and `self.field` kept its old value with no diagnostic at
+    /// all. That is silent data loss, and the compiler's own recovery hint used
+    /// to recommend the broken shape. The AST interpreter got a guard first
+    /// (`interpreter/node_exec.rs`, "invalid assignment: `x` is a field of
+    /// `C`..."), which left the two engines DISAGREEING: `bin/simple test`
+    /// (interpreter) rejected the program while `bin/simple run` (JIT) accepted
+    /// it and lost the write — so no spec could ever observe the defect. This
+    /// check runs in HIR lowering, upstream of both the Cranelift JIT and the
+    /// LLVM/native backends, so all lowering-based engines inherit it.
+    /// See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
+    ///
+    /// DELIBERATELY NARROW — this must not reject working code:
+    ///   * only inside a method (`ctx.has_self`); free functions are untouched,
+    ///     so implicit local declaration still works everywhere else;
+    ///   * only when the name has NO local binding yet — a real local or
+    ///     parameter that happens to share a field's name keeps shadowing it,
+    ///     exactly as it does today, and re-assigning it stays legal;
+    ///   * only when the receiver's class type is CONCRETE and the name is a
+    ///     declared field of that exact struct. `TypeId::ANY` is skipped on
+    ///     purpose: `get_field_info` falls back to a fuzzy global field search
+    ///     for ANY, which would let an unrelated struct elsewhere in the tree
+    ///     turn an ordinary local into a hard error.
+    ///
+    /// NOT gated on `lenient_types`, unlike the sibling
+    /// `check_self_mutation_in_fn_method`. That gate would disable this check on
+    /// exactly the lane that has the defect: `pipeline/execution.rs` (the
+    /// `bin/simple run` / JIT lane) calls `set_lenient_types(true)`, and an
+    /// earlier revision of this function did skip on it — the probe still
+    /// printed `implicit -> false` with no diagnostic. `lenient_types` means
+    /// "unknown TYPES degrade to ANY", which is a different question from
+    /// "this name is a declared field of a class we fully resolved". The
+    /// concrete-class requirement above is what keeps the check sound; leniency
+    /// is not.
+    pub(super) fn check_implicit_self_field_assignment(
+        &self,
+        name: &str,
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if !ctx.has_self {
+            return Ok(());
+        }
+        // An existing binding (local, parameter, or `self` itself) means this is
+        // a normal re-assignment, not an implicit field write.
+        if ctx.local_map.contains_key(name) {
+            return Ok(());
+        }
+        let Some(class_ty) = self.current_class_type else {
+            return Ok(());
+        };
+        if class_ty == TypeId::ANY {
+            return Ok(());
+        }
+        let Some(HirType::Struct { name: class_name, fields, .. }) = self.module.types.get(class_ty) else {
+            return Ok(());
+        };
+        if fields.iter().any(|(field_name, _)| field_name == name) {
+            return Err(LowerError::ImplicitSelfFieldAssignment {
+                field: name.to_string(),
+                class: class_name.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Check if an expression represents mutation of self (local index 0 in methods)
     ///
     /// Returns true for:
