@@ -1,8 +1,20 @@
 # Two `list`-parameter stdlib/helper functions return wrong values while byte-identical inline code is correct — one of them silently corrupted a bug investigation
 
 **Date:** 2026-08-08
-**Status:** OPEN — reproducers are minimal and self-contained; mechanism NOT
-determined
+**Status:** ROOT-CAUSED and RESOLVED 2026-08-08 — see
+`doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md`
+
+> **Mechanism (was "NOT determined"):** under the JIT, an element read `data[i]`
+> from a parameter declared as an untyped `list` yields the value still carrying
+> its small-int tag, i.e. `v << 3`. The interpreter is correct. Both reproducers
+> here are that one defect. The hex helper's `v / 16` sees `v*8`, giving
+> `0810808` where inline gives `010210ff`; `pkcs7_unpad`'s `padding_len` was 16
+> instead of 2, so `padding_len > data_len` was true and it early-returned its
+> input for VALID padding. Next steps 1-3 below were carried out: step 1 found
+> the interpreter/JIT divergence, step 2 bisected it to the `list`-typed
+> parameter (a list built *locally inside* the same fn is correct, and a `[i64]`
+> parameter is correct), step 3 landed the fail-closed fix plus an
+> invalid-padding rejection spec in 6bb978f4a42.
 **Severity:** High as a *measurement* hazard. A hex-formatting helper of the
 shape everyone writes returned wrong digits with no error, and that wrong
 output was written into a landed bug doc and commit message as fact. Also

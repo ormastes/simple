@@ -153,3 +153,28 @@ fixed and KAT-gated, at which point CTR and GCM would have to move too.
 Interpreter only, via `bin/simple run`, which on this box is the Rust bootstrap
 seed (prints the "bootstrap seed only" banner). Not checked on JIT, native, or
 a self-hosted binary.
+
+## RE-MEASUREMENT REQUIRED (added 2026-08-08)
+
+The characterisation "`expand_key` returns a correct round key 0 but a wrong
+round key 1" was measured on the **JIT**, and every function in
+`src/lib/common/aes/key_expansion.spl` takes untyped `list` parameters
+(`expand_key`, `get_key_word`, `xor_words`, `rotate_word`, `get_round_key`).
+That is exactly the trigger for the tagged-element defect filed at
+`doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md`,
+so those numbers were taken through a known-corrupting path.
+
+A fresh probe from the repo root, AES-128 key `000102...0f`:
+
+- **JIT** (`bin/simple run`): bytes 16..31 of the expanded key read `nil` — not
+  "wrong round key 1", but absent.
+- **Interpreter** (`SIMPLE_EXECUTION_MODE=interpret`): hard error,
+  `array index out of bounds: index is 16 but length is 16`.
+
+So on the trustworthy lane `expand_key` returns only the **16 input bytes** and
+never expands at all. The JIT silently yields `nil` for the same out-of-range
+reads instead of erroring, which is how "a wrong round key 1" was ever
+observed. Whatever the defect is, it is NOT "the word-derivation loop computes
+wrong words" — the loop appears not to append anything. Re-derive this finding
+under the interpreter before acting on it, and note that the `nil`-vs-error
+divergence on out-of-range list reads is itself worth filing.
