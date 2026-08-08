@@ -1,0 +1,117 @@
+# Lane E6: thin adapter wiring `SpipeEvidenceExtension` (spipe_extension.spl)
+# into the spec-to-sspec emitter (main.spl) as an additive sidecar.
+#
+# Honest scope: main.spl's modernizer has no semantic-node model of its own —
+# it works line-by-line on raw text (see `_scan_scenario`/`_has_evidence` in
+# main.spl) and never builds a `SpecImportManifest`/`SpecLedgerEntry` tree that
+# an extension field could attach to. So this adapter does not "attach an
+# extension field" (there is no field to attach to yet); it reuses the same
+# evidence-bearing-scenario detection main.spl already performs during
+# modernization and projects it into one `SpipeEvidenceNode` per detected
+# scenario, then serializes an envelope via `extension_lines`. This is real
+# data flow from the emitter's own scan (not fabricated), wired to run on every
+# `--apply`/`-o` write, but it is a NEW sidecar output, not a write into an
+# existing core manifest structure.
+#
+# Design: doc/05_design/app/spec_to_spipe_evidence_extension.md
+# Envelope: src/lib/common/spec/evidence/spipe_extension.spl
+
+use std.common.spec.evidence.spipe_extension.{
+    SpipeEvidenceNode, SpipeEvidenceNodeKind, SpipeEvidenceExtension,
+    spipe_evidence_node, spipe_evidence_extension, extension_lines
+}
+
+fn _leading_ws_len(line: text) -> i64:
+    line.len() - line.trim().len()
+
+fn _is_it_header(trimmed: text) -> bool:
+    trimmed.starts_with("it \"") and trimmed.ends_with(":")
+
+fn _step_label(trimmed: text) -> text:
+    var body = trimmed
+    if body.starts_with("it \""):
+        body = body[4:]
+    var label = body
+    if label.ends_with(":"):
+        label = label[:label.len() - 1]
+    if label.starts_with("\""):
+        label = label[1:]
+    if label.ends_with("\""):
+        label = label[:label.len() - 1]
+    label.trim()
+
+fn _has_evidence_line(trimmed: text) -> bool:
+    trimmed.contains("capture_") or trimmed.contains("@capture") or
+        trimmed.contains("evidence(")
+
+# Scan one scenario body starting after its `it "..."` header (line index
+# `from`). Returns the exclusive end line index of the scenario body.
+fn _scenario_end(lines: [text], from: i64, header_indent_len: i64) -> i64:
+    var k = from + 1
+    var has_evidence = false
+    while k < lines.len():
+        val line = lines[k]
+        if line.trim() == "":
+            k = k + 1
+            continue
+        if _leading_ws_len(line) <= header_indent_len:
+            return k
+        if _has_evidence_line(line.trim()):
+            has_evidence = true
+        k = k + 1
+    k
+
+# Mirrors main.spl's own evidence-bearing-scenario detection (`_scan_scenario`
+# / `_has_evidence`), but instead of deciding whether to inject a step(), it
+# projects each evidence-bearing scenario into an `interaction_case` node so
+# the extension envelope reports what the emitter already found.
+pub fn spipe_evidence_nodes_for_source(path: text, source: text) -> [SpipeEvidenceNode]:
+    val lines = source.split("\n")
+    var nodes: [SpipeEvidenceNode] = []
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if _is_it_header(trimmed):
+            val header_indent_len = _leading_ws_len(lines[i])
+            var has_evidence = false
+            var k = i + 1
+            var body_end = i + 1
+            while k < lines.len():
+                val line = lines[k]
+                if line.trim() == "":
+                    k = k + 1
+                    continue
+                if _leading_ws_len(line) <= header_indent_len:
+                    break
+                if _has_evidence_line(line.trim()):
+                    has_evidence = true
+                body_end = k + 1
+                k = k + 1
+            if has_evidence:
+                val label = _step_label(trimmed)
+                nodes.push(spipe_evidence_node(
+                    path + "#" + label,
+                    SpipeEvidenceNodeKind.interaction_case,
+                    i,
+                    body_end,
+                    "",
+                    "spec-to-sspec.evidence-scan.v1",
+                    "kept",
+                    label
+                ))
+        i = i + 1
+    nodes
+
+# Build the full extension envelope for `source` (already resident/about to be
+# written at `path`). Empty node list still produces a well-formed envelope
+# (namespace/version present, node_count: 0).
+pub fn spipe_evidence_extension_for_source(path: text, source: text) -> SpipeEvidenceExtension:
+    spipe_evidence_extension(spipe_evidence_nodes_for_source(path, source))
+
+# Sidecar path convention: `<path>.spipe-evidence.txt`, next to the spec file.
+pub fn spipe_evidence_sidecar_path(path: text) -> text:
+    path + ".spipe-evidence.txt"
+
+# Serialized sidecar content for `source` at `path`.
+pub fn spipe_evidence_sidecar_content(path: text, source: text) -> text:
+    extension_lines(spipe_evidence_extension_for_source(path, source)).join("\n") + "\n"

@@ -16,14 +16,22 @@
 
 use std.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.crypto.sha256.{sha256_text}
 use app.io.cli_ops.{_cli_eprint}
 use app.sspec_maintain.improve.{safe_sspec_easyfixes, apply_sspec_easyfixes_result}
+use app.sspec_maintain.analyzer.{derive_manual_path}
+use app.sspec_maintain.documentize.{compose_sspec_documentized_manual}
+use app.spipe_docgen.spipe_docgen.main.{run_spipe_docgen}
+use app.spec_to_sspec.spipe_evidence_emit.{spipe_evidence_sidecar_path, spipe_evidence_sidecar_content}
 
 fn _usage():
     print "spec-to-sspec: modernize an existing SSpec (non-fabricating)"
-    print "Usage: simple spec-to-sspec modernize <spec.spl> [--apply] [-o <out>]"
+    print "Usage: simple spec-to-sspec modernize <spec.spl> [--apply] [-o <out>] [--with-manual]"
     print "  modernize  Apply mechanical SSDOC fixes + inject step() flow; preview to stdout."
     print "             --apply writes back in place; -o <out> writes to a path."
+    print "             --with-manual also regenerates the doc/06_spec mirror (clears MNT-002);"
+    print "                        needs --apply or -o (docgen reads the written file)."
     print "Assertions are preserved exactly; only structure is assembled."
 
 fn _option(args: [text], name: text, fallback: text) -> text:
@@ -155,12 +163,47 @@ fn modernize_source(path: text, source: text) -> text:
     else:
         stepped
 
+# Regenerate the doc/06_spec mirror for `source` (already on disk at `written_path`)
+# by mirroring sspec-maintain documentize staging: SPipe docgen into a hashed
+# staging dir, wrap with provenance + scorecard, write the canonical mirror.
+# Clears SSDOC-MNT-002 (mirrored manual is stale) — the one mechanical lift that
+# also produces the spec-like doc. Heavy (runs spipe_docgen); opt-in via flag.
+fn _regenerate_manual(written_path: text, source: text) -> i64:
+    val output = derive_manual_path(written_path)
+    val staging_root = "build/spec-to-sspec/documentize/" + sha256_text(written_path + "\n" + source)
+    dir_remove(staging_root, true)
+    val generated = run_spipe_docgen([written_path, "--output", staging_root, "--no-index"])
+    if generated != 0:
+        dir_remove(staging_root, true)
+        _cli_eprint("spec-to-sspec: SPipe manual generation failed")
+        return 3
+    val prefix = "doc/06_spec/"
+    val canonical = derive_manual_path(written_path)
+    val rel = if canonical.starts_with(prefix): canonical[prefix.len():] else: canonical
+    val staged_path = staging_root + "/" + rel
+    val spipe_manual = file_read(staged_path) ?? ""
+    if spipe_manual == "":
+        dir_remove(staging_root, true)
+        _cli_eprint("spec-to-sspec: canonical SPipe manual not produced at {staged_path}")
+        return 3
+    dir_remove(staging_root, true)
+    val result = compose_sspec_documentized_manual(written_path, source, spipe_manual, true)
+    if file_atomic_write(output, result.content):
+        print "spec-to-sspec: regenerated manual {output}"
+        0
+    else:
+        _cli_eprint("spec-to-sspec: cannot write manual {output}")
+        3
+
 fn _modernize(args: [text]) -> i64:
     var positional: [text] = []
     var i = 0
     while i < args.len():
-        if args[i] == "--apply" or args[i] == "-o":
-            i = i + 1
+        if args[i] == "-o":
+            i = i + 1   # -o <value>: skip flag and its value
+        elif args[i] == "--apply" or args[i] == "--with-manual":
+            # bare flags: skip just the token
+            pass
         else:
             positional.push(args[i])
         i = i + 1
@@ -177,15 +220,25 @@ fn _modernize(args: [text]) -> i64:
             _cli_eprint("spec-to-sspec: cannot read: {path}")
             return 2
     val modernized = modernize_source(path, source)
+    val want_manual = _has(args, "--with-manual")
     if _has(args, "--apply"):
         file_atomic_write(path, modernized)
         print "spec-to-sspec: modernized {path}"
+        file_atomic_write(spipe_evidence_sidecar_path(path), spipe_evidence_sidecar_content(path, modernized))
+        if want_manual:
+            return _regenerate_manual(path, modernized)
     else:
         val out_path = _option(args, "-o", "")
         if out_path != "":
             file_atomic_write(out_path, modernized)
             print "spec-to-sspec: wrote {out_path}"
+            file_atomic_write(spipe_evidence_sidecar_path(out_path), spipe_evidence_sidecar_content(out_path, modernized))
+            if want_manual:
+                return _regenerate_manual(out_path, modernized)
         else:
+            if want_manual:
+                _cli_eprint("spec-to-sspec: --with-manual needs --apply or -o (docgen reads the file)")
+                return 2
             print modernized
     0
 

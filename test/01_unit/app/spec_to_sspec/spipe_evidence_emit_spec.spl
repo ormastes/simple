@@ -1,0 +1,85 @@
+# @req REQ-SPEC-TO-SPIPE-EVIDENCE-EXT-001
+"""
+# spec-to-sspec evidence extension adapter
+
+**Purpose and audience:** verifies `spipe_evidence_emit.spl` (Lane E6) projects
+evidence-bearing scenarios detected by the spec-to-sspec modernizer into a
+well-formed `SpipeEvidenceExtension` envelope, and that `extension_is_wellformed`
+rejects a malformed envelope the spec constructs directly.
+"""
+
+use std.spec.*
+use app.spec_to_sspec.spipe_evidence_emit.{
+    spipe_evidence_nodes_for_source, spipe_evidence_extension_for_source,
+    spipe_evidence_sidecar_content
+}
+use std.common.spec.evidence.spipe_extension.{
+    SpipeEvidenceNode, SpipeEvidenceNodeKind, SpipeEvidenceExtension,
+    spipe_evidence_node, spipe_evidence_extension,
+    extension_is_wellformed, extension_wellformed_reason
+}
+
+describe "spec-to-sspec spipe evidence extension adapter":
+    it "emits one interaction_case node per evidence-bearing scenario":
+        step("scan a synthetic spec source with one evidence-bearing scenario")
+        val source = "describe \"d\":\n    it \"captures output\":\n        capture_tui_grid()\n        expect(1).to_equal(1)\n"
+        val nodes = spipe_evidence_nodes_for_source("synthetic_spec.spl", source)
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].kind).to_equal(SpipeEvidenceNodeKind.interaction_case)
+        expect(nodes[0].semantic_id).to_equal("synthetic_spec.spl#captures output")
+        expect(nodes[0].adapter_rule_id).to_equal("spec-to-sspec.evidence-scan.v1")
+
+    it "skips scenarios with no evidence-bearing calls":
+        step("scan a synthetic spec source with an assertion-only scenario")
+        val source = "describe \"d\":\n    it \"pure check\":\n        expect(1).to_equal(1)\n"
+        val nodes = spipe_evidence_nodes_for_source("synthetic_spec.spl", source)
+        expect(nodes.len()).to_equal(0)
+
+    it "produces a well-formed extension envelope for a real scan":
+        step("build the full envelope from a synthetic source")
+        val source = "describe \"d\":\n    it \"captures output\":\n        capture_tui_grid()\n        expect(1).to_equal(1)\n"
+        val extension = spipe_evidence_extension_for_source("synthetic_spec.spl", source)
+        expect(extension.namespace_id).to_equal("simple.sspec.evidence.ext.v1")
+        expect(extension_is_wellformed(extension)).to_equal(true)
+        expect(extension_wellformed_reason(extension)).to_equal("")
+
+    it "serializes sidecar content deterministically":
+        step("render sidecar text twice for identical input")
+        val source = "describe \"d\":\n    it \"captures output\":\n        capture_tui_grid()\n        expect(1).to_equal(1)\n"
+        val first = spipe_evidence_sidecar_content("synthetic_spec.spl", source)
+        val second = spipe_evidence_sidecar_content("synthetic_spec.spl", source)
+        expect(first).to_equal(second)
+        expect(first.contains("namespace_id: simple.sspec.evidence.ext.v1")).to_equal(true)
+        expect(first.contains("node.kind: interaction_case")).to_equal(true)
+
+    it "rejects a malformed envelope built with an empty semantic id":
+        step("construct an envelope with an invalid node directly")
+        val bad_node = spipe_evidence_node(
+            "",
+            SpipeEvidenceNodeKind.interaction_case,
+            0,
+            1,
+            "",
+            "rule",
+            "kept",
+            "payload"
+        )
+        val extension = spipe_evidence_extension([bad_node])
+        expect(extension_is_wellformed(extension)).to_equal(false)
+        expect(extension_wellformed_reason(extension)).to_contain("empty semantic id")
+
+    it "rejects a malformed envelope with a non-positive span":
+        step("construct an envelope with span_end <= span_start")
+        val bad_node = spipe_evidence_node(
+            "id-1",
+            SpipeEvidenceNodeKind.interaction_case,
+            5,
+            5,
+            "",
+            "rule",
+            "kept",
+            "payload"
+        )
+        val extension = spipe_evidence_extension([bad_node])
+        expect(extension_is_wellformed(extension)).to_equal(false)
+        expect(extension_wellformed_reason(extension)).to_contain("non-positive span")

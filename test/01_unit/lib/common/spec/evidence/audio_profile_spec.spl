@@ -1,0 +1,133 @@
+# Audio/media evidence profiles (E7 domain profile).
+#
+# @manual_section Audio/media evidence profiles
+# @req REQ-SSPEC-EVD-007-AUDIO
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus,
+    check_numeric_tolerance, check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.audio_profile.{
+    AudioSampleSet,
+    audio_sample_set_is_valid, audio_to_evidence,
+    audio_rms_scaled, audio_peak_scaled,
+    audio_duration_ms, audio_silence_ratio_permille
+}
+
+fn stereo_capture() -> AudioSampleSet:
+    AudioSampleSet(
+        channel_count: 2,
+        sample_rate_hz: 8000,
+        bit_depth: 16,
+        samples: [1000, -1000, 2000, -2000, 3000, -3000, 4000, -4000]
+    )
+
+describe "Audio evidence profile":
+    """
+    A captured audio buffer becomes evidence only when it actually has
+    samples and a coherent capture format. Duration is always derived from
+    the sample data itself, never taken as an independently-asserted field
+    that could disagree with what was actually captured.
+    """
+
+    it "rejects an empty sample set as not a real capture":
+        step("Build a sample set with no samples")
+        val empty = AudioSampleSet(channel_count: 2, sample_rate_hz: 8000, bit_depth: 16, samples: [])
+
+        step("Verify it is rejected as invalid")
+        expect(audio_sample_set_is_valid(empty)).to_equal(false)
+
+        step("Verify converting it to evidence fails to parse instead of emitting a zero-valued reading")
+        val evidence = audio_to_evidence(empty, "audio/capture")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.nodes.len()).to_equal(0)
+
+    it "rejects a non-positive sample rate":
+        step("Build a sample set with sample_rate_hz of 0")
+        val zero_rate = AudioSampleSet(channel_count: 2, sample_rate_hz: 0, bit_depth: 16, samples: [1, 2])
+        expect(audio_sample_set_is_valid(zero_rate)).to_equal(false)
+        val evidence = audio_to_evidence(zero_rate, "audio/capture")
+        expect(evidence.parse_ok).to_equal(false)
+
+        step("Build a sample set with a negative sample_rate_hz")
+        val negative_rate = AudioSampleSet(channel_count: 2, sample_rate_hz: -1, bit_depth: 16, samples: [1, 2])
+        expect(audio_sample_set_is_valid(negative_rate)).to_equal(false)
+        val negative_evidence = audio_to_evidence(negative_rate, "audio/capture")
+        expect(negative_evidence.parse_ok).to_equal(false)
+
+    it "rejects a zero channel count":
+        step("Build a sample set with channel_count of 0")
+        val zero_channels = AudioSampleSet(channel_count: 0, sample_rate_hz: 8000, bit_depth: 16, samples: [1, 2])
+
+        step("Verify it is rejected as invalid and fails to parse")
+        expect(audio_sample_set_is_valid(zero_channels)).to_equal(false)
+        val evidence = audio_to_evidence(zero_channels, "audio/capture")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.nodes.len()).to_equal(0)
+
+    it "derives duration from the actual sample count, never an asserted field":
+        step("Compute duration for a stereo 8kHz capture of 8 interleaved samples (4 frames)")
+        val duration = audio_duration_ms(8, 8000, 2)
+
+        step("Verify duration matches frames/rate, not any value the caller could assert independently")
+        expect(duration).to_equal(0)
+
+        step("Compute duration for a longer capture where the math yields a nonzero result")
+        val longer_duration = audio_duration_ms(16000, 8000, 2)
+        expect(longer_duration).to_equal(1000)
+
+    it "computes RMS of an all-zero buffer as exactly zero":
+        step("Build an all-silent buffer")
+        val silence: [i64] = [0, 0, 0, 0, 0, 0]
+
+        step("Verify RMS is exactly zero, not merely close to zero")
+        expect(audio_rms_scaled(silence, 1)).to_equal(0)
+
+    it "computes RMS of a full-scale square wave close to its peak":
+        step("Build a symmetric square wave alternating between +peak and -peak")
+        val peak_value: i64 = 5000
+        val square: [i64] = [peak_value, 0 - peak_value, peak_value, 0 - peak_value, peak_value, 0 - peak_value]
+
+        step("Verify the computed RMS equals the computed peak (a square wave's RMS is its peak)")
+        val rms = audio_rms_scaled(square, 1)
+        val peak = audio_peak_scaled(square)
+        expect(rms).to_equal(peak)
+
+    it "reports silence ratio in parts-per-thousand from the actual samples":
+        step("Build a buffer where half the samples are below the silence threshold")
+        val mixed: [i64] = [0, 0, 0, 5000, 5000, 5000]
+
+        step("Verify the silence ratio is exactly 500 permille (half)")
+        expect(audio_silence_ratio_permille(mixed, 0)).to_equal(500)
+
+    it "feeds a captured buffer into compare_evidence against a closed oracle":
+        step("Convert a valid stereo capture to canonical evidence")
+        val evidence = audio_to_evidence(stereo_capture(), "audio/capture")
+        expect(evidence.parse_ok).to_equal(true)
+
+        step("Build a closed oracle checking format fields exactly and RMS within a stated tolerance")
+        val expected_rms = audio_rms_scaled(stereo_capture().samples, 1)
+        val expected_peak = audio_peak_scaled(stereo_capture().samples)
+        val expected_duration = audio_duration_ms(stereo_capture().samples.len(), 8000, 2)
+        val expected_silence = audio_silence_ratio_permille(stereo_capture().samples, 0)
+        val oracle: OracleSpec = oracle_spec(
+            "audio/capture",
+            [
+                check_exact("audio.channel_count", "2"),
+                check_exact("audio.sample_rate_hz", "8000"),
+                check_exact("audio.bit_depth", "16"),
+                check_exact("audio.duration_ms", "{expected_duration}"),
+                check_exact("audio.peak", "{expected_peak}"),
+                check_exact("audio.silence_ratio_permille", "{expected_silence}"),
+                check_numeric_tolerance(
+                    "audio.rms", "{expected_rms}", 5,
+                    "RMS is deterministic for this fixed buffer; a small tolerance absorbs any future integer-sqrt rounding change"
+                )
+            ]
+        )
+
+        step("Verify the evidence passes the closed oracle")
+        val result = compare_evidence(evidence, oracle)
+        expect(result.status).to_equal(EvidenceStatus.passed)

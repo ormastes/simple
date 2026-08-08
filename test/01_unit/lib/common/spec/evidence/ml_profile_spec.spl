@@ -1,0 +1,199 @@
+# ML / probabilistic evidence profile (E7).
+#
+# @manual_section ML and probabilistic evidence profiles
+# @req REQ-SSPEC-EVD-007
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus,
+    check_numeric_tolerance, check_exact, oracle_spec
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.ml_profile.{
+    MlRun, MlMetric, MlPrediction,
+    ml_run_is_valid, ml_metric_is_valid, ml_run_to_evidence,
+    evaluate_metrics, confusion_counts, accuracy_permille
+}
+
+fn tracked_run() -> MlRun:
+    MlRun(
+        model_id: "fraud-classifier",
+        model_version: "2.4",
+        dataset_hash: "d41d8cd98f00b204e9800998ecf8427e",
+        model_hash: "5eb63bbbe01eeed093cb22bb8f5acdc3",
+        seed: "20260808-ml-1",
+        framework: "torch"
+    )
+
+fn accuracy_metric() -> MlMetric:
+    MlMetric(name: "accuracy", value_scaled: 920, scale: 1000, tolerance_scaled: 10, reason: "held-out test split, run-to-run noise margin")
+
+fn predictions() -> [MlPrediction]:
+    [
+        MlPrediction(input_id: "1", predicted_class: "fraud", expected_class: "fraud", confidence_permille: 910),
+        MlPrediction(input_id: "2", predicted_class: "legit", expected_class: "legit", confidence_permille: 980),
+        MlPrediction(input_id: "3", predicted_class: "fraud", expected_class: "legit", confidence_permille: 550),
+        MlPrediction(input_id: "4", predicted_class: "legit", expected_class: "legit", confidence_permille: 990)
+    ]
+
+describe "ML evidence profile":
+    """
+    A recorded ML/probabilistic run becomes evidence only when its dataset,
+    model, and seed are all tracked, so a metric can always be traced back to
+    the specific inputs that produced it. Metric tolerances always carry a
+    stated reason, and accuracy is refused rather than reported as a hollow
+    zero when there is nothing to measure.
+    """
+
+    it "rejects a run with no recorded dataset hash as not reproducible":
+        step("Build a run whose dataset hash was never recorded")
+        val run = MlRun(
+            model_id: "fraud-classifier",
+            model_version: "2.4",
+            dataset_hash: "",
+            model_hash: "5eb63bbbe01eeed093cb22bb8f5acdc3",
+            seed: "20260808-ml-1",
+            framework: "torch"
+        )
+
+        step("Verify the run is rejected as invalid")
+        expect(ml_run_is_valid(run)).to_equal(false)
+
+        step("Verify converting it to evidence fails to parse instead of emitting nodes")
+        val evidence = ml_run_to_evidence(run, [accuracy_metric()], "ml/fraud-classifier")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.nodes.len()).to_equal(0)
+
+    it "rejects a run with no recorded model hash as not reproducible":
+        step("Build a run whose model hash was never recorded")
+        val run = MlRun(
+            model_id: "fraud-classifier",
+            model_version: "2.4",
+            dataset_hash: "d41d8cd98f00b204e9800998ecf8427e",
+            model_hash: "",
+            seed: "20260808-ml-1",
+            framework: "torch"
+        )
+
+        step("Verify the run is rejected as invalid")
+        expect(ml_run_is_valid(run)).to_equal(false)
+
+    it "rejects a run with no recorded seed as not reproducible":
+        step("Build a run whose seed was never recorded")
+        val run = MlRun(
+            model_id: "fraud-classifier",
+            model_version: "2.4",
+            dataset_hash: "d41d8cd98f00b204e9800998ecf8427e",
+            model_hash: "5eb63bbbe01eeed093cb22bb8f5acdc3",
+            seed: "",
+            framework: "torch"
+        )
+
+        step("Verify the run is rejected as invalid")
+        expect(ml_run_is_valid(run)).to_equal(false)
+
+        step("Verify converting it to evidence fails to parse instead of emitting nodes")
+        val evidence = ml_run_to_evidence(run, [accuracy_metric()], "ml/fraud-classifier")
+        expect(evidence.parse_ok).to_equal(false)
+
+    it "accepts a fully-tracked run and records its metrics as evidence nodes":
+        step("Convert a tracked run and its metrics to canonical evidence")
+        val evidence = ml_run_to_evidence(tracked_run(), [accuracy_metric()], "ml/fraud-classifier")
+
+        step("Verify the run parses and carries a node for the metric")
+        expect(evidence.parse_ok).to_equal(true)
+        var metric_nodes = 0
+        for node in evidence.nodes:
+            if node.path == "ml.metric.accuracy":
+                metric_nodes = metric_nodes + 1
+        expect(metric_nodes).to_equal(1)
+
+    it "requires every metric tolerance to carry a reason":
+        step("Declare a metric whose tolerance has no recorded reason")
+        val metric = MlMetric(name: "accuracy", value_scaled: 920, scale: 1000, tolerance_scaled: 10, reason: "")
+
+        step("Verify the module itself rejects the metric as invalid")
+        expect(ml_metric_is_valid(metric)).to_equal(false)
+
+        step("Verify evaluate_metrics reports it as a finding rather than silently checking the tolerance anyway")
+        val findings = evaluate_metrics([metric], [920])
+        expect(findings.len()).to_equal(1)
+        expect(findings[0]).to_contain("no recorded reason")
+
+    it "flags a metric outside its tolerance band":
+        step("Declare an accuracy metric expecting 92.0% +/- 1.0%")
+        val metric = accuracy_metric()
+
+        step("Evaluate it against an actual value far outside tolerance")
+        val findings = evaluate_metrics([metric], [700])
+
+        step("Verify a finding is reported")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0]).to_contain("accuracy")
+
+    it "passes a metric inside its tolerance band":
+        step("Evaluate the accuracy metric against an actual value inside tolerance")
+        val findings = evaluate_metrics([accuracy_metric()], [925])
+
+        step("Verify no findings are reported")
+        expect(findings.len()).to_equal(0)
+
+    it "reports a metrics/actual_values length mismatch as a finding, not a silent truncation":
+        step("Evaluate two metrics against only one actual value")
+        val findings = evaluate_metrics([accuracy_metric(), accuracy_metric()], [925])
+
+        step("Verify the mismatch itself is reported")
+        expect(findings.len()).to_equal(1)
+        expect(findings[0]).to_contain("length mismatch")
+
+    it "counts correct vs total predictions":
+        step("Compute confusion counts over a mixed prediction set")
+        val counts = confusion_counts(predictions())
+
+        step("Verify 3 of 4 predictions were correct")
+        expect(counts.0).to_equal(3)
+        expect(counts.1).to_equal(4)
+
+    it "computes accuracy in parts-per-thousand":
+        step("Compute accuracy over the same prediction set")
+        val acc = accuracy_permille(predictions())
+
+        step("Verify it is 750 permille (3/4)")
+        expect(acc).to_equal(750)
+
+    it "refuses accuracy on an empty prediction set instead of reporting a hollow zero":
+        step("Compute accuracy over no predictions")
+        val acc = accuracy_permille([])
+
+        step("Verify it is refused, not reported as 0")
+        expect(acc).to_equal(-1)
+
+    it "feeds ml run evidence into compare_evidence against a closed oracle":
+        step("Convert the tracked run and its metric to canonical evidence")
+        val evidence = ml_run_to_evidence(tracked_run(), [accuracy_metric()], "ml/fraud-classifier")
+
+        step("Declare a closed oracle covering every field the run emits, with a stated reason on the tolerance check")
+        val oracle: OracleSpec = oracle_spec(
+            "ml/fraud-classifier",
+            [
+                check_exact("ml.model_id", "fraud-classifier"),
+                check_exact("ml.model_version", "2.4"),
+                check_exact("ml.dataset_hash", "d41d8cd98f00b204e9800998ecf8427e"),
+                check_exact("ml.model_hash", "5eb63bbbe01eeed093cb22bb8f5acdc3"),
+                check_exact("ml.seed", "20260808-ml-1"),
+                check_exact("ml.framework", "torch"),
+                check_numeric_tolerance("ml.metric.accuracy", "920", 10, "held-out test split, run-to-run noise margin")
+            ]
+        )
+
+        step("Compare and verify the closed oracle passes because every emitted field is declared")
+        val result = compare_evidence(evidence, oracle)
+        expect(result.status).to_equal(EvidenceStatus.passed)
+
+    it "checks a metric with check_numeric_tolerance and a stated reason":
+        step("Declare a single numeric-tolerance check with an explicit reason")
+        val check = check_numeric_tolerance("ml.metric.accuracy", "920", 10, "held-out test split, run-to-run noise margin")
+
+        step("Verify the reason is carried on the check, not silently dropped")
+        expect(check.reason).to_equal("held-out test split, run-to-run noise margin")
+        expect(check.tolerance).to_equal(10)
