@@ -1,0 +1,261 @@
+# Forward-hop fact extractor — feeds zero_forward_path_gate.spl
+# (C5 / M7 of doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md, which is
+# §3 lane C5 of doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md).
+#
+# Same checker/scan split M1 already uses: layer_call_direction_checker.spl
+# decides, layer_call_scan.spl extracts. This file is the extract half for C5.
+#
+# SCOPE (stated plainly, do not overclaim):
+#   - TEXT-based extractor, same tier of honesty as layer_call_scan.spl. There
+#     is no standalone self-hosted parse entry point to hang this off, so a
+#     forwarding declaration is recognized only when it matches the literal
+#     line shapes src/app/desugar/forwarding.spl itself keys on:
+#         alias fn NAME[(args)] = FIELD.METHOD      (that file's Phase 2)
+#         alias me NAME[(args)] = FIELD.METHOD      (that file's Phase 2)
+#     A trait alias (`alias Trait = field`, Phase 3) and a blanket alias
+#     (`alias field`, Phase 4) expand to a method set this scan cannot
+#     enumerate from text — they are reported as UNMEASURABLE for the file that
+#     contains them (see `scan_forward_hops`), never silently skipped, because
+#     skipping them would let a forwarder hide from the gate.
+#   - WHY `physical: true` IS SOUND TODAY: every recognized alias line is
+#     rewritten by src/app/desugar/forwarding.spl into a REAL generated method
+#     body (`fn len(): self.inner.len()` — that file's own header, lines 11-15).
+#     No collapse pass exists to remove it: M4 (HirForwardDecl) is PARTIAL with
+#     zero consumers, M5/M6 are designed-only. So a recognized alias edge
+#     provably survives as a physical call, and marking it `physical: true` is
+#     a measurement, not an assumption. When collapse lands, THIS is the line
+#     that must change — and the gate flipping from RED to GREEN is the proof
+#     collapse works.
+#   - The three axes this text scan cannot see (layer-view copy bytes,
+#     temporary allocations, dynamic dispatches per batch) require the
+#     post-collapse MIR that M4-M6 have not built. They are declared in
+#     `unmeasured_axes`, so the gate BLOCKS on them rather than reading an
+#     absent number as a zero.
+#   - Standalone tool, not a compile-pipeline pass — same precedent as
+#     layer_call_scan.spl and noalloc_manifest_scan.spl.
+
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.semantics.zero_forward_path_gate.{ForwardEdge, ZeroForwardEntry}
+use compiler.semantics.zero_forward_path_gate.{ZFP_AXIS_HOPS, ZFP_AXIS_COPY_BYTES}
+use compiler.semantics.zero_forward_path_gate.{ZFP_AXIS_ALLOCATIONS, ZFP_AXIS_DISPATCH}
+
+val ZFP_DECORATOR = "@zero_forward_path"
+
+# The reason string attached to every axis this text scan cannot measure.
+val MIR_AXES_REASON = "text scan cannot see MIR; layer-view copies, temporary "
+    + "allocations and per-batch dispatch counts require the post-collapse MIR "
+    + "that M4-M6 have not built (M4 PARTIAL/unwired, M5-M6 designed-only)"
+
+val UNENUMERABLE_ALIAS_REASON = "file contains a trait or blanket alias whose "
+    + "expanded method set cannot be enumerated from source text; the hop count "
+    + "is therefore a lower bound, not a measurement"
+
+struct ForwardDeclLine:
+    """One recognized `alias fn` / `alias me` forwarding declaration."""
+    logical_name: text
+    receiver_field: text
+    target_method: text
+
+fn _ident_prefix(s: text) -> text:
+    """Leading identifier of `s` ("" when it does not start with one)."""
+    var name = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_alpha or (is_digit and name != ""):
+            name = name + ch
+        else:
+            break
+        i = i + 1
+    name
+
+fn _split_once(s: text, sep: text) -> [text]:
+    """[before, after] on the first occurrence of `sep`; [] when absent."""
+    var i = 0
+    while i + sep.len() <= s.len():
+        if s[i:i + sep.len()] == sep:
+            return [s[0:i], s[i + sep.len():s.len()]]
+        i = i + 1
+    []
+
+fn parse_forward_decl(line: text) -> [ForwardDeclLine]:
+    """Parse `alias fn NAME[(args)] = FIELD.METHOD` / `alias me ...`.
+
+    Returns a one-element list on a match and [] otherwise — Simple has no
+    nullable-struct return shape in use elsewhere in this directory, and a
+    list keeps the caller's loop uniform (same convention layer_call_scan.spl
+    uses for its extractors)."""
+    val trimmed = line.trim()
+    var rest = ""
+    if trimmed.starts_with("alias fn "):
+        rest = trimmed[9:trimmed.len()]
+    elif trimmed.starts_with("alias me "):
+        rest = trimmed[9:trimmed.len()]
+    else:
+        return []
+
+    val halves = _split_once(rest, "=")
+    if halves.len() != 2:
+        return []
+    val logical = _ident_prefix(halves[0].trim())
+    if logical == "":
+        return []
+    val target = halves[1].trim()
+    val dotted = _split_once(target, ".")
+    if dotted.len() != 2:
+        return []
+    val field = _ident_prefix(dotted[0].trim())
+    val method = _ident_prefix(dotted[1].trim())
+    if field == "" or method == "":
+        return []
+    [ForwardDeclLine(logical_name: logical, receiver_field: field,
+        target_method: method)]
+
+fn _is_unenumerable_alias(line: text) -> bool:
+    """True for a Phase 3 (`alias Trait = field`) or Phase 4 (`alias field`)
+    declaration — recognized as PRESENT but not enumerable from text."""
+    val trimmed = line.trim()
+    if not trimmed.starts_with("alias "):
+        return false
+    if trimmed.starts_with("alias fn ") or trimmed.starts_with("alias me "):
+        return false
+    true
+
+fn _annotated_names(lines: [text]) -> [text]:
+    """Names of `fn`/`me` declarations carrying `@zero_forward_path` on a
+    preceding decorator line (blank/comment lines between the decorator and the
+    declaration are tolerated, matching how other decorators are written)."""
+    var names: [text] = []
+    var pending = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with(ZFP_DECORATOR):
+            pending = true
+            continue
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not pending:
+            continue
+        var rest = ""
+        if trimmed.starts_with("fn "):
+            rest = trimmed[3:trimmed.len()]
+        elif trimmed.starts_with("me "):
+            rest = trimmed[3:trimmed.len()]
+        elif trimmed.starts_with("alias fn "):
+            rest = trimmed[9:trimmed.len()]
+        elif trimmed.starts_with("alias me "):
+            rest = trimmed[9:trimmed.len()]
+        else:
+            # Decorator attached to something that is not a callable — drop the
+            # pending flag rather than mis-attributing it to the next function.
+            pending = false
+            continue
+        val name = _ident_prefix(rest)
+        if name != "":
+            names.push(name)
+        pending = false
+    names
+
+fn _find_decl(decls: [ForwardDeclLine], name: text) -> i64:
+    var i = 0
+    while i < decls.len():
+        if decls[i].logical_name == name:
+            return i
+        i = i + 1
+    0 - 1
+
+fn _walk_chain(decls: [ForwardDeclLine], start: text) -> [ForwardEdge]:
+    """Follow the forwarding chain from `start`, one physical hop per edge.
+
+    Cycle-safe: a name already visited terminates the walk (a cyclic alias
+    chain is rejected elsewhere by the layer DAG checker; here it must simply
+    not hang)."""
+    var edges: [ForwardEdge] = []
+    var visited: [text] = []
+    var current = start
+    var guard = 0
+    while guard < decls.len() + 1:
+        guard = guard + 1
+        var seen = false
+        for v in visited:
+            if v == current:
+                seen = true
+        if seen:
+            break
+        visited.push(current)
+        val idx = _find_decl(decls, current)
+        if idx < 0:
+            break
+        val d = decls[idx]
+        val target = d.receiver_field + "." + d.target_method
+        edges.push(ForwardEdge(from_symbol: d.logical_name, to_symbol: target,
+            physical: true, copy_bytes: 0 - 1))
+        current = d.target_method
+    edges
+
+fn scan_source_forward_hops(path: text, content: text) -> [ZeroForwardEntry]:
+    """Extract one `ZeroForwardEntry` per `@zero_forward_path` entrypoint in
+    `content`. `path` prefixes the entrypoint name so two files declaring the
+    same symbol stay distinct.
+
+    Every returned entry declares the three MIR-only axes unmeasured. When the
+    file also contains a trait/blanket alias, the HOP axis is declared
+    unmeasured too — the enumerated hop count would otherwise be a lower bound
+    reported as if it were exact, which is precisely the fabricated-zero
+    failure this gate exists to prevent."""
+    val lines = content.split("\n")
+
+    var decls: [ForwardDeclLine] = []
+    var unenumerable = false
+    for line in lines:
+        for d in parse_forward_decl(line):
+            decls.push(d)
+        if _is_unenumerable_alias(line):
+            unenumerable = true
+
+    var entries: [ZeroForwardEntry] = []
+    for name in _annotated_names(lines):
+        var axes: [text] = [ZFP_AXIS_COPY_BYTES, ZFP_AXIS_ALLOCATIONS,
+            ZFP_AXIS_DISPATCH]
+        var reason = MIR_AXES_REASON
+        if unenumerable:
+            axes.push(ZFP_AXIS_HOPS)
+            reason = reason + "; " + UNENUMERABLE_ALIAS_REASON
+        entries.push(ZeroForwardEntry(
+            entrypoint: path + ":" + name,
+            annotated: true,
+            edges: _walk_chain(decls, name),
+            temporary_allocations: 0 - 1,
+            dynamic_dispatches: 0 - 1,
+            batches: 0 - 1,
+            unmeasured_axes: axes,
+            unmeasured_reason: reason,
+        ))
+    entries
+
+fn scan_file_forward_hops(path: text) -> [ZeroForwardEntry]:
+    scan_source_forward_hops(path, file_read(path))
+
+fn scan_forward_hops(root: text) -> [ZeroForwardEntry]:
+    """Walk `root` and extract every `@zero_forward_path` entrypoint under it.
+
+    Returns [] when the tree declares none. That empty result is NOT a pass —
+    `check_all_zero_forward_paths` turns it into an explicit BLOCKED verdict,
+    which is the whole reason this function is allowed to return []."""
+    var entries: [ZeroForwardEntry] = []
+    for path in dir_walk(root):
+        if not path.ends_with(".spl"):
+            continue
+        if path.ends_with("_spec.spl"):
+            continue
+        for e in scan_file_forward_hops(path):
+            entries.push(e)
+    entries
+
+export ForwardDeclLine, ZFP_DECORATOR, MIR_AXES_REASON, UNENUMERABLE_ALIAS_REASON
+export parse_forward_decl
+export scan_source_forward_hops, scan_file_forward_hops, scan_forward_hops

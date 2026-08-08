@@ -372,12 +372,58 @@ after M4/M5 because "post-weave, post-collapse MIR" (the verifier's stated
 target per the sketch) doesn't exist as a concept until collapse (M4) and
 weaving (M5) land.
 
-### M7 (= C5) — `@zero_forward_path` mechanical gate
+### M7 (= C5) — `@zero_forward_path` mechanical gate — **PARTIAL (hop axis LANDED, three axes BLOCKED)**
 
-Last, because it's a compile-fail gate over the counters (`physical_forward_calls=0`,
-`layer_view_copy_bytes=0`, etc.) that only M4-M6 produce. Scope: wire the gate
-to already-existing counters; do not invent new measurement machinery here if
-M4-M6 already emit what's needed — re-check before adding anything.
+**Status 2026-08-08: PARTIAL.** The re-check this milestone demanded was done:
+M4 is PARTIAL with `hir_forward_decl.spl` having **zero consumers**
+(grep-verified), M5 and M6 are DESIGNED-ONLY, so **no post-collapse MIR
+counters exist to wire to**. Rather than block entirely, the gate landed split
+by measurement axis, in the established checker/scan shape
+(`layer_call_direction_checker.spl` ← `layer_call_scan.spl`):
+
+- `src/compiler/35.semantics/zero_forward_path_gate.spl` — the decision half.
+  Pure function over supplied counters; not registered with any driver pass
+  (same precedent as every sibling in that directory).
+- `src/compiler/90.tools/verify/forward_hop_scan.spl` — the fact half. Text
+  extractor over `alias fn` / `alias me` declarations, keyed on exactly the
+  line shapes `src/app/desugar/forwarding.spl` itself matches.
+- `test/01_unit/compiler/semantics/zero_forward_path_gate_spec.spl` — 29/29.
+
+**Which axes actually bite, and which do not:**
+
+| Axis | State | Why |
+|---|---|---|
+| `physical_forward_calls` (§0 "physical forward hops = 0") | **MEASURABLE, gate bites** | A recognized alias line provably desugars to a real generated body (`forwarding.spl` header lines 11-15) and no collapse pass exists to remove it, so `physical: true` is a measurement, not an assumption. `hop_axis_verdict` gates this axis alone. |
+| `layer_view_copy_bytes` | **BLOCKED** | Requires post-collapse MIR (M4-M6). |
+| `temporary_allocations` | **BLOCKED** | Same. |
+| `dynamic_dispatches <= 1/batch` | **BLOCKED** | Same. |
+
+So the FULL gate is BLOCKED for every entrypoint on today's tree, by design —
+each unmeasurable axis yields an explicit `ZFP_UNMEASURED` violation with a
+reason string rather than an assumed zero. **Unblock condition:** when M4's
+collapse lands, `forward_hop_scan.spl`'s `physical: true` becomes conditional,
+and the hop gate flipping RED→GREEN is the proof collapse works. When M6 wires
+real MIR extraction, the three blocked axes drop out of `unmeasured_axes` and
+the full gate becomes live with no change to the decision half.
+
+**Fail-closed contract (spec-enforced, sabotage-verified):** an empty scan is
+BLOCKED; a scan with zero `@zero_forward_path` claims is BLOCKED; a negative
+counter is a not-measured sentinel, never a zero; `batches <= 0` makes the
+`<=1/batch` bound unmeasurable rather than passing; an unknown axis name is an
+error so a typo cannot silently disable a check.
+**Sabotage numbers:** baseline 29/29 pass · vacuous-pass sabotage (empty and
+unclaimed scans made to return `ok`) → 25/29, 4 failed · fabricated-collapse
+sabotage (scan claiming every hop already collapsed) → 28/29, 1 failed ·
+restored byte-identical → 29/29 pass.
+
+**Still open in M7:** the compile-FAIL half. This gate is a checker + spec, not
+a compile-time diagnostic — nothing in the compile driver calls it, exactly as
+with M0/M1/M3's landed slices. Wiring it as a real compilation failure belongs
+with M4's collapse, since a gate that fails compilation on every existing
+forwarder before collapse exists would block the tree.
+
+Resume command:
+`SIMPLE_MODULE_LIMIT=4000 bin/simple test test/01_unit/compiler/semantics/zero_forward_path_gate_spec.spl`
 
 ## 3. Sequencing dependency chain
 
@@ -393,9 +439,13 @@ M0 (layer DAG) → M1 (call direction) → M2 (real layout) → M3 (tags/obligat
                                               M7 (@zero_forward_path gate)
 ```
 
-Status overlay (2026-08-07): **M0 LANDED · M1 LANDED (WARN-level) · M2 PARTIAL
-(spec-side only) · M3 LANDED · M4 PARTIAL (struct only, unwired) · M5-M7
-DESIGNED-ONLY.** Note M3 landed ahead of M2's production wiring, so the chain
+Status overlay (2026-08-08): **M0 LANDED · M1 LANDED (WARN-level) · M2 PARTIAL
+(spec-side only) · M3 LANDED · M4 PARTIAL (struct only, unwired) · M5-M6
+DESIGNED-ONLY · M7 PARTIAL (hop axis landed and biting; copy/alloc/dispatch
+axes explicitly BLOCKED on M4-M6, never assumed zero).** M7 landed out of chain
+order deliberately: its hop axis is measurable from source alone, so the plan's
+§0 line "physical forward hops = 0" is pinned ahead of collapse rather than
+after it. Note M3 landed ahead of M2's production wiring, so the chain
 below was not walked strictly in order — M2's gap is real and still open.
 
 M0-M3 are genuinely independent-shippable in the sense the task asked for:
