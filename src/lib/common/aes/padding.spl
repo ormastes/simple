@@ -1,64 +1,85 @@
 # AES Padding Module
 #
-# This module implements PKCS#7 padding for block alignment
+# This module implements PKCS#7 padding for block alignment (RFC 5652 §6.3).
+#
+# Element types are declared `[i64]` rather than the bare `list` this module
+# used previously. That is NOT cosmetic: under the JIT lane, an element read
+# `data[i]` from a parameter declared as an untyped `list` yields the value
+# still carrying its small-int tag (i.e. `v << 3`), so `data_len - padding_len`
+# computed garbage and every unpad rejected. Typed `[i64]` parameters read
+# correctly. The compiler defect is filed separately at
+# doc/08_tracking/bug/jit_param_passed_list_element_read_returns_tagged_2026-08-08.md
+# and is NOT considered fixed by this file's typing.
 
 # =============================================================================
 # PADDING (PKCS#7)
 # =============================================================================
 
-# Add PKCS#7 padding to data
-fn pkcs7_pad(data: list, block_size: i64) -> list:
+# Add PKCS#7 padding to `data` so its length is a whole multiple of
+# `block_size`. A block-aligned input gains a full extra block of padding, per
+# RFC 5652 §6.3. Returns nil when `block_size` is outside 1..=255.
+fn pkcs7_pad(data: [i64], block_size: i64) -> [i64]?:
     if block_size <= 0 or block_size > 255:
-        return data
+        return nil
 
-    val data_len = data.length()
+    val data_len = data.len()
     val remainder = data_len % block_size
     val padding_len = block_size - remainder
 
-    var padded = []
+    var padded: [i64] = []
     var i = 0
     while i < data_len:
-        padded.append(data[i])
+        padded.push(data[i] & 0xFF)
         i = i + 1
 
     # Add padding bytes (each byte = padding length)
     var j = 0
     while j < padding_len:
-        padded.append(padding_len)
+        padded.push(padding_len)
         j = j + 1
 
     padded
 
-# Remove PKCS#7 padding from data
-fn pkcs7_unpad(data: list) -> list:
-    val data_len = data.length()
+# Strip and VALIDATE PKCS#7 padding. Returns nil when the padding is invalid.
+#
+# This fails CLOSED on purpose. The previous revision returned its input
+# unchanged on invalid padding, which under a wrong key hands raw padding bytes
+# back to the caller as if they were plaintext -- a padding-oracle enabler.
+# An invalid trailer is now an explicit failure that the caller cannot ignore,
+# and it is distinguishable from the legitimate empty result produced by a
+# single full block of padding.
+#
+# Rejects, in order: an empty input; a length that is not a whole number of
+# blocks; a pad length outside 1..=block_size; and any trailer byte that does
+# not equal the pad length.
+fn pkcs7_unpad(data: [i64], block_size: i64) -> [i64]?:
+    if block_size <= 0 or block_size > 255:
+        return nil
 
-    if data_len == 0:
-        return data
+    val data_len = data.len()
+    if data_len == 0 or (data_len % block_size) != 0:
+        return nil
 
     # Last byte indicates padding length
-    val padding_len = data[data_len - 1]
+    val padding_len = data[data_len - 1] & 0xFF
 
-    # Validate padding
-    if padding_len > data_len:
-        return data
+    # A pad length must name a real, whole run of padding inside one block.
+    if padding_len < 1 or padding_len > block_size:
+        return nil
 
-    if padding_len <= 0 or padding_len > 255:
-        return data
-
+    # Every one of the trailing `padding_len` bytes must equal `padding_len`.
     var p = 0
-    val padding_start = data_len - padding_len
     while p < padding_len:
-        if data[padding_start + p] != padding_len:
-            return data
+        if (data[data_len - 1 - p] & 0xFF) != padding_len:
+            return nil
         p = p + 1
 
     # Extract unpadded data
-    var unpadded = []
-    val unpadded_len = padding_start
+    var unpadded: [i64] = []
+    val keep = data_len - padding_len
     var i = 0
-    while i < unpadded_len:
-        unpadded.append(data[i])
+    while i < keep:
+        unpadded.push(data[i] & 0xFF)
         i = i + 1
 
     unpadded
