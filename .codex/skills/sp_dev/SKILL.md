@@ -891,3 +891,35 @@ from scoring, and never self-applies.
 Full external-standard imports follow the shared `spec-to-spipe` architecture
 (`spec-to-sspec` is a compatibility name) and retain source-ledger coverage;
 the maintenance scaffold alone is not a lossless importer.
+
+
+## Bootstrap platform handoff readiness
+
+For bootstrap/platform handoff work, use the canonical readiness checker:
+
+```bash
+sh scripts/check/check-bootstrap-platform-handoff-readiness.shs
+```
+
+Plans and manuals must call the helper step exactly
+`step_bootstrap_platform_handoff_readiness` after Gate 5R. The helper checks
+receipts for the same source and frozen candidate lineage; it does not rebuild,
+substitute the seed, accept stale artifacts, or infer a PASS from partial logs.
+Only a complete Gate 1-6 sequence may emit PASS. Missing native hosts are OPEN
+or BLOCKED, never PASS.
+
+Stage 3 may be owned by another agent. Stage 4 and external-host preparation
+may proceed independently, but later gates consume the Stage 3 owner's exact
+path, hash, authority identity, and admission receipt. Independent preparation
+must not be reported as admission or platform success.
+
+Gate order is fixed: 1) Stage 3 admission, 2) x86_64 Linux Stage 4, 3) frozen
+candidate sanity/hash, 4) four essential-tool smoke markers, 5) deployment then
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` with
+rollback receipt, and 6) the selected native/QEMU/target platform acceptance.
+The rollback receipt includes command, exit status, pre/post/restored hashes,
+receipt path, and arithmetic smoke output.
+
+A live failure permits at most three distinct fix/verify cycles. Stop after the
+third cycle and do not rerun an identical failed command. Cross-builds, stale
+artifacts, static review, and unavailable hosts cannot produce a false PASS.

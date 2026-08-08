@@ -2161,3 +2161,36 @@ parse/analyse time (`TripleLt`, `AluResult32 not found`, VHDL `missing
 entity/architecture`) — a WC-pollution symptom, not a code regression. Restore
 the landed state first: `git checkout origin/main -- src/lib/hardware/
 examples/09_embedded/fpga_riscv/`.
+
+
+## Bootstrap readiness handoff contract
+
+Bootstrap handoff plans use the canonical checker:
+
+```bash
+sh scripts/check/check-bootstrap-platform-handoff-readiness.shs
+```
+
+The named flow helper is `step_bootstrap_platform_handoff_readiness`. It runs
+after Gate 5R and before the Gate 6 platform claim, verifies the exact source
+and candidate lineage, and records the first missing gate. It is fail-closed:
+seed/cross-build substitutions, stale artifacts, partial markers, missing logs,
+and unavailable hosts are not PASS.
+
+The exact sequence is Gate 1 Stage 3 admission, Gate 2 x86_64 Linux Stage 4,
+Gate 3 candidate sanity/hash, Gate 4 all four essential-tool markers, Gate 5
+deployment plus
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`,
+and Gate 6 native/QEMU/target acceptance. Rollback evidence must include the
+reviewed command, exit status, receipt path, pre/post/restored hashes, and
+arithmetic smoke output.
+
+Another agent may own Stage 3 while Stage 4, receipt preparation, and native-host
+coordination proceed independently. The later owner must consume the Stage 3
+path/hash and admission receipt for the same lineage; preparation never waives a
+gate. External native-host rows remain OPEN until their host-specific command,
+identity, hashes, logs, sanity, and markers are returned.
+
+Cap each live failure lane at three distinct fix/verify cycles. Do not repeat an
+identical failed command or promote executable existence, static checks, or
+frontier review to a false PASS.

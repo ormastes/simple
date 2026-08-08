@@ -47,7 +47,7 @@ source and candidate lineage.
 | 3 | Candidate sanity and hash | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. The session plan states that this wrapper runs candidate sanity and provenance checks but publishes no standalone sanity/hash command. Merge owner records exact path and SHA-256, pure-Simple identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
 | 4 | Essential-tools smoke | `sh scripts/check/check-bootstrap-essential-tools-smoke.shs /absolute/path/to/stage4/simple` | The same candidate emits all four required markers: `essential_test_runner_smoke=true`, `essential_lint_smoke=true`, `essential_duplicate_checker_smoke=true`, and `bootstrap_essential_tools_smoke=true` |
 | 5 | Deployment | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output |
-| 5R | Explicit rollback execution | The session plan publishes no standalone rollback command. Do not invent one. Merge owner must record the exact reviewed restore command before execution, prove `bin/release/<platform>/simple.pre_deploy` still exists, run the same arithmetic smoke, and retain rollback command/output plus restored SHA-256. | Distinct executable rollback receipt is mandatory before Gate 5 is accepted; automatic restoration on failed post-swap smoke is retained separately |
+| 5R | Explicit rollback execution | Run `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` after recording the reviewed candidate and deployed identities. Prove `bin/release/<canonical-triple>/simple.pre_deploy` exists, run the same arithmetic smoke, and retain the command/output, exit status, restored SHA-256, and rollback receipt. | Distinct executable rollback receipt is mandatory before Gate 5 is accepted; automatic restoration on failed post-swap smoke is retained separately |
 | 6 | Linux AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on native AArch64 Linux | Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | macOS x86_64/AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Retain matching `stage3/<triple>/simple` and `full/<triple>/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
@@ -57,6 +57,37 @@ source and candidate lineage.
 | 6b | SimpleOS AArch64 QMP input | `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` after 6a | Retain atomic evidence manifest, QMP/serial logs, watermarks, captures, and guest/capture checksum equality; QEMU input evidence only |
 | 6 | RISC-V64 scoped cross/QEMU acceptance | `sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Retain matrix evidence; scoped cross execution/SIMD evidence only, not hosted bootstrap PASS |
 | 6 | RISC-V32 bare-metal object acceptance | No exact command is published in the session plan. Platform sidecar owns the repository architecture-gate receipt for `riscv32-unknown-none-elf`, including ELF32/RISC-V attributes, toolchain identity, command transcript, hashes, and logs. | Bare-metal object acceptance only; never claim `riscv32-unknown-linux-gnu` or hosted bootstrap PASS |
+
+### Canonical readiness checker and handoff helper
+
+The canonical readiness checker is:
+
+```bash
+sh scripts/check/check-bootstrap-platform-handoff-readiness.shs
+```
+
+It is fail-closed and evaluates the retained receipts for the exact source and
+candidate lineage. It must not rebuild, substitute the Rust seed, accept a stale
+artifact, infer a marker from a log fragment, or turn an unavailable host into a
+PASS. A result is `PASS` only when Gates 1 through 5, including executable
+rollback, are evidenced and the selected Gate 6 native/platform handoff is
+complete. Otherwise the result is `OPEN` or `BLOCKED`, with the first missing
+gate named.
+
+Plans and generated operator manuals use the helper step name
+`step_bootstrap_platform_handoff_readiness`. The helper invokes the canonical
+checker after Gate 5R, binds the handoff to `<canonical-triple>`, and publishes
+the Gate 6 handoff receipt. It is a readiness check, not permission to skip a
+gate or to claim platform success.
+
+### Stage 3 ownership and independent work
+
+Stage 3 may be owned and executed by another agent. Stage 4, receipt preparation,
+checker integration, and external-host coordination may proceed independently,
+but the Stage 4 owner must consume the Stage 3 owner's exact path, SHA-256,
+authority identity, and admission receipt. Independent work is preparation only
+until that receipt is attached; it cannot reorder Gates 1 through 6 or publish a
+Stage 3, Stage 4, deployment, rollback, or platform PASS.
 
 ### Required evidence and provenance
 

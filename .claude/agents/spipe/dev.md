@@ -123,3 +123,25 @@ dev-done
 ## Log
 - dev: Created state file with N acceptance criteria (type: <task-type>)
 ```
+
+
+## Bootstrap readiness handoff tasks
+
+When the raw request concerns bootstrap/platform readiness, refine the state
+file around the canonical checker
+`sh scripts/check/check-bootstrap-platform-handoff-readiness.shs`
+and the helper step `step_bootstrap_platform_handoff_readiness`.
+
+Acceptance criteria must require the exact Gate 1-6 order: Stage 3 admission,
+x86_64 Linux Stage 4, candidate sanity/hash, four essential-tool markers,
+deployment plus
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` and
+its command/exit/hash/arithmetic receipts, then platform acceptance. They must
+state that another agent may own Stage 3 and that independent Stage 4 or
+external-host preparation cannot waive the Stage 3 receipt or publish PASS.
+
+The criteria must also require fail-closed handling of stale artifacts, seed or
+cross-build substitutions, missing logs, and unavailable native hosts, plus a
+maximum of three distinct fix/verify cycles with no repeated failed command.
+The developer agent still writes only the state file; it does not execute the
+checker, edit scripts/tests, or claim readiness.
