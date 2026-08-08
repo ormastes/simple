@@ -345,6 +345,7 @@ if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
 fi
 echo "$$" > "${bootstrap_lock}/pid"
 bootstrap_progress_pid=
+deploy_lock=
 bootstrap_progress_state=
 build_progress_events=
 bootstrap_progress_event() {
@@ -396,6 +397,9 @@ bootstrap_cleanup() {
     wait "${bootstrap_progress_pid}" 2>/dev/null || true
   fi
   rm -rf "${bootstrap_lock}"
+  if [ -n "${deploy_lock}" ]; then
+    rm -rf "${deploy_lock}"
+  fi
   exit "${bootstrap_status}"
 }
 trap bootstrap_cleanup EXIT INT TERM
@@ -2127,7 +2131,21 @@ fi
 if [ "${deploy}" -eq 1 ]; then
   bootstrap_progress_mark deploy ""
   deploy_dir="bin/release/${PLATFORM}"
+  if [ -L "bin" ] || [ -L "bin/release" ]; then
+    echo "ERROR: deploy refused - symlinked deployment parent" >&2
+    exit 1
+  fi
   mkdir -p "${deploy_dir}"
+  if [ -L "${deploy_dir}" ]; then
+    echo "ERROR: deploy refused - symlinked deployment directory: ${deploy_dir}" >&2
+    exit 1
+  fi
+  deploy_lock_candidate="${deploy_dir}/.bootstrap-deploy.lock"
+  if ! mkdir "${deploy_lock_candidate}" 2>/dev/null; then
+    echo "ERROR: deploy refused - deployment is locked: ${deploy_lock_candidate}" >&2
+    exit 1
+  fi
+  deploy_lock="${deploy_lock_candidate}"
 
   # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
   # a working seed driver exists at the delegate path. Without it the stage4
@@ -2178,21 +2196,47 @@ if [ "${deploy}" -eq 1 ]; then
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
   prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
-  [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
-  install -m755 "${full_bin}" "${deployed_bin}"
+  deploy_receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
+  deploy_tmp="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
+  receipt_tmp="${deploy_dir}/.bootstrap-deploy-receipt.$$"
+  rm -f "${deploy_receipt}"
+  backup_created=0
+  if [ -e "${deployed_bin}" ]; then
+    if [ ! -f "${deployed_bin}" ] || [ -L "${deployed_bin}" ] || \
+       ! selfhost_identity_ok "${deployed_bin}" || \
+       [ "$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)" != "2" ]; then
+      echo "ERROR: deploy refused - current compiler is not a safe known-good backup." >&2
+      exit 1
+    fi
+    prev_tmp="${deploy_dir}/.simple${exe_suffix}.pre_deploy.$$"
+    install -m755 "${deployed_bin}" "${prev_tmp}"
+    mv "${prev_tmp}" "${prev_bin}"
+    backup_created=1
+  else
+    rm -f "${prev_bin}"
+  fi
+  install -m755 "${full_bin}" "${deploy_tmp}"
+  mv "${deploy_tmp}" "${deployed_bin}"
   echo "Deployed full CLI binary to ${deployed_bin}"
 
   # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
-  smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"
+  if smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"; then
+    :
+  else
+    smoke_out=""
+  fi
   if [ "${smoke_out}" != "2" ]; then
     echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
-    if [ -x "${prev_bin}" ]; then
-      mv "${prev_bin}" "${deployed_bin}"
+    if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
+      restore_tmp="${deploy_dir}/.simple${exe_suffix}.restore.$$"
+      install -m755 "${prev_bin}" "${restore_tmp}"
+      mv "${restore_tmp}" "${deployed_bin}"
       echo "Restored previous binary to ${deployed_bin}" >&2
+    else
+      rm -f "${deployed_bin}"
     fi
     exit 1
   fi
-  rm -f "${prev_bin}"
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
   echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 
@@ -2213,8 +2257,36 @@ if [ "${deploy}" -eq 1 ]; then
 
   # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
   if [ "${os}" != "windows" ]; then
-    "${repo_root}/scripts/setup/setup.shs"
+    if ! "${repo_root}/scripts/setup/setup.shs"; then
+      echo "ERROR: deployment setup failed; restoring previous compiler" >&2
+      if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
+        restore_tmp="${deploy_dir}/.simple${exe_suffix}.setup-restore.$$"
+        install -m755 "${prev_bin}" "${restore_tmp}"
+        mv "${restore_tmp}" "${deployed_bin}"
+      else
+        rm -f "${deployed_bin}"
+      fi
+      exit 1
+    fi
   fi
+
+  current_hash="$(hash_file "${deployed_bin}")"
+  backup_hash="none"
+  [ "${backup_created}" -eq 1 ] && [ -f "${prev_bin}" ] && [ ! -L "${prev_bin}" ] && backup_hash="$(hash_file "${prev_bin}")"
+  {
+    echo "schema=bootstrap-deploy-receipt-v1"
+    echo "platform=${PLATFORM}"
+    echo "current_path=${deployed_bin}"
+    echo "current_sha256=${current_hash}"
+    echo "backup_path=${prev_bin}"
+    echo "backup_sha256=${backup_hash}"
+    echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "deployment_status=pass"
+    echo "platform_acceptance_claimed=false"
+  } > "${receipt_tmp}"
+  chmod 644 "${receipt_tmp}"
+  mv "${receipt_tmp}" "${deploy_receipt}"
+  echo "Deployment receipt: ${deploy_receipt}"
 
   if [ "${release_tests}" -eq 1 ]; then
     echo "Stage 6: running release whole-test gate..."
