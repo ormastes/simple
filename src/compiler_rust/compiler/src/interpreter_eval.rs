@@ -1080,7 +1080,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // If this is a trait implementation, verify and register it
                     if let Some(ref trait_name) = impl_block.trait_name {
                         // Verify trait exists
-                        if let Some(trait_def) = traits.get(trait_name) {
+                        if let Some(trait_candidates) = traits.get(trait_name) {
                             // Check all abstract trait methods are implemented
                             let impl_method_names: std::collections::HashSet<_> =
                                 impl_block.methods.iter().map(|m| m.name.clone()).collect();
@@ -1091,35 +1091,61 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             // `return Err` on the first missing name, which reported a multi-method
                             // drift one method per rebuild and made a three-method drift look like a
                             // one-method problem.
-                            let mut problems: Vec<String> = Vec::new();
-                            for trait_method in &trait_def.methods {
-                                match impl_methods_by_name.get(trait_method.name.as_str()) {
-                                    None => {
-                                        // Only require implementation of abstract methods; a default
-                                        // method the impl does not override is not a problem.
-                                        if trait_method.is_abstract {
-                                            problems.push(format!(
-                                                "type `{}` does not implement required method `{}` from trait `{}`",
-                                                type_name, trait_method.name, trait_name
-                                            ));
+                            //
+                            // Same-named traits from different flattened modules are all
+                            // registered; an impl is conformant when it satisfies ANY
+                            // candidate. If none matches, report the problems against the
+                            // closest candidate (fewest problems) so the diagnostic names
+                            // the trait the impl most plausibly targets.
+                            let mut best_problems: Option<Vec<String>> = None;
+                            let mut matched_trait: Option<&simple_parser::ast::TraitDef> = None;
+                            for trait_def in trait_candidates {
+                                let mut problems: Vec<String> = Vec::new();
+                                for trait_method in &trait_def.methods {
+                                    match impl_methods_by_name.get(trait_method.name.as_str()) {
+                                        None => {
+                                            // Only require implementation of abstract methods; a default
+                                            // method the impl does not override is not a problem.
+                                            if trait_method.is_abstract {
+                                                problems.push(format!(
+                                                    "type `{}` does not implement required method `{}` from trait `{}`",
+                                                    type_name, trait_method.name, trait_name
+                                                ));
+                                            }
                                         }
-                                    }
-                                    Some(impl_method) => {
-                                        // Arity conformance, receiver-normalised on both sides.
-                                        let declared = trait_conformance_arity(trait_method);
-                                        let implemented = trait_conformance_arity(impl_method);
-                                        if declared != implemented {
-                                            problems.push(format!(
-                                                "type `{}` implements method `{}` from trait `{}` with {} parameter(s), but the trait declares {}",
-                                                type_name, trait_method.name, trait_name, implemented, declared
-                                            ));
+                                        Some(impl_method) => {
+                                            // Arity conformance, receiver-normalised on both sides.
+                                            let declared = trait_conformance_arity(trait_method);
+                                            let implemented = trait_conformance_arity(impl_method);
+                                            if declared != implemented {
+                                                problems.push(format!(
+                                                    "type `{}` implements method `{}` from trait `{}` with {} parameter(s), but the trait declares {}",
+                                                    type_name, trait_method.name, trait_name, implemented, declared
+                                                ));
+                                            }
                                         }
                                     }
                                 }
+                                if problems.is_empty() {
+                                    matched_trait = Some(trait_def);
+                                    break;
+                                }
+                                let is_better = match &best_problems {
+                                    Some(current) => problems.len() < current.len(),
+                                    None => true,
+                                };
+                                if is_better {
+                                    best_problems = Some(problems);
+                                }
                             }
-                            if !problems.is_empty() {
-                                return Err(CompileError::Semantic(problems.join("; ")));
-                            }
+                            let trait_def = match matched_trait {
+                                Some(def) => def,
+                                None => {
+                                    return Err(CompileError::Semantic(
+                                        best_problems.unwrap_or_default().join("; "),
+                                    ));
+                                }
+                            };
 
                             // Build combined methods: impl methods + default trait methods
                             let mut combined_methods: Vec<Arc<FunctionDef>> =
@@ -1175,8 +1201,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
             }
             Node::Trait(t) => {
-                // Register trait definition for use in impl checking
-                traits.insert(t.name.clone(), t.clone());
+                // Register trait definition for use in impl checking.
+                // Same-named traits from different modules all survive here;
+                // the impl check picks the candidate that fully conforms.
+                traits.entry(t.name.clone()).or_default().push(t.clone());
                 env.insert(t.name.clone(), Value::Nil);
             }
             Node::Mixin(mixin_def) => {

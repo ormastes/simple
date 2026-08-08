@@ -98,8 +98,14 @@ pub(crate) struct UnitFamilyInfo {
     pub conversions: HashMap<String, f64>,
 }
 
-/// Stores trait definitions: trait_name -> TraitDef
-pub(crate) type Traits = HashMap<String, simple_parser::ast::TraitDef>;
+/// Stores trait definitions: trait_name -> all TraitDefs with that name.
+///
+/// The interpreter flattens every imported module into one namespace, so two
+/// modules may declare same-named traits (e.g. the gc `engine3d.backend` and
+/// nogc `engine.render.backend3d` `RenderBackend3D`). Keeping every candidate
+/// lets impl-block conformance checking resolve against the trait the impl
+/// actually satisfies instead of whichever registration won the single slot.
+pub(crate) type Traits = HashMap<String, Vec<simple_parser::ast::TraitDef>>;
 
 /// Stores trait implementations: (trait_name, type_name) -> list of methods
 /// Used to track which types implement which traits
