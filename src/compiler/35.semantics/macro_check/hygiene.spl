@@ -149,6 +149,18 @@ fn hygienescope_expansion(parent_id: i64, mark: SyntaxMark, scope_id: i64) -> Hy
         )
 
 
+fn hygienescope_lookup(self: HygieneScope, name: text) -> has_MarkedIdent:
+        """Look up a name's binding in this scope only (no parent walk).
+
+        Native Dict pitfall: .get() on a struct-valued dict is corrupt —
+        use contains_key + index read instead.
+        """
+        if self.bindings.contains_key(name):
+            self.bindings[name]
+        else:
+            nil
+
+
 # ============================================================================
 # Hygiene Context
 # ============================================================================
@@ -218,8 +230,13 @@ class HygieneContext:
     me bind_name(name: text, ident: MarkedIdent):
         """Bind a name in current scope."""
         if self.scopes.contains_key(self.current_scope):
-            val scope = self.scopes[self.current_scope]
-            scope_bind(scope, name, ident)
+            # ADR-004: struct/dict-index mutation needs an explicit write-back.
+            # A `fn <type>_<method>(self: HygieneScope, ...)` helper cannot do
+            # this — the file's convention for that form (markedident_add_mark
+            # at :64) is to RETURN a new struct, never mutate in place, so a
+            # void bind helper would silently no-op.
+            var scope = self.scopes[self.current_scope]
+            scope.bindings[name] = ident
             self.scopes[self.current_scope] = scope
         else:
             self.errors = self.errors.push("Invalid current scope for binding")
@@ -236,7 +253,7 @@ class HygieneContext:
                 return nil  # Invalid scope chain
             val scope = self.scopes[scope_id]
             # Check for binding in this scope
-            match scope_lookup(scope, ident.name):
+            match hygienescope_lookup(scope, ident.name):
                 case bound:
                     # Check marks match for hygiene
                     if self.marks_compatible(ident, bound, scope):
@@ -287,7 +304,7 @@ class HygieneContext:
             if not self.scopes.contains_key(scope_id):
                 return nil
             val scope = self.scopes[scope_id]
-            match scope_lookup(scope, name):
+            match hygienescope_lookup(scope, name):
                 case existing:
                     # Check if same expansion scope
                     if scope.has_expansion_mark:
@@ -334,7 +351,7 @@ class HygieneTransformer:
         """Mark an identifier with current expansion mark."""
         var ident = markedident_from_name(name)
         if self.has_current_mark:
-            ident = ident_add_mark(ident, self.current_mark)
+            ident = markedident_add_mark(ident, self.current_mark)
         ident
 
     me bind(name: text):

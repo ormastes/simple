@@ -2,8 +2,179 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** High (dead call sites in live compiler passes; silent no-ops / unresolved calls)
-- **Status:** OPEN
+- **Status:** PARTIALLY FIXED — 24 of 64 oracle survivors restored. 40 oracle
+  hits remain, but only **27 are actual refactor damage**: 7 are `fuzz.spl`'s
+  missing-module defect, 5 are known regex false positives, 1 is a Class C
+  stdlib gap. Quote both numbers (oracle-40 / family-27) or the next reader
+  chases 13 non-issues. **The family is NOT closed.**
 - **Found by:** adversarial review of `b0c98541d2a`, `bc052a4470d`
+
+## Update 2026-08-08: oracle rebuilt, 24 sites restored
+
+The oracle below was re-implemented **fail-closed with an injection test** (the
+08-07 doc's oracle failed open three ways; this one is proven to move by exactly
+one on an injected known-bad symbol and back on restore — probe landed at
+`easy.spl:321`, count 64 -> 65 -> 64, round-trip byte-identical).
+
+**Precise-extraction count is 64, not ~60.** An earlier pass that emitted every
+underscore-named call on a matching line reported 91; tightening extraction to
+only the callee whose first argument re-passes its own prefix (`<X>_<Y>(<X>`)
+drops the 27 incidental hits (`outline_*.spl` etc). Use the tightened form.
+
+### What the oracle can and cannot prove
+
+- **Proves:** the called name has ZERO `fn`/`me` definitions in `src/`.
+- **Does NOT prove:** that a call binds to the *right* function. `mod.spl:207`'s
+  `args_len(args)` has a definition (`src/app/ui.tauri/tauri_entry.spl:15`,
+  `[text] -> i64`) while `args` is `[MacroArg]` — under the flat bare-name
+  function table this binds the WRONG function silently. The oracle is
+  structurally blind to this class. **A zero-survivor oracle run is therefore
+  NOT proof the family is closed.**
+- **Does NOT prove:** semantic correctness of any restore.
+
+### Disposition classes
+
+- **Class A — mechanical, target confirmed to exist.** Fixed in this pass.
+- **Class B — the body itself was deleted; restoring requires inventing
+  semantics.** Deliberately NOT fixed. A wrong body is worse than a missing one:
+  it makes a dead check look live while enforcing invented rules.
+- **Class C — not this family.** Excluded, filed separately where warranted.
+
+### Fixed in this pass (24 sites, 17 files)
+
+| file:line | was | restored to | evidence |
+|---|---|---|---|
+| `macro_check/hygiene.spl:222` | `scope_bind(scope,...)` | inlined `scope.bindings[name] = ident` + write-back | see note — a helper here would be a silent no-op |
+| `macro_check/hygiene.spl:239,290` | `scope_lookup(scope,...)` | `hygienescope_lookup(...)` | **function newly written** — see note |
+| `macro_check/hygiene.spl:337` | `ident_add_mark(ident,...)` | `markedident_add_mark(...)` | target at `hygiene.spl:64` |
+| `macro_check/template.spl:277` | `param.kind_to_text(kind)` | `param.kind.to_text()` | `TemplateParam.kind` field at `:82`; `kind.to_text()` already used at `:167` |
+| `macro_check/template.spl:300` | `kind_to_text(kind)` | `kind.to_text()` | same |
+| `macro_check/mod.spl:207` | `args_len(args)` | `args.len()` | wrong-binding class; `args` is `[MacroArg]` |
+| `exhaustiveness_validator.spl:117` | `pattern_get_severity(pattern)` | `pattern.severity` | field at `:63`; `match self.severity:` is the file's own idiom at `:72`,`:77`, and no accessor normalizes it (`is_error` at `:71` just matches it) |
+| `exhaustiveness_validator.spl:405` | `pattern_is_error(pattern)` | `pattern.is_error()` | method at `:71` |
+| `predicate_parser.spl:125` | `tokens_len(tokens)` | `tokens.len()` | `tokens: [Token]` |
+| `blocks/validators.spl:100,109` | `key_len` / `elements_len` | `.len()` | list/text receivers |
+| `blocks/validators.spl:143` | `query.raw_lower(raw)` | `query.raw.lower()` | `.raw` field used at `:42` |
+| `blocks/testing.spl:84` | `error.message_contains(message,...)` | `error.message.contains(...)` | shape (d); the very next line `:85` already interpolates `{error.message}` |
+| `monomorphize/util.spl:112` | `elems_first(elems)` | `elems.first()` | list receiver |
+| `semantics/binary_ops.spl:120,123` | `*_wrapping_mul(x, y)` | `x.wrapping_mul(y)` | integer receivers |
+| `macro_contracts.spl:104` | `existing_symbols_contains(...)` | `.contains(...)` | collection receiver |
+| `smf_mmap_native.spl:106` | `result_reserve(result, length)` | `result.reserve(length)` | |
+| `type_system/effects.spl:228` | `scc_contains(scc, callee)` | `scc.contains(callee)` | collection receiver |
+| `visibility_checker.spl:111` | `checker_check_symbol_access(checker,...)` | `checker.check_symbol_access(...)` | method exists in file |
+| `common/type_mapper.spl:23` | `mapper_map_type(mapper,...)` | `mapper.map_type(...)` | method exists in file |
+| `vulkan_backend.spl:100` | `backend_compile(backend,...)` | `backend.compile(...)` | method exists in file |
+| `win_vfs_driver.spl:145,157` | `tree_readdir` / `tree_read` | `tree.readdir()` / `tree.read()` | methods exist in file |
+(`gc_analysis/mod.spl`'s `_1` sites are **diagnosed but NOT landed** — see the
+shape (e) section below.)
+
+**Note on `hygienescope_bind`/`hygienescope_lookup`:** neither existed. The
+08-07 doc's "candidate restore" column guessed them as pre-existing targets;
+that was wrong.
+
+- **`hygienescope_lookup` was written** — body reconstructed from the field type
+  (`bindings: Dict<text, MarkedIdent>`) as `contains_key` + index read (the
+  native `.get()` prohibition applies since `MarkedIdent` is a struct). It is a
+  pure read, so taking `self` by value is harmless. A reconstruction, not a
+  recovery.
+- **`hygienescope_bind` was deliberately NOT written.** `HygieneScope` is a
+  struct (value type), and this file's convention for
+  `fn <type>_<method>(self: Struct, ...)` is to **return a new struct**, never
+  mutate in place — see `markedident_add_mark`/`markedident_remove_mark`
+  (`:64`, `:69`), both of which construct and return a fresh value. A void
+  `bind` helper mutating `self.bindings` would therefore have died inside the
+  callee and the caller's write-back would have stored an unchanged scope —
+  converting one dead check into a differently-dead check. The bind is inlined
+  at the call site with the repo's ADR-004 write-back idiom
+  (`var scope` → mutate → store back) instead.
+
+## NEW: shape (e) — deleted match-arm bodies. `gc_analysis/mod.spl` does not parse.
+
+A **fourth damage shape** exists that none of the sweep regexes catch: `case`
+arms whose body was deleted, leaving `case _:` immediately followed by a dedent.
+`gc_analysis/mod.spl` has **4 such arms**, and they make the whole module
+**unparseable**:
+
+```
+src/compiler/55.borrow/gc_analysis/mod.spl:250:1: error[PARSE001]: NOT LINTED:
+source did not parse - every AST-based lint was skipped for this file
+(unexpected token in expression: Dedent '')
+```
+
+This is **pre-existing on `origin/main`**, not introduced by any restore: the
+empty `case _:` at local line 250 is byte-identical to `origin/main`'s line 246
+(the 4-line offset is a comment added while investigating), and a lint of
+origin's own blob reproduces it.
+
+Consequences, which matter more than any single call site here:
+
+- **The module is wholly non-functional.** Nothing in it can have been running.
+- This **supersedes** this doc's earlier claim that `gc_types_contains` /
+  `gc_types_push` at `:119,120,124` were "fixed in the commit that adds this
+  doc" — those fixes live in a file that has never parsed.
+- **The `_1` shape is diagnosed but deliberately NOT landed.** `_1`/`_2` lift
+  into lambdas only inside *parenthesised pipe* expressions
+  (`syntax_quick_reference.md`, "Placeholder Lambdas in Pipes"), so the bare
+  `_1` at `:129,132` is an unbound identifier. The intended form is determined
+  — not guessed — by the sibling call for the *same* constructor parameter at
+  `:111`, `RootAnalysis.create(\t: false)` (verified with `cat -A` to be a
+  literal backslash-t lambda, not a tab), giving
+  `\t: self.is_gc_type(t)`. It is held back because a file that does not parse
+  cannot verify the fix: no lint, no spec, no oracle can exercise it. Landing it
+  would put a signature on a file that stays dead.
+
+**To make `gc_analysis/mod.spl` live again**, the 4 empty `case _:` arms must be
+given bodies first — that is Class B work (what should each arm do?), and it
+gates the `_1` fix behind it.
+
+Any future sweep of this family must add a shape (e) detector: a `case` label
+followed immediately by a dedent.
+
+### Still open — Class B (body deleted, semantics must be invented)
+
+Do NOT "restore" these by pattern-matching a name; each needs its behaviour
+decided and a test.
+
+- `macro_check/template.spl:165` `kind_can_follow(kind, prev_kind)` — the
+  `# FragmentKind Methods (was: impl FragmentKind:)` block at `template.spl:36`
+  is **empty**. This is resurgent **shape (a)**, which the 08-07 doc declared
+  had "zero instances remain" — that claim is false. Writing a macro follow-set
+  rule from nothing is a semantic invention; left dead deliberately.
+- `type_system/effects.spl:117,309,353,361` — `effect_is_sync` /
+  `effect_value_is_async` / `effect_value_is_sync` /
+  `callee_effect_value_is_async`. `Effect` here (`:18`) is a bare
+  `Sync`/`Async` enum with no methods; `is_sync`/`is_async` methods exist only
+  on *different* Effect types in `00.common/effects.spl` and
+  `00.common/effects_phase3a.spl`. Which one is intended is ambiguous.
+
+### Still open — Class C (not this family)
+
+- `exhaustiveness_validator.spl:474` `std.sys_exit(sys, 1)` — a `std.`-qualified
+  stdlib call, not a folded receiver. No `sys_exit` exists anywhere; the stdlib
+  offers `exit(code)` (`io_runtime.spl:214`). Missing stdlib binding, separate bug.
+- `src/lib/nogc_sync_mut/fuzz.spl:164,169,199,231,246,291,299` `rng_next_range` —
+  **not refactor damage.** `fuzz.spl:16` imports `std.random_utils`, a module
+  that **does not exist anywhere in the tree**, so every one of its imported
+  names (`rng_create`, `rng_next`, `rng_next_range`, `random_choice`) is dead.
+  The whole module is non-functional. Separate defect; do not "fix" by inventing
+  an RNG.
+- `syscall_spm.spl` (4), `backend_metal_msl.spl` (1) — known regex false
+  positives already listed at the bottom of this doc (docstring text; embedded
+  MSL shader source). Do not touch.
+
+### Still open — remaining Class A (not yet done, mechanical)
+
+`resolution.spl:95,97,129,130,157`; `desugar_async.spl` (both copies);
+`visibility_checker.spl:270,272`; `blocks/registry.spl:26,182`;
+`blocks/definition.spl:60,61`; `blocks/text_transforms.spl:37`;
+`parser/recovery.spl:215`;
+`test_batch.spl:69`; `snapshots.spl:147`; `markdown.spl:164`.
+
+`blocks/testing.spl:294` `value_type_name(value)` is **also still open** — note
+that `:84` in the same file WAS fixed this pass, so the file is not untouched.
+It is held back because the in-file `type_name` method count is zero; the
+receiver's type was NOT resolved, so the disposition (mechanical rename vs
+Class B deleted body) is undetermined. Resolve the receiver type before editing.
 
 ## Summary
 
