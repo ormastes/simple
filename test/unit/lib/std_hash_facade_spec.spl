@@ -1,0 +1,56 @@
+# std_hash_facade_spec
+#
+# `src/std` is a symlink to `lib`, so `src/lib/hash.spl` WINS the `std.hash`
+# name and shadows the `nogc_async_mut_noalloc/hash/` package that previously
+# answered it. The facade must therefore be a SUPERSET: the Hash trait (which
+# `use std.hash` could not reach before the facade existed) AND the four
+# allocation-free hash functions the shadowed package documented.
+#
+# Both directions are asserted here so a future facade edit cannot silently
+# drop one half. See
+# doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+
+use std.spec
+use std.hash.{Hash, hash_combine, hash_array, rt_hash_text}
+
+struct FacadePoint:
+    x: i64
+    y: i64
+
+impl Hash for FacadePoint:
+    fn hash() -> i64:
+        self.x * 31 + self.y
+
+describe "std.hash facade — trait half":
+
+    it "resolves the Hash trait through `use std.hash`":
+        val p = FacadePoint(x: 2, y: 3)
+        expect(p.hash()).to_equal(65)
+
+    it "hashes text through the trait impl in hash.spl":
+        val h = "abc".hash()
+        expect(h != 0).to_be_true()
+
+    it "exposes hash_combine":
+        val combined = hash_combine(1, 2)
+        expect(combined != 0).to_be_true()
+
+describe "std.hash facade — function half must not be dropped":
+
+    it "exposes hash_array":
+        val h = hash_array([1, 2, 3])
+        expect(h != 0).to_be_true()
+
+    it "exposes rt_hash_text":
+        val a = rt_hash_text("a")
+        val b = rt_hash_text("b")
+        expect(a != b).to_be_true()
+
+    # The four allocation-free functions of the SHADOWED
+    # nogc_async_mut_noalloc/hash package (fnv1a_hash_bytes, fnv1a_hash_i64,
+    # crc32_byte, crc32_bytes) are NOT asserted here because they are
+    # unreachable independently of this facade: importing them by their own
+    # full path fails with "semantic: variable `noalloc` not found", measured
+    # both with and without src/lib/hash.spl present. When that `@noalloc`
+    # import defect is fixed, add them to the facade AND to this describe —
+    # the facade must stay a superset of the package it shadows.
