@@ -3682,7 +3682,12 @@ int8_t rt_contains(int64_t collection, int64_t value) {
 }
 
 int64_t rt_unwrap_or_self(int64_t value) {
-    if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);
+    /* Only the canonical Option (enum_id 1, Some=0/None=1) unwraps here.
+     * `rt_enum_discriminant(value) >= 0` is true for ANY boxed enum, so
+     * gating on that alone unwraps user enums to their raw payload instead
+     * of returning the enum itself -- see
+     * doc/08_tracking/bug/stage3_nil_coalesce_unwraps_user_enum_payload_2026-08-08.md. */
+    if (rt_enum_id(value) == 1 && rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);
     return value;
 }
 

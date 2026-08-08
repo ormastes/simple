@@ -15,4 +15,21 @@ describe "MIR null coalesce lowering":
         expect(source).to_contain("left_value = unwrapped")
         expect(source).to_contain("val right_terminated = self.builder.current_block_has_explicit_terminator()")
         expect(source).to_contain("if not right_terminated:")
-        expect(runtime).to_contain("if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);")
+
+    it "gates rt_unwrap_or_self on the canonical Option enum_id, not any boxed enum":
+        # Regression for doc/08_tracking/bug/stage3_nil_coalesce_unwraps_user_enum_payload_2026-08-08.md:
+        # `??` on an `Option<UserEnum>` used to unwrap to the enum's PAYLOAD
+        # instead of returning the enum itself, because rt_unwrap_or_self
+        # treated ANY boxed enum (rt_enum_discriminant(value) >= 0) as
+        # unwrappable. Only enum_id 1 (the canonical Option, Some=0/None=1)
+        # may unwrap; every other boxed enum must pass through unchanged.
+        val runtime = read_source("src/runtime/runtime_native.c")
+        val core_values = read_source("src/runtime/simple_core/core_values.spl")
+
+        # The old, buggy predicate must be gone: it unwraps ANY boxed enum.
+        val has_old_bug = runtime.contains("if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);")
+        expect(has_old_bug).to_equal(false)
+
+        # Both runtimes must gate on enum_id == 1 before unwrapping.
+        expect(runtime).to_contain("if (rt_enum_id(value) == 1 && rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);")
+        expect(core_values).to_contain("if rt_enum_id(value) == 1 and rt_enum_discriminant(value) >= 0:")
