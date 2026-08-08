@@ -5,6 +5,27 @@
 
 use std.io.sqlite_sffi.{SqliteConnection, sqlite_execute, sqlite_error_message, sqlite_begin, sqlite_commit, sqlite_rollback, sqlite_query_all, SqliteRow}
 use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.escape.{quote_ident, validate_ident}
+
+# ============================================================================
+# Savepoint name handling
+# ============================================================================
+
+# Validate and quote a caller-supplied savepoint name.
+#
+# Savepoint names land in SQL text, and the underlying runtime primitive
+# (rt_sqlite_execute -> sqlite3_exec) executes EVERY ';'-separated statement
+# in that text. An unvalidated name is therefore a full multi-statement SQL
+# injection sink: "sp1; DROP TABLE users; --" really drops the table.
+#
+# Names are restricted to plain SQL identifiers and then double-quoted, the
+# same discipline the rest of this package (query_builder, repository,
+# schema, sql_gen) applies to table and column names.
+fn _savepoint_ident(name: text) -> Result<text, DbError>:
+    val checked = validate_ident(name)
+    if val Err(msg) = checked:
+        return Err(DbError.TransactionFailed("invalid savepoint name: {msg}"))
+    Ok(quote_ident(name))
 
 # ============================================================================
 # TxState — transaction lifecycle
@@ -62,7 +83,8 @@ class Transaction:
         if not self.is_active():
             return Err(DbError.TransactionFailed("transaction not active"))
 
-        val sql = "SAVEPOINT {name}"
+        val ident = _savepoint_ident(name)?
+        val sql = "SAVEPOINT {ident}"
         val ok = sqlite_execute(self.conn, sql)
         if not ok:
             val msg = sqlite_error_message(self.conn)
@@ -77,7 +99,8 @@ class Transaction:
         if not self.is_active():
             return Err(DbError.TransactionFailed("transaction not active"))
 
-        val sql = "RELEASE SAVEPOINT {name}"
+        val ident = _savepoint_ident(name)?
+        val sql = "RELEASE SAVEPOINT {ident}"
         val ok = sqlite_execute(self.conn, sql)
         if not ok:
             val msg = sqlite_error_message(self.conn)
@@ -92,7 +115,8 @@ class Transaction:
         if not self.is_active():
             return Err(DbError.TransactionFailed("transaction not active"))
 
-        val sql = "ROLLBACK TO SAVEPOINT {name}"
+        val ident = _savepoint_ident(name)?
+        val sql = "ROLLBACK TO SAVEPOINT {ident}"
         val ok = sqlite_execute(self.conn, sql)
         if not ok:
             val msg = sqlite_error_message(self.conn)
