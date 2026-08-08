@@ -61,7 +61,7 @@ use std.common.svmg.mailbox_const.{
 use std.gc_async_mut.gpu_lane.vulkan_lane_session.{VulkanLaneSession}
 use std.gc_async_mut.gpu_lane.vulkan_vm_executor.{
     SVMG_ENTRY, DEFAULT_STEP_BUDGET, build_svmg_arena,
-    read_sentinel, read_log, read_records, SvmgResultRecord}
+    read_sentinel, read_log, read_records}
 use std.sffi.io.{file_read_bytes}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
@@ -93,9 +93,6 @@ fn _decode_exit(sentinel: i64) -> (bool, i64):
         return (code_val == 0x7F, code_val)
     (false, 0)
 
-fn _record_to_text(r: SvmgResultRecord) -> text:
-    "seq={r.seq} passed={r.passed} value={r.value}"
-
 # ============================================================================
 # VulkanExec — one persistent VulkanLaneSession + a carried-over arena
 # readback per (session, mode_spec) cache entry (design §4.5).
@@ -126,14 +123,14 @@ class VulkanExec:
 
     me _establish():
         val probe_status = self.probe()
-        match probe_status:
-            LaneStatus.Available: pass
-            LaneStatus.Skip(reason):
-                self.blocked_reason = "skip: {reason}"
-                return
-            LaneStatus.Blocked(reason):
-                self.blocked_reason = "blocked: {reason}"
-                return
+        if not probe_status.is_available():
+            # `to_text()` already carries the repo's skip:/blocked: prefix
+            # convention (types.spl) -- stored as-is, and `execute_cell`
+            # does NOT re-wrap it (see its own "blocked: {self.blocked_reason}"
+            # composition, which only applies to the raw diagnostics set
+            # elsewhere in this file).
+            self.blocked_reason = probe_status.to_text()
+            return
 
         val kernel_bytes = file_read_bytes(_KERNEL_SPV)
         if kernel_bytes.len() == 0:
@@ -251,7 +248,7 @@ impl NotebookExecutor for VulkanExec:
 
         var record_texts: [text] = []
         for rec in records:
-            record_texts.push(_record_to_text(rec))
+            record_texts.push("seq={rec.seq} passed={rec.passed} value={rec.value}")
 
         val end_us = time_now_unix_micros()
         val duration_ms = (end_us - start_us) / 1000
