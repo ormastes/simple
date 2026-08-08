@@ -164,3 +164,43 @@ before any significant compilation output was written.
 - The isolated worktree's local ineffective patch was reverted before
   finishing; the worktree is left at clean `origin/main` (`6ac02f5d8a93`)
   plus the pre-existing CRLF-only noise that was already there.
+
+## Append 2026-08-08: re-verify with two new span-kernel commits in scope — Stage 2 still blocked (different blocker)
+
+Re-ran the same replay technique in a fresh worktree
+(`/home/ormastes/dev/simple-s3rv2`, `git worktree add --detach origin/main`)
+pinned at `be775aa04fdbaa6b9548c74aec17413543698f12`, to check whether
+`a399483d` (span-kernel array-return registration) and `796d8484`
+(blend-span SIMD kernel registration) — landed after the Mailbox-ambiguity
+fix (`983058c5ff39`) referenced above — keep the self-host chain intact.
+
+The Mailbox ambiguous-export blocker from this doc's original run is
+resolved (`983058c5ff39` landed since), but Stage 2 now fails on a
+**different**, newly-introduced defect in the same area: an incomplete
+`Mailbox` -> `PriorityMailbox` rename (`a019ba19aa6`, landed immediately
+after `983058c5ff39`) left `src/lib/nogc_async_mut/actor_scheduler.spl`
+referencing a symbol that no longer exists, and resurrected a dead
+re-export block in `__init__.spl` that the prior commit had just removed.
+`build_stage2.sh` fails deterministically:
+
+```
+STAGE2_EXIT=1
+llvm codegen: semantic: llvm global load referenced undeclared symbol `Mailbox`
+```
+
+Full root-cause, blob-hash proof, and an unlanded scratch-only probe (which
+gets Stage 2 to GREEN but then hits a second, undiagnosed Stage-3 SIGSEGV
+during monomorphize at a `method=len` dispatch, `WALL=513s`,
+`tasks_done=4/6`) are recorded in
+`doc/08_tracking/bug/stage2_mailbox_priorimailbox_rename_incomplete_blocks_build_2026-08-08.md`.
+
+**Verdict: neither `a399483d` nor `796d8484` was reached or exercised by
+this run.** Both remain unverified against a real Stage 2/3 build — not
+implicated, not exonerated. The self-host chain has not regressed *because
+of* either commit; it simply cannot be driven far enough to tell, blocked
+first by the rename gap and then, once that is scratch-patched, by an
+unrelated new SIGSEGV.
+
+No artifact (linked ELF, `file` output) was produced by this run — Stage 2
+did not link against real `origin/main` content, and Stage 3 was not
+reached with real `origin/main` content at all.
