@@ -132,15 +132,16 @@ describe "WM input routing":
         print "wm_input_moved new_routed={new_routed} new_local_x={router.last_local_x} new_local_y={router.last_local_y}"
 
     slow_it "pointer-events pass through a window region marked non-interactive":
-        """The compositor has no `pointer_events`/`hit_test` capability
-        (probed via `grep -n "pointer_events\\|hit_test"
-        src/os/compositor/*.spl`, zero matches), so there is no way to mark a
-        sub-region of a window as click-through. This example encodes the
-        behaviour a real implementation would need -- a click over the
-        overlap area of the topmost window's declared non-interactive corner
-        falls through to the window underneath -- and is expected to stay RED
-        until that capability exists. See
-        doc/08_tracking/bug/wm_hit_test_pointer_events_missing_2026-08.md.
+        """`HostedWindow` carries a window-local-content-coordinate
+        `passthrough_x/y/w/h` dead rect, set via
+        `HostCompositor.set_window_pointer_passthrough`, that
+        `HostGuiEventRouter.update_client_target` skips when hit-testing --
+        a click landing inside a window's declared dead rect falls through
+        to whatever window is underneath instead of being claimed by the
+        (topmost) window that owns the rect. This example marks the topmost
+        window's overlap corner as its dead rect and checks that a click
+        there is claimed by the window underneath, not the topmost window.
+        See doc/08_tracking/bug/wm_hit_test_pointer_events_missing_2026-08.md.
         """
         step("Two overlapping windows: A (bottom) and B (top, overlap corner meant to be click-through)")
         var compositor = HostCompositor.new_headless(Size.wh(640, 600))
@@ -162,12 +163,15 @@ describe "WM input routing":
         val overlap_x = 220
         val overlap_y = 230
 
+        step("Mark B's overlap corner (B-local (0,0)-(152,124)) as click-through")
+        compositor.set_window_pointer_passthrough(b_id, 0, 0, 152, 124)
+
         step("A click in the declared-non-interactive overlap corner of B should fall through to A")
         val routed_to_a = router_a.route(_move_event(1, overlap_x, overlap_y), compositor, session)
         val routed_to_b = router_b.route(_move_event(2, overlap_x, overlap_y), compositor, session)
-        # Desired end state: routed_to_a true, routed_to_b false. Today the
-        # compositor has no pointer-events concept, so B (topmost, created
-        # last) always wins the overlap -- this is expected to fail RED.
+        # B (topmost, created last) declared its overlap corner click-through,
+        # so the hit-test in update_client_target skips B there and A (the
+        # window underneath) claims the click instead.
         assert_true(routed_to_a)
         assert_false(routed_to_b)
         print "wm_input_passthrough routed_to_a={routed_to_a} routed_to_b={routed_to_b}"

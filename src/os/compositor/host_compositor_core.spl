@@ -336,6 +336,15 @@ class HostedWindow:
     restore_y: i32 = 0
     restore_w: i32 = 0
     restore_h: i32 = 0
+    # Click-through ("pointer-events: none") sub-region, in window-local
+    # content coordinates (relative to the content origin the router already
+    # computes in update_client_target/update_captured_target). w == 0 or
+    # h == 0 means "no dead region" (the default). See
+    # doc/08_tracking/bug/wm_hit_test_pointer_events_missing_2026-08.md.
+    passthrough_x: i32 = 0
+    passthrough_y: i32 = 0
+    passthrough_w: i32 = 0
+    passthrough_h: i32 = 0
 
 struct HostedWebContentTarget:
     window_id: i64
@@ -1786,6 +1795,21 @@ class HostCompositor:
             j = j + 1
         self._mark_geometry_damage(prior_windows)
 
+    me set_window_pointer_passthrough(window_id: i64, x: i32, y: i32, w: i32, h: i32):
+        """Mark a window-local content-coordinate sub-region as click-through
+        ("pointer-events: none"): pointer events landing inside it fall
+        through to whatever window is underneath instead of being claimed by
+        this window. w == 0 or h == 0 clears the dead region."""
+        val i = self._find_window_index(window_id)
+        if i < 0:
+            return
+        var win = self.windows[i]
+        win.passthrough_x = x
+        win.passthrough_y = y
+        win.passthrough_w = w
+        win.passthrough_h = h
+        self.windows[i] = win
+
     me apply_wm_action(action: WmAction):
         val prior_windows = self.windows
         val out = host_compositor_apply_lifecycle_action(self, action)
@@ -1802,6 +1826,10 @@ class HostCompositor:
                     iw.restore_y = prior_windows[j].restore_y
                     iw.restore_w = prior_windows[j].restore_w
                     iw.restore_h = prior_windows[j].restore_h
+                    iw.passthrough_x = prior_windows[j].passthrough_x
+                    iw.passthrough_y = prior_windows[j].passthrough_y
+                    iw.passthrough_w = prior_windows[j].passthrough_w
+                    iw.passthrough_h = prior_windows[j].passthrough_h
                     self.windows[i] = iw
                 j = j + 1
             i = i + 1
@@ -1941,6 +1969,25 @@ class HostCompositor:
         val prior_windows = self.windows
         val out = host_compositor_pointer_move(self, x, y)
         self.windows = out.windows
+        # host_compositor_pointer_move round-trips through
+        # host_windows_to/from_lifecycle_state, which -- like
+        # apply_wm_action's own `maximized`/`restore_*` fields -- doesn't
+        # carry passthrough_*, so every pointer move would otherwise silently
+        # erase a window's declared click-through region. Restore it from
+        # the pre-move snapshot, same pattern as apply_wm_action.
+        var wi = 0
+        while wi < self.windows.len():
+            var wj = 0
+            while wj < prior_windows.len():
+                if self.windows[wi].id == prior_windows[wj].id:
+                    var mw = self.windows[wi]
+                    mw.passthrough_x = prior_windows[wj].passthrough_x
+                    mw.passthrough_y = prior_windows[wj].passthrough_y
+                    mw.passthrough_w = prior_windows[wj].passthrough_w
+                    mw.passthrough_h = prior_windows[wj].passthrough_h
+                    self.windows[wi] = mw
+                wj = wj + 1
+            wi = wi + 1
         self.next_window_id = out.next_window_id
         self.dragging = out.dragging
         self.drag_window_id = out.drag_window_id
