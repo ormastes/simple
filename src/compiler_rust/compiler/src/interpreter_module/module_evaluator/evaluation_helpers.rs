@@ -276,47 +276,58 @@ pub(super) fn register_definitions(
                     _ => None,
                 };
                 if let Some(type_name) = type_name {
+                    // Owner-tag every method pulled from this impl block, the
+                    // same way Node::Class/Node::Struct/Node::Enum already tag
+                    // their inline methods via `tag_methods_owner`. Without
+                    // this, `impl TypeName:` methods (as opposed to methods
+                    // written inline in the class/struct/enum body) never got
+                    // a `FUNCTION_MODULE_OWNER` entry or the
+                    // `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute fallback,
+                    // so `function_module_owner()` always returned `None` for
+                    // them, `CURRENT_EXEC_MODULE` was never set while they
+                    // executed, and coverage attribution fell back to the
+                    // `<entry>` sentinel for every impl-block method body in
+                    // the codebase. `method_with_impl_driver_attrs` builds a
+                    // *new* `FunctionDef`, so tagging must happen on its
+                    // result, not on `impl_block.methods` itself. See
+                    // doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md.
+                    let tagged_method = |m: &FunctionDef| -> FunctionDef {
+                        let mut method = method_with_impl_driver_attrs(m, &impl_block.attributes);
+                        if let Some(owner) = module_ident.as_ref() {
+                            tag_function_module_owner(&mut method, owner);
+                        }
+                        method
+                    };
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(class_def)
+                            .methods
+                            .extend(impl_block.methods.iter().map(tagged_method));
                     }
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(class_def)
+                            .methods
+                            .extend(impl_block.methods.iter().map(tagged_method));
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(enum_def)
+                            .methods
+                            .extend(impl_block.methods.iter().map(tagged_method));
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
-                        Arc::make_mut(enum_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(enum_def)
+                            .methods
+                            .extend(impl_block.methods.iter().map(tagged_method));
                     }
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
-                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                        let method = tagged_method(method);
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
                             let arc_method = Arc::new(method);
+                            record_function_owner(&arc_method, module_ident.as_ref());
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             exports.insert(
@@ -334,12 +345,7 @@ pub(super) fn register_definitions(
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
-                        );
+                        methods.extend(impl_block.methods.iter().map(|m| Arc::new(tagged_method(m))));
                     });
                     // Update MODULE_CLASSES_CACHE with the enriched class definition
                     // so cross-module fallback lookups find impl-added methods
