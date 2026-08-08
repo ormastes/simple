@@ -4,6 +4,15 @@ Date: 2026-08-08
 Status: OPEN — Stage 3 cannot produce a genuine self-hosted binary
 Severity: BLOCKER (critical path to self-host)
 
+> **2026-08-08 CORRECTION — the "enum discriminant garbage" root cause below is
+> REFUTED by control runs.** Native enum dispatch is correct on both backends,
+> the reproducer claim was mis-recorded, and the SEED-vs-stage2 comparison that
+> motivated the whole diagnosis is **confounded by a pipeline switch**. The
+> symptom (a vacuous object) still stands and is still a blocker. Read
+> [§ Control runs (2026-08-08)](#control-runs-2026-08-08-enum-dispatch-refuted-pipeline-confound-found)
+> at the end of this document before acting on anything in the "Root cause" or
+> "Remaining blocker" sections, both of which are now void.
+
 ## Prior framing (WRONG) — corrected here
 
 The working hypothesis was: *"Stage 3 exits 0 but the compiled 1.16 MB compiler
@@ -100,7 +109,7 @@ Instruction census over all 5,767 `define`s in `simple_llvm_567760.ll`:
 
 Control flow and stack slots survive; every value-producing instruction is gone.
 
-## Root cause: garbage enum discriminants in the natively-built stage2
+## Root cause: garbage enum discriminants in the natively-built stage2 — **REFUTED (see final section)**
 
 Minimal reproducer — a 7-line program, built by
 `build/cyc/S3FIX1/stage2-simple` (native, seed-emitted) on the same
@@ -210,7 +219,7 @@ Consequently `error:` lines = 0 and `failed=0` are fail-open readings.
 - **Not a timeout or memory budget.** Three runs of 529s/948s/1202s produced a
   byte-identical artifact.
 
-## Remaining blocker (stated plainly)
+## Remaining blocker (stated plainly) — **superseded (see final section)**
 
 **Stage 3 does not produce a genuine self-hosted binary, and cannot until enum
 discriminant reads work in a natively-compiled compiler.** The compiler source
@@ -235,3 +244,139 @@ infrastructure, not the fix.
 3. Strengthen the `bootstrap_globals.spl:408` guard from "0 instructions" to
    "0 stores and 0 non-panic calls in the entry module" — that is the assertion
    that would have caught this run.
+
+## Control runs (2026-08-08): enum dispatch REFUTED, pipeline confound found
+
+This section supersedes the "Root cause" and "Remaining blocker" sections above.
+All runs below use the *same* `--backend llvm --mode dynload` lane, the same
+runtime authority, and preserved logs under
+`/home/ormastes/dev/simple-s3bisect/build/cyc/`.
+
+### 0. A seed control WAS available — the doc was wrong to say otherwise
+
+The claim above that "the obvious control (build the same reproducer with the
+Rust seed) is **not available**" is false. It tested the *wrong* seed. The seed
+the bootstrap scripts actually use is
+
+```
+/home/ormastes/dev/simple-t3-final-20260806/build/bootstrap-t3-final-20260806/\
+  stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority/simple
+```
+
+(155 MB, md5 `d1987e1d31872c4661b0aa43416b9b14`) — **not**
+`src/compiler_rust/target/bootstrap/simple` (33 MB). The former has LLVM
+compiled in (`LLVMBuildStore` present in `strings`; the string
+`native backend '…' is not available` is **absent**) and it is what
+`build_stage2.sh`/`cycle.sh` invoke as `$SEED`. It is a Rust seed (it prints the
+"Rust-built Simple binary is a bootstrap seed only" banner).
+
+### 1. Native enum dispatch is CORRECT — the stated root cause is refuted
+
+Two probes, kept at `probe_enum/` in the bisect worktree:
+
+- `probe_enum_dispatch.spl` — 4-variant enum, payload-free and payload-carrying
+  variants, matched with and without sub-patterns.
+- `probe_enum2.spl` — deliberately shaped like `HirTypeKind`: **25 variants**,
+  recursive through a class field (`TyNode.kind`), list/str/struct payloads,
+  matched via `match t.kind:` with 4 variants intentionally left to a `case _:`
+  wildcard so the wildcard arm's correctness is measured too.
+
+| run | binary that compiled it | engine / backend | result |
+|---|---|---|---|
+| A | SEED | interpreter (`SIMPLE_EXECUTION_MODE=interpret`) | 12/12 correct (reference) |
+| B | SEED | native, `--backend llvm` | 12/12 correct |
+| C | SEED | native, `--backend cranelift` | 12/12 correct |
+| D | `S3FIX1/stage2-simple` | native, `--backend llvm` | 12/12 correct |
+| E | `S3FIX1/stage2-simple` | native, **exact `cycle.sh` Stage-3 env** | 12/12 correct |
+
+The four variants with no named arm returned `-99` in every run — i.e. the
+wildcard arm is reached **exactly when it should be** and not otherwise.
+**Enum discriminant reads and match dispatch are not broken under native
+codegen, on either backend, including at `HirTypeKind` scale and shape.**
+
+### 2. The reproducer claim in this document is not reproducible
+
+This document states that the 7-line `p2_add.spl` program, built by
+`build/cyc/S3FIX1/stage2-simple`, "Build exits **1**" with
+`[TEMP-PROBE-mir-wildcard] d=-1 …` and
+`error: bootstrap entry lowered to 0 MIR instructions`.
+
+Re-run against the byte-identical binary named in that claim
+(`S3FIX1/stage2-simple`, 128,111,944 B, mtime 2026-08-08 02:40 — unchanged since
+before this document was written at 04:24), the build **exits 0** and the
+resulting binary prints `RESULT=42`. Confirmed across four flag forms, all
+exit 0 / `RESULT=42`:
+
+| form | flags |
+|---|---|
+| A | `--entry-closure --entry FILE` |
+| B | `--entry FILE` |
+| C | positional `FILE` (this is the form Stage 3 uses) |
+| D | `--entry-closure` positional `FILE` |
+
+So the reproducer was mis-recorded. Every inference this document drew from
+`d=-1` and from "a `HirTypeKind` reaches the wildcard arm" rests on that run and
+therefore does not stand. This is stronger than the earlier "unproven"
+downgrade: the observation itself does not reproduce.
+
+### 3. The real finding: the SEED-vs-stage2 comparison is CONFOUNDED
+
+`cycle.sh` does not hold the pipeline fixed across the two stages:
+
+- **Stage 2** sets `SIMPLE_NATIVE_BUILD_RUST=1`.
+- **Stage 3** does not set it.
+
+That variable is a pipeline selector, not a tuning knob:
+
+- `src/compiler_rust/driver/src/main.rs:160` —
+  `native_build_rust_override(std::env::var("SIMPLE_NATIVE_BUILD_RUST")…)`
+- `src/compiler_rust/driver/src/cli/native_build.rs:549` — comment:
+  *"Rust handler is reached only via `SIMPLE_NATIVE_BUILD_RUST=1` or a …"*
+
+Therefore **Stage 2 was compiled by the Rust native-build pipeline, and Stage 3
+by the pure-Simple native-build pipeline.** The "SEED works / stage2 produces
+garbage" asymmetry never isolated *which binary ran* — it changed the pipeline
+at the same time.
+
+Restated: **Stage 3 is the only run in the whole bootstrap that exercises the
+pure-Simple `native-build` pipeline at compiler scale, and it has never once
+produced non-vacuous output.** The probes in §1 show that same pure-Simple
+pipeline is correct on a 1–3 module closure, so the open question is scale or a
+construct that only the compiler's own source contains — not enum dispatch, not
+the backend, not the flag form, and not the environment.
+
+### 4. What is now eliminated
+
+- Enum discriminant reads / match dispatch under native codegen (§1).
+- The LLVM backend specifically — cranelift agrees (§1, run C).
+- The Stage-3 flag form: `--entry-closure`, `--entry` vs positional (§2).
+- The Stage-3 environment, including `SIMPLE_NATIVE_ARENA_DECLS=1`, replayed
+  exactly on a small input (§1, run E).
+- `stage2-simple` being a corrupt binary in any general sense (§1 run D, §2).
+
+### 5. Note on two red herrings in the IR
+
+- All 5,767 `define`s carry `nounwind readonly`. This is LLVM's `function-attrs`
+  pass *inferring* `readonly` from the absence of stores. It is a consequence of
+  the vacuity, not a cause — do not chase it.
+- `parse_module_body()` and 887 other defines have no parameters where a method
+  should carry `self`. Interesting, but unmeasured; it is not part of any
+  established causal chain.
+
+### 6. Next actions (replacing the list above)
+
+1. Determine whether the pure-Simple `native-build` pipeline fails by **scale**
+   or by **construct**: bisect the input between a 3-module closure (known good)
+   and the full compiler (known vacuous). A mid-size real target — one compiler
+   layer — is the cheapest next point.
+2. A Stage-3 run using the *Stage-2 recipe* (`--entry-closure` + explicit
+   `--source src/compiler --source src/app --source src/lib` + `--entry`) was
+   launched but is **a multi-variable flip** (it also changes `--threads` 2→8).
+   A non-vacuous result would be the headline; it would still need
+   `--entry-closure` isolated as a single-variable follow-up before any causal
+   claim.
+3. The parallel `unresolved method call:` MIR-lowering lane (`to_u8`/`join`) is
+   plausibly the same defect seen from the other side — `[mir-method-call] …
+   disc=… unresolved=true` is resolution failure over an enum-keyed table. With
+   enum dispatch itself now eliminated, that lane's findings become the more
+   promising thread, not a duplicate of this one.
