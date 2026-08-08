@@ -347,6 +347,116 @@ pub fn rt_file_atomic_write(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(atomic_write_file(Path::new(&path), content.as_bytes())))
 }
 
+/// Atomically write text to a file with an EXPLICIT permission mode.
+///
+/// This is the write path for secret-bearing files (credential keys, tokens,
+/// session state). It exists because every other writer in this module creates
+/// the file permissively and only then narrows it:
+///
+///   - `rt_file_write_text` uses `fs::write`, i.e. 0666 & ~umask (usually 0644),
+///   - the native runtime's writer uses `open(..., 0644)`,
+///   - `rt_file_atomic_write` COPIES THE EXISTING TARGET'S MODE onto the temp,
+///     so re-writing a secret into an already-0644 file keeps it 0644.
+///
+/// In all three the file is world/group-readable for a window before any
+/// `chmod` lands, and any process that opens it in that window keeps its
+/// descriptor. Here the mode is applied to the temp file BEFORE it is written
+/// and before it is renamed into place, and `tempfile` creates that temp at
+/// 0600 to begin with, so the target is never observable at a wider mode — not
+/// even momentarily.
+///
+/// Note this REPLACES the metadata-copy that `atomic_write_file` performs; the
+/// caller's mode is authoritative, otherwise an existing permissive file would
+/// silently defeat the request.
+///
+/// Args: (path, content, mode). Mode is the usual octal permission bits, e.g.
+/// 0o600. Returns false on any failure, leaving the original file untouched.
+pub fn rt_file_atomic_write_mode(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let content = extract_content(args, 1)?;
+    let mode = match args.get(2) {
+        Some(Value::Int(n)) if *n >= 0 => *n as u32,
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_file_atomic_write_mode: mode must be a non-negative integer",
+            ))
+        }
+    };
+    Ok(Value::Bool(atomic_write_file_mode(
+        Path::new(&path),
+        content.as_bytes(),
+        mode,
+    )))
+}
+
+/// Atomic write with the caller's mode forced onto the temp before it lands.
+fn atomic_write_file_mode(path: &Path, content: &[u8], mode: u32) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = atomic_write_parent(path);
+        if fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+        let Ok(mut temp) = tempfile::NamedTempFile::new_in(parent) else {
+            return false;
+        };
+        // Narrow BEFORE the secret bytes are written, so the content never
+        // exists on disk under a wider mode even transiently.
+        if temp
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .is_err()
+        {
+            return false;
+        }
+        if temp.write_all(content).is_err() {
+            return false;
+        }
+        if temp.as_file().sync_all().is_err() {
+            return false;
+        }
+        temp.persist(path).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        atomic_write_file(path, content)
+    }
+}
+
+/// Read a file's permission mode. Returns the octal permission bits (e.g. 384
+/// for 0o600), or -1 if the file cannot be stat'd.
+///
+/// Added because the runtime exposed NO mode-read primitive at all, which meant
+/// a spec could only ever trust `chmod`'s own return value and could not assert
+/// what actually landed on disk. `rt_file_stat_readonly` is not a substitute --
+/// it collapses the whole mode to one bool and cannot distinguish 0600 from
+/// 0644, which is exactly the distinction that matters for a secret.
+pub fn rt_file_mode(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(&path) {
+            Ok(metadata) => Ok(Value::Int((metadata.permissions().mode() & 0o7777) as i64)),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match fs::metadata(&path) {
+            Ok(metadata) => Ok(Value::Int(if metadata.permissions().readonly() {
+                0o444
+            } else {
+                0o644
+            })),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+}
+
 /// Copy file
 pub fn rt_file_copy(args: &[Value]) -> Result<Value, CompileError> {
     let src = extract_path(args, 0)?;

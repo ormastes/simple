@@ -1255,6 +1255,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
+    insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
+    insert_simple!("rt_file_mode", file_io::rt_file_mode);
     insert_simple!("rt_file_canonicalize", file_io::rt_file_canonicalize);
     insert_simple!("rt_file_close", file_io::rt_file_close);
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
