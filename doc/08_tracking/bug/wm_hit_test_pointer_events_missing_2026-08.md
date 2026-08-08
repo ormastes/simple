@@ -155,3 +155,42 @@ through afterward.
 Results: 5 total, 5 passed, 0 failed
 ```
 via the same command as above.
+
+## Rework 2 2026-08-08
+
+Higher-model review found the previous fix (commit `c261229b`) was itself
+half-fixed: the restoration loop it added to the shared free function
+`host_compositor_pointer_move` restored `passthrough_*` only. The
+`maximized`/`restore_x/y/w/h` family -- which `apply_wm_action`'s own
+restore block (`src/os/compositor/host_compositor_core.spl` around line
+1815) already restores, and which the round-trip through
+`WmLifecycleWindowState` drops just like `passthrough_*` does -- was still
+left out, even though the commit's own comment named the fields. Net
+effect: maximize a window, then any pointer move (a drag, or
+`SimpleOsGuiAdapter.deliver_pointer_move`) silently reset `maximized` to
+`false` and zeroed `restore_x/y/w/h`, so a later unmaximize restored the
+window to `(0,0,0,0)` instead of its pre-maximize rect, or the maximize
+toggle misfired.
+
+**Fix:** extended the same restoration loop in
+`host_compositor_pointer_move` (`src/os/compositor/host_compositor_core.spl`)
+to also copy `maximized`/`restore_x/y/w/h` from the pre-move snapshot,
+mirroring `apply_wm_action`'s restore block exactly. Both known callers
+(`HostCompositor.pointer_move` and
+`SimpleOsGuiAdapter.deliver_pointer_move`) get the fix automatically since
+they share the one loop.
+
+**Verification:** added
+`"a maximized window's maximized/restore_* fields survive a pointer move,
+through both call paths"` to
+`test/03_system/wm/wm_input_routing_system_spec.spl`. It maximizes a
+window on a bare `HostCompositor`, delivers a pointer move via
+`HostCompositor.pointer_move`, and asserts `maximized`/`restore_*` survive;
+then repeats through `SimpleOsGuiAdapter.deliver_pointer_move` on a second
+window, and additionally proves `restore_window` afterward restores the
+original rect (not `(0,0,0,0)`).
+
+```
+Results: 6 total, 6 passed, 0 failed
+```
+`bin/simple test test/03_system/wm/wm_input_routing_system_spec.spl`.

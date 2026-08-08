@@ -2417,20 +2417,27 @@ fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCom
     val result = wm_lifecycle_pointer_move(host_windows_to_lifecycle_state(out.windows), out.next_window_id, out.width, out.height, interaction, x, y)
     out.windows = host_windows_from_lifecycle_state(result.windows)
     # The host_windows_to/from_lifecycle_state round-trip above goes through
-    # WmLifecycleWindowState, which -- like apply_wm_action's own
-    # `maximized`/`restore_*` fields -- doesn't carry passthrough_*, so every
-    # pointer move would otherwise silently erase a window's declared
-    # click-through region. Restore it from the pre-move snapshot, same
-    # pattern as apply_wm_action. This lives here (not in each caller) so
-    # HostCompositor.pointer_move AND SimpleOsGuiAdapter.deliver_pointer_move
-    # -- both of which call this function directly -- share one fix instead
-    # of each needing its own copy of the restoration loop.
+    # WmLifecycleWindowState, which doesn't carry passthrough_* OR
+    # maximized/restore_*, so every pointer move would otherwise silently
+    # erase a window's declared click-through region AND reset its
+    # maximize/restore bookkeeping (a later unmaximize would then restore to
+    # 0,0,0,0). Restore both families from the pre-move snapshot, same
+    # pattern as apply_wm_action's restore block. This lives here (not in
+    # each caller) so HostCompositor.pointer_move AND
+    # SimpleOsGuiAdapter.deliver_pointer_move -- both of which call this
+    # function directly -- share one fix instead of each needing its own
+    # copy of the restoration loop.
     var wi = 0
     while wi < out.windows.len():
         var wj = 0
         while wj < prior_windows.len():
             if out.windows[wi].id == prior_windows[wj].id:
                 var mw = out.windows[wi]
+                mw.maximized = prior_windows[wj].maximized
+                mw.restore_x = prior_windows[wj].restore_x
+                mw.restore_y = prior_windows[wj].restore_y
+                mw.restore_w = prior_windows[wj].restore_w
+                mw.restore_h = prior_windows[wj].restore_h
                 mw.passthrough_x = prior_windows[wj].passthrough_x
                 mw.passthrough_y = prior_windows[wj].passthrough_y
                 mw.passthrough_w = prior_windows[wj].passthrough_w
