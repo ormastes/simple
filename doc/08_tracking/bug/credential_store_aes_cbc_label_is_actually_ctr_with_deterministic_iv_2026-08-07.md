@@ -219,8 +219,15 @@ exist elsewhere — `src/lib/common/aes/cipher.spl` has
 is **broken**: probed against FIPS-197 C.1 its *forward* `aes_encrypt_block`
 returns `a038909860609818008018a060a880f8` instead of
 `69c4e0d86a7b0430d8cdb78070b4c55a`, and its decrypt is correspondingly wrong.
-That is a separate, still-open defect in `cipher.spl` (nothing security-
-critical is known to call it, but it should be either fixed or deleted).
+That is a separate defect, now filed with an enumerated consumer list as
+`doc/08_tracking/bug/aes_cipher_spl_block_functions_fail_fips197_c1_2026-08-08.md`.
+Enumerated (not assumed): its only callers are
+`examples/02_language_features/cipher/aes_minimal.spl` and four specs
+(`simd_dispatch_facade_spec.spl`, `variant_api_parity_spec.spl`, and their
+`test/unit`/`test/system` duplicates) — all of which assert ONLY
+`decrypt(encrypt(x)) == x`, which passes under any symmetric bug, so the
+suite is structurally incapable of catching it. No production crypto path
+calls it.
 
 ### 2. Genuine CBC in `src/lib/common/aes/modes.spl`
 
@@ -393,3 +400,40 @@ Two caveats that survive, and one correction the Resolution does not make:
 **Status after audit:** the vulnerability as shipped on `origin/main` was real
 and High; a genuine fix exists and was unlanded at audit time. The stated
 blocker was false.
+
+## Known follow-ups NOT addressed by this fix
+
+### CBC is unauthenticated — this introduces a padding oracle
+
+`aes_cbc_decrypt` returns `nil` on invalid PKCS#7 padding and a value
+otherwise, and `credential_decrypt` turns that into `""` vs. the plaintext.
+That distinction is observable, which is the textbook precondition for a
+padding-oracle attack, and CBC ciphertext is malleable besides (an attacker
+who can write the credential file can flip chosen plaintext bits in block
+N+1 by flipping bits in block N).
+
+This is **not a regression** — the CTR that was actually running before was
+equally unauthenticated and additionally leaked plaintext XORs — and the
+brief for this fix specified CBC, so shipping CBC was correct. It is recorded
+here so the residual weakness is not hidden by a commit labelled "security
+fix". The fail-closed padding check is still strictly better than the
+alternative (returning padding bytes as plaintext), so it stays.
+
+**Correct end state: AEAD.** `aes256_gcm_encrypt`/`aes256_gcm_decrypt` are
+already exported from `src/lib/common/crypto/aes_gcm.spl` — the very file this
+fix extended — and are KAT-verified. A future `v3` record format should use
+GCM with the credential file path or entry name as associated data, at which
+point both the oracle and the malleability disappear. The versioned format
+introduced here (`encrypted:v2:`) is exactly the mechanism that makes that
+migration cheap: add a `v3:` marker and keep the `v2` branch read-only, the
+same way `v2` keeps `v1` readable.
+
+### `generate_iv_from_seed` is now unused but still exported
+
+`src/lib/common/aes/utilities.spl:274` `generate_iv_from_seed` was the
+deterministic LCG IV generator at the heart of this bug. `store.spl` was its
+only caller and no longer uses it, so it now has zero callers in the tree. It
+remains exported, and its name does not advertise that it is
+cryptographically unsuitable — a footgun for the next person who needs an IV.
+A deprecation banner has been added to it directing callers to the OS CSPRNG;
+removing it outright is a separate API-surface decision.
