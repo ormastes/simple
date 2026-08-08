@@ -1,7 +1,55 @@
 # Stage-3 `warning: unresolved call` family — incomplete diagnostic + cross-module static-method resolution hole
 
 - **Date:** 2026-08-07
-- **Status:** OPEN (one member fixed, see below)
+- **Status:** OPEN (two members fixed, rest classified as out-of-scope or
+  non-code build-config issues).
+  - **FIXED** `d328200332e` — `target_is_float` (mechanism B,
+    `src/compiler/35.semantics/semantics/cast_rules.spl`).
+  - **FIXED** (this pass) — `kind_can_follow` (mechanism B,
+    `src/compiler/35.semantics/macro_check/template.spl`): restored the
+    missing free-function body as `fn kind_can_follow(kind, prev_kind)`,
+    following Rust `macro_rules` follow-set rules (nothing may directly
+    follow an `expr`/`stmt` fragment). Regression spec:
+    `test/01_unit/compiler/macros/template_kind_can_follow_spec.spl`
+    (RED before the fix: 0/4 pass, "unresolved call"; GREEN after: 4/4 pass).
+  - **NOT reproduced as a bare unresolved call** — `kind_to_text`: no bare
+    `kind_to_text(...)` call site exists anywhere in the current tree (only
+    qualified siblings like `borrow_kind_to_text`, `transport_kind_to_text`,
+    `objectprovider_backend_kind_to_text`, all defined). The one call site in
+    `template.spl` uses the already-working `kind.to_text()` method form. This
+    may have been the stage-3 log capturing a desugared method-call lookup
+    rather than a literal bare call, or the log line no longer reproduces
+    against current source; cannot confirm without a full stage-3 repro run
+    (out of budget for this pass).
+  - **mechanism A** (`hygienetransformer_create`, `templatetypechecker_create`
+    x2, `templatevalidator_create` x2) — deliberately **not fixed**: root
+    cause confirmed still present at `mangle.rs:236-243` /
+    `imports.rs:184-188` (see §2); fixing it means loosening the fuzzy global
+    suffix resolver on the bootstrap critical path, which needs its own
+    change per the doc's existing recommendation, and per CLAUDE.md ("fix
+    .spl not Rust") is out of scope for a `.spl`-only pass regardless. All six
+    call sites live in the dead `macro_check/` module (zero importers).
+  - `rsa_sig_valid`, `handle_os` — confirmed non-bug: `src/os` is not in the
+    `--source` build set; this is a build-config scope question, not a code
+    defect.
+  - `t32_cli_main` — confirmed not independently fixable here: `src/app/t32_cli`
+    is a symlink out of the tree; the `-> i32` vs. caller-as-`i64` mismatch
+    lives in code outside this repo's tracked tree.
+  - `parse_hostcomm_config` — confirmed still undefined; imports a
+    nonexistent module `std.nogc_sync_mut.baremetal.config`, and the function
+    itself has no definition anywhere (only `default_hostcomm_config()`
+    exists in `types.spl`). Left open: no clear single correct restoration
+    without knowing the intended config-loading API, and the call site risks
+    overlapping other in-flight baremetal/config lanes.
+  - `run_check`, `runtime_args` — left open: not touched this pass because
+    resolving them (a caller-scope/import-failure question for `run_check`,
+    and a rename to `get_args()` for `runtime_args`) sits in `src/app/cli` and
+    `src/app/io`, areas this pass did not have budget to safely cross-check
+    against the excluded parallel lanes (nil-coalesce/vacuous-binary/SIGILL/
+    Symbol-alias/ByteOrder/measurement-baseline work).
+  - The §1 finding (diagnostic is a partial sample) and §5 recommendation
+    (promote to error once coverage is fixed) both still hold; not addressed
+    here.
 - **Severity:** HIGH — a warning-level diagnostic for "this call resolves to no
   definition", emitted by a build that also runs with `SIMPLE_NO_STUB_FALLBACK=1`.
   Any member reached at runtime is a call into nothing.
