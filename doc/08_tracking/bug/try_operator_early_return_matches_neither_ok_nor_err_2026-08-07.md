@@ -361,3 +361,144 @@ Remaining follow-ups (not this fix's scope): redeploy the seed so the shared
 binary picks the fix up; then revert `http1.decode_chunked` to the `?` form
 per "How it was found"; optionally relax the AOT `TryOperator` compilability
 refusal now that a correct lowering exists.
+
+# Blast-radius audit — bounded (2026-08-08)
+
+The `## Blast radius` section above was an unbounded estimate and was flagged as
+an open gap. This section closes it. Pinned to `origin/main` throughout
+(`git grep origin/main` — no working-copy contamination).
+
+## Matching rule and its error profile
+
+`?` is an operator only; it never appears in identifiers. Scan of every `.spl`
+under `src/`, `test/`, `examples/` (vendored paths excluded), per line:
+strip `#` comments and string literals, mask multi-line `"""` regions, then
+take `?` tokens preceded by `[A-Za-z0-9_)\]]`, and drop `??`, `.?`, `?.` and
+type-position `?` (a `?` followed by `)`, `,`, `]`, `:`, `=`, `->`, `{` or
+end-of-line).
+
+Raw token census (51,092 `?` characters in 43,211 candidate lines):
+
+| shape | count | disposition |
+|---|---|---|
+| `??` | 23,881 | nil-coalescing operator — **not** try |
+| `.?` | 13,258 | presence/exists test — Option lane, **unchanged by construction** (the fix tests the hashed `"Err"` discriminant, which `Some`/`None` never match) |
+| type-position `?` | ~5,900 | `-> text?`, `field: T?` — nullable **type** syntax, not the operator |
+| `?.` + stray | 210 | optional-chaining / prose |
+| **try operator** | **7,787** | the audited surface |
+
+Measured precision, hand-checked on 25 random rows drawn from each arm of the
+**final** classifier's own output (an earlier draft of this scanner tested
+type-position against the raw line rather than the comment/literal-stripped one
+and scored far worse; those numbers do not apply here): `)?` call-position
+**25/25**, bare-identifier `?` **25/25**. Residual false positives do exist but
+are rare enough to miss a 25-sample — both known survivors are type annotations
+in call-paren position that the `->`-guard does not cover
+(`block_comment: (text, text)? = nil` in `15.blocks/blocks/highlighting.spl:101`,
+`resolution_cache: {text: text?}` in `99.loader/module_resolver/types.spl:324`),
+so the 119-site bucket 2 below carries a handful of them. False negatives are
+concentrated in `?` written inside embedded Simple source in spec fixtures,
+which is data, not a call site. Scope: `.spl` only — a `?` in
+`src/compiler_rust/**/*.rs` is Rust's own operator.
+
+## The result that bounds everything: the fix was seed-only
+
+**Verified, not taken from the commit message.**
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2553`
+(`lower_try_expr`) already emitted, on the Result path,
+`rt_enum_discriminant` -> compare against `err_key = 1` ->
+`terminate_return(res_local)` — a real discriminant test and a real early
+return — and does the same for both physical Option representations.
+
+So the pure-Simple compiler was **always** correct. Only the Rust seed
+swallowed `Err`. The behavior change is therefore confined to code executed by
+seed-compiled artifacts (bootstrap stage 1, `bin/simple test`/`run`), and it
+moves the seed *toward* what the rest of the toolchain already did. Anything
+built by the deployed self-hosted binary has **no** behavior change to audit.
+
+## Risk-ranked classification of all 7,787 try sites
+
+Bucketed by the enclosing function's declared return type (multi-line
+signatures accumulated until parens balance — an earlier naive version
+mis-reported 392 `src` sites as having no return type; the real figure is 135).
+
+| rank | bucket | sites | verdict |
+|---|---|---|---|
+| — | `src/` -> `Result<…>` (incl. aliases e.g. `BrowserResult<T>`) | 3,881 | **safe** — propagation is the declared contract; callers already had to handle `Err`. The fix makes the seed match the contract. |
+| — | `test/` + `examples/` -> `Result<…>` | 292 | **safe**, same reason |
+| **1** | `src/compiler/` -> non-Result **and** body returns `Ok`/`Err` | **16** | **behavior-changed** — see below; **filed, not fixed** |
+| 2 | other `src/` non-Result enclosing fn | 119 | known separate hole (raw `Err`-tagged handle as an integer, no diagnostic); pre-existing, not a regression |
+| 3a | `test/`/`examples/` non-Result enclosing fn, Option-shaped | ~2,868 | `check(opt? == 42)` / `verify(result? == 99)` — **Option lane, out of scope** |
+| 3b | `test/` spec closures at top level of a `describe`/`it` block | 540 | **Result**, not Option — `db.exec("CREATE TABLE …", [])?` in the sql specs. Same known hole as bucket 2 (no enclosing declared return type), same verdict: pre-existing, not a regression |
+| — | `src/` Option-typed enclosing fn | 62 | Option lane — noted, not fixed |
+| — | `test/` Option-typed enclosing fn | 9 | Option lane — noted, not fixed |
+
+**Zero sites were fixed, and that is the finding**: no site "breaks" in the
+sense of a caller that now receives an `Err` it cannot handle. Bucket 1 is the
+only genuinely behavior-changed set, and the task's own scope rule ("a `?` in a
+function whose return type isn't Result/Option is a known separate hole …
+report any you find but don't try to fix that hole here") puts it out of bounds.
+
+## Bucket 1 in full — 16 sites, all in `src/compiler/`, 3 files
+
+Every one is the *same* defect: the function's declared return type says `text`
+while its body speaks `Result` (`return Ok(…)` / `return Err(…)`) and its
+callers `match … case Ok(…) / case Err(e)`. The declared type is simply wrong.
+
+| file | lines | enclosing fn (declared) |
+|---|---|---|
+| `src/compiler/00.common/predicate_parser.spl` | 121, 132, 139, 147, 154, 165, 176, 183 | `parse_predicate`, `parse_or`, `parse_and`, `parse_not`, `parse_primary` — all `-> text`; `tokenize` and `make_selector` are `-> text` too |
+| `src/compiler/70.backend/backend/common/expression_evaluator.spl` | 99, 108, 119, 120, 132, 133, 176 | `eval_array_lit`, `eval_tuple_lit`, `eval_dict_lit`, `eval_binary_op`, `eval_unary_op` — all `-> text`, all bodies `Ok(…)` |
+| `src/compiler/70.backend/arch_rules.spl` | 181 | `parse_arch_rules_block -> text`, calls `parse_predicate(…)?` |
+
+Post-fix these now genuinely early-return an `Err`-tagged handle out of a
+function declared `-> text`.
+
+**Why filed and not fixed.** The intent looks obvious (`parse_or` should be
+`Result<(Predicate, i64), text>`) but it is not safely actionable here:
+
+1. These files are **known refactor damage with an OPEN family** owned by
+   another lane — the two most recent commits touching them are
+   `b0c98541d2a` ("restore folded-receiver method calls (shape (d) refactor
+   damage)") and `9d4d16b106e` ("restore 22 zero-definition call sites; family
+   still OPEN (29 remain)"). Rewriting return types underneath that lane risks
+   a clobber.
+2. `expression_evaluator.spl` has a sibling `expression_evaluator_bootstrap.spl`
+   selected by `backend/common/mod.spl`, so the bootstrap-active variant may not
+   even be the damaged one — which of the two is authoritative is undecided.
+3. The mismatch is **not local to these 3 files**: a mechanical scan of all
+   35,719 owned `.spl` files finds **1,385 functions** (888 in `src/`) declared
+   with a non-`Result` return type whose body still returns `Ok(…)`/`Err(…)`.
+   Fixing 3 files would be arbitrary. This class needs its own lane.
+
+## Secondary finding: the two compilers disagree on the Err discriminant
+
+The seed's fixed `lower_try` tests a **hashed** variant-name discriminant
+(`rt_enum_check_discriminant(tmp, hash("Err"))`, the seed's stated convention,
+shared with its match lowering). The pure-Simple `lower_try_expr` tests
+**positional index 1**. Each is self-consistent because each also *constructs*
+its enums with its own convention, so this is not a live defect today. It
+becomes one the moment an enum value constructed by seed-compiled code is
+`?`-tested by pure-Simple-compiled code in the same process. Recorded here so
+the convention split is not rediscovered as a mystery later.
+
+## Checked and cleared: the fix does not skip resource cleanup
+
+The pure-Simple `lower_try_expr` calls `emit_pending_resource_drops(nil)`
+immediately before its `terminate_return` on the Err path. The seed's new
+`lower_try` emits a bare `HirStmt::Return` with no such step, which would be a
+*new* leak on the Err path — an early return skipping cleanup that previously
+always ran — if the seed had cleanup to skip. It does not: `git grep` for
+`emit_pending_resource_drops`, `pending_resource_drops`, `ResourceDrop`,
+`resource_drop` and `scope_exit_drops` across `src/compiler_rust/compiler/src/**`
+returns **zero** hits. The Rust seed has no resource-ownership machinery at all,
+so there is no drop for the new early return to bypass.
+
+## Honest summary
+
+The surface is large — 7,787 try sites — but almost all of it is safe, for a
+reason that is verified rather than assumed: the pure-Simple lowering was
+already correct, so the fix only converges the seed onto behavior the rest of
+the toolchain already had, and 4,173 of the 7,787 sites sit in functions that
+already declare `Result` and whose callers already handle `Err`. The residue is
+16 compiler sites in a documented, pre-existing, out-of-scope defect class.
