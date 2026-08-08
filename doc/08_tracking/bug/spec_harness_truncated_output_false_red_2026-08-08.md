@@ -28,14 +28,34 @@ This is a false RED, not a greenwash — the less dangerous polarity. No past
 "green" result is retroactively suspect from this defect; some past **RED**s in
 high-output specs may have been spurious.
 
-## Trigger condition (precise)
+## IMPORTANT: this is A mechanism, not necessarily THE reported one
 
-Not directory shape, not entry shape, not imports, not example count — those were
-all ruled out by controls (`src/lib/**/test/` vs `test/01_unit/...`, top-level
-`describe` vs `fn main(): describe`, with/without imports, nested describes,
-multiple examples, `--assert-ran`: all consistent and green).
+The original report described the contradiction coming from a **one-line
+trivially-passing spec under `src/lib/**/test/`**. That exact experiment was run
+here (`src/lib/common/test/zprobe_ctl_spec.spl`) and came back **green and
+self-consistent**. So the finder's case was *not* reproduced.
 
-The real trigger is **child stdout volume**:
+What was found is a distinct, fully-proven mechanism producing the **identical
+signature**. It cannot be the finder's case as literally described, because it
+requires >4 MB of child stdout and a one-line spec's full run log measured only
+**81 KB** here — two orders of magnitude short. (The "child lint noise pushes it
+over the cap" theory was tested and is FALSE at that size.)
+
+Therefore: **the finder's `src/lib/**/test/` one-liner case remains
+unexplained and OPEN.** It is a second mechanism. Do not read this record as
+having characterized it. What the axis controls below do establish is that
+directory, entry shape, imports, example count and `--assert-ran` do not *by
+themselves* trigger the contradiction on a quiet run.
+
+## Trigger condition (precise) — for the mechanism fixed here
+
+Not directory shape, not entry shape, not imports, not example count — each was
+held constant against the other (`src/lib/**/test/` vs `test/01_unit/...`,
+top-level `describe` vs `fn main(): describe`, with/without imports, nested
+describes, multiple examples, `--assert-ran`) and every one of those runs was
+consistent and green.
+
+The trigger for THIS defect is **child stdout volume**:
 
 1. the spec's child process emits **more than 4 MB** on stdout
    (`TEST_OUTPUT_CAPTURE_BYTES = 4 * 1024 * 1024`,
@@ -116,7 +136,27 @@ it, and the failure direction is RED — so this recalibrates **spurious failure
 never past greens. `doc/08_tracking/test/test_result.md` currently records 0
 occurrences of `no examples executed`.
 
+## Lane coverage
+
+`test_runner_single.spl` is the per-file execution lane that BOTH suite paths
+spawn once per spec (`test_runner_client.spl:231`, `test_daemon/light_daemon.spl:102`),
+so the fix applies to directory/suite runs too, not just explicit single-file
+invocations. The aggregators above it scrape the child's `Results:` / `PASS` /
+`FAIL` lines, which are emitted last and therefore survive in the retained tail
+of their own bounded capture.
+
 ## Follow-up (not done here)
+
+**OPEN: the finder's one-line `src/lib/**/test/` case is still unexplained** (see
+the section at the top). A second mechanism with the same signature exists and
+was not isolated. Anyone reproducing it should grep their log for the four
+branch-identifying strings, which name the branch uniquely:
+`error: test-runner: file timed out` (line ~849, child killed),
+`error: test-runner: spec failed` (~858, non-zero exit under `--assert-ran`),
+`error: --assert-ran: no BDD examples executed` (~862, missing evidence file),
+`error: test-runner: no examples executed` (~871, the one fixed here).
+
+
 
 Other consumers of `process_run_bounded` scrape the same head+tail-truncated text
 and none of them check the truncation marker either:
