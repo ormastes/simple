@@ -180,6 +180,29 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   verify this before trusting a rollup's summary as "coverage achieved"
   rather than "coverage observed across the inputs given".
 
+## 2026-08-08: impl-block methods stopped landing on `<entry>` (`b6a43042`)
+
+`Node::Impl` handling in `interpreter_module`'s `register_definitions()`
+never called `tag_methods_owner`/`tag_function_module_owner` on impl-block
+methods (unlike `Node::Class`/`Struct`/`Enum`, which all tag their inline
+methods). `function_module_owner()` returned `None` for every impl-block
+method body, so `CURRENT_EXEC_MODULE` stayed unset while they ran and
+`current_coverage_file()` fell back to the `<entry>` sentinel. This is the
+confirmed root cause of the previously-reported "line coverage tops out at
+143" sparsity for `engine2d_baremetal_core.spl` — those rows were never
+missing, they were correctly-numbered lines misfiled under `<entry>` because
+`draw_rect_stroked`/`draw_circle_stroked`/`draw_image`/`draw_codes12_block`
+are impl-block methods. A/B probe: `engine2d_baremetal_core.spl` coverage
+6% (13/209) -> 62% (131/209); `<entry>` rows in the impl block's line range
+(240-389) 73 -> 0; max real-path line 143 -> 389 (file's last line).
+
+**Still open — RC2:** entry-script top-level functions never get an owner
+registered at all (a second, distinct root cause, not fixed this pass). See
+`doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md`.
+The rollup-tautology, signature/tail-expr/elif-line blindness, and 90%
+line-target-unreachable caveats above are unaffected by this fix and remain
+open.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

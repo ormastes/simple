@@ -123,6 +123,18 @@ This layer is what the four SimpleOS screen targets are being unified onto — s
   ([doc/09_report/gui_perf_benchmark_2026-07-10.md](../../../09_report/gui_perf_benchmark_2026-07-10.md));
   harness `test/perf/graphics_2d/bench_harness.spl`.
 
+## `paint_rect` x-span clip fix (2026-08-07, `d129996a`)
+
+`paint_rect` (`paint_chunk_rasterizer.spl`) clipped `py` to `[0, height)` per
+row but never clipped `x`/`row_offset` to `[0, stride)`, so a negative `x`
+(or `x+w` overflowing the row) wrote past the row boundary into the next
+row's pixels instead of being dropped or truncated. Fixed to clip the x-span
+per row before writing, matching the existing y-clip discipline. Any Draw IR
+consumer that computes rects from layout math without pre-clamping (e.g. the
+overflow-wrap / ellipsis text fixes in
+[web_render_css_parity](../../feature_expert/web_render_css_parity/skill.md))
+depended on this being correct.
+
 ## Unified Packed UI Scene (2026-08-06, lanes L0-L9 all landed)
 
 WM, GUI, Web all write disjoint pre-reserved ranges of one physical

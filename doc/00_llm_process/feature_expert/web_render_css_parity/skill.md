@@ -252,3 +252,26 @@ RED-by-design examples (CSS Grid `fr` tracks, `grid-template-areas`,
 parsing work), recorded in their own bug docs, left untouched per RED
 protocol — do not fold those into this feature's scope without a separate
 plan.
+
+## 2026-08-08: all four deferred RED-by-design examples landed
+
+The four items triaged above on 2026-08-07 were implemented in the same
+follow-up session, not deferred further:
+
+- `3e56ef9c` — `normalized_grid_track_list` accepts `<n>fr` tokens alongside
+  `<n>px` instead of rejecting the whole track list; `grid_track_sizes`
+  distributes remaining free space across `fr` tracks.
+- `eee74d33` — `grid-template-areas` + `grid-auto-flow:column` implemented.
+  `web_css_grid_spec.spl` now 6/6 (was 4/6 after the `fr`-tracks fix, 3/6
+  before this session).
+- `6fa4098d` — `overflow-wrap` threaded into Draw IR text emission.
+  `_html_draw_ir_command` previously always emitted one text command per
+  `#text` node regardless of container width, ignoring layout's
+  already-computed `wrap_starts`/`wrap_ends` ranges — this is a wiring fix
+  into an existing subsystem, **not** a new wrap-computation engine (layout
+  already did the wrap math; Draw IR just didn't consume it, same shape of
+  gap as the `text-overflow: ellipsis` fix above).
+
+Net: `web_css_text_layout_spec.spl` and `web_css_grid_spec.spl` should now be
+fully green when re-run; re-verify rather than trusting this note as durable
+PASS evidence.

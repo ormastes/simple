@@ -323,6 +323,64 @@ General pattern for this layer: any device/capability probe built on
 `file_exists` alone is suspect — check what `file_exists` actually proves
 before trusting a "device present" branch.
 
+**Follow-up shell-injection hole closed same session (`6a53089f`):** the
+`test -c` probe above interpolated `render_node` unvalidated into
+`shell_bool("test -c '{render_node}'")`, a `/bin/sh -c` command line —
+single-quoting alone does not stop a value containing `'` from breaking out.
+Hardened with input validation before the shell call. Any future probe in
+this layer built on `shell_bool`/`shell(...)` with a path argument must
+validate the argument, not just quote it.
+
+## WM pointer-events passthrough (`49e7a5f6`, 2026-08-08)
+
+Added `HostedWindow.passthrough_x/y/w/h` (a window-local click-through dead
+rect) and `HostCompositor.set_window_pointer_passthrough()`.
+`HostGuiEventRouter.update_client_target` now skips a window's hit-test
+match when the point lands in its declared dead rect, letting the window
+underneath claim the click. Flips
+`test/03_system/wm/wm_input_routing_system_spec.spl` it-4 RED->green.
+
+**Field-drop trap found while wiring this in:** `pointer_move`'s lifecycle
+round-trip (`host_compositor_pointer_move`) silently dropped the new
+`passthrough_*` fields on every mouse move — the same gap `apply_wm_action`
+already had for `maximized`/`restore_*` — which made the new capability look
+inert end-to-end even though the field and hit-test skip were correct in
+isolation. Fixed by restoring `passthrough_*` from the pre-move snapshot,
+mirroring `apply_wm_action`'s existing pattern. **General lesson for this
+layer: any new `HostedWindow` field needs an explicit carry-through check in
+every mutate-and-snapshot round trip (`pointer_move`, `apply_wm_action`,
+and any future ones) — a field can be correctly read/written at the call
+site and still be silently dropped by the round trip that's supposed to
+persist it.**
+
+## SimpleOS WM kernel: build unblocked, still short of QEMU (2026-08-08)
+
+- `521ed055` — `SimpleWebLayoutEngine2DReadbackResult` never declared
+  `resolved_backend` even though an earlier commit added reads/writes for it
+  and set it at one of four call sites; the missing field declaration
+  blocked the SimpleOS kernel build at the link stage. Fixed by declaring
+  the field.
+- `136f0769` — the desktop-kernel evidence gate reaches the freestanding
+  link stage and rejects unbaselined undefined symbols; traced via `nm -u`
+  on real objects (not LLVM `declare` text) to confirm genuine call sites.
+  Implemented 7 of 13: `hda_dma_write_pcm_i16` (a pre-existing
+  missing-implementation bug, unrelated to freestanding), plus freestanding
+  bodies for `rt_push`/`rt_pop`/`rt_clear`/`rt_sort` and
+  `rt_engine2d_simd_blend_span_u32`/`_const_span_u32` in
+  `baremetal_stubs.c` (the freestanding link is `-nostdlib` and never sees
+  `runtime_native.c`/`runtime_simd_dispatch.c`, so these had no freestanding
+  body despite sibling span/blend helpers already being present in that
+  file). Remaining 6 (`rt_cuda_memset_d32` + 5 `rt_metal_*`) are host-only
+  GPU-driver FFI bridges pulled in because
+  `src/lib/gc_async_mut/gpu/engine2d/mod.spl`'s backend barrel
+  unconditionally imports every backend regardless of target — documented
+  as pre-existing debt requiring a target-conditional backend-selection
+  refactor, not re-baselined. Gate re-run: fabricated-stub count for this
+  entry 13 -> 6; **still fails before reaching QEMU** — do not read this as
+  a green board-boot result. See the "7 of 13 fabricated-stub symbols
+  implemented" section appended to
+  `doc/09_report/os/simpleos_2d_render_qemu_evidence_2026-08-07.md`.
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer
