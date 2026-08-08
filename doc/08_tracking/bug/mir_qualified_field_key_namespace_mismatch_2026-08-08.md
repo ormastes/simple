@@ -304,3 +304,188 @@ repo's documented fixture-only-detection pattern.
   (`1d1267788e6`). No green and no red is claimed from a build here.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+---
+
+## DYNAMIC CONFIRMATION (2026-08-08) — the first actual measurement
+
+The review above stated its central claim was static-only and named the probe
+that would settle it. That probe has now been RUN, on the deployed
+self-hosted binary (`bin/release/x86_64-unknown-linux-gnu/simple`,
+`native-build` -> real ELF, executed). **Finding 1 and Finding 2 are both
+CONFIRMED DYNAMICALLY.** No stage-3 was needed: a three-module program
+reproduces the defect in ~110 s.
+
+### The probe
+
+```
+# wallq_mod_a.spl
+class Config:            # [alpha, beta, errors]
+    alpha: i64
+    beta: i64
+    errors: i64
+fn a_make() -> Config: Config(alpha: 111, beta: 222, errors: 333)
+
+# wallq_mod_b.spl
+class Config:            # [errors, gamma]   <-- SAME bare name, DIFFERENT layout
+    errors: i64
+    gamma: i64
+fn b_make() -> Config: Config(errors: 777, gamma: 888)
+
+# wallq_main.spl
+use wallq_mod_a.{a_make}
+use wallq_mod_b.{Config, b_make}
+fn main():
+    val c = Config(errors: 777, gamma: 888)   # constructed in the IMPORTER
+    print("direct.errors={c.errors} expect=777")
+    print("direct.gamma={c.gamma} expect=888")
+    print("DISCRIMINATOR c.alpha={c.alpha}")  # alpha exists ONLY in mod_a
+    val d = b_make()                          # constructed in its OWN module
+    print("viafn.errors={d.errors} expect=777")
+    print("viafn.gamma={d.gamma} expect=888")
+    val e = a_make()
+    print("a.errors={e.errors} expect=333")
+```
+
+Build note (cost the first attempt): `native-build` resolves
+`src/runtime/runtime.c` relative to CWD, so the probe tree needs a
+`src/runtime` symlink to the repo's. Without it the run ends
+`error: LLVM native linking failed: ... Expected src/runtime/runtime.c` —
+and the outer wrapper still reports `RC=0`, the known silent-failure shape.
+
+### Measured output
+
+```
+direct.errors=777 expect=777        OK
+direct.gamma=0   expect=888         *** WRONG ***
+DISCRIMINATOR c.alpha=0             *** COMPILES AND RUNS ***
+viafn.errors=777 expect=777         OK
+viafn.gamma=888 expect=888          OK
+a.errors=333    expect=333          OK
+```
+
+### What each line proves
+
+1. **`c.alpha` compiles and runs at all.** `alpha` exists ONLY in
+   `mod_a::Config`. `wallq_main` imports `mod_b`'s `Config` and never names
+   `mod_a::Config`. That the field resolves is direct proof that the bare
+   `Config` key in `struct_field_order` holds **mod_a's** layout while the
+   consumer believes it holds mod_b's. The cross-module field-index
+   collision is REAL and is not confined to entry-closure/bootstrap builds —
+   it reproduces in an ordinary three-file `native-build`.
+
+2. **`direct.gamma=0` vs `viafn.gamma=888` is the predicted local-vs-imported
+   split, exactly.** `b_make` constructs inside `mod_b`, where
+   `module_lowering.spl:719/730`'s `overwrite: true` re-registration makes
+   the bare key mod_b's own layout — correct. The identical construction in
+   the importing module gets mod_a's layout — wrong. This is precisely the
+   asymmetry Finding 1 predicted ("the new tier fires where it was not needed
+   and is skipped where it was").
+
+3. **`direct.errors=777` is correct BY ACCIDENT, and that is the important
+   part.** Construction and read are *both* keyed by the same bare name, so
+   they are both wrong in the *same* direction and cancel. This is the
+   empirical form of the sequencing hazard in Finding 2: today's state is
+   **collided but CONSISTENT**. Fixing the READ path alone would move
+   `errors` onto mod_b's index while construction still wrote it at mod_a's
+   — turning a currently-correct read into a wrong one. **Any fix that
+   qualifies the read path without qualifying construction makes this program
+   strictly worse.** Confirmed, not merely argued.
+
+4. **`gamma` was silently DROPPED at construction.** With field order
+   `[alpha, beta, errors]`, the named arg `gamma: 888` matches no declared
+   field, is inserted into `named_args` and never consumed, and no diagnostic
+   is emitted — the Finding-3 named-constructor defect, observed. `alpha` and
+   `beta` take the nil fill, which is why both `c.gamma` and `c.alpha` read
+   as 0.
+
+### This is now a cheap, permanent fix oracle
+
+`direct.gamma` must become **888** once the namespace and the construction
+path agree. Runtime ~110 s. Note that `c.alpha` resolving at all will NOT be
+fixed by this work and must not be used as an oracle: `resolve_field_index`
+returns index 0 on a miss and never errors, so nothing in the layout-key
+change adds field-existence checking. `c.alpha` compiling is a SEPARATE
+missing-validation defect (the same family as the dropped `gamma:` named
+arg); it is diagnostic evidence here, not a target. This replaces "requires a full
+Stage 3" as the verification bar for this bug: Stage 3 is still the
+integration oracle, but it is no longer the *only* oracle.
+
+## Correction to the "Suggested fix direction" — it is NOT a one-line change
+
+The suggestion above ("normalize `defining_module` through a single
+canonicalizer at both sites, or have `composite_layout_key` normalize") is
+necessary but **not sufficient**, and landing only that half is the actively
+harmful state proven by point 3.
+
+Normalizing in `composite_layout_key` is the right shape and the right place
+(`defining_module` is load-bearing elsewhere — 20.hir visibility matching
+compares it against literal PATHS — so the two population sites must not
+change). The canonical namespace should be the **dotted logical name**, not
+the path, because `src/compiler` exposes each layer under both a numbered
+real directory (`50.mir/`) and a symlink (`mir/`): one module, two path
+spellings, one dotted name. `hir_pkg_canonical_module_name`'s rules (drop
+all-digit tier segments, fold `std.` -> `lib.`) are exactly right and should
+be reimplemented locally in 50.mir rather than imported, matching the
+existing precedent in `bootstrap_globals.spl:57` and
+`hir_module_logical_name_from_path`'s own docstring.
+
+**Read the BLOCKER section below before starting.** It is the reason the
+one-line normalization must NOT be landed by itself, and it names the real
+scope (`struct_value_syms` re-namespacing across all writers and readers).
+A lane that skips it will re-derive the same dead end.
+
+Two further requirements that were not previously identified:
+
+- **`canonical_mir_type_symbol` (`50.mir/_MirLowering/module_lowering.spl:198`)
+  has the SAME two-namespace bug**, keying `"{defining_module}.{name}"`
+  inline. Un-normalized, one physical type reached via declaration vs via
+  import mints TWO distinct canonical MIR type symbols — defeating the exact
+  canonicalization that function exists to provide. Same normalizer, same
+  commit.
+
+- **The conflict-warning exemption becomes unsound.**
+  `register_composite_field_metadata:590` skips the divergent-field-list
+  warning for any key containing `::`, on the premise that qualified keys
+  "never collide". Normalization weakens that premise: dropping tier segments
+  and folding `std.`->`lib.` could merge two genuinely distinct modules onto
+  one key, after which `overwrite: false` first-wins hands the qualified tier
+  a *confidently* wrong layout — worse than the ambiguous bare key. The
+  exemption must be relaxed so qualified keys warn too; it is the only canary
+  for a normalizer over-merge available without a full build.
+
+## BLOCKER on the construction half — why this is still OPEN
+
+`lower_struct_construct` cannot simply be re-keyed. Beyond the layout maps
+(`struct_field_order`, `struct_field_hir_type`, `struct_field_type_name`,
+`struct_field_has_default`, `struct_field_default_expr`), it writes the
+constructed local's provenance into **`struct_value_syms`**, and
+`resolve_field_index:1018` consults `struct_value_syms` as **tier 1 — BEFORE
+the module-qualified tier**. So if construction keeps recording the bare
+name, tier 1 returns the collided layout and the qualified tier is never
+reached for any construct-then-read local: the read-path fix is defeated for
+the dominant case.
+
+But `struct_value_syms` cannot be qualified in `lower_struct_construct`
+alone. It is written from at least six other sites with **bare** names —
+`function_lowering.spl:296/328/330` (`parameter_type.name`),
+`expr_dispatch.spl:229` (`struct_symbol_raw.name`), `expr_dispatch.spl:390`
+(`nested_name`) — and read by consumers beyond field resolution, including
+method dispatch (`module_lowering.spl:934`) and `expr_dispatch.spl:776`.
+Qualifying one writer would leave the map holding two namespaces and would
+plausibly break method dispatch — reintroducing, one layer down, the very
+class of bug this document is about.
+
+**A correct fix therefore has to re-namespace `struct_value_syms` across all
+of its writers and readers in one change.** That is materially larger than
+the read-path patch, and it has no oracle short of a compiler rebuild:
+`src/compiler/**.spl` edits are NOT live for `native-build` (the deployed
+binary is used), so the probe above cannot validate a source change until the
+compiler is rebuilt. Scoping it correctly, rather than landing the harmful
+half, is the reason this stays OPEN.
+
+**Status: root cause CONFIRMED DYNAMICALLY; fix NOT LANDED.** A prepared
+patch covering the normalizer, `composite_layout_key`,
+`canonical_mir_type_symbol`, and the warning exemption exists but is
+deliberately withheld, because on its own it is the read-path-only change
+that point 3 proves is worse than the status quo.

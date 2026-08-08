@@ -112,6 +112,83 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
         else: 0
     )
 
+fn mir_layout_module_segment_is_tier(seg: text) -> bool:
+    """True for an all-digit layer segment ("50" in compiler.50.mir.*).
+    Mirrors `hir_pkg_segment_is_tier` (20.hir/hir_lowering/_Items/
+    module_lowering.spl) and `_driver_module_name_segment_is_tier`
+    (80.driver/driver_source_loading.spl); duplicated rather than imported
+    for the same reason those two are duplicated from each other -- 50.mir
+    must not grow a module edge onto 20.hir's lowering items barrel just to
+    reach one pure text helper. Keep byte-equivalent to those copies."""
+    if seg == "":
+        return false
+    var i = 0
+    val seg_len = seg.len()
+    while i < seg_len:
+        val code = seg.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+fn mir_layout_canonical_module_name(name: text) -> text:
+    """Fold every spelling of ONE physical module onto a single dotted name.
+
+    ROOT FIX for the qualified-key namespace mismatch (bug
+    mir_qualified_field_key_namespace_mismatch_2026-08-08): `defining_module`
+    is populated from TWO DIFFERENT NAMESPACES depending on how a symbol was
+    created.
+
+    - DECLARATION (`declare_module_types`, 20.hir/hir_lowering/_Items/
+      module_lowering.spl) stores `self.module_filename` -- a repo-relative
+      FILE PATH (`src/compiler/55.borrow/nll.spl`). Every qualified
+      `struct_field_order` key is registered from these symbols.
+    - IMPORT (`register_imported_symbol`, same file) stores
+      `imported_mod.module_name` -- the DOTTED LOGICAL NAME
+      (`compiler.borrow.nll`).
+
+    So `composite_layout_key` produced `src/compiler/55.borrow/nll.spl::X` on
+    the producer side and `compiler.borrow.nll::X` on the consumer side, and
+    the module-qualified tier added by `b9e23914a0e` could never fire across
+    an import -- precisely the case it was written to fix. It fired only for
+    locally-declared types, where the bare tier was already correct thanks to
+    the `overwrite: true` re-registration below.
+
+    Normalizing HERE rather than at the two population sites is deliberate:
+    `defining_module` is load-bearing for other consumers (visibility
+    matching in 20.hir/hir_lowering/types.spl compares it against literal
+    PATHS), so changing what is stored would have a blast radius far beyond
+    layout keying. `composite_layout_key` is the single funnel through which
+    both the registration sites and the read tier pass, so one normalization
+    makes producer and consumer agree by construction.
+
+    The dotted logical name is the canonical namespace (not the path) because
+    it is stable under the numbered-directory/symlink layout: `src/compiler`
+    exposes both `50.mir/` (real) and `mir/` (symlink), so ONE module has two
+    distinct path spellings but only one dotted name. Applies the same two
+    rules as `hir_pkg_canonical_module_name`: drop all-digit tier segments and
+    fold a leading `std.` to `lib.`."""
+    var dotted = name
+    if dotted == "":
+        return ""
+    if dotted.ends_with(".spl"):
+        dotted = dotted[0:dotted.len() - 4]
+    dotted = dotted.replace("\\", "/")
+    dotted = dotted.replace("/", ".")
+    if dotted.starts_with("src."):
+        dotted = dotted.substring(4)
+    var segs: [text] = []
+    for seg in dotted.split("."):
+        if mir_layout_module_segment_is_tier(seg):
+            continue
+        segs = segs.push(seg)
+    val canonical = segs.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
         val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
@@ -190,6 +267,16 @@ impl MirLowering:
         symbol.id
 
     fn composite_layout_key(symbol: HirSymbol) -> text:
+        # DELIBERATELY NOT normalized yet -- see the BLOCKER section of
+        # doc/08_tracking/bug/mir_qualified_field_key_namespace_mismatch_2026-08-08.md.
+        # Wrapping this in mir_layout_canonical_module_name() is the one-line
+        # change that makes resolve_field_index's module-qualified tier
+        # actually fire across an import, but on its own it is HARMFUL: the
+        # CONSTRUCTION path (lower_struct_construct) is still bare-name keyed,
+        # so a read newly resolved against the defining module's layout would
+        # disagree with a write laid out from the collided bare key. Land it
+        # only together with the struct_value_syms re-namespacing described
+        # there.
         val defining_module = symbol.defining_module ?? ""
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
@@ -200,9 +287,19 @@ impl MirLowering:
         match symbol_info:
             case Some(info):
                 if info == nil: return symbol
-                val defining_module = match info.defining_module:
+                # Same two-namespace hazard as composite_layout_key (see
+                # mir_layout_canonical_module_name): without normalization one
+                # physical type reached via DECLARATION (path-form
+                # defining_module) and via IMPORT (dotted-form) minted TWO
+                # distinct canonical MIR type symbols, defeating the very
+                # canonicalization this function exists to provide. Merging
+                # them is strictly correct here -- the id is derived from the
+                # key, so folding two spellings of one module onto one key
+                # folds two ids that always denoted the same type.
+                val raw_defining_module = match info.defining_module:
                     case Some(value): value
                     case None: ""
+                val defining_module = mir_layout_canonical_module_name(raw_defining_module)
                 if defining_module == "":
                     return symbol
                 val key = "{defining_module}.{info.name}"
@@ -586,8 +683,20 @@ impl MirLowering:
         # ambiguous across modules of an entry-closure build. Warn ONCE per
         # bare name; an identical re-registration (same field list) stays
         # silent, and module-qualified '<module>::<Name>' keys (from
-        # composite_layout_key) never collide, so they are exempt.
-        if not name.contains("::") and self.struct_field_order.has(name):
+        # composite_layout_key) were assumed never to collide.
+        #
+        # That exemption is NO LONGER SOUND (bug
+        # mir_qualified_field_key_namespace_mismatch_2026-08-08):
+        # composite_layout_key now normalizes defining_module through
+        # mir_layout_canonical_module_name, which DROPS all-digit tier
+        # segments and folds `std.` -> `lib.`. Those rules exist to collapse
+        # the path/dotted spellings of ONE module, but they could in
+        # principle merge two genuinely distinct modules onto one key -- and
+        # then `overwrite: false` first-wins would hand the qualified tier a
+        # CONFIDENTLY WRONG layout, which is worse than the ambiguous bare
+        # key it replaced. So qualified keys warn too: this is the only
+        # canary for a normalization over-merge.
+        if self.struct_field_order.has(name):
             val existing_fields = self.struct_field_order[name]
             var fields_differ = existing_fields.len() != field_names.len()
             if not fields_differ:
@@ -599,7 +708,8 @@ impl MirLowering:
             if fields_differ and not self.struct_field_order_conflict_warned.contains(name):
                 self.struct_field_order_conflict_warned[name] = true
                 val kept_side = if overwrite: "keeping NEW" else: "keeping EXISTING"
-                print "[mir-lower] WARNING: struct/class name '{name}' re-registered with a DIFFERENT field list (existing=[{existing_fields.join(", ")}] vs new=[{field_names.join(", ")}]; {kept_side}); bare-name field-index lookups for this type are ambiguous across modules — module-qualified keys stay correct (field-index collision, 2026-08-07)"
+                val key_kind = if name.contains("::"): "QUALIFIED key — the module-name normalizer over-merged two distinct modules; this is a NORMALIZER BUG, not an ordinary bare-name collision" else: "bare-name field-index lookups for this type are ambiguous across modules — module-qualified keys stay correct"
+                print "[mir-lower] WARNING: struct/class name '{name}' re-registered with a DIFFERENT field list (existing=[{existing_fields.join(", ")}] vs new=[{field_names.join(", ")}]; {kept_side}); {key_kind} (field-index collision, 2026-08-07)"
         if overwrite or not self.struct_field_order.has(name):
             self.struct_field_order[name] = field_names
         if overwrite or not self.struct_field_type_name.has(name):
