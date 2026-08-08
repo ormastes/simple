@@ -1939,13 +1939,51 @@ fn _html_draw_ir_command(
         # Bound to the fixed-advance width model already used by those raster
         # loops (style_text_advance/style_space_advance), so it does not
         # disturb the vector-font measurement path below when ellipsis is off.
+        #
+        # overflow-wrap (2026-08-08): layout already computes per-node
+        # word-wrap break points (boxes.wrap_starts[i]/boxes.wrap_ends[i]) for
+        # the CPU-framebuffer raster loop above (`wrap_cache`, :999-1035);
+        # this Draw IR builder used to ignore that pre-computed line list
+        # entirely and always emit the full node.text_trimmed as one command
+        # (doc/08_tracking/bug/web_css_overflow_wrap_zero_consumer_2026-08-07.md).
+        # `wrap_active` reuses that line list as-is instead of re-deriving
+        # break points conditioned on `st.overflow_wrap`: layout's own wrap
+        # computation (compute_style_wrap_ranges/compute_wrap_ranges) is not
+        # conditioned on `overflow_wrap` either — it always falls back to a
+        # one-character hard split when a single word cannot fit a line — so
+        # this keeps Draw IR consistent with the raster path's existing
+        # (already-hard-splitting) wrap model rather than adding a second,
+        # differently-gated one. Only the first wrapped line is returned here
+        # (byte-identical to the old single-command shape when unwrapped);
+        # `_html_draw_ir_wrap_extra_line_commands` below emits the rest. A
+        # wrapped node always uses the fixed-advance measurement model (same
+        # as the ellipsis path) rather than the vector/shaped-font metrics
+        # path further down — line-by-line glyph shaping is not implemented,
+        # noted here as a scope simplification.
+        val wrap_line_starts = boxes.wrap_starts[i]
+        val wrap_line_ends = boxes.wrap_ends[i]
+        val wrap_active = (
+            wrap_line_starts.len() > 1 and not st.text_overflow_ellipsis
+        )
         val visual_text = if st.text_overflow_ellipsis:
             ellipsize_text_for_width(
                 visual_text_rtl, 0, visual_text_rtl.len(), content_w, st,
                 style_text_advance(st), style_space_advance(st)
             )
+        elif wrap_active:
+            visual_text_rtl.substring(wrap_line_starts[0], wrap_line_ends[0])
         else:
             visual_text_rtl
+        if wrap_active:
+            return draw_ir_text_styled_clipped(
+                _html_draw_ir_component_id(node, i),
+                content_x,
+                content_y,
+                visual_text,
+                st.fg,
+                computed_style,
+                clip_rect
+            )
         if not vector_fonts:
             return draw_ir_text_styled_clipped(
                 _html_draw_ir_component_id(node, i),
@@ -2004,6 +2042,60 @@ fn _html_draw_ir_command(
         computed_style
     )
     command
+
+# Companion to `_html_draw_ir_command`'s `wrap_active` branch: that function
+# returns only the first wrapped line (to keep its single-`DrawIrCommand`
+# return shape byte-identical to the unwrapped case); this emits the Draw IR
+# text commands for the remaining lines using layout's precomputed
+# boxes.wrap_starts[i]/boxes.wrap_ends[i], one command per line, offset by
+# style_line_h(st) per line. Returns an empty list when the node is not a
+# wrapped `#text` node, so callers can push its result unconditionally.
+fn _html_draw_ir_wrap_extra_line_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    val node = nodes[i]
+    val st = styles[i]
+    if node.tag != "#text" or node.text_trimmed == "" or st.text_overflow_ellipsis:
+        return out
+    val wrap_line_starts = boxes.wrap_starts[i]
+    val wrap_line_ends = boxes.wrap_ends[i]
+    val wrap_line_count = wrap_line_starts.len()
+    if wrap_line_count <= 1:
+        return out
+    val x = boxes.bx[i]
+    val y = boxes.by[i]
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val transformed_text = apply_text_transform_for_paint(
+        node.text_trimmed, st.text_transform
+    )
+    val visual_text_rtl = if st.direction_rtl:
+        reverse_text_for_paint(transformed_text)
+    else:
+        transformed_text
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    val computed_style = _html_draw_ir_style_props(node, st)
+    val lh = style_line_h(st)
+    var line_i = 1
+    # cpu-lane-loop-ok: emits the wrapped lines beyond the first for one
+    # #text node's Draw IR command; bound is wrap_line_count from layout's
+    # precomputed boxes.wrap_starts[i], the same per-node line list the
+    # CPU-framebuffer raster loop (:999-1035) iterates over.
+    while line_i < wrap_line_count:
+        val line_text = visual_text_rtl.substring(
+            wrap_line_starts[line_i], wrap_line_ends[line_i]
+        )
+        val line_y = content_y + line_i * lh
+        out.push(draw_ir_text_styled_clipped(
+            _html_draw_ir_component_id(node, i) + "_line{line_i}",
+            content_x, line_y, line_text, st.fg, computed_style, clip_rect
+        ))
+        line_i = line_i + 1
+    out
 
 fn _html_draw_ir_image_index(
     images: [SimpleOsHostGpuImageResource], image_uri: text
@@ -2877,6 +2969,18 @@ fn _html_draw_ir_commands(
             node_command.parent_id = parent_id
             commands.push(node_command)
             owner_nodes.push(i)
+            # cpu-lane-loop-ok: pushes the Draw IR text commands for wrapped
+            # lines 2..N of one #text node; bound is that node's own
+            # layout-precomputed wrap-line count (see
+            # _html_draw_ir_wrap_extra_line_commands), empty for every other
+            # node kind and for single-line text
+            for extra_line_command in _html_draw_ir_wrap_extra_line_commands(
+                nodes, styles, boxes, i, node_clip
+            ):
+                var extra_line = extra_line_command
+                extra_line.parent_id = parent_id
+                commands.push(extra_line)
+                owner_nodes.push(i)
             if val summary_marker = _html_draw_ir_summary_marker_command(
                 nodes, styles, boxes, i, node_clip
             ):
