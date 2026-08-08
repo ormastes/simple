@@ -145,15 +145,56 @@ Real call sites: `src/compiler/35.semantics/error_formatter.spl` (the `:442,465,
 sites) and `src/compiler/20.hir/hir_lowering/types.spl` both lint with 0 errors and
 no `PARSE001`.
 
-### Remaining gap (still OPEN)
+### Seed parity, verified on the seed itself (not inferred)
 
-Evidence item 6 is unchanged. The parser now **accepts and validates** `|x: i64|`
-and then drops the annotation, exactly as `parse_fn_lambda_after_kw` already does
-for `fn(x: i64)` lambdas. That is parity with the pre-existing behaviour of the
-other lambda forms, not a new hole — but widening `expr_lambda` to carry per-param
-types and un-hard-coding `has_type_: false` in
-`_FlatAstBridge/convert_nodes.spl:948-953` remains to be done before typed
-pipe-lambda params are semantically honoured.
+The zero-param spelling was checked against the seed rather than assumed, because
+an unverified parity claim is how a divergent dialect gets shipped:
+
+- **source** — `src/compiler_rust/parser/src/expressions/primary/lambdas.rs:130`
+  dispatches on `TokenKind::Pipe` **only**; there is no `DoublePipe` arm.
+  `postfix.rs:978` then tests `!self.check(&TokenKind::Pipe)` for the empty param
+  list, i.e. the seed also wants two *separate* pipe tokens.
+- **runtime** — `bin/simple run` on `val f = || 7` fails with
+  `Unexpected token: expected expression, found DoublePipe`; on `val f = | | 7`
+  it parses (and only then hits an unrelated JIT closure-ABI fallback).
+
+So `| |` / not-`||` is the seed's grammar, and the pure-Simple production matches
+it. Rust's `||` zero-arg closure spelling is **not** accepted by either.
+
+### Remaining gaps (still OPEN)
+
+**1. Per-param types are parsed then dropped.** Evidence item 6 is unchanged. The
+parser now **accepts and validates** `|x: i64|` and then discards the annotation,
+exactly as `parse_fn_lambda_after_kw` already does for `fn(x: i64)` lambdas. That
+is parity with the pre-existing behaviour of the other lambda forms, not a new
+hole — but widening `expr_lambda` to carry per-param types and un-hard-coding
+`has_type_: false` in `_FlatAstBridge/convert_nodes.spl:948-953` remains to be
+done before typed pipe-lambda params are semantically honoured.
+
+**2. The brace-block body `|x| { ... }` is still seed-only.** The seed accepts it
+(`lambdas.rs:137-140`, `peek_brace_is_lambda_block`); the production landed here
+parses a single expression body only:
+
+```
+$ bin/simple lint build/parity_probe/z_brace.spl     # val ys = xs.map(|e| { e + 1 })
+z_brace.spl:3:33: error[PARSE001]: ... (expected :, got } '}')
+```
+
+Nine call sites use it, in six files — none under `src/compiler`, so unlike the
+form this commit fixed it is **not** on the Stage-3 self-host path:
+
+```
+src/lib/nogc_sync_mut/lsp/handlers/semantic_tokens.spl
+src/lib/nogc_sync_mut/db_atomic.spl
+src/lib/gc_async_mut/lsp/handlers/semantic_tokens.spl
+src/lib/nogc_async_mut/lsp/handlers/semantic_tokens.spl
+src/lib/nogc_async_mut/db_atomic.spl
+src/compiler_rust/lib/std/examples/ui_todo_app.spl
+```
+
+Recorded rather than worked around: these sites must NOT be rewritten to dodge
+the parser: the brace-block production belongs in the pure-Simple parser, the same
+way the pipe form did.
 
 ## Related
 
