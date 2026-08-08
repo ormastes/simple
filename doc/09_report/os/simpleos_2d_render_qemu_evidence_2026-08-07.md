@@ -171,3 +171,99 @@ above must be fixed first.
 - `build/simpleos_wm_fullscreen_evidence/evidence.env` (this run)
 - `build/simpleos_wm_fullscreen_evidence/native-build.out` (this run)
 - Full stdout: `/home/ormastes/.claude/jobs/afa73365/tmp/fullscreen_run_stdout.log`
+
+## Fix + re-run — 2026-08-08
+
+### Root cause was more specific than "cannot infer type"
+
+The class `SimpleWebLayoutEngine2DReadbackResult`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl:80-96`)
+never declared a `resolved_backend` field. Commit `ca75bf0700a` added
+`.resolved_backend` reads in `simple_web_engine2d_renderer.spl` and
+`web_render_pixel_backend.spl`, and set it at exactly ONE of the struct's
+four constructor call sites
+(`simple_web_engine2d_renderer.spl:179`) — but never added the field to the
+class declaration, and never set it at the other three constructors
+(`simple_web_layout_engine2d_fast.spl:727, 743, 763`). The frontend accepted
+this silently; the failure surfaced only in HIR lowering as "cannot infer
+field type," naming a consumer function rather than the real defect site.
+
+### Fix applied (source-only)
+
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`:
+- Added `resolved_backend: text` to the `SimpleWebLayoutEngine2DReadbackResult`
+  class declaration.
+- Added `resolved_backend: backend_name` to all three previously-incomplete
+  constructor call sites (lines 727, 743, 763 pre-edit) — `backend_name` is
+  the parameter already in scope at each site and matches the semantics used
+  by the one constructor that already set the field correctly.
+
+Bug filed for the misleading/late diagnostic (frontend does not catch a
+field that is read/set at some constructors and declared nowhere):
+`doc/08_tracking/bug/hir_lowering_cannot_infer_struct_field_type_from_constructor_args_only_2026-08-08.md`.
+
+### Re-run result: original blocker cleared, kernel build now fails LATER (link stage)
+
+Command (same as the original run, `SIMPLE_BIN` re-pinned to the pure-Simple
+self-hosted binary):
+
+```
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple \
+REPORT_PATH=<scratch>/simpleos_wm_fullscreen_evidence_run.md \
+BUILD_DIR=build/simpleos_wm_fullscreen_evidence \
+SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS=900 \
+SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS=870 \
+timeout 840 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+`native-build.out` no longer contains any `hir:`/`resolved_backend` error —
+the two previously-failing files
+(`simple_web_engine2d_renderer.spl`, `web_render_pixel_backend.spl`) now
+compile. The build progressed all the way through HIR lowering/codegen for
+the full `gui_entry_desktop.spl` closure to the **freestanding link stage**,
+where it hit a **different, pre-existing, unrelated blocker**:
+
+```
+Freestanding unresolved symbol check: 130 unexpected symbol(s)
+Fabricated freestanding stubs: 130 symbol(s) for entry
+'simpleos_wm_production_desktop.elf.candidate' -- weak bodies that RETURN 0
+(baseline config/freestanding_fabricated_stub_baseline.sdn: 117 known, 13 new)
+...
+Build failed: freestanding link would FABRICATE 13 symbol(s) not in the
+baseline for entry 'simpleos_wm_production_desktop.elf.candidate':
+hda_dma_write_pcm_i16, rt_clear, rt_cuda_memset_d32,
+rt_engine2d_simd_blend_const_span_u32, rt_engine2d_simd_blend_span_u32,
+rt_metal_device_identity, rt_metal_device_supports_metal3,
+rt_metal_load_library_bytes, rt_metal_load_library_bytes_raw,
+rt_metal_load_library_file, rt_pop, rt_push, rt_sort. These get weak bodies
+that return 0, which silently corrupts every caller. Implement them, or --
+only if nil is genuinely the correct answer -- re-baseline with
+SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1 and justify it in
+config/freestanding_fabricated_stub_baseline.sdn.
+```
+
+`evidence.env` this run:
+
+```
+simpleos_wm_fullscreen_status=fail
+simpleos_wm_fullscreen_reason=wm-simple-web-build-failed
+simpleos_wm_fullscreen_kernel_build_status=failed-cache-preserved
+simpleos_wm_fullscreen_serial_log_bytes=0
+```
+
+**Verdict: the `resolved_backend` HIR blocker is fully cleared — it is not
+the reason the gate fails anymore.** The gate still does not reach QEMU
+(`serial_log_bytes=0`, no OVMF boot this run) — it is now blocked by a
+separate, freestanding-link fabricated-stub gate rejecting 13 new
+unimplemented runtime symbols (SIMD engine2d blend spans, Metal device
+query/library-load, CUDA memset, array `push`/`pop`/`sort`/`clear`
+primitives, and an HDA PCM DMA write helper) that this closure now reaches
+for the first time. This is out of scope for the smallest-safe-fix requested
+here (13 real runtime implementations, several touching hardware-specific
+backends); it is the concrete next blocker for whoever picks up the
+QEMU-boot evidence gate next. No `doc/08_tracking/bug/` record filed for it
+in this pass — recommend one be filed against `src/runtime/**` /
+`src/lib/**` for the 13 named symbols before attempting
+`SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1` (a baseline bump would silently
+accept "return 0" bodies for real GPU/audio/array primitives, which the gate
+itself warns "silently corrupts every caller").
