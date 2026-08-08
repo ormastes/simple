@@ -54,7 +54,13 @@ fn wm_read_event_at(event_path: text, seq: i64) -> HostInputEvent?:
     val doc = file_read(path)
     if doc.trim() == "":
         return nil
-    host_input_from_wm_fs_event(wm_fs_app_event_decode(doc))
+    val decoded = wm_fs_app_event_decode(doc)
+    # The filename is the delivery cursor, while the wire sequence is the
+    # producer's claim.  Both must agree: accepting a stale/replayed payload
+    # would advance the cursor and permanently skip the real next event.
+    if decoded.seq != seq:
+        return nil
+    host_input_from_wm_fs_event(decoded)
 
 class ScreenWmHost:
     var w: i32
@@ -134,6 +140,16 @@ impl ScreenHost for ScreenWmHost:
         if ev == nil:
             return nil
         self.event_seq = next
+        # Resize is a public layout update, not merely another input record.
+        # Keep size() coherent for the next DrawIR composition while leaving
+        # malformed/non-positive dimensions fail-closed at the host boundary.
+        match ev:
+            HostInputEvent.Resize(w, h):
+                if w > 0 and h > 0:
+                    self.w = w
+                    self.h = h
+            _:
+                pass
         ev
 
     me shutdown():
