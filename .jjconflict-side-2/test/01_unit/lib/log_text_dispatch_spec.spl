@@ -1,0 +1,82 @@
+"""
+log-lib-drivers Phase 5 regression spec — log_dispatch_text() text correlation.
+
+Bug (Batch D, lane DS4): log_dispatch_text() — used by log_trace_subsys/debug/info/
+warn/error/fatal — called `_dispatch_to_backends(level, subsys, 0)` with a
+dummy p0=0. The actual message text never reached ring backends; only
+log_dispatch_record() (the structured/numeric p0-p1 path) carried a real
+payload. This spec proves the dispatched backend record now correlates back
+to the real message via the text-intern handle carried in p0.
+"""
+
+use std.spec
+use std.log.{
+    LOG_INFO, log_set_level, log_register_backend, log_remove_backend,
+    log_info_subsys, SUBSYS_KERN, log_text_from_handle,
+    log_text_intern_overwritten, LOG_TEXT_INTERN_CAP
+}
+
+describe "log facade — log_dispatch_text() text correlation (bug fix)":
+
+    it "log_info_subsys's message is retrievable from the dispatched ring record":
+        log_set_level(LOG_INFO)
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        ring_backend_clear(sink)
+        log_info_subsys(SUBSYS_KERN, "hello-from-log-info")
+        expect(ring_backend_count(sink)).to_equal(1)
+        val handle = ring_backend_seq_at(sink, 0)
+        val recovered = log_text_from_handle(handle)
+        expect(recovered).to_equal("hello-from-log-info")
+        log_remove_backend(id)
+
+    it "two distinct messages correlate to two distinct, correctly-ordered handles":
+        log_set_level(LOG_INFO)
+        val sink = ring_backend_new(64)
+        val id = log_register_backend(sink.ops)
+        ring_backend_clear(sink)
+        log_info_subsys(SUBSYS_KERN, "first-message")
+        log_info_subsys(SUBSYS_KERN, "second-message")
+        expect(ring_backend_count(sink)).to_equal(2)
+        val h0 = ring_backend_seq_at(sink, 0)
+        val h1 = ring_backend_seq_at(sink, 1)
+        expect(log_text_from_handle(h0)).to_equal("first-message")
+        expect(log_text_from_handle(h1)).to_equal("second-message")
+        log_remove_backend(id)
+
+    it "an out-of-range or never-issued handle resolves to empty, not garbage":
+        expect(log_text_from_handle(0)).to_equal("")
+        expect(log_text_from_handle(-1)).to_equal("")
+        expect(log_text_from_handle(999999999)).to_equal("")
+
+    it "the text table wraps instead of going permanently text-blind":
+        # The pre-review implementation stopped storing after
+        # LOG_TEXT_INTERN_CAP messages, so every later log line lost its text
+        # forever. Logging past the cap must still resolve the newest message.
+        log_set_level(LOG_INFO)
+        val sink = ring_backend_new(4)
+        val id = log_register_backend(sink.ops)
+        var i = 0
+        while i < LOG_TEXT_INTERN_CAP + 8:
+            log_info_subsys(SUBSYS_KERN, "filler")
+            i = i + 1
+        ring_backend_clear(sink)
+        log_info_subsys(SUBSYS_KERN, "after-wrap")
+        val handle = ring_backend_seq_at(sink, 0)
+        expect(log_text_from_handle(handle)).to_equal("after-wrap")
+        assert_true(log_text_intern_overwritten() > 0)
+        log_remove_backend(id)
+
+    it "a handle whose slot was overwritten resolves to empty, not a later message":
+        log_set_level(LOG_INFO)
+        val sink = ring_backend_new(4)
+        val id = log_register_backend(sink.ops)
+        ring_backend_clear(sink)
+        log_info_subsys(SUBSYS_KERN, "doomed-message")
+        val stale = ring_backend_seq_at(sink, 0)
+        var i = 0
+        while i < LOG_TEXT_INTERN_CAP + 1:
+            log_info_subsys(SUBSYS_KERN, "overwriter")
+            i = i + 1
+        expect(log_text_from_handle(stale)).to_equal("")
+        log_remove_backend(id)

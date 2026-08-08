@@ -1,0 +1,95 @@
+# Intensive probe: JTAG routing over the shared multi-channel link.
+# Run-path probe: `bin/simple run`; expects "JTAG ROUTE PROBE: ALL PASS".
+# Proves: (1) the TAP model reads IDCODE 0x15350067 directly; (2) the same
+# remote_bitbang IDCODE read travels host->mux->fpga-demux->TAP->mux->host-demux
+# and decodes correctly; (3) it works INTERLEAVED with LOG + TERM traffic on the
+# same link (true multi-channel: jtag + console + log over one wire).
+use std.hardware.link_mux.frame.{frame_encode}
+use std.hardware.link_mux.mux.{
+    TransportProfile, transport_sim_loopback, CH_LOG, CH_TERM, CH_JTAG,
+    LinkMux, mux_create, mux_push, mux_pump_all, MuxPumpResult,
+    LinkDemux, demux_create, demux_feed, demux_peek
+}
+use std.hardware.link_mux.jtag_route.{
+    JTAG_IDCODE, TapState, tap_create, jtag_fpga_process, JtagProc,
+    jtag_read_idcode_cmds, jtag_decode_idcode
+}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+fn bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if (a[i].to_i64() & 0xFF) != (b[i].to_i64() & 0xFF):
+            return false
+        i = i + 1
+    true
+
+fn main() -> i64:
+    var fails: i64 = 0
+    val prof = transport_sim_loopback()
+
+    # --- 1. Direct TAP: read IDCODE with no transport in between ---
+    val cmds = jtag_read_idcode_cmds()
+    val direct = jtag_fpga_process(tap_create(), cmds)
+    val id_direct = jtag_decode_idcode(direct.replies)
+    fails = fails + check("direct TAP IDCODE == 0x15350067", id_direct == JTAG_IDCODE)
+
+    # --- 2 + 3. IDCODE over the muxed link, interleaved with LOG + TERM ---
+    # Host multiplexes: LOG banner, TERM keystrokes, and the JTAG command stream.
+    var log_msg: [u8] = []
+    var c = 0x41
+    while c < 0x41 + 16:
+        log_msg.push(c.to_u8())          # "ABCDEFGHIJKLMNOP"
+        c = c + 1
+    var term_msg: [u8] = []
+    term_msg.push(0x6C.to_u8())          # 'l'
+    term_msg.push(0x73.to_u8())          # 's'
+    term_msg.push(0x0A.to_u8())          # '\n'
+
+    var hmux = mux_create(prof)
+    hmux = mux_push(hmux, CH_LOG, log_msg)
+    hmux = mux_push(hmux, CH_JTAG, cmds)
+    hmux = mux_push(hmux, CH_TERM, term_msg)
+    val hp = mux_pump_all(hmux)
+    val to_fpga = hp.frame
+
+    # FPGA demuxes the shared link.
+    var fdemux = demux_create(prof)
+    fdemux = demux_feed(fdemux, to_fpga)
+    fails = fails + check("fpga received LOG intact", bytes_eq(demux_peek(fdemux, CH_LOG), log_msg))
+    fails = fails + check("fpga received TERM intact", bytes_eq(demux_peek(fdemux, CH_TERM), term_msg))
+    val fpga_jtag_cmds = demux_peek(fdemux, CH_JTAG)
+    fails = fails + check("fpga received JTAG cmds intact", bytes_eq(fpga_jtag_cmds, cmds))
+
+    # FPGA drives the TAP with the demuxed JTAG stream, frames TDO replies back.
+    val proc = jtag_fpga_process(tap_create(), fpga_jtag_cmds)
+    var fmux = mux_create(prof)
+    fmux = mux_push(fmux, CH_JTAG, proc.replies)
+    # FPGA also sends console output back on the same link at the same time.
+    var boot_log: [u8] = []
+    boot_log.push(0x4F.to_u8())          # 'O'
+    boot_log.push(0x4B.to_u8())          # 'K'
+    fmux = mux_push(fmux, CH_LOG, boot_log)
+    val fp = mux_pump_all(fmux)
+    val to_host = fp.frame
+
+    # Host demuxes the return link and decodes IDCODE.
+    var hdemux = demux_create(prof)
+    hdemux = demux_feed(hdemux, to_host)
+    val id_muxed = jtag_decode_idcode(demux_peek(hdemux, CH_JTAG))
+    fails = fails + check("IDCODE over muxed link == 0x15350067", id_muxed == JTAG_IDCODE)
+    fails = fails + check("host got FPGA console back on shared link", bytes_eq(demux_peek(hdemux, CH_LOG), boot_log))
+    fails = fails + check("no bad frames either direction", fdemux.bad_frames == 0 and hdemux.bad_frames == 0)
+
+    if fails == 0:
+        print("JTAG ROUTE PROBE: ALL PASS")
+        return 0
+    print("JTAG ROUTE PROBE: {fails} FAIL")
+    1

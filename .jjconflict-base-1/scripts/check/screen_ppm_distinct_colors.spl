@@ -1,0 +1,116 @@
+# Count distinct colours in a binary (P6) PPM — the A5 non-blank proof.
+#
+# A blank screen has exactly ONE distinct colour, so
+# `simpleos_screen_<T>_screendump_distinct_colors > 1` is the captured (not
+# asserted) evidence that a screen type actually painted. This is the only
+# place that number is produced; the checker just reads the row.
+#
+# Usage: bin/simple run scripts/check/screen_ppm_distinct_colors.spl <file.ppm>
+# Prints:
+#   ppm_path=<path>
+#   ppm_status=pass|fail:<reason>
+#   ppm_bytes=<n>
+#   ppm_width=<n>
+#   ppm_height=<n>
+#   ppm_distinct_colors=<n>
+# Exit 0 when the dump parsed AND carries more than one colour.
+
+use std.nogc_sync_mut.io_runtime.{file_read_bytes, get_args}
+
+# Distinct-colour ceiling. We only need to distinguish "1" from "more than 1",
+# and an exact count over a 1024x768 dump is a needless full-image scan cost.
+# Stopping at this many proves non-blankness with room to spare.
+val DISTINCT_COLOR_CAP: i64 = 4096
+
+fn skip_whitespace_and_comments(bytes: [u8], start: i64) -> i64:
+    var i = start
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        if b == 35:
+            # '#' — comment runs to end of line
+            while i < bytes.len() and (bytes[i] as i64) != 10:
+                i = i + 1
+        elif b == 32 or b == 9 or b == 10 or b == 13:
+            i = i + 1
+        else:
+            return i
+    i
+
+fn read_int_at(bytes: [u8], start: i64) -> (i64, i64):
+    """Return (value, index-after). value is -1 when no digits are present."""
+    var i = skip_whitespace_and_comments(bytes, start)
+    var value: i64 = -1
+    while i < bytes.len():
+        val b = bytes[i] as i64
+        if b < 48 or b > 57:
+            return (value, i)
+        if value < 0:
+            value = 0
+        value = value * 10 + (b - 48)
+        i = i + 1
+    (value, i)
+
+fn main() -> i32:
+    val args = get_args()
+    var path = ""
+    for arg in args:
+        if not arg.starts_with("--"):
+            path = arg
+    if path == "":
+        print "ppm_status=fail:missing-path"
+        return 1
+
+    val bytes = file_read_bytes(path)
+    print "ppm_path=" + path
+    print "ppm_bytes=" + "{bytes.len()}"
+    if bytes.len() < 16:
+        print "ppm_status=fail:unreadable-or-truncated"
+        print "ppm_width=0"
+        print "ppm_height=0"
+        print "ppm_distinct_colors=0"
+        return 1
+    if (bytes[0] as i64) != 80 or (bytes[1] as i64) != 54:
+        print "ppm_status=fail:not-binary-p6"
+        print "ppm_width=0"
+        print "ppm_height=0"
+        print "ppm_distinct_colors=0"
+        return 1
+
+    val w_read = read_int_at(bytes, 2)
+    val width = w_read.0
+    val h_read = read_int_at(bytes, w_read.1)
+    val height = h_read.0
+    val m_read = read_int_at(bytes, h_read.1)
+    val maxval = m_read.0
+    print "ppm_width=" + "{width}"
+    print "ppm_height=" + "{height}"
+    if width <= 0 or height <= 0 or maxval != 255:
+        print "ppm_status=fail:bad-header"
+        print "ppm_distinct_colors=0"
+        return 1
+
+    # Exactly one whitespace byte separates the header from the raster.
+    val pixels_start = m_read.1 + 1
+    var seen: [i64] = []
+    var distinct: i64 = 0
+    var i = pixels_start
+    while i + 2 < bytes.len() and distinct < DISTINCT_COLOR_CAP:
+        val r = bytes[i] as i64
+        val g = bytes[i + 1] as i64
+        val b = bytes[i + 2] as i64
+        val color = (r * 65536) + (g * 256) + b
+        var found = false
+        for known in seen:
+            if known == color:
+                found = true
+        if not found:
+            seen.push(color)
+            distinct = distinct + 1
+        i = i + 3
+
+    print "ppm_distinct_colors=" + "{distinct}"
+    if distinct > 1:
+        print "ppm_status=pass"
+        return 0
+    print "ppm_status=fail:blank-uniform-color"
+    1

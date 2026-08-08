@@ -1,0 +1,27 @@
+"""Compiled provider-event bridge over the durable messaging store."""
+
+use std.cli.cli_util.{get_cli_args, has_flag}
+use app.io.mod.{env_get, current_time_ms}
+use std.io_runtime.{mkdir_p, thread_sleep}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{drain_hook_events}
+use app.llm_caret.messaging.adapter.chat.http_delivery.{drain_transport_outbox}
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val database = env_get("LLM_CARET_MESSAGING_DB") ?? ".simple/state/llm-caret-messaging.db"
+    val slash = database.last_index_of("/")
+    if slash > 0: mkdir_p(database.substring(0, slash))
+    var store = PureSqlMessagingStore.open(database)
+    if has_flag(args, "--once"):
+        val result = drain_hook_events(store, 100)
+        val delivery = drain_transport_outbox(store, 100, current_time_ms(), 5000, 5)
+        store.close()
+        print "{\"handled\":" + result.0.to_text() + ",\"failed\":" + result.1.to_text() +
+            ",\"delivered\":" + delivery.0.to_text() + ",\"delivery_failed\":" + delivery.1.to_text() + "}"
+        return if result.1 == 0 and delivery.1 == 0: 0 else: 1
+    while true:
+        drain_hook_events(store, 100)
+        drain_transport_outbox(store, 100, current_time_ms(), 5000, 5)
+        thread_sleep(250)
+    0

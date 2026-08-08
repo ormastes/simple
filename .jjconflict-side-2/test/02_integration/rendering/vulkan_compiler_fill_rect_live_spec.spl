@@ -1,0 +1,142 @@
+# @req REQ-002 REQ-006 REQ-007 REQ-011
+"""Compiler-produced FillRect SPIR-V validation and physical Vulkan readback."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+use compiler.backend.backend.vulkan_backend.{vulkan_compile_module_direct}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_dispatch_framebuffer_compute_checked}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
+    vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
+    vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_read_buffer_bytes,
+    vulkan_sffi_shutdown_reaped
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, content: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val VULKAN_COMPILER_ARTIFACT_DIR: text = "build/test-artifacts/02_integration/rendering/vulkan_compiler_fill_rect_live"
+
+fn _u32_le(value: i64) -> [u8]:
+    [(value & 255).to_u8(), ((value >> 8) & 255).to_u8(),
+     ((value >> 16) & 255).to_u8(), ((value >> 24) & 255).to_u8()]
+
+fn _expected_rect_bytes() -> [u8]:
+    var result: [u8] = []
+    var index: i64 = 0
+    while index < 256:
+        val px = index % 16
+        val py = index / 16
+        val pixel = if px >= 2 and px < 8 and py >= 3 and py < 8: 0xff3366cc else: 0
+        val bytes = _u32_le(pixel)
+        result.push(bytes[0])
+        result.push(bytes[1])
+        result.push(bytes[2])
+        result.push(bytes[3])
+        index = index + 1
+    result
+
+describe "compiler-produced Vulkan FillRect":
+    it "should pass spirv-val and return exact physical-device pixels":
+        step("Lower representative drawing semantics through frontend HIR MIR and Vulkan")
+        val source = "@gpu(\"vulkan\")\n" +
+            "fn processing_fill_rect_u32(mut output: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        output[i + 50u32] = 0xff3366ccu32\n" +
+            "        output[i + 66u32] = 0xff3366ccu32\n" +
+            "        output[i + 82u32] = 0xff3366ccu32\n" +
+            "        output[i + 98u32] = 0xff3366ccu32\n" +
+            "        output[i + 114u32] = 0xff3366ccu32\n"
+        val parsed = parse_full_frontend(source, "processing_fill_rect_u32.spl", "processing_fill_rect_u32", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("processing_fill_rect_u32.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val compiled = vulkan_compile_module_direct(mir)
+        expect(compiled.is_ok()).to_equal(true)
+        val assembly = compiled.unwrap().text_output
+        expect(assembly).to_contain("OpStore")
+        expect(assembly).to_contain("Binding 0")
+
+        val assembly_path = "/tmp/simple_processing_fill_rect.spvasm"
+        val binary_path = "/tmp/simple_processing_fill_rect.spv"
+        step("Compile and validate the compiler-produced SPIR-V artifact")
+        expect(rt_file_write_text(assembly_path, assembly)).to_equal(true)
+        val (_as_out, as_err, as_status) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", assembly_path, "-o", binary_path])
+        expect(as_status).to_equal(0)
+        expect(as_err).to_equal("")
+        val (_val_out, val_err, val_status) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", binary_path])
+        expect(val_status).to_equal(0)
+        expect(val_err).to_equal("")
+        val spirv = rt_file_read_bytes(binary_path)
+        expect(spirv.len()).to_be_greater_than(20)
+
+        step("Submit native work and capture device readback")
+        var session = VulkanSession.create()
+        expect(session.init()).to_equal(0)
+        print("processing_fill_rect_device_name=" + session.device_name)
+        print("processing_fill_rect_device_type=" + session.device_type)
+        print("processing_fill_rect_driver_identity=" + session.driver_identity)
+        expect(session.device_type == "discrete" or session.device_type == "integrated").to_equal(true)
+        expect(session.driver_identity.len()).to_be_greater_than(0)
+        val shader = vulkan_sffi_compile_spirv(spirv)
+        expect(shader).to_be_greater_than(0)
+        val pipeline = vulkan_sffi_create_compute_pipeline(shader, "processing_fill_rect_u32", 4)
+        expect(pipeline).to_be_greater_than(0)
+        val output = vulkan_sffi_alloc_buffer(1024, 0x80)
+        expect(output).to_be_greater_than(0)
+        val zeroes: [u8] = [0u8; 1024]
+        expect(vulkan_sffi_copy_to_buffer(output, zeroes, 0)).to_equal(true)
+        expect(vulkan_dispatch_framebuffer_compute_checked(output, pipeline, _u32_le(6), 1, 1, 1)).to_equal(1)
+        val readback = vulkan_sffi_read_buffer_bytes(output, 1024, 0)
+        step("Compare device readback with the CPU oracle")
+        val expected = _expected_rect_bytes()
+        var mismatch_count: i64 = 0
+        var byte_index: i64 = 0
+        while byte_index < expected.len().to_i64():
+            if readback[byte_index] != expected[byte_index]:
+                mismatch_count = mismatch_count + 1
+            byte_index = byte_index + 1
+        print("processing_fill_rect_readback_bytes=" + readback.len().to_text())
+        print("processing_fill_rect_mismatch_count=" + mismatch_count.to_text())
+        expect(readback).to_equal(expected)
+
+        step("Retain compiler validator and physical readback provenance")
+        val (_mkdir_out, _mkdir_err, mkdir_status) = rt_process_run("/bin/mkdir", ["-p", VULKAN_COMPILER_ARTIFACT_DIR])
+        expect(mkdir_status).to_equal(0)
+        val retained_assembly = VULKAN_COMPILER_ARTIFACT_DIR + "/processing_fill_rect.spvasm"
+        val retained_binary = VULKAN_COMPILER_ARTIFACT_DIR + "/processing_fill_rect.spv"
+        expect(rt_file_write_text(retained_assembly, assembly)).to_equal(true)
+        expect(rt_file_write_bytes(retained_binary, spirv)).to_equal(true)
+        val (artifact_sha_out, artifact_sha_err, artifact_sha_status) = rt_process_run("sha256sum", [retained_binary])
+        expect(artifact_sha_status).to_equal(0)
+        expect(artifact_sha_err).to_equal("")
+        val artifact_sha = artifact_sha_out.split(" ")[0]
+        expect(artifact_sha.len()).to_equal(64)
+        val receipt = "version=1\ncommand=bin/simple test test/02_integration/rendering/vulkan_compiler_fill_rect_live_spec.spl --mode=interpreter --no-session-daemon\nevidence_class=physical-device\ncompiler=simple-vulkan-mir-backend\nassembler=spirv-as --target-env vulkan1.3\nvalidator=spirv-val --target-env vulkan1.3\nentry_point=processing_fill_rect_u32\nartifact_path=" + retained_binary + "\nartifact_sha256=" + artifact_sha + "\ndevice_name=" + session.device_name + "\ndevice_type=" + session.device_type + "\ndriver_identity=" + session.driver_identity + "\nreadback_bytes=" + readback.len().to_text() + "\nmismatch_count=" + mismatch_count.to_text() + "\nparity=pass\n"
+        expect(receipt).to_contain("compiler=simple-vulkan-mir-backend")
+        expect(receipt).to_contain("validator=spirv-val --target-env vulkan1.3")
+        expect(receipt).to_contain("mismatch_count=0")
+        val receipt_path = VULKAN_COMPILER_ARTIFACT_DIR + "/compiler_fill_rect_vulkan.receipt"
+        expect(rt_file_write_text(receipt_path, receipt)).to_equal(true)
+        print("processing_fill_rect_artifact_sha256=" + artifact_sha)
+        print("processing_fill_rect_receipt=" + receipt_path)
+
+        if output > 0:
+            expect(vulkan_sffi_free_buffer(output)).to_equal(true)
+        if pipeline > 0:
+            expect(vulkan_sffi_destroy_pipeline(pipeline)).to_equal(true)
+        if shader > 0:
+            expect(vulkan_sffi_destroy_shader(shader)).to_equal(true)
+        session.release()
+        expect(vulkan_sffi_shutdown_reaped()).to_equal(true)

@@ -1,0 +1,1113 @@
+; SVM-G stack-machine interpreter -- Vulkan SPIR-V compute shader (Task C3).
+;
+; Implements the 50-opcode SVM-G ISA (src/lib/common/svmg/opcodes.spl) as a
+; fetch-decode-execute loop, single invocation (dispatch 1x1x1, local size
+; 1x1x1) -- design doc doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+; S4.1/S4.3/S6.3, mirroring the CUDA PTX sibling
+; (src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx) instruction-for-
+; instruction and both matching the host reference VM
+; (src/lib/common/svmg/ref_vm.spl, SvmgVm.step/run): same PC model (code-
+; array-relative, fetched at arena[code_off+pc]), same i32-wraparound-on-
+; stack representation (32-bit words carry raw bit patterns; ordinary 32-bit
+; OpIAdd/OpISub/OpIMul already wrap the same way _wrap_i32 does), same trap
+; values (TRAP_OOB=1, TRAP_DIV0=2; call-stack overflow reuses 3, matching
+; the CUDA sibling's L_CALLSTACK_OVERFLOW convention -- ref_vm.step panics
+; there instead, since it is a host/assembler bug, not a device-representable
+; trap), same sentinel values (0xCAFE0000|code clean exit, 0xDEAD0000 exactly
+; on budget exhaustion), same LOG/RECORD ring layout (mailbox_const.spl).
+;
+; No .glsl/.comp source: there is no glslangValidator/glslc/dxc on this repo's
+; build hosts (verified), and the byte-addressable arena buffer this
+; interpreter needs (arbitrary unaligned 1/2/4-byte reads/writes into a
+; uint32-word SSBO) has no natural GLSL expression anyway -- so this checked-
+; in SPIR-V assembly text IS the source, exactly the same precedent as the
+; checked-in CUDA PTX kernel (hand-written .ptx, no .cu) and the existing
+; x25519_mlkem768 CUDA kernel (ml_kem_ntt_forward.ptx). Byte-level access is
+; implemented directly against the uint32 SSBO via shift/mask (read-modify-
+; write for stores), since there is no 8-bit-storage capability assumed here.
+;
+; Single SSBO binding: set 0, binding 0 -- the 128 KiB GMB-1 arena
+; (src/lib/common/svmg/sgp.spl for the 36-byte SGP header at arena+0,
+; mailbox_const.spl for the arena layout past DATA), matching
+; VulkanLaneSession's single-arena-buffer dispatch contract exactly like the
+; CUDA lane's single arena_ptr kernel parameter.
+;
+; Regenerate: scripts/build/regen_svmg_vulkan_kernel.shs (spirv-as + spirv-val).
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+
+; ============================================================================
+; Decorations
+; ============================================================================
+               OpDecorate %rtarr ArrayStride 4
+               OpMemberDecorate %arena_struct 0 Offset 0
+               OpDecorate %arena_struct BufferBlock
+               OpDecorate %arena DescriptorSet 0
+               OpDecorate %arena Binding 0
+
+; ============================================================================
+; Types
+; ============================================================================
+       %void = OpTypeVoid
+   %void_fn_t = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+       %bool = OpTypeBool
+
+  %uint_fn_from_uint_t = OpTypeFunction %uint %uint
+  %void_fn_from_uint_uint_t = OpTypeFunction %void %uint %uint
+  %void_fn_from_uint_t = OpTypeFunction %void %uint
+  %uint_fn_void_t = OpTypeFunction %uint
+
+; SSBO: arena as a runtime array of uint32 words (byte-addressed manually).
+      %rtarr = OpTypeRuntimeArray %uint
+%arena_struct = OpTypeStruct %rtarr
+%arena_struct_ptr = OpTypePointer Uniform %arena_struct
+      %arena = OpVariable %arena_struct_ptr Uniform
+%arena_word_ptr = OpTypePointer Uniform %uint
+
+; Function-local "register" globals (Private storage class -- single
+; invocation only, never touched by another thread, so no shared-memory
+; hazard from module-scope mutable state here).
+%uint_ptr_priv = OpTypePointer Private %uint
+      %g_pc = OpVariable %uint_ptr_priv Private
+      %g_sp = OpVariable %uint_ptr_priv Private
+     %g_csp = OpVariable %uint_ptr_priv Private
+   %g_steps = OpVariable %uint_ptr_priv Private
+     %g_seq = OpVariable %uint_ptr_priv Private
+%g_reccount = OpVariable %uint_ptr_priv Private
+ %g_codeoff = OpVariable %uint_ptr_priv Private
+ %g_codelen = OpVariable %uint_ptr_priv Private
+  %g_logcap = OpVariable %uint_ptr_priv Private
+ %g_recbase = OpVariable %uint_ptr_priv Private
+
+%uint_256 = OpConstant %uint 256
+%uint_32c = OpConstant %uint 32
+%arr256_t = OpTypeArray %uint %uint_256
+%arr32_t  = OpTypeArray %uint %uint_32c
+%arr256_ptr_priv = OpTypePointer Private %arr256_t
+%arr32_ptr_priv  = OpTypePointer Private %arr32_t
+%g_opstack = OpVariable %arr256_ptr_priv Private
+%g_callstack = OpVariable %arr32_ptr_priv Private
+
+; ============================================================================
+; Constants
+; ============================================================================
+        %c_0 = OpConstant %uint 0
+        %c_1 = OpConstant %uint 1
+        %c_2 = OpConstant %uint 2
+        %c_3 = OpConstant %uint 3
+        %c_4 = OpConstant %uint 4
+        %c_8 = OpConstant %uint 8
+       %c_12 = OpConstant %uint 12
+       %c_16 = OpConstant %uint 16
+       %c_24 = OpConstant %uint 24
+       %c_31 = OpConstant %uint 31
+       %c_32 = OpConstant %uint 32
+     %c_0xFF = OpConstant %uint 255
+   %c_0xFFFF = OpConstant %uint 65535
+%c_sentinel_widx = OpConstant %uint 8192
+%c_CAFE0000 = OpConstant %uint 3405643776
+%c_DEAD0000 = OpConstant %uint 3735879680
+     %c_0x7F = OpConstant %uint 127
+%c_TRAP_OOB  = OpConstant %uint 1
+%c_TRAP_DIV0 = OpConstant %uint 2
+%c_TRAP_CALLOF = OpConstant %uint 3
+%c_BADBAD    = OpConstant %uint 12245933
+%c_LOG_HEAD_OFFSET = OpConstant %uint 65568
+%c_LOG_CAP_OFFSET  = OpConstant %uint 65572
+%c_LOG_DATA_OFFSET = OpConstant %uint 65576
+%c_NEG_SIGN_BIT = OpConstant %uint 2147483648
+%c_SIGN_EXT_ADD = OpConstant %uint 4294901760
+%c_ARENA_DATA_SIZE = OpConstant %uint 65536
+      %c_28 = OpConstant %uint 28
+   %c_32768 = OpConstant %uint 32768
+
+; ============================================================================
+; read_u8(off) -> uint : arena[off], byte-addressed against the uint32 SSBO.
+; ============================================================================
+   %read_u8 = OpFunction %uint None %uint_fn_from_uint_t
+   %ru8_off = OpFunctionParameter %uint
+ %ru8_entry = OpLabel
+  %ru8_widx = OpShiftRightLogical %uint %ru8_off %c_2
+%ru8_shiftb = OpBitwiseAnd %uint %ru8_off %c_3
+ %ru8_shift = OpShiftLeftLogical %uint %ru8_shiftb %c_3
+   %ru8_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %ru8_widx
+  %ru8_word = OpLoad %uint %ru8_ptr Volatile
+%ru8_shifted = OpShiftRightLogical %uint %ru8_word %ru8_shift
+  %ru8_byte = OpBitwiseAnd %uint %ru8_shifted %c_0xFF
+               OpReturnValue %ru8_byte
+               OpFunctionEnd
+
+; ============================================================================
+; write_u8(off, val) -> void : read-modify-write the containing word.
+; ============================================================================
+  %write_u8 = OpFunction %void None %void_fn_from_uint_uint_t
+   %wu8_off = OpFunctionParameter %uint
+   %wu8_val = OpFunctionParameter %uint
+ %wu8_entry = OpLabel
+  %wu8_widx = OpShiftRightLogical %uint %wu8_off %c_2
+%wu8_shiftb = OpBitwiseAnd %uint %wu8_off %c_3
+ %wu8_shift = OpShiftLeftLogical %uint %wu8_shiftb %c_3
+   %wu8_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %wu8_widx
+  %wu8_word = OpLoad %uint %wu8_ptr Volatile
+ %wu8_mask8 = OpShiftLeftLogical %uint %c_0xFF %wu8_shift
+%wu8_invmask = OpNot %uint %wu8_mask8
+%wu8_cleared = OpBitwiseAnd %uint %wu8_word %wu8_invmask
+%wu8_valmasked = OpBitwiseAnd %uint %wu8_val %c_0xFF
+%wu8_valshift = OpShiftLeftLogical %uint %wu8_valmasked %wu8_shift
+   %wu8_new = OpBitwiseOr %uint %wu8_cleared %wu8_valshift
+               OpStore %wu8_ptr %wu8_new Volatile
+               OpReturn
+               OpFunctionEnd
+
+; ============================================================================
+; read_u32(off) -> uint : little-endian 4-byte combine, fully inlined (no
+; nested OpFunctionCall to read_u8) -- see the fix note above write_u8.
+; ============================================================================
+  %read_u32 = OpFunction %uint None %uint_fn_from_uint_t
+   %r32_off = OpFunctionParameter %uint
+ %r32_entry = OpLabel
+%r32_widx0 = OpShiftRightLogical %uint %r32_off %c_2
+%r32_shb0 = OpBitwiseAnd %uint %r32_off %c_3
+%r32_sh0 = OpShiftLeftLogical %uint %r32_shb0 %c_3
+%r32_ptr0 = OpAccessChain %arena_word_ptr %arena %c_0 %r32_widx0
+%r32_word0 = OpLoad %uint %r32_ptr0 Volatile
+%r32_shd0 = OpShiftRightLogical %uint %r32_word0 %r32_sh0
+    %r32_b0 = OpBitwiseAnd %uint %r32_shd0 %c_0xFF
+    %r32_o1 = OpIAdd %uint %r32_off %c_1
+%r32_widx1 = OpShiftRightLogical %uint %r32_o1 %c_2
+%r32_shb1 = OpBitwiseAnd %uint %r32_o1 %c_3
+%r32_sh1 = OpShiftLeftLogical %uint %r32_shb1 %c_3
+%r32_ptr1 = OpAccessChain %arena_word_ptr %arena %c_0 %r32_widx1
+%r32_word1 = OpLoad %uint %r32_ptr1 Volatile
+%r32_shd1 = OpShiftRightLogical %uint %r32_word1 %r32_sh1
+    %r32_b1 = OpBitwiseAnd %uint %r32_shd1 %c_0xFF
+    %r32_o2 = OpIAdd %uint %r32_off %c_2
+%r32_widx2 = OpShiftRightLogical %uint %r32_o2 %c_2
+%r32_shb2 = OpBitwiseAnd %uint %r32_o2 %c_3
+%r32_sh2 = OpShiftLeftLogical %uint %r32_shb2 %c_3
+%r32_ptr2 = OpAccessChain %arena_word_ptr %arena %c_0 %r32_widx2
+%r32_word2 = OpLoad %uint %r32_ptr2 Volatile
+%r32_shd2 = OpShiftRightLogical %uint %r32_word2 %r32_sh2
+    %r32_b2 = OpBitwiseAnd %uint %r32_shd2 %c_0xFF
+    %r32_o3 = OpIAdd %uint %r32_off %c_3
+%r32_widx3 = OpShiftRightLogical %uint %r32_o3 %c_2
+%r32_shb3 = OpBitwiseAnd %uint %r32_o3 %c_3
+%r32_sh3 = OpShiftLeftLogical %uint %r32_shb3 %c_3
+%r32_ptr3 = OpAccessChain %arena_word_ptr %arena %c_0 %r32_widx3
+%r32_word3 = OpLoad %uint %r32_ptr3 Volatile
+%r32_shd3 = OpShiftRightLogical %uint %r32_word3 %r32_sh3
+    %r32_b3 = OpBitwiseAnd %uint %r32_shd3 %c_0xFF
+    %r32_s1 = OpShiftLeftLogical %uint %r32_b1 %c_8
+    %r32_s2 = OpShiftLeftLogical %uint %r32_b2 %c_16
+    %r32_s3 = OpShiftLeftLogical %uint %r32_b3 %c_24
+    %r32_t1 = OpBitwiseOr %uint %r32_b0 %r32_s1
+    %r32_t2 = OpBitwiseOr %uint %r32_t1 %r32_s2
+ %r32_result = OpBitwiseOr %uint %r32_t2 %r32_s3
+               OpReturnValue %r32_result
+               OpFunctionEnd
+
+; ============================================================================
+; read_u16(off) -> uint : little-endian 2-byte combine (unsigned), fully
+; inlined (no nested OpFunctionCall to read_u8).
+; ============================================================================
+  %read_u16 = OpFunction %uint None %uint_fn_from_uint_t
+   %r16_off = OpFunctionParameter %uint
+ %r16_entry = OpLabel
+%r16_widx0 = OpShiftRightLogical %uint %r16_off %c_2
+%r16_shb0 = OpBitwiseAnd %uint %r16_off %c_3
+%r16_sh0 = OpShiftLeftLogical %uint %r16_shb0 %c_3
+%r16_ptr0 = OpAccessChain %arena_word_ptr %arena %c_0 %r16_widx0
+%r16_word0 = OpLoad %uint %r16_ptr0 Volatile
+%r16_shd0 = OpShiftRightLogical %uint %r16_word0 %r16_sh0
+    %r16_b0 = OpBitwiseAnd %uint %r16_shd0 %c_0xFF
+    %r16_o1 = OpIAdd %uint %r16_off %c_1
+%r16_widx1 = OpShiftRightLogical %uint %r16_o1 %c_2
+%r16_shb1 = OpBitwiseAnd %uint %r16_o1 %c_3
+%r16_sh1 = OpShiftLeftLogical %uint %r16_shb1 %c_3
+%r16_ptr1 = OpAccessChain %arena_word_ptr %arena %c_0 %r16_widx1
+%r16_word1 = OpLoad %uint %r16_ptr1 Volatile
+%r16_shd1 = OpShiftRightLogical %uint %r16_word1 %r16_sh1
+    %r16_b1 = OpBitwiseAnd %uint %r16_shd1 %c_0xFF
+    %r16_s1 = OpShiftLeftLogical %uint %r16_b1 %c_8
+%r16_result = OpBitwiseOr %uint %r16_b0 %r16_s1
+               OpReturnValue %r16_result
+               OpFunctionEnd
+
+; ============================================================================
+; write_u32(off, val) -> void : little-endian 4-byte split, fully inlined
+; (no nested OpFunctionCall to write_u8) -- an earlier version routed
+; through 4 write_u8 calls and was observed, empirically, on a live NVIDIA
+; Vulkan driver, to occasionally cross-contaminate one byte lane of the
+; written word with a stale value from an unrelated PRIOR write_u8 call
+; elsewhere in the same dispatch (reproduced against the D3
+; mem_store_load_byte conformance vector: the record's `pass` word came
+; back with byte 2 holding STORE8's operand value instead of 0). Marking
+; the loads/stores Volatile did not change the outcome, so this was
+; resolved by removing the nested-call boundary entirely rather than
+; continuing to chase a suspected driver/codegen interaction -- each byte's
+; read-modify-write is now fully self-contained in this function body.
+; ============================================================================
+ %write_u32 = OpFunction %void None %void_fn_from_uint_uint_t
+   %w32_off = OpFunctionParameter %uint
+   %w32_val = OpFunctionParameter %uint
+ %w32_entry = OpLabel
+    %w32_b0 = OpBitwiseAnd %uint %w32_val %c_0xFF
+    %w32_s1v = OpShiftRightLogical %uint %w32_val %c_8
+    %w32_b1 = OpBitwiseAnd %uint %w32_s1v %c_0xFF
+    %w32_s2v = OpShiftRightLogical %uint %w32_val %c_16
+    %w32_b2 = OpBitwiseAnd %uint %w32_s2v %c_0xFF
+    %w32_s3v = OpShiftRightLogical %uint %w32_val %c_24
+    %w32_b3 = OpBitwiseAnd %uint %w32_s3v %c_0xFF
+%w32_widx0 = OpShiftRightLogical %uint %w32_off %c_2
+%w32_shb0 = OpBitwiseAnd %uint %w32_off %c_3
+%w32_sh0 = OpShiftLeftLogical %uint %w32_shb0 %c_3
+%w32_ptr0 = OpAccessChain %arena_word_ptr %arena %c_0 %w32_widx0
+%w32_word0 = OpLoad %uint %w32_ptr0 Volatile
+%w32_mask0 = OpShiftLeftLogical %uint %c_0xFF %w32_sh0
+%w32_invm0 = OpNot %uint %w32_mask0
+%w32_cleared0 = OpBitwiseAnd %uint %w32_word0 %w32_invm0
+%w32_vshift0 = OpShiftLeftLogical %uint %w32_b0 %w32_sh0
+%w32_new0 = OpBitwiseOr %uint %w32_cleared0 %w32_vshift0
+               OpStore %w32_ptr0 %w32_new0 Volatile
+    %w32_o1 = OpIAdd %uint %w32_off %c_1
+%w32_widx1 = OpShiftRightLogical %uint %w32_o1 %c_2
+%w32_shb1 = OpBitwiseAnd %uint %w32_o1 %c_3
+%w32_sh1 = OpShiftLeftLogical %uint %w32_shb1 %c_3
+%w32_ptr1 = OpAccessChain %arena_word_ptr %arena %c_0 %w32_widx1
+%w32_word1 = OpLoad %uint %w32_ptr1 Volatile
+%w32_mask1 = OpShiftLeftLogical %uint %c_0xFF %w32_sh1
+%w32_invm1 = OpNot %uint %w32_mask1
+%w32_cleared1 = OpBitwiseAnd %uint %w32_word1 %w32_invm1
+%w32_vshift1 = OpShiftLeftLogical %uint %w32_b1 %w32_sh1
+%w32_new1 = OpBitwiseOr %uint %w32_cleared1 %w32_vshift1
+               OpStore %w32_ptr1 %w32_new1 Volatile
+    %w32_o2 = OpIAdd %uint %w32_off %c_2
+%w32_widx2 = OpShiftRightLogical %uint %w32_o2 %c_2
+%w32_shb2 = OpBitwiseAnd %uint %w32_o2 %c_3
+%w32_sh2 = OpShiftLeftLogical %uint %w32_shb2 %c_3
+%w32_ptr2 = OpAccessChain %arena_word_ptr %arena %c_0 %w32_widx2
+%w32_word2 = OpLoad %uint %w32_ptr2 Volatile
+%w32_mask2 = OpShiftLeftLogical %uint %c_0xFF %w32_sh2
+%w32_invm2 = OpNot %uint %w32_mask2
+%w32_cleared2 = OpBitwiseAnd %uint %w32_word2 %w32_invm2
+%w32_vshift2 = OpShiftLeftLogical %uint %w32_b2 %w32_sh2
+%w32_new2 = OpBitwiseOr %uint %w32_cleared2 %w32_vshift2
+               OpStore %w32_ptr2 %w32_new2 Volatile
+    %w32_o3 = OpIAdd %uint %w32_off %c_3
+%w32_widx3 = OpShiftRightLogical %uint %w32_o3 %c_2
+%w32_shb3 = OpBitwiseAnd %uint %w32_o3 %c_3
+%w32_sh3 = OpShiftLeftLogical %uint %w32_shb3 %c_3
+%w32_ptr3 = OpAccessChain %arena_word_ptr %arena %c_0 %w32_widx3
+%w32_word3 = OpLoad %uint %w32_ptr3 Volatile
+%w32_mask3 = OpShiftLeftLogical %uint %c_0xFF %w32_sh3
+%w32_invm3 = OpNot %uint %w32_mask3
+%w32_cleared3 = OpBitwiseAnd %uint %w32_word3 %w32_invm3
+%w32_vshift3 = OpShiftLeftLogical %uint %w32_b3 %w32_sh3
+%w32_new3 = OpBitwiseOr %uint %w32_cleared3 %w32_vshift3
+               OpStore %w32_ptr3 %w32_new3 Volatile
+               OpReturn
+               OpFunctionEnd
+
+; ============================================================================
+; vm_push(v) -> void ; vm_pop() -> uint : operand stack (g_opstack/g_sp).
+; ============================================================================
+   %vm_push = OpFunction %void None %void_fn_from_uint_t
+  %push_v = OpFunctionParameter %uint
+%push_entry = OpLabel
+%push_spval = OpLoad %uint %g_sp
+%push_ptr = OpAccessChain %uint_ptr_priv %g_opstack %push_spval
+               OpStore %push_ptr %push_v
+%push_spnew = OpIAdd %uint %push_spval %c_1
+               OpStore %g_sp %push_spnew
+               OpReturn
+               OpFunctionEnd
+
+    %vm_pop = OpFunction %uint None %uint_fn_void_t
+ %pop_entry = OpLabel
+%pop_spval = OpLoad %uint %g_sp
+%pop_spnew = OpISub %uint %pop_spval %c_1
+               OpStore %g_sp %pop_spnew
+   %pop_ptr = OpAccessChain %uint_ptr_priv %g_opstack %pop_spnew
+   %pop_val = OpLoad %uint %pop_ptr
+               OpReturnValue %pop_val
+               OpFunctionEnd
+
+; ============================================================================
+; write_record(pass, value) -> void : 12-byte RECORD ring entry, matching
+; ref_vm.write_record exactly (seq/pass/value words at record_base +
+; reccount*12; reccount and seq both advance by 1).
+; ============================================================================
+%write_record = OpFunction %void None %void_fn_from_uint_uint_t
+   %wr_pass = OpFunctionParameter %uint
+  %wr_value = OpFunctionParameter %uint
+ %wr_entry = OpLabel
+     %wr_rc = OpLoad %uint %g_reccount
+    %wr_seq = OpLoad %uint %g_seq
+     %wr_rb = OpLoad %uint %g_recbase
+   %wr_off1 = OpIMul %uint %wr_rc %c_12
+    %wr_off = OpIAdd %uint %wr_rb %wr_off1
+ %wr_off_p4 = OpIAdd %uint %wr_off %c_4
+ %wr_off_p8 = OpIAdd %uint %wr_off %c_8
+    %wr_c0 = OpFunctionCall %void %write_u32 %wr_off %wr_seq
+    %wr_c1 = OpFunctionCall %void %write_u32 %wr_off_p4 %wr_pass
+    %wr_c2 = OpFunctionCall %void %write_u32 %wr_off_p8 %wr_value
+   %wr_rc2 = OpIAdd %uint %wr_rc %c_1
+               OpStore %g_reccount %wr_rc2
+  %wr_seq2 = OpIAdd %uint %wr_seq %c_1
+               OpStore %g_seq %wr_seq2
+               OpReturn
+               OpFunctionEnd
+
+; ============================================================================
+; do_trap(val) -> void : write_record(0, val), sentinel = 0xCAFE007F.
+; do_exit(code) -> void : sentinel = 0xCAFE0000 | (code & 0xFFFF).
+; ============================================================================
+   %do_trap = OpFunction %void None %void_fn_from_uint_t
+    %dt_val = OpFunctionParameter %uint
+ %dt_entry = OpLabel
+     %dt_c0 = OpFunctionCall %void %write_record %c_0 %dt_val
+%dt_sentinel = OpBitwiseOr %uint %c_CAFE0000 %c_0x7F
+   %dt_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
+               OpStore %dt_ptr %dt_sentinel Volatile
+               OpReturn
+               OpFunctionEnd
+
+   %do_exit = OpFunction %void None %void_fn_from_uint_t
+   %de_code = OpFunctionParameter %uint
+ %de_entry = OpLabel
+%de_masked = OpBitwiseAnd %uint %de_code %c_0xFFFF
+%de_sentinel = OpBitwiseOr %uint %c_CAFE0000 %de_masked
+   %de_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
+               OpStore %de_ptr %de_sentinel Volatile
+               OpReturn
+               OpFunctionEnd
+
+; ============================================================================
+; append_log_byte(b) -> void : LOG ring write, matching ref_vm.append_log_byte
+; (slot = log_head % log_cap; log_head persisted back into the arena; seq++).
+; ============================================================================
+%append_log_byte = OpFunction %void None %void_fn_from_uint_t
+     %alb_b = OpFunctionParameter %uint
+%alb_entry = OpLabel
+  %alb_head = OpFunctionCall %uint %read_u32 %c_LOG_HEAD_OFFSET
+   %alb_cap = OpLoad %uint %g_logcap
+  %alb_slot = OpUMod %uint %alb_head %alb_cap
+  %alb_addr = OpIAdd %uint %alb_slot %c_LOG_DATA_OFFSET
+   %alb_c0 = OpFunctionCall %void %write_u8 %alb_addr %alb_b
+ %alb_head2 = OpIAdd %uint %alb_head %c_1
+   %alb_c1 = OpFunctionCall %void %write_u32 %c_LOG_HEAD_OFFSET %alb_head2
+   %alb_seq = OpLoad %uint %g_seq
+  %alb_seq2 = OpIAdd %uint %alb_seq %c_1
+               OpStore %g_seq %alb_seq2
+               OpReturn
+               OpFunctionEnd
+
+; ============================================================================
+; main() -- header decode, then the flat fetch-decode-execute loop.
+; ============================================================================
+      %main = OpFunction %void None %void_fn_t
+%main_entry = OpLabel
+%m_codeoff = OpFunctionCall %uint %read_u32 %c_8
+               OpStore %g_codeoff %m_codeoff
+%m_codelen = OpFunctionCall %uint %read_u32 %c_12
+               OpStore %g_codelen %m_codelen
+%m_stepbudget = OpFunctionCall %uint %read_u32 %c_24
+               OpStore %g_steps %m_stepbudget
+%m_entrypc = OpFunctionCall %uint %read_u32 %c_28
+               OpStore %g_pc %m_entrypc
+               OpStore %g_sp %c_0
+               OpStore %g_csp %c_0
+               OpStore %g_seq %c_0
+               OpStore %g_reccount %c_0
+%m_logcap = OpFunctionCall %uint %read_u32 %c_LOG_CAP_OFFSET
+               OpStore %g_logcap %m_logcap
+%m_recbase = OpIAdd %uint %m_logcap %c_LOG_DATA_OFFSET
+               OpStore %g_recbase %m_recbase
+               OpBranch %loop_header
+
+%loop_header = OpLabel
+               OpLoopMerge %loop_merge %loop_continue None
+               OpBranch %loop_check
+
+%loop_check = OpLabel
+  %lc_steps = OpLoad %uint %g_steps
+%lc_timedout = OpIEqual %bool %lc_steps %c_0
+               OpSelectionMerge %lc_after_to None
+               OpBranchConditional %lc_timedout %timeout_block %lc_after_to
+
+%timeout_block = OpLabel
+    %tb_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
+               OpStore %tb_ptr %c_DEAD0000 Volatile
+               OpReturn
+
+  %lc_after_to = OpLabel
+     %lc_pc = OpLoad %uint %g_pc
+%lc_codelen = OpLoad %uint %g_codelen
+  %lc_atend = OpUGreaterThanEqual %bool %lc_pc %lc_codelen
+               OpSelectionMerge %fetch_block None
+               OpBranchConditional %lc_atend %exit0_block %fetch_block
+
+%exit0_block = OpLabel
+    %e0_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
+               OpStore %e0_ptr %c_CAFE0000 Volatile
+               OpReturn
+
+%fetch_block = OpLabel
+   %fb_steps = OpLoad %uint %g_steps
+  %fb_steps2 = OpISub %uint %fb_steps %c_1
+               OpStore %g_steps %fb_steps2
+      %fb_pc = OpLoad %uint %g_pc
+ %fb_codeoff = OpLoad %uint %g_codeoff
+%fb_fetchoff = OpIAdd %uint %fb_codeoff %fb_pc
+  %fb_opcode = OpFunctionCall %uint %read_u8 %fb_fetchoff
+               OpSelectionMerge %switch_merge None
+               OpSwitch %fb_opcode %case_default
+                 0 %case_nop 1 %case_halt 2 %case_trap
+                 16 %case_pushi 17 %case_pushf 18 %case_dup 19 %case_drop 20 %case_swap
+                 32 %case_add 33 %case_sub 34 %case_mul 35 %case_div 36 %case_rem
+                 40 %case_fadd 41 %case_fsub 42 %case_fmul 43 %case_fdiv
+                 48 %case_and 49 %case_or 50 %case_xor 51 %case_shl 52 %case_shr 53 %case_sar
+                 56 %case_eq 57 %case_ne 58 %case_lt 59 %case_le 60 %case_gt 61 %case_ge
+                 62 %case_feq 63 %case_fne 64 %case_flt 65 %case_fle 66 %case_fgt 67 %case_fge
+                 80 %case_load32 81 %case_store32 82 %case_load8 83 %case_store8
+                 96 %case_jmp 97 %case_jz 98 %case_jnz
+                 104 %case_call 105 %case_ret
+                 112 %case_sys_putc 113 %case_sys_exit 114 %case_sys_result
+                 120 %case_tid 121 %case_ntid 122 %case_parfor
+
+%case_default = OpLabel
+    %cd_c0 = OpFunctionCall %void %do_trap %c_BADBAD
+               OpReturn
+
+; ---- control ---------------------------------------------------------
+  %case_nop = OpLabel
+    %nop_pc = OpLoad %uint %g_pc
+   %nop_pc2 = OpIAdd %uint %nop_pc %c_1
+               OpStore %g_pc %nop_pc2
+               OpBranch %switch_merge
+
+ %case_halt = OpLabel
+%halt_codeoff = OpLoad %uint %g_codeoff
+   %halt_pc = OpLoad %uint %g_pc
+ %halt_base = OpIAdd %uint %halt_codeoff %halt_pc
+ %halt_immoff = OpIAdd %uint %halt_base %c_1
+ %halt_code = OpFunctionCall %uint %read_u8 %halt_immoff
+     %h_c0 = OpFunctionCall %void %do_exit %halt_code
+               OpReturn
+
+ %case_trap = OpLabel
+%trap_codeoff = OpLoad %uint %g_codeoff
+   %trap_pc = OpLoad %uint %g_pc
+ %trap_base = OpIAdd %uint %trap_codeoff %trap_pc
+ %trap_immoff = OpIAdd %uint %trap_base %c_1
+ %trap_code = OpFunctionCall %uint %read_u8 %trap_immoff
+     %t_c0 = OpFunctionCall %void %do_trap %trap_code
+               OpReturn
+
+; ---- stack ops ---------------------------------------------------------
+%case_pushi = OpLabel
+%pi_codeoff = OpLoad %uint %g_codeoff
+    %pi_pc = OpLoad %uint %g_pc
+  %pi_base = OpIAdd %uint %pi_codeoff %pi_pc
+%pi_immoff = OpIAdd %uint %pi_base %c_1
+   %pi_val = OpFunctionCall %uint %read_u32 %pi_immoff
+    %pi_c0 = OpFunctionCall %void %vm_push %pi_val
+   %pi_pc5 = OpIAdd %uint %pi_pc %c_4
+   %pi_pc5b = OpIAdd %uint %pi_pc5 %c_1
+               OpStore %g_pc %pi_pc5b
+               OpBranch %switch_merge
+
+%case_pushf = OpLabel
+%pf_codeoff = OpLoad %uint %g_codeoff
+    %pf_pc = OpLoad %uint %g_pc
+  %pf_base = OpIAdd %uint %pf_codeoff %pf_pc
+%pf_immoff = OpIAdd %uint %pf_base %c_1
+   %pf_val = OpFunctionCall %uint %read_u32 %pf_immoff
+    %pf_c0 = OpFunctionCall %void %vm_push %pf_val
+   %pf_pc5 = OpIAdd %uint %pf_pc %c_4
+   %pf_pc5b = OpIAdd %uint %pf_pc5 %c_1
+               OpStore %g_pc %pf_pc5b
+               OpBranch %switch_merge
+
+  %case_dup = OpLabel
+   %dup_sp = OpLoad %uint %g_sp
+  %dup_idx = OpISub %uint %dup_sp %c_1
+  %dup_ptr = OpAccessChain %uint_ptr_priv %g_opstack %dup_idx
+  %dup_val = OpLoad %uint %dup_ptr
+   %dup_c0 = OpFunctionCall %void %vm_push %dup_val
+    %dup_pc = OpLoad %uint %g_pc
+   %dup_pc2 = OpIAdd %uint %dup_pc %c_1
+               OpStore %g_pc %dup_pc2
+               OpBranch %switch_merge
+
+ %case_drop = OpLabel
+ %drop_popped = OpFunctionCall %uint %vm_pop
+   %drop_pc = OpLoad %uint %g_pc
+  %drop_pc2 = OpIAdd %uint %drop_pc %c_1
+               OpStore %g_pc %drop_pc2
+               OpBranch %switch_merge
+
+ %case_swap = OpLabel
+    %sw_y = OpFunctionCall %uint %vm_pop
+    %sw_x = OpFunctionCall %uint %vm_pop
+   %sw_c0 = OpFunctionCall %void %vm_push %sw_y
+   %sw_c1 = OpFunctionCall %void %vm_push %sw_x
+   %sw_pc = OpLoad %uint %g_pc
+  %sw_pc2 = OpIAdd %uint %sw_pc %c_1
+               OpStore %g_pc %sw_pc2
+               OpBranch %switch_merge
+
+; ---- integer arithmetic -------------------------------------------------
+  %case_add = OpLabel
+   %add_b = OpFunctionCall %uint %vm_pop
+   %add_a = OpFunctionCall %uint %vm_pop
+   %add_r = OpIAdd %uint %add_a %add_b
+   %add_c0 = OpFunctionCall %void %vm_push %add_r
+   %add_pc = OpLoad %uint %g_pc
+  %add_pc2 = OpIAdd %uint %add_pc %c_1
+               OpStore %g_pc %add_pc2
+               OpBranch %switch_merge
+
+  %case_sub = OpLabel
+   %sub_b = OpFunctionCall %uint %vm_pop
+   %sub_a = OpFunctionCall %uint %vm_pop
+   %sub_r = OpISub %uint %sub_a %sub_b
+   %sub_c0 = OpFunctionCall %void %vm_push %sub_r
+   %sub_pc = OpLoad %uint %g_pc
+  %sub_pc2 = OpIAdd %uint %sub_pc %c_1
+               OpStore %g_pc %sub_pc2
+               OpBranch %switch_merge
+
+  %case_mul = OpLabel
+   %mul_b = OpFunctionCall %uint %vm_pop
+   %mul_a = OpFunctionCall %uint %vm_pop
+   %mul_r = OpIMul %uint %mul_a %mul_b
+   %mul_c0 = OpFunctionCall %void %vm_push %mul_r
+   %mul_pc = OpLoad %uint %g_pc
+  %mul_pc2 = OpIAdd %uint %mul_pc %c_1
+               OpStore %g_pc %mul_pc2
+               OpBranch %switch_merge
+
+  %case_div = OpLabel
+   %div_b = OpFunctionCall %uint %vm_pop
+   %div_a = OpFunctionCall %uint %vm_pop
+%div_iszero = OpIEqual %bool %div_b %c_0
+               OpSelectionMerge %div_ok None
+               OpBranchConditional %div_iszero %div_trap %div_ok
+%div_trap = OpLabel
+   %div_t0 = OpFunctionCall %void %do_trap %c_TRAP_DIV0
+               OpReturn
+  %div_ok = OpLabel
+   %div_r = OpSDiv %uint %div_a %div_b
+   %div_c0 = OpFunctionCall %void %vm_push %div_r
+   %div_pc = OpLoad %uint %g_pc
+  %div_pc2 = OpIAdd %uint %div_pc %c_1
+               OpStore %g_pc %div_pc2
+               OpBranch %switch_merge
+
+  %case_rem = OpLabel
+   %rem_b = OpFunctionCall %uint %vm_pop
+   %rem_a = OpFunctionCall %uint %vm_pop
+%rem_iszero = OpIEqual %bool %rem_b %c_0
+               OpSelectionMerge %rem_ok None
+               OpBranchConditional %rem_iszero %rem_trap %rem_ok
+%rem_trap = OpLabel
+   %rem_t0 = OpFunctionCall %void %do_trap %c_TRAP_DIV0
+               OpReturn
+  %rem_ok = OpLabel
+   %rem_r = OpSRem %uint %rem_a %rem_b
+   %rem_c0 = OpFunctionCall %void %vm_push %rem_r
+   %rem_pc = OpLoad %uint %g_pc
+  %rem_pc2 = OpIAdd %uint %rem_pc %c_1
+               OpStore %g_pc %rem_pc2
+               OpBranch %switch_merge
+
+; ---- float arithmetic ----------------------------------------------------
+ %case_fadd = OpLabel
+   %fa_b = OpFunctionCall %uint %vm_pop
+   %fa_a = OpFunctionCall %uint %vm_pop
+  %fa_bf = OpBitcast %float %fa_b
+  %fa_af = OpBitcast %float %fa_a
+   %fa_r = OpFAdd %float %fa_af %fa_bf
+  %fa_ru = OpBitcast %uint %fa_r
+   %fa_c0 = OpFunctionCall %void %vm_push %fa_ru
+   %fa_pc = OpLoad %uint %g_pc
+  %fa_pc2 = OpIAdd %uint %fa_pc %c_1
+               OpStore %g_pc %fa_pc2
+               OpBranch %switch_merge
+
+ %case_fsub = OpLabel
+   %fs_b = OpFunctionCall %uint %vm_pop
+   %fs_a = OpFunctionCall %uint %vm_pop
+  %fs_bf = OpBitcast %float %fs_b
+  %fs_af = OpBitcast %float %fs_a
+   %fs_r = OpFSub %float %fs_af %fs_bf
+  %fs_ru = OpBitcast %uint %fs_r
+   %fs_c0 = OpFunctionCall %void %vm_push %fs_ru
+   %fs_pc = OpLoad %uint %g_pc
+  %fs_pc2 = OpIAdd %uint %fs_pc %c_1
+               OpStore %g_pc %fs_pc2
+               OpBranch %switch_merge
+
+ %case_fmul = OpLabel
+   %fm_b = OpFunctionCall %uint %vm_pop
+   %fm_a = OpFunctionCall %uint %vm_pop
+  %fm_bf = OpBitcast %float %fm_b
+  %fm_af = OpBitcast %float %fm_a
+   %fm_r = OpFMul %float %fm_af %fm_bf
+  %fm_ru = OpBitcast %uint %fm_r
+   %fm_c0 = OpFunctionCall %void %vm_push %fm_ru
+   %fm_pc = OpLoad %uint %g_pc
+  %fm_pc2 = OpIAdd %uint %fm_pc %c_1
+               OpStore %g_pc %fm_pc2
+               OpBranch %switch_merge
+
+ %case_fdiv = OpLabel
+   %fd_b = OpFunctionCall %uint %vm_pop
+   %fd_a = OpFunctionCall %uint %vm_pop
+  %fd_bf = OpBitcast %float %fd_b
+  %fd_af = OpBitcast %float %fd_a
+   %fd_r = OpFDiv %float %fd_af %fd_bf
+  %fd_ru = OpBitcast %uint %fd_r
+   %fd_c0 = OpFunctionCall %void %vm_push %fd_ru
+   %fd_pc = OpLoad %uint %g_pc
+  %fd_pc2 = OpIAdd %uint %fd_pc %c_1
+               OpStore %g_pc %fd_pc2
+               OpBranch %switch_merge
+
+; ---- bitwise ---------------------------------------------------------
+  %case_and = OpLabel
+   %and_b = OpFunctionCall %uint %vm_pop
+   %and_a = OpFunctionCall %uint %vm_pop
+   %and_r = OpBitwiseAnd %uint %and_a %and_b
+   %and_c0 = OpFunctionCall %void %vm_push %and_r
+   %and_pc = OpLoad %uint %g_pc
+  %and_pc2 = OpIAdd %uint %and_pc %c_1
+               OpStore %g_pc %and_pc2
+               OpBranch %switch_merge
+
+   %case_or = OpLabel
+    %or_b = OpFunctionCall %uint %vm_pop
+    %or_a = OpFunctionCall %uint %vm_pop
+    %or_r = OpBitwiseOr %uint %or_a %or_b
+    %or_c0 = OpFunctionCall %void %vm_push %or_r
+    %or_pc = OpLoad %uint %g_pc
+   %or_pc2 = OpIAdd %uint %or_pc %c_1
+               OpStore %g_pc %or_pc2
+               OpBranch %switch_merge
+
+  %case_xor = OpLabel
+   %xor_b = OpFunctionCall %uint %vm_pop
+   %xor_a = OpFunctionCall %uint %vm_pop
+   %xor_r = OpBitwiseXor %uint %xor_a %xor_b
+   %xor_c0 = OpFunctionCall %void %vm_push %xor_r
+   %xor_pc = OpLoad %uint %g_pc
+  %xor_pc2 = OpIAdd %uint %xor_pc %c_1
+               OpStore %g_pc %xor_pc2
+               OpBranch %switch_merge
+
+  %case_shl = OpLabel
+   %shl_b = OpFunctionCall %uint %vm_pop
+   %shl_a = OpFunctionCall %uint %vm_pop
+%shl_bmask = OpBitwiseAnd %uint %shl_b %c_31
+   %shl_r = OpShiftLeftLogical %uint %shl_a %shl_bmask
+   %shl_c0 = OpFunctionCall %void %vm_push %shl_r
+   %shl_pc = OpLoad %uint %g_pc
+  %shl_pc2 = OpIAdd %uint %shl_pc %c_1
+               OpStore %g_pc %shl_pc2
+               OpBranch %switch_merge
+
+  %case_shr = OpLabel
+   %shr_b = OpFunctionCall %uint %vm_pop
+   %shr_a = OpFunctionCall %uint %vm_pop
+%shr_bmask = OpBitwiseAnd %uint %shr_b %c_31
+   %shr_r = OpShiftRightLogical %uint %shr_a %shr_bmask
+   %shr_c0 = OpFunctionCall %void %vm_push %shr_r
+   %shr_pc = OpLoad %uint %g_pc
+  %shr_pc2 = OpIAdd %uint %shr_pc %c_1
+               OpStore %g_pc %shr_pc2
+               OpBranch %switch_merge
+
+  %case_sar = OpLabel
+   %sar_b = OpFunctionCall %uint %vm_pop
+   %sar_a = OpFunctionCall %uint %vm_pop
+%sar_bmask = OpBitwiseAnd %uint %sar_b %c_31
+   %sar_r = OpShiftRightArithmetic %uint %sar_a %sar_bmask
+   %sar_c0 = OpFunctionCall %void %vm_push %sar_r
+   %sar_pc = OpLoad %uint %g_pc
+  %sar_pc2 = OpIAdd %uint %sar_pc %c_1
+               OpStore %g_pc %sar_pc2
+               OpBranch %switch_merge
+
+; ---- integer comparisons -------------------------------------------------
+   %case_eq = OpLabel
+    %eq_b = OpFunctionCall %uint %vm_pop
+    %eq_a = OpFunctionCall %uint %vm_pop
+ %eq_bool = OpIEqual %bool %eq_a %eq_b
+    %eq_r = OpSelect %uint %eq_bool %c_1 %c_0
+    %eq_c0 = OpFunctionCall %void %vm_push %eq_r
+    %eq_pc = OpLoad %uint %g_pc
+   %eq_pc2 = OpIAdd %uint %eq_pc %c_1
+               OpStore %g_pc %eq_pc2
+               OpBranch %switch_merge
+
+   %case_ne = OpLabel
+    %ne_b = OpFunctionCall %uint %vm_pop
+    %ne_a = OpFunctionCall %uint %vm_pop
+ %ne_bool = OpINotEqual %bool %ne_a %ne_b
+    %ne_r = OpSelect %uint %ne_bool %c_1 %c_0
+    %ne_c0 = OpFunctionCall %void %vm_push %ne_r
+    %ne_pc = OpLoad %uint %g_pc
+   %ne_pc2 = OpIAdd %uint %ne_pc %c_1
+               OpStore %g_pc %ne_pc2
+               OpBranch %switch_merge
+
+   %case_lt = OpLabel
+    %lt_b = OpFunctionCall %uint %vm_pop
+    %lt_a = OpFunctionCall %uint %vm_pop
+ %lt_bool = OpSLessThan %bool %lt_a %lt_b
+    %lt_r = OpSelect %uint %lt_bool %c_1 %c_0
+    %lt_c0 = OpFunctionCall %void %vm_push %lt_r
+    %lt_pc = OpLoad %uint %g_pc
+   %lt_pc2 = OpIAdd %uint %lt_pc %c_1
+               OpStore %g_pc %lt_pc2
+               OpBranch %switch_merge
+
+   %case_le = OpLabel
+    %le_b = OpFunctionCall %uint %vm_pop
+    %le_a = OpFunctionCall %uint %vm_pop
+ %le_bool = OpSLessThanEqual %bool %le_a %le_b
+    %le_r = OpSelect %uint %le_bool %c_1 %c_0
+    %le_c0 = OpFunctionCall %void %vm_push %le_r
+    %le_pc = OpLoad %uint %g_pc
+   %le_pc2 = OpIAdd %uint %le_pc %c_1
+               OpStore %g_pc %le_pc2
+               OpBranch %switch_merge
+
+   %case_gt = OpLabel
+    %gt_b = OpFunctionCall %uint %vm_pop
+    %gt_a = OpFunctionCall %uint %vm_pop
+ %gt_bool = OpSGreaterThan %bool %gt_a %gt_b
+    %gt_r = OpSelect %uint %gt_bool %c_1 %c_0
+    %gt_c0 = OpFunctionCall %void %vm_push %gt_r
+    %gt_pc = OpLoad %uint %g_pc
+   %gt_pc2 = OpIAdd %uint %gt_pc %c_1
+               OpStore %g_pc %gt_pc2
+               OpBranch %switch_merge
+
+   %case_ge = OpLabel
+    %ge_b = OpFunctionCall %uint %vm_pop
+    %ge_a = OpFunctionCall %uint %vm_pop
+ %ge_bool = OpSGreaterThanEqual %bool %ge_a %ge_b
+    %ge_r = OpSelect %uint %ge_bool %c_1 %c_0
+    %ge_c0 = OpFunctionCall %void %vm_push %ge_r
+    %ge_pc = OpLoad %uint %g_pc
+   %ge_pc2 = OpIAdd %uint %ge_pc %c_1
+               OpStore %g_pc %ge_pc2
+               OpBranch %switch_merge
+
+; ---- float comparisons ----------------------------------------------------
+  %case_feq = OpLabel
+   %feq_b = OpFunctionCall %uint %vm_pop
+   %feq_a = OpFunctionCall %uint %vm_pop
+  %feq_bf = OpBitcast %float %feq_b
+  %feq_af = OpBitcast %float %feq_a
+%feq_bool = OpFOrdEqual %bool %feq_af %feq_bf
+   %feq_r = OpSelect %uint %feq_bool %c_1 %c_0
+   %feq_c0 = OpFunctionCall %void %vm_push %feq_r
+   %feq_pc = OpLoad %uint %g_pc
+  %feq_pc2 = OpIAdd %uint %feq_pc %c_1
+               OpStore %g_pc %feq_pc2
+               OpBranch %switch_merge
+
+  %case_fne = OpLabel
+   %fne_b = OpFunctionCall %uint %vm_pop
+   %fne_a = OpFunctionCall %uint %vm_pop
+  %fne_bf = OpBitcast %float %fne_b
+  %fne_af = OpBitcast %float %fne_a
+%fne_bool = OpFUnordNotEqual %bool %fne_af %fne_bf
+   %fne_r = OpSelect %uint %fne_bool %c_1 %c_0
+   %fne_c0 = OpFunctionCall %void %vm_push %fne_r
+   %fne_pc = OpLoad %uint %g_pc
+  %fne_pc2 = OpIAdd %uint %fne_pc %c_1
+               OpStore %g_pc %fne_pc2
+               OpBranch %switch_merge
+
+  %case_flt = OpLabel
+   %flt_b = OpFunctionCall %uint %vm_pop
+   %flt_a = OpFunctionCall %uint %vm_pop
+  %flt_bf = OpBitcast %float %flt_b
+  %flt_af = OpBitcast %float %flt_a
+%flt_bool = OpFOrdLessThan %bool %flt_af %flt_bf
+   %flt_r = OpSelect %uint %flt_bool %c_1 %c_0
+   %flt_c0 = OpFunctionCall %void %vm_push %flt_r
+   %flt_pc = OpLoad %uint %g_pc
+  %flt_pc2 = OpIAdd %uint %flt_pc %c_1
+               OpStore %g_pc %flt_pc2
+               OpBranch %switch_merge
+
+  %case_fle = OpLabel
+   %fle_b = OpFunctionCall %uint %vm_pop
+   %fle_a = OpFunctionCall %uint %vm_pop
+  %fle_bf = OpBitcast %float %fle_b
+  %fle_af = OpBitcast %float %fle_a
+%fle_bool = OpFOrdLessThanEqual %bool %fle_af %fle_bf
+   %fle_r = OpSelect %uint %fle_bool %c_1 %c_0
+   %fle_c0 = OpFunctionCall %void %vm_push %fle_r
+   %fle_pc = OpLoad %uint %g_pc
+  %fle_pc2 = OpIAdd %uint %fle_pc %c_1
+               OpStore %g_pc %fle_pc2
+               OpBranch %switch_merge
+
+  %case_fgt = OpLabel
+   %fgt_b = OpFunctionCall %uint %vm_pop
+   %fgt_a = OpFunctionCall %uint %vm_pop
+  %fgt_bf = OpBitcast %float %fgt_b
+  %fgt_af = OpBitcast %float %fgt_a
+%fgt_bool = OpFOrdGreaterThan %bool %fgt_af %fgt_bf
+   %fgt_r = OpSelect %uint %fgt_bool %c_1 %c_0
+   %fgt_c0 = OpFunctionCall %void %vm_push %fgt_r
+   %fgt_pc = OpLoad %uint %g_pc
+  %fgt_pc2 = OpIAdd %uint %fgt_pc %c_1
+               OpStore %g_pc %fgt_pc2
+               OpBranch %switch_merge
+
+  %case_fge = OpLabel
+   %fge_b = OpFunctionCall %uint %vm_pop
+   %fge_a = OpFunctionCall %uint %vm_pop
+  %fge_bf = OpBitcast %float %fge_b
+  %fge_af = OpBitcast %float %fge_a
+%fge_bool = OpFOrdGreaterThanEqual %bool %fge_af %fge_bf
+   %fge_r = OpSelect %uint %fge_bool %c_1 %c_0
+   %fge_c0 = OpFunctionCall %void %vm_push %fge_r
+   %fge_pc = OpLoad %uint %g_pc
+  %fge_pc2 = OpIAdd %uint %fge_pc %c_1
+               OpStore %g_pc %fge_pc2
+               OpBranch %switch_merge
+
+; ---- memory (bounds-checked against ARENA_DATA_SIZE=0x10000) -------------
+%case_load32 = OpLabel
+   %l32_off = OpFunctionCall %uint %vm_pop
+%l32_isneg = OpUGreaterThanEqual %bool %l32_off %c_NEG_SIGN_BIT
+               OpSelectionMerge %l32_ok None
+               OpBranchConditional %l32_isneg %l32_trap %l32_chkhi
+%l32_chkhi = OpLabel
+   %l32_hi = OpIAdd %uint %l32_off %c_4
+%l32_over = OpUGreaterThan %bool %l32_hi %c_ARENA_DATA_SIZE
+               OpBranchConditional %l32_over %l32_trap %l32_ok
+%l32_trap = OpLabel
+   %l32_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+               OpReturn
+ %l32_ok = OpLabel
+   %l32_val = OpFunctionCall %uint %read_u32 %l32_off
+   %l32_c0 = OpFunctionCall %void %vm_push %l32_val
+   %l32_pc = OpLoad %uint %g_pc
+  %l32_pc2 = OpIAdd %uint %l32_pc %c_1
+               OpStore %g_pc %l32_pc2
+               OpBranch %switch_merge
+
+%case_store32 = OpLabel
+   %s32_val = OpFunctionCall %uint %vm_pop
+   %s32_off = OpFunctionCall %uint %vm_pop
+%s32_isneg = OpUGreaterThanEqual %bool %s32_off %c_NEG_SIGN_BIT
+               OpSelectionMerge %s32_ok None
+               OpBranchConditional %s32_isneg %s32_trap %s32_chkhi
+%s32_chkhi = OpLabel
+   %s32_hi = OpIAdd %uint %s32_off %c_4
+%s32_over = OpUGreaterThan %bool %s32_hi %c_ARENA_DATA_SIZE
+               OpBranchConditional %s32_over %s32_trap %s32_ok
+%s32_trap = OpLabel
+   %s32_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+               OpReturn
+ %s32_ok = OpLabel
+   %s32_c0 = OpFunctionCall %void %write_u32 %s32_off %s32_val
+   %s32_pc = OpLoad %uint %g_pc
+  %s32_pc2 = OpIAdd %uint %s32_pc %c_1
+               OpStore %g_pc %s32_pc2
+               OpBranch %switch_merge
+
+%case_load8 = OpLabel
+    %l8_off = OpFunctionCall %uint %vm_pop
+ %l8_isneg = OpUGreaterThanEqual %bool %l8_off %c_NEG_SIGN_BIT
+               OpSelectionMerge %l8_ok None
+               OpBranchConditional %l8_isneg %l8_trap %l8_chkhi
+%l8_chkhi = OpLabel
+    %l8_hi = OpIAdd %uint %l8_off %c_1
+  %l8_over = OpUGreaterThan %bool %l8_hi %c_ARENA_DATA_SIZE
+               OpBranchConditional %l8_over %l8_trap %l8_ok
+ %l8_trap = OpLabel
+    %l8_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+               OpReturn
+   %l8_ok = OpLabel
+   %l8_val = OpFunctionCall %uint %read_u8 %l8_off
+    %l8_c0 = OpFunctionCall %void %vm_push %l8_val
+    %l8_pc = OpLoad %uint %g_pc
+   %l8_pc2 = OpIAdd %uint %l8_pc %c_1
+               OpStore %g_pc %l8_pc2
+               OpBranch %switch_merge
+
+%case_store8 = OpLabel
+   %s8_val = OpFunctionCall %uint %vm_pop
+   %s8_off = OpFunctionCall %uint %vm_pop
+ %s8_isneg = OpUGreaterThanEqual %bool %s8_off %c_NEG_SIGN_BIT
+               OpSelectionMerge %s8_ok None
+               OpBranchConditional %s8_isneg %s8_trap %s8_chkhi
+%s8_chkhi = OpLabel
+    %s8_hi = OpIAdd %uint %s8_off %c_1
+  %s8_over = OpUGreaterThan %bool %s8_hi %c_ARENA_DATA_SIZE
+               OpBranchConditional %s8_over %s8_trap %s8_ok
+ %s8_trap = OpLabel
+    %s8_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+               OpReturn
+   %s8_ok = OpLabel
+    %s8_c0 = OpFunctionCall %void %write_u8 %s8_off %s8_val
+    %s8_pc = OpLoad %uint %g_pc
+   %s8_pc2 = OpIAdd %uint %s8_pc %c_1
+               OpStore %g_pc %s8_pc2
+               OpBranch %switch_merge
+
+; ---- control flow ----------------------------------------------------
+  %case_jmp = OpLabel
+%jmp_codeoff = OpLoad %uint %g_codeoff
+    %jmp_pc = OpLoad %uint %g_pc
+  %jmp_base = OpIAdd %uint %jmp_codeoff %jmp_pc
+%jmp_immoff = OpIAdd %uint %jmp_base %c_1
+  %jmp_raw = OpFunctionCall %uint %read_u16 %jmp_immoff
+%jmp_isneg2 = OpUGreaterThanEqual %bool %jmp_raw %c_32768
+%jmp_negval = OpIAdd %uint %jmp_raw %c_SIGN_EXT_ADD
+   %jmp_rel = OpSelect %uint %jmp_isneg2 %jmp_negval %jmp_raw
+  %jmp_pc3 = OpIAdd %uint %jmp_pc %c_3
+  %jmp_new = OpIAdd %uint %jmp_pc3 %jmp_rel
+               OpStore %g_pc %jmp_new
+               OpBranch %switch_merge
+
+   %case_jz = OpLabel
+   %jz_cond = OpFunctionCall %uint %vm_pop
+%jz_codeoff = OpLoad %uint %g_codeoff
+    %jz_pc = OpLoad %uint %g_pc
+  %jz_base = OpIAdd %uint %jz_codeoff %jz_pc
+%jz_immoff = OpIAdd %uint %jz_base %c_1
+  %jz_raw = OpFunctionCall %uint %read_u16 %jz_immoff
+%jz_isneg2 = OpUGreaterThanEqual %bool %jz_raw %c_32768
+%jz_negval = OpIAdd %uint %jz_raw %c_SIGN_EXT_ADD
+   %jz_rel = OpSelect %uint %jz_isneg2 %jz_negval %jz_raw
+  %jz_pc3 = OpIAdd %uint %jz_pc %c_3
+%jz_taken = OpIAdd %uint %jz_pc3 %jz_rel
+%jz_iszero = OpIEqual %bool %jz_cond %c_0
+   %jz_new = OpSelect %uint %jz_iszero %jz_taken %jz_pc3
+               OpStore %g_pc %jz_new
+               OpBranch %switch_merge
+
+  %case_jnz = OpLabel
+  %jnz_cond = OpFunctionCall %uint %vm_pop
+%jnz_codeoff = OpLoad %uint %g_codeoff
+   %jnz_pc = OpLoad %uint %g_pc
+ %jnz_base = OpIAdd %uint %jnz_codeoff %jnz_pc
+%jnz_immoff = OpIAdd %uint %jnz_base %c_1
+  %jnz_raw = OpFunctionCall %uint %read_u16 %jnz_immoff
+%jnz_isneg2 = OpUGreaterThanEqual %bool %jnz_raw %c_32768
+%jnz_negval = OpIAdd %uint %jnz_raw %c_SIGN_EXT_ADD
+  %jnz_rel = OpSelect %uint %jnz_isneg2 %jnz_negval %jnz_raw
+ %jnz_pc3 = OpIAdd %uint %jnz_pc %c_3
+%jnz_taken = OpIAdd %uint %jnz_pc3 %jnz_rel
+%jnz_nz = OpINotEqual %bool %jnz_cond %c_0
+  %jnz_new = OpSelect %uint %jnz_nz %jnz_taken %jnz_pc3
+               OpStore %g_pc %jnz_new
+               OpBranch %switch_merge
+
+ %case_call = OpLabel
+    %cl_csp = OpLoad %uint %g_csp
+%cl_overflow = OpUGreaterThanEqual %bool %cl_csp %c_32
+               OpSelectionMerge %cl_ok None
+               OpBranchConditional %cl_overflow %cl_trap %cl_ok
+ %cl_trap = OpLabel
+    %cl_t0 = OpFunctionCall %void %do_trap %c_TRAP_CALLOF
+               OpReturn
+  %cl_ok = OpLabel
+%cl_codeoff = OpLoad %uint %g_codeoff
+    %cl_pc = OpLoad %uint %g_pc
+  %cl_base = OpIAdd %uint %cl_codeoff %cl_pc
+%cl_immoff = OpIAdd %uint %cl_base %c_1
+%cl_target = OpFunctionCall %uint %read_u16 %cl_immoff
+   %cl_ret = OpIAdd %uint %cl_pc %c_3
+   %cl_ptr = OpAccessChain %uint_ptr_priv %g_callstack %cl_csp
+               OpStore %cl_ptr %cl_ret
+  %cl_csp2 = OpIAdd %uint %cl_csp %c_1
+               OpStore %g_csp %cl_csp2
+               OpStore %g_pc %cl_target
+               OpBranch %switch_merge
+
+  %case_ret = OpLabel
+    %rt_csp = OpLoad %uint %g_csp
+%rt_iszero = OpIEqual %bool %rt_csp %c_0
+               OpSelectionMerge %rt_pop None
+               OpBranchConditional %rt_iszero %rt_topexit %rt_pop
+%rt_topexit = OpLabel
+    %rt_e0 = OpFunctionCall %void %do_exit %c_0
+               OpReturn
+  %rt_pop = OpLabel
+  %rt_csp2 = OpISub %uint %rt_csp %c_1
+   %rt_ptr = OpAccessChain %uint_ptr_priv %g_callstack %rt_csp2
+   %rt_pcv = OpLoad %uint %rt_ptr
+               OpStore %g_csp %rt_csp2
+               OpStore %g_pc %rt_pcv
+               OpBranch %switch_merge
+
+; ---- SYS_* / thread-id -------------------------------------------------
+%case_sys_putc = OpLabel
+    %sp_ch = OpFunctionCall %uint %vm_pop
+    %sp_c0 = OpFunctionCall %void %append_log_byte %sp_ch
+    %sp_pc = OpLoad %uint %g_pc
+   %sp_pc2 = OpIAdd %uint %sp_pc %c_1
+               OpStore %g_pc %sp_pc2
+               OpBranch %switch_merge
+
+%case_sys_exit = OpLabel
+   %se_code = OpFunctionCall %uint %vm_pop
+    %se_c0 = OpFunctionCall %void %do_exit %se_code
+               OpReturn
+
+%case_sys_result = OpLabel
+  %sr_value = OpFunctionCall %uint %vm_pop
+   %sr_pass = OpFunctionCall %uint %vm_pop
+    %sr_c0 = OpFunctionCall %void %write_record %sr_pass %sr_value
+    %sr_pc = OpLoad %uint %g_pc
+   %sr_pc2 = OpIAdd %uint %sr_pc %c_1
+               OpStore %g_pc %sr_pc2
+               OpBranch %switch_merge
+
+  %case_tid = OpLabel
+   %tid_c0 = OpFunctionCall %void %vm_push %c_0
+   %tid_pc = OpLoad %uint %g_pc
+  %tid_pc2 = OpIAdd %uint %tid_pc %c_1
+               OpStore %g_pc %tid_pc2
+               OpBranch %switch_merge
+
+ %case_ntid = OpLabel
+  %ntid_c0 = OpFunctionCall %void %vm_push %c_1
+  %ntid_pc = OpLoad %uint %g_pc
+ %ntid_pc2 = OpIAdd %uint %ntid_pc %c_1
+               OpStore %g_pc %ntid_pc2
+               OpBranch %switch_merge
+
+%case_parfor = OpLabel
+    %pf2_pc = OpLoad %uint %g_pc
+   %pf2_pc3 = OpIAdd %uint %pf2_pc %c_3
+               OpStore %g_pc %pf2_pc3
+               OpBranch %switch_merge
+
+%switch_merge = OpLabel
+               OpBranch %loop_continue
+
+%loop_continue = OpLabel
+               OpBranch %loop_header
+
+%loop_merge = OpLabel
+               OpUnreachable
+
+               OpFunctionEnd

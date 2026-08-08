@@ -1,0 +1,54 @@
+# COLL019: mutation through indexed access is silently lost (ADR-004).
+#
+# Positive cases must fire; the two guaranteed idioms (array-of-arrays element
+# mutation, write-back) must stay silent — a lint that flags correct code
+# would train people to ignore it.
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+
+val DICT_SRC = "fn add(d2: Dict<text, [i64]>):\n    var d: Dict<text, [i64]> = {}\n    d[\"k\"] = []\n    d[\"k\"].push(1)\n"
+val PARAM_SRC = "fn addp(d: Dict<text, [i64]>):\n    d[\"k\"].push(1)\n"
+val FIELD_SRC = "struct Row:\n    vals: [i64]\n\nfn addf(rows: [Row]):\n    rows[0].vals.push(5)\n"
+val AOA_SRC = "fn addn():\n    var b: [[i64]] = [[1]]\n    b[0].push(2)\n"
+val WRITEBACK_SRC = "fn addw():\n    var d: Dict<text, [i64]> = {}\n    d[\"k\"] = []\n    var bucket = d[\"k\"]\n    bucket.push(1)\n    d[\"k\"] = bucket\n"
+val READONLY_SRC = "fn peek(d: Dict<text, [i64]>) -> i64:\n    d[\"k\"].len()\n"
+
+fn coll019_count(path: text, src: text) -> i64:
+    var count = 0
+    for result in lint_cli_source(Linter.new(), path, src):
+        if result.lint.code == "COLL019":
+            count = count + 1
+    count
+
+describe "COLL019 mutation through indexed access":
+
+    it "flags a push through a dict-annotated local":
+        """`d[\"k\"].push(1)` mutates a copy of the bucket; the dict never
+        changes. The reader cannot see that, so the lint must."""
+        step("Lint a function that pushes through a local dict index")
+        expect(coll019_count("/tmp/coll019_local.spl", DICT_SRC)).to_equal(1)
+
+    it "flags a push through a dict-typed parameter":
+        step("Lint a function whose dict evidence is the parameter annotation")
+        expect(coll019_count("/tmp/coll019_param.spl", PARAM_SRC)).to_equal(1)
+
+    it "flags a push through a struct field of an indexed element":
+        """`rows[0].vals.push(5)` is the shape that silently dropped every
+        group_by member and every CLDR script total."""
+        step("Lint a push whose receiver is field-of-index")
+        expect(coll019_count("/tmp/coll019_field.spl", FIELD_SRC)).to_equal(1)
+
+    it "stays silent on array-of-arrays element mutation":
+        """`b[0].push(2)` on a [[i64]] mutates in place on every engine and is
+        a guaranteed idiom under ADR-004 — it must never fire."""
+        step("Lint the guaranteed array-of-arrays shape")
+        expect(coll019_count("/tmp/coll019_aoa.spl", AOA_SRC)).to_equal(0)
+
+    it "stays silent on the write-back idiom":
+        step("Lint the ADR-004 conforming write-back form")
+        expect(coll019_count("/tmp/coll019_wb.spl", WRITEBACK_SRC)).to_equal(0)
+
+    it "stays silent on read-only methods through a dict index":
+        """Reading through a copy is fine; only mutation is lost."""
+        step("Lint a .len() through a dict index")
+        expect(coll019_count("/tmp/coll019_ro.spl", READONLY_SRC)).to_equal(0)

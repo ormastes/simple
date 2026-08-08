@@ -1,0 +1,23 @@
+# SimpleOS WM Visible Display Evidence
+
+- date: 2026-07-25
+- status: fail
+- reason: grub-mkstandalone-not-found
+- Simple binary: /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple
+- Simple binary resolved: /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple
+- no Rust seed fallback: pass (selected-simple-binary-not-under-src-compiler-rust; source=repo-self-hosted:/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple; status=pass)
+- display backend:  (not-selected)
+- real display surface: not-run (not-selected)
+- kernel: build/os/simpleos_wm_simple_web_check_32.elf
+- serial markers: not-run (not-run)
+- shared-renderer serial evidence: generated Aetheric theme installed, web-demo renderer, backend selected, direct-mmio present, html renderable, render-ready
+- marker state: theme:false probe:false web:false backend:false present:false mdi:false windows:false top:false taskbar:false html:false render:false
+- QMP capture: not-run (not-run; method=not-run)
+- PPM validation: not-run (not-run)
+- PPM: build/simpleos_wm_visible_display_evidence/qmp-visible-display.ppm 0x0, nonblack=0, unique_colors=0
+- taskbar/item pixels: colored=0, runs=0, sampled_regions=0
+- readable text glyph matches: 0 / 0
+- cleanup: pass (pass; qemu=not-started, qmp_socket=absent)
+- serial log: build/simpleos_wm_visible_display_evidence/serial.log
+- QEMU stderr: build/simpleos_wm_visible_display_evidence/qemu.stderr.log
+- command: ``

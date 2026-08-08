@@ -1,0 +1,168 @@
+# Build Pipeline — Multi-platform game build orchestration
+#
+# Manages build steps, targets, and results for the game export pipeline.
+#
+# Usage:
+#   var pipeline = BuildPipeline.new()
+#   pipeline.add_target(BuildTarget.windows_x64())
+#   pipeline.add_default_steps()
+#   val result = pipeline.build_for_target(BuildTarget.windows_x64())
+
+use std.nogc_async_mut.engine.build.build_config.{BuildTarget, AssetBundle}
+
+# ============================================================================
+# BuildStep — single step in the build pipeline
+# ============================================================================
+
+struct BuildStep:
+    """Represents a single step in the build pipeline."""
+    name: text
+    step_type: text
+    completed: bool
+    duration_ms: f64
+
+# ============================================================================
+# BuildResult — outcome of building for a single target
+# ============================================================================
+
+class BuildResult:
+    """Collects the outcome of a build: steps executed, errors, and output."""
+    success: bool
+    target: BuildTarget
+    steps: [BuildStep]
+    total_duration_ms: f64
+    output_path: text
+    errors: [text]
+
+impl BuildResult:
+    static fn new(target: BuildTarget) -> BuildResult:
+        """Create a new build result for the given target."""
+        BuildResult(
+            success: true,
+            target: target,
+            steps: [],
+            total_duration_ms: 0.0,
+            output_path: "",
+            errors: []
+        )
+
+    me add_step(step: BuildStep):
+        """Add a completed build step and accumulate duration."""
+        self.total_duration_ms = self.total_duration_ms + step.duration_ms
+        self.steps.push(step)
+
+    me add_error(error: text):
+        """Record a build error and mark result as failed."""
+        self.success = false
+        self.errors.push(error)
+
+    fn step_count() -> i32:
+        """Return the number of steps in this result."""
+        self.steps.len()
+
+    fn error_count() -> i32:
+        """Return the number of errors."""
+        self.errors.len()
+
+    fn is_success() -> bool:
+        """Return true if build succeeded with no errors."""
+        self.success and self.errors.len() == 0
+
+# ============================================================================
+# BuildPipeline — orchestrates multi-target builds
+# ============================================================================
+
+class BuildPipeline:
+    """Manages build targets, asset bundles, and build steps."""
+    targets: [BuildTarget]
+    asset_bundle: AssetBundle
+    steps: [BuildStep]
+    current_step: i32
+
+impl BuildPipeline:
+    static fn new() -> BuildPipeline:
+        """Create an empty build pipeline."""
+        BuildPipeline(
+            targets: [],
+            asset_bundle: AssetBundle.new("default"),
+            steps: [],
+            current_step: 0
+        )
+
+    me add_target(target: BuildTarget):
+        """Add a build target to the pipeline."""
+        self.targets.push(target)
+
+    me set_asset_bundle(bundle: AssetBundle):
+        """Set the asset bundle for this pipeline."""
+        self.asset_bundle = bundle
+
+    me add_step(name: text, step_type: text):
+        """Add a custom build step to the pipeline."""
+        val step = BuildStep(
+            name: name,
+            step_type: step_type,
+            completed: false,
+            duration_ms: 0.0
+        )
+        self.steps.push(step)
+
+    me add_default_steps():
+        """Add the standard compile, bundle_assets, and package steps."""
+        self.add_step("compile", "compile")
+        self.add_step("bundle_assets", "bundle_assets")
+        self.add_step("package", "package")
+
+    me complete_step(index: i32, duration_ms: f64) -> bool:
+        """Mark a step as completed with the given duration. Returns false if index is out of range."""
+        if index < 0 or index >= self.steps.len():
+            return false
+        self.steps[index] = BuildStep(
+            name: self.steps[index].name,
+            step_type: self.steps[index].step_type,
+            completed: true,
+            duration_ms: duration_ms
+        )
+        self.current_step = index + 1
+        true
+
+    fn build_for_target(target: BuildTarget) -> BuildResult:
+        """Simulate a build for the given target.
+
+        Creates a BuildResult with copies of all pipeline steps marked as
+        completed. The result is marked successful if no errors are added.
+        """
+        var result = BuildResult.new(target)
+        result.output_path = "build/" + target.triple() + "/game"
+        var i = 0
+        while i < self.steps.len():
+            val completed_step = BuildStep(
+                name: self.steps[i].name,
+                step_type: self.steps[i].step_type,
+                completed: true,
+                duration_ms: 0.0
+            )
+            result.add_step(completed_step)
+            i = i + 1
+        result
+
+    fn target_count() -> i32:
+        """Return the number of targets."""
+        self.targets.len()
+
+    fn step_count() -> i32:
+        """Return the number of steps."""
+        self.steps.len()
+
+    fn get_step(index: i32) -> BuildStep?:
+        """Return the step at the given index, or nil if out of range."""
+        if index < 0 or index >= self.steps.len():
+            return nil
+        self.steps[index]
+
+    me clear():
+        """Reset the pipeline to empty state."""
+        self.targets = []
+        self.asset_bundle = AssetBundle.new("default")
+        self.steps = []
+        self.current_step = 0

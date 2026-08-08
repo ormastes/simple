@@ -1,0 +1,385 @@
+# SimpleOS Update — REAL cryptographic signature verification for TUF metadata.
+#
+# `tuf_metadata.spl` models the TUF *trust structure* (role delegation, signing
+# thresholds, freshness/freeze, version rollback, snapshot consistency) but
+# treats `signatures_present` as a list of key-ids assumed already verified.
+# THIS file removes that assumption.
+#
+# It sits IN FRONT of the structural verifier: signatures are checked with real
+# Ed25519 (`os.crypto.ed25519`, pure Simple, KAT-verified byte-for-byte against
+# RFC 8032 §7.1) over an explicitly defined canonical byte encoding, and only
+# the key-ids whose signatures ACTUALLY VERIFIED are handed to
+# `verify_update`. Every existing defense therefore still runs, unchanged, on
+# top of a now-cryptographic signer set.
+#
+# What is real now:  signature verification, target artifact digests (SHA-256).
+# What is still out of scope: network pull, A/B transactional install, SLSA
+# provenance emission, key rotation/revocation lists.
+#
+# ============================================================================
+# CANONICALIZATION — exactly what is signed
+# ============================================================================
+#
+# An ambiguous signing payload is itself a security bug: if two distinct
+# metadata values can serialize to the same bytes, one signature covers both.
+# So every variable-length field is length-prefixed with a u64 little-endian
+# count. There are no delimiters to inject and no field boundary is ambiguous.
+#
+#   canonical_role_bytes(meta) :=
+#       "TUF1"                                   # domain-separation tag
+#    || u64le(len(role))      || role_utf8
+#    || u64le(version)
+#    || u64le(expires_at)
+#    || u64le(threshold)
+#    || u64le(recorded_targets_version)
+#    || u64le(count(signer_key_ids))    || foreach k: u64le(len(k)) || k_utf8
+#    || u64le(count(delegated_key_ids)) || foreach k: u64le(len(k)) || k_utf8
+#
+# `signatures_present` and the signature list are DELIBERATELY EXCLUDED — a
+# signature cannot cover itself. The "TUF1" tag is domain separation: a role
+# signature can never be replayed as a signature over a different payload kind
+# (target entries use the distinct tag "TUFT").
+
+use os.crypto.ed25519.{ed25519_verify}
+use os.crypto.sha256.{sha256}
+use os.services.update.tuf_metadata.{
+    RoleMetadata,
+    CurrentVersions,
+    VerifyOutcome,
+    TargetEntry,
+    verify_update,
+    tuf_contains,
+    root_trusted_set,
+    reject,
+    TUF_UNTRUSTED_KEY
+}
+
+# ============================================================================
+# Reason codes contributed by the cryptographic layer
+# ============================================================================
+#
+# Continues the numbering in tuf_metadata.spl (0..5 are taken there).
+
+val TUF_BAD_SIGNATURE: u32 = 6   # a presented signature failed to verify
+val TUF_MALFORMED_SIG: u32 = 7   # signature/public key is not the right length
+val TUF_DIGEST_MISMATCH: u32 = 8 # artifact bytes do not match the signed digest
+
+val ED25519_SIG_LEN: u64 = 64
+val ED25519_PUBKEY_LEN: u64 = 32
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct RoleSignature:
+    """One presented signature: which key claims to have signed, and the bytes.
+
+    `sig` is a raw 64-byte Ed25519 signature over `canonical_role_bytes(meta)`.
+    The `key_id` is a CLAIM — it is checked against root's trusted set and the
+    keyring before any cryptography runs, then proven by the verification.
+    """
+    key_id: text
+    sig:    [u8]
+
+struct SignedRole:
+    """Role metadata plus the signatures presented for it."""
+    meta:       RoleMetadata
+    signatures: List<RoleSignature>
+
+struct TrustedKey:
+    """A key-id bound to real Ed25519 public key material (the keyring).
+
+    The binding of key-id -> public key is the trust anchor's job. A key-id with
+    no entry here cannot be verified and is therefore treated as untrusted.
+    """
+    key_id:     text
+    public_key: [u8]
+
+# ============================================================================
+# Byte-building primitives for the canonical encoding
+# ============================================================================
+
+fn u64le(v: u64) -> [u8]:
+    """Encode `v` as 8 little-endian bytes (fixed width — never ambiguous)."""
+    var out: [u8] = []
+    var rest: u64 = v
+    var i: u64 = 0
+    while i < 8:
+        out = out.push((rest % 256).to_u8())
+        rest = rest / 256
+        i = i + 1
+    return out
+
+fn text_bytes(t: text) -> [u8]:
+    """UTF-8 (ASCII-range) bytes of `t`.
+
+    NOTE: `text.to_char_code()` does not exist and fails OPEN (prints a runtime
+    error, returns 0x1b, execution continues) — never use it here. `ch.ord()`
+    is the correct idiom and is identical on JIT and interpreter.
+    """
+    var out: [u8] = []
+    for ch in t:
+        out = out.push(ch.ord().to_u8())
+    return out
+
+fn append_bytes(dst: [u8], src: [u8]) -> [u8]:
+    """Concatenate byte arrays (arrays are value types — returns the result)."""
+    var out: [u8] = dst
+    for b in src:
+        out = out.push(b)
+    return out
+
+fn append_lp_text(dst: [u8], t: text) -> [u8]:
+    """Append a length-prefixed text field: u64le(byte length) || bytes."""
+    val raw: [u8] = text_bytes(t)
+    var out: [u8] = append_bytes(dst, u64le(raw.len()))
+    out = append_bytes(out, raw)
+    return out
+
+fn append_lp_text_list(dst: [u8], items: List<text>) -> [u8]:
+    """Append u64le(count) followed by each element length-prefixed."""
+    var out: [u8] = append_bytes(dst, u64le(items.len()))
+    for it in items:
+        out = append_lp_text(out, it)
+    return out
+
+# ============================================================================
+# Canonical encodings
+# ============================================================================
+
+fn canonical_role_bytes(meta: RoleMetadata) -> [u8]:
+    """The exact bytes a role signature covers. See the header for the grammar.
+
+    Excludes `signatures_present` — a signature cannot sign itself.
+    """
+    var out: [u8] = text_bytes("TUF1")
+    out = append_lp_text(out, meta.role)
+    out = append_bytes(out, u64le(meta.version))
+    out = append_bytes(out, u64le(meta.expires_at))
+    out = append_bytes(out, u64le(meta.threshold))
+    out = append_bytes(out, u64le(meta.recorded_targets_version))
+    out = append_lp_text_list(out, meta.signer_key_ids)
+    out = append_lp_text_list(out, meta.delegated_key_ids)
+    return out
+
+fn canonical_target_bytes(entry: TargetEntry) -> [u8]:
+    """The exact bytes a target-entry signature covers (distinct "TUFT" tag)."""
+    var out: [u8] = text_bytes("TUFT")
+    out = append_lp_text(out, entry.name)
+    out = append_bytes(out, u64le(entry.length))
+    out = append_lp_text(out, entry.digest)
+    out = append_bytes(out, u64le(entry.version))
+    return out
+
+# ============================================================================
+# Hex helper (local: std.crypto.types.bytes_to_hex takes [i64], not [u8])
+# ============================================================================
+
+fn bytes_to_hex_lower(b: [u8]) -> text:
+    """Lowercase hex of `b`, two digits per byte."""
+    val digits: text = "0123456789abcdef"
+    var out: text = ""
+    for x in b:
+        val v: u64 = x.to_u64()
+        out = out + digits.char_at((v / 16).to_i64())
+        out = out + digits.char_at((v % 16).to_i64())
+    return out
+
+# ============================================================================
+# Keyring lookup
+# ============================================================================
+
+fn keyring_has(keyring: List<TrustedKey>, key_id: text) -> bool:
+    """True if `key_id` has real public key material in the keyring."""
+    for k in keyring:
+        if k.key_id == key_id:
+            return true
+    return false
+
+fn keyring_lookup(keyring: List<TrustedKey>, key_id: text) -> [u8]:
+    """Public key bytes for `key_id`, or an empty array when absent.
+
+    Callers MUST have already established presence via `keyring_has`; an empty
+    return is rejected as malformed rather than treated as a usable key.
+    """
+    for k in keyring:
+        if k.key_id == key_id:
+            return k.public_key
+    var empty: [u8] = []
+    return empty
+
+# ============================================================================
+# Per-signature verification
+# ============================================================================
+
+fn signature_well_formed(sig: RoleSignature, public_key: [u8]) -> bool:
+    """Reject wrong-length signature or key material before touching Ed25519."""
+    if public_key.len() != ED25519_PUBKEY_LEN:
+        return false
+    if sig.sig.len() != ED25519_SIG_LEN:
+        return false
+    return true
+
+fn verify_role_signature(
+    meta:       RoleMetadata,
+    sig:        RoleSignature,
+    public_key: [u8]
+) -> bool:
+    """REAL Ed25519 verification of one signature over the canonical bytes."""
+    val payload: [u8] = canonical_role_bytes(meta)
+    return ed25519_verify(public_key, payload, sig.sig)
+
+# ============================================================================
+# Role-level: turn presented signatures into a PROVEN signer set
+# ============================================================================
+
+struct SignerCheck:
+    """Outcome of cryptographically checking every signature on one role.
+
+    `ok` false means the whole update must be rejected with `reason_code`.
+    `verified_key_ids` are the DISTINCT key-ids whose signatures really verified.
+    """
+    ok:               bool
+    reason_code:      u32
+    verified_key_ids: List<text>
+
+fn check_role_signatures(
+    signed:  SignedRole,
+    trusted: List<text>,
+    keyring: List<TrustedKey>
+) -> SignerCheck:
+    """Verify every presented signature on `signed`; fail closed on any problem.
+
+    Order matters and is deliberate:
+      1. UNTRUSTED KEYS ARE REJECTED BEFORE ANY CRYPTOGRAPHY. A key-id outside
+         root's trusted set, or with no keyring entry, rejects immediately —
+         we never run a verification against attacker-nominated key material.
+      2. Malformed signature/key lengths reject.
+      3. A signature that fails Ed25519 verification rejects the WHOLE update
+         (`TUF_BAD_SIGNATURE`) rather than being silently ignored — fail closed,
+         so a forgery can never be hidden among enough valid signatures.
+    Duplicate key-ids are collapsed, so threshold counts DISTINCT signers.
+    """
+    var verified: List<text> = []
+    val meta: RoleMetadata = signed.meta
+
+    for s in signed.signatures:
+        # 1. Trust before crypto.
+        if not tuf_contains(trusted, s.key_id):
+            return SignerCheck(ok: false, reason_code: TUF_UNTRUSTED_KEY, verified_key_ids: [])
+        if not keyring_has(keyring, s.key_id):
+            return SignerCheck(ok: false, reason_code: TUF_UNTRUSTED_KEY, verified_key_ids: [])
+
+        val pk: [u8] = keyring_lookup(keyring, s.key_id)
+
+        # 2. Shape.
+        if not signature_well_formed(s, pk):
+            return SignerCheck(ok: false, reason_code: TUF_MALFORMED_SIG, verified_key_ids: [])
+
+        # 3. Real cryptography.
+        if not verify_role_signature(meta, s, pk):
+            return SignerCheck(ok: false, reason_code: TUF_BAD_SIGNATURE, verified_key_ids: [])
+
+        if not tuf_contains(verified, s.key_id):
+            verified = verified.push(s.key_id)
+
+    return SignerCheck(ok: true, reason_code: 0, verified_key_ids: verified)
+
+fn with_verified_signers(meta: RoleMetadata, verified: List<text>) -> RoleMetadata:
+    """Rebuild `meta` with `signatures_present` = the PROVEN signer key-ids.
+
+    This is the join between the cryptographic layer and the structural
+    verifier: downstream threshold counting now counts real signatures.
+    """
+    return RoleMetadata(
+        role:                     meta.role,
+        version:                  meta.version,
+        expires_at:               meta.expires_at,
+        threshold:                meta.threshold,
+        signer_key_ids:           meta.signer_key_ids,
+        signatures_present:       verified,
+        delegated_key_ids:        meta.delegated_key_ids,
+        recorded_targets_version: meta.recorded_targets_version
+    )
+
+# ============================================================================
+# Full verification pipeline — real signatures + every structural defense
+# ============================================================================
+
+fn signer_check_rejection(chk: SignerCheck) -> VerifyOutcome:
+    """Map a failed `SignerCheck` to its fail-closed rejection outcome."""
+    if chk.reason_code == TUF_UNTRUSTED_KEY:
+        return reject(TUF_UNTRUSTED_KEY, "signer key not in root trusted set")
+    if chk.reason_code == TUF_MALFORMED_SIG:
+        return reject(TUF_MALFORMED_SIG, "malformed signature or public key")
+    return reject(TUF_BAD_SIGNATURE, "signature failed cryptographic verification")
+
+fn verify_update_signed(
+    root:      SignedRole,
+    timestamp: SignedRole,
+    snapshot:  SignedRole,
+    targets:   SignedRole,
+    keyring:   List<TrustedKey>,
+    current:   CurrentVersions,
+    now:       u64
+) -> VerifyOutcome:
+    """Cryptographically verify all four roles, then run every TUF defense.
+
+    Fail-closed throughout. Signature failure rejects before any structural
+    check can accept. On success, delegates to the unchanged `verify_update`,
+    so threshold / freshness / rollback / snapshot-consistency still decide —
+    but now over signers that are cryptographically proven, not assumed.
+    """
+    # Trust anchor is root's OWN metadata: its signing keys plus its delegations.
+    val trusted: List<text> = root_trusted_set(root.meta)
+
+    # Each role is checked EXACTLY ONCE — Ed25519 verification is ~5 s per
+    # signature here (the JIT bails to the interpreter on `u128`), so a second
+    # pass would double the cost of every update check for no benefit.
+    val rc: SignerCheck = check_role_signatures(root, trusted, keyring)
+    if not rc.ok:
+        return signer_check_rejection(rc)
+    val tc: SignerCheck = check_role_signatures(timestamp, trusted, keyring)
+    if not tc.ok:
+        return signer_check_rejection(tc)
+    val sc: SignerCheck = check_role_signatures(snapshot, trusted, keyring)
+    if not sc.ok:
+        return signer_check_rejection(sc)
+    val gc: SignerCheck = check_role_signatures(targets, trusted, keyring)
+    if not gc.ok:
+        return signer_check_rejection(gc)
+
+    val root_m: RoleMetadata = with_verified_signers(root.meta, rc.verified_key_ids)
+    val ts_m:   RoleMetadata = with_verified_signers(timestamp.meta, tc.verified_key_ids)
+    val sn_m:   RoleMetadata = with_verified_signers(snapshot.meta, sc.verified_key_ids)
+    val tg_m:   RoleMetadata = with_verified_signers(targets.meta, gc.verified_key_ids)
+
+    return verify_update(root_m, ts_m, sn_m, tg_m, current, now)
+
+# ============================================================================
+# Target artifact digest verification (real SHA-256)
+# ============================================================================
+
+fn compute_target_digest(artifact: [u8]) -> text:
+    """Lowercase-hex SHA-256 of the actual artifact bytes."""
+    return bytes_to_hex_lower(sha256(artifact))
+
+fn verify_target_digest(artifact: [u8], entry: TargetEntry) -> bool:
+    """True only if `artifact` matches BOTH the signed length and digest.
+
+    Length is checked as well as digest: a length field that disagrees with the
+    bytes means the metadata does not describe this artifact, regardless of the
+    hash. Comparison is over lowercase hex of the full 32-byte digest, so a
+    truncated or empty recorded digest can never match.
+    """
+    if entry.length != artifact.len():
+        return false
+    if entry.digest.len() != 64:
+        return false
+    return compute_target_digest(artifact) == entry.digest
+
+fn verify_target(artifact: [u8], entry: TargetEntry) -> VerifyOutcome:
+    """Fail-closed digest check of one target artifact."""
+    if not verify_target_digest(artifact, entry):
+        return reject(TUF_DIGEST_MISMATCH, "target artifact digest mismatch")
+    return VerifyOutcome(accepted: true, reason_code: 0, reason: "accepted")

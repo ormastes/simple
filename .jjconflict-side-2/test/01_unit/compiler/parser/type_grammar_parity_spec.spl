@@ -1,0 +1,96 @@
+"""
+Regression coverage for the compiled checker core type-grammar parity batch.
+"""
+
+use std.spec
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+
+fn parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+fn reference_source() -> text:
+    "fn convert(tree: &Tree, buffer: &mut [u8]) -> Option<&String>:\n" +
+        "    nil\n"
+
+fn legacy_generic_source() -> text:
+    "fn copy_to(other: GpuArray[T], nested: Box[Option[&Node]]) -> bool:\n" +
+        "    true\n"
+
+fn pointer_source() -> text:
+    "fn pointer_cast(address: u64) -> i64:\n" +
+        "    val ptr = address as *u8\n" +
+        "    1\n" +
+        "fn pointer_params(shared: *u8, immutable: *const u8, mutable: *mut u8, borrowed: &u8) -> bool:\n" +
+        "    true\n"
+
+fn is_named_reference(kind: TypeKind, expected_name: text, expected_mutable: bool) -> bool:
+    match kind:
+        case TypeKind.Reference(inner, mutable):
+            mutable == expected_mutable and parser_type_kind_named_name(inner.kind) == expected_name
+        case _:
+            false
+
+describe "compiled checker core type grammar parity":
+    it "parses exact immutable mutable and nested reference annotations":
+        expect(parses_clean("type_reference_exact.spl", reference_source())).to_equal(true)
+
+    it "preserves immutable and mutable reference shapes through the flat bridge":
+        val module = parse_and_build_module(reference_source(), "type_reference_bridge.spl")
+        val convert = module.functions["convert"] ?? panic("missing convert")
+        expect(is_named_reference(convert.params[0].type_.kind, "Tree", false)).to_equal(true)
+        match convert.params[1].type_.kind:
+            case TypeKind.Reference(inner, mutable):
+                expect(mutable).to_equal(true)
+                match inner.kind:
+                    case TypeKind.Array(element, _):
+                        expect(parser_type_kind_named_name(element.kind)).to_equal("u8")
+                    case _:
+                        fail("mutable reference inner type was not an array")
+            case _:
+                fail("mutable reference shape was not preserved")
+
+    it "parses the exact explicit nil return annotation":
+        expect(parses_clean("type_nil_return_exact.spl", "fn write(msg: text) -> nil:\n    nil\n")).to_equal(true)
+
+    it "parses exact and nested legacy square generic annotations":
+        expect(parses_clean("type_square_generic_exact.spl", legacy_generic_source())).to_equal(true)
+
+    it "keeps angle generics arrays and ordinary types adjacent":
+        val source = "fn adjacent(value: Result<Option<&Item>, text>, bytes: [u8]) -> bool:\n" +
+            "    true\n"
+        expect(parses_clean("type_reference_adjacent.spl", source)).to_equal(true)
+
+    it "parses the exact raw pointer cast and adjacent pointer forms":
+        expect(parses_clean("type_pointer_exact.spl", pointer_source())).to_equal(true)
+
+    it "preserves immutable and mutable raw pointer shapes through the flat bridge":
+        val module = parse_and_build_module(pointer_source(), "type_pointer_bridge.spl")
+        val params = (module.functions["pointer_params"] ?? panic("missing pointer_params")).params
+        match params[0].type_.kind:
+            case TypeKind.Pointer(inner, mutable):
+                expect(mutable).to_equal(false)
+                expect(parser_type_kind_named_name(inner.kind)).to_equal("u8")
+            case _:
+                fail("shared pointer shape was not preserved")
+        match params[2].type_.kind:
+            case TypeKind.Pointer(inner, mutable):
+                expect(mutable).to_equal(true)
+                expect(parser_type_kind_named_name(inner.kind)).to_equal("u8")
+            case _:
+                fail("mutable pointer shape was not preserved")
+
+    it "reports a missing reference target then recovers for valid references":
+        expect(parses_clean("type_reference_malformed.spl", "fn bad(value: &) -> bool:\n    false\n")).to_equal(false)
+        expect(parses_clean("type_reference_recovery.spl", reference_source())).to_equal(true)
+
+    it "reports an unclosed square generic then recovers for a valid generic":
+        expect(parses_clean("type_square_generic_malformed.spl", "fn bad(value: Box[i64) -> bool:\n    false\n")).to_equal(false)
+        expect(parses_clean("type_square_generic_recovery.spl", legacy_generic_source())).to_equal(true)
+
+    it "reports a missing pointer target then recovers for a valid pointer cast":
+        expect(parses_clean("type_pointer_malformed.spl", "fn bad(value: *) -> bool:\n    false\n")).to_equal(false)
+        expect(parses_clean("type_pointer_recovery.spl", pointer_source())).to_equal(true)

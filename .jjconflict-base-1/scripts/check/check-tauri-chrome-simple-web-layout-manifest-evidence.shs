@@ -1,0 +1,694 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/tauri_chrome_simple_web_layout_manifest_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/tauri_chrome_simple_web_layout_manifest_evidence_$(date -u +%F).md}"
+LAYOUT_ENV="${LAYOUT_ENV:-}"
+TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
+TAURI_CHROME_LAYOUT_MANIFEST_RESUME="${TAURI_CHROME_LAYOUT_MANIFEST_RESUME:-0}"
+TAURI_CHROME_LAYOUT_CASE_FILTER="${TAURI_CHROME_LAYOUT_CASE_FILTER:-}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+
+field_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+missing_commands() {
+    missing=""
+    for cmd in "$@"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            if [ "$missing" = "" ]; then
+                missing="$cmd"
+            else
+                missing="$missing,$cmd"
+            fi
+        fi
+    done
+    echo "$missing"
+}
+
+ensure_layout_env() {
+    if [ -n "$LAYOUT_ENV" ] && [ -s "$LAYOUT_ENV" ]; then
+        return 0
+    fi
+    case_dir="$BUILD_DIR/electron_layout_manifest"
+    mkdir -p "$case_dir"
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" ELECTRON_BITMAP_TIMEOUT_SECS="$TIMEOUT_SECS" \
+        sh scripts/check/check-electron-simple-web-layout-manifest-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    LAYOUT_ENV="$case_dir/evidence.env"
+    [ -s "$LAYOUT_ENV" ]
+}
+
+num_at_least() {
+    case "$1" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge "$2" ]
+}
+
+is_tracked_policy() {
+    case "$1" in
+        track-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_tracked_surface_result() {
+    tracked_policy="$1"
+    tracked_status="$2"
+    tracked_reason="$3"
+    tracked_mismatch_count="$4"
+
+    is_tracked_policy "$tracked_policy" || return 1
+    if [ "$tracked_status" = "pass" ] && [ "$tracked_mismatch_count" = "0" ]; then
+        return 0
+    fi
+    case "$tracked_reason" in
+        checksum-mismatch|weighted-checksum-mismatch|pixel-mismatch)
+            [ "$tracked_status" = "divergent" ] && [ -n "$tracked_mismatch_count" ] && [ "$tracked_mismatch_count" != "0" ]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+argb_artifact_pass() {
+    written="$1"
+    file_status="$2"
+    symlink_status="$3"
+    hardlink_status="$4"
+    size_bytes="$5"
+    format="$6"
+    producer="$7"
+    width="$8"
+    height="$9"
+    pixel_count="${10}"
+    nonzero_pixel_count="${11}"
+    expected_width="${12}"
+    expected_height="${13}"
+    expected_producer="${14}"
+    expected_pixel_count=$((expected_width * expected_height))
+
+    [ "$written" = "true" ] &&
+        [ "$file_status" = "pass" ] &&
+        [ "$symlink_status" = "pass" ] &&
+        [ "$hardlink_status" = "pass" ] &&
+        num_at_least "$size_bytes" 1 &&
+        [ "$format" = "argb-u32" ] &&
+        [ "$producer" = "$expected_producer" ] &&
+        [ "$width" = "$expected_width" ] &&
+        [ "$height" = "$expected_height" ] &&
+        [ "$pixel_count" = "$expected_pixel_count" ] &&
+        num_at_least "$nonzero_pixel_count" 1
+}
+
+chrome_capture_reason() {
+    if [ -n "${CHROME_CAPTURE_BIN:-}" ]; then
+        echo "chrome-live-capture-configured"
+    elif command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+        echo "chrome-live-capture-configured"
+    elif [ -x /usr/bin/google-chrome ] || [ -x /usr/bin/google-chrome-stable ] || [ -x /usr/bin/chromium ] || [ -x /usr/bin/chromium-browser ] || [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+        echo "chrome-live-capture-configured"
+    elif find "${HOME:-/nonexistent}/.cache/ms-playwright" -maxdepth 3 -type f \( -name chrome -o -name chromium -o -name headless_shell \) 2>/dev/null | grep -q .; then
+        echo "chrome-live-capture-configured"
+    else
+        echo "chrome-binary-unavailable"
+    fi
+}
+
+layout_cases() {
+    all_cases="$(sed -n 's/^electron_simple_web_layout_manifest_case=//p' "$LAYOUT_ENV")"
+    if [ "$TAURI_CHROME_LAYOUT_CASE_FILTER" = "" ]; then
+        echo "$all_cases"
+        return 0
+    fi
+    for case_name in $all_cases; do
+        case " $TAURI_CHROME_LAYOUT_CASE_FILTER " in
+            *" $case_name "*) echo "$case_name" ;;
+        esac
+    done
+}
+
+tauri_capture_backend() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Linux) echo "x11-xvfb-window-screenshot" ;;
+        Darwin) echo "macos-wkwebview-snapshot" ;;
+        *) echo "tauri-capture-backend-unimplemented" ;;
+    esac
+}
+
+tauri_capture_required_commands() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Linux) echo "cargo,xvfb-run,dbus-run-session,xdotool,import,convert,node" ;;
+        Darwin) echo "swift,node" ;;
+        *) echo "host-specific-tauri-capture-backend" ;;
+    esac
+}
+
+tauri_capture_missing_commands() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Linux) missing_commands cargo xvfb-run dbus-run-session xdotool import convert node ;;
+        Darwin) missing_commands swift node ;;
+        *) echo "host-specific-tauri-capture-backend" ;;
+    esac
+}
+
+tauri_capture_reason() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Linux) ;;
+        Darwin)
+            if command -v swift >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && [ -f tools/tauri-live-bitmap/capture_snapshot.swift ]; then
+                echo "tauri-live-capture-configured"
+            else
+                echo "macos-wkwebview-snapshot-prerequisite-unavailable"
+            fi
+            return 0
+            ;;
+        *)
+            echo "tauri-capture-host-backend-unimplemented"
+            return 0
+            ;;
+    esac
+    if command -v cargo >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1 && command -v dbus-run-session >/dev/null 2>&1 && command -v xdotool >/dev/null 2>&1 && command -v import >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+        echo "tauri-live-capture-configured"
+    else
+        echo "tauri-xvfb-capture-prerequisite-unavailable"
+    fi
+}
+
+tauri_capture_argb_producer() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin) echo "macos-wkwebview-snapshot" ;;
+        Linux) echo "tauri-x11-window-screenshot" ;;
+        *) echo "tauri-capture-backend-unimplemented" ;;
+    esac
+}
+
+run_tauri_capture() {
+    root_dir="$BUILD_DIR/tauri_layout"
+    mkdir -p "$root_dir"
+    tauri_case_count=0
+    tauri_pass_count=0
+    tauri_tracked_count=0
+    tauri_fail_count=0
+    tauri_mismatch_count=0
+    tauri_tracked_mismatch_count=0
+    tauri_argb_artifact_pass_count=0
+    tauri_argb_artifact_fail_count=0
+    expected_tauri_argb_producer="$(tauri_capture_argb_producer)"
+    tauri_capture_status="pass"
+    tauri_capture_reason="pass"
+    tauri_live_capture=false
+    tauri_exit_code=0
+    cases="$(layout_cases)"
+    if [ "$cases" = "" ]; then
+        tauri_capture_status="unavailable"
+        tauri_capture_reason="tauri-layout-manifest-cases-missing"
+    fi
+    if [ "$tauri_capture_status" = "pass" ] && [ "$(tauri_capture_reason)" != "tauri-live-capture-configured" ]; then
+        tauri_capture_status="unavailable"
+        tauri_capture_reason="$(tauri_capture_reason)"
+    fi
+    for case_name in $cases; do
+        if [ "$tauri_capture_status" = "unavailable" ]; then
+            break
+        fi
+        case_dir="$root_dir/$case_name"
+        mkdir -p "$case_dir"
+        html_path="$(field_of "case_${case_name}_electron_simple_web_layout_html_path" "$LAYOUT_ENV")"
+        expected_argb="$(field_of "case_${case_name}_electron_simple_web_layout_expected_argb_path" "$LAYOUT_ENV")"
+        policy="$(field_of "electron_simple_web_layout_manifest_${case_name}_policy" "$LAYOUT_ENV")"
+        width="$(field_of "case_${case_name}_electron_simple_web_layout_width" "$LAYOUT_ENV")"
+        height="$(field_of "case_${case_name}_electron_simple_web_layout_height" "$LAYOUT_ENV")"
+        if [ "$width" = "" ]; then
+            width=96
+        fi
+        if [ "$height" = "" ]; then
+            height=64
+        fi
+        tauri_case_count=$((tauri_case_count + 1))
+        env_file="$case_dir/evidence.env"
+        case_reused=false
+        code=0
+        if [ "$TAURI_CHROME_LAYOUT_MANIFEST_RESUME" = "1" ] && [ -s "$env_file" ]; then
+            prior_status="$(field_of tauri_simple_web_layout_status "$env_file")"
+            prior_reason="$(field_of tauri_simple_web_layout_reason "$env_file")"
+            prior_argb_written="$(field_of tauri_simple_web_layout_captured_argb_written "$env_file")"
+            prior_argb_file_status="$(field_of tauri_simple_web_layout_captured_argb_file_status "$env_file")"
+            prior_argb_symlink_status="$(field_of tauri_simple_web_layout_captured_argb_symlink_status "$env_file")"
+            prior_argb_hardlink_status="$(field_of tauri_simple_web_layout_captured_argb_hardlink_status "$env_file")"
+            prior_argb_size_bytes="$(field_of tauri_simple_web_layout_captured_argb_size_bytes "$env_file")"
+            prior_argb_format="$(field_of tauri_simple_web_layout_captured_argb_format "$env_file")"
+            prior_argb_producer="$(field_of tauri_simple_web_layout_captured_argb_producer "$env_file")"
+            prior_argb_width="$(field_of tauri_simple_web_layout_captured_argb_width "$env_file")"
+            prior_argb_height="$(field_of tauri_simple_web_layout_captured_argb_height "$env_file")"
+            prior_argb_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_pixel_count "$env_file")"
+            prior_argb_nonzero_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
+            prior_mismatch="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
+            if { [ "$prior_status" = "pass" ] || is_tracked_surface_result "$policy" "$prior_status" "$prior_reason" "$prior_mismatch"; } &&
+                argb_artifact_pass "$prior_argb_written" "$prior_argb_file_status" "$prior_argb_symlink_status" "$prior_argb_hardlink_status" "$prior_argb_size_bytes" "$prior_argb_format" "$prior_argb_producer" "$prior_argb_width" "$prior_argb_height" "$prior_argb_pixel_count" "$prior_argb_nonzero_pixel_count" "$width" "$height" "$expected_tauri_argb_producer"; then
+                case_reused=true
+                prior_code="$(field_of tauri_simple_web_layout_exit_code "$env_file")"
+                case "$prior_code" in
+                    ""|*[!0-9]*) code=0 ;;
+                    *) code="$prior_code" ;;
+                esac
+            fi
+        fi
+        if [ "$case_reused" != true ]; then
+            set +e
+            BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" TAURI_LAYOUT_HTML_PATH="$html_path" TAURI_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" TAURI_LAYOUT_WIDTH="$width" TAURI_LAYOUT_HEIGHT="$height" \
+                sh scripts/check/check-tauri-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+            code=$?
+            set -e
+        fi
+        case_status=""
+        case_reason=""
+        case_mismatch=0
+        if [ -s "$env_file" ]; then
+            case_status="$(field_of tauri_simple_web_layout_status "$env_file")"
+            case_reason="$(field_of tauri_simple_web_layout_reason "$env_file")"
+            case_mismatch="$(field_of tauri_simple_web_layout_mismatch_count "$env_file")"
+            case_argb_written="$(field_of tauri_simple_web_layout_captured_argb_written "$env_file")"
+            case_argb_file_status="$(field_of tauri_simple_web_layout_captured_argb_file_status "$env_file")"
+            case_argb_symlink_status="$(field_of tauri_simple_web_layout_captured_argb_symlink_status "$env_file")"
+            case_argb_hardlink_status="$(field_of tauri_simple_web_layout_captured_argb_hardlink_status "$env_file")"
+            case_argb_size_bytes="$(field_of tauri_simple_web_layout_captured_argb_size_bytes "$env_file")"
+            case_argb_format="$(field_of tauri_simple_web_layout_captured_argb_format "$env_file")"
+            case_argb_producer="$(field_of tauri_simple_web_layout_captured_argb_producer "$env_file")"
+            case_argb_width="$(field_of tauri_simple_web_layout_captured_argb_width "$env_file")"
+            case_argb_height="$(field_of tauri_simple_web_layout_captured_argb_height "$env_file")"
+            case_argb_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_pixel_count "$env_file")"
+            case_argb_nonzero_pixel_count="$(field_of tauri_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
+        fi
+        if [ "$case_mismatch" = "" ]; then
+            case_mismatch=0
+        fi
+        if is_tracked_surface_result "$policy" "$case_status" "$case_reason" "$case_mismatch"; then
+            tauri_tracked_count=$((tauri_tracked_count + 1))
+            tauri_tracked_mismatch_count=$((tauri_tracked_mismatch_count + case_mismatch))
+            tauri_live_capture=true
+            if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "$expected_tauri_argb_producer"; then
+                tauri_argb_artifact_pass_count=$((tauri_argb_artifact_pass_count + 1))
+            else
+                tauri_argb_artifact_fail_count=$((tauri_argb_artifact_fail_count + 1))
+                tauri_capture_status="fail"
+                tauri_capture_reason="tauri-layout-manifest-argb-artifact-missing"
+            fi
+        elif [ "$case_status" = "pass" ]; then
+            tauri_pass_count=$((tauri_pass_count + 1))
+            tauri_live_capture=true
+            if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "$expected_tauri_argb_producer"; then
+                tauri_argb_artifact_pass_count=$((tauri_argb_artifact_pass_count + 1))
+            else
+                tauri_argb_artifact_fail_count=$((tauri_argb_artifact_fail_count + 1))
+                tauri_capture_status="fail"
+                tauri_capture_reason="tauri-layout-manifest-argb-artifact-missing"
+            fi
+        else
+            tauri_mismatch_count=$((tauri_mismatch_count + case_mismatch))
+            tauri_fail_count=$((tauri_fail_count + 1))
+            tauri_exit_code="$code"
+            if [ "$case_reason" = "" ]; then
+                case_reason="$(tauri_capture_reason)"
+            fi
+            if [ "$case_status" = "unavailable" ] && [ "$tauri_capture_status" = "pass" ]; then
+                tauri_capture_status="unavailable"
+                tauri_capture_reason="$case_reason"
+            elif [ "$case_status" != "unavailable" ]; then
+                tauri_capture_status="$case_status"
+                tauri_capture_reason="$case_reason"
+            fi
+        fi
+        {
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case=$case_name"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_exit_code=$code"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_resume_reused=$case_reused"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_policy=$policy"
+            echo "tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_report=$case_dir/report.md"
+            sed "s/^/tauri_chrome_simple_web_layout_manifest_tauri_case_${case_name}_detail_/" "$env_file" 2>/dev/null || true
+        } >>"$BUILD_DIR/evidence.env.tmp"
+        if [ "$tauri_capture_status" = "unavailable" ]; then
+            break
+        fi
+    done
+    tauri_accepted_count=$((tauri_pass_count + tauri_tracked_count))
+    if [ "$tauri_capture_status" = "pass" ] && [ "$tauri_accepted_count" != "$tauri_case_count" ]; then
+        tauri_capture_status="fail"
+        tauri_capture_reason="tauri-layout-manifest-incomplete"
+    fi
+    if [ "$tauri_capture_status" = "pass" ] && { [ "$tauri_argb_artifact_pass_count" != "$tauri_accepted_count" ] || [ "$tauri_argb_artifact_fail_count" != "0" ]; }; then
+        tauri_capture_status="fail"
+        tauri_capture_reason="tauri-layout-manifest-argb-artifact-missing"
+    fi
+    if [ "$tauri_capture_status" = "pass" ] && [ "$tauri_mismatch_count" != "0" ]; then
+        tauri_capture_status="divergent"
+        tauri_capture_reason="tauri-layout-manifest-pixel-mismatch"
+    fi
+    if [ "$tauri_capture_reason" = "" ]; then
+        tauri_capture_reason="$(tauri_capture_reason)"
+    fi
+    {
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_exit_code=$tauri_exit_code"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_report=$root_dir"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_case_count=$tauri_case_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_pass_count=$tauri_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_tracked_count=$tauri_tracked_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_fail_count=$tauri_fail_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_tracked_mismatch_count=$tauri_tracked_mismatch_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_argb_artifact_pass_count=$tauri_argb_artifact_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_tauri_argb_artifact_fail_count=$tauri_argb_artifact_fail_count"
+    } >>"$BUILD_DIR/evidence.env.tmp"
+}
+
+run_chrome_capture() {
+    root_dir="$BUILD_DIR/chrome_layout"
+    mkdir -p "$root_dir"
+    chrome_case_count=0
+    chrome_pass_count=0
+    chrome_tracked_count=0
+    chrome_fail_count=0
+    chrome_mismatch_count=0
+    chrome_tracked_mismatch_count=0
+    chrome_argb_artifact_pass_count=0
+    chrome_argb_artifact_fail_count=0
+    chrome_capture_status="pass"
+    chrome_capture_reason="pass"
+    chrome_live_capture=false
+    chrome_exit_code=0
+    cases="$(layout_cases)"
+    if [ "$cases" = "" ]; then
+        chrome_capture_status="unavailable"
+        chrome_capture_reason="chrome-layout-manifest-cases-missing"
+    fi
+    for case_name in $cases; do
+        case_dir="$root_dir/$case_name"
+        mkdir -p "$case_dir"
+        html_path="$(field_of "case_${case_name}_electron_simple_web_layout_html_path" "$LAYOUT_ENV")"
+        expected_argb="$(field_of "case_${case_name}_electron_simple_web_layout_expected_argb_path" "$LAYOUT_ENV")"
+        policy="$(field_of "electron_simple_web_layout_manifest_${case_name}_policy" "$LAYOUT_ENV")"
+        width="$(field_of "case_${case_name}_electron_simple_web_layout_width" "$LAYOUT_ENV")"
+        height="$(field_of "case_${case_name}_electron_simple_web_layout_height" "$LAYOUT_ENV")"
+        if [ "$width" = "" ]; then
+            width=96
+        fi
+        if [ "$height" = "" ]; then
+            height=64
+        fi
+        chrome_case_count=$((chrome_case_count + 1))
+        env_file="$case_dir/evidence.env"
+        case_reused=false
+        code=0
+        if [ "$TAURI_CHROME_LAYOUT_MANIFEST_RESUME" = "1" ] && [ -s "$env_file" ]; then
+            prior_status="$(field_of chrome_simple_web_layout_status "$env_file")"
+            prior_reason="$(field_of chrome_simple_web_layout_reason "$env_file")"
+            prior_argb_written="$(field_of chrome_simple_web_layout_captured_argb_written "$env_file")"
+            prior_argb_file_status="$(field_of chrome_simple_web_layout_captured_argb_file_status "$env_file")"
+            prior_argb_symlink_status="$(field_of chrome_simple_web_layout_captured_argb_symlink_status "$env_file")"
+            prior_argb_hardlink_status="$(field_of chrome_simple_web_layout_captured_argb_hardlink_status "$env_file")"
+            prior_argb_size_bytes="$(field_of chrome_simple_web_layout_captured_argb_size_bytes "$env_file")"
+            prior_argb_format="$(field_of chrome_simple_web_layout_captured_argb_format "$env_file")"
+            prior_argb_producer="$(field_of chrome_simple_web_layout_captured_argb_producer "$env_file")"
+            prior_argb_width="$(field_of chrome_simple_web_layout_captured_argb_width "$env_file")"
+            prior_argb_height="$(field_of chrome_simple_web_layout_captured_argb_height "$env_file")"
+            prior_argb_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_pixel_count "$env_file")"
+            prior_argb_nonzero_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
+            prior_mismatch="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+            if { [ "$prior_status" = "pass" ] || is_tracked_surface_result "$policy" "$prior_status" "$prior_reason" "$prior_mismatch"; } &&
+                argb_artifact_pass "$prior_argb_written" "$prior_argb_file_status" "$prior_argb_symlink_status" "$prior_argb_hardlink_status" "$prior_argb_size_bytes" "$prior_argb_format" "$prior_argb_producer" "$prior_argb_width" "$prior_argb_height" "$prior_argb_pixel_count" "$prior_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
+                case_reused=true
+                prior_code="$(field_of chrome_simple_web_layout_exit_code "$env_file")"
+                case "$prior_code" in
+                    ""|*[!0-9]*) code=0 ;;
+                    *) code="$prior_code" ;;
+                esac
+            fi
+        fi
+        if [ "$case_reused" != true ]; then
+            set +e
+            BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" CHROME_LAYOUT_HTML_PATH="$html_path" CHROME_LAYOUT_EXPECTED_ARGB_PATH="$expected_argb" CHROME_LAYOUT_WIDTH="$width" CHROME_LAYOUT_HEIGHT="$height" \
+                sh scripts/check/check-chrome-simple-web-layout-bitmap-evidence.shs >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+            code=$?
+            set -e
+        fi
+        case_status=""
+        case_reason=""
+        case_mismatch=0
+        if [ -s "$env_file" ]; then
+            case_status="$(field_of chrome_simple_web_layout_status "$env_file")"
+            case_reason="$(field_of chrome_simple_web_layout_reason "$env_file")"
+            case_mismatch="$(field_of chrome_simple_web_layout_mismatch_count "$env_file")"
+            case_argb_written="$(field_of chrome_simple_web_layout_captured_argb_written "$env_file")"
+            case_argb_file_status="$(field_of chrome_simple_web_layout_captured_argb_file_status "$env_file")"
+            case_argb_symlink_status="$(field_of chrome_simple_web_layout_captured_argb_symlink_status "$env_file")"
+            case_argb_hardlink_status="$(field_of chrome_simple_web_layout_captured_argb_hardlink_status "$env_file")"
+            case_argb_size_bytes="$(field_of chrome_simple_web_layout_captured_argb_size_bytes "$env_file")"
+            case_argb_format="$(field_of chrome_simple_web_layout_captured_argb_format "$env_file")"
+            case_argb_producer="$(field_of chrome_simple_web_layout_captured_argb_producer "$env_file")"
+            case_argb_width="$(field_of chrome_simple_web_layout_captured_argb_width "$env_file")"
+            case_argb_height="$(field_of chrome_simple_web_layout_captured_argb_height "$env_file")"
+            case_argb_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_pixel_count "$env_file")"
+            case_argb_nonzero_pixel_count="$(field_of chrome_simple_web_layout_captured_argb_nonzero_pixel_count "$env_file")"
+        fi
+        if [ "$case_mismatch" = "" ]; then
+            case_mismatch=0
+        fi
+        if is_tracked_surface_result "$policy" "$case_status" "$case_reason" "$case_mismatch"; then
+            chrome_tracked_count=$((chrome_tracked_count + 1))
+            chrome_tracked_mismatch_count=$((chrome_tracked_mismatch_count + case_mismatch))
+            chrome_live_capture=true
+            if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
+                chrome_argb_artifact_pass_count=$((chrome_argb_artifact_pass_count + 1))
+            else
+                chrome_argb_artifact_fail_count=$((chrome_argb_artifact_fail_count + 1))
+                chrome_capture_status="fail"
+                chrome_capture_reason="chrome-layout-manifest-argb-artifact-missing"
+            fi
+        elif [ "$case_status" = "pass" ]; then
+            chrome_pass_count=$((chrome_pass_count + 1))
+            chrome_live_capture=true
+            if argb_artifact_pass "$case_argb_written" "$case_argb_file_status" "$case_argb_symlink_status" "$case_argb_hardlink_status" "$case_argb_size_bytes" "$case_argb_format" "$case_argb_producer" "$case_argb_width" "$case_argb_height" "$case_argb_pixel_count" "$case_argb_nonzero_pixel_count" "$width" "$height" "chrome-headless-screenshot"; then
+                chrome_argb_artifact_pass_count=$((chrome_argb_artifact_pass_count + 1))
+            else
+                chrome_argb_artifact_fail_count=$((chrome_argb_artifact_fail_count + 1))
+                chrome_capture_status="fail"
+                chrome_capture_reason="chrome-layout-manifest-argb-artifact-missing"
+            fi
+        else
+            chrome_mismatch_count=$((chrome_mismatch_count + case_mismatch))
+            chrome_fail_count=$((chrome_fail_count + 1))
+            chrome_exit_code="$code"
+            if [ "$case_reason" = "" ]; then
+                case_reason="$(chrome_capture_reason)"
+            fi
+            if [ "$case_status" = "unavailable" ] && [ "$chrome_capture_status" = "pass" ]; then
+                chrome_capture_status="unavailable"
+                chrome_capture_reason="$case_reason"
+            elif [ "$case_status" != "unavailable" ]; then
+                chrome_capture_status="$case_status"
+                chrome_capture_reason="$case_reason"
+            fi
+        fi
+        {
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case=$case_name"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_exit_code=$code"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_resume_reused=$case_reused"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_policy=$policy"
+            echo "tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_report=$case_dir/report.md"
+            sed "s/^/tauri_chrome_simple_web_layout_manifest_chrome_case_${case_name}_detail_/" "$env_file" 2>/dev/null || true
+        } >>"$BUILD_DIR/evidence.env.tmp"
+        if [ "$chrome_capture_status" = "unavailable" ]; then
+            break
+        fi
+    done
+    chrome_accepted_count=$((chrome_pass_count + chrome_tracked_count))
+    if [ "$chrome_capture_status" = "pass" ] && [ "$chrome_accepted_count" != "$chrome_case_count" ]; then
+        chrome_capture_status="fail"
+        chrome_capture_reason="chrome-layout-manifest-incomplete"
+    fi
+    if [ "$chrome_capture_status" = "pass" ] && { [ "$chrome_argb_artifact_pass_count" != "$chrome_accepted_count" ] || [ "$chrome_argb_artifact_fail_count" != "0" ]; }; then
+        chrome_capture_status="fail"
+        chrome_capture_reason="chrome-layout-manifest-argb-artifact-missing"
+    fi
+    if [ "$chrome_capture_status" = "pass" ] && [ "$chrome_mismatch_count" != "0" ]; then
+        chrome_capture_status="divergent"
+        chrome_capture_reason="chrome-layout-manifest-pixel-mismatch"
+    fi
+    if [ "$chrome_capture_reason" = "" ]; then
+        chrome_capture_reason="$(chrome_capture_reason)"
+    fi
+    {
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_exit_code=$chrome_exit_code"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_report=$root_dir"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_case_count=$chrome_case_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_pass_count=$chrome_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_tracked_count=$chrome_tracked_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_fail_count=$chrome_fail_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_tracked_mismatch_count=$chrome_tracked_mismatch_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_argb_artifact_pass_count=$chrome_argb_artifact_pass_count"
+        echo "tauri_chrome_simple_web_layout_manifest_chrome_argb_artifact_fail_count=$chrome_argb_artifact_fail_count"
+    } >>"$BUILD_DIR/evidence.env.tmp"
+}
+
+status="pass"
+reason="pass"
+
+ensure_layout_env || {
+    status="fail"
+    reason="electron-layout-manifest-missing"
+}
+
+electron_status=""
+electron_reason=""
+electron_case_count=""
+electron_pass_count=""
+electron_fail_count=""
+if [ "$status" = "pass" ]; then
+    electron_status="$(field_of electron_simple_web_layout_manifest_status "$LAYOUT_ENV")"
+    electron_reason="$(field_of electron_simple_web_layout_manifest_reason "$LAYOUT_ENV")"
+    electron_case_count="$(field_of electron_simple_web_layout_manifest_case_count "$LAYOUT_ENV")"
+    electron_pass_count="$(field_of electron_simple_web_layout_manifest_pass_count "$LAYOUT_ENV")"
+    electron_fail_count="$(field_of electron_simple_web_layout_manifest_fail_count "$LAYOUT_ENV")"
+    if [ "$electron_status" != "pass" ] || [ "$electron_fail_count" != "0" ]; then
+        status="fail"
+        reason="electron-layout-manifest-failed"
+    fi
+fi
+
+tauri_capture_status="unavailable"
+tauri_capture_reason="$(tauri_capture_reason)"
+tauri_capture_backend="$(tauri_capture_backend)"
+tauri_capture_required_commands="$(tauri_capture_required_commands)"
+tauri_capture_missing_commands="$(tauri_capture_missing_commands)"
+tauri_live_capture=false
+tauri_mismatch_count=0
+tauri_case_count=0
+tauri_pass_count=0
+tauri_tracked_count=0
+tauri_fail_count=0
+tauri_tracked_mismatch_count=0
+tauri_argb_artifact_pass_count=0
+tauri_argb_artifact_fail_count=0
+chrome_capture_status="unavailable"
+chrome_capture_reason="$(chrome_capture_reason)"
+chrome_capture_backend="chrome-live-bitmap"
+chrome_live_capture=false
+chrome_mismatch_count=0
+chrome_case_count=0
+chrome_pass_count=0
+chrome_tracked_count=0
+chrome_fail_count=0
+chrome_tracked_mismatch_count=0
+chrome_argb_artifact_pass_count=0
+chrome_argb_artifact_fail_count=0
+
+rm -f "$BUILD_DIR/evidence.env.tmp"
+if [ "$status" = "pass" ]; then
+    run_tauri_capture
+    run_chrome_capture
+fi
+tauri_status="$tauri_capture_status"
+tauri_reason="$tauri_capture_reason"
+chrome_status="$chrome_capture_status"
+chrome_reason="$chrome_capture_reason"
+host_uname_s="$(uname -s)"
+host_uname_m="$(uname -m)"
+
+tauri_accepted_count=$((tauri_pass_count + tauri_tracked_count))
+chrome_accepted_count=$((chrome_pass_count + chrome_tracked_count))
+if [ "$tauri_status" = "pass" ] && { [ "$tauri_live_capture" != true ] || [ "$tauri_mismatch_count" != "0" ] || [ "$tauri_accepted_count" != "$tauri_case_count" ] || [ "$tauri_fail_count" != "0" ] || [ "$tauri_argb_artifact_pass_count" != "$tauri_accepted_count" ] || [ "$tauri_argb_artifact_fail_count" != "0" ]; }; then
+    status="fail"
+    reason="surface-row-claims-live-capture-without-proof"
+elif [ "$tauri_status" != "pass" ]; then
+    status="fail"
+    reason="tauri-$tauri_reason"
+fi
+if [ "$chrome_status" = "pass" ] && { [ "$chrome_live_capture" != true ] || [ "$chrome_mismatch_count" != "0" ] || [ "$chrome_accepted_count" != "$chrome_case_count" ] || [ "$chrome_fail_count" != "0" ] || [ "$chrome_argb_artifact_pass_count" != "$chrome_accepted_count" ] || [ "$chrome_argb_artifact_fail_count" != "0" ]; }; then
+    status="fail"
+    reason="surface-row-claims-live-capture-without-proof"
+elif [ "$chrome_status" != "pass" ]; then
+    status="fail"
+    if [ "$tauri_status" != "pass" ]; then
+        reason="tauri-$tauri_reason;chrome-$chrome_reason"
+    else
+        reason="chrome-$chrome_reason"
+    fi
+fi
+
+{
+    echo "tauri_chrome_simple_web_layout_manifest_status=$status"
+    echo "tauri_chrome_simple_web_layout_manifest_reason=$reason"
+    echo "tauri_chrome_simple_web_layout_manifest_resume=$TAURI_CHROME_LAYOUT_MANIFEST_RESUME"
+    echo "tauri_chrome_simple_web_layout_manifest_case_filter=$TAURI_CHROME_LAYOUT_CASE_FILTER"
+    echo "tauri_chrome_simple_web_layout_manifest_reference=electron-simple-web-layout-manifest"
+    echo "tauri_chrome_simple_web_layout_manifest_layout_env=$LAYOUT_ENV"
+    echo "tauri_chrome_simple_web_layout_manifest_host_uname_s=$host_uname_s"
+    echo "tauri_chrome_simple_web_layout_manifest_host_uname_m=$host_uname_m"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_target=electron"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_capture_status=$electron_status"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_capture_reason=$electron_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_live_capture=true"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_case_count=$electron_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_pass_count=$electron_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_fail_count=$electron_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_electron_mismatch_count=0"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_target=tauri"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_status=$tauri_status"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_reason=$tauri_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_backend=$tauri_capture_backend"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_required_commands=$tauri_capture_required_commands"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_capture_missing_commands=$tauri_capture_missing_commands"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_live_capture=$tauri_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_case_count=$tauri_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_pass_count=$tauri_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_tracked_count=$tauri_tracked_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_fail_count=$tauri_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_mismatch_count=$tauri_mismatch_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_tracked_mismatch_count=$tauri_tracked_mismatch_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_argb_artifact_pass_count=$tauri_argb_artifact_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_tauri_argb_artifact_fail_count=$tauri_argb_artifact_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_target=chrome"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_status=$chrome_status"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_reason=$chrome_reason"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_capture_backend=$chrome_capture_backend"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_live_capture=$chrome_live_capture"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_case_count=$chrome_case_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_pass_count=$chrome_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_tracked_count=$chrome_tracked_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_fail_count=$chrome_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_mismatch_count=$chrome_mismatch_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_tracked_mismatch_count=$chrome_tracked_mismatch_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_argb_artifact_pass_count=$chrome_argb_artifact_pass_count"
+    echo "tauri_chrome_simple_web_layout_manifest_chrome_argb_artifact_fail_count=$chrome_argb_artifact_fail_count"
+    echo "tauri_chrome_simple_web_layout_manifest_blur_or_tolerance_used=false"
+    echo "tauri_chrome_simple_web_layout_manifest_no_fake_capture=true"
+    if [ -s "$BUILD_DIR/evidence.env.tmp" ]; then
+        cat "$BUILD_DIR/evidence.env.tmp"
+    fi
+} >"$BUILD_DIR/evidence.env"
+
+{
+    echo "# Tauri/Chrome Simple Web Layout Manifest Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- electron live capture: $electron_status"
+    echo "- tauri capture: $tauri_status ($tauri_reason)"
+    echo "- chrome capture: $chrome_status ($chrome_reason)"
+    echo "- blur/tolerance used: false"
+    echo "- fake capture allowed: false"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$BUILD_DIR/evidence.env"
+} >"$REPORT_PATH"
+
+cat "$BUILD_DIR/evidence.env"
+[ "$status" = "pass" ]

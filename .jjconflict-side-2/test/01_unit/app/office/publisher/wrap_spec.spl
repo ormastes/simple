@@ -1,0 +1,72 @@
+# Publisher text-wrap-around-object spec.
+#
+# Verifies wrap_flow narrows lines whose row-band overlaps a left-anchored
+# FloatObject, and leaves lines below the object at full frame width.
+#
+# Geometry (hand-computed, CHAR_W=6, LINE_H=16 as in page_layout.spl):
+#   frame: x=0, y=0, w=120, h=48   -> total_lines = 48/16 = 3
+#   obj:   x=0, y=0, w=60,  h=32   -> occupies row-bands of line 0 and 1
+#          (line0 y=[0,16), line1 y=[16,32) both intersect obj y=[0,32);
+#           line2 y=[32,48) does not overlap obj)
+#
+#   narrowed_chars = (frame_w - obj.w) / CHAR_W = (120 - 60) / 6 = 10
+#   full_chars     = frame_w / CHAR_W            = 120 / 6       = 20
+#
+# Content: "aaaa bbbb cccc dddd eeee ffff gggg hhhh" (8 words, each 4 chars).
+#   line0 (cap=10): "aaaa"(4) -> "aaaa bbbb"(9) -> +"cccc" would be 14>10,
+#                   stop. line0 = "aaaa bbbb"
+#   line1 (cap=10): "cccc"(4) -> "cccc dddd"(9) -> +"eeee" would be 14>10,
+#                   stop. line1 = "cccc dddd"
+#   line2 (cap=20, full width): "eeee"(4) -> "eeee ffff"(9) ->
+#                   "eeee ffff gggg"(14) -> "eeee ffff gggg hhhh"(19) <= 20,
+#                   all 4 remaining words fit. line2 = "eeee ffff gggg hhhh"
+#   -> 3 lines total, all 8 words consumed.
+
+use std.spec
+use app.office.publisher.wrap.{FloatObject, float_new, wrap_flow, wrap_line_count, wrap_render_html}
+
+val CONTENT = "aaaa bbbb cccc dddd eeee ffff gggg hhhh"
+
+fn _obj() -> FloatObject:
+    float_new(0, 0, 60, 32)
+
+describe "publisher wrap: narrowed lines beside the object":
+    it "narrows line 0 to the space right of the object":
+        val lines = wrap_flow(0, 0, 120, 48, CONTENT, _obj())
+        expect(lines[0]).to_equal("aaaa bbbb")
+
+    it "narrows line 1 to the space right of the object":
+        val lines = wrap_flow(0, 0, 120, 48, CONTENT, _obj())
+        expect(lines[1]).to_equal("cccc dddd")
+
+describe "publisher wrap: full-width line below the object":
+    it "uses the full frame width once past the object's row-band":
+        val lines = wrap_flow(0, 0, 120, 48, CONTENT, _obj())
+        expect(lines[2]).to_equal("eeee ffff gggg hhhh")
+
+describe "publisher wrap: line count":
+    it "produces exactly 3 lines for the full content":
+        val count = wrap_line_count(0, 0, 120, 48, CONTENT, _obj())
+        expect(count).to_equal(3)
+
+describe "publisher wrap: html rendering":
+    it "includes a positioned float div for the object":
+        val html = wrap_render_html(0, 0, 120, 48, CONTENT, _obj())
+        expect(html).to_contain("pub-float")
+        expect(html).to_contain("width:60px")
+        expect(html).to_contain("height:32px")
+
+    it "includes the text region div with the wrapped lines":
+        val html = wrap_render_html(0, 0, 120, 48, CONTENT, _obj())
+        expect(html).to_contain("pub-wrap-text")
+        expect(html).to_contain("aaaa bbbb")
+        expect(html).to_contain("eeee ffff gggg hhhh")
+
+    describe "deliberate-fail probe (must stay green)":
+        it "sanity-checks the hand-computed narrowed-vs-full split ground truth":
+            val lines = wrap_flow(0, 0, 120, 48, CONTENT, _obj())
+            # Probe verified live: asserting line 0 equals the full-width
+            # line's content ("eeee ffff gggg hhhh") failed with a
+            # mismatch, confirming the harness executes this assertion.
+            # Correct ground truth: line 0 is narrowed to "aaaa bbbb".
+            expect(lines[0]).to_equal("aaaa bbbb")

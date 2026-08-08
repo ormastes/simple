@@ -1,0 +1,36 @@
+use std.spec
+use std.io_runtime.{file_read}
+use app.io.env_ops.{host_os}
+use app.simple_lsp_mcp.tools.{run_command_text}
+
+describe "simple_lsp_mcp bounded command dispatch":
+    it "keeps every query dispatch behind the bounded command owner":
+        val helpers = file_read("src/app/simple_lsp_mcp/json_helpers.spl")
+        val tools = file_read("src/app/simple_lsp_mcp/tools.spl")
+
+        expect(helpers.contains("process_run(binary, args)")).to_equal(false)
+        expect(tools).to_contain("process_run_bounded(")
+        expect(tools).to_contain("LSP_COMMAND_TIMEOUT_MS: i64 = 10000")
+        expect(tools).to_contain("LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024")
+        expect(tools).to_contain("fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:\n    run_command_text(")
+        expect(tools).to_contain("fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:\n    run_command_text(")
+        expect(tools).to_contain("fn run_visibility_symbols(file: text) -> text:\n    run_command_text(")
+
+    it "finds the repo binary from SIMPLE_LIB when cwd is not the repo root":
+        val helpers = file_read("src/app/simple_lsp_mcp/json_helpers.spl")
+        expect(helpers).to_contain("val lib_dir = env_get(\"SIMPLE_LIB\") ?? \"\"")
+        expect(helpers).to_contain("val repo_bin = lib_dir.substring(0, lib_dir.len() - 4) + \"/bin/simple\"")
+
+    it "bounds a hung command and caps a flood":
+        if host_os() != "windows":
+            val timeout = run_command_text("/bin/sh", ["-c", "printf EARLY; sleep 11"])
+            val flood = run_command_text("/bin/sh", ["-c", "yes X | head -c 1049600"])
+
+            expect(timeout.contains("TIMEOUT") or timeout.contains("timed out")).to_equal(true)
+            expect(flood).to_contain("[output truncated: ")
+
+    it "marks nonzero child output as command failure":
+        if host_os() != "windows":
+            val failure = run_command_text("/bin/sh", ["-c", "printf child-error >&2; exit 7"])
+            expect(failure).to_start_with("command failed with exit code 7:")
+            expect(failure).to_contain("child-error")

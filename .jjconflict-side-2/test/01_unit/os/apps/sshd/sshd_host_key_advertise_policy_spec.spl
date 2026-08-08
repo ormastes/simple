@@ -1,0 +1,201 @@
+use os.apps.sshd.ssh_kex.{HostKeySet, host_key_set_advertised_algorithms}
+use os.apps.sshd.ssh_kex_primitives.{HostCertificateSet, host_key_set_has_any_algorithm, host_key_algorithms_with_certificates}
+use os.apps.sshd.sshd.{sshd_build_host_keys_for_session_for_test, sshd_host_key_policy_satisfiable_for_test, sshd_build_production_session_kexinit_for_test, sshd_start_verdict_for_test, sshd_daemon_host_key_policy_satisfiable_for_test}
+use os.apps.sshd.ssh_transport.{SshKexInit, ssh_parse_kexinit, ssh_negotiate_algorithms}
+
+fn _seed32() -> [u8]:
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        s = s.push(0x11u8)
+        i = i + 1
+    s
+
+fn _no_certs() -> HostCertificateSet:
+    HostCertificateSet(
+        ssh_ed25519_cert: nil,
+        rsa_sha2_256_cert: nil,
+        rsa_sha2_512_cert: nil
+    )
+
+describe "SSHD host key advertisement follows config":
+    it "advertises ssh-ed25519 when the config enables it":
+        val keys = sshd_build_host_keys_for_session_for_test(true, _seed32(), nil, nil, nil)
+        expect(host_key_set_advertised_algorithms(keys)).to_equal("ssh-ed25519")
+
+    it "never advertises ssh-ed25519 when the config disables it":
+        val keys = sshd_build_host_keys_for_session_for_test(false, _seed32(), nil, nil, nil)
+        # Absolute oracle: the disabled algorithm must be absent from the list.
+        expect(host_key_set_advertised_algorithms(keys)).to_equal("")
+        expect(host_key_set_advertised_algorithms(keys).contains("ssh-ed25519")).to_equal(false)
+
+    it "advertises only the remaining enabled algorithm when ed25519 is disabled":
+        val keys = sshd_build_host_keys_for_session_for_test(false, _seed32(), [0x30u8, 0x82u8], nil, nil)
+        val algos = host_key_set_advertised_algorithms(keys)
+        expect(algos).to_equal("rsa-sha2-256,rsa-sha2-512")
+        expect(algos.contains("ssh-ed25519")).to_equal(false)
+
+    it "advertises ecdsa alone when only ecdsa is configured":
+        val keys = sshd_build_host_keys_for_session_for_test(false, _seed32(), nil, nil, [0x30u8, 0x77u8])
+        val algos = host_key_set_advertised_algorithms(keys)
+        expect(algos).to_equal("ecdsa-sha2-nistp256")
+        expect(algos.contains("ssh-ed25519")).to_equal(false)
+
+describe "SSHD host key policy fails closed":
+    it "reports no algorithm available when every host key is disabled":
+        val keys = sshd_build_host_keys_for_session_for_test(false, _seed32(), nil, nil, nil)
+        expect(host_key_set_has_any_algorithm(keys)).to_equal(false)
+
+    it "reports an algorithm available when ed25519 is enabled":
+        val keys = sshd_build_host_keys_for_session_for_test(true, _seed32(), nil, nil, nil)
+        expect(host_key_set_has_any_algorithm(keys)).to_equal(true)
+
+    it "refuses to serve when the config leaves no host key algorithm enabled":
+        expect(sshd_host_key_policy_satisfiable_for_test(false, _seed32(), nil, nil, nil)).to_equal(false)
+
+    it "serves when at least one host key algorithm remains enabled":
+        expect(sshd_host_key_policy_satisfiable_for_test(true, _seed32(), nil, nil, nil)).to_equal(true)
+        expect(sshd_host_key_policy_satisfiable_for_test(false, _seed32(), [0x30u8], nil, nil)).to_equal(true)
+
+    it "serves on a certificate alone when the raw key is disabled":
+        expect(sshd_host_key_policy_satisfiable_for_test(false, _seed32(), nil, nil, [0x00u8, 0x01u8])).to_equal(true)
+
+describe "SSHD startup itself is gated by the host key policy":
+    # The examples above pin the POLICY FUNCTION. These pin the STARTUP PATH:
+    # they drive the real SshDaemon.start(), so a gate that exists but is never
+    # consulted by start() fails here instead of passing on a technicality.
+    it "refuses to start when no host key algorithm is enabled":
+        # Absolute oracle: start() must hand back the refusal Err, and must do
+        # so BEFORE binding a listener. Reaching the bind is itself the failure
+        # signal here — rt_boot_tcp_bind is a baremetal-only extern, so an
+        # unguarded start() dies on it rather than returning this text.
+        expect(sshd_start_verdict_for_test(false, _seed32(), nil, nil, nil))
+            .to_equal("sshd: no host key algorithm enabled")
+
+    it "still refuses when ed25519 is disabled and no other key or cert is set":
+        expect(sshd_start_verdict_for_test(false, _seed32(), nil, nil, nil).contains("no host key algorithm"))
+            .to_equal(true)
+
+    it "does not refuse a daemon that still has ed25519 enabled":
+        # Success half of the gate, evaluated on a real SshDaemon. start()
+        # cannot be run to completion on a host interpreter once the gate
+        # passes (it proceeds into the baremetal rt_boot_tcp_bind), so this
+        # asserts the very verdict start() branches on.
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(true, _seed32(), nil, nil, nil))
+            .to_equal(true)
+
+    it "does not refuse a daemon carrying only a host certificate":
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), nil, nil, [0x00u8, 0x01u8]))
+            .to_equal(true)
+
+    it "refuses a daemon whose only configured key is one this lane never advertises":
+        # Divergence pinned deliberately, and it is the fail-closed direction:
+        # build_host_keys_for_session() hardcodes rsa_pkcs8/ecdsa to nil because
+        # the live lane stays on the Ed25519/X25519 surface. So an RSA-only or
+        # ECDSA-only configuration leaves NOTHING advertisable and start() must
+        # refuse — even though the pure-policy hook above, which trusts the
+        # passed-in key material, reports such a config satisfiable.
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), [0x30u8], nil, nil))
+            .to_equal(false)
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), nil, [0x30u8], nil))
+            .to_equal(false)
+        expect(sshd_start_verdict_for_test(false, _seed32(), [0x30u8], nil, nil))
+            .to_equal("sshd: no host key algorithm enabled")
+
+fn _client_kexinit(host_key_algos: text) -> SshKexInit:
+    """A client proposal that matches the daemon everywhere except host keys."""
+    SshKexInit(
+        cookie: [],
+        kex_algorithms: "curve25519-sha256",
+        server_host_key_algorithms: host_key_algos,
+        encryption_client_to_server: "aes256-gcm@openssh.com",
+        encryption_server_to_client: "aes256-gcm@openssh.com",
+        mac_client_to_server: "hmac-sha2-256-etm@openssh.com",
+        mac_server_to_client: "hmac-sha2-256-etm@openssh.com",
+        compression_client_to_server: "none",
+        compression_server_to_client: "none",
+        first_kex_packet_follows: false
+    )
+
+fn _server_kexinit(advertise_ed25519: bool, rsa_pkcs8: [u8]?) -> SshKexInit:
+    """A server proposal whose host-key list comes from the gated policy."""
+    val keys = sshd_build_host_keys_for_session_for_test(
+        advertise_ed25519,
+        _seed32(),
+        rsa_pkcs8,
+        rsa_pkcs8,
+        nil
+    )
+    _client_kexinit(host_key_set_advertised_algorithms(keys))
+
+describe "SSHD never negotiates a disabled host key algorithm":
+    it "negotiates ssh-ed25519 when the config enables it":
+        # Positive control: the same client proposal succeeds when enabled, so a
+        # failure below is attributable to the gate and not to the harness.
+        val negotiated = ssh_negotiate_algorithms(
+            _client_kexinit("ssh-ed25519"),
+            _server_kexinit(true, nil)
+        )
+        expect(negotiated.is_ok()).to_equal(true)
+        expect(negotiated.unwrap().host_key).to_equal("ssh-ed25519")
+
+    it "refuses the exchange when the client offers only the disabled algorithm":
+        # Security oracle: a disabled algorithm must be unreachable, not merely
+        # unadvertised — negotiation fails closed rather than selecting it.
+        val negotiated = ssh_negotiate_algorithms(
+            _client_kexinit("ssh-ed25519"),
+            _server_kexinit(false, [0x30u8, 0x82u8])
+        )
+        expect(negotiated.is_ok()).to_equal(false)
+        expect(negotiated.unwrap_err()).to_equal("no matching host key algorithm")
+
+    it "falls through to an enabled algorithm instead of the disabled one":
+        # The client prefers ssh-ed25519; the daemon must skip it and land on RSA
+        # rather than honouring client preference for a switched-off key.
+        val negotiated = ssh_negotiate_algorithms(
+            _client_kexinit("ssh-ed25519,rsa-sha2-256"),
+            _server_kexinit(false, [0x30u8, 0x82u8])
+        )
+        expect(negotiated.is_ok()).to_equal(true)
+        expect(negotiated.unwrap().host_key).to_equal("rsa-sha2-256")
+
+    it "refuses every exchange when no host key algorithm is enabled":
+        # No key material at all: the daemon must not fall back to a default.
+        val negotiated = ssh_negotiate_algorithms(
+            _client_kexinit("ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"),
+            _server_kexinit(false, nil)
+        )
+        expect(negotiated.is_ok()).to_equal(false)
+        expect(negotiated.unwrap_err()).to_equal("no matching host key algorithm")
+
+    it "refuses ssh-ed25519 against the real accepted-session KEXINIT when disabled":
+        # Same oracle, but against the bytes a live accepted session would send:
+        # parse the production KEXINIT rather than a reconstructed list.
+        val payload = sshd_build_production_session_kexinit_for_test(
+            false, _seed32(), nil, nil, nil, nil, nil, nil
+        )
+        val server = ssh_parse_kexinit(payload).unwrap()
+        expect(server.server_host_key_algorithms.contains("ssh-ed25519")).to_equal(false)
+        val negotiated = ssh_negotiate_algorithms(_client_kexinit("ssh-ed25519"), server)
+        expect(negotiated.is_ok()).to_equal(false)
+        expect(negotiated.unwrap_err()).to_equal("no matching host key algorithm")
+
+    it "negotiates ssh-ed25519 against the real accepted-session KEXINIT when enabled":
+        val payload = sshd_build_production_session_kexinit_for_test(
+            true, _seed32(), nil, nil, nil, nil, nil, nil
+        )
+        val server = ssh_parse_kexinit(payload).unwrap()
+        val negotiated = ssh_negotiate_algorithms(_client_kexinit("ssh-ed25519"), server)
+        expect(negotiated.is_ok()).to_equal(true)
+        expect(negotiated.unwrap().host_key).to_equal("ssh-ed25519")
+
+describe "SSHD certificate-aware host key list follows config":
+    it "omits ssh-ed25519 from the certificate-aware list when disabled":
+        val keys = sshd_build_host_keys_for_session_for_test(false, _seed32(), nil, nil, nil)
+        val algos = host_key_algorithms_with_certificates(keys, _no_certs())
+        expect(algos).to_equal("")
+        expect(algos.contains("ssh-ed25519")).to_equal(false)
+
+    it "keeps ssh-ed25519 in the certificate-aware list when enabled":
+        val keys = sshd_build_host_keys_for_session_for_test(true, _seed32(), nil, nil, nil)
+        expect(host_key_algorithms_with_certificates(keys, _no_certs())).to_equal("ssh-ed25519")

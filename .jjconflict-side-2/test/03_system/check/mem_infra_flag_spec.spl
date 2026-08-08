@@ -1,0 +1,166 @@
+# @req REQ-MEM-INFRA-CLI-FLAG-001
+"""
+# `--mem-infra=` CLI Flag Wiring
+
+## Overview
+
+M3 wires `--mem-infra=a,b,c` (+ `--mem-infra-strict`) into the pure-Simple CLI
+for `simple run` (and `simple test`, transitively, since both dispatch through
+`main()` in `src/app/cli/_CliMain/main_and_help.spl`). The flag is parsed in
+`src/app/cli/_CliMain/args_and_os_commands.spl`, resolved against the
+capability matrix in `std.common.mem_infra.config` for the engine actually in
+use (`cranelift` for a default run, `interpreter` when
+`SIMPLE_EXECUTION_MODE=interpreter`), and applied via `env_set` before the
+target program runs.
+
+**Design:** doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md M3
+**Library:** src/lib/common/mem_infra/config.spl
+
+## Acceptance
+
+- `--mem-infra=attr` on a default (cranelift) run enables `SIMPLE_MEM_ATTR=1`
+  before the target program executes, observable via `rt_mem_attr_enabled()`.
+- `--mem-infra=asan` on a default (cranelift) run — `asan` is llvm-only —
+  degrades to `harden` with a `mem-infra: ... degraded to 'harden'` notice on
+  stderr, and the run still exits 0.
+- `--mem-infra=bogus` (unknown row) aborts before the program runs, with exit
+  code 2.
+"""
+
+# @tag: system, cli, mem-infra, m3
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get, env_set}
+
+val FIXTURE = "test/fixture/mem_infra/attr_enabled_probe.spl"
+
+# Self-interpreting src/app/cli/main.spl (or _CliMain/main_and_help.spl)
+# directly as the `simple run` target hard-fails on an unrelated pre-existing
+# parse error reachable from main()'s full dispatch surface (eager
+# whole-program compile — see test/fixture/mem_infra/cli_dispatch_probe.spl
+# header comment and doc/08_tracking/bug/ for the ot_layout_shaper.spl parse
+# error). cli_dispatch_probe.spl replicates main()'s exact `run` dispatch
+# sequence (parse_global_flags -> apply_fault_detection -> apply_mem_infra_flags
+# -> spawn the target as a real subprocess) using the same production library
+# calls, in the same order, as src/app/cli/_CliMain/main_and_help.spl — see
+# that fixture's own header comment for why it spawns a subprocess for the
+# target rather than calling cli_handle_run in-process.
+val DISPATCH_PROBE = "test/fixture/mem_infra/cli_dispatch_probe.spl"
+
+# Mirrors the SIMPLE_TEST_BINARY override convention used by sibling specs
+# (doctest_lane_symmetry_contract_spec.spl, mem_attr_report_spec.spl): defaults
+# to the deployed self-hosted bin/simple, honors an explicit override.
+fn contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override
+    "bin/simple"
+
+# Invokes cli_dispatch_probe.spl as `simple <probe> run <fixture> <mem_infra_args...>`
+# (implicit "run source file" form, NOT the explicit `simple run <probe>`
+# subcommand form — the latter shifts argv by one extra element and makes the
+# probe see its own script path as args[0] instead of "run", which it rejects
+# as unsupported). The probe's own argv strip (raw[1..], past
+# [this_script_path]) recovers exactly ["run", fixture, ...mem_infra_args],
+# which it then feeds through the real parse_global_flags/apply_mem_infra_flags
+# sequence — same functions, same order, as the production CLI path.
+#
+# `bin/simple test` itself runs specs under the tree-walk interpreter
+# (SIMPLE_EXECUTION_MODE=interpreter in the ambient environment — see
+# doc/07_guide/infra/testing.md "run and test are DIFFERENT ENGINES"), which
+# the spawned probe would otherwise inherit and misclassify as its own
+# effective backend (`mem_infra_effective_backend` reads that env var when no
+# explicit `--backend` is given). Force `cranelift` here so these
+# "default (cranelift) run" cases exercise the engine they claim to, not
+# whatever engine happens to be running the spec suite.
+fn run_with_binary(bin: text, fixture: text, mem_infra_args: [text]) -> (text, text, i64):
+    val _ = env_set("SIMPLE_EXECUTION_MODE", "cranelift")
+    # The probe spawns the inner target itself; point it at the same binary,
+    # otherwise it defaults to the deployed bin/simple and the choice we make
+    # here only applies to the outer process.
+    val _b = env_set("SIMPLE_TEST_BINARY", bin)
+    var argv: [text] = [DISPATCH_PROBE, "run", fixture]
+    for a in mem_infra_args:
+        argv.push(a)
+    process_run(bin, argv)
+
+# Pick a binary that can actually answer the question, once, by CAPABILITY --
+# not by matching an error string. The DEPLOYED bin/simple can predate the
+# rt_mem_attr_* extern registration, in which case the child reports enabled=0
+# no matter how correctly the flag was applied, and this spec goes red for a
+# deployment-staleness reason unrelated to the flag wiring under test. (An
+# earlier attempt here sniffed the child's stderr for "unknown extern function"
+# and did NOT work: that diagnostic is emitted on the parent's tracing stream,
+# so it never appears in the captured stderr.)
+#
+# The probe asks the outcome directly: run the attr fixture with --mem-infra=attr
+# and keep the first binary that reports enabled=1. This cannot mask a real
+# regression -- if the flag wiring is broken, NO candidate reports enabled=1 and
+# the spec still fails on the deployed binary. It only decides which binary is
+# asked, never whether the question is asked. Once a bootstrap redeploy refreshes
+# bin/simple, the deployed binary wins on the first try and the ladder is inert.
+val ATTR_CAPABLE_CANDIDATES = ["src/compiler_rust/target/release/simple",
+                               "src/compiler_rust/target/debug/simple"]
+
+# Memoized: the probe below spawns a full compiler per candidate, and seed
+# startup is tens of seconds. Resolving per `it` block instead of once ran ~12
+# subprocesses and blew the spec's timeout.
+var ATTR_BIN_CACHE: text = ""
+
+fn attr_capable_binary() -> text:
+    if ATTR_BIN_CACHE != "":
+        return ATTR_BIN_CACHE
+    ATTR_BIN_CACHE = attr_capable_binary_uncached()
+    ATTR_BIN_CACHE
+
+fn attr_capable_binary_uncached() -> text:
+    val deployed = contract_binary()
+    val (out, _e, _c) = run_with_binary(deployed, FIXTURE, ["--mem-infra=attr"])
+    if out.contains("enabled=1"):
+        return deployed
+    for candidate in ATTR_CAPABLE_CANDIDATES:
+        val (exists, _pe, _pc) = process_run("/bin/sh",
+            ["-c", "test -x {candidate} && echo yes || echo no"])
+        if exists.trim() != "yes":
+            continue
+        val (cand_out, _ce, _cc) = run_with_binary(candidate, FIXTURE, ["--mem-infra=attr"])
+        if cand_out.contains("enabled=1"):
+            return candidate
+    deployed
+
+fn run_via_dispatch_probe(fixture: text, mem_infra_args: [text]) -> (text, text, i64):
+    run_with_binary(attr_capable_binary(), fixture, mem_infra_args)
+
+describe "--mem-infra= CLI flag":
+
+    it "enables SIMPLE_MEM_ATTR before the target program runs on the default (cranelift) engine":
+        step("Run the attr_enabled_probe fixture with --mem-infra=attr")
+        val (out, _err, code) = run_via_dispatch_probe(FIXTURE, ["--mem-infra=attr"])
+
+        step("Confirm the child process exited cleanly and observed attribution enabled")
+        assert_equal(code, 0)
+        expect(out).to_contain("enabled=1")
+
+    it "degrades an llvm-only row to its cranelift equivalent with a mem-infra notice, exit 0":
+        step("Run with --mem-infra=asan on the default (cranelift) engine")
+        val (out, err, code) = run_via_dispatch_probe(FIXTURE, ["--mem-infra=asan"])
+        # The notice is written via eprint (stderr) in the normal deployed
+        # binary; combine with stdout so this assertion also holds under an
+        # interpreter/import topology where an eprint stub falls back to
+        # stdout (see doc/08_tracking/bug/ for the underlying mod_stub note).
+        val output = out + err
+
+        step("Confirm a degrade notice was printed and the run still exits 0")
+        expect(output).to_contain("mem-infra:")
+        expect(output).to_contain("degraded to 'harden'")
+        assert_equal(code, 0)
+
+    it "aborts with exit 2 on an unknown mem-infra row":
+        step("Run with --mem-infra=bogus")
+        val (out, err, code) = run_via_dispatch_probe(FIXTURE, ["--mem-infra=bogus"])
+        val output = out + err
+
+        step("Confirm the CLI reports the unknown row and aborts before running the program")
+        expect(output).to_contain("mem-infra:")
+        expect(output).to_contain("unknown mem-infra 'bogus'")
+        assert_equal(code, 2)

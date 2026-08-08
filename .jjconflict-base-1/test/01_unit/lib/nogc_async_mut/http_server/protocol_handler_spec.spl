@@ -1,0 +1,148 @@
+"""
+# Protocol Handler ALPN Dispatch Specification
+
+**Feature IDs:** #AC-4-alpn
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Artifacts:** N/A
+"""
+
+use std.spec
+use std.nogc_async_mut.io.tls_handshake.{
+    parse_alpn_extension,
+    find_alpn_extension_data,
+    negotiate_alpn,
+    build_alpn_extension_block
+}
+use std.nogc_async_mut.io.tls_common.{wire_to_bytes}
+use std.http_server.protocol_handler.{protocol_from_alpn, protocol_handler_label}
+
+fn alpn_data_h2_first() -> [i64]:
+    """ALPN extension value offering ["h2", "http/1.1"] (RFC 7301 3.1).
+
+    list_len(2) = 12, then 2 "h2", then 8 "http/1.1".
+    """
+    [
+        0, 12,
+        2, 104, 50,
+        8, 104, 116, 116, 112, 47, 49, 46, 49
+    ]
+
+fn ch_extensions_h2_first() -> [i64]:
+    """ClientHello extensions block wrapping the ["h2", "http/1.1"] offer.
+
+    block_len(2) = 18, type(2) = 0x0010, ext_len(2) = 14, then the value.
+    """
+    [
+        0, 18,
+        0, 16,
+        0, 14,
+        0, 12,
+        2, 104, 50,
+        8, 104, 116, 116, 112, 47, 49, 46, 49
+    ]
+
+fn ch_extensions_unsupported() -> [i64]:
+    """Same framing, but the only offer is "spdy/3", which this server
+    cannot serve. list_len = 7, name_len = 6.
+    """
+    [
+        0, 13,
+        0, 16,
+        0, 9,
+        0, 7,
+        6, 115, 112, 100, 121, 47, 51
+    ]
+
+describe "ALPN extension parsing and protocol dispatch":
+    """
+    ## ProtocolHandler — AC-4 ALPN Negotiation
+
+    Validates parse_alpn_extension on raw ClientHello bytes, the
+    negotiate_alpn server-side selection wired into perform_server_handshake,
+    and the protocol_from_alpn dispatch logic for H1, H2, and H3.
+    """
+
+    it "parses ALPN extension from ClientHello bytes":
+        """
+        RFC 7301 3.1 — The ALPN extension (type 0x0010) in a TLS ClientHello
+        contains a list of protocol name strings. parse_alpn_extension must
+        extract the first offered protocol name.
+        """
+        expect(parse_alpn_extension(alpn_data_h2_first())).to_equal("h2")
+        expect(parse_alpn_extension([])).to_equal("")
+        # Truncated list — length says 12 bytes follow but only 3 do.
+        expect(parse_alpn_extension([0, 12, 2, 104, 50])).to_equal("")
+
+    it "locates the ALPN extension inside a ClientHello extensions block":
+        """
+        find_alpn_extension_data walks the type/length framed extension
+        block and returns the ALPN value field, so parse_alpn_extension
+        sees exactly the bytes it documents.
+        """
+        val found = find_alpn_extension_data(ch_extensions_h2_first())
+        expect(found.len()).to_equal(14)
+        expect(parse_alpn_extension(found)).to_equal("h2")
+        # No ALPN extension present (block holds only server_name, type 0).
+        expect(find_alpn_extension_data([0, 5, 0, 0, 0, 1, 0]).len()).to_equal(0)
+        expect(find_alpn_extension_data([]).len()).to_equal(0)
+
+    it "negotiates h2 when the client offers it":
+        """
+        negotiate_alpn accepts the client's most-preferred offer only when
+        this server can serve it. This is the value perform_server_handshake
+        stores on TlsHandshakeState.alpn and worker.handle_tls_accept
+        forwards to dispatch_by_alpn.
+        """
+        expect(negotiate_alpn(ch_extensions_h2_first())).to_equal("h2")
+
+    it "negotiates nothing when ALPN is absent or unsupported":
+        """
+        A client that offers no ALPN extension, or only protocols this
+        server cannot serve, is answered without ALPN — which leaves the
+        connection on HTTP/1.1 rather than failing the handshake.
+        """
+        expect(negotiate_alpn([])).to_equal("")
+        expect(negotiate_alpn(ch_extensions_unsupported())).to_equal("")
+
+    it "echoes the selected protocol back in the ServerHello block":
+        """
+        RFC 7301 3.1 — without the ServerHello echo the client never
+        considers ALPN negotiated and keeps speaking HTTP/1.1, so the
+        server must not dispatch H2 unless it emitted this extension.
+        The block reuses ClientHello framing, so it round-trips through
+        find_alpn_extension_data.
+        """
+        val block = wire_to_bytes(build_alpn_extension_block("h2"))
+        expect(block.len()).to_equal(11)
+        expect(parse_alpn_extension(find_alpn_extension_data(block))).to_equal("h2")
+        # No protocol selected — no extension bytes at all.
+        expect(build_alpn_extension_block("")).to_equal("")
+
+    it "returns H1 handler for no ALPN":
+        """
+        When the TLS handshake completes without any ALPN negotiation
+        (state.alpn is empty), the dispatcher must route to HTTP/1.1.
+        """
+        expect(protocol_handler_label(protocol_from_alpn(""))).to_equal("http/1.1")
+        expect(protocol_handler_label(protocol_from_alpn("http/1.1"))).to_equal("http/1.1")
+
+    it "returns H2 handler for h2 ALPN":
+        """
+        When ALPN negotiation produces 'h2' (RFC 7540), the dispatcher
+        must return the H2 connection handler backed by H2Connection.
+        """
+        val negotiated = negotiate_alpn(ch_extensions_h2_first())
+        expect(protocol_handler_label(protocol_from_alpn(negotiated))).to_equal("h2")
+
+    it "returns h3 for h3 ALPN so a TCP connection can be rejected":
+        """
+        H3 runs over QUIC/UDP. dispatch_by_alpn closes a TCP connection
+        that negotiated 'h3', so the kind must stay distinguishable from
+        H1 rather than collapsing into the default. negotiate_alpn never
+        selects it on TCP, since 'h3' is not in the server's supported list.
+        """
+        expect(protocol_handler_label(protocol_from_alpn("h3"))).to_equal("h3")
+        val h3_only: [i64] = [0, 9, 0, 16, 0, 5, 0, 3, 2, 104, 51]
+        expect(negotiate_alpn(h3_only)).to_equal("")

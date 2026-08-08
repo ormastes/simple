@@ -1,0 +1,41 @@
+"""Unit tests for native linker hardening helpers."""
+
+use compiler.backend.linker.linker_wrapper.{
+    unresolved_symbol_flags_for_unix_linker,
+    unresolved_symbol_flags_for_cc
+}
+use testing.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Native linker hardening":
+    it "adds unresolved-symbol flags for ELF direct linkers":
+        expect(unresolved_symbol_flags_for_unix_linker("linux")).to_equal([
+            "--allow-multiple-definition"
+        ])
+        expect(unresolved_symbol_flags_for_unix_linker("freebsd")).to_equal([
+            "--allow-multiple-definition"
+        ])
+
+    it "skips ELF unresolved-symbol flags on non-ELF direct linkers":
+        expect(unresolved_symbol_flags_for_unix_linker("macos")).to_equal([])
+        expect(unresolved_symbol_flags_for_unix_linker("darwin")).to_equal([])
+
+    it "adds unresolved-symbol flags for cc fallback on Linux and FreeBSD":
+        expect(unresolved_symbol_flags_for_cc("Linux")).to_equal([
+            "-Wl,--allow-multiple-definition"
+        ])
+        expect(unresolved_symbol_flags_for_cc("FreeBSD")).to_equal([
+            "-Wl,--allow-multiple-definition"
+        ])
+
+    it "skips cc fallback unresolved-symbol flags on Darwin":
+        expect(unresolved_symbol_flags_for_cc("Darwin")).to_equal([])
+
+    it "lets strict links disable duplicate forgiveness and cc fallback":
+        val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        val llvm = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        expect(native).to_contain("if config.allow_duplicate_definitions:")
+        expect(native).to_contain("if not config.allow_cc_fallback:")
+        expect(llvm).to_contain("allow_duplicate_definitions: not stage4_requested")
+        expect(llvm).to_contain("allow_cc_fallback: not stage4_requested")

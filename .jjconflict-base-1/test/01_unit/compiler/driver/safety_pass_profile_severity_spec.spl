@@ -1,0 +1,88 @@
+# @cover src/compiler/80.driver/driver_safety_severity.spl
+# Safety pass profile-gated severity (lane SE1).
+#
+# Proves the safety-warn pass — previously unable to enforce anything at all
+# (see doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md) —
+# now has a settled severity mapping:
+#   moderate, strict -> Advisory (nothing pushed to ctx; build never fails)
+#   robust           -> Warn (ctx.warnings; build does NOT fail — migration
+#                        window)
+#   critical         -> Deny (ctx.errors; build DOES fail)
+#
+# Asserts on the actual SafetyPassSeverity values, not merely "a diagnostic
+# exists". Imports ONLY driver_safety_severity.spl, which is deliberately
+# self-contained (no compiler.tools.lint.main): the driver layer must not
+# depend upward on 90.tools, and executing lint-main's graph then
+# parse_full_frontend in one interpreter session deterministically fails with
+# "cannot convert dict to int" — see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+#
+# NO real-frontend fixture in this file for the same reason. The proof that
+# InlineAsmOutsideUnsafe really produces exactly one diagnostic lives verbatim
+# and GREEN in
+# test/01_unit/compiler/semantics/safety_checker_unsafe_boundary_spec.spl
+# ("still warns on inline asm outside unsafe"). The raw-pointer and FFI rules
+# are RED there (0 diagnostics instead of 1) — a pre-existing bug in
+# safety_checker.spl itself, out of scope for lane SE1 (owns driver.spl only).
+#
+# run_safety_warn_pass's ctx-routing in driver.spl is a 3-arm match on this
+# module's severity value (Advisory -> no-op, Warn -> ctx.add_warning, Deny ->
+# ctx.add_error); CompileContext is a class (reference semantics), so the
+# mutations persist — verified against driver_types.spl:34.
+
+use std.spec
+use compiler.driver.driver_safety_severity.{
+    SafetyPassSeverity, safety_pass_severity_for_name, safety_pass_severity
+}
+
+extern fn rt_env_set(key: text, value: text)
+
+describe "safety pass profile-gated severity":
+    # --- Pure mapping: severity is a deterministic function of the profile
+    # name. This is the core requirement: prove the actual severity per
+    # profile, and specifically that robust warns while critical denies.
+    it "maps moderate to Advisory":
+        expect(safety_pass_severity_for_name("moderate")).to_equal(SafetyPassSeverity.Advisory)
+
+    it "maps strict to Advisory":
+        expect(safety_pass_severity_for_name("strict")).to_equal(SafetyPassSeverity.Advisory)
+
+    it "maps robust to Warn (the migration window — never Deny)":
+        expect(safety_pass_severity_for_name("robust")).to_equal(SafetyPassSeverity.Warn)
+
+    it "maps critical to Deny":
+        expect(safety_pass_severity_for_name("critical")).to_equal(SafetyPassSeverity.Deny)
+
+    # --- Deprecated aliases map to the SAME severity as their new spelling.
+    it "deprecated lib behaves as strict (Advisory)":
+        expect(safety_pass_severity_for_name("lib")).to_equal(SafetyPassSeverity.Advisory)
+
+    it "deprecated reliable behaves as robust (Warn, not Deny)":
+        expect(safety_pass_severity_for_name("reliable")).to_equal(SafetyPassSeverity.Warn)
+
+    it "deprecated mission-critical behaves as critical (Deny)":
+        expect(safety_pass_severity_for_name("mission-critical")).to_equal(SafetyPassSeverity.Deny)
+        expect(safety_pass_severity_for_name("mission_critical")).to_equal(SafetyPassSeverity.Deny)
+
+    # --- Fail-safe resolution: unset and unknown stay advisory, i.e. today's
+    # exact behavior is preserved unless a caller opts in explicitly.
+    it "empty name resolves to Advisory (default unchanged)":
+        expect(safety_pass_severity_for_name("")).to_equal(SafetyPassSeverity.Advisory)
+
+    it "unknown name resolves to Advisory, does not crash":
+        expect(safety_pass_severity_for_name("not-a-real-profile")).to_equal(SafetyPassSeverity.Advisory)
+
+    # --- Env resolution: SIMPLE_SAFETY_PROFILE feeds the same mapping.
+    it "env var unset resolves to Advisory":
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "")
+        expect(safety_pass_severity()).to_equal(SafetyPassSeverity.Advisory)
+
+    it "env var robust resolves to Warn":
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "robust")
+        expect(safety_pass_severity()).to_equal(SafetyPassSeverity.Warn)
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "")
+
+    it "env var critical resolves to Deny":
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")
+        expect(safety_pass_severity()).to_equal(SafetyPassSeverity.Deny)
+        rt_env_set("SIMPLE_SAFETY_PROFILE", "")

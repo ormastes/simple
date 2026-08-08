@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "Vulkan Engine2D production frame batching":
+    it "opts Engine-owned Vulkan surfaces into lazy primitive batching":
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val engine = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+
+        expect(backend).to_contain("frame_batching_enabled: bool")
+        expect(backend).to_contain("pending_compute_command: i64")
+        expect(backend).to_contain("pending_compute_pipelines: [i64]")
+        expect(helpers).to_contain("me _enqueue_framebuffer_compute(")
+        expect(helpers).to_contain("me _flush_pending_compute() -> i64:")
+        expect(engine).to_contain("vulkan.enable_frame_batching()")
+        expect(engine).to_contain(
+            "val pending_status = vulkan._flush_pending_compute()")
+        expect(helpers).to_contain(
+            "me _flush_for_host_fallback(reason: text) -> bool:")
+        expect(backend).to_contain(
+            "if not self._flush_for_host_fallback(\"blur-host-readback\"):")
+
+    it "retains dependencies through the one fenced frame submit":
+        val helpers = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs")
+
+        expect(helpers).to_contain(
+            "self.pending_compute_descriptors.push(desc)")
+        expect(helpers).to_contain(
+            "if self.pending_compute_pipelines[i] == pipe:")
+        expect(helpers).to_contain(
+            "val fence = vulkan_sffi_submit_and_wait_fence(cmd)")
+        expect(helpers).to_contain(
+            "self._quarantine_pending_compute_descriptors()")
+        expect(runtime).to_contain(
+            "state.descriptor_set_owners.insert(h, (layout_h, pool_h))")
+        expect(runtime).to_contain(
+            "state.descriptor_set_owners.remove(&desc_set)")
+
+    it "counts accepted native and interpreter submissions":
+        val runtime = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs")
+        val interpreter = file_read(
+            "src/compiler_rust/compiler/src/interpreter_extern/gpu.rs")
+
+        expect(runtime).to_contain(
+            "accepted_compute_submit_count += 1")
+        expect(runtime).to_contain(
+            "fn rt_vulkan_accepted_compute_submit_count() -> i64")
+        expect(interpreter).to_contain(
+            "s.accepted_compute_submit_count += 1")
+        expect(interpreter).to_contain(
+            "rt_vulkan_accepted_compute_submit_count_fn")

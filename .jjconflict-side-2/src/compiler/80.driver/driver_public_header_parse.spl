@@ -1,0 +1,211 @@
+pub struct PublicExportField:
+    name: text
+    type_name: text
+    raw_decl: text
+    has_bits: bool
+    bits_width: text
+
+pub struct PublicExportClass:
+    name: text
+    fields: [PublicExportField]
+    methods: [PublicExportMethod]
+
+pub struct PublicExportFunction:
+    name: text
+    params: [text]
+    return_type: text
+
+pub struct PublicExportMethod:
+    name: text
+    params: [text]
+    return_type: text
+    is_static: bool
+
+pub struct PublicExportParse:
+    exported_classes: [PublicExportClass]
+    exported_functions: [PublicExportFunction]
+    error: text
+
+pub fn parse_public_exports(source: text) -> PublicExportParse:
+    val lines = source.split("\n")
+    var classes: [PublicExportClass] = []
+    var functions: [PublicExportFunction] = []
+    var pending_export = false
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line == "":
+            i = i + 1
+            continue
+        if line == "@export(\"C\")":
+            pending_export = true
+            i = i + 1
+            continue
+        if line.starts_with("@"):
+            i = i + 1
+            continue
+        if pending_export and line.starts_with("class "):
+            val class_name = _parse_class_name(line)
+            if class_name == "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: "failed to parse exported class declaration")
+            val class_result = _parse_export_class(lines, i + 1)
+            if class_result.error != "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: class_result.error)
+            classes = classes.push(PublicExportClass(name: class_name, fields: class_result.fields, methods: class_result.methods))
+            pending_export = false
+            i = class_result.next_index
+            continue
+        if pending_export and line.starts_with("fn "):
+            val function_result = _parse_export_function(line)
+            if function_result.error != "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: function_result.error)
+            functions = functions.push(function_result.exported_fn)
+            pending_export = false
+            i = i + 1
+            continue
+        pending_export = false
+        i = i + 1
+
+    PublicExportParse(exported_classes: classes, exported_functions: functions, error: "")
+
+struct PublicFieldParse:
+    fields: [PublicExportField]
+    methods: [PublicExportMethod]
+    next_index: i64
+    error: text
+
+struct PublicFunctionParse:
+    exported_fn: PublicExportFunction
+    error: text
+
+struct PublicMethodParse:
+    exported_method: PublicExportMethod
+    error: text
+
+fn _parse_class_name(line: text) -> text:
+    if not line.starts_with("class "):
+        return ""
+    val rest = line.substring(6).trim()
+    val parts = rest.split(":")
+    if parts.len() == 0:
+        return rest
+    parts[0].trim()
+
+fn _leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line[i:i + 1] == " ":
+        i = i + 1
+    i
+
+fn _parse_export_class(lines: [text], start_index: i64) -> PublicFieldParse:
+    var fields: [PublicExportField] = []
+    var methods: [PublicExportMethod] = []
+    var i = start_index
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        val indent = _leading_spaces(raw)
+        if indent < 4:
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
+        if indent > 4:
+            i = i + 1
+            continue
+        if trimmed.starts_with("@"):
+            i = i + 1
+            continue
+        if trimmed.starts_with("static fn ") or trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            val method_result = _parse_export_method(trimmed)
+            if method_result.error != "":
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: method_result.error)
+            methods = methods.push(method_result.exported_method)
+            i = i + 1
+            continue
+        if trimmed.starts_with("class "):
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
+        val field_parts = trimmed.split(":")
+        if field_parts.len() < 2:
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse exported field: {trimmed}")
+        val field_name = field_parts[0].trim()
+        var type_part = field_parts[1].trim()
+        var has_bits = false
+        var bits_width = ""
+        if type_part.contains("@bits("):
+            has_bits = true
+            val bits_parts = type_part.split("@bits(")
+            if bits_parts.len() < 2:
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+            val bits_text_parts = bits_parts[1].split(")")
+            if bits_text_parts.len() == 0:
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+            bits_width = bits_text_parts[0].trim()
+            type_part = bits_parts[0].trim()
+        fields = fields.push(PublicExportField(name: field_name, type_name: type_part, raw_decl: trimmed, has_bits: has_bits, bits_width: bits_width))
+        i = i + 1
+    PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
+
+fn _parse_export_method(line: text) -> PublicMethodParse:
+    var normalized = line.substring(3).trim()
+    if line.starts_with("static fn "):
+        normalized = line.substring(10).trim()
+    elif line.starts_with("fn "):
+        normalized = line.substring(3).trim()
+    val parsed = _parse_signature_parts(normalized)
+    if parsed.error != "":
+        return PublicMethodParse(exported_method: PublicExportMethod(name: "", params: [], return_type: "", is_static: false), error: parsed.error)
+    PublicMethodParse(
+        exported_method: PublicExportMethod(
+            name: parsed.name,
+            params: parsed.params,
+            return_type: parsed.return_type,
+            is_static: line.starts_with("static fn ")
+        ),
+        error: ""
+    )
+
+fn _parse_export_function(line: text) -> PublicFunctionParse:
+    val parsed = _parse_signature_parts(line.substring(3).trim())
+    if parsed.error != "":
+        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: parsed.error)
+    PublicFunctionParse(
+        exported_fn: PublicExportFunction(name: parsed.name, params: parsed.params, return_type: parsed.return_type),
+        error: ""
+    )
+
+struct PublicSignatureParse:
+    name: text
+    params: [text]
+    return_type: text
+    error: text
+
+fn _parse_signature_parts(signature: text) -> PublicSignatureParse:
+    val fn_parts = signature.split("(")
+    if fn_parts.len() < 2:
+        return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse exported function declaration")
+    val fn_name = fn_parts[0].trim()
+    val tail = fn_parts[1]
+    val tail_parts = tail.split(")")
+    if tail_parts.len() < 2:
+        return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse exported function declaration")
+    val params_text = tail_parts[0].trim()
+    var params: [text] = []
+    if params_text != "":
+        val parts = params_text.split(",")
+        var i = 0
+        while i < parts.len():
+            val param = parts[i].trim()
+            val param_parts = param.split(":")
+            if param_parts.len() < 2:
+                return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse parameter in exported function: {fn_name}")
+            params = params.push(param_parts[1].trim())
+            i = i + 1
+    var return_type = "unit"
+    if tail_parts[1].contains("->"):
+        val ret_parts = tail_parts[1].split("->")
+        if ret_parts.len() >= 2:
+            val suffix = ret_parts[1].trim()
+            val suffix_parts = suffix.split(":")
+            return_type = suffix_parts[0].trim()
+    PublicSignatureParse(name: fn_name, params: params, return_type: return_type, error: "")

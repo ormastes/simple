@@ -1,0 +1,187 @@
+#!/bin/sh
+# WS-A A5 — per-screen-type QEMU boot evidence.
+#
+# For each `screen_type` in {wm,2d,web,gui}: boot SimpleOS under QEMU with that
+# type staged into /etc/rc.conf, capture the serial transcript and a QMP
+# screendump, and emit the seven `simpleos_screen_<T>_*` rows the multiconfig
+# checker requires. Non-blank is proven by
+# `screen_ppm_distinct_colors.spl` (>1 distinct colour), never asserted.
+#
+# FAIL-CLOSED: every precondition that is not met emits
+# `boot_status=blocked:<reason>` for the affected types. A blocked type is NOT
+# a pass — `derived_screen_type_status` in
+# `check_simpleos_multiconfig_live_evidence.spl` rejects anything but `pass`.
+# This wrapper never synthesizes a screendump or a marker count.
+#
+# Usage: sh scripts/check/check-simpleos-screen-type-qemu-evidence.shs
+
+set -e
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+OUT_DIR="${SIMPLEOS_SCREEN_EVIDENCE_DIR:-build/os/screen_type_evidence}"
+EVIDENCE="$OUT_DIR/evidence.env"
+KERNEL="${SIMPLEOS_SCREEN_KERNEL:-build/os/simpleos_arm64_desktop_engine2d.elf}"
+DISK="${SIMPLEOS_SCREEN_DISK:-build/os/fat32-arm64-desktop.img}"
+IMAGE_BUILDER="src/os/installer/image_builder.spl"
+SCREEN_TYPES="wm 2d web gui"
+
+mkdir -p "$OUT_DIR"
+: > "$EVIDENCE"
+
+emit() { echo "$1" >> "$EVIDENCE"; }
+
+# Emit a fully-blocked row set for one screen type.
+blocked_type() {
+    t="$1"; reason="$2"
+    emit "simpleos_screen_${t}_boot_status=blocked:$reason"
+    emit "simpleos_screen_${t}_selected_effective=unknown"
+    emit "simpleos_screen_${t}_serial_marker_count=0"
+    emit "simpleos_screen_${t}_screendump_path=none"
+    emit "simpleos_screen_${t}_screendump_bytes=0"
+    emit "simpleos_screen_${t}_screendump_distinct_colors=0"
+    emit "simpleos_screen_${t}_fallback_reason=blocked:$reason"
+}
+
+# --- preconditions ---------------------------------------------------------
+PRECHECK_BLOCKER=""
+PER_TYPE_BLOCKER=""
+
+if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    PRECHECK_BLOCKER="qemu-system-aarch64-missing"
+fi
+
+# The guest build lane fail-closes on a Rust bootstrap-seed compiler
+# (build-simpleos-arm64-desktop-engine2d-attested.shs -> compiler-version-invalid).
+# Without a self-hosted bin/simple no FRESH guest image can be produced, so any
+# image on disk predates the `[screen]` marker this evidence counts.
+if [ -z "$PRECHECK_BLOCKER" ]; then
+    if bin/simple --version 2>&1 | grep -q 'bootstrap seed only'; then
+        PRECHECK_BLOCKER="guest-image-unbuildable-bin-simple-is-rust-seed"
+    fi
+fi
+
+# The QMP screendump client is not written yet: the boot path below is
+# unreachable while the guest image is unbuildable, so it is declared missing
+# rather than stubbed. Fail closed on it instead of failing confusingly.
+if [ -z "$PRECHECK_BLOCKER" ] && [ ! -f scripts/check/qmp_screendump.spl ]; then
+    PRECHECK_BLOCKER="missing-qmp-screendump-client:scripts/check/qmp_screendump.spl"
+fi
+
+if [ -z "$PRECHECK_BLOCKER" ] && [ ! -f "$KERNEL" ]; then
+    PRECHECK_BLOCKER="missing-kernel:$KERNEL"
+fi
+if [ -z "$PRECHECK_BLOCKER" ] && [ ! -f "$DISK" ]; then
+    PRECHECK_BLOCKER="missing-disk-image:$DISK"
+fi
+
+# `screen_type` stageability: the ONLY writer of the guest /etc/rc.conf is
+# `_rc_conf_template()` in image_builder.spl.
+#
+# RESOLVED 2026-08-06 — the builder now emits the key. `image_builder_set_screen()`
+# (and the `--screen-type=` / `--screen-res=` / `--screen-simd=` CLI flags)
+# appends `screen_type`/`screen_res`/`screen_simd` to the staged rc.conf, and
+# fails closed with an `Err` on an unrecognized value rather than normalizing to
+# `wm` — silently staging `wm` for a requested `2d` would be precisely the
+# false-green this gate exists to catch.
+#
+# This probe is deliberately left as a live grep rather than deleted: it
+# self-resolves when the builder gains the key and self-re-arms if the key is
+# ever removed. Do not replace it with a hardcoded `none`.
+#
+# NOTE: stageability is proven; a BOOTED 2d image is NOT. That is gated
+# separately by PRECHECK_BLOCKER, which still fails on this host because
+# `bin/simple` is a Rust seed and the attested guest build exits
+# `compiler-version-invalid`.
+if ! grep -q 'screen_type' "$IMAGE_BUILDER" 2>/dev/null; then
+    PER_TYPE_BLOCKER="rc-conf-screen-type-not-stageable-image-builder-out-of-scope"
+fi
+
+emit "simpleos_screen_evidence_lane=qemu-aarch64-desktop-engine2d"
+emit "simpleos_screen_evidence_kernel=$KERNEL"
+emit "simpleos_screen_evidence_disk=$DISK"
+emit "simpleos_screen_evidence_precheck_blocker=${PRECHECK_BLOCKER:-none}"
+emit "simpleos_screen_evidence_stageability_blocker=${PER_TYPE_BLOCKER:-none}"
+
+for t in $SCREEN_TYPES; do
+    if [ -n "$PRECHECK_BLOCKER" ]; then
+        blocked_type "$t" "$PRECHECK_BLOCKER"
+        continue
+    fi
+    if [ "$t" != wm ] && [ -n "$PER_TYPE_BLOCKER" ]; then
+        blocked_type "$t" "$PER_TYPE_BLOCKER"
+        continue
+    fi
+    # --- live boot for this screen type ------------------------------------
+    SERIAL="$OUT_DIR/$t-serial.log"
+    PPM="$OUT_DIR/$t.ppm"
+    QMP_SOCK="$OUT_DIR/$t-qmp.sock"
+    rm -f "$SERIAL" "$PPM" "$QMP_SOCK"
+
+    set +e
+    timeout 180 qemu-system-aarch64 \
+        -machine virt,gic-version=3 -cpu cortex-a72 -m 2048 \
+        -kernel "$KERNEL" \
+        -drive "file=$DISK,if=none,id=screendisk,format=raw" \
+        -device virtio-blk-device,drive=screendisk \
+        -device ramfb \
+        -qmp "unix:$QMP_SOCK,server=on,wait=off" \
+        -serial "file:$SERIAL" -display none &
+    QEMU_PID=$!
+    sleep 30
+    bin/simple run scripts/check/qmp_screendump.spl --socket "$QMP_SOCK" --out "$PPM" \
+        > "$OUT_DIR/$t-qmp.log" 2>&1
+    DUMP_CODE=$?
+    kill "$QEMU_PID" 2>/dev/null
+    wait "$QEMU_PID" 2>/dev/null
+    set -e
+
+    MARKERS=0
+    [ -f "$SERIAL" ] && MARKERS=$(grep -ac "\[screen\] .*effective=$t" "$SERIAL" || echo 0)
+    # Anchored to the `[screen]` line so an unrelated subsystem printing
+    # `effective=` cannot poison the selected type.
+    EFFECTIVE=$(grep -ao '\[screen\] .*effective=[a-z0-9]*' "$SERIAL" 2>/dev/null \
+        | grep -ao 'effective=[a-z0-9]*' | tail -1 | cut -d= -f2)
+    [ -z "$EFFECTIVE" ] && EFFECTIVE=unknown
+
+    if [ "$DUMP_CODE" -ne 0 ] || [ ! -s "$PPM" ]; then
+        blocked_type "$t" "screendump-capture-failed"
+        continue
+    fi
+
+    COLORS=$(bin/simple run scripts/check/screen_ppm_distinct_colors.spl "$PPM" 2>/dev/null \
+        | grep -a '^ppm_distinct_colors=' | cut -d= -f2)
+    [ -z "$COLORS" ] && COLORS=0
+    BYTES=$(wc -c < "$PPM" | tr -d ' ')
+
+    STATUS=pass
+    [ "$MARKERS" -ge 1 ] || STATUS="blocked:no-serial-marker"
+    [ "$EFFECTIVE" = "$t" ] || STATUS="blocked:wrong-effective:$EFFECTIVE"
+    [ "$COLORS" -gt 1 ] || STATUS="blocked:blank-screendump"
+
+    emit "simpleos_screen_${t}_boot_status=$STATUS"
+    emit "simpleos_screen_${t}_selected_effective=$EFFECTIVE"
+    emit "simpleos_screen_${t}_serial_marker_count=$MARKERS"
+    emit "simpleos_screen_${t}_screendump_path=$ROOT/$PPM"
+    emit "simpleos_screen_${t}_screendump_bytes=$BYTES"
+    emit "simpleos_screen_${t}_screendump_distinct_colors=$COLORS"
+    emit "simpleos_screen_${t}_fallback_reason=none"
+done
+
+# Echo the value the checker DERIVES, so the required-keys list does not name a
+# row that is never emitted. The checker still ignores this row and re-derives
+# — a self-declared pass must never short-circuit captured evidence.
+if grep -aq '_boot_status=blocked' "$EVIDENCE"; then
+    emit "simpleos_screen_evidence_status=blocked:see-per-type-rows"
+else
+    emit "simpleos_screen_evidence_status=pass"
+fi
+
+BLOCKED=$(grep -ac '_boot_status=blocked' "$EVIDENCE" || echo 0)
+echo "simpleos_screen_evidence_file=$EVIDENCE"
+if [ "$BLOCKED" -ne 0 ]; then
+    echo "FAIL — $BLOCKED of 4 screen types are blocked; see $EVIDENCE (no row was synthesized)"
+    exit 1
+fi
+echo "PASS — 4 of 4 screen types booted with a non-blank screendump; see $EVIDENCE"

@@ -1,0 +1,101 @@
+# Interface Desugar Tests
+#
+# Tests the interface keyword support across the trait scanner and trait desugar
+# modules. Interfaces are like traits but always use dynamic dispatch and
+# cannot have default method implementations.
+
+use app.desugar.trait_scanner (scan_traits, find_trait, ScannedTrait, TraitMethod)
+use app.desugar.trait_desugar (desugar_traits)
+use app.desugar.forwarding (desugar_forwarding)
+
+describe "interface in trait_scanner":
+
+    context "basic detection":
+        it "detects interface with is_interface=true":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            val traits = scan_traits(src)
+            expect(traits.len()).to_equal(1)
+            expect(traits[0].name).to_equal("Drawable")
+            expect(traits[0].is_interface).to_equal(true)
+
+        it "trait has is_interface=false":
+            var src = "trait Printable:" + "\n"
+            src = src + "    fn print_text() -> text" + "\n"
+            val traits = scan_traits(src)
+            expect(traits.len()).to_equal(1)
+            expect(traits[0].is_interface).to_equal(false)
+
+        it "finds both traits and interfaces in same source":
+            var src = "trait Printable:" + "\n"
+            src = src + "    fn print_text() -> text" + "\n"
+            src = src + "\n"
+            src = src + "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            val traits = scan_traits(src)
+            expect(traits.len()).to_equal(2)
+            expect(traits[0].name).to_equal("Printable")
+            expect(traits[0].is_interface).to_equal(false)
+            expect(traits[1].name).to_equal("Drawable")
+            expect(traits[1].is_interface).to_equal(true)
+
+    context "method extraction":
+        it "extracts fn methods from interface":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            src = src + "    fn bounds() -> Rect" + "\n"
+            val traits = scan_traits(src)
+            expect(traits[0].methods.len()).to_equal(2)
+            expect(traits[0].methods[0].name).to_equal("draw")
+            expect(traits[0].methods[1].name).to_equal("bounds")
+
+        it "extracts me methods from interface":
+            var src = "interface MutableWidget:" + "\n"
+            src = src + "    me resize(w: i64, h: i64)" + "\n"
+            val traits = scan_traits(src)
+            expect(traits[0].methods[0].name).to_equal("resize")
+            expect(traits[0].methods[0].is_me).to_equal(true)
+
+    context "find_trait works with interfaces":
+        it "find_trait locates interface by name":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            val traits = scan_traits(src)
+            val found = find_trait("Drawable", traits)
+            expect(found.name).to_equal("Drawable")
+            expect(found.is_interface).to_equal(true)
+
+describe "interface in trait_desugar":
+
+    context "struct generation":
+        it "interface desugars to struct with fn-fields":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            src = src + "    fn color() -> text" + "\n"
+            val out = desugar_traits(src)
+            expect(out).to_contain("struct Drawable:")
+            expect(out).to_contain("draw_fn: fn()")
+            expect(out).to_contain("color_fn: fn() -> text")
+
+    context "impl for interface":
+        it "impl Interface for value generates factory function":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            src = src + "\n"
+            src = src + "impl Drawable for canvas:" + "\n"
+            src = src + "    fn draw(): canvas_render()" + "\n"
+            val out = desugar_traits(src)
+            expect(out).to_contain("fn canvas_as_Drawable() -> Drawable:")
+
+describe "interface with forwarding":
+
+    it "alias Interface = field generates forwarding":
+        var src = "interface Drawable:" + "\n"
+        src = src + "    fn draw()" + "\n"
+        src = src + "\n"
+        src = src + "class Widget:" + "\n"
+        src = src + "    renderer: Renderer" + "\n"
+        src = src + "    alias Drawable = renderer" + "\n"
+        val out = desugar_forwarding(src)
+        expect(out).to_contain("fn draw():")
+        expect(out).to_contain("self.renderer.draw()")

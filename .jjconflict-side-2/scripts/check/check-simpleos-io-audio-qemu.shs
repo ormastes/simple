@@ -1,0 +1,160 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+evidence_dir=${SIMPLEOS_IO_AUDIO_EVIDENCE_DIR:-$repo_root/build/verify/simpleos-io-audio}
+
+fail() {
+    echo "simpleos_io_audio_qemu_status=fail reason=$1" >&2
+    exit 1
+}
+
+qemu_for_arch() {
+    case "$1" in
+        x86_64) echo qemu-system-x86_64 ;;
+        aarch64) echo qemu-system-aarch64 ;;
+        riscv64) echo qemu-system-riscv64 ;;
+        *) return 1 ;;
+    esac
+}
+
+require_device() {
+    qemu=$1
+    pattern=$2
+    "$qemu" -device help 2>/dev/null | grep -Eq "$pattern" ||
+        fail "qemu-device-missing:$qemu:$pattern"
+}
+
+preflight() {
+    for arch in x86_64 aarch64 riscv64; do
+        qemu=$(qemu_for_arch "$arch")
+        command -v "$qemu" >/dev/null 2>&1 || fail "qemu-missing:$arch"
+        require_device "$qemu" 'virtio-sound-(device|pci)'
+        require_device "$qemu" 'virtio-input-host-(device|pci)'
+    done
+    require_device qemu-system-x86_64 '(ich9-intel-hda|intel-hda)'
+    require_device qemu-system-x86_64 'hda-duplex'
+    require_device qemu-system-x86_64 'ivshmem-plain'
+
+    test -f "$repo_root/src/os/drivers/virtio/virtio_snd_mmio.spl" ||
+        fail virtio-snd-mmio-source-missing
+    test -f "$repo_root/src/os/drivers/virtio/virtio_snd_protocol.spl" ||
+        fail virtio-snd-protocol-source-missing
+    test -f "$repo_root/src/os/drivers/virtio/virtio_input_ops.spl" ||
+        fail virtio-input-source-missing
+    test -f "$repo_root/src/os/services/audio/audio_service.spl" ||
+        fail hda-service-source-missing
+    test -f "$repo_root/examples/09_embedded/simple_os/arch/x86_64/audio_cuda_ivshmem_probe_entry.spl" ||
+        fail audio-cuda-guest-probe-missing
+    echo simpleos_io_audio_qemu_preflight=pass
+}
+
+field() {
+    key=$1
+    line=$2
+    printf '%s\n' "$line" | tr ' ' '\n' | sed -n "s/^${key}=//p" | head -n 1
+}
+
+validate_row() {
+    arch=$1
+    backend=$2
+    log=$3
+    test -s "$log" || fail "guest-log-missing:$arch:$backend"
+
+    provenance=$(grep -E "^SIMPLEOS_IO_AUDIO_PROVENANCE arch=${arch} backend=${backend} " "$log" | tail -n 1 || true)
+    test -n "$provenance" || fail "provenance-missing:$arch:$backend"
+    test "$(field binary_kind "$provenance")" = pure-simple || fail "not-pure-simple:$arch:$backend"
+    test "$(field guest_execution "$provenance")" = 1 || fail "host-substitute:$arch:$backend"
+    test "$(field source_hash_valid "$provenance")" = 1 || fail "source-hash-invalid:$arch:$backend"
+    test "$(field artifact_hash_valid "$provenance")" = 1 || fail "artifact-hash-invalid:$arch:$backend"
+    test "$(field seed_rejected "$provenance")" = 1 || fail "seed-not-rejected:$arch:$backend"
+
+    for kind in keyboard pointer controller; do
+        grep -Eq "^SIMPLEOS_INPUT_EVENT .*kind=${kind} .*order=monotonic" "$log" ||
+            fail "input-receipt-missing:$arch:$backend:$kind"
+    done
+
+    playback=$(grep -E '^SIMPLEOS_AUDIO_PLAYBACK ' "$log" | tail -n 1 || true)
+    test -n "$playback" || fail "playback-receipt-missing:$arch:$backend"
+    test "$(field non_silent "$playback")" = 1 || fail "silent-playback:$arch:$backend"
+    pcm_hash=$(field pcm_hash "$playback")
+    expected_hash=$(field expected_pcm_hash "$playback")
+    test -n "$pcm_hash" && test "$pcm_hash" = "$expected_hash" || fail "pcm-hash-mismatch:$arch:$backend"
+
+    capture=$(grep -E '^SIMPLEOS_AUDIO_CAPTURE ' "$log" | tail -n 1 || true)
+    test -n "$capture" || fail "capture-receipt-missing:$arch:$backend"
+    test "$(field status "$capture")" = completed || fail "capture-not-completed:$arch:$backend"
+    capture_session=$(field session "$capture")
+    capture_generation=$(field generation "$capture")
+    capture_frames=$(field frames "$capture")
+    capture_samples=$(field samples "$capture")
+    capture_hash=$(field hash "$capture")
+    test -n "$capture_session" && test "$capture_session" -gt 0 || fail "capture-session-missing:$arch:$backend"
+    test -n "$capture_generation" && test "$capture_generation" -gt 0 || fail "capture-generation-missing:$arch:$backend"
+    test -n "$capture_frames" && test "$capture_frames" -gt 0 && test "$capture_frames" -le 256 || fail "capture-frame-bounds:$arch:$backend"
+    test -n "$capture_samples" && test "$capture_samples" -ge "$capture_frames" && test "$capture_samples" -le 4096 || fail "capture-sample-bounds:$arch:$backend"
+    test -n "$capture_hash" && test "$capture_hash" -gt 0 || fail "capture-hash-missing:$arch:$backend"
+    test "$(field bounded "$capture")" = 1 || fail "capture-unbounded:$arch:$backend"
+
+    shutdown=$(grep -E '^SIMPLEOS_AUDIO_SHUTDOWN ' "$log" | tail -n 1 || true)
+    test -n "$shutdown" || fail "shutdown-receipt-missing:$arch:$backend"
+    test "$(field live_dma_resources "$shutdown")" = 0 || fail "dma-leak:$arch:$backend"
+    test "$(field receipts "$shutdown")" = 1 || fail "shutdown-count:$arch:$backend"
+
+    if test "$backend" = hda; then
+        grep -Eq '^SIMPLEOS_AUDIO_PERIOD .*count=[1-9][0-9]*' "$log" ||
+            fail "hda-period-missing:$arch"
+    else
+        grep -Eq '^SIMPLEOS_VIRTIO_SND .*status=driver_ok' "$log" ||
+            fail "virtio-snd-driver-receipt-missing:$arch"
+    fi
+    echo "simpleos_io_audio_qemu_row=pass arch=$arch backend=$backend"
+}
+
+live() {
+    preflight
+    validate_row x86_64 virtio-snd "$evidence_dir/x86_64-virtio-snd.serial.log"
+    validate_row x86_64 hda "$evidence_dir/x86_64-hda.serial.log"
+    validate_row aarch64 virtio-snd "$evidence_dir/aarch64-virtio-snd.serial.log"
+    validate_row riscv64 virtio-snd "$evidence_dir/riscv64-virtio-snd.serial.log"
+    echo simpleos_io_audio_qemu_status=pass
+}
+
+self_test() {
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    for row in x86_64-virtio-snd x86_64-hda aarch64-virtio-snd riscv64-virtio-snd; do
+        arch=${row%-*}
+        backend=${row#*-}
+        case "$row" in
+            x86_64-virtio-snd) arch=x86_64; backend=virtio-snd ;;
+            x86_64-hda) arch=x86_64; backend=hda ;;
+            aarch64-virtio-snd) arch=aarch64; backend=virtio-snd ;;
+            riscv64-virtio-snd) arch=riscv64; backend=virtio-snd ;;
+        esac
+        log="$tmp/$row.serial.log"
+        {
+            echo "SIMPLEOS_IO_AUDIO_PROVENANCE arch=$arch backend=$backend binary_kind=pure-simple guest_execution=1 source_hash_valid=1 artifact_hash_valid=1 seed_rejected=1"
+            echo 'SIMPLEOS_INPUT_EVENT sequence=1 kind=keyboard order=monotonic'
+            echo 'SIMPLEOS_INPUT_EVENT sequence=2 kind=pointer order=monotonic'
+            echo 'SIMPLEOS_INPUT_EVENT sequence=3 kind=controller order=monotonic'
+            echo 'SIMPLEOS_AUDIO_PLAYBACK non_silent=1 pcm_hash=abc expected_pcm_hash=abc'
+            echo 'SIMPLEOS_AUDIO_CAPTURE status=completed session=1 generation=1 frames=128 samples=256 hash=17 non_silent=0 bounded=1'
+            echo 'SIMPLEOS_AUDIO_SHUTDOWN live_dma_resources=0 receipts=1'
+            if test "$backend" = hda; then
+                echo 'SIMPLEOS_AUDIO_PERIOD count=4'
+            else
+                echo 'SIMPLEOS_VIRTIO_SND status=driver_ok'
+            fi
+        } >"$log"
+        validate_row "$arch" "$backend" "$log"
+    done
+    echo simpleos_io_audio_qemu_self_test=pass
+}
+
+case "${1:---live}" in
+    --preflight) preflight ;;
+    --self-test) self_test ;;
+    --live) live ;;
+    *) fail unknown-mode ;;
+esac

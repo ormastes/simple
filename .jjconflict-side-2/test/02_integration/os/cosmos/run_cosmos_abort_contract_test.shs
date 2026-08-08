@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+SRC="$ROOT/src/os/kernel/arch/arm32/cosmos"
+TEST="$ROOT/test/02_integration/os/cosmos/cosmos_abort_contract_test.c"
+LINKER="$ROOT/test/02_integration/os/cosmos/cosmos_abort_contract_test.ld"
+CC=${CC:-clang}
+LD=${LD:-ld.lld}
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-abort-contract.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+command -v "$CC" >/dev/null 2>&1 || { echo "missing-tool: $CC" >&2; exit 2; }
+command -v "$LD" >/dev/null 2>&1 || { echo "missing-tool: $LD" >&2; exit 2; }
+command -v qemu-system-arm >/dev/null 2>&1 || {
+    echo "missing-tool: qemu-system-arm" >&2
+    exit 2
+}
+command -v timeout >/dev/null 2>&1 || { echo "missing-tool: timeout" >&2; exit 2; }
+
+CFLAGS='--target=armv7-none-eabi -mcpu=cortex-a9 -marm -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-pic -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes'
+
+build_and_run() {
+    mode=$1
+    define=$2
+    image="$TMP/cosmos_abort_${mode}.elf"
+    output="$TMP/cosmos_abort_${mode}.out"
+    "$CC" $CFLAGS -D"$define" -c "$SRC/cosmos_start.S" -o "$TMP/start_${mode}.o"
+    "$CC" $CFLAGS -D"$define" -O2 -c "$TEST" -o "$TMP/test_${mode}.o"
+    "$LD" -T "$LINKER" "$TMP/start_${mode}.o" "$TMP/test_${mode}.o" -o "$image"
+    set +e
+    timeout 3 qemu-system-arm -M xilinx-zynq-a9 -display none \
+        -serial null -serial "file:$output" -kernel "$image"
+    qemu_status=$?
+    set -e
+    case "$qemu_status" in
+        124|143) ;;
+        *)
+            echo "$mode: qemu exit=$qemu_status (expected timeout 124 or 143)" >&2
+            return 1
+            ;;
+    esac
+    if ! grep -F "COSMOS_ABORT_TRIGGER $mode" "$output" >/dev/null ||
+       ! grep -F "COSMOS_ABORT" "$output" |
+           grep -F " PASS terminal=0x00000001" >/dev/null ||
+       grep -F "resumed=0x00000001" "$output" >/dev/null; then
+        echo "$mode: contract markers missing (qemu exit=$qemu_status)" >&2
+        tr '\r\n' '  ' < "$output" >&2
+        echo >&2
+        return 1
+    fi
+    printf '%s: PASS (%s)\n' "$mode" "$(tr '\r\n' '  ' < "$output")"
+}
+
+build_and_run prefetch COSMOS_ABORT_PREFETCH
+build_and_run data COSMOS_ABORT_DATA
+echo "cosmos ARM prefetch/data abort contract: PASS"

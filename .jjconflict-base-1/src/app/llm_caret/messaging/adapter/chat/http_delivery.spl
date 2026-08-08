@@ -1,0 +1,96 @@
+"""Shared authenticated HTTP delivery worker for prepared chat requests."""
+
+use app.io.http_ffi.{HttpMethod, HttpResponse, http_request}
+use app.llm_caret.messaging.adapter.chat.rest_common.{ChatHttpRequest, CredentialHttpRequestTemplate,
+    credential_request_template, materialize_credential_request}
+use app.llm_caret.messaging.adapter.chat.credential_resolver.{resolve_transport_credential}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore, StoredTransportRequest,
+    StoreWriteResult}
+
+struct HttpDeliveryResult:
+    accepted: bool
+    retryable: bool
+    permanent: bool
+    status_code: i64
+    response_body: text
+    error: text
+
+fn classify_http_delivery(status_code: i64, response_body: text, error: text) -> HttpDeliveryResult:
+    if status_code >= 200 and status_code < 300:
+        return HttpDeliveryResult(accepted: true, retryable: false, permanent: false,
+            status_code: status_code, response_body: response_body, error: "")
+    if status_code == 0 or status_code == 408 or status_code == 425 or status_code == 429 or status_code >= 500:
+        return HttpDeliveryResult(accepted: false, retryable: true, permanent: false,
+            status_code: status_code, response_body: response_body,
+            error: if error != "": error else: "remote_retryable_status_" + status_code.to_string())
+    HttpDeliveryResult(accepted: false, retryable: false, permanent: true,
+        status_code: status_code, response_body: response_body,
+        error: if error != "": error else: "remote_permanent_status_" + status_code.to_string())
+
+fn request_method(value: text) -> HttpMethod:
+    if value == "POST": HttpMethod.POST
+    elif value == "PUT": HttpMethod.PUT
+    elif value == "DELETE": HttpMethod.DELETE
+    elif value == "PATCH": HttpMethod.PATCH
+    elif value == "HEAD": HttpMethod.HEAD
+    elif value == "OPTIONS": HttpMethod.OPTIONS
+    else: HttpMethod.GET
+
+fn execute_prepared_request(request: ChatHttpRequest) -> HttpDeliveryResult:
+    if not request.accepted:
+        return HttpDeliveryResult(accepted: false, retryable: false, permanent: true,
+            status_code: 0, response_body: "", error: request.error)
+    val response = http_request(request_method(request.method), request.url,
+        request.headers, request.body)
+    classify_http_delivery(response.status_code, response.body, response.error)
+
+fn deliver_outbox_request(store: PureSqlMessagingStore, delivery_id: text,
+        request: ChatHttpRequest, now: i64, retry_at: i64, max_attempts: i64) -> HttpDeliveryResult:
+    val result = execute_prepared_request(request)
+    if result.accepted:
+        store.mark_outbox_delivered(delivery_id, now)
+    else:
+        # A permanent response consumes the retry budget immediately.
+        val limit = if result.permanent: 1 else: max_attempts
+        store.mark_outbox_attempt(delivery_id, result.error, retry_at, limit, now)
+    result
+
+fn stored_request_template(request: StoredTransportRequest) -> CredentialHttpRequestTemplate:
+    CredentialHttpRequestTemplate(accepted: true, method: request.method,
+        url_template: request.url_template, headers: request.headers, body: request.body,
+        credential_ref: request.credential_ref, credential_mode: request.credential_mode,
+        idempotency_key: request.idempotency_key, error: "")
+
+fn queue_prepared_transport_request(store: PureSqlMessagingStore, delivery_id: text,
+        message_id: text, binding_id: text, prepared: ChatHttpRequest, credential_ref: text,
+        credential_mode: text, resolved_value: text, at: i64) -> StoreWriteResult:
+    val safe = credential_request_template(prepared, credential_ref, credential_mode, resolved_value)
+    if not safe.accepted: return StoreWriteResult(ok: false, error: safe.error)
+    store.enqueue_transport_request(StoredTransportRequest(delivery_id: delivery_id,
+        message_id: message_id, binding_id: binding_id, method: safe.method,
+        url_template: safe.url_template, headers: safe.headers, body: safe.body,
+        credential_ref: safe.credential_ref, credential_mode: safe.credential_mode,
+        idempotency_key: safe.idempotency_key), at)
+
+fn drain_transport_outbox(store: PureSqlMessagingStore, limit: i64, now: i64,
+        retry_delay_ms: i64, max_attempts: i64) -> (i64, i64):
+    var delivered = 0
+    var failed = 0
+    for stored in store.queued_transport_requests(now, limit):
+        val credential = resolve_transport_credential(stored.credential_ref)
+        if not credential.ok:
+            store.mark_outbox_attempt(stored.delivery_id, credential.error,
+                now + retry_delay_ms, max_attempts, now)
+            failed = failed + 1
+        else:
+            val request = materialize_credential_request(stored_request_template(stored), credential.value)
+            val result = deliver_outbox_request(store, stored.delivery_id, request, now,
+                now + retry_delay_ms, max_attempts)
+            if result.accepted: delivered = delivered + 1
+            else: failed = failed + 1
+    (delivered, failed)
+
+export HttpDeliveryResult, classify_http_delivery, request_method
+export execute_prepared_request, deliver_outbox_request
+export stored_request_template, drain_transport_outbox
+export queue_prepared_transport_request

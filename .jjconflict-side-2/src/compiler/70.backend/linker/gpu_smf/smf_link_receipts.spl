@@ -1,0 +1,261 @@
+# ============================================================================
+# compiler/70.backend/linker/gpu_smf/smf_link_receipts.spl — StageReceipt
+# wiring for the SmfLinkProfile CPU-reference stages (Lane PROFILE)
+#
+# Wires the frozen cross-stage receipt contract
+# (`StageReceipt`, src/lib/common/compute/placement_contracts/backend.spl —
+# REUSED, never redefined) onto the three CPU-reference SMF link steps that
+# exist today: collect (smf_collect_records), resolve (smf_resolve) and
+# reachability (smf_reachable_sections). Each `*_with_receipt` wrapper calls
+# the frozen function unchanged and attaches one receipt keyed by the
+# matching pipeline-stage const from resolve_types.spl:
+#
+#   collect      -> SMF_LINK_STAGE_L2_ARENAS   (record arenas built)
+#   resolve      -> SMF_LINK_STAGE_L4_SELECT   (winning definition selected)
+#   reachability -> SMF_LINK_STAGE_L6_REACHABILITY
+#
+# Receipt content is DETERMINISTIC ONLY: item counts and SHA-256 content
+# roots over canonical serializations of the stage's inputs/outputs
+# (crypto/sha256.spl — the same reuse rule resolve_core's `intern_name`
+# follows). `elapsed_us`, `bytes_read` and `bytes_written` are always 0:
+# this in-memory CPU slice performs no byte I/O and a wall-clock value would
+# break run-to-run receipt equality (no timestamps by lane rule).
+#
+# The wrappers live HERE rather than inside smf_link_profile.spl /
+# smf_reachability.spl because this module must import their types to hash
+# the stage inputs — calls in the other direction would be a circular
+# import. Callers that want receipts call the `*_with_receipt` entry points;
+# the frozen underlying functions stay byte-for-byte untouched.
+#
+# Composition only, no inheritance (repo rule): plain value structs, free
+# functions, same discipline as smf_link_profile.spl.
+# ============================================================================
+
+use std.common.compute.placement_contracts.backend.{StageReceipt}
+use std.common.compute.placement_contracts.semantic.{
+    BackendId,
+    ExecutionMode,
+    Hash256,
+    StageId
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.resolve.resolve_types.{
+    DefinitionRecord,
+    ReferenceRecord,
+    ResolutionRecord,
+    SMF_LINK_STAGE_L2_ARENAS,
+    SMF_LINK_STAGE_L4_SELECT,
+    SMF_LINK_STAGE_L6_REACHABILITY
+}
+use std.common.structural.resolve.resolve_frontier.{ResolveEdge, ReachableResult}
+use compiler.backend.linker.gpu_smf.smf_link_profile.{
+    SmfLinkInputs,
+    SmfSymbolInput,
+    smf_collect_records,
+    smf_resolve
+}
+use compiler.backend.linker.gpu_smf.smf_reachability.{smf_reachable_sections}
+
+# ----------------------------------------------------------------------------
+# Receipt identity constants.
+# ----------------------------------------------------------------------------
+
+val SMF_LINK_RECEIPT_BACKEND: text = "cpu_reference"
+val SMF_LINK_RECEIPT_SCHEMA: text = "smf_link_receipt.v1"
+
+fn smf_link_stage_id(stage: i64) -> StageId:
+    """The `StageId` a SmfLinkProfile receipt carries for pipeline stage
+    const `stage` (resolve_types.spl `SMF_LINK_STAGE_L*`): `smf_link.L<n>`.
+    Pure text derivation from the const — the receipt key and the pipeline
+    stage table can never drift apart."""
+    StageId(value: "smf_link.L" + stage.to_text())
+
+# ----------------------------------------------------------------------------
+# Outcome shapes — frozen result + its receipt, one per wrapped stage.
+# ----------------------------------------------------------------------------
+
+struct SmfCollectOutcome:
+    """`smf_collect_records` output plus its L2 StageReceipt."""
+    defs: [DefinitionRecord]
+    refs: [ReferenceRecord]
+    receipt: StageReceipt
+
+struct SmfResolveOutcome:
+    """`smf_resolve` output plus its L4 StageReceipt."""
+    results: [ResolutionRecord]
+    receipt: StageReceipt
+
+struct SmfReachabilityOutcome:
+    """`smf_reachable_sections` output plus its L6 StageReceipt."""
+    result: ReachableResult
+    receipt: StageReceipt
+
+# ----------------------------------------------------------------------------
+# Canonical serializations (hash preimages). Field order is fixed; every
+# record is terminated with `;` and every scalar separated with `,` so no
+# two distinct record sequences share a preimage. Symbol names are
+# length-prefixed for the same reason.
+# ----------------------------------------------------------------------------
+
+fn _ser_bool(b: bool) -> text:
+    if b: "1" else: "0"
+
+fn _ser_symbol_input(sym: SmfSymbolInput) -> text:
+    val name_len = sym.name.len() as i64
+    ("s:" + name_len.to_text() + ":" + sym.name +
+        "," + _ser_bool(sym.defined) +
+        "," + (sym.binding as i64).to_text() +
+        "," + (sym.sym_type as i64).to_text() +
+        "," + (sym.layout_phase as i64).to_text() +
+        "," + _ser_bool(sym.is_event_loop_anchor) +
+        "," + _ser_bool(sym.layout_pinned) +
+        "," + sym.section_index.to_text() + ";")
+
+fn _ser_def_or_ref(tag: text, key_hi: i64, key_lo: i64, space: i64, slot: i64, local: i64, attributes: i64, order: i64) -> text:
+    (tag + ":" + key_hi.to_text() + "," + key_lo.to_text() +
+        "," + space.to_text() + "," + slot.to_text() + "," + local.to_text() +
+        "," + attributes.to_text() + "," + order.to_text() + ";")
+
+fn _ser_definition(d: DefinitionRecord) -> text:
+    _ser_def_or_ref(
+        "d",
+        d.key.name_hash.hi as i64,
+        d.key.name_hash.lo as i64,
+        d.key.space as i64,
+        d.owner.object_slot as i64,
+        d.owner.local_index as i64,
+        d.attributes as i64,
+        d.order as i64)
+
+fn _ser_reference(r: ReferenceRecord) -> text:
+    _ser_def_or_ref(
+        "r",
+        r.key.name_hash.hi as i64,
+        r.key.name_hash.lo as i64,
+        r.key.space as i64,
+        r.owner.object_slot as i64,
+        r.owner.local_index as i64,
+        r.attributes as i64,
+        r.order as i64)
+
+fn _ser_records(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> text:
+    var out = "defs|"
+    for d in defs:
+        out = out + _ser_definition(d)
+    out = out + "|refs|"
+    for r in refs:
+        out = out + _ser_reference(r)
+    out
+
+fn _ser_resolution(x: ResolutionRecord) -> text:
+    ("x:" + (x.reference.object_slot as i64).to_text() +
+        "," + (x.reference.local_index as i64).to_text() +
+        "," + (x.definition.object_slot as i64).to_text() +
+        "," + (x.definition.local_index as i64).to_text() +
+        "," + (x.status as i64).to_text() +
+        "," + (x.reason as i64).to_text() + ";")
+
+# ----------------------------------------------------------------------------
+# Receipt assembly.
+# ----------------------------------------------------------------------------
+
+fn _smf_stage_receipt(stage: i64, input_ser: text, output_ser: text, count_in: u64, count_out: u64, malformed: u32) -> StageReceipt:
+    """Assemble one deterministic StageReceipt: content roots are SHA-256
+    over the canonical serializations, `deterministic_hash` binds the stage
+    key, both roots and both counts into a single replay check. Byte and
+    time counters are structurally 0 (see file header)."""
+    val input_root_hex = sha256_text(input_ser)
+    val output_root_hex = sha256_text(output_ser)
+    val det_hex = sha256_text(
+        (SMF_LINK_RECEIPT_SCHEMA + "|L" + stage.to_text() +
+            "|in:" + input_root_hex + "|out:" + output_root_hex +
+            "|nin:" + (count_in as i64).to_text() +
+            "|nout:" + (count_out as i64).to_text() +
+            "|mal:" + (malformed as i64).to_text()))
+    StageReceipt(
+        stage: smf_link_stage_id(stage),
+        backend: BackendId(value: SMF_LINK_RECEIPT_BACKEND),
+        mode: ExecutionMode.CpuReference,
+        input_root: Hash256(value: input_root_hex),
+        output_root: Hash256(value: output_root_hex),
+        item_count_in: count_in,
+        item_count_out: count_out,
+        bytes_read: 0,
+        bytes_written: 0,
+        fallback_count: 0,
+        malformed_count: malformed,
+        overflow_flags: 0,
+        elapsed_us: 0,
+        deterministic_hash: Hash256(value: det_hex))
+
+# ----------------------------------------------------------------------------
+# Stage wrappers — frozen function first, receipt second.
+# ----------------------------------------------------------------------------
+
+fn smf_collect_records_with_receipt(inputs: SmfLinkInputs) -> SmfCollectOutcome:
+    """`smf_collect_records` plus its L2_ARENAS receipt. `item_count_in` =
+    symbols presented, `item_count_out` = records produced (defs + refs —
+    equal to the input count today because collect classifies every symbol,
+    but counted independently so a future filtering collect step cannot
+    silently drop records without the receipt showing it)."""
+    val (defs, refs) = smf_collect_records(inputs)
+    var input_ser = "smf.collect.v1|m:" + (inputs.module_index as i64).to_text() + "|"
+    for sym in inputs.symbols:
+        input_ser = input_ser + _ser_symbol_input(sym)
+    val output_ser = _ser_records(defs, refs)
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L2_ARENAS,
+        input_ser,
+        output_ser,
+        inputs.symbols.len() as u64,
+        (defs.len() + refs.len()) as u64,
+        0)
+    SmfCollectOutcome(defs: defs, refs: refs, receipt: receipt)
+
+fn smf_resolve_with_receipt(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> SmfResolveOutcome:
+    """`smf_resolve` plus its L4_SELECT receipt. `item_count_in` = records
+    consumed (defs + refs), `item_count_out` = resolutions produced (one per
+    reference — the frozen every-reference-appears-once contract, now
+    replayable from the receipt alone)."""
+    val results = smf_resolve(defs, refs)
+    val input_ser = "smf.resolve.v1|" + _ser_records(defs, refs)
+    var output_ser = "resolutions|"
+    for x in results:
+        output_ser = output_ser + _ser_resolution(x)
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L4_SELECT,
+        input_ser,
+        output_ser,
+        (defs.len() + refs.len()) as u64,
+        results.len() as u64,
+        0)
+    SmfResolveOutcome(results: results, receipt: receipt)
+
+fn smf_reachable_sections_with_receipt(section_count: i64, edges: [ResolveEdge], roots: [u32]) -> SmfReachabilityOutcome:
+    """`smf_reachable_sections` plus its L6_REACHABILITY receipt.
+    `item_count_in` = edges + roots presented, `item_count_out` = sections
+    marked reachable. A bounds-rejected run (`ok: false`) is recorded as
+    `malformed_count: 1` — the receipt never hides a rejected stage."""
+    val result = smf_reachable_sections(section_count, edges, roots)
+    var input_ser = "smf.reach.v1|n:" + section_count.to_text() + "|edges|"
+    for e in edges:
+        input_ser = (input_ser + "e:" + (e.from_index as i64).to_text() +
+            "," + (e.to_index as i64).to_text() + ";")
+    input_ser = input_ser + "|roots|"
+    for root in roots:
+        input_ser = input_ser + "t:" + (root as i64).to_text() + ";"
+    var output_ser = "ok:" + _ser_bool(result.ok) + "|marks|"
+    var marked: i64 = 0
+    for m in result.values:
+        output_ser = output_ser + "m:" + _ser_bool(m) + ";"
+        if m:
+            marked = marked + 1
+    val malformed: u32 = if result.ok: 0 else: 1
+    val receipt = _smf_stage_receipt(
+        SMF_LINK_STAGE_L6_REACHABILITY,
+        input_ser,
+        output_ser,
+        (edges.len() + roots.len()) as u64,
+        marked as u64,
+        malformed)
+    SmfReachabilityOutcome(result: result, receipt: receipt)

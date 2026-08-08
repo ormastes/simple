@@ -1,0 +1,897 @@
+"""Canonical messaging persistence on the in-tree pure-Simple SQL engine."""
+
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+use app.llm_caret.messaging.domain.model.{Workspace, Identity, IdentityKind, AgentBinding, AgentHandler, Room, RoomKind, RoomMessage, MessageOrigin, AgentProfile, AgentStatus, messaging_id}
+use app.llm_caret.messaging.application.room_service.{RoomMembership}
+use app.llm_caret.messaging.application.task_service.{MessagingTask, TaskState}
+use app.llm_caret.messaging.application.enrollment.{EmailInvite, LocalAccount}
+use app.llm_caret.messaging.domain.receipt.{MessageReceipt, ReceiptState, ReceiptEvidence}
+
+struct StoreWriteResult:
+    ok: bool
+    error: text
+
+struct AppendMessageResult:
+    ok: bool
+    message_id: text
+    room_seq: i64
+    duplicate: bool
+    error: text
+
+struct StoredHookEvent:
+    event_id: text
+    provider: text
+    event_name: text
+    payload: text
+    state: text
+    received_at: i64
+
+struct StoredHookCorrelation:
+    event_id: text
+    task_id: text
+    room_id: text
+    agent_id: text
+
+struct StoredArtifact:
+    artifact_id: text
+    task_id: text
+    room_id: text
+    media_type: text
+    value: text
+    published_by: text
+    created_at: i64
+
+struct StoredIdempotency:
+    resource_id: text
+    evidence: text
+
+struct StoredTransportBinding:
+    binding_id: text
+    canonical_room_id: text
+    transport: text
+    external_room_id: text
+    mirror_policy: text
+    capabilities_version: text
+    last_inbound_cursor: text
+    last_outbound_cursor: text
+
+struct StoredExternalRef:
+    ref_id: text
+    binding_id: text
+    canonical_message_id: text
+    external_message_id: text
+    external_thread_id: text
+    created_at: i64
+
+struct StoredTransportRequest:
+    delivery_id: text
+    message_id: text
+    binding_id: text
+    method: text
+    url_template: text
+    headers: [text]
+    body: text
+    credential_ref: text
+    credential_mode: text
+    idempotency_key: text
+
+struct StoredCanonicalEvent:
+    event_id: text
+    workspace_id: text
+    aggregate_type: text
+    aggregate_id: text
+    event_kind: text
+    payload: text
+    occurred_at: i64
+
+struct StoredTaskEvent:
+    task_event_id: text
+    task_id: text
+    state: text
+    summary: text
+    required_input: text
+    occurred_at: i64
+
+fn ok_write() -> StoreWriteResult: StoreWriteResult(ok: true, error: "")
+fn failed_write(reason: text) -> StoreWriteResult: StoreWriteResult(ok: false, error: reason)
+fn q(value: text) -> text: "'" + value.replace("'", "''") + "'"
+fn cell(row: DbRow, index: i64) -> text:
+    if index < 0 or index >= row.values.len(): return ""
+    row.values[index].to_text()
+fn integer(row: DbRow, index: i64) -> i64:
+    val value = cell(row, index)
+    if value == "": return 0
+    int(value) ?? 0
+fn kind_text(kind: RoomKind) -> text:
+    match kind:
+        RoomKind.Channel: "channel"
+        RoomKind.Private: "private"
+        RoomKind.Direct: "direct"
+        RoomKind.Task: "task"
+fn kind_value(value: text) -> RoomKind:
+    match value:
+        "private": RoomKind.Private
+        "direct": RoomKind.Direct
+        "task": RoomKind.Task
+        _: RoomKind.Channel
+fn origin_text(origin: MessageOrigin) -> text:
+    match origin:
+        MessageOrigin.Human: "human"
+        MessageOrigin.AgentAnswer: "agent_answer"
+        MessageOrigin.AgentUpdate: "agent_update"
+        MessageOrigin.System: "system"
+        MessageOrigin.TransportBridge: "transport_bridge"
+        MessageOrigin.CommandResult: "command_result"
+fn origin_value(value: text) -> MessageOrigin:
+    match value:
+        "agent_answer": MessageOrigin.AgentAnswer
+        "agent_update": MessageOrigin.AgentUpdate
+        "system": MessageOrigin.System
+        "transport_bridge": MessageOrigin.TransportBridge
+        "command_result": MessageOrigin.CommandResult
+        _: MessageOrigin.Human
+fn identity_kind_text(kind: IdentityKind) -> text:
+    match kind:
+        IdentityKind.Human: "human"
+        IdentityKind.Agent: "agent"
+        IdentityKind.Bridge: "bridge"
+        IdentityKind.System: "system"
+fn identity_kind_value(value: text) -> IdentityKind:
+    match value:
+        "agent": IdentityKind.Agent
+        "bridge": IdentityKind.Bridge
+        "system": IdentityKind.System
+        _: IdentityKind.Human
+fn agent_handler_text(handler: AgentHandler) -> text:
+    match handler:
+        AgentHandler.Main: "main"
+        AgentHandler.Subagent: "subagent"
+        AgentHandler.Advisor: "advisor"
+        AgentHandler.Router: "router"
+fn agent_handler_value(value: text) -> AgentHandler:
+    match value:
+        "subagent": AgentHandler.Subagent
+        "advisor": AgentHandler.Advisor
+        "router": AgentHandler.Router
+        _: AgentHandler.Main
+fn agent_status_text(status: AgentStatus) -> text:
+    match status:
+        AgentStatus.Offline: "offline"
+        AgentStatus.Idle: "idle"
+        AgentStatus.Queued: "queued"
+        AgentStatus.Running: "running"
+        AgentStatus.WaitingInput: "waiting_input"
+        AgentStatus.Blocked: "blocked"
+        AgentStatus.Completed: "completed"
+        AgentStatus.Failed: "failed"
+        AgentStatus.Stopped: "stopped"
+fn agent_status_value(value: text) -> AgentStatus:
+    match value:
+        "idle": AgentStatus.Idle
+        "queued": AgentStatus.Queued
+        "running": AgentStatus.Running
+        "waiting_input": AgentStatus.WaitingInput
+        "blocked": AgentStatus.Blocked
+        "completed": AgentStatus.Completed
+        "failed": AgentStatus.Failed
+        "stopped": AgentStatus.Stopped
+        _: AgentStatus.Offline
+fn task_state_text(state: TaskState) -> text:
+    match state:
+        TaskState.Queued: "queued"
+        TaskState.Running: "running"
+        TaskState.WaitingInput: "waiting_input"
+        TaskState.Blocked: "blocked"
+        TaskState.Completed: "completed"
+        TaskState.Failed: "failed"
+        TaskState.Canceled: "canceled"
+fn task_state_value(value: text) -> TaskState:
+    match value:
+        "running": TaskState.Running
+        "waiting_input": TaskState.WaitingInput
+        "blocked": TaskState.Blocked
+        "completed": TaskState.Completed
+        "failed": TaskState.Failed
+        "canceled": TaskState.Canceled
+        _: TaskState.Queued
+fn receipt_state_text(state: ReceiptState) -> text:
+    match state:
+        ReceiptState.Accepted: "accepted"
+        ReceiptState.Transmitted: "transmitted"
+        ReceiptState.Delivered: "delivered"
+        ReceiptState.Read: "read"
+        ReceiptState.ConsumedByAgent: "consumed_by_agent"
+        ReceiptState.Handled: "handled"
+        ReceiptState.Failed: "failed"
+fn receipt_state_value(value: text) -> ReceiptState:
+    match value:
+        "transmitted": ReceiptState.Transmitted
+        "delivered": ReceiptState.Delivered
+        "read": ReceiptState.Read
+        "consumed_by_agent": ReceiptState.ConsumedByAgent
+        "handled": ReceiptState.Handled
+        "failed": ReceiptState.Failed
+        _: ReceiptState.Accepted
+fn receipt_evidence_text(evidence: ReceiptEvidence) -> text:
+    match evidence:
+        ReceiptEvidence.Native: "native"
+        ReceiptEvidence.LocalCursor: "local_cursor"
+        ReceiptEvidence.Synthetic: "synthetic"
+        ReceiptEvidence.Unknown: "unknown"
+fn receipt_evidence_value(value: text) -> ReceiptEvidence:
+    match value:
+        "native": ReceiptEvidence.Native
+        "local_cursor": ReceiptEvidence.LocalCursor
+        "synthetic": ReceiptEvidence.Synthetic
+        _: ReceiptEvidence.Unknown
+fn pack(values: [text]) -> text: values.join("\u001f")
+fn unpack(value: text) -> [text]:
+    if value == "": return []
+    value.split("\u001f")
+
+fn schema() -> [text]:
+    [
+        "CREATE TABLE IF NOT EXISTS messaging_metadata (id TEXT PRIMARY KEY, value TEXT)",
+        "CREATE TABLE IF NOT EXISTS canonical_events (event_id TEXT PRIMARY KEY, workspace_id TEXT, aggregate_type TEXT, aggregate_id TEXT, event_kind TEXT, payload TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS workspaces (workspace_id TEXT PRIMARY KEY, name TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS identities (identity_id TEXT PRIMARY KEY, workspace_id TEXT, kind TEXT, account_id TEXT, display_name TEXT, external_transport TEXT, external_id TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS rooms (room_id TEXT PRIMARY KEY, workspace_id TEXT, kind TEXT, name TEXT, topic TEXT, visibility TEXT, mode TEXT, update_policy TEXT, context_policy TEXT, created_by TEXT, created_at INTEGER, next_seq INTEGER)",
+        "CREATE TABLE IF NOT EXISTS memberships (membership_id TEXT PRIMARY KEY, room_id TEXT, identity_id TEXT, role TEXT, joined_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_profiles (agent_id TEXT PRIMARY KEY, display_name TEXT, aliases TEXT, provider TEXT, role_summary TEXT, capabilities TEXT, current_task_id TEXT, status TEXT, owner_identity_id TEXT, room_ids TEXT, last_activity_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_bindings (binding_id TEXT PRIMARY KEY, room_id TEXT, agent_id TEXT, handler TEXT, session_policy TEXT, trigger_policy TEXT, update_policy TEXT, context_policy TEXT, permissions TEXT)",
+        "CREATE TABLE IF NOT EXISTS email_invites (invite_id TEXT PRIMARY KEY, email TEXT, token_hash TEXT, expires_at INTEGER, attempts INTEGER, max_attempts INTEGER, used INTEGER)",
+        "CREATE TABLE IF NOT EXISTS local_accounts (account_id TEXT PRIMARY KEY, identity_id TEXT, email TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_hook_events (event_id TEXT PRIMARY KEY, provider TEXT, event_name TEXT, payload TEXT, state TEXT, received_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_hook_correlations (event_id TEXT PRIMARY KEY, task_id TEXT, room_id TEXT, agent_id TEXT)",
+        "CREATE TABLE IF NOT EXISTS messages (message_id TEXT PRIMARY KEY, workspace_id TEXT, room_id TEXT, room_seq INTEGER, thread_root_id TEXT, reply_to_id TEXT, sender_identity_id TEXT, sender_agent_id TEXT, origin TEXT, body TEXT, mentions TEXT, command TEXT, audience TEXT, external_ref TEXT, correlation_id TEXT, causation_id TEXT, hop_count INTEGER, created_at INTEGER, edited_at INTEGER, idempotency_key TEXT)",
+        "CREATE TABLE IF NOT EXISTS message_receipts (receipt_id TEXT PRIMARY KEY, message_id TEXT, identity_id TEXT, state TEXT, evidence TEXT, occurred_at INTEGER, detail TEXT)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency ON messages (idempotency_key)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_room_sequence ON messages (room_id, room_seq)",
+        "CREATE TABLE IF NOT EXISTS room_cursors (cursor_id TEXT PRIMARY KEY, room_id TEXT, identity_id TEXT, room_seq INTEGER, advanced_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS inbound_dedup (dedup_id TEXT PRIMARY KEY, binding_id TEXT, external_event_id TEXT, accepted_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS outbox (delivery_id TEXT PRIMARY KEY, message_id TEXT, binding_id TEXT, payload TEXT, state TEXT, attempts INTEGER, available_at INTEGER, last_error TEXT, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS dead_letters (delivery_id TEXT PRIMARY KEY, message_id TEXT, binding_id TEXT, payload TEXT, attempts INTEGER, final_error TEXT, failed_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS audit_events (audit_id TEXT PRIMARY KEY, event_kind TEXT, actor_id TEXT, subject_id TEXT, detail TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS context_manifests (context_bundle_id TEXT PRIMARY KEY, task_id TEXT, included_message_ids TEXT, included_profile_ids TEXT, source_pack_hash TEXT, summary_version TEXT, redaction_policy_version TEXT, token_estimate INTEGER, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, origin_message_id TEXT, assigned_agent_id TEXT, state TEXT, objective TEXT, progress_summary TEXT, required_input TEXT, created_at INTEGER, updated_at INTEGER, completed_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS task_events (task_event_id TEXT PRIMARY KEY, task_id TEXT, state TEXT, summary TEXT, required_input TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS artifacts (artifact_id TEXT PRIMARY KEY, task_id TEXT, room_id TEXT, media_type TEXT, value TEXT, published_by TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS mcp_idempotency (idempotency_key TEXT PRIMARY KEY, resource_id TEXT, evidence TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS transport_bindings (binding_id TEXT PRIMARY KEY, canonical_room_id TEXT, transport TEXT, external_room_id TEXT, mirror_policy TEXT, capabilities_version TEXT, last_inbound_cursor TEXT, last_outbound_cursor TEXT)",
+        "CREATE TABLE IF NOT EXISTS external_refs (ref_id TEXT PRIMARY KEY, binding_id TEXT, canonical_message_id TEXT, external_message_id TEXT, external_thread_id TEXT, created_at INTEGER)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS external_refs_remote ON external_refs (binding_id, external_message_id)",
+        "CREATE TABLE IF NOT EXISTS transport_requests (delivery_id TEXT PRIMARY KEY, method TEXT, url_template TEXT, headers TEXT, body TEXT, credential_ref TEXT, credential_mode TEXT, idempotency_key TEXT)"
+    ]
+
+class PureSqlMessagingStore:
+    db: PureDatabase
+    is_open: bool
+    initialization_error: text
+
+    static fn open(path: text) -> PureSqlMessagingStore:
+        val store = PureSqlMessagingStore(db: PureDatabase.open_deferred(path).unwrap(), is_open: true,
+            initialization_error: "")
+        if store.initialize():
+            val checkpointed = store.db.checkpoint()
+            if checkpointed.is_err():
+                store.initialization_error = checkpointed.unwrap_err().message()
+            store.db.set_auto_checkpoint(true)
+        store
+
+    static fn open_memory() -> PureSqlMessagingStore:
+        val store = PureSqlMessagingStore(db: PureDatabase.memory().unwrap(), is_open: true,
+            initialization_error: "")
+        store.initialize()
+        store
+
+    me initialize() -> bool:
+        for statement in schema():
+            val result = self.db.exec_sql(statement)
+            if result.is_err():
+                self.initialization_error = result.unwrap_err().message()
+                return false
+        val rows = self.db.query("SELECT value FROM messaging_metadata WHERE id = 'schema_version'", []).unwrap()
+        if rows.len() == 0:
+            val inserted = self.db.exec_sql("INSERT INTO messaging_metadata (id,value) VALUES ('schema_version','1')")
+            if inserted.is_err():
+                self.initialization_error = inserted.unwrap_err().message()
+                return false
+        true
+
+    me close() -> bool:
+        if not self.is_open: return true
+        val result = self.db.close()
+        self.is_open = false
+        result.is_ok()
+    fn ready() -> bool: self.is_open and self.schema_version() == 1
+    fn metadata_count() -> i64:
+        integer(self.db.query("SELECT COUNT(*) FROM messaging_metadata", []).unwrap()[0], 0)
+    fn metadata_schema_value() -> text:
+        val rows = self.db.query("SELECT * FROM messaging_metadata", []).unwrap()
+        if rows.len() == 0: return ""
+        cell(rows[0], 1)
+    fn schema_version() -> i64:
+        val rows = self.db.query("SELECT value FROM messaging_metadata WHERE id = 'schema_version'", []).unwrap()
+        if rows.len() == 0: return 0
+        integer(rows[0], 0)
+    fn table_ready(name: text) -> bool:
+        for statement in schema():
+            if statement.contains(" " + name + " ") or statement.contains(" " + name + " ("): return true
+        false
+    fn room_count() -> i64: integer(self.db.query("SELECT COUNT(*) FROM rooms", []).unwrap()[0], 0)
+    fn message_count() -> i64: integer(self.db.query("SELECT COUNT(*) FROM messages", []).unwrap()[0], 0)
+    fn canonical_event_count() -> i64: integer(self.db.query("SELECT COUNT(*) FROM canonical_events", []).unwrap()[0], 0)
+
+    me append_canonical_event(event: StoredCanonicalEvent) -> StoreWriteResult:
+        if event.event_id == "" or event.aggregate_type == "" or event.aggregate_id == "":
+            return failed_write("invalid_canonical_event")
+        val sql = "INSERT INTO canonical_events (event_id,workspace_id,aggregate_type,aggregate_id,event_kind,payload,occurred_at) VALUES (" +
+            q(event.event_id) + "," + q(event.workspace_id) + "," + q(event.aggregate_type) + "," +
+            q(event.aggregate_id) + "," + q(event.event_kind) + "," + q(event.payload) + "," +
+            event.occurred_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("canonical_event_write_failed")
+
+    fn canonical_events() -> [StoredCanonicalEvent]:
+        val rows = self.db.query("SELECT event_id,workspace_id,aggregate_type,aggregate_id,event_kind,payload,occurred_at FROM canonical_events ORDER BY occurred_at", []).unwrap()
+        var result: [StoredCanonicalEvent] = []
+        for row in rows:
+            result.push(StoredCanonicalEvent(event_id: cell(row, 0), workspace_id: cell(row, 1),
+                aggregate_type: cell(row, 2), aggregate_id: cell(row, 3), event_kind: cell(row, 4),
+                payload: cell(row, 5), occurred_at: integer(row, 6)))
+        result
+
+    me put_workspace(workspace: Workspace) -> StoreWriteResult:
+        if workspace.workspace_id.value == "": return failed_write("invalid_workspace")
+        val prior = self.db.query("SELECT workspace_id FROM workspaces WHERE workspace_id = " + q(workspace.workspace_id.value), []).unwrap()
+        if prior.len() > 0: return ok_write()
+        val sql = "INSERT INTO workspaces (workspace_id,name,created_at) VALUES (" +
+            q(workspace.workspace_id.value) + "," + q(workspace.name) + "," + workspace.created_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("workspace_write_failed")
+
+    fn workspace(workspace_id: text) -> Workspace:
+        val rows = self.db.query("SELECT workspace_id,name,created_at FROM workspaces WHERE workspace_id = " + q(workspace_id), []).unwrap()
+        if rows.len() == 0: return Workspace(workspace_id: messaging_id("workspace", ""), name: "", created_at: 0)
+        Workspace(workspace_id: messaging_id("workspace", cell(rows[0], 0)), name: cell(rows[0], 1),
+            created_at: integer(rows[0], 2))
+
+    me put_identity(identity: Identity) -> StoreWriteResult:
+        if identity.identity_id.value == "" or identity.workspace_id.value == "": return failed_write("invalid_identity")
+        val prior = self.db.query("SELECT identity_id FROM identities WHERE identity_id = " + q(identity.identity_id.value), []).unwrap()
+        val sql = if prior.len() == 0:
+            "INSERT INTO identities (identity_id,workspace_id,kind,account_id,display_name,external_transport,external_id,created_at) VALUES (" +
+                q(identity.identity_id.value) + "," + q(identity.workspace_id.value) + "," + q(identity_kind_text(identity.kind)) + "," +
+                q(identity.account_id) + "," + q(identity.display_name) + "," + q(identity.external_transport) + "," +
+                q(identity.external_id) + "," + identity.created_at.to_string() + ")"
+        else:
+            "UPDATE identities SET display_name=" + q(identity.display_name) + ", external_transport=" +
+                q(identity.external_transport) + ", external_id=" + q(identity.external_id) + " WHERE identity_id=" + q(identity.identity_id.value)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("identity_write_failed")
+
+    fn identity(identity_id: text) -> Identity:
+        val rows = self.db.query("SELECT identity_id,workspace_id,kind,account_id,display_name,external_transport,external_id,created_at FROM identities WHERE identity_id = " + q(identity_id), []).unwrap()
+        if rows.len() == 0:
+            return Identity(identity_id: messaging_id("identity", ""), workspace_id: messaging_id("workspace", ""),
+                kind: IdentityKind.Human, account_id: "", display_name: "", external_transport: "",
+                external_id: "", created_at: 0)
+        val row = rows[0]
+        Identity(identity_id: messaging_id("identity", cell(row, 0)),
+            workspace_id: messaging_id("workspace", cell(row, 1)), kind: identity_kind_value(cell(row, 2)),
+            account_id: cell(row, 3), display_name: cell(row, 4), external_transport: cell(row, 5),
+            external_id: cell(row, 6), created_at: integer(row, 7))
+
+    me create_room(room: Room) -> StoreWriteResult:
+        if room.room_id.value == "" or room.workspace_id.value == "": return failed_write("invalid_room_id")
+        val prior = self.db.query("SELECT room_id FROM rooms WHERE room_id = " + q(room.room_id.value), []).unwrap()
+        if prior.len() > 0: return ok_write()
+        val sql = "INSERT INTO rooms (room_id,workspace_id,kind,name,topic,visibility,mode,update_policy,context_policy,created_by,created_at,next_seq) VALUES (" + q(room.room_id.value) + "," + q(room.workspace_id.value) + "," + q(kind_text(room.kind)) + "," + q(room.name) + "," + q(room.topic) + "," + q(room.visibility) + "," + q(room.mode) + "," + q(room.update_policy) + "," + q(room.context_policy) + "," + q(room.created_by.value) + "," + room.created_at.to_string() + ",1)"
+        self.db.exec_sql("BEGIN").unwrap()
+        if self.db.exec_sql(sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            return failed_write("room_write_failed")
+        val event = StoredCanonicalEvent(event_id: "room:" + room.room_id.value + ":created",
+            workspace_id: room.workspace_id.value, aggregate_type: "room", aggregate_id: room.room_id.value,
+            event_kind: "room_created", payload: pack([kind_text(room.kind), room.name, room.visibility,
+                room.mode, room.created_by.value]), occurred_at: room.created_at)
+        if not self.append_canonical_event(event).ok:
+            self.db.exec_sql("ROLLBACK")
+            return failed_write("canonical_event_write_failed")
+        self.db.exec_sql("COMMIT").unwrap()
+        ok_write()
+
+    me put_membership(membership: RoomMembership) -> StoreWriteResult:
+        val id = membership.room_id + ":" + membership.identity_id
+        val existing = self.db.query("SELECT membership_id FROM memberships WHERE membership_id = " + q(id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO memberships (membership_id,room_id,identity_id,role,joined_at) VALUES (" + q(id) + "," + q(membership.room_id) + "," + q(membership.identity_id) + "," + q(membership.role) + "," + membership.joined_at.to_string() + ")"
+        else:
+            "UPDATE memberships SET role = " + q(membership.role) + ", joined_at = " + membership.joined_at.to_string() + " WHERE membership_id = " + q(id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("membership_write_failed")
+
+    me delete_membership(room_id: text, identity_id: text) -> StoreWriteResult:
+        if self.db.exec_sql("DELETE FROM memberships WHERE membership_id = " + q(room_id + ":" + identity_id)).is_ok():
+            return ok_write()
+        failed_write("membership_delete_failed")
+
+    fn memberships() -> [RoomMembership]:
+        val rows = self.db.query("SELECT room_id,identity_id,role,joined_at FROM memberships", []).unwrap()
+        var result: [RoomMembership] = []
+        for row in rows:
+            result.push(RoomMembership(room_id: cell(row, 0), identity_id: cell(row, 1),
+                role: cell(row, 2), joined_at: integer(row, 3)))
+        result
+
+    me put_profile(profile: AgentProfile) -> StoreWriteResult:
+        val id = profile.agent_id.value
+        val existing = self.db.query("SELECT agent_id FROM agent_profiles WHERE agent_id = " + q(id), []).unwrap()
+        val values = q(profile.display_name) + "," + q(pack(profile.aliases)) + "," + q(profile.provider) + "," + q(profile.role_summary) + "," + q(pack(profile.capabilities)) + "," + q(profile.current_task_id) + "," + q(agent_status_text(profile.status)) + "," + q(profile.owner_identity_id) + "," + q(pack(profile.room_ids)) + "," + profile.last_activity_at.to_string()
+        val sql = if existing.len() == 0:
+            "INSERT INTO agent_profiles (agent_id,display_name,aliases,provider,role_summary,capabilities,current_task_id,status,owner_identity_id,room_ids,last_activity_at) VALUES (" + q(id) + "," + values + ")"
+        else:
+            "UPDATE agent_profiles SET display_name=" + q(profile.display_name) + ", aliases=" + q(pack(profile.aliases)) + ", provider=" + q(profile.provider) + ", role_summary=" + q(profile.role_summary) + ", capabilities=" + q(pack(profile.capabilities)) + ", current_task_id=" + q(profile.current_task_id) + ", status=" + q(agent_status_text(profile.status)) + ", owner_identity_id=" + q(profile.owner_identity_id) + ", room_ids=" + q(pack(profile.room_ids)) + ", last_activity_at=" + profile.last_activity_at.to_string() + " WHERE agent_id=" + q(id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("profile_write_failed")
+
+    fn profiles() -> [AgentProfile]:
+        val rows = self.db.query("SELECT agent_id,display_name,aliases,provider,role_summary,capabilities,current_task_id,status,owner_identity_id,room_ids,last_activity_at FROM agent_profiles", []).unwrap()
+        var result: [AgentProfile] = []
+        for row in rows:
+            result.push(AgentProfile(agent_id: messaging_id("agent", cell(row, 0)),
+                display_name: cell(row, 1), aliases: unpack(cell(row, 2)), provider: cell(row, 3),
+                role_summary: cell(row, 4), capabilities: unpack(cell(row, 5)),
+                current_task_id: cell(row, 6), status: agent_status_value(cell(row, 7)),
+                owner_identity_id: cell(row, 8), room_ids: unpack(cell(row, 9)),
+                last_activity_at: integer(row, 10)))
+        result
+
+    me put_agent_binding(binding: AgentBinding) -> StoreWriteResult:
+        if binding.binding_id.value == "" or binding.room_id.value == "" or binding.agent_id.value == "":
+            return failed_write("invalid_agent_binding")
+        val prior = self.db.query("SELECT binding_id FROM agent_bindings WHERE binding_id = " + q(binding.binding_id.value), []).unwrap()
+        val sql = if prior.len() == 0:
+            "INSERT INTO agent_bindings (binding_id,room_id,agent_id,handler,session_policy,trigger_policy,update_policy,context_policy,permissions) VALUES (" +
+                q(binding.binding_id.value) + "," + q(binding.room_id.value) + "," + q(binding.agent_id.value) + "," +
+                q(agent_handler_text(binding.handler)) + "," + q(binding.session_policy) + "," + q(binding.trigger_policy) + "," +
+                q(binding.update_policy) + "," + q(binding.context_policy) + "," + q(pack(binding.permissions)) + ")"
+        else:
+            "UPDATE agent_bindings SET room_id=" + q(binding.room_id.value) + ", agent_id=" + q(binding.agent_id.value) +
+                ", handler=" + q(agent_handler_text(binding.handler)) + ", session_policy=" + q(binding.session_policy) +
+                ", trigger_policy=" + q(binding.trigger_policy) + ", update_policy=" + q(binding.update_policy) +
+                ", context_policy=" + q(binding.context_policy) + ", permissions=" + q(pack(binding.permissions)) +
+                " WHERE binding_id=" + q(binding.binding_id.value)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("agent_binding_write_failed")
+
+    fn agent_bindings() -> [AgentBinding]:
+        val rows = self.db.query("SELECT binding_id,room_id,agent_id,handler,session_policy,trigger_policy,update_policy,context_policy,permissions FROM agent_bindings", []).unwrap()
+        var result: [AgentBinding] = []
+        for row in rows:
+            result.push(AgentBinding(binding_id: messaging_id("agent_binding", cell(row, 0)),
+                room_id: messaging_id("room", cell(row, 1)), agent_id: messaging_id("agent", cell(row, 2)),
+                handler: agent_handler_value(cell(row, 3)), session_policy: cell(row, 4),
+                trigger_policy: cell(row, 5), update_policy: cell(row, 6), context_policy: cell(row, 7),
+                permissions: unpack(cell(row, 8))))
+        result
+
+    me put_task(task: MessagingTask) -> StoreWriteResult:
+        val existing = self.db.query("SELECT task_id FROM tasks WHERE task_id = " + q(task.task_id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO tasks (task_id,origin_message_id,assigned_agent_id,state,objective,progress_summary,required_input,created_at,updated_at,completed_at) VALUES (" + q(task.task_id) + "," + q(task.origin_message_id) + "," + q(task.assigned_agent_id) + "," + q(task_state_text(task.state)) + "," + q(task.objective) + "," + q(task.progress_summary) + "," + q(task.required_input) + "," + task.created_at.to_string() + "," + task.updated_at.to_string() + "," + task.completed_at.to_string() + ")"
+        else:
+            "UPDATE tasks SET state=" + q(task_state_text(task.state)) + ", progress_summary=" + q(task.progress_summary) + ", required_input=" + q(task.required_input) + ", updated_at=" + task.updated_at.to_string() + ", completed_at=" + task.completed_at.to_string() + " WHERE task_id=" + q(task.task_id)
+        val event_id = "task:" + task.task_id + ":" + task.updated_at.to_string() + ":" + task_state_text(task.state)
+        val prior_event = self.db.query("SELECT task_event_id FROM task_events WHERE task_event_id = " + q(event_id), []).unwrap()
+        self.db.exec_sql("BEGIN").unwrap()
+        if self.db.exec_sql(sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            return failed_write("task_write_failed")
+        if prior_event.len() == 0:
+            val event_sql = "INSERT INTO task_events (task_event_id,task_id,state,summary,required_input,occurred_at) VALUES (" +
+                q(event_id) + "," + q(task.task_id) + "," + q(task_state_text(task.state)) + "," +
+                q(task.progress_summary) + "," + q(task.required_input) + "," + task.updated_at.to_string() + ")"
+            if self.db.exec_sql(event_sql).is_err():
+                self.db.exec_sql("ROLLBACK")
+                return failed_write("task_event_write_failed")
+        self.db.exec_sql("COMMIT").unwrap()
+        ok_write()
+
+    fn tasks() -> [MessagingTask]:
+        val rows = self.db.query("SELECT task_id,origin_message_id,assigned_agent_id,state,objective,progress_summary,required_input,created_at,updated_at,completed_at FROM tasks", []).unwrap()
+        var result: [MessagingTask] = []
+        for row in rows:
+            result.push(MessagingTask(task_id: cell(row, 0), origin_message_id: cell(row, 1),
+                assigned_agent_id: cell(row, 2), state: task_state_value(cell(row, 3)),
+                objective: cell(row, 4), progress_summary: cell(row, 5), required_input: cell(row, 6),
+                created_at: integer(row, 7), updated_at: integer(row, 8), completed_at: integer(row, 9)))
+        result
+
+    fn task_events(task_id: text) -> [StoredTaskEvent]:
+        val rows = self.db.query("SELECT task_event_id,task_id,state,summary,required_input,occurred_at FROM task_events WHERE task_id = " + q(task_id) + " ORDER BY occurred_at", []).unwrap()
+        var result: [StoredTaskEvent] = []
+        for row in rows:
+            result.push(StoredTaskEvent(task_event_id: cell(row, 0), task_id: cell(row, 1),
+                state: cell(row, 2), summary: cell(row, 3), required_input: cell(row, 4),
+                occurred_at: integer(row, 5)))
+        result
+
+    me put_artifact(artifact: StoredArtifact) -> StoreWriteResult:
+        if artifact.artifact_id == "" or artifact.task_id == "": return failed_write("invalid_artifact")
+        val existing = self.db.query("SELECT artifact_id FROM artifacts WHERE artifact_id = " + q(artifact.artifact_id), []).unwrap()
+        if existing.len() > 0: return failed_write("artifact_id_conflict")
+        val sql = "INSERT INTO artifacts (artifact_id,task_id,room_id,media_type,value,published_by,created_at) VALUES (" +
+            q(artifact.artifact_id) + "," + q(artifact.task_id) + "," + q(artifact.room_id) + "," +
+            q(artifact.media_type) + "," + q(artifact.value) + "," + q(artifact.published_by) + "," +
+            artifact.created_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("artifact_write_failed")
+
+    fn artifacts() -> [StoredArtifact]:
+        val rows = self.db.query("SELECT artifact_id,task_id,room_id,media_type,value,published_by,created_at FROM artifacts ORDER BY created_at", []).unwrap()
+        var result: [StoredArtifact] = []
+        for row in rows:
+            result.push(StoredArtifact(artifact_id: cell(row, 0), task_id: cell(row, 1),
+                room_id: cell(row, 2), media_type: cell(row, 3), value: cell(row, 4),
+                published_by: cell(row, 5), created_at: integer(row, 6)))
+        result
+
+    me put_mcp_idempotency(key: text, resource_id: text, evidence: text, at: i64) -> StoreWriteResult:
+        if key == "": return failed_write("idempotency_key_required")
+        val prior = self.mcp_idempotency(key)
+        if prior.resource_id != "": return ok_write()
+        val sql = "INSERT INTO mcp_idempotency (idempotency_key,resource_id,evidence,created_at) VALUES (" +
+            q(key) + "," + q(resource_id) + "," + q(evidence) + "," + at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("idempotency_write_failed")
+
+    fn mcp_idempotency(key: text) -> StoredIdempotency:
+        val rows = self.db.query("SELECT resource_id,evidence FROM mcp_idempotency WHERE idempotency_key = " + q(key), []).unwrap()
+        if rows.len() == 0: return StoredIdempotency(resource_id: "", evidence: "")
+        StoredIdempotency(resource_id: cell(rows[0], 0), evidence: cell(rows[0], 1))
+
+    me put_context_manifest(context_bundle_id: text, task_id: text, message_ids: [text],
+            profile_ids: [text], source_pack_hash: text, summary_version: text,
+            redaction_version: text, token_estimate: i64, at: i64) -> StoreWriteResult:
+        if context_bundle_id == "": return failed_write("context_bundle_id_required")
+        val prior = self.db.query("SELECT context_bundle_id FROM context_manifests WHERE context_bundle_id = " + q(context_bundle_id), []).unwrap()
+        if prior.len() > 0: return ok_write()
+        val sql = "INSERT INTO context_manifests (context_bundle_id,task_id,included_message_ids,included_profile_ids,source_pack_hash,summary_version,redaction_policy_version,token_estimate,created_at) VALUES (" +
+            q(context_bundle_id) + "," + q(task_id) + "," + q(pack(message_ids)) + "," + q(pack(profile_ids)) + "," +
+            q(source_pack_hash) + "," + q(summary_version) + "," + q(redaction_version) + "," +
+            token_estimate.to_string() + "," + at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("context_manifest_write_failed")
+
+    fn context_manifest_count() -> i64:
+        integer(self.db.query("SELECT COUNT(*) FROM context_manifests", []).unwrap()[0], 0)
+
+    me put_invite(invite: EmailInvite) -> StoreWriteResult:
+        val existing = self.db.query("SELECT invite_id FROM email_invites WHERE invite_id = " + q(invite.invite_id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO email_invites (invite_id,email,token_hash,expires_at,attempts,max_attempts,used) VALUES (" + q(invite.invite_id) + "," + q(invite.email) + "," + q(invite.token_hash) + "," + invite.expires_at.to_string() + "," + invite.attempts.to_string() + "," + invite.max_attempts.to_string() + "," + (if invite.used: "1" else: "0") + ")"
+        else:
+            "UPDATE email_invites SET attempts=" + invite.attempts.to_string() + ", used=" + (if invite.used: "1" else: "0") + " WHERE invite_id=" + q(invite.invite_id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("invite_write_failed")
+
+    fn invites() -> [EmailInvite]:
+        val rows = self.db.query("SELECT invite_id,email,token_hash,expires_at,attempts,max_attempts,used FROM email_invites", []).unwrap()
+        var result: [EmailInvite] = []
+        for row in rows:
+            result.push(EmailInvite(invite_id: cell(row, 0), email: cell(row, 1), token_hash: cell(row, 2),
+                expires_at: integer(row, 3), attempts: integer(row, 4), max_attempts: integer(row, 5),
+                used: integer(row, 6) == 1))
+        result
+
+    me put_account(account: LocalAccount) -> StoreWriteResult:
+        val existing = self.db.query("SELECT account_id FROM local_accounts WHERE account_id = " + q(account.account_id), []).unwrap()
+        if existing.len() > 0: return ok_write()
+        val sql = "INSERT INTO local_accounts (account_id,identity_id,email,created_at) VALUES (" + q(account.account_id) + "," + q(account.identity_id) + "," + q(account.email) + "," + account.created_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("account_write_failed")
+
+    fn accounts() -> [LocalAccount]:
+        val rows = self.db.query("SELECT account_id,identity_id,email,created_at FROM local_accounts", []).unwrap()
+        var result: [LocalAccount] = []
+        for row in rows:
+            result.push(LocalAccount(account_id: cell(row, 0), identity_id: cell(row, 1),
+                email: cell(row, 2), created_at: integer(row, 3)))
+        result
+
+    me put_transport_binding(binding: StoredTransportBinding) -> StoreWriteResult:
+        if binding.binding_id == "" or binding.canonical_room_id == "" or binding.transport == "":
+            return failed_write("invalid_transport_binding")
+        val existing = self.db.query("SELECT binding_id FROM transport_bindings WHERE binding_id = " + q(binding.binding_id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO transport_bindings (binding_id,canonical_room_id,transport,external_room_id,mirror_policy,capabilities_version,last_inbound_cursor,last_outbound_cursor) VALUES (" + q(binding.binding_id) + "," + q(binding.canonical_room_id) + "," + q(binding.transport) + "," + q(binding.external_room_id) + "," + q(binding.mirror_policy) + "," + q(binding.capabilities_version) + "," + q(binding.last_inbound_cursor) + "," + q(binding.last_outbound_cursor) + ")"
+        else:
+            "UPDATE transport_bindings SET canonical_room_id=" + q(binding.canonical_room_id) + ", transport=" + q(binding.transport) + ", external_room_id=" + q(binding.external_room_id) + ", mirror_policy=" + q(binding.mirror_policy) + ", capabilities_version=" + q(binding.capabilities_version) + ", last_inbound_cursor=" + q(binding.last_inbound_cursor) + ", last_outbound_cursor=" + q(binding.last_outbound_cursor) + " WHERE binding_id=" + q(binding.binding_id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("transport_binding_write_failed")
+
+    fn transport_binding(binding_id: text) -> StoredTransportBinding:
+        val rows = self.db.query("SELECT binding_id,canonical_room_id,transport,external_room_id,mirror_policy,capabilities_version,last_inbound_cursor,last_outbound_cursor FROM transport_bindings WHERE binding_id = " + q(binding_id), []).unwrap()
+        if rows.len() == 0:
+            return StoredTransportBinding(binding_id: "", canonical_room_id: "", transport: "",
+                external_room_id: "", mirror_policy: "", capabilities_version: "",
+                last_inbound_cursor: "", last_outbound_cursor: "")
+        val row = rows[0]
+        StoredTransportBinding(binding_id: cell(row, 0), canonical_room_id: cell(row, 1),
+            transport: cell(row, 2), external_room_id: cell(row, 3), mirror_policy: cell(row, 4),
+            capabilities_version: cell(row, 5), last_inbound_cursor: cell(row, 6),
+            last_outbound_cursor: cell(row, 7))
+
+    me put_external_ref(ref: StoredExternalRef) -> StoreWriteResult:
+        if ref.ref_id == "" or ref.binding_id == "" or ref.canonical_message_id == "" or ref.external_message_id == "":
+            return failed_write("invalid_external_ref")
+        val existing = self.db.query("SELECT ref_id FROM external_refs WHERE ref_id = " + q(ref.ref_id), []).unwrap()
+        if existing.len() > 0: return ok_write()
+        val sql = "INSERT INTO external_refs (ref_id,binding_id,canonical_message_id,external_message_id,external_thread_id,created_at) VALUES (" + q(ref.ref_id) + "," + q(ref.binding_id) + "," + q(ref.canonical_message_id) + "," + q(ref.external_message_id) + "," + q(ref.external_thread_id) + "," + ref.created_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("external_ref_write_failed")
+
+    fn external_ref(binding_id: text, canonical_message_id: text) -> StoredExternalRef:
+        val rows = self.db.query("SELECT ref_id,binding_id,canonical_message_id,external_message_id,external_thread_id,created_at FROM external_refs WHERE binding_id = " + q(binding_id) + " AND canonical_message_id = " + q(canonical_message_id), []).unwrap()
+        if rows.len() == 0:
+            return StoredExternalRef(ref_id: "", binding_id: "", canonical_message_id: "",
+                external_message_id: "", external_thread_id: "", created_at: 0)
+        val row = rows[0]
+        StoredExternalRef(ref_id: cell(row, 0), binding_id: cell(row, 1),
+            canonical_message_id: cell(row, 2), external_message_id: cell(row, 3),
+            external_thread_id: cell(row, 4), created_at: integer(row, 5))
+
+    me enqueue_hook_event(event_id: text, provider: text, event_name: text,
+            payload: text, received_at: i64) -> StoreWriteResult:
+        if event_id == "" or provider == "" or event_name == "": return failed_write("invalid_hook_event")
+        val existing = self.db.query("SELECT event_id FROM agent_hook_events WHERE event_id = " + q(event_id), []).unwrap()
+        if existing.len() > 0: return ok_write()
+        val sql = "INSERT INTO agent_hook_events (event_id,provider,event_name,payload,state,received_at) VALUES (" + q(event_id) + "," + q(provider) + "," + q(event_name) + "," + q(payload) + ",'queued'," + received_at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("hook_event_write_failed")
+
+    me put_hook_correlation(correlation: StoredHookCorrelation) -> StoreWriteResult:
+        if correlation.event_id == "" or correlation.task_id == "" or
+                correlation.room_id == "" or correlation.agent_id == "":
+            return failed_write("invalid_hook_correlation")
+        val existing = self.db.query("SELECT event_id FROM agent_hook_correlations WHERE event_id = " +
+            q(correlation.event_id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO agent_hook_correlations (event_id,task_id,room_id,agent_id) VALUES (" +
+                q(correlation.event_id) + "," + q(correlation.task_id) + "," +
+                q(correlation.room_id) + "," + q(correlation.agent_id) + ")"
+        else:
+            "UPDATE agent_hook_correlations SET task_id=" + q(correlation.task_id) +
+                ", room_id=" + q(correlation.room_id) + ", agent_id=" + q(correlation.agent_id) +
+                " WHERE event_id=" + q(correlation.event_id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("hook_correlation_write_failed")
+
+    fn hook_correlation(event_id: text) -> StoredHookCorrelation:
+        val rows = self.db.query("SELECT event_id,task_id,room_id,agent_id FROM agent_hook_correlations WHERE event_id = " +
+            q(event_id), []).unwrap()
+        if rows.len() == 0:
+            return StoredHookCorrelation(event_id: "", task_id: "", room_id: "", agent_id: "")
+        StoredHookCorrelation(event_id: cell(rows[0], 0), task_id: cell(rows[0], 1),
+            room_id: cell(rows[0], 2), agent_id: cell(rows[0], 3))
+
+    fn queued_hook_event_count() -> i64:
+        integer(self.db.query("SELECT COUNT(*) FROM agent_hook_events WHERE state = 'queued'", []).unwrap()[0], 0)
+
+    fn queued_hook_events(limit: i64) -> [StoredHookEvent]:
+        var cap = limit
+        if cap < 1: cap = 1
+        if cap > 1000: cap = 1000
+        val rows = self.db.query("SELECT event_id,provider,event_name,payload,state,received_at FROM agent_hook_events WHERE state = 'queued' ORDER BY received_at LIMIT " + cap.to_string(), []).unwrap()
+        var result: [StoredHookEvent] = []
+        for row in rows:
+            result.push(StoredHookEvent(event_id: cell(row, 0), provider: cell(row, 1),
+                event_name: cell(row, 2), payload: cell(row, 3), state: cell(row, 4),
+                received_at: integer(row, 5)))
+        result
+
+    me mark_hook_event(event_id: text, state: text) -> StoreWriteResult:
+        if state != "handled" and state != "failed": return failed_write("invalid_hook_event_state")
+        if self.db.exec_sql("UPDATE agent_hook_events SET state = " + q(state) + " WHERE event_id = " + q(event_id)).is_ok():
+            return ok_write()
+        failed_write("hook_event_state_write_failed")
+
+    me put_receipt(receipt: MessageReceipt) -> StoreWriteResult:
+        val id = receipt.message_id + ":" + receipt.identity_id + ":" + receipt_state_text(receipt.state)
+        val existing = self.db.query("SELECT receipt_id FROM message_receipts WHERE receipt_id = " + q(id), []).unwrap()
+        val sql = if existing.len() == 0:
+            "INSERT INTO message_receipts (receipt_id,message_id,identity_id,state,evidence,occurred_at,detail) VALUES (" + q(id) + "," + q(receipt.message_id) + "," + q(receipt.identity_id) + "," + q(receipt_state_text(receipt.state)) + "," + q(receipt_evidence_text(receipt.evidence)) + "," + receipt.occurred_at.to_string() + "," + q(receipt.detail) + ")"
+        else:
+            "UPDATE message_receipts SET evidence=" + q(receipt_evidence_text(receipt.evidence)) + ", occurred_at=" + receipt.occurred_at.to_string() + ", detail=" + q(receipt.detail) + " WHERE receipt_id=" + q(id)
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("receipt_write_failed")
+
+    fn receipts(message_id: text) -> [MessageReceipt]:
+        val rows = self.db.query("SELECT message_id,identity_id,state,evidence,occurred_at,detail FROM message_receipts WHERE message_id = " + q(message_id), []).unwrap()
+        var result: [MessageReceipt] = []
+        for row in rows:
+            result.push(MessageReceipt(message_id: cell(row, 0), identity_id: cell(row, 1),
+                state: receipt_state_value(cell(row, 2)), evidence: receipt_evidence_value(cell(row, 3)),
+                occurred_at: integer(row, 4), detail: cell(row, 5)))
+        result
+
+    fn room(room_id: text) -> Room:
+        val rows = self.db.query("SELECT room_id,workspace_id,kind,name,topic,visibility,mode,update_policy,context_policy,created_by,created_at FROM rooms WHERE room_id = " + q(room_id), []).unwrap()
+        if rows.len() == 0:
+            return Room(room_id: messaging_id("room", ""), workspace_id: messaging_id("workspace", ""), kind: RoomKind.Channel, name: "", topic: "", visibility: "", mode: "", update_policy: "", context_policy: "", created_by: messaging_id("identity", ""), created_at: 0)
+        val r = rows[0]
+        Room(room_id: messaging_id("room", cell(r,0)), workspace_id: messaging_id("workspace",cell(r,1)), kind: kind_value(cell(r,2)), name: cell(r,3), topic: cell(r,4), visibility: cell(r,5), mode: cell(r,6), update_policy: cell(r,7), context_policy: cell(r,8), created_by: messaging_id("identity",cell(r,9)), created_at: integer(r,10))
+
+    fn rooms() -> [Room]:
+        val rows = self.db.query("SELECT room_id,workspace_id,kind,name,topic,visibility,mode,update_policy,context_policy,created_by,created_at FROM rooms", []).unwrap()
+        var result: [Room] = []
+        for r in rows:
+            result.push(Room(room_id: messaging_id("room", cell(r, 0)),
+                workspace_id: messaging_id("workspace", cell(r, 1)), kind: kind_value(cell(r, 2)),
+                name: cell(r, 3), topic: cell(r, 4), visibility: cell(r, 5), mode: cell(r, 6),
+                update_policy: cell(r, 7), context_policy: cell(r, 8),
+                created_by: messaging_id("identity", cell(r, 9)), created_at: integer(r, 10)))
+        result
+
+    me append_message(message: RoomMessage, key: text) -> AppendMessageResult:
+        if key == "": return AppendMessageResult(ok: false, message_id: message.message_id.value, room_seq: 0, duplicate: false, error: "idempotency_key_required")
+        val prior = self.db.query("SELECT message_id,room_seq FROM messages WHERE idempotency_key = " + q(key), []).unwrap()
+        if prior.len() > 0: return AppendMessageResult(ok: true, message_id: cell(prior[0], 0), room_seq: integer(prior[0], 1), duplicate: true, error: "")
+        val room_rows = self.db.query("SELECT next_seq FROM rooms WHERE room_id = " + q(message.room_id.value), []).unwrap()
+        if room_rows.len() == 0: return AppendMessageResult(ok: false, message_id: message.message_id.value, room_seq: 0, duplicate: false, error: "room_not_found")
+        val seq = integer(room_rows[0],0)
+        self.db.exec_sql("BEGIN").unwrap()
+        val sql = "INSERT INTO messages (message_id,workspace_id,room_id,room_seq,thread_root_id,reply_to_id,sender_identity_id,sender_agent_id,origin,body,mentions,command,audience,external_ref,correlation_id,causation_id,hop_count,created_at,edited_at,idempotency_key) VALUES (" + q(message.message_id.value) + "," + q(message.workspace_id.value) + "," + q(message.room_id.value) + "," + seq.to_string() + "," + q(message.thread_root_id) + "," + q(message.reply_to_id) + "," + q(message.sender_identity_id.value) + "," + q(message.sender_agent_id) + "," + q(origin_text(message.origin)) + "," + q(message.body) + "," + q(pack(message.mentions)) + "," + q(message.command) + "," + q(pack(message.audience)) + "," + q(message.external_ref) + "," + q(message.correlation_id) + "," + q(message.causation_id) + "," + message.hop_count.to_string() + "," + message.created_at.to_string() + "," + message.edited_at.to_string() + "," + q(key) + ")"
+        if self.db.exec_sql(sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "message_write_failed")
+        if self.db.exec_sql("UPDATE rooms SET next_seq = " + (seq + 1).to_string() + " WHERE room_id = " + q(message.room_id.value)).is_err():
+            self.db.exec_sql("ROLLBACK")
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "sequence_update_failed")
+        val accepted_receipt = MessageReceipt(message_id: message.message_id.value,
+            identity_id: message.sender_identity_id.value, state: ReceiptState.Accepted,
+            evidence: ReceiptEvidence.Synthetic, occurred_at: message.created_at,
+            detail: "server_accepted")
+        if not self.put_receipt(accepted_receipt).ok:
+            self.db.exec_sql("ROLLBACK")
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "receipt_write_failed")
+        val event = StoredCanonicalEvent(event_id: "message:" + message.message_id.value + ":created",
+            workspace_id: message.workspace_id.value, aggregate_type: "message",
+            aggregate_id: message.message_id.value, event_kind: "message_created",
+            payload: pack([message.room_id.value, seq.to_string(), message.sender_identity_id.value,
+                origin_text(message.origin), message.thread_root_id, message.reply_to_id, message.body]),
+            occurred_at: message.created_at)
+        if not self.append_canonical_event(event).ok:
+            self.db.exec_sql("ROLLBACK")
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "canonical_event_write_failed")
+        self.db.exec_sql("COMMIT").unwrap()
+        AppendMessageResult(ok: true, message_id: message.message_id.value, room_seq: seq, duplicate: false, error: "")
+
+    fn message_history(room_id: text, after_seq: i64, limit: i64) -> [RoomMessage]:
+        var cap = limit
+        if cap < 1: cap = 1
+        if cap > 1000: cap = 1000
+        val rows = self.db.query("SELECT message_id,workspace_id,room_id,room_seq,thread_root_id,reply_to_id,sender_identity_id,sender_agent_id,origin,body,mentions,command,audience,external_ref,correlation_id,causation_id,hop_count,created_at,edited_at FROM messages WHERE room_id = " + q(room_id) + " AND room_seq > " + after_seq.to_string() + " ORDER BY room_seq LIMIT " + cap.to_string(), []).unwrap()
+        var result: [RoomMessage] = []
+        for r in rows:
+            result.push(RoomMessage(message_id: messaging_id("message", cell(r, 0)), workspace_id: messaging_id("workspace", cell(r, 1)), room_id: messaging_id("room", cell(r, 2)), room_seq: integer(r, 3), thread_root_id: cell(r, 4), reply_to_id: cell(r, 5), sender_identity_id: messaging_id("identity", cell(r, 6)), sender_agent_id: cell(r, 7), origin: origin_value(cell(r, 8)), body: cell(r, 9), mentions: unpack(cell(r, 10)), command: cell(r, 11), audience: unpack(cell(r, 12)), external_ref: cell(r, 13), correlation_id: cell(r, 14), causation_id: cell(r, 15), hop_count: integer(r, 16), created_at: integer(r, 17), edited_at: integer(r, 18)))
+        result
+
+    fn message(message_id: text) -> RoomMessage:
+        val rows = self.db.query("SELECT message_id,workspace_id,room_id,room_seq,thread_root_id,reply_to_id,sender_identity_id,sender_agent_id,origin,body,mentions,command,audience,external_ref,correlation_id,causation_id,hop_count,created_at,edited_at FROM messages WHERE message_id = " + q(message_id), []).unwrap()
+        if rows.len() == 0:
+            return RoomMessage(message_id: messaging_id("message", ""), workspace_id: messaging_id("workspace", ""),
+                room_id: messaging_id("room", ""), room_seq: 0, thread_root_id: "", reply_to_id: "",
+                sender_identity_id: messaging_id("identity", ""), sender_agent_id: "",
+                origin: MessageOrigin.System, body: "", mentions: [], command: "", audience: [],
+                external_ref: "", correlation_id: "", causation_id: "", hop_count: 0,
+                created_at: 0, edited_at: 0)
+        val r = rows[0]
+        RoomMessage(message_id: messaging_id("message", cell(r, 0)), workspace_id: messaging_id("workspace", cell(r, 1)),
+            room_id: messaging_id("room", cell(r, 2)), room_seq: integer(r, 3), thread_root_id: cell(r, 4),
+            reply_to_id: cell(r, 5), sender_identity_id: messaging_id("identity", cell(r, 6)),
+            sender_agent_id: cell(r, 7), origin: origin_value(cell(r, 8)), body: cell(r, 9),
+            mentions: unpack(cell(r, 10)), command: cell(r, 11), audience: unpack(cell(r, 12)),
+            external_ref: cell(r, 13), correlation_id: cell(r, 14), causation_id: cell(r, 15),
+            hop_count: integer(r, 16), created_at: integer(r, 17), edited_at: integer(r, 18))
+
+    fn message_exists(message_id: text) -> bool:
+        self.db.query("SELECT message_id FROM messages WHERE message_id = " + q(message_id), []).unwrap().len() > 0
+
+    me advance_cursor(room_id: text, identity_id: text, seq: i64, at: i64) -> StoreWriteResult:
+        val max_rows = self.db.query("SELECT MAX(room_seq) FROM messages WHERE room_id = " + q(room_id), []).unwrap()
+        val max_seq = if max_rows.len() > 0: integer(max_rows[0], 0) else: 0
+        if seq < 0 or seq > max_seq: return failed_write("cursor_out_of_range")
+        val id = room_id + ":" + identity_id
+        val prior = self.cursor(room_id, identity_id)
+        if seq <= prior: return ok_write()
+        val existing = self.db.query("SELECT cursor_id FROM room_cursors WHERE cursor_id = " + q(id), []).unwrap()
+        val sql = if existing.len() == 0: "INSERT INTO room_cursors (cursor_id,room_id,identity_id,room_seq,advanced_at) VALUES (" + q(id) + "," + q(room_id) + "," + q(identity_id) + "," + seq.to_string() + "," + at.to_string() + ")" else: "UPDATE room_cursors SET room_seq = " + seq.to_string() + ", advanced_at = " + at.to_string() + " WHERE cursor_id = " + q(id)
+        if self.db.exec_sql(sql).is_err(): return failed_write("cursor_write_failed")
+        val message_rows = self.db.query("SELECT message_id FROM messages WHERE room_id = " + q(room_id) + " AND room_seq <= " + seq.to_string(), []).unwrap()
+        for row in message_rows:
+            val receipt = MessageReceipt(message_id: cell(row, 0), identity_id: identity_id,
+                state: ReceiptState.Read, evidence: ReceiptEvidence.LocalCursor,
+                occurred_at: at, detail: "canonical_cursor_advanced")
+            if not self.put_receipt(receipt).ok: return failed_write("read_receipt_write_failed")
+        ok_write()
+    fn cursor(room_id: text, identity_id: text) -> i64:
+        val rows = self.db.query("SELECT room_seq FROM room_cursors WHERE cursor_id = " + q(room_id + ":" + identity_id), []).unwrap()
+        if rows.len() == 0: 0 else: integer(rows[0], 0)
+    me accept_inbound(binding_id: text, event_id: text, at: i64) -> bool:
+        val id = binding_id + ":" + event_id
+        if self.db.query("SELECT dedup_id FROM inbound_dedup WHERE dedup_id = " + q(id), []).unwrap().len() > 0: return false
+        self.db.exec_sql("INSERT INTO inbound_dedup (dedup_id,binding_id,external_event_id,accepted_at) VALUES (" + q(id) + "," + q(binding_id) + "," + q(event_id) + "," + at.to_string() + ")").is_ok()
+    me enqueue_outbox(id: text, message_id: text, binding_id: text, payload: text, at: i64) -> StoreWriteResult:
+        val sql = "INSERT INTO outbox (delivery_id,message_id,binding_id,payload,state,attempts,available_at,last_error,updated_at) VALUES (" + q(id) + "," + q(message_id) + "," + q(binding_id) + "," + q(payload) + ",'queued',0," + at.to_string() + ",''," + at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("outbox_write_failed")
+    me enqueue_transport_request(request: StoredTransportRequest, at: i64) -> StoreWriteResult:
+        if request.delivery_id == "" or request.message_id == "" or request.binding_id == "":
+            return failed_write("invalid_transport_request")
+        if not request.credential_ref.starts_with("secret://"):
+            return failed_write("secret_reference_required")
+        for header in request.headers:
+            if header.to_lower().starts_with("authorization:"):
+                return failed_write("authorization_header_must_not_be_persisted")
+        self.db.exec_sql("BEGIN").unwrap()
+        val queued = self.enqueue_outbox(request.delivery_id, request.message_id,
+            request.binding_id, "credential_safe_http_request", at)
+        if not queued.ok:
+            self.db.exec_sql("ROLLBACK")
+            return queued
+        val sql = "INSERT INTO transport_requests (delivery_id,method,url_template,headers,body,credential_ref,credential_mode,idempotency_key) VALUES (" +
+            q(request.delivery_id) + "," + q(request.method) + "," + q(request.url_template) + "," +
+            q(pack(request.headers)) + "," + q(request.body) + "," + q(request.credential_ref) + "," +
+            q(request.credential_mode) + "," + q(request.idempotency_key) + ")"
+        if self.db.exec_sql(sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            return failed_write("transport_request_write_failed")
+        val event = StoredCanonicalEvent(event_id: "delivery:" + request.delivery_id + ":queued",
+            workspace_id: "", aggregate_type: "delivery", aggregate_id: request.delivery_id,
+            event_kind: "transport_request_queued",
+            payload: pack([request.message_id, request.binding_id, request.method,
+                request.url_template, request.credential_ref, request.credential_mode]), occurred_at: at)
+        if not self.append_canonical_event(event).ok:
+            self.db.exec_sql("ROLLBACK")
+            return failed_write("canonical_event_write_failed")
+        self.db.exec_sql("COMMIT").unwrap()
+        ok_write()
+    fn queued_transport_requests(now: i64, limit: i64) -> [StoredTransportRequest]:
+        var cap = limit
+        if cap < 1: cap = 1
+        if cap > 1000: cap = 1000
+        val rows = self.db.query("SELECT delivery_id,message_id,binding_id FROM outbox WHERE state = 'queued' AND available_at <= " + now.to_string() + " ORDER BY available_at LIMIT " + cap.to_string(), []).unwrap()
+        var result: [StoredTransportRequest] = []
+        for row in rows:
+            val delivery_id = cell(row, 0)
+            val requests = self.db.query("SELECT method,url_template,headers,body,credential_ref,credential_mode,idempotency_key FROM transport_requests WHERE delivery_id = " + q(delivery_id), []).unwrap()
+            if requests.len() > 0:
+                val req = requests[0]
+                result.push(StoredTransportRequest(delivery_id: delivery_id, message_id: cell(row, 1),
+                    binding_id: cell(row, 2), method: cell(req, 0), url_template: cell(req, 1),
+                    headers: unpack(cell(req, 2)), body: cell(req, 3), credential_ref: cell(req, 4),
+                    credential_mode: cell(req, 5), idempotency_key: cell(req, 6)))
+        result
+    me mark_outbox_attempt(id: text, reason: text, next_at: i64, max_attempts: i64, at: i64) -> StoreWriteResult:
+        val rows = self.db.query("SELECT message_id,binding_id,payload,attempts FROM outbox WHERE delivery_id = " + q(id), []).unwrap()
+        if rows.len() == 0: return failed_write("delivery_not_found")
+        val attempts = integer(rows[0], 3) + 1
+        val state = if attempts >= max_attempts: "dead_letter" else: "queued"
+        self.db.exec_sql("UPDATE outbox SET state = "+q(state)+", attempts = "+attempts.to_string()+", available_at = "+next_at.to_string()+", last_error = "+q(reason)+", updated_at = "+at.to_string()+" WHERE delivery_id = "+q(id)).unwrap()
+        if state == "dead_letter":
+            self.db.exec_sql("INSERT INTO dead_letters (delivery_id,message_id,binding_id,payload,attempts,final_error,failed_at) VALUES (" + q(id) + "," + q(cell(rows[0], 0)) + "," + q(cell(rows[0], 1)) + "," + q(cell(rows[0], 2)) + "," + attempts.to_string() + "," + q(reason) + "," + at.to_string() + ")").unwrap()
+        ok_write()
+    me mark_outbox_delivered(id: text, at: i64) -> StoreWriteResult:
+        val rows = self.db.query("SELECT delivery_id FROM outbox WHERE delivery_id = " + q(id), []).unwrap()
+        if rows.len() == 0: return failed_write("delivery_not_found")
+        if self.db.exec_sql("UPDATE outbox SET state = 'delivered', updated_at = " + at.to_string() +
+                ", last_error = '' WHERE delivery_id = " + q(id)).is_ok():
+            return ok_write()
+        failed_write("delivery_state_write_failed")
+    fn outbox_state(id: text) -> text:
+        val rows = self.db.query("SELECT state FROM outbox WHERE delivery_id = " + q(id), []).unwrap()
+        if rows.len() == 0: "" else: cell(rows[0], 0)
+    fn dead_letter_count() -> i64: integer(self.db.query("SELECT COUNT(*) FROM dead_letters", []).unwrap()[0], 0)
+    me append_audit(kind: text, actor_id: text, subject: text, detail: text, at: i64) -> StoreWriteResult:
+        val id = "audit-" + (self.audit_count() + 1).to_string()
+        val sql = "INSERT INTO audit_events (audit_id,event_kind,actor_id,subject_id,detail,occurred_at) VALUES (" + q(id) + "," + q(kind) + "," + q(actor_id) + "," + q(subject) + "," + q(detail) + "," + at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("audit_write_failed")
+    fn audit_count() -> i64: integer(self.db.query("SELECT COUNT(*) FROM audit_events", []).unwrap()[0], 0)
+
+export StoreWriteResult, AppendMessageResult, StoredHookEvent, StoredArtifact, StoredIdempotency
+export StoredHookCorrelation
+export StoredTransportBinding, StoredExternalRef
+export StoredTransportRequest
+export StoredCanonicalEvent
+export StoredTaskEvent
+export PureSqlMessagingStore

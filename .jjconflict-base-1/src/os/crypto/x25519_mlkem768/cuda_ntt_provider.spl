@@ -1,0 +1,506 @@
+# Persistent CUDA batch provider for the ML-KEM forward/inverse NTT candidate.
+# Production hybrid dispatch does not select this provider until its complete
+# ML-KEM pipeline and promotion evidence pass.
+
+mod os.crypto.x25519_mlkem768.cuda_ntt_provider
+
+use std.gc_async_mut.crypto_accel.cuda_session.{CryptoCudaSession}
+use std.gc_async_mut.cuda.{CUDA_SUCCESS}
+use std.sffi.io.{file_read_text, file_read_bytes, file_size}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use os.crypto.ml_kem_kpke.{MlKemNttBatchProvider}
+use os.crypto.x25519_mlkem768.cuda_ntt_unsafe.{
+    cuda_ntt_unsafe_alloc, cuda_ntt_unsafe_free, cuda_ntt_unsafe_clear,
+    cuda_ntt_unsafe_write_input, cuda_ntt_unsafe_write_launch_args,
+    cuda_ntt_unsafe_read_i32s}
+use os.crypto.x25519_mlkem768.cache_identity.{
+    X25519MlKem768CacheIdentity, x25519_mlkem768_cache_identity,
+    x25519_mlkem768_cache_bind, x25519_mlkem768_cache_bind_device}
+use os.crypto.x25519_mlkem768.artifact_snapshot_admission.{
+    x25519_mlkem768_artifact_size_admitted,
+    x25519_mlkem768_artifact_read_exact}
+use os.crypto.x25519_mlkem768.gpu_lifecycle_snapshot.{
+    X25519MlKem768GpuLifecycleSnapshot,
+    x25519_mlkem768_gpu_lifecycle_snapshot}
+
+val X25519_MLKEM768_CUDA_NTT_FORWARD_ENTRY: text = "x25519_mlkem768_ntt_forward"
+val X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY: text = "x25519_mlkem768_ntt_inverse"
+val X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256: text =
+    "e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa"
+val X25519_MLKEM768_CUDA_NTT_MAX_BATCH: i64 = 65535
+val _X25519_MLKEM768_PAIRED_CAPACITY_BYTES: i64 = 6 * 256 * 4
+val _CUDA_NTT_MAX_SOURCE_BYTES: i64 = 16777216
+val _CUDA_NTT_MAX_ARTIFACT_BYTES: i64 = 268435456
+val _CUDA_NTT_ARG_BYTES: i64 = 24
+val _GPU_LIFECYCLE_COUNTER_MAX: i64 = 9223372036854775807
+
+struct X25519MlKem768CudaNttResult:
+    completed: bool
+    reason: text
+    values: list
+    source_digest: text
+    artifact_digest: text
+    device_identity: i64
+    compiled: bool
+    submitted: bool
+    fence_completed: bool
+    device_readback: bool
+    kernel_invocations: i64
+
+fn _cuda_ntt_failure(reason: text, source_digest: text,
+        artifact_digest: text,
+        compiled: bool, submitted: bool) -> X25519MlKem768CudaNttResult:
+    X25519MlKem768CudaNttResult(
+        completed: false, reason: reason, values: [],
+        source_digest: source_digest, artifact_digest: artifact_digest,
+        device_identity: 0, compiled: compiled, submitted: submitted,
+        fence_completed: false, device_readback: false,
+        kernel_invocations: 0)
+
+fn _cuda_ntt_u32_input(values: list) -> [u32]:
+    var out: [u32] = []
+    var i: i64 = 0
+    while i < values.len():
+        out.push(values.get(i).to_u32())
+        i = i + 1
+    out
+
+fn _cuda_ntt_i32_values_valid(values: list) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        val value = values.get(i)
+        if value < -2147483648 or value > 2147483647:
+            return false
+        i = i + 1
+    true
+
+class X25519MlKem768CudaNttExecutor:
+    session: CryptoCudaSession
+    kernel_path: text
+    source: text
+    source_digest: text
+    expected_source_digest: text
+    artifact_path: text
+    artifact_bytes: [u8]
+    artifact_digest: text
+    expected_artifact_digest: text
+    cache_identity: X25519MlKem768CacheIdentity
+    use_binary: bool
+    closed: bool
+    kernel_invocations: i64
+    transfer_count: i64
+    launch_count: i64
+    synchronization_count: i64
+    readback_count: i64
+    fence_completed: bool
+    device_identity: i64
+    input_device: i64
+    output_device: i64
+    input_host: i64
+    output_host: i64
+    values_ptr: i64
+    args_ptr: i64
+    capacity_bytes: i64
+
+    fn lifecycle_snapshot() -> X25519MlKem768GpuLifecycleSnapshot:
+        x25519_mlkem768_gpu_lifecycle_snapshot(
+            self.transfer_count, self.launch_count,
+            self.synchronization_count, self.readback_count,
+            self.kernel_invocations)
+
+    static fn create(kernel_path: text) -> X25519MlKem768CudaNttExecutor:
+        X25519MlKem768CudaNttExecutor.create_for_device(kernel_path, 0)
+
+    static fn create_for_device(kernel_path: text,
+            device_ordinal: i64) -> X25519MlKem768CudaNttExecutor:
+        val source_size = file_size(kernel_path)
+        val source_admitted = x25519_mlkem768_artifact_size_admitted(
+            source_size, _CUDA_NTT_MAX_SOURCE_BYTES)
+        val source_read = if source_admitted:
+            file_read_text(kernel_path)
+        else:
+            ""
+        val source = if x25519_mlkem768_artifact_read_exact(
+                source_admitted, source_size, source_read.len().to_i64()):
+            source_read
+        else:
+            ""
+        val source_digest = if source == "": "" else: sha256_text(source)
+        X25519MlKem768CudaNttExecutor(
+            session: CryptoCudaSession.create_for_device(device_ordinal),
+            kernel_path: kernel_path,
+            source: source,
+            source_digest: source_digest,
+            expected_source_digest: X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256,
+            artifact_path: "", artifact_bytes: [], artifact_digest: "",
+            expected_artifact_digest: "",
+            cache_identity: x25519_mlkem768_cache_identity(
+                "cuda", source_digest, ""),
+            use_binary: false,
+            closed: false, kernel_invocations: 0,
+            transfer_count: 0, launch_count: 0,
+            synchronization_count: 0, readback_count: 0,
+            fence_completed: false, device_identity: 0,
+            input_device: 0, output_device: 0, input_host: 0,
+            output_host: 0, values_ptr: 0, args_ptr: 0,
+            capacity_bytes: 0)
+
+    static fn create_binary(artifact_path: text,
+            expected_artifact_digest: text) -> X25519MlKem768CudaNttExecutor:
+        X25519MlKem768CudaNttExecutor.create_binary_for_device(
+            artifact_path, expected_artifact_digest, 0)
+
+    static fn create_binary_for_device(artifact_path: text,
+            expected_artifact_digest: text,
+            device_ordinal: i64) -> X25519MlKem768CudaNttExecutor:
+        val artifact_size = file_size(artifact_path)
+        val artifact_admitted = x25519_mlkem768_artifact_size_admitted(
+            artifact_size, _CUDA_NTT_MAX_ARTIFACT_BYTES)
+        val artifact_read = if artifact_admitted:
+            file_read_bytes(artifact_path)
+        else:
+            []
+        val artifact_bytes = if x25519_mlkem768_artifact_read_exact(
+                artifact_admitted, artifact_size,
+                artifact_read.len().to_i64()):
+            artifact_read
+        else:
+            []
+        val artifact_digest = if artifact_bytes.len() == 0:
+            ""
+        else:
+            sha256_u8_hex(artifact_bytes)
+        X25519MlKem768CudaNttExecutor(
+            session: CryptoCudaSession.create_for_device(device_ordinal),
+            kernel_path: artifact_path,
+            source: "",
+            # A compiled binary digest does not prove which source produced it.
+            source_digest: "",
+            expected_source_digest: X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256,
+            artifact_path: artifact_path, artifact_bytes: artifact_bytes,
+            artifact_digest: artifact_digest,
+            expected_artifact_digest: expected_artifact_digest,
+            cache_identity: x25519_mlkem768_cache_identity(
+                "cuda", "", artifact_digest),
+            use_binary: true, closed: false, kernel_invocations: 0,
+            transfer_count: 0, launch_count: 0,
+            synchronization_count: 0, readback_count: 0,
+            fence_completed: false, device_identity: 0,
+            input_device: 0, output_device: 0, input_host: 0,
+            output_host: 0, values_ptr: 0, args_ptr: 0,
+            capacity_bytes: 0)
+
+    me bind_cache_contract(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        if self.closed:
+            return "cuda-ntt-executor-closed"
+        if self.use_binary:
+            if (not self.artifact_path.ends_with(".cubin") and
+                    not self.artifact_path.ends_with(".fatbin")):
+                return "cuda-ntt-binary-extension-invalid"
+            if self.artifact_digest == "":
+                return "cuda-ntt-binary-artifact-invalid"
+            if (self.expected_artifact_digest == "" or
+                    self.artifact_digest != self.expected_artifact_digest):
+                return "cuda-ntt-binary-digest-mismatch"
+        else:
+            if self.source_digest == "":
+                return "cuda-ntt-artifact-invalid"
+            if self.source_digest != self.expected_source_digest:
+                return "cuda-ntt-artifact-digest-mismatch"
+            val has_forward_entry = self.source.contains(
+                ".entry " + X25519_MLKEM768_CUDA_NTT_FORWARD_ENTRY + "(")
+            val has_inverse_entry = self.source.contains(
+                ".entry " + X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY + "(")
+            if not has_forward_entry or not has_inverse_entry:
+                return "cuda-ntt-artifact-invalid"
+        match x25519_mlkem768_cache_bind(
+                self.cache_identity, implementation_version,
+                profile_version, configuration_digest):
+            case Ok(bound):
+                self.cache_identity = bound
+                ""
+            case Err(reason): reason
+
+    me warmup() -> text:
+        """Validate and load the pinned PTX/CUBIN without dispatching work."""
+        self._ensure_ready()
+
+    me prepare_paired_measurement(implementation_version: text,
+            profile_version: text, configuration_digest: text) -> text:
+        """Bind, load, and allocate before a paired candidate timer starts."""
+        val cache_reason = self.bind_cache_contract(
+            implementation_version, profile_version, configuration_digest)
+        if cache_reason != "": return cache_reason
+        val ready_reason = self._ensure_ready()
+        if ready_reason != "": return ready_reason
+        if not self._ensure_capacity(
+                _X25519_MLKEM768_PAIRED_CAPACITY_BYTES):
+            return "cuda-ntt-allocation-failed"
+        ""
+
+    me _ensure_ready() -> text:
+        if self.closed:
+            return "cuda-ntt-executor-closed"
+        if self.use_binary:
+            if (not self.artifact_path.ends_with(".cubin") and
+                    not self.artifact_path.ends_with(".fatbin")):
+                return "cuda-ntt-binary-extension-invalid"
+            if self.artifact_bytes.len() == 0:
+                return "cuda-ntt-binary-artifact-invalid"
+            if (self.expected_artifact_digest == "" or
+                    self.artifact_digest != self.expected_artifact_digest):
+                return "cuda-ntt-binary-digest-mismatch"
+        else:
+            if self.source == "":
+                return "cuda-ntt-artifact-invalid"
+            if self.source_digest != self.expected_source_digest:
+                return "cuda-ntt-artifact-digest-mismatch"
+            val has_forward_entry = self.source.contains(
+                ".entry " + X25519_MLKEM768_CUDA_NTT_FORWARD_ENTRY + "(")
+            val has_inverse_entry = self.source.contains(
+                ".entry " + X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY + "(")
+            if not has_forward_entry or not has_inverse_entry:
+                return "cuda-ntt-artifact-invalid"
+        if not self.session.is_valid() and self.session.init() != CUDA_SUCCESS:
+            return "cuda-ntt-init-failed"
+        if self.session.activate() != CUDA_SUCCESS:
+            self.session.shutdown()
+            return "cuda-ntt-context-activate-failed"
+        if self.session.module == 0:
+            val loaded = if self.use_binary:
+                self.session.load_module_binary(self.artifact_bytes)
+            else:
+                self.session.load_module(self.source)
+            if loaded <= 0:
+                self.session.shutdown()
+                return "cuda-ntt-module-load-failed"
+        val identity = self.session.identity()
+        if identity <= 0:
+            self.session.shutdown()
+            return "cuda-ntt-device-identity-unavailable"
+        if self.cache_identity.bound:
+            match x25519_mlkem768_cache_bind_device(
+                    self.cache_identity, identity):
+                case Ok(bound): self.cache_identity = bound
+                case Err(reason):
+                    self._release_buffers()
+                    self.session.shutdown()
+                    self.device_identity = 0
+                    self.closed = true
+                    return reason
+        self.device_identity = identity
+        ""
+
+    me _release_buffers():
+        # When synchronization fails, retain every device and host dependency
+        # together with the context; clearing handles would make safe reaping
+        # impossible and freeing launch-adjacent storage could race the driver.
+        if self.session.completion_unknown:
+            return
+        if self.input_device > 0 and not self.session.completion_unknown:
+            val _clear_input = self.session.clear(
+                self.input_device, self.capacity_bytes)
+            self.session.free(self.input_device)
+        if self.output_device > 0 and not self.session.completion_unknown:
+            val _clear_output = self.session.clear(
+                self.output_device, self.capacity_bytes)
+            self.session.free(self.output_device)
+        val _clear_input_host = cuda_ntt_unsafe_clear(
+            self.input_host, self.capacity_bytes)
+        val _clear_output_host = cuda_ntt_unsafe_clear(
+            self.output_host, self.capacity_bytes)
+        if self.input_host != 0:
+            cuda_ntt_unsafe_free(self.input_host, self.capacity_bytes)
+        if self.output_host != 0:
+            cuda_ntt_unsafe_free(self.output_host, self.capacity_bytes)
+        if self.values_ptr != 0:
+            cuda_ntt_unsafe_free(self.values_ptr, _CUDA_NTT_ARG_BYTES)
+        if self.args_ptr != 0:
+            cuda_ntt_unsafe_free(self.args_ptr, _CUDA_NTT_ARG_BYTES)
+        self.input_device = 0
+        self.output_device = 0
+        self.input_host = 0
+        self.output_host = 0
+        self.values_ptr = 0
+        self.args_ptr = 0
+        self.capacity_bytes = 0
+
+    me _ensure_capacity(byte_count: i64) -> bool:
+        val device_buffers_ready = self.input_device > 0 and self.output_device > 0
+        val host_buffers_ready = self.input_host != 0 and self.output_host != 0
+        val argument_buffers_ready = self.values_ptr != 0 and self.args_ptr != 0
+        val capacity_ready = self.capacity_bytes >= byte_count
+        val data_buffers_ready = device_buffers_ready and host_buffers_ready
+        if capacity_ready and data_buffers_ready and argument_buffers_ready:
+            return true
+        self._release_buffers()
+        self.capacity_bytes = byte_count
+        self.input_device = self.session.alloc(byte_count)
+        self.output_device = self.session.alloc(byte_count)
+        self.input_host = cuda_ntt_unsafe_alloc(byte_count)
+        self.output_host = cuda_ntt_unsafe_alloc(byte_count)
+        self.values_ptr = cuda_ntt_unsafe_alloc(_CUDA_NTT_ARG_BYTES)
+        self.args_ptr = cuda_ntt_unsafe_alloc(_CUDA_NTT_ARG_BYTES)
+        val device_allocation_failed = self.input_device <= 0 or self.output_device <= 0
+        val host_allocation_failed = self.input_host == 0 or self.output_host == 0
+        val argument_allocation_failed = self.values_ptr == 0 or self.args_ptr == 0
+        if device_allocation_failed or host_allocation_failed or argument_allocation_failed:
+            self._release_buffers()
+            return false
+        true
+
+    me _clear_operation_buffers():
+        if not self.session.completion_unknown:
+            val _clear_input = self.session.clear(
+                self.input_device, self.capacity_bytes)
+            val _clear_output = self.session.clear(
+                self.output_device, self.capacity_bytes)
+        val _clear_input_host = cuda_ntt_unsafe_clear(
+            self.input_host, self.capacity_bytes)
+        val _clear_output_host = cuda_ntt_unsafe_clear(
+            self.output_host, self.capacity_bytes)
+
+    me _lifecycle_counters_have_capacity() -> bool:
+        self.transfer_count < _GPU_LIFECYCLE_COUNTER_MAX and
+            self.launch_count < _GPU_LIFECYCLE_COUNTER_MAX and
+            self.synchronization_count < _GPU_LIFECYCLE_COUNTER_MAX and
+            self.readback_count < _GPU_LIFECYCLE_COUNTER_MAX and
+            self.kernel_invocations < _GPU_LIFECYCLE_COUNTER_MAX
+
+    me shutdown():
+        self.closed = true
+        self._release_buffers()
+        self.session.shutdown()
+
+fn _cuda_ntt_execute(
+        executor: X25519MlKem768CudaNttExecutor,
+        polynomials: list, entry: text) -> X25519MlKem768CudaNttResult:
+    # This flag describes only the latest operation attempt.  A validation
+    # failure after an earlier successful dispatch must not retain stale fence
+    # evidence that a caller could mistake for completion of the failed work.
+    executor.fence_completed = false
+    if polynomials.len() == 0 or polynomials.len() % 256 != 0:
+        return _cuda_ntt_failure("cuda-ntt-input-size-invalid",
+            executor.source_digest, executor.artifact_digest, false, false)
+    if not _cuda_ntt_i32_values_valid(polynomials):
+        return _cuda_ntt_failure("cuda-ntt-input-value-out-of-range",
+            executor.source_digest, executor.artifact_digest, false, false)
+    val batch = polynomials.len() / 256
+    if batch > X25519_MLKEM768_CUDA_NTT_MAX_BATCH:
+        return _cuda_ntt_failure("cuda-ntt-batch-too-large",
+            executor.source_digest, executor.artifact_digest, false, false)
+    if not executor._lifecycle_counters_have_capacity():
+        executor.closed = true
+        return _cuda_ntt_failure("cuda-ntt-lifecycle-counter-overflow",
+            executor.source_digest, executor.artifact_digest, false, false)
+    val ready_reason = executor._ensure_ready()
+    if ready_reason != "":
+        return _cuda_ntt_failure(ready_reason, executor.source_digest,
+            executor.artifact_digest, false, false)
+
+    val byte_count = polynomials.len() * 4
+    if not executor._ensure_capacity(byte_count):
+        return _cuda_ntt_failure("cuda-ntt-allocation-failed",
+            executor.source_digest, executor.artifact_digest, true, false)
+
+    val input_values = _cuda_ntt_u32_input(polynomials)
+    if not cuda_ntt_unsafe_write_input(
+            executor.input_host, input_values, input_values.len().to_i64()):
+        executor._clear_operation_buffers()
+        return _cuda_ntt_failure("cuda-ntt-host-write-invalid",
+            executor.source_digest, executor.artifact_digest, true, false)
+    if executor.session.upload(executor.input_device, executor.input_host,
+            byte_count) != CUDA_SUCCESS:
+        executor._clear_operation_buffers()
+        return _cuda_ntt_failure("cuda-ntt-upload-failed",
+            executor.source_digest, executor.artifact_digest, true, false)
+    executor.transfer_count = executor.transfer_count + 1
+
+    if not cuda_ntt_unsafe_write_launch_args(
+            executor.values_ptr, executor.args_ptr, executor.input_device,
+            executor.output_device, batch):
+        executor._clear_operation_buffers()
+        return _cuda_ntt_failure("cuda-ntt-launch-arguments-invalid",
+            executor.source_digest, executor.artifact_digest, true, false)
+    val launched = executor.session.launch(
+        entry, batch, 256, executor.args_ptr) == CUDA_SUCCESS
+    if launched:
+        executor.launch_count = executor.launch_count + 1
+    val synced = launched and executor.session.sync() == CUDA_SUCCESS
+    if synced:
+        executor.synchronization_count = executor.synchronization_count + 1
+    if not synced:
+        executor.shutdown()
+        return _cuda_ntt_failure("cuda-ntt-submit-or-sync-failed",
+            executor.source_digest, executor.artifact_digest, true, launched)
+    val copied = executor.session.readback(executor.output_host,
+        executor.output_device,
+        byte_count) == CUDA_SUCCESS
+    if copied:
+        executor.readback_count = executor.readback_count + 1
+    val values = if copied:
+        cuda_ntt_unsafe_read_i32s(executor.output_host, polynomials.len())
+    else:
+        []
+    val identity = executor.session.identity()
+    executor._clear_operation_buffers()
+    if not copied or values.len() != polynomials.len() or identity <= 0:
+        val failure_reason = if not copied:
+            "cuda-ntt-readback-failed"
+        elif identity <= 0:
+            "cuda-ntt-device-identity-unavailable"
+        else:
+            "cuda-ntt-readback-size-mismatch"
+        return _cuda_ntt_failure(failure_reason,
+            executor.source_digest, executor.artifact_digest, true, true)
+    if executor.cache_identity.bound:
+        match x25519_mlkem768_cache_bind_device(
+                executor.cache_identity, identity):
+            case Ok(bound): executor.cache_identity = bound
+            case Err(reason):
+                return _cuda_ntt_failure(reason, executor.source_digest,
+                    executor.artifact_digest, true, true)
+    executor.kernel_invocations = executor.kernel_invocations + 1
+    executor.fence_completed = true
+    executor.device_identity = identity
+    X25519MlKem768CudaNttResult(
+        completed: true, reason: "ok", values: values,
+        source_digest: executor.source_digest,
+        artifact_digest: executor.artifact_digest,
+        device_identity: identity,
+        compiled: true, submitted: true, fence_completed: true,
+        device_readback: true, kernel_invocations: 1)
+
+fn x25519_mlkem768_cuda_ntt_execute(
+        executor: X25519MlKem768CudaNttExecutor,
+        polynomials: list) -> X25519MlKem768CudaNttResult:
+    _cuda_ntt_execute(executor, polynomials,
+        X25519_MLKEM768_CUDA_NTT_FORWARD_ENTRY)
+
+fn x25519_mlkem768_cuda_intt_execute(
+        executor: X25519MlKem768CudaNttExecutor,
+        polynomials: list) -> X25519MlKem768CudaNttResult:
+    _cuda_ntt_execute(executor, polynomials,
+        X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY)
+
+impl MlKemNttBatchProvider for X25519MlKem768CudaNttExecutor:
+
+    fn forward(polynomials: list) -> Result<list, text>:
+        val result = x25519_mlkem768_cuda_ntt_execute(self, polynomials)
+        if not result.completed:
+            return Err(result.reason)
+        Ok(result.values)
+
+    fn inverse(polynomials: list) -> Result<list, text>:
+        val result = x25519_mlkem768_cuda_intt_execute(self, polynomials)
+        if not result.completed:
+            return Err(result.reason)
+        Ok(result.values)
+
+export X25519MlKem768CudaNttResult, X25519MlKem768CudaNttExecutor
+export x25519_mlkem768_cuda_ntt_execute, x25519_mlkem768_cuda_intt_execute
+export X25519_MLKEM768_CUDA_NTT_FORWARD_ENTRY
+export X25519_MLKEM768_CUDA_NTT_INVERSE_ENTRY
+export X25519_MLKEM768_CUDA_NTT_SOURCE_SHA256
+export X25519_MLKEM768_CUDA_NTT_MAX_BATCH

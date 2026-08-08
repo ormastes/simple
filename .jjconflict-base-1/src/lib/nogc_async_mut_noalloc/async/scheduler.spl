@@ -1,0 +1,352 @@
+# Noalloc Scheduler - Fixed-Slot Cooperative Task Scheduler
+#
+# Fixed array of MAX_TASKS task slots with bitmask completion tracking.
+# No heap allocation — all state is inline. Cooperative polling model.
+#
+# Usage:
+#   val sched = NoallocScheduler.new()
+#   val id = sched.spawn(task_fn_handle, 0)
+#   sched.run_until_complete()
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val MAX_TASKS: i32 = 16
+
+# ============================================================================
+# TaskSlot - Per-Task State
+# ============================================================================
+
+class TaskSlot:
+    """State for a single scheduled task.
+
+    task_fn: Function handle (i64) to poll. In interpreter mode,
+             this is used as an identifier; actual dispatch is
+             handled by the scheduler's poll callback.
+    result: Task result value (set when complete).
+    is_active: True if slot is occupied by a live task.
+    is_complete: True if task has finished.
+    priority: 0=highest, 3=lowest. Higher priority tasks polled first.
+    deadline: Ravenscar-subset field. Absolute tick value (as returned by
+              timer_now() in async/timer.spl) by which the task must
+              complete. 0 means "no deadline set" (aperiodic/best-effort).
+    period: Ravenscar-subset field. Release period in ticks for a
+            periodic task. 0 means "not periodic" (one-shot task).
+    """
+    task_fn: i64
+    result: i64
+    is_active: bool
+    is_complete: bool
+    priority: i32
+    deadline: i64
+    period: i64
+
+# ============================================================================
+# NoallocScheduler - Cooperative Scheduler
+# ============================================================================
+
+class NoallocScheduler:
+    """Fixed-slot cooperative scheduler.
+
+    Maintains up to MAX_TASKS tasks. Each tick polls all active,
+    incomplete tasks in priority order. Tasks signal completion
+    by returning PollResult.ready().
+    """
+    tasks: [TaskSlot]
+    active_count: i32
+    completed_mask: i64     # Bitmask: bit i set = task i complete
+    last_seen_mask: i64     # completed_mask as observed at the end of the
+                             # previous run_one_tick() call — lets run_one_tick
+                             # detect a completion that happened via an
+                             # external complete_task() call in between ticks
+                             # (the only completion path available in
+                             # interpreter mode; see run_one_tick() docstring).
+
+    static fn new() -> NoallocScheduler:
+        """Create a scheduler with empty task slots."""
+        var tasks: [TaskSlot] = []
+        var i = 0
+        while i < MAX_TASKS:
+            tasks.push(TaskSlot(
+                task_fn: 0,
+                result: 0,
+                is_active: false,
+                is_complete: false,
+                priority: 3,
+                deadline: 0,
+                period: 0
+            ))
+            i = i + 1
+        NoallocScheduler(
+            tasks: tasks,
+            active_count: 0,
+            completed_mask: 0,
+            last_seen_mask: 0
+        )
+
+    me spawn(task_fn: i64, priority: i32) -> i32:
+        """Register a new task. Returns task ID (slot index), or -1 if full."""
+        var i = 0
+        while i < MAX_TASKS:
+            if not self.tasks[i].is_active:
+                self.tasks[i] = TaskSlot(
+                    task_fn: task_fn,
+                    result: 0,
+                    is_active: true,
+                    is_complete: false,
+                    priority: priority,
+                    deadline: 0,
+                    period: 0
+                )
+                self.active_count = self.active_count + 1
+                return i
+            i = i + 1
+        -1
+
+    me spawn_periodic(task_fn: i64, priority: i32, deadline: i64, period: i64) -> i32:
+        """Register a new Ravenscar-subset periodic/deadline-bound task.
+
+        Same slot allocation as spawn(), but also records a deadline
+        (absolute tick value, see timer_now() in async/timer.spl) and a
+        release period (ticks). Returns task ID (slot index), or -1 if full.
+        """
+        val task_id = self.spawn(task_fn, priority)
+        if task_id >= 0:
+            self.set_deadline(task_id, deadline, period)
+        task_id
+
+    me set_deadline(task_id: i32, deadline: i64, period: i64):
+        """Set/update the deadline and period of an already-registered task."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return
+        val slot = self.tasks[task_id]
+        if not slot.is_active:
+            return
+        self.tasks[task_id] = TaskSlot(
+            task_fn: slot.task_fn,
+            result: slot.result,
+            is_active: slot.is_active,
+            is_complete: slot.is_complete,
+            priority: slot.priority,
+            deadline: deadline,
+            period: period
+        )
+
+    fn task_deadline(task_id: i32) -> i64:
+        """Return the deadline (absolute ticks) of a task. 0 if unset/invalid."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return 0
+        self.tasks[task_id].deadline
+
+    fn task_period(task_id: i32) -> i64:
+        """Return the release period (ticks) of a task. 0 if unset/invalid."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return 0
+        self.tasks[task_id].period
+
+    me complete_task(task_id: i32, value: i64):
+        """Mark a task as complete with the given result value."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return
+        val slot = self.tasks[task_id]
+        if not slot.is_active:
+            return
+        self.tasks[task_id] = TaskSlot(
+            task_fn: slot.task_fn,
+            result: value,
+            is_active: true,
+            is_complete: true,
+            priority: slot.priority,
+            deadline: slot.deadline,
+            period: slot.period
+        )
+        # Set bit in completion mask
+        val bit: i64 = 1
+        self.completed_mask = self.completed_mask | (bit << task_id)
+
+    me cancel(task_id: i32):
+        """Cancel a task, freeing its slot."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return
+        val slot = self.tasks[task_id]
+        if not slot.is_active:
+            return
+        self.tasks[task_id] = TaskSlot(
+            task_fn: 0,
+            result: slot.result,
+            is_active: false,
+            is_complete: false,
+            priority: slot.priority,
+            deadline: slot.deadline,
+            period: slot.period
+        )
+        self.active_count = self.active_count - 1
+        # Clear this task's completion bit: if a future spawn() reuses this
+        # slot index and completes, the OR in complete_task() would
+        # otherwise be a no-op against a stale set bit, making
+        # completed_mask == last_seen_mask and run_one_tick() wrongly
+        # report false on a genuine new completion.
+        val bit: i64 = 1
+        self.completed_mask = self.completed_mask & ~(bit << task_id)
+        # Keep last_seen_mask in sync too — otherwise clearing a bit here
+        # makes completed_mask < last_seen_mask, and the very next
+        # run_one_tick() would see a spurious difference and report a
+        # completion that didn't actually happen on that tick.
+        self.last_seen_mask = self.last_seen_mask & ~(bit << task_id)
+
+    fn is_task_complete(task_id: i32) -> bool:
+        """Check if a specific task is complete."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return false
+        self.tasks[task_id].is_complete
+
+    fn task_result(task_id: i32) -> i64:
+        """Get the result of a completed task. Returns 0 if not complete."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return 0
+        if not self.tasks[task_id].is_complete:
+            return 0
+        self.tasks[task_id].result
+
+    me run_one_tick() -> bool:
+        """Poll all active, incomplete tasks once.
+
+        Returns true if any task made progress (completed since the last
+        call to run_one_tick() — see below for why "since the last call"
+        instead of "strictly inside this call").
+        Tasks are polled in priority order (lower number = higher priority).
+
+        Completion detection: compares completed_mask against
+        last_seen_mask, which was recorded as of the end of the *previous*
+        run_one_tick() call. Any difference means at least one task
+        completed in between — whether that happened via a real
+        poll-and-complete call inside the loop below, or (the only path
+        available in interpreter mode, since task_fn handles can't be
+        dispatched from within .spl) via complete_task() invoked
+        externally by the application loop before this tick was polled.
+        Snapshotting completed_mask at *entry* to this same call would not
+        work: complete_task() always runs strictly before the next
+        run_one_tick() call returns, so an entry-snapshot would already
+        include the completion and see no change. last_seen_mask carries
+        the boundary across calls instead, so the very next tick correctly
+        reports the completion that happened since the previous one.
+        """
+        val mask_before = self.last_seen_mask
+        var prio = 0
+        while prio <= 3:
+            var i = 0
+            while i < MAX_TASKS:
+                if (self.tasks[i].is_active and
+                    not self.tasks[i].is_complete and
+                    self.tasks[i].priority == prio):
+                    # In a real embedded system, this would call the poll function.
+                    # In interpreter mode, tasks must be completed externally
+                    # via complete_task() since we can't invoke function handles.
+                    #
+                    # The scheduler's role is tracking and prioritization.
+                    # Actual polling is done by the application loop.
+                    0
+                i = i + 1
+            prio = prio + 1
+        val any_completed = self.completed_mask != mask_before
+        self.last_seen_mask = self.completed_mask
+        any_completed
+
+    me run_until_complete() -> i32:
+        """Run scheduler until all tasks complete.
+
+        Returns number of completed tasks.
+        Note: In interpreter mode, tasks must be externally completed
+        via complete_task(). This method polls until no active tasks remain.
+        """
+        var iterations = 0
+        val max_iterations = 10000    # Safety limit
+        while self.has_active_incomplete() and iterations < max_iterations:
+            self.run_one_tick()
+            iterations = iterations + 1
+        self.count_completed()
+
+    fn has_active_incomplete() -> bool:
+        """Check if any tasks are active but not yet complete."""
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and not self.tasks[i].is_complete:
+                return true
+            i = i + 1
+        false
+
+    fn is_deadline_missed(task_id: i32, now: i64) -> bool:
+        """Ravenscar-subset deadline-miss check for one task.
+
+        Report-only (not enforced): true when the task is still active and
+        incomplete but its deadline (absolute ticks, 0 = no deadline set)
+        has already passed as of `now` (see timer_now() in async/timer.spl).
+        """
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return false
+        val slot = self.tasks[task_id]
+        if not slot.is_active or slot.is_complete:
+            return false
+        if slot.deadline == 0:
+            return false
+        now > slot.deadline
+
+    fn count_deadline_misses(now: i64) -> i32:
+        """Count active, incomplete tasks whose deadline has passed as of `now`.
+
+        Report-only Ravenscar-subset signal: does not cancel or otherwise
+        enforce anything, just surfaces how many tasks are currently missing
+        their deadline.
+        """
+        var count = 0
+        var i = 0
+        while i < MAX_TASKS:
+            if self.is_deadline_missed(i, now):
+                count = count + 1
+            i = i + 1
+        count
+
+    fn is_idle() -> bool:
+        """Check if scheduler has no active tasks."""
+        self.active_count == 0
+
+    fn task_count() -> i32:
+        """Return number of active tasks (including completed)."""
+        self.active_count
+
+    fn count_completed() -> i32:
+        """Count number of completed tasks."""
+        var count = 0
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and self.tasks[i].is_complete:
+                count = count + 1
+            i = i + 1
+        count
+
+    me cleanup_completed():
+        """Free slots of all completed tasks."""
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and self.tasks[i].is_complete:
+                val slot = self.tasks[i]
+                self.tasks[i] = TaskSlot(
+                    task_fn: 0,
+                    result: slot.result,
+                    is_active: false,
+                    is_complete: false,
+                    priority: slot.priority,
+                    deadline: slot.deadline,
+                    period: slot.period
+                )
+                self.active_count = self.active_count - 1
+                # Same rationale as cancel(): clear the bit so a future
+                # spawn() into this slot index doesn't inherit a stale
+                # completion bit that would make run_one_tick() blind to
+                # its next real completion.
+                val bit: i64 = 1
+                self.completed_mask = self.completed_mask & ~(bit << i)
+                self.last_seen_mask = self.last_seen_mask & ~(bit << i)
+            i = i + 1

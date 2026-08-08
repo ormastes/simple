@@ -1,0 +1,175 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+"""# Hosted Browser InputEvent Payload
+
+This scenario proves that committed UTF-8 text and deletion keys keep their
+InputEvent payload while crossing the hosted session, live DOM, JavaScript
+listener, Draw IR, and Engine2D boundaries.
+"""
+
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+fn input_event_color_count(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+describe "Hosted browser InputEvent payload":
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve UTF-8 insertion and deletion payloads through pixels":
+        step("Open and focus the hosted text control")
+        val html = (
+            "<style>body{{margin:0}}input{display:block;width:48px;height:20px}" +
+            "#probe{width:32px;height:24px;background-color:#ef4444}" +
+            "#probe.ok{{background-color:#2563eb}}</style>" +
+            "<input id='q' value='A' onchange=\"" +
+            "document.title=document.title+'change>'\">" +
+            "<div id='probe'></div><script>" +
+            "var q=document.getElementById('q');var redirected=false;" +
+            "var beforeBackwardNull=false;var inputBackwardNull=false;" +
+            "var beforeForwardNull=false;var inputForwardNull=false;" +
+            "var genericEventMissing=false;" +
+            "q.addEventListener('keydown',function(event){" +
+            "genericEventMissing=typeof event.data==='undefined'&&" +
+            "typeof event.inputType==='undefined'&&" +
+            "typeof event.isComposing==='undefined';});" +
+            "q.addEventListener('beforeinput',function(event){" +
+            "if(event.inputType==='deleteContentBackward'){" +
+            "beforeBackwardNull=event.data===null;}" +
+            "if(event.inputType==='deleteContentForward'){" +
+            "beforeForwardNull=event.data===null;}" +
+            "if(event.inputType==='insertText'&&!redirected){" +
+            "this.value='éY';this.selectionStart=2;" +
+            "this.selectionEnd=3;redirected=true;}" +
+            "document.title=document.title+'before:'+event.data+'|'+" +
+            "event.inputType+'|'+event.isComposing+'>';});" +
+            "q.addEventListener('input',function(event){" +
+            "if(event.inputType==='deleteContentBackward'){" +
+            "inputBackwardNull=event.data===null;}" +
+            "if(event.inputType==='deleteContentForward'){" +
+            "inputForwardNull=event.data===null;}" +
+            "document.title=document.title+'input:'+event.data+'|'+" +
+            "event.inputType+'|'+event.isComposing+'>';" +
+            "if(event.data==='한'&&event.inputType==='insertText'&&" +
+            "!event.isComposing){" +
+            "document.getElementById('probe').className='ok';}});" +
+            "</script>"
+        )
+        var session = HostedWebContentSession.create(23, html, 80, 64)
+        val before_pixels = session.render_to_pixels()
+        expect(input_event_color_count(
+            before_pixels, 0xFFEF4444u32
+        )).to_be_greater_than(0)
+        val _ = session.dispatch_pointer_at(1, 4, 4, true)
+        val _ = session.dispatch_pointer_at(2, 4, 4, false)
+        expect(session.last_target_id).to_equal("q")
+
+        step("Commit one UTF-8 insertion with exact InputEvent data")
+        val inserted = session.dispatch_text(3, "한")
+        expect(inserted.reason).to_equal("")
+        expect(session.browser.current_title).to_equal(
+            "before:한|insertText|false>input:한|insertText|false>"
+        )
+        expect(session.current_body_html()).to_contain("value=\"é한\"")
+        expect(session.browser.text_selection_anchor_byte).to_equal(5)
+        expect(session.browser.text_selection_focus_byte).to_equal(5)
+
+        step("Delete backward and forward before committing change")
+        val backspace = session.dispatch_key(4, 8, true)
+        expect(backspace.reason).to_equal("")
+        expect(session.browser.current_title).to_end_with(
+            "before:null|deleteContentBackward|false>" +
+            "input:null|deleteContentBackward|false>"
+        )
+        expect(session.current_body_html()).to_contain("value=\"é\"")
+        expect(session.browser.set_dom_text_selection("q", 0, 0)).to_be(true)
+        val deleted = session.dispatch_key(5, 46, true)
+        expect(deleted.reason).to_equal("")
+        expect(session.browser.current_title).to_end_with(
+            "before:null|deleteContentForward|false>" +
+            "input:null|deleteContentForward|false>"
+        )
+        expect(session.current_body_html()).to_contain("value=\"\"")
+        expect(session.browser.eval_script(
+            "document.title=document.title+'sentinels:'+" +
+            "beforeBackwardNull+'|'+inputBackwardNull+'|'+" +
+            "beforeForwardNull+'|'+inputForwardNull+'|'+" +
+            "genericEventMissing+'>'"
+        ).is_ok()).to_be(true)
+        expect(session.browser.current_title).to_end_with(
+            "sentinels:true|true|true|true|true>"
+        )
+        expect(session.browser.blur_dom_text_input("q").is_ok()).to_be(true)
+        expect(session.browser.current_title).to_equal(
+            "before:한|insertText|false>input:한|insertText|false>" +
+            "before:null|deleteContentBackward|false>" +
+            "input:null|deleteContentBackward|false>" +
+            "before:null|deleteContentForward|false>" +
+            "input:null|deleteContentForward|false>" +
+            "sentinels:true|true|true|true|true>change>"
+        )
+
+        val canceled_html = (
+            "<input id='canceled' value='A'><script>" +
+            "var canceled=document.getElementById('canceled');" +
+            "canceled.addEventListener('beforeinput',function(event){" +
+            "this.value='éZ';this.selectionStart=2;this.selectionEnd=3;" +
+            "document.title='canceled-before>';event.preventDefault();});" +
+            "canceled.addEventListener('input',function(event){" +
+            "document.title=document.title+'wrong-input>';});</script>"
+        )
+        var canceled = HostedWebContentSession.create(
+            24, canceled_html, 80, 40
+        )
+        val _ = canceled.dispatch_pointer_at(6, 4, 4, true)
+        val _ = canceled.dispatch_pointer_at(7, 4, 4, false)
+        val canceled_edit = canceled.dispatch_text(8, "한")
+        expect(canceled_edit.semantic_target_id).to_equal("canceled")
+        expect(canceled.browser.current_title).to_equal("canceled-before>")
+        expect(canceled.current_body_html()).to_contain("value=\"éZ\"")
+        expect(canceled.current_body_html().contains(
+            "data-input-dirty"
+        )).to_be(false)
+        expect(canceled.browser.text_selection_anchor_byte).to_equal(2)
+        expect(canceled.browser.text_selection_focus_byte).to_equal(3)
+        canceled.close()
+
+        step("Lower the listener mutation through Draw IR and Engine2D")
+        val document = session.browser.render_html_document()
+        val composition = WebRenderBackend.create(
+            "pure_simple", 80, 64
+        ).render_html_to_draw_ir(document)
+        var probe_found = false
+        var probe_color = 0u32
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.component_id == "probe":
+                    probe_found = true
+                    probe_color = command.color
+        expect(probe_found).to_be(true)
+        expect(probe_color).to_equal(0xFF2563EBu32)
+
+        val engine = Engine2dCompositorBackend.create_named(
+            80, 64, "software"
+        )
+        val rendered = engine.render_draw_ir_composition_resources(
+            composition, session.browser.image_resources
+        )
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.rendered_command_count).to_be_greater_than(0)
+        expect(input_event_color_count(
+            rendered.pixels, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        expect(input_event_color_count(
+            rendered.pixels, 0xFFEF4444u32
+        )).to_equal(0)
+        engine.shutdown()
+        session.close()

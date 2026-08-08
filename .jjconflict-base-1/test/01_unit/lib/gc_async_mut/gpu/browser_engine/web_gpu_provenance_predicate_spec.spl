@@ -1,0 +1,99 @@
+"""
+# The GPU Provenance Predicate, Pinned By Value
+
+## Overview
+
+A frame may be labelled GPU-rendered only when the readback proves a device
+produced it. All four conjuncts are load-bearing:
+
+    source == "device_readback" and backend_handle > 0
+        and device_identity > 0 and pixel_count == frame_pixels
+
+Until now this predicate was only ever observed *indirectly*, through the
+presenter's decision string. A decision string can stay word-for-word identical
+while the predicate behind it is quietly loosened, so this spec pins the
+predicate itself by value via `web_gpu_readback_device_proven_for_frame`, with
+one arm per conjunct. Dropping any single conjunct turns an arm red.
+
+The `pixel_count` conjunct is the anti-truncation one: it is what stops a short
+or fallback buffer from being certified as a device frame.
+
+## Measured note on the width of the comparison
+
+`pixel_count` is an i64 field while the frame extent is two i32s, so the product
+`width * height` is computed with `.to_i64()` at every call site. This is
+defence-in-depth, **not** a fix for an observed defect: it was measured on this
+engine that a value declared `i32` does **not** wrap at 32 bits —
+`65540 * 65536` evaluates to `4295229440` exactly, not to the 32-bit-wrapped
+`262144` (probe: `simple run` on a two-line `w * h` function). An inversion in
+which a truncated 262144-pixel readback out-certifies the honest full one is
+therefore **not reachable on the current engine**, and the arm below that
+exercises that extent is recorded as **non-biting today** — it is a tripwire for
+a backend where i32 really is 32-bit (native codegen), not evidence of a
+present-day bug. The arms that do bite are the four conjunct arms.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_gpu_readback_device_proven_for_frame}
+use lib.gc_async_mut.gpu.engine2d.backend.{engine2d_readback_with_identity}
+
+val W: i32 = 96
+val H: i32 = 64
+
+fn _pixels(n: i32) -> [u32]:
+    [0xFF00FF00u32; n]
+
+# A readback that satisfies every conjunct, so each arm below can break exactly
+# one of them and attribute the rejection to that conjunct alone.
+fn _device_readback() -> [u32]:
+    _pixels(W * H)
+
+describe "GPU provenance predicate":
+
+    it "certifies a complete device readback (the honest direction)":
+        step("Every conjunct satisfied: device source, positive handle, positive identity, exact size")
+        val full = engine2d_readback_with_identity(_device_readback(), "device_readback", 3, 5)
+        expect(full.source).to_equal("device_readback")
+        expect(full.backend_handle).to_equal(3)
+        expect(full.device_identity).to_equal(5)
+        expect(full.pixel_count).to_equal((W * H).to_i64())
+        expect(web_gpu_readback_device_proven_for_frame(full, W, H)).to_equal(true)
+
+    it "rejects a readback that is not sourced from a device (source conjunct)":
+        step("A CPU fallback of exactly the right size is still not device-proven")
+        val fallback = engine2d_readback_with_identity(_device_readback(), "cpu_fallback", 3, 5)
+        expect(web_gpu_readback_device_proven_for_frame(fallback, W, H)).to_equal(false)
+
+    it "rejects a readback with no backend handle (handle conjunct)":
+        step("handle == 0 means no backend owned the frame")
+        val no_handle = engine2d_readback_with_identity(_device_readback(), "device_readback", 0, 5)
+        expect(web_gpu_readback_device_proven_for_frame(no_handle, W, H)).to_equal(false)
+
+    it "rejects a readback with no device identity (identity conjunct)":
+        step("identity == 0 means no device identified itself")
+        val no_identity = engine2d_readback_with_identity(_device_readback(), "device_readback", 3, 0)
+        expect(web_gpu_readback_device_proven_for_frame(no_identity, W, H)).to_equal(false)
+
+    it "rejects a TRUNCATED device readback (pixel_count conjunct - the anti-truncation arm)":
+        step("One pixel short of the frame, device-shaped in every other respect")
+        val short_rb = engine2d_readback_with_identity(_pixels(W * H - 1), "device_readback", 3, 5)
+        expect(short_rb.pixel_count).to_equal((W * H - 1).to_i64())
+        expect(web_gpu_readback_device_proven_for_frame(short_rb, W, H)).to_equal(false)
+        step("A drastically truncated buffer is likewise refused, never partially credited")
+        val tiny = engine2d_readback_with_identity(_pixels(1), "device_readback", 3, 5)
+        expect(web_gpu_readback_device_proven_for_frame(tiny, W, H)).to_equal(false)
+        step("An OVERSIZED readback is refused too - the conjunct is equality, not a floor")
+        val over = engine2d_readback_with_identity(_pixels(W * H + 1), "device_readback", 3, 5)
+        expect(web_gpu_readback_device_proven_for_frame(over, W, H)).to_equal(false)
+
+    it "compares the pixel count at i64 width (tripwire: NON-BITING on this engine, see docstring)":
+        step("Record the measured premise: a value declared i32 does not wrap at 32 bits here")
+        val ow: i32 = 65540
+        val oh: i32 = 65536
+        expect((ow * oh).to_i64()).to_equal(4295229440)
+        step("So the wrapped value 262144 is NOT what the predicate compares against")
+        val wrapped = engine2d_readback_with_identity(_pixels(262144), "device_readback", 7, 9)
+        expect(web_gpu_readback_device_proven_for_frame(wrapped, ow, oh)).to_equal(false)

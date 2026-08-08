@@ -1,0 +1,127 @@
+# Driver - Compiler Driver Implementation
+#
+# This module contains the main compiler driver implementation:
+# - CompilerDriver: Compatibility facade and mode execution
+#
+# Extracted modules:
+# - driver_log_helpers.spl: Logging helpers
+# - driver_bootstrap.spl: Bootstrap compilation functions
+# - driver_source_loading.spl: Source collection + error formatting
+# - driver_pipeline.spl: JIT/SMF/borrow/async/optimize/AOP/debug methods
+# - driver_aot_output.spl: AOT output methods
+# - driver_types.spl: Type definitions
+# - driver_api.spl: Convenience API functions
+
+pub use compiler.driver.driver_public_api.{interpret_file}
+pub use compiler.driver.driver_public_compile.{
+    aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf
+}
+
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use lazy compiler.backend.backend_types.{BackendResult}
+use compiler.driver.driver_types.{CompileContext}
+pub use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_aot_output.*
+# driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
+# (lower_to_mir, jit_compile_and_run, weave_aop, apply_debug_trace, ...). It was
+# imported by nothing, so the interpreter never loaded it and those methods were
+# unregistered ("method lower_to_mir not found on type CompilerDriver"). Native
+# AOT hides this by compiling every .spl by path; the interpreter only loads
+# imported modules. Glob-import to load the file and register its impl methods.
+use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_source_pipeline_impl.*
+use compiler.driver.driver_hir_pipeline_impl.*
+use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_orchestration.*
+use compiler.common.driver_core_types.{CompileOptions, CompileResult, driver_core_compile_options_default}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.driver.driver_log_helpers.{log_debug}
+
+
+# ------------------------------------------------------------------------------
+# Compiler Driver
+# ------------------------------------------------------------------------------
+impl CompilerDriver:
+    static fn run_compile(driver: CompilerDriver) -> CompileResult:
+        driver.compile()
+
+    # Mode: SDN (Data only)
+    # --------------------------------------------------------------------------
+
+    fn process_sdn() -> CompileResult:
+        val backend_port = self.ctx.backend
+        var results: Dict<text, Any> = {}
+
+        for name in self.ctx.hir_modules.keys():
+            val hir_module = self.ctx.hir_modules[name]
+            match backend_port.run_fn(hir_module):
+                case Ok(value):
+                    results[name] = value
+                case Err(e):
+                    return CompileResult.RuntimeError("SDN error in {name}: {e.message}")
+
+        CompileResult.Success(results)
+
+    # --------------------------------------------------------------------------
+    # Mode: Interpret
+    # --------------------------------------------------------------------------
+
+    fn interpret() -> CompileResult:
+        self.interpret_pipeline()
+
+    fn interpret_pipeline() -> CompileResult:
+        val log = self.ctx.logger
+        var last_result: Any = BackendResult.Unit
+        var has_result = false
+
+        if self.ctx.sources.len() == 0:
+            return CompileResult.RuntimeError("No source file specified for interpret mode")
+
+        log_debug("interpret: running {self.ctx.sources.len()} modules through compiler frontend output")
+
+        # ponytail: bypass the BackendPort.run_fn closure for the interpreter
+        # backend. The cranelift seed miscompiles closure-captured method dispatch
+        # for a closure whose body calls `interp_impl.process_module(m)` returning
+        # `Result<BackendResult, BackendError>` with a large by-value HirModule arg:
+        # `backend_port.run_fn(hir_module)` is invoked but process_module's body is
+        # never entered (silent no-op, main never runs). Constructing a fresh
+        # concrete InterpreterBackendImpl and calling process_module inline enters
+        # the body correctly. See doc/08_tracking/bug/
+        # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 13/14).
+        val interp = InterpreterBackendImpl.new()
+
+        var src_idx = 0
+        while src_idx < self.ctx.sources.len():
+            val source = self.ctx.sources[src_idx]
+            val name = source.module_name
+            val hir_module = self.ctx.hir_modules[name]
+            if hir_module == nil:
+                src_idx = src_idx + 1
+                continue
+
+            match interp.interpret_hir_module(hir_module):
+                case Ok(value):
+                    last_result = value
+                    has_result = true
+                case Err(e):
+                    return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
+            src_idx = src_idx + 1
+
+        if has_result:
+            return CompileResult.Success(last_result)
+        CompileResult.Success(BackendResult.Unit)
+
+pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
+    val ctx = CompileContext.create(options)
+    CompilerDriver(ctx: ctx)
+
+pub fn compiler_driver_run_compile(driver: CompilerDriver) -> CompileResult:
+    driver.compile()
+
+pub fn compiler_driver_run_vhdl(driver: CompilerDriver) -> CompileResult:
+    driver.compile_vhdl_only()
+
+pub use compiler.driver.driver_hir_pipeline_impl.{
+    run_typecheck_warn_pass,
+    run_safety_warn_pass
+}

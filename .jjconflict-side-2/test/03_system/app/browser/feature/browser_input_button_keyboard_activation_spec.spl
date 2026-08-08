@@ -1,0 +1,168 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+# @evidence-display: links
+"""# Hosted input-button keyboard activation
+
+Native input buttons remain keyboard-operable through the production hosted
+content-session route. Space activates on key-up, Enter activates on key-down,
+pointer activation stays equivalent, and type=button never submits its form.
+"""
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use test.system.browser_dom_identity_helpers.{
+    system_browser_dom_identity_index, system_dom_focused_route,
+    system_dom_route
+}
+
+val INPUT_BUTTON_WINDOW_ID: i64 = 802
+
+fn setup_hosted_input_button_activation_fixture(
+) -> HostedWebContentSession:
+    HostedWebContentSession.create(
+        INPUT_BUTTON_WINDOW_ID,
+        "<style>body{{margin:0}}input{display:block;margin:0;padding:0;" +
+        "border:0;width:80px;height:20px}</style>" +
+        "<form id='guard' action='https://must-not-submit.test/save' " +
+        "method='post' " +
+        "onsubmit='set-attr:data-submit=yes'>" +
+        "<input id='space-button' type='button' value='Space' " +
+        "onfocus='set-attr:data-focus=space' " +
+        "onblur='set-attr:data-blur=space' " +
+        "onclick='set-attr:data-click=space'>" +
+        "<input id='enter-button' type='button' value='Enter' " +
+        "onfocus='set-attr:data-focus=enter' " +
+        "onblur='set-attr:data-blur=enter' " +
+        "onclick='set-attr:data-click=enter'>" +
+        "<input id='pointer-button' type='button' value='Pointer' " +
+        "onfocus='set-attr:data-focus=pointer' " +
+        "onclick='set-attr:data-click=pointer'></form>",
+        100, 70
+    )
+
+fn focus_input_buttons_through_host_tab(
+    session: HostedWebContentSession
+):
+    val tab_down = session.dispatch_key_with_shift(
+        1, 9, true, false
+    )
+    val tab_up = session.dispatch_key_with_shift(
+        2, 9, false, false
+    )
+    expect(tab_down.semantic_target_id).to_equal("space-button")
+    expect(tab_down.callback_count).to_equal(1)
+    expect(tab_up.semantic_target_id).to_equal("space-button")
+    expect(tab_up.callback_count).to_equal(0)
+    val root = session.browser.dom_root()
+    val identity_index = system_browser_dom_identity_index(session.browser)
+    expect(system_dom_focused_route(
+        root, identity_index
+    ).node_id).to_equal(system_dom_route(identity_index, "space-button").node_id)
+    expect(session.current_body_html()).to_contain(
+        "data-focus=\"space\""
+    )
+
+fn activate_input_buttons_through_host_keyboard(
+    session: HostedWebContentSession
+):
+    val space_down = session.dispatch_key_with_shift(
+        3, 32, true, false
+    )
+    expect(space_down.semantic_target_id).to_equal("space-button")
+    expect(space_down.callback_count).to_equal(0)
+    expect(session.current_body_html()).not.to_contain(
+        "data-click=\"space\""
+    )
+    expect(session.browser.pending_request_count()).to_equal(0)
+
+    val space_up = session.dispatch_key_with_shift(
+        4, 32, false, false
+    )
+    expect(space_up.semantic_target_id).to_equal("space-button")
+    expect(space_up.callback_count).to_equal(1)
+    expect(session.current_body_html()).to_contain(
+        "data-click=\"space\""
+    )
+    expect(session.browser.pending_request_count()).to_equal(0)
+
+    val next_tab = session.dispatch_key_with_shift(
+        5, 9, true, false
+    )
+    val next_tab_up = session.dispatch_key_with_shift(
+        6, 9, false, false
+    )
+    expect(next_tab.semantic_target_id).to_equal("enter-button")
+    expect(next_tab.callback_count).to_equal(2)
+    expect(next_tab_up.callback_count).to_equal(0)
+    expect(session.current_body_html()).to_contain(
+        "data-blur=\"space\""
+    )
+    expect(session.current_body_html()).to_contain(
+        "data-focus=\"enter\""
+    )
+
+    val enter_down = session.dispatch_key_with_shift(
+        7, 13, true, false
+    )
+    expect(enter_down.semantic_target_id).to_equal("enter-button")
+    expect(enter_down.callback_count).to_equal(1)
+    expect(session.current_body_html()).to_contain(
+        "data-click=\"enter\""
+    )
+    expect(session.browser.pending_request_count()).to_equal(0)
+
+    val enter_up = session.dispatch_key_with_shift(
+        8, 13, false, false
+    )
+    expect(enter_up.semantic_target_id).to_equal("enter-button")
+    expect(enter_up.callback_count).to_equal(0)
+    expect(session.browser.pending_request_count()).to_equal(0)
+
+fn check_input_button_activation_and_form_safety(
+    session: HostedWebContentSession
+):
+    val pointer_down = session.dispatch_pointer_at(
+        9, 5, 45, true
+    )
+    expect(pointer_down.semantic_target_id).to_equal("pointer-button")
+    expect(pointer_down.callback_count).to_equal(2)
+    expect(session.current_body_html()).not.to_contain(
+        "data-click=\"pointer\""
+    )
+    expect(session.current_body_html()).to_contain(
+        "data-blur=\"enter\""
+    )
+    expect(session.current_body_html()).to_contain(
+        "data-focus=\"pointer\""
+    )
+
+    val pointer_up = session.dispatch_pointer_at(
+        10, 5, 45, false
+    )
+    expect(pointer_up.semantic_target_id).to_equal("pointer-button")
+    expect(pointer_up.callback_count).to_equal(1)
+    expect(session.current_body_html()).to_contain(
+        "data-click=\"pointer\""
+    )
+    expect(session.current_body_html()).not.to_contain(
+        "data-submit=\"yes\""
+    )
+    expect(session.browser.pending_request_count()).to_equal(0)
+
+describe "Hosted input-button keyboard activation":
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "should preserve keyboard pointer and form semantics":
+        step("Install hosted input-button activation controls")
+        var fixture = setup_hosted_input_button_activation_fixture()
+
+        step("Focus input buttons through the host Tab route")
+        focus_input_buttons_through_host_tab(fixture)
+
+        step("Activate the focused controls with Space and Enter")
+        activate_input_buttons_through_host_keyboard(fixture)
+
+        step("Preserve pointer parity and form non-submission")
+        check_input_button_activation_and_form_safety(fixture)

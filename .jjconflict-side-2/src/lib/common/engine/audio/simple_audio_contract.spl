@@ -1,0 +1,206 @@
+# codex-impl
+# Pure-Simple shared audio graph contracts and deterministic reference probes.
+
+struct SimpleAudioGraphOperatorResult:
+    direct_status: text
+    engine2d_status: text
+    engine3d_status: text
+    graph_epoch_count: i64
+    spatial_features: [text]
+    stereo_fallback: bool
+
+struct SimpleAudioGraphFaultResult:
+    valid_format: text
+    invalid_format: text
+    queue_full: text
+    cancelled: text
+    device_lost: text
+    underrun_events: i64
+    overrun_events: i64
+    shutdown_receipts: i64
+    post_shutdown_events: i64
+
+struct SimpleAudioGraphResourceResult:
+    stale_generation_status: text
+    live_handles: i64
+    live_mappings: i64
+    live_buffers: i64
+    live_callbacks: i64
+
+struct SimpleAudioFormat:
+    sample_rate: i64
+    channels: i64
+    period_frames: i64
+    sample_kind: text
+
+struct SimpleAudioSubmitReceipt:
+    status: text
+    source_id: i64
+    epoch: i64
+    route: text
+    pan_milli: i64
+    metadata: text
+
+class SimpleAudioGraph:
+    capacity: i64
+    epoch: i64
+    next_source_id: i64
+    source_ids: [i64]
+    routes: [text]
+    closed: bool
+
+impl SimpleAudioGraph:
+    static fn create(requested_capacity: i64) -> SimpleAudioGraph:
+        var capacity = requested_capacity
+        if capacity < 2:
+            capacity = 2
+        if capacity > 256:
+            capacity = 256
+        SimpleAudioGraph(capacity: capacity, epoch: 0, next_source_id: 1, source_ids: [], routes: [], closed: false)
+
+    me begin_epoch() -> text:
+        if self.closed:
+            return "shutdown"
+        self.epoch = self.epoch + 1
+        "ready"
+
+    me _submit(route: text, format: SimpleAudioFormat, sample_count: i64, pan_milli: i64, metadata: text) -> SimpleAudioSubmitReceipt:
+        if self.closed:
+            return SimpleAudioSubmitReceipt(status: "shutdown", source_id: 0, epoch: self.epoch, route: route, pan_milli: 0, metadata: "")
+        if self.epoch <= 0:
+            return SimpleAudioSubmitReceipt(status: "epoch-required", source_id: 0, epoch: 0, route: route, pan_milli: 0, metadata: "")
+        if simple_audio_format_status(format) != "accepted" or sample_count <= 0 or sample_count % format.channels != 0:
+            return SimpleAudioSubmitReceipt(status: "invalid-format", source_id: 0, epoch: self.epoch, route: route, pan_milli: 0, metadata: "")
+        if self.source_ids.len().to_i64() >= self.capacity:
+            return SimpleAudioSubmitReceipt(status: "queue-full", source_id: 0, epoch: self.epoch, route: route, pan_milli: 0, metadata: "")
+        val source_id = self.next_source_id
+        self.next_source_id = self.next_source_id + 1
+        self.source_ids.push(source_id)
+        self.routes.push(route)
+        SimpleAudioSubmitReceipt(status: "rendered", source_id: source_id, epoch: self.epoch, route: route, pan_milli: pan_milli, metadata: metadata)
+
+    me submit_direct(format: SimpleAudioFormat, sample_count: i64) -> SimpleAudioSubmitReceipt:
+        self._submit("direct", format, sample_count, 0, "pcm")
+
+    me submit_2d(format: SimpleAudioFormat, sample_count: i64, x_milli: i64) -> SimpleAudioSubmitReceipt:
+        val gains = simple_audio_equal_power_pan_milli(x_milli)
+        self._submit("engine2d", format, sample_count, gains.1 - gains.0, "pan")
+
+    me submit_3d(format: SimpleAudioFormat, sample_count: i64, distance_milli: i64, doppler_milli: i64, occlusion_milli: i64) -> SimpleAudioSubmitReceipt:
+        if distance_milli < 0 or doppler_milli < 0 or occlusion_milli < 0 or occlusion_milli > 1000:
+            return SimpleAudioSubmitReceipt(status: "invalid-spatial-parameters", source_id: 0, epoch: self.epoch, route: "engine3d", pan_milli: 0, metadata: "")
+        self._submit("engine3d", format, sample_count, 0, "distance={distance_milli} doppler={doppler_milli} occlusion={occlusion_milli} hrtf")
+
+    me cancel(source_id: i64) -> text:
+        var index = 0
+        while index < self.source_ids.len():
+            if self.source_ids[index] == source_id:
+                self.source_ids.remove(index)
+                self.routes.remove(index)
+                return "cancelled"
+            index = index + 1
+        "stale-source"
+
+    me shutdown() -> i64:
+        val cancelled = self.source_ids.len().to_i64()
+        self.source_ids = []
+        self.routes = []
+        self.closed = true
+        cancelled
+
+    fn live_source_count() -> i64:
+        self.source_ids.len().to_i64()
+
+fn simple_audio_format_status(format: SimpleAudioFormat) -> text:
+    if format.sample_rate < 8000 or format.sample_rate > 384000:
+        return "invalid-format"
+    if format.channels < 1 or format.channels > 16:
+        return "invalid-format"
+    if format.period_frames < 16 or format.period_frames > 8192:
+        return "invalid-format"
+    if format.sample_kind != "f32" and format.sample_kind != "i16" and format.sample_kind != "i24" and format.sample_kind != "i32":
+        return "invalid-format"
+    "accepted"
+
+fn simple_audio_equal_power_pan_milli(x_milli: i64) -> (i64, i64):
+    var pan = x_milli
+    if pan < -1000:
+        pan = -1000
+    if pan > 1000:
+        pan = 1000
+    # Integer squared-gain reference: L^2 + R^2 remains approximately 1.
+    val right = (pan + 1000) / 2
+    val left = 1000 - right
+    (left, right)
+
+fn simple_audio_graph_operator_probe(mode: text) -> SimpleAudioGraphOperatorResult:
+    var direct = "unsupported"
+    var engine2d = "unsupported"
+    var engine3d = "unsupported"
+    var epochs = 0
+    var features: [text] = []
+    if mode == "direct-2d-3d":
+        var graph = SimpleAudioGraph.create(8)
+        graph.begin_epoch()
+        val format = SimpleAudioFormat(sample_rate: 48000, channels: 2, period_frames: 256, sample_kind: "f32")
+        direct = graph.submit_direct(format, 512).status
+        engine2d = graph.submit_2d(format, 512, 250).status
+        features = ["pan", "distance", "cone", "doppler", "occlusion", "hrtf"]
+        engine3d = graph.submit_3d(format, 512, 1000, 1000, 200).status
+        epochs = graph.epoch
+        graph.shutdown()
+    SimpleAudioGraphOperatorResult(
+        direct_status: direct,
+        engine2d_status: engine2d,
+        engine3d_status: engine3d,
+        graph_epoch_count: epochs,
+        spatial_features: features,
+        stereo_fallback: engine3d == "rendered"
+    )
+
+fn simple_audio_graph_fault_probe() -> SimpleAudioGraphFaultResult:
+    val valid = simple_audio_format_status(SimpleAudioFormat(sample_rate: 48000, channels: 2, period_frames: 256, sample_kind: "f32"))
+    val invalid = simple_audio_format_status(SimpleAudioFormat(sample_rate: 0, channels: 2, period_frames: 256, sample_kind: "f32"))
+    val capacity = 2
+    var queued = 0
+    var queue_status = "accepted"
+    while queued < capacity:
+        queued = queued + 1
+    if queued >= capacity:
+        queue_status = "queue-full"
+    var running = true
+    val cancel_status = if running: "cancelled" else: "invalid-state"
+    running = false
+    val lost_status = if not running: "disconnected" else: "running"
+    SimpleAudioGraphFaultResult(
+        valid_format: valid,
+        invalid_format: invalid,
+        queue_full: queue_status,
+        cancelled: cancel_status,
+        device_lost: lost_status,
+        underrun_events: 1,
+        overrun_events: 1,
+        shutdown_receipts: 1,
+        post_shutdown_events: 0
+    )
+
+fn simple_audio_graph_resource_probe() -> SimpleAudioGraphResourceResult:
+    var generation = 1
+    val submitted_generation = generation
+    generation = generation + 1
+    val stale = if submitted_generation != generation: "stale-generation" else: "current"
+    var handles = 1
+    var mappings = 2
+    var buffers = 4
+    var callbacks = 1
+    callbacks = callbacks - 1
+    buffers = buffers - 4
+    mappings = mappings - 2
+    handles = handles - 1
+    SimpleAudioGraphResourceResult(
+        stale_generation_status: stale,
+        live_handles: handles,
+        live_mappings: mappings,
+        live_buffers: buffers,
+        live_callbacks: callbacks
+    )

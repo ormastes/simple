@@ -1,0 +1,73 @@
+use std.security.remote_quorum.{RemoteSecurityQuorumSessionStore}
+use std.security.types.{RemoteSecuritySessionStoreAdapter}
+
+
+fn main():
+
+    describe "remote security quorum session store":
+        it "writes sessions to all replicas when write quorum is reachable":
+            var quorum = RemoteSecurityQuorumSessionStore.new([
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:a"),
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:b"),
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:c")
+            ], 2, 2)
+
+            val ok = quorum.create_session("quorum-session", "user-10", ["profile.read"], 9000)
+            val session = quorum.lookup_session("quorum-session")
+
+            expect ok == true
+            expect session != nil
+            expect session.unwrap().user_id == "user-10"
+
+        it "requires read quorum before returning a session":
+            var partial = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:a")
+            partial.create_session("partial-session", "user-11", ["profile.read"], 9000)
+            var empty_b = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:b")
+            var empty_c = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:c")
+            var quorum = RemoteSecurityQuorumSessionStore.new([partial, empty_b, empty_c], 2, 2)
+
+            expect quorum.lookup_session("partial-session") == nil
+
+        it "merges later expiry and repairs replicas on quorum read":
+            var newer = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:newer")
+            newer.create_session("repair-session", "user-12", ["profile.read", "billing.write"], 9000)
+            var older = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:older")
+            older.create_session("repair-session", "user-12", ["profile.read"], 4000)
+            var quorum = RemoteSecurityQuorumSessionStore.new([older, newer, older], 2, 2)
+
+            val winner = quorum.lookup_and_repair_session("repair-session")
+            val repaired = quorum.replicas[0].lookup_session("repair-session")
+
+            expect winner != nil
+            expect winner.unwrap().expires_at_ms == 9000
+            expect winner.unwrap().capabilities[1] == "billing.write"
+            expect repaired.unwrap().expires_at_ms == 9000
+
+        it "propagates revocation over later active sessions":
+            var active = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:active")
+            active.create_session("revoked-quorum-session", "user-13", ["admin.read"], 9000)
+            var revoked = RemoteSecuritySessionStoreAdapter.replicated("redis", "security:revoked")
+            revoked.create_session("revoked-quorum-session", "user-13", ["admin.read"], 4000)
+            revoked.revoke_session("revoked-quorum-session")
+            var quorum = RemoteSecurityQuorumSessionStore.new([active, revoked, active], 2, 2)
+
+            val session = quorum.lookup_and_repair_session("revoked-quorum-session")
+            val repaired = quorum.replicas[0].lookup_session("revoked-quorum-session")
+
+            expect session != nil
+            expect session.unwrap().revoked == true
+            expect repaired.unwrap().revoked == true
+
+        it "exports quorum topology without session payloads":
+            var quorum = RemoteSecurityQuorumSessionStore.new([
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:a"),
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:b"),
+                RemoteSecuritySessionStoreAdapter.replicated("redis", "security:c")
+            ], 2, 2)
+
+            val sdn = quorum.export_sdn()
+
+            expect (sdn).contains("remote_security_quorum_session_store:")
+            expect (sdn).contains("read_quorum: 2")
+            expect (sdn).contains("write_quorum: 2")
+            expect (sdn).contains("replica|1|redis|security:b")

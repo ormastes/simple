@@ -1,0 +1,442 @@
+# ============================================================================
+# Frozen MappingKind / compressed mapping contract v1 — contract-freeze gate.
+#
+# Architecture §6 (MappingGraph and provenance), §26 (contract freeze),
+# §27 (MAP lane owns structural/mapping).
+#
+# This spec is the gate for the MAP lane deliverable. Like the ID-TAG gate it
+# proves three separate things, because round-tripping alone is not enough for
+# a frozen contract:
+#
+#   1. EXACT BYTES — encoder output equals a hand-derived golden vector. This
+#      is what actually freezes the format; a round-trip test alone passes
+#      happily even if encoder and decoder drift together.
+#   2. ROUND TRIP — decode(encode(x)) reconstructs x for every record shape.
+#   3. REJECTION — malformed, truncated, cross-typed, wrong-version and
+#      structurally-invalid buffers are refused rather than silently coerced.
+#      For a compressed sparse adjacency this is the important half: a corrupt
+#      offset array does not fail loudly, it silently returns a neighbouring
+#      node's provenance.
+# ============================================================================
+
+use std.spec
+use std.common.structural.wire.{wire_to_hex}
+use std.common.structural.identity.entity_id.{entity_ref}
+use std.common.structural.mapping.contracts.{MappingKind}
+use std.common.structural.mapping.mapping_edge.{
+    MAPPING_EDGE_LEN,
+    MAPPING_FLAG_DISCARDED,
+    MAPPING_FLAG_NONE,
+    MAPPING_FLAG_SYNTHETIC,
+    MAPPING_FLAG_WEIGHT_VALID,
+    MAPPING_KIND_COUNT,
+    MAPPING_KIND_MAX,
+    MAPPING_KIND_SET_ALL,
+    MAPPING_KIND_SET_EMPTY,
+    MAPPING_SCHEMA_VERSION,
+    MappingEdge,
+    OriginPolicy,
+    mapping_build_reverse,
+    mapping_edge,
+    mapping_edge_equal,
+    mapping_edge_weight_or_default,
+    mapping_flags_valid,
+    mapping_forward_edges,
+    mapping_kind_from_u8,
+    mapping_kind_set_add,
+    mapping_kind_set_contains,
+    mapping_kind_set_of,
+    mapping_kind_set_valid,
+    mapping_kind_to_u8,
+    mapping_kind_valid,
+    mapping_offsets_well_formed,
+    mapping_reverse_edges,
+    mapping_shard,
+    mapping_shard_equal,
+    mapping_shard_forward,
+    mapping_shard_valid,
+    origin_policy_from_u8,
+    origin_policy_to_u8,
+    origin_policy_valid
+}
+use std.common.structural.mapping.mapping_codec.{
+    decode_mapping_edge,
+    decode_mapping_kind_set,
+    decode_mapping_shard,
+    encode_mapping_edge,
+    encode_mapping_kind_set,
+    encode_mapping_shard
+}
+use test.fixtures.structural.mapping_golden_v1.{
+    GOLDEN_EDGE_BASIC,
+    GOLDEN_EDGE_MAX,
+    GOLDEN_EDGE_SYNTHETIC,
+    GOLDEN_EDGE_ZERO,
+    GOLDEN_KIND_SET_ALL,
+    GOLDEN_KIND_SET_EMPTY,
+    GOLDEN_KIND_SET_LAYOUT_PAINT,
+    GOLDEN_SHARD_EMPTY,
+    GOLDEN_SHARD_FORWARD,
+    GOLDEN_SHARD_REVERSE
+}
+
+# The shared 3-edge fixture the shard vectors are built from.
+fn fixture_edges() -> [MappingEdge]:
+    var es: [MappingEdge] = []
+    es.push(mapping_edge(entity_ref(0, 0), entity_ref(0, 1),
+                         MappingKind.LoweredFrom, 1, MAPPING_FLAG_NONE, 0))
+    es.push(mapping_edge(entity_ref(0, 0), entity_ref(0, 2),
+                         MappingKind.LoweredFrom, 1, MAPPING_FLAG_NONE, 0))
+    es.push(mapping_edge(entity_ref(0, 1), entity_ref(0, 2),
+                         MappingKind.OptimizedFrom, 2,
+                         MAPPING_FLAG_WEIGHT_VALID, 400))
+    es
+
+fn fixture_offsets() -> [u32]:
+    var o: [u32] = []
+    o.push(0)
+    o.push(2)
+    o.push(3)
+    o
+
+fn fixture_forward_shard() -> any:
+    mapping_shard_forward(1, 2, fixture_offsets(), fixture_edges())
+
+fn corrupt_byte(data: [u8], index: i64, value: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        if i == index:
+            b.push(value)
+        else:
+            b.push(data[i])
+        i = i + 1
+    b
+
+fn truncated(data: [u8], keep: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < keep and i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b
+
+describe "MappingKind wire discriminants":
+    it "assigns the 17 architecture variants to 0..16 in declaration order":
+        assert_equal(mapping_kind_to_u8(MappingKind.ParsedFrom), 0)
+        assert_equal(mapping_kind_to_u8(MappingKind.LoweredFrom), 4)
+        assert_equal(mapping_kind_to_u8(MappingKind.LinkedFrom), 10)
+        assert_equal(mapping_kind_to_u8(MappingKind.Styles), 11)
+        assert_equal(mapping_kind_to_u8(MappingKind.InvalidatedBy), 16)
+
+    it "declares exactly 17 kinds with 16 as the maximum discriminant":
+        assert_equal(MAPPING_KIND_COUNT, 17)
+        assert_equal(MAPPING_KIND_MAX, 16)
+
+    it "round-trips every discriminant through from_u8":
+        var i = 0
+        var mismatches = 0
+        while i <= MAPPING_KIND_MAX:
+            if mapping_kind_to_u8(mapping_kind_from_u8(i)) != i:
+                mismatches = mismatches + 1
+            i = i + 1
+        assert_equal(mismatches, 0)
+
+    it "rejects a discriminant past the end of the frozen enum":
+        assert_true(mapping_kind_valid(16))
+        assert_false(mapping_kind_valid(17))
+        assert_false(mapping_kind_valid(-1))
+        assert_false(mapping_kind_valid(255))
+
+describe "OriginPolicy wire discriminants":
+    it "assigns the six architecture variants to 0..5 in declaration order":
+        assert_equal(origin_policy_to_u8(OriginPolicy.PreserveOneToOne), 0)
+        assert_equal(origin_policy_to_u8(OriginPolicy.Split), 1)
+        assert_equal(origin_policy_to_u8(OriginPolicy.Merge), 2)
+        assert_equal(origin_policy_to_u8(OriginPolicy.Clone), 3)
+        assert_equal(origin_policy_to_u8(OriginPolicy.Synthesize), 4)
+        assert_equal(origin_policy_to_u8(OriginPolicy.DiscardWithReason), 5)
+
+    it "rejects an unknown policy discriminant":
+        assert_true(origin_policy_valid(5))
+        assert_false(origin_policy_valid(6))
+        assert_equal(origin_policy_to_u8(origin_policy_from_u8(3)), 3)
+
+describe "MappingEdge — exact bytes":
+    it "encodes the zero edge to the frozen 27-byte body":
+        expect(wire_to_hex(encode_mapping_edge(
+            mapping_edge(entity_ref(0, 0), entity_ref(0, 0),
+                         MappingKind.ParsedFrom, 0, 0, 0))))
+            .to_equal(GOLDEN_EDGE_ZERO)
+
+    it "encodes every field asymmetrically so field order is pinned":
+        expect(wire_to_hex(encode_mapping_edge(
+            mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                         MappingKind.LoweredFrom, 0x11223344,
+                         MAPPING_FLAG_WEIGHT_VALID, 600))))
+            .to_equal(GOLDEN_EDGE_BASIC)
+
+    it "encodes the all-ones edge without sign extension":
+        expect(wire_to_hex(encode_mapping_edge(
+            mapping_edge(entity_ref(0xFFFFFFFF, 0xFFFFFFFF),
+                         entity_ref(0xFFFFFFFF, 0xFFFFFFFF),
+                         MappingKind.InvalidatedBy, 0xFFFFFFFF, 7, 0xFFFF))))
+            .to_equal(GOLDEN_EDGE_MAX)
+
+    it "encodes a synthesized, discarded origin":
+        expect(wire_to_hex(encode_mapping_edge(
+            mapping_edge(entity_ref(0, 0), entity_ref(7, 9),
+                         MappingKind.GeneratedFrom, 2,
+                         MAPPING_FLAG_SYNTHETIC + MAPPING_FLAG_DISCARDED, 0))))
+            .to_equal(GOLDEN_EDGE_SYNTHETIC)
+
+    it "occupies exactly 27 bytes of body":
+        assert_equal(MAPPING_EDGE_LEN, 27)
+        assert_equal(encode_mapping_edge(
+            mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                         MappingKind.LoweredFrom, 1, 1, 600)).len(), 35)
+
+describe "MappingEdge — round trip and rejection":
+    it "reconstructs an edge through decode(encode(x))":
+        val e = mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                             MappingKind.LoweredFrom, 0x11223344,
+                             MAPPING_FLAG_WEIGHT_VALID, 600)
+        val r = decode_mapping_edge(encode_mapping_edge(e))
+        assert_true(r.ok)
+        assert_true(mapping_edge_equal(r.value, e))
+
+    it "rejects an unknown kind discriminant instead of defaulting":
+        val e = mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                             MappingKind.LoweredFrom, 1, 0, 0)
+        val bad = corrupt_byte(encode_mapping_edge(e), 24, 17)
+        assert_false(decode_mapping_edge(bad).ok)
+
+    it "rejects a set reserved flag bit":
+        val e = mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                             MappingKind.LoweredFrom, 1, 0, 0)
+        val bad = corrupt_byte(encode_mapping_edge(e), 29, 8)
+        assert_false(decode_mapping_edge(bad).ok)
+
+    it "rejects a truncated edge":
+        val e = mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                             MappingKind.LoweredFrom, 1, 0, 0)
+        assert_false(decode_mapping_edge(truncated(encode_mapping_edge(e), 30)).ok)
+
+    it "rejects a shard buffer offered to the edge decoder":
+        assert_false(decode_mapping_edge(encode_mapping_shard(fixture_forward_shard())).ok)
+
+    it "treats a missing WEIGHT_VALID bit as a full share, not as zero":
+        val no_w = mapping_edge(entity_ref(0, 0), entity_ref(0, 1),
+                                MappingKind.LoweredFrom, 1, MAPPING_FLAG_NONE, 0)
+        val with_w = mapping_edge(entity_ref(0, 0), entity_ref(0, 1),
+                                  MappingKind.OptimizedFrom, 1,
+                                  MAPPING_FLAG_WEIGHT_VALID, 400)
+        assert_equal(mapping_edge_weight_or_default(no_w), 1000)
+        assert_equal(mapping_edge_weight_or_default(with_w), 400)
+
+describe "MappingKindSet":
+    it "encodes the empty mask to the frozen bytes":
+        expect(wire_to_hex(encode_mapping_kind_set(MAPPING_KIND_SET_EMPTY)))
+            .to_equal(GOLDEN_KIND_SET_EMPTY)
+
+    it "encodes the all-kinds mask as 17 set bits":
+        assert_equal(MAPPING_KIND_SET_ALL, 131071)
+        expect(wire_to_hex(encode_mapping_kind_set(MAPPING_KIND_SET_ALL)))
+            .to_equal(GOLDEN_KIND_SET_ALL)
+
+    it "encodes {LayoutOf, PaintOf} to the frozen bit positions":
+        var kinds: [MappingKind] = []
+        kinds.push(MappingKind.LayoutOf)
+        kinds.push(MappingKind.PaintOf)
+        expect(wire_to_hex(encode_mapping_kind_set(mapping_kind_set_of(kinds))))
+            .to_equal(GOLDEN_KIND_SET_LAYOUT_PAINT)
+
+    it "answers membership by discriminant bit":
+        val s = mapping_kind_set_add(MAPPING_KIND_SET_EMPTY, MappingKind.InvalidatedBy)
+        assert_true(mapping_kind_set_contains(s, MappingKind.InvalidatedBy))
+        assert_false(mapping_kind_set_contains(s, MappingKind.ParsedFrom))
+
+    it "rejects a mask with a reserved bit set":
+        assert_true(mapping_kind_set_valid(MAPPING_KIND_SET_ALL))
+        assert_false(mapping_kind_set_valid(131072))
+        assert_false(decode_mapping_kind_set(
+            corrupt_byte(encode_mapping_kind_set(MAPPING_KIND_SET_ALL), 10, 0x03)).ok)
+
+    it "round-trips a mask":
+        val r = decode_mapping_kind_set(encode_mapping_kind_set(24576))
+        assert_true(r.ok)
+        assert_equal(r.value, 24576)
+
+describe "MappingShard — exact bytes":
+    it "encodes the empty shard with its CSR terminator":
+        val off: [u32] = [0]
+        val none: [MappingEdge] = []
+        expect(wire_to_hex(encode_mapping_shard(mapping_shard_forward(1, 0, off, none))))
+            .to_equal(GOLDEN_SHARD_EMPTY)
+
+    it "encodes the forward-only shard to the frozen bytes":
+        expect(wire_to_hex(encode_mapping_shard(fixture_forward_shard())))
+            .to_equal(GOLDEN_SHARD_FORWARD)
+
+    it "encodes the shard with a lazily built reverse index":
+        expect(wire_to_hex(encode_mapping_shard(
+            mapping_build_reverse(fixture_forward_shard(), 3))))
+            .to_equal(GOLDEN_SHARD_REVERSE)
+
+describe "MappingShard — round trip":
+    it "reconstructs a forward-only shard":
+        val s = fixture_forward_shard()
+        val r = decode_mapping_shard(encode_mapping_shard(s))
+        assert_true(r.ok)
+        assert_true(mapping_shard_equal(r.value, s))
+
+    it "reconstructs a shard carrying a reverse index":
+        val s = mapping_build_reverse(fixture_forward_shard(), 3)
+        val r = decode_mapping_shard(encode_mapping_shard(s))
+        assert_true(r.ok)
+        assert_true(mapping_shard_equal(r.value, s))
+
+    it "builds the reverse index deterministically by target index":
+        val s = mapping_build_reverse(fixture_forward_shard(), 3)
+        assert_equal(s.reverse_offsets.len(), 4)
+        assert_equal(s.reverse_offsets[0], 0)
+        assert_equal(s.reverse_offsets[1], 0)
+        assert_equal(s.reverse_offsets[2], 1)
+        assert_equal(s.reverse_offsets[3], 3)
+        assert_equal(s.reverse_edges.len(), 3)
+
+describe "MappingShard — CSR invariants":
+    it "accepts a well-formed offset array":
+        assert_true(mapping_offsets_well_formed(fixture_offsets(), 2, 3))
+
+    it "rejects an offset array of the wrong length":
+        assert_false(mapping_offsets_well_formed(fixture_offsets(), 3, 3))
+
+    it "rejects an offset array that does not start at zero":
+        var o: [u32] = []
+        o.push(1)
+        o.push(2)
+        o.push(3)
+        assert_false(mapping_offsets_well_formed(o, 2, 3))
+
+    it "rejects an offset array that does not end at the edge count":
+        var o: [u32] = []
+        o.push(0)
+        o.push(2)
+        o.push(9)
+        assert_false(mapping_offsets_well_formed(o, 2, 3))
+
+    it "rejects a decreasing offset array":
+        var o: [u32] = []
+        o.push(0)
+        o.push(3)
+        o.push(3)
+        assert_true(mapping_offsets_well_formed(o, 2, 3))
+        var d: [u32] = []
+        d.push(0)
+        d.push(5)
+        d.push(3)
+        assert_false(mapping_offsets_well_formed(d, 2, 3))
+
+    it "considers the fixture shards structurally valid":
+        assert_true(mapping_shard_valid(fixture_forward_shard()))
+        assert_true(mapping_shard_valid(mapping_build_reverse(fixture_forward_shard(), 3)))
+
+    it "rejects a shard whose reverse index points past the edge list":
+        var ro: [u32] = []
+        ro.push(0)
+        ro.push(1)
+        var re: [u32] = []
+        re.push(99)
+        assert_false(mapping_shard_valid(
+            mapping_shard(1, 2, fixture_offsets(), fixture_edges(), 1, ro, re)))
+
+    it "refuses to encode a structurally invalid shard at all":
+        var bad: [u32] = []
+        bad.push(0)
+        bad.push(9)
+        bad.push(3)
+        assert_equal(encode_mapping_shard(
+            mapping_shard_forward(1, 2, bad, fixture_edges())).len(), 0)
+
+describe "MappingShard — rejection":
+    it "rejects a corrupted from_offsets terminator":
+        # Byte 29 is the low byte of from_offsets[2], the CSR terminator:
+        # envelope 0..7 | version 8..11 | node_count 12..15 | edge_count 16..19
+        # | has_reverse 20 | from_offsets 21..32. Setting it to 9 makes the
+        # array claim 9 edges while the header declares 3.
+        val bytes = encode_mapping_shard(fixture_forward_shard())
+        assert_false(decode_mapping_shard(corrupt_byte(bytes, 29, 9)).ok)
+
+    it "rejects a has_reverse byte outside {0, 1}":
+        val bytes = encode_mapping_shard(fixture_forward_shard())
+        assert_false(decode_mapping_shard(corrupt_byte(bytes, 20, 2)).ok)
+
+    it "rejects a truncated shard":
+        val bytes = encode_mapping_shard(fixture_forward_shard())
+        assert_false(decode_mapping_shard(truncated(bytes, bytes.len() - 1)).ok)
+
+    it "rejects trailing bytes after a complete shard":
+        var bytes = encode_mapping_shard(fixture_forward_shard())
+        bytes.push(0)
+        assert_false(decode_mapping_shard(bytes).ok)
+
+    it "rejects an edge-typed buffer offered to the shard decoder":
+        assert_false(decode_mapping_shard(encode_mapping_edge(
+            mapping_edge(entity_ref(1, 2), entity_ref(3, 4),
+                         MappingKind.LoweredFrom, 1, 0, 0))).ok)
+
+    it "rejects a wrong schema version":
+        val bytes = encode_mapping_shard(fixture_forward_shard())
+        assert_equal(MAPPING_SCHEMA_VERSION, 1)
+        assert_false(decode_mapping_shard(corrupt_byte(bytes, 4, 2)).ok)
+
+    it "rejects a non-zero envelope reserved field":
+        val bytes = encode_mapping_shard(fixture_forward_shard())
+        assert_false(decode_mapping_shard(corrupt_byte(bytes, 6, 1)).ok)
+
+describe "MappingReadPort reference semantics":
+    it "returns only the edges leaving the queried node":
+        val s = fixture_forward_shard()
+        assert_equal(mapping_forward_edges(s, 0, MAPPING_KIND_SET_ALL).len(), 2)
+        assert_equal(mapping_forward_edges(s, 1, MAPPING_KIND_SET_ALL).len(), 1)
+
+    it "filters forward edges by kind mask":
+        val s = fixture_forward_shard()
+        val only_lowered = mapping_kind_set_add(MAPPING_KIND_SET_EMPTY,
+                                                MappingKind.LoweredFrom)
+        assert_equal(mapping_forward_edges(s, 0, only_lowered).len(), 2)
+        assert_equal(mapping_forward_edges(s, 1, only_lowered).len(), 0)
+
+    it "misses rather than traps on a node outside the shard":
+        val s = fixture_forward_shard()
+        assert_equal(mapping_forward_edges(s, 99, MAPPING_KIND_SET_ALL).len(), 0)
+        assert_equal(mapping_forward_edges(s, -1, MAPPING_KIND_SET_ALL).len(), 0)
+
+    it "returns nothing in reverse until the reverse index is demanded":
+        assert_equal(mapping_reverse_edges(fixture_forward_shard(), 2,
+                                           MAPPING_KIND_SET_ALL).len(), 0)
+
+    it "traces many-to-one provenance once the reverse index exists":
+        val s = mapping_build_reverse(fixture_forward_shard(), 3)
+        assert_equal(mapping_reverse_edges(s, 0, MAPPING_KIND_SET_ALL).len(), 0)
+        assert_equal(mapping_reverse_edges(s, 1, MAPPING_KIND_SET_ALL).len(), 1)
+        assert_equal(mapping_reverse_edges(s, 2, MAPPING_KIND_SET_ALL).len(), 2)
+
+    it "filters reverse edges by kind mask":
+        val s = mapping_build_reverse(fixture_forward_shard(), 3)
+        val only_opt = mapping_kind_set_add(MAPPING_KIND_SET_EMPTY,
+                                            MappingKind.OptimizedFrom)
+        assert_equal(mapping_reverse_edges(s, 2, only_opt).len(), 1)
+
+describe "MappingFlags vocabulary":
+    it "accepts only the three derived bits":
+        assert_true(mapping_flags_valid(0))
+        assert_true(mapping_flags_valid(7))
+        assert_false(mapping_flags_valid(8))
+        assert_false(mapping_flags_valid(-1))
+
+    it "assigns the derived bits to distinct powers of two":
+        assert_equal(MAPPING_FLAG_WEIGHT_VALID, 1)
+        assert_equal(MAPPING_FLAG_SYNTHETIC, 2)
+        assert_equal(MAPPING_FLAG_DISCARDED, 4)

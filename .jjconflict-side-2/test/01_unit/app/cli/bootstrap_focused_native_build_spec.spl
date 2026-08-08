@@ -1,0 +1,80 @@
+use std.spec.{describe, it, expect}
+use app.cli.bootstrap_focused_native_build.{
+    focused_native_build_error,
+    focused_native_build_sources,
+    focused_native_build_target,
+    focused_native_build_linker_script,
+    focused_native_build_runtime_path,
+    focused_native_build_cache_dir,
+    focused_native_build_effective_sources,
+    focused_native_build_effective_cache_dir,
+    focused_native_build_backend,
+    focused_native_build_strip,
+    focused_native_build_exact_capsule_entry_allowed,
+}
+
+describe "focused bootstrap native-build plan":
+    it "accepts at most five explicit source roots":
+        val five = [
+            "simple", "native-build",
+            "--source", "src/compiler",
+            "--source=src/app",
+            "--source", "src/lib",
+            "--source=src/os",
+            "--source", "examples/10_tooling",
+            "--entry", "src/app/os/main.spl",
+            "--output", "build/focused-simple",
+        ]
+        val sources = focused_native_build_sources(five)
+
+        expect(sources.len()).to_equal(5)
+        expect(sources[0]).to_equal("src/compiler")
+        expect(sources[4]).to_equal("examples/10_tooling")
+        expect(focused_native_build_error(five)).to_equal("")
+        expect(focused_native_build_effective_sources(five, false).len()).to_equal(5)
+        expect(focused_native_build_effective_sources(five, true).len()).to_equal(0)
+
+        val six = five + ["--source", "examples/09_embedded/simple_os"]
+        expect(focused_native_build_error(six)).to_contain("at most five --source roots")
+
+    it "preserves explicit target and linker-script ownership":
+        val args = [
+            "simple", "native-build",
+            "--entry", "src/os/kernel/arch/aarch64/boot.spl",
+            "-o", "build/os/kernel.elf",
+            "--target=aarch64-unknown-none",
+            "--linker-script", "src/os/kernel/arch/aarch64/linker.ld",
+            "--runtime-path", "src/compiler_rust/target/bootstrap",
+            "--cache-dir", "build/focused-cache",
+        ]
+
+        expect(focused_native_build_target(args)).to_equal("aarch64-unknown-none")
+        expect(focused_native_build_linker_script(args)).to_equal("src/os/kernel/arch/aarch64/linker.ld")
+        expect(focused_native_build_runtime_path(args)).to_equal("src/compiler_rust/target/bootstrap")
+        expect(focused_native_build_cache_dir(args)).to_equal("build/focused-cache")
+        expect(focused_native_build_effective_cache_dir(args, "build/previous-cache")).to_equal("build/focused-cache")
+        expect(focused_native_build_effective_cache_dir([], "build/previous-cache")).to_equal("build/previous-cache")
+
+    it "rejects unsupported build modes before compiler entry":
+        val args = [
+            "simple", "native-build",
+            "--mode", "definitely-invalid-mode",
+            "--entry", "src/app/os/main.spl",
+            "--output", "build/focused-simple",
+        ]
+
+        expect(focused_native_build_error(args)).to_equal(
+            "Error: invalid --mode 'definitely-invalid-mode' (expected dynload or one-binary)"
+        )
+
+    it "preserves llvm as the implicit bootstrap backend":
+        expect(focused_native_build_backend([])).to_equal("llvm")
+        expect(focused_native_build_backend(["--backend", "cranelift"])).to_equal("cranelift")
+
+    it "restricts source dropping and forced strip to authorized exact capsules":
+        expect(focused_native_build_exact_capsule_entry_allowed("src/app/cli/main.spl")).to_equal(true)
+        expect(focused_native_build_exact_capsule_entry_allowed("src/app/os/main.spl")).to_equal(true)
+        expect(focused_native_build_exact_capsule_entry_allowed("src/os/kernel/main.spl")).to_equal(false)
+        expect(focused_native_build_strip([], true)).to_equal(true)
+        expect(focused_native_build_strip([], false)).to_equal(false)
+        expect(focused_native_build_strip(["--strip"], false)).to_equal(true)

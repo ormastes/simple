@@ -1,0 +1,72 @@
+"""
+Claude full user text message parity model.
+"""
+
+const USER_TEXT_MESSAGE_SOURCE_LINES = 274
+const USER_TEXT_NO_CONTENT_MESSAGE = "(no content)"
+const USER_TEXT_COMMAND_MESSAGE_TAG = "command-message"
+const USER_TEXT_LOCAL_COMMAND_CAVEAT_TAG = "local-command-caveat"
+const USER_TEXT_TASK_NOTIFICATION_TAG = "task-notification"
+const USER_TEXT_TEAMMATE_MESSAGE_TAG = "teammate-message"
+const USER_TEXT_TICK_TAG = "tick"
+const USER_TEXT_INTERRUPT_MESSAGE = "[Request interrupted by user]"
+const USER_TEXT_INTERRUPT_MESSAGE_FOR_TOOL_USE = "[Request interrupted by user for tool use]"
+
+class UserTextRender:
+    visible: bool
+    kind: text
+    text_value: text
+    add_margin: bool
+    verbose: bool
+    is_transcript_mode: bool
+    timestamp: text
+
+impl UserTextRender:
+    static fn hidden(kind: text) -> UserTextRender:
+        UserTextRender(visible: false, kind: kind, text_value: "", add_margin: false, verbose: false, is_transcript_mode: false, timestamp: "")
+
+    static fn visible(kind: text, textValue: text, addMargin: bool, verbose: bool, isTranscriptMode: bool, timestamp: text) -> UserTextRender:
+        UserTextRender(visible: true, kind: kind, text_value: textValue, add_margin: addMargin, verbose: verbose, is_transcript_mode: isTranscriptMode, timestamp: timestamp)
+
+fn userTextHasTag(textValue: text, tag: text) -> bool:
+    textValue.contains("<" + tag) or textValue.contains("<" + tag + ">")
+
+fn userTextMessage(textValue: text, addMargin: bool, verbose: bool, planContent: text, isTranscriptMode: bool, timestamp: text, agentSwarmsEnabled: bool, githubWebhooksEnabled: bool, forkSubagentEnabled: bool, udsInboxEnabled: bool, kairosEnabled: bool, kairosChannelsEnabled: bool) -> UserTextRender:
+    if textValue.trim() == USER_TEXT_NO_CONTENT_MESSAGE:
+        return UserTextRender.hidden("no-content")
+    if planContent != "":
+        return UserTextRender.visible("plan", planContent, addMargin, verbose, isTranscriptMode, timestamp)
+    if userTextHasTag(textValue, USER_TEXT_TICK_TAG):
+        return UserTextRender.hidden("tick")
+    if textValue.contains("<" + USER_TEXT_LOCAL_COMMAND_CAVEAT_TAG + ">"):
+        return UserTextRender.hidden("local-command-caveat")
+    if textValue.starts_with("<bash-stdout") or textValue.starts_with("<bash-stderr"):
+        return UserTextRender.visible("bash-output", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.starts_with("<local-command-stdout") or textValue.starts_with("<local-command-stderr"):
+        return UserTextRender.visible("local-command-output", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue == USER_TEXT_INTERRUPT_MESSAGE or textValue == USER_TEXT_INTERRUPT_MESSAGE_FOR_TOOL_USE:
+        return UserTextRender.visible("interrupted", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if githubWebhooksEnabled and textValue.starts_with("<github-webhook-activity>"):
+        return UserTextRender.visible("github-webhook", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.contains("<bash-input>"):
+        return UserTextRender.visible("bash-input", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.contains("<" + USER_TEXT_COMMAND_MESSAGE_TAG + ">"):
+        return UserTextRender.visible("command", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.contains("<user-memory-input>"):
+        return UserTextRender.visible("memory-input", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if agentSwarmsEnabled and textValue.contains("<" + USER_TEXT_TEAMMATE_MESSAGE_TAG):
+        return UserTextRender.visible("teammate", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.contains("<" + USER_TEXT_TASK_NOTIFICATION_TAG):
+        return UserTextRender.visible("agent-notification", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if textValue.contains("<mcp-resource-update") or textValue.contains("<mcp-polling-update"):
+        return UserTextRender.visible("resource-update", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if forkSubagentEnabled and textValue.contains("<fork-boilerplate>"):
+        return UserTextRender.visible("fork-boilerplate", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if udsInboxEnabled and textValue.contains("<cross-session-message"):
+        return UserTextRender.visible("cross-session", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    if (kairosEnabled or kairosChannelsEnabled) and textValue.contains("<channel source=\""):
+        return UserTextRender.visible("channel", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+    UserTextRender.visible("prompt", textValue, addMargin, verbose, isTranscriptMode, timestamp)
+
+fn userTextMessageSourceLinesModeled() -> i64:
+    USER_TEXT_MESSAGE_SOURCE_LINES

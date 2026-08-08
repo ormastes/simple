@@ -1,0 +1,53 @@
+# Target Timing Model - Tick/Time-Unit Conversion (WP-18)
+#
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md, WP-18.
+#
+# Scope, deliberately narrow: this is a *declared conversion rate* between the
+# tick counter used throughout async/timer.spl and async/scheduler.spl (see
+# timer_now() there — a monotonic counter, platform-mapped to ARM SysTick,
+# RISC-V mcycle/mtime, x86 RDTSC/PIT, or an interpreter-mode stub that
+# increments by 1 per call) and a wall-clock time unit (milliseconds). It does
+# NOT model cache effects, pipeline stalls, interrupt latency, or any other
+# microarchitectural behaviour — a real target timing model in that sense is
+# open engineering/research scope, out of reach here. This is the honest,
+# minimal piece: "how many ticks make up 1ms on this declared target," so a
+# ticks-denominated measurement (observed_max_ticks, see wcet_adapter.spl) can
+# be reported in a human time unit too.
+#
+# Reuses the existing tick convention rather than inventing a new one — same
+# instruction WP-17 followed for TaskSlot.deadline/period.
+
+class TargetTimingModel:
+    """Declares a target platform's tick-to-time-unit conversion rate.
+
+    ticks_per_ms: how many timer_now()-domain ticks make up one millisecond
+                  on the declared target. This is configuration data supplied
+                  by the caller (e.g. a board's documented clock frequency
+                  divided by however timer_now() derives its tick from that
+                  clock) -- NOT something this module measures or derives
+                  from hardware itself. Must be > 0.
+    name: a free-text label for the declared target (e.g. "qemu-virt-1MHz",
+          "generic-1kHz-tick"), for report readability only.
+    """
+    ticks_per_ms: i64
+    name: text
+
+    static fn new(name: text, ticks_per_ms: i64) -> TargetTimingModel:
+        """Construct a target timing model. ticks_per_ms must be > 0;
+        callers that pass <= 0 get a model that reports 0 for every
+        conversion (see ticks_to_ms) rather than dividing by zero."""
+        TargetTimingModel(name: name, ticks_per_ms: ticks_per_ms)
+
+    fn ticks_to_ms(ticks: i64) -> i64:
+        """Convert a tick count to whole milliseconds (integer division,
+        truncating). Returns 0 if ticks_per_ms is not positive."""
+        if self.ticks_per_ms <= 0:
+            return 0
+        ticks / self.ticks_per_ms
+
+    fn ms_to_ticks(ms: i64) -> i64:
+        """Convert a millisecond count to ticks. Returns 0 if ticks_per_ms
+        is not positive."""
+        if self.ticks_per_ms <= 0:
+            return 0
+        ms * self.ticks_per_ms

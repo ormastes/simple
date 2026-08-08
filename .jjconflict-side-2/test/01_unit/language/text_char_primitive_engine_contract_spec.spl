@@ -1,0 +1,95 @@
+# Pins the three text/codepoint primitives whose JIT and interpreter answers
+# diverged until 2026-08-06, so the agreed contract cannot silently regress.
+#
+# Background:
+#   doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
+#
+# Measured divergence before the fix (seed at
+# src/compiler_rust/target/bootstrap/simple, `run` = Cranelift JIT):
+#
+#   | expression                  | JIT before        | interpret |
+#   |-----------------------------|-------------------|-----------|
+#   | `(97).chr()`                | abort: i64.chr    | "a"       |
+#   | `"Café".char_at(99) == ""`  | false (nil)       | true      |
+#   | `"Café".char_at(4)  == ""`  | false (nil)       | true      |
+#   | `"Café".char_at(3) as i64`  | 465849835860 (ptr)| 233       |
+#
+# HONESTY NOTE, read before trusting this file as JIT evidence: `bin/simple
+# test` hard-defaults to the tree-walk interpreter and `TestExecutionMode` has
+# no JIT variant (.claude/rules/testing.md, run_vs_test_harness_divergence_
+# 2026-07-28.md), so this spec pins the CONTRACT but exercises only one engine.
+# The JIT half is proved by running the same expressions through
+# `<seed> run` with and without `SIMPLE_EXECUTION_MODE=interpret`, which is how
+# every number in the table above was produced.
+#
+# Only the agreed cases are asserted. Multi-character text cast to an integer
+# is deliberately NOT asserted: the interpreter raises a semantic error while
+# the compiled path returns a bare i64 with no error channel, so the engines
+# cannot agree there without a wider ABI change. That residue is filed, not
+# frozen in.
+
+describe "text codepoint primitives agree across engines":
+    """
+    As a Simple developer walking text by codepoint,
+    I want `.chr()`, `char_at` over-run and single-character integer casts
+    to mean the same thing whichever engine runs my program,
+    so that a loop that terminates under the interpreter does not run past
+    the end of the string once it is compiled.
+    """
+
+    # --- i64.chr / i64.to_char ------------------------------------------
+    # Was a hard abort ("Function 'i64.chr' not found") on the compiled path
+    # for ~100 call sites in src/lib, ASCII included.
+
+    it "chr builds an ASCII character from its code point":
+        assert_equal((97).chr(), "a")
+
+    it "chr builds a 2-byte character from its code point":
+        assert_equal((233).chr(), "é")
+
+    it "to_char is the same builtin as chr and handles 3-byte code points":
+        assert_equal((8364).to_char(), "€")
+
+    # --- char_at over-run is EMPTY TEXT, never nil ----------------------
+    # `if ch == "": break` is the pervasive loop-termination idiom. With a nil
+    # over-run it is fail-open: the guard never fires and the loop runs on.
+
+    it "char_at past the byte length yields empty text":
+        val s = "Café"
+        assert_equal(s.char_at(99), "")
+
+    it "char_at past the codepoint count yields empty text":
+        # "Café" is 5 bytes but 4 codepoints, so index 4 clears the byte-length
+        # fast reject and lands on the real character bound.
+        val s = "Café"
+        assert_equal(s.char_at(4), "")
+
+    it "the empty-text break idiom terminates on the first over-run index":
+        val s = "Café"
+        var seen = 0
+        var i = 0
+        while i < 99:
+            val ch = s.char_at(i)
+            if ch == "":
+                break
+            seen = seen + 1
+            i = i + 1
+        assert_equal(seen, 4)
+
+    # --- single-codepoint text cast to an integer is that code point ----
+    # Was the string's heap pointer >> 3 on the compiled path.
+
+    it "casting a 1-byte character to i64 gives its code point":
+        val s = "Café"
+        assert_equal(s.char_at(0) as i64, 67)
+
+    it "casting a 2-byte character to i64 gives its code point":
+        val s = "Café"
+        assert_equal(s.char_at(3) as i64, 233)
+
+    it "casting a 3-byte character to i64 gives its code point":
+        val e = "€"
+        assert_equal(e.char_at(0) as i64, 8364)
+
+    it "chr and the integer cast round-trip":
+        assert_equal((233).chr().char_at(0) as i64, 233)

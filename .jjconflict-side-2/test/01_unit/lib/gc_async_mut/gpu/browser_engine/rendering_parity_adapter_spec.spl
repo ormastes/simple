@@ -1,0 +1,74 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.rendering_parity_adapter.{
+    SIMPLE_WEB_PARITY_CONVERTER, simple_web_rendering_parity_observe,
+    simple_web_rendering_parity_paint_payload,
+    simple_web_rendering_parity_stage_records
+}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_box_with_style,
+    draw_ir_composition, draw_ir_embedding_config, draw_ir_rect_bounds
+}
+
+describe "Simple Web rendering parity observation adapter":
+    it "observes production DOM style layout and Draw IR in one result":
+        val html = "<style>body{margin:0}#card{width:12px;height:7px;background:#123456}</style><div id='card'>A:B;C</div>"
+        val observed = simple_web_rendering_parity_observe(html, 32, 24)
+        expect(SIMPLE_WEB_PARITY_CONVERTER).to_equal("simple-web-stage-v1")
+        expect(observed.node_count).to_be_greater_than(2)
+        expect(observed.command_count).to_be_greater_than(0)
+        expect(observed.dom_payload).to_start_with("schema=dom-v1")
+        expect(observed.dom_payload).to_contain("id(4:card)")
+        expect(observed.dom_payload).to_contain("5:A:B;C")
+        expect(observed.style_payload).to_start_with("schema=style-v1")
+        expect(observed.layout_payload).to_start_with("schema=layout-v1")
+        expect(observed.paint_payload).to_start_with("schema=paint-v1")
+        expect(observed.degraded).to_be(false)
+
+        val records = simple_web_rendering_parity_stage_records("card", "cpu", html, 32, 24).unwrap()
+        expect(records.len()).to_equal(4)
+        expect(records[0].stage).to_equal("dom")
+        expect(records[3].stage).to_equal("paint")
+        expect(records[1].input_checksum).to_equal(records[0].output_checksum)
+        expect(records[3].ordinal).to_equal(3)
+        expect(records[0].payload).to_equal(observed.dom_payload)
+
+    it "is deterministic for identical production input":
+        val html = "<main><p id='same'>stable</p></main>"
+        val first = simple_web_rendering_parity_observe(html, 80, 40)
+        val second = simple_web_rendering_parity_observe(html, 80, 40)
+        expect(second.dom_payload).to_equal(first.dom_payload)
+        expect(second.style_payload).to_equal(first.style_payload)
+        expect(second.layout_payload).to_equal(first.layout_payload)
+        expect(second.paint_payload).to_equal(first.paint_payload)
+
+    it "changes paint payload when only semantic clip geometry changes":
+        val first_command = draw_ir_box_with_style(
+            "box", 1, 2, 3, 4, 0xff112233u32,
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(0, 0, 8, 8), []
+        )
+        val second_command = draw_ir_box_with_style(
+            "box", 1, 2, 3, 4, 0xff112233u32,
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(1, 2, 3, 4),
+            draw_ir_rect_bounds(0, 0, 7, 8), []
+        )
+        val embedding = draw_ir_embedding_config(
+            "surface", "component", 0, 0, 8, 8, 0, 1000, true
+        )
+        val first = draw_ir_composition(
+            "same", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, embedding, [first_command])]
+        )
+        val second = draw_ir_composition(
+            "same", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, embedding, [second_command])]
+        )
+        val first_payload = simple_web_rendering_parity_paint_payload(first)
+        val second_payload = simple_web_rendering_parity_paint_payload(second)
+        expect(first_payload == second_payload).to_be(false)
+        expect(first_payload).to_contain("clip_width=8")
+        expect(second_payload).to_contain("clip_width=7")

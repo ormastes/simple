@@ -1,0 +1,249 @@
+# @cover src/lib/common/ui/ui_scene_counts.spl 70%
+# @cover src/lib/common/ui/ui_scene_owner_table.spl 70%
+# @cover src/lib/common/ui/ui_scene_prepared2d.spl 70%
+# @tag: unit, ui, draw_ir, draw_ir_v3, unified_packed_ui_scene, l1
+
+use std.spec
+use common.ui.draw_ir_v3.{DRAW_IR_V3_NO_ID}
+use common.ui.ui_scene_counts.{
+    UiSceneRange,
+    UI_SCENE_TABLE_COMMANDS,
+    UI_SCENE_TABLE_GEOMETRY,
+    UI_SCENE_TABLE_PAINT,
+    UI_SCENE_TABLE_TEXT_RUNS,
+    UI_SCENE_TABLE_GLYPHS,
+    UI_SCENE_TABLE_RESOURCES,
+    UI_SCENE_TABLE_PATH_SPANS,
+    UI_SCENE_TABLE_PATH_POINTS,
+    UI_SCENE_TABLE_CLIPS,
+    UI_SCENE_TABLE_TRANSFORMS,
+    UI_SCENE_TABLE_HIT_SHAPES,
+    UI_SCENE_TABLE_PROVENANCE_EDGES,
+    UI_SCENE_TABLE_OWNER_RECORDS,
+    UI_SCENE_TABLE_ACTION_BINDINGS,
+    UI_SCENE_TABLE_PREPARED_BATCHES,
+    UI_SCENE_TABLE_DIRTY_RANGES,
+    UI_SCENE_OVERFLOW_CAPACITY,
+    UI_PRODUCER_WM,
+    UI_PRODUCER_GUI,
+    ui_scene_counts_zero,
+    ui_scene_counts_set,
+    ui_scene_counts_at,
+    ui_scene_ranges_at,
+    ui_scene_capacity_zero,
+    ui_scene_capacity_set,
+    ui_scene_scan_table,
+    ui_scene_scan,
+    ui_scene_verify
+}
+use common.ui.ui_scene_owner_table.{
+    UiOwnerRecord,
+    MenuActionBinding,
+    UI_SCENE_DISPATCH_OK,
+    UI_SCENE_DISPATCH_REFUSE_STALE_APP_GENERATION,
+    UI_SCENE_DISPATCH_REFUSE_STALE_MENU_REVISION,
+    ui_scene_owner_chain,
+    ui_scene_validate_menu_action_dispatch
+}
+use common.ui.ui_scene_prepared2d.{
+    Prepared2DBatch,
+    Prepared2DPlan,
+    UI_SCENE_PREPARED2D_FLAG_NEEDS_OFFSCREEN,
+    ui_scene_prepared2d_cache_key,
+    ui_scene_prepared2d_cache_key_equal,
+    ui_scene_prepared2d_batch_needs_offscreen
+}
+
+describe "UiSceneTableId numbering (design section 2.1, cross-module ABI)":
+    """The sixteen destination table ids are a stable, append-only, numeric
+    contract every other lane's writers and receipts key off. A silent
+    renumber here corrupts six downstream lanes without a compile error."""
+
+    it "should pin all 16 UiSceneTableId values exactly as design 2.1 numbers them":
+        step("Compare each named table id constant to its literal design number")
+        expect(UI_SCENE_TABLE_COMMANDS).to_equal(0u16)
+        expect(UI_SCENE_TABLE_GEOMETRY).to_equal(1u16)
+        expect(UI_SCENE_TABLE_PAINT).to_equal(2u16)
+        expect(UI_SCENE_TABLE_TEXT_RUNS).to_equal(3u16)
+        expect(UI_SCENE_TABLE_GLYPHS).to_equal(4u16)
+        expect(UI_SCENE_TABLE_RESOURCES).to_equal(5u16)
+        expect(UI_SCENE_TABLE_PATH_SPANS).to_equal(6u16)
+        expect(UI_SCENE_TABLE_PATH_POINTS).to_equal(7u16)
+        expect(UI_SCENE_TABLE_CLIPS).to_equal(8u16)
+        expect(UI_SCENE_TABLE_TRANSFORMS).to_equal(9u16)
+        expect(UI_SCENE_TABLE_HIT_SHAPES).to_equal(10u16)
+        expect(UI_SCENE_TABLE_PROVENANCE_EDGES).to_equal(11u16)
+        expect(UI_SCENE_TABLE_OWNER_RECORDS).to_equal(12u16)
+        expect(UI_SCENE_TABLE_ACTION_BINDINGS).to_equal(13u16)
+        expect(UI_SCENE_TABLE_PREPARED_BATCHES).to_equal(14u16)
+        expect(UI_SCENE_TABLE_DIRTY_RANGES).to_equal(15u16)
+
+describe "Count -> scan -> verify state machine (design section 5)":
+    """Exact-size vocabulary: an exclusive prefix scan over per-producer
+    counts must be disjoint and gapless, and VERIFY must refuse — never
+    clamp — when a table's total exceeds its capacity."""
+
+    it "should scan one table's producer counts into disjoint, gapless ranges":
+        step("Scan counts {3, 0, 5} for a single table")
+        val ranges = ui_scene_scan_table([3u32, 0u32, 5u32])
+
+        expect(ranges.len()).to_equal(3)
+        expect(ranges[0].start).to_equal(0u32)
+        expect(ranges[0].count).to_equal(3u32)
+        expect(ranges[1].start).to_equal(3u32)
+        expect(ranges[1].count).to_equal(0u32)
+        expect(ranges[2].start).to_equal(3u32)
+        expect(ranges[2].count).to_equal(5u32)
+
+        step("Each range must start exactly where the previous one ended")
+        expect(ranges[1].start).to_equal(ranges[0].start + ranges[0].count)
+        expect(ranges[2].start).to_equal(ranges[1].start + ranges[1].count)
+        expect(ranges[2].start + ranges[2].count).to_equal(8u32)
+
+    it "should scan all 16 tables across multiple producers into disjoint per-producer ranges":
+        step("Two producers each report a count for the COMMANDS table only")
+        var c0 = ui_scene_counts_zero()
+        c0 = ui_scene_counts_set(c0, UI_SCENE_TABLE_COMMANDS, 2u32)
+        var c1 = ui_scene_counts_zero()
+        c1 = ui_scene_counts_set(c1, UI_SCENE_TABLE_COMMANDS, 3u32)
+
+        val scanned = ui_scene_scan([c0, c1])
+        expect(scanned.len()).to_equal(2)
+
+        val r0 = ui_scene_ranges_at(scanned[0], UI_SCENE_TABLE_COMMANDS)
+        val r1 = ui_scene_ranges_at(scanned[1], UI_SCENE_TABLE_COMMANDS)
+        expect(r0.start).to_equal(0u32)
+        expect(r0.count).to_equal(2u32)
+        expect(r1.start).to_equal(2u32)
+        expect(r1.count).to_equal(3u32)
+
+        step("An untouched table stays a zero-width range for both producers")
+        val g0 = ui_scene_ranges_at(scanned[0], UI_SCENE_TABLE_GEOMETRY)
+        expect(g0.start).to_equal(0u32)
+        expect(g0.count).to_equal(0u32)
+
+    it "should refuse with a receipt naming the exact table/required/capacity when required exceeds capacity, and pass nothing to emit":
+        step("A producer's GEOMETRY total (20) exceeds the reserved capacity (10)")
+        var totals = ui_scene_counts_zero()
+        totals = ui_scene_counts_set(totals, UI_SCENE_TABLE_GEOMETRY, 20u32)
+        var capacity = ui_scene_capacity_zero()
+        capacity = ui_scene_capacity_set(capacity, UI_SCENE_TABLE_GEOMETRY, 10u32)
+
+        val receipt = ui_scene_verify(totals, capacity, UI_PRODUCER_WM, 7u32, 42u64)
+        expect(receipt == nil).to_equal(false)
+        if val r = receipt:
+            expect(r.table_id).to_equal(UI_SCENE_TABLE_GEOMETRY)
+            expect(r.required).to_equal(20u32)
+            expect(r.capacity).to_equal(10u32)
+            expect(r.kind).to_equal(UI_SCENE_OVERFLOW_CAPACITY)
+            expect(r.producer_kind).to_equal(UI_PRODUCER_WM)
+            expect(r.producer_id).to_equal(7u32)
+            expect(r.snapshot_id).to_equal(42u64)
+
+    it "should pass verify with no receipt when every table stays within capacity":
+        step("A COMMANDS total of 4 is well inside a capacity of 100")
+        var totals = ui_scene_counts_zero()
+        totals = ui_scene_counts_set(totals, UI_SCENE_TABLE_COMMANDS, 4u32)
+        var capacity = ui_scene_capacity_zero()
+        capacity = ui_scene_capacity_set(capacity, UI_SCENE_TABLE_COMMANDS, 100u32)
+
+        val receipt = ui_scene_verify(totals, capacity, UI_PRODUCER_GUI, 1u32, 1u64)
+        expect(receipt == nil).to_equal(true)
+
+describe "Owner/action table (design section 2.4)":
+    """Owner-chain walk is a pure fold over a caller-supplied flat table;
+    menu action dispatch validates app_generation and menu_revision before
+    ever delivering to a recycled slot."""
+
+    it "should walk the owner-record parent chain from a leaf up to the WM root":
+        step("Row 0's parent is row 1; row 1 is the WM root (NO_ID parent)")
+        val owners = [
+            UiOwnerRecord(
+                producer_kind: UI_PRODUCER_GUI, event_policy: 0u16,
+                semantic_id: 1u32, semantic_generation: 1u32,
+                parent_owner_id: 1u32, action_binding_id: DRAW_IR_V3_NO_ID
+            ),
+            UiOwnerRecord(
+                producer_kind: UI_PRODUCER_WM, event_policy: 0u16,
+                semantic_id: 2u32, semantic_generation: 1u32,
+                parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+            )
+        ]
+
+        val chain = ui_scene_owner_chain(owners, 0u32)
+        expect(chain.len()).to_equal(2)
+        expect(chain[0]).to_equal(0u32)
+        expect(chain[1]).to_equal(1u32)
+
+    it "should return just the root when the root itself is walked":
+        val owners = [
+            UiOwnerRecord(
+                producer_kind: UI_PRODUCER_WM, event_policy: 0u16,
+                semantic_id: 9u32, semantic_generation: 1u32,
+                parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+            )
+        ]
+        val chain = ui_scene_owner_chain(owners, 0u32)
+        expect(chain.len()).to_equal(1)
+        expect(chain[0]).to_equal(0u32)
+
+    it "should refuse dispatch on a stale app_generation and accept on a fresh one":
+        step("Same binding checked against a stale, then the matching, app_generation")
+        val binding = MenuActionBinding(
+            app_id: 9u32, app_generation: 5u32, menu_revision: 2u32,
+            action_id: 77u32, default_target_owner_id: 3u32
+        )
+
+        val stale = ui_scene_validate_menu_action_dispatch(binding, 6u32, 2u32)
+        expect(stale.accepted).to_equal(false)
+        expect(stale.reason).to_equal(UI_SCENE_DISPATCH_REFUSE_STALE_APP_GENERATION)
+
+        val fresh = ui_scene_validate_menu_action_dispatch(binding, 5u32, 2u32)
+        expect(fresh.accepted).to_equal(true)
+        expect(fresh.reason).to_equal(UI_SCENE_DISPATCH_OK)
+        expect(fresh.target_owner_id).to_equal(3u32)
+        expect(fresh.action_id).to_equal(77u32)
+
+    it "should also refuse dispatch on a stale menu_revision with a fresh app_generation":
+        val binding = MenuActionBinding(
+            app_id: 9u32, app_generation: 5u32, menu_revision: 2u32,
+            action_id: 77u32, default_target_owner_id: 3u32
+        )
+        val stale_menu = ui_scene_validate_menu_action_dispatch(binding, 5u32, 3u32)
+        expect(stale_menu.accepted).to_equal(false)
+        expect(stale_menu.reason).to_equal(UI_SCENE_DISPATCH_REFUSE_STALE_MENU_REVISION)
+
+describe "Prepared2D sidecar (design section 2.5)":
+    """Cache key = (scene_generation, capability_key, viewport_generation);
+    an unchanged key must compare equal so a caller can reuse the plan
+    bit-for-bit."""
+
+    it "should compare Prepared2D cache keys equal only when all three fields match":
+        val plan = Prepared2DPlan(
+            batches: UiSceneRange(start: 0u32, count: 4u32),
+            dirty_upload: UiSceneRange(start: 0u32, count: 1u32),
+            damage_rect_count: 1u32, capability_key: 55u64, scene_generation: 9u32
+        )
+        val key_a = ui_scene_prepared2d_cache_key(plan, 1u32)
+        val key_b = ui_scene_prepared2d_cache_key(plan, 1u32)
+        val key_c = ui_scene_prepared2d_cache_key(plan, 2u32)
+
+        expect(ui_scene_prepared2d_cache_key_equal(key_a, key_b)).to_equal(true)
+        expect(ui_scene_prepared2d_cache_key_equal(key_a, key_c)).to_equal(false)
+
+    it "should read Prepared2DBatch.flags bit 0 as NEEDS_OFFSCREEN":
+        val plain = Prepared2DBatch(
+            first_command: 0u32, command_count: 1u32, target_surface_id: 0u32,
+            pipeline_id: 0u32, resource_set_id: 0u32,
+            resolved_clip_id: DRAW_IR_V3_NO_ID, resolved_transform_id: DRAW_IR_V3_NO_ID,
+            flags: 0u32
+        )
+        val offscreen = Prepared2DBatch(
+            first_command: 0u32, command_count: 1u32, target_surface_id: 0u32,
+            pipeline_id: 0u32, resource_set_id: 0u32,
+            resolved_clip_id: DRAW_IR_V3_NO_ID, resolved_transform_id: DRAW_IR_V3_NO_ID,
+            flags: UI_SCENE_PREPARED2D_FLAG_NEEDS_OFFSCREEN
+        )
+
+        expect(ui_scene_prepared2d_batch_needs_offscreen(plain)).to_equal(false)
+        expect(ui_scene_prepared2d_batch_needs_offscreen(offscreen)).to_equal(true)

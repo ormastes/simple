@@ -1,0 +1,650 @@
+# Pure evidence classification shared by host probes and tests.
+
+fn _host_env_json_text(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    val escaped_newlines = escaped_quotes.replace("\n", "\\n")
+    "\"{escaped_newlines}\""
+
+fn _host_evidence_value_matches(evidence: text, key: text, expected: text) -> bool:
+    val prefix = key + "="
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found:
+                return false
+            if expected == "":
+                if line == prefix:
+                    return false
+            elif line != prefix + expected:
+                return false
+            found = true
+    found
+
+fn _host_evidence_positive_decimal(evidence: text, key: text) -> bool:
+    val prefix = key + "="
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line.len() == prefix.len():
+                return false
+            var i = prefix.len()
+            var positive = false
+            while i < line.len():
+                val digit = line.char_at(i)
+                if not "0123456789".contains(digit):
+                    return false
+                if digit != "0":
+                    positive = true
+                i += 1
+            if not positive:
+                return false
+            found = true
+    found
+
+fn _host_normalized_positive_decimal(value: text) -> text:
+    if value == "":
+        return ""
+    var first = 0
+    var nonzero = false
+    var i = 0
+    while i < value.len():
+        val digit = value.char_at(i)
+        if not "0123456789".contains(digit):
+            return ""
+        if not nonzero and digit == "0":
+            first = i + 1
+        elif digit != "0":
+            nonzero = true
+        i += 1
+    if not nonzero:
+        return ""
+    value.slice(first, value.len())
+
+fn _host_evidence_values_increase(evidence: text, earlier_key: text, later_key: text) -> bool:
+    val earlier_prefix = earlier_key + "="
+    val later_prefix = later_key + "="
+    var earlier = ""
+    var later = ""
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(earlier_prefix):
+            if earlier != "":
+                return false
+            earlier = _host_normalized_positive_decimal(line.slice(earlier_prefix.len(), line.len()))
+            if earlier == "":
+                return false
+        elif line.starts_with(later_prefix):
+            if later != "":
+                return false
+            later = _host_normalized_positive_decimal(line.slice(later_prefix.len(), line.len()))
+            if later == "":
+                return false
+    if earlier == "" or later == "":
+        return false
+    if earlier.len() != later.len():
+        return later.len() > earlier.len()
+    later > earlier
+
+fn _host_evidence_lower_hex_64(evidence: text, key: text) -> bool:
+    val prefix = key + "="
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line.len() != prefix.len() + 64:
+                return false
+            var i = prefix.len()
+            var nonzero = false
+            while i < line.len():
+                val digit = line.char_at(i)
+                if not "0123456789abcdef".contains(digit):
+                    return false
+                if digit != "0":
+                    nonzero = true
+                i += 1
+            if not nonzero:
+                return false
+            found = true
+    found
+
+fn _host_evidence_values_equal(evidence: text, left_key: text, right_key: text) -> bool:
+    val left_prefix = left_key + "="
+    val right_prefix = right_key + "="
+    var left = ""
+    var right = ""
+    var left_found = false
+    var right_found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(left_prefix):
+            if left_found or line == left_prefix:
+                return false
+            left = line.slice(left_prefix.len(), line.len())
+            left_found = true
+        elif line.starts_with(right_prefix):
+            if right_found or line == right_prefix:
+                return false
+            right = line.slice(right_prefix.len(), line.len())
+            right_found = true
+    left_found and right_found and left == right
+
+fn _host_evidence_values_differ(evidence: text, left_key: text, right_key: text) -> bool:
+    val left_prefix = left_key + "="
+    val right_prefix = right_key + "="
+    var left = ""
+    var right = ""
+    var left_found = false
+    var right_found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(left_prefix):
+            if left_found or line == left_prefix:
+                return false
+            left = line.slice(left_prefix.len(), line.len())
+            left_found = true
+        elif line.starts_with(right_prefix):
+            if right_found or line == right_prefix:
+                return false
+            right = line.slice(right_prefix.len(), line.len())
+            right_found = true
+    left_found and right_found and left != right
+
+fn host_simd_evidence_passes(evidence: text, expected_arch: text, expected_feature: text) -> bool:
+    _host_evidence_value_matches(evidence, "cpu_simd_evidence_status", "pass") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_simple_bin_status", "pass") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_arch", expected_arch) and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_feature", expected_feature) and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_execution_environment", "native_host") and
+        _host_evidence_lower_hex_64(evidence, "cpu_simd_evidence_canonical_source_sha256") and
+        _host_evidence_lower_hex_64(evidence, "cpu_simd_evidence_compiler_sha256") and
+        _host_evidence_lower_hex_64(evidence, "cpu_simd_evidence_frame_receipt_sha256") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_native_simd_executed", "true") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_native_simd_bit_exact", "true") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_native_simd_hits") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_fill_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_fill_expected_checksum", "cpu_simd_evidence_fill_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_fill_mismatch_count", "0") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_copy_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_copy_expected_checksum", "cpu_simd_evidence_copy_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_copy_mismatch_count", "0") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_alpha_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_alpha_expected_checksum", "cpu_simd_evidence_alpha_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_alpha_mismatch_count", "0") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_alpha_edge_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_alpha_edge_expected_checksum", "cpu_simd_evidence_alpha_edge_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_alpha_edge_mismatch_count", "0") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_scroll_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_scroll_expected_checksum", "cpu_simd_evidence_scroll_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_scroll_mismatch_count", "0") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_diagram_pixel_count", "192") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_expected_checksum") and
+        _host_evidence_values_equal(evidence, "cpu_simd_evidence_diagram_expected_checksum", "cpu_simd_evidence_diagram_actual_checksum") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_diagram_mismatch_count", "0") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_fill_hits") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_copy_hits") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_alpha_hits") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_blit_hits") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_diagram_scroll_hits") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_facade_draw_image_clip_mask_status", "pass") and
+        _host_evidence_positive_decimal(evidence, "cpu_simd_evidence_facade_draw_image_clip_mask_examples") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_facade_draw_image_clip_mask_failures", "0") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_policy", "exact-bitmap-no-blur-no-tolerance") and
+        _host_evidence_value_matches(evidence, "cpu_simd_evidence_blur_or_tolerance_used", "false")
+
+fn host_x86_simd_evidence_passes(evidence: text) -> bool:
+    host_simd_evidence_passes(evidence, "x86_64", "avx2") or
+        host_simd_evidence_passes(evidence, "x86_64", "sse42")
+
+fn host_vulkan_evidence_passes(evidence: text) -> bool:
+    _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_status", "pass") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_spec_status", "pass") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_available", "true") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_backend_name", "vulkan") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_present_exercised", "true") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_readback_exercised", "true") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_status", "pass") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_status", "pass") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_pixels", "256") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_pixels", "256") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_expected_checksum", "140735349260160") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_actual_checksum", "140735349260160") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_expected_checksum", "140781974135910") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_actual_checksum", "140781974135910") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_mismatches", "0") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_mismatches", "0") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_clear_source", "device_readback") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_rect_source", "device_readback") and
+        _host_evidence_positive_decimal(evidence, "vulkan_engine2d_readback_clear_backend_handle") and
+        _host_evidence_positive_decimal(evidence, "vulkan_engine2d_readback_rect_backend_handle") and
+        _host_evidence_positive_decimal(evidence, "vulkan_engine2d_readback_clear_device_identity") and
+        _host_evidence_positive_decimal(evidence, "vulkan_engine2d_readback_rect_device_identity") and
+        _host_evidence_values_equal(evidence, "vulkan_engine2d_readback_clear_device_identity", "vulkan_engine2d_readback_rect_device_identity") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_blur_or_tolerance_used", "false") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_vulkan_strict_exit_code", "0") and
+        _host_evidence_value_matches(evidence, "vulkan_engine2d_readback_cpu_vulkan_parity_exit_code", "0")
+
+fn _host_evidence_bounded_positive_decimal_value(evidence: text, key: text) -> i64:
+    val prefix = key + "="
+    var found = false
+    var value: i64 = -1
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line.len() == prefix.len() or line.len() > prefix.len() + 9:
+                return -1
+            var i = prefix.len()
+            while i < line.len():
+                if not "0123456789".contains(line.char_at(i)):
+                    return -1
+                i += 1
+            value = line.slice(prefix.len(), line.len()).parse_i64() ?? -1
+            found = true
+    if found and value > 0:
+        return value
+    -1
+
+fn _host_evidence_argb_shape_matches(evidence: text, prefix: text) -> bool:
+    val width = _host_evidence_bounded_positive_decimal_value(evidence, prefix + "_argb_width")
+    val height = _host_evidence_bounded_positive_decimal_value(evidence, prefix + "_argb_height")
+    val pixel_count = _host_evidence_bounded_positive_decimal_value(evidence, prefix + "_argb_pixel_count")
+    val nonblank = _host_evidence_bounded_positive_decimal_value(evidence, prefix + "_argb_nonblank_pixel_count")
+    width > 0 and height > 0 and pixel_count == width * height and
+        nonblank > 0 and nonblank <= pixel_count
+
+fn host_browser_vulkan_parity_evidence_passes(browser_evidence: text, run_evidence: text) -> bool:
+    _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_browser_backing_mode", "gpu-feature-status") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_browser_backing_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_vulkan", "enabled") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_gpu_compositing", "enabled") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_hardware_supports_vulkan", "true") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_source", "") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_source_file_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source", "") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_electron_browser_backing_argb_source_file_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_chrome_browser_backing_status", "pass") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_chrome_browser_backing_gpu_compositing", "enabled") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_chrome_browser_backing_hardware_supports_vulkan", "true") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_chrome_browser_backing_source", "") and
+        _host_evidence_value_matches(browser_evidence, "gui_web_2d_vulkan_chrome_browser_backing_source_file_status", "pass") and
+        _host_evidence_positive_decimal(run_evidence, "gui_web_2d_vulkan_width") and
+        _host_evidence_positive_decimal(run_evidence, "gui_web_2d_vulkan_height") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_argb_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_argb_path", "") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_width", "gui_web_2d_vulkan_electron_argb_width") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_height", "gui_web_2d_vulkan_electron_argb_height") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_argb_format", "argb-u32") and
+        _host_evidence_argb_shape_matches(run_evidence, "gui_web_2d_vulkan_electron") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_argb_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_argb_path", "") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_width", "gui_web_2d_vulkan_chrome_argb_width") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_height", "gui_web_2d_vulkan_chrome_argb_height") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_argb_format", "argb-u32") and
+        _host_evidence_argb_shape_matches(run_evidence, "gui_web_2d_vulkan_chrome") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_simple_argb_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_simple_argb_backend", "vulkan") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_simple_argb_path", "") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_width", "gui_web_2d_vulkan_simple_argb_width") and
+        _host_evidence_values_equal(run_evidence, "gui_web_2d_vulkan_height", "gui_web_2d_vulkan_simple_argb_height") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_simple_argb_format", "argb-u32") and
+        _host_evidence_argb_shape_matches(run_evidence, "gui_web_2d_vulkan_simple") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_chrome_diff_path", "") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_chrome_mismatch_count", "0") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_simple_diff_path", "") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_simple_pairwise_diff_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_electron_simple_mismatch_count", "0") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_simple_diff_path", "") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status", "pass") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_chrome_simple_mismatch_count", "0") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_pixel_comparison_mode", "pairwise-argb-diff") and
+        _host_evidence_value_matches(run_evidence, "gui_web_2d_vulkan_pixel_comparison_status", "pass")
+
+fn _host_evidence_unique_value(evidence: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line == prefix:
+                return ""
+            value = line.slice(prefix.len(), line.len())
+            found = true
+    value
+
+fn host_simd_artifact_bindings(evidence: text) -> (text, text, text):
+    val compiler_path = _host_evidence_unique_value(evidence, "cpu_simd_evidence_simple_bin")
+    val source_sha = _host_evidence_unique_value(evidence, "cpu_simd_evidence_canonical_source_sha256")
+    val compiler_sha = _host_evidence_unique_value(evidence, "cpu_simd_evidence_compiler_sha256")
+    if compiler_path != "" and source_sha != "" and compiler_sha != "":
+        return (compiler_path, source_sha, compiler_sha)
+    ("", "", "")
+
+fn host_simd_frame_receipt_binding(evidence: text) -> (text, text):
+    val arch = _host_evidence_unique_value(evidence, "cpu_simd_evidence_arch")
+    val feature = _host_evidence_unique_value(evidence, "cpu_simd_evidence_feature")
+    val execution_environment = _host_evidence_unique_value(
+        evidence, "cpu_simd_evidence_execution_environment")
+    val checksum = _host_evidence_unique_value(evidence, "cpu_simd_evidence_diagram_actual_checksum")
+    val source_sha = _host_evidence_unique_value(evidence, "cpu_simd_evidence_canonical_source_sha256")
+    val compiler_sha = _host_evidence_unique_value(evidence, "cpu_simd_evidence_compiler_sha256")
+    val receipt_sha = _host_evidence_unique_value(evidence, "cpu_simd_evidence_frame_receipt_sha256")
+    if (arch != "" and feature != "" and execution_environment != "" and checksum != "" and
+        source_sha != "" and compiler_sha != "" and receipt_sha != ""):
+        val payload = "arch=" + arch + "\n" +
+            "feature=" + feature + "\n" +
+            "execution_environment=" + execution_environment + "\n" +
+            "diagram_actual_checksum=" + checksum + "\n" +
+            "canonical_source_sha256=" + source_sha + "\n" +
+            "compiler_sha256=" + compiler_sha + "\n"
+        return (payload, receipt_sha)
+    ("", "")
+
+fn host_renderdoc_capture_binding(evidence: text) -> (text, text):
+    val path = _host_evidence_unique_value(evidence, "rdoc_simple_gate_capture_file")
+    val sha = _host_evidence_unique_value(evidence, "rdoc_simple_gate_capture_file_sha256")
+    if path != "" and sha != "":
+        return (path, sha)
+    ("", "")
+
+fn host_renderdoc_replay_xml_binding(evidence: text) -> (text, text):
+    val path = _host_evidence_unique_value(evidence, "rdoc_simple_gate_replay_xml_path")
+    val sha = _host_evidence_unique_value(evidence, "rdoc_simple_gate_replay_xml_file_sha256")
+    if path != "" and sha != "":
+        return (path, sha)
+    ("", "")
+
+fn host_readback_capture_bindings(evidence: text) -> (text, text, text, text):
+    val baseline_path = _host_evidence_unique_value(evidence, "linux_hosted_wm_live_window_baseline_capture")
+    val baseline_sha = _host_evidence_unique_value(evidence, "linux_hosted_wm_live_window_baseline_capture_sha256")
+    val input_path = _host_evidence_unique_value(evidence, "linux_hosted_wm_live_window_input_capture")
+    val input_sha = _host_evidence_unique_value(evidence, "linux_hosted_wm_live_window_input_capture_sha256")
+    if baseline_path != "" and baseline_sha != "" and input_path != "" and input_sha != "":
+        return (baseline_path, baseline_sha, input_path, input_sha)
+    ("", "", "", "")
+
+fn host_renderdoc_evidence_passes(evidence: text) -> bool:
+    _host_evidence_value_matches(evidence, "rdoc_simple_gate_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_backend", "simple") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_scene", "vulkan-engine2d") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_file_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_magic", "RDOC") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_file_magic", "RDOC") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_capture_sha256") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_capture_file_sha256") and
+        _host_evidence_values_equal(evidence, "rdoc_simple_gate_capture_sha256", "rdoc_simple_gate_capture_file_sha256") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_hash_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_runtime_backend", "vulkan") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_renderdoc_available", "1") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_renderdoc_start", "1") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_renderdoc_capturing_before_end", "1") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_renderdoc_end", "1") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_renderdoc_num_captures") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_pixel_count") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_renderdoc_device") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_record_valid", "1") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_semantic_hash") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_record_hash") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_pixel_hash") and
+        _host_evidence_values_equal(evidence, "rdoc_simple_gate_owner_frame_id", "rdoc_simple_gate_capture_frame_id") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_capture_identity_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_reason", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_driver", "vulkan") and
+        _host_evidence_values_equal(evidence, "rdoc_simple_gate_capture_file", "rdoc_simple_gate_replay_capture_path") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_xml_path", "") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_replay_xml_hash") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_xml_file_status", "pass") and
+        _host_evidence_lower_hex_64(evidence, "rdoc_simple_gate_replay_xml_file_sha256") and
+        _host_evidence_values_equal(evidence, "rdoc_simple_gate_replay_xml_hash", "rdoc_simple_gate_replay_xml_file_sha256") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_xml_hash_status", "pass") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_xml_bytes") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_xml_file_bytes") and
+        _host_evidence_values_equal(evidence, "rdoc_simple_gate_replay_xml_bytes", "rdoc_simple_gate_replay_xml_file_bytes") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_chunk_count") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_relevant_action_count") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_pipeline_count") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_shader_count") and
+        _host_evidence_positive_decimal(evidence, "rdoc_simple_gate_replay_resource_count") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_convert_exit_code", "0") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_owner_agreement_status", "pass") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_owner_api", "vulkan") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_replay_command_exit", "0") and
+        _host_evidence_value_matches(evidence, "rdoc_simple_gate_runtime_metadata_status", "pass")
+
+fn host_display_input_evidence_passes(evidence: text) -> bool:
+    _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_receipt_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_semantic_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_text_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_focus_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_pointer_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_keyboard_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_move_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_maximize_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_restore_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_event_origin", "screen") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_event_id") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_wm_target_id") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_compositor_wm_target_id") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_wm_target_id", "linux_hosted_wm_live_window_input_compositor_wm_target_id") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_semantic_target_id", "host-proof") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_callback_count", "1") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_mutation_revision", "1") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_replay_rejection_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_frame_marker", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_frame_correlation_status", "pass")
+
+fn host_readback_evidence_passes(evidence: text) -> bool:
+    host_display_input_evidence_passes(evidence) and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_framebuffer_status", "pass") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_glyph_crop_status", "pass") and
+        _host_evidence_lower_hex_64(evidence, "linux_hosted_wm_live_window_glyph_crop_sha256") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_glyph_crop_sha256", "linux_hosted_wm_live_window_glyph_crop_expected_sha256") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_glyph_crop_live_match", "true") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_baseline_nonce", "1") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_nonce", "2") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_baseline_revision") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_revision") and
+        _host_evidence_values_increase(evidence, "linux_hosted_wm_live_window_baseline_revision", "linux_hosted_wm_live_window_input_revision") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_baseline_frame_checksum") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_frame_checksum") and
+        _host_evidence_values_differ(evidence, "linux_hosted_wm_live_window_baseline_frame_checksum", "linux_hosted_wm_live_window_input_frame_checksum") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_baseline_backend", "vulkan") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_baseline_backend", "linux_hosted_wm_live_window_input_backend") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_baseline_readback_source", "device_readback") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_source", "device_readback") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_baseline_backend_handle") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_backend_handle") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_baseline_backend_handle", "linux_hosted_wm_live_window_input_backend_handle") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_render_event_id") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_event_id", "linux_hosted_wm_live_window_input_render_event_id") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_render_mutation_revision") and
+        _host_evidence_values_equal(evidence, "linux_hosted_wm_live_window_mutation_revision", "linux_hosted_wm_live_window_input_render_mutation_revision") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_composition_id", "wm-composite") and
+        _host_evidence_positive_decimal(evidence, "linux_hosted_wm_live_window_input_web_content_image_count") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_completed", "true") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_width", "1024") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_height", "720") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_stride", "4096") and
+        _host_evidence_value_matches(evidence, "linux_hosted_wm_live_window_input_readback_format", "argb8888") and
+        _host_evidence_lower_hex_64(evidence, "linux_hosted_wm_live_window_baseline_capture_sha256") and
+        _host_evidence_lower_hex_64(evidence, "linux_hosted_wm_live_window_input_capture_sha256") and
+        _host_evidence_values_differ(evidence, "linux_hosted_wm_live_window_baseline_capture_sha256", "linux_hosted_wm_live_window_input_capture_sha256")
+
+struct HostCapabilityRow:
+    name: text
+    status: text
+    reason: text
+    evidence_path: text
+    resume_command: text
+
+    static fn create(name: text, status: text, reason: text, evidence_path: text, resume_command: text) -> HostCapabilityRow:
+        HostCapabilityRow(
+            name: name,
+            status: status,
+            reason: reason,
+            evidence_path: evidence_path,
+            resume_command: resume_command
+        )
+
+    fn validation_reason() -> text:
+        if self.status != "pass" and self.status != "blocked" and self.status != "fail":
+            return "invalid-status"
+        if self.evidence_path == "":
+            return "missing-evidence-path"
+        if self.status == "pass" and self.reason != "":
+            return "pass-has-reason"
+        if self.status != "pass" and self.reason == "":
+            return "{self.status}-without-reason"
+        if self.status == "blocked" and self.resume_command == "":
+            return "blocked-without-resume-command"
+        ""
+
+    fn to_json() -> text:
+        "{\"name\":{_host_env_json_text(self.name)},\"status\":{_host_env_json_text(self.status)},\"reason\":{_host_env_json_text(self.reason)},\"evidence_path\":{_host_env_json_text(self.evidence_path)},\"resume_command\":{_host_env_json_text(self.resume_command)}}"
+
+fn host_capability_row_from_evidence(
+    name: text, evidence_valid: bool, evidence_present: bool,
+    reason: text, evidence_path: text, resume_command: text
+) -> HostCapabilityRow:
+    if evidence_valid and evidence_present:
+        return HostCapabilityRow.create(name, "pass", "", evidence_path, "")
+    val status = if evidence_present: "fail" else: "blocked"
+    HostCapabilityRow.create(name, status, reason, evidence_path, resume_command)
+
+fn host_simd_capability_row(name: text, evidence: text, arch: text, feature: text, path: text) -> HostCapabilityRow:
+    if host_simd_evidence_passes(evidence, arch, feature):
+        return HostCapabilityRow.create(name, "pass", "", path, "")
+    HostCapabilityRow.create(
+        name,
+        "blocked",
+        "complete-retained-native-{arch}-simd-frame-evidence-required",
+        path,
+        "CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+    )
+
+struct TestHostEnv:
+    rows: [HostCapabilityRow]
+
+    static fn create(rows: [HostCapabilityRow]) -> TestHostEnv:
+        TestHostEnv(rows: rows)
+
+    fn with_row(row: HostCapabilityRow) -> TestHostEnv:
+        var rows = self.rows
+        rows.push(row)
+        TestHostEnv(rows: rows)
+
+    fn validation_reason() -> text:
+        val required = [
+            "x86_simd",
+            "arm_simd",
+            "riscv_simd",
+            "vulkan",
+            "renderdoc",
+            "display_input",
+            "framebuffer_readback"
+        ]
+        var seen: [text] = []
+        for row in self.rows:
+            var known = false
+            for name in required:
+                if row.name == name:
+                    known = true
+            if not known:
+                return "unknown-{row.name}"
+            for name in seen:
+                if row.name == name:
+                    return "duplicate-{row.name}"
+            val reason = row.validation_reason()
+            if reason != "":
+                return "{row.name}-{reason}"
+            seen.push(row.name)
+        for name in required:
+            var found = false
+            for row in self.rows:
+                if row.name == name:
+                    found = true
+            if not found:
+                return "missing-{name}"
+        ""
+
+    fn ready() -> bool:
+        if self.validation_reason() != "":
+            return false
+        for row in self.rows:
+            if row.status != "pass":
+                return false
+        true
+
+    fn to_json() -> text:
+        var rows_json = ""
+        var i = 0
+        while i < self.rows.len():
+            if i > 0:
+                rows_json = rows_json + ","
+            rows_json = rows_json + self.rows[i].to_json()
+            i = i + 1
+        "{\"schema\":\"simple-test-host-env-v1\",\"validation_reason\":{_host_env_json_text(self.validation_reason())},\"rows\":[{rows_json}]}"
+
+struct RenderPipelineReceipt:
+    event_id: i64
+    frame_id: i64
+    mutation_revision: i64
+    backend: text
+    backend_handle: i64
+    completed: bool
+    readback_source: text
+    width: i32
+    height: i32
+    stride: i32
+    format: text
+    checksum: i64
+    nonblank_pixels: i64
+    fallback_used: bool
+
+    static fn create(event_id: i64, frame_id: i64, mutation_revision: i64, backend: text, backend_handle: i64, completed: bool, readback_source: text, width: i32, height: i32, stride: i32, format: text, checksum: i64, nonblank_pixels: i64, fallback_used: bool) -> RenderPipelineReceipt:
+        RenderPipelineReceipt(
+            event_id: event_id,
+            frame_id: frame_id,
+            mutation_revision: mutation_revision,
+            backend: backend,
+            backend_handle: backend_handle,
+            completed: completed,
+            readback_source: readback_source,
+            width: width,
+            height: height,
+            stride: stride,
+            format: format,
+            checksum: checksum,
+            nonblank_pixels: nonblank_pixels,
+            fallback_used: fallback_used
+        )
+
+    fn validation_reason() -> text:
+        if self.event_id <= 0:
+            return "missing-event-id"
+        if self.frame_id != self.event_id:
+            return "event-frame-mismatch"
+        if self.mutation_revision <= 0:
+            return "missing-mutation-revision"
+        if self.fallback_used:
+            return "fallback-used"
+        if self.backend != "vulkan":
+            return "not-vulkan-backend"
+        if self.backend_handle <= 0:
+            return "missing-backend-handle"
+        if not self.completed:
+            return "submission-incomplete"
+        if self.readback_source != "device_readback":
+            return "not-device-readback"
+        if self.width <= 0 or self.height <= 0:
+            return "invalid-dimensions"
+        if self.stride != self.width * 4:
+            return "invalid-stride"
+        if self.format != "argb8888":
+            return "invalid-format"
+        if self.checksum == 0:
+            return "missing-checksum"
+        if self.nonblank_pixels <= 0:
+            return "blank-frame"
+        ""

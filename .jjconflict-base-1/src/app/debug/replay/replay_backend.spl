@@ -1,0 +1,165 @@
+# SReplay — Process Replay Debug Backend
+#
+# Implements DebugBackend for process-level replay (Track 3).
+# Wraps ProcessReplayer to expose reverse debugging through the coordinator.
+# The replayer manages its own CheckpointManager internally; the backend
+# delegates reverse execution to replayer.reverse_continue / reverse_step.
+
+use std.nogc_async_mut.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
+use std.nogc_sync_mut.replay.process.replayer.{ProcessReplayer}
+use std.nogc_sync_mut.replay.process.checkpoint.{PageCheckpoint, CheckpointManager}
+
+class ReplayProcessBackend:
+    replayer: Option<ProcessReplayer>
+    trace_path: text
+    current_event_idx: i64
+
+impl ReplayProcessBackend:
+    static fn create(trace_path: text) -> ReplayProcessBackend:
+        ReplayProcessBackend(
+            replayer: None,
+            trace_path: trace_path,
+            current_event_idx: 0
+        )
+
+    fn name() -> text:
+        "process-replay"
+
+    me fn attach(program_path: text, args: [text]) -> Result<Nil, text>:
+        var r = ProcessReplayer.create(self.trace_path)
+        val load_res = r.load()
+        match load_res:
+            case Ok(_):
+                self.replayer = Some(r)
+                self.current_event_idx = 0
+                Ok(nil)
+            case Err(e):
+                Err("failed to load trace: {e}")
+
+    me fn detach() -> Result<Nil, text>:
+        self.replayer = None
+        self.current_event_idx = 0
+        Ok(nil)
+
+    me fn run() -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                r.replay_all()
+                self.current_event_idx = r.position()
+                Ok(nil)
+            case None:
+                Err("no replay session active")
+
+    fn pause() -> Result<Nil, text>:
+        # Replay is deterministic and synchronous; pause is a no-op
+        Ok(nil)
+
+    me fn resume() -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                r.replay_all()
+                self.current_event_idx = r.position()
+                Ok(nil)
+            case None:
+                Err("no replay session active")
+
+    me fn step_over() -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                val step_res = r.replay_one()
+                match step_res:
+                    case Some(_):
+                        self.current_event_idx = r.position()
+                        Ok(nil)
+                    case None:
+                        Err("end of trace")
+            case None:
+                Err("no replay session active")
+
+    me fn step_in() -> Result<Nil, text>:
+        self.step_over()
+
+    me fn step_out() -> Result<Nil, text>:
+        self.step_over()
+
+    me fn reverse_step() -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                val res = r.reverse_step()
+                match res:
+                    case Ok(_):
+                        self.current_event_idx = r.position()
+                        Ok(nil)
+                    case Err(e):
+                        Err(e)
+            case None:
+                Err("no replay session active")
+
+    me fn reverse_continue() -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                val res = r.reverse_continue(0)
+                match res:
+                    case Ok(_):
+                        self.current_event_idx = r.position()
+                        Ok(nil)
+                    case Err(e):
+                        Err(e)
+            case None:
+                Err("no replay session active")
+
+    # Reverse to a specific target event index (used internally)
+    me fn reverse_to_event(target_idx: i64) -> Result<Nil, text>:
+        match self.replayer:
+            case Some(r):
+                val res = r.reverse_continue(target_idx)
+                match res:
+                    case Ok(_):
+                        self.current_event_idx = r.position()
+                        Ok(nil)
+                    case Err(e):
+                        Err(e)
+            case None:
+                Err("no replay session active")
+
+    fn add_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        # Breakpoint support for replay requires source-map correlation (future)
+        Ok(0)
+
+    fn remove_breakpoint(file: text, line: i32) -> Result<Nil, text>:
+        Ok(nil)
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        # Stack unwinding from process memory requires DWARF parsing (future)
+        Ok([])
+
+    fn locals() -> Result<[VarInfo], text>:
+        # Variable inspection requires DWARF debug info (future)
+        Ok([])
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        Err("evaluate not supported in replay mode")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        Err("location tracking not yet implemented for replay")
+
+    # ------------------------------------------------------------------
+    # Replay-specific queries
+    # ------------------------------------------------------------------
+
+    fn event_position() -> i64:
+        self.current_event_idx
+
+    fn total_events() -> i64:
+        match self.replayer:
+            case Some(r):
+                r.event_count()
+            case None:
+                0
+
+    fn has_more_events() -> bool:
+        match self.replayer:
+            case Some(r):
+                r.has_more()
+            case None:
+                false

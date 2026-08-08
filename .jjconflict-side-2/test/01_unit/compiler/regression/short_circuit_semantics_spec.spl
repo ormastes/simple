@@ -1,0 +1,90 @@
+# Regression spec: `and`/`or` must be true short-circuit operators — the
+# operand that cannot affect the result must never be evaluated.
+#
+# Mirrors Rust-seed fix d85059513a2 ("short-circuit and/or in MIR default
+# (non-coverage) lowering", entry-closure codegen defect C3, see
+# doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md).
+#
+# Surface bug (pre-fix, compiled/native-build path only): `lower_binary_expr`
+# only special-cased `And`/`Or` under coverage instrumentation. The default
+# (non-coverage) path eagerly lowered BOTH operands and combined them
+# bitwise, so `x and call()` always ran `call()` even when `x` was false —
+# silent logic corruption whenever the right operand has a side effect. Per
+# the fix commit, the tree-walking interpreter's `BinOp::And`/`BinOp::Or`
+# handling was already correct; this spec pins that interpreter-level
+# contract so a future regression (interpreter OR compiled path) is caught.
+#
+# tag: unit
+
+var _sc_call_count: i64 = 0
+
+fn sc_reset_calls():
+    _sc_call_count = 0
+
+fn sc_record_call() -> bool:
+    _sc_call_count = _sc_call_count + 1
+    return true
+
+fn sc_get_call_count() -> i64:
+    return _sc_call_count
+
+fn sc_false_and_side_effect() -> bool:
+    return false and sc_record_call()
+
+fn sc_true_or_side_effect() -> bool:
+    return true or sc_record_call()
+
+fn sc_true_and_call() -> bool:
+    return true and sc_record_call()
+
+fn sc_false_or_call() -> bool:
+    return false or sc_record_call()
+
+# Nested: `a and (b or c())`. The inner `c()` may or may not run depending on
+# BOTH the outer `and`'s left operand and the inner `or`'s left operand.
+fn sc_nested(a: bool, b: bool) -> bool:
+    return a and (b or sc_record_call())
+
+describe "short-circuit `and`/`or` never evaluate an operand that cannot affect the result":
+    it "`false and side_effect()` does not call the right operand":
+        sc_reset_calls()
+        val result = sc_false_and_side_effect()
+        expect(result).to_equal(false)
+        expect(sc_get_call_count()).to_equal(0)
+
+    it "`true or side_effect()` does not call the right operand":
+        sc_reset_calls()
+        val result = sc_true_or_side_effect()
+        expect(result).to_equal(true)
+        expect(sc_get_call_count()).to_equal(0)
+
+    it "`true and f()` calls the right operand":
+        sc_reset_calls()
+        val result = sc_true_and_call()
+        expect(result).to_equal(true)
+        expect(sc_get_call_count()).to_equal(1)
+
+    it "`false or f()` calls the right operand":
+        sc_reset_calls()
+        val result = sc_false_or_call()
+        expect(result).to_equal(true)
+        expect(sc_get_call_count()).to_equal(1)
+
+describe "nested short-circuit `a and (b or c())`":
+    it "outer `and` short-circuits on a=false: inner `c()` never runs regardless of b":
+        sc_reset_calls()
+        val result = sc_nested(false, true)
+        expect(result).to_equal(false)
+        expect(sc_get_call_count()).to_equal(0)
+
+    it "outer `and` true, inner `or` short-circuits on b=true: `c()` never runs":
+        sc_reset_calls()
+        val result = sc_nested(true, true)
+        expect(result).to_equal(true)
+        expect(sc_get_call_count()).to_equal(0)
+
+    it "outer `and` true, inner `or` needs the right side: `c()` runs exactly once":
+        sc_reset_calls()
+        val result = sc_nested(true, false)
+        expect(result).to_equal(true)
+        expect(sc_get_call_count()).to_equal(1)

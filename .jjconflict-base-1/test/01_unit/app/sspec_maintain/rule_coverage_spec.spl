@@ -1,0 +1,127 @@
+use std.spec.*
+use std.crypto.sha256.{sha256_text}
+use app.sspec_maintain.*
+
+fn _rule_ids(report: SspecDocumentizationReport) -> [text]:
+    var ids: [text] = []
+    for finding in report.findings:
+        if not ids.contains(finding.rule_id): ids.push(finding.rule_id)
+    ids.sort()
+    ids
+
+fn _catalog_ids() -> [text]:
+    var ids: [text] = []
+    for rule in sspec_rule_definitions(): ids.push(rule.rule_id)
+    ids.sort()
+    ids
+
+fn _professional_source() -> text:
+    "\"\"\"\n## Purpose and audience\n## Operator workflow\n" +
+        "## Recovery and troubleshooting\n# @manual: primary\n" +
+        "doc/01_research/local/sspec_documentization_maintenance.md\n" +
+        "doc/03_plan/sys_test/sspec_documentization_maintenance.md\n" +
+        "doc/04_architecture/sspec_documentization_maintenance.md\n" +
+        "doc/05_design/sspec_documentization_maintenance.md\n\"\"\"\n" +
+        "use std.spec.*\ndescribe \"documented behavior\":\n" +
+        "    it \"returns the production status\":\n" +
+        "        # @req: REQ-SSDOC-003\n" +
+        "        # @capture(text)\n" +
+        "        step(\"Read the production status\")\n" +
+        "        expect(product_status()).to_equal(\"ready\")\n"
+
+fn _professional_manual(source: text) -> text:
+    "# SSpec maintenance\n## Purpose and audience\nFor operators.\n" +
+        "## Scope and preconditions\nThe tool is available.\n" +
+        "## Primary workflow\n1. Read the production status.\n" +
+        "## Requirements and traceability\nREQ-SSDOC-003\n" +
+        "## Evidence\nCaptured text status.\n" +
+        "## Verification and expected outcomes\nThe status is ready.\n" +
+        "## Unsupported behavior and limitations\nNone for this fixture.\n" +
+        "## Recovery and troubleshooting\nReview the finding report.\n" +
+        "## Generation history\nGenerated for this fixture.\n" +
+        "Source SHA-256: {sha256_text(source)}\n"
+
+fn _all_source_rule_fixture() -> text:
+    "\"\"\"\nTODO: author narrative.\n" +
+        "REQ-DANGLING-001\nREQ-PLANNED-001 selected planned\n" +
+        "The tool must reject invalid input.\n@internal\n" +
+        "before_each setup\n\"\"\"\n" +
+        "use std.spipe\ndescribe \"flat behavior\":\n" +
+        "    it \"works\":\n" +
+        "        @step \"Inspect source\"\n" +
+        "        expect(file_read(\"source.spl\")).to_equal(\"present\")\n" +
+        "    it \"test arithmetic\":\n" +
+        "        # @req: REQ-IMPLEMENTED-001\n" +
+        "        # @capture(text)\n" +
+        "        step(\"Calculate locally\")\n" +
+        "        val answer = 7\n" +
+        "        expect(answer).to_equal(7)\n" +
+        "    it \"is unresolved\":\n" +
+        "        step(\"Review the unresolved behavior\")\n" +
+        "        pass_todo\n"
+
+describe "SSpec maintenance rule coverage":
+    it "covers every stable rule with an executable witness":
+        val source = _all_source_rule_fixture()
+        val incomplete_current_manual = "# Internal @qa-only\n" +
+            "Source SHA-256: {sha256_text(source)}\n"
+        var report = analyze_sspec_pair_text("test/rule_fixture_spec.spl",
+            source, Some(incomplete_current_manual))
+        report = inspect_sspec_lifecycle_links(report,
+            source + "\ndoc/05_design/definitely_missing_ssdoc_rule_fixture.md\n")
+        var observed = _rule_ids(report)
+        val missing_mirror = analyze_sspec_pair_text(
+            "test/missing_mirror_spec.spl", _professional_source(), None)
+        for rule_id in _rule_ids(missing_mirror):
+            if not observed.contains(rule_id): observed.push(rule_id)
+        val missing_requirement = analyze_sspec_text(
+            "test/missing_requirement_spec.spl", _professional_source().replace(
+                "        # @req: REQ-SSDOC-003\n", ""))
+        for rule_id in _rule_ids(missing_requirement):
+            if not observed.contains(rule_id): observed.push(rule_id)
+        observed.sort()
+        expect(observed).to_equal(_catalog_ids())
+
+    it "accepts professional source and manual facts without false positives":
+        val source = _professional_source()
+        val report = analyze_sspec_pair_text("test/professional_spec.spl",
+            source, Some(_professional_manual(source)))
+        expect(report.mirror_state).to_equal("current")
+        expect(report.findings.len()).to_equal(0)
+        for rule in sspec_rule_definitions():
+            expect(rule.false_positive_limits.len()).to_be_greater_than(8)
+
+    it "flags a structurally incomplete manual even when its source hash is current":
+        val source = _professional_source()
+        val manual = "# Minimal mirror\nSource SHA-256: {sha256_text(source)}\n"
+        val report = analyze_sspec_pair_text("test/incomplete_spec.spl",
+            source, Some(manual))
+        expect(report.mirror_state).to_equal("current")
+        expect(_rule_ids(report)).to_contain("SSDOC-MNT-008")
+        expect(_rule_ids(report).contains("SSDOC-MNT-002")).to_be(false)
+
+    it "orders findings by normalized path line and rule identity":
+        val base = analyze_sspec_pair_text("test/order_spec.spl",
+            _professional_source(), Some(_professional_manual(_professional_source())))
+        val ordered = append_sspec_findings(base, [
+            make_sspec_finding("test/z_spec.spl", "SSDOC-TRC-001", 2,
+                "z finding", "repair z", 1),
+            make_sspec_finding("./test/a_spec.spl", "SSDOC-TRC-001", 3,
+                "a later finding", "repair a", 1),
+            make_sspec_finding("test/a_spec.spl", "SSDOC-NAR-001", 1,
+                "a first finding", "repair a", 1),
+            make_sspec_finding("test/a_spec.spl", "SSDOC-BEH-001", 1,
+                "a alphabetic finding", "repair a", 1)])
+        expect(ordered.findings[0].rule_id).to_equal("SSDOC-BEH-001")
+        expect(ordered.findings[1].rule_id).to_equal("SSDOC-NAR-001")
+        expect(ordered.findings[2].line).to_equal(3)
+        expect(ordered.findings[3].path).to_equal("test/z_spec.spl")
+
+    it "keeps fingerprints stable across normal evidence whitespace":
+        val compact = make_sspec_finding("./test/stable_spec.spl",
+            "SSDOC-NAR-001", 1, "Missing authored purpose and audience",
+            "Add purpose.", 20)
+        val spaced = make_sspec_finding("test/stable_spec.spl",
+            "SSDOC-NAR-001", 99, "  missing   authored purpose  and audience ",
+            "Add purpose.", 20)
+        expect(spaced.fingerprint).to_equal(compact.fingerprint)

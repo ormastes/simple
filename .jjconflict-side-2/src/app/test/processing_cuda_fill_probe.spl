@@ -1,0 +1,140 @@
+"""Native direct-CUDA ProcessingIR FillU32 probe."""
+
+use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_set}
+use std.common.processing.processing_ir.{processing_ir_fill_u32}
+use std.gc_async_mut.processing.cuda_fill_u32.{
+    ProcessingCudaExecutor,
+    processing_ir_execute_cuda_with_executor
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+fn _elapsed_us(started_nanos: i64) -> i64:
+    if started_nanos <= 0: return 0
+    val elapsed_nanos = time_now_nanos() - started_nanos
+    if elapsed_nanos <= 0: return 0
+    (elapsed_nanos + 999) / 1000
+
+fn _checksum(values: [u32]) -> u64:
+    var checksum: u64 = 0
+    for actual in values:
+        checksum = checksum + actual.to_u64()
+    checksum
+
+fn _values_exact(values: [u32], count: i64, value: u32, checksum: u64) -> bool:
+    if values.len().to_i64() != count or _checksum(values) != checksum:
+        return false
+    for actual in values:
+        if actual != value:
+            return false
+    true
+
+fn _run_recovery(value: u32, expected_checksum: u64, phase: String,
+                 fault: String, expected_reason: String) -> i64:
+    var executor = ProcessingCudaExecutor.create()
+    val test_armed = env_set("SIMPLE_GPU_TEST", "1")
+    val fault_reset = env_set("SIMPLE_GPU_FAULT_INJECT", "")
+    val before = processing_ir_execute_cuda_with_executor(
+        executor, processing_ir_fill_u32(64, value))
+    val before_checksum = _checksum(before.values)
+    val before_exact = _values_exact(before.values, 64, value, expected_checksum)
+    val fault_armed = env_set("SIMPLE_GPU_FAULT_INJECT", fault)
+    val failed = processing_ir_execute_cuda_with_executor(
+        executor, processing_ir_fill_u32(64, value))
+    val fault_cleared = env_set("SIMPLE_GPU_FAULT_INJECT", "")
+    val recovered = processing_ir_execute_cuda_with_executor(
+        executor, processing_ir_fill_u32(64, value))
+    val recovered_checksum = _checksum(recovered.values)
+    val recovered_exact = _values_exact(
+        recovered.values, 64, value, expected_checksum)
+    val test_cleared = env_set("SIMPLE_GPU_TEST", "")
+    executor.shutdown()
+    val identity_stable =
+        recovered.backend_handle == before.backend_handle and
+        recovered.device_identity == before.device_identity
+    val valid =
+        test_armed and fault_reset and before.completed and before.reason == "ok" and
+        before_exact and before.backend_handle > 0 and before.device_identity > 0 and
+        fault_armed and not failed.completed and
+        failed.reason == expected_reason and failed.values.len() == 0 and
+        failed.backend_handle == 0 and failed.device_identity == 0 and
+        fault_cleared and test_cleared and recovered.completed and
+        recovered.reason == "ok" and recovered_exact and
+        recovered.backend_handle > 0 and recovered.device_identity > 0 and
+        identity_stable
+    val status = if valid: "pass" else: "fail"
+    print("PROCESSING_CUDA_RECOVERY status={status} phase={phase} before_completed={before.completed} before_count={before.values.len()} before_checksum={before_checksum} before_exact={before_exact} before_handle={before.backend_handle} before_identity={before.device_identity} test_armed={test_armed} fault_armed={fault_armed} failed_completed={failed.completed} failed_reason={failed.reason} failed_count={failed.values.len()} failed_handle={failed.backend_handle} failed_identity={failed.device_identity} fault_cleared={fault_cleared} test_cleared={test_cleared} recovered={recovered.completed} recovered_count={recovered.values.len()} recovered_checksum={recovered_checksum} recovered_exact={recovered_exact} recovered_handle={recovered.backend_handle} recovered_identity={recovered.device_identity} identity_stable={identity_stable} cpu_fallback=false\n")
+    if valid: 0 else: 1
+
+fn main() -> i64:
+    val args = get_args()
+    val large = args.contains("--large")
+    val warm = args.contains("--warm")
+    val recover_readback = args.contains("--recover=readback")
+    val recover_submit = args.contains("--recover=submit")
+    val recover_mismatch = args.contains("--recover=mismatch")
+    val recover = recover_readback or recover_submit or recover_mismatch
+    if ((large or warm or recover) and args.len() != 2) or
+       (not large and not warm and not recover and args.len() != 1):
+        print("PROCESSING_CUDA_NATIVE status=fail reason=invalid-argument\n")
+        return 2
+    if recover:
+        if recover_submit:
+            return _run_recovery(0x01020304u32, 1082179840u64,
+                "submit", "cuda:submit", "cuda-submit-failed")
+        if recover_mismatch:
+            return _run_recovery(0x01020304u32, 1082179840u64,
+                "mismatch", "cuda:mismatch", "checksum-mismatch")
+        return _run_recovery(0x01020304u32, 1082179840u64,
+            "readback", "cuda:readback", "cuda-readback-failed")
+    val mode = if warm: "warm" elif large: "large" else: "parity"
+    val count: i64 = if large or warm: 1048576 else: 64
+    val value = 0x01020304u32
+    val expected_checksum: u64 = if large or warm: 17730434498560 else: 1082179840
+    var executor = ProcessingCudaExecutor.create()
+    var cold_us: i64 = 0
+    var cold_handle: i64 = 0
+    var cold_identity: i64 = 0
+    if warm:
+        val cold_started = time_now_nanos()
+        val cold = processing_ir_execute_cuda_with_executor(
+            executor, processing_ir_fill_u32(count, value))
+        cold_us = _elapsed_us(cold_started)
+        var cold_checksum: u64 = 0
+        var cold_mismatches: i64 = 0
+        for actual in cold.values:
+            cold_checksum = cold_checksum + actual.to_u64()
+            if actual != value:
+                cold_mismatches = cold_mismatches + 1
+        val cold_exact = cold.values.len().to_i64() == count and
+            cold_checksum == expected_checksum and cold_mismatches == 0
+        if not cold.completed or cold.reason != "ok" or
+           not cold_exact or cold.backend_handle <= 0 or
+           cold.device_identity <= 0 or cold_us <= 0:
+            executor.shutdown()
+            print("PROCESSING_CUDA_NATIVE status=fail reason=warmup-failed cold_completed={cold.completed} cold_reason={cold.reason} cold_count={cold.values.len()} cold_us={cold_us} cold_handle={cold.backend_handle} cold_identity={cold.device_identity}\n")
+            return 1
+        cold_handle = cold.backend_handle
+        cold_identity = cold.device_identity
+    val started = time_now_nanos()
+    val result = processing_ir_execute_cuda_with_executor(
+        executor, processing_ir_fill_u32(count, value))
+    val elapsed_us = _elapsed_us(started)
+    executor.shutdown()
+    var checksum: u64 = 0
+    var mismatches: i64 = 0
+    for actual in result.values:
+        checksum = checksum + actual.to_u64()
+        if actual != value:
+            mismatches = mismatches + 1
+    val exact = result.values.len().to_i64() == count and
+        checksum == expected_checksum and mismatches == 0
+    val warm_improved = not warm or elapsed_us < cold_us
+    val valid = result.completed and result.reason == "ok" and exact and
+        result.backend_handle > 0 and result.device_identity > 0 and
+        elapsed_us > 0 and warm_improved and
+        (not warm or (result.backend_handle == cold_handle and
+                      result.device_identity == cold_identity))
+    val status = if valid: "pass" else: "fail"
+    print("PROCESSING_CUDA_NATIVE status={status} reason={result.reason} op=fill_u32 mode={mode} completed={result.completed} count={result.values.len()} value={value} expected_checksum={expected_checksum} actual_checksum={checksum} mismatch_count={mismatches} values_exact={exact} cold_us={cold_us} elapsed_us={elapsed_us} warm_improved={warm_improved} backend=cuda readback_source=device_readback handle={result.backend_handle} identity={result.device_identity} cpu_fallback=false\n")
+    if valid: 0 else: 1

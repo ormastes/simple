@@ -1,0 +1,160 @@
+use std.spec
+use std.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent, SEMANTIC_EVENT_SIZE}
+use std.replay.semantic.trace_writer.TraceWriter
+use std.replay.semantic.trace_reader.decode_semantic_event
+use std.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
+
+# ============================================================================
+# SemanticEventKind round-trips
+# ============================================================================
+
+describe "SemanticEventKind to_i32":
+    it "returns expected ordinals for core kinds":
+        expect(SemanticEventKind.FunctionEnter.to_i32()).to_equal(0)
+        expect(SemanticEventKind.FunctionExit.to_i32()).to_equal(1)
+        expect(SemanticEventKind.VariableWrite.to_i32()).to_equal(2)
+        expect(SemanticEventKind.ObjectAlloc.to_i32()).to_equal(3)
+
+    it "returns expected ordinals for ownership kinds":
+        expect(SemanticEventKind.ObjectDrop.to_i32()).to_equal(4)
+        expect(SemanticEventKind.OwnershipTransfer.to_i32()).to_equal(5)
+        expect(SemanticEventKind.BorrowStart.to_i32()).to_equal(6)
+        expect(SemanticEventKind.BorrowEnd.to_i32()).to_equal(7)
+
+describe "SemanticEventKind from_i32":
+    it "round-trips ownership transfer":
+        val kind = SemanticEventKind.from_i32(5)
+        expect(kind.to_i32()).to_equal(5)
+        expect(kind.to_text()).to_equal("OwnershipTransfer")
+
+    it "round-trips async spawn":
+        val spawn_kind = SemanticEventKind.from_i32(8)
+        expect(spawn_kind.to_text()).to_equal("AsyncSpawn")
+
+    it "round-trips async yield and resume":
+        val yield_kind = SemanticEventKind.from_i32(9)
+        expect(yield_kind.to_text()).to_equal("AsyncYield")
+        val resume_kind = SemanticEventKind.from_i32(10)
+        expect(resume_kind.to_text()).to_equal("AsyncResume")
+
+    it "defaults to FunctionEnter for unknown values":
+        val kind = SemanticEventKind.from_i32(999)
+        expect(kind.to_i32()).to_equal(0)
+
+describe "SemanticEventKind to_text":
+    it "returns readable names for borrow kinds":
+        expect(SemanticEventKind.BorrowStart.to_text()).to_equal("BorrowStart")
+        expect(SemanticEventKind.BorrowEnd.to_text()).to_equal("BorrowEnd")
+
+    it "returns readable names for object kinds":
+        expect(SemanticEventKind.ObjectAlloc.to_text()).to_equal("ObjectAlloc")
+        expect(SemanticEventKind.ObjectDrop.to_text()).to_equal("ObjectDrop")
+
+# ============================================================================
+# SemanticEvent construction
+# ============================================================================
+
+describe "SemanticEvent construction":
+    it "create sets kind and zeroes other fields":
+        val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
+        expect(ev.kind).to_equal(3)
+        expect(ev.seq).to_equal(0)
+        expect(ev.thread_id).to_equal(0)
+        expect(ev.object_id).to_equal(0)
+
+    it "event_kind returns the enum from kind field":
+        val ev = SemanticEvent.create(SemanticEventKind.AsyncYield)
+        val kind = ev.event_kind()
+        expect(kind.to_text()).to_equal("AsyncYield")
+
+    it "SEMANTIC_EVENT_SIZE is 68":
+        expect(SEMANTIC_EVENT_SIZE).to_equal(68)
+
+    it "create with FunctionEnter sets kind 0":
+        val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
+        expect(ev.kind).to_equal(0)
+        expect(ev.payload_a).to_equal(0)
+        expect(ev.payload_b).to_equal(0)
+
+# ============================================================================
+# TraceWriter creation and emit
+# ============================================================================
+
+describe "TraceWriter creation":
+    it "create initializes empty state":
+        val writer = TraceWriter.create("/tmp/test.sst", 1000000)
+        expect(writer.event_count).to_equal(0)
+        expect(writer.next_seq).to_equal(0)
+        expect(writer.buffer.len()).to_equal(0)
+        expect(writer.output_path).to_equal("/tmp/test.sst")
+
+    it "create stores buffer capacity":
+        val writer = TraceWriter.create("/tmp/test2.sst", 500000)
+        expect(writer.buffer_capacity).to_equal(500000)
+        expect(writer.write_pos).to_equal(0)
+
+describe "TraceWriter emit":
+    it "emit increments event_count and next_seq":
+        var writer = TraceWriter.create("/tmp/test3.sst", 1000000)
+        val ev = SemanticEvent.create(SemanticEventKind.FunctionEnter)
+        writer.emit(ev)
+        expect(writer.event_count).to_equal(1)
+        expect(writer.next_seq).to_equal(1)
+
+    it "emit appends bytes to buffer":
+        var writer = TraceWriter.create("/tmp/test4.sst", 1000000)
+        val ev = SemanticEvent.create(SemanticEventKind.ObjectAlloc)
+        writer.emit(ev)
+        expect(writer.buffer.len()).to_equal(68)
+
+# ============================================================================
+# ObjectId construction
+# ============================================================================
+
+describe "ObjectId":
+    it "stores type and alloc site":
+        val obj = ObjectId(id: 1, type_name_id: 10, alloc_site_file: 5, alloc_site_line: 42, dropped: false)
+        expect(obj.id).to_equal(1)
+        expect(obj.type_name_id).to_equal(10)
+        expect(obj.alloc_site_file).to_equal(5)
+        expect(obj.alloc_site_line).to_equal(42)
+        expect(obj.dropped).to_equal(false)
+
+    it "to_text includes id and type":
+        val obj = ObjectId(id: 7, type_name_id: 3, alloc_site_file: 1, alloc_site_line: 99, dropped: false)
+        val s = obj.to_text()
+        expect(s).to_contain("7")
+        expect(s).to_contain("type=3")
+
+describe "ObjectRegistry creation":
+    it "create starts with next_id 1 and empty entries":
+        val reg = ObjectRegistry.create()
+        expect(reg.next_id).to_equal(1)
+        expect(reg.entries.len()).to_equal(0)
+
+describe "ObjectRegistry register and lookup":
+    it "register returns incrementing IDs":
+        var reg = ObjectRegistry.create()
+        val id1 = reg.register(10, 1, 42)
+        val id2 = reg.register(20, 2, 99)
+        expect(id1).to_equal(1)
+        expect(id2).to_equal(2)
+        expect(reg.entries.len()).to_equal(2)
+
+    it "mark_dropped sets dropped flag":
+        var reg = ObjectRegistry.create()
+        val id1 = reg.register(10, 1, 42)
+        reg.mark_dropped(id1)
+        match reg.lookup(id1):
+            case Some(obj):
+                expect(obj.dropped).to_equal(true)
+            case None:
+                expect("should find object").to_equal("")
+
+    it "active_count excludes dropped objects":
+        var reg = ObjectRegistry.create()
+        val id1 = reg.register(10, 1, 1)
+        val id2 = reg.register(20, 1, 2)
+        val id3 = reg.register(30, 1, 3)
+        reg.mark_dropped(id2)
+        expect(reg.active_count()).to_equal(2)

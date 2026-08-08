@@ -1,0 +1,116 @@
+# Concrete dedicated-host provider and remaining startup branch specification.
+
+use std.spec.{describe, it, expect}
+use common.platform.dedicated_host.{
+    HOST_MAP_ANONYMOUS,
+    HOST_MAP_PRIVATE,
+    HOST_MAP_SHARED,
+    HOST_PROT_READ,
+    HOST_PROT_WRITE,
+    host_map_request
+}
+use os.hosted.dedicated_host_posix.{PosixDedicatedHost}
+use os.startup.dedicated_host_simpleos.{
+    SimpleOsDedicatedHost,
+    simpleos_dedicated_host_map_request_error
+}
+use app.startup.host_startup.{startup_before_main, startup_parse_file_arguments}
+use os.kernel.loader.artifact_manifest.{
+    ManifestArgument,
+    ManifestPreload,
+    manifest_for_kind,
+    manifest_kind_native_simple,
+    manifest_with_startup
+}
+
+fn _fixed_preload(path: text, mode: text, required: bool) -> ManifestPreload:
+    ManifestPreload(
+        source_arg: "",
+        fixed_path: path,
+        mode: mode,
+        required: required,
+        maximum_bytes: 1048576,
+        access: "read",
+        prefault: true,
+        hash_policy: "verify"
+    )
+
+describe "concrete dedicated host providers":
+    it "rejects an invalid POSIX mapping before entering the native ABI":
+        var host = PosixDedicatedHost.create()
+        val request = host_map_request(
+            0,
+            0,
+            HOST_PROT_READ | HOST_PROT_WRITE,
+            HOST_MAP_PRIVATE | HOST_MAP_ANONYMOUS
+        )
+        val region = host.mmap(request)
+        expect(region.ok).to_equal(false)
+        expect(region.error_code).to_equal(-22)
+        expect(region.error).to_equal("length-must-be-positive")
+
+    it "preloads an existing POSIX file through mmap bytes":
+        var host = PosixDedicatedHost.create()
+        val result = host.preload_readonly_file(
+            "test/01_unit/app/startup/dedicated_host_provider_contract_spec.spl",
+            host.page_size()
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.strategy).to_equal("mmap")
+        expect(result.native_mapping_used).to_equal(true)
+        expect(result.byte_count > 0).to_equal(true)
+        expect(result.page_count > 0).to_equal(true)
+
+    it "reports the SimpleOS provider capability boundary honestly":
+        val host = SimpleOsDedicatedHost.create()
+        expect(host.host_name()).to_equal("simpleos")
+        expect(host.supports_file_backed_mmap()).to_equal(false)
+        expect(host.supports_shared_writable_mmap()).to_equal(false)
+
+        val private_anon = host_map_request(
+            0, 4096, HOST_PROT_READ | HOST_PROT_WRITE,
+            HOST_MAP_PRIVATE | HOST_MAP_ANONYMOUS
+        )
+        val shared_file = host_map_request(
+            0, 4096, HOST_PROT_READ | HOST_PROT_WRITE,
+            HOST_MAP_SHARED, 3, 0
+        )
+        expect(simpleos_dedicated_host_map_request_error(private_anon)).to_equal("")
+        expect(simpleos_dedicated_host_map_request_error(shared_file)).to_equal("simpleos-file-or-shared-mmap-unsupported")
+
+describe "remaining lightweight startup branches":
+    it "accepts inline values flags and defaults without scanning unknown args":
+        val schema = [
+            ManifestArgument(name: "--config", value_kind: "path", required: true, default_value: ""),
+            ManifestArgument(name: "--trace", value_kind: "flag", required: false, default_value: ""),
+            ManifestArgument(name: "--mode", value_kind: "text", required: false, default_value: "safe")
+        ]
+        val parsed = startup_parse_file_arguments("hello", ["--config=/cfg", "--trace", "--unknown"], schema)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.values.len()).to_equal(3)
+        expect(parsed.values[0].value).to_equal("/cfg")
+        expect(parsed.values[1].value).to_equal("true")
+        expect(parsed.values[2].value).to_equal("safe")
+
+    it "continues after an optional preload failure":
+        val manifest = manifest_with_startup(
+            manifest_for_kind(manifest_kind_native_simple()),
+            [],
+            [_fixed_preload("/definitely/missing/simple-startup-preload", "map_read_only", false)]
+        )
+        val result = startup_before_main(PosixDedicatedHost.create(), "hello", [], manifest)
+        expect(result.ok).to_equal(true)
+        expect(result.phase).to_equal("ready-before-main")
+        expect(result.preloads.len()).to_equal(1)
+        expect(result.preloads[0].ok).to_equal(false)
+
+    it "rejects an undeclared preload execution mode before touching the host":
+        val manifest = manifest_with_startup(
+            manifest_for_kind(manifest_kind_native_simple()),
+            [],
+            [_fixed_preload("/any", "writable-map", true)]
+        )
+        val result = startup_before_main(PosixDedicatedHost.create(), "hello", [], manifest)
+        expect(result.ok).to_equal(false)
+        expect(result.phase).to_equal("blocked-before-main")
+        expect(result.error).to_equal("unsupported-preload-mode:writable-map")

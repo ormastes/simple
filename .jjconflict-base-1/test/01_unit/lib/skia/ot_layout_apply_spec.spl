@@ -1,0 +1,426 @@
+"""# Bounded generic OpenType layout sequence application
+
+Focused synthetic-table checks for the bounded GSUB application plan. GPOS
+has its own sibling application spec.
+"""
+
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable}
+use std.skia.feature.glyph.ot_parser_layout.GsubLookup
+use std.skia.feature.shaper.ot_layout_apply.{LayoutGlyphRecord, layout_apply_gsub, layout_apply_gsub_with_catalog, layout_validate_gsub}
+
+fn _font(blob: [u8]) -> OtFont:
+    OtFont(blob: blob, tables: [])
+
+fn _gsub(lookup_type: u32, flag: u32, end: i64) -> GsubLookup:
+    GsubLookup(lookup_index: 0, lookup_type: lookup_type, flag: flag,
+        lookup_offset: 0u32, table_start: 0u32, table_end: end as u32,
+        subtable_offsets: [0u32], subtable_ends: [end as u32], mark_filtering_set: -1)
+
+fn _record(glyph: u32, source: i64, cluster: i64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, feature_mask: 15u64, source_index: source, cluster: cluster,
+        component_clusters: [cluster], x_advance_units: 0, y_advance_units: 0,
+        x_offset_units: 0, y_offset_units: 0)
+
+fn _record_mask(glyph: u32, source: i64, cluster: i64, feature_mask: u64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, feature_mask: feature_mask, source_index: source, cluster: cluster,
+        component_clusters: [cluster], x_advance_units: 0, y_advance_units: 0,
+        x_offset_units: 0, y_offset_units: 0)
+
+fn _font_with_gdef(blob: [u8], gdef: [u8]) -> OtFont:
+    var combined = blob
+    while combined.len() < 20: combined.push(0u8)
+    for byte in gdef: combined.push(byte)
+    OtFont(blob: combined, tables: [OtTable(tag: 1195656006u32, offset: 20u32, length: gdef.len() as u32)])
+
+fn _wide_single_blob(count: i64) -> [u8]:
+    var blob: [u8] = [0, 1, 0, 6, 0, 1, 0, 1,
+        (count / 256) as u8, (count % 256) as u8]
+    var glyph: i64 = 1
+    while glyph <= count:
+        blob.push((glyph / 256) as u8)
+        blob.push((glyph % 256) as u8)
+        glyph = glyph + 1
+    blob
+
+describe "generic layout sequence GSUB":
+    it "applies SingleSubst format 1 modulo 65536":
+        val font = _font([0, 1, 0, 6, 0, 2, 0, 1, 0, 1, 0, 7])
+        val result = layout_apply_gsub(font, [_gsub(1u32, 0u32, font.blob.len())], [_record(7u32, 3, 4)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[0].source_index).to_equal(3)
+        expect(result.glyphs[0].cluster).to_equal(4)
+
+    it "applies SingleSubst format 2 without changing provenance":
+        # format=2, coverage=8, count=1, replacement=9; coverage=[7]
+        val font = _font([0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7])
+        val lookup = _gsub(1u32, 0u32, font.blob.len())
+        val result = layout_apply_gsub(font, [lookup], [_record(7u32, 11, 5)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[0].source_index).to_equal(11)
+        expect(result.glyphs[0].cluster).to_equal(5)
+
+    it "applies MultipleSubst format 1 and preserves every emitted cluster":
+        # format=1, coverage=8, sequenceOffset=14; coverage=[7], sequence=[9,10]
+        val font = _font([0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 2, 0, 9, 0, 10])
+        val result = layout_apply_gsub(font, [_gsub(2u32, 0u32, font.blob.len())], [_record(7u32, 4, 3)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(2)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[1].glyph_id).to_equal(10u32)
+        expect(result.glyphs[0].source_index).to_equal(4)
+        expect(result.glyphs[1].source_index).to_equal(4)
+        expect(result.glyphs[0].cluster).to_equal(3)
+        expect(result.glyphs[1].cluster).to_equal(3)
+        expect(result.glyphs[0].feature_mask).to_equal(15u64)
+        expect(result.glyphs[1].feature_mask).to_equal(15u64)
+
+    it "accepts MultipleSubst format 1 deletion sequences":
+        val font = _font([0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 0])
+        val result = layout_apply_gsub(font, [_gsub(2u32, 0u32, font.blob.len())],
+            [_record(7u32, 4, 3), _record(8u32, 5, 4)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(1)
+        expect(result.glyphs[0].glyph_id).to_equal(8u32)
+
+    it "applies LigatureSubst format 1 with the first source and minimum cluster":
+        # format=1, coverage=8, set=14; coverage=[7], ligature 7+8 -> 12
+        val font = _font([0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 1, 0, 4, 0, 12, 0, 2, 0, 8])
+        val result = layout_apply_gsub(font, [_gsub(4u32, 0u32, font.blob.len())],
+            [_record_mask(7u32, 9, 6, 7u64), _record_mask(8u32, 10, 2, 3u64)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(1)
+        expect(result.glyphs[0].glyph_id).to_equal(12u32)
+        expect(result.glyphs[0].source_index).to_equal(9)
+        expect(result.glyphs[0].cluster).to_equal(2)
+        expect(result.glyphs[0].component_clusters).to_equal([6, 2])
+        expect(result.glyphs[0].feature_mask).to_equal(3u64)
+
+    it "does not publish earlier mutation when a later active lookup is unsupported":
+        val font = _font([0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7])
+        val valid = _gsub(1u32, 0u32, font.blob.len())
+        val unsupported = _gsub(3u32, 0u32, font.blob.len())
+        val result = layout_apply_gsub(font, [valid, unsupported], [_record(7u32, 0, 0)])
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs.len()).to_equal(1)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+
+    it "applies ContextSubst format 1 through its nested lookup":
+        # SubRule 7,8 dispatches lookup 1 at sequence index zero.
+        val blob = [
+            0, 1, 0, 24, 0, 1, 0, 8,
+            0, 1, 0, 4,
+            0, 2, 0, 1, 0, 8, 0, 0, 0, 1,
+            0, 0, 0, 1, 0, 1, 0, 7,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 30u32,
+            subtable_offsets: [0u32], subtable_ends: [30u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 30u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [30u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, nested],
+            [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[1].glyph_id).to_equal(8u32)
+
+    it "leaves a ContextSubst format 1 miss unchanged":
+        val blob = [
+            0, 1, 0, 24, 0, 1, 0, 8,
+            0, 1, 0, 4,
+            0, 2, 0, 1, 0, 8, 0, 0, 0, 1,
+            0, 0, 0, 1, 0, 1, 0, 7,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 30u32,
+            subtable_offsets: [0u32], subtable_ends: [30u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 30u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [30u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, nested],
+            [_record(7u32, 0, 0), _record(10u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[1].glyph_id).to_equal(10u32)
+
+    it "rejects malformed ContextSubst format 1 before mutation":
+        # glyphCount zero is invalid even when the coverage is otherwise valid.
+        val blob = [
+            0, 1, 0, 20, 0, 1, 0, 8,
+            0, 1, 0, 4,
+            0, 0, 0, 0,
+            0, 0, 0, 0, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val result = layout_apply_gsub(font, [_gsub(5u32, 0u32, font.blob.len())],
+            [_record(7u32, 4, 5)])
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[0].source_index).to_equal(4)
+        expect(result.glyphs[0].cluster).to_equal(5)
+
+    it "applies ContextSubst format 3 through a nested catalog lookup":
+        # Context f3: [7,8] then nested lookup 1 substitutes first input 7->9.
+        val blob = [
+            0, 3, 0, 2, 0, 1, 0, 14, 0, 20, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7, 0, 1, 0, 1, 0, 8,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 26u32,
+            subtable_offsets: [0u32], subtable_ends: [26u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 26u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [26u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, nested], [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[1].glyph_id).to_equal(8u32)
+
+    it "dispatches a nested MultipleSubst and preserves emitted provenance":
+        val blob = [
+            0, 3, 0, 2, 0, 1, 0, 14, 0, 20, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7, 0, 1, 0, 1, 0, 8,
+            0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 2, 0, 9, 0, 10
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 26u32,
+            subtable_offsets: [0u32], subtable_ends: [26u32], mark_filtering_set: -1)
+        val nested_multiple = GsubLookup(lookup_index: 1, lookup_type: 2u32, flag: 0u32,
+            lookup_offset: 26u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [26u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, nested_multiple], [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(3)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[0].source_index).to_equal(0)
+        expect(result.glyphs[1].source_index).to_equal(0)
+        expect(result.glyphs[2].glyph_id).to_equal(8u32)
+
+    it "remaps later contextual sequence indices after nested expansion":
+        val blob = [
+            0, 3, 0, 2, 0, 2, 0, 18, 0, 24,
+            0, 0, 0, 1, 0, 1, 0, 2,
+            0, 1, 0, 1, 0, 7, 0, 1, 0, 1, 0, 8,
+            0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 2, 0, 9, 0, 10,
+            0, 2, 0, 8, 0, 1, 0, 11, 0, 1, 0, 1, 0, 8
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 30u32,
+            subtable_offsets: [0u32], subtable_ends: [30u32], mark_filtering_set: -1)
+        val multiple = GsubLookup(lookup_index: 1, lookup_type: 2u32, flag: 0u32,
+            lookup_offset: 30u32, table_start: 0u32, table_end: 50u32,
+            subtable_offsets: [30u32], subtable_ends: [50u32], mark_filtering_set: -1)
+        val single = GsubLookup(lookup_index: 2, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 50u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [50u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, multiple, single],
+            [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(3)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[1].glyph_id).to_equal(10u32)
+        expect(result.glyphs[2].glyph_id).to_equal(11u32)
+
+    it "applies ContextSubst format 2 class rules":
+        val blob = [
+            0, 2, 0, 26, 0, 32, 0, 2, 0, 0, 0, 12,
+            0, 1, 0, 4, 0, 2, 0, 1, 0, 2, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 1, 0, 7, 0, 2, 0, 1, 0, 2,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val context = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 42u32,
+            subtable_offsets: [0u32], subtable_ends: [42u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 42u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [42u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [context], [context, nested],
+            [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "applies ChainContextSubst format 1 glyph rules":
+        val blob = [
+            0, 1, 0, 30, 0, 1, 0, 8,
+            0, 1, 0, 4,
+            0, 1, 0, 6, 0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 2, 0, 8, 0, 1, 0, 11, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val chained = GsubLookup(lookup_index: 0, lookup_type: 6u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 36u32,
+            subtable_offsets: [0u32], subtable_ends: [36u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 36u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [36u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [chained], [chained, nested],
+            [_record(6u32, 0, 0), _record(7u32, 1, 1), _record(8u32, 2, 2), _record(9u32, 3, 3)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[1].glyph_id).to_equal(11u32)
+
+    it "applies ChainContextSubst format 2 class rules":
+        val blob = [
+            0, 2, 0, 38, 0, 44, 0, 52, 0, 62, 0, 2, 0, 0, 0, 16,
+            0, 1, 0, 4,
+            0, 1, 0, 1, 0, 2, 0, 2, 0, 1, 0, 3, 0, 1, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 1, 0, 6, 0, 1, 0, 1,
+            0, 1, 0, 7, 0, 2, 0, 1, 0, 2,
+            0, 1, 0, 9, 0, 1, 0, 3,
+            0, 2, 0, 8, 0, 1, 0, 11, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val chained = GsubLookup(lookup_index: 0, lookup_type: 6u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 70u32,
+            subtable_offsets: [0u32], subtable_ends: [70u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 70u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [70u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [chained], [chained, nested],
+            [_record(6u32, 0, 0), _record(7u32, 1, 1), _record(8u32, 2, 2), _record(9u32, 3, 3)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[1].glyph_id).to_equal(11u32)
+
+    it "rejects recursive contextual lookup cycles before mutation":
+        val blob = [
+            0, 3, 0, 1, 0, 1, 0, 12, 0, 0, 0, 0,
+            0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val recursive = GsubLookup(lookup_index: 0, lookup_type: 5u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [0u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [recursive], [recursive], [_record(7u32, 5, 6)])
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[0].source_index).to_equal(5)
+        expect(result.glyphs[0].cluster).to_equal(6)
+
+    it "applies ChainContextSubst format 3 through the same bounded nested dispatcher":
+        # Chain f3 with empty backtrack/lookahead, input [7,8], then 7->9.
+        val blob = [
+            0, 3, 0, 0, 0, 2, 0, 20, 0, 26, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
+            0, 1, 0, 1, 0, 7, 0, 1, 0, 1, 0, 8,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val chained = GsubLookup(lookup_index: 0, lookup_type: 6u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 32u32,
+            subtable_offsets: [0u32], subtable_ends: [32u32], mark_filtering_set: -1)
+        val nested = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 32u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [32u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub_with_catalog(font, [chained], [chained, nested], [_record(7u32, 0, 0), _record(8u32, 1, 1)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "rejects unsupported GSUB LookupFlags and formats without mutation":
+        val font = _font([0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7])
+        expect(layout_validate_gsub(font, [_gsub(1u32, 1u32, font.blob.len())])).to_equal(false)
+        expect(layout_validate_gsub(font, [_gsub(1u32, 8u32, font.blob.len())])).to_equal(false)
+        expect(layout_validate_gsub(font, [_gsub(5u32, 0u32, font.blob.len())])).to_equal(false)
+
+    it "uses bounded GDEF classes for IgnoreMarks and MarkGlyphSets filtering":
+        val single = [0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7]
+        # GDEF 1.2: GlyphClassDef format 1 maps glyph 7 to Mark (3).
+        val ignored = _font_with_gdef(single, [
+            0, 1, 0, 2, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 1, 0, 7, 0, 1, 0, 3
+        ])
+        val ignored_result = layout_apply_gsub(ignored, [_gsub(1u32, 8u32, 14)], [_record(7u32, 0, 0)])
+        expect(ignored_result.complete).to_equal(true)
+        expect(ignored_result.glyphs[0].glyph_id).to_equal(7u32)
+        # The same mark appears in MarkGlyphSetsDef set zero and is accepted.
+        val filtered = _font_with_gdef(single, [
+            0, 1, 0, 2, 0, 14, 0, 0, 0, 0, 0, 0, 0, 22,
+            0, 1, 0, 7, 0, 1, 0, 3,
+            0, 1, 0, 1, 0, 0, 0, 8,
+            0, 1, 0, 1, 0, 7
+        ])
+        val lookup = GsubLookup(lookup_index: 0, lookup_type: 1u32, flag: 16u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 14u32,
+            subtable_offsets: [0u32], subtable_ends: [14u32], mark_filtering_set: 0)
+        val filtered_result = layout_apply_gsub(filtered, [lookup], [_record(7u32, 0, 0)])
+        expect(filtered_result.complete).to_equal(true)
+        expect(filtered_result.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "skips ignored marks while ligating and records exact component clusters":
+        val ligature = [0, 1, 0, 8, 0, 1, 0, 14, 0, 1, 0, 1, 0, 7, 0, 1, 0, 4, 0, 12, 0, 2, 0, 8]
+        val gdef = [
+            0, 1, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0,
+            0, 2, 0, 1, 0, 20, 0, 20, 0, 3
+        ]
+        var blob = ligature
+        for byte in gdef: blob.push(byte)
+        val font = OtFont(blob: blob, tables: [
+            OtTable(tag: 1195656006u32, offset: 24u32, length: gdef.len() as u32)
+        ])
+        val lookup = GsubLookup(lookup_index: 0, lookup_type: 4u32, flag: 8u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 24u32,
+            subtable_offsets: [0u32], subtable_ends: [24u32], mark_filtering_set: -1)
+        val result = layout_apply_gsub(font, [lookup],
+            [_record(7u32, 1, 6), _record(20u32, 2, 4), _record(8u32, 3, 2)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(2)
+        expect(result.glyphs[0].glyph_id).to_equal(12u32)
+        expect(result.glyphs[0].component_clusters).to_equal([6, 2])
+        expect(result.glyphs[1].glyph_id).to_equal(20u32)
+
+    it "fails closed when repeated coverage scans exceed the shared work cap":
+        val font = _font(_wide_single_blob(600))
+        var records: [LayoutGlyphRecord] = []
+        var index: i64 = 0
+        while index < 100:
+            records.push(_record(7u32, index, index))
+            index = index + 1
+        val result = layout_apply_gsub(font, [_gsub(1u32, 0u32, font.blob.len())], records)
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs.len()).to_equal(100)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+
+    it "rolls back every record field when shared work is exhausted after an earlier substitution":
+        val first: [u8] = [0, 2, 0, 8, 0, 1, 0, 8, 0, 1, 0, 1, 0, 7]
+        var blob = first
+        val multiple_start = blob.len()
+        for byte in _wide_single_blob(600):
+            blob.push(byte)
+        val font = _font(blob)
+        val single = GsubLookup(lookup_index: 0, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: multiple_start as u32,
+            subtable_offsets: [0u32], subtable_ends: [multiple_start as u32], mark_filtering_set: -1)
+        val multiple = GsubLookup(lookup_index: 1, lookup_type: 1u32, flag: 0u32,
+            lookup_offset: multiple_start as u32, table_start: 0u32, table_end: blob.len() as u32,
+            subtable_offsets: [multiple_start as u32], subtable_ends: [blob.len() as u32], mark_filtering_set: -1)
+        val original = LayoutGlyphRecord(glyph_id: 7u32, feature_mask: 11u64,
+            source_index: 4, cluster: 5, component_clusters: [5, 6],
+            x_advance_units: 12, y_advance_units: 13, x_offset_units: 14, y_offset_units: 15)
+        var records: [LayoutGlyphRecord] = [original]
+        var index: i64 = 1
+        while index < 100:
+            records.push(_record(7u32, index, index))
+            index = index + 1
+        val result = layout_apply_gsub_with_catalog(font, [single, multiple], [single, multiple], records)
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[0].feature_mask).to_equal(11u64)
+        expect(result.glyphs[0].source_index).to_equal(4)
+        expect(result.glyphs[0].cluster).to_equal(5)
+        expect(result.glyphs[0].component_clusters).to_equal([5, 6])
+        expect(result.glyphs[0].x_advance_units).to_equal(12)
+        expect(result.glyphs[0].y_advance_units).to_equal(13)
+        expect(result.glyphs[0].x_offset_units).to_equal(14)
+        expect(result.glyphs[0].y_offset_units).to_equal(15)

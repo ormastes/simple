@@ -1,0 +1,240 @@
+use std.ndarray.*
+use std.nogc_async_mut.df.mod.{Symbol, DfError, Series, SeriesErased, DataFrame, CategoricalEncoding, no_missing_values, column_index}
+
+fn dataframe_to_csv_text(frame: DataFrame) -> Result<text, DfError>:
+    var lines: [text] = []
+    var headers: [text] = []
+    var col = 0
+    while col < frame.columns_internal.len():
+        headers.push(frame.columns_internal[col].name.text)
+        col = col + 1
+    lines.push(headers.join(","))
+    var row = 0
+    while row < frame.num_rows().value:
+        var cells: [text] = []
+        col = 0
+        while col < frame.columns_internal.len():
+            cells.push(csv_cell_text(frame.columns_internal[col], row)?)
+            col = col + 1
+        lines.push(cells.join(","))
+        row = row + 1
+    Ok(lines.join("\n"))
+
+fn csv_cell_text(series: Series, row: i64) -> Result<text, DfError>:
+    if series.missing[row].value:
+        return Ok("")
+    match series.dtype:
+        case DType.F64:
+            Ok(csv_f64_text(series.values.flat_f64(row)))
+        case DType.I64:
+            Ok("{series.values.flat_i64(row).value}")
+        case DType.Bool:
+            Err(DfError.ShapeMismatch)
+
+fn csv_f64_text(value: Float64) -> text:
+    val raw_i64 = value.value as i64
+    if value.value == raw_i64 as f64:
+        return "{raw_i64}.0"
+    "{value.value}"
+
+fn from_csv_text(payload: text) -> Result<DataFrame, DfError>:
+    val cleaned = payload.trim()
+    if cleaned == "":
+        return Err(DfError.ParseError)
+    val lines = cleaned.split("\n")
+    if lines.len() < 2:
+        return Err(DfError.ParseError)
+    val headers = lines[0].split(",")
+    if headers.len() == 0:
+        return Err(DfError.ParseError)
+    var columns: [[Float64]] = []
+    var missing_columns: [[Bool]] = []
+    var integral_columns: [Bool] = []
+    var value_columns: [Bool] = []
+    var col = 0
+    while col < headers.len():
+        columns.push([])
+        missing_columns.push([])
+        integral_columns.push(Bool.new(true))
+        value_columns.push(Bool.new(false))
+        col = col + 1
+    var row = 1
+    while row < lines.len():
+        val line = lines[row].trim()
+        if line != "":
+            val cells = line.split(",")
+            if cells.len() != headers.len():
+                return Err(DfError.ShapeMismatch)
+            col = 0
+            while col < cells.len():
+                val cell = cells[col].trim()
+                var current = columns[col]
+                var current_missing = missing_columns[col]
+                if cell == "":
+                    current.push(Float64.new(0.0))
+                    current_missing.push(Bool.new(true))
+                else:
+                    current.push(parse_csv_f64(cell)?)
+                    current_missing.push(Bool.new(false))
+                    value_columns[col] = Bool.new(true)
+                    if csv_has_decimal(cell):
+                        integral_columns[col] = Bool.new(false)
+                columns[col] = current
+                missing_columns[col] = current_missing
+                col = col + 1
+        row = row + 1
+    var built: [SeriesErased] = []
+    col = 0
+    while col < headers.len():
+        val name = Symbol.from(headers[col].trim())
+        if integral_columns[col].value and value_columns[col].value:
+            built.push(SeriesErased.I64Series(Series(name: name, values: array_i64(csv_coerce_i64_values(columns[col])), dtype: DType.I64, missing: missing_columns[col])))
+        else:
+            built.push(SeriesErased.F64Series(Series(name: name, values: array(columns[col]), dtype: DType.F64, missing: missing_columns[col])))
+        col = col + 1
+    DataFrame.from_columns(built)
+
+fn csv_has_decimal(value: text) -> bool:
+    var i = 0
+    while i < value.len():
+        if value.substring(i, i + 1) == ".":
+            return true
+        i = i + 1
+    false
+
+fn csv_coerce_i64_values(values: [Float64]) -> [Int64]:
+    var out: [Int64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Int64.new(values[i].value as i64))
+        i = i + 1
+    out
+
+fn parse_csv_f64(value: text) -> Result<Float64, DfError>:
+    if value == "":
+        return Err(DfError.ParseError)
+    var sign = 1.0
+    var i = 0
+    if value.substring(0, 1) == "-":
+        sign = -1.0
+        i = 1
+    var whole = 0.0
+    var fraction = 0.0
+    var scale = 1.0
+    var seen_digit = false
+    var seen_dot = false
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == ".":
+            if seen_dot:
+                return Err(DfError.ParseError)
+            seen_dot = true
+        else:
+            val digit = csv_digit(ch)?
+            seen_digit = true
+            if seen_dot:
+                scale = scale * 10.0
+                fraction = fraction + (digit as f64) / scale
+            else:
+                whole = whole * 10.0 + (digit as f64)
+        i = i + 1
+    if not seen_digit:
+        return Err(DfError.ParseError)
+    Ok(Float64.new(sign * (whole + fraction)))
+
+fn csv_digit(ch: text) -> Result<i64, DfError>:
+    if ch == "0": return Ok(0)
+    if ch == "1": return Ok(1)
+    if ch == "2": return Ok(2)
+    if ch == "3": return Ok(3)
+    if ch == "4": return Ok(4)
+    if ch == "5": return Ok(5)
+    if ch == "6": return Ok(6)
+    if ch == "7": return Ok(7)
+    if ch == "8": return Ok(8)
+    if ch == "9": return Ok(9)
+    Err(DfError.ParseError)
+
+fn iso_date_series(name: Symbol, values: [text]) -> Result<Series, DfError>:
+    var out: [Int64] = []
+    var i = 0
+    while i < values.len():
+        out.push(parse_iso_date_days(values[i])?)
+        i = i + 1
+    Series.from_i64_masked(name, out, no_missing_values(out.len()))
+
+fn parse_iso_date_days(value: text) -> Result<Int64, DfError>:
+    if value.len() != 10:
+        return Err(DfError.ParseError)
+    if value.substring(4, 5) != "-" or value.substring(7, 8) != "-":
+        return Err(DfError.ParseError)
+    val year = parse_fixed_i64(value, 0, 4)?
+    val month = parse_fixed_i64(value, 5, 2)?
+    val day = parse_fixed_i64(value, 8, 2)?
+    if year < 1 or month < 1 or month > 12:
+        return Err(DfError.ParseError)
+    val max_day = days_in_month(year, month)
+    if day < 1 or day > max_day:
+        return Err(DfError.ParseError)
+    val absolute = days_before_year(year) + days_before_month(year, month) + day - 1
+    Ok(Int64.new(absolute - days_before_year(1970)))
+
+fn parse_fixed_i64(value: text, start: i64, count: i64) -> Result<i64, DfError>:
+    var out = 0
+    var i = 0
+    while i < count:
+        out = out * 10 + csv_digit(value.substring(start + i, start + i + 1))?
+        i = i + 1
+    Ok(out)
+
+fn days_before_year(year: i64) -> i64:
+    val previous = year - 1
+    previous * 365 + previous / 4 - previous / 100 + previous / 400
+
+fn days_before_month(year: i64, month: i64) -> i64:
+    var total = 0
+    var current = 1
+    while current < month:
+        total = total + days_in_month(year, current)
+        current = current + 1
+    total
+
+fn days_in_month(year: i64, month: i64) -> i64:
+    if month == 2:
+        if is_leap_year(year):
+            return 29
+        return 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    31
+
+fn is_leap_year(year: i64) -> bool:
+    if year % 400 == 0:
+        return true
+    if year % 100 == 0:
+        return false
+    year % 4 == 0
+
+fn categorical_encode(name: Symbol, values: [Symbol]) -> CategoricalEncoding:
+    var labels: [Symbol] = []
+    var codes: [Int64] = []
+    var i = 0
+    while i < values.len():
+        var index = symbol_index(labels, values[i])
+        if index < 0:
+            labels.push(values[i])
+            index = labels.len() - 1
+        codes.push(Int64.new(index))
+        i = i + 1
+    CategoricalEncoding(
+        series: Series(name: name, values: array_i64(codes), dtype: DType.I64, missing: no_missing_values(codes.len())),
+        labels: labels
+    )
+
+fn symbol_index(values: [Symbol], target: Symbol) -> i64:
+    var i = 0
+    while i < values.len():
+        if values[i] == target:
+            return i
+        i = i + 1
+    -1

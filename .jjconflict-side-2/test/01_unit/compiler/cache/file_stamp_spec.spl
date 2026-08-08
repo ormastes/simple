@@ -1,0 +1,155 @@
+"""
+# File Stamp Index Specification
+
+Hybrid size+mtime stamp over SHA-256 identity — the Option-C fast path with
+Option-A strict cross-check. The bridge test is the executable form of the
+Lean C≡A theorem (CacheIdentity.Model: StampValid — a valid stamp's recorded
+SHA equals the file's fresh SHA).
+
+Plan: doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md
+"""
+
+use std.spec.*
+use compiler.driver.cache.file_stamp.{FileStamp, StampIndex, stamp_index_new, file_stamp_take, file_stamp_check, file_sha_via_stamp}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+
+describe "FileStamp take and check":
+    it "stamps an existing file and validates it unchanged":
+        val path = "/tmp/simple_file_stamp_spec_take.txt"
+        file_delete(path)
+        file_write(path, "stamp me v1")
+        if val stamp = file_stamp_take(path):
+            expect(stamp.size).to_equal(11)
+            expect(stamp.content_sha.len()).to_equal(64)
+            assert_true(file_stamp_check(stamp))
+        else:
+            assert_true(false)
+        file_delete(path)
+
+    it "invalidates the stamp when the file grows":
+        val path = "/tmp/simple_file_stamp_spec_grow.txt"
+        file_delete(path)
+        file_write(path, "short")
+        if val stamp = file_stamp_take(path):
+            file_write(path, "much longer content now")
+            assert_false(file_stamp_check(stamp))
+        else:
+            assert_true(false)
+        file_delete(path)
+
+    it "returns nil for a missing file without crashing":
+        val path = "/tmp/simple_file_stamp_spec_missing.txt"
+        file_delete(path)
+        val stamp = file_stamp_take(path)
+        expect(stamp).to_be_nil()
+
+    it "check returns false when the stamped file was deleted":
+        val path = "/tmp/simple_file_stamp_spec_deleted.txt"
+        file_delete(path)
+        file_write(path, "soon gone")
+        if val stamp = file_stamp_take(path):
+            file_delete(path)
+            assert_false(file_stamp_check(stamp))
+        else:
+            assert_true(false)
+
+describe "file_sha_via_stamp C/A bridge":
+    it "non-strict stamped sha equals strict rehash (executable C = A bridge)":
+        val path = "/tmp/simple_file_stamp_spec_bridge.txt"
+        file_delete(path)
+        file_write(path, "bridge content v1")
+        var idx = stamp_index_new()
+        # Prime: first non-strict call rehashes and records the stamp.
+        val (sha_primed, idx1, reused_primed) = file_sha_via_stamp(idx, path, false)
+        assert_false(reused_primed)
+        # C fast path: stamp-valid, answered without hashing.
+        val (sha_fast, idx2, reused_fast) = file_sha_via_stamp(idx1, path, false)
+        assert_true(reused_fast)
+        # A strict path: full rehash of the same unchanged file.
+        val (sha_strict, idx3, reused_strict) = file_sha_via_stamp(idx2, path, true)
+        assert_false(reused_strict)
+        expect(sha_fast).to_equal(sha_primed)
+        expect(sha_fast).to_equal(sha_strict)
+        expect(idx3.divergences).to_equal(0)
+        file_delete(path)
+
+    it "reuses a valid stamp without divergence on an unchanged file":
+        val path = "/tmp/simple_file_stamp_spec_reuse.txt"
+        file_delete(path)
+        file_write(path, "unchanged content")
+        var idx = stamp_index_new()
+        val (sha1, idx1, _r1) = file_sha_via_stamp(idx, path, false)
+        val (sha2, idx2, reused) = file_sha_via_stamp(idx1, path, false)
+        assert_true(reused)
+        expect(sha2).to_equal(sha1)
+        expect(idx2.hits).to_equal(1)
+        expect(idx2.rehashes).to_equal(1)
+        expect(idx2.divergences).to_equal(0)
+        file_delete(path)
+
+    it "rehashes to a different sha after a size-changing rewrite":
+        val path = "/tmp/simple_file_stamp_spec_rewrite.txt"
+        file_delete(path)
+        file_write(path, "original body")
+        var idx = stamp_index_new()
+        val (sha_old, idx1, _r1) = file_sha_via_stamp(idx, path, false)
+        # mtime granularity is whole seconds — change the size too so the
+        # stamp invalidates deterministically inside one second.
+        file_write(path, "rewritten body that is clearly longer")
+        val (sha_new, idx2, reused) = file_sha_via_stamp(idx1, path, false)
+        assert_false(reused)
+        expect(sha_new == sha_old).to_equal(false)
+        expect(idx2.rehashes).to_equal(2)
+        file_delete(path)
+
+    it "serves a stale sha when size and mtime both match a poisoned stamp":
+        # ponytail: mtime-granularity ceiling — strict mode catches it
+        # A same-size rewrite landing in the same mtime second is
+        # indistinguishable to the stamp fast path. Modeled deterministically
+        # by recording a stamp whose size+mtime match the current file but
+        # whose sha belongs to older content: non-strict trusts it (current,
+        # documented behavior — the stamp-index ceiling).
+        val path = "/tmp/simple_file_stamp_spec_ceiling.txt"
+        file_delete(path)
+        file_write(path, "AAAA current bytes")
+        var idx = stamp_index_new()
+        if val real = file_stamp_take(path):
+            val stale_sha = "0000000000000000000000000000000000000000000000000000000000000000"
+            val poisoned = FileStamp(path: path, size: real.size,
+                                     mtime_s: real.mtime_s, content_sha: stale_sha)
+            idx.stamps[path] = poisoned
+            val (sha_fast, idx1, reused) = file_sha_via_stamp(idx, path, false)
+            assert_true(reused)
+            expect(sha_fast).to_equal(stale_sha)
+            expect(idx1.divergences).to_equal(0)
+        else:
+            assert_true(false)
+        file_delete(path)
+
+    it "strict mode detects a poisoned stamp and returns the fresh sha":
+        val path = "/tmp/simple_file_stamp_spec_poison.txt"
+        file_delete(path)
+        file_write(path, "real content here")
+        var idx = stamp_index_new()
+        if val real = file_stamp_take(path):
+            val stale_sha = "1111111111111111111111111111111111111111111111111111111111111111"
+            val poisoned = FileStamp(path: path, size: real.size,
+                                     mtime_s: real.mtime_s, content_sha: stale_sha)
+            idx.stamps[path] = poisoned
+            val (sha_strict, idx1, reused) = file_sha_via_stamp(idx, path, true)
+            assert_false(reused)
+            expect(sha_strict).to_equal(real.content_sha)
+            expect(idx1.divergences).to_equal(1)
+            expect(idx1.divergent_paths).to_contain(path)
+        else:
+            assert_true(false)
+        file_delete(path)
+
+    it "returns empty sha for a missing file without crashing":
+        val path = "/tmp/simple_file_stamp_spec_gone.txt"
+        file_delete(path)
+        var idx = stamp_index_new()
+        val (sha, idx1, reused) = file_sha_via_stamp(idx, path, false)
+        expect(sha).to_equal("")
+        assert_false(reused)
+        expect(idx1.rehashes).to_equal(0)

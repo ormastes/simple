@@ -1,0 +1,185 @@
+"""
+# Text Ordering (`<` `>` `<=` `>=`) Content Comparison Specification
+
+**Feature IDs:** #P0-TEXT-ORDER-001
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md
+
+## Overview
+
+Regression guard for the P0 sspec false-green root cause: text `<` / `>` /
+`<=` / `>=` used to lower to a RAW POINTER (handle) integer compare on the
+native/cranelift codegen paths, producing address-dependent (context-
+sensitive) results instead of lexicographic byte comparison. Fixed by
+lowering text ordering compares through `rt_text_cmp_any` (strcmp-style
+signed result vs 0) in both the seed cranelift codegen
+(`src/compiler_rust/compiler/src/codegen/instr/core.rs`) and the self-hosted
+MIR lowering (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`).
+
+This spec must run on the sspec TEST path (the path that was broken);
+`simple run` was always correct on all backends.
+"""
+
+use std.spec
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
+
+describe "text ordering comparison is lexicographic content compare":
+    it "orders distinct words alphabetically":
+        expect("apple" < "banana").to_equal(true)
+        expect("banana" < "apple").to_equal(false)
+        expect("banana" > "apple").to_equal(true)
+
+    it "orders a prefix before its extension":
+        expect("a" < "ab").to_equal(true)
+        expect("ab" < "a").to_equal(false)
+        expect("ab" > "a").to_equal(true)
+
+    it "orders single characters bytewise":
+        expect("b" > "a").to_equal(true)
+        expect("a" < "b").to_equal(true)
+
+    it "treats equal strings as neither < nor >":
+        val a = "same"
+        val b = "same"
+        expect(a < b).to_equal(false)
+        expect(a > b).to_equal(false)
+        expect(a <= b).to_equal(true)
+        expect(a >= b).to_equal(true)
+
+    it "orders non-literal (runtime-built) strings by content":
+        # Concat-produced strings exercise the tagged-heap-string operand
+        # shape (vs raw literal pointers) — both must compare by content.
+        val ab = "a" + "b"
+        expect(ab < "ac").to_equal(true)
+        expect(ab > "aa").to_equal(true)
+        expect(ab < "ab").to_equal(false)
+        expect(ab >= "ab").to_equal(true)
+
+    it "orders empty string before any non-empty string":
+        expect("" < "a").to_equal(true)
+        expect("a" > "").to_equal(true)
+        expect("" < "").to_equal(false)
+
+# ============================================================================
+# 2026-08-01 regression guard: statically-UNTYPED text operands
+# ============================================================================
+#
+# The 2026-07-22 fix above guarded the ordering arm with
+#   vreg_is_text(left) && vreg_is_text(right)
+# i.e. it only fired when BOTH operand vregs were statically TypeId::STRING.
+# A text produced by a method call (`.substring(...)`) does not get its vreg
+# type threaded, so the guard failed and the comparison fell straight back
+# into the raw-pointer icmp arm -- reintroducing address ordering, silently,
+# and ONLY under the JIT (the tree-walking interpreter was always correct).
+#
+# `==` was unaffected because Eq/NotEq already had a tag-aware dynamic
+# fallback (rt_native_eq); ordering had none. That asymmetry is why the
+# failure looked like ">= behaving as ==" at the lint level.
+#
+# Real-world impact: `ch >= "0" and ch <= "9"` in
+# src/compiler/35.semantics/lint/module_init_literal.spl returned FALSE for
+# most digits, producing MODINIT001 lint false positives.
+#
+# See doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+
+# The operand shapes below were each MEASURED to produce a wrong answer under
+# the pre-fix JIT while the tree-walking interpreter gave the right one. The
+# defect is sensitive to how much static type info survives to codegen, so
+# these specific shapes (receiver arriving as a fn PARAMETER) are the ones that
+# actually carry weight -- a substring of a bare literal often kept its typing
+# and passed even before the fix.
+
+fn _ge_zero(t: text) -> bool:
+    """Digit-range lower bound, receiver via parameter. Pre-fix JIT answered
+    `true` for "/" (0x2F), which sorts BELOW "0" (0x30)."""
+    val ch = t.substring(0, 1)
+    ch >= "0"
+
+fn _le_nine(t: text) -> bool:
+    val ch = t.substring(0, 1)
+    ch <= "9"
+
+fn _lower_lt(a: text, b: text) -> bool:
+    """The lexicographic-sorting family: both operands are method results, so
+    NEITHER is statically typed. Pre-fix JIT said `"banana" < "apple"` was
+    true -- a comparator that would silently corrupt any text sort."""
+    a.lower() < b.lower()
+
+describe "text ordering is content-based for runtime-produced (untyped) operands":
+    it "orders a substring result below the digit range":
+        # '/' is 0x2F, one below '0' (0x30). PRE-FIX JIT: true (address order).
+        expect(_ge_zero("/")).to_equal(false)
+        expect(_ge_zero(".")).to_equal(false)
+        expect(_ge_zero(" ")).to_equal(false)
+
+    it "orders a substring result inside the digit range":
+        expect(_ge_zero("0")).to_equal(true)
+        expect(_ge_zero("7")).to_equal(true)
+        expect(_ge_zero("9")).to_equal(true)
+        expect(_le_nine("0")).to_equal(true)
+        expect(_le_nine("9")).to_equal(true)
+
+    it "orders a substring result above the digit range":
+        expect(_ge_zero("a")).to_equal(true)
+        expect(_le_nine("a")).to_equal(false)
+
+    it "gives a correct lexicographic comparator for text sorting":
+        # PRE-FIX JIT: both directions returned true, so the comparator was
+        # not even antisymmetric.
+        expect(_lower_lt("apple", "banana")).to_equal(true)
+        expect(_lower_lt("banana", "apple")).to_equal(false)
+
+    it "keeps the sorting comparator antisymmetric and irreflexive":
+        expect(_lower_lt("Zebra", "apple")).to_equal(false)
+        expect(_lower_lt("apple", "Zebra")).to_equal(true)
+        expect(_lower_lt("apple", "apple")).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# JIT-path assertion (out of process).
+#
+# Everything above this line runs on the TREE-WALK INTERPRETER and always did,
+# even before the fix — `describe`/`it`/`expect` are interpreter intrinsics
+# with no JIT lowering, and a spec file has no `fn main`, so
+# exec_core.rs:774-781 routes it to `evaluate_module` regardless of
+# SIMPLE_EXECUTION_MODE. The defect this file is named for was CRANELIFT JIT
+# ONLY. The assertions above therefore could not have caught it, and did not:
+# this spec passed 11/11 on a binary whose JIT was provably wrong.
+#
+# The block below spawns the runnable probe under an explicitly NAMED engine
+# and scores its self-reported verdict line. See
+# src/lib/nogc_sync_mut/spec/engine_probe.spl for the pattern.
+# ---------------------------------------------------------------------------
+
+val _PROBE = "test/01_unit/bugs/text_ordering_jit_probe.spl"
+val _PASS = "PROBE VERDICT: PASS"
+
+describe "text ordering is correct on the JIT path (out of process)":
+    """
+    As a compiler maintainer, I need the text-ordering guard to be pointed at
+    a NAMED engine, so that a JIT-only regression cannot pass review behind a
+    spec that only ever ran on the interpreter.
+
+    Pattern and adoption notes: doc/07_guide/infra/testing/spec_engine_reach.md
+    Helper tier (verified by sabotage): src/lib/nogc_sync_mut/spec/engine_probe.spl
+    """
+    it "passes the probe under the interpreter":
+        # Control column. The interpreter was correct throughout, so this
+        # arm failing means the probe or the harness broke, not codegen.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
+
+    it "passes the probe under the cranelift JIT":
+        # The arm that carries the weight. Observed RED against a binary
+        # missing the rt_native_cmp runtime symbol, GREEN once present.
+        expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        # SIMPLE_EXECUTION_MODE falls back to JIT on any unknown value, which
+        # would make an A/B comparison look like agreement.
+        assert_false(is_known_engine("interp"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))

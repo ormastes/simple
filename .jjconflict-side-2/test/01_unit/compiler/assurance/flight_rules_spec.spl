@@ -1,0 +1,251 @@
+# @cover src/compiler/00.common/assurance/flight_rules.spl 80%
+# @cover src/compiler/00.common/assurance/docgen.spl 80%
+#
+# WP-0 — canonical flight-rule registry. Assertions are structural, not
+# existential: uniqueness, completeness of every field, monotone grade ladder,
+# and docgen row counts tied to the registry length. "Output is non-empty" is
+# not an oracle in this repo.
+
+use compiler.common.assurance.flight_rules.{
+    RuleCategory, EnforcementPhase, RuleLevel, DeviationPolicy,
+    flight_rules, find_flight_rule, flight_rules_in_category,
+    flight_rule_enforcement_gaps, flight_rules_canonical_text,
+    flight_rules_hash, assurance_text_hash, source_verification_note
+}
+use compiler.common.assurance.docgen.{
+    render_standards_crosswalk, render_severity_table,
+    render_enforcement_gap_report
+}
+
+fn count_lines_starting_with(haystack: text, prefix: text) -> i64:
+    val lines = haystack.split("\n")
+    var n = 0
+    var i = 0
+    while i < lines.len():
+        if lines[i].starts_with(prefix):
+            n = n + 1
+        i = i + 1
+    n
+
+describe "FlightRuleV1 registry":
+    describe "identity":
+        it "is non-empty and covers every category":
+            expect(flight_rules().len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.ControlFlow).len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.Memory).len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.Data).len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.Abstraction).len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.MatchCoverage).len() > 0).to_equal(true)
+            expect(flight_rules_in_category(RuleCategory.Implementation).len() > 0).to_equal(true)
+
+        it "gives every rule an FLT- prefixed id":
+            val rules = flight_rules()
+            var bad = 0
+            var i = 0
+            while i < rules.len():
+                if not rules[i].id.starts_with("FLT-"):
+                    bad = bad + 1
+                i = i + 1
+            expect(bad).to_equal(0)
+
+        it "has unique rule ids":
+            val rules = flight_rules()
+            var dups = 0
+            var i = 0
+            while i < rules.len():
+                var j = i + 1
+                while j < rules.len():
+                    if rules[i].id == rules[j].id:
+                        dups = dups + 1
+                    j = j + 1
+                i = i + 1
+            expect(dups).to_equal(0)
+
+        it "has unique diagnostic codes, ignoring the '-' placeholder":
+            val rules = flight_rules()
+            var dups = 0
+            var i = 0
+            while i < rules.len():
+                var j = i + 1
+                while j < rules.len():
+                    if rules[i].diagnostic != "-" and rules[i].diagnostic == rules[j].diagnostic:
+                        dups = dups + 1
+                    j = j + 1
+                i = i + 1
+            expect(dups).to_equal(0)
+
+        it "finds a rule by id and returns nil for an unknown id":
+            # `.?` in CONDITION position is the specified presence test. Two
+            # weaker forms were tried first and both give a WRONG answer here:
+            #   * `expect(opt.?).to_equal(false)` — `.?` in VALUE position is
+            #     specified to return `T?`, so an absent optional yields nil,
+            #     not false.
+            #   * `if opt:` (bare optional as a condition) takes the PRESENT
+            #     branch for an absent optional, because RT_NIL is sentinel 3
+            #     and therefore truthy. Open defect:
+            #     doc/08_tracking/bug/bare_optional_in_condition_position_wrong_branch_2026-08-01.md
+            var hit_known = false
+            if find_flight_rule("FLT-CF-001").?:
+                hit_known = true
+            expect(hit_known).to_equal(true)
+            val found = find_flight_rule("FLT-CF-001")
+            if found:
+                expect(found.title.starts_with("No goto")).to_equal(true)
+            var hit_unknown = false
+            if find_flight_rule("FLT-NOPE-999").?:
+                hit_unknown = true
+            expect(hit_unknown).to_equal(false)
+
+    describe "field completeness":
+        it "leaves no field of any rule empty":
+            val rules = flight_rules()
+            var bad = 0
+            var i = 0
+            while i < rules.len():
+                val r = rules[i]
+                if r.title.len() == 0:
+                    bad = bad + 1
+                if r.sources.len() == 0:
+                    bad = bad + 1
+                if r.analyzer.len() == 0:
+                    bad = bad + 1
+                if r.diagnostic.len() == 0:
+                    bad = bad + 1
+                if r.fix.len() == 0:
+                    bad = bad + 1
+                i = i + 1
+            expect(bad).to_equal(0)
+
+        it "gives every non-intrinsic rule a real diagnostic code":
+            val rules = flight_rules()
+            var bad = 0
+            var i = 0
+            while i < rules.len():
+                val r = rules[i]
+                val is_intrinsic = r.critical_level.name() == "intrinsic"
+                if not is_intrinsic and r.diagnostic == "-":
+                    bad = bad + 1
+                i = i + 1
+            expect(bad).to_equal(0)
+
+    describe "grade ladder":
+        it "is monotone: a higher grade never relaxes a rule":
+            val rules = flight_rules()
+            var violations = 0
+            var i = 0
+            while i < rules.len():
+                val r = rules[i]
+                if r.aero_a_level.rank() < r.critical_level.rank():
+                    violations = violations + 1
+                if r.space_a_level.rank() < r.aero_a_level.rank():
+                    violations = violations + 1
+                i = i + 1
+            expect(violations).to_equal(0)
+
+    describe "analyzer honesty":
+        it "separates intrinsic rules from unfilled enforcement gaps":
+            # FLT-CF-001 has no analyzer because the grammar has no goto.
+            # FLT-CF-003 has no analyzer because nobody wrote one.
+            val cf1 = find_flight_rule("FLT-CF-001")
+            val cf3 = find_flight_rule("FLT-CF-003")
+            if cf1:
+                expect(cf1.analyzer).to_equal("none")
+                expect(cf1.is_enforcement_gap()).to_equal(false)
+            if cf3:
+                expect(cf3.analyzer).to_equal("none")
+                expect(cf3.is_enforcement_gap()).to_equal(true)
+
+        it "names the twin that actually fires, not the dead semantic checker":
+            # Plan premises 12b/13: the LIVE emitters are the text
+            # reimplementations in 90.tools/lint, not 35.semantics/lint.
+            val imp1 = find_flight_rule("FLT-IMP-001")
+            if imp1:
+                expect(imp1.analyzer.starts_with("lint.text.")).to_equal(true)
+                expect(imp1.is_enforcement_gap()).to_equal(false)
+
+        it "reports enforcement gaps as a strict subset of the registry":
+            val gaps = flight_rule_enforcement_gaps()
+            expect(gaps.len() > 0).to_equal(true)
+            expect(gaps.len() < flight_rules().len()).to_equal(true)
+
+    describe "rule-set hash":
+        it "is deterministic across calls":
+            expect(flight_rules_hash()).to_equal(flight_rules_hash())
+
+        it "is sensitive to the registry text":
+            val base = assurance_text_hash(flight_rules_canonical_text())
+            val perturbed = assurance_text_hash(flight_rules_canonical_text() + "x")
+            expect(base == perturbed).to_equal(false)
+
+        it "distinguishes inputs that differ only by field order":
+            expect(assurance_text_hash("a|b") == assurance_text_hash("b|a")).to_equal(false)
+
+describe "flight-rule docgen":
+    it "emits one crosswalk row per rule":
+        val doc = render_standards_crosswalk()
+        expect(count_lines_starting_with(doc, "| `FLT-")).to_equal(flight_rules().len())
+
+    it "emits one severity row per rule":
+        val doc = render_severity_table()
+        expect(count_lines_starting_with(doc, "| `FLT-")).to_equal(flight_rules().len())
+
+    it "carries the unverified-citation marker in the crosswalk":
+        val doc = render_standards_crosswalk()
+        expect(doc.contains(source_verification_note())).to_equal(true)
+
+    it "stamps both tables with the rule-set hash":
+        expect(render_standards_crosswalk().contains(flight_rules_hash())).to_equal(true)
+        expect(render_severity_table().contains(flight_rules_hash())).to_equal(true)
+
+    it "renders a specific rule row with its generated severity ladder":
+        val doc = render_severity_table()
+        expect(doc.contains("| `FLT-MEM-001` | shall | shall | shall |")).to_equal(true)
+
+    it "counts wired, intrinsic and gap rules separately":
+        # The three-way split is what WP-2's census keys off. Row-count alone
+        # would still pass if `wired` and `intrinsic` were swapped, so the
+        # counters are asserted directly. Hardcoded on purpose: the registry is
+        # frozen, and adding a rule SHOULD break this and force a conscious
+        # update to the crosswalk.
+        val doc = render_enforcement_gap_report()
+        expect(doc.contains("32 total")).to_equal(true)
+        expect(doc.contains("2 with a live analyzer")).to_equal(true)
+        expect(doc.contains("2 intrinsic (no analyzer needed)")).to_equal(true)
+        expect(doc.contains("28 unfilled gaps")).to_equal(true)
+        expect(flight_rule_enforcement_gaps().len()).to_equal(28)
+
+    it "lists exactly the enforcement gaps in the gap report":
+        val doc = render_enforcement_gap_report()
+        expect(count_lines_starting_with(doc, "| `FLT-")).to_equal(flight_rule_enforcement_gaps().len())
+
+describe "flight-rule enum round-trips":
+    it "round-trips every RuleCategory through name/from_name":
+        expect(RuleCategory.from_name(RuleCategory.ControlFlow.name()).name()).to_equal("control_flow")
+        expect(RuleCategory.from_name(RuleCategory.Memory.name()).name()).to_equal("memory")
+        expect(RuleCategory.from_name(RuleCategory.Data.name()).name()).to_equal("data")
+        expect(RuleCategory.from_name(RuleCategory.Abstraction.name()).name()).to_equal("abstraction")
+        expect(RuleCategory.from_name(RuleCategory.MatchCoverage.name()).name()).to_equal("match_coverage")
+        expect(RuleCategory.from_name(RuleCategory.Implementation.name()).name()).to_equal("implementation")
+
+    it "round-trips every EnforcementPhase":
+        expect(EnforcementPhase.from_name("compile").name()).to_equal("compile")
+        expect(EnforcementPhase.from_name("integration").name()).to_equal("integration")
+        expect(EnforcementPhase.from_name("release").name()).to_equal("release")
+
+    it "round-trips every RuleLevel":
+        expect(RuleLevel.from_name("intrinsic").name()).to_equal("intrinsic")
+        expect(RuleLevel.from_name("shall").name()).to_equal("shall")
+        expect(RuleLevel.from_name("will").name()).to_equal("will")
+        expect(RuleLevel.from_name("should").name()).to_equal("should")
+        expect(RuleLevel.from_name("evidence").name()).to_equal("evidence")
+
+    it "ranks intrinsic above shall above will above should":
+        expect(RuleLevel.Intrinsic.rank() > RuleLevel.Shall.rank()).to_equal(true)
+        expect(RuleLevel.Shall.rank() > RuleLevel.Will.rank()).to_equal(true)
+        expect(RuleLevel.Will.rank() > RuleLevel.Should.rank()).to_equal(true)
+
+    it "round-trips every DeviationPolicy":
+        expect(DeviationPolicy.from_name("prohibited").name()).to_equal("prohibited")
+        expect(DeviationPolicy.from_name("reviewed_waiver").name()).to_equal("reviewed_waiver")
+        expect(DeviationPolicy.from_name("project_approval").name()).to_equal("project_approval")
+        expect(DeviationPolicy.from_name("not_applicable").name()).to_equal("not_applicable")

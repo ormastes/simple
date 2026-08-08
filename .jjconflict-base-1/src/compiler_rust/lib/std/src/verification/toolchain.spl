@@ -1,0 +1,137 @@
+# Lean Toolchain Detection and Validation
+#
+# Provides toolchain detection, version validation, and environment
+# readiness checks for Lean 4 / Lake proof checking.
+# Environment failures are reported as ToolchainError, distinct from
+# proof-level failures in StructuredProofResult.
+
+use host.process as process
+use io.fs as fs
+
+# Toolchain information gathered from the local environment
+class ToolchainInfo:
+    lean_available: bool
+    lean_version: Option<text>       # e.g., "leanprover/lean4:v4.x.0"
+    lake_available: bool
+    lake_version: Option<text>
+    expected_version: Option<text>    # From lean-toolchain file
+    version_match: bool              # lean_version matches expected
+
+    # Detect the current toolchain by probing lean/lake binaries
+    static fn detect() -> ToolchainInfo:
+        var lean_available = false
+        var lean_version: Option<text> = nil
+        var lake_available = false
+        var lake_version: Option<text> = nil
+        var expected_version: Option<text> = nil
+        var version_match = false
+
+        # Check lean
+        val lean_result = process.run("lean", ["--version"])
+        if lean_result.success:
+            lean_available = true
+            lean_version = Some(lean_result.stdout.trim())
+
+        # Check lake
+        val lake_result = process.run("lake", ["--version"])
+        if lake_result.success:
+            lake_available = true
+            lake_version = Some(lake_result.stdout.trim())
+
+        # Read lean-toolchain if present
+        if fs.exists("lean-toolchain"):
+            val content = fs.read_text("lean-toolchain").trim()
+            if content.len() > 0:
+                expected_version = Some(content)
+
+        # Compare versions
+        if lean_version.? and expected_version.?:
+            val lv = lean_version.unwrap()
+            val ev = expected_version.unwrap()
+            version_match = lv.contains(ev) or ev.contains(lv)
+        else:
+            # If no expected version file, any version is acceptable
+            if lean_available and not expected_version.?:
+                version_match = true
+
+        ToolchainInfo(lean_available, lean_version, lake_available, lake_version, expected_version, version_match)
+
+    # Check if the toolchain is ready for proof checking
+    fn is_ready(self) -> bool:
+        self.lean_available and self.lake_available and self.version_match
+
+    # Human-readable status string
+    fn format_status(self) -> text:
+        var out = "Lean Toolchain Status:\n"
+
+        if self.lean_available:
+            val ver = self.lean_version ?? "unknown"
+            out = out + "  Lean:    available ({ver})\n"
+        else:
+            out = out + "  Lean:    NOT FOUND\n"
+
+        if self.lake_available:
+            val ver = self.lake_version ?? "unknown"
+            out = out + "  Lake:    available ({ver})\n"
+        else:
+            out = out + "  Lake:    NOT FOUND\n"
+
+        if self.expected_version.?:
+            val ev = self.expected_version.unwrap()
+            if self.version_match:
+                out = out + "  Version: matches lean-toolchain ({ev})\n"
+            else:
+                out = out + "  Version: MISMATCH (expected {ev})\n"
+        else:
+            out = out + "  Version: no lean-toolchain file\n"
+
+        if self.is_ready():
+            out = out + "  Status:  READY\n"
+        else:
+            out = out + "  Status:  NOT READY\n"
+
+        out
+
+# Environment check errors — distinct from proof failures
+enum ToolchainError:
+    LeanNotFound        # lean binary not on PATH
+    LakeNotFound        # lake binary not on PATH
+    VersionMismatch     # lean version doesn't match lean-toolchain
+    ProjectInvalid      # lakefile.lean missing or malformed
+    DependencyError     # Lake dependencies can't be resolved
+
+    fn to_string(self) -> text:
+        match self:
+            case LeanNotFound: "Lean 4 not found. Install from https://leanprover.github.io/lean4/"
+            case LakeNotFound: "Lake not found. It should be installed with Lean."
+            case VersionMismatch: "Lean version does not match lean-toolchain file"
+            case ProjectInvalid: "lakefile.lean is missing or malformed"
+            case DependencyError: "Lake dependency resolution failed"
+
+# Validate the full toolchain for proof checking in a given project directory.
+# Returns Ok(ToolchainInfo) when everything is ready, or Err(ToolchainError)
+# identifying the first environment problem found.
+fn validate_toolchain(project_dir: text) -> Result<ToolchainInfo, ToolchainError>:
+    val info = ToolchainInfo.detect()
+
+    # 1. Check lean exists
+    if not info.lean_available:
+        return Err(ToolchainError.LeanNotFound)
+
+    # 2. Check lake exists
+    if not info.lake_available:
+        return Err(ToolchainError.LakeNotFound)
+
+    # 3. Check version match (only if lean-toolchain exists)
+    if info.expected_version.? and not info.version_match:
+        return Err(ToolchainError.VersionMismatch)
+
+    # 4. Check lakefile.lean exists in project_dir
+    val lakefile_path = "{project_dir}/lakefile.lean"
+    if not fs.exists(lakefile_path):
+        # Also check lakefile.toml as alternative
+        val lakefile_toml = "{project_dir}/lakefile.toml"
+        if not fs.exists(lakefile_toml):
+            return Err(ToolchainError.ProjectInvalid)
+
+    Ok(info)

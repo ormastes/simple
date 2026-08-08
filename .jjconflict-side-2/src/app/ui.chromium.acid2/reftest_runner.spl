@@ -1,0 +1,229 @@
+# Chromium Shell Acid2 — Reftest Runner (V3 simple_browser shell — M12)
+#
+# M12's goal is "Acid2 reftest (currently UNSUPPORTED) passes." This
+# file owns the two acceptance gates:
+#
+#   1. Acid2 reftest flips from UNSUPPORTED to SUPPORTED.
+#   2. DesktopShell golden frames have zero regressions in the same pass.
+#
+# Both halves are plumbed through a single `Acid2ReftestRunner` so the
+# WPT report writer has a single object to query. The runner is
+# deliberately pure-data: it takes a reference `PixelGrid`, a rendered
+# `PixelGrid`, and a `GoldenGuard` for the DesktopShell skins. The
+# actual rasteriser is out of scope for M12 per the milestone doc — the
+# chromium shell hands pre-built grids in, backed by whichever SFFI
+# placeholder is live that day.
+
+use app.ui.chromium.acid2.pixel_grid.{PixelGrid}
+use app.ui.chromium.acid2.golden_guard.{GoldenGuard, GoldenVerdict}
+
+# =========================================================================
+# WPT support status constants
+# =========================================================================
+
+val ACID2_STATUS_UNSUPPORTED: i32 = 0     # pre-M12 baseline
+val ACID2_STATUS_FAILED:      i32 = 1     # attempted but pixels drifted
+val ACID2_STATUS_SUPPORTED:   i32 = 2     # M12 target: all green
+
+# =========================================================================
+# Acid2WptStatus
+# =========================================================================
+
+class Acid2WptStatus:
+    """Small enum wrapper for the WPT report row the marketing milestone
+    cares about. The label must match the strings the existing WPT
+    report writer already prints for other tests."""
+    code: i32
+
+impl Acid2WptStatus:
+
+    static fn unsupported() -> Acid2WptStatus:
+        Acid2WptStatus(code: ACID2_STATUS_UNSUPPORTED)
+
+    static fn failed() -> Acid2WptStatus:
+        Acid2WptStatus(code: ACID2_STATUS_FAILED)
+
+    static fn supported() -> Acid2WptStatus:
+        Acid2WptStatus(code: ACID2_STATUS_SUPPORTED)
+
+    fn code_of() -> i32:
+        self.code
+
+    fn is_supported() -> bool:
+        self.code == ACID2_STATUS_SUPPORTED
+
+    fn is_failed() -> bool:
+        self.code == ACID2_STATUS_FAILED
+
+    fn is_unsupported() -> bool:
+        self.code == ACID2_STATUS_UNSUPPORTED
+
+    fn label() -> text:
+        if self.code == ACID2_STATUS_SUPPORTED:
+            return "SUPPORTED"
+        if self.code == ACID2_STATUS_FAILED:
+            return "FAILED"
+        "UNSUPPORTED"
+
+# =========================================================================
+# Acid2ReftestReport
+# =========================================================================
+
+class Acid2ReftestReport:
+    """Immutable snapshot of a completed reftest pass. The WPT report
+    writer consumes one of these per Acid2 run and translates it into
+    a `reftest.json` row."""
+    status_code:        i32
+    diff_pixels:        i32
+    reference_pixels:   i32
+    rendered_pixels:    i32
+    golden_regressions: i32
+    golden_matches:     i32
+    regression_names:   [text]
+
+impl Acid2ReftestReport:
+
+    fn status() -> Acid2WptStatus:
+        Acid2WptStatus(code: self.status_code)
+
+    fn diff_pixels_of() -> i32:
+        self.diff_pixels
+
+    fn reference_pixels_of() -> i32:
+        self.reference_pixels
+
+    fn rendered_pixels_of() -> i32:
+        self.rendered_pixels
+
+    fn golden_regressions_of() -> i32:
+        self.golden_regressions
+
+    fn golden_matches_of() -> i32:
+        self.golden_matches
+
+    fn regression_names_of() -> [text]:
+        self.regression_names
+
+    fn is_supported() -> bool:
+        """True iff the Acid2 reftest passed AND zero DesktopShell golden
+        frames regressed — the full M12 acceptance gate."""
+        if self.status_code != ACID2_STATUS_SUPPORTED:
+            return false
+        self.golden_regressions == 0
+
+    fn summary_line() -> text:
+        """Human-readable one-liner for `recent_build.md`."""
+        val st = self.status().label()
+        "acid2: " + st
+
+# =========================================================================
+# Acid2ReftestRunner
+# =========================================================================
+
+class Acid2ReftestRunner:
+    """Top-level Acid2 harness. Holds the current reference and rendered
+    frames plus the DesktopShell golden guard. `run_pass()` folds both
+    halves of the M12 acceptance criteria into a single report.
+    """
+    reference: PixelGrid
+    rendered:  PixelGrid
+    guard:     GoldenGuard
+    last_diff: i32
+    pass_count: i32
+
+impl Acid2ReftestRunner:
+
+    static fn new() -> Acid2ReftestRunner:
+        Acid2ReftestRunner(
+            reference:  PixelGrid.new(),
+            rendered:   PixelGrid.new(),
+            guard:      GoldenGuard.new(),
+            last_diff:  0,
+            pass_count: 0
+        )
+
+    # ---- fixtures ----------------------------------------------------
+
+    me load_reference(frame: PixelGrid):
+        """Install the 'reference.html' raster — the canonical Acid2
+        answer the WPT harness already blesses."""
+        self.reference = frame
+
+    me load_rendered(frame: PixelGrid):
+        """Install the 'acid2.html' raster — whatever the chromium shell
+        produced for the current pass."""
+        self.rendered = frame
+
+    me register_golden(name: text, frame: PixelGrid) -> bool:
+        """Add a DesktopShell golden frame the guard should watch."""
+        self.guard.register(name, frame)
+
+    me compare_desktop(name: text, candidate: PixelGrid) -> GoldenVerdict:
+        """Forward a DesktopShell frame into the guard. The harness
+        exposes this so wm_compare can reuse the same runner object
+        for live shell captures."""
+        self.guard.compare_frame(name, candidate)
+
+    fn guard_of() -> GoldenGuard:
+        """Return the golden guard so the runner consumer can inspect
+        per-frame state without going through `run_pass()`."""
+        self.guard
+
+    fn reference_of() -> PixelGrid:
+        self.reference
+
+    fn rendered_of() -> PixelGrid:
+        self.rendered
+
+    fn last_diff_of() -> i32:
+        self.last_diff
+
+    fn pass_count_of() -> i32:
+        self.pass_count
+
+    # ---- core comparator --------------------------------------------
+
+    fn pixels_match() -> bool:
+        """Low-level gate: does the rendered frame exactly equal the
+        reference frame? This is the raw Acid2 pass condition — the
+        M12 doc does not allow a fuzz threshold."""
+        self.reference.equals(self.rendered)
+
+    fn compute_diff() -> i32:
+        """Count of differing cells between reference and rendered."""
+        self.reference.diff_count(self.rendered)
+
+    me run_pass() -> Acid2ReftestReport:
+        """Perform a full Acid2 pass against the current reference /
+        rendered pair plus every registered golden frame. The status
+        is only SUPPORTED when the reference matches AND the guard
+        reports zero regressions against frames the chromium shell
+        re-submitted since `reset_pass`."""
+        self.pass_count = self.pass_count + 1
+        val diff = self.compute_diff()
+        self.last_diff = diff
+        var status: i32 = ACID2_STATUS_FAILED
+        if diff == 0:
+            if self.reference.cell_count() > 0:
+                status = ACID2_STATUS_SUPPORTED
+            else:
+                status = ACID2_STATUS_UNSUPPORTED
+        val regressions = self.guard.regression_count()
+        if regressions > 0:
+            if status == ACID2_STATUS_SUPPORTED:
+                status = ACID2_STATUS_FAILED
+        Acid2ReftestReport(
+            status_code:        status,
+            diff_pixels:        diff,
+            reference_pixels:   self.reference.cell_count(),
+            rendered_pixels:    self.rendered.cell_count(),
+            golden_regressions: regressions,
+            golden_matches:     self.guard.match_calls_of(),
+            regression_names:   self.guard.regression_names()
+        )
+
+    me reset_pass():
+        """Drop the per-pass state so the next `run_pass()` starts from
+        a clean slate."""
+        self.last_diff = 0
+        self.guard.reset_pass()

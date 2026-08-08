@@ -1,0 +1,83 @@
+use std.spec
+use std.io.{file_read_text}
+
+fn source(path: text) -> text:
+    file_read_text(path)
+
+fn expect_integer_source(path: text):
+    val text = source(path)
+    expect(text.len()).to_be_greater_than(0)
+    expect(text.contains("use std.hardware.rv64gc_rtl.fpu")).to_equal(false)
+    expect(text.contains("f32")).to_equal(false)
+    expect(text.contains("f64")).to_equal(false)
+    expect(text.contains("extern fn")).to_equal(false)
+
+fn import_source_path(line: text) -> text:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("use "):
+        return ""
+    var module = trimmed.slice(4, trimmed.len()).split("{")[0].trim()
+    if module.ends_with("."):
+        module = module.slice(0, module.len() - 1)
+    var parts = module.split(".")
+    if parts.len() < 2 or (parts[0] != "std" and parts[0] != "lib"):
+        return ""
+    while parts.len() > 1:
+        var base = "src/lib"
+        for idx in 1..parts.len():
+            base = base + "/" + parts[idx]
+        val file = base + ".spl"
+        if source(file).len() > 0:
+            return file
+        val init = base + "/__init__.spl"
+        if source(init).len() > 0:
+            return init
+        parts = parts.slice(0, parts.len() - 1)
+    ""
+
+fn source_closure(root: text) -> [text]:
+    var queue: [text] = [root]
+    var seen: [text] = []
+    var cursor = 0
+    while cursor < queue.len():
+        val path = queue[cursor]
+        cursor = cursor + 1
+        if not seen.contains(path):
+            seen.push(path)
+            for line in source(path).split("\n"):
+                val dependency = import_source_path(line)
+                if dependency.len() > 0 and not seen.contains(dependency):
+                    queue.push(dependency)
+    seen
+
+describe "RV64IMAC synthesizable source closure":
+    it "keeps every specialized owner outside the behavioral float closure":
+        val closure = source_closure("src/lib/hardware/rv64gc_rtl/imac_entry.spl")
+        expect(closure.len()).to_be_greater_than(5)
+        for path in closure:
+            expect_integer_source(path)
+
+    it "uses only the reset-owned IMAC product boundary":
+        val entry = source("src/lib/hardware/rv64gc_rtl/imac_entry.spl")
+        expect(entry).to_contain("@clocked(clk, none)")
+        expect(entry).to_contain("_core64_imac_product_state = result.state")
+        expect(entry).to_contain("core64_imac_reset_result(reset_vec)")
+        expect(entry).to_contain("msip: bool, mtip: bool, meip: bool")
+        expect(entry).to_contain("stip: bool, seip: bool, time_value: i64")
+        expect(entry.contains("core64_imac_cycle(reset_state")).to_equal(false)
+        expect(entry.contains("core64_protected_product_entry")).to_equal(false)
+
+    it "reuses the canonical protected-memory and integer leaves":
+        val protected = source("src/lib/hardware/rv64gc_rtl/imac_protected_core.spl")
+        val core = source("src/lib/hardware/rv64gc_rtl/imac_core.spl")
+        expect(protected).to_contain("std.hardware.rv64gc_rtl.memory_access")
+        expect(protected).to_contain("std.hardware.rv64gc_rtl.pmp")
+        expect(protected).to_contain("std.hardware.rv64gc_rtl.rvfi_base")
+        expect(core).to_contain("std.hardware.rv64gc_rtl.mul_div")
+        expect(core).to_contain("std.hardware.rv64gc_rtl.atomics")
+        expect(core).to_contain("std.hardware.rv64gc_rtl.decode")
+
+    it "leaves behavioral F/D in its separate unqualified root":
+        val behavioral = source("src/lib/hardware/rv64gc_rtl/protected_core.spl")
+        expect(behavioral).to_contain("use std.hardware.rv64gc_rtl.fpu")
+        expect(behavioral.contains("VHDL-qualified")).to_equal(false)

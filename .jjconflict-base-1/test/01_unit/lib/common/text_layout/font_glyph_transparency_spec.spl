@@ -1,0 +1,38 @@
+# @cover src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl 60%
+# @tag: unit, ui, font, transparency, blend
+#
+# Transparency / effects check for font rendering: glyph alpha coverage (the
+# same per-pixel alpha a GPU backend returns) must composite correctly through
+# the blit path. Opaque coverage replaces; partial coverage blends toward the
+# foreground; zero coverage leaves the background untouched.
+
+use std.spec.{describe, it, expect}
+use common.text_layout.font_renderer.{CachedGlyph}
+use common.text_layout.font_rasterizer.{blit_glyph}
+
+fn _argb(a: i64, r: i64, g: i64, b: i64) -> u32:
+    (((a & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF)).to_u32()
+
+fn _r(px: u32) -> i64:
+    ((px >> 16) & 0xFF).to_i64()
+
+fn _glyph_1x1(alpha: i64) -> CachedGlyph:
+    var pixels: [u8] = [alpha.to_u8()]
+    CachedGlyph(codepoint: 65, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 2, bearing_x: 0, bearing_y: 0, pixels: pixels)
+
+describe "font glyph transparency / alpha compositing":
+    it "full coverage replaces the background with the foreground":
+        var buf: [u32] = [_argb(255, 0, 0, 0)]
+        val out = blit_glyph(buf, 1, 1, 0, 0, _glyph_1x1(255), _argb(255, 255, 255, 255))
+        expect(_r(out[0])).to_equal(255)
+
+    it "half coverage blends toward the foreground (midpoint)":
+        var buf: [u32] = [_argb(255, 0, 0, 0)]
+        val out = blit_glyph(buf, 1, 1, 0, 0, _glyph_1x1(128), _argb(255, 255, 255, 255))
+        # (255*128 + 0*127)/255 == 128
+        expect(_r(out[0])).to_equal(128)
+
+    it "zero coverage leaves the background unchanged":
+        var buf: [u32] = [_argb(255, 10, 20, 30)]
+        val out = blit_glyph(buf, 1, 1, 0, 0, _glyph_1x1(0), _argb(255, 255, 255, 255))
+        expect(_r(out[0])).to_equal(10)

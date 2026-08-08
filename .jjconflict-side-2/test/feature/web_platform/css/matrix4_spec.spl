@@ -1,0 +1,163 @@
+"""
+# Matrix4 / ComputedStyle library-path regression guard
+
+Pins the fix for two `src/lib/` modules that imported from a non-existent
+`examples.browser.*` tree. An unresolved `use` is only a WARN in this repo
+(exit 0), so the breakage was invisible: `Matrix4.identity()` and
+`get_property_from_style` only failed at RUNTIME, and the one spec that called
+them was itself already dead from a second broken import.
+
+This spec fails if either import is repointed back at a missing module, because
+every example below drives a real value through the library call path rather
+than merely importing the symbol.
+
+Run with: bin/simple test test/feature/web_platform/css/matrix4_spec.spl
+"""
+
+use std.spec
+
+use std.common.render_scene.matrix4.Matrix4
+use std.gc_async_mut.gpu.browser_engine.style.transform.{parse_transform, transforms_to_matrix}
+use std.gc_async_mut.gpu.browser_engine.style.computed.{ComputedStyle, get_property_from_style}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{CSSValue, AnimationEngine}
+use std.gc_async_mut.gpu.browser_engine.style.animation_controller.{AnimationController}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+    abs_diff < 0.0001
+
+describe "Matrix4 resolves from the library, not from examples/":
+
+    context "constructors":
+        it "identity has a unit diagonal and zero off-diagonal":
+            val m = Matrix4.identity()
+            expect(approx(m.get(0, 0), 1.0)).to_equal(true)
+            expect(approx(m.get(1, 1), 1.0)).to_equal(true)
+            expect(approx(m.get(3, 3), 1.0)).to_equal(true)
+            expect(approx(m.get(0, 1), 0.0)).to_equal(true)
+
+        it "scale places factors on the diagonal":
+            val m = Matrix4.scale(2.0, 3.0, 4.0)
+            expect(approx(m.get(0, 0), 2.0)).to_equal(true)
+            expect(approx(m.get(1, 1), 3.0)).to_equal(true)
+            expect(approx(m.get(2, 2), 4.0)).to_equal(true)
+
+        it "translate places offsets in the last column":
+            val m = Matrix4.translate(10.0, 20.0, 30.0)
+            expect(approx(m.get(0, 3), 10.0)).to_equal(true)
+            expect(approx(m.get(1, 3), 20.0)).to_equal(true)
+            expect(approx(m.get(2, 3), 30.0)).to_equal(true)
+
+        it "rotate_z(90deg) maps the x axis onto the y axis":
+            val m = Matrix4.rotate_z(90.0)
+            expect(approx(m.get(0, 0), 0.0)).to_equal(true)
+            expect(approx(m.get(1, 0), 1.0)).to_equal(true)
+            expect(approx(m.get(0, 1), -1.0)).to_equal(true)
+
+        it "get is bounds-checked":
+            val m = Matrix4.identity()
+            expect(approx(m.get(9, 9), 0.0)).to_equal(true)
+            expect(approx(m.get(-1, 0), 0.0)).to_equal(true)
+
+    context "multiply":
+        it "identity is a left and right unit":
+            val s = Matrix4.scale(2.0, 5.0, 1.0)
+            val i = Matrix4.identity()
+            val left = i.multiply(s)
+            val right = s.multiply(i)
+            expect(approx(left.get(0, 0), 2.0)).to_equal(true)
+            expect(approx(left.get(1, 1), 5.0)).to_equal(true)
+            expect(approx(right.get(0, 0), 2.0)).to_equal(true)
+            expect(approx(right.get(1, 1), 5.0)).to_equal(true)
+
+        it "composes scale then translate":
+            val composed = Matrix4.scale(2.0, 2.0, 1.0).multiply(Matrix4.translate(3.0, 4.0, 0.0))
+            expect(approx(composed.get(0, 0), 2.0)).to_equal(true)
+            expect(approx(composed.get(0, 3), 6.0)).to_equal(true)
+            expect(approx(composed.get(1, 3), 8.0)).to_equal(true)
+
+    context "transform.spl drives Matrix4 through the library import":
+        it "transforms_to_matrix('none') is identity":
+            val m = transforms_to_matrix(parse_transform("none"))
+            expect(approx(m.get(0, 0), 1.0)).to_equal(true)
+            expect(approx(m.get(1, 1), 1.0)).to_equal(true)
+
+        it "transforms_to_matrix('scale(2)') scales both axes":
+            val m = transforms_to_matrix(parse_transform("scale(2)"))
+            expect(approx(m.get(0, 0), 2.0)).to_equal(true)
+            expect(approx(m.get(1, 1), 2.0)).to_equal(true)
+
+        it "transforms_to_matrix('translate(10px, 20px)') offsets":
+            val m = transforms_to_matrix(parse_transform("translate(10px, 20px)"))
+            expect(approx(m.get(0, 3), 10.0)).to_equal(true)
+            expect(approx(m.get(1, 3), 20.0)).to_equal(true)
+
+        it "transforms_to_matrix('rotate(90deg)') rotates":
+            val m = transforms_to_matrix(parse_transform("rotate(90deg)"))
+            expect(approx(m.get(1, 0), 1.0)).to_equal(true)
+
+describe "ComputedStyle resolves from the library, not from examples/":
+
+    context "property lookup":
+        it "returns a stored value":
+            var s = ComputedStyle.empty()
+            s.set("opacity", CSSValue.Number(v: 0.5))
+            var got = 0.0
+            match get_property_from_style(s, "opacity"):
+                case CSSValue.Number(v):
+                    got = v
+                case _:
+                    got = -1.0
+            expect(approx(got, 0.5)).to_equal(true)
+
+        it "returns Unset for an absent property":
+            val s = ComputedStyle.empty()
+            var was_unset = false
+            match get_property_from_style(s, "width"):
+                case CSSValue.Unset:
+                    was_unset = true
+                case _:
+                    was_unset = false
+            expect(was_unset).to_equal(true)
+
+        it "a later declaration wins":
+            var s = ComputedStyle.empty()
+            s.set("opacity", CSSValue.Number(v: 0.25))
+            s.set("opacity", CSSValue.Number(v: 0.75))
+            var got = 0.0
+            match get_property_from_style(s, "opacity"):
+                case CSSValue.Number(v):
+                    got = v
+                case _:
+                    got = -1.0
+            expect(approx(got, 0.75)).to_equal(true)
+            expect(s.has_property("opacity")).to_equal(true)
+
+describe "animation_controller drives ComputedStyle through the library import":
+
+    context "detect_transitions":
+        it "records a transition when a transitionable property changes":
+            val logger = Logger.new("spec", BrowserLogLevel.Error)
+            val engine = AnimationEngine.new(logger)
+            var controller = AnimationController.new(engine, logger)
+
+            var old_style = ComputedStyle.empty()
+            old_style.set("width", CSSValue.Length(v: 10.0, unit: "px"))
+            var new_style = ComputedStyle.empty()
+            new_style.set("width", CSSValue.Length(v: 50.0, unit: "px"))
+
+            controller.detect_transitions(1, old_style, new_style, ["width"], 100.0, "linear")
+            expect(controller.active_transitions.len()).to_equal(1)
+
+        it "records nothing when the property is unchanged":
+            val logger = Logger.new("spec", BrowserLogLevel.Error)
+            val engine = AnimationEngine.new(logger)
+            var controller = AnimationController.new(engine, logger)
+
+            var same = ComputedStyle.empty()
+            same.set("width", CSSValue.Length(v: 10.0, unit: "px"))
+
+            controller.detect_transitions(2, same, same, ["width"], 100.0, "linear")
+            expect(controller.active_transitions.len()).to_equal(0)

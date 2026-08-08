@@ -1,0 +1,74 @@
+"""
+Probe: what does PURE-SIMPLE HIR lowering do with a bare `field = value`
+assignment inside a `me` method, where `field` is a declared class field and
+has no existing local binding? Executes the real `compiler.hir.hir_lowering`
+module (not the Rust seed) via `parse_full_frontend` + `HirLowering.lower_module`.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+val IMPLICIT_SRC: text = "class Counter:\n" +
+    "    flag: bool\n" +
+    "\n" +
+    "impl Counter:\n" +
+    "    me set_flag():\n" +
+    "        flag = true\n"
+
+val EXPLICIT_SRC: text = "class Counter:\n" +
+    "    flag: bool\n" +
+    "\n" +
+    "impl Counter:\n" +
+    "    me set_flag():\n" +
+    "        self.flag = true\n"
+
+val PLAIN_LOCAL_SRC: text = "class Counter:\n" +
+    "    flag: bool\n" +
+    "\n" +
+    "impl Counter:\n" +
+    "    me compute() -> i64:\n" +
+    "        scratch = 41\n" +
+    "        return scratch + 1\n"
+
+fn diag_count(source: text, label: text) -> i64:
+    val log = make_logger()
+    val module = parse_full_frontend(source, label, label, log)
+    var lowering = HirLowering.with_filename(label)
+    lowering.lower_module(module)
+    val err_count = lowering.lowering_error_count()
+    print("PROBE[" + label + "]_ERROR_COUNT=" + err_count.to_text())
+    var i = 0
+    while i < err_count:
+        print("PROBE[" + label + "]_DIAG[" + i.to_text() + "]=" + lowering.diagnostic_messages[i])
+        i = i + 1
+    err_count
+
+describe "pure-Simple HIR lowering: implicit self-field assignment":
+    it "hard-errors on a bare field-name assignment (measured, not silent)":
+        val log = make_logger()
+        val module = parse_full_frontend(IMPLICIT_SRC, "implicit", "implicit", log)
+        var lowering = HirLowering.with_filename("implicit")
+        lowering.lower_module(module)
+        val err_count = lowering.lowering_error_count()
+        print("PROBE[implicit]_ERROR_COUNT=" + err_count.to_text())
+        print("PROBE[implicit]_DIAG[0]=" + lowering.diagnostic_messages[0])
+        expect(err_count).to_equal(1)
+        # Distinguish a HARD error (compilation refuses to proceed) from a
+        # `recovered()` diagnostic (noted, but the pipeline carries on with
+        # HirExprKind.Error in the tree). lower_unresolved_ident calls
+        # self.error(...), not self.recovered(...) -- confirm that here rather
+        # than inferring it from the source read alone.
+        expect(lowering.lowering_error_is_recovered_at(0)).to_equal(false)
+
+    it "still accepts the explicit self.field form with zero diagnostics":
+        val err_count = diag_count(EXPLICIT_SRC, "explicit")
+        expect(err_count).to_equal(0)
+
+    it "has NO implicit-local-declaration path at all -- errors on bare non-field assignment too (seed/pure-Simple divergence, filed separately, not fixed here)":
+        val err_count = diag_count(PLAIN_LOCAL_SRC, "plain_local")
+        expect(err_count).to_equal(2)

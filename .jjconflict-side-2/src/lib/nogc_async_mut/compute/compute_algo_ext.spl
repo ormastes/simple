@@ -1,0 +1,102 @@
+@no_gc
+
+# compute_algo_ext — extended Thrust-parity generic algorithms (CPU reference oracle).
+#
+# Companion to compute_ops.spl. Every algorithm is generic over T and takes a final
+# ExecTarget so the SAME call runs on CPU or a GPU backend selected only by config.
+# The pure-Simple CPU path here is the REFERENCE ORACLE: backend cells must
+# differential-match these results. `target` is accepted and threaded through;
+# the reference impl computes deterministically on the CPU.
+
+use std.nogc_async_mut.compute.exec_target.{ExecTarget}
+
+# Index of the minimum element under `less`, or -1 if empty.
+fn compute_min_element<T>(data: [T], less: fn(T, T) -> bool, target: ExecTarget) -> i64:
+    if data.len() == 0:
+        return -1
+    var best = 0
+    var i = 1
+    while i < data.len():
+        if less(data[i], data[best]):
+            best = i
+        i = i + 1
+    return best
+
+# Index of the maximum element under `less`, or -1 if empty.
+fn compute_max_element<T>(data: [T], less: fn(T, T) -> bool, target: ExecTarget) -> i64:
+    if data.len() == 0:
+        return -1
+    var best = 0
+    var i = 1
+    while i < data.len():
+        if less(data[best], data[i]):
+            best = i
+        i = i + 1
+    return best
+
+# map each element then reduce with `op` starting from `init`.
+fn compute_transform_reduce<T>(data: [T], map: fn(T) -> T, init: T, op: fn(T, T) -> T, target: ExecTarget) -> T:
+    var acc = init
+    var i = 0
+    while i < data.len():
+        acc = op(acc, map(data[i]))
+        i = i + 1
+    return acc
+
+# Remove CONSECUTIVE duplicates (like std::unique), keeping first of each run.
+# Equality derived from `less` (!(a<b) && !(b<a)) to avoid the generic `!=`/2-arg
+# `==` interpreter bug. See doc/08_tracking/bug/interp_generic_eq_callback_2026-06-16.
+fn compute_unique<T>(data: [T], less: fn(T, T) -> bool, target: ExecTarget) -> [T]:
+    var out: [T] = []
+    if data.len() == 0:
+        return out
+    out.push(data[0])
+    var i = 1
+    while i < data.len():
+        val same = (not less(data[i], data[i - 1])) and (not less(data[i - 1], data[i]))
+        if not same:
+            out.push(data[i])
+        i = i + 1
+    return out
+
+# First index i where !(data[i] < key) on sorted input (binary search).
+fn compute_lower_bound<T>(data: [T], key: T, less: fn(T, T) -> bool, target: ExecTarget) -> i64:
+    var lo = 0
+    var hi = data.len()
+    while lo < hi:
+        val mid = lo + (hi - lo) / 2
+        if less(data[mid], key):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+# True when `key` is present in sorted `data` (binary search).
+fn compute_binary_search<T>(data: [T], key: T, less: fn(T, T) -> bool, target: ExecTarget) -> bool:
+    var lo = 0
+    var hi = data.len()
+    while lo < hi:
+        val mid = lo + (hi - lo) / 2
+        if less(data[mid], key):
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo < data.len():
+        val at = data[lo]
+        if not less(key, at):
+            return true
+    return false
+
+# out[0]=init, out[i]=op(out[i-1], data[i-1]).
+fn compute_exclusive_scan<T>(data: [T], init: T, op: fn(T, T) -> T, target: ExecTarget) -> [T]:
+    var out = [for i in 0..data.len(): data[i]]
+    var acc = init
+    var i = 0
+    while i < data.len():
+        out[i] = acc
+        acc = op(acc, data[i])
+        i = i + 1
+    return out
+
+export compute_min_element, compute_max_element, compute_transform_reduce
+export compute_unique, compute_lower_bound, compute_binary_search, compute_exclusive_scan

@@ -1,0 +1,27 @@
+#!/bin/sh
+# WS-D D0 driver: N fresh processes (native_pixel_rows_enabled() memoizes, so an
+# in-process matrix would measure the first value N times). Prints p50/p99/max
+# per kernel plus max RSS. Usage: run_span_bench.shs [runs] [label]
+RUNS=${1:-11}
+LABEL=${2:-baseline}
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+BIN="$ROOT/bin/simple"
+SPL="$ROOT/test/perf/graphics_2d/bench_span_kernels.spl"
+OUT=$(mktemp)
+RSSF=$(mktemp)
+i=0
+while [ "$i" -lt "$RUNS" ]; do
+  /usr/bin/time -f '%M' -o "$RSSF" -a "$BIN" run "$SPL" 2>/dev/null | grep KERNEL_RESULT >> "$OUT"
+  i=$((i+1))
+done
+echo "label=$LABEL runs=$RUNS binary=$(readlink -f "$BIN") md5=$(md5sum "$(readlink -f "$BIN")" | cut -d' ' -f1)"
+for k in fill copy blend blit; do
+  grep "kernel=$k " "$OUT" | sed 's/.*ms=//' | tail -n +2 | sort -n | awk -v k="$k" '
+    {a[NR]=$1} END {
+      if (NR==0) { print "kernel=" k " NO DATA"; exit }
+      p50=a[int((NR+1)/2)]; p99=a[NR>1?int(NR*0.99+0.5)>0?int(NR*0.99+0.5):1:1];
+      print "kernel=" k " n=" NR " p50=" p50 " p99=" p99 " max=" a[NR]
+    }'
+done
+echo "max_rss_kb=$(sort -n "$RSSF" | tail -1)"
+rm -f "$OUT" "$RSSF"

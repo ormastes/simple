@@ -1,0 +1,391 @@
+"""Pure trust-boundary policy for sandbox renderer network requests."""
+
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererNetworkDecodeResult
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.web.browser_session_url.{
+    normalize_network_navigation_url
+}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+
+pub struct HostedBrowserNavigationPermit:
+    active: bool
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+    redirect_count: i64
+    form_action_policy: text = ""
+    form_action_document_url: text = ""
+
+pub struct HostedBrowserRequestPolicy:
+    ok: bool
+    reason: text
+    mode: RequestMode
+    credentials: text
+    canonical_url: text
+    sanitized_headers: text
+    consumes_navigation: bool
+    form_action_policy: text = ""
+    form_action_document_url: text = ""
+
+pub fn hosted_browser_transport_host(host: text) -> text:
+    if (host.len() < 4 or not host.starts_with("[") or
+        not host.ends_with("]")):
+        return host
+    val parsed = Url.parse("https://{host}/")
+    if not parsed.?:
+        return host
+    if parsed!.host != host:
+        return host
+    val inner = host.slice(1, host.len() - 1)
+    if (not inner.contains(":") or inner.contains("[") or
+        inner.contains("]")):
+        return host
+    inner
+
+pub fn hosted_browser_network_error(
+    scheme: text, error: text
+) -> text:
+    if error == "":
+        return ""
+    if (error == "network: Network request failed" or
+        error == "network-timeout: Network request timed out"):
+        return error
+    if scheme == "https" and (
+        error == "tls-certificate: TLS certificate validation failed" or
+        error == "tls-hostname: TLS certificate identity validation failed" or
+        error == "tls-protocol: TLS protocol negotiation failed" or
+        error == "tls-timeout: TLS connection timed out"
+    ):
+        return error
+    "network: Network request failed"
+
+fn _renderer_header_name_valid(name: text) -> bool:
+    if name == "":
+        return false
+    for ch in name:
+        val code = ch.char_code_at(0)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122) or ch == "-"):
+            return false
+    true
+
+pub fn hosted_browser_sanitize_fetch_headers(
+    headers: text, content_type: text
+) -> Result<text, text>:
+    if headers.contains("\r") or content_type.contains("\r") or
+        content_type.contains("\n"):
+        return Err("invalid-request-headers")
+    var lines: [text] = []
+    var has_content_type = false
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        if colon <= 0:
+            return Err("invalid-request-headers")
+        val name = line.slice(0, colon).trim()
+        val lowered = name.lower()
+        if (not _renderer_header_name_valid(name) or lowered == "host" or
+            lowered == "connection" or lowered == "content-length" or
+            lowered == "transfer-encoding" or lowered == "proxy-connection" or
+            lowered == "upgrade" or lowered == "origin" or
+            lowered == "cookie" or lowered == "cookie2" or
+            lowered == "keep-alive" or lowered == "te" or
+            lowered == "trailer" or lowered == "referer" or
+            lowered == "accept-charset" or lowered == "accept-encoding" or
+            lowered.starts_with("access-control-request-") or
+            lowered == "date" or lowered == "dnt" or lowered == "expect" or
+            lowered == "permissions-policy" or lowered.starts_with("proxy-") or
+            lowered.starts_with("sec-") or lowered == "via"):
+            return Err("forbidden-request-header")
+        val value = line.slice(colon + 1, line.len()).trim()
+        for ch in value:
+            val code = ch.char_code_at(0)
+            if code < 32 and code != 9:
+                return Err("invalid-request-headers")
+        if lowered == "content-type":
+            has_content_type = true
+        lines.push("{name}: {value}")
+    if content_type != "" and not has_content_type:
+        for ch in content_type:
+            if ch.char_code_at(0) < 32:
+                return Err("invalid-request-headers")
+        lines.push("Content-Type: {content_type}")
+    Ok(lines.join("\r\n"))
+
+pub fn hosted_browser_empty_navigation_permit(
+) -> HostedBrowserNavigationPermit:
+    HostedBrowserNavigationPermit(
+        active: false,
+        url: "",
+        method: "",
+        headers: "",
+        body: "",
+        content_type: "",
+        redirect_count: 0,
+        form_action_policy: "",
+        form_action_document_url: ""
+    )
+
+fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
+    HostedBrowserRequestPolicy(
+        ok: false,
+        reason: reason,
+        mode: RequestMode.SameOrigin,
+        credentials: "omit",
+        canonical_url: "",
+        sanitized_headers: "",
+        consumes_navigation: false
+    )
+
+pub fn hosted_browser_canonical_navigation_url(raw: text) -> text:
+    if (raw == "" or raw.contains("\0") or raw.contains("\r") or
+        raw.contains("\n") or raw != raw.trim() or
+        rt_text_to_bytes(raw).len() > 8192):
+        return ""
+    val normalized = match normalize_network_navigation_url(raw):
+        Err(_):
+            return ""
+        Ok(value):
+            value
+    val lower = raw.trim().lower()
+    if (not lower.starts_with("http://") and
+        not lower.starts_with("https://")):
+        return ""
+    val parsed_opt = Url.parse(normalized)
+    if not parsed_opt.?:
+        return ""
+    parsed_opt!.to_text()
+
+pub fn hosted_browser_canonical_http_url(raw: text) -> text:
+    val rendered = hosted_browser_canonical_navigation_url(raw)
+    if rendered == "":
+        return ""
+    val fragment_at = rendered.index_of("#")
+    if fragment_at >= 0:
+        return rendered.slice(0, fragment_at)
+    rendered
+
+pub fn hosted_browser_hsts_upgrade_valid(
+    request_url: text, effective_url: text
+) -> bool:
+    val request_canonical = hosted_browser_canonical_http_url(request_url)
+    val effective_canonical = hosted_browser_canonical_http_url(effective_url)
+    if request_canonical == "" or effective_canonical == "":
+        return false
+    if request_canonical == effective_canonical:
+        return true
+    val request_opt = Url.parse(request_canonical)
+    val effective_opt = Url.parse(effective_canonical)
+    if not request_opt.? or not effective_opt.?:
+        return false
+    val request = request_opt!
+    val effective = effective_opt!
+    if (request.scheme != "http" or effective.scheme != "https" or
+        request.host != effective.host or request.path != effective.path or
+        request.query != effective.query):
+        return false
+    if request.port == 80:
+        return effective.port == 443
+    effective.port == request.port
+
+pub fn hosted_browser_remove_response_header(
+    headers: text, expected_name: text
+) -> text:
+    val expected = expected_name.to_lower()
+    var lines: [text] = []
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        if (colon <= 0 or
+            line.slice(0, colon).trim().to_lower() != expected):
+            lines.push(line)
+    lines.join("\r\n")
+
+fn _hosted_browser_header_list_contains(
+    values: text, expected: text
+) -> bool:
+    val target = expected.to_lower()
+    for value in values.split(","):
+        if value.trim().to_lower() == target:
+            return true
+    false
+
+pub fn hosted_browser_cors_response_headers(
+    headers: text, preserve_location: bool, credentials: text = "omit"
+) -> text:
+    val exposed = hosted_browser_response_header_value(
+        headers, "access-control-expose-headers"
+    )
+    val expose_all = (credentials != "include" and
+        _hosted_browser_header_list_contains(exposed, "*"))
+    var lines: [text] = []
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if colon <= 0:
+            continue
+        val raw_name = line.slice(0, colon).trim()
+        val name = raw_name.to_lower()
+        val forbidden = name == "set-cookie" or name == "set-cookie2"
+        val safelisted = (
+            name == "cache-control" or name == "content-language" or
+            name == "content-length" or name == "content-type" or
+            name == "expires" or name == "last-modified" or
+            name == "pragma"
+        )
+        if (_renderer_header_name_valid(raw_name) and not forbidden and (
+            safelisted or expose_all or
+            _hosted_browser_header_list_contains(exposed, name) or
+            (preserve_location and name == "location")
+        )):
+            lines.push(line)
+    lines.join("\r\n")
+
+pub fn hosted_browser_network_origin(url: text) -> text:
+    val parsed_opt = Url.parse(url)
+    if not parsed_opt.?:
+        return ""
+    Origin.from_url(parsed_opt!).to_text()
+
+pub fn hosted_browser_response_header_value(
+    headers: text, expected_name: text
+) -> text:
+    val expected = expected_name.to_lower()
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == expected):
+            return line.slice(colon + 1, line.len()).trim()
+    ""
+
+pub fn hosted_browser_replace_response_header(
+    headers: text, expected_name: text, value: text
+) -> text:
+    val expected = expected_name.to_lower()
+    var lines: [text] = []
+    var replaced = false
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == expected):
+            if not replaced:
+                lines.push("{expected_name}: {value}")
+                replaced = true
+        else:
+            lines.push(line)
+    lines.join("\r\n")
+
+pub fn hosted_browser_redirect_status(status: i32) -> bool:
+    status == 301 or status == 302 or status == 303 or
+        status == 307 or status == 308
+
+pub fn hosted_browser_renderer_request_policy(
+    document_origin: text,
+    permit: HostedBrowserNavigationPermit,
+    request: BrowserRendererNetworkDecodeResult,
+    effective_url: text = ""
+) -> HostedBrowserRequestPolicy:
+    if not request.ok:
+        return _request_policy_reject(request.reason)
+    if (request.credentials != "omit" and
+        request.credentials != "same-origin" and
+        request.credentials != "include"):
+        return _request_policy_reject("invalid-request-credentials")
+    val request_url = hosted_browser_canonical_http_url(request.url)
+    val candidate_url = if effective_url != "":
+        effective_url
+    else:
+        request.url
+    val canonical_url = hosted_browser_canonical_http_url(candidate_url)
+    if (request_url == "" or canonical_url == "" or
+        not hosted_browser_hsts_upgrade_valid(request_url, canonical_url)):
+        return _request_policy_reject("invalid-request-url")
+    val sanitized_headers = match hosted_browser_sanitize_fetch_headers(
+        request.headers, request.content_type
+    ):
+        Err(reason):
+            return _request_policy_reject(reason)
+        Ok(value):
+            value
+    val method = request.method.to_upper()
+    if request.kind == "document":
+        val permit_url = hosted_browser_canonical_http_url(permit.url)
+        if (not permit.active or request_url != permit_url or
+            canonical_url != request_url or
+            method != permit.method or sanitized_headers != permit.headers or
+            request.body != permit.body or
+            request.content_type != permit.content_type or
+            request.credentials != "include"):
+            return _request_policy_reject(
+                "unauthorized-document-request"
+            )
+        return HostedBrowserRequestPolicy(
+            ok: true,
+            reason: "ok",
+            mode: RequestMode.Navigate,
+            credentials: request.credentials,
+            canonical_url: permit.url,
+            sanitized_headers: sanitized_headers,
+            consumes_navigation: true,
+            form_action_policy: permit.form_action_policy,
+            form_action_document_url: permit.form_action_document_url
+        )
+    if document_origin == "":
+        return _request_policy_reject("missing-document-origin")
+    if (document_origin.starts_with("https://") and
+        canonical_url.starts_with("http://")):
+        return _request_policy_reject("mixed-content-blocked")
+    if (request.kind != "fetch" and method != "GET" and method != "HEAD"):
+        return _request_policy_reject("invalid-resource-method")
+    if (request.kind != "fetch" and
+        (sanitized_headers != "" or request.body != "" or
+            request.content_type != "")):
+        return _request_policy_reject("invalid-resource-request")
+    val request_origin = hosted_browser_network_origin(canonical_url)
+    if request_origin == document_origin:
+        return HostedBrowserRequestPolicy(
+            ok: true,
+            reason: "ok",
+            mode: RequestMode.SameOrigin,
+            credentials: request.credentials,
+            canonical_url: canonical_url,
+            sanitized_headers: sanitized_headers,
+            consumes_navigation: false
+        )
+    if request.kind == "image":
+        return HostedBrowserRequestPolicy(
+            ok: true,
+            reason: "ok",
+            mode: RequestMode.NoCors,
+            credentials: request.credentials,
+            canonical_url: canonical_url,
+            sanitized_headers: "",
+            consumes_navigation: false
+        )
+    HostedBrowserRequestPolicy(
+        ok: true,
+        reason: "ok",
+        mode: RequestMode.Cors,
+        credentials: request.credentials,
+        canonical_url: canonical_url,
+        # FetchEngine owns the browser-generated Origin header and preflight.
+        sanitized_headers: sanitized_headers,
+        consumes_navigation: false
+    )

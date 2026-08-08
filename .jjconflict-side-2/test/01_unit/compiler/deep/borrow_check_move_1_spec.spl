@@ -1,0 +1,86 @@
+"""
+Borrow-checker move dataflow — forward propagation across program points
+and place-projection granularity (lane SF1, 2026-07-28).
+
+Companion to test/01_unit/compiler/borrow/borrow_check_spec.spl, which
+covers the top-level same-point/later-point/reassign contract. This file
+drills into BorrowGraph.moved_now specifically at the PlaceElem.Field
+projection granularity: place_conflicts_with treats a place and any of
+its projections as conflicting (x conflicts with x.field), so a move of
+the whole local must be visible through a later field read, and a move of
+one field must be visible through a later whole-local read.
+
+Places are built via the `Place(base:, projections:)` struct literal
+rather than a chained `.field(idx)` call: the field-projection helper in
+borrow_graph.spl is a free function (`place_field(self: Place, idx: i64)`,
+not an `impl Place` method), so it is not reachable through method-call
+syntax and is not re-exported from the borrow_check package besides.
+"""
+
+use std.spec
+use compiler.borrow.borrow_check.*
+
+fn field_of(base: Place, idx: i64) -> Place:
+    Place(base: base.base, projections: base.projections.push(PlaceElem.Field(idx)))
+
+describe "BorrowGraph move dataflow — forward propagation":
+    it "detects use-after-move at the same program point":
+        var graph = BorrowGraph.create()
+        val p = Place.local(0)
+        graph.record_move(3, p)
+        graph.record_use(3, p)
+        assert_true(graph.has_errors())
+
+    it "detects use-after-move at a LATER program point":
+        # Core dataflow fix: moved_places used to be keyed and read only at
+        # the SAME point, so a move at pt3 + use at pt7 was invisible.
+        # moved_now is the running forward union that closes this gap.
+        var graph = BorrowGraph.create()
+        val p = Place.local(0)
+        graph.record_move(3, p)
+        graph.record_use(7, p)
+        assert_true(graph.has_errors())
+
+    it "detects use-after-move many points later":
+        var graph = BorrowGraph.create()
+        val p = Place.local(0)
+        graph.record_move(1, p)
+        graph.record_use(50, p)
+        assert_true(graph.has_errors())
+
+describe "BorrowGraph move dataflow — place-projection granularity":
+    it "a whole-local move is visible through a later FIELD read":
+        # x moved at pt3; x.f0 read at pt7 -> conflict (x is a prefix of
+        # x.f0), even though the exact Place values differ.
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, whole)
+        graph.record_use(7, field0)
+        assert_true(graph.has_errors())
+
+    it "a FIELD move is visible through a later whole-local read":
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, field0)
+        graph.record_use(7, whole)
+        assert_true(graph.has_errors())
+
+    it "moving one field does not flag a read of a DIFFERENT field":
+        var graph = BorrowGraph.create()
+        val base: Place = Place.local(0)
+        val field0: Place = field_of(base, 0)
+        val field1: Place = field_of(base, 1)
+        graph.record_move(3, field0)
+        graph.record_use(7, field1)
+        assert_false(graph.has_errors())
+
+    it "borrow-of-moved is also forward-propagated across projections":
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, whole)
+        val b = graph.record_borrow(7, field0, BorrowKind.Shared)
+        assert_false(b.?)
+        assert_true(graph.has_errors())

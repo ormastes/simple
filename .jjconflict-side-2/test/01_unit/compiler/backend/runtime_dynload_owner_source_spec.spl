@@ -1,0 +1,79 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "hosted dynamic-loader ownership":
+    it "uses one tagged C owner only when native-all is absent":
+        val owner = rt_file_read_text("src/runtime/runtime_dynload.c")
+        val header = rt_file_read_text("src/runtime/runtime.h")
+        val compiler = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl")
+        val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl")
+        val seed = rt_file_read_text("src/compiler_rust/runtime/src/value/wsffi_native.rs")
+        val unix = rt_file_read_text("src/runtime/platform/unix_common.h")
+        val windows = rt_file_read_text("src/runtime/platform/platform_win.h")
+
+        for name in ["spl_dlopen", "spl_dlsym", "spl_dlclose"]:
+            expect(owner).to_contain("int64_t " + name + "(")
+            expect(header).to_contain("int64_t " + name + "(")
+        expect(owner).to_contain("rt_interp_cstr(path_value)")
+        expect(owner).to_contain("rt_interp_cstr(name_value)")
+        expect(owner).to_contain("if (!path) return 0;")
+        expect(owner).to_contain("if (!handle || !name) return 0;")
+        expect(owner).to_contain("if (!handle) return 0;")
+        expect(owner).to_contain("RTLD_NOW | RTLD_LOCAL")
+        expect(owner).to_contain("LoadLibraryA(path)")
+        expect(owner).to_contain("FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1")
+        expect(compiler).to_contain("include_dynload: bool = true")
+        expect(compiler).to_contain("if include_dynload:\n        sources = sources.push(\"runtime_dynload\")")
+        expect(compiler).to_contain("if linker_flavor == \"msvc\":\n        return false")
+        expect(compiler).to_contain("if linker_flavor == \"gnu\":\n        return true")
+        expect(linker).to_contain("compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == \"\", hosted_cc, stage4_requested)")
+        expect(linker).to_contain(
+            "fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:")
+        expect(linker).to_contain(
+            "native_all_allowed_for_runtime_bundle(runtime_bundle)")
+        for bundle in ["simple-core", "simple_core", "core-c-bootstrap",
+                "core_c_bootstrap", "runtime", "core", "core-c", "core_c"]:
+            # Stale-expectation repair 2026-08-05: this was written as a
+            # SINGLE-quoted literal, which does NOT interpolate — it searched
+            # for the literal text `case "{bundle}": false`, never matched, and
+            # had been red at HEAD. Concatenate explicitly instead.
+            expect(linker).to_contain("case \"" + bundle + "\": false")
+        # Stale-expectation repair 2026-08-05: the seed body is unchanged in
+        # meaning (FreeLibrary != 0 -> 0, else -1) but rustfmt spread it over
+        # five lines, so the old single-line expectation had been red at HEAD.
+        expect(seed).to_contain("if unsafe { FreeLibrary(handle as _) } != 0 {")
+        expect(unix.contains("spl_dlopen_c")).to_be(false)
+        expect(windows.contains("spl_dlopen_c")).to_be(false)
+
+    it "keeps the runtime_native fallback copy guarded and encoding-identical":
+        # Regression 2026-08-05: runtime_native.c defined the same three symbols
+        # with a DIFFERENT string decoder (rt_core_string_to_cstring, tagged
+        # heap strings only). runtime_native.o links BEFORE runtime_dynload.o
+        # and the bundle uses -z muldefs, so that weaker copy won and
+        # spl_dlopen returned 0 for a raw char* path -- indistinguishable from
+        # a missing library. The copy must stay for lanes that omit
+        # runtime_dynload.c (native-all, core-c), but it must (a) be compiled
+        # out whenever the owner is bundled and (b) decode identically.
+        val fallback = rt_file_read_text("src/runtime/runtime_native.c")
+        val compiler = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl")
+
+        expect(fallback).to_contain("#if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)")
+        expect(fallback).to_contain("#endif /* !SIMPLE_RUNTIME_DYNLOAD_OWNER */")
+        expect(fallback).to_contain("rt_interp_cstr(path_value)")
+        expect(fallback).to_contain("rt_interp_cstr(name_value)")
+        expect(fallback).to_contain("dlopen(path, RTLD_NOW | RTLD_LOCAL)")
+        # The incompatible decoder must not come back.
+        expect(fallback.contains("rt_core_string_to_cstring(path_value)")).to_be(false)
+        expect(fallback.contains("rt_core_string_to_cstring(name_value)")).to_be(false)
+        expect(fallback.contains("dlopen(path, RTLD_NOW);")).to_be(false)
+
+        # The macro must be defined on BOTH compiler arms, gated on the same
+        # include_dynload condition that pushes the owner source.
+        expect(compiler).to_contain("/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+        expect(compiler).to_contain("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+
+        # And the semantic-agreement gate must keep the two bodies identical.
+        val baseline = rt_file_read_text("scripts/check/runtime_bundle_duplicate_symbols_baseline.txt")
+        for name in ["spl_dlopen", "spl_dlsym", "spl_dlclose"]:
+            expect(baseline).to_contain(name + "\truntime_dynload.c,runtime_native.c\tsame")

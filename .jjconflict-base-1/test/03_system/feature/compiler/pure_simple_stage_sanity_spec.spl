@@ -1,0 +1,113 @@
+# codex-system-test
+# @req REQ-BOOT-STAGE-001
+"""
+# Pure-Simple Bootstrap Stage Sanity
+
+**Requirements:** doc/02_requirements/app/build/bootstrap.md
+**Plan:** doc/03_plan/sys_test/pure_simple_stage_sanity.md
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Prove that each retained pure-Simple bootstrap stage starts, rejects unsupported
+`run` dispatch, compiles the canonical tiny redeploy fixture with stub
+fallback disabled, and runs it.
+
+## Examples
+
+Stage 2 and Stage 3 each compile `p2_add.spl`; the produced native program
+must exit successfully and print exactly `5`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{dir_create_all, file_delete, file_exists, host_arch, host_os, process_run}
+
+struct StageSanity:
+    version_exit: i64
+    version_output: text
+    unsupported_exit: i64
+    unsupported_output: text
+    build_exit: i64
+    binary_exists: bool
+    run_exit: i64
+    run_output: text
+
+fn bootstrap_triple() -> text:
+    val os = host_os()
+    val arch = host_arch()
+    if os == "linux":
+        return arch + "-unknown-linux-gnu"
+    if os == "macos":
+        return arch + "-apple-darwin-macho"
+    arch + "-unknown-" + os
+
+fn probe_stage(stage: text) -> StageSanity:
+    val compiler = "build/bootstrap/" + stage + "/" + bootstrap_triple() + "/simple"
+    val output_dir = "build/test-artifacts/pure_simple_stage_sanity/" + stage
+    val output = output_dir + "/p2_add"
+    dir_create_all(output_dir)
+    file_delete(output)
+
+    val (version_out, version_err, version_exit) = process_run(compiler, ["--version"])
+    val (unsupported_out, unsupported_err, unsupported_exit) = process_run(
+        compiler,
+        ["run", "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl"]
+    )
+    val build_args = [
+        "SIMPLE_NO_STUB_FALLBACK=1", compiler, "native-build",
+        "--backend", "cranelift",
+        "--source", "scripts/check/cert/redeploy_gate/fixtures",
+        "--entry-closure",
+        "--entry", "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl",
+        "--runtime-path", "src/compiler_rust/target/bootstrap",
+        "-o", output
+    ]
+    val (build_out, build_err, build_exit) = process_run("env", build_args)
+    var run_out = ""
+    var run_err = ""
+    var run_exit: i64 = 1
+    if build_exit == 0 and file_exists(output):
+        (run_out, run_err, run_exit) = process_run(output, [])
+
+    StageSanity(
+        version_exit: version_exit,
+        version_output: version_out + version_err,
+        unsupported_exit: unsupported_exit,
+        unsupported_output: unsupported_out + unsupported_err,
+        build_exit: build_exit,
+        binary_exists: file_exists(output),
+        run_exit: run_exit,
+        run_output: run_out + run_err
+    )
+
+fn expect_stage_sane(stage: text):
+    step("Start " + stage + " and read its version")
+    val result = probe_stage(stage)
+    expect(result.version_exit).to_equal(0)
+    expect(result.version_output).to_contain("simple-bootstrap")
+    step("Reject unsupported run instead of routing it to native-build")
+    expect(result.unsupported_exit).to_equal(1)
+    expect(result.unsupported_output).to_contain("unknown command 'run'")
+    step("Compile the tiny redeploy fixture with strict stub fallback disabled")
+    expect(result.build_exit).to_equal(0)
+    expect(result.binary_exists).to_equal(true)
+    step("Run the stage-produced native fixture")
+    expect(result.run_exit).to_equal(0)
+    expect(result.run_output.trim()).to_equal("5")
+
+describe "Pure-Simple Bootstrap Stage Sanity":
+    describe "REQ-BOOT-STAGE-001: every retained pure-Simple stage is executable":
+        it "should prove Stage 2 can compile and run a native fixture":
+            step("Start Stage 2 and require its bootstrap version")
+            step("Reject unsupported run without native-build misrouting")
+            step("Strictly compile the canonical tiny fixture")
+            step("Run the Stage 2-produced fixture and require output 5")
+            expect_stage_sane("stage2")
+
+        it "should prove Stage 3 can compile and run a native fixture":
+            step("Start Stage 3 and require its bootstrap version")
+            step("Reject unsupported run without native-build misrouting")
+            step("Strictly compile the canonical tiny fixture")
+            step("Run the Stage 3-produced fixture and require output 5")
+            expect_stage_sane("stage3")

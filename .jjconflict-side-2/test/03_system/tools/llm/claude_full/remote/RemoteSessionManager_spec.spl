@@ -1,0 +1,79 @@
+"""
+# Claude Full Remote Session Manager
+
+Checks remote session websocket lifecycle and permission flow.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.remote.RemoteSessionManager.*
+
+describe "Claude full RemoteSessionManager":
+    it "should create configs and connect websocket state":
+        step("Create manager and connect")
+        val config = createRemoteSessionConfig("sess-1", "token", "org-1", true, false)
+        val manager = RemoteSessionManager.new(config)
+        manager.connect()
+        expect(manager.isConnected()).to_equal(true)
+        expect(manager.callbacks[0]).to_equal("connected")
+        expect(manager.getSessionId()).to_equal("sess-1")
+        expect(manager.config.hasInitialPrompt).to_equal(true)
+
+    it "should forward SDK messages and ignore control responses":
+        step("Handle SDK and control response messages")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, false))
+        manager.handleMessage(remoteMessage("assistant", "hello"))
+        manager.handleMessage(remoteMessage("control_response", "ack"))
+        expect(manager.receivedMessages).to_equal(["assistant:hello"])
+        expect(manager.callbacks).to_equal(["control_response"])
+        expect(isSDKMessage(remoteMessage("assistant", ""))).to_equal(true)
+        expect(isSDKMessage(remoteMessage("control_request", ""))).to_equal(false)
+
+    it "should store permission requests and send allow responses":
+        step("Receive can_use_tool then allow it")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, false))
+        manager.handleMessage(permissionRequest("req-1", "tool-1", "Bash"))
+        expect(manager.permissionRequests[0]).to_equal("req-1:Bash")
+        expect(manager.pendingPermissionRequestIds).to_equal(["req-1"])
+        manager.respondToPermissionRequest("req-1", remotePermissionAllow("{\"cmd\":\"ls\"}"))
+        expect(manager.pendingPermissionRequestIds.len()).to_equal(0)
+        expect(manager.sentControlResponses[0]).to_equal("success:req-1:allow:{\"cmd\":\"ls\"}")
+
+    it "should send deny responses and reject missing request ids":
+        step("Deny one request and try a missing request")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, false))
+        manager.handleMessage(permissionRequest("req-2", "tool-2", "Edit"))
+        manager.respondToPermissionRequest("req-2", remotePermissionDeny("no"))
+        manager.respondToPermissionRequest("missing", remotePermissionDeny("no"))
+        expect(manager.sentControlResponses[0]).to_equal("success:req-2:deny:no")
+        expect(manager.errors[0]).to_equal("No pending permission request with ID: missing")
+
+    it "should cancel pending permission requests with tool use id":
+        step("Cancel a pending permission request")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, false))
+        manager.handleMessage(permissionRequest("req-3", "tool-3", "Read"))
+        manager.handleMessage(controlCancel("req-3"))
+        expect(manager.permissionCancelled[0]).to_equal("req-3:tool-3")
+        expect(manager.pendingPermissionRequestIds.len()).to_equal(0)
+
+    it "should handle unsupported control requests and message send failures":
+        step("Send unsupported control error and failed remote message")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, true))
+        manager.handleMessage(unsupportedControlRequest("req-4", "unknown"))
+        expect(manager.sentControlResponses[0]).to_equal("error:req-4:Unsupported control request subtype: unknown")
+        expect(manager.sendMessage("hi", "uuid-1", false)).to_equal(false)
+        expect(manager.errors[0]).to_equal("Failed to send message to session sess")
+        expect(manager.config.viewerOnly).to_equal(true)
+
+    it "should interrupt, reconnect, disconnect, and expose source coverage":
+        step("Drive lifecycle helpers")
+        val manager = RemoteSessionManager.new(createRemoteSessionConfig("sess", "token", "org", false, false))
+        manager.connect()
+        manager.cancelSession()
+        manager.reconnect()
+        expect(manager.sentControlRequests[0]).to_equal("interrupt")
+        expect(manager.callbacks[1]).to_equal("reconnecting")
+        manager.handleMessage(permissionRequest("req-5", "tool-5", "Write"))
+        manager.disconnect()
+        expect(manager.isConnected()).to_equal(false)
+        expect(manager.pendingPermissionRequestIds.len()).to_equal(0)
+        expect(remoteSessionManagerSourceLinesModeled()).to_equal(343)

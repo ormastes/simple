@@ -1,0 +1,266 @@
+# Breakpoint Manager Specification
+# Tests BreakpointInfo construction, to_string(), serialize(), and field access.
+# Since BreakpointManager requires a live GDB MI client, these tests focus on
+# the BreakpointInfo data structure and serialization format.
+
+# --- Local BreakpointInfo for testing ---
+# Defined locally to avoid GDB MI dependencies
+
+class BreakpointInfo:
+    id: i64
+    file: text
+    line: i64
+    condition: text
+    enabled: bool
+    hit_count: i64
+    is_temporary: bool
+    log_message: text
+    func_name: text
+    address: i64
+
+    static fn of(id: i64, file: text, line: i64) -> BreakpointInfo:
+        BreakpointInfo(
+            id: id,
+            file: file,
+            line: line,
+            condition: "",
+            enabled: true,
+            hit_count: 0,
+            is_temporary: false,
+            log_message: "",
+            func_name: "",
+            address: 0
+        )
+
+    static fn function_bp(id: i64, func_name: text) -> BreakpointInfo:
+        BreakpointInfo(
+            id: id,
+            file: "",
+            line: 0,
+            condition: "",
+            enabled: true,
+            hit_count: 0,
+            is_temporary: false,
+            log_message: "",
+            func_name: func_name,
+            address: 0
+        )
+
+impl BreakpointInfo:
+    fn to_string() -> text:
+        var parts: [text] = []
+        parts.push("bp#{self.id}")
+        if self.file.len() > 0:
+            parts.push("{self.file}:{self.line}")
+        if self.func_name.len() > 0:
+            parts.push("fn:{self.func_name}")
+        if not self.enabled:
+            parts.push("[disabled]")
+        if self.condition.len() > 0:
+            parts.push("if:{self.condition}")
+        if self.hit_count > 0:
+            parts.push("hits:{self.hit_count}")
+        if self.is_temporary:
+            parts.push("[temp]")
+        if self.log_message.len() > 0:
+            parts.push("log:{self.log_message}")
+        parts.join(" ")
+
+    fn serialize() -> text:
+        var enabled_str = "1"
+        if not self.enabled:
+            enabled_str = "0"
+        var temp_str = "0"
+        if self.is_temporary:
+            temp_str = "1"
+        "{self.id}|{self.file}|{self.line}|{self.condition}|{enabled_str}|{self.hit_count}|{temp_str}|{self.log_message}|{self.func_name}|{self.address}"
+
+# ============================================================================
+# BreakpointInfo Construction Tests
+# ============================================================================
+
+describe "BreakpointInfo":
+    describe "construction with of()":
+        it "creates a breakpoint with id, file, and line":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.id).to_equal(1)
+            expect(bp.file).to_equal("main.spl")
+            expect(bp.line).to_equal(42)
+
+        it "sets enabled to true by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.enabled).to_equal(true)
+
+        it "sets condition to empty by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.condition).to_equal("")
+
+        it "sets hit_count to 0 by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.hit_count).to_equal(0)
+
+        it "sets is_temporary to false by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.is_temporary).to_equal(false)
+
+        it "sets log_message to empty by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.log_message).to_equal("")
+
+        it "sets func_name to empty by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.func_name).to_equal("")
+
+        it "sets address to 0 by default":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            expect(bp.address).to_equal(0)
+
+    describe "construction with function_bp()":
+        it "creates a function breakpoint with func_name":
+            val bp = BreakpointInfo.function_bp(2, "main")
+            expect(bp.id).to_equal(2)
+            expect(bp.func_name).to_equal("main")
+
+        it "sets file to empty for function breakpoints":
+            val bp = BreakpointInfo.function_bp(2, "main")
+            expect(bp.file).to_equal("")
+
+        it "sets line to 0 for function breakpoints":
+            val bp = BreakpointInfo.function_bp(2, "main")
+            expect(bp.line).to_equal(0)
+
+        it "sets enabled to true for function breakpoints":
+            val bp = BreakpointInfo.function_bp(3, "calculate")
+            expect(bp.enabled).to_equal(true)
+
+    describe "to_string()":
+        it "formats a basic line breakpoint":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            val s = bp.to_string()
+            expect(s).to_contain("bp#1")
+            expect(s).to_contain("main.spl:42")
+
+        it "formats a function breakpoint":
+            val bp = BreakpointInfo.function_bp(2, "main")
+            val s = bp.to_string()
+            expect(s).to_contain("bp#2")
+            expect(s).to_contain("fn:main")
+
+        it "shows disabled state":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.enabled = false
+            val s = bp.to_string()
+            expect(s).to_contain("[disabled]")
+
+        it "shows condition":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.condition = "x > 5"
+            val s = bp.to_string()
+            expect(s).to_contain("if:x > 5")
+
+        it "shows hit count when non-zero":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.hit_count = 3
+            val s = bp.to_string()
+            expect(s).to_contain("hits:3")
+
+        it "does not show hit count when zero":
+            val bp = BreakpointInfo.of(1, "main.spl", 10)
+            val s = bp.to_string()
+            expect(s).to_start_with("bp#1")
+            # Should not contain "hits:" since hit_count is 0
+            var has_hits = s.contains("hits:")
+            expect(has_hits).to_equal(false)
+
+        it "shows temporary flag":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.is_temporary = true
+            val s = bp.to_string()
+            expect(s).to_contain("[temp]")
+
+        it "shows log message":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.log_message = "reached here"
+            val s = bp.to_string()
+            expect(s).to_contain("log:reached here")
+
+        it "combines multiple attributes":
+            var bp = BreakpointInfo.of(5, "test.spl", 100)
+            bp.condition = "i == 10"
+            bp.hit_count = 7
+            bp.is_temporary = true
+            val s = bp.to_string()
+            expect(s).to_contain("bp#5")
+            expect(s).to_contain("test.spl:100")
+            expect(s).to_contain("if:i == 10")
+            expect(s).to_contain("hits:7")
+            expect(s).to_contain("[temp]")
+
+    describe "serialize()":
+        it "serializes a basic breakpoint with pipe delimiters":
+            val bp = BreakpointInfo.of(1, "main.spl", 42)
+            val s = bp.serialize()
+            expect(s).to_equal("1|main.spl|42||1|0|0|||0")
+
+        it "serializes a disabled breakpoint":
+            var bp = BreakpointInfo.of(1, "main.spl", 42)
+            bp.enabled = false
+            val s = bp.serialize()
+            expect(s).to_contain("|0|0|0|")
+
+        it "serializes a temporary breakpoint":
+            var bp = BreakpointInfo.of(1, "main.spl", 42)
+            bp.is_temporary = true
+            val s = bp.serialize()
+            expect(s).to_equal("1|main.spl|42||1|0|1|||0")
+
+        it "serializes a conditional breakpoint":
+            var bp = BreakpointInfo.of(1, "main.spl", 42)
+            bp.condition = "x > 10"
+            val s = bp.serialize()
+            expect(s).to_equal("1|main.spl|42|x > 10|1|0|0|||0")
+
+        it "serializes a function breakpoint":
+            val bp = BreakpointInfo.function_bp(3, "process")
+            val s = bp.serialize()
+            expect(s).to_equal("3||0||1|0|0||process|0")
+
+        it "serializes with hit count":
+            var bp = BreakpointInfo.of(2, "test.spl", 10)
+            bp.hit_count = 15
+            val s = bp.serialize()
+            expect(s).to_contain("|15|")
+
+        it "serializes with log message":
+            var bp = BreakpointInfo.of(1, "main.spl", 5)
+            bp.log_message = "checkpoint reached"
+            val s = bp.serialize()
+            expect(s).to_contain("checkpoint reached")
+
+        it "serializes with address":
+            var bp = BreakpointInfo.of(1, "main.spl", 5)
+            bp.address = 4096
+            val s = bp.serialize()
+            expect(s).to_end_with("|4096")
+
+    describe "field mutation":
+        it "can modify enabled state":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            expect(bp.enabled).to_equal(true)
+            bp.enabled = false
+            expect(bp.enabled).to_equal(false)
+
+        it "can modify condition":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.condition = "count > 100"
+            expect(bp.condition).to_equal("count > 100")
+
+        it "can modify hit_count":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.hit_count = 42
+            expect(bp.hit_count).to_equal(42)
+
+        it "can modify log_message":
+            var bp = BreakpointInfo.of(1, "main.spl", 10)
+            bp.log_message = "debug point"
+            expect(bp.log_message).to_equal("debug point")

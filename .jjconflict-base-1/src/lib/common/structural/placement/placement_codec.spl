@@ -1,0 +1,480 @@
+# ============================================================================
+# common/structural/placement/placement_codec.spl — CPU reference serializers
+#
+# PLACE lane (architecture §27). The oracle for the §20.2 / §20.3 / §20.4 /
+# §20.5 wire records: any future staged, direct or device-initiated placement
+# backend (§20.7) must accept exactly these bytes and produce exactly these
+# bytes. Without a single byte-level definition, §30's "eviction/recovery,
+# stale-handle, and fault-injection tests pass" gate has nothing to compare
+# two backends against.
+#
+# Contract document:
+#   doc/05_design/platform/structural_compute/placement_contract_v1.md
+#
+# Layout tables live in placement_types.spl next to the records they describe.
+#
+# ENCODE VALIDATES TOO. Every `encode_*` returns an EMPTY buffer when the
+# record is not well formed, and an empty buffer fails the envelope check, so
+# it can never be decoded. That is deliberate and is the receipts lane's model:
+# an ill-formed record is made unrepresentable ON THE WIRE rather than merely
+# discouraged in prose. For this group the rule that matters is the lease one —
+# a Released or Revoked grant carrying a live device address cannot be written
+# at all, so a stale address cannot reach a consumer even from a buggy backend.
+#
+# HARD REJECTS, never a silent default:
+#   - wrong magic, wrong version, non-zero envelope reserved;
+#   - unknown AccessPattern, PersistencePolicy, LeaseState or ResidencyTier
+#     discriminant;
+#   - a reserved bit set in a ResidencyTierSet or a LeaseAccess mask;
+#   - a non-zero reserved byte or reserved u16;
+#   - a preference entry outside the required tier set, duplicated, or a used
+#     slot that is not PLACE_NO_TIER filler past `preferred_len`;
+#   - a liveness interval that ends before it begins (compared UNSIGNED);
+#   - a deadline_us present while deadline_present is 0;
+#   - a live lease at epoch PLACEMENT_NO_EPOCH, at address 0, of length 0, with
+#     no rights, or whose window wraps past 2^64;
+#   - a dead lease carrying any of epoch, rights, address or length;
+#   - a lease set that is not strictly ascending by (object_slot, generation);
+#   - a plan with no lease arena, an arena sentinel carrying a generation, a
+#     confidence above 1000 per-mille, or a receipt seed that is not 64
+#     lowercase hex characters;
+#   - trailing bytes after the record.
+# ============================================================================
+
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u16,
+    wire_get_u32,
+    wire_get_u64,
+    wire_get_u8,
+    wire_has,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u16,
+    wire_put_u32,
+    wire_put_u64,
+    wire_put_u8
+}
+use std.common.compute.placement_contracts.schema.{PLACEMENT_NO_EPOCH}
+use std.common.structural.placement.placement_contracts.{
+    PLACE_SCHEMA_VERSION,
+    lease_access_valid,
+    lease_state_valid,
+    tier_set_valid
+}
+use std.common.structural.placement.placement_types.{
+    LEASE_GRANT_LEN,
+    PLACEMENT_COST_LEN,
+    PLACEMENT_HASH_LEN,
+    PLACEMENT_PLAN_LEN,
+    PLACEMENT_REQUEST_LEN,
+    PLACE_NO_TIER,
+    LeaseGrant,
+    LeaseSetWire,
+    PlacementCostWire,
+    PlacementPlanWire,
+    PlacementRequestWire,
+    lease_grant,
+    lease_grant_well_formed,
+    lease_grant_zero,
+    lease_set_empty,
+    lease_set_well_formed,
+    lease_set_wire,
+    placement_cost_wire,
+    placement_cost_well_formed,
+    placement_cost_zero,
+    placement_plan_well_formed,
+    placement_plan_wire,
+    placement_plan_zero,
+    placement_request_well_formed,
+    placement_request_wire,
+    placement_request_zero
+}
+
+fn place_magic_request() -> i64:
+    wire_magic("SPRQ")
+
+fn place_magic_lease_grant() -> i64:
+    wire_magic("SPLG")
+
+fn place_magic_lease_set() -> i64:
+    wire_magic("SPLS")
+
+fn place_magic_plan() -> i64:
+    wire_magic("SPPL")
+
+# ----------------------------------------------------------------------------
+# Result carriers — the same shape as the ID-TAG, MAP and QUERY lanes' so a
+# caller that already handles a QueryOpResult handles these without a new idiom.
+# ----------------------------------------------------------------------------
+
+struct PlacementRequestResult:
+    ok: bool
+    value: PlacementRequestWire
+
+struct LeaseGrantResult:
+    ok: bool
+    value: LeaseGrant
+
+struct LeaseSetResult:
+    ok: bool
+    value: LeaseSetWire
+
+struct PlacementCostResult:
+    ok: bool
+    value: PlacementCostWire
+
+struct PlacementPlanResult:
+    ok: bool
+    value: PlacementPlanWire
+
+val PLACE_HEX_DIGITS: text = "0123456789abcdef"
+
+fn place_hex_nibble(code: i64) -> i64:
+    """Decode one lowercase hex character, or -1. Uppercase is rejected, not
+    folded: the digest spelling is part of the contract, so two spellings of one
+    hash would give one plan two encodings."""
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    -1
+
+fn place_put_hash(out: [u8], digest: text) -> [u8]:
+    """Append 32 raw bytes from a 64-character lowercase hex digest. Callers
+    validate the digest first; a bad nibble is written as 0 here and the
+    caller's well-formedness gate is what actually refuses it."""
+    var b = out
+    var i = 0
+    while i < PLACEMENT_HASH_LEN:
+        val hi = place_hex_nibble(digest.char_code_at(i * 2))
+        val lo = place_hex_nibble(digest.char_code_at(i * 2 + 1))
+        val hi_ok = if hi < 0: 0 else: hi
+        val lo_ok = if lo < 0: 0 else: lo
+        b = wire_put_u8(b, (hi_ok << 4) | lo_ok)
+        i = i + 1
+    b
+
+fn place_read_hash(data: [u8], off: i64) -> text:
+    var s = ""
+    var i = 0
+    while i < PLACEMENT_HASH_LEN:
+        val v = data[off + i] & 0xFF
+        s = s + PLACE_HEX_DIGITS.substring(v >> 4, (v >> 4) + 1)
+        s = s + PLACE_HEX_DIGITS.substring(v & 0x0F, (v & 0x0F) + 1)
+        i = i + 1
+    s
+
+# ----------------------------------------------------------------------------
+# PlacementRequest
+# ----------------------------------------------------------------------------
+
+fn placement_request_put(out: [u8], r: PlacementRequestWire) -> [u8]:
+    var b = wire_put_u32(out, r.object_slot)
+    b = wire_put_u32(b, r.generation)
+    b = wire_put_u8(b, r.access)
+    b = wire_put_u8(b, r.required_tiers)
+    b = wire_put_u8(b, r.preferred.len())
+    var i = 0
+    while i < 7:
+        if i < r.preferred.len():
+            b = wire_put_u8(b, r.preferred[i])
+        else:
+            b = wire_put_u8(b, PLACE_NO_TIER)
+        i = i + 1
+    b = wire_put_u8(b, r.persistence)
+    b = wire_put_u8(b, r.deadline_present)
+    b = wire_put_u16(b, 0)
+    b = wire_put_u32(b, r.expected_reuse_distance)
+    b = wire_put_u64(b, r.device_mask)
+    b = wire_put_u64(b, r.expected_first_use)
+    b = wire_put_u64(b, r.expected_last_use)
+    b = wire_put_u64(b, r.recompute_cost)
+    b = wire_put_u64(b, r.transfer_cost_hint)
+    b = wire_put_u64(b, r.affinity_group)
+    wire_put_u64(b, r.deadline_us)
+
+fn placement_request_read(data: [u8], off: i64) -> PlacementRequestResult:
+    if not wire_has(data, off, PLACEMENT_REQUEST_LEN):
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    val tiers = wire_get_u8(data, off + 9)
+    if not tier_set_valid(tiers):
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    val pref_len = wire_get_u8(data, off + 10)
+    if pref_len > 7:
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    var pref: [i64] = []
+    var i = 0
+    while i < 7:
+        val raw = wire_get_u8(data, off + 11 + i)
+        if i < pref_len:
+            pref.push(raw)
+        else:
+            # Filler past the declared length must be exactly PLACE_NO_TIER.
+            # Accepting anything else would give one preference order many
+            # encodings, and a receipt hashing the request would not be stable.
+            if raw != PLACE_NO_TIER:
+                return PlacementRequestResult(ok: false,
+                                              value: placement_request_zero())
+        i = i + 1
+    if wire_get_u16(data, off + 20) != 0:
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    val r = placement_request_wire(wire_get_u32(data, off),
+                                   wire_get_u32(data, off + 4),
+                                   wire_get_u8(data, off + 8),
+                                   tiers,
+                                   pref,
+                                   wire_get_u8(data, off + 18),
+                                   wire_get_u8(data, off + 19),
+                                   wire_get_u64(data, off + 74),
+                                   wire_get_u32(data, off + 22),
+                                   wire_get_u64(data, off + 26),
+                                   wire_get_u64(data, off + 34),
+                                   wire_get_u64(data, off + 42),
+                                   wire_get_u64(data, off + 50),
+                                   wire_get_u64(data, off + 58),
+                                   wire_get_u64(data, off + 66))
+    if not placement_request_well_formed(r):
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    PlacementRequestResult(ok: true, value: r)
+
+fn encode_placement_request(r: PlacementRequestWire) -> [u8]:
+    var b: [u8] = []
+    if not placement_request_well_formed(r):
+        return b
+    b = wire_put_envelope(b, place_magic_request(), PLACE_SCHEMA_VERSION)
+    placement_request_put(b, r)
+
+fn decode_placement_request(data: [u8]) -> PlacementRequestResult:
+    if not wire_check_envelope(data, 0, place_magic_request(),
+                               PLACE_SCHEMA_VERSION):
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    if data.len() != WIRE_ENVELOPE_LEN + PLACEMENT_REQUEST_LEN:
+        return PlacementRequestResult(ok: false, value: placement_request_zero())
+    placement_request_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# LeaseGrant
+# ----------------------------------------------------------------------------
+
+fn lease_grant_put(out: [u8], g: LeaseGrant) -> [u8]:
+    var b = wire_put_u32(out, g.object_slot)
+    b = wire_put_u32(b, g.generation)
+    b = wire_put_u32(b, g.lease_epoch)
+    b = wire_put_u8(b, g.state)
+    b = wire_put_u8(b, g.access)
+    b = wire_put_u8(b, g.tier)
+    b = wire_put_u8(b, 0)
+    b = wire_put_u64(b, g.device_address)
+    wire_put_u64(b, g.length)
+
+fn lease_grant_read(data: [u8], off: i64) -> LeaseGrantResult:
+    if not wire_has(data, off, LEASE_GRANT_LEN):
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    val state = wire_get_u8(data, off + 12)
+    if not lease_state_valid(state):
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    val access = wire_get_u8(data, off + 13)
+    if not lease_access_valid(access):
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    if wire_get_u8(data, off + 15) != 0:
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    val g = lease_grant(wire_get_u32(data, off),
+                        wire_get_u32(data, off + 4),
+                        wire_get_u32(data, off + 8),
+                        state, access,
+                        wire_get_u8(data, off + 14),
+                        wire_get_u64(data, off + 16),
+                        wire_get_u64(data, off + 24))
+    # The lease rules themselves. A Released or Revoked grant that still names
+    # an epoch or an address dies here rather than being handed to a consumer
+    # that would dereference it.
+    if not lease_grant_well_formed(g):
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    LeaseGrantResult(ok: true, value: g)
+
+fn encode_lease_grant(g: LeaseGrant) -> [u8]:
+    var b: [u8] = []
+    if not lease_grant_well_formed(g):
+        return b
+    b = wire_put_envelope(b, place_magic_lease_grant(), PLACE_SCHEMA_VERSION)
+    lease_grant_put(b, g)
+
+fn decode_lease_grant(data: [u8]) -> LeaseGrantResult:
+    if not wire_check_envelope(data, 0, place_magic_lease_grant(),
+                               PLACE_SCHEMA_VERSION):
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    if data.len() != WIRE_ENVELOPE_LEN + LEASE_GRANT_LEN:
+        return LeaseGrantResult(ok: false, value: lease_grant_zero())
+    lease_grant_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# LeaseSet
+# ----------------------------------------------------------------------------
+
+fn encode_lease_set(s: LeaseSetWire) -> [u8]:
+    var b: [u8] = []
+    if not lease_set_well_formed(s):
+        return b
+    b = wire_put_envelope(b, place_magic_lease_set(), PLACE_SCHEMA_VERSION)
+    b = wire_put_u32(b, s.grants.len())
+    var i = 0
+    while i < s.grants.len():
+        b = lease_grant_put(b, s.grants[i])
+        i = i + 1
+    b
+
+fn decode_lease_set(data: [u8]) -> LeaseSetResult:
+    if not wire_check_envelope(data, 0, place_magic_lease_set(),
+                               PLACE_SCHEMA_VERSION):
+        return LeaseSetResult(ok: false, value: lease_set_empty())
+    if not wire_has(data, WIRE_ENVELOPE_LEN, 4):
+        return LeaseSetResult(ok: false, value: lease_set_empty())
+    val count = wire_get_u32(data, WIRE_ENVELOPE_LEN)
+    # Bound the whole variable region before reading any of it. `count` is a
+    # u32 read into an i64, so this multiply cannot wrap the way it would at
+    # 32-bit width — the widening is the point.
+    val body = count * LEASE_GRANT_LEN
+    val expect = WIRE_ENVELOPE_LEN + 4 + body
+    if data.len() != expect:
+        return LeaseSetResult(ok: false, value: lease_set_empty())
+    var grants: [LeaseGrant] = []
+    var i = 0
+    while i < count:
+        val r = lease_grant_read(data, WIRE_ENVELOPE_LEN + 4 + i * LEASE_GRANT_LEN)
+        if not r.ok:
+            return LeaseSetResult(ok: false, value: lease_set_empty())
+        grants.push(r.value)
+        i = i + 1
+    val s = lease_set_wire(grants)
+    if not lease_set_well_formed(s):
+        return LeaseSetResult(ok: false, value: lease_set_empty())
+    LeaseSetResult(ok: true, value: s)
+
+# ----------------------------------------------------------------------------
+# PlacementCost — nested inside a plan, never framed on its own
+# ----------------------------------------------------------------------------
+
+fn placement_cost_put(out: [u8], c: PlacementCostWire) -> [u8]:
+    var b = wire_put_u64(out, c.cpu_work)
+    b = wire_put_u64(b, c.simd_work)
+    b = wire_put_u64(b, c.gpu_work)
+    b = wire_put_u64(b, c.host_to_device_bytes)
+    b = wire_put_u64(b, c.device_to_host_bytes)
+    b = wire_put_u64(b, c.ssd_read_bytes)
+    b = wire_put_u64(b, c.ssd_write_bytes)
+    b = wire_put_u32(b, c.synchronization_points)
+    b = wire_put_u64(b, c.predicted_latency_us)
+    wire_put_u16(b, c.confidence_milli)
+
+fn placement_cost_read(data: [u8], off: i64) -> PlacementCostResult:
+    if not wire_has(data, off, PLACEMENT_COST_LEN):
+        return PlacementCostResult(ok: false, value: placement_cost_zero())
+    val c = placement_cost_wire(wire_get_u64(data, off),
+                                wire_get_u64(data, off + 8),
+                                wire_get_u64(data, off + 16),
+                                wire_get_u64(data, off + 24),
+                                wire_get_u64(data, off + 32),
+                                wire_get_u64(data, off + 40),
+                                wire_get_u64(data, off + 48),
+                                wire_get_u32(data, off + 56),
+                                wire_get_u64(data, off + 60),
+                                wire_get_u16(data, off + 68))
+    if not placement_cost_well_formed(c):
+        return PlacementCostResult(ok: false, value: placement_cost_zero())
+    PlacementCostResult(ok: true, value: c)
+
+# ----------------------------------------------------------------------------
+# PlacementPlan
+# ----------------------------------------------------------------------------
+
+fn placement_plan_put(out: [u8], p: PlacementPlanWire) -> [u8]:
+    var b = wire_put_u32(out, p.reservations_slot)
+    b = wire_put_u32(b, p.reservations_gen)
+    b = wire_put_u32(b, p.transfers_slot)
+    b = wire_put_u32(b, p.transfers_gen)
+    b = wire_put_u32(b, p.evictions_slot)
+    b = wire_put_u32(b, p.evictions_gen)
+    b = wire_put_u32(b, p.prefetches_slot)
+    b = wire_put_u32(b, p.prefetches_gen)
+    b = wire_put_u32(b, p.leases_slot)
+    b = wire_put_u32(b, p.leases_gen)
+    b = placement_cost_put(b, p.cost)
+    place_put_hash(b, p.receipt_seed)
+
+fn placement_plan_read(data: [u8], off: i64) -> PlacementPlanResult:
+    if not wire_has(data, off, PLACEMENT_PLAN_LEN):
+        return PlacementPlanResult(ok: false, value: placement_plan_zero())
+    val cost = placement_cost_read(data, off + 40)
+    if not cost.ok:
+        return PlacementPlanResult(ok: false, value: placement_plan_zero())
+    val p = placement_plan_wire(wire_get_u32(data, off),
+                                wire_get_u32(data, off + 4),
+                                wire_get_u32(data, off + 8),
+                                wire_get_u32(data, off + 12),
+                                wire_get_u32(data, off + 16),
+                                wire_get_u32(data, off + 20),
+                                wire_get_u32(data, off + 24),
+                                wire_get_u32(data, off + 28),
+                                wire_get_u32(data, off + 32),
+                                wire_get_u32(data, off + 36),
+                                cost.value,
+                                place_read_hash(data, off + 110))
+    if not placement_plan_well_formed(p):
+        return PlacementPlanResult(ok: false, value: placement_plan_zero())
+    PlacementPlanResult(ok: true, value: p)
+
+fn encode_placement_plan(p: PlacementPlanWire) -> [u8]:
+    var b: [u8] = []
+    if not placement_plan_well_formed(p):
+        return b
+    b = wire_put_envelope(b, place_magic_plan(), PLACE_SCHEMA_VERSION)
+    placement_plan_put(b, p)
+
+fn decode_placement_plan(data: [u8]) -> PlacementPlanResult:
+    if not wire_check_envelope(data, 0, place_magic_plan(),
+                               PLACE_SCHEMA_VERSION):
+        return PlacementPlanResult(ok: false, value: placement_plan_zero())
+    if data.len() != WIRE_ENVELOPE_LEN + PLACEMENT_PLAN_LEN:
+        return PlacementPlanResult(ok: false, value: placement_plan_zero())
+    placement_plan_read(data, WIRE_ENVELOPE_LEN)
+
+# ----------------------------------------------------------------------------
+# Cross-record rule: a plan and the lease set acquired from it
+# ----------------------------------------------------------------------------
+
+fn lease_set_acquirable_from(p: PlacementPlanWire, s: LeaseSetWire) -> bool:
+    """§20.4's `acquire(plan) -> Result<LeaseSet, PlacementError>` relation,
+    checked at the contract boundary: the plan must be well formed and name a
+    lease arena, the set must be well formed, and every grant in it must be
+    live. A set returned from `acquire` that already contains a Released or
+    Revoked grant is a backend defect, and without this check it would look
+    exactly like a successful acquire."""
+    if not placement_plan_well_formed(p):
+        return false
+    if not lease_set_well_formed(s):
+        return false
+    if s.grants.len() == 0:
+        return false
+    var i = 0
+    while i < s.grants.len():
+        if s.grants[i].lease_epoch == PLACEMENT_NO_EPOCH:
+            return false
+        i = i + 1
+    true
+
+export PlacementRequestResult, LeaseGrantResult, LeaseSetResult
+export PlacementCostResult, PlacementPlanResult
+export PLACE_HEX_DIGITS, place_hex_nibble, place_put_hash, place_read_hash
+export place_magic_request, place_magic_lease_grant, place_magic_lease_set
+export place_magic_plan
+export placement_request_put, placement_request_read
+export encode_placement_request, decode_placement_request
+export lease_grant_put, lease_grant_read
+export encode_lease_grant, decode_lease_grant
+export encode_lease_set, decode_lease_set
+export placement_cost_put, placement_cost_read
+export placement_plan_put, placement_plan_read
+export encode_placement_plan, decode_placement_plan
+export lease_set_acquirable_from

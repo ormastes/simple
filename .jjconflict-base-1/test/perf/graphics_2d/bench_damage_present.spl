@@ -1,0 +1,85 @@
+# WS-D3 frame-level benchmark: full readback vs damage-driven readback.
+#
+# Models the real compositor loop: a static scene with a small per-frame
+# mutation (a cursor / caret / spinner sized region), read back every frame.
+#
+#   BASELINE   read_pixels()            -> allocates + walks W*H boxed pixels
+#   DAMAGE     read_pixels_damaged(16)  -> refreshes only the damaged rects of
+#                                          a frame-persistent mirror
+#
+# Run:  bin/simple run test/perf/graphics_2d/bench_damage_present.spl
+
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+extern fn rt_time_now_nanos() -> i64
+
+fn now_millis() -> i64:
+    rt_time_now_nanos() / 1000000
+
+val W: i32 = 800
+val H: i32 = 600
+val FRAMES: i32 = 60
+
+fn paint_scene(mut b: SoftwareBackend):
+    b.clear(0xFF101820)
+    b.draw_rect_filled(40, 40, 300, 200, 0xFF3050A0)
+    b.draw_rect_filled(420, 300, 320, 240, 0xFFA07030)
+
+fn main():
+    println("BENCH damage_present W=" + W.to_text() + " H=" + H.to_text() + " frames=" + FRAMES.to_text())
+
+    # ---- baseline: full read_pixels every frame -------------------------
+    var base = SoftwareBackend.create()
+    if not base.init(W, H):
+        println("init failed")
+        return
+    paint_scene(base)
+    base.present()
+    var checksum_a: i64 = 0
+    var t0 = now_millis()
+    var f = 0
+    while f < FRAMES:
+        base.draw_rect_filled(100 + (f % 40), 100, 16, 16, 0xFFFFFFFF)
+        val px = base.read_pixels()
+        checksum_a = checksum_a + px[0].to_i64()
+        base.present()
+        f = f + 1
+    val ms_full = now_millis() - t0
+
+    # ---- damage-driven: mirror refreshed over damaged rects only --------
+    var dmg = SoftwareBackend.create()
+    if not dmg.init(W, H):
+        println("init failed")
+        return
+    paint_scene(dmg)
+    val seed = dmg.read_pixels_damaged(16)   # seed the mirror (one full copy)
+    dmg.present()
+    var checksum_b: i64 = 0
+    t0 = now_millis()
+    f = 0
+    while f < FRAMES:
+        dmg.draw_rect_filled(100 + (f % 40), 100, 16, 16, 0xFFFFFFFF)
+        val px = dmg.read_pixels_damaged(16)
+        checksum_b = checksum_b + px[0].to_i64()
+        dmg.present()
+        f = f + 1
+    val ms_damage = now_millis() - t0
+
+    # Cross-check: both paths must agree on the final full framebuffer.
+    val truth = base.read_pixels()
+    val mirror = dmg.read_pixels_damaged(16)
+    var mismatches = 0
+    var i = 0
+    while i < truth.len():
+        if truth[i] != mirror[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+
+    println("DAMAGE_RESULT path=full_readback ms=" + ms_full.to_text())
+    println("DAMAGE_RESULT path=damage_driven ms=" + ms_damage.to_text())
+    println("DAMAGE_RESULT whole_framebuffer_mismatches=" + mismatches.to_text())
+    println("DAMAGE_RESULT checksum_full=" + checksum_a.to_text() + " checksum_damage=" + checksum_b.to_text())
+    base.shutdown()
+    dmg.shutdown()
+
+main()

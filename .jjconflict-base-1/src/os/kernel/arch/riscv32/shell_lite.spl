@@ -1,0 +1,60 @@
+"""SimpleOS RV32 Lite Shell — minimal serial-UART command dispatch.
+
+Pure text-in/text-out dispatch, unit-testable in the interpreter without UART
+hardware (mirrors os.kernel.arch.riscv64.shell_lite). The interactive
+read/echo loop, login gate, and `ls` (real VFS readdir) handling live in
+os.kernel.arch.riscv32.console (serial_shell_main). This module provides the
+pure directory-listing formatter that `ls` reuses.
+
+Commands handled here: help, info, pwd, net, echo <text>, reboot.
+`ls` and login are I/O and live in console.spl.
+"""
+
+use os.kernel.types.fs_types.{DirEntry}
+
+fn rv32_shell_banner() -> text:
+    "SimpleOS RV32 serial console - network unavailable, UART management active.\r\nType 'help' for commands."
+
+fn rv32_shell_prompt() -> text:
+    "simpleos-rv32> "
+
+fn rv32_shell_help() -> text:
+    "commands: help, info, ls, launch <path>, pwd, net, echo <text>, reboot"
+
+fn rv32_shell_pwd() -> text:
+    "/"
+
+fn rv32_shell_format_dir_entries(entries: [DirEntry]) -> text:
+    """Pure formatter: one entry name per line. console.spl calls this with the
+    live result of g_vfs_readdir so `ls` reflects the actual mounted filesystem."""
+    var out = ""
+    var i: u64 = 0
+    while i < entries.len():
+        out = out + entries[i].name + "\r\n"
+        i = i + 1
+    out
+
+fn rv32_shell_dispatch(line: text, network_ok: i64) -> text:
+    """Map one command line to its response text. Pure: no UART, no I/O.
+    `ls` is NOT handled here — console.spl intercepts it to call g_vfs_readdir."""
+    if line == "help":
+        return rv32_shell_help()
+    if line == "info":
+        return "SimpleOS RV32 (riscv32) - serial console fallback"
+    if line == "pwd":
+        return rv32_shell_pwd()
+    if line == "net":
+        if network_ok == 1:
+            return "network: ready"
+        return "network: unavailable - UART telnet/ssh fallback in use"
+    if line == "reboot":
+        # ponytail: stub response only — wire SBI/M-mode system_reset in the
+        # console loop when an operator actually needs remote reset.
+        return "rebooting..."
+    if line.starts_with("echo "):
+        return line.slice(5, line.len())
+    if line == "":
+        return ""
+    return "unknown command: {line}\r\nType 'help' for commands."
+
+export rv32_shell_banner, rv32_shell_prompt, rv32_shell_dispatch, rv32_shell_help, rv32_shell_pwd, rv32_shell_format_dir_entries

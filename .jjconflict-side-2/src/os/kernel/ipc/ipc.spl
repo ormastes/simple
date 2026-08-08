@@ -1,0 +1,551 @@
+# Kernel IPC Manager — Computation Dimension
+#
+# Message-passing IPC with capability transfer.
+# Port-based: tasks create named ports, connect by name, send/recv messages.
+# Integrates with scheduler for blocking/unblocking on recv.
+#
+# Consumes: IpcInputPort (scheduler for blocking, memory for buffers)
+# Produces: IpcOutputPort (message passing, capability management)
+
+use os.kernel.types.ipc_types.{IpcPort, IpcMessage, IpcEndpoint, IpcFlags, OwnedIpcReceiveStatus, OwnedIpcReceiveResult}
+use os.kernel.types.task_types.{TaskId, BlockReason}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.replay.hooks.{replay_hook_ipc_send, replay_hook_ipc_recv}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val MAX_PORTS: i32 = 1024
+val MAX_MESSAGES: i32 = 64         # Per-port queue depth
+val MAX_OWNED_PAYLOAD_BYTES: i64 = 4096
+val MAX_OWNED_QUEUE_BYTES: u64 = 65536u64
+
+# Owner-checked copied-delivery status values. The caller-provided TaskId is
+# consistency data only; K2 must supply dispatcher current-task context before
+# this path may claim source authentication.
+val IPC_OWNED_SOURCE_OWNER_MISMATCH: i64 = -3
+val IPC_OWNED_PAYLOAD_TOO_LARGE: i64 = -4
+val IPC_OWNED_PAYLOAD_MISMATCH: i64 = -5
+val IPC_OWNED_QUEUE_BUDGET_EXHAUSTED: i64 = -6
+val IPC_OWNED_CAPABILITY_UNSUPPORTED: i64 = -7
+
+# ============================================================================
+# Message Queue — Bounded FIFO per Port
+# ============================================================================
+
+enum QueuedIpcDeliveryKind:
+    """Owner-local queue discriminator; it carries no authentication claim."""
+    CopiedPayload
+    LegacyMetadata
+
+struct QueuedIpcMessage:
+    """Owner-local queue slot. No caller address or provenance token is kept."""
+    header: IpcMessage
+    payload: [u8]
+    delivery_kind: QueuedIpcDeliveryKind
+
+struct MessageQueue:
+    """Bounded FIFO queue of IPC messages for a single port."""
+    messages: [QueuedIpcMessage?]
+    head: i32
+    tail: i32
+    count: i32
+    capacity: i32
+    owned_payload_bytes: u64
+
+impl MessageQueue:
+    static fn new(capacity: i32) -> MessageQueue:
+        """Create an empty message queue with given capacity."""
+        var messages: [QueuedIpcMessage?] = []
+        var i = 0
+        while i < capacity:
+            messages.push(nil)
+            i = i + 1
+        MessageQueue(
+            messages: messages,
+            head: 0,
+            tail: 0,
+            count: 0,
+            capacity: capacity,
+            owned_payload_bytes: 0u64
+        )
+
+    me push(msg: QueuedIpcMessage) -> bool:
+        """Enqueue a message. Returns false if queue is full."""
+        if self.count >= self.capacity:
+            return false
+        val payload_bytes = msg.payload.len().to_u64()
+        if payload_bytes > MAX_OWNED_QUEUE_BYTES - self.owned_payload_bytes:
+            return false
+        self.messages[self.tail] = msg
+        self.tail = (self.tail + 1) % self.capacity
+        self.count = self.count + 1
+        self.owned_payload_bytes = self.owned_payload_bytes + payload_bytes
+        true
+
+    me pop() -> QueuedIpcMessage?:
+        """Dequeue the next message. Returns nil if empty."""
+        if self.count == 0:
+            return nil
+        val msg = self.messages[self.head]
+        if msg != nil:
+            val queued = msg
+            self.owned_payload_bytes = self.owned_payload_bytes - queued.payload.len().to_u64()
+        # Clearing the slot drops the queue's sole payload reference. The
+        # returned value owns the bytes until its receiver releases them.
+        self.messages[self.head] = nil
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        msg
+
+    me clear():
+        """Release every queued payload exactly once and reset accounting."""
+        var remaining = self.count
+        var index = self.head
+        while remaining > 0:
+            self.messages[index] = nil
+            index = (index + 1) % self.capacity
+            remaining = remaining - 1
+        self.head = 0
+        self.tail = 0
+        self.count = 0
+        self.owned_payload_bytes = 0u64
+
+    fn is_empty() -> bool:
+        self.count == 0
+
+    fn is_full() -> bool:
+        self.count >= self.capacity
+
+    fn len() -> i32:
+        self.count
+
+# ============================================================================
+# Port State
+# ============================================================================
+
+struct IpcPortState:
+    """Runtime state for a single IPC port.
+
+    Each port has a name for service discovery, a bounded message queue,
+    and a list of tasks blocked waiting to receive from this port.
+    """
+    port: IpcPort
+    name: text
+    queue: MessageQueue
+    waiters: [TaskId]           # Tasks blocked on recv for this port
+    max_depth: i32
+
+fn _copy_owned_payload(payload: [u8]) -> [u8]:
+    """Make the queue's byte copy without retaining caller storage."""
+    var copied: [u8] = []
+    for byte in payload:
+        copied.push(byte)
+    copied
+
+fn _owned_receive_without_message(status: OwnedIpcReceiveStatus) -> OwnedIpcReceiveResult:
+    OwnedIpcReceiveResult(status: status, header: nil, payload: [])
+
+# ============================================================================
+# IPC Manager
+# ============================================================================
+
+class IpcManager:
+    """Kernel IPC subsystem.
+
+    Manages named ports, message delivery, and capability transfer.
+    Works with the scheduler to block/unblock tasks on send/recv.
+
+    Port lifecycle:
+      1. create_port(owner, name) -> IpcPort
+      2. connect(name) -> IpcPort?  (lookup by name)
+      3. send(msg) / recv(port, timeout)
+      4. Ports are destroyed when the owning task exits.
+
+    Capability transfer:
+      Messages with CapTransfer flag carry CapabilityTokens.
+      cap_grant/cap_revoke/cap_check delegate to CapabilityManager.
+
+    Concurrency/resource contract:
+      The scheduler/kernel dispatcher serializes mutation of one IpcManager;
+      this class does not provide an internal lock. Each port admits at most
+      MAX_MESSAGES queue slots and MAX_OWNED_QUEUE_BYTES copied payload bytes.
+      Payload ownership is transferred only through send_owned/recv_owned.
+      K1 checks a claimed TaskId against the port table but cannot authenticate
+      that claim. K2 must bind the sender/receiver TaskId to dispatcher-owned
+      current-task state before exposing authenticated delivery.
+    """
+    ports: [IpcPortState?]          # Port table (nil = unused slot)
+    next_port_id: u64               # Monotonic port ID allocator
+    cap_manager: CapabilityManager  # Capability subsystem
+
+impl IpcManager:
+    static fn new() -> IpcManager:
+        """Create an IPC manager with empty port table."""
+        var ports: [IpcPortState?] = []
+        var i = 0
+        while i < MAX_PORTS:
+            ports.push(nil)
+            i = i + 1
+        IpcManager(
+            ports: ports,
+            next_port_id: 1,
+            cap_manager: CapabilityManager.new()
+        )
+
+    # -- Port Lifecycle ------------------------------------------------------
+
+    me create_port(owner: TaskId, name: text) -> IpcPort:
+        """Create a new named IPC port owned by the given task.
+
+        Returns the new port. Returns a port with id=0 if table is full.
+        """
+        val slot = self._find_empty_port_slot()
+        if slot < 0:
+            return IpcPort(id: 0, owner: owner.id)
+
+        val port = IpcPort(id: self.next_port_id, owner: owner.id)
+        self.next_port_id = self.next_port_id + 1
+
+        val port_state = IpcPortState(
+            port: port,
+            name: name,
+            queue: MessageQueue.new(MAX_MESSAGES),
+            waiters: [],
+            max_depth: MAX_MESSAGES
+        )
+        self.ports[slot] = port_state
+        port
+
+    me connect(name: text) -> IpcPort?:
+        """Look up a port by name for service discovery.
+
+        Returns the port if found, nil otherwise.
+        """
+        var i = 0
+        while i < MAX_PORTS:
+            val ps = self.ports[i]
+            if ps != nil:
+                val port_state = ps
+                if port_state.name == name:
+                    return port_state.port
+            i = i + 1
+        nil
+
+    # -- Message Passing -----------------------------------------------------
+
+    me send_owned(
+        sender_task: TaskId,
+        claimed_source_port: u64,
+        header: IpcMessage,
+        payload: [u8]
+    ) -> i64:
+        """Queue a bounded payload copy after claimed-owner consistency checks.
+
+        `sender_task` is not authenticated here because this manager API has no
+        dispatcher current-task context. K2 must make it dispatcher-only before
+        treating the source identity as authenticated.
+
+        Returns:
+          0  = success
+          -1 = destination port not found
+          -2 = destination queue full
+          -3 = source port is absent, mismatched, or not claimed-sender-owned
+          -4 = payload exceeds the per-message cap
+          -5 = header payload_len does not match the supplied bytes
+          -6 = destination payload-byte budget exhausted
+          -7 = capability count/transfer is unsupported on this path
+        """
+        if payload.len() > MAX_OWNED_PAYLOAD_BYTES:
+            return IPC_OWNED_PAYLOAD_TOO_LARGE
+        if header.payload_len.to_u64() != payload.len().to_u64():
+            return IPC_OWNED_PAYLOAD_MISMATCH
+        if header.cap_count != 0u32 or header.flags == (IpcFlags.CapTransfer as u32):
+            return IPC_OWNED_CAPABILITY_UNSUPPORTED
+        if claimed_source_port == 0u64 or header.src_port != claimed_source_port:
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
+
+        val source_slot = self._find_port_by_id(claimed_source_port)
+        if source_slot < 0:
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
+        val source_state = self.ports[source_slot]
+        if source_state == nil:
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
+        val claimed_source = source_state
+        if claimed_source.port.owner != sender_task.id:
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
+
+        val destination_slot = self._find_port_by_id(header.dst_port)
+        if destination_slot < 0:
+            return -1
+        val destination_state = self.ports[destination_slot]
+        if destination_state == nil:
+            return -1
+
+        var port_state = destination_state
+        if port_state.queue.is_full():
+            return -2
+        val payload_bytes = payload.len().to_u64()
+        if payload_bytes > MAX_OWNED_QUEUE_BYTES - port_state.queue.owned_payload_bytes:
+            return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
+
+        val owned = QueuedIpcMessage(
+            header: header,
+            payload: _copy_owned_payload(payload),
+            delivery_kind: QueuedIpcDeliveryKind.CopiedPayload
+        )
+        if not port_state.queue.push(owned):
+            return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
+        # K1 has no dispatcher-authenticated sender identity; record zero until
+        # K2 supplies the actual current task.
+        replay_hook_ipc_send(0, header.dst_port as i64, header.payload_len as i64)
+        self.ports[destination_slot] = port_state
+        0
+
+    me recv_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcReceiveResult:
+        """Return a typed copied-payload receive outcome.
+
+        A wrong receiver does not consume the FIFO head. Legacy send() entries
+        return MetadataOnly and no payload. Delivered proves queue ownership of
+        the byte copy, not dispatcher authentication of either TaskId.
+        """
+        val slot = self._find_port_by_id(port.id)
+        if slot < 0:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
+        val state = self.ports[slot]
+        if state == nil:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
+        var port_state = state
+        if port_state.port.owner != receiver_task.id:
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.Unauthorized)
+
+        val msg = port_state.queue.pop()
+        self.ports[slot] = port_state
+        if msg != nil:
+            val queued = msg
+            if queued.delivery_kind == QueuedIpcDeliveryKind.LegacyMetadata:
+                return OwnedIpcReceiveResult(
+                    status: OwnedIpcReceiveStatus.MetadataOnly,
+                    header: Some(queued.header),
+                    payload: []
+                )
+            if queued.header.payload_len.to_u64() != queued.payload.len().to_u64():
+                return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+            if queued.header.cap_count != 0u32 or queued.header.flags == (IpcFlags.CapTransfer as u32):
+                return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+
+            # The receiver TaskId is caller-provided in K1; do not emit it as
+            # authenticated replay provenance.
+            replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64)
+            return OwnedIpcReceiveResult(
+                status: OwnedIpcReceiveStatus.Delivered,
+                header: Some(queued.header),
+                payload: queued.payload
+            )
+        _owned_receive_without_message(OwnedIpcReceiveStatus.Empty)
+
+    me send(msg: IpcMessage) -> i64:
+        """Send a message to the destination port.
+
+        Queues the message in the destination port's message queue.
+        If there are tasks blocked waiting to receive on that port,
+        the first waiter is returned (caller should unblock it via scheduler).
+
+        Returns:
+          0  = success
+          -1 = destination port not found
+          -2 = destination queue full
+          -3 = capability check failed
+        """
+        # Find the destination port
+        val slot = self._find_port_by_id(msg.dst_port)
+        if slot < 0:
+            return -1
+
+        val ps = self.ports[slot]
+        if ps == nil:
+            return -1
+
+        var port_state = ps
+
+        # Legacy metadata-only delivery remains distinct from copied payload.
+        val queued = QueuedIpcMessage(
+            header: msg,
+            payload: [],
+            delivery_kind: QueuedIpcDeliveryKind.LegacyMetadata
+        )
+        val ok = port_state.queue.push(queued)
+        if not ok:
+            self.ports[slot] = port_state
+            return -2
+        replay_hook_ipc_send(0, msg.dst_port as i64, msg.payload_len as i64)
+
+        self.ports[slot] = port_state
+        0
+
+    me recv(port: IpcPort, timeout_ms: i64) -> IpcMessage?:
+        """Receive a message from the given port.
+
+        If a message is available, returns it immediately.
+        If the queue is empty and timeout_ms > 0, the caller should
+        block the task (via scheduler) and add it to the port's waiter list.
+        If timeout_ms == 0, returns nil immediately (non-blocking).
+
+        Returns the message, or nil if none available.
+        """
+        val slot = self._find_port_by_id(port.id)
+        if slot < 0:
+            return nil
+
+        val ps = self.ports[slot]
+        if ps == nil:
+            return nil
+
+        var port_state = ps
+        val msg = port_state.queue.pop()
+        self.ports[slot] = port_state
+
+        if msg != nil:
+            val queued = msg
+            replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64)
+            return queued.header
+
+        # Queue empty — non-blocking mode returns nil
+        if timeout_ms == 0:
+            return nil
+
+        # For blocking recv: caller (syscall handler) must call
+        # add_waiter() and then block the task via scheduler.
+        nil
+
+    me add_waiter(port: IpcPort, task_id: TaskId):
+        """Add a task to the waiter list for a port.
+
+        Called by the syscall handler when a recv() finds an empty queue
+        and blocking is requested.
+        """
+        val slot = self._find_port_by_id(port.id)
+        if slot < 0:
+            return
+
+        val ps = self.ports[slot]
+        if ps == nil:
+            return
+
+        var port_state = ps
+        port_state.waiters.push(task_id)
+        self.ports[slot] = port_state
+
+    me get_first_waiter(port_id: u64) -> TaskId?:
+        """Get (and remove) the first waiter for a port.
+
+        Used by send() path to determine which task to unblock.
+        """
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return nil
+
+        val ps = self.ports[slot]
+        if ps == nil:
+            return nil
+
+        var port_state = ps
+        if port_state.waiters.len() == 0:
+            return nil
+
+        # Pop the first waiter
+        val first = port_state.waiters[0]
+        var remaining: [TaskId] = []
+        var i = 1
+        while i < port_state.waiters.len():
+            remaining.push(port_state.waiters[i])
+            i = i + 1
+        port_state.waiters = remaining
+        self.ports[slot] = port_state
+        first
+
+    # -- Capability Delegation -----------------------------------------------
+
+    me cap_grant(from: TaskId, to: TaskId, cap: CapabilityToken) -> bool:
+        """Grant a capability from one task to another.
+
+        The granting task must hold the capability being granted.
+        """
+        self.cap_manager.grant(from, to, cap)
+
+    me cap_revoke(cap: CapabilityToken) -> bool:
+        """Revoke a capability token (owner-level, direct)."""
+        self.cap_manager.revoke(cap)
+
+    me cap_revoke_transitive(root_token_id: u64) -> i64:
+        """Revoke a token and all delegation descendants (E3 transitive revocation)."""
+        self.cap_manager.revoke_transitive(root_token_id)
+
+    me cap_check(task: TaskId, kind: CapabilityKind) -> bool:
+        """Check if a task holds a capability of the given kind."""
+        self.cap_manager.check(task, kind)
+
+    # -- Cleanup -------------------------------------------------------------
+
+    me destroy_task_ports(task_id: TaskId):
+        """Destroy all ports owned by a task.
+
+        Called when a task exits. Drains queues, removes port entries.
+        """
+        var i = 0
+        while i < MAX_PORTS:
+            val ps = self.ports[i]
+            if ps != nil:
+                val port_state = ps
+                if port_state.port.owner == task_id.id:
+                    var draining = port_state
+                    draining.queue.clear()
+                    self.ports[i] = nil
+            i = i + 1
+
+    fn queued_message_count(port_id: u64) -> i32:
+        """Return queue depth for resource accounting and kernel diagnostics."""
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return 0
+        val state = self.ports[slot]
+        if state == nil:
+            return 0
+        val port_state = state
+        port_state.queue.len()
+
+    fn queued_owned_payload_bytes(port_id: u64) -> u64:
+        """Return bytes currently owned by one port queue."""
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return 0u64
+        val state = self.ports[slot]
+        if state == nil:
+            return 0u64
+        val port_state = state
+        port_state.queue.owned_payload_bytes
+
+    # -- Internal Helpers ----------------------------------------------------
+
+    fn _find_empty_port_slot() -> i32:
+        """Find the first empty port slot. Returns -1 if full."""
+        var i = 0
+        while i < MAX_PORTS:
+            if self.ports[i] == nil:
+                return i
+            i = i + 1
+        -1
+
+    fn _find_port_by_id(port_id: u64) -> i32:
+        """Find port slot by port ID. Returns -1 if not found."""
+        var i = 0
+        while i < MAX_PORTS:
+            val ps = self.ports[i]
+            if ps != nil:
+                val port_state = ps
+                if port_state.port.id == port_id:
+                    return i
+            i = i + 1
+        -1

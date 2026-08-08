@@ -1,0 +1,272 @@
+# Scheduler Syscall Handlers — sys_schedule and sys_schedctl.
+#
+# Provides SchedRequest, SchedctlOp, SysScheduleHandler, SysSchedctlHandler,
+# and the C-ABI shim SchedSyscallShim.
+
+# ============================================================================
+# SchedRequest — parsed arguments for sys_schedule
+# ============================================================================
+
+struct SchedRequest:
+    pid: i64
+    sched_class: text
+    priority: i64
+    affinity: i64
+
+fn sched_request_create(pid: i64, cls: text, prio: i64, aff: i64) -> SchedRequest:
+    SchedRequest(pid: pid, sched_class: cls, priority: prio, affinity: aff)
+
+fn sched_request_validate(self: SchedRequest) -> text:
+    if self.pid <= 0:
+        return "invalid pid: must be > 0"
+    if self.sched_class == "realtime" == false:
+        if self.sched_class == "normal" == false:
+            if self.sched_class == "batch" == false:
+                if self.sched_class == "idle" == false:
+                    return "invalid sched_class: must be realtime/normal/batch/idle"
+    if self.priority < 0:
+        return "invalid priority: must be 0-99"
+    if self.priority > 99:
+        return "invalid priority: must be 0-99"
+    if self.affinity < 0:
+        return "invalid affinity: must be >= 0"
+    ""
+
+fn sched_request_summary(self: SchedRequest) -> text:
+    "SchedRequest(pid=" + self.pid.to_text() + " class=" + self.sched_class + " prio=" + self.priority.to_text() + " aff=" + self.affinity.to_text() + ")"
+
+# ============================================================================
+# SchedctlOp — operation descriptor for sys_schedctl
+# ============================================================================
+
+struct SchedctlOp:
+    op_name: text
+    pid: i64
+    value: i64
+    text_value: text
+
+fn schedctl_op_get_priority(pid: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "get_priority", pid: pid, value: 0, text_value: "")
+
+fn schedctl_op_set_priority(pid: i64, prio: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "set_priority", pid: pid, value: prio, text_value: "")
+
+fn schedctl_op_get_affinity(pid: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "get_affinity", pid: pid, value: 0, text_value: "")
+
+fn schedctl_op_set_affinity(pid: i64, mask: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "set_affinity", pid: pid, value: mask, text_value: "")
+
+fn schedctl_op_get_slice(pid: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "get_slice", pid: pid, value: 0, text_value: "")
+
+fn schedctl_op_set_slice(pid: i64, ms: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "set_slice", pid: pid, value: ms, text_value: "")
+
+fn schedctl_op_get_isolation(pid: i64) -> SchedctlOp:
+    SchedctlOp(op_name: "get_isolation", pid: pid, value: 0, text_value: "")
+
+fn schedctl_op_set_isolation(pid: i64, level: text) -> SchedctlOp:
+    SchedctlOp(op_name: "set_isolation", pid: pid, value: 0, text_value: level)
+
+fn schedctl_op_validate(self: SchedctlOp) -> text:
+    if self.pid <= 0:
+        return "invalid pid: must be > 0"
+    if self.op_name == "set_priority":
+        if self.value < 0:
+            return "invalid priority: must be 0-99"
+        if self.value > 99:
+            return "invalid priority: must be 0-99"
+    if self.op_name == "set_affinity":
+        if self.value < 0:
+            return "invalid affinity mask: must be >= 0"
+    if self.op_name == "set_slice":
+        if self.value <= 0:
+            return "invalid slice: must be > 0 ms"
+    if self.op_name == "set_isolation":
+        if self.text_value == "none" == false:
+            if self.text_value == "soft" == false:
+                if self.text_value == "hard" == false:
+                    return "invalid isolation level: must be none/soft/hard"
+    ""
+
+fn schedctl_op_is_getter(self: SchedctlOp) -> bool:
+    if self.op_name == "get_priority":
+        return true
+    if self.op_name == "get_affinity":
+        return true
+    if self.op_name == "get_slice":
+        return true
+    if self.op_name == "get_isolation":
+        return true
+    false
+
+fn schedctl_op_is_setter(self: SchedctlOp) -> bool:
+    schedctl_op_is_getter(self) == false
+
+fn schedctl_op_summary(self: SchedctlOp) -> text:
+    "SchedctlOp(op=" + self.op_name + " pid=" + self.pid.to_text() + " val=" + self.value.to_text() + " txt=" + self.text_value + ")"
+
+# ============================================================================
+# SysScheduleHandler — handler for sys_schedule syscall
+# ============================================================================
+
+struct SysScheduleHandler:
+    handled_count: i64
+    error_count: i64
+    last_error: text
+
+fn sys_schedule_handler_create() -> SysScheduleHandler:
+    SysScheduleHandler(handled_count: 0, error_count: 0, last_error: "")
+
+fn sys_schedule_handler_handle(self: SysScheduleHandler, req: SchedRequest) -> text:
+    val err = sched_request_validate(req)
+    if err == "" == false:
+        val h = SysScheduleHandler(
+            handled_count: self.handled_count,
+            error_count: self.error_count + 1,
+            last_error: err
+        )
+        return "error:" + err
+    # Execute: schedule the process (stub — real impl calls into Scheduler)
+    val h = SysScheduleHandler(
+        handled_count: self.handled_count + 1,
+        error_count: self.error_count,
+        last_error: ""
+    )
+    ""
+
+fn sys_schedule_handler_stats(self: SysScheduleHandler) -> text:
+    "SysScheduleHandler(handled=" + self.handled_count.to_text() + " errors=" + self.error_count.to_text() + " last_error=" + self.last_error + ")"
+
+# ============================================================================
+# SysSchedctlHandler — handler for sys_schedctl syscall
+# ============================================================================
+
+struct SysSchedctlHandler:
+    handled_count: i64
+    error_count: i64
+    last_result_value: i64
+    last_result_text: text
+
+fn sys_schedctl_handler_create() -> SysSchedctlHandler:
+    SysSchedctlHandler(handled_count: 0, error_count: 0, last_result_value: 0, last_result_text: "")
+
+fn sys_schedctl_handler_handle(self: SysSchedctlHandler, op: SchedctlOp) -> text:
+    val err = schedctl_op_validate(op)
+    if err == "" == false:
+        val h = SysSchedctlHandler(
+            handled_count: self.handled_count,
+            error_count: self.error_count + 1,
+            last_result_value: -1,
+            last_result_text: err
+        )
+        return "error:" + err
+    # Execute getter — return stub value
+    if schedctl_op_is_getter(op):
+        val result_val: i64 = 0
+        val h = SysSchedctlHandler(
+            handled_count: self.handled_count + 1,
+            error_count: self.error_count,
+            last_result_value: result_val,
+            last_result_text: ""
+        )
+        return "ok:" + result_val.to_text()
+    # Execute setter
+    val h = SysSchedctlHandler(
+        handled_count: self.handled_count + 1,
+        error_count: self.error_count,
+        last_result_value: 0,
+        last_result_text: ""
+    )
+    "ok:0"
+
+fn sys_schedctl_handler_stats(self: SysSchedctlHandler) -> text:
+    "SysSchedctlHandler(handled=" + self.handled_count.to_text() + " errors=" + self.error_count.to_text() + " last_val=" + self.last_result_value.to_text() + ")"
+
+# ============================================================================
+# SchedSyscallShim — C-ABI shim layer
+# ============================================================================
+
+struct SchedSyscallShim:
+    call_count: i64
+    schedule_handler: SysScheduleHandler
+    schedctl_handler: SysSchedctlHandler
+
+fn sched_syscall_shim_create() -> SchedSyscallShim:
+    SchedSyscallShim(
+        call_count: 0,
+        schedule_handler: sys_schedule_handler_create(),
+        schedctl_handler: sys_schedctl_handler_create()
+    )
+
+fn sched_syscall_shim_decode_class(self: SchedSyscallShim, code: i64) -> text:
+    if code == 0:
+        return "realtime"
+    if code == 1:
+        return "normal"
+    if code == 2:
+        return "batch"
+    if code == 3:
+        return "idle"
+    "normal"
+
+fn sched_syscall_shim_decode_op(self: SchedSyscallShim, code: i64) -> text:
+    if code == 0:
+        return "get_priority"
+    if code == 1:
+        return "set_priority"
+    if code == 2:
+        return "get_affinity"
+    if code == 3:
+        return "set_affinity"
+    if code == 4:
+        return "get_slice"
+    if code == 5:
+        return "set_slice"
+    if code == 6:
+        return "get_isolation"
+    if code == 7:
+        return "set_isolation"
+    "get_priority"
+
+fn sched_syscall_shim_sys_schedule(self: SchedSyscallShim, pid: i64, cls_code: i64, priority: i64, affinity: i64) -> i64:
+    val cls = sched_syscall_shim_decode_class(self, cls_code)
+    val req = sched_request_create(pid, cls, priority, affinity)
+    val result = sys_schedule_handler_handle(self.schedule_handler, req)
+    val shim = SchedSyscallShim(
+        call_count: self.call_count + 1,
+        schedule_handler: self.schedule_handler,
+        schedctl_handler: self.schedctl_handler
+    )
+    if result == "":
+        return 0
+    -22  # EINVAL
+
+fn sched_syscall_shim_sys_schedctl(self: SchedSyscallShim, pid: i64, op_code: i64, value: i64) -> i64:
+    val op_name = sched_syscall_shim_decode_op(self, op_code)
+    var op = SchedctlOp(op_name: op_name, pid: pid, value: value, text_value: "")
+    # set_isolation needs a text level — map value to level
+    if op_name == "set_isolation":
+        var level = "none"
+        if value == 1:
+            level = "soft"
+        if value == 2:
+            level = "hard"
+        op = SchedctlOp(op_name: op_name, pid: pid, value: 0, text_value: level)
+    val result = sys_schedctl_handler_handle(self.schedctl_handler, op)
+    val shim = SchedSyscallShim(
+        call_count: self.call_count + 1,
+        schedule_handler: self.schedule_handler,
+        schedctl_handler: self.schedctl_handler
+    )
+    if result == "" == false:
+        if result.starts_with("error:"):
+            return -22  # EINVAL
+    if result.starts_with("ok:"):
+        val num_str = result.slice(3, result.length())
+        return num_str.to_i64()
+    0
+
+fn sched_syscall_shim_stats(self: SchedSyscallShim) -> text:
+    "SchedSyscallShim(calls=" + self.call_count.to_text() + " " + sys_schedule_handler_stats(self.schedule_handler) + " " + sys_schedctl_handler_stats(self.schedctl_handler) + ")"

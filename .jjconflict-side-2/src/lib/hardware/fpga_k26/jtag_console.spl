@@ -1,0 +1,388 @@
+# ============================================================================
+# K26 Console Transport — PMOD UART vs JTAG terminal
+# ============================================================================
+#
+# Two ways to get SimpleOS console bytes off a Simple RISC-V core on a KV260,
+# selectable instead of hard-wired per SoC variant:
+#
+#   CONSOLE_UART — the PL soft-UART TX pin on PMOD J2 (H12/E10, LVCMOS33,
+#       115200 8N1, see k26_xdc.spl). Streaming and unbounded, but needs a
+#       3.3V USB-TTL cable soldered onto the PMOD header.
+#
+#   CONSOLE_JTAG — the "jtagterminal" path. Every byte the soft-UART transmits
+#       is ALSO written to the on-chip UARTBUF capture buffer
+#       (rv32_bram_soc.vhd, UARTBUF_WORDS x 32-bit) and read back over the SAME
+#       FT4232H JTAG chain used to program the board, through the BSCANE2 USER4
+#       observation DR (obs command `<word:16>0003`, see
+#       scripts/fpga/jtag_obs_tunnel.tcl). Zero extra cabling — but the buffer
+#       is FINITE: capacity = buf_words * 4 bytes.
+#
+#   CONSOLE_BOTH — capture buffer present AND the pin routed out; the JTAG side
+#       is then a replayable transcript of what the cable streamed live.
+#
+# WHY THIS MODULE EXISTS — completeness. The RTL keeps counting UART bytes after
+# the capture buffer fills (`if uart_count_q < UARTBUF_WORDS*4 then <write>` —
+# the write stops, the counter does not), so a JTAG transcript that ran past the
+# end is DETECTABLE. It was not previously REPORTED: the readout capped its word
+# loop at the buffer size and printed the first 8 KB as if it were the whole
+# boot log, and additionally dropped every byte below 0x20 that was not '\n'.
+# Both are silent incompleteness — a truncated transcript that reads as total.
+#
+# Everything here is pure: no I/O, no FFI. The Vivado/hw_jtag plumbing stays in
+# scripts/fpga/; this module owns the encoding, the decoding, and the verdict.
+
+use std.common.string_core.{char_from_code}
+use std.common.string_builder.{StringBuilder}
+
+# ============================================================================
+# Console mode
+# ============================================================================
+
+val CONSOLE_UART: i64 = 0
+val CONSOLE_JTAG: i64 = 1
+val CONSOLE_BOTH: i64 = 2
+
+# The tiny-BRAM obs register file exposes the UART byte counter in the low 24
+# bits of the status word (bits 31/30 are pass/fail flags), so a run that emits
+# 16777215+ bytes can no longer be trusted to report its true total.
+val CONSOLE_COUNT_MASK: i64 = 0x00ff_ffff
+
+# Completeness verdicts.
+val CONSOLE_OK: i64 = 0                # every emitted byte recovered
+val CONSOLE_EMPTY: i64 = 1             # core produced no output at all
+val CONSOLE_OVERFLOW: i64 = 2          # emitted > buffer capacity: bytes lost
+val CONSOLE_SHORT_READ: i64 = 3        # fewer words read back than required
+val CONSOLE_NO_BUFFER: i64 = 4         # JTAG console asked for, bitstream has none
+val CONSOLE_COUNT_SATURATED: i64 = 5   # 24-bit counter pinned; true total unknown
+
+export CONSOLE_UART, CONSOLE_JTAG, CONSOLE_BOTH, CONSOLE_COUNT_MASK
+export CONSOLE_OK, CONSOLE_EMPTY, CONSOLE_OVERFLOW, CONSOLE_SHORT_READ
+export CONSOLE_NO_BUFFER, CONSOLE_COUNT_SATURATED
+
+struct ConsoleConfig:
+    """How this bitstream/board pair delivers console bytes."""
+    mode: i64          # CONSOLE_UART | CONSOLE_JTAG | CONSOLE_BOTH
+    buf_words: i64     # UARTBUF_WORDS generic; 0 = bitstream has no capture buffer
+    user_chain: i64    # BSCANE2 JTAG_CHAIN carrying the observation DR
+    baud: i64          # PMOD UART line rate
+    tck_hz: i64        # JTAG clock; 1 MHz is the proven-calibration rate
+
+struct ConsoleTranscript:
+    """Result of decoding a JTAG capture-buffer readout."""
+    bytes: [i64]       # recovered console bytes, in emission order
+    emitted: i64       # what the core's own counter says it transmitted
+    captured: i64      # how many of those we actually recovered
+    lost: i64          # emitted - captured
+    status: i64        # CONSOLE_* verdict
+    reason: text       # human-readable verdict
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+pub fn console_default_config() -> ConsoleConfig:
+    """Default for the KV260 tiny-BRAM rv32 SoC: JTAG terminal, 8 KB capture.
+
+    2048 words x 4 bytes = 8192 bytes, which holds the ~700-byte SimpleOS boot
+    transcript with room to spare. Raise buf_words in lockstep with the
+    UARTBUF_WORDS generic if a run needs more."""
+    ConsoleConfig(
+        mode: CONSOLE_JTAG,
+        buf_words: 2048,
+        user_chain: 4,
+        baud: 115200,
+        tck_hz: 1000000
+    )
+
+pub fn console_uart_config() -> ConsoleConfig:
+    """PMOD J2 cable console: no capture buffer, unbounded streaming."""
+    ConsoleConfig(mode: CONSOLE_UART, buf_words: 0, user_chain: 4,
+                  baud: 115200, tck_hz: 1000000)
+
+pub fn console_mode_from_text(name: text) -> i64:
+    """Parse a console mode knob ("uart" | "jtag" | "both"); defaults to JTAG.
+
+    Anything unrecognised falls back to the cable-free path, because that is
+    the one that works with no extra hardware attached."""
+    if name == "uart":
+        return CONSOLE_UART
+    if name == "both":
+        return CONSOLE_BOTH
+    CONSOLE_JTAG
+
+pub fn console_mode_name(mode: i64) -> text:
+    """Render a console mode back to its knob spelling."""
+    if mode == CONSOLE_UART:
+        return "uart"
+    if mode == CONSOLE_BOTH:
+        return "both"
+    "jtag"
+
+pub fn console_with_mode(cfg: ConsoleConfig, mode: i64) -> ConsoleConfig:
+    """Same bitstream parameters, different transport selection."""
+    ConsoleConfig(mode: mode, buf_words: cfg.buf_words, user_chain: cfg.user_chain,
+                  baud: cfg.baud, tck_hz: cfg.tck_hz)
+
+pub fn console_capacity(cfg: ConsoleConfig) -> i64:
+    """Bytes the on-chip capture buffer can hold before it stops writing."""
+    cfg.buf_words * 4
+
+pub fn console_has_jtag(cfg: ConsoleConfig) -> bool:
+    """Whether this configuration can produce a JTAG transcript at all."""
+    (cfg.mode == CONSOLE_JTAG or cfg.mode == CONSOLE_BOTH) and cfg.buf_words > 0
+
+# ============================================================================
+# Observation-DR command encoding
+# ============================================================================
+
+fn hex_digit(v: i64) -> text:
+    val digits = "0123456789abcdef"
+    digits.substring(v & 0xf, (v & 0xf) + 1)
+
+fn hex4(v: i64) -> text:
+    hex_digit(v >> 12) + hex_digit(v >> 8) + hex_digit(v >> 4) + hex_digit(v)
+
+fn hex2(v: i64) -> text:
+    hex_digit(v >> 4) + hex_digit(v)
+
+pub fn console_obs_cmd(word_index: i64) -> text:
+    """Obs command reading capture-buffer word `word_index` (cmd 0x3).
+
+    The tiny-BRAM obs decoder takes the word index from obs_cmd(31 downto 16),
+    so the command is the index in the high half and 0x0003 in the low half."""
+    hex4(word_index) + "0003"
+
+pub fn console_words_needed(emitted: i64, cfg: ConsoleConfig) -> i64:
+    """How many buffer words a complete readout of `emitted` bytes must fetch.
+
+    Capped at the buffer capacity — past that the words simply do not exist,
+    which is exactly the overflow that console_decode reports."""
+    var n = emitted
+    val cap = console_capacity(cfg)
+    if n > cap:
+        n = cap
+    if n <= 0:
+        return 0
+    (n + 3) / 4
+
+pub fn console_status_bytes(status_word: i64) -> i64:
+    """Extract the UART byte counter from an obs status word (cmd 0x1)."""
+    status_word & CONSOLE_COUNT_MASK
+
+# ============================================================================
+# Decoding — the completeness core
+# ============================================================================
+
+pub fn console_decode(words: [i64], emitted: i64, cfg: ConsoleConfig) -> ConsoleTranscript:
+    """Rebuild the console byte stream from capture-buffer words, with a verdict.
+
+    `words` are the 32-bit obs readbacks for indices 0..n-1 in order; `emitted`
+    is the core's own byte counter. Bytes sit little-endian within each word
+    (lane = count(1 downto 0), so lane 0 is bits 7..0).
+
+    The returned transcript is always the bytes we can actually stand behind:
+    the tail padding of the final partial word is dropped, and a run that
+    overran the buffer is reported as CONSOLE_OVERFLOW with the exact loss
+    rather than being quietly cut off at the capacity boundary."""
+    if not console_has_jtag(cfg):
+        return ConsoleTranscript(bytes: [], emitted: emitted, captured: 0, lost: emitted,
+                                 status: CONSOLE_NO_BUFFER,
+                                 reason: "console mode '" + console_mode_name(cfg.mode)
+                                         + "' has no JTAG capture buffer (buf_words="
+                                         + i64_text(cfg.buf_words) + ")")
+    if emitted <= 0:
+        return ConsoleTranscript(bytes: [], emitted: 0, captured: 0, lost: 0,
+                                 status: CONSOLE_EMPTY,
+                                 reason: "UART byte count is 0 — core produced no output")
+
+    val cap = console_capacity(cfg)
+    val need = console_words_needed(emitted, cfg)
+    if words.len() < need:
+        # Decode what arrived so the partial transcript is still usable, but the
+        # verdict stays negative — a short read is missing data, not an ending.
+        val got = words.len() * 4
+        return ConsoleTranscript(bytes: console_take(words, got), emitted: emitted,
+                                 captured: got, lost: emitted - got,
+                                 status: CONSOLE_SHORT_READ,
+                                 reason: "short read: got " + i64_text(words.len())
+                                         + " buffer words, need " + i64_text(need))
+
+    var keep = emitted
+    if keep > cap:
+        keep = cap
+    val bytes = console_take(words, keep)
+
+    if emitted > cap:
+        return ConsoleTranscript(bytes: bytes, emitted: emitted, captured: keep,
+                                 lost: emitted - keep, status: CONSOLE_OVERFLOW,
+                                 reason: "capture buffer overflowed: core emitted "
+                                         + i64_text(emitted) + " bytes, buffer holds "
+                                         + i64_text(cap) + " — " + i64_text(emitted - cap)
+                                         + " bytes LOST (raise UARTBUF_WORDS or use the PMOD cable)")
+
+    if emitted >= CONSOLE_COUNT_MASK:
+        return ConsoleTranscript(bytes: bytes, emitted: emitted, captured: keep, lost: 0,
+                                 status: CONSOLE_COUNT_SATURATED,
+                                 reason: "24-bit byte counter is pinned at "
+                                         + i64_text(CONSOLE_COUNT_MASK)
+                                         + " — true emitted total is unknown")
+
+    ConsoleTranscript(bytes: bytes, emitted: emitted, captured: keep, lost: 0,
+                      status: CONSOLE_OK,
+                      reason: "complete: all " + i64_text(emitted) + " emitted bytes recovered")
+
+fn console_take(words: [i64], count: i64) -> [i64]:
+    """Unpack exactly `count` bytes from little-endian lanes of `words`."""
+    var out: [i64] = []
+    var i = 0
+    while i < count:
+        val w = words[i / 4]
+        val lane = i - (i / 4) * 4
+        out = out.push((w >> (lane * 8)) & 0xff)
+        i = i + 1
+    out
+
+pub fn console_complete(t: ConsoleTranscript) -> bool:
+    """Whether every byte the core emitted is present in this transcript."""
+    t.status == CONSOLE_OK
+
+# ============================================================================
+# Rendering
+# ============================================================================
+
+pub fn console_render(bytes: [i64]) -> text:
+    """Render console bytes as text WITHOUT dropping any of them.
+
+    Printable ASCII and the three whitespace controls a terminal transcript
+    genuinely carries (\\n, \\r, \\t) pass through verbatim; everything else
+    becomes a visible \\xNN escape. Silently discarding unprintables — the old
+    readout dropped every byte below 0x20 that was not '\\n' — makes a lossy
+    transcript indistinguishable from a clean one."""
+    val sb = StringBuilder.new()
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i] & 0xff
+        if b == 10 or b == 13 or b == 9:
+            sb.push(char_from_code(b))
+        elif b >= 32 and b < 127:
+            sb.push(char_from_code(b))
+        else:
+            sb.push("\\x")
+            sb.push(hex2(b))
+        i = i + 1
+    sb.to_text()
+
+# ============================================================================
+# Readout-log parsing
+# ============================================================================
+
+struct ConsoleReadout:
+    """Capture-buffer words and status recovered from a jtag_obs_tunnel log."""
+    words: [i64]        # dense prefix words[0..n-1]; stops at the first gap
+    status_word: i64    # obs cmd 0x1 readback, 0 when absent
+    have_status: bool
+    gap_at: i64         # first missing word index, or -1 when the prefix is whole
+
+fn hex_val(ch: text) -> i64:
+    if ch == "":
+        return -1
+    val lower = "0123456789abcdef".index_of(ch)
+    if lower >= 0:
+        return lower
+    "0123456789ABCDEF".index_of(ch)
+
+fn field_hex(line: text, key: text) -> i64:
+    """Read the hex number that follows `key` on `line`; -1 when absent."""
+    val at = line.index_of(key)
+    if at < 0:
+        return -1
+    var i = at + key.len()
+    var v = 0
+    var n = 0
+    var scanning = true
+    while scanning and i < line.len():
+        val d = hex_val(line.substring(i, i + 1))
+        if d < 0:
+            scanning = false
+        else:
+            v = v * 16 + d
+            n = n + 1
+            i = i + 1
+    if n == 0:
+        return -1
+    v
+
+pub fn console_parse_obs_log(log: text, cfg: ConsoleConfig) -> ConsoleReadout:
+    """Collect capture-buffer words and the status word from a tunnel log.
+
+    Reads the `OBSn CMD=<hex> DATA=<hex>` lines jtag_obs_tunnel.tcl prints. A
+    word is addressed by the high half of its command, so out-of-order or
+    re-run chunks land correctly. Only the gap-free prefix starting at word 0
+    is returned — a hole in the middle is missing data, and surfacing it as a
+    short prefix makes console_decode report SHORT_READ instead of splicing
+    unrelated words together into a plausible-looking transcript."""
+    val cap_words = cfg.buf_words
+    var words: [i64] = []
+    var seen: [bool] = []
+    var w = 0
+    while w < cap_words:
+        words = words.push(0)
+        seen = seen.push(false)
+        w = w + 1
+
+    var status_word = 0
+    var have_status = false
+    val lines = log.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("OBS"):
+            val cmd = field_hex(line, "CMD=")
+            val data = field_hex(line, "DATA=")
+            if cmd >= 0 and data >= 0:
+                val sel = cmd & 0xffff
+                if sel == 1:
+                    status_word = data
+                    have_status = true
+                elif sel == 3:
+                    val idx = (cmd >> 16) & 0xffff
+                    if idx < cap_words:
+                        words[idx] = data
+                        seen[idx] = true
+        i = i + 1
+
+    var n = 0
+    var scanning = true
+    while scanning and n < cap_words:
+        if seen[n]:
+            n = n + 1
+        else:
+            scanning = false
+    var gap_at = n
+    if n >= cap_words:
+        gap_at = -1
+
+    var prefix: [i64] = []
+    var k = 0
+    while k < n:
+        prefix = prefix.push(words[k])
+        k = k + 1
+    ConsoleReadout(words: prefix, status_word: status_word,
+                   have_status: have_status, gap_at: gap_at)
+
+pub fn console_verdict_line(t: ConsoleTranscript) -> text:
+    """One-line completeness verdict for a board evidence log."""
+    var tag = "INCOMPLETE"
+    if console_complete(t):
+        tag = "COMPLETE"
+    tag + ": emitted=" + i64_text(t.emitted) + " captured=" + i64_text(t.captured)
+        + " lost=" + i64_text(t.lost) + " — " + t.reason
+
+fn i64_text(v: i64) -> text:
+    "{v}"
+
+export ConsoleConfig, ConsoleTranscript
+export console_default_config, console_uart_config, console_mode_from_text
+export console_mode_name, console_with_mode, console_capacity, console_has_jtag
+export console_obs_cmd, console_words_needed, console_status_bytes
+export console_decode, console_complete, console_render, console_verdict_line

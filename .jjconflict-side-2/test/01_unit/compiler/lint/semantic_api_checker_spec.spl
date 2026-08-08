@@ -1,0 +1,155 @@
+# Semantic-API Recursive Checker Specification (mission-critical lane A1)
+#
+# Verifies src/compiler/35.semantics/lint/semantic_api/: a bare-primitive
+# leaf reachable ANYWHERE in a declaration's type graph is a violation —
+# generics, arrays, tuples, optionals unwrapped recursively. Codes:
+# MC-API-001 fn signature, MC-API-002 field, MC-API-003 extern fn
+# (informational, not silently skipped). NO pure-math exemption.
+
+use std.spec.*
+use compiler.semantics.lint.semantic_api.checker.{ApiViolation, check_fn_signature, check_field_texts, check_extern_signature_text, check_module_items}
+use compiler.semantics.lint.semantic_api.type_walk.{semantic_api_primitive_leaves, semantic_api_is_newunit, semantic_api_resolve_alias}
+use compiler.core.types.{newunit_register, TYPE_I64}
+use compiler.frontend.ast.{Node, FunctionDef, StructDef, EnumDef}
+
+describe "semantic_api recursive checker":
+    context "fn signatures (MC-API-001)":
+        it "flags a bare i64 parameter":
+            val vs = check_fn_signature("set_port", ["port: i64"], "", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].code).to_equal("MC-API-001")
+            expect(vs[0].leaf).to_equal("i64")
+            expect(vs[0].member).to_equal("param 'port'")
+
+        it "flags a bare bool return":
+            val vs = check_fn_signature("is_ready", ["cfg: Config"], "bool", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].code).to_equal("MC-API-001")
+            expect(vs[0].member).to_equal("return")
+            expect(vs[0].leaf).to_equal("bool")
+
+        it "flags Option<bool> — wrapping in Option does not launder a primitive":
+            val vs = check_fn_signature("try_flag", [], "Option<bool>", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].leaf).to_equal("bool")
+
+        it "flags nested Dict<text, Option<i32>>":
+            val vs = check_fn_signature("lookup", ["m: Dict<text, Option<i32>>"], "", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].leaf).to_equal("i32")
+
+        it "has NO pure-math exemption (abs-style fn still flagged)":
+            val vs = check_fn_signature("abs", ["x: f64"], "f64", false)
+            expect(vs.len()).to_equal(2)
+
+        it "skips the receiver but not other params":
+            val vs = check_fn_signature("scale", ["self", "factor: f32"], "", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].leaf).to_equal("f32")
+
+        it "recurses arrays, tuples and unions":
+            expect(semantic_api_primitive_leaves("[Option<u16>]").len()).to_equal(1)
+            expect(semantic_api_primitive_leaves("(Name, i8)").len()).to_equal(1)
+            expect(semantic_api_primitive_leaves("Name | u64").len()).to_equal(1)
+            expect(semantic_api_primitive_leaves("Result<Ok, [(text, Option<i16>)]>").len()).to_equal(1)
+
+        it "leaves domain-typed signatures clean":
+            val vs = check_fn_signature("send", ["msg: Message", "to: Address"], "DeliveryReceipt", false)
+            expect(vs.len()).to_equal(0)
+
+    context "newunit awareness":
+        it "treats a registered newunit as clean":
+            newunit_register("RetryCount", "retries", TYPE_I64)
+            expect(semantic_api_is_newunit("RetryCount")).to_equal(true)
+            val vs = check_fn_signature("with_retries", ["n: RetryCount"], "RetryCount", false)
+            expect(vs.len()).to_equal(0)
+
+        it "treats Option<newunit> as clean":
+            newunit_register("RetryCount", "retries", TYPE_I64)
+            expect(semantic_api_primitive_leaves("Option<RetryCount>").len()).to_equal(0)
+
+    context "struct/class fields (MC-API-002)":
+        it "flags a bare u8 struct field":
+            val vs = check_field_texts("Packet", ["flags: u8", "payload: Bytes"])
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].code).to_equal("MC-API-002")
+            expect(vs[0].leaf).to_equal("u8")
+            expect(vs[0].member).to_equal("field 'flags'")
+
+    context "extern fns (MC-API-003, informational — not skipped)":
+        it "reports extern signatures under the distinct code":
+            val vs = check_fn_signature("rt_read", ["fd: i64", "len: i64"], "i64", true)
+            expect(vs.len()).to_equal(3)
+            expect(vs[0].code).to_equal("MC-API-003")
+            expect(vs[2].code).to_equal("MC-API-003")
+
+        it "parses an 'extern fn' declaration line":
+            val vs = check_extern_signature_text("extern fn rt_env_get_i64(key: text, default_value: i64) -> i64")
+            expect(vs.len()).to_equal(2)
+            expect(vs[0].code).to_equal("MC-API-003")
+            expect(vs[0].leaf).to_equal("i64")
+
+    context "alias resolution hook":
+        it "is fail-open until alias metadata exists (documented gap)":
+            # No alias registry at the 35.semantics layer: hook returns ""
+            # and an alias-of-primitive is NOT flagged (fail-open, loud).
+            expect(semantic_api_resolve_alias("Fd")).to_equal("")
+            expect(semantic_api_primitive_leaves("Fd").len()).to_equal(0)
+
+    context "module-items entry point":
+        it "walks Function and Struct nodes and emits distinct codes":
+            val fd = FunctionDef(
+                name: "resize",
+                generic_params: [],
+                params: ["self", "w: i64", "h: Height"],
+                return_type: "bool",
+                body: [],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {}
+            )
+            val sd = StructDef(
+                name: "Pixel",
+                generic_params: [],
+                fields: ["r: u8", "color: Color"],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {}
+            )
+            val items = [Node.Function(fd), Node.Struct(sd)]
+            val vs = check_module_items(items)
+            expect(vs.len()).to_equal(3)
+            expect(vs[0].code).to_equal("MC-API-001")
+            expect(vs[0].leaf).to_equal("i64")
+            expect(vs[1].code).to_equal("MC-API-001")
+            expect(vs[1].member).to_equal("return")
+            expect(vs[2].code).to_equal("MC-API-002")
+            expect(vs[2].leaf).to_equal("u8")
+
+        it "emits MC-API-003 for extern lines carried as Other nodes":
+            val items = [Node.Other("extern fn rt_now() -> i64")]
+            val vs = check_module_items(items)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].code).to_equal("MC-API-003")
+
+    context "enum payloads (lane A4E, 2026-07-29 — confirmed structural blocker)":
+        it "emits nothing for an enum, even one whose variant text encodes a primitive payload":
+            # Ground truth (doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md):
+            # the core parser discards variant payload types at the token
+            # level (parser_decls_types.spl:140, enum_module_body.spl:150/155)
+            # and the one production flat-AST bridge that builds real
+            # Enum/Variant nodes from parsed source hardcodes an empty
+            # payload for every variant (_FlatAstBridge/module_assembly.spl:390).
+            # There is no AST structure to walk, so check_module_items must
+            # stay silent on Enum nodes -- this pins that honest behavior
+            # rather than leaving it an unverified assumption.
+            val ed = EnumDef(
+                name: "BadEnum",
+                generic_params: [],
+                variants: ["Bad(payload: i64)", "Clean"],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {}
+            )
+            val vs = check_module_items([Node.Enum(ed)])
+            expect(vs.len()).to_equal(0)

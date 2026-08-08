@@ -1,0 +1,80 @@
+"""
+# Claude Full Branch Command
+
+Mirrors `tmp/claude/claude-code-main/src/commands/branch` for branch command
+metadata and the pure branch transcript behaviors.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.commands.branch.index.{branchCommand, branchIndexSourceLinesModeled}
+use app.llm_caret.claude_full.commands.branch.branch.{BranchMessage, BranchReplacement, branchSourceLinesModeled, callBranch, createFork, deriveFirstPrompt, effectiveBranchTitle, getUniqueForkName}
+
+describe "Claude full branch command":
+    it "matches command metadata and fork alias feature gate":
+        step("Load command metadata with fork subagent disabled")
+        val command = branchCommand(false)
+
+        expect(command.typeName).to_equal("local-jsx")
+        expect(command.name).to_equal("branch")
+        expect(command.aliases.len()).to_equal(1)
+        expect(command.aliases[0]).to_equal("fork")
+        expect(command.description).to_equal("Create a branch of the current conversation at this point")
+        expect(command.argumentHint).to_equal("[name]")
+        expect(command.loadPath).to_equal("./branch.js")
+
+        step("Load command metadata with fork subagent enabled")
+        val gated = branchCommand(true)
+        expect(gated.aliases.len()).to_equal(0)
+        expect(branchIndexSourceLinesModeled()).to_equal(14)
+
+    it "derives first prompt and collision-safe branch titles":
+        step("Collapse multiline user prompts to Claude's single-line title base")
+        expect(deriveFirstPrompt("  fix\n\nthis\tbug  now  ")).to_equal("fix this bug now")
+        expect(deriveFirstPrompt("")).to_equal("Branched conversation")
+
+        step("Apply branch suffixes and skip occupied branch names")
+        val existing = ["fix this bug now (Branch)", "fix this bug now (Branch 2)"]
+        expect(getUniqueForkName("fix this bug now", existing)).to_equal("fix this bug now (Branch 3)")
+
+        val messages = [BranchMessage.new("u1", "user", "hello\nworld", false)]
+        expect(effectiveBranchTitle("", messages, [])).to_equal("hello world (Branch)")
+        expect(effectiveBranchTitle("  named branch  ", messages, [])).to_equal("named branch (Branch)")
+
+    it "forks main transcript messages and preserves replacement records":
+        step("Build a fork from mixed main and sidechain transcript messages")
+        val messages = [
+            BranchMessage.new("u1", "user", "hello", false),
+            BranchMessage.new("s1", "assistant", "side", true),
+            BranchMessage.new("p1", "progress", "tick", false),
+            BranchMessage.new("a1", "assistant", "done", false),
+        ]
+        val replacements = [
+            BranchReplacement.new("orig", "tool-result-preview"),
+            BranchReplacement.new("other", "ignore"),
+        ]
+        val fork = createFork("orig", "fork-id", "/tmp/fork.jsonl", "named", messages, replacements)
+
+        expect(fork.sessionId).to_equal("fork-id")
+        expect(fork.forkPath).to_equal("/tmp/fork.jsonl")
+        expect(fork.serializedMessages.len()).to_equal(3)
+        expect(fork.entries.len()).to_equal(3)
+        expect(fork.entries[0].parentUuid).to_equal("")
+        expect(fork.entries[1].parentUuid).to_equal("u1")
+        expect(fork.entries[2].parentUuid).to_equal("u1")
+        expect(fork.entries[2].forkedFromSessionId).to_equal("orig")
+        expect(fork.contentReplacementCount).to_equal(1)
+        expect(branchSourceLinesModeled()).to_equal(296)
+
+    it "returns resume and fallback completion messages":
+        step("Resume into the fork when a resume callback is available")
+        val fork = createFork("orig", "fork-id", "/tmp/fork.jsonl", "named", [BranchMessage.new("u1", "user", "hello", false)], [])
+        val resumed = callBranch("orig", fork, "named", true)
+        expect(resumed.ok).to_equal(true)
+        expect(resumed.resumedSessionId).to_equal("fork-id")
+        expect(resumed.resumeMode).to_equal("fork")
+        expect(resumed.doneMessage).to_contain("Branched conversation \"named\". You are now in the branch.")
+        expect(resumed.doneMessage).to_contain("claude -r orig")
+
+        step("Fall back to slash resume when no resume callback exists")
+        val fallback = callBranch("orig", fork, "", false)
+        expect(fallback.doneMessage).to_equal("Branched conversation. Resume with: /resume fork-id")

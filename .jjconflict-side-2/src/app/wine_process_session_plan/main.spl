@@ -1,0 +1,52 @@
+use common.wine_process_session.{
+    wine_process_execute_controlled_hello,
+    wine_process_launch_handoff,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+use app.io.cli_ops (cli_get_args)
+use std.cli.log_modes.{parse_log_options, log_options_help}
+use std.log.{error}
+
+extern fn stdout_write(data: text)
+
+fn print_help():
+    print "Usage: simple wine-process-session-plan [options]"
+    print ""
+    print "Run the Wine process session planning fixture."
+    print ""
+    print "Options:"
+    for line in log_options_help():
+        print "  {line}"
+    print "  -h, --help   Show this help"
+
+fn _hello_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified " +
+        "pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn main() -> i64:
+    val args = cli_get_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        error("wine-process-session-plan", log_opts.error)
+        return 1
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+    val request = wine_process_session_request_new("hello.exe", [], "C:\\")
+    val plan = wine_process_session_plan(request, _hello_gates())
+    val handoff = wine_process_launch_handoff(plan, true)
+    if handoff.ok:
+        val execution = wine_process_execute_controlled_hello(plan)
+        if not execution.ok:
+            print "wine-process-session-plan failed: {execution.error}"
+            return 1
+        stdout_write("command={handoff.command}\n")
+        stdout_write("readiness={handoff.substrate_readiness}\n")
+        stdout_write("handoff={handoff.status}\n")
+        stdout_write("execution={execution.status}\n")
+        stdout_write("stdout={execution.stdout}")
+        return 0
+    print "wine-process-session-plan failed: {handoff.error}"
+    1

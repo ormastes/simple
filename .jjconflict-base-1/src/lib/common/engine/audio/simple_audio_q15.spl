@@ -1,0 +1,83 @@
+# codex-impl
+# Deterministic fixed-point audio work shared by the CPU oracle and GPU host.
+
+val SIMPLE_AUDIO_Q15_SCALE: i64 = 32768
+val SIMPLE_AUDIO_Q15_MAX_SAMPLES: i64 = 65536
+val SIMPLE_AUDIO_Q15_MAX_KERNEL: i64 = 4096
+
+fn simple_audio_q15_at(values: [u32], index: i64) -> i64:
+    values[index].to_i64()
+
+fn simple_audio_q15_push(values: [u32], value: u32) -> bool:
+    values.push(value)
+    true
+
+fn simple_audio_q15_decode(value: i64) -> i64:
+    val raw = value
+    if raw > 2147483647:
+        raw - 4294967296
+    else:
+        raw
+
+fn simple_audio_q15_encode(value: i64) -> u32:
+    var clipped = value
+    if clipped > 2147483647:
+        clipped = 2147483647
+    elif clipped < -2147483648:
+        clipped = -2147483648
+    if clipped < 0:
+        (clipped + 4294967296) as u32
+    else:
+        clipped as u32
+
+fn simple_audio_q15_work_status(input: [u32], kernel: [u32]) -> text:
+    if input.len() == 0 or kernel.len() == 0:
+        return "empty-audio-work"
+    if input.len().to_i64() > SIMPLE_AUDIO_Q15_MAX_SAMPLES:
+        return "audio-input-too-large"
+    if kernel.len().to_i64() > SIMPLE_AUDIO_Q15_MAX_KERNEL:
+        return "audio-kernel-too-large"
+    if input.len().to_i64() + kernel.len().to_i64() - 1 > SIMPLE_AUDIO_Q15_MAX_SAMPLES:
+        return "audio-output-too-large"
+    "ok"
+
+fn simple_audio_q15_convolve_reference(input: [u32], kernel: [u32]) -> [u32]:
+    if simple_audio_q15_work_status(input, kernel) != "ok":
+        return []
+    var output: [u32] = []
+    var n = 0
+    val output_len = input.len() + kernel.len() - 1
+    while n < output_len:
+        var accumulator = 0
+        var k = 0
+        while k < kernel.len():
+            val input_index = n - k
+            if input_index >= 0 and input_index < input.len():
+                accumulator = accumulator + simple_audio_q15_decode(simple_audio_q15_at(input, input_index)) * simple_audio_q15_decode(simple_audio_q15_at(kernel, k))
+            k = k + 1
+        simple_audio_q15_push(output, simple_audio_q15_encode(accumulator / SIMPLE_AUDIO_Q15_SCALE))
+        n = n + 1
+    output
+
+fn simple_audio_q15_checksum(values: [u32]) -> i64:
+    var checksum = 1469598103
+    var i = 0
+    while i < values.len():
+        checksum = ((checksum * 16777619) + simple_audio_q15_at(values, i)) % 2147483647
+        i = i + 1
+    if checksum == 0: 1 else: checksum
+
+fn simple_audio_q15_max_error_millionths(reference: [u32], candidate: [u32]) -> i64:
+    if reference.len() != candidate.len():
+        return 1000000
+    var maximum = 0
+    var i = 0
+    while i < reference.len():
+        var error = simple_audio_q15_decode(simple_audio_q15_at(reference, i)) - simple_audio_q15_decode(simple_audio_q15_at(candidate, i))
+        if error < 0:
+            error = 0 - error
+        val normalized = (error * 1000000) / SIMPLE_AUDIO_Q15_SCALE
+        if normalized > maximum:
+            maximum = normalized
+        i = i + 1
+    maximum

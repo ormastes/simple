@@ -1,0 +1,77 @@
+"""Live launch/readback of PTX emitted by the Simple CUDA compiler.
+
+@tag: integration, rendering, cuda, hardware, strict
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+use compiler.backend.backend.cuda_backend.{CudaBackend}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_memcpy_dtoh, CUDA_SUCCESS}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+fn write_fill_args(values: i64, args: i64, output: i64, count: i64):
+    rt_ptr_write_i64(values, 0, output)
+    rt_ptr_write_i64(values, 8, count)
+    rt_ptr_write_i64(args, 0, values)
+    rt_ptr_write_i64(args, 8, values + 8)
+
+describe "compiler-produced CUDA PTX live qualification":
+    it "launches the compiled fill kernel and reads exact device values":
+        val source = "@gpu(\"cuda\")\n" +
+            "fn fill(mut output: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        output[i] = 42u32\n"
+        val parsed = parse_full_frontend(source, "cuda_compiler_ptx_live.spl", "cuda_compiler_ptx_live", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cuda_compiler_ptx_live.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val compiled = CudaBackend.create((8, 6)).compile(mir)
+        expect(compiled.is_ok()).to_equal(true)
+
+        var session = CudaSession.create()
+        val init_status = session.init()
+        expect(init_status).to_equal(CUDA_SUCCESS)
+        if init_status == CUDA_SUCCESS:
+            val ptx = compiled.unwrap().ptx
+            expect(ptx).to_contain(".visible .entry fill")
+            expect(session.load_module(ptx)).to_be_greater_than(0)
+            val count: i64 = 8
+            val bytes = count * 4
+            val host_output = rt_alloc(bytes)
+            val values = rt_alloc(16)
+            val args = rt_alloc(16)
+            val output = session.alloc(bytes)
+            expect(host_output).to_be_greater_than(0)
+            expect(values).to_be_greater_than(0)
+            expect(args).to_be_greater_than(0)
+            expect(output).to_be_greater_than(0)
+            if host_output > 0 and values > 0 and args > 0 and output > 0:
+                write_fill_args(values, args, output, count)
+                expect(session.launch_kernel_args("fill", 1, 1, 1, 32, 1, 1, args)).to_equal(CUDA_SUCCESS)
+                expect(session.sync()).to_equal(CUDA_SUCCESS)
+                expect(cuda_memcpy_dtoh(host_output, output, bytes)).to_equal(CUDA_SUCCESS)
+                var index: i64 = 0
+                while index < count:
+                    expect(rt_ptr_read_i32(host_output, index * 4) as i64).to_equal(42)
+                    index = index + 1
+            if output > 0:
+                session.free(output)
+            if host_output > 0:
+                rt_free(host_output)
+            if values > 0:
+                rt_free(values)
+            if args > 0:
+                rt_free(args)
+            session.shutdown()

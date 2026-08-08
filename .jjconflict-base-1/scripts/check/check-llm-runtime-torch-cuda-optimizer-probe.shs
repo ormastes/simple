@@ -1,0 +1,729 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_torch_cuda_optimizer_probe}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_torch_cuda_optimizer_probe_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+OUT_LOG="$BUILD_DIR/probe.log"
+LIBTORCH_PROBE_LOG="$BUILD_DIR/system_libtorch_probe.log"
+SURFACE_MANIFEST="$BUILD_DIR/torch_cuda_optimizer_surface_manifest.tsv"
+WRAPPER_PATH="scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs"
+PROBE="src/app/test/torch_cuda_optimizer_probe.spl"
+PROBE_COMMAND="$SIMPLE_BIN run $PROBE --mode=interpreter --clean"
+STRICT=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict)
+            STRICT=1
+            ;;
+        *)
+            echo "unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$OUT_LOG" "$REPORT_PATH" "$SURFACE_MANIFEST" "$LIBTORCH_PROBE_LOG"
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+text_sha256() {
+    text="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$text" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$text" | shasum -a 256 | awk '{print $1}'
+    else
+        printf '%s\n' "unavailable"
+    fi
+}
+
+wrapper_sha256="$(artifact_sha256 "$WRAPPER_PATH")"
+probe_sha256="$(artifact_sha256 "$PROBE")"
+probe_command_sha256="$(text_sha256 "$PROBE_COMMAND")"
+
+PYTHON_TORCH_ENV="$BUILD_DIR/python_torch.env"
+python3 - "$PYTHON_TORCH_ENV" <<'PY'
+import sys
+
+out = sys.argv[1]
+values = {
+    "python_torch_module_status": "missing",
+    "python_torch_version": "missing",
+    "python_torch_file": "missing",
+    "python_torch_package_dir": "missing",
+    "python_torch_library_dir": "missing",
+    "python_torch_cmake_prefix_path": "missing",
+    "python_torch_library_paths": "missing",
+    "python_torch_library_count": "0",
+    "python_torch_libtorch_bundle_status": "missing",
+    "python_torch_libtorch_status": "missing",
+    "python_torch_libtorch_cuda_status": "missing",
+    "python_torch_libc10_status": "missing",
+    "python_torch_libc10_cuda_status": "missing",
+    "python_torch_cuda_library_bundle_status": "missing",
+    "python_torch_cuda_available": "false",
+    "python_torch_cuda_device_count": "0",
+    "python_torch_error": "none",
+}
+try:
+    import torch
+    from pathlib import Path
+
+    values["python_torch_module_status"] = "available"
+    values["python_torch_version"] = str(torch.__version__)
+    torch_file = Path(getattr(torch, "__file__", "") or "")
+    if str(torch_file):
+        values["python_torch_file"] = str(torch_file)
+        values["python_torch_package_dir"] = str(torch_file.parent)
+        lib_dir = torch_file.parent / "lib"
+        values["python_torch_library_dir"] = str(lib_dir)
+        libs = sorted(str(path) for pattern in ("libtorch*.so*", "libc10*.so*") for path in lib_dir.glob(pattern))
+        if libs:
+            values["python_torch_library_paths"] = ",".join(libs)
+            values["python_torch_library_count"] = str(len(libs))
+            names = {Path(path).name for path in libs}
+            values["python_torch_libtorch_status"] = "ready" if "libtorch.so" in names else "missing"
+            values["python_torch_libtorch_cuda_status"] = "ready" if "libtorch_cuda.so" in names else "missing"
+            values["python_torch_libc10_status"] = "ready" if "libc10.so" in names else "missing"
+            values["python_torch_libc10_cuda_status"] = "ready" if "libc10_cuda.so" in names else "missing"
+            if (values["python_torch_libtorch_status"] == "ready"
+                    and values["python_torch_libc10_status"] == "ready"):
+                values["python_torch_libtorch_bundle_status"] = "ready"
+            if (values["python_torch_libtorch_status"] == "ready"
+                    and values["python_torch_libtorch_cuda_status"] == "ready"
+                    and values["python_torch_libc10_status"] == "ready"
+                    and values["python_torch_libc10_cuda_status"] == "ready"):
+                values["python_torch_cuda_library_bundle_status"] = "ready"
+    cmake_prefix_path = getattr(getattr(torch, "utils", None), "cmake_prefix_path", "")
+    if cmake_prefix_path:
+        values["python_torch_cmake_prefix_path"] = str(cmake_prefix_path)
+    values["python_torch_cuda_available"] = str(torch.cuda.is_available()).lower()
+    values["python_torch_cuda_device_count"] = str(torch.cuda.device_count())
+except Exception as exc:
+    values["python_torch_error"] = f"{type(exc).__name__}:{exc}"
+
+with open(out, "w", encoding="utf-8") as handle:
+    for key, value in values.items():
+        handle.write(f"{key}={value}\n")
+PY
+python_torch_module_status="$(sed -n 's/^python_torch_module_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_version="$(sed -n 's/^python_torch_version=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_file="$(sed -n 's/^python_torch_file=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_package_dir="$(sed -n 's/^python_torch_package_dir=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_library_dir="$(sed -n 's/^python_torch_library_dir=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_cmake_prefix_path="$(sed -n 's/^python_torch_cmake_prefix_path=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_library_paths="$(sed -n 's/^python_torch_library_paths=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_library_count="$(sed -n 's/^python_torch_library_count=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libtorch_bundle_status="$(sed -n 's/^python_torch_libtorch_bundle_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libtorch_status="$(sed -n 's/^python_torch_libtorch_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libtorch_cuda_status="$(sed -n 's/^python_torch_libtorch_cuda_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libc10_status="$(sed -n 's/^python_torch_libc10_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_libc10_cuda_status="$(sed -n 's/^python_torch_libc10_cuda_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_cuda_library_bundle_status="$(sed -n 's/^python_torch_cuda_library_bundle_status=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_cuda_available="$(sed -n 's/^python_torch_cuda_available=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_cuda_device_count="$(sed -n 's/^python_torch_cuda_device_count=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+python_torch_error="$(sed -n 's/^python_torch_error=//p' "$PYTHON_TORCH_ENV" | tail -n 1)"
+
+auto_libtorch_env_source="not_used"
+auto_ld_library_path_source="not_used"
+auto_simple_sffi_path_source="not_used"
+auto_simple_runtime_path_source="not_used"
+default_torch_sffi_bridge_dir="build/llm_runtime_torch_sffi_bridge"
+default_torch_sffi_bridge_path="$default_torch_sffi_bridge_dir/libspl_torch.so"
+if [ -z "${LIBTORCH:-}" ] &&
+   [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] &&
+   [ -n "${python_torch_library_dir:-}" ] &&
+   [ "${python_torch_library_dir:-missing}" != "missing" ] &&
+   [ -d "$python_torch_library_dir" ]; then
+    LIBTORCH="$python_torch_library_dir"
+    export LIBTORCH
+    auto_libtorch_env_source="python_torch_library_dir"
+fi
+if [ -n "${LIBTORCH:-}" ] && [ -d "${LIBTORCH:-}" ]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$LIBTORCH:"*)
+            auto_ld_library_path_source="already_contains_libtorch"
+            ;;
+        *)
+            if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+                LD_LIBRARY_PATH="$LIBTORCH:$LD_LIBRARY_PATH"
+            else
+                LD_LIBRARY_PATH="$LIBTORCH"
+            fi
+            export LD_LIBRARY_PATH
+            auto_ld_library_path_source="libtorch_env"
+            ;;
+    esac
+fi
+if [ -z "${SIMPLE_SFFI_PATH:-}" ] && [ -f "$default_torch_sffi_bridge_path" ]; then
+    SIMPLE_SFFI_PATH="$default_torch_sffi_bridge_dir"
+    export SIMPLE_SFFI_PATH
+    auto_simple_sffi_path_source="default_bridge"
+fi
+if [ -z "${SIMPLE_RUNTIME_PATH:-}" ] && [ -f "$default_torch_sffi_bridge_path" ]; then
+    SIMPLE_RUNTIME_PATH="$default_torch_sffi_bridge_path"
+    export SIMPLE_RUNTIME_PATH
+    auto_simple_runtime_path_source="default_bridge"
+fi
+
+python_torch_env_size="0"
+python_torch_env_sha256="missing"
+if [ -s "$PYTHON_TORCH_ENV" ]; then
+    python_torch_env_size="$(wc -c <"$PYTHON_TORCH_ENV" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        python_torch_env_sha256="$(sha256sum "$PYTHON_TORCH_ENV" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        python_torch_env_sha256="$(shasum -a 256 "$PYTHON_TORCH_ENV" | awk '{print $1}')"
+    fi
+fi
+system_libtorch_status="missing"
+if command -v ldconfig >/dev/null 2>&1; then
+    if ldconfig -p 2>/dev/null | grep -E 'libtorch|libc10' >"$LIBTORCH_PROBE_LOG" 2>&1; then
+        system_libtorch_status="visible"
+    else
+        printf '%s\n' "system_libtorch_probe_status=missing" >"$LIBTORCH_PROBE_LOG"
+    fi
+else
+    printf '%s\n' "system_libtorch_probe_status=ldconfig_missing" >"$LIBTORCH_PROBE_LOG"
+fi
+system_libtorch_probe_log_size="0"
+system_libtorch_probe_log_sha256="missing"
+if [ -s "$LIBTORCH_PROBE_LOG" ]; then
+    system_libtorch_probe_log_size="$(wc -c <"$LIBTORCH_PROBE_LOG" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        system_libtorch_probe_log_sha256="$(sha256sum "$LIBTORCH_PROBE_LOG" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        system_libtorch_probe_log_sha256="$(shasum -a 256 "$LIBTORCH_PROBE_LOG" | awk '{print $1}')"
+    fi
+fi
+libtorch_env_value="${LIBTORCH:-}"
+scilib_torch_root_value="${SCILIB_TORCH_ROOT:-}"
+simple_sffi_path_value="${SIMPLE_SFFI_PATH:-}"
+ld_library_path_value="${LD_LIBRARY_PATH:-}"
+libtorch_env_status="missing"
+scilib_torch_root_status="missing"
+simple_sffi_path_status="missing"
+simple_sffi_libtorch_bridge_status="missing"
+ld_library_path_libtorch_status="missing"
+simple_runtime_torch_link_status="not_evaluated"
+if [ -n "$libtorch_env_value" ]; then
+    libtorch_env_status="set"
+fi
+if [ -n "$scilib_torch_root_value" ]; then
+    if [ -d "$scilib_torch_root_value" ]; then
+        scilib_torch_root_status="set_dir"
+    else
+        scilib_torch_root_status="set_missing_dir"
+    fi
+fi
+if [ -n "$simple_sffi_path_value" ]; then
+    simple_sffi_path_status="set"
+    old_ifs="$IFS"
+    IFS=:
+    for simple_sffi_dir in $simple_sffi_path_value; do
+        if [ -n "$simple_sffi_dir" ] && [ -f "$simple_sffi_dir/libspl_torch.so" ]; then
+            simple_sffi_libtorch_bridge_status="visible"
+            break
+        fi
+    done
+    IFS="$old_ifs"
+fi
+if [ -n "${python_torch_library_dir:-}" ] && [ "${python_torch_library_dir:-missing}" != "missing" ]; then
+    case ":$ld_library_path_value:" in
+        *":$python_torch_library_dir:"*)
+            ld_library_path_libtorch_status="contains_python_torch_library_dir"
+            ;;
+        *)
+            ld_library_path_libtorch_status="missing_python_torch_library_dir"
+            ;;
+    esac
+fi
+
+for path in \
+    "$PROBE" \
+    "src/lib/common/torch/dyn_sffi_ops.spl" \
+    "src/lib/common/torch/dyn_sffi_tensor_ops.spl" \
+    "src/lib/gc_async_mut/torch/backend.spl" \
+    "src/lib/gc_async_mut/torch/optim.spl" \
+    "src/lib/gc_async_mut/torch/torch_training.spl" \
+    "src/lib/nogc_sync_mut/torch/backend.spl" \
+    "src/lib/nogc_sync_mut/torch/optim.spl" \
+    "src/lib/nogc_sync_mut/torch/torch_training.spl" \
+    "src/compiler_rust/runtime/src/value/torch/dynamic_runtime.rs" \
+    "src/compiler_rust/compiler/src/interpreter_extern/torch.rs" \
+    "test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl" \
+    "test/01_unit/lib/common/torch/dyn_sffi_tensor_ops_status_spec.spl" \
+    "test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl" \
+    "test/01_unit/lib/extended/torch_optim_unit_spec.spl" \
+    "test/01_unit/lib/extended/torch_optim_integration_spec.spl" \
+    "doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md" \
+    "doc/04_architecture/app/tools/llm_runtime_vllm_torch_interface.md" \
+    "doc/05_design/app/tools/llm_runtime_vllm_torch_interface.md" \
+    "doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md" \
+    "scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs" \
+    "scripts/check/check-llm-runtime-torch-setup-contract.shs"
+do
+    if [ -r "$path" ]; then
+        file_size="$(wc -c <"$path" | tr -d ' ')"
+        if command -v sha256sum >/dev/null 2>&1; then
+            file_sha256="$(sha256sum "$path" | awk '{print $1}')"
+        elif command -v shasum >/dev/null 2>&1; then
+            file_sha256="$(shasum -a 256 "$path" | awk '{print $1}')"
+        else
+            file_sha256="missing"
+        fi
+        printf '%s\t%s\t%s\n' "$path" "$file_size" "$file_sha256" >>"$SURFACE_MANIFEST"
+    fi
+done
+
+surface_manifest_count="0"
+surface_manifest_size="0"
+surface_manifest_sha256="missing"
+if [ -s "$SURFACE_MANIFEST" ]; then
+    surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+    surface_manifest_size="$(wc -c <"$SURFACE_MANIFEST" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        surface_manifest_sha256="$(sha256sum "$SURFACE_MANIFEST" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        surface_manifest_sha256="$(shasum -a 256 "$SURFACE_MANIFEST" | awk '{print $1}')"
+    fi
+fi
+
+status="fail"
+reason="probe_failed"
+exit_code=0
+if $PROBE_COMMAND >"$OUT_LOG" 2>&1; then
+    :
+else
+    exit_code=$?
+fi
+
+log_size="0"
+log_sha256="missing"
+status_line_count="0"
+required_gates_line_count="0"
+torch_available_line_count="0"
+cuda_available_line_count="0"
+parameter_is_cuda_line_count="0"
+grad_handle_line_count="0"
+optimizer_step_line_count="0"
+before_sum_line_count="0"
+after_sum_line_count="0"
+if [ -s "$OUT_LOG" ]; then
+    log_size="$(wc -c <"$OUT_LOG" | tr -d ' ')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        log_sha256="$(sha256sum "$OUT_LOG" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        log_sha256="$(shasum -a 256 "$OUT_LOG" | awk '{print $1}')"
+    fi
+    status_line_count="$(grep -c '^torch_cuda_optimizer_probe_status=' "$OUT_LOG" 2>/dev/null || true)"
+    required_gates_line_count="$(grep -c '^torch_cuda_optimizer_probe_required_gates=' "$OUT_LOG" 2>/dev/null || true)"
+    torch_available_line_count="$(grep -c '^torch_cuda_optimizer_probe_torch_available=' "$OUT_LOG" 2>/dev/null || true)"
+    cuda_available_line_count="$(grep -c '^torch_cuda_optimizer_probe_cuda_available=' "$OUT_LOG" 2>/dev/null || true)"
+    parameter_is_cuda_line_count="$(grep -c '^torch_cuda_optimizer_probe_parameter_is_cuda=' "$OUT_LOG" 2>/dev/null || true)"
+    grad_handle_line_count="$(grep -c '^torch_cuda_optimizer_probe_grad_handle=' "$OUT_LOG" 2>/dev/null || true)"
+    optimizer_step_line_count="$(grep -c '^torch_cuda_optimizer_probe_optimizer_step_attempted=' "$OUT_LOG" 2>/dev/null || true)"
+    before_sum_line_count="$(grep -c '^torch_cuda_optimizer_probe_before_sum=' "$OUT_LOG" 2>/dev/null || true)"
+    after_sum_line_count="$(grep -c '^torch_cuda_optimizer_probe_after_sum=' "$OUT_LOG" 2>/dev/null || true)"
+fi
+
+grep '^torch_cuda_optimizer_probe_' "$OUT_LOG" >"$OUT_ENV" 2>/dev/null || true
+status="$(sed -n 's/^torch_cuda_optimizer_probe_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^torch_cuda_optimizer_probe_reason=//p' "$OUT_ENV" | tail -n 1)"
+required_gates="$(sed -n 's/^torch_cuda_optimizer_probe_required_gates=//p' "$OUT_ENV" | tail -n 1)"
+blocked_gate="$(sed -n 's/^torch_cuda_optimizer_probe_blocked_gate=//p' "$OUT_ENV" | tail -n 1)"
+torch_available="$(sed -n 's/^torch_cuda_optimizer_probe_torch_available=//p' "$OUT_ENV" | tail -n 1)"
+cuda_available="$(sed -n 's/^torch_cuda_optimizer_probe_cuda_available=//p' "$OUT_ENV" | tail -n 1)"
+parameter_is_cuda="$(sed -n 's/^torch_cuda_optimizer_probe_parameter_is_cuda=//p' "$OUT_ENV" | tail -n 1)"
+dyn_tensor_status="$(sed -n 's/^torch_cuda_optimizer_probe_dyn_tensor_status=//p' "$OUT_ENV" | tail -n 1)"
+dyn_tensor_reason="$(sed -n 's/^torch_cuda_optimizer_probe_dyn_tensor_reason=//p' "$OUT_ENV" | tail -n 1)"
+dyn_tensor_handle="$(sed -n 's/^torch_cuda_optimizer_probe_dyn_tensor_handle=//p' "$OUT_ENV" | tail -n 1)"
+grad_handle="$(sed -n 's/^torch_cuda_optimizer_probe_grad_handle=//p' "$OUT_ENV" | tail -n 1)"
+optimizer_step_attempted="$(sed -n 's/^torch_cuda_optimizer_probe_optimizer_step_attempted=//p' "$OUT_ENV" | tail -n 1)"
+before_sum="$(sed -n 's/^torch_cuda_optimizer_probe_before_sum=//p' "$OUT_ENV" | tail -n 1)"
+after_sum="$(sed -n 's/^torch_cuda_optimizer_probe_after_sum=//p' "$OUT_ENV" | tail -n 1)"
+
+if [ -z "$status" ]; then
+    status="fail"
+    reason="missing_probe_status"
+fi
+if { [ "$reason" = "missing_probe_status" ] || { [ "$status" = "running" ] && [ -z "$reason" ]; }; } && [ -s "$OUT_LOG" ]; then
+    unknown_torch_extern="$(sed -n 's/.*unknown extern function: \(rt_torch_[A-Za-z0-9_]*\).*/\1/p' "$OUT_LOG" | tail -n 1)"
+    if [ -n "$unknown_torch_extern" ]; then
+        status="fail"
+        reason="unknown_torch_extern:$unknown_torch_extern"
+        blocked_gate="torch_extern_surface"
+    elif grep -q 'Rust cannot catch foreign exceptions' "$OUT_LOG" 2>/dev/null; then
+        status="fail"
+        reason="optimizer_foreign_exception_abort"
+        blocked_gate="optimizer_step_decreases_parameter_sum"
+    elif grep -q 'Aborted (core dumped)' "$OUT_LOG" 2>/dev/null; then
+        status="fail"
+        reason="optimizer_probe_aborted"
+        blocked_gate="optimizer_step_decreases_parameter_sum"
+    fi
+fi
+if [ -z "$reason" ]; then
+    reason="not_reported"
+fi
+if [ -z "$required_gates" ]; then
+    required_gates="libtorch,cuda,parameter_cuda,autograd_gradient,optimizer_step_decreases_parameter_sum,probe_log_integrity"
+fi
+if [ -z "$blocked_gate" ]; then
+    case "$status" in
+        pass) blocked_gate="none" ;;
+        *) blocked_gate="$reason" ;;
+    esac
+fi
+blocked_gates="$blocked_gate"
+primary_blocked_gate="$blocked_gate"
+if [ -z "$blocked_gates" ]; then
+    blocked_gates="none"
+fi
+if [ "$status" = "pass" ]; then
+    blocked_gates="none"
+    primary_blocked_gate="none"
+fi
+if [ -z "$torch_available" ]; then
+    torch_available="missing"
+fi
+if [ -z "$cuda_available" ]; then
+    cuda_available="missing"
+fi
+if [ -z "$parameter_is_cuda" ]; then
+    parameter_is_cuda="missing"
+fi
+if [ -z "$dyn_tensor_status" ]; then
+    dyn_tensor_status="missing"
+fi
+if [ -z "$dyn_tensor_reason" ]; then
+    dyn_tensor_reason="missing"
+fi
+if [ -z "$dyn_tensor_handle" ]; then
+    dyn_tensor_handle="missing"
+fi
+if [ -z "$grad_handle" ]; then
+    grad_handle="missing"
+fi
+if [ -z "$optimizer_step_attempted" ]; then
+    optimizer_step_attempted="false"
+fi
+if [ -z "$before_sum" ]; then
+    before_sum="missing"
+fi
+if [ -z "$after_sum" ]; then
+    after_sum="missing"
+fi
+
+pass_integrity_status="not_applicable"
+pass_integrity_reason="not_applicable"
+sum_decreased_status="not_collected"
+if [ "$status" = "pass" ]; then
+    pass_integrity_status="pass"
+    pass_integrity_reason="all_required_pass_fields_present"
+    if [ "$exit_code" != "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="wrapper_exit_nonzero"
+    elif [ "$log_size" = "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="probe_log_empty"
+    elif [ "$status_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="status_record_count_not_one"
+    elif [ "$required_gates_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="required_gates_record_count_not_one"
+    elif [ "$torch_available_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="torch_available_record_count_not_one"
+    elif [ "$cuda_available_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="cuda_available_record_count_not_one"
+    elif [ "$parameter_is_cuda_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_is_cuda_record_count_not_one"
+    elif [ "$grad_handle_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="grad_handle_record_count_not_one"
+    elif [ "$optimizer_step_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="optimizer_step_record_count_not_one"
+    elif [ "$before_sum_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="before_sum_record_count_not_one"
+    elif [ "$after_sum_line_count" != "1" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="after_sum_record_count_not_one"
+    elif [ "$torch_available" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="torch_available_not_true"
+    elif [ "$cuda_available" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="cuda_available_not_true"
+    elif [ "$parameter_is_cuda" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_not_cuda"
+    elif [ "$grad_handle" = "missing" ] || [ "$grad_handle" = "0" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="gradient_handle_missing"
+    elif [ "$optimizer_step_attempted" != "true" ]; then
+        pass_integrity_status="fail"
+        pass_integrity_reason="optimizer_step_not_attempted"
+    elif awk "BEGIN { exit !(($after_sum) < ($before_sum)) }" >/dev/null 2>&1; then
+        sum_decreased_status="pass"
+    else
+        pass_integrity_status="fail"
+        pass_integrity_reason="parameter_sum_not_decreased"
+        sum_decreased_status="fail"
+    fi
+    if [ "$pass_integrity_status" != "pass" ]; then
+        status="fail"
+        reason="wrapper_pass_integrity_failed:$pass_integrity_reason"
+        blocked_gate="probe_log_integrity"
+        blocked_gates="$blocked_gate"
+        primary_blocked_gate="$blocked_gate"
+    fi
+fi
+
+next_action="verify Simple/libtorch CUDA optimizer execution and parameter-sum decrease"
+case "$blocked_gate" in
+    libtorch|libtorch_unavailable)
+        next_action="build or install the Simple runtime with libtorch symbols available, then rerun the strict Torch optimizer probe"
+        if [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] && [ "${python_torch_library_dir:-missing}" != "missing" ]; then
+            next_action="expose Python Torch lib directory ${python_torch_library_dir} to the Simple runtime with LIBTORCH or LD_LIBRARY_PATH, then rerun the strict Torch optimizer probe"
+        fi
+        if [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] &&
+           [ "${libtorch_env_status:-missing}" = "set" ] &&
+           [ "${ld_library_path_libtorch_status:-missing}" = "contains_python_torch_library_dir" ] &&
+           [ "${simple_sffi_libtorch_bridge_status:-missing}" != "visible" ]; then
+            simple_runtime_torch_link_status="missing_simple_sffi_bridge"
+            next_action="run scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs, export its SIMPLE_SFFI_PATH and libtorch values, then rerun the strict Torch optimizer probe"
+        elif [ "${python_torch_cuda_library_bundle_status:-missing}" = "ready" ] &&
+           [ "${libtorch_env_status:-missing}" = "set" ] &&
+           [ "${ld_library_path_libtorch_status:-missing}" = "contains_python_torch_library_dir" ] &&
+           [ "${torch_available:-missing}" != "true" ]; then
+            simple_runtime_torch_link_status="missing_after_libtorch_env_exposed"
+            next_action="rebuild or relink the Simple runtime with Torch SFFI auto-discovery from SIMPLE_SFFI_PATH; Python libtorch and libspl_torch are exposed but rt_torch_available remains false"
+        fi
+        ;;
+    cuda|cuda_unavailable)
+        next_action="make CUDA visible to the Simple/libtorch runtime, then rerun the strict Torch optimizer probe"
+        ;;
+    parameter_cuda|parameter_not_cuda)
+        next_action="fix CUDA parameter placement in the Simple Torch optimizer path, then rerun the strict Torch optimizer probe"
+        ;;
+    autograd_gradient|gradient_missing)
+        next_action="fix autograd gradient production for the probe parameter, then rerun the strict Torch optimizer probe"
+        ;;
+    optimizer_step_decreases_parameter_sum|optimizer_step_failed)
+        next_action="fix optimizer step execution until parameter sum decreases, then rerun the strict Torch optimizer probe"
+        ;;
+    probe_log_integrity)
+        next_action="fix the Torch optimizer probe log so it emits one complete hashed PASS record with all required proof fields"
+        ;;
+    torch_extern_surface)
+        next_action="implement or register the missing Torch extern surface reported in normalized_reason, then rerun the strict Torch optimizer probe"
+        ;;
+    none)
+        next_action="strict Torch optimizer probe is ready"
+        ;;
+esac
+
+{
+    printf '%s\n' "torch_cuda_optimizer_probe_required_gates=$required_gates"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_path=$WRAPPER_PATH"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_sha256=$wrapper_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_path=$PROBE"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_sha256=$probe_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_command=$PROBE_COMMAND"
+    printf '%s\n' "torch_cuda_optimizer_probe_probe_command_sha256=$probe_command_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_blocked_gate=$blocked_gate"
+    printf '%s\n' "torch_cuda_optimizer_probe_blocked_gates=$blocked_gates"
+    printf '%s\n' "torch_cuda_optimizer_probe_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "torch_cuda_optimizer_probe_wrapper_exit=$exit_code"
+    printf '%s\n' "torch_cuda_optimizer_probe_log_size=$log_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_log_sha256=$log_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_status_line_count=$status_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_required_gates_line_count=$required_gates_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_torch_available_line_count=$torch_available_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_cuda_available_line_count=$cuda_available_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_parameter_is_cuda_line_count=$parameter_is_cuda_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_grad_handle_line_count=$grad_handle_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_optimizer_step_line_count=$optimizer_step_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_before_sum_line_count=$before_sum_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_after_sum_line_count=$after_sum_line_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_module_status=$python_torch_module_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_version=$python_torch_version"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_file=$python_torch_file"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_package_dir=$python_torch_package_dir"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_library_dir=$python_torch_library_dir"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cmake_prefix_path=$python_torch_cmake_prefix_path"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_library_paths=$python_torch_library_paths"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_library_count=${python_torch_library_count:-0}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libtorch_bundle_status=${python_torch_libtorch_bundle_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libtorch_status=${python_torch_libtorch_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libtorch_cuda_status=${python_torch_libtorch_cuda_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libc10_status=${python_torch_libc10_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_libc10_cuda_status=${python_torch_libc10_cuda_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_library_bundle_status=${python_torch_cuda_library_bundle_status:-missing}"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_available=$python_torch_cuda_available"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_cuda_device_count=$python_torch_cuda_device_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_error=$python_torch_error"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_env=$PYTHON_TORCH_ENV"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_env_size=$python_torch_env_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_python_torch_env_sha256=$python_torch_env_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_status=$system_libtorch_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_probe_log=$LIBTORCH_PROBE_LOG"
+    printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_probe_log_size=$system_libtorch_probe_log_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_system_libtorch_probe_log_sha256=$system_libtorch_probe_log_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_libtorch_env_status=$libtorch_env_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_auto_libtorch_env_source=$auto_libtorch_env_source"
+    printf '%s\n' "torch_cuda_optimizer_probe_auto_ld_library_path_source=$auto_ld_library_path_source"
+    printf '%s\n' "torch_cuda_optimizer_probe_auto_simple_sffi_path_source=$auto_simple_sffi_path_source"
+    printf '%s\n' "torch_cuda_optimizer_probe_auto_simple_runtime_path_source=$auto_simple_runtime_path_source"
+    printf '%s\n' "torch_cuda_optimizer_probe_scilib_torch_root_status=$scilib_torch_root_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_simple_sffi_path_status=$simple_sffi_path_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_simple_sffi_libtorch_bridge_status=$simple_sffi_libtorch_bridge_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_ld_library_path_libtorch_status=$ld_library_path_libtorch_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_simple_runtime_torch_link_status=$simple_runtime_torch_link_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "torch_cuda_optimizer_probe_surface_manifest_sha256=$surface_manifest_sha256"
+    printf '%s\n' "torch_cuda_optimizer_probe_normalized_status=$status"
+    printf '%s\n' "torch_cuda_optimizer_probe_normalized_reason=$reason"
+    printf '%s\n' "torch_cuda_optimizer_probe_torch_available_normalized=$torch_available"
+    printf '%s\n' "torch_cuda_optimizer_probe_cuda_available_normalized=$cuda_available"
+    printf '%s\n' "torch_cuda_optimizer_probe_parameter_is_cuda_normalized=$parameter_is_cuda"
+    printf '%s\n' "torch_cuda_optimizer_probe_dyn_tensor_status_normalized=$dyn_tensor_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_dyn_tensor_reason_normalized=$dyn_tensor_reason"
+    printf '%s\n' "torch_cuda_optimizer_probe_dyn_tensor_handle_normalized=$dyn_tensor_handle"
+    printf '%s\n' "torch_cuda_optimizer_probe_grad_handle_normalized=$grad_handle"
+    printf '%s\n' "torch_cuda_optimizer_probe_optimizer_step_attempted_normalized=$optimizer_step_attempted"
+    printf '%s\n' "torch_cuda_optimizer_probe_before_sum_normalized=$before_sum"
+    printf '%s\n' "torch_cuda_optimizer_probe_after_sum_normalized=$after_sum"
+    printf '%s\n' "torch_cuda_optimizer_probe_sum_decreased_status=$sum_decreased_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_pass_integrity_status=$pass_integrity_status"
+    printf '%s\n' "torch_cuda_optimizer_probe_pass_integrity_reason=$pass_integrity_reason"
+    printf '%s\n' "torch_cuda_optimizer_probe_next_action=$next_action"
+} >>"$OUT_ENV"
+
+{
+    printf '# LLM Runtime Torch CUDA Optimizer Probe\n\n'
+    printf '%s\n' "- command: \`$PROBE_COMMAND\`"
+    printf '%s\n' "- wrapper_path: \`$WRAPPER_PATH\`"
+    printf '%s\n' "- wrapper_sha256: \`$wrapper_sha256\`"
+    printf '%s\n' "- probe_path: \`$PROBE\`"
+    printf '%s\n' "- probe_sha256: \`$probe_sha256\`"
+    printf '%s\n' "- probe_command_sha256: \`$probe_command_sha256\`"
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- required_gates: \`$required_gates\`"
+    printf '%s\n' "- blocked_gate: \`$blocked_gate\`"
+    printf '%s\n' "- blocked_gates: \`$blocked_gates\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- log_size: \`$log_size\`"
+    printf '%s\n' "- log_sha256: \`$log_sha256\`"
+    printf '%s\n' "- status_line_count: \`$status_line_count\`"
+    printf '%s\n' "- required_gates_line_count: \`$required_gates_line_count\`"
+    printf '%s\n' "- torch_available_line_count: \`$torch_available_line_count\`"
+    printf '%s\n' "- cuda_available_line_count: \`$cuda_available_line_count\`"
+    printf '%s\n' "- parameter_is_cuda_line_count: \`$parameter_is_cuda_line_count\`"
+    printf '%s\n' "- grad_handle_line_count: \`$grad_handle_line_count\`"
+    printf '%s\n' "- optimizer_step_line_count: \`$optimizer_step_line_count\`"
+    printf '%s\n' "- before_sum_line_count: \`$before_sum_line_count\`"
+    printf '%s\n' "- after_sum_line_count: \`$after_sum_line_count\`"
+    printf '%s\n' "- python_torch_module_status: \`$python_torch_module_status\`"
+    printf '%s\n' "- python_torch_version: \`$python_torch_version\`"
+    printf '%s\n' "- python_torch_file: \`$python_torch_file\`"
+    printf '%s\n' "- python_torch_package_dir: \`$python_torch_package_dir\`"
+    printf '%s\n' "- python_torch_library_dir: \`$python_torch_library_dir\`"
+    printf '%s\n' "- python_torch_cmake_prefix_path: \`$python_torch_cmake_prefix_path\`"
+    printf '%s\n' "- python_torch_library_paths: \`$python_torch_library_paths\`"
+    printf '%s\n' "- python_torch_library_count: \`${python_torch_library_count:-0}\`"
+    printf '%s\n' "- python_torch_libtorch_bundle_status: \`${python_torch_libtorch_bundle_status:-missing}\`"
+    printf '%s\n' "- python_torch_libtorch_status: \`${python_torch_libtorch_status:-missing}\`"
+    printf '%s\n' "- python_torch_libtorch_cuda_status: \`${python_torch_libtorch_cuda_status:-missing}\`"
+    printf '%s\n' "- python_torch_libc10_status: \`${python_torch_libc10_status:-missing}\`"
+    printf '%s\n' "- python_torch_libc10_cuda_status: \`${python_torch_libc10_cuda_status:-missing}\`"
+    printf '%s\n' "- python_torch_cuda_library_bundle_status: \`${python_torch_cuda_library_bundle_status:-missing}\`"
+    printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
+    printf '%s\n' "- python_torch_cuda_device_count: \`$python_torch_cuda_device_count\`"
+    printf '%s\n' "- python_torch_env: \`$PYTHON_TORCH_ENV\`"
+    printf '%s\n' "- python_torch_env_size: \`$python_torch_env_size\`"
+    printf '%s\n' "- python_torch_env_sha256: \`$python_torch_env_sha256\`"
+    printf '%s\n' "- system_libtorch_status: \`$system_libtorch_status\`"
+    printf '%s\n' "- system_libtorch_probe_log: \`$LIBTORCH_PROBE_LOG\`"
+    printf '%s\n' "- system_libtorch_probe_log_size: \`$system_libtorch_probe_log_size\`"
+    printf '%s\n' "- system_libtorch_probe_log_sha256: \`$system_libtorch_probe_log_sha256\`"
+    printf '%s\n' "- libtorch_env_status: \`$libtorch_env_status\`"
+    printf '%s\n' "- auto_libtorch_env_source: \`$auto_libtorch_env_source\`"
+    printf '%s\n' "- auto_ld_library_path_source: \`$auto_ld_library_path_source\`"
+    printf '%s\n' "- auto_simple_sffi_path_source: \`$auto_simple_sffi_path_source\`"
+    printf '%s\n' "- auto_simple_runtime_path_source: \`$auto_simple_runtime_path_source\`"
+    printf '%s\n' "- scilib_torch_root_status: \`$scilib_torch_root_status\`"
+    printf '%s\n' "- simple_sffi_path_status: \`$simple_sffi_path_status\`"
+    printf '%s\n' "- simple_sffi_libtorch_bridge_status: \`$simple_sffi_libtorch_bridge_status\`"
+    printf '%s\n' "- ld_library_path_libtorch_status: \`$ld_library_path_libtorch_status\`"
+    printf '%s\n' "- simple_runtime_torch_link_status: \`$simple_runtime_torch_link_status\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- torch_available: \`$torch_available\`"
+    printf '%s\n' "- cuda_available: \`$cuda_available\`"
+    printf '%s\n' "- parameter_is_cuda: \`$parameter_is_cuda\`"
+    printf '%s\n' "- dyn_tensor_status: \`$dyn_tensor_status\`"
+    printf '%s\n' "- dyn_tensor_reason: \`$dyn_tensor_reason\`"
+    printf '%s\n' "- dyn_tensor_handle: \`$dyn_tensor_handle\`"
+    printf '%s\n' "- grad_handle: \`$grad_handle\`"
+    printf '%s\n' "- optimizer_step_attempted: \`$optimizer_step_attempted\`"
+    printf '%s\n' "- before_sum: \`$before_sum\`"
+    printf '%s\n' "- after_sum: \`$after_sum\`"
+    printf '%s\n' "- sum_decreased_status: \`$sum_decreased_status\`"
+    printf '%s\n' "- pass_integrity_status: \`$pass_integrity_status\`"
+    printf '%s\n' "- pass_integrity_reason: \`$pass_integrity_reason\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- exit_code: \`$exit_code\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- log: \`$OUT_LOG\`"
+    printf '\n'
+    printf 'This wrapper proves the Simple/libtorch CUDA optimizer lane only when all required gates pass. A `status=pass` probe log must be non-empty, hashed, exit with code 0, and include exactly one complete proof record for status, required gates, libtorch/CUDA availability, CUDA parameter placement, gradient handle, optimizer step, and before/after sums. The normalized fields must show libtorch and CUDA availability, CUDA parameter placement, a nonzero gradient handle, an attempted optimizer step, and numeric `after_sum < before_sum`. `unavailable` records the exact missing host/runtime gate, plus hashed Python Torch discovery, system libtorch probe, and wrapper/source/spec/doc surface logs, and remains a strict-host failure.\n'
+} >"$REPORT_PATH"
+
+case "$status" in
+    pass)
+        echo "STATUS: PASS llm-runtime-torch-cuda-optimizer-probe"
+        ;;
+    unavailable)
+        echo "STATUS: WARN llm-runtime-torch-cuda-optimizer-probe reason=$reason"
+        if [ "$STRICT" -eq 1 ]; then
+            exit 1
+        fi
+        ;;
+    *)
+        echo "STATUS: FAIL llm-runtime-torch-cuda-optimizer-probe reason=$reason"
+        exit 1
+        ;;
+esac

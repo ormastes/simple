@@ -1,0 +1,1112 @@
+//! MIR name mangling for the LLVM backend.
+//!
+//! The Cranelift backend does mangling at codegen time via `module_prefix`, `import_map`, etc.
+//! The LLVM backend operates on MIR names directly, so we mangle MIR before passing it.
+
+use super::imports::{resolve_name_variants, resolve_by_suffix, suffix_of};
+
+fn dotted_enum_runtime_name(mangled: &str) -> String {
+    mangled.replace("_dot_", ".").replace("__", ".")
+}
+
+fn qualify_enum_pattern(
+    pattern: &mut crate::mir::MirPattern,
+    qualify: &impl Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    use crate::mir::MirPattern;
+    match pattern {
+        MirPattern::Variant { enum_name, payload, .. } => {
+            *enum_name = qualify(enum_name)?;
+            if let Some(payload) = payload {
+                qualify_enum_pattern(payload, qualify)?;
+            }
+        }
+        MirPattern::Tuple(items) | MirPattern::Or(items) => {
+            for item in items {
+                qualify_enum_pattern(item, qualify)?;
+            }
+        }
+        MirPattern::Struct { fields, .. } => {
+            for (_, field) in fields {
+                qualify_enum_pattern(field, qualify)?;
+            }
+        }
+        MirPattern::Guard { pattern, .. } => qualify_enum_pattern(pattern, qualify)?,
+        MirPattern::Union { inner: Some(inner), .. } => qualify_enum_pattern(inner, qualify)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Replace bare enum owners in constructor and pattern MIR with stable,
+/// declaring-module-qualified runtime identities before either native backend.
+pub(crate) fn qualify_enum_runtime_names(
+    mir: &mut crate::mir::MirModule,
+    runtime_module_name: &str,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    runtime_names: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use crate::hir::HirType;
+    use crate::mir::MirInst;
+
+    let local_enums: std::collections::HashSet<String> = mir
+        .local_globals
+        .iter()
+        .filter(|name| {
+            mir.type_registry
+                .lookup(name)
+                .and_then(|id| mir.type_registry.get(id))
+                .is_some_and(|ty| matches!(ty, HirType::Enum { .. }))
+        })
+        .cloned()
+        .collect();
+    let known_enums: std::collections::HashSet<String> = mir
+        .type_registry
+        .iter()
+        .filter_map(|(_, ty)| match ty {
+            HirType::Enum { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let known_runtime_names: std::collections::HashSet<&str> = runtime_names.values().map(String::as_str).collect();
+    let local_runtime_name = |name: &str| {
+        if runtime_module_name.is_empty() {
+            name.to_string()
+        } else {
+            format!("{runtime_module_name}.{name}")
+        }
+    };
+
+    let mut names = runtime_names.values().cloned().collect::<Vec<_>>();
+    names.extend(local_enums.iter().map(|name| local_runtime_name(name)));
+    names.sort();
+    names.dedup();
+    let mut ids = std::collections::HashMap::new();
+    for name in names {
+        let id = crate::codegen::shared::enum_runtime_type_id(&name);
+        if let Some(existing) = ids.insert(id, name.clone()) {
+            return Err(format!("enum runtime ID collision: '{existing}' and '{name}'"));
+        }
+    }
+
+    let qualify = |name: &str| -> Result<String, String> {
+        if known_runtime_names.contains(name) {
+            return Ok(name.to_string());
+        }
+        let resolved = if local_enums.contains(name) {
+            return Ok(local_runtime_name(name));
+        } else {
+            use_map.get(name).or_else(|| import_map.get(name)).cloned()
+        };
+        if let Some(resolved) = resolved {
+            return Ok(runtime_names
+                .get(&resolved)
+                .cloned()
+                .unwrap_or_else(|| dotted_enum_runtime_name(&resolved)));
+        }
+        // A module may construct a uniquely declared enum through a facade or
+        // legacy import path that did not survive use-map resolution. The
+        // global enum sidecar still has the authoritative mangled owner. Use
+        // that identity only when the bare enum suffix is globally unique;
+        // never guess between duplicate enum names.
+        let mangled_suffix = format!("__{name}");
+        let mut suffix_matches = runtime_names
+            .iter()
+            .filter(|(mangled, _)| *mangled == name || mangled.ends_with(&mangled_suffix))
+            .map(|(_, runtime_name)| runtime_name.as_str());
+        if let Some(unique) = suffix_matches.next() {
+            if suffix_matches.next().is_none() {
+                return Ok(unique.to_string());
+            }
+        }
+        if matches!(name, "Result" | "Option") {
+            return Ok(name.to_string());
+        }
+        if name.contains("__") || name.contains('.') {
+            return Ok(dotted_enum_runtime_name(name));
+        }
+        // Some runtime/library enum owners are supplied outside the selected
+        // source closure (for example ByteOrder), so no declaring-module
+        // sidecar exists in this build. After exhausting every authoritative
+        // local/import/global route, retain the bare owner as the stable
+        // external runtime identity. Collisions among declarations that are
+        // present in the build are still rejected while constructing the
+        // global enum sidecar above.
+        Ok(name.to_string())
+    };
+
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::EnumUnit { enum_name, .. } | MirInst::EnumWith { enum_name, .. } => {
+                        *enum_name = qualify(enum_name)?;
+                    }
+                    MirInst::PatternTest { pattern, .. } => qualify_enum_pattern(pattern, &qualify)?,
+                    MirInst::Call { target, .. } => {
+                        let name = target.name();
+                        if let Some((owner, variant)) = name.rsplit_once("::") {
+                            let resolved_owner = use_map.get(owner).or_else(|| import_map.get(owner));
+                            let is_custom_enum = known_enums.contains(owner)
+                                || local_enums.contains(owner)
+                                || resolved_owner.is_some_and(|resolved| runtime_names.contains_key(resolved));
+                            if is_custom_enum {
+                                *target = target.with_name(format!("{}::{variant}", qualify(owner)?));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply name mangling to a MIR module for the LLVM backend.
+pub(crate) fn mangle_mir(
+    mir: &mut crate::mir::MirModule,
+    prefix: &str,
+    is_entry: bool,
+    import_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    use_map: &std::collections::HashMap<String, String>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> usize {
+    use crate::mir::MirInst;
+
+    let mut unresolved_count: usize = 0;
+
+    // Extern fn declarations from this module must never be mangled.
+    let extern_fns = mir.extern_fn_names.clone();
+
+    // Names that should never be mangled (runtime functions, builtins).
+    let is_runtime_or_builtin = |name: &str| -> bool { is_runtime_or_builtin_name(name, &extern_fns) };
+
+    // Build set of locally-defined function names.
+    let local_fn_names: std::collections::HashSet<String> = mir
+        .functions
+        .iter()
+        .filter(|f| !f.blocks.is_empty())
+        .map(|f| f.name.clone())
+        .collect();
+
+    // Build a mapping from raw name -> mangled name for local functions.
+    let mut local_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for func in &mir.functions {
+        let has_body = !func.blocks.is_empty();
+        if !has_body {
+            continue;
+        }
+        let keeps_abi_name = func.attributes.iter().any(|attr| attr == "export")
+            || extern_fns.contains(&func.name)
+            || func.name.starts_with("__simple_")
+            || func.name.starts_with("__module_init_")
+            || func.name.starts_with("spl_")
+            || func.name.starts_with("__get_global_")
+            || func.name.starts_with("__set_global_");
+        if keeps_abi_name {
+            continue;
+        }
+        let mangled = if func.name == "main" {
+            if is_entry {
+                "spl_main".to_string()
+            } else {
+                format!("{}__{}", prefix, func.name)
+            }
+        } else {
+            format!("{}__{}", prefix, func.name)
+        };
+        local_mangled.insert(func.name.clone(), mangled);
+    }
+
+    // Build local suffix index from this module's known names.
+    let mut local_suffix_index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for resolved in local_mangled
+        .values()
+        .chain(use_map.values())
+        .chain(import_map.values())
+    {
+        if let Some(suffix) = suffix_of(resolved) {
+            local_suffix_index
+                .entry(suffix.to_string())
+                .or_default()
+                .push(resolved.clone());
+            if let Some(dot_pos) = suffix.rfind('.') {
+                let sub_suffix = &suffix[dot_pos + 1..];
+                if !sub_suffix.is_empty() {
+                    local_suffix_index
+                        .entry(sub_suffix.to_string())
+                        .or_default()
+                        .push(resolved.clone());
+                }
+            }
+        }
+    }
+
+    // Build a mapping from raw name -> mangled name for local globals.
+    let mut local_global_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (name, _ty, _is_mut) in &mir.globals {
+        if mir.local_globals.contains(name) && !is_runtime_or_builtin(name) {
+            local_global_mangled.insert(name.clone(), format!("{}__{}", prefix, name));
+        }
+    }
+
+    // Phase 1: Rename function definitions
+    for func in &mut mir.functions {
+        if let Some(mangled) = local_mangled.get(&func.name) {
+            func.name = mangled.clone();
+        }
+    }
+
+    // Phase 2: Rename globals in mir.globals, global_init_values, local_globals
+    let mut new_globals = Vec::new();
+    for (name, ty, is_mut) in &mir.globals {
+        if let Some(mangled) = local_global_mangled.get(name) {
+            new_globals.push((mangled.clone(), *ty, *is_mut));
+        } else if !is_runtime_or_builtin(name) {
+            if let Some(resolved) = resolve_name(
+                name,
+                &local_global_mangled,
+                use_map,
+                import_map,
+                &local_suffix_index,
+                suffix_index,
+            ) {
+                new_globals.push((resolved, *ty, *is_mut));
+            } else {
+                new_globals.push((name.clone(), *ty, *is_mut));
+            }
+        } else {
+            new_globals.push((name.clone(), *ty, *is_mut));
+        }
+    }
+    mir.globals = new_globals;
+
+    let old_init = std::mem::take(&mut mir.global_init_values);
+    for (name, val) in old_init {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_values.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_values.insert(name, val);
+        }
+    }
+
+    let old_init_strings = std::mem::take(&mut mir.global_init_strings);
+    for (name, val) in old_init_strings {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_strings.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_strings.insert(name, val);
+        }
+    }
+
+    let old_init_arrays = std::mem::take(&mut mir.global_init_arrays);
+    for (name, val) in old_init_arrays {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.global_init_arrays.insert(mangled.clone(), val);
+        } else {
+            mir.global_init_arrays.insert(name, val);
+        }
+    }
+
+    let old_init_functions = std::mem::take(&mut mir.global_init_functions);
+    for (name, func_name) in old_init_functions {
+        let global_name = local_global_mangled.get(&name).cloned().unwrap_or(name);
+        let resolved_func = local_mangled
+            .get(&func_name)
+            .cloned()
+            .or_else(|| use_map.get(&func_name).cloned())
+            .or_else(|| import_map.get(&func_name).cloned())
+            .or_else(|| {
+                resolve_name(
+                    &func_name,
+                    &local_mangled,
+                    use_map,
+                    import_map,
+                    &local_suffix_index,
+                    suffix_index,
+                )
+            })
+            .unwrap_or(func_name);
+        mir.global_init_functions.insert(global_name, resolved_func);
+    }
+
+    let old_local = std::mem::take(&mut mir.local_globals);
+    for name in old_local {
+        if let Some(mangled) = local_global_mangled.get(&name) {
+            mir.local_globals.insert(mangled.clone());
+        } else {
+            mir.local_globals.insert(name);
+        }
+    }
+
+    // Build a set of all known mangled names.
+    let known_mangled: std::collections::HashSet<String> = {
+        let mut set: std::collections::HashSet<String> = import_map
+            .values()
+            .chain(use_map.values())
+            .chain(local_mangled.values())
+            .cloned()
+            .collect();
+        let extras: Vec<String> = set
+            .iter()
+            .filter_map(|v| {
+                if v.contains('.') {
+                    Some(v.replace('.', "_dot_"))
+                } else if v.contains("_dot_") {
+                    Some(v.replace("_dot_", "."))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        set.extend(extras);
+        set
+    };
+
+    // Phase 3: Rename call targets and global references in instructions.
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        let mut canonical_name = target.name().to_string();
+                        canonicalize_equivalent_dot_name(&mut canonical_name, &known_mangled);
+                        if canonical_name != target.name() {
+                            *target = target.with_name(canonical_name);
+                        }
+                        let name = target.name().to_string();
+                        if known_mangled.contains(name.as_str()) {
+                            continue;
+                        }
+                        if name.contains("_dot_") {
+                            let converted = name.replace("_dot_", ".");
+                            if known_mangled.contains(converted.as_str()) {
+                                *target = target.with_name(converted);
+                                continue;
+                            }
+                        }
+                        if let Some(mangled) = local_mangled.get(&name) {
+                            *target = target.with_name(mangled.clone());
+                        } else if is_runtime_or_builtin(&name) {
+                            continue;
+                        } else if let Some(resolved) = use_map.get(&name) {
+                            *target = target.with_name(resolved.clone());
+                        } else {
+                            let method_dot = format!(".{}", name);
+                            let mut use_resolved = None;
+                            for (raw, mangled) in use_map.iter() {
+                                if raw.ends_with(&method_dot) && raw.len() > name.len() + 1 {
+                                    use_resolved = Some(mangled.clone());
+                                    break;
+                                }
+                            }
+                            if use_resolved.is_none() {
+                                for (raw, mangled) in import_map.iter() {
+                                    if raw.ends_with(&method_dot) && raw.len() > name.len() + 1 {
+                                        let type_part = &raw[..raw.len() - method_dot.len()];
+                                        if use_map.contains_key(type_part) {
+                                            use_resolved = Some(mangled.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(resolved) = use_resolved {
+                                *target = target.with_name(resolved);
+                            } else if let Some(resolved) = import_map.get(&name) {
+                                *target = target.with_name(resolved.clone());
+                            }
+                        }
+                        let name = target.name().to_string();
+                        if !known_mangled.contains(name.as_str()) && !is_runtime_or_builtin(&name) {
+                            resolve_call_target(
+                                target,
+                                &name,
+                                use_map,
+                                import_map,
+                                ambiguous_names,
+                                &local_suffix_index,
+                                suffix_index,
+                                &func.name,
+                                prefix,
+                                &mut unresolved_count,
+                            );
+                        }
+                    }
+                    MirInst::InterpCall { func_name, .. } => {
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                            continue;
+                        }
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = resolve_name(
+                            func_name,
+                            &local_mangled,
+                            use_map,
+                            import_map,
+                            &local_suffix_index,
+                            suffix_index,
+                        ) {
+                            *func_name = resolved;
+                        }
+                    }
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(resolved) = resolve_name(
+                            global_name,
+                            &local_global_mangled,
+                            use_map,
+                            import_map,
+                            &local_suffix_index,
+                            suffix_index,
+                        ) {
+                            *global_name = resolved;
+                        }
+                    }
+                    MirInst::MethodCallStatic { func_name, .. } => {
+                        canonicalize_equivalent_dot_name(func_name, &known_mangled);
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                            continue;
+                        }
+                        if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
+                            continue;
+                        }
+                        if func_name.contains("_dot_") {
+                            let converted = func_name.replace("_dot_", ".");
+                            if known_mangled.contains(converted.as_str()) {
+                                *func_name = converted;
+                                continue;
+                            }
+                            if let Some(resolved) = use_map
+                                .get(converted.as_str())
+                                .or_else(|| import_map.get(converted.as_str()))
+                            {
+                                *func_name = resolved.clone();
+                                continue;
+                            }
+                        }
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                        } else if let Some(resolved) = use_map.get(func_name.as_str()) {
+                            *func_name = resolved.clone();
+                        } else {
+                            let method_part = func_name.as_str();
+                            let mut use_resolved = None;
+                            for (raw, mangled) in use_map.iter() {
+                                if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
+                                    use_resolved = Some(mangled.clone());
+                                    break;
+                                }
+                            }
+                            if let Some(resolved) = use_resolved {
+                                *func_name = resolved;
+                            } else if let Some(resolved) = import_map.get(func_name.as_str()) {
+                                *func_name = resolved.clone();
+                            }
+                        }
+                        if !known_mangled.contains(func_name.as_str()) && !is_runtime_or_builtin(func_name) {
+                            resolve_method_call_static(
+                                func_name,
+                                use_map,
+                                import_map,
+                                &local_suffix_index,
+                                suffix_index,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    unresolved_count
+}
+
+/// Resolve a name by checking local_map → use_map → import_map → variant resolution → suffix resolution.
+///
+/// This is the common resolution chain used by InterpCall, GlobalLoad/GlobalStore, and other
+/// instruction types that need to resolve a raw name to its mangled/qualified form.
+fn resolve_name(
+    name: &str,
+    local_map: &std::collections::HashMap<String, String>,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    if let Some(mangled) = local_map.get(name) {
+        Some(mangled.clone())
+    } else if name.contains("_dot_") {
+        let dotted = name.replace("_dot_", ".");
+        if let Some(mangled) = local_map.get(&dotted) {
+            Some(mangled.clone())
+        } else if let Some(resolved) = use_map.get(&dotted) {
+            Some(resolved.clone())
+        } else if let Some(resolved) = import_map.get(&dotted) {
+            Some(resolved.clone())
+        } else {
+            resolve_name_variants(name, use_map, import_map)
+                .or_else(|| resolve_by_suffix(name, local_suffix_index))
+                .or_else(|| resolve_by_suffix(name, suffix_index))
+        }
+    } else if name.contains('.') {
+        let sanitized = name.replace('.', "_dot_");
+        if let Some(mangled) = local_map.get(&sanitized) {
+            Some(mangled.clone())
+        } else if let Some(resolved) = use_map.get(&sanitized) {
+            Some(resolved.clone())
+        } else if let Some(resolved) = import_map.get(&sanitized) {
+            Some(resolved.clone())
+        } else {
+            resolve_name_variants(name, use_map, import_map)
+                .or_else(|| resolve_by_suffix(name, local_suffix_index))
+                .or_else(|| resolve_by_suffix(name, suffix_index))
+        }
+    } else if let Some(resolved) = use_map.get(name) {
+        Some(resolved.clone())
+    } else if let Some(resolved) = import_map.get(name) {
+        Some(resolved.clone())
+    } else if let Some(resolved) = resolve_name_variants(name, use_map, import_map) {
+        Some(resolved)
+    } else {
+        resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
+    }
+}
+
+/// Resolve a Call target that is still unresolved after local/use_map/import_map lookup.
+#[allow(clippy::too_many_arguments)] // reason: call resolution requires full module context
+fn resolve_call_target(
+    target: &mut crate::mir::CallTarget,
+    name: &str,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    func_name: &str,
+    prefix: &str,
+    unresolved_count: &mut usize,
+) {
+    let lookup_name_storage;
+    let lookup_name = if name.contains("_dot_") {
+        lookup_name_storage = name.replace("_dot_", ".");
+        lookup_name_storage.as_str()
+    } else {
+        name
+    };
+
+    if !lookup_name.contains('.')
+        && matches!(
+            lookup_name,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+        )
+    {
+        // Preserve bare enum-helper call targets so codegen can route them to the
+        // runtime builtins. If we suffix-resolve bare `unwrap` here, ordinary
+        // option-like field access in local code can be rebound to an imported
+        // `FailSafeResult.unwrap` symbol, which is exactly the hosted RV64 leak
+        // observed from Report.get_file/get_line/format and LevelConfig.effective_level.
+        return;
+    }
+
+    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
+        *target = target.with_name(resolved);
+    } else if lookup_name.contains('.') {
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let type_part = lookup_name.split('.').next().unwrap_or("");
+        let candidates = local_suffix_index
+            .get(lookup_name)
+            .or_else(|| suffix_index.get(lookup_name))
+            .or_else(|| local_suffix_index.get(method))
+            .or_else(|| suffix_index.get(method));
+        if let Some(candidates) = candidates {
+            let best = candidates
+                .iter()
+                .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
+                .or_else(|| {
+                    if candidates.len() == 1 {
+                        candidates.first()
+                    } else {
+                        None
+                    }
+                });
+            if let Some(b) = best {
+                *target = target.with_name(b.clone());
+            } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
+                .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            {
+                *target = target.with_name(resolved);
+            } else {
+                *unresolved_count += 1;
+                eprintln!(
+                    "warning: unresolved call `{}` in function `{}` (module: {})",
+                    name, func_name, prefix
+                );
+            }
+        } else if let Some(resolved) =
+            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+        {
+            *target = target.with_name(resolved);
+        } else {
+            *unresolved_count += 1;
+            eprintln!(
+                "warning: unresolved call `{}` in function `{}` (module: {})",
+                name, func_name, prefix
+            );
+        }
+    } else if let Some(resolved) =
+        resolve_ambiguous_private_call_in_module(lookup_name, prefix, ambiguous_names, suffix_index)
+            .or_else(|| resolve_by_suffix(lookup_name, local_suffix_index))
+            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+    {
+        *target = target.with_name(resolved);
+    } else {
+        *unresolved_count += 1;
+        eprintln!(
+            "warning: unresolved call `{}` in function `{}` (module: {})",
+            name, func_name, prefix
+        );
+    }
+}
+
+fn resolve_ambiguous_private_call_in_module(
+    name: &str,
+    prefix: &str,
+    ambiguous_names: &std::collections::HashSet<String>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    if !name.starts_with('_') || !ambiguous_names.contains(name) {
+        return None;
+    }
+
+    let suffix = format!("__{name}");
+    let mut candidates = std::collections::BTreeSet::new();
+    for candidate in suffix_index.values().flatten() {
+        if candidate.ends_with(&suffix) {
+            candidates.insert(candidate);
+        }
+    }
+
+    let mut best = None;
+    let mut best_score = 0;
+    let mut tied = false;
+    for candidate in candidates {
+        let owner = candidate.strip_suffix(&suffix)?;
+        let score = owner
+            .split("__")
+            .zip(prefix.split("__"))
+            .take_while(|(left, right)| left == right)
+            .count();
+        if score > best_score {
+            best = Some(candidate);
+            best_score = score;
+            tied = false;
+        } else if score == best_score && score != 0 {
+            tied = true;
+        }
+    }
+
+    (best_score != 0 && !tied).then(|| best.unwrap().clone())
+}
+
+/// Resolve a MethodCallStatic target that is still unresolved.
+fn resolve_method_call_static(
+    func_name: &mut String,
+    use_map: &std::collections::HashMap<String, String>,
+    import_map: &std::collections::HashMap<String, String>,
+    local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) {
+    let lookup_name_storage;
+    let lookup_name = if func_name.contains("_dot_") {
+        lookup_name_storage = func_name.replace("_dot_", ".");
+        lookup_name_storage.as_str()
+    } else {
+        func_name.as_str()
+    };
+
+    // Collection `parts.join(sep)` lowers to a bare builtin call. An imported
+    // path helper with the same name must not capture it during suffix binding.
+    if matches!(lookup_name, "join" | "Array.join") {
+        return;
+    }
+
+    // The string-builtin guard below must run BEFORE resolve_name_variants,
+    // not only before the suffix fallback: a project-wide FREE function with a
+    // builtin's name (private `fn char_at(s, i)` in mcp_sdk/core/json.spl) leaks
+    // into the global import map as a bare entry, so resolution SUCCEEDS and
+    // rebinds an erased-receiver `.char_at()` to a module that may not even be
+    // in the entry closure (undefined `..mcp_sdk__core__json__char_at` at the
+    // stage4 final link, 2026-07-25). For these names builtin lowering is the
+    // correct semantics for every receiver, so pre-resolution is safe — same
+    // rationale as the `join` guard above. The enum-helper and numeric lists
+    // stay in the post-failure position: hoisting them broke legitimate
+    // resolution-success rebinds (the compiled interpreter's own Option
+    // helpers printed `<unknown>` for every text-option `??`, 2026-07-25).
+    let method_early = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+    if !lookup_name.contains('.') {
+        if matches!(
+            method_early,
+            "starts_with"
+                | "ends_with"
+                | "trim"
+                | "trim_start"
+                | "trim_end"
+                | "to_upper"
+                | "upper"
+                | "to_lower"
+                | "lower"
+                | "char_at"
+                | "char_code_at"
+                | "replace"
+        ) {
+            // Preserve bare string-builtin method names when the receiver type
+            // could not be recovered (an erased receiver -- e.g. `parts[i]` from
+            // `split(...)`, or a `line.trim()` chain -- leaves the MethodCallStatic
+            // func_name bare). Rebinding bare `starts_with` to the ONLY user method
+            // of that name, struct `Path.starts_with` (fs_driver/types.spl), whose
+            // `self.raw` dereferences the text receiver as a Path struct, crashed
+            // inside decode_string (SimpleOS WM first-frame render fault,
+            // 2026-07-13). Leaving the name bare routes it through codegen's
+            // `bare_rt_redirect` table (functions/calls.rs) -> rt_string_* -- the
+            // SAME correct lowering a statically-typed `text` receiver gets. Every
+            // method here has a bare_rt_redirect entry, so leaving it bare never
+            // produces an unresolved-call error. Scoped to unambiguous string ops
+            // (contains/split/index_of/to_string are intentionally excluded --
+            // either they collide with generic user methods or lack a
+            // bare_rt_redirect entry).
+            return;
+        }
+    }
+
+    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
+        *func_name = resolved;
+    } else {
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let type_part = lookup_name.split('.').next().unwrap_or("");
+        let has_type_qualifier = lookup_name.contains('.');
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+            )
+        {
+            // Preserve enum helper method names when the receiver type could not be
+            // recovered. Rebinding bare `unwrap` by suffix to an imported
+            // `FailSafeResult.unwrap` symbol causes option/result-style field access
+            // in local code (for example Report.location.unwrap()) to become a fake
+            // cross-module call target instead of flowing through the builtin enum
+            // payload/discriminant lowering paths.
+            return;
+        }
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "len"
+                    | "to_i8"
+                    | "to_i16"
+                    | "to_i32"
+                    | "to_i64"
+                    | "to_u8"
+                    | "to_u16"
+                    | "to_u32"
+                    | "to_u64"
+                    | "to_f32"
+                    | "to_f64"
+                    | "to_int"
+                    | "to_float"
+            )
+        {
+            // Same defect class as the string-builtin guard above, for NUMERIC
+            // builtins: a bare erased-receiver `.to_i32()` (e.g. `value.len()
+            // .to_i32()`, `commands.len().to_i32()`) must lower to the builtin
+            // conversion, not rebind through the single-candidate suffix
+            // fallback to the ONLY user method of that name (`Px.to_i32`,
+            // window_protocol/geometry.spl), which would deref the raw integer
+            // as a Px pointer -> null-receiver fault on the SimpleOS WM
+            // first-frame render (cr2=0, 2026-07-17). Leaving the name bare
+            // routes it through codegen's builtin numeric lowering (a direct
+            // truncation/extension), which is the correct semantics for every
+            // primitive receiver.
+            return;
+        }
+        let type_part_lower = type_part.to_lowercase();
+        let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
+        if let Some(candidates) = candidates {
+            let best = if has_type_qualifier {
+                candidates.iter().find(|c| c.to_lowercase().contains(&type_part_lower))
+            } else {
+                let mut use_match: Option<&String> = None;
+                for (raw, mangled) in use_map.iter() {
+                    if raw.ends_with(&format!(".{}", method)) {
+                        if let Some(c) = candidates.iter().find(|c| *c == mangled) {
+                            use_match = Some(c);
+                            break;
+                        }
+                    }
+                }
+                if use_match.is_none() {
+                    for (raw, mangled) in import_map.iter() {
+                        if raw.ends_with(&format!(".{}", method)) && raw != method {
+                            if let Some(c) = candidates.iter().find(|c| *c == mangled) {
+                                let raw_type = raw.split('.').next().unwrap_or("");
+                                if use_map.contains_key(raw_type) {
+                                    use_match = Some(c);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                use_match
+            };
+            let best = best.or_else(|| {
+                // A qualified receiver is semantic type evidence.  Do not
+                // discard it merely because another type contributes the only
+                // same-named method in the suffix index (for example,
+                // `str.rfind` versus `DoubleEndedIterator.rfind`).  Bare calls
+                // have no such evidence and retain the unique-candidate
+                // fallback.
+                if !has_type_qualifier && candidates.len() == 1 {
+                    candidates.first()
+                } else {
+                    None
+                }
+            });
+            if let Some(b) = best {
+                *func_name = b.clone();
+            }
+        } else if let Some(resolved) =
+            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+        {
+            *func_name = resolved;
+        }
+    }
+}
+
+fn canonicalize_equivalent_dot_name(name: &mut String, known_mangled: &std::collections::HashSet<String>) {
+    if name.contains("_dot_") {
+        let dotted = name.replace("_dot_", ".");
+        if known_mangled.contains(dotted.as_str()) {
+            *name = dotted;
+        }
+    }
+}
+
+/// Check if a name is a runtime/builtin that should never be mangled.
+fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet<String>) -> bool {
+    extern_fns.contains(name)
+        || name.starts_with("rt_")
+        || name.starts_with("__simple_")
+        || name.starts_with("__module_init_")
+        || name.starts_with("spl_")
+        || name.starts_with("__get_global_")
+        || name.starts_with("__set_global_")
+        || name.starts_with("bit_")
+        || name.starts_with("bitwise_")
+        || name.starts_with("sffi_")
+        || name.starts_with("rc_box_")
+        || name.starts_with("arc_box_")
+        || (name.contains('.') && {
+            let prefix = name.split('.').next().unwrap_or("");
+            !prefix.is_empty()
+                && prefix
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        })
+        || name.ends_with("_contains_key")
+        || matches!(
+            name,
+            "print"
+                | "println"
+                | "eprint"
+                | "eprintln"
+                | "print_raw"
+                | "eprint_raw"
+                | "dprint"
+                | "Ok"
+                | "Err"
+                | "Some"
+                | "None"
+                | "len"
+                | "push"
+                | "pop"
+                | "get"
+                | "clear"
+                | "contains"
+                | "starts_with"
+                | "ends_with"
+                | "concat"
+                | "char_at"
+                | "at"
+                | "join"
+                | "trim"
+                | "split"
+                | "replace"
+                | "to_upper"
+                | "upper"
+                | "to_lower"
+                | "lower"
+                | "to_int"
+                | "to_i64"
+                | "parse_int"
+                | "to_float"
+                | "to_f64"
+                | "parse_float"
+                | "parse_f64"
+                | "parse_f64_safe"
+                | "to_string"
+                | "str"
+                | "slice"
+                | "substring"
+                | "keys"
+                | "values"
+                | "filter"
+                | "sort"
+                | "reverse"
+                | "first"
+                | "last"
+                | "find"
+                | "any"
+                | "all"
+                | "map"
+                | "each"
+                | "reduce"
+                | "fold"
+                | "asm"
+                | "unsafe"
+                | "assert"
+                | "Dict"
+                | "traverse"
+                | "func"
+                | "line_trim"
+                | "malloc"
+                | "free"
+                | "calloc"
+                | "realloc"
+                | "memset"
+                | "memcpy"
+                | "memmove"
+                | "madvise"
+                | "mmap"
+                | "mmap_file"
+                | "munmap"
+                | "readln"
+                | "input"
+                | "input_line"
+                | "input_chars"
+                | "env_var"
+                | "env_args"
+                | "env_clone"
+                | "temp_dir"
+                | "file_mtime"
+                | "file_size_for_mmap"
+                | "fs_read_text"
+                | "fs_write_text"
+                | "fs_has_file"
+                | "fs_has_file_or_dir"
+                | "dir_list_recursive"
+                | "__traits"
+                | "Error"
+                | "VReg"
+                | "Generic"
+                | "trim_end"
+                | "trim_start"
+                | "string_from_byte"
+                | "string_from_char_code"
+                | "from_char_code"
+                | "i64_max"
+                | "text_index_of"
+                | "current_rss_kb_main"
+                | "array_length"
+                | "array_new"
+                | "mmap_read_string"
+                | "mmap_read_bytes"
+                | "interpret_ast"
+                | "execute_compiled"
+                | "handler"
+                | "highlighter"
+                | "completer"
+                | "validator"
+                | "AtomicI64"
+                | "CircuitBreakerConfig"
+                | "RateLimitConfig"
+                | "ResourceLimits"
+                | "TimeoutConfig"
+                | "run_benchmarks"
+                | "run_arch_check"
+                | "validate_databases"
+                | "test_user_service"
+                | "register_builtin_blocks"
+                | "sql_keywords"
+                | "path_pop"
+                | "new_text_lines"
+                | "old_text_lines"
+                | "new_to_clone"
+                | "parent_clone"
+                | "cycle_path_clone"
+                | "upx_ensure_available"
+                | "upx_get_path"
+                | "self_extract_create"
+                | "self_extract_is_compressed"
+                | "JsonBlockDef"
+                | "MathBlockDef"
+                | "ShellBlockDef"
+                | "SqlBlockDef"
+                | "RegexBlockDef"
+                | "MarkdownBlockDef"
+                | "NogradBlockDef"
+                | "LossBlockDef"
+                | "make_cuda_port"
+                | "make_vulkan_port"
+                | "lexer_create_internal"
+                | "mlr_lower_module"
+                | "hir_expr_type"
+                | "hir_pool_get"
+                | "json_to_const"
+                | "linkercompilationcontext_from_objects"
+                | "search_recursive"
+                | "find_decreases"
+                | "find_scope_ancestor"
+                | "calls_itself"
+                | "hover_fn"
+                | "daemon_send_request"
+                | "parse_shell_commands"
+                | "count_leading_chars"
+                | "count_trailing_chars"
+                | "line_trim_start"
+                | "trimmed_is_empty"
+                | "transcriber_is_empty"
+                | "trait__is_none"
+                | "type__size_bytes"
+                | "next_lexeme_value_chars"
+                | "matching_sort_by"
+                | "mp_segments"
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_method_call_static;
+    use std::collections::HashMap;
+
+    #[test]
+    fn array_join_stays_builtin_when_path_join_is_imported() {
+        let use_map = HashMap::from([("join".to_string(), "nogc_async_mut__path__join".to_string())]);
+
+        for builtin in ["join", "Array.join"] {
+            let mut name = builtin.to_string();
+            resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+            assert_eq!(name, builtin);
+        }
+    }
+}

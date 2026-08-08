@@ -1,0 +1,58 @@
+"""Modeled NT virtual-memory bridge over the Wine VM adapter."""
+
+use common.wine_vm_adapter.{
+    WineVmSpace,
+    wine_vm_commit,
+    wine_vm_protect,
+    wine_vm_reserve,
+    wine_vm_reserve_fixed,
+    wine_vm_space_find,
+    wine_vm_unmap
+}
+
+class WineNtVirtualMemoryResult:
+    ok: bool
+    state: text
+    space: WineVmSpace
+    base: i64
+    size: i64
+    old_perms: text
+
+fn _result(ok: bool, state: text, space: WineVmSpace, base: i64, size: i64, old_perms: text) -> WineNtVirtualMemoryResult:
+    WineNtVirtualMemoryResult(ok: ok, state: state, space: space, base: base, size: size, old_perms: old_perms)
+
+pub fn wine_nt_virtual_memory_required_calls() -> [text]:
+    [
+        "VirtualAlloc",
+        "VirtualProtect",
+        "VirtualFree"
+    ]
+
+pub fn wine_nt_virtual_memory_alloc(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineNtVirtualMemoryResult:
+    if size <= 0:
+        return _result(false, "invalid-size", space, 0, 0, "")
+    val reserved = if base > 0:
+        wine_vm_reserve_fixed(space, base, size)
+    else:
+        wine_vm_reserve(space, size)
+    if not reserved.ok:
+        return _result(false, reserved.state, reserved.space, 0, 0, "")
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    if not committed.ok:
+        return _result(false, committed.state, committed.space, reserved.region.base, reserved.region.size, "")
+    _result(true, "allocated", committed.space, committed.region.base, committed.region.size, "")
+
+pub fn wine_nt_virtual_memory_protect(space: WineVmSpace, base: i64, perms: text) -> WineNtVirtualMemoryResult:
+    val existing = wine_vm_space_find(space, base)
+    if existing.size == 0:
+        return _result(false, "missing-region", space, 0, 0, "")
+    val protected = wine_vm_protect(space, base, perms)
+    if not protected.ok:
+        return _result(false, protected.state, protected.space, existing.base, existing.size, existing.perms)
+    _result(true, "protected", protected.space, protected.region.base, protected.region.size, existing.perms)
+
+pub fn wine_nt_virtual_memory_free(space: WineVmSpace, base: i64) -> WineNtVirtualMemoryResult:
+    val unmapped = wine_vm_unmap(space, base)
+    if not unmapped.ok:
+        return _result(false, unmapped.state, unmapped.space, 0, 0, "")
+    _result(true, "freed", unmapped.space, unmapped.region.base, unmapped.region.size, unmapped.region.perms)

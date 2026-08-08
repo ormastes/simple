@@ -1,0 +1,93 @@
+# Deterministic no-hardware fault-provider branches for the ML-KEM core.
+# Coverage is static/unmeasured until canonical branch instrumentation runs.
+# @tag: unit, crypto, x25519mlkem768, branch, provider
+
+use std.spec.*
+use os.crypto.ml_kem_kpke.{MlKemNttBatchProvider}
+use os.crypto.ml_kem.{
+    ml_kem_keygen_checked, ml_kem_encaps_checked,
+    ml_kem_keygen_checked_provider, ml_kem_encaps_checked_provider,
+    ml_kem_decaps_checked_provider}
+
+class DeterministicFaultNttProvider:
+    forward_error: text
+    inverse_error: text
+    short_forward: bool
+
+    static fn create(forward_error: text, inverse_error: text,
+            short_forward: bool) -> DeterministicFaultNttProvider:
+        DeterministicFaultNttProvider(
+            forward_error: forward_error,
+            inverse_error: inverse_error,
+            short_forward: short_forward)
+
+impl MlKemNttBatchProvider for DeterministicFaultNttProvider:
+
+    fn forward(polynomials: list) -> Result<list, text>:
+        if self.forward_error != "":
+            return Err(self.forward_error)
+        if self.short_forward:
+            return Ok([])
+        Ok(polynomials)
+
+    fn inverse(polynomials: list) -> Result<list, text>:
+        if self.inverse_error != "":
+            return Err(self.inverse_error)
+        Ok(polynomials)
+
+fn _core_zero32() -> list:
+    var values: list = []
+    var index: i64 = 0
+    while index < 32:
+        values.push(0)
+        index = index + 1
+    values
+
+fn _core_valid_material() -> tuple:
+    val seed = _core_zero32()
+    val pair = match ml_kem_keygen_checked(seed, seed):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+    val (ek, dk) = pair
+    val encapsulated = match ml_kem_encaps_checked(ek, seed):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+    val (_, ciphertext) = encapsulated
+    (ek, dk, ciphertext, seed)
+
+describe "X25519MLKEM768 core provider negative branches":
+    it "should propagate a deterministic forward-provider failure from key generation":
+        step("Inject an explicit forward NTT error before polynomial splitting")
+        val provider = DeterministicFaultNttProvider.create(
+            "fixture-forward-failure", "", false)
+        match ml_kem_keygen_checked_provider(
+                _core_zero32(), _core_zero32(), provider):
+            case Ok(_): fail("key generation swallowed the provider failure")
+            case Err(reason): expect(reason).to_equal("fixture-forward-failure")
+
+    it "should reject a deterministic short accelerator output":
+        step("Return an empty forward batch for a nonempty polynomial request")
+        val provider = DeterministicFaultNttProvider.create("", "", true)
+        match ml_kem_keygen_checked_provider(
+                _core_zero32(), _core_zero32(), provider):
+            case Ok(_): fail("key generation accepted a short provider output")
+            case Err(reason): expect(reason).to_equal(
+                "ml-kem-accelerator-output-size-invalid")
+
+    it "should propagate a deterministic inverse-provider failure from encapsulation":
+        step("Use valid scalar key material and fail the provider inverse batch")
+        val (ek, _, _, message) = _core_valid_material()
+        val provider = DeterministicFaultNttProvider.create(
+            "", "fixture-inverse-failure", false)
+        match ml_kem_encaps_checked_provider(ek, message, provider):
+            case Ok(_): fail("encapsulation swallowed the provider failure")
+            case Err(reason): expect(reason).to_equal("fixture-inverse-failure")
+
+    it "should propagate a deterministic inverse-provider failure from decapsulation":
+        step("Use valid scalar ciphertext and fail the provider inverse batch")
+        val (_, dk, ciphertext, _) = _core_valid_material()
+        val provider = DeterministicFaultNttProvider.create(
+            "", "fixture-inverse-failure", false)
+        match ml_kem_decaps_checked_provider(dk, ciphertext, provider):
+            case Ok(_): fail("decapsulation swallowed the provider failure")
+            case Err(reason): expect(reason).to_equal("fixture-inverse-failure")

@@ -1,0 +1,76 @@
+"""
+# Service Lifecycle — PID file management and liveness checks
+#
+# Wraps daemon_sdk lock primitives for the service base library.
+# Provides PID-file creation, liveness check, and cleanup.
+"""
+
+use std.io_runtime
+
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_process_exists(pid: i64) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+
+# --- PID File Operations ---
+
+struct PidFileState:
+    path: text
+    pid: i64
+    acquired: bool
+
+fn _parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1i64:
+        return "."
+    var out: [text] = []
+    var i = 0i64
+    while i < parts.len() - 1i64:
+        out.push(parts[i])
+        i = i + 1i64
+    out.join("/")
+
+fn acquire_pid_file(path: text) -> PidFileState:
+    val parent = _parent_dir(path)
+    rt_mkdir_p(parent)
+
+    if rt_file_exists(path):
+        val existing_pid = read_pid_file(path)
+        if existing_pid > 0i64 and rt_process_exists(existing_pid):
+            return PidFileState(path: path, pid: -1i64, acquired: false)
+        rt_file_delete(path)
+
+    val pid = rt_getpid()
+    val timestamp = rt_time_now_unix_micros()
+    val content = "{pid}\n{timestamp}"
+    if rt_file_write_text(path, content):
+        return PidFileState(path: path, pid: pid, acquired: true)
+    PidFileState(path: path, pid: -1i64, acquired: false)
+
+fn release_pid_file(state: PidFileState):
+    if state.acquired and rt_file_exists(state.path):
+        rt_file_delete(state.path)
+
+fn read_pid_file(path: text) -> i64:
+    val content = rt_file_read_text(path)
+    if content.len() == 0i64:
+        return -1i64
+    val lines = content.split("\n")
+    if lines.len() == 0i64:
+        return -1i64
+    val pid_str = lines[0i64].trim()
+    if pid_str.len() == 0i64:
+        return -1i64
+    pid_str.to_i64() ?? -1i64
+
+fn is_daemon_alive(pid_path: text) -> bool:
+    if not rt_file_exists(pid_path):
+        return false
+    val pid = read_pid_file(pid_path)
+    if pid <= 0i64:
+        return false
+    rt_process_exists(pid)

@@ -1,0 +1,52 @@
+#!/bin/sh
+# ghdl_validate_jtag_debug.shs — Lane B: GHDL validation of the integrated SoC
+# JTAG debug back-end (jtag_debug_chain) driven end-to-end over the RAW TAP.
+#
+# Analyzes the landed debug units + the READ-ONLY rv32_exec_core + hart_core_glue
+# + the new jtag_debug_chain bundle + tb_soc_jtag_debug, stages the deterministic
+# rv32 payload the core reads at elaboration, runs the tb, and PASSES only when
+# the tb prints "SOC JTAG DEBUG: ALL PASS" (which is unreachable on any assert
+# failure — see the tb header). Fail-closed: any ghdl :error: or a missing marker
+# is a FAIL.
+#
+# This is the sim proof that the board transport chain
+#   raw JTAG -> jtag_tap -> riscv_dtm ==CDC==> dmi_bus -> DM -> real rv32 hart
+# halts / reads pc+GPRs / single-steps / resumes with TCK 8x slower than clk.
+set -e
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DEBUG_DIR="$REPO_ROOT/src/lib/hardware/debug"
+CORE="$REPO_ROOT/examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
+RUN_DIR="${JTAG_DEBUG_RUN_DIR:-$REPO_ROOT/build/ghdl/jtag_debug}"
+STD=08
+
+command -v ghdl >/dev/null 2>&1 || { echo "FAIL: ghdl not found in PATH"; exit 1; }
+
+rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"; cd "$RUN_DIR"
+
+# Deterministic program (matches tb_soc_jtag_debug / run_hart_e2e):
+#   addi x10,x0,42 ; addi x1,x0,7 ; NOP sled (ROM default 0x00000013)
+printf '02A00513\n00700093\n' > rv32_payload.mem
+printf '00000000\n' > rv32_fat32.mem
+
+UNITS="jtag_tap dmi_bus debug_registers riscv_dtm riscv_debug_module sba_test_mem"
+for u in $UNITS; do
+  ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/$u.vhd"
+done
+ghdl -a --std=$STD --workdir=. "$CORE"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/hart_core_glue.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/jtag_debug_chain.vhd"
+ghdl -a --std=$STD --workdir=. "$DEBUG_DIR/tb_soc_jtag_debug.vhd"
+ghdl -e --std=$STD --workdir=. tb_soc_jtag_debug
+
+LOG="$RUN_DIR/tb_soc_jtag_debug.log"
+ghdl -r --std=$STD --workdir=. tb_soc_jtag_debug --stop-time=50ms > "$LOG" 2>&1 || true
+cat "$LOG"
+
+if grep -q "SOC JTAG DEBUG: ALL PASS" "$LOG" && ! grep -qi ":error:" "$LOG"; then
+  echo "ghdl_validate_jtag_debug: PASS"
+  exit 0
+else
+  echo "ghdl_validate_jtag_debug: FAIL (no ALL PASS marker or ghdl error; see $LOG)"
+  exit 1
+fi

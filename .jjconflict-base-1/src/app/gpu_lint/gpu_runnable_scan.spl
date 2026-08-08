@@ -1,0 +1,629 @@
+# gpu_runnable_scan - lint: which web/2D renderer functions are NOT
+# GPU-offloadable, transitively.
+#
+# Text/line-level scan (no real parser). Owner-aware call graph: defs are
+# keyed per (file, name); plain and self./me. calls resolve preferring
+# same-file defs, then import-reachable defs (line-based import scan).
+# Dotted calls with an unresolvable receiver stay ambiguous: they edge to
+# every reachable same-name def except the calling def itself, so delegation
+# (engine.clear -> backend.clear) is a cross edge, not a self-loop. Ambiguous
+# edges propagate blockage only; cycle detection runs on resolved edges.
+# Remaining false positives are noted in the report header.
+#
+# Run: SIMPLE_TIMEOUT_SECONDS=3600 bin/simple run src/app/gpu_lint/gpu_runnable_scan.spl
+# Flags: --summary        <=20 line output (counts + root verdicts)
+#        --strict         exit 1 when any ROOT is blocked (for CI)
+#        --report=PATH    write full ranked report to PATH (default: /tmp)
+#
+# Ban list (per body line): text interpolation, Dict usage, dynamic list
+# growth (.push), string ops, io/shell calls, non-GPU FFI, closures,
+# print, recursion (direct or via call-graph cycle), nested fn defs.
+# Whitelist: arithmetic, indexing, numeric loops, calls to gpu-runnable fns,
+# vulkan_*/cuda_*/vk_*/webgpu_sffi_*/metal_sffi_* SFFI intrinsics.
+#
+# Overload rule: a NAME is reported blocked when ANY of its defs is blocked
+# (any-def-blocked rollup); ambiguous dotted calls edge to all reachable
+# same-name defs, so unresolvable receivers keep the conservative taint.
+
+use app.io.mod (dir_walk, file_read, file_write, get_args)
+
+fn count_indent(line: text) -> i64:
+    var i = 0
+    val n = line.len()
+    var going = true
+    while going and i < n:
+        if line[i:i+1] == " ":
+            i = i + 1
+        else:
+            going = false
+    i
+
+fn trailing_ident(frag: text, ic: text) -> text:
+    var j = frag.len()
+    var going = true
+    while going and j > 0:
+        if ic.contains(frag[j-1:j]):
+            j = j - 1
+        else:
+            going = false
+    frag[j:]
+
+fn is_ident(s: text, ic: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        if not ic.contains(s[i:i+1]):
+            return false
+        i = i + 1
+    true
+
+# "fn name(" / "me name(" / "pub fn name(" -> name, else ""
+fn parse_def_name(trimmed: text, ic: text) -> text:
+    var t = trimmed
+    if t.starts_with("pub "):
+        t = t[4:]
+    var rest = ""
+    if t.starts_with("fn "):
+        rest = t[3:]
+    if t.starts_with("me "):
+        rest = t[3:]
+    if rest == "":
+        return ""
+    var p = rest.index_of("(")
+    val g = rest.index_of("<")
+    if g >= 0 and (p < 0 or g < p):
+        p = g
+    if p <= 0:
+        return ""
+    val name = rest[0:p].trim()
+    if is_ident(name, ic):
+        return name
+    ""
+
+# remove string-literal contents and trailing # comment
+fn strip_strings(line: text) -> text:
+    val parts = line.split("\"")
+    var code = ""
+    var pi = 0
+    while pi < parts.len():
+        if pi % 2 == 0:
+            code = code + parts[pi] + " "
+        pi = pi + 1
+    val h = code.index_of("#")
+    if h >= 0:
+        return code[0:h]
+    code
+
+fn has_interpolation(line: text) -> bool:
+    val parts = line.split("\"")
+    var pi = 1
+    while pi < parts.len():
+        if parts[pi].contains("{"):
+            return true
+        pi = pi + 2
+    false
+
+# entries are kind-prefixed: "0name" plain call, "1name" self./me. receiver,
+# "2name" other dotted receiver (unresolvable owner)
+fn extract_callees(code: text, ic: text) -> [text]:
+    var out: [text] = []
+    val frags = code.split("(")
+    var fi = 0
+    while fi < frags.len() - 1:
+        val frag = frags[fi]
+        val name = trailing_ident(frag, ic)
+        if name.len() > 0:
+            if name != "if" and name != "while" and name != "for" and
+               name != "match" and name != "return" and name != "not" and
+               name != "in" and name != "and" and name != "or" and
+               name != "fn" and name != "me" and name != "val" and
+               name != "var" and name != "case" and name != "else":
+                val j = frag.len() - name.len()
+                var kind = "0"
+                if j > 0 and frag[j-1:j] == ".":
+                    val recv = trailing_ident(frag[0:j-1], ic)
+                    if recv == "self" or recv == "me":
+                        kind = "1"
+                    else:
+                        kind = "2"
+                out.push(kind + name)
+        fi = fi + 1
+    out
+
+fn is_gpu_intrinsic(c: text) -> bool:
+    c.starts_with("vulkan_") or c.starts_with("cuda_") or c.starts_with("vk_") or
+        c.starts_with("sffi_vulkan") or c.starts_with("sffi_cuda") or
+        c.contains("vulkan_sffi") or c.contains("cuda_sffi") or
+        c.contains("webgpu_sffi") or c.contains("metal_sffi") or
+        c.starts_with("sffi_webgpu") or c.starts_with("sffi_metal")
+
+fn is_banned_ffi(c: text) -> bool:
+    if is_gpu_intrinsic(c):
+        return false
+    c.contains("sffi") or c.starts_with("ffi_") or c.starts_with("rt_") or
+        c.starts_with("extern_")
+
+# violations for one body line; each entry "label at file:line"
+fn line_violations(raw: text, code: text, callees: [text], loc: text, ic: text) -> [text]:
+    var v: [text] = []
+    if has_interpolation(raw):
+        v.push("text-interpolation at " + loc)
+    if code.contains(".push("):
+        v.push("list-push at " + loc)
+    if code.contains("Dict<") or code.contains(".contains_key(") or
+       code.contains(".keys()") or code.contains(".values()"):
+        v.push("dict-usage at " + loc)
+    if code.contains(".split(") or code.contains(".replace(") or
+       code.contains(".trim(") or code.contains(".join(") or
+       code.contains(".starts_with(") or code.contains(".ends_with(") or
+       code.contains(".index_of(") or code.contains(".to_text(") or
+       code.contains(".to_upper") or code.contains(".to_lower") or
+       code.contains(".chars(") or code.contains(".substring("):
+        v.push("string-op at " + loc)
+    val ct = code.trim()
+    if ct.starts_with("print ") or ct.starts_with("print(") or
+       code.contains(" print "):
+        v.push("print at " + loc)
+    if code.contains("file_read") or code.contains("file_write") or
+       code.contains("file_exists") or code.contains("dir_walk") or
+       code.contains("dir_create") or code.contains("http_") or
+       code.contains("socket") or code.contains("shell_run") or
+       code.contains("process_run") or code.contains("getenv") or
+       code.contains("env_get") or code.contains("read_line"):
+        v.push("io-call at " + loc)
+    if code.contains("=>") or code.contains("\\"):
+        v.push("closure at " + loc)
+    if code.contains(".map(") or code.contains(".filter(") or
+       code.contains(".flat_map(") or code.contains(".each(") or
+       code.contains(".sort("):
+        v.push("higher-order-call at " + loc)
+    var ci = 0
+    while ci < callees.len():
+        val cn = callees[ci][1:]
+        if is_banned_ffi(cn):
+            v.push("ffi-call:" + cn + " at " + loc)
+        ci = ci + 1
+    v
+
+fn is_root_name(n: text) -> bool:
+    if n == "draw_rect_filled" or n == "clear" or n == "draw_line" or
+       n == "tile_checksum" or n == "tile_checksums":
+        return true
+    if n.contains("draw_ellipse") or n.contains("draw_line"):
+        return true
+    if n.contains("cull"):
+        return true
+    if n.contains("checksum") and (n.contains("tile") or n.contains("pixel") or
+       n.contains("glyph")):
+        return true
+    if n.contains("draw_ir") and (n.contains("exec") or n.contains("run") or
+       n.contains("apply") or n.contains("dispatch")):
+        return true
+    false
+
+fn main() -> i64:
+    val ic = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    val scan_dirs = ["src/lib/gc_async_mut/gpu/engine2d",
+                     "src/lib/gc_async_mut/gpu/browser_engine"]
+
+    # ---- CLI flags ----
+    var summary_mode = false
+    var strict_mode = false
+    var out_path = "/tmp/gpu_runnable_report.txt"
+    val argv = get_args()
+    for a in argv:
+        if a == "--summary":
+            summary_mode = true
+        if a == "--strict":
+            strict_mode = true
+        if a.starts_with("--report="):
+            out_path = a[9:]
+
+    # ---- collect top-level .spl files ----
+    var files: [text] = []
+    for d in scan_dirs:
+        val walked = dir_walk(d)
+        for f in walked:
+            if f.ends_with(".spl"):
+                # keep only files directly inside d (no deeper subdir)
+                var rel = f
+                if f.starts_with(d):
+                    rel = f[d.len() + 1:]
+                if not rel.contains("/"):
+                    files.push(f)
+
+    # ---- def-level function table (parallel arrays, owner-aware) ----
+    var d_name: [text] = []            # bare function name
+    var d_file: [i64] = []             # owning file index
+    var d_loc: [text] = []             # "file:line"
+    var d_viols: [[text]] = []         # local violations of this def
+    var d_callees: [[text]] = []       # kind-prefixed callee entries
+    # name-level index over defs (for resolution + any-def-blocked rollup)
+    var names: [text] = []
+    var name_loc: [text] = []          # first def "file:line"
+    var name_id: Dict<text, i64> = {}
+    var name_def_ids: [[i64]] = []     # def node ids sharing each name
+    var construct_counts: Dict<text, i64> = {}
+    var construct_labels: [text] = []
+    var total_defs = 0
+    var file_bases: [text] = []        # per-file basename without .spl
+    var file_imports: [text] = []      # per-file concatenated use/import lines
+    var fidx = -1
+
+    for f in files:
+        val content = file_read(f)
+        val lines = content.split("\n")
+        val nlines = lines.len()
+        fidx = fidx + 1
+        val segs = f.split("/")
+        var fbase = segs[segs.len() - 1]
+        if fbase.ends_with(".spl"):
+            fbase = fbase[0:fbase.len() - 4]
+        file_bases.push(fbase)
+
+        # pass 1: def positions + import lines in this file
+        var def_lines: [i64] = []
+        var def_indents: [i64] = []
+        var def_names: [text] = []
+        var imp_text = ""
+        var li = 0
+        while li < nlines:
+            val line = lines[li]
+            val trimmed = line.trim()
+            if trimmed.len() > 0 and not trimmed.starts_with("#"):
+                if trimmed.starts_with("use ") or trimmed.starts_with("import "):
+                    imp_text = imp_text + trimmed + "\n"
+                val dn = parse_def_name(trimmed, ic)
+                if dn != "":
+                    def_lines.push(li)
+                    def_indents.push(count_indent(line))
+                    def_names.push(dn)
+            li = li + 1
+        file_imports.push(imp_text)
+
+        # pass 2: analyze each def body
+        var di = 0
+        while di < def_lines.len():
+            val dname = def_names[di]
+            val dline = def_lines[di]
+            val dindent = def_indents[di]
+            total_defs = total_defs + 1
+
+            var cur_viols: [text] = []
+            var cur_callees: [text] = []
+            var bi = dline + 1
+            var in_body = true
+            while in_body and bi < nlines:
+                val bline = lines[bi]
+                val btrim = bline.trim()
+                if btrim.len() == 0 or btrim.starts_with("#"):
+                    bi = bi + 1
+                else:
+                    if count_indent(bline) <= dindent:
+                        in_body = false
+                    else:
+                        val loc = "{f}:{bi + 1}"
+                        val code = strip_strings(bline)
+                        val nested = parse_def_name(btrim, ic)
+                        if nested != "":
+                            cur_viols.push("nested-fn-closure at " + loc)
+                        val callees = extract_callees(code, ic)
+                        for c in callees:
+                            cur_callees.push(c)
+                        val lv = line_violations(bline, code, callees, loc, ic)
+                        for v in lv:
+                            cur_viols.push(v)
+                        bi = bi + 1
+
+            # register def node + name index
+            val did = d_name.len()
+            d_name.push(dname)
+            d_file.push(fidx)
+            d_loc.push("{f}:{dline + 1}")
+            d_viols.push(cur_viols)
+            d_callees.push(cur_callees)
+            if name_id.contains_key(dname):
+                val id = name_id[dname]
+                var td = name_def_ids[id]
+                td.push(did)
+                name_def_ids[id] = td
+            else:
+                name_id[dname] = names.len()
+                names.push(dname)
+                name_loc.push("{f}:{dline + 1}")
+                name_def_ids.push([did])
+
+            # tally construct frequencies
+            for v in cur_viols:
+                val sp = v.index_of(" at ")
+                var k = v
+                if sp >= 0:
+                    k = v[0:sp]
+                if construct_counts.contains_key(k):
+                    construct_counts[k] = construct_counts[k] + 1
+                else:
+                    construct_counts[k] = 1
+                    construct_labels.push(k)
+            di = di + 1
+
+    val nfn = names.len()
+    val ndefs = d_name.len()
+
+    # ---- build owner-aware def-level edge lists (dedup, in-table only) ----
+    # STRONG edges: plain ("0") and self./me. ("1") calls, resolved preferring
+    # same-file defs, then import-reachable defs (line-based use-scan). These
+    # carry cycle detection: real recursion is always a resolved call.
+    # WEAK edges: dotted calls ("2") with an unresolvable receiver stay
+    # ambiguous: edge to EVERY reachable same-name def except the calling def
+    # itself. Weak edges propagate blockage (any-def-blocked taint) but do NOT
+    # feed cycle detection — an ambiguous fan-out is not recursion evidence,
+    # and treating it as such is what merged-name self-loops used to do.
+    # A callee with no reachable def drops the edge.
+    var s_edges: [[i64]] = []
+    var w_edges: [[i64]] = []
+    var edges_dropped = 0
+    var i = 0
+    while i < ndefs:
+        var seen: Dict<text, bool> = {}
+        var tseen: Dict<text, bool> = {}
+        var es: [i64] = []
+        var ws: [i64] = []
+        val cs = d_callees[i]
+        val cf = d_file[i]
+        var ci2 = 0
+        while ci2 < cs.len():
+            val entry = cs[ci2]
+            val c = entry[1:]
+            if name_id.contains_key(c) and not seen.contains_key(entry):
+                seen[entry] = true
+                val kind = entry[0:1]
+                val cands = name_def_ids[name_id[c]]
+                var targets: [i64] = []
+                if kind == "2":
+                    for t in cands:
+                        if t != i:
+                            if d_file[t] == cf or
+                               file_imports[cf].contains(file_bases[d_file[t]]):
+                                targets.push(t)
+                else:
+                    for t in cands:
+                        if d_file[t] == cf:
+                            targets.push(t)
+                    if targets.len() == 0:
+                        for t in cands:
+                            if file_imports[cf].contains(file_bases[d_file[t]]):
+                                targets.push(t)
+                if targets.len() == 0:
+                    edges_dropped = edges_dropped + 1
+                else:
+                    var kc = "s"
+                    if kind == "2":
+                        kc = "w"
+                    for t in targets:
+                        val tk = kc + "{t}"
+                        if not tseen.contains_key(tk):
+                            tseen[tk] = true
+                            if kind == "2":
+                                ws.push(t)
+                            else:
+                                es.push(t)
+            ci2 = ci2 + 1
+        s_edges.push(es)
+        w_edges.push(ws)
+        i = i + 1
+
+    # ---- cycle detection: eliminate nodes with no live out-edges ----
+    # remaining nodes are in, or can reach, a call cycle (approximation)
+    var removed: [bool] = []
+    i = 0
+    while i < ndefs:
+        removed.push(false)
+        i = i + 1
+    var changed = true
+    while changed:
+        changed = false
+        i = 0
+        while i < ndefs:
+            if not removed[i]:
+                var all_gone = true
+                val es = s_edges[i]
+                for e in es:
+                    if not removed[e]:
+                        all_gone = false
+                if all_gone:
+                    removed[i] = true
+                    changed = true
+            i = i + 1
+
+    # ---- blocked state + chain reasons (def-level) ----
+    var blocked: [bool] = []
+    var reason: [text] = []
+    i = 0
+    while i < ndefs:
+        val lv = d_viols[i]
+        if lv.len() > 0:
+            blocked.push(true)
+            reason.push(lv[0])
+        else:
+            if not removed[i]:
+                blocked.push(true)
+                reason.push("recursion (direct or via call cycle) at " + d_loc[i])
+            else:
+                blocked.push(false)
+                reason.push("")
+        i = i + 1
+
+    # ---- propagate blockage up the call graph, building chains ----
+    changed = true
+    var iters = 0
+    while changed and iters < 200:
+        changed = false
+        iters = iters + 1
+        i = 0
+        while i < ndefs:
+            if not blocked[i]:
+                val es = s_edges[i]
+                var hit = -1
+                for e in es:
+                    if hit < 0 and blocked[e]:
+                        hit = e
+                var via = "calls"
+                if hit < 0:
+                    val ws2 = w_edges[i]
+                    for e in ws2:
+                        if hit < 0 and blocked[e]:
+                            hit = e
+                            via = "may-call"
+                if hit >= 0:
+                    blocked[i] = true
+                    reason[i] = "{via} {d_name[hit]}[{file_bases[d_file[hit]]}] -> " + reason[hit]
+                    changed = true
+            i = i + 1
+
+    # ---- name-level rollup (any-def-blocked overload rule) ----
+    var nblocked: [bool] = []
+    var nreason: [text] = []
+    var name_defs: [i64] = []
+    i = 0
+    while i < nfn:
+        val dids = name_def_ids[i]
+        name_defs.push(dids.len())
+        var b = false
+        var rsn = ""
+        for d in dids:
+            if blocked[d] and not b:
+                b = true
+                rsn = reason[d]
+        nblocked.push(b)
+        nreason.push(rsn)
+        i = i + 1
+    # count recursion construct (per name)
+    i = 0
+    var rec_count = 0
+    while i < nfn:
+        if nblocked[i] and nreason[i].starts_with("recursion"):
+            rec_count = rec_count + 1
+        i = i + 1
+    if rec_count > 0:
+        construct_counts["recursion-cycle"] = rec_count
+        construct_labels.push("recursion-cycle")
+
+    # ---- gather stats (name-level) ----
+    var blocked_n = 0
+    var tainted_overloads = 0
+    i = 0
+    while i < nfn:
+        if nblocked[i]:
+            blocked_n = blocked_n + 1
+            if name_defs[i] > 1:
+                tainted_overloads = tainted_overloads + 1
+        i = i + 1
+
+    # ---- roots ----
+    var root_ids: [i64] = []
+    i = 0
+    while i < nfn:
+        if is_root_name(names[i]):
+            root_ids.push(i)
+        i = i + 1
+    var roots_blocked = 0
+    for r in root_ids:
+        if nblocked[r]:
+            roots_blocked = roots_blocked + 1
+
+    # ---- top constructs by frequency (selection sort) ----
+    var sorted_labels: [text] = []
+    var sorted_counts: [i64] = []
+    var pool_labels: [text] = []
+    for l in construct_labels:
+        pool_labels.push(l)
+    var picked = 0
+    while picked < pool_labels.len():
+        var best = -1
+        var best_c = -1
+        var pj = 0
+        while pj < pool_labels.len():
+            val pl = pool_labels[pj]
+            if pl != "":
+                val c = construct_counts[pl]
+                if c > best_c:
+                    best_c = c
+                    best = pj
+            pj = pj + 1
+        if best < 0:
+            picked = pool_labels.len()
+        else:
+            sorted_labels.push(pool_labels[best])
+            sorted_counts.push(best_c)
+            pool_labels[best] = ""
+            picked = picked + 1
+
+    # ---- report ----
+    var rep = "GPU-runnable transitive scan (line-based)\n"
+    rep = rep + "Scanned dirs: engine2d + browser_engine (top-level .spl)\n"
+    rep = rep + "Caveats (remaining false-positive sources, stated honestly):\n"
+    rep = rep + "  - Owner-aware graph keys defs per (file, name); dotted calls with\n"
+    rep = rep + "    an unresolvable receiver still edge to ALL reachable same-name\n"
+    rep = rep + "    defs (any-def-blocked taint), which can over-connect. Those weak\n"
+    rep = rep + "    edges do NOT feed cycle detection, so ambiguous mutual dotted\n"
+    rep = rep + "    recursion would be missed (recursion needs a resolved call).\n"
+    rep = rep + "  - Import filter is line-based substring match on file basenames\n"
+    rep = rep + "    (short basenames like 'mod' over-match, keeping extra edges;\n"
+    rep = rep + "    re-exports/facade modules are not followed transitively).\n"
+    rep = rep + "  - Trait signature decls count as empty runnable bodies.\n"
+    rep = rep + "  - Cycle marking includes nodes that merely reach a cycle.\n"
+    rep = rep + "Call-site edges dropped by import filter: {edges_dropped}\n\n"
+    rep = rep + "Files scanned: {files.len()}\n"
+    rep = rep + "Function defs: {total_defs} ({nfn} unique names, {ndefs} graph nodes)\n"
+    rep = rep + "Blocked names: {blocked_n} / {nfn}\n"
+    rep = rep + "Tainted overloaded names (any-def-blocked rule): {tainted_overloads}\n"
+    rep = rep + "Roots: {root_ids.len()} total, {roots_blocked} BLOCKED, {root_ids.len() - roots_blocked} OFFLOADABLE\n\n"
+    rep = rep + "== Top blocking constructs by frequency ==\n"
+    var ti = 0
+    while ti < sorted_labels.len() and ti < 15:
+        rep = rep + "  {sorted_counts[ti]}  {sorted_labels[ti]}\n"
+        ti = ti + 1
+    rep = rep + "\n== Per-root verdicts (first blocking chain) ==\n"
+    for r in root_ids:
+        if nblocked[r]:
+            rep = rep + "BLOCKED     {names[r]} ({name_loc[r]}, {name_defs[r]} defs)\n"
+            rep = rep + "    chain: {names[r]} -> " + nreason[r] + "\n"
+        else:
+            rep = rep + "OFFLOADABLE {names[r]} ({name_loc[r]}, {name_defs[r]} defs)\n"
+
+    file_write(out_path, rep)
+
+    if summary_mode:
+        # ---- <=20 line summary: counts + root verdicts ----
+        print "gpu_runnable_scan: {files.len()} files, {total_defs} defs, {nfn} names"
+        print "blocked {blocked_n}/{nfn} names; tainted overloads: {tainted_overloads}; edges dropped by import filter: {edges_dropped}"
+        print "roots: {root_ids.len()} ({roots_blocked} BLOCKED, {root_ids.len() - roots_blocked} OFFLOADABLE)"
+        var shown = 0
+        for r in root_ids:
+            if nblocked[r] and shown < 15:
+                print "  BLOCKED {names[r]}"
+                shown = shown + 1
+        print "full report: {out_path}"
+    else:
+        # ---- verbose console output ----
+        print "gpu_runnable_scan: {files.len()} files, {total_defs} defs, {nfn} names"
+        print "blocked {blocked_n}/{nfn} names; tainted overloads: {tainted_overloads}; edges dropped by import filter: {edges_dropped}"
+        print "roots: {root_ids.len()} ({roots_blocked} BLOCKED, {root_ids.len() - roots_blocked} OFFLOADABLE)"
+        print "top blocking constructs:"
+        ti = 0
+        while ti < sorted_labels.len() and ti < 8:
+            print "  {sorted_counts[ti]}  {sorted_labels[ti]}"
+            ti = ti + 1
+        print "root verdicts:"
+        for r in root_ids:
+            var verdict = "OFFLOADABLE"
+            if nblocked[r]:
+                verdict = "BLOCKED"
+            print "  {verdict} {names[r]}"
+        print "full report: {out_path}"
+
+    # warning mode: always 0; --strict: fail when any ROOT is blocked
+    if strict_mode and roots_blocked > 0:
+        return 1
+    0

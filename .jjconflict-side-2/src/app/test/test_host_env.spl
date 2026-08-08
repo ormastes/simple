@@ -1,0 +1,139 @@
+# Aggregate live host evidence without substituting emulation or CPU mirrors.
+
+use app.io.mod.{dir_create_all, file_exists, file_hash_sha256, file_is_regular_no_follow, file_read, file_write}
+use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
+use common.ui.host_env_contract.{
+    HostCapabilityRow,
+    TestHostEnv,
+    host_browser_vulkan_parity_evidence_passes,
+    host_display_input_evidence_passes,
+    host_capability_row_from_evidence,
+    host_readback_evidence_passes,
+    host_readback_capture_bindings,
+    host_renderdoc_capture_binding,
+    host_renderdoc_replay_xml_binding,
+    host_renderdoc_evidence_passes,
+    host_simd_artifact_bindings,
+    host_simd_evidence_passes,
+    host_simd_frame_receipt_binding,
+    host_vulkan_evidence_passes,
+    host_x86_simd_evidence_passes
+}
+
+val OUT_DIR = "build/test-artifacts/test_host_env"
+val OUT_PATH = "build/test-artifacts/test_host_env/evidence.json"
+val VULKAN_PATH = "build/gui-web-2d-vulkan-env-run-current/simple-vulkan-readback/evidence.env"
+val VULKAN_RUN_PATH = "build/gui-web-2d-vulkan-env-run-current/evidence.env"
+val VULKAN_BROWSER_PATH = "build/gui-web-2d-vulkan-env-browser-backing/evidence.env"
+val RENDERDOC_PATH = "build/renderdoc/simple-gate/evidence.env"
+val LIVE_WM_PATH = "build/linux-hosted-wm-live-window-evidence/evidence.env"
+val CPU_SIMD_PATH = "build/cpu-simd-engine2d-evidence/evidence.env"
+val ARM_SIMD_PATH = "build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env"
+val RISCV_SIMD_PATH = "build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env"
+val SIMD_SOURCE_PATH = "scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl"
+
+fn retained(path: text) -> text:
+    if file_exists(path):
+        return file_read(path)
+    ""
+
+fn host_renderdoc_artifacts_are_current(evidence: text) -> bool:
+    val (capture_path, capture_sha) = host_renderdoc_capture_binding(evidence)
+    val (xml_path, xml_sha) = host_renderdoc_replay_xml_binding(evidence)
+    (capture_path != "" and xml_path != "" and
+        file_is_regular_no_follow(capture_path) and file_is_regular_no_follow(xml_path) and
+        file_hash_sha256(capture_path) == capture_sha and
+        file_hash_sha256(xml_path) == xml_sha)
+
+fn host_readback_captures_are_current(evidence: text) -> bool:
+    val (baseline_path, baseline_sha, input_path, input_sha) = host_readback_capture_bindings(evidence)
+    (baseline_path != "" and input_path != "" and
+        file_is_regular_no_follow(baseline_path) and file_is_regular_no_follow(input_path) and
+        file_hash_sha256(baseline_path) == baseline_sha and
+        file_hash_sha256(input_path) == input_sha)
+
+fn host_simd_artifacts_are_current(evidence: text, source_path: text = SIMD_SOURCE_PATH) -> bool:
+    val (compiler_path, source_sha, compiler_sha) = host_simd_artifact_bindings(evidence)
+    val (receipt_payload, receipt_sha) = host_simd_frame_receipt_binding(evidence)
+    (source_path != "" and compiler_path != "" and receipt_payload != "" and
+        file_is_regular_no_follow(source_path) and file_is_regular_no_follow(compiler_path) and
+        file_hash_sha256(source_path) == source_sha and
+        file_hash_sha256(compiler_path) == compiler_sha and
+        hash_sha256(receipt_payload) == receipt_sha)
+
+fn host_simd_capability_row_current(
+    name: text, evidence: text, arch: text, feature: text, evidence_path: text
+) -> HostCapabilityRow:
+    host_capability_row_from_evidence(
+        name,
+        host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence),
+        file_exists(evidence_path),
+        "complete-retained-native-" + arch + "-simd-frame-evidence-required",
+        evidence_path,
+        "sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+    )
+
+fn main() -> i64:
+    val vulkan = retained(VULKAN_PATH)
+    val vulkan_run = retained(VULKAN_RUN_PATH)
+    val vulkan_browser = retained(VULKAN_BROWSER_PATH)
+    val renderdoc = retained(RENDERDOC_PATH)
+    val live = retained(LIVE_WM_PATH)
+    val cpu_simd = retained(CPU_SIMD_PATH)
+    val arm_simd = retained(ARM_SIMD_PATH)
+    val riscv_simd = retained(RISCV_SIMD_PATH)
+
+    val x86 = host_capability_row_from_evidence(
+        "x86_simd",
+        host_x86_simd_evidence_passes(cpu_simd) and host_simd_artifacts_are_current(cpu_simd),
+        file_exists(CPU_SIMD_PATH),
+        "complete-retained-x86-simd-evidence-required", CPU_SIMD_PATH,
+        "sh scripts/check/check-cpu-simd-engine2d-evidence.shs"
+    )
+    val arm = host_simd_capability_row_current(
+        "arm_simd", arm_simd, "aarch64", "neon", ARM_SIMD_PATH
+    )
+    val riscv = host_simd_capability_row_current(
+        "riscv_simd", riscv_simd, "riscv64", "rvv", RISCV_SIMD_PATH
+    )
+
+    val vulkan_row = host_capability_row_from_evidence(
+        "vulkan",
+        host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run),
+        file_exists(VULKAN_PATH) and file_exists(VULKAN_RUN_PATH) and file_exists(VULKAN_BROWSER_PATH),
+        "validated-device-readback-browser-vulkan-and-parity-evidence-required", VULKAN_RUN_PATH,
+        "GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing && GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current scripts/setup/setup-gui-web-2d-vulkan-env.shs --run"
+    )
+
+    val renderdoc_row = host_capability_row_from_evidence(
+        "renderdoc",
+        host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc),
+        file_exists(RENDERDOC_PATH),
+        "valid-rdoc-capture-required", RENDERDOC_PATH,
+        "scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple"
+    )
+
+    val display_row = host_capability_row_from_evidence(
+        "display_input", host_display_input_evidence_passes(live), file_exists(LIVE_WM_PATH),
+        "screen-to-semantic-event-evidence-required", LIVE_WM_PATH,
+        "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+    )
+
+    val readback_row = host_capability_row_from_evidence(
+        "framebuffer_readback",
+        host_readback_evidence_passes(live) and host_readback_captures_are_current(live),
+        file_exists(LIVE_WM_PATH),
+        "device-readback-and-exact-argb-required", LIVE_WM_PATH,
+        "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+    )
+
+    val env = TestHostEnv.create([
+        x86, arm, riscv, vulkan_row, renderdoc_row, display_row, readback_row
+    ])
+    val json = env.to_json()
+    dir_create_all(OUT_DIR)
+    file_write(OUT_PATH, json)
+    print json
+    if env.ready():
+        return 0
+    1

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-sspec-expect.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+probe="$work_dir/expect_only_helper_spec.spl"
+dump="$work_dir/stubs.txt"
+output="$work_dir/output.log"
+
+cat >"$probe" <<'EOF'
+use std.spec.*
+
+fn helper():
+    expect(false).to_equal(true)
+
+describe "expect helper":
+    it "fails through the real matcher":
+        helper()
+EOF
+
+if env -u SIMPLE_BOOTSTRAP SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_DUMP_STUBS="$dump" \
+    "$SIMPLE_BIN" test "$probe" --mode=native --clean >"$output" 2>&1; then
+    echo "native SSpec expect-helper check failed: false assertion passed" >&2
+    exit 1
+fi
+
+grep -Eq '(^|[^0-9])1 examples?, 1 failures?([^0-9]|$)' "$output" || {
+    echo "native SSpec expect-helper check failed before the assertion ran" >&2
+    sed -n '1,80p' "$output" >&2
+    exit 1
+}
+[ -f "$dump" ] || {
+    echo "native SSpec expect-helper check did not produce the stub dump" >&2
+    exit 1
+}
+if grep -Eq '[^[:space:]]' "$dump"; then
+    echo "native SSpec expect-helper check generated unresolved stubs:" >&2
+    sed -n '1,40p' "$dump" >&2
+    exit 1
+fi
+
+echo "native_sspec_expect_helper=pass"

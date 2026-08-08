@@ -1,0 +1,341 @@
+# CUDA lane session for the GPU Remote Interpreter test lanes (Task B1).
+#
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md
+# section 5 / 3.1. This wraps the existing crypto-owned CUDA lifecycle
+# facade (`std.gc_async_mut.crypto_accel.cuda_session.CryptoCudaSession`)
+# with the GMB-1 mailbox arena: a single device allocation shaped
+# `[guard][ARENA_SIZE data][guard]`, HtoD/DtoH round-trip helpers, JIT
+# module load + entry-point resolution, and first-error retention per
+# `doc/03_plan/sys_test/cuda_host_validation_2026-07-11.md` ("Preserve the
+# first operational error and append cleanup errors as secondary
+# diagnostics"). Scope mirrors Task C1's `VulkanLaneSession` shell: the
+# session/arena/guard/first-error plumbing, not the full SVM-G bytecode VM
+# (later tasks) or resident/interactive polling mode (design doc 5.3).
+#
+# GMB-1 arena constants (ARENA_SIZE, OFF_RAM_SENTINEL, sentinel values) are
+# imported from the canonical A2 module, never re-declared here.
+
+mod std.gc_async_mut.gpu_lane.cuda_lane_session
+
+use std.gc_async_mut.crypto_accel.cuda_session.{CryptoCudaSession}
+use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count,
+    cuda_module_get_function, CUDA_SUCCESS}
+use std.nogc_sync_mut.test_runner.gpu_mailbox.{
+    ARENA_SIZE, OFF_RAM_SENTINEL, SENTINEL_TIMEOUT,
+    decode_sentinel, SentinelState, zero_bytes}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+
+# One canary byte value on both sides of the arena. Chosen to be neither
+# 0x00 (the zero-filled arena default) nor either GMB-1 sentinel byte, so a
+# guard-region read that accidentally lands one word into the arena or one
+# word past the guard is still distinguishable in a diagnostic dump.
+val GUARD_CANARY_BYTE: i64 = 0xA5
+val GUARD_BYTES: i64 = 64
+
+# =========================================================================
+# Pure helpers (no device/driver calls -- unit-testable on any host)
+# =========================================================================
+
+fn canary_bytes(len: i64) -> [u8]:
+    """`len` bytes of the guard canary pattern."""
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < len:
+        out.push(GUARD_CANARY_BYTE.to_u8())
+        i = i + 1
+    out
+
+fn bytes_match_canary(candidate: [u8]) -> bool:
+    """True when every byte of `candidate` equals the guard canary byte."""
+    var i: i64 = 0
+    val n = candidate.len().to_i64()
+    while i < n:
+        if candidate[i].to_i64() != GUARD_CANARY_BYTE:
+            return false
+        i = i + 1
+    true
+
+fn read_bytes_from_ptr(ptr: i64, count: i64) -> [u8]:
+    """Read `count` bytes out of raw host memory at `ptr`, 4 bytes/call via
+    `rt_ptr_read_i32` (no per-byte read extern exists in the runtime)."""
+    var out: [u8] = []
+    var i: i64 = 0
+    while i + 4 <= count:
+        val word = rt_ptr_read_i32(ptr, i) as i64
+        out.push((word & 0xFF).to_u8())
+        out.push(((word >> 8) & 0xFF).to_u8())
+        out.push(((word >> 16) & 0xFF).to_u8())
+        out.push(((word >> 24) & 0xFF).to_u8())
+        i = i + 4
+    while i < count:
+        val word = rt_ptr_read_i32(ptr, i) as i64
+        out.push((word & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn write_bytes_to_ptr(ptr: i64, data: [u8]):
+    """Write `data` into raw host memory at `ptr`, one byte per
+    `rt_ptr_write_u8` call."""
+    var i: i64 = 0
+    val n = data.len().to_i64()
+    while i < n:
+        val _written = rt_ptr_write_u8(ptr, i, data[i].to_i64())
+        i = i + 1
+
+# Thin `rt_alloc`/`rt_free` wrappers so application code (specs included)
+# never declares the raw runtime intrinsic directly (RAW-RT-001). Plain host
+# process memory, not device memory -- used to give `write_bytes_to_ptr`/
+# `read_bytes_from_ptr` a real pointer without needing CUDA.
+fn lane_scratch_alloc(size: i64) -> i64:
+    rt_alloc(size)
+
+fn lane_scratch_free(ptr: i64):
+    rt_free(ptr)
+
+# `CudaLaneSession` — one crypto-owned CUDA context (via CryptoCudaSession),
+# one combined device allocation shaped [guard|ARENA_SIZE data|guard], and
+# an optional JIT-loaded module + resolved entry point. Mirrors the
+# resource-safety discipline of `VulkanLaneSession`/`CryptoCudaSession`:
+# a failed synchronization or readback never silently proceeds, and the
+# FIRST error captured is retained even if cleanup afterwards also fails
+# (`cuda_host_validation_2026-07-11.md`: "Preserve the first operational
+# error and append cleanup errors as secondary diagnostics").
+class CudaLaneSession:
+    device_ordinal: i64
+    session: CryptoCudaSession
+    initialized: bool
+    completion_unknown: bool
+    release_pending: bool
+    device_name: text
+    device_identity: i64
+    guard_bytes: i64
+    arena_capacity: i64
+    combined_capacity: i64
+    combined_ptr: i64
+    arena_ptr: i64
+    host_scratch_ptr: i64
+    module_loaded: bool
+    entry: text
+    last_dispatch_sentinel: i64
+    last_error: text
+
+    static fn create() -> CudaLaneSession:
+        CudaLaneSession.create_for_device(0)
+
+    static fn create_for_device(device_ordinal: i64) -> CudaLaneSession:
+        CudaLaneSession(
+            device_ordinal: device_ordinal,
+            session: CryptoCudaSession.create_for_device(device_ordinal),
+            initialized: false, completion_unknown: false,
+            release_pending: false,
+            device_name: "", device_identity: 0,
+            guard_bytes: GUARD_BYTES, arena_capacity: ARENA_SIZE,
+            combined_capacity: 2 * GUARD_BYTES + ARENA_SIZE,
+            combined_ptr: 0, arena_ptr: 0, host_scratch_ptr: 0,
+            module_loaded: false, entry: "",
+            last_dispatch_sentinel: 0, last_error: "")
+
+    # First-error retention: the first captured code sticks in `last_error`
+    # even if later cleanup/probe calls also fail. Always returns `code` so
+    # call sites can `return self._fail(...)` directly.
+    me _fail(code: text) -> text:
+        if self.last_error == "":
+            self.last_error = code
+        code
+
+    # Host-aware capability probe. Never raises: "" when a live CUDA device
+    # is usable, or a "skip:<reason>" string (GMB-1 SKIP contract, design
+    # doc section 7) when the driver/device is absent. Safe before `init`.
+    me probe() -> text:
+        if not cuda_available():
+            return "skip:cuda-driver-unavailable"
+        if cuda_init() != CUDA_SUCCESS:
+            return "skip:cuda-init-failed"
+        val device_count = cuda_device_count()
+        if device_count < 1:
+            return "skip:cuda-no-device"
+        if self.device_ordinal >= device_count:
+            return "skip:cuda-device-ordinal-unavailable"
+        ""
+
+    # Context init + combined guard|arena|guard device allocation, with the
+    # canary written into both guard regions. No module/entry is required
+    # for this step -- allocation is independent of JIT load in the CUDA
+    # driver API (unlike Vulkan, where even a buffer-only session still
+    # needs a pipeline object).
+    me init() -> text:
+        if self.initialized or self.completion_unknown or self.release_pending:
+            return self._fail("cuda-lane-session-state-invalid")
+        val probe_result = self.probe()
+        if probe_result != "":
+            return probe_result
+        if self.session.init() != CUDA_SUCCESS:
+            return self._fail("cuda-lane-context-init-failed")
+        self.device_name = self.session.stable_device_name()
+        self.device_identity = self.session.identity()
+        if self.device_name == "" or self.device_identity <= 0:
+            self.session.shutdown()
+            return self._fail("cuda-lane-device-identity-unavailable")
+        self.host_scratch_ptr = rt_alloc(self.combined_capacity)
+        if self.host_scratch_ptr == 0:
+            self.session.shutdown()
+            return self._fail("cuda-lane-host-scratch-alloc-failed")
+        self.combined_ptr = self.session.alloc(self.combined_capacity)
+        if self.combined_ptr == 0:
+            rt_free(self.host_scratch_ptr)
+            self.host_scratch_ptr = 0
+            self.session.shutdown()
+            return self._fail("cuda-lane-arena-alloc-failed")
+        self.arena_ptr = self.combined_ptr + self.guard_bytes
+        val guard = canary_bytes(self.guard_bytes)
+        val init_bytes = guard + zero_bytes(self.arena_capacity) + guard
+        val upload_rc = self.session.upload(
+            self.combined_ptr, rt_array_data_ptr_u8(init_bytes),
+            self.combined_capacity)
+        if upload_rc != CUDA_SUCCESS:
+            self.session.free(self.combined_ptr)
+            self.combined_ptr = 0
+            self.arena_ptr = 0
+            rt_free(self.host_scratch_ptr)
+            self.host_scratch_ptr = 0
+            self.session.shutdown()
+            return self._fail("cuda-lane-arena-guard-init-failed")
+        self.initialized = true
+        ""
+
+    # JIT-load a PTX/cubin byte artifact and resolve `entry`. Optional --
+    # only required before `launch_once`.
+    me load_entry(lane_binary: [u8], entry: text) -> text:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return self._fail("cuda-lane-session-unavailable")
+        if lane_binary.len() == 0 or entry == "":
+            return self._fail("cuda-lane-entry-artifact-invalid")
+        val module = self.session.load_module_binary(lane_binary)
+        if module <= 0:
+            return self._fail("cuda-lane-module-load-failed")
+        val fn_handle = cuda_module_get_function(self.session.module, entry)
+        if fn_handle <= 0:
+            return self._fail("cuda-lane-entry-resolution-failed")
+        self.entry = entry
+        self.module_loaded = true
+        ""
+
+    # Host-side arena write (bounded to ARENA_SIZE). Returns false without
+    # raising so a caller can fold this into its own contract.
+    me arena_write(data: [u8]) -> bool:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return false
+        if data.len().to_i64() > self.arena_capacity:
+            return false
+        val rc = self.session.upload(
+            self.arena_ptr, rt_array_data_ptr_u8(data), data.len().to_i64())
+        if rc != CUDA_SUCCESS:
+            val _e = self._fail("cuda-lane-arena-upload-failed")
+            return false
+        true
+
+    me arena_read(byte_count: i64) -> [u8]:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return []
+        if byte_count <= 0 or byte_count > self.arena_capacity:
+            return []
+        val rc = self.session.readback(
+            self.host_scratch_ptr, self.arena_ptr, byte_count)
+        if rc != CUDA_SUCCESS:
+            val _e = self._fail("cuda-lane-arena-readback-failed")
+            return []
+        read_bytes_from_ptr(self.host_scratch_ptr, byte_count)
+
+    # Read both guard regions back and verify every byte still matches the
+    # canary. False (and a captured first-error) on any corruption or
+    # readback failure -- never a silent pass.
+    me guard_check() -> bool:
+        if not self.initialized:
+            return false
+        val before_rc = self.session.readback(
+            self.host_scratch_ptr, self.combined_ptr, self.guard_bytes)
+        if before_rc != CUDA_SUCCESS:
+            val _e = self._fail("cuda-lane-guard-before-readback-failed")
+            return false
+        val before_bytes = read_bytes_from_ptr(
+            self.host_scratch_ptr, self.guard_bytes)
+        if not bytes_match_canary(before_bytes):
+            val _e = self._fail("cuda-lane-guard-before-corrupted")
+            return false
+        val after_ptr = self.combined_ptr + self.guard_bytes + self.arena_capacity
+        val after_rc = self.session.readback(
+            self.host_scratch_ptr, after_ptr, self.guard_bytes)
+        if after_rc != CUDA_SUCCESS:
+            val _e = self._fail("cuda-lane-guard-after-readback-failed")
+            return false
+        val after_bytes = read_bytes_from_ptr(
+            self.host_scratch_ptr, self.guard_bytes)
+        if not bytes_match_canary(after_bytes):
+            val _e = self._fail("cuda-lane-guard-after-corrupted")
+            return false
+        true
+
+    me _read_arena_sentinel() -> u32:
+        val rc = self.session.readback(
+            self.host_scratch_ptr, self.arena_ptr + OFF_RAM_SENTINEL, 4)
+        if rc != CUDA_SUCCESS:
+            return 0u32
+        (rt_ptr_read_i32(self.host_scratch_ptr, 0)) as u32
+
+    # Launch the resolved entry once, sync, and decode the GMB-1 sentinel.
+    # Per design doc section 3.3: a failed `cuCtxSynchronize` cannot prove
+    # the device stopped using the arena/module, so it is treated exactly
+    # like the Vulkan lane's fence timeout -- force the GMB-1 timeout
+    # sentinel, mark completion unknown, and never release resources.
+    me launch_once(grid_x: i64, block_x: i64, args_ptr: i64) -> text:
+        if not self.initialized or self.completion_unknown or self.release_pending:
+            return self._fail("cuda-lane-session-unavailable")
+        if not self.module_loaded:
+            return self._fail("cuda-lane-module-not-loaded")
+        if grid_x <= 0 or block_x <= 0:
+            return self._fail("cuda-lane-dispatch-invalid")
+        val launch_rc = self.session.launch(
+            self.entry, grid_x, block_x, args_ptr)
+        if launch_rc != CUDA_SUCCESS:
+            return self._fail("cuda-lane-launch-failed")
+        val sync_rc = self.session.sync()
+        if sync_rc != CUDA_SUCCESS:
+            self.completion_unknown = true
+            self.release_pending = true
+            self.last_dispatch_sentinel = SENTINEL_TIMEOUT as i64
+            return self._fail("cuda-lane-sync-completion-unknown")
+        val sentinel_raw = self._read_arena_sentinel()
+        self.last_dispatch_sentinel = sentinel_raw as i64
+        if decode_sentinel(sentinel_raw) == SentinelState.Timeout:
+            self.completion_unknown = true
+            self.release_pending = true
+            return self._fail("cuda-lane-device-timeout-sentinel")
+        ""
+
+    me shutdown() -> text:
+        if self.completion_unknown or self.release_pending:
+            return self._fail("cuda-lane-session-cleanup-pending")
+        if self.combined_ptr != 0:
+            self.session.free(self.combined_ptr)
+            self.combined_ptr = 0
+            self.arena_ptr = 0
+        if self.host_scratch_ptr != 0:
+            rt_free(self.host_scratch_ptr)
+            self.host_scratch_ptr = 0
+        self.session.shutdown()
+        self.initialized = false
+        self.module_loaded = false
+        self.entry = ""
+        self.device_name = ""
+        self.device_identity = 0
+        ""
+
+export CudaLaneSession, GUARD_BYTES, GUARD_CANARY_BYTE
+export canary_bytes, bytes_match_canary
+export read_bytes_from_ptr, write_bytes_to_ptr
+export lane_scratch_alloc, lane_scratch_free

@@ -1,0 +1,200 @@
+#!/bin/sh
+# soak_rv32_board.shs  (Lane A — REAL-BOARD companion to soak_rv32_hard_job.shs)
+#
+# The GHDL soak (soak_rv32_hard_job.shs) proves the fixed rv32 core in
+# simulation. This script runs the SAME Adler-32 hard-job on the real Kria
+# KV260 board. The rv32_exec_core loads its code ROM from rv32_payload.mem via
+# textio at synthesis (baked into BRAM) — there is no runtime ELF loader for
+# this custom core — so the soak payload must be BAKED INTO THE BITSTREAM.
+#
+# Modes:
+#   payload  — assemble soak_rv32.s at the board-sized COUNT/INTERVAL into an
+#              ELF (for the synth to bake) and print the host Adler-32 golden.
+#   synth    — run build_k26_rv32.shs with the soak ELF as the payload so the
+#              bitstream boots straight into the soak (30-60 min Vivado).
+#   run      — program the board and capture the fabric UART (FT4232H
+#              /dev/ttyUSB1 + /dev/ttyUSB2) with per-line timestamps until the
+#              final DONE=<hex>~ appears, then verify: wall >= MIN_WALL,
+#              progress markers present, golden == host golden.
+#   all      — payload, synth, run in sequence.
+#
+# Board core clock = CFGMCLK/2. CFGMCLK is a free-running UltraScale+ oscillator
+# (nominal 50 MHz, datasheet spread ~30-70 MHz => core 15-35 MHz), so COUNT is
+# oversized to keep wall >= 600 s even at the fast end. Measured 88.1 cyc/iter
+# (GHDL). At 35 MHz core: 260e6*88.1/35e6 = 654 s; at 25 MHz: 916 s.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:-all}"
+
+PAY="$ROOT_DIR/examples/09_embedded/fpga_riscv/payload"
+WORK="$ROOT_DIR/build/fpga/laneA_board_soak"
+EVID="${EVID:-$ROOT_DIR/build/fpga/evidence/rv32_2026-07-24}"
+GCC="${RV32_GCC:-riscv64-unknown-elf-gcc}"
+OBJCOPY="${RV32_OBJCOPY:-riscv64-unknown-elf-objcopy}"
+
+COUNT="${RV32_BOARD_COUNT:-260000000}"
+INTERVAL="${RV32_BOARD_INTERVAL:-6500000}"
+MIN_WALL="${RV32_BOARD_MIN_WALL:-600}"
+CAP_MAX="${RV32_BOARD_CAP_MAX:-1800}"
+UART_PORTS="${RV32_BOARD_UART_PORTS:-/dev/ttyUSB1 /dev/ttyUSB2}"
+BAUD="${BAUD:-115200}"
+
+SOAK_ELF="$WORK/soak_board.elf"
+GOLDEN_FILE="$WORK/golden.txt"
+
+mkdir -p "$WORK" "$EVID"
+
+golden_of() {
+    awk -v k="$1" 'BEGIN{
+        a=1; b=0;
+        for(i=0;i<k;i++){ a=(a+(i%256))%65521; b=(b+a)%65521; }
+        printf "%08X", (b*65536+a)%4294967296;
+    }'
+}
+
+do_payload() {
+    command -v "$GCC" >/dev/null 2>&1 || { echo "FAIL: $GCC not found"; exit 1; }
+    command -v "$OBJCOPY" >/dev/null 2>&1 || { echo "FAIL: $OBJCOPY not found"; exit 1; }
+    echo "=== payload: COUNT=$COUNT INTERVAL=$INTERVAL ==="
+    sed -e "s/@COUNT@/$COUNT/g" -e "s/@INTERVAL@/$INTERVAL/g" \
+        "$PAY/soak_rv32.s" > "$WORK/soak_board.s"
+    "$GCC" -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles \
+        -Wl,-Ttext=0x80000000 -o "$SOAK_ELF" "$WORK/soak_board.s" \
+        || { echo "FAIL: assemble"; exit 1; }
+    echo "soak_elf=$SOAK_ELF"
+    GOLDEN="$(golden_of "$COUNT")"
+    echo "$GOLDEN" > "$GOLDEN_FILE"
+    echo "host_golden=$GOLDEN"
+    cp "$WORK/soak_board.s" "$EVID/payload_snapshot/soak_board.s"
+    echo "$COUNT $INTERVAL $GOLDEN" > "$EVID/board_soak_params.txt"
+}
+
+do_synth() {
+    [ -f "$SOAK_ELF" ] || { echo "FAIL: run payload mode first ($SOAK_ELF missing)"; exit 1; }
+    if [ "$(pgrep -fc 'lnx64.o/vivado' 2>/dev/null || echo 0)" -gt 0 ]; then
+        echo "FAIL: a Vivado is already running (serialize: one at a time)"; exit 1
+    fi
+    echo "=== synth: baking soak payload into bitstream ==="
+    # Safety net: the seed VHDL driver only runs under SIMPLE_BOOTSTRAP_DRIVER;
+    # when it degrades, generate_rv32_vhdl.shs exits at its pkg-VHDL gate BEFORE
+    # regenerating rv32_payload.mem. Pre-stage the soak payload.mem so the baked
+    # ROM is correct either way, and pass the bootstrap-driver env so the clean
+    # path (driver -> pkg + payload regen from RV32_PAYLOAD_ELF) also works.
+    mkdir -p build/vhdl/rv32
+    "$OBJCOPY" -O binary "$SOAK_ELF" build/vhdl/rv32/rv32_payload.bin
+    od -An -v -tx4 -w4 build/vhdl/rv32/rv32_payload.bin | tr -d ' ' | awk 'NF{print}' \
+        > build/vhdl/rv32/rv32_payload.mem
+    echo "pre-staged payload.mem words=$(wc -l < build/vhdl/rv32/rv32_payload.mem)"
+    RV32_PAYLOAD_ELF="$SOAK_ELF" \
+    RV32_PAYLOAD_BIN="$ROOT_DIR/build/vhdl/rv32/simpleos_riscv32_fpga.bin" \
+    SIMPLE_BOOTSTRAP_DRIVER="${SIMPLE_BOOTSTRAP_DRIVER:-$ROOT_DIR/src/compiler_rust/target/bootstrap/simple}" \
+        sh scripts/fpga/build_k26_rv32.shs
+    OUT_BIT="build/build/rv32_fpga/gateware/rv32_fpga.bit"
+    [ -f "$OUT_BIT" ] || { echo "FAIL: bitstream not produced"; exit 1; }
+    sha256sum "$OUT_BIT" | tee "$EVID/bitstream.sha256"
+    cp "$OUT_BIT" "$EVID/rv32_fpga.bit"
+    # capture timing summary
+    TS="build/fpga/k26_rv32/k26_rv32/k26_rv32.runs/impl_1/soc_top_rv32_timing_summary_routed.rpt"
+    [ -f "$TS" ] && cp "$TS" "$EVID/timing_summary_routed.rpt" || true
+    echo "bitstream=$OUT_BIT"
+}
+
+do_run() {
+    OUT_BIT="${BITSTREAM:-build/build/rv32_fpga/gateware/rv32_fpga.bit}"
+    [ -f "$OUT_BIT" ] || { echo "FAIL: bitstream $OUT_BIT missing (run synth)"; exit 1; }
+    GOLDEN="$(cat "$GOLDEN_FILE" 2>/dev/null || golden_of "$COUNT")"
+    echo "=== run: program board + capture (expect golden=$GOLDEN) ==="
+    STAMP="$(date +%Y%m%d_%H%M%S)"
+    RUNDIR="$EVID/board_run_$STAMP"
+    mkdir -p "$RUNDIR"
+
+    # ONE raw reader per candidate fabric-UART port (two readers on the same
+    # tty would split the byte stream and corrupt both). Wall time is derived
+    # from T_RESET and the DONE-detection epoch (poll granularity 5s << 600s).
+    cap_pids=""
+    for port in $UART_PORTS; do
+        [ -e "$port" ] || { echo "WARN: $port missing"; continue; }
+        base="$(echo "$port" | tr '/ ' '__')"
+        stty -F "$port" "$BAUD" cs8 -cstopb -parenb -ixon -ixoff raw -echo || true
+        ( timeout "$CAP_MAX" dd if="$port" of="$RUNDIR/${base}.raw" bs=1 status=none ) &
+        cap_pids="$cap_pids $!"
+        echo "capture_started port=$port raw=$RUNDIR/${base}.raw"
+    done
+
+    sleep 1
+    T_PROG0="$(date +%s)"
+    OUT_DIR="$RUNDIR" sh scripts/fpga/program_kv260_bitstream.shs "$OUT_BIT" \
+        > "$RUNDIR/program.log" 2>&1 || { echo "FAIL: programming"; cat "$RUNDIR/program.log"; }
+    T_RESET="$(date +%s)"   # core runs from reset ~immediately after program done
+    echo "programmed at reset_epoch=$T_RESET (prog_took=$((T_RESET-T_PROG0))s); waiting for DONE (cap_max=${CAP_MAX}s)"
+
+    # Poll raw captures for the DONE=<hex>~ sentinel.
+    DONE_EPOCH=""
+    FABRIC_PORT=""
+    end=$(( $(date +%s) + CAP_MAX ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+        for port in $UART_PORTS; do
+            base="$(echo "$port" | tr '/ ' '__')"
+            raw="$RUNDIR/${base}.raw"
+            [ -f "$raw" ] || continue
+            if tr -cd '\11\12\15\40-\176' < "$raw" | grep -q 'DONE=[0-9A-F]\{8\}~'; then
+                DONE_EPOCH="$(date +%s)"
+                FABRIC_PORT="$port"
+                break 2
+            fi
+        done
+        sleep 5
+    done
+
+    # Stop captures.
+    for pid in $cap_pids; do kill "$pid" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+
+    if [ -z "$FABRIC_PORT" ]; then
+        echo "FAIL: no DONE sentinel seen on any UART within ${CAP_MAX}s"
+        for port in $UART_PORTS; do
+            base="$(echo "$port" | tr '/ ' '__')"
+            echo "--- $port raw bytes: $(wc -c < "$RUNDIR/${base}.raw" 2>/dev/null || echo 0) ---"
+            tr -cd '\11\12\15\40-\176' < "$RUNDIR/${base}.raw" 2>/dev/null | tail -c 200
+            echo
+        done
+        echo "SOAK_RV32_BOARD: FAIL"; exit 1
+    fi
+
+    base="$(echo "$FABRIC_PORT" | tr '/ ' '__')"
+    CAP="$(tr -cd '\11\12\15\40-\176' < "$RUNDIR/${base}.raw")"
+    PMARK="$(printf '%s' "$CAP" | tr -cd 'P' | wc -c | tr -d ' ')"
+    CORE_GOLD="$(printf '%s' "$CAP" | sed -n 's/.*DONE=\([0-9A-F]\{8\}\)~.*/\1/p' | head -1)"
+    WALL=$(( DONE_EPOCH - T_RESET ))
+
+    {
+        echo "fabric_uart_port=$FABRIC_PORT"
+        echo "count=$COUNT interval=$INTERVAL"
+        echo "progress_markers=$PMARK"
+        echo "wall_seconds=$WALL"
+        echo "core_golden=$CORE_GOLD"
+        echo "host_golden=$GOLDEN"
+        echo "raw_capture=$RUNDIR/${base}.raw"
+    } | tee "$RUNDIR/verdict.txt"
+
+    FAIL=0
+    [ "$PMARK" -ge 1 ] || { echo "FAIL: no progress markers"; FAIL=1; }
+    [ "$CORE_GOLD" = "$GOLDEN" ] || { echo "FAIL: golden mismatch core=$CORE_GOLD host=$GOLDEN"; FAIL=1; }
+    [ "$WALL" -ge "$MIN_WALL" ] || { echo "FAIL: wall ${WALL}s < ${MIN_WALL}s"; FAIL=1; }
+    if [ "$FAIL" -eq 0 ]; then
+        echo "SOAK_RV32_BOARD: PASS"
+    else
+        echo "SOAK_RV32_BOARD: FAIL"; exit 1
+    fi
+}
+
+case "$MODE" in
+    payload) do_payload ;;
+    synth)   do_synth ;;
+    run)     do_run ;;
+    all)     do_payload; do_synth; do_run ;;
+    *) echo "usage: $0 {payload|synth|run|all}"; exit 2 ;;
+esac

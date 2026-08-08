@@ -1,0 +1,125 @@
+# Shared flat-AST evaluator for portable enum discriminants.
+
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right}
+use compiler.core.ast.{decl_get_tag, decl_get_name, decl_get_body, module_get_decls}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_FIELD_ACCESS, EXPR_CAST}
+use compiler.core.ast.{DECL_VAL}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
+use compiler.core.tokens.{TOK_SHL, TOK_SHR, TOK_AMPERSAND, TOK_PIPE, TOK_CARET, TOK_TILDE}
+use compiler.core.types.{TYPE_I64, TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
+
+struct EnumDiscriminantEval:
+    valid: bool
+    value: i64
+    error: text
+
+fn enum_discriminant_invalid(error: text) -> EnumDiscriminantEval:
+    EnumDiscriminantEval(valid: false, value: 0, error: error)
+
+fn enum_discriminant_integer_type(type_tag: i64) -> bool:
+    if type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16: return true
+    if type_tag == TYPE_U32 or type_tag == TYPE_U64 or type_tag == TYPE_I8: return true
+    type_tag == TYPE_I16 or type_tag == TYPE_I32
+
+fn enum_discriminant_named_value(name: text, variant_names: [text],
+                                  variant_values: [i64]) -> EnumDiscriminantEval:
+    var i = 0
+    while i < variant_names.len() and i < variant_values.len():
+        if variant_names[i] == name:
+            return EnumDiscriminantEval(valid: true, value: variant_values[i], error: "")
+        i = i + 1
+    enum_discriminant_invalid("unknown enum variant or module constant '" + name + "'")
+
+fn enum_discriminant_eval_inner(expr_id: i64, enum_name: text,
+                                variant_names: [text], variant_values: [i64],
+                                depth: i64) -> EnumDiscriminantEval:
+    if expr_id < 0 or depth > 64:
+        return enum_discriminant_invalid("invalid or cyclic constant expression")
+    val tag = expr_get_tag(expr_id)
+    if tag == EXPR_INT_LIT:
+        return EnumDiscriminantEval(valid: true, value: expr_get_int(expr_id), error: "")
+    if tag == EXPR_IDENT:
+        val name = expr_get_str(expr_id)
+        val variant = enum_discriminant_named_value(name, variant_names, variant_values)
+        if variant.valid:
+            return variant
+        for decl_id in module_get_decls():
+            if decl_get_tag(decl_id) == DECL_VAL and decl_get_name(decl_id) == name:
+                val body = decl_get_body(decl_id)
+                if body.len() != 1:
+                    return enum_discriminant_invalid("module constant '" + name + "' has no constant initializer")
+                return enum_discriminant_eval_inner(
+                    body[0], enum_name, variant_names, variant_values, depth + 1
+                )
+        return variant
+    if tag == EXPR_FIELD_ACCESS:
+        val base_id = expr_get_left(expr_id)
+        if expr_get_tag(base_id) == EXPR_IDENT and expr_get_str(base_id) == enum_name:
+            return enum_discriminant_named_value(
+                expr_get_str(expr_id), variant_names, variant_values
+            )
+        return enum_discriminant_invalid("qualified enum constant is not from '" + enum_name + "'")
+    if tag == EXPR_CAST:
+        if not enum_discriminant_integer_type(expr_get_int(expr_id)):
+            return enum_discriminant_invalid("enum discriminant cast target must be an integer type")
+        return enum_discriminant_eval_inner(
+            expr_get_left(expr_id), enum_name, variant_names, variant_values, depth + 1
+        )
+    if tag == EXPR_UNARY:
+        val operand = enum_discriminant_eval_inner(
+            expr_get_left(expr_id), enum_name, variant_names, variant_values, depth + 1
+        )
+        if not operand.valid:
+            return operand
+        val op = expr_get_int(expr_id)
+        if op == TOK_MINUS:
+            return EnumDiscriminantEval(valid: true, value: 0 - operand.value, error: "")
+        if op == TOK_TILDE:
+            return EnumDiscriminantEval(valid: true, value: ~operand.value, error: "")
+        return enum_discriminant_invalid("unsupported unary enum discriminant operator")
+    if tag == EXPR_BINARY:
+        val left = enum_discriminant_eval_inner(
+            expr_get_left(expr_id), enum_name, variant_names, variant_values, depth + 1
+        )
+        if not left.valid:
+            return left
+        val right = enum_discriminant_eval_inner(
+            expr_get_right(expr_id), enum_name, variant_names, variant_values, depth + 1
+        )
+        if not right.valid:
+            return right
+        val op = expr_get_int(expr_id)
+        if op == TOK_PLUS:
+            return EnumDiscriminantEval(valid: true, value: left.value + right.value, error: "")
+        if op == TOK_MINUS:
+            return EnumDiscriminantEval(valid: true, value: left.value - right.value, error: "")
+        if op == TOK_STAR:
+            return EnumDiscriminantEval(valid: true, value: left.value * right.value, error: "")
+        if op == TOK_SLASH:
+            if right.value == 0:
+                return enum_discriminant_invalid("division by zero in enum discriminant")
+            return EnumDiscriminantEval(valid: true, value: left.value / right.value, error: "")
+        if op == TOK_PERCENT:
+            if right.value == 0:
+                return enum_discriminant_invalid("remainder by zero in enum discriminant")
+            return EnumDiscriminantEval(valid: true, value: left.value % right.value, error: "")
+        if op == TOK_SHL or op == TOK_SHR:
+            if right.value < 0 or right.value >= 63:
+                return enum_discriminant_invalid("invalid shift in enum discriminant")
+            if op == TOK_SHL:
+                return EnumDiscriminantEval(valid: true, value: left.value << right.value, error: "")
+            return EnumDiscriminantEval(valid: true, value: left.value >> right.value, error: "")
+        if op == TOK_AMPERSAND:
+            return EnumDiscriminantEval(valid: true, value: left.value & right.value, error: "")
+        if op == TOK_PIPE:
+            return EnumDiscriminantEval(valid: true, value: left.value | right.value, error: "")
+        if op == TOK_CARET:
+            return EnumDiscriminantEval(valid: true, value: left.value ^ right.value, error: "")
+        return enum_discriminant_invalid("unsupported binary enum discriminant operator")
+    enum_discriminant_invalid("enum discriminant is not a constant integer expression")
+
+fn eval_enum_discriminant_expr(expr_id: i64, enum_name: text,
+                               variant_names: [text], variant_values: [i64]) -> EnumDiscriminantEval:
+    enum_discriminant_eval_inner(expr_id, enum_name, variant_names, variant_values, 0)
+
+export EnumDiscriminantEval, eval_enum_discriminant_expr

@@ -1,0 +1,190 @@
+# Simple Lab hardening — auth + bounds on Lab routes (Stream H, task H1).
+#
+# Design: doc/05_design/app/tools/notebook_lanes_architecture.md §8.1-§8.2
+# Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream H, H1)
+#
+# Pure(ish) helpers factored out of lab_server.spl so the auth/origin/bounds
+# contract is independently unit-testable without a real socket. Every limit
+# is env-configurable with a safe default (design §8.2 "all configurable, all
+# spec-tested"); lab_server.spl reads the config once at process start into
+# `LAB_CONFIG` and applies it at the single dispatch gate plus the per-route
+# bound checks that need request-shaped data (cell size, session count).
+
+use std.common.crypto.constant_time.{constant_time_compare}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.json.parser.{json_parse_with_error}
+use std.nogc_sync_mut.io_runtime.{env_get}
+
+# ============================================================================
+# Config — every field configurable via env, safe default otherwise.
+# ============================================================================
+
+struct LabHardeningConfig:
+    token: text
+    allow_remote: bool
+    allowed_origins: [text]
+    max_body_bytes: i32
+    max_cell_bytes: i64
+    max_cells_per_session: i64
+    max_output_bytes: i64
+    max_ws_frame_bytes: i64
+    max_sessions: i64
+
+fn _lab_hard_env_or(key: text, fallback: text) -> text:
+    val v = env_get(key)
+    if v == nil or v == "":
+        fallback
+    else:
+        v
+
+fn _lab_hard_env_i64(key: text, fallback: i64) -> i64:
+    val v = env_get(key)
+    if v == nil or v == "":
+        return fallback
+    val n = v.trim().to_i64()
+    if n <= 0:
+        return fallback
+    n
+
+fn _lab_hard_env_i32(key: text, fallback: i32) -> i32:
+    _lab_hard_env_i64(key, fallback.to_i64()).to_i32()
+
+fn _lab_hard_split_csv(s: text) -> [text]:
+    var out: [text] = []
+    if s == "":
+        return out
+    for part in s.split(","):
+        val t = part.trim()
+        if t != "":
+            out.push(t)
+    out
+
+# Random per-start token (Jupyter-style, design §8.2). Overridable via
+# SIMPLE_LAB_TOKEN so tests/CI can pin a known value without scraping stdout.
+fn lab_generate_token() -> text:
+    random_hex(32)
+
+fn lab_hardening_config_from_env() -> LabHardeningConfig:
+    var token = env_get("SIMPLE_LAB_TOKEN")
+    if token == nil or token == "":
+        token = lab_generate_token()
+    val allow_remote = _lab_hard_env_or("SIMPLE_LAB_ALLOW_REMOTE", "0") == "1"
+    val origins = _lab_hard_split_csv(_lab_hard_env_or("SIMPLE_LAB_ALLOWED_ORIGINS", ""))
+    LabHardeningConfig(
+        token: token,
+        allow_remote: allow_remote,
+        allowed_origins: origins,
+        max_body_bytes: _lab_hard_env_i32("SIMPLE_LAB_MAX_BODY_BYTES", 10485760),
+        max_cell_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_CELL_BYTES", 1048576),
+        max_cells_per_session: _lab_hard_env_i64("SIMPLE_LAB_MAX_CELLS_PER_SESSION", 500),
+        max_output_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_OUTPUT_BYTES", 65536),
+        max_ws_frame_bytes: _lab_hard_env_i64("SIMPLE_LAB_MAX_WS_FRAME_BYTES", 262144),
+        max_sessions: _lab_hard_env_i64("SIMPLE_LAB_MAX_SESSIONS", 8)
+    )
+
+# ============================================================================
+# Auth — bearer token, constant-time compare (design §8.2 "Auth").
+# ============================================================================
+
+fn lab_bearer_token_from_header(auth_header: text) -> text:
+    val prefix = "Bearer "
+    if auth_header.starts_with(prefix):
+        return auth_header.slice(prefix.len(), auth_header.len()).trim()
+    ""
+
+fn lab_token_matches(candidate: text, expected: text) -> bool:
+    if candidate == "" or expected == "":
+        return false
+    constant_time_compare(candidate, expected)
+
+# ============================================================================
+# Bind guard — localhost by default; non-localhost requires explicit
+# SIMPLE_LAB_ALLOW_REMOTE=1 (design §8.2 "localhost bind by default,
+# non-localhost bind requires explicit --allow-remote + token").
+# ============================================================================
+
+fn lab_is_loopback_host(host: text) -> bool:
+    val h = host.trim().to_lower()
+    h == "127.0.0.1" or h == "localhost" or h == "::1" or h == ""
+
+fn lab_bind_allowed(host: text, config: LabHardeningConfig) -> bool:
+    lab_is_loopback_host(host) or config.allow_remote
+
+# ============================================================================
+# WebSocket Origin allow-list (design §8.2 "WebSocket").
+#
+# Default (no SIMPLE_LAB_ALLOWED_ORIGINS configured): missing Origin (native
+# / non-browser clients, e.g. this repo's own loopback test driver) is
+# allowed, and any http(s)://127.0.0.1[:port] or http(s)://localhost[:port]
+# origin is allowed. Once SIMPLE_LAB_ALLOWED_ORIGINS is set, it is the
+# complete allow-list (exact string match) and the loopback default no
+# longer applies.
+# ============================================================================
+
+fn _lab_origin_is_loopback(origin: text) -> bool:
+    val o = origin.to_lower()
+    o.starts_with("http://127.0.0.1") or o.starts_with("https://127.0.0.1") or o.starts_with("http://localhost") or o.starts_with("https://localhost")
+
+fn lab_origin_allowed(origin: text, config: LabHardeningConfig) -> bool:
+    if config.allowed_origins.len() > 0:
+        for allowed in config.allowed_origins:
+            if allowed == origin:
+                return true
+        return false
+    if origin == "":
+        return true
+    _lab_origin_is_loopback(origin)
+
+# ============================================================================
+# Path traversal guard for notebook routes (design §8.1). Defense in depth
+# on top of Router.dispatch's path_is_safe (router.spl) — this one is scoped
+# to the single `:name` segment and returns 403 (not the router's blanket
+# 400), matching the H1 verify contract ("traversal path 403").
+# ============================================================================
+
+fn lab_notebook_name_is_safe(name: text) -> bool:
+    if name == "":
+        return false
+    if name.contains(".."):
+        return false
+    if name.contains("/"):
+        return false
+    if name.contains("\\"):
+        return false
+    if name.contains("\0"):
+        return false
+    true
+
+# ============================================================================
+# Malformed-JSON guard (design §8.1 "panic-free bad-request handling").
+# `json_parse` alone can't distinguish "valid JSON that parsed to nil" from
+# "failed to parse" — json_parse_with_error's error string is the real
+# signal. An empty body is not malformed (routes that need a body validate
+# emptiness themselves).
+# ============================================================================
+
+fn lab_json_body_is_valid(body: text) -> bool:
+    if body == "":
+        return true
+    val result = json_parse_with_error(body)
+    result.1 == ""
+
+# ============================================================================
+# Output/frame truncation with an explicit marker (design §8.2 "Message
+# bounds ... truncate with marker").
+# ============================================================================
+
+fn lab_truncate_with_marker(s: text, max_bytes: i64) -> text:
+    if max_bytes <= 0:
+        return s
+    if s.len() <= max_bytes:
+        return s
+    val kept = s.slice(0, max_bytes)
+    val omitted = s.len() - max_bytes
+    "{kept}...[truncated: {omitted} bytes omitted]"
+
+export LabHardeningConfig, lab_hardening_config_from_env, lab_generate_token
+export lab_bearer_token_from_header, lab_token_matches
+export lab_is_loopback_host, lab_bind_allowed
+export lab_origin_allowed, lab_notebook_name_is_safe
+export lab_json_body_is_valid, lab_truncate_with_marker

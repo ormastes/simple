@@ -1,0 +1,108 @@
+# Renders a solid page background through the Vulkan-backed Engine2D surface and
+# writes the ARGB pixel buffer to a JSON file in the same shape the Electron/
+# Chromium capture tool (tools/electron-live-bitmap/capture_html_argb.js) emits,
+# so a real browser (Electron's Chromium) is the reference oracle for the
+# Vulkan-backed web renderer. Driven by
+# scripts/check/check-electron-vulkan-web-parity.shs.
+#
+# Env:
+#   EVWP_BG      decimal ARGB u32 background (default 4280435814 = 0xFF224466)
+#   EVWP_WIDTH   surface width  (default 64)
+#   EVWP_HEIGHT  surface height (default 48)
+#   EVWP_OUTPUT  output JSON path (default /tmp/ecap/vulkan.json)
+#   EVWP_RUN_ID  wrapper-generated nonce that binds JSON to one invocation
+#   SIMPLE_EXECUTION_MODE must be interpret for the Windows parity wrapper
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use app.io.mod.{env_get}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+val ENTRYPOINT = "src/app/test/electron_vulkan_web_parity.spl"
+val SCHEMA = "simple-engine2d-vulkan-parity-v1"
+
+fn env_or(name: text, fallback: text) -> text:
+    val v = env_get(name) ?? ""
+    if v == "":
+        return fallback
+    v
+
+fn write_failure(out: text, w: i32, h: i32, reason: text, execution_mode: text, run_id: text) -> bool:
+    var sb = "{\"status\":\"fail\",\"reason\":\"" + reason + "\""
+    sb = sb + ",\"schema\":\"" + SCHEMA + "\""
+    sb = sb + ",\"producer\":\"simple-engine2d-vulkan\""
+    sb = sb + ",\"entrypoint\":\"" + ENTRYPOINT + "\""
+    sb = sb + ",\"requested_backend\":\"vulkan\""
+    sb = sb + ",\"execution_mode\":\"" + execution_mode + "\""
+    sb = sb + ",\"run_id\":\"" + run_id + "\""
+    sb = sb + ",\"backend\":\"\""
+    sb = sb + ",\"pixel_count\":0"
+    sb = sb + ",\"width\":" + w.to_text() + ",\"height\":" + h.to_text()
+    sb = sb + ",\"pixels\":[]}"
+    rt_file_write_bytes(out, sb.bytes())
+
+fn write_success(out: text, w: i32, h: i32, backend_name: text, px: [u32], execution_mode: text, run_id: text) -> bool:
+    var sb = "{\"status\":\"pass\",\"reason\":\"pass\""
+    sb = sb + ",\"schema\":\"" + SCHEMA + "\""
+    sb = sb + ",\"producer\":\"simple-engine2d-vulkan\""
+    sb = sb + ",\"entrypoint\":\"" + ENTRYPOINT + "\""
+    sb = sb + ",\"requested_backend\":\"vulkan\""
+    sb = sb + ",\"execution_mode\":\"" + execution_mode + "\""
+    sb = sb + ",\"run_id\":\"" + run_id + "\""
+    sb = sb + ",\"backend\":\"" + backend_name + "\""
+    sb = sb + ",\"pixel_count\":" + px.len().to_text()
+    sb = sb + ",\"width\":" + w.to_text() + ",\"height\":" + h.to_text()
+    sb = sb + ",\"pixels\":["
+    var i = 0
+    while i < px.len():
+        if i > 0:
+            sb = sb + ","
+        sb = sb + px[i].to_i64().to_text()
+        i = i + 1
+    sb = sb + "]}"
+    rt_file_write_bytes(out, sb.bytes())
+
+fn main() -> i64:
+    val bg = env_or("EVWP_BG", "4280435814").to_i64().to_u32()
+    val w = env_or("EVWP_WIDTH", "64").to_i64().to_i32()
+    val h = env_or("EVWP_HEIGHT", "48").to_i64().to_i32()
+    val out = env_or("EVWP_OUTPUT", "/tmp/ecap/vulkan.json")
+    val run_id = env_or("EVWP_RUN_ID", "")
+    val execution_mode = env_or("SIMPLE_EXECUTION_MODE", "")
+
+    # Prime the real Vulkan device, then render the page background through the
+    # Vulkan-backed Engine2D surface (an opaque page background is a deterministic
+    # full-surface fill, so it matches a real browser's solid background).
+    var prime = VulkanBackend.create()
+    if not prime.init(w, h):
+        val wrote = write_failure(out, w, h, "vulkan-prime-init-failed", execution_mode, run_id)
+        print("status=fail reason=vulkan-prime-init-failed wrote=" + wrote.to_text() + "\n")
+        return 2
+
+    val r = Engine2D.create_requested_backend(w, h, "vulkan")
+    var eng = match r:
+        Ok(value): value
+        Err(message):
+            val wrote = write_failure(out, w, h, "vulkan-engine-create-failed", execution_mode, run_id)
+            print("status=fail reason=vulkan-engine-create-failed detail=" + message + " wrote=" + wrote.to_text() + "\n")
+            return 2
+    val backend_name = eng.backend_name()
+    if backend_name != "vulkan":
+        val wrote = write_failure(out, w, h, "vulkan-backend-not-proven", execution_mode, run_id)
+        print("status=fail reason=vulkan-backend-not-proven backend=" + backend_name + " wrote=" + wrote.to_text() + "\n")
+        return 2
+    eng.clear(bg)
+    val px = eng.read_pixels()
+    val expected_pixels = w.to_i64() * h.to_i64()
+    if px.len() == 0 or px.len().to_i64() != expected_pixels:
+        val wrote = write_failure(out, w, h, "vulkan-pixel-count-mismatch", execution_mode, run_id)
+        print("status=fail reason=vulkan-pixel-count-mismatch pixels=" + px.len().to_text() + " expected=" + expected_pixels.to_text() + " wrote=" + wrote.to_text() + "\n")
+        return 2
+
+    val ok = write_success(out, w, h, backend_name, px, execution_mode, run_id)
+    if not ok:
+        print("status=fail reason=vulkan-json-write-failed backend=" + backend_name + " pixels=" + px.len().to_text() + "\n")
+        return 2
+    print("status=pass reason=pass backend=" + backend_name + " pixels=" + px.len().to_text() + " px0=" + px[0].to_i64().to_text() + " wrote=" + ok.to_text() + "\n")
+    0

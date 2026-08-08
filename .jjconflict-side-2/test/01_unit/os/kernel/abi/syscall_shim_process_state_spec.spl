@@ -1,0 +1,195 @@
+# C-ABI syscall shim state-threading spec (syscall_shim_process.spl /
+# syscall_shim_file.spl, landed 2026-08-06 alongside real Scheduler
+# state-threading — see commit 7e36d9a577aa3637bd20b5602cb19960765d3f32
+# and doc/08_tracking/bug/execve_spec_blocked_by_dead_ipc_cap_gate_and_missing_rt_copy_user_byte_2026-08-06.md).
+#
+# syscall_shim_spec.spl (same directory) is compile-only: it checks the
+# shim's public surface (name/arity/return type) but never calls a shim
+# function, because most spl_handle_* need kernel context (UART/MMIO, a
+# live Scheduler). spl_handle_spawn_binary and spl_handle_waitpid do NOT
+# touch any arch/MMIO primitive: they only mutate the module-level
+# `g_shim_scheduler` global via `_handle_*_state(...)` +
+# `g_shim_scheduler = st.scheduler`. That assignment line is exactly the
+# "state-threading wired into the C-ABI override" claim from the landing
+# commit, and it had never been exercised by a spec before this file. Unlike
+# execve_spec.spl (which calls `_handle_exec_state` directly and threads the
+# returned Scheduler through a local `var`), this spec calls the real
+# `@export("C")` entry points and only ever reads back the module-global
+# `g_shim_scheduler` — proving the assignment inside the shim wrapper
+# itself, not just the underlying `_handle_*_state` helper. Confirmed by
+# sabotage: commenting out `g_shim_scheduler = st.scheduler` inside
+# `spl_handle_spawn_binary` turns the first test below red
+# (`expected Option::None to not equal nil`); restoring the line turns it
+# green again.
+#
+# A third function, spl_handle_fork (syscall_shim_file.spl), was also
+# attempted here but dropped — see "Known gap" below.
+#
+# Run with: bin/simple test test/01_unit/os/kernel/abi/syscall_shim_process_state_spec.spl
+#
+# NOTE: this spec seeds `g_shim_scheduler`/`g_shim_ipc`/`g_shim_klog` by
+# direct assignment rather than calling the real `shim_init()` boot
+# entrypoint. `shim_init()` unconditionally calls `_shim_keepalive()`
+# (a DCE-retention helper that sums `spl_handle_* as u64` function-pointer
+# casts) — under `bin/simple test`'s tree-walk interpreter engine, executing
+# that cast is a hard `semantic: type mismatch: cannot cast function to u64`
+# error, reproduced in isolation with nothing else in the file. This is a
+# real, pre-existing engine gap: `shim_init()` itself cannot be unit-tested
+# under the interpreter today. Filed as a follow-up rather than fixed here
+# (Rust-seed engine work is out of scope for a spec-coverage pass) — see
+# doc/08_tracking/bug/shim_init_keepalive_function_ptr_cast_breaks_interpreter_2026-08-06.md.
+#
+# Known gap — spl_handle_fork (syscall 57, syscall_shim_file.spl) is NOT
+# covered here. A fork test (spawn a task via spl_handle_spawn_binary,
+# `g_shim_scheduler.schedule()` onto it, then call spl_handle_fork) reaches
+# a child pid > 0 from the C-ABI return value, but a subsequent
+# `spl_handle_waitpid(child_pid, ..., WNOHANG)` call returns -10 (ECHILD)
+# instead of 0 ("no status yet, but the child exists"). This is ambiguous,
+# not a confirmed bug: `sched_wait_for_collect_impl` returns -10 at its
+# FIRST branch, before ever scanning for a child, when the caller
+# (`g_shim_scheduler.current`, i.e. the parent) is not itself found in the
+# tasks table — the same early-return the ECHILD test below deliberately
+# exercises. So -10 here is consistent with EITHER "the forked child was
+# never threaded back" OR "the parent itself dropped out of the
+# caller-visible `g_shim_scheduler` after `.schedule()`" — both plausible,
+# neither confirmed. The discriminating check
+# (`g_shim_scheduler.get_task(TaskId(id: pid))` on the PARENT, immediately
+# after fork, as the only assertion in that block, since this runner only
+# surfaces an example's LAST failed assertion) was not run. Left as a
+# follow-up rather than guessed at.
+use std.spec.{describe, it, expect}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, g_shim_ipc, g_shim_klog}
+use os.kernel.abi.syscall_shim_process.{spl_handle_spawn_binary, spl_handle_getpid}
+use os.kernel.abi.syscall_shim_file.{spl_handle_waitpid}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.loader.executable_source.{_set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
+use os.posix.fd_table.{fd_table_init}
+
+extern fn rt_string_data(s: text) -> i64
+
+# ============================================================================
+# Minimal x86_64 ELF fixture (same shape as execve_spec.spl's _make_x86_64_exec)
+# ============================================================================
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_exec() -> [u8]:
+    """Build a minimal valid x86_64 ELF binary with one PT_LOAD segment."""
+    var bytes: [u8] = []
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 62)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 64)
+    bytes = _push_u64_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u32_le(bytes, 1)
+    bytes = _push_u32_le(bytes, 5)
+    bytes = _push_u64_le(bytes, 0x1000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 0x400000)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 4)
+    bytes = _push_u64_le(bytes, 0x1000)
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    bytes.push(0xC3.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes.push(0x90.to_u8())
+    bytes
+
+"""
+Syscall Shim C-ABI State-Threading Specification
+
+Calls the real `@export("C")` shim entry points (as C code / the interrupt
+trap handler would) and checks that mutations made inside `_handle_*_state`
+handlers are visible afterward through the shim's module-global
+`g_shim_scheduler`, not just inside the handler's own return value.
+"""
+
+describe "spl_handle_spawn_binary (syscall 13) C-ABI shim":
+    it "threads the newly spawned task back into g_shim_scheduler":
+        fd_table_init()
+        val path = "/sys/apps/shim_state_hello"
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
+
+        g_shim_scheduler = Scheduler.new()
+        g_shim_ipc = IpcManager.new()
+        g_shim_klog = KernelLog.new(16)
+
+        val pid = spl_handle_spawn_binary(
+            rt_string_data(path) as u64, path.len() as u64, 2, 0, 0, 0
+        )
+        expect(pid).to_be_greater_than(0)
+
+        # The shim wrapper's own `g_shim_scheduler = st.scheduler` line is
+        # what's under test here: without it, the newly created task would
+        # exist only in the discarded local `st.scheduler` copy inside
+        # spl_handle_spawn_binary, and this lookup would come back nil even
+        # though the syscall itself reported success via its i64 return.
+        # (Sabotage-verified: see the file header note above.)
+        val tcb = g_shim_scheduler.get_task(TaskId(id: pid as u64))
+        expect(tcb).to_not_equal(nil)
+        _clear_synthetic_vfs_for_test()
+
+describe "spl_handle_waitpid (syscall 61) C-ABI shim error path":
+    it "returns ECHILD cleanly through the C-ABI boundary for a nonexistent child":
+        fd_table_init()
+        g_shim_scheduler = Scheduler.new()
+        g_shim_ipc = IpcManager.new()
+        g_shim_klog = KernelLog.new(16)
+
+        # arg0 = bogus pid, arg1 = 0 (no status pointer), arg2 = 1 (WNOHANG)
+        # so a genuinely missing child returns synchronously with -10
+        # (ECHILD) instead of blocking — sched_wait_for_collect_impl returns
+        # error=-10 immediately when the caller has no matching child at all.
+        val result = spl_handle_waitpid(999888777, 0, 1, 0, 0, 0)
+        expect(result).to_equal(0 - 10)
+
+        # The failure path must still leave g_shim_scheduler in a callable
+        # state — a corrupted/half-threaded global would break the next
+        # syscall too. getpid on the still-sentinel current must not crash
+        # and must return a stable value across repeated calls.
+        val pid1 = spl_handle_getpid(0, 0, 0, 0, 0, 0)
+        val pid2 = spl_handle_getpid(0, 0, 0, 0, 0, 0)
+        expect(pid1).to_equal(pid2)

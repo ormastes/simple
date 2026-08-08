@@ -1,0 +1,391 @@
+"""
+# ScriptHost Specification
+
+**Feature IDs:** #M15-SCRIPT-HOST
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests for `ScriptHost` in
+`src/lib/gc_async_mut/gpu/browser_engine/script/script_host.spl` (REQ-1 / AC-1).
+All specs FAIL until that module is implemented.
+
+## Key Behaviors
+
+- `ScriptHost.new()` creates a host ready to execute scripts.
+- After creation: `dom_dirty()` is false, `console_buffer().entries()` is empty.
+- `execute(source, dom_root)` does not panic on an empty script string.
+- `dom_dirty()` starts false, `clear_dirty()` resets it.
+- `inject_dom_event(event)` accepts a `BeDomEvent` without crashing when no
+  listener is registered.
+- `tick(now_micros)` can be called without an execute having run first.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost,
+    script_host_apply_action_to_route, script_host_apply_event_action}
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{
+    ScriptRunner, run_script, run_script_file
+}
+use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptStaticFetchDispatch,
+    fetch_create_request}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_host() -> ScriptHost:
+    return ScriptHost.new()
+
+fn _make_div_root() -> BeDomNode:
+    return BeDomNode.element("div")
+
+fn _make_click_event() -> BeDomEvent:
+    return BeDomEvent.create("click", "", true, true)
+
+fn _install_host_document(
+    host: ScriptHost, root: BeDomNode
+) -> DomIdentityIndex:
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    val index = dom_identity_index_build(root, generation).unwrap()
+    expect(host.install_document_state(root, index, generation)).to_be(true)
+    index
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "ScriptHost":
+    describe "security boundary":
+        it "denies legacy Simple source and paths without ambient host execution":
+            val runner = ScriptRunner.new()
+            expect(run_script(
+                runner,
+                "use std.process.*\nprocess_run(\"sh\", [\"-c\", \"id\"])"
+            )).to_equal(
+                "simple-script-error: ambient host execution disabled"
+            )
+            expect(run_script_file(
+                runner, "/etc/passwd"
+            )).to_equal(
+                "simple-script-error: ambient host execution disabled"
+            )
+
+    describe "AC-1: lifecycle — creation":
+        it "AC-1: new ScriptHost has dom_dirty false":
+            val host = _make_host()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: new ScriptHost has empty console buffer":
+            val host = _make_host()
+            val buf = host.console_buffer()
+            val count = buf.entries().len()
+            expect(count).to_equal(0)
+
+    describe "AC-1: execute — basic script intake":
+        it "AC-1: execute with empty string does not crash":
+            var host = _make_host()
+            val root = _make_div_root()
+            val _ = _install_host_document(host, root)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: execute_with_type captures transpiled console output":
+            var host = _make_host()
+            val root = _make_div_root()
+            host.execute_with_type("console.log(\"hello from js\")\nconsole.warn(\"careful\")\nconsole.error(\"bad\")", "text/javascript", root)
+            val entries = host.console_buffer().entries()
+            expect(entries.len()).to_equal(3)
+            expect(entries[0].level).to_equal("log")
+            expect(entries[0].message).to_contain("hello from js")
+            expect(entries[1].level).to_equal("warn")
+            expect(entries[1].message).to_contain("careful")
+            expect(entries[2].level).to_equal("error")
+            expect(entries[2].message).to_contain("bad")
+
+    describe "AC-1: dirty flag management":
+        it "AC-1: dom_dirty starts false before any tick":
+            val host = _make_host()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: clear_dirty leaves dom_dirty false when already false":
+            var host = _make_host()
+            host.clear_dirty()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: tick — callable without prior execute":
+        it "AC-1: tick with zero timestamp does not crash":
+            var host = _make_host()
+            host.tick(0)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: tick with large timestamp does not crash":
+            var host = _make_host()
+            host.tick(9999999999)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: inject_dom_event — no registered listeners":
+        it "AC-1: inject_dom_event does not crash when no listeners registered":
+            var host = _make_host()
+            val index = _install_host_document(host, host.dom_root())
+            val event = _make_click_event()
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation,
+                    node_id: host.dom_root().node_id
+                ),
+                event
+            ).unwrap()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: inject_dom_event executes deterministic set-text listener action":
+            var host = _make_host()
+            var root = _make_div_root()
+            root.add_event_listener("click", "set-text:clicked")
+            val index = _install_host_document(host, root)
+            val event = BeDomEvent.create("click", "", true, true)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
+            expect(host.dom_dirty()).to_equal(true)
+            expect(host.dom_root().text_content).to_equal("clicked")
+
+        it "AC-1: deterministic listener action sets and removes attributes":
+            var root = _make_div_root()
+            root = script_host_apply_event_action(root, "set-attr:aria-expanded=true")
+            expect(root.get_attr("aria-expanded")).to_equal("true")
+            root = script_host_apply_event_action(root, "remove-attr:aria-expanded")
+            expect(root.has_attr("aria-expanded")).to_equal(false)
+
+        it "AC-1: deterministic listener action updates class tokens":
+            var root = _make_div_root()
+            root = script_host_apply_event_action(root, "add-class:active")
+            expect(root.classes).to_contain("active")
+            root = script_host_apply_event_action(root, "add-class:active")
+            expect(root.classes.len()).to_equal(1)
+            root = script_host_apply_event_action(root, "toggle-class:active")
+            expect(root.classes.len()).to_equal(0)
+            root = script_host_apply_event_action(root, "toggle-class:active")
+            expect(root.classes).to_contain("active")
+            root = script_host_apply_event_action(root, "remove-class:active")
+            expect(root.classes.len()).to_equal(0)
+
+        it "AC-1: targeted actions stop at the first matching DOM identity":
+            var first = BeDomNode.element("button")
+            first.set_attr("id", "duplicate")
+            first.set_attr("data-slot", "first")
+            var branch = BeDomNode.element("section")
+            branch.add_child(first)
+            var second = BeDomNode.element("button")
+            second.set_attr("id", "duplicate")
+            second.set_attr("data-slot", "second")
+            var root = _make_div_root()
+            root.add_child(branch)
+            root.add_child(second)
+
+            val index = dom_identity_index_build(
+                root, DomDocumentGeneration.create(1).unwrap()
+            ).unwrap()
+            val duplicate_route = index.route_for_author_id(
+                "duplicate"
+            ).unwrap()
+            val updated = script_host_apply_action_to_route(
+                root, index, duplicate_route,
+                "set-attr:data-hit=yes", false
+            )
+            expect(updated.children[0].children[0].get_attr(
+                "data-hit"
+            )).to_equal("yes")
+            expect(updated.children[0].children[0].get_attr(
+                "data-slot"
+            )).to_equal("first")
+            expect(updated.children[1].get_attr("data-hit")).to_equal("")
+            expect(updated.children[1].get_attr("data-slot")).to_equal(
+                "second"
+            )
+            val missing_route = DomNodeRoute(
+                generation: index.generation,
+                node_id: 9223372036854775807
+            )
+            val missing = script_host_apply_action_to_route(
+                updated, index, missing_route,
+                "set-attr:data-hit=no", false
+            )
+            expect(missing.children[0].children[0].get_attr(
+                "data-hit"
+            )).to_equal("yes")
+            expect(missing.children[1].get_attr("data-hit")).to_equal("")
+
+        it "AC-1: inject_dom_event executes deterministic attribute and class actions":
+            var host = _make_host()
+            var root = _make_div_root()
+            root.add_event_listener("click", "set-attr:data-clicked=yes")
+            root.add_event_listener("click", "add-class:clicked")
+            val index = _install_host_document(host, root)
+            val event = BeDomEvent.create("click", "", true, true)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
+            expect(host.dom_root().get_attr("data-clicked")).to_equal("yes")
+            expect(host.dom_root().classes).to_contain("clicked")
+            expect(host.dom_dirty()).to_equal(true)
+
+        it "AC-1: inject_dom_event targets a child and applies its default action":
+            var host = _make_host()
+            var checkbox = BeDomNode.element("input")
+            checkbox.set_attr("id", "accept")
+            checkbox.set_attr("type", "checkbox")
+            checkbox.add_event_listener("click", "set-attr:data-clicked=yes")
+            var root = _make_div_root()
+            root.set_attr("id", "root")
+            root.add_child(checkbox)
+            val index = _install_host_document(host, root)
+
+            val event = BeDomEvent.create("click", "", true, true)
+            host.inject_dom_event_route(
+                index.route_for_author_id("accept").unwrap(), event
+            ).unwrap()
+
+            val updated = host.dom_root().children[0]
+            expect(updated.get_attr("data-clicked")).to_equal("yes")
+            expect(updated.has_attr("checked")).to_equal(true)
+            expect(host.dom_dirty()).to_equal(true)
+
+        it "AC-1: selecting a radio clears only same-form named peers":
+            var first = BeDomNode.element_with_id(11, "input")
+            first.set_attr("id", "first")
+            first.set_attr("type", "radio")
+            first.set_attr("name", "choice")
+            first.set_attr("checked", "checked")
+            var second = BeDomNode.element_with_id(12, "input")
+            second.set_attr("id", "second")
+            second.set_attr("type", "radio")
+            second.set_attr("name", "choice")
+            var other = BeDomNode.element_with_id(13, "input")
+            other.set_attr("id", "other")
+            other.set_attr("type", "radio")
+            other.set_attr("name", "choice")
+            other.set_attr("checked", "checked")
+            var form = BeDomNode.element_with_id(10, "form")
+            form.set_attr("id", "primary")
+            form.add_child(first)
+            form.add_child(second)
+            var other_form = BeDomNode.element_with_id(20, "form")
+            other_form.set_attr("id", "secondary")
+            other_form.add_child(other)
+            var root = _make_div_root()
+            root.add_child(form)
+            root.add_child(other_form)
+            var host = _make_host()
+            val index = _install_host_document(host, root)
+
+            host.inject_dom_event_route(
+                index.route_for_author_id("second").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
+
+            val updated = host.dom_root()
+            expect(updated.children[0].children[0].has_attr("checked")).to_be(false)
+            expect(updated.children[0].children[0].has_attr("data-focused")).to_be(false)
+            expect(updated.children[0].children[1].has_attr("checked")).to_be(true)
+            expect(updated.children[0].children[1].has_attr("data-focused")).to_be(true)
+            expect(updated.children[1].children[0].has_attr("checked")).to_be(true)
+
+        it "AC-1: submit controls dispatch a cancelable event to their owning form":
+            var blocked_form = BeDomNode.element_with_id(10, "form")
+            blocked_form.set_attr("id", "blocked-form")
+            blocked_form.add_event_listener("submit", "prevent-default")
+            var blocked_button = BeDomNode.element_with_id(11, "button")
+            blocked_button.set_attr("id", "blocked-submit")
+            blocked_form.add_child(blocked_button)
+            var allowed_form = BeDomNode.element_with_id(20, "form")
+            allowed_form.set_attr("id", "allowed-form")
+            var allowed_button = BeDomNode.element_with_id(21, "button")
+            allowed_button.set_attr("id", "allowed-submit")
+            allowed_form.add_child(allowed_button)
+            var root = _make_div_root()
+            root.add_child(blocked_form)
+            root.add_child(allowed_form)
+            var host = _make_host()
+            val index = _install_host_document(host, root)
+
+            host.inject_dom_event_route(
+                index.route_for_author_id("blocked-submit").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
+            host.inject_dom_event_route(
+                index.route_for_author_id("allowed-submit").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
+
+            val updated = host.dom_root()
+            expect(updated.children[0].has_attr("data-submitted")).to_be(false)
+            expect(updated.children[1].get_attr("data-submitted")).to_equal("true")
+
+        it "AC-1: capture actions mutate currentTarget rather than the event target":
+            var host = _make_host()
+            var checkbox = BeDomNode.element("input")
+            checkbox.set_attr("id", "accept")
+            checkbox.set_attr("type", "checkbox")
+            var root = _make_div_root()
+            root.set_attr("id", "root")
+            root.add_event_listener_with_capture("click", "set-attr:data-captured=yes", true)
+            root.add_child(checkbox)
+            val index = _install_host_document(host, root)
+
+            val event = BeDomEvent.create("click", "", true, true)
+            host.inject_dom_event_route(
+                index.route_for_author_id("accept").unwrap(), event
+            ).unwrap()
+
+            expect(host.dom_root().get_attr("data-captured")).to_equal("yes")
+            expect(host.dom_root().children[0].get_attr("data-captured")).to_equal("")
+
+    describe "AC-1: dom_root — returns current root":
+        it "AC-1: dom_root after execute returns a BeDomNode":
+            var host = _make_host()
+            val root = _make_div_root()
+            val _ = _install_host_document(host, root)
+            val returned_root = host.dom_root()
+            expect(returned_root.tag).to_equal("div")
+
+    describe "fetch dispatch bridge":
+        it "uses safe fallback when no fetch dispatch is installed":
+            val host = _make_host()
+            val resp = host.fetch(fetch_create_request("https://example.test/data", "GET"))
+            expect(resp.status).to_equal(0)
+            expect(resp.ok).to_equal(false)
+
+        it "sends fetch requests through installed dispatch":
+            var host = _make_host()
+            host.set_fetch_dispatch(ScriptStaticFetchDispatch.create(200, "x-host: yes", "body"))
+            val resp = host.fetch(fetch_create_request("https://example.test/data", "GET"))
+            expect(resp.status).to_equal(200)
+            expect(resp.ok).to_equal(true)
+            expect(resp.headers[0]).to_equal("x-host")
+            expect(resp.headers[1]).to_equal("yes")
+            expect(resp.body).to_equal("body")

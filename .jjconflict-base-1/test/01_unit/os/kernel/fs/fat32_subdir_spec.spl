@@ -1,0 +1,357 @@
+"""
+# FAT32 Subdirectory Traversal — Wave-4f Spec
+
+**Lane:** B2 of `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
+**Feature:** kernel FAT32 driver (IF-07) nested path resolution
+
+Before this wave the driver could only see the root directory, so an in-guest
+source tree (an LLVM checkout is ~150k files in nested directories) could not
+exist at all. These scenarios drive `resolve_path` / `open_at` / `stat_at`
+against a synthetic in-memory FAT32 volume and prove that each path component
+is really walked — not merely that the last component happens to be findable.
+
+Synthetic volume geometry (fat_start=32, data_start=64, bps=512, spc=1,
+cluster_size=512, data_clusters=8, root_cluster=2):
+
+    cluster 2  (LBA 64)  root : dir A -> cluster 3
+                                FILE.O  -> cluster 9, size 11   (decoy)
+    cluster 3  (LBA 65)  /A   : "." -> 3, ".." -> 0 (root), dir B -> cluster 4
+    cluster 4  (LBA 66)  /A/B : "." -> 4, ".." -> 3, dir C -> cluster 5
+    cluster 5  (LBA 67)  /A/B/C : "." -> 5, ".." -> 4,
+                                FILE.O -> cluster 6, size 77
+                                "LongName.txt" (LFN) -> cluster 7, size 5
+
+The two `FILE.O` entries share a basename but carry **different sizes**, so a
+resolver that silently ignores intermediate components cannot pass.
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.fs.fat32.{Fat32Filesystem, Fat32DirEntryLoc, fat32_split_path}
+
+# ============================================================================
+# In-memory mock block device
+# ============================================================================
+
+struct MockSubdirSector:
+    lba: u64
+    data: [u8]
+
+class MockSubdirDev:
+    sectors: [MockSubdirSector]
+
+impl MockSubdirDev:
+    static fn new() -> MockSubdirDev:
+        MockSubdirDev(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockSubdirDev:
+        self.sectors.push(MockSubdirSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        Ok(_zero_sector())
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<(), text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                self.sectors[i] = MockSubdirSector(lba: lba, data: data)
+                return Ok(())
+            i = i + 1
+        self.sectors.push(MockSubdirSector(lba: lba, data: data))
+        Ok(())
+
+# ============================================================================
+# Image builders
+# ============================================================================
+
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _poke32(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8u32)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    buf
+
+# Write a space-padded 8.3 name field into a 32-byte dirent at `off`.
+fn _put_name(sec: [u8], off: i32, base: text, ext: text) -> [u8]:
+    var i = 0
+    while i < 8:
+        if i < base.len():
+            sec[off + i] = base.char_code_at(i).to_u8()
+        else:
+            sec[off + i] = 0x20u8
+        i = i + 1
+    var j = 0
+    while j < 3:
+        if j < ext.len():
+            sec[off + 8 + j] = ext.char_code_at(j).to_u8()
+        else:
+            sec[off + 8 + j] = 0x20u8
+        j = j + 1
+    sec
+
+# Write one 8.3 directory entry (name, attr, first cluster, size).
+fn _put_entry(sec: [u8], off: i32, base: text, ext: text, attr: u8, cluster: u32, size: u32) -> [u8]:
+    var s = _put_name(sec, off, base, ext)
+    s[off + 11] = attr
+    val hi = (cluster >> 16u32) & 0xFFFFu32
+    val lo = cluster & 0xFFFFu32
+    s[off + 20] = (hi & 0xFFu32).to_u8()
+    s[off + 21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+    s[off + 26] = (lo & 0xFFu32).to_u8()
+    s[off + 27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+    s = _poke32(s, off + 28, size)
+    s
+
+# Write one LFN slot holding up to 13 UCS-2 code units of `name`.
+# Char slots live at entry offsets +1,+3,+5,+7,+9 / +14,+16,+18,+20,+22,+24 / +28,+30.
+fn _lfn_char_offset(k: i32) -> i32:
+    if k < 5:
+        return 1 + k * 2
+    if k < 11:
+        return 14 + (k - 5) * 2
+    28 + (k - 11) * 2
+
+fn _put_lfn_slot(sec: [u8], off: i32, seq: u8, name: text) -> [u8]:
+    var s = sec
+    s[off] = seq
+    s[off + 11] = 0x0Fu8
+    var k = 0
+    while k < 13:
+        val co = off + _lfn_char_offset(k)
+        if k < name.len():
+            s[co]     = name.char_code_at(k).to_u8()
+            s[co + 1] = 0u8
+        else:
+            if k == name.len():
+                s[co]     = 0u8      # NUL terminator
+                s[co + 1] = 0u8
+            else:
+                s[co]     = 0xFFu8   # padding past terminator
+                s[co + 1] = 0xFFu8
+        k = k + 1
+    s
+
+fn _fat_sector() -> [u8]:
+    # Clusters 2..9 each terminate their own single-cluster chain (EOC).
+    var f = _zero_sector()
+    var c = 2
+    while c <= 9:
+        f = _poke32(f, c * 4, 0x0FFFFFFFu32)
+        c = c + 1
+    f
+
+fn _root_dir() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0,  "A",      "",    0x10u8, 3u32, 0u32)    # directory A
+    s = _put_entry(s, 32, "FILE",   "O",   0x20u8, 9u32, 11u32)   # decoy, size 11
+    # byte 64 stays 0x00 = end-of-directory marker
+    s
+
+fn _dir_a() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0,  ".",  "", 0x10u8, 3u32, 0u32)
+    s = _put_entry(s, 32, "..", "", 0x10u8, 0u32, 0u32)   # 0 == root, per FAT32
+    s = _put_entry(s, 64, "B",  "", 0x10u8, 4u32, 0u32)
+    s
+
+fn _dir_b() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0,  ".",  "", 0x10u8, 4u32, 0u32)
+    s = _put_entry(s, 32, "..", "", 0x10u8, 3u32, 0u32)
+    s = _put_entry(s, 64, "C",  "", 0x10u8, 5u32, 0u32)
+    # Same directory cluster, but attr = DIRECTORY|ARCHIVE — the shape mkfs
+    # and real volumes commonly produce. Descent must test the 0x10 BIT, not
+    # equality against 0x10.
+    s = _put_entry(s, 96, "D",  "", 0x30u8, 5u32, 0u32)
+    s
+
+fn _dir_c() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0,   ".",      "",  0x10u8, 5u32, 0u32)
+    s = _put_entry(s, 32,  "..",     "",  0x10u8, 4u32, 0u32)
+    s = _put_entry(s, 64,  "FILE",   "O", 0x20u8, 6u32, 77u32)    # the real one
+    s = _put_lfn_slot(s, 96, 0x41u8, "LongName.txt")
+    s = _put_entry(s, 128, "LONGNA~1", "TXT", 0x20u8, 7u32, 5u32)
+    s
+
+fn _make_dev() -> MockSubdirDev:
+    var dev = MockSubdirDev.new()
+    dev = dev.with_sector(32u64, _fat_sector())
+    dev = dev.with_sector(64u64, _root_dir())
+    dev = dev.with_sector(65u64, _dir_a())
+    dev = dev.with_sector(66u64, _dir_b())
+    dev = dev.with_sector(67u64, _dir_c())
+    dev
+
+fn _make_fs() -> Fat32Filesystem:
+    Fat32Filesystem.make_for_dirent_test(32u32, 64u32, 512u32, 1u32, 8u32, _root_dir())
+
+# ============================================================================
+# Scenarios
+# ============================================================================
+
+describe "fat32 subdirectory traversal — wave-4f":
+
+    describe "path splitting":
+
+        it "drops empty components and yields one entry per name":
+            step("split a three-deep absolute path")
+            val parts = fat32_split_path("/A/B/C/FILE.O")
+            expect(parts.len()).to_equal(4)
+            expect(parts[0]).to_equal("A")
+            expect(parts[3]).to_equal("FILE.O")
+
+        it "treats the root path as having no components":
+            step("split \"/\"")
+            expect(fat32_split_path("/").len()).to_equal(0)
+
+    describe "nested read path":
+
+        it "resolves /A/B/C/FILE.O to the nested file, not the root decoy":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("stat the root FILE.O — the decoy, size 11")
+            val root_st = fs.stat_at(dev, "/FILE.O")
+            assert_true(root_st.is_ok())
+            expect(root_st.unwrap().size).to_equal(11u64)
+            step("stat the three-deep FILE.O — the real one, size 77")
+            val nested_st = fs.stat_at(dev, "/A/B/C/FILE.O")
+            assert_true(nested_st.is_ok())
+            expect(nested_st.unwrap().size).to_equal(77u64)
+
+        it "open_at on the nested file yields its own first cluster and size":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("open /A/B/C/FILE.O")
+            val h_result = fs.open_at(dev, "/A/B/C/FILE.O")
+            assert_true(h_result.is_ok())
+            val h = h_result.unwrap()
+            expect(h.start_cluster).to_equal(6u32)
+            expect(h.file_size).to_equal(77u64)
+
+        it "records the dirent address inside the containing subdirectory":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve /A/B/C/FILE.O and read back its on-disk dirent address")
+            val loc_result = fs.resolve_path(dev, "/A/B/C/FILE.O")
+            assert_true(loc_result.is_ok())
+            val loc = loc_result.unwrap()
+            assert_true(loc.found)
+            expect(loc.dir_cluster).to_equal(5u32)
+            expect(loc.dirent_sector).to_equal(67u64)   # cluster 5 -> LBA 64+(5-2)
+            expect(loc.dirent_offset).to_equal(64)
+
+        it "reports intermediate components as directories":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("stat /A/B")
+            val st = fs.stat_at(dev, "/A/B")
+            assert_true(st.is_ok())
+            assert_true(st.unwrap().is_dir)
+
+        it "descends through a directory carrying extra attribute bits":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("/A/B/D has attr 0x30 (DIRECTORY|ARCHIVE) and shares C's cluster")
+            val st = fs.stat_at(dev, "/A/B/D/FILE.O")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(77u64)
+
+        it "refuses to open a directory as a file":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("open_at /A/B must fail")
+            val h = fs.open_at(dev, "/A/B")
+            assert_true(h.is_err())
+            expect(h.unwrap_err()).to_equal(-2)
+
+    describe "long filenames inside a subdirectory":
+
+        it "matches an LFN entry three levels down":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("stat /A/B/C/LongName.txt by its long name")
+            val st = fs.stat_at(dev, "/A/B/C/LongName.txt")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(5u64)
+
+        it "still matches the same entry by its 8.3 short name":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("stat /A/B/C/LONGNA~1.TXT")
+            val st = fs.stat_at(dev, "/A/B/C/LONGNA~1.TXT")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(5u64)
+
+    describe "dot and dot-dot components":
+
+        it "treats \".\" as a no-op component":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve /A/B/./C/FILE.O")
+            val st = fs.stat_at(dev, "/A/B/./C/FILE.O")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(77u64)
+
+        it "walks \"..\" back to the parent directory":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve /A/B/C/../C/FILE.O — down to C, up to B, back into C")
+            val st = fs.stat_at(dev, "/A/B/C/../C/FILE.O")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(77u64)
+
+        it "maps a \"..\" cluster of 0 back to the root directory":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("climb all the way out and land on the root decoy, size 11")
+            val st = fs.stat_at(dev, "/A/B/C/../../../FILE.O")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(11u64)
+
+    describe "fail-closed behaviour":
+
+        it "returns ENOENT when an intermediate directory does not exist":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve /A/NOPE/FILE.O")
+            val r = fs.resolve_path(dev, "/A/NOPE/FILE.O")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-2)
+
+        it "returns ENOENT for a name that only exists deeper in the tree":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("FILE.O lives in /A/B/C, not in /A")
+            val r = fs.resolve_path(dev, "/A/FILE.O")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-2)
+
+        it "refuses to descend through a regular file":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve /FILE.O/X — FILE.O is not a directory")
+            val r = fs.resolve_path(dev, "/FILE.O/X")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-2)
+
+        it "rejects a path with no components":
+            val fs = _make_fs()
+            val dev = _make_dev()
+            step("resolve \"/\"")
+            val r = fs.resolve_path(dev, "/")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-22)

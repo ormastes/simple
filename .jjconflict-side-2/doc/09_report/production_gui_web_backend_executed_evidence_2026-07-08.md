@@ -1,0 +1,451 @@
+# Production GUI Web Backend-Executed Evidence
+
+- status: pass
+- reason: pass
+- scene: backend-executed Engine2D clear/fill primitive proof
+- dimensions: 16x16
+- CPU SIMD resolved: cpu_simd
+- CPU SIMD total hits: 20
+- CPU SIMD alpha quality: pass
+- CPU SIMD alpha quality hits: 4
+- CPU SIMD different pixels: 0
+- Metal resolved: vulkan
+- Metal gpu frame complete: true
+- Metal gpu readback pixel count: 256
+- Metal command queue handle: 1
+- Backend checksums (software/cpu_simd/metal/gpu): 140768607855648 / 140768607855648 / 140768607855648 / 140768607855648
+- Backend checksum match: true
+- Same-frame backend readback: true
+- Backend readback source: device_readback
+- Metal different pixels: 0
+- Software render elapsed us: 1610
+- CPU SIMD render elapsed us: 1495
+- Metal render elapsed us: 693394
+- Total render elapsed us: 699227
+- Software pixels/s: 159006
+- CPU SIMD pixels/s: 171237
+- Metal pixels/s: 369
+- Total pixels/s: 366
+- Timing budget us: 250000
+- Timing budget status: warn
+- Timing budget reason: render-budget-exceeded
+- Sample count: 3
+- Total elapsed us min/avg/max: 189257 / 359905 / 699227
+- Total pixels/s min/avg/max: 366 / 1018 / 1352
+- First pixels (software/cpu_simd/metal/gpu): 4279246896 / 4279246896 / 4279246896 / 4279246896
+- Rect pixels (software/cpu_simd/metal/gpu): 4278256132 / 4278256132 / 4278256132 / 4278256132
+- blur/tolerance used: false
+
+This evidence intentionally exercises the currently proven Metal GPU
+readback subset (clear + filled rectangle) through Engine2D and separately
+requires CPU-SIMD alpha blending to match the software renderer exactly.
+It proves backend execution separately from the HTML layout fast path,
+which currently renders through a pure framebuffer renderer. Larger
+generated GUI scenes remain tracked as open Metal coverage.
+
+## Raw Evidence
+- production_gui_backend_status=pass
+- production_gui_backend_reason=pass
+- production_gui_backend_width=16
+- production_gui_backend_height=16
+- production_gui_backend_software_resolved=software
+- production_gui_backend_cpu_simd_resolved=cpu_simd
+- production_gui_backend_metal_resolved=vulkan
+- production_gui_backend_software_pixel_count=256
+- production_gui_backend_cpu_simd_pixel_count=256
+- production_gui_backend_metal_pixel_count=256
+- production_gui_backend_cpu_simd_different_pixels=0
+- production_gui_backend_cpu_simd_max_channel_diff=0
+- production_gui_backend_cpu_simd_total_hits=20
+- production_gui_backend_cpu_simd_fill_hits=20
+- production_gui_backend_cpu_simd_copy_hits=0
+- production_gui_backend_cpu_simd_alpha_hits=0
+- production_gui_backend_cpu_simd_blit_hits=0
+- production_gui_backend_cpu_simd_scroll_hits=0
+- production_gui_backend_cpu_simd_alpha_quality_status=pass
+- production_gui_backend_cpu_simd_alpha_quality_hits=4
+- production_gui_backend_cpu_simd_alpha_quality_software_checksum=8901726553200
+- production_gui_backend_cpu_simd_alpha_quality_cpu_simd_checksum=8901726553200
+- production_gui_backend_cpu_simd_alpha_quality_software_pixel=4280964222
+- production_gui_backend_cpu_simd_alpha_quality_cpu_simd_pixel=4280964222
+- production_gui_backend_metal_different_pixels=0
+- production_gui_backend_metal_max_channel_diff=0
+- production_gui_backend_metal_gpu_frame_complete=true
+- production_gui_backend_metal_gpu_readback_pixel_count=256
+- production_gui_backend_metal_gpu_readback_checksum=140768607855648
+- production_gui_backend_metal_command_queue_handle=1
+- production_gui_backend_software_checksum=140768607855648
+- production_gui_backend_cpu_simd_checksum=140768607855648
+- production_gui_backend_metal_checksum=140768607855648
+- production_gui_backend_backend_checksum_match=true
+- production_gui_backend_same_frame_backend_readback=true
+- production_gui_backend_backend_readback_source=device_readback
+- production_gui_backend_software_first_pixel=4279246896
+- production_gui_backend_cpu_simd_first_pixel=4279246896
+- production_gui_backend_metal_first_pixel=4279246896
+- production_gui_backend_metal_gpu_first_pixel=4279246896
+- production_gui_backend_software_rect_pixel=4278256132
+- production_gui_backend_cpu_simd_rect_pixel=4278256132
+- production_gui_backend_metal_rect_pixel=4278256132
+- production_gui_backend_metal_gpu_rect_pixel=4278256132
+- production_gui_backend_tolerance_used=false
+- production_gui_backend_exact_backend_parity=true
+- production_gui_backend_software_render_elapsed_us=1610
+- production_gui_backend_cpu_simd_render_elapsed_us=1495
+- production_gui_backend_metal_render_elapsed_us=693394
+- production_gui_backend_total_elapsed_us=699227
+- production_gui_backend_software_pixels_per_second=159006
+- production_gui_backend_cpu_simd_pixels_per_second=171237
+- production_gui_backend_metal_pixels_per_second=369
+- production_gui_backend_total_pixels_per_second=366
+- production_gui_backend_timing_budget_us=250000
+- production_gui_backend_timing_budget_status=warn
+- production_gui_backend_timing_budget_reason=render-budget-exceeded
+- production_gui_backend_sample_count=3
+- production_gui_backend_total_elapsed_us_min=189257
+- production_gui_backend_total_elapsed_us_avg=359905
+- production_gui_backend_total_elapsed_us_max=699227
+- production_gui_backend_total_pixels_per_second_min=366
+- production_gui_backend_total_pixels_per_second_avg=1018
+- production_gui_backend_total_pixels_per_second_max=1352
+- production_gui_backend_simple_bin=bin/simple
+- production_gui_backend_simple_bin_source=repo-self-hosted-fallback
+- production_gui_backend_simple_bin_status=pass
+- production_gui_backend_blur_or_tolerance_used=false
+- production_gui_backend_evidence_log=build/production_gui_web_backend_executed_evidence/evidence.log
+
+## Evidence Log
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+- 
+- Use angle brackets: s<...> instead of s[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/simd_provider.spl:3:1
+-    |
+-   3 | export use std.nogc_sync_mut.gpu.engine2d.simd_provider.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3733:24
+-    |
+- 3733 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+- 
+- Use angle brackets: cb<...> instead of cb[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4753:58
+-    |
+- 4753 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4771:58
+-    |
+- 4771 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4804:58
+-    |
+- 4804 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4807:42
+-    |
+- 4807 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4831:58
+-    |
+- 4831 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4834:42
+-    |
+- 4834 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/ormastes/dev/pub/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+- 
+- Use angle brackets: pp<...> instead of pp[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+- 
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /home/ormastes/dev/pub/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+- 
+- Use explicit exports instead
+- 
+- Example: export use module.{A, B, C} or export A, B from module
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.time_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- production_gui_backend_status=pass
+- production_gui_backend_width=16
+- production_gui_backend_height=16
+- production_gui_backend_software_resolved=software
+- production_gui_backend_cpu_simd_resolved=cpu_simd
+- production_gui_backend_metal_resolved=vulkan
+- production_gui_backend_software_pixel_count=256
+- production_gui_backend_cpu_simd_pixel_count=256
+- production_gui_backend_metal_pixel_count=256
+- production_gui_backend_cpu_simd_different_pixels=0
+- production_gui_backend_cpu_simd_max_channel_diff=0
+- production_gui_backend_cpu_simd_total_hits=20
+- production_gui_backend_cpu_simd_fill_hits=20
+- production_gui_backend_cpu_simd_copy_hits=0
+- production_gui_backend_cpu_simd_alpha_hits=0
+- production_gui_backend_cpu_simd_blit_hits=0
+- production_gui_backend_cpu_simd_scroll_hits=0
+- production_gui_backend_cpu_simd_alpha_quality_status=pass
+- production_gui_backend_cpu_simd_alpha_quality_hits=4
+- production_gui_backend_cpu_simd_alpha_quality_software_checksum=8901726553200
+- production_gui_backend_cpu_simd_alpha_quality_cpu_simd_checksum=8901726553200
+- production_gui_backend_cpu_simd_alpha_quality_software_pixel=4280964222
+- production_gui_backend_cpu_simd_alpha_quality_cpu_simd_pixel=4280964222
+- production_gui_backend_metal_different_pixels=0
+- production_gui_backend_metal_max_channel_diff=0
+- production_gui_backend_metal_gpu_frame_complete=true
+- production_gui_backend_metal_gpu_readback_pixel_count=256
+- production_gui_backend_metal_gpu_readback_checksum=140768607855648
+- production_gui_backend_metal_command_queue_handle=1
+- production_gui_backend_software_checksum=140768607855648
+- production_gui_backend_cpu_simd_checksum=140768607855648
+- production_gui_backend_metal_checksum=140768607855648
+- production_gui_backend_backend_checksum_match=true
+- production_gui_backend_same_frame_backend_readback=true
+- production_gui_backend_backend_readback_source=device_readback
+- production_gui_backend_software_first_pixel=4279246896
+- production_gui_backend_cpu_simd_first_pixel=4279246896
+- production_gui_backend_metal_first_pixel=4279246896
+- production_gui_backend_metal_gpu_first_pixel=4279246896
+- production_gui_backend_software_rect_pixel=4278256132
+- production_gui_backend_cpu_simd_rect_pixel=4278256132
+- production_gui_backend_metal_rect_pixel=4278256132
+- production_gui_backend_metal_gpu_rect_pixel=4278256132
+- production_gui_backend_tolerance_used=false
+- production_gui_backend_exact_backend_parity=true
+- production_gui_backend_software_render_elapsed_us=1610
+- production_gui_backend_cpu_simd_render_elapsed_us=1495
+- production_gui_backend_metal_render_elapsed_us=693394
+- production_gui_backend_total_elapsed_us=699227
+- production_gui_backend_software_pixels_per_second=159006
+- production_gui_backend_cpu_simd_pixels_per_second=171237
+- production_gui_backend_metal_pixels_per_second=369
+- production_gui_backend_total_pixels_per_second=366
+- production_gui_backend_timing_budget_us=250000
+- production_gui_backend_timing_budget_status=warn
+- production_gui_backend_timing_budget_reason=render-budget-exceeded
+- production_gui_backend_sample_count=3
+- production_gui_backend_total_elapsed_us_min=189257
+- production_gui_backend_total_elapsed_us_avg=359905
+- production_gui_backend_total_elapsed_us_max=699227
+- production_gui_backend_total_pixels_per_second_min=366
+- production_gui_backend_total_pixels_per_second_avg=1018
+- production_gui_backend_total_pixels_per_second_max=1352

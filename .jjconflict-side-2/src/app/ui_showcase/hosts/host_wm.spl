@@ -1,0 +1,159 @@
+# ScreenHost impl #3 of 4 -- WM client over the file/env bridge.
+#
+# Mirrors the protocol examples/06_io/ui/widget_showcase_gui.spl already
+# speaks (that file is read, never edited): frames are written as binary P6
+# PPM to SIMPLE_WM_FRAME_FILE, the frame sequence number is written to the
+# seq file, a WmFsFrameReceipt is written beside the frame, and input arrives
+# as one encoded WmFsAppEvent per `wm_fs_app_event_seq_path(event_path, seq)`
+# file. Ingress conversion is B1's `host_input_from_wm_fs_event` -- this file
+# does not invent a second WM->widget mapping.
+#
+# Honesty contract: `open` returns nil unless SIMPLE_WM_APP_MODE == "client"
+# AND a frame path is set. Without a WM there is nothing to present to, and a
+# host that presented into the void would manufacture a frames>0 transcript.
+
+use std.io_runtime.{env_get, file_exists, file_read, file_write_bytes, write_file}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use common.ui.screen_host.{ScreenHost}
+use common.ui.host_input_event.{HostInputEvent, host_input_from_wm_fs_event}
+use common.ui.wm_app_process_contract.{
+    WM_APP_MODE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV,
+    WIDGET_SHOWCASE_WINDOW_W, WIDGET_SHOWCASE_WINDOW_H,
+    wm_app_mode_is_client, wm_widget_showcase_event_path,
+    wm_widget_showcase_frame_seq_path, wm_fs_app_event_seq_path,
+    wm_fs_app_event_decode, wm_fs_frame_checksum, wm_fs_frame_receipt,
+    wm_fs_frame_receipt_encode, wm_fs_frame_receipt_path
+}
+use app.ui_showcase.hosts.scene_raster.{raster_scene_argb, raster_to_ppm_bytes}
+
+# T4 (render_perf_replan_parallel_teams_2026-08-07): the per-frame PPM +
+# seq + receipt writes are file-bridge evidence/export, not rendering — they
+# are OFF on the warm frame loop by default and enabled only by an explicit
+# flag, mirroring main_2d.spl's SIMPLE_SHOWCASE_CAPTURE gate. A WM spawner
+# that still consumes the PPM file bridge must set SIMPLE_WM_FRAME_EXPORT=1
+# in the client env. The capability is gated, not deleted (log-retention rule).
+val WM_FRAME_EXPORT_ENV: text = "SIMPLE_WM_FRAME_EXPORT"
+
+fn wm_host_frame_export_enabled() -> bool:
+    env_get(WM_FRAME_EXPORT_ENV).trim() == "1"
+
+fn wm_env_path_or(default_path: text, key: text) -> text:
+    """Env override for a derived bridge path; empty env keeps the default."""
+    val raw = env_get(key).trim()
+    if raw == "":
+        return default_path
+    raw
+
+fn wm_read_event_at(event_path: text, seq: i64) -> HostInputEvent?:
+    """One numbered event file -> HostInputEvent, or nil when the WM has not
+    written that sequence number yet. Decode and conversion are both the
+    landed shared helpers; nothing is re-derived here."""
+    val path = wm_fs_app_event_seq_path(event_path, seq)
+    if not file_exists(path):
+        return nil
+    val doc = file_read(path)
+    if doc.trim() == "":
+        return nil
+    val decoded = wm_fs_app_event_decode(doc)
+    # The filename is the delivery cursor, while the wire sequence is the
+    # producer's claim.  Both must agree: accepting a stale/replayed payload
+    # would advance the cursor and permanently skip the real next event.
+    if decoded.seq != seq:
+        return nil
+    host_input_from_wm_fs_event(decoded)
+
+class ScreenWmHost:
+    var w: i32
+    var h: i32
+    var frame_path: text
+    var seq_path: text
+    var event_path: text
+    var frame_seq: i64
+    var event_seq: i64
+    var last_pixel_count: i64
+    var last_checksum: i64
+    # Counter-backed proof for host_wm_present_no_ppm_spec.spl: every file
+    # write present_scene performs is counted here; a warm frame must add 0.
+    # (A field, not a module global: cross-module reads of module-level vars
+    # are unreliable — the spec observed a stale 0 through an imported getter.)
+    var ppm_file_writes: i64
+
+    static fn open(w: i32, h: i32) -> ScreenWmHost?:
+        """nil unless this process really was launched as a WM client."""
+        if not wm_app_mode_is_client(env_get(WM_APP_MODE_ENV).trim()):
+            return nil
+        val frame_path = env_get(WM_FRAME_FILE_ENV).trim()
+        if frame_path == "":
+            return nil
+        ScreenWmHost(
+            w: w, h: h,
+            frame_path: frame_path,
+            seq_path: wm_env_path_or(wm_widget_showcase_frame_seq_path(frame_path), WM_FRAME_SEQ_FILE_ENV),
+            event_path: wm_env_path_or(wm_widget_showcase_event_path(frame_path), WM_EVENT_FILE_ENV),
+            frame_seq: 0, event_seq: 0, last_pixel_count: 0, last_checksum: 0,
+            ppm_file_writes: 0
+        )
+
+    static fn open_default() -> ScreenWmHost?:
+        ScreenWmHost.open(WIDGET_SHOWCASE_WINDOW_W, WIDGET_SHOWCASE_WINDOW_H)
+
+impl ScreenHost for ScreenWmHost:
+    me host_name() -> text:
+        "wm"
+
+    me size() -> (i32, i32):
+        (self.w, self.h)
+
+    me present_scene(scene: DrawIrV3Scene) -> bool:
+        if not wm_host_frame_export_enabled():
+            # Warm path: zero file writes, zero raster. frame_seq is NOT
+            # bumped — a sequence number with no frame file behind it would
+            # manufacture a transcript (see the honesty contract above).
+            return true
+        val pixels = raster_scene_argb(scene, self.w, self.h)
+        val bytes = raster_to_ppm_bytes(pixels, self.w, self.h)
+        if bytes.len() == 0:
+            return false
+        self.ppm_file_writes = self.ppm_file_writes + 1
+        if not file_write_bytes(self.frame_path, bytes):
+            return false
+        self.frame_seq = self.frame_seq + 1
+        self.last_pixel_count = pixels.len().to_i64()
+        self.last_checksum = wm_fs_frame_checksum(pixels)
+        self.ppm_file_writes = self.ppm_file_writes + 1
+        write_file(self.seq_path, "{self.frame_seq}")
+        # The receipt is what makes a WM frame claim checkable: pixel_count
+        # and checksum come from the buffer that was actually written.
+        self.ppm_file_writes = self.ppm_file_writes + 1
+        write_file(
+            wm_fs_frame_receipt_path(self.frame_path),
+            wm_fs_frame_receipt_encode(wm_fs_frame_receipt(
+                self.event_seq, self.frame_seq, "wm", "host-raster",
+                0, 0, self.last_pixel_count, self.last_checksum
+            ))
+        )
+        true
+
+    me poll_input() -> HostInputEvent?:
+        val next = self.event_seq + 1
+        val ev = wm_read_event_at(self.event_path, next)
+        if ev == nil:
+            return nil
+        self.event_seq = next
+        # Resize is a public layout update, not merely another input record.
+        # Keep size() coherent for the next DrawIR composition while leaving
+        # malformed/non-positive dimensions fail-closed at the host boundary.
+        match ev:
+            HostInputEvent.Resize(resize_w, resize_h):
+                if resize_w > 0 and resize_h > 0:
+                    self.w = resize_w
+                    self.h = resize_h
+            _:
+                pass
+        ev
+
+    me shutdown():
+        self.frame_path = ""
+
+export ScreenWmHost, wm_read_event_at, wm_env_path_or
+export WM_FRAME_EXPORT_ENV, wm_host_frame_export_enabled

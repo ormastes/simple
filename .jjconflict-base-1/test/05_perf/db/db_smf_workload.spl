@@ -1,0 +1,47 @@
+# db_smf_workload.spl — standalone db-domain workload, runnable in any mode.
+#
+# Self-times the RAM-mode insert+scan op (the db-domain representative op, same
+# PureDatabase.memory() path the db spec validates) and prints RESULT lines.
+# Oracle: the final SELECT * count must equal BENCH_N — nothing is printed otherwise.
+# db_bench_driver compiles this to SMF, runs it, and parses mode="smf" rows.
+
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+val BENCH_N: i64 = 100
+
+fn run_ram_insert_count() -> i64:
+    val r = PureDatabase.memory()
+    if r.is_err():
+        return -1
+    var db = r.unwrap()
+    val cr = db.exec_sql("CREATE TABLE bench (id INTEGER, val TEXT)")
+    if cr.is_err():
+        return -2
+    var i: i64 = 0
+    while i < BENCH_N:
+        val v = "val_" + (i * 10).to_text()
+        val sql = "INSERT INTO bench (id, val) VALUES (" + i.to_text() + ", '" + v + "')"
+        val ir = db.exec_sql(sql)
+        if ir.is_err():
+            return -3
+        i = i + 1
+    val qr = db.query("SELECT * FROM bench", [])
+    if qr.is_err():
+        return -4
+    val rows = qr.unwrap()
+    rows.len()
+
+fn main():
+    val iters: i64 = 50
+    val t0 = rt_time_now_unix_micros()
+    var k: i64 = 0
+    var last_count: i64 = 0
+    while k < iters:
+        last_count = run_ram_insert_count()
+        k = k + 1
+    val dt = rt_time_now_unix_micros() - t0
+
+    if last_count == BENCH_N:
+        print("RESULT|db_ram_insert100|{dt}|50")

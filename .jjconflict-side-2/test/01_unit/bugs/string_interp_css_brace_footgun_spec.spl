@@ -1,0 +1,87 @@
+# Bug: string interpolation misparses literal CSS-style `{prop:val}` braces
+# Severity: low-medium (confusing error / silent corruption, content-dependent)
+# Doc: doc/08_tracking/bug/string_interpolation_css_brace_footgun_2026-07-03.md
+#      doc/08_tracking/bug/interp_brace_literal_collides_with_string_interpolation_2026-07-03.md
+#
+# Confirmed still open 2026-08-07 across all three engines/harnesses probed:
+# a plain (non-raw, double-quoted) text literal containing a CSS-shaped
+# `{prop:val}` span is misparsed as string interpolation of a variable named
+# after the CSS property, because `{...}` is also Simple's interpolation
+# syntax. Behavior is content-dependent:
+#   - `bin/simple run` (seed/native default): a hex-color value after the
+#     colon (`{color:#ffffff}`) does not error — `print` of the literal
+#     emits `.t0` instead of the CSS text (silently wrong, no diagnostic),
+#     and the following expression in the same function got absorbed into
+#     that corrupted output in the probe that found this.
+#   - `SIMPLE_EXECUTION_MODE=interpret`, and `bin/simple test` (which
+#     hard-defaults to the tree-walk interpreter per .claude/rules/testing.md
+#     "run and test are DIFFERENT ENGINES"): hard-fails with a
+#     location-less `semantic: variable 'color' not found`.
+# This bites even inside a spec file's own `expect(...).to_equal("...")` —
+# an UNESCAPED `{prop:val}`-shaped literal used as the *expected* value also
+# hard-fails to parse, independent of what's under test. Confirmed live via
+# a diagnostic spec: `expect(v).to_equal(".t{color:#ffffff}")` failed even
+# though `v` held the exact correct string.
+#
+# PREFERRED fix (confirmed working, and the documented, idiomatic answer —
+# see doc/07_guide/quick_reference/syntax_quick_reference.md "Raw Strings
+# (No Interpolation)"): use a raw string literal. Single-quoted `'...'`
+# strings never interpolate; `r"..."` (double-quote, r-prefixed) also works.
+# Both were verified byte-correct in `bin/simple run`,
+# `SIMPLE_EXECUTION_MODE=interpret`, and `bin/simple test`, including as
+# `to_equal(...)` expected-value literals. (`r'...'` — single-quote with an
+# `r` prefix — is NOT supported: it parses as a call to an undefined
+# function `r`; that's redundant anyway since plain `'...'` is already raw.)
+#
+# SECONDARY workaround (also confirmed working in all three engines/
+# harnesses, useful only if a raw string form is unavailable for some
+# reason): double the braces, exactly like Python f-strings / Rust
+# format! — `{{`/`}}` collapses to a single literal brace inside an
+# interpolated (double-quoted) string. Must be applied to EVERY
+# `{prop:val}`-shaped literal, including ones written only as test
+# expectations.
+#
+# Assertions below use two INDEPENDENT oracles per form (not a literal
+# compared against an identically-written literal, which would stay green
+# even if the collapse/raw-passthrough mechanism silently broke): an exact
+# length pin (17 -- both example strings below are 17 chars; a broken
+# `{{`/`}}` collapse would leave it at 19, and the swallow bug found in
+# `bin/simple run` shrinks it far below that), plus cross-form equality
+# between two independently-lexed forms that must therefore break
+# identically to falsely pass.
+
+fn css_rule_raw() -> text:
+    '.t{color:#ffffff}'
+
+fn css_rule_raw_r_prefix() -> text:
+    r".t{color:#ffffff}"
+
+fn css_rule_escaped() -> text:
+    ".t{{color:#ffffff}}"
+
+fn css_rule_word_value_unescaped() -> text:
+    # A CSS value that itself parses as a bare identifier (e.g. `red`)
+    # happens to fall back to literal text without erroring under
+    # `bin/simple run` — but this is content-dependent, not a rule. Do not
+    # rely on the unescaped form; use a raw string ('...' or r"...") or the
+    # {{ }} escape for literal CSS/JSON-shaped brace content.
+    "body {color: red}"
+
+describe "string interpolation CSS-brace footgun":
+    it "single-quoted raw string is byte-exact length 17 (preferred fix)":
+        expect(css_rule_raw().len()).to_equal(17)
+
+    it "r-prefixed raw string is byte-exact length 17 (preferred fix)":
+        expect(css_rule_raw_r_prefix().len()).to_equal(17)
+
+    it "both raw-string forms agree with each other (independent lexer paths)":
+        expect(css_rule_raw()).to_equal(css_rule_raw_r_prefix())
+
+    it "{{ }} escaped form is byte-exact length 17 (secondary workaround)":
+        expect(css_rule_escaped().len()).to_equal(17)
+
+    it "{{ }} escaped form agrees with the raw-string form (independent mechanisms)":
+        expect(css_rule_escaped()).to_equal(css_rule_raw())
+
+    it "unescaped word-value CSS text is byte-exact length 17 (content-dependent, not a guarantee)":
+        expect(css_rule_word_value_unescaped().len()).to_equal(17)

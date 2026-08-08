@@ -1,0 +1,42 @@
+# @req REQ-LLM-MSG-003 REQ-LLM-MSG-015 REQ-LLM-MSG-017
+"""Tier-three adapters expose only genuine LINE and KakaoTalk API subsets."""
+
+use std.spec.*
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.adapter.chat.line.{LineChatTransport}
+use app.llm_caret.messaging.adapter.chat.kakao.{KakaoChatTransport}
+
+fn tier3_message() -> RoomMessage:
+    RoomMessage(message_id: messaging_id("message", "message-3"),
+        workspace_id: messaging_id("workspace", "workspace-1"),
+        room_id: messaging_id("room", "development"), room_seq: 6,
+        thread_root_id: "", reply_to_id: "message-2",
+        sender_identity_id: messaging_id("identity", "agent-1"), sender_agent_id: "agent-1",
+        origin: MessageOrigin.AgentAnswer, body: "limited native subset", mentions: [], command: "",
+        audience: [], external_ref: "quote-token-1", correlation_id: "correlation-3",
+        causation_id: "", hop_count: 0, created_at: 10, edited_at: 0)
+
+describe "LINE and KakaoTalk limited adapter contracts":
+    it "sends to an existing LINE chat with a supported quote token":
+        var line = LineChatTransport.new("line-channel-token")
+        expect(line.bind_existing_chat("line-binding", "development", "line-group-1")).to_equal(
+            "binding_attached")
+        val request = line.prepare_send("line-binding", tier3_message(), "stable-key-line")
+        expect(request.url).to_equal("https://api.line.me/v2/bot/message/push")
+        expect(request.body).to_contain("quoteToken")
+        expect(line.open_private("line-binding", ["human-1", "agent-1"])).to_equal(
+            "primitive_sidecar:open_private")
+
+    it "limits KakaoTalk to self or authorized-friend message APIs":
+        var kakao = KakaoChatTransport.new("kakao-user-token")
+        expect(kakao.bind_self("kakao-self", "development")).to_equal("binding_attached")
+        val self_request = kakao.prepare_send("kakao-self", tier3_message(), "stable-key-kakao-self")
+        expect(self_request.url).to_contain("/talk/memo/default/send")
+        expect(self_request.body).to_start_with("template_object=")
+        expect(kakao.bind_friend("kakao-friend", "development", "friend-uuid-1")).to_equal(
+            "binding_attached")
+        val friend_request = kakao.prepare_send("kakao-friend", tier3_message(), "stable-key-kakao-friend")
+        expect(friend_request.url).to_contain("/talk/friends/message/default/send")
+        expect(friend_request.body).to_contain("receiver_uuids=")
+        expect(kakao.open_private("kakao-friend", ["human-1", "agent-1"])).to_equal(
+            "primitive_sidecar:open_private")

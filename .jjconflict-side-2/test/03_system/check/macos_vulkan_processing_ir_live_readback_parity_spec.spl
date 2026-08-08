@@ -1,0 +1,178 @@
+# @tag: system, gpu, vulkan, macos, host, readback, parity
+#
+# This is a Darwin-only live gate. Non-macOS hosts record postponement and do
+# not claim Vulkan success. The canonical checker owns launch, device submit,
+# readback, capture, and exact pixel validation.
+
+use std.io_runtime.{file_exists, file_read, process_run}
+use std.spec.{describe, it, expect, pending}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+val FRONTEND = "scripts/check/check-macos-vulkan-2d-live-evidence.shs"
+val CHECKER = "scripts/check/check-macos-gpu-2d-live-evidence.shs"
+val HARNESS = "test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+val VULKAN_IO_SFFI = "src/lib/nogc_sync_mut/io/vulkan_sffi.spl"
+val RECEIPT = "build/tmp/macos_vulkan_2d_live_evidence/runtime_receipt.env"
+val EVIDENCE = "build/tmp/macos_vulkan_2d_live_evidence/evidence.env"
+
+# Keep the canonical ProcessingIR receipt fields under the macOS live-evidence
+# namespace so the checker can reject CPU mirrors and incomplete readback.
+val PROCESSING_IR_STATUS = "gpu_2d_live_processing_ir_status"
+val PROCESSING_IR_REASON = "gpu_2d_live_processing_ir_reason"
+val PROCESSING_IR_COMPLETED = "gpu_2d_live_processing_ir_completed"
+val PROCESSING_IR_BACKEND = "gpu_2d_live_processing_ir_backend"
+val PROCESSING_IR_COUNT = "gpu_2d_live_processing_ir_count"
+val PROCESSING_IR_EXPECTED_CHECKSUM = "gpu_2d_live_processing_ir_expected_checksum"
+val PROCESSING_IR_ACTUAL_CHECKSUM = "gpu_2d_live_processing_ir_actual_checksum"
+val PROCESSING_IR_VALUES_EXACT = "gpu_2d_live_processing_ir_values_exact"
+val PROCESSING_IR_READBACK_SOURCE = "gpu_2d_live_processing_ir_readback_source"
+val PROCESSING_IR_HANDLE = "gpu_2d_live_processing_ir_handle"
+val PROCESSING_IR_IDENTITY = "gpu_2d_live_processing_ir_identity"
+val PROCESSING_IR_MISMATCH_COUNT = "gpu_2d_live_processing_ir_mismatch_count"
+val PROCESSING_IR_CPU_FALLBACK = "gpu_2d_live_processing_ir_cpu_fallback"
+
+fn nonempty_field(lines: text, key: text) -> bool:
+    receipt_value(lines, key) != ""
+
+fn receipt_value(lines: text, key: text) -> text:
+    val prefix = key + "="
+    for line in lines.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+    ""
+
+fn positive_field(lines: text, key: text) -> bool:
+    val value = receipt_value(lines, key)
+    value != "" and value != "0" and value.to_i64() > 0
+
+fn equal_nonempty_fields(lines: text, expected_key: text, actual_key: text) -> bool:
+    val expected = receipt_value(lines, expected_key)
+    val actual = receipt_value(lines, actual_key)
+    expected != "" and actual != "" and expected == actual
+
+fn require_processing_ir_receipt(receipt: text):
+    for key in [
+        PROCESSING_IR_STATUS, PROCESSING_IR_REASON, PROCESSING_IR_COMPLETED,
+        PROCESSING_IR_BACKEND, PROCESSING_IR_COUNT,
+        PROCESSING_IR_EXPECTED_CHECKSUM, PROCESSING_IR_ACTUAL_CHECKSUM,
+        PROCESSING_IR_VALUES_EXACT, PROCESSING_IR_READBACK_SOURCE,
+        PROCESSING_IR_HANDLE, PROCESSING_IR_IDENTITY,
+        PROCESSING_IR_MISMATCH_COUNT, PROCESSING_IR_CPU_FALLBACK
+    ]:
+        expect(nonempty_field(receipt, key)).to_equal(true)
+    expect(receipt_value(receipt, PROCESSING_IR_STATUS)).to_equal("pass")
+    expect(receipt_value(receipt, PROCESSING_IR_REASON)).to_equal("ok")
+    expect(receipt_value(receipt, PROCESSING_IR_COMPLETED)).to_equal("true")
+    expect(receipt_value(receipt, PROCESSING_IR_BACKEND)).to_equal("vulkan")
+    expect(receipt_value(receipt, PROCESSING_IR_COUNT)).to_equal("64")
+    expect(receipt_value(receipt, PROCESSING_IR_EXPECTED_CHECKSUM))
+        .to_equal("1082179840")
+    expect(equal_nonempty_fields(receipt,
+        PROCESSING_IR_EXPECTED_CHECKSUM,
+        PROCESSING_IR_ACTUAL_CHECKSUM)).to_equal(true)
+    expect(receipt_value(receipt, PROCESSING_IR_VALUES_EXACT)).to_equal("true")
+    expect(receipt_value(receipt, PROCESSING_IR_READBACK_SOURCE))
+        .to_equal("device_readback")
+    expect(positive_field(receipt, PROCESSING_IR_HANDLE)).to_equal(true)
+    expect(positive_field(receipt, PROCESSING_IR_IDENTITY)).to_equal(true)
+    expect(receipt_value(receipt, PROCESSING_IR_MISMATCH_COUNT)).to_equal("0")
+    expect(receipt_value(receipt, PROCESSING_IR_CPU_FALLBACK)).to_equal("false")
+
+describe "macOS Vulkan ProcessingIR 2D live readback parity":
+    it "runs the canonical Vulkan checker and admits only real device evidence":
+        if not is_macos():
+            pending("macOS host capability unavailable; live Vulkan evidence is postponed")
+            return
+        expect(file_exists(FRONTEND)).to_equal(true)
+        val (_stdout, _stderr, code) = process_run("/bin/sh", [FRONTEND])
+        expect(code).to_equal(0)
+        expect(file_exists(RECEIPT)).to_equal(true)
+        expect(file_exists(EVIDENCE)).to_equal(true)
+
+        val receipt = file_read(RECEIPT)
+        val evidence = file_read(EVIDENCE)
+        expect(receipt).to_contain("gpu_2d_live_status=pass")
+        expect(receipt).to_contain("gpu_2d_live_backend=vulkan")
+        expect(receipt).to_contain("gpu_2d_live_source=device_readback")
+        expect(receipt).to_contain("gpu_2d_live_draw_ir_readback_source=device_readback")
+        expect(receipt).to_contain("gpu_2d_live_draw_ir_fallback_required=false")
+        expect(receipt).to_contain("gpu_2d_live_draw_ir_skipped_commands=0")
+        expect(receipt.contains("gpu_2d_live_draw_ir_fallback_reason=\n")).to_equal(true)
+
+        # The current canonical schema proves a positive native handle and
+        # hashes the complete device capture.
+        expect(nonempty_field(receipt, "gpu_2d_live_backend_handle")).to_equal(true)
+        expect(receipt.contains("gpu_2d_live_backend_handle=0\n")).to_equal(false)
+        expect(receipt).to_contain("gpu_2d_live_width=3840")
+        expect(receipt).to_contain("gpu_2d_live_height=2160")
+        expect(nonempty_field(receipt, "gpu_2d_live_initial_checksum")).to_equal(true)
+        expect(nonempty_field(receipt, "gpu_2d_live_interaction_checksum")).to_equal(true)
+        expect(nonempty_field(receipt, "gpu_2d_live_draw_ir_readback_checksum")).to_equal(true)
+        expect(nonempty_field(evidence, "macos_vulkan_2d_live_pixel_sha256")).to_equal(true)
+
+        expect(receipt_value(receipt, "gpu_2d_live_fallback")).to_equal("false")
+
+        require_processing_ir_receipt(receipt)
+
+    it "keeps device-only admission in the canonical checker":
+        val frontend = file_read(FRONTEND)
+        val checker = file_read(CHECKER)
+        expect(frontend).to_contain("GPU_2D_LIVE_BACKEND=vulkan")
+        expect(checker).to_contain("device-readback-missing")
+        expect(checker).to_contain("backend-handle-missing")
+        expect(checker).to_contain("capture-header-mismatch")
+        expect(checker).to_contain("pixel-sha256-invalid")
+        expect(checker).to_contain("shared-draw-ir-fallback-required")
+        expect(checker).to_contain("device_readback")
+        expect(checker.contains("cpu_mirror")).to_equal(false)
+
+    it "keeps ProcessingIR receipt fields owned by the macOS harness":
+        val harness = file_read(HARNESS)
+        val checker = file_read(CHECKER)
+        for field in [
+            "processing_ir_status", "processing_ir_backend", "processing_ir_count",
+            "processing_ir_expected_checksum", "processing_ir_actual_checksum",
+            "processing_ir_values_exact", "processing_ir_readback_source",
+            "processing_ir_handle", "processing_ir_identity",
+            "processing_ir_mismatch_count", "processing_ir_cpu_fallback"
+        ]:
+            expect(harness).to_contain("gpu_2d_live_{field}=")
+            expect(checker).to_contain("gpu_2d_live_{field}")
+        expect(harness).to_contain("device_readback")
+        expect(harness).to_contain("expected_checksum")
+        expect(harness).to_contain("actual_checksum")
+        expect(harness).to_contain(
+            "gpu_2d_live_processing_ir_reason={result.reason}")
+        expect(harness).to_contain(
+            "gpu_2d_live_processing_ir_completed={result.completed}")
+        expect(harness).to_contain("write_failure_receipt_with_diagnostics")
+        expect(harness).to_contain(
+            "receipt_path, backend, \"processing-ir-receipt-failed\", 4, 4,")
+        expect(harness).to_contain("receipt_lines)")
+        expect(harness).to_contain(
+            "\"gpu_2d_live_exit_code={exit_code}\\n\" +")
+        expect(harness).to_contain("        diagnostics)\n    exit_code")
+        expect(checker).to_contain("processing-ir-receipt")
+
+    it "uses the native raw SPIR-V ABI outside the interpreter":
+        val source = file_read(VULKAN_IO_SFFI)
+        expect(source).to_contain("gpu_sffi_uses_interpreter_array_abi")
+        expect(source).to_contain(
+            "extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64)")
+        expect(source).to_contain("extern fn rt_array_data_ptr_u8(bytes: [u8])")
+        expect(source).to_contain("fn _vulkan_compile_spirv_abi")
+        expect(source).to_contain(
+            "return rt_vulkan_compile_spirv(spirv_bytes)")
+        expect(source).to_contain(
+            "rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64())")
+        expect(source).to_contain(
+            "val handle = _vulkan_compile_spirv_abi(spirv_bytes)")
+
+    it "invalidates stale or caller-forged receipts before admission":
+        val checker = file_read(CHECKER)
+        expect(checker).to_contain("rm -f \"$CAPTURE_PPM\"")
+        expect(checker).to_contain("repo-revision-mismatch")
+        expect(checker).to_contain("source-revision-mismatch")
+        expect(checker).to_contain("trusted-build-manifest-invalid")
+        expect(checker).to_contain("arbitrary-native-driver-supplied")
+        expect(checker).to_contain("runtime-receipt-timeout")

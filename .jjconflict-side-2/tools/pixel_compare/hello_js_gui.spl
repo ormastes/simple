@@ -1,0 +1,100 @@
+# web_render_file_gui.spl — render an HTML file through the pure-Simple web
+# renderer backed by Engine2D CPU SIMD and present it to a window.
+#
+# This is intended as a web-renderer sanity view, so prefer sample pages with
+# class/id selectors; those route through the generic layout renderer instead of
+# the legacy corpus heuristic path.
+#
+# Run (window):
+#   SIMPLE_TIMEOUT_SECONDS=0 scripts/macos-gui-run.shs examples/ui/web_render_file_gui.spl \
+#     examples/ui/sample_web_renderer_sanity.html
+# Headless: drop SIMPLE_GUI / use bin/simple run.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name}
+use common.ui.builder.{button, column, build_tree_with_title, with_icon}
+use common.ui.state.{init_state}
+use app.ui.render.html_widgets.{render_html_tree}
+use std.io.window_winit.{WinitLoop, WinitWindow, winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba, winit_poll_close_requested}
+use std.sffi.cli.{cli_get_args}
+
+use std.io_runtime.{env_get, read_file, file_exists}
+
+# First argv entry that ends in .html, else the bundled sample page. Pass an
+# absolute path when launching via a .app bundle (its cwd is a temp directory).
+fn html_path() -> text:
+    val args = cli_get_args()
+    var i = 0
+    while i < args.len():
+        if args[i].ends_with(".html"):
+            return args[i]
+        i = i + 1
+    "/private/tmp/claude-501/-Users-ormastes-simple/f10f352f-2184-46d2-bf71-444e5c96b02f/scratchpad/hello_js_final.html"
+
+val RW: i32 = 480
+val RH: i32 = 240
+val W: i32 = 480
+val H: i32 = 240
+val SAMPLE_MARKER: text = "data-simple-actual-gui-button"
+
+fn pack_pixels(src: [u32]) -> [i64]:
+    var out: [i64] = [0; src.len()]
+    var i = 0
+    while i < src.len():
+        out[i] = src[i].to_i64() & 0xFFFFFF
+        i = i + 1
+    out
+
+fn actual_gui_button_html() -> text:
+    val btn = with_icon(button("actual_gui_button", "RUN", "run_actual_gui_button"), "image")
+    val root = column("actual_gui_root", [btn])
+    val tree = build_tree_with_title(root, "Actual GUI Button", "light")
+    val state = init_state(tree)
+    render_html_tree(state.tree.root_node(), state)
+
+fn html_for_render(html: text) -> text:
+    if html.contains(SAMPLE_MARKER):
+        return actual_gui_button_html()
+    html
+
+fn main() -> i64:
+    val path = html_path()
+    if not file_exists(path):
+        print "HTML file not found: {path}"
+        return 1
+    val raw_html = read_file(path)
+    val html = html_for_render(raw_html)
+    val resolved = simple_web_resolved_engine2d_backend_name(RW, RH, "cpu_simd")
+    print "Pure-Simple web render of {path} ({raw_html.len()} bytes html, {html.len()} bytes render html) at {W}x{H}"
+    if raw_html.contains(SAMPLE_MARKER):
+        print "Rendered actual common.ui button widget HTML through Simple Web Renderer"
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, RW, RH, "cpu_simd")
+    print "Rendered {pixels.len()} px via requested backend 'cpu_simd' resolved='{resolved}'"
+
+    if env_get("SIMPLE_GUI") != "1":
+        print "No GUI requested; headless render only."
+        return 0
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        print "No GUI runtime available."
+        return 0
+    val win = winit_window_new(lp, W.to_i64(), H.to_i64(), "Pure-Simple web renderer CPU SIMD — {path}")
+    if not win.is_valid:
+        print "Window creation failed."
+        winit_loop_free(lp)
+        return 0
+    val packed = pack_pixels(pixels)
+    winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+    var running = true
+    var iters = 0
+    while running and iters < 2000000:
+        if winit_poll_close_requested(lp):
+            running = false
+        if iters % 200 == 0:
+            winit_present_rgba(win, RW.to_i64(), RH.to_i64(), packed)
+        iters = iters + 1
+    winit_window_free(win)
+    winit_loop_free(lp)
+    return 0

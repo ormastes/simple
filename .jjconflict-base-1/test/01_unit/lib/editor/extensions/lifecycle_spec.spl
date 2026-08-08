@@ -1,0 +1,150 @@
+# Extension lifecycle — lazy activation on typed onCommand events, real
+# handler dispatch, and deactivation disposing every registration.
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.api.{Disposable}
+
+fn lifecycle_handler(payload: text) -> Result<text, text>:
+    Ok("ran:" + payload)
+
+fn lifecycle_listener(payload: text):
+    pass_do_nothing
+
+fn lifecycle_demo_manifest() -> ExtensionManifest:
+    extension_manifest_basic(
+        "demo-ext", "1.0.0", "",
+        ["onCommand:demo.hello"],
+        [ExtensionCommand(id: "demo.hello", title: "Demo Hello", category: "Demo")],
+        []
+    )
+
+describe "extension lifecycle: activate -> dispatch -> deactivate":
+
+    it "dispatch_command lazily activates the owner then runs the handler":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.register_command_handler("demo-ext", "demo.hello", "Demo Hello", lifecycle_handler)
+        expect(host.is_active("demo-ext")).to_equal(false)
+        match host.dispatch_command("demo.hello", "world"):
+            case Ok(out):
+                expect(out).to_equal("ran:world")
+            case Err(_):
+                expect("dispatch").to_equal("failed")
+        expect(host.is_active("demo-ext")).to_equal(true)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(1)
+
+    it "deactivation disposes all registrations and dispatch fails cleanly":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.register_command_handler("demo-ext", "demo.hello", "Demo Hello", lifecycle_handler)
+        host.on_event("demo-ext", "doc.saved", lifecycle_listener)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(2)
+        match host.dispatch_command("demo.hello", "x"):
+            case Ok(out):
+                expect(out).to_equal("ran:x")
+            case Err(_):
+                expect("dispatch").to_equal("failed")
+        expect(host.deactivate("demo-ext")).to_equal(true)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(0)
+        expect(host.command_handler_registered("demo.hello")).to_equal(false)
+        match host.dispatch_command("demo.hello", "again"):
+            case Ok(_):
+                expect("dispatch after deactivate").to_equal("should fail")
+            case Err(e):
+                expect(e.contains("no handler registered")).to_equal(true)
+
+    it "typed event listeners are invoked and counted by emit_event":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.activate("demo-ext")
+        host.on_event("demo-ext", "doc.saved", lifecycle_listener)
+        expect(host.emit_event("doc.saved", "payload") >= 1).to_equal(true)
+        host.deactivate("demo-ext")
+        expect(host.emit_event("doc.saved", "payload")).to_equal(0)
+
+    it "dispatching a command nobody declared or registered fails cleanly":
+        val host = ExtensionHost.new()
+        match host.dispatch_command("ghost.cmd", "x"):
+            case Ok(_):
+                expect("ghost dispatch").to_equal("should fail")
+            case Err(e):
+                expect(e.contains("no handler registered")).to_equal(true)
+
+    it "builtins register (unactivated) and activate lazily through their own declared events, without wildcard activation":
+        val host = extension_host_with_builtins()
+        expect(host.extension_count()).to_be_greater_than(2)
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.is_active("markdown-language")).to_equal(false)
+        expect(host.is_active("sdn-graph-language")).to_equal(false)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+        expect(host.activate_language("markdown")).to_equal(1)
+        expect(host.is_active("markdown-language")).to_equal(true)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")
+        # A matching event does not drag unrelated builtins up with it.
+        expect(host.is_active("simple-language")).to_equal(false)
+
+    # --- the builtin seam is genuinely lazy now ---------------------------
+    # extension_host_with_builtins() == extension_host_with_builtins_indexed()
+    # (no eager activate-all loop, removed 2026-07-31). These pin the shared
+    # semantics so both constructor names cannot silently diverge again.
+    # See doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+
+    it "the indexed builtin host activates nothing and registers no contributions":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.extension_count()).to_be_greater_than(2)
+        expect(host.active_count()).to_equal(0)
+        expect(host.is_active("markdown-language")).to_equal(false)
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+
+    it "an indexed builtin activates lazily through its declared onLanguage event":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.activate_language("markdown")).to_equal(1)
+        expect(host.is_active("markdown-language")).to_equal(true)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")
+        # idempotent: the same event has nothing left to activate
+        expect(host.activate_language("markdown")).to_equal(0)
+        # and it did NOT drag its neighbours up with it
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.active_count()).to_equal(1)
+
+    it "an indexed builtin activates lazily through its declared onCommand event":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.is_active("writer")).to_equal(false)
+        expect(host.activate_command("writer.save")).to_equal(1)
+        expect(host.is_active("writer")).to_equal(true)
+        expect(host.command_registered("writer.format_bold")).to_equal(true)
+
+    # `contributes_themes` is a live contribution kind: registered on
+    # activation like commands/languages/keybindings, resolvable by id, and
+    # reversed on deactivate. `designer` is the builtin that declares the
+    # shipped aetheric_dark palette.
+    it "a theme contributed by a builtin is resolvable through the host once that builtin activates":
+        val host = extension_host_with_builtins()
+        expect(host.theme_registered("aetheric-dark")).to_equal(false)
+        expect(host.activate_command("designer.load_note")).to_equal(1)
+        expect(host.is_active("designer")).to_equal(true)
+        expect(host.theme_registered("aetheric-dark")).to_equal(true)
+        val entry = host.find_theme("aetheric-dark")
+        expect(entry.extension_name).to_equal("designer")
+        expect(entry.theme.ui_theme).to_equal("dark")
+        expect(entry.theme.path).to_equal("config/themes/aetheric_dark/theme.sdn")
+        # an id nobody declared stays unresolved
+        expect(host.theme_registered("no-such-theme")).to_equal(false)
+        expect(host.find_theme("no-such-theme").extension_name).to_equal("")
+        # deactivation reverses the contribution, like every other kind
+        expect(host.deactivate("designer")).to_equal(true)
+        expect(host.theme_registered("aetheric-dark")).to_equal(false)
+
+    it "extension_host_with_builtins() and extension_host_with_builtins_indexed() index the same manifests, both unactivated":
+        val eager = extension_host_with_builtins()
+        val indexed = extension_host_with_builtins_indexed()
+        expect(indexed.extension_count()).to_equal(eager.extension_count())
+        expect(eager.active_count()).to_equal(0)
+        expect(indexed.active_count()).to_equal(0)

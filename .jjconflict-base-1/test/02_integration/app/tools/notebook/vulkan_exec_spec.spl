@@ -1,0 +1,145 @@
+"""
+# VulkanExec — Vulkan SVM-G lane session lifecycle
+
+**Feature:** Notebook Execution Lanes, Stream K, task K6 —
+`src/lib/nogc_sync_mut/notebook/vulkan_exec.spl`
+**Design:** `doc/05_design/app/tools/notebook_lanes_architecture.md` §4.5
+**Plan:** `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`
+(Stream K, K6)
+
+## Overview
+
+Exercises `VulkanExec` against the `interpreter(remote(vulkan(spv15)))` lane —
+one persistent `VulkanLaneSession` (device/pipeline/arena created once at
+`start()`) driving the checked-in `svmg_vulkan_kernel.spv` SVM-G interpreter
+shader (Task C3), the same shader
+`test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl` drives
+directly. Host-aware, like every other gpu_lane spec: no usable Vulkan
+ICD/device on this host is an acceptable, non-failing SKIP outcome, never a
+hard spec failure.
+
+## What this proves
+
+- **Cross-cell arena state**: a cell that STOREs a value and a LATER,
+  independent cell that only LOADs the same address (no STORE of its own)
+  observe the SAME value — proving the arena's DATA region survives across
+  `execute_cell()` dispatches, per design §4.5 ("Arena DATA persists across
+  dispatches ⇒ incremental state").
+- **Interrupt**: `interrupt()` puts the lane into a `blocked:` state; a
+  subsequent `execute_cell()` short-circuits with that status instead of
+  attempting another dispatch; `%reset` (`reset()`) clears it and the lane
+  becomes usable again.
+- **SKIP-clean without Vulkan**: `probe()` reports `skip:`, never panics, and
+  the whole spec asserts only the acceptable-outcome contract in that case.
+
+## Syntax
+
+```simple
+val ex = VulkanExec.make("interpreter(remote(vulkan(spv15)))")
+val status = ex.probe()
+ex.start(session_opts_default("s1", ex.mode_spec()))
+val r1 = ex.execute_cell("PUSHI 500\nPUSHI 777\nSTORE32\nPUSHI 1\nPUSHI 500\nLOAD32\nSYS_RESULT\nHALT 0", "cell-1")
+val r2 = ex.execute_cell("PUSHI 1\nPUSHI 500\nLOAD32\nSYS_RESULT\nHALT 0", "cell-2")
+ex.interrupt()
+ex.reset()
+ex.shutdown()
+```
+"""
+
+use std.spec
+use std.notebook.vulkan_exec.{VulkanExec}
+use std.notebook.types.{LaneStatus, session_opts_default}
+
+val VULKAN_SPEC = "interpreter(remote(vulkan(spv15)))"
+
+# A cell that stores 777 at DATA address 500 and reports it back via
+# SYS_RESULT in the SAME dispatch (proves the store itself works).
+val CELL_STORE = "PUSHI 500\nPUSHI 777\nSTORE32\nPUSHI 1\nPUSHI 500\nLOAD32\nSYS_RESULT\nHALT 0"
+
+# A SEPARATE, later cell that does NOT store anything -- it only loads
+# address 500 and reports it. If the arena's DATA region did not persist
+# across dispatches, this would read back 0 (a fresh arena is zeroed), not
+# 777.
+val CELL_LOAD_ONLY = "PUSHI 1\nPUSHI 500\nLOAD32\nSYS_RESULT\nHALT 0"
+
+fn lane_outcome_is_acceptable(status_text: text) -> bool:
+    """A live lane must self-report as one of these — anything else (a
+    panic, or a status string outside this convention) is the failure."""
+    status_text == "available" or status_text.starts_with("skip:") or status_text.starts_with("blocked:")
+
+describe "VulkanExec — Vulkan SVM-G lane (Stream K, K6)":
+
+    it "probe() reuses VulkanLaneSession.probe() verbatim and never panics":
+        val ex = VulkanExec.make(VULKAN_SPEC)
+        expect(ex.mode_spec()).to_equal(VULKAN_SPEC)
+        val status = ex.probe()
+        assert_true(lane_outcome_is_acceptable(status.to_text()))
+        if not status.is_available():
+            expect_not(status.is_available())
+
+    it "cross-cell arena DATA state: a store in cell 1 is observed by a load-only cell 2 — SKIP-clean without a live Vulkan device":
+        val ex = VulkanExec.make(VULKAN_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            # Documented, non-failing outcome (design §3 skip:/blocked:
+            # wording): missing Vulkan ICD/device. SKIP-clean.
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("vulkan-exec-spec", VULKAN_SPEC))
+
+            val r1 = ex.execute_cell(CELL_STORE, "cell-1")
+            assert_true(r1.is_ok() or r1.error != "")
+            if r1.is_ok():
+                assert_equal(r1.records.len(), 1)
+                # seq=0, not 1: `SvmgVm.seq` (src/lib/common/svmg/ref_vm.spl,
+                # the host reference implementation the device shader must
+                # match bit-for-bit) is a per-VM-run event counter that
+                # STARTS AT 0 and is written pre-increment by write_record
+                # (ref_vm.spl:243 `seq: 0`, :274-281) -- a fresh VM's first
+                # (and only) SYS_RESULT call always produces record.seq=0.
+                assert_equal(r1.records[0], "seq=0 passed=1 value=777")
+
+                val r2 = ex.execute_cell(CELL_LOAD_ONLY, "cell-2")
+                assert_true(r2.is_ok() or r2.error != "")
+                if r2.is_ok():
+                    # Proves arena DATA persisted: cell-2 never stored
+                    # anything, only loaded what cell-1 left behind. seq=0
+                    # again for the same reason as cell-1 above: each
+                    # execute_cell() dispatch is a FRESH VM run (design
+                    # §4.5 "each cell relaunches the VM"), so its own
+                    # per-run seq counter restarts at 0 -- only the arena's
+                    # DATA content (the 777) is expected to carry over, not
+                    # the seq counter, which is per-run VM-instance state.
+                    assert_equal(r2.records.len(), 1)
+                    assert_equal(r2.records[0], "seq=0 passed=1 value=777")
+
+            ex.shutdown()
+
+    it "interrupt() blocks the lane; %reset (reset()) recovers it — SKIP-clean without a live Vulkan device":
+        val ex = VulkanExec.make(VULKAN_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("vulkan-exec-interrupt-spec", VULKAN_SPEC))
+
+            val r1 = ex.execute_cell(CELL_STORE, "cell-1")
+            assert_true(r1.is_ok() or r1.error != "")
+
+            # Design §4.5: interrupt = fence-timeout path -- the lane must
+            # report blocked: afterward, and execute_cell must SHORT-CIRCUIT
+            # (never attempt another dispatch) rather than silently running.
+            ex.interrupt()
+            val r_blocked = ex.execute_cell(CELL_LOAD_ONLY, "cell-2")
+            assert_false(r_blocked.is_ok())
+            assert_true(r_blocked.error.starts_with("blocked:"))
+
+            # %reset must actually reallocate/reinitialize so the lane
+            # becomes usable again.
+            ex.reset()
+            val r_after_reset = ex.execute_cell(CELL_LOAD_ONLY, "cell-3")
+            assert_true(r_after_reset.is_ok() or r_after_reset.error != "")
+
+            ex.shutdown()

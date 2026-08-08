@@ -1,0 +1,301 @@
+# String and RegExp built-ins for the JS engine.
+# Operates on Simple text type (maps to JS string).
+
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
+
+fn string_length(s: text) -> i64:
+    s.len()
+
+# `index` here is a JS-style CHARACTER index, not a byte index -- so this
+# walks codepoints (text_codepoints + utf8_codepoint_byte_len, both already
+# byte-consistent) to find the right byte range, then does one plain
+# byte-indexed bracket-slice. Never char_at (character-indexed, the exact
+# mismatch this survey hunts -- doc/08_tracking/bug/
+# bracket_slice_byte_index_survey_2026-07-29.md) and never a
+# tuple-returning helper (aggregate returns across a call boundary are a
+# separate, independently-documented corruption class on this seed --
+# doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md
+# -- confirmed by hand here: an earlier version of this fix split the byte-
+# range lookup into a `(i64, i64)`-returning helper and it silently
+# produced the right answer for a 2-byte codepoint but an empty string for
+# 3-byte codepoints (CJK, em-dash); inlining the walk removed the call
+# boundary and fixed it). Old behavior: `s[index:index+1]` treated `index`
+# as a byte offset, so for any character after a multi-byte one it read a
+# stray continuation byte (invalid, partial UTF-8) instead of the
+# requested character.
+fn string_charAt(s: text, index: i64) -> text:
+    if index < 0:
+        return ""
+    val cps = text_codepoints(s)
+    if index >= cps.len():
+        return ""
+    var byte_pos = 0
+    var ci = 0
+    while ci < index:
+        val cp = cps[ci]
+        val cp_len = utf8_codepoint_byte_len(cp)
+        byte_pos = byte_pos + cp_len
+        ci = ci + 1
+    val this_cp = cps[index]
+    val this_len = utf8_codepoint_byte_len(this_cp)
+    val end_pos = byte_pos + this_len
+    s[byte_pos:end_pos]
+
+fn string_charCodeAt(s: text, index: i64) -> i64:
+    val cps = text_codepoints(s)
+    if index < 0 or index >= cps.len():
+        return -1
+    # Return the Unicode codepoint value of the character (JS charCodeAt
+    # semantics), not a raw UTF-8 lead byte -- for multi-byte input the
+    # lead byte alone (e.g. 0xC3, the first byte of "é"'s 2-byte encoding)
+    # is not the character's numeric value (233).
+    cps[index]
+
+fn string_indexOf(s: text, search: text) -> i64:
+    val s_len = s.len()
+    val search_len = search.len()
+    if search_len == 0:
+        return 0
+    if search_len > s_len:
+        return -1
+    var i = 0
+    val limit = s_len - search_len
+    while i <= limit:
+        val sub = s[i:i + search_len]
+        if sub == search:
+            return i
+        i = i + 1
+    -1
+
+fn string_lastIndexOf(s: text, search: text) -> i64:
+    val s_len = s.len()
+    val search_len = search.len()
+    if search_len == 0:
+        return s_len
+    if search_len > s_len:
+        return -1
+    var i = s_len - search_len
+    while i >= 0:
+        val sub = s[i:i + search_len]
+        if sub == search:
+            return i
+        i = i - 1
+    -1
+
+fn string_includes(s: text, search: text) -> bool:
+    string_indexOf(s, search) >= 0
+
+fn string_startsWith(s: text, prefix: text) -> bool:
+    val prefix_len = prefix.len()
+    if prefix_len > s.len():
+        return false
+    s[0:prefix_len] == prefix
+
+fn string_endsWith(s: text, suffix: text) -> bool:
+    val s_len = s.len()
+    val suffix_len = suffix.len()
+    if suffix_len > s_len:
+        return false
+    s[s_len - suffix_len:s_len] == suffix
+
+fn string_slice(s: text, start: i64, end_idx: i64) -> text:
+    val len = s.len()
+    var st = start
+    var en = end_idx
+    if st < 0:
+        st = len + st
+    if st < 0:
+        st = 0
+    if en < 0:
+        en = len + en
+    if en > len:
+        en = len
+    if st >= en:
+        return ""
+    s[st:en]
+
+fn string_substring(s: text, start: i64, end_idx: i64) -> text:
+    val len = s.len()
+    var st = start
+    var en = end_idx
+    if st < 0:
+        st = 0
+    if en < 0:
+        en = 0
+    if st > len:
+        st = len
+    if en > len:
+        en = len
+    # substring swaps if start > end
+    if st > en:
+        val tmp = st
+        st = en
+        en = tmp
+    s[st:en]
+
+fn string_toUpperCase(s: text) -> text:
+    s.upper()
+
+fn string_toLowerCase(s: text) -> text:
+    s.lower()
+
+fn string_trim(s: text) -> text:
+    s.trim()
+
+fn string_trimStart(s: text) -> text:
+    s.trim_start()
+
+fn string_trimEnd(s: text) -> text:
+    s.trim_end()
+
+fn string_split(s: text, separator: text) -> [text]:
+    if separator == "":
+        # Split into individual characters (codepoints, not bytes -- a
+        # multi-byte character must produce exactly one array element,
+        # matching JS split('') semantics for BMP text). Old code pushed
+        # one BYTE per element (`s[i:i+1]` stepping `i` by 1 always), so a
+        # multi-byte character was shredded into multiple invalid,
+        # partial-UTF-8 single-byte elements instead of one real element.
+        var chars: [text] = []
+        val cps = text_codepoints(s)
+        var byte_pos = 0
+        val blen = s.len()
+        var ci = 0
+        val cps_len = cps.len()
+        while ci < cps_len:
+            val cp = cps[ci]
+            val seqlen = utf8_codepoint_byte_len(cp)
+            var end = byte_pos + seqlen
+            if end > blen:
+                end = blen
+            chars.push(s[byte_pos:end])
+            byte_pos = end
+            ci = ci + 1
+        return chars
+    s.split(separator)
+
+fn string_replace(s: text, search: text, replacement: text) -> text:
+    val idx = string_indexOf(s, search)
+    if idx < 0:
+        return s
+    val before = s[0:idx]
+    val after = s[idx + search.len():s.len()]
+    before + replacement + after
+
+fn string_repeat(s: text, count: i64) -> text:
+    if count <= 0:
+        return ""
+    var result = ""
+    var i = 0
+    while i < count:
+        result = result + s
+        i = i + 1
+    result
+
+fn string_padStart(s: text, length: i64, pad: text) -> text:
+    val s_len = s.len()
+    if s_len >= length:
+        return s
+    val pad_len = pad.len()
+    if pad_len == 0:
+        return s
+    var padding = ""
+    val needed = length - s_len
+    while padding.len() < needed:
+        padding = padding + pad
+    # Trim padding to exact needed length
+    padding = padding[0:needed]
+    padding + s
+
+fn string_padEnd(s: text, length: i64, pad: text) -> text:
+    val s_len = s.len()
+    if s_len >= length:
+        return s
+    val pad_len = pad.len()
+    if pad_len == 0:
+        return s
+    var padding = ""
+    val needed = length - s_len
+    while padding.len() < needed:
+        padding = padding + pad
+    padding = padding[0:needed]
+    s + padding
+
+fn string_replaceAll(s: text, search: text, replacement: text) -> text:
+    if search == "":
+        return s
+    var result = ""
+    var pos = 0
+    val s_len = s.len()
+    val search_len = search.len()
+    while pos <= s_len - search_len:
+        val sub = s[pos:pos + search_len]
+        if sub == search:
+            result = result + replacement
+            pos = pos + search_len
+        else:
+            result = result + s[pos:pos + 1]
+            pos = pos + 1
+    # Append remaining characters
+    if pos < s_len:
+        result = result + s[pos:s_len]
+    result
+
+fn string_concat(a: text, b: text) -> text:
+    a + b
+
+fn string_fromCharCode(code: i64) -> text:
+    # Convert a char code to a single-character string
+    # Common ASCII range
+    if code == 0: return "\0"
+    if code == 9: return "\t"
+    if code == 10: return "\n"
+    if code == 13: return "\r"
+    if code == 32: return " "
+    if code == 33: return "!"
+    if code == 34: return "\""
+    if code == 35: return "#"
+    if code == 36: return "$"
+    if code == 37: return "%"
+    if code == 38: return "&"
+    if code == 39: return "'"
+    if code == 40: return "("
+    if code == 41: return ")"
+    if code == 42: return "*"
+    if code == 43: return "+"
+    if code == 44: return ","
+    if code == 45: return "-"
+    if code == 46: return "."
+    if code == 47: return "/"
+    if code >= 48 and code <= 57:
+        val digit = code - 48
+        return "{digit}"
+    if code == 58: return ":"
+    if code == 59: return ";"
+    if code == 60: return "<"
+    if code == 61: return "="
+    if code == 62: return ">"
+    if code == 63: return "?"
+    if code == 64: return "@"
+    # Uppercase letters A-Z (65-90)
+    if code >= 65 and code <= 90:
+        val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        val idx = code - 65
+        return letters[idx:idx + 1]
+    if code == 91: return "["
+    if code == 92: return "\\"
+    if code == 93: return "]"
+    if code == 94: return "^"
+    if code == 95: return "_"
+    if code == 96: return "`"
+    # Lowercase letters a-z (97-122)
+    if code >= 97 and code <= 122:
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        val idx = code - 97
+        return letters[idx:idx + 1]
+    if code == 123: return "{"
+    if code == 124: return "|"
+    if code == 125: return "}"
+    if code == 126: return "~"
+    # Outside printable ASCII range — return placeholder
+    "?"

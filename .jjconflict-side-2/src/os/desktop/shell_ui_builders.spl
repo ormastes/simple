@@ -1,0 +1,277 @@
+# Desktop Shell UI Builders — Taskbar, Launcher, App Trees, Remote Windows
+#
+# Companion to shell.spl. Contains widget-tree builder free functions that
+# construct UITree values for the various shell surfaces.
+
+use common.ui.widget.{WidgetNode, UITree}
+use common.ui.builder.{
+    column, row, panel, text_widget, button, label, statusbar,
+    build_tree, build_tree_with_title, with_height, with_width, with_flex
+}
+use os.desktop.app_manifest.{AppManifest, load_app_manifests, manifest_categories}
+use os.kernel.log.klog_api.{log_info}
+
+use os.apps.calculator.calculator.{Calculator}
+use os.apps.clock.clock.{ClockApp}
+use os.apps.terminal.terminal.{Terminal}
+use os.apps.hello_world.hello_world.{HelloWorldApp}
+use os.apps.browser_demo.browser_demo.{BrowserDemoApp}
+use os.apps.editor.editor.{TextEditor}
+use os.apps.memo.memo.{MemoApp}
+use os.apps.paint.paint.{PaintApp}
+use os.apps.file_manager.file_manager.{FileManager}
+use os.apps.file_explorer.file_explorer.{FileExplorer}
+use os.apps.image_viewer.image_viewer.{ImageViewer}
+use os.apps.calendar.calendar.{CalendarApp}
+use os.apps.system_monitor.system_monitor.{SystemMonitor}
+use os.apps.disk_manager.disk_manager.{DiskManager}
+use os.apps.screenshot.screenshot.{ScreenshotApp}
+use os.apps.settings.settings_app.{SettingsApp}
+use os.apps.minesweeper.minesweeper.{MinesweeperApp}
+use os.apps.snake.snake.{SnakeApp}
+use os.apps.tetris.tetris.{TetrisApp}
+use os.apps.solitaire.solitaire.{SolitaireApp}
+use os.apps.todo.todo_app.{TodoApp}
+use os.apps.hex_editor.hex_editor.{HexEditorApp}
+use os.apps.log_viewer.log_viewer.{LogViewerApp}
+use os.apps.network_monitor.network_monitor.{NetworkMonitorApp}
+use os.apps.contacts.contacts_app.{ContactsApp}
+use os.apps.package_manager.package_manager.{PackageManagerApp}
+use os.apps.color_picker.color_picker.{ColorPickerApp}
+use os.apps.font_viewer.font_viewer.{FontViewerApp}
+use os.apps.installer_gui.installer_gui.{InstallerGuiApp}
+use os.apps.installer_gui.upgrade_gui.{UpgradeGuiApp}
+
+val TASKBAR_HEIGHT: i32 = 32
+val APP_LAUNCHER_WIDTH: i32 = 200
+val APP_LAUNCHER_HEIGHT: i32 = 300
+val CLOCK_WIDTH: i32 = 80
+val SYSTEM_TRAY_WIDTH: i32 = 120
+
+# ============================================================================
+# Taskbar Builder
+# ============================================================================
+
+fn _build_taskbar_tree(window_titles: [text], clock: text) -> UITree:
+    """Build the taskbar widget tree.
+
+    Layout: [App Button | Window List ... | Clock | System Tray]
+    """
+    log_info("[desktop] " + "[taskbar] creating launcher button...")
+    var launcher_btn = button("taskbar_launcher", "Apps", "launcher")
+    log_info("[desktop] " + "[taskbar] launcher button created, setting width...")
+    launcher_btn = with_width(launcher_btn, 60)
+    log_info("[desktop] " + "[taskbar] launcher button width set")
+
+    var window_buttons: [WidgetNode] = []
+    var win_idx: i32 = 0
+    for title in window_titles:
+        var win_btn = button("taskbar_win_{win_idx}", title, "focus_win_{title}")
+        win_btn = with_flex(win_btn, 1)
+        window_buttons = window_buttons.push(win_btn)
+        win_idx = win_idx + 1
+
+    var window_list_children: [WidgetNode] = []
+    for btn in window_buttons:
+        window_list_children = window_list_children.push(btn)
+    var window_list = row("taskbar_window_list", window_list_children)
+    window_list = with_flex(window_list, 1)
+
+    var clock_label = label("taskbar_clock", clock)
+    clock_label = with_width(clock_label, CLOCK_WIDTH)
+
+    var tray = row("taskbar_tray", [
+        label("taskbar_tray_cpu", "CPU"),
+        label("taskbar_tray_mem", "MEM")
+    ])
+    tray = with_width(tray, SYSTEM_TRAY_WIDTH)
+
+    val taskbar_row = row("taskbar_root", [
+        launcher_btn,
+        window_list,
+        clock_label,
+        tray
+    ])
+
+    build_tree_with_title(taskbar_row, "SimpleOS Taskbar", "dark")
+
+# ============================================================================
+# App Launcher Builder
+# ============================================================================
+
+fn _build_launcher_tree() -> UITree:
+    """Build the app launcher widget tree from app manifests."""
+    val manifests = load_app_manifests()
+
+    var app_buttons: [WidgetNode] = []
+    app_buttons = app_buttons.push(label("launcher_title", "Applications"))
+
+    val categories = manifest_categories(manifests)
+    for category in categories:
+        var cat_apps: [AppManifest] = []
+        for m in manifests:
+            if m.category == category:
+                cat_apps = cat_apps.push(m)
+        if cat_apps.len() > 0:
+            app_buttons = app_buttons.push(label("launcher_cat_{category}", "-- {category} --"))
+            for app in cat_apps:
+                val action = "launch_{app.name}"
+                app_buttons = app_buttons.push(
+                    button("launcher_app_{app.name}", "{app.icon} {app.name}", action)
+                )
+
+    val root = column("launcher_root", app_buttons)
+    build_tree_with_title(root, "App Launcher", "dark")
+
+# ============================================================================
+# Default App Tree Builder
+# ============================================================================
+
+fn _build_app_tree(name: text) -> UITree:
+    """Build a widget tree for an application window."""
+    match name:
+        "Simple Browser":
+            return build_tree_with_title(column("simple_browser_root", [
+                text_widget("simple_browser_page", "about:network"),
+                text_widget("simple_browser_status", "filesystem process launch")
+            ]), "Simple Browser", "dark")
+        "Calculator":
+            val calc = Calculator.new()
+            val session = calc.build_ui()
+            return session.current_tree()
+        "Clock":
+            val clock = ClockApp.new()
+            val session = clock.build_ui()
+            return session.current_tree()
+        "Terminal":
+            val term = Terminal.new(80, 24)
+            val session = term.build_ui()
+            return session.current_tree()
+        "Hello World":
+            val app = HelloWorldApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Browser Demo":
+            val app = BrowserDemoApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Editor":
+            val app = TextEditor.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Memo":
+            val app = MemoApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Paint":
+            val app = PaintApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "File Manager":
+            val app = FileManager.new("/")
+            val session = app.build_ui()
+            return session.current_tree()
+        "File Explorer":
+            val app = FileExplorer.new("/")
+            val session = app.build_ui()
+            return session.current_tree()
+        "Image Viewer":
+            val app = ImageViewer.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Calendar":
+            val app = CalendarApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "System Monitor":
+            val app = SystemMonitor.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Disk Manager":
+            val app = DiskManager.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Screenshot":
+            val app = ScreenshotApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Settings":
+            val app = SettingsApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Minesweeper":
+            val app = MinesweeperApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Snake":
+            val app = SnakeApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Tetris":
+            val app = TetrisApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Solitaire":
+            val app = SolitaireApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Todo":
+            val app = TodoApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Hex Editor":
+            val app = HexEditorApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Log Viewer":
+            val app = LogViewerApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Network Monitor":
+            val app = NetworkMonitorApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Contacts":
+            val app = ContactsApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Package Manager":
+            val app = PackageManagerApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "OS Installer":
+            val app = InstallerGuiApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Software Update":
+            val app = UpgradeGuiApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Color Picker":
+            val app = ColorPickerApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        "Font Viewer":
+            val app = FontViewerApp.new()
+            val session = app.build_ui()
+            return session.current_tree()
+        _:
+            val root = column("app_{name}_root", [
+                text_widget("app_{name}_content", "Welcome to {name}")
+            ])
+            return build_tree_with_title(root, name, "dark")
+
+# ============================================================================
+# Remote Window Tree Builder
+# ============================================================================
+
+fn _build_remote_tree(window_id: u64, content: text) -> UITree:
+    """Build a widget tree for a remote window's content update."""
+    val wid_str = "{window_id}"
+    val root = column("remote_{wid_str}", [
+        panel("remote_content_{wid_str}", "", [
+            text_widget("remote_text_{wid_str}", content)
+        ]),
+        statusbar("remote_status_{wid_str}", "Remote window {wid_str}", "Updated")
+    ])
+    build_tree_with_title(root, "Window {wid_str}", "dark")

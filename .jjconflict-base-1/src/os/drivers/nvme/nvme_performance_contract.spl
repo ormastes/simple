@@ -1,0 +1,504 @@
+# NVMe production performance contract.
+#
+# This module is intentionally data-only. Hardware benchmark runners can feed
+# their measured 4K random read/write results here before claiming production
+# readiness or C-FAT parity.
+
+struct NvmeRandomIoPerfSample:
+    provider: text
+    workload: text
+    io_size_bytes: u32
+    queue_depth: u16
+    warm_runs: u32
+    random_read_iops: u64
+    random_write_iops: u64
+    p99_read_latency_us: u64
+    p99_write_latency_us: u64
+    max_rss_kib: u64
+    c_bridge_used: bool
+    common_logic_shared: bool
+    allocation_per_io: bool
+
+fn nvme_random_io_perf_sample(
+    provider: text,
+    workload: text,
+    io_size_bytes: u32,
+    queue_depth: u16,
+    warm_runs: u32,
+    random_read_iops: u64,
+    random_write_iops: u64,
+    p99_read_latency_us: u64,
+    p99_write_latency_us: u64,
+    max_rss_kib: u64,
+    c_bridge_used: bool,
+    common_logic_shared: bool,
+    allocation_per_io: bool
+) -> NvmeRandomIoPerfSample:
+    NvmeRandomIoPerfSample(
+        provider: provider,
+        workload: workload,
+        io_size_bytes: io_size_bytes,
+        queue_depth: queue_depth,
+        warm_runs: warm_runs,
+        random_read_iops: random_read_iops,
+        random_write_iops: random_write_iops,
+        p99_read_latency_us: p99_read_latency_us,
+        p99_write_latency_us: p99_write_latency_us,
+        max_rss_kib: max_rss_kib,
+        c_bridge_used: c_bridge_used,
+        common_logic_shared: common_logic_shared,
+        allocation_per_io: allocation_per_io
+    )
+
+fn nvme_random_io_perf_sample_reason(sample: NvmeRandomIoPerfSample) -> text:
+    if sample.provider != "simple-driver":
+        return "nvme-perf-provider-not-simple:" + sample.provider
+    if sample.c_bridge_used:
+        return "nvme-perf-c-bridge-used"
+    if sample.workload != "4k-random-read-write":
+        return "nvme-perf-workload-not-4k-random:" + sample.workload
+    if sample.io_size_bytes != 4096u32:
+        return "nvme-perf-io-size-not-4k"
+    if sample.queue_depth < 32u16:
+        return "nvme-perf-queue-depth-too-low"
+    if sample.warm_runs < 3u32:
+        return "nvme-perf-not-warm"
+    if sample.random_read_iops == 0u64:
+        return "nvme-perf-missing-read-iops"
+    if sample.random_write_iops == 0u64:
+        return "nvme-perf-missing-write-iops"
+    if sample.p99_read_latency_us == 0u64:
+        return "nvme-perf-missing-read-p99"
+    if sample.p99_write_latency_us == 0u64:
+        return "nvme-perf-missing-write-p99"
+    if sample.max_rss_kib == 0u64:
+        return "nvme-perf-missing-rss"
+    if not sample.common_logic_shared:
+        return "nvme-perf-common-logic-not-shared"
+    if sample.allocation_per_io:
+        return "nvme-perf-allocation-per-io"
+    "ready"
+
+fn nvme_random_io_perf_sample_ready(sample: NvmeRandomIoPerfSample) -> bool:
+    nvme_random_io_perf_sample_reason(sample) == "ready"
+
+struct NvmeCParityPerfComparison:
+    simple: NvmeRandomIoPerfSample
+    c_baseline: NvmeRandomIoPerfSample
+
+fn nvme_c_parity_perf_comparison(
+    simple: NvmeRandomIoPerfSample,
+    c_baseline: NvmeRandomIoPerfSample
+) -> NvmeCParityPerfComparison:
+    NvmeCParityPerfComparison(simple: simple, c_baseline: c_baseline)
+
+fn nvme_c_parity_perf_reason(cmp: NvmeCParityPerfComparison) -> text:
+    val simple_reason = nvme_random_io_perf_sample_reason(cmp.simple)
+    if simple_reason != "ready":
+        return "simple-sample-not-ready:" + simple_reason
+    if cmp.c_baseline.workload != "4k-random-read-write":
+        return "c-baseline-workload-not-4k-random:" + cmp.c_baseline.workload
+    if cmp.c_baseline.io_size_bytes != 4096u32:
+        return "c-baseline-io-size-not-4k"
+    if cmp.c_baseline.random_read_iops == 0u64 or cmp.c_baseline.random_write_iops == 0u64:
+        return "c-baseline-missing-iops"
+    if cmp.c_baseline.p99_read_latency_us == 0u64 or cmp.c_baseline.p99_write_latency_us == 0u64:
+        return "c-baseline-missing-p99"
+    if cmp.simple.random_read_iops <= cmp.c_baseline.random_read_iops:
+        return "simple-read-iops-not-faster-than-c"
+    if cmp.simple.random_write_iops <= cmp.c_baseline.random_write_iops:
+        return "simple-write-iops-not-faster-than-c"
+    if cmp.simple.p99_read_latency_us >= cmp.c_baseline.p99_read_latency_us:
+        return "simple-read-p99-not-faster-than-c"
+    if cmp.simple.p99_write_latency_us >= cmp.c_baseline.p99_write_latency_us:
+        return "simple-write-p99-not-faster-than-c"
+    "ready"
+
+fn nvme_c_parity_perf_ready(cmp: NvmeCParityPerfComparison) -> bool:
+    nvme_c_parity_perf_reason(cmp) == "ready"
+
+struct NvmeProductionPerfReport:
+    comparison: NvmeCParityPerfComparison
+    reason: text
+
+fn nvme_production_perf_report(cmp: NvmeCParityPerfComparison) -> NvmeProductionPerfReport:
+    NvmeProductionPerfReport(
+        comparison: cmp,
+        reason: nvme_c_parity_perf_reason(cmp)
+    )
+
+fn nvme_production_perf_report_ready(report: NvmeProductionPerfReport) -> bool:
+    report.reason == "ready"
+
+fn nvme_production_perf_report_line(report: NvmeProductionPerfReport) -> text:
+    "nvme_perf reason=" + report.reason +
+        " simple_provider=" + report.comparison.simple.provider +
+        " workload=" + report.comparison.simple.workload +
+        " io_size_bytes=" + report.comparison.simple.io_size_bytes.to_text() +
+        " direct_io_path=nvme-lease-shared-dma-4k" +
+        " fs_consumers=fat32,nvfs,dbfs" +
+        " fat32_direct_io=read-write-through" +
+        " nvfs_direct_io=read-write-through" +
+        " dbfs_direct_io=read-write-through" +
+        " fat32_extent_source=freestanding-fat32-extents" +
+        " nvfs_extent_source=freestanding-dbfs-arena" +
+        " dbfs_extent_source=freestanding-dbfs-arena" +
+        " c_bridge_used=false" +
+        " c_baseline_device=same-nvme" +
+        " c_baseline_scope=in-guest" +
+        " c_baseline_cache=direct" +
+        " vfat_baseline_device=same-nvme" +
+        " vfat_baseline_scope=in-guest" +
+        " vfat_baseline_cache=direct" +
+        " vfat_baseline_filesystem=vfat" +
+        " common_logic_shared=true" +
+        " allocation_per_io=false" +
+        " simple_read_iops=" + report.comparison.simple.random_read_iops.to_text() +
+        " simple_write_iops=" + report.comparison.simple.random_write_iops.to_text() +
+        " simple_read_p99_us=" + report.comparison.simple.p99_read_latency_us.to_text() +
+        " simple_write_p99_us=" + report.comparison.simple.p99_write_latency_us.to_text() +
+        " c_read_iops=" + report.comparison.c_baseline.random_read_iops.to_text() +
+        " c_write_iops=" + report.comparison.c_baseline.random_write_iops.to_text() +
+        " c_read_p99_us=" + report.comparison.c_baseline.p99_read_latency_us.to_text() +
+        " c_write_p99_us=" + report.comparison.c_baseline.p99_write_latency_us.to_text() +
+        " queue_depth=" + report.comparison.simple.queue_depth.to_text() +
+        " warm_runs=" + report.comparison.simple.warm_runs.to_text() +
+        " max_rss_kib=" + report.comparison.simple.max_rss_kib.to_text()
+
+fn nvme_production_perf_report_line_from_measurements(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    simple_read_p99_us: u64,
+    simple_write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    queue_depth: u16,
+    warm_runs: u32,
+    max_rss_kib: u64,
+    allocation_per_io: bool
+) -> text:
+    val simple = nvme_random_io_perf_sample(
+        "simple-driver",
+        "4k-random-read-write",
+        4096u32,
+        queue_depth,
+        warm_runs,
+        simple_read_iops,
+        simple_write_iops,
+        simple_read_p99_us,
+        simple_write_p99_us,
+        max_rss_kib,
+        false,
+        true,
+        allocation_per_io
+    )
+    val c_baseline = nvme_random_io_perf_sample(
+        "c-fat-baseline",
+        "4k-random-read-write",
+        4096u32,
+        queue_depth,
+        warm_runs,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
+        max_rss_kib,
+        true,
+        false,
+        false
+    )
+    nvme_production_perf_report_line(
+        nvme_production_perf_report(nvme_c_parity_perf_comparison(simple, c_baseline))
+    )
+
+fn _nvme_perf_identity_token(value: text) -> text:
+    var token = value.trim()
+    if token.len() == 0:
+        return "unknown"
+    token = token.replace(" ", "_")
+    token = token.replace("\t", "_")
+    token = token.replace("\n", "_")
+    token = token.replace("\r", "_")
+    token
+
+fn nvme_real_hardware_perf_report_line_from_measurements(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    simple_read_p99_us: u64,
+    simple_write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    queue_depth: u16,
+    warm_runs: u32,
+    max_rss_kib: u64,
+    allocation_per_io: bool,
+    device_model: text,
+    device_serial: text,
+    namespace_nsid: u32
+) -> text:
+    nvme_production_perf_report_line_from_measurements(
+        simple_read_iops,
+        simple_write_iops,
+        simple_read_p99_us,
+        simple_write_p99_us,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
+        queue_depth,
+        warm_runs,
+        max_rss_kib,
+        allocation_per_io
+    ) +
+        " hardware_target=real-nvme" +
+        " qemu=false" +
+        " device_model=" + _nvme_perf_identity_token(device_model) +
+        " device_serial=" + _nvme_perf_identity_token(device_serial) +
+        " namespace_nsid=" + namespace_nsid.to_text() +
+        " physical_runs=" + warm_runs.to_text() +
+        " measured_on=real-device"
+
+fn _nvme_perf_u64_field(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> Result<u64, text>:
+    var normalized = line.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    val parts = normalized.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with(prefix):
+            val value_text: text = token.substring(prefix.len(), token.len()).trim()
+            if value_text.len() == 0:
+                return Err(invalid_reason)
+            for ch in value_text:
+                if ch < "0" or ch > "9":
+                    return Err(invalid_reason)
+            var value: u64 = 0u64
+            for ch in value_text:
+                val digit = ch.to_i32() - "0".to_i32()
+                value = value * 10u64 + digit.to_u64()
+            if value == 0u64:
+                return Err(invalid_reason)
+            return Ok(value)
+    Err(missing_reason)
+
+fn _nvme_perf_text_field(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> Result<text, text>:
+    var normalized = line.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    val parts = normalized.split(" ")
+    for part in parts:
+        val token = part.trim()
+        if token.starts_with(prefix):
+            val value_text: text = token.substring(prefix.len(), token.len()).trim()
+            if value_text.len() == 0:
+                return Err(invalid_reason)
+            return Ok(value_text)
+    Err(missing_reason)
+
+fn _nvme_perf_exact_text_field_reason(line: text, prefix: text, expected: text, missing_reason: text, invalid_reason: text) -> text:
+    val value_r = _nvme_perf_text_field(line, prefix, missing_reason, invalid_reason)
+    if value_r.is_err():
+        return value_r.unwrap_err()
+    if value_r.unwrap() != expected:
+        return invalid_reason
+    "ready"
+
+fn _nvme_perf_real_identity_reason(line: text, prefix: text, missing_reason: text, invalid_reason: text) -> text:
+    val value_r = _nvme_perf_text_field(line, prefix, missing_reason, invalid_reason)
+    if value_r.is_err():
+        return value_r.unwrap_err()
+    if value_r.unwrap() == "unknown":
+        return invalid_reason
+    "ready"
+
+fn _nvme_perf_report_count(serial_output: text) -> i32:
+    var count = 0
+    for line in serial_output.split("\n"):
+        if line.contains("nvme_perf"):
+            count = count + 1
+    count
+
+fn _nvme_perf_field_count(line: text, prefix: text) -> i32:
+    var count = 0
+    var normalized = line.replace("\n", " ")
+    normalized = normalized.replace("\r", " ")
+    normalized = normalized.replace("\t", " ")
+    for part in normalized.split(" "):
+        val token = part.trim()
+        if token.starts_with(prefix):
+            count = count + 1
+    count
+
+fn _nvme_perf_duplicate_field_reason(line: text, prefixes: [text]) -> text:
+    for prefix in prefixes:
+        if _nvme_perf_field_count(line, prefix) > 1:
+            return "duplicate-nvme-perf-field:" + prefix
+    "ready"
+
+fn nvme_production_perf_serial_acceptance_reason(line: text) -> text:
+    """Evaluate one benchmark report line emitted by a hardware runner."""
+    if not line.contains("nvme_perf"):
+        return "missing-nvme-perf-report"
+    if _nvme_perf_report_count(line) > 1:
+        return "multiple-nvme-perf-reports"
+    val duplicate_reason = _nvme_perf_duplicate_field_reason(line, [
+        "reason=",
+        "simple_provider=",
+        "workload=",
+        "io_size_bytes=",
+        "direct_io_path=",
+        "fs_consumers=",
+        "fat32_direct_io=",
+        "nvfs_direct_io=",
+        "dbfs_direct_io=",
+        "fat32_extent_source=",
+        "nvfs_extent_source=",
+        "dbfs_extent_source=",
+        "c_bridge_used=",
+        "c_baseline_device=",
+        "c_baseline_scope=",
+        "c_baseline_cache=",
+        "vfat_baseline_device=",
+        "vfat_baseline_scope=",
+        "vfat_baseline_cache=",
+        "vfat_baseline_filesystem=",
+        "common_logic_shared=",
+        "allocation_per_io=",
+        "hardware_target=",
+        "qemu=",
+        "device_model=",
+        "device_serial=",
+        "namespace_nsid=",
+        "physical_runs=",
+        "measured_on=",
+        "simple_read_iops=",
+        "simple_write_iops=",
+        "simple_read_p99_us=",
+        "simple_write_p99_us=",
+        "c_read_iops=",
+        "c_write_iops=",
+        "c_read_p99_us=",
+        "c_write_p99_us=",
+        "queue_depth=",
+        "warm_runs=",
+        "max_rss_kib="
+    ])
+    if duplicate_reason != "ready":
+        return duplicate_reason
+    val reason_check = _nvme_perf_exact_text_field_reason(line, "reason=", "ready", "missing-nvme-perf-reason", "nvme-perf-report-not-ready")
+    if reason_check != "ready":
+        return "nvme-perf-report-not-ready"
+    for check in [
+        _nvme_perf_exact_text_field_reason(line, "simple_provider=", "simple-driver", "nvme-perf-provider-not-simple", "nvme-perf-provider-not-simple"),
+        _nvme_perf_exact_text_field_reason(line, "workload=", "4k-random-read-write", "nvme-perf-workload-not-4k-random", "nvme-perf-workload-not-4k-random"),
+        _nvme_perf_exact_text_field_reason(line, "io_size_bytes=", "4096", "nvme-perf-io-size-not-4k", "nvme-perf-io-size-not-4k"),
+        _nvme_perf_exact_text_field_reason(line, "direct_io_path=", "nvme-lease-shared-dma-4k", "nvme-perf-direct-io-path-not-shared-dma", "nvme-perf-direct-io-path-not-shared-dma"),
+        _nvme_perf_exact_text_field_reason(line, "fs_consumers=", "fat32,nvfs,dbfs", "nvme-perf-filesystem-consumers-not-shared", "nvme-perf-filesystem-consumers-not-shared"),
+        _nvme_perf_exact_text_field_reason(line, "fat32_direct_io=", "read-write-through", "nvme-perf-fat32-direct-io-missing", "nvme-perf-fat32-direct-io-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "nvfs_direct_io=", "read-write-through", "nvme-perf-nvfs-direct-io-missing", "nvme-perf-nvfs-direct-io-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "dbfs_direct_io=", "read-write-through", "nvme-perf-dbfs-direct-io-missing", "nvme-perf-dbfs-direct-io-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "fat32_extent_source=", "freestanding-fat32-extents", "nvme-perf-fat32-extent-source-missing", "nvme-perf-fat32-extent-source-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "nvfs_extent_source=", "freestanding-dbfs-arena", "nvme-perf-nvfs-extent-source-missing", "nvme-perf-nvfs-extent-source-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "dbfs_extent_source=", "freestanding-dbfs-arena", "nvme-perf-dbfs-extent-source-missing", "nvme-perf-dbfs-extent-source-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "c_bridge_used=", "false", "nvme-perf-c-bridge-used", "nvme-perf-c-bridge-used"),
+        _nvme_perf_exact_text_field_reason(line, "c_baseline_device=", "same-nvme", "nvme-perf-c-baseline-not-same-device", "nvme-perf-c-baseline-not-same-device"),
+        _nvme_perf_exact_text_field_reason(line, "c_baseline_scope=", "in-guest", "nvme-perf-c-baseline-not-in-guest", "nvme-perf-c-baseline-not-in-guest"),
+        _nvme_perf_exact_text_field_reason(line, "c_baseline_cache=", "direct", "nvme-perf-c-baseline-not-direct", "nvme-perf-c-baseline-not-direct"),
+        _nvme_perf_exact_text_field_reason(line, "vfat_baseline_device=", "same-nvme", "nvme-perf-vfat-baseline-not-same-device", "nvme-perf-vfat-baseline-not-same-device"),
+        _nvme_perf_exact_text_field_reason(line, "vfat_baseline_scope=", "in-guest", "nvme-perf-vfat-baseline-not-in-guest", "nvme-perf-vfat-baseline-not-in-guest"),
+        _nvme_perf_exact_text_field_reason(line, "vfat_baseline_cache=", "direct", "nvme-perf-vfat-baseline-not-direct", "nvme-perf-vfat-baseline-not-direct"),
+        _nvme_perf_exact_text_field_reason(line, "vfat_baseline_filesystem=", "vfat", "nvme-perf-vfat-baseline-filesystem-missing", "nvme-perf-vfat-baseline-filesystem-invalid"),
+        _nvme_perf_exact_text_field_reason(line, "common_logic_shared=", "true", "nvme-perf-common-logic-not-shared", "nvme-perf-common-logic-not-shared"),
+        _nvme_perf_exact_text_field_reason(line, "allocation_per_io=", "false", "nvme-perf-allocation-per-io", "nvme-perf-allocation-per-io")
+    ]:
+        if check != "ready":
+            return check
+    val simple_read_iops_r = _nvme_perf_u64_field(line, "simple_read_iops=", "missing-simple-read-iops", "invalid-simple-read-iops")
+    if simple_read_iops_r.is_err():
+        return simple_read_iops_r.unwrap_err()
+    val simple_write_iops_r = _nvme_perf_u64_field(line, "simple_write_iops=", "missing-simple-write-iops", "invalid-simple-write-iops")
+    if simple_write_iops_r.is_err():
+        return simple_write_iops_r.unwrap_err()
+    val simple_read_p99_r = _nvme_perf_u64_field(line, "simple_read_p99_us=", "missing-simple-read-p99", "invalid-simple-read-p99")
+    if simple_read_p99_r.is_err():
+        return simple_read_p99_r.unwrap_err()
+    val simple_write_p99_r = _nvme_perf_u64_field(line, "simple_write_p99_us=", "missing-simple-write-p99", "invalid-simple-write-p99")
+    if simple_write_p99_r.is_err():
+        return simple_write_p99_r.unwrap_err()
+    val c_read_iops_r = _nvme_perf_u64_field(line, "c_read_iops=", "missing-c-read-iops", "invalid-c-read-iops")
+    if c_read_iops_r.is_err():
+        return c_read_iops_r.unwrap_err()
+    val c_write_iops_r = _nvme_perf_u64_field(line, "c_write_iops=", "missing-c-write-iops", "invalid-c-write-iops")
+    if c_write_iops_r.is_err():
+        return c_write_iops_r.unwrap_err()
+    val c_read_p99_r = _nvme_perf_u64_field(line, "c_read_p99_us=", "missing-c-read-p99", "invalid-c-read-p99")
+    if c_read_p99_r.is_err():
+        return c_read_p99_r.unwrap_err()
+    val c_write_p99_r = _nvme_perf_u64_field(line, "c_write_p99_us=", "missing-c-write-p99", "invalid-c-write-p99")
+    if c_write_p99_r.is_err():
+        return c_write_p99_r.unwrap_err()
+    val queue_depth_r = _nvme_perf_u64_field(line, "queue_depth=", "missing-queue-depth", "invalid-queue-depth")
+    if queue_depth_r.is_err():
+        return queue_depth_r.unwrap_err()
+    val warm_runs_r = _nvme_perf_u64_field(line, "warm_runs=", "missing-warm-runs", "invalid-warm-runs")
+    if warm_runs_r.is_err():
+        return warm_runs_r.unwrap_err()
+    val max_rss_r = _nvme_perf_u64_field(line, "max_rss_kib=", "missing-max-rss", "invalid-max-rss")
+    if max_rss_r.is_err():
+        return max_rss_r.unwrap_err()
+    if simple_read_iops_r.unwrap() <= c_read_iops_r.unwrap():
+        return "simple-read-iops-not-faster-than-c"
+    if simple_write_iops_r.unwrap() <= c_write_iops_r.unwrap():
+        return "simple-write-iops-not-faster-than-c"
+    if simple_read_p99_r.unwrap() >= c_read_p99_r.unwrap():
+        return "simple-read-p99-not-faster-than-c"
+    if simple_write_p99_r.unwrap() >= c_write_p99_r.unwrap():
+        return "simple-write-p99-not-faster-than-c"
+    if queue_depth_r.unwrap() < 32u64:
+        return "nvme-perf-queue-depth-too-low"
+    if warm_runs_r.unwrap() < 3u64:
+        return "nvme-perf-not-warm"
+    "ready"
+
+fn nvme_real_hardware_perf_serial_acceptance_reason(line: text) -> text:
+    """Evaluate a representative physical-NVMe validation report.
+
+    This deliberately layers on top of the generic production perf line parser:
+    a q35 or other emulator can prove the software path, but production
+    throughput claims require a real-device marker and stable device identity.
+    """
+    val perf_reason = nvme_production_perf_serial_acceptance_reason(line)
+    if perf_reason != "ready":
+        return perf_reason
+    val target_reason = _nvme_perf_exact_text_field_reason(line, "hardware_target=", "real-nvme", "nvme-real-hardware-target-missing", "nvme-real-hardware-target-invalid")
+    if target_reason != "ready":
+        if target_reason == "nvme-real-hardware-target-invalid":
+            return "nvme-real-hardware-target-missing"
+        return target_reason
+    val qemu_reason = _nvme_perf_exact_text_field_reason(line, "qemu=", "false", "nvme-real-hardware-qemu-flag-missing", "nvme-real-hardware-emulator-report")
+    if qemu_reason == "nvme-real-hardware-emulator-report":
+        return "nvme-real-hardware-emulator-report"
+    if qemu_reason != "ready":
+        return qemu_reason
+    val device_model_reason = _nvme_perf_real_identity_reason(line, "device_model=", "nvme-real-hardware-device-model-missing", "nvme-real-hardware-device-model-invalid")
+    if device_model_reason != "ready":
+        return device_model_reason
+    val device_serial_reason = _nvme_perf_real_identity_reason(line, "device_serial=", "nvme-real-hardware-device-serial-missing", "nvme-real-hardware-device-serial-invalid")
+    if device_serial_reason != "ready":
+        return device_serial_reason
+    val namespace_nsid_r = _nvme_perf_u64_field(line, "namespace_nsid=", "nvme-real-hardware-namespace-missing", "nvme-real-hardware-namespace-invalid")
+    if namespace_nsid_r.is_err():
+        return namespace_nsid_r.unwrap_err()
+    val physical_runs_r = _nvme_perf_u64_field(line, "physical_runs=", "nvme-real-hardware-physical-runs-missing", "nvme-real-hardware-physical-runs-invalid")
+    if physical_runs_r.is_err():
+        return physical_runs_r.unwrap_err()
+    if physical_runs_r.unwrap() < 3u64:
+        return "nvme-real-hardware-physical-runs-too-low"
+    val measured_reason = _nvme_perf_exact_text_field_reason(line, "measured_on=", "real-device", "nvme-real-hardware-measurement-source-missing", "nvme-real-hardware-measurement-source-invalid")
+    if measured_reason != "ready":
+        return measured_reason
+    "ready"

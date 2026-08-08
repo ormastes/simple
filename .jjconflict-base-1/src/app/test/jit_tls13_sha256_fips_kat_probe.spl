@@ -1,0 +1,76 @@
+"""FIPS 180-4 known-answer test for the `rt_tls13_sha256` runtime extern.
+
+Regression guard for
+`doc/08_tracking/bug/jit_rt_tls13_sha256_returns_empty_2026-08-05.md`:
+`rt_tls13_sha256` has no native `T`-linkage symbol, so the hybrid transform
+routes every call to it through `InterpCall`. Before the fix, `InterpCall`
+unboxed the marshalled heap array to a raw i64 (`rt_value_raw_i64`), which
+stripped the tag and made the digest read as LENGTH 0 for every input under
+the Cranelift JIT -- silently, at exit 0.
+
+This probe deliberately calls the extern DIRECTLY rather than through
+`std.crypto.sha256.sha256_text`, because that call site carries a length-guard
+fallback to the pure-Simple implementation: going through it would mask the
+defect this probe exists to detect.
+
+Vectors are the published FIPS 180-4 / NIST CAVP SHA-256 examples, NOT
+hand-computed:
+      ""     e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+      "abc"  ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+      56-byte "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+             248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+
+Run it under a NAMED engine and score the VERDICT LINE, never the exit code:
+
+    SIMPLE_EXECUTION_MODE=interpret bin/simple run src/app/test/jit_tls13_sha256_fips_kat_probe.spl
+    SIMPLE_EXECUTION_MODE=jit       bin/simple run src/app/test/jit_tls13_sha256_fips_kat_probe.spl
+"""
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_tls13_sha256(data: [u8]) -> [u8]
+
+fn digest_hex(input: text) -> text:
+    val raw = rt_text_to_bytes(input)
+    val digest = rt_tls13_sha256(raw)
+    val hex_digits = "0123456789abcdef"
+    var out = ""
+    var oi = 0
+    while oi < digest.len():
+        val v = digest[oi] as i64
+        val hi = (v >> 4) & 15
+        val lo = v & 15
+        out = out + hex_digits.substring(hi, hi + 1)
+        out = out + hex_digits.substring(lo, lo + 1)
+        oi = oi + 1
+    out
+
+fn main():
+    var failures = 0
+
+    val empty_expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    val abc_expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    val long_input = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    val long_expected = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+
+    val empty_actual = digest_hex("")
+    print("KAT empty len=" + empty_actual.len().to_text() + " got=" + empty_actual)
+    if empty_actual != empty_expected:
+        failures = failures + 1
+        print("KAT empty MISMATCH want=" + empty_expected)
+
+    val abc_actual = digest_hex("abc")
+    print("KAT abc len=" + abc_actual.len().to_text() + " got=" + abc_actual)
+    if abc_actual != abc_expected:
+        failures = failures + 1
+        print("KAT abc MISMATCH want=" + abc_expected)
+
+    val long_actual = digest_hex(long_input)
+    print("KAT 56byte len=" + long_actual.len().to_text() + " got=" + long_actual)
+    if long_actual != long_expected:
+        failures = failures + 1
+        print("KAT 56byte MISMATCH want=" + long_expected)
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS rt_tls13_sha256 matches 3/3 FIPS 180-4 vectors")
+    else:
+        print("PROBE VERDICT: FAIL rt_tls13_sha256 failed " + failures.to_text() + "/3 FIPS 180-4 vectors")

@@ -1,0 +1,241 @@
+# std.config core — layer precedence and SDN line parsing.
+#
+# Extracted from src/lib/editor/00.common/config.spl, which hard-coded a
+# two-layer load (`editor_config_load(user_path, workspace_path)`) plus a
+# line parser (`_ec_apply_sdn` / `_ec_apply_line`) that reconstructed the whole
+# EditorConfig struct once per field. The same parser is duplicated in
+# keybindings.spl and the same get/set-by-key ladder in platform.spl.
+#
+# Precedence (master plan section 16):
+#   compiled default < vendor < machine < sysadmin < device < user
+#   < named profile < workspace < session < mandatory security policy
+#
+# Mandatory policy is a CEILING, not merely the last layer: resolution picks the
+# highest-ranked contributing layer, so a session or workspace entry appearing
+# later in the entry list can never displace a mandatory entry.
+#
+# Tier-neutral: pure functions only, no file IO. Callers read documents and pass
+# the text in with the layer they came from.
+
+use std.common.config_core.schema.{ConfigFieldDescriptor, ConfigValidation}
+use std.common.config_core.schema.{config_validate_value, config_schema_index}
+
+# One key/value contribution from one layer.
+struct ConfigEntry:
+    key: text
+    value: text
+    layer: text
+
+# Outcome of resolving one field across all layers.
+#
+# `layer` is "compiled_default" when no layer contributed.
+# `locked` is true when the mandatory policy layer supplied the winning value.
+struct ConfigResolution:
+    key: text
+    value: text
+    layer: text
+    rank: i64
+    locked: bool
+
+fn config_layer_names() -> [text]:
+    [
+        "compiled_default",
+        "vendor",
+        "machine",
+        "sysadmin",
+        "device",
+        "user",
+        "profile",
+        "workspace",
+        "session",
+        "mandatory"
+    ]
+
+fn config_layer_mandatory_rank() -> i64:
+    9
+
+# Precedence rank of a layer name; -1 for an unrecognised layer.
+fn config_layer_rank(layer: text) -> i64:
+    if layer == "compiled_default": return 0
+    if layer == "vendor": return 1
+    if layer == "machine": return 2
+    if layer == "sysadmin": return 3
+    if layer == "device": return 4
+    if layer == "user": return 5
+    if layer == "profile": return 6
+    if layer == "workspace": return 7
+    if layer == "session": return 8
+    if layer == "mandatory": return 9
+    # BUG (filed in .spipe/simpleos_harden_p7_config/state.md): a bare trailing
+    # `-1` after an inline `if cond: return <int literal>` is folded into the
+    # previous line as binary minus (`9` then `-1` evaluates to 8). Explicit
+    # `return -1` is the correct form and is not affected.
+    return -1
+
+fn config_layer_is_known(layer: text) -> bool:
+    config_layer_rank(layer) >= 0
+
+# ---------------------------------------------------------------------------
+# SDN line parsing (ported from _ec_apply_sdn / _ec_apply_line)
+# ---------------------------------------------------------------------------
+
+fn _cfg_find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+# Strip an inline `#` comment from a value ("true   # note" -> "true").
+# Kept separate from config_parse_line so existing flat-document callers keep
+# their exact semantics; documents that allow trailing comments opt in.
+fn config_strip_inline_comment(value: text) -> text:
+    val idx = _cfg_find_char(s: value, ch: "#")
+    if idx < 0:
+        return value
+    value.slice(0, idx).trim()
+
+# Parse one `key: value` line into an entry. Returns an entry with an empty key
+# for blank lines, comment lines, and lines without a separator — exactly the
+# cases `_ec_apply_line` returned the config unchanged for.
+fn config_parse_line(line: text, layer: text) -> ConfigEntry:
+    val trimmed = line.trim()
+    if trimmed == "" or trimmed.starts_with("#"):
+        return ConfigEntry(key: "", value: "", layer: layer)
+    val sep = _cfg_find_char(s: trimmed, ch: ":")
+    if sep < 0:
+        return ConfigEntry(key: "", value: "", layer: layer)
+    val key = trimmed.slice(0, sep).trim()
+    val value = trimmed.slice(sep + 1, trimmed.len()).trim()
+    ConfigEntry(key: key, value: value, layer: layer)
+
+# Parse a whole flat SDN document into entries tagged with `layer`.
+fn config_parse_layer(content: text, layer: text) -> [ConfigEntry]:
+    var result: [ConfigEntry] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            val entry = config_parse_line(line: content.slice(start, i), layer: layer)
+            if entry.key != "":
+                result.push(entry)
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        val last = config_parse_line(line: content.slice(start, content.len()), layer: layer)
+        if last.key != "":
+            result.push(last)
+    result
+
+# Serialise entries back to a flat SDN document (round-trip of config_parse_layer).
+fn config_entries_to_sdn(entries: [ConfigEntry]) -> text:
+    var result = ""
+    var i = 0
+    while i < entries.len():
+        result = result + entries[i].key + ": " + entries[i].value + "\n"
+        i = i + 1
+    result
+
+fn config_entry_keys(entries: [ConfigEntry]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < entries.len():
+        result.push(entries[i].key)
+        i = i + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Layer precedence resolution
+# ---------------------------------------------------------------------------
+
+# Resolve one field. Highest-ranked contributing layer wins; equal ranks resolve
+# last-wins (a second `user` document overrides the first). Entries carrying an
+# unknown layer name are ignored. No validation is performed here — see
+# `config_resolve_valid`.
+fn config_resolve(desc: ConfigFieldDescriptor, entries: [ConfigEntry]) -> ConfigResolution:
+    var best_value = desc.default_value
+    var best_layer = "compiled_default"
+    var best_rank = 0
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        if e.key == desc.key:
+            val rank = config_layer_rank(e.layer)
+            if rank >= best_rank:
+                best_value = e.value
+                best_layer = e.layer
+                best_rank = rank
+        i = i + 1
+    ConfigResolution(
+        key: desc.key,
+        value: best_value,
+        layer: best_layer,
+        rank: best_rank,
+        locked: best_rank == config_layer_mandatory_rank()
+    )
+
+# Resolve one field, ignoring entries whose value fails descriptor validation.
+# This is the behaviour the editor open-coded with its per-field `n > 0` guards:
+# an invalid value silently leaves the lower layer in effect.
+fn config_resolve_valid(desc: ConfigFieldDescriptor, entries: [ConfigEntry]) -> ConfigResolution:
+    var kept: [ConfigEntry] = []
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        if e.key != desc.key:
+            i = i + 1
+            continue
+        val verdict = config_validate_value(desc, e.value)
+        if verdict.ok:
+            kept.push(e)
+        i = i + 1
+    config_resolve(desc, kept)
+
+# Resolve every field the schema declares.
+fn config_resolve_all(schema: [ConfigFieldDescriptor], entries: [ConfigEntry]) -> [ConfigResolution]:
+    var result: [ConfigResolution] = []
+    var i = 0
+    while i < schema.len():
+        result.push(config_resolve(schema[i], entries))
+        i = i + 1
+    result
+
+# Effective value for one key; "" when the schema does not declare the key.
+fn config_effective_value(schema: [ConfigFieldDescriptor], entries: [ConfigEntry], key: text) -> text:
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return ""
+    config_resolve(schema[idx], entries).value
+
+# True when the mandatory policy layer pins this key.
+fn config_is_locked(schema: [ConfigFieldDescriptor], entries: [ConfigEntry], key: text) -> bool:
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return false
+    config_resolve(schema[idx], entries).locked
+
+# Keys contributed by any layer that the schema does not declare.
+fn config_unknown_entry_keys(schema: [ConfigFieldDescriptor], entries: [ConfigEntry]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < entries.len():
+        val key = entries[i].key
+        if config_schema_index(schema, key) < 0:
+            result.push(key)
+        i = i + 1
+    result
+
+# Entries whose value fails validation, reported as ConfigValidation records.
+fn config_invalid_entries(schema: [ConfigFieldDescriptor], entries: [ConfigEntry]) -> [ConfigValidation]:
+    var result: [ConfigValidation] = []
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        val idx = config_schema_index(schema, e.key)
+        if idx >= 0:
+            val verdict = config_validate_value(schema[idx], e.value)
+            if not verdict.ok:
+                result.push(verdict)
+        i = i + 1
+    result

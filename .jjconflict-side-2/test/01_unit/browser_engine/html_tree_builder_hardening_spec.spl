@@ -1,0 +1,368 @@
+"""
+# HTML Tree Builder — Defensive Limits
+
+**Category:** Browser Engine / HTML Parsing
+**Status:** Implemented
+
+## Overview
+
+`html_tree_builder.spl` caps open-element depth at `HTML_MAX_TREE_DEPTH`
+(512) and total element-node creation at `HTML_MAX_NODES` (65536), matching
+Blink/WebKit defensive limits. A hostile/deeply-nested document must still
+parse to completion (never abort, never drop already-open content) — once
+the depth cap is hit, further nesting flattens into siblings at the cap
+level instead of recursing deeper.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build, html_tree_builder_build_with_scripts,
+    html_tree_builder_build_with_scripts_limit,
+    html_tree_builder_build_with_parse_limits
+}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    BE_DOM_HTML_SERIALIZE_MAX_DEPTH,
+    BE_DOM_HTML_SERIALIZE_MAX_FRAGMENTS,
+    BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH,
+    be_dom_get_tag, be_dom_get_children,
+    _be_dom_html_escaped_length_within,
+    _be_dom_measure_html_serialization, be_dom_serialize_children,
+    be_dom_serialize_html, be_dom_serialize_html_for_render
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomNodeRoute, dom_identity_index_build
+}
+
+fn _flat_serialization_dom(siblings: i32) -> BeDomNode:
+    var root = BeDomNode.element("div")
+    var i = 0
+    while i < siblings:
+        var child = BeDomNode.element("span")
+        child.add_child(BeDomNode.text_node(i.to_i64() + 1, "x"))
+        root.add_child(child)
+        i = i + 1
+    root
+
+fn _deep_serialization_dom(depth: i32) -> BeDomNode:
+    # Build bottom-up. The previous top-down `cursor` walk silently returned
+    # ONE flat `<div></div>` for every depth: `add_child` stores a COPY, so
+    # the first append mutated the cursor copy and never reached `root`.
+    # That made the depth-cap assertions below measure a single node instead
+    # of a deep chain — the serializer depth guard was never exercised.
+    var chain = BeDomNode.element("div")
+    var i = 0
+    while i < depth:
+        var parent = BeDomNode.element("div")
+        parent.children.push(chain)
+        chain = parent
+        i = i + 1
+    chain
+
+fn _old_prefix_copy_work(siblings: i32) -> i64:
+    """Bytes copied by the removed `children_html = children_html + child`."""
+    var prefix_length: i64 = 0
+    var copied: i64 = 0
+    var i = 0
+    while i < siblings:
+        prefix_length = prefix_length + 14
+        copied = copied + prefix_length
+        i = i + 1
+    copied
+
+fn build_nested_markup(depth: i32) -> text:
+    var open_tags = ""
+    var close_tags = ""
+    var i = 0
+    while i < depth:
+        open_tags = "{open_tags}<div>"
+        close_tags = "{close_tags}</div>"
+        i = i + 1
+    return "{open_tags}{close_tags}"
+
+fn _max_depth(node: BeDomNode) -> i32:
+    """Iterative BFS depth measurement — avoids relying on interpreter
+    recursion depth (which would confound a depth-cap oracle)."""
+    var frontier: [BeDomNode] = [node]
+    var depth = 0
+    while frontier.len() > 0:
+        depth = depth + 1
+        var next_frontier: [BeDomNode] = []
+        var i = 0
+        while i < frontier.len():
+            val ch = be_dom_get_children(frontier[i])
+            var j = 0
+            while j < ch.len():
+                next_frontier.push(ch[j])
+                j = j + 1
+            i = i + 1
+        frontier = next_frontier
+    return depth
+
+fn _count_by_tag(node: BeDomNode, tag: text) -> i32:
+    """Iterative worklist traversal — avoids relying on interpreter
+    recursion depth over a possibly-deep tree."""
+    var count = 0
+    var worklist: [BeDomNode] = [node]
+    while worklist.len() > 0:
+        val n = worklist.len()
+        val cur = worklist[n - 1]
+        var rest: [BeDomNode] = []
+        var i = 0
+        while i < n - 1:
+            rest.push(worklist[i])
+            i = i + 1
+        worklist = rest
+        if be_dom_get_tag(cur) == tag:
+            count = count + 1
+        val ch = be_dom_get_children(cur)
+        var j = 0
+        while j < ch.len():
+            worklist.push(ch[j])
+            j = j + 1
+    return count
+
+fn _find_first_by_tag(node: BeDomNode, tag: text) -> BeDomNode:
+    if be_dom_get_tag(node) == tag:
+        return node
+    val ch = be_dom_get_children(node)
+    var i = 0
+    while i < ch.len():
+        val child = ch[i]
+        if be_dom_get_tag(child) == tag:
+            return child
+        val nested = _find_first_by_tag(child, tag)
+        if be_dom_get_tag(nested) == tag:
+            return nested
+        i = i + 1
+    return node
+
+# ============================================================================
+# Scenarios
+# ============================================================================
+
+describe "HtmlTreeBuilder depth cap":
+    it "deeply nested markup parses to completion with bounded depth":
+        step("Build 2000 levels of nested <div> markup")
+        val html = build_nested_markup(2000)
+
+        step("Parse the markup into a DOM tree")
+        val doc = html_tree_builder_build(html)
+
+        step("Then measured tree depth stays within the HTML_MAX_TREE_DEPTH cap")
+        val measured_depth = _max_depth(doc)
+        expect(measured_depth).to_be_less_than(513)
+
+        step("Then no content was dropped — all 2000 divs are still present as siblings")
+        val measured_count = _count_by_tag(doc, "div")
+        expect(measured_count).to_equal(2000)
+
+describe "HtmlTreeBuilder node cap":
+    it "accepts the exact limit and truncates the next node":
+        val exact = html_tree_builder_build_with_scripts_limit("<p>x</p>", 6)
+        val overflow = html_tree_builder_build_with_scripts_limit(
+            "<p>x</p><b>later</b>", 6
+        )
+
+        expect(exact.truncated).to_be(false)
+        expect(overflow.truncated).to_be(true)
+        expect(_count_by_tag(overflow.doc, "p")).to_equal(1)
+        expect(_count_by_tag(overflow.doc, "b")).to_equal(0)
+
+    it "propagates tokenizer truncation to document admission":
+        val result = html_tree_builder_build_with_parse_limits(
+            "<p>x</p>", 100, 1, 10
+        )
+        expect(result.truncated).to_be(true)
+
+describe "HtmlTreeBuilder honest content":
+    it "reports ordinary documents as complete":
+        val result = html_tree_builder_build_with_scripts("<p>safe</p>")
+        expect(result.truncated).to_be(false)
+
+    it "normal nesting is unchanged by the defensive limits":
+        step("Parse a shallow, well-formed document (depth 3)")
+        val doc = html_tree_builder_build("<div><p><span>text</span></p></div>")
+
+        step("Then parent-child structure is exact, unaffected by the caps")
+        val div = _find_first_by_tag(doc, "div")
+        val p = _find_first_by_tag(div, "p")
+        val span = _find_first_by_tag(p, "span")
+        expect(be_dom_get_tag(span)).to_equal("span")
+        expect(be_dom_get_children(p).len()).to_equal(1)
+        expect(be_dom_get_children(div).len()).to_equal(1)
+
+    it "assigns stable node identities and serializes the parsed DOM":
+        val doc = html_tree_builder_build("<button>Go</button><input value='x'>")
+        val button = _find_first_by_tag(doc, "button")
+        val input = _find_first_by_tag(doc, "input")
+
+        expect(button.node_id).to_be_greater_than(0)
+        expect(input.node_id).to_be_greater_than(button.node_id)
+        val generation = DomDocumentGeneration.create(1).unwrap()
+        val index = dom_identity_index_build(doc, generation).unwrap()
+        val button_route = DomNodeRoute(
+            generation: generation, node_id: button.node_id
+        )
+        expect(index.contains_route(button_route)).to_be(true)
+        expect(index.author_id_for_route(button_route)).to_be_nil()
+        val html = be_dom_serialize_html(doc)
+        expect(html).to_contain("<button>Go</button>")
+        expect(html).to_contain("<input value=\"x\">")
+
+    it "does not expose stylesheet text as body content":
+        val doc = html_tree_builder_build(
+            "<html><head><style>#stage { color: red; }</style></head><body><div>Visible</div></body></html>"
+        )
+        val html = be_dom_serialize_html(doc)
+
+        expect(html).to_contain("<div>Visible</div>")
+        expect(html.contains("#stage")).to_equal(false)
+
+describe "DOM serialization work":
+    it "preserves escaping void elements and render-only attributes":
+        var container = BeDomNode.element("div")
+        container.set_attr("id", "ordered")
+        container.set_attr("title", "<&\"")
+        container.set_attr("data-last", "z")
+        container.add_child(BeDomNode.text_node(1, "<&"))
+
+        val container_html = be_dom_serialize_html(container)
+        expect(container_html).to_start_with("<div ")
+        expect(container_html).to_contain(" id=\"ordered\"")
+        expect(container_html).to_contain(
+            " title=\"&lt;&amp;&quot;\""
+        )
+        expect(container_html).to_contain(" data-last=\"z\"")
+        expect(container_html).to_end_with(">&lt;&amp;</div>")
+
+        var image = BeDomNode.element("img")
+        image.set_attr("src", "auth&")
+        image.set_attr("\u0000simple-render-image-src", "render&")
+        image.add_child(BeDomNode.text_node(2, "ignored"))
+
+        expect(be_dom_serialize_html(image)).to_equal(
+            "<img src=\"auth&amp;\">"
+        )
+        expect(be_dom_serialize_html_for_render(image)).to_equal(
+            "<img src=\"render&amp;\">"
+        )
+
+        var poster = BeDomNode.element("video")
+        poster.set_attr("poster", "poster<")
+        poster.set_attr("\u0000simple-render-image-poster", "render<")
+        expect(be_dom_serialize_html(poster)).to_equal(
+            "<video poster=\"poster&lt;\"></video>"
+        )
+        expect(be_dom_serialize_html_for_render(poster)).to_equal(
+            "<video poster=\"render&lt;\"></video>"
+        )
+
+        var styled = BeDomNode.element("div")
+        styled.set_attr("style", "background:url(\"auth\")")
+        styled.set_attr(
+            "\u0000simple-render-image-style", "background:url(\"render\")"
+        )
+        expect(be_dom_serialize_html(styled)).to_equal(
+            "<div style=\"background:url(&quot;auth&quot;)\"></div>"
+        )
+        expect(be_dom_serialize_html_for_render(styled)).to_equal(
+            "<div style=\"background:url(&quot;render&quot;)\"></div>"
+        )
+
+    it "serializes children through the same byte-exact fragment path":
+        var parent = BeDomNode.element("section")
+        var span = BeDomNode.element("span")
+        span.set_attr("id", "first")
+        span.add_child(BeDomNode.text_node(3, "A&B"))
+        var image = BeDomNode.element("img")
+        image.set_attr("src", "icon<")
+        parent.add_child(span)
+        parent.add_child(image)
+
+        expect(be_dom_serialize_children(parent)).to_equal(
+            "<span id=\"first\">A&amp;B</span><img src=\"icon&lt;\">"
+        )
+        expect(be_dom_serialize_children(parent)).to_equal(
+            be_dom_serialize_html(span) + be_dom_serialize_html(image)
+        )
+
+    it "keeps measured fragment work linear from N to two N siblings":
+        val smaller = _be_dom_measure_html_serialization(
+            _flat_serialization_dom(512)
+        )
+        val larger = _be_dom_measure_html_serialization(
+            _flat_serialization_dom(1024)
+        )
+        val old_smaller_work = _old_prefix_copy_work(512)
+        val old_larger_work = _old_prefix_copy_work(1024)
+
+        expect(smaller.failed).to_be(false)
+        expect(larger.failed).to_be(false)
+        expect(smaller.fragment_count).to_equal(3 + 4 * 512)
+        expect(larger.fragment_count).to_equal(3 + 4 * 1024)
+        expect(larger.fragment_count).to_equal(
+            smaller.fragment_count * 2 - 3
+        )
+        expect(smaller.output_length).to_equal(11 + 14 * 512)
+        expect(larger.output_length).to_equal(11 + 14 * 1024)
+        expect(larger.output_length).to_equal(
+            smaller.output_length * 2 - 11
+        )
+        expect(larger.work_units).to_be_less_than(smaller.work_units * 3)
+        expect(old_larger_work).to_be_greater_than(old_smaller_work * 3)
+        expect(larger.work_units).to_be_less_than(old_larger_work)
+
+    it "accepts depth 512 and fails closed at depth 513":
+        val at_limit = _be_dom_measure_html_serialization(
+            _deep_serialization_dom(BE_DOM_HTML_SERIALIZE_MAX_DEPTH - 1)
+        )
+        val overflow = _be_dom_measure_html_serialization(
+            _deep_serialization_dom(BE_DOM_HTML_SERIALIZE_MAX_DEPTH)
+        )
+
+        expect(at_limit.failed).to_be(false)
+        expect(at_limit.fragment_count).to_equal(
+            3 * BE_DOM_HTML_SERIALIZE_MAX_DEPTH
+        )
+        expect(at_limit.fragment_count).to_be_less_than(
+            BE_DOM_HTML_SERIALIZE_MAX_FRAGMENTS + 1
+        )
+        expect(at_limit.output_length).to_equal(
+            11 * BE_DOM_HTML_SERIALIZE_MAX_DEPTH
+        )
+        expect(at_limit.output_length).to_be_less_than(
+            BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH + 1
+        )
+        expect(at_limit.html.len().to_i64()).to_equal(at_limit.output_length)
+        expect(overflow.failed).to_be(true)
+        expect(overflow.html).to_equal("")
+        expect(be_dom_serialize_html(
+            _deep_serialization_dom(BE_DOM_HTML_SERIALIZE_MAX_DEPTH)
+        )).to_equal("")
+
+    it "preflights expanding escapes against the remaining output budget":
+        expect(_be_dom_html_escaped_length_within(
+            "&<>\"'", 24
+        )).to_equal(24)
+        expect(_be_dom_html_escaped_length_within(
+            "&<>\"'", 23
+        )).to_equal(-1)
+        expect(_be_dom_html_escaped_length_within("safe", 4)).to_equal(4)
+
+    it "collects fragments once instead of copying each accumulated prefix":
+        val source = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl"
+        )
+
+        expect(source).to_contain("parts.join(\"\")")
+        expect(source.index_of(
+            "children_html = children_html +"
+        )).to_equal(-1)
+        expect(source.index_of(
+            "attributes_html = attributes_html +"
+        )).to_equal(-1)
+        expect(source.index_of(
+            "out = out + be_dom_serialize_html(child)"
+        )).to_equal(-1)

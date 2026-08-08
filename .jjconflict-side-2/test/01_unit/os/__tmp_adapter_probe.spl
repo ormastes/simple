@@ -1,0 +1,70 @@
+use std.spec.*
+use std.memory_leveling.{
+    MEMORY_DMA_DIRECTION_TO_DEVICE,
+    MEMORY_DMA_DIRECTION_FROM_DEVICE,
+    MEMORY_DMA_DIRECTION_BIDIRECTIONAL,
+    MEMORY_DMA_DIRECTION_NONE,
+}
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_device_adapters.{_device_mapping}
+use os.kernel.memory.memory_leveling_device_adapters.{memory_leveling_device_migration_unavailable}
+
+describe "memory-leveling adapter probe":
+
+    it "probe first registration path":
+        val config = simpleos_memory_leveling_config_default()
+        config.gpu_capacity_bytes = 65536
+        val manager = memory_leveling_manager_new(config)
+        expect(_device_mapping(301, 9, 0x18000, 0x8000, 4096, true) .buffer.owner.task_id).to_equal(9)
+        val gpu = manager.register_gpu_queue(_device_mapping(301, 9, 0x18000, 0x8000, 4096, true))
+        if not gpu.ok:
+            print "probe1 registration failed " + gpu.reason
+            expect(gpu.ok).to_equal(true)
+        val submit = manager.device_submit(301, 9)
+        if not submit.ok:
+            print "probe1 submit failed " + submit.reason + " state " + submit.state
+            expect(submit.ok).to_equal(true)
+        val complete = manager.device_complete(301, 9)
+        if not complete.ok:
+            print "probe1 complete failed " + complete.reason + " state " + complete.state
+            expect(complete.ok).to_equal(true)
+
+    it "probe second NIC buffer path":
+        val config = simpleos_memory_leveling_config_default()
+        config.nic_capacity_bytes = 65536
+        config.nic_reserved_bytes = 0
+        config.nic_low_watermark_bytes = 8192
+        config.nic_high_watermark_bytes = 16384
+        val manager = memory_leveling_manager_new(config)
+        val reg = manager.register_nic_buffer(_device_mapping(401, 10, 0x1A000, 0xA000, 2048, false))
+        if not reg.ok:
+            print "probe2 register failed " + reg.reason + " id " + reg.allocation_id.to_string()
+            expect(reg.ok).to_equal(true)
+        val submit = manager.device_submit(reg.allocation_id, 10)
+        if not submit.ok:
+            print "probe2 submit failed " + submit.reason + " state " + submit.state
+            expect(submit.ok).to_equal(true)
+        val complete = manager.device_complete(reg.allocation_id, 10)
+        if not complete.ok:
+            print "probe2 complete failed " + complete.reason + " state " + complete.state
+            expect(complete.ok).to_equal(true)
+        val unmap = manager.device_unmap(reg.allocation_id, 10)
+        if not unmap.ok:
+            print "probe2 unmap failed " + unmap.reason + " state " + unmap.state
+            expect(unmap.ok).to_equal(true)
+        val release = manager.release(reg.allocation_id, 10)
+        if not release.ok:
+            print "probe2 release failed " + release.reason + " state " + release.state
+            expect(release.ok).to_equal(true)
+        expect(memory_leveling_device_migration_unavailable(reg.allocation_id).reason).to_equal("migration-unavailable")
+
+    it "probe contiguous proof rejection path":
+        val config = simpleos_memory_leveling_config_default()
+        config.nic_capacity_bytes = 65536
+        config.nic_reserved_bytes = 0
+        config.nic_low_watermark_bytes = 8192
+        config.nic_high_watermark_bytes = 16384
+        val manager = memory_leveling_manager_new(config)
+        val reg = manager.register_nic_ring(_device_mapping(402, 10, 0x1A000, 0xA000, 2048, false))
+        print "probe3 reason " + reg.reason
+        expect(reg.ok).to_equal(false)

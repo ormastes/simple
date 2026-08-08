@@ -1,0 +1,60 @@
+"""Pure-Simple owner for the narrow hosted CUDA audio SFFI boundary."""
+
+use std.sffi.dynamic.{DynLib}
+
+extern fn rt_string_data(value: text) -> i64
+
+class SimpleAudioCudaDriver:
+    lib: DynLib?
+    handle: i64
+    module: i64
+
+    static fn create() -> SimpleAudioCudaDriver:
+        val lib = DynLib.load("libsimple_audio_cuda.so")
+        val handle = if lib == nil: 0 else: lib.call0("simple_audio_cuda_open")
+        SimpleAudioCudaDriver(lib: lib, handle: handle, module: 0)
+
+    fn available() -> bool:
+        self.lib != nil and self.handle > 0
+
+    me load(ptx: text) -> bool:
+        if not self.available(): return false
+        self.module = self.lib.call2("simple_audio_cuda_module_load", self.handle, rt_string_data(ptx))
+        self.module > 0
+
+    fn alloc(size: i64) -> i64:
+        if not self.available() or size <= 0: return 0
+        self.lib.call2("simple_audio_cuda_alloc", self.handle, size)
+
+    fn free(ptr: i64):
+        if self.available() and ptr > 0:
+            self.lib.call2("simple_audio_cuda_free", self.handle, ptr)
+
+    fn upload(dst: i64, src: i64, size: i64) -> bool:
+        self.available() and self.lib.call4("simple_audio_cuda_upload", self.handle, dst, src, size) == 0
+
+    fn download(dst: i64, src: i64, size: i64) -> bool:
+        self.available() and self.lib.call4("simple_audio_cuda_download", self.handle, dst, src, size) == 0
+
+    fn launch(name: text, grid_x: i64, block_x: i64, args: i64) -> bool:
+        if not self.available() or self.module <= 0: return false
+        self.lib.call_n("simple_audio_cuda_launch", [self.handle, self.module, rt_string_data(name), grid_x, block_x, args]) == 0
+
+    fn sync() -> bool:
+        self.available() and self.lib.call1("simple_audio_cuda_sync", self.handle) == 0
+
+    fn identity() -> i64:
+        if not self.available(): return 0
+        self.lib.call1("simple_audio_cuda_identity", self.handle)
+
+    me shutdown():
+        if self.lib != nil and self.module > 0:
+            self.lib.call2("simple_audio_cuda_module_unload", self.handle, self.module)
+            self.module = 0
+        if self.lib != nil and self.handle > 0:
+            self.lib.call1("simple_audio_cuda_close", self.handle)
+            self.handle = 0
+        if self.lib != nil:
+            self.lib.close()
+
+export SimpleAudioCudaDriver

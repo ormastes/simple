@@ -1,0 +1,128 @@
+# AArch64 SVE2 Comparison and Select Byte Emitter — Pure Simple
+#
+# Emits 4-byte little-endian instruction words for ARM SVE2 comparison and
+# select operations. All return [i64] of length 4 (LE bytes, byte0=bits[7:0]).
+#
+# Register encoding:
+#   Predicate registers P0-P15 use a 4-bit field (Pd) or 3-bit field (Pg, P0-P7).
+#   Vector registers Z0-Z31 use a 5-bit field (Zn/Zm/Zd).
+#
+# Encoding formula for CMP instructions (vector form):
+#   base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Pd
+#
+# Reference: ARM Architecture Reference Manual, ARMv9-A,
+#            SVE supplement §C7 (SVE/SVE2 instructions).
+#            Opcodes verified with llvm-mc --triple=aarch64 --mattr=+sve.
+
+# ============================================================================
+# Helper — pack a 32-bit word into 4 LE bytes
+# ============================================================================
+
+"""Pack a 32-bit instruction word into a 4-element little-endian [i64] array.
+
+Bit 0 of w goes into index 0 (lowest address), bit 31 into index 3.
+"""
+fn _sve2_cmp_word_to_bytes(w: i64) -> [i64]:
+    [w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF]
+
+# ============================================================================
+# CMPEQ — integer equal (signed/unsigned)
+# ============================================================================
+
+"""Emit CMPEQ Pd.S, Pg/Z, Zn.S, Zm.S — compare equal, .S lanes.
+
+Opcode base: 0x2480A000
+Encoding: base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Pd
+Pg is 3-bit (P0-P7), Pd is 4-bit (P0-P15), Zn/Zm are 5-bit.
+ARMv9-A ARM SVE §C7.2.CMPEQ (vectors).
+"""
+fn emit_cmpeq_s(pd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x2480A000 | (zm << 16) | (pg << 10) | (zn << 5) | pd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# CMPGT — integer greater-than (signed)
+# ============================================================================
+
+"""Emit CMPGT Pd.S, Pg/Z, Zn.S, Zm.S — compare signed greater-than, .S lanes.
+
+Opcode base: 0x24808010
+Encoding: base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.CMPGT (vectors).
+"""
+fn emit_cmpgt_s(pd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x24808010 | (zm << 16) | (pg << 10) | (zn << 5) | pd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# CMPGE — integer greater-or-equal (signed)
+# ============================================================================
+
+"""Emit CMPGE Pd.S, Pg/Z, Zn.S, Zm.S — compare signed greater-or-equal, .S lanes.
+
+Opcode base: 0x24808000
+Encoding: base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.CMPGE (vectors).
+"""
+fn emit_cmpge_s(pd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x24808000 | (zm << 16) | (pg << 10) | (zn << 5) | pd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# CMPHI — integer higher (unsigned greater-than)
+# ============================================================================
+
+"""Emit CMPHI Pd.S, Pg/Z, Zn.S, Zm.S — compare unsigned higher, .S lanes.
+
+Opcode base: 0x24800010
+Encoding: base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.CMPHI (vectors).
+"""
+fn emit_cmphi_s(pd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x24800010 | (zm << 16) | (pg << 10) | (zn << 5) | pd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# CMPLO — integer lower (unsigned less-than; alias of CMPHI with swapped Zn/Zm)
+# ============================================================================
+
+"""Emit CMPLO Pd.S, Pg/Z, Zn.S, Zm.S — compare unsigned lower, .S lanes.
+
+CMPLO is an assembler alias of CMPHI with Zn and Zm swapped.
+Opcode base: 0x24800010 (same as CMPHI)
+Encoding: base | (Zn << 16) | (Pg << 10) | (Zm << 5) | Pd  (note swap)
+ARMv9-A ARM SVE §C7.2.CMPLO (alias of CMPHI).
+"""
+fn emit_cmplo_s(pd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x24800010 | (zn << 16) | (pg << 10) | (zm << 5) | pd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# SEL — select vector elements under predicate
+# ============================================================================
+
+"""Emit SEL Zd.S, Pg, Zn.S, Zm.S — select elements by predicate, .S lanes.
+
+Opcode base: 0x05A0C000
+Encoding: base | (Zm << 16) | (Pg << 10) | (Zn << 5) | Zd
+Pg is 4-bit (P0-P15), Zd/Zn/Zm are 5-bit.
+ARMv9-A ARM SVE §C7.2.SEL (vectors).
+"""
+fn emit_sel_z_s(zd: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    var w = 0x05A0C000 | (zm << 16) | (pg << 10) | (zn << 5) | zd
+    _sve2_cmp_word_to_bytes(w)
+
+# ============================================================================
+# COMPACT — compact active elements into a contiguous vector
+# ============================================================================
+
+"""Emit COMPACT Zd.S, Pg, Zn.S — compact active elements, .S lanes.
+
+Opcode base: 0x05A18000
+Encoding: base | (Pg << 10) | (Zn << 5) | Zd
+Pg is 3-bit (P0-P7), Zd/Zn are 5-bit. No Zm operand.
+ARMv9-A ARM SVE §C7.2.COMPACT.
+"""
+fn emit_compact_s(zd: i64, pg: i64, zn: i64) -> [i64]:
+    var w = 0x05A18000 | (pg << 10) | (zn << 5) | zd
+    _sve2_cmp_word_to_bytes(w)

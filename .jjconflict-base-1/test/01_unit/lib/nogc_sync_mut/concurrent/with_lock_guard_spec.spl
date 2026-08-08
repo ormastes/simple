@@ -1,0 +1,159 @@
+"""
+# Guard-pattern locking specs (SF4)
+
+with_lock / with_read / with_write: closure-based guard — lock is released by
+construction when the body returns. Release is proven by a subsequent
+try_lock/with_lock succeeding.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock, mutex_try_lock, mutex_unlock}
+use std.nogc_sync_mut.concurrent.rwlock.{RwLock, rwlock_new, rwlock_with_read, rwlock_with_write}
+
+describe "mutex with_lock guard":
+    it "runs the body on the protected value and stores the result":
+        val m = mutex_new(7)
+        val out = mutex_with_lock(m, \v: v + 3)
+        expect(out).to_equal(10)
+
+    it "releases the lock after the body (second lock attempt succeeds)":
+        val m = mutex_new(1)
+        mutex_with_lock(m, \v: v + 1)
+        # try_lock returns nil when held; a value when free.
+        val probe = mutex_try_lock(m)
+        expect(probe).to_equal(2)
+        expect(mutex_unlock(m, 2)).to_equal(1)
+
+    it "supports consecutive with_lock calls (release is real, not one-shot)":
+        val m = mutex_new(0)
+        mutex_with_lock(m, \v: v + 1)
+        mutex_with_lock(m, \v: v + 1)
+        val final = mutex_with_lock(m, \v: v + 1)
+        expect(final).to_equal(3)
+
+    it "method form with_lock works on the Mutex receiver":
+        val m = mutex_new(5)
+        val out = m.with_lock(\v: v * 2)
+        expect(out).to_equal(10)
+        expect(mutex_with_lock(m, \v: v)).to_equal(10)
+
+describe "mutex with_lock nesting":
+    it "two distinct mutexes can nest without deadlock":
+        val outer = mutex_new(100)
+        val inner = mutex_new(10)
+        val got = mutex_with_lock(outer, \a: a + mutex_with_lock(inner, \b: b + 1))
+        expect(got).to_equal(111)
+        # Both released afterwards.
+        expect(mutex_with_lock(outer, \v: v)).to_equal(111)
+        expect(mutex_with_lock(inner, \v: v)).to_equal(11)
+
+describe "rwlock guard pattern":
+    it "with_read passes a snapshot and returns the body result":
+        val rw = rwlock_new(42)
+        val doubled = rwlock_with_read(rw, \v: v * 2)
+        expect(doubled).to_equal(84)
+        # Snapshot semantics: the protected value is unchanged.
+        expect(rwlock_with_read(rw, \v: v)).to_equal(42)
+
+    it "reads are shared: consecutive reads need no unlock in between":
+        val rw = rwlock_new(9)
+        val a = rwlock_with_read(rw, \v: v)
+        val b = rwlock_with_read(rw, \v: v)
+        expect(a).to_equal(9)
+        expect(b).to_equal(9)
+
+    it "with_write does an exclusive read-modify-write and releases the gate":
+        val rw = rwlock_new(10)
+        val updated = rwlock_with_write(rw, \v: v + 5)
+        expect(updated).to_equal(15)
+        # Gate released: a second with_write succeeds and sees the new value.
+        expect(rwlock_with_write(rw, \v: v + 5)).to_equal(20)
+        # Readers observe the committed value.
+        expect(rwlock_with_read(rw, \v: v)).to_equal(20)
+
+    it "method forms with_read/with_write work on the RwLock receiver":
+        val rw = rwlock_new(3)
+        expect(rw.with_write(\v: v * 3)).to_equal(9)
+        expect(rw.with_read(\v: v + 1)).to_equal(10)
+
+describe "with_lock body result is the stored value":
+    it "identity body leaves the protected value untouched":
+        val m = mutex_new(64)
+        expect(mutex_with_lock(m, \v: v)).to_equal(64)
+        expect(mutex_with_lock(m, \v: v)).to_equal(64)
+
+describe "generic guard round-trip proves no Any-typed value loss":
+    # These are the tests that would have caught the retracted Any-typed
+    # with_lock, which silently wrote nil back on every call (see
+    # doc/08_tracking/bug/any_typed_closure_param_destroys_value_2026-07-28.md).
+    # A round-trip through with_lock must return the SAME value put in, not
+    # nil, and a SECOND call must see what the FIRST call stored.
+    #
+    # Uses i64 and f64 (not text) to prove the guard is generic over T and not
+    # hardcoded to i64: text specifically hits a SEPARATE, pre-existing,
+    # lower-layer bug unrelated to this guard rewrite — see the dedicated
+    # "text values" describe block below for that gap, filed as
+    # doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md.
+
+    it "mutex with_lock round-trips an i64 value unchanged":
+        val m = mutex_new(41)
+        val out = mutex_with_lock(m, \v: v)
+        expect(out).to_equal(41)
+
+    it "mutex with_lock round-trips an f64 value unchanged":
+        val m = mutex_new(4.5)
+        val out = mutex_with_lock(m, \v: v)
+        expect(out).to_equal(4.5)
+
+    it "mutex with_lock: a second call observes what the first call stored":
+        val m = mutex_new(1.0)
+        mutex_with_lock(m, \v: 2.0)
+        val seen = mutex_with_lock(m, \v: v)
+        expect(seen).to_equal(2.0)
+
+    it "mutex method with_lock round-trips f64 and chains stores":
+        val m = mutex_new(1.5)
+        expect(m.with_lock(\v: v)).to_equal(1.5)
+        m.with_lock(\v: 2.5)
+        expect(m.with_lock(\v: v)).to_equal(2.5)
+
+    it "rwlock with_write round-trips an f64 value unchanged":
+        val rw = rwlock_new(9.5)
+        val out = rwlock_with_write(rw, \v: v)
+        expect(out).to_equal(9.5)
+
+    it "rwlock with_write: a second write/read observes what the first stored":
+        val rw = rwlock_new(1.0)
+        rwlock_with_write(rw, \v: 2.0)
+        val seen = rwlock_with_read(rw, \v: v)
+        expect(seen).to_equal(2.0)
+
+    it "rwlock method with_write/with_read round-trip f64 and chain stores":
+        val rw = rwlock_new(1.0)
+        expect(rw.with_read(\v: v)).to_equal(1.0)
+        rw.with_write(\v: 9.0)
+        expect(rw.with_read(\v: v)).to_equal(9.0)
+
+describe "text values through the guard (KNOWN BROKEN, not by this lane)":
+    # NOT caused by with_lock/with_read/with_write, and NOT fixed by making
+    # them generic over T: reproduces identically with the raw, unguarded
+    # extern-level mutex_lock/mutex_unlock, i.e. it is a bug in the runtime
+    # bridge underneath the guard, not in the guard API. The interpreter's
+    # default `PureStd` concurrent backend nulls every `text` value crossing
+    # rt_mutex_new/rt_mutex_lock/rt_mutex_unlock (and the rwlock equivalents)
+    # -- see interpreter_extern/atomic.rs value_to_runtime's
+    # `Value::Str(s) => RuntimeValue::NIL`. Verified fix direction (not
+    # applied here: switching backend is a process-wide side effect out of
+    # scope for this guard-API rewrite): the `Native` concurrent backend
+    # stores the Value directly and round-trips text correctly.
+    # Full writeup:
+    # doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
+    it "mutex with_lock round-trips a text value unchanged":
+        val m = mutex_new("hello")
+        val out = mutex_with_lock(m, \v: v)
+        expect(out).to_equal("hello")
+
+    it "rwlock with_write round-trips a text value unchanged":
+        val rw = rwlock_new("start")
+        val out = rwlock_with_write(rw, \v: v)
+        expect(out).to_equal("start")

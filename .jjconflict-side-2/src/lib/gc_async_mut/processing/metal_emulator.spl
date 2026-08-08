@@ -1,0 +1,66 @@
+"""Typed host-independent Metal artifact emulator; never native GPU evidence."""
+
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_cpu_execute, processing_ir_validate}
+use std.common.processing.backend_contract.{ProcessingBackendTarget, ProcessingBackendArtifact, processing_backend_artifact_validate}
+use std.gc_async_mut.processing.metal_msl_backend.{processing_metal_generate_artifact}
+
+val PROCESSING_METAL_EMULATOR_EVIDENCE_CLASS: text = "emulator"
+
+struct ProcessingMetalEmulatorEnvironment:
+    evidence_class: text
+    runtime_library: text
+    hal_owner: text
+    device_identity: text
+    compiler_validator: text
+    memory_capabilities: text
+    ready: bool
+    reason: text
+
+struct ProcessingMetalEmulatorReceipt:
+    evidence_class: text
+    uploaded: bool
+    submitted: bool
+    downloaded: bool
+    native_device: bool
+    bindings_valid: bool
+    dispatch_count: i64
+    values: [u32]
+    reason: text
+
+fn processing_metal_emulator_environment() -> ProcessingMetalEmulatorEnvironment:
+    ProcessingMetalEmulatorEnvironment(evidence_class: PROCESSING_METAL_EMULATOR_EVIDENCE_CLASS,
+        runtime_library: "pure-simple-in-process", hal_owner: "std.gc_async_mut.processing.metal_emulator",
+        device_identity: "simple-metal-emulator-v1", compiler_validator: "deterministic-msl-source-contract-v1",
+        memory_capabilities: "host-u32-upload-download;no-shared-device-memory", ready: true, reason: "ok")
+
+fn _metal_emulator_reject(reason: text, dispatch_count: i64) -> ProcessingMetalEmulatorReceipt:
+    ProcessingMetalEmulatorReceipt(evidence_class: PROCESSING_METAL_EMULATOR_EVIDENCE_CLASS,
+        uploaded: false, submitted: false, downloaded: false, native_device: false,
+        bindings_valid: false, dispatch_count: dispatch_count, values: [], reason: reason)
+
+fn processing_metal_emulate(ir: ProcessingIr, artifact: ProcessingBackendArtifact,
+        upload: [u32], output_binding: i64, unused_binding: i64, params_binding: i64,
+        grid_x: i64, grid_y: i64, prior_dispatch_count: i64) -> ProcessingMetalEmulatorReceipt:
+    val validation = processing_ir_validate(ir)
+    if not validation.valid: return _metal_emulator_reject(validation.reason, prior_dispatch_count)
+    if artifact.target != ProcessingBackendTarget.MetalMsl: return _metal_emulator_reject("metal-emulator-target-mismatch", prior_dispatch_count)
+    val artifact_reason = processing_backend_artifact_validate(ir, artifact)
+    if artifact_reason != "ok": return _metal_emulator_reject(artifact_reason, prior_dispatch_count)
+    val canonical = processing_metal_generate_artifact(ir)
+    if artifact.source != canonical.source: return _metal_emulator_reject("metal-emulator-source-mismatch", prior_dispatch_count)
+    if artifact.entry_point != canonical.entry_point: return _metal_emulator_reject("metal-emulator-entry-mismatch", prior_dispatch_count)
+    if output_binding != 0 or unused_binding != 1 or params_binding != 2: return _metal_emulator_reject("metal-emulator-binding-mismatch", prior_dispatch_count)
+    if upload.len().to_i64() != ir.element_count: return _metal_emulator_reject("metal-emulator-upload-size-mismatch", prior_dispatch_count)
+    if grid_x <= 0 or grid_y <= 0: return _metal_emulator_reject("metal-emulator-invalid-dispatch", prior_dispatch_count)
+    val required_x = if ir.height > 1: ir.stride else: ir.element_count
+    val required_y = if ir.height > 1: ir.height else: 1
+    if grid_x < required_x or grid_y < required_y: return _metal_emulator_reject("metal-emulator-dispatch-undercoverage", prior_dispatch_count)
+    val output = processing_ir_cpu_execute(ir)
+    if output.len().to_i64() != ir.element_count: return _metal_emulator_reject("metal-emulator-download-size-mismatch", prior_dispatch_count)
+    ProcessingMetalEmulatorReceipt(evidence_class: PROCESSING_METAL_EMULATOR_EVIDENCE_CLASS,
+        uploaded: true, submitted: true, downloaded: true, native_device: false,
+        bindings_valid: true, dispatch_count: prior_dispatch_count + 1, values: output, reason: "ok")
+
+export PROCESSING_METAL_EMULATOR_EVIDENCE_CLASS
+export ProcessingMetalEmulatorEnvironment, ProcessingMetalEmulatorReceipt
+export processing_metal_emulator_environment, processing_metal_emulate

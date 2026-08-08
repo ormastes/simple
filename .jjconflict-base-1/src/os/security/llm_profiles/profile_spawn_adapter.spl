@@ -1,0 +1,142 @@
+# LLM Profile -> Spawn Rights Adapter (Production Harden, lane INT-3)
+#
+# Bridges two deliverables that do not otherwise talk to each other:
+#   - src/os/security/llm_profiles/profile_registry.spl — resolves an
+#     `LlmProfile` (policy layer, LLM_RIGHT_* i64 bitmask) via `resolve_effective`.
+#   - src/os/kernel/loader/spawn_authority.spl — computes spawn-time capability
+#     rights (kernel layer, CAP_RIGHT_* u32 bitmask, see capability_types.spl)
+#     as an intersection of parent/executable/system ceilings.
+#
+# Master plan §5.4 + §17: an LLM process's spawn-time capabilities must be its
+# PROFILE's effective rights INTERSECTED with the parent's delegable rights and
+# the executable ceiling — deny always wins, never amplified. This module is
+# the pure adapter that makes that intersection possible: it maps the resolved
+# profile into the spawn rights space, then reuses `spawn_rights_is_subset`
+# (spawn_authority.spl) to intersect and to prove the result never amplifies.
+#
+# This module does NOT modify profile_registry.spl or spawn_authority.spl (read
+# only, imported), and does NOT wire into cspace_spawn.spl / the real spawn
+# syscall path — that is the next increment (see
+# .spipe/simpleos_harden_int3_llm_spawn/state.md). No `extern fn` here: every
+# function is a pure computation over plain structs/scalars.
+#
+# ============================================================================
+# The mapping — LLM_RIGHT_* (policy, i64) -> CAP_RIGHT_* (spawn, u32)
+# ============================================================================
+#
+# CAP_RIGHT_* (capability_types.spl) is a generic KERNEL object-capability
+# rights space (READ/WRITE/EXEC/ADMIN/MOUNT/QUEUE_SUBMIT/MAP/DATASET_BUILD/
+# QUEUE_RECV) shared by file/block/storage/mount/queue capabilities. LLM_RIGHT_*
+# (profile_registry.spl) is a PRODUCT-POLICY space describing what an LLM CLI
+# session may do (filesystem, network, spawn, secrets, UI, device, model
+# access). The two spaces are not isomorphic — most LLM_RIGHT_* bits describe a
+# policy dimension that has no single kernel capability-rights bit backing it.
+#
+# Per the task's fail-closed instruction, the mapping below is conservative and
+# EXPLICIT: only a bit with a genuine, defensible kernel-capability analogue is
+# mapped; every other LLM_RIGHT_* bit maps to NO spawn right (0), never to a
+# nearby-but-wrong bit that would let an unrelated resource capability quietly
+# carry policy authority it was never meant to.
+#
+#   LLM_RIGHT_FS_READ       (1)   -> CAP_RIGHT_READ    (1)   direct match
+#   LLM_RIGHT_FS_WRITE      (2)   -> CAP_RIGHT_WRITE   (2)   direct match
+#   LLM_RIGHT_FS_EXEC       (4)   -> CAP_RIGHT_EXEC    (4)   direct match
+#   LLM_RIGHT_NET           (8)   -> NONE (0)                 no kernel CAP_RIGHT
+#                                                              bit models network
+#                                                              I/O; it is mediated
+#                                                              by a higher-layer
+#                                                              socket/proxy object
+#                                                              not present in
+#                                                              capability_types.spl
+#   LLM_RIGHT_PROCESS_SPAWN (16)  -> NONE (0)                 spawn authority is
+#                                                              governed by the
+#                                                              separate
+#                                                              spawn_authority /
+#                                                              cspace_spawn gate
+#                                                              machinery, not by a
+#                                                              CAP_RIGHT bit on an
+#                                                              unrelated resource
+#   LLM_RIGHT_SECRETS       (32)  -> NONE (0)                 no kernel CAP_RIGHT
+#                                                              bit for a secrets
+#                                                              store
+#   LLM_RIGHT_UI_CLIPBOARD  (64)  -> NONE (0)                 no kernel CAP_RIGHT
+#                                                              bit for UI clipboard
+#   LLM_RIGHT_UI_SCREENSHOT (128) -> NONE (0)                 no kernel CAP_RIGHT
+#                                                              bit for UI capture
+#   LLM_RIGHT_DEVICE        (256) -> CAP_RIGHT_MAP (64)        device access needs
+#                                                              MMIO/device-memory
+#                                                              mapping rights — the
+#                                                              closest kernel
+#                                                              capability analogue
+#   LLM_RIGHT_MODEL_ACCESS  (512) -> NONE (0)                 model access is a
+#                                                              product-policy
+#                                                              concept with no
+#                                                              kernel object right
+#
+# Unmapped bits deliberately fall through to 0 (fail-closed): an unknown or
+# unmapped LLM right can NEVER contribute a spawn right, by construction (no
+# `else` branch ever sets a bit — the accumulator starts at 0 and only known
+# `if`s add to it).
+
+use os.security.llm_profiles.profile_registry.{LlmProfile, has_right,
+    LLM_RIGHT_FS_READ, LLM_RIGHT_FS_WRITE, LLM_RIGHT_FS_EXEC, LLM_RIGHT_DEVICE}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC, CAP_RIGHT_MAP}
+use os.kernel.loader.spawn_authority.{spawn_rights_is_subset, spawn_effective_rights_with_profile}
+
+# ============================================================================
+# Profile -> spawn rights space
+# ============================================================================
+
+pub fn llm_profile_to_spawn_rights(profile: LlmProfile) -> u32:
+    """Map a resolved `LlmProfile`'s rights bitmask into the spawn (CAP_RIGHT_*)
+    rights space per the table above. Fail-closed: only the four explicitly
+    mapped LLM_RIGHT_* bits ever contribute a spawn right; every other bit
+    (NET, PROCESS_SPAWN, SECRETS, UI_CLIPBOARD, UI_SCREENSHOT, MODEL_ACCESS, and
+    any future/unknown bit) contributes nothing."""
+    var out: u32 = 0u32
+    if has_right(profile.rights, LLM_RIGHT_FS_READ):
+        out = out | CAP_RIGHT_READ
+    if has_right(profile.rights, LLM_RIGHT_FS_WRITE):
+        out = out | CAP_RIGHT_WRITE
+    if has_right(profile.rights, LLM_RIGHT_FS_EXEC):
+        out = out | CAP_RIGHT_EXEC
+    if has_right(profile.rights, LLM_RIGHT_DEVICE):
+        out = out | CAP_RIGHT_MAP
+    out
+
+# ============================================================================
+# Final spawn-time effective rights — triple attenuation, intersection only
+# ============================================================================
+
+pub fn llm_spawn_effective_rights(profile: LlmProfile, parent_delegable: u32, executable_ceiling: u32) -> u32:
+    """The final spawn-time effective rights for an LLM-driven spawn:
+
+        effective = llm_profile_to_spawn_rights(profile)
+                  & parent_delegable
+                  & executable_ceiling
+
+    Pure intersection — deny-by-omission. A right absent from ANY of the three
+    inputs (the profile's own mapped rights, what the parent is willing to
+    delegate, or what the executable's policy ceiling allows) is absent from
+    the result. There is no union step anywhere in this function, so the
+    result can never exceed any one of the three inputs.
+
+    Since the P8×P2 meet-point landed, this routes through the SINGLE meet
+    function `spawn_authority.spawn_effective_rights_with_profile` (same triple
+    intersection, one provable definition) with the profile mask supplied by
+    `llm_profile_to_spawn_rights` — unmapped bits already resolved to 0 there
+    (fail closed)."""
+    val profile_spawn_rights = llm_profile_to_spawn_rights(profile)
+    spawn_effective_rights_with_profile(parent_delegable, executable_ceiling, profile_spawn_rights)
+
+pub fn llm_spawn_rights_triple_attenuated(profile: LlmProfile, parent_delegable: u32, executable_ceiling: u32) -> bool:
+    """Invariant oracle: the rights `llm_spawn_effective_rights` computes are
+    simultaneously a subset of the profile's own mapped rights, of
+    `parent_delegable`, and of `executable_ceiling` — reusing
+    `spawn_rights_is_subset` (spawn_authority.spl) as the attenuation check, the
+    same oracle the kernel-layer spawn contract spec uses."""
+    val effective = llm_spawn_effective_rights(profile, parent_delegable, executable_ceiling)
+    val profile_spawn_rights = llm_profile_to_spawn_rights(profile)
+    (spawn_rights_is_subset(effective, profile_spawn_rights)
+        and spawn_rights_is_subset(effective, parent_delegable)
+        and spawn_rights_is_subset(effective, executable_ceiling))

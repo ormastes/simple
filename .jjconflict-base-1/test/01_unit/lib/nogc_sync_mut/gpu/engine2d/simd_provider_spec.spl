@@ -1,0 +1,150 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/simd_provider.spl 90%
+# @tag: unit, gpu, engine2d, simd_provider, render_perf
+#
+# F5 — simd_provider registration/accounting functional coverage.
+# Covers the module-level hit-count accumulator (record_simd_*_hit,
+# reset_simd_hits, simd_hit_counts, make_simd_hit_counts_zero), the
+# provider registry singleton (register_simd_provider,
+# has_registered_provider, registered_provider_name), and the
+# SimdProvider trait's target_features() via the real CpuSimdProvider
+# implementation in simd_kernels.spl (the trait itself has no
+# free-standing function to call).
+#
+# NOTE: register_simd_provider / reset_simd_hits touch module-level
+# singleton state shared across this whole process — each `it` resets
+# state it depends on rather than assuming ordering, but the "no
+# provider registered" case must run before any registration happens
+# in this process, so it is asserted first via a fresh reset path
+# that only clears hit counters (there is no unregister API — this
+# module never provides one, which is itself the reason the "absent"
+# case is checked first, before F5 registers anything).
+
+use std.spec
+use std.nogc_sync_mut.gpu.engine2d.simd_provider.{
+    reset_simd_hits,
+    simd_hit_counts,
+    make_simd_hit_counts_zero,
+    record_simd_fill_hit,
+    record_simd_copy_hit,
+    record_simd_alpha_hit,
+    record_simd_blit_hit,
+    record_simd_scroll_hit,
+    record_simd_vectorize_change,
+    register_simd_provider,
+    has_registered_provider,
+    registered_provider_name,
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{make_cpu_simd_provider}
+
+describe "simd_provider — registry (absent state, checked before any registration in this process)":
+    it "no provider registered reports absent with empty name":
+        assert_false(has_registered_provider())
+        assert_equal(registered_provider_name(), "")
+
+describe "simd_provider — registry (after registration)":
+    it "register then query returns name and true":
+        register_simd_provider("cpu-simd-v1")
+        assert_true(has_registered_provider())
+        assert_equal(registered_provider_name(), "cpu-simd-v1")
+
+    it "re-registering overwrites the previous name":
+        register_simd_provider("cpu-simd-v2")
+        assert_true(has_registered_provider())
+        assert_equal(registered_provider_name(), "cpu-simd-v2")
+
+describe "simd_provider — hit-count accumulator":
+    it "reset zeroes all counters":
+        record_simd_fill_hit()
+        record_simd_copy_hit()
+        reset_simd_hits()
+        val c = simd_hit_counts()
+        assert_equal(c.fill_hits, 0)
+        assert_equal(c.copy_hits, 0)
+        assert_equal(c.alpha_hits, 0)
+        assert_equal(c.blit_hits, 0)
+        assert_equal(c.scroll_hits, 0)
+        assert_equal(c.vectorize_changes, 0)
+
+    it "each record_*_hit increments exactly its counter":
+        reset_simd_hits()
+        record_simd_fill_hit()
+        val after_fill = simd_hit_counts()
+        assert_equal(after_fill.fill_hits, 1)
+        assert_equal(after_fill.copy_hits, 0)
+        assert_equal(after_fill.alpha_hits, 0)
+        assert_equal(after_fill.blit_hits, 0)
+        assert_equal(after_fill.scroll_hits, 0)
+
+        record_simd_copy_hit()
+        val after_copy = simd_hit_counts()
+        assert_equal(after_copy.fill_hits, 1)
+        assert_equal(after_copy.copy_hits, 1)
+        assert_equal(after_copy.alpha_hits, 0)
+
+        record_simd_alpha_hit()
+        val after_alpha = simd_hit_counts()
+        assert_equal(after_alpha.alpha_hits, 1)
+        assert_equal(after_alpha.blit_hits, 0)
+
+        record_simd_blit_hit()
+        val after_blit = simd_hit_counts()
+        assert_equal(after_blit.blit_hits, 1)
+        assert_equal(after_blit.scroll_hits, 0)
+
+        record_simd_scroll_hit()
+        val after_scroll = simd_hit_counts()
+        assert_equal(after_scroll.scroll_hits, 1)
+        # None of the other counters moved from the prior single-hit
+        # values, confirming no cross-wiring between counters.
+        assert_equal(after_scroll.fill_hits, 1)
+        assert_equal(after_scroll.copy_hits, 1)
+        assert_equal(after_scroll.alpha_hits, 1)
+        assert_equal(after_scroll.blit_hits, 1)
+
+    it "repeated record_simd_fill_hit calls accumulate, not saturate":
+        reset_simd_hits()
+        record_simd_fill_hit()
+        record_simd_fill_hit()
+        record_simd_fill_hit()
+        assert_equal(simd_hit_counts().fill_hits, 3)
+
+    it "vectorize_change events are counted separately from hits":
+        reset_simd_hits()
+        record_simd_fill_hit()
+        record_simd_vectorize_change()
+        record_simd_vectorize_change()
+        val c = simd_hit_counts()
+        assert_equal(c.fill_hits, 1)
+        assert_equal(c.vectorize_changes, 2)
+
+    it "make_simd_hit_counts_zero constructs an all-zero snapshot independent of module state":
+        reset_simd_hits()
+        record_simd_fill_hit()
+        record_simd_vectorize_change()
+        val zero = make_simd_hit_counts_zero()
+        assert_equal(zero.fill_hits, 0)
+        assert_equal(zero.copy_hits, 0)
+        assert_equal(zero.alpha_hits, 0)
+        assert_equal(zero.blit_hits, 0)
+        assert_equal(zero.scroll_hits, 0)
+        assert_equal(zero.vectorize_changes, 0)
+        # And it did not disturb the live singleton counters.
+        val live = simd_hit_counts()
+        assert_equal(live.fill_hits, 1)
+        assert_equal(live.vectorize_changes, 1)
+
+describe "simd_provider — SimdProvider trait dispatch (via CpuSimdProvider)":
+    it "target_features() returns a non-empty feature list from the real provider":
+        val provider = make_cpu_simd_provider()
+        val feats = provider.target_features()
+        assert_true(feats.len() > 0)
+
+    it "hit_counts() on the trait reflects the same module-level singleton as simd_hit_counts()":
+        reset_simd_hits()
+        record_simd_copy_hit()
+        record_simd_copy_hit()
+        val provider = make_cpu_simd_provider()
+        val via_trait = provider.hit_counts()
+        val via_module = simd_hit_counts()
+        assert_equal(via_trait.copy_hits, via_module.copy_hits)
+        assert_equal(via_trait.copy_hits, 2)

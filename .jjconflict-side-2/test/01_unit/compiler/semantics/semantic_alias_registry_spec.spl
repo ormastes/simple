@@ -1,0 +1,131 @@
+# Semantic Alias Registry Specification (lane ALS1)
+#
+# Verifies src/compiler/35.semantics/lint/semantic_api/alias_registry.spl:
+# closes the FAIL-OPEN alias hook in type_walk.spl now that lane TAL1
+# (commit 5df3b3f5b40) captures real `type X = Y` declarations into
+# module.type_aliases: Dict<text, ParserTypeAlias>.
+#
+# (a) alias to a rule-violating type -> the MC-API rule fires THROUGH the
+#     alias, (b) alias to a clean type -> silent, (c) alias-of-alias
+#     resolves, (d) alias cycle -> loud error / safe bail, never a hang.
+
+use std.spec.*
+use compiler.semantics.lint.semantic_api.alias_registry.{
+    type_to_text, alias_registry_clear, alias_registry_populate, alias_registry_resolve
+}
+use compiler.semantics.lint.semantic_api.type_walk.{semantic_api_primitive_leaves, semantic_api_resolve_alias}
+use compiler.semantics.lint.semantic_api.checker.{check_fn_signature}
+use compiler.frontend.parser_types.{ParserTypeAlias}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+
+fn _zspan() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+
+fn _named_type(name: text, args: [Type]) -> Type:
+    Type(kind: TypeKind.Named(name, args), span: _zspan())
+
+fn _alias(name: text, aliased: Type) -> ParserTypeAlias:
+    ParserTypeAlias(
+        name: name,
+        type_params: [],
+        type_: aliased,
+        visibility: Visibility.Private,
+        is_public: false,
+        span: _zspan()
+    )
+
+describe "semantic alias registry (lane ALS1)":
+    context "type_to_text rendering":
+        it "renders a bare named type":
+            alias_registry_clear()
+            expect(type_to_text(_named_type("i64", []))).to_equal("i64")
+
+        it "renders a generic named type":
+            alias_registry_clear()
+            val opt_i32 = _named_type("Option", [_named_type("i32", [])])
+            expect(type_to_text(opt_i32)).to_equal("Option<i32>")
+
+    context "(a) alias to a rule-violating type fires through the alias":
+        it "flags a primitive reached only via an alias name":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "Fd": _alias("Fd", _named_type("i64", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(semantic_api_resolve_alias("Fd")).to_equal("i64")
+            expect(semantic_api_primitive_leaves("Fd").len()).to_equal(1)
+            expect(semantic_api_primitive_leaves("Fd")[0]).to_equal("i64")
+
+        it "fires through check_fn_signature for an aliased param type":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "Fd": _alias("Fd", _named_type("i64", []))
+            }
+            alias_registry_populate(type_aliases)
+            val vs = check_fn_signature("read", ["fd: Fd"], "", false)
+            expect(vs.len()).to_equal(1)
+            expect(vs[0].code).to_equal("MC-API-001")
+            expect(vs[0].leaf).to_equal("i64")
+
+    context "(b) alias to a clean type stays silent":
+        it "does not flag an alias to a domain/struct type":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "UserId": _alias("UserId", _named_type("Identity", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(semantic_api_primitive_leaves("UserId").len()).to_equal(0)
+            val vs = check_fn_signature("lookup", ["id: UserId"], "", false)
+            expect(vs.len()).to_equal(0)
+
+    context "(c) alias-of-alias resolves":
+        it "chases a two-level alias chain down to the primitive leaf":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "Fd": _alias("Fd", _named_type("i64", [])),
+                "Handle": _alias("Handle", _named_type("Fd", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(semantic_api_resolve_alias("Handle")).to_equal("i64")
+            expect(semantic_api_primitive_leaves("Handle").len()).to_equal(1)
+            expect(semantic_api_primitive_leaves("Handle")[0]).to_equal("i64")
+
+        it "chases a three-level alias chain":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "A": _alias("A", _named_type("B", [])),
+                "B": _alias("B", _named_type("C", [])),
+                "C": _alias("C", _named_type("f64", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(semantic_api_resolve_alias("A")).to_equal("f64")
+            expect(semantic_api_primitive_leaves("A").len()).to_equal(1)
+
+    context "(d) alias cycle bails safely, never hangs":
+        it "bails on a direct self-alias (type A = A)":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "A": _alias("A", _named_type("A", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(alias_registry_resolve("A")).to_equal("")
+            expect(semantic_api_primitive_leaves("A").len()).to_equal(0)
+
+        it "bails on a mutual two-alias cycle (type A = B, type B = A)":
+            alias_registry_clear()
+            val type_aliases: Dict<text, ParserTypeAlias> = {
+                "A": _alias("A", _named_type("B", [])),
+                "B": _alias("B", _named_type("A", []))
+            }
+            alias_registry_populate(type_aliases)
+            expect(alias_registry_resolve("A")).to_equal("")
+            expect(alias_registry_resolve("B")).to_equal("")
+            expect(semantic_api_primitive_leaves("A").len()).to_equal(0)
+
+    context "unknown names remain fail-open":
+        it "returns empty for a name the registry never saw":
+            alias_registry_clear()
+            expect(alias_registry_resolve("NeverDeclared")).to_equal("")
+            expect(semantic_api_resolve_alias("NeverDeclared")).to_equal("")

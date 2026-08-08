@@ -1,0 +1,215 @@
+# @tag: gpu, engine2d, metal, macos, contract
+# Host-neutral source contract. It does not claim that Metal ran on Linux.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read}
+
+describe "Metal macOS host resume contract":
+
+    it "keeps every prepared-host script and test path present and listed":
+        val plan = file_read("doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md")
+        val paths = [
+            "scripts/check/check-portable-compute-toolchains.shs",
+            "scripts/check/check-metal-generated-2d-readback.shs",
+            "scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs",
+            "scripts/check/check-engine2d-cpu-metal-parity-evidence.shs",
+            "scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs",
+            "scripts/check/check-macos-gpu-2d-live-evidence.shs",
+            "test/02_integration/rendering/macos_metal_msl_library_micro_diagnostic.spl",
+            "test/03_system/gpu/metal_backend_mac_host_spec.spl",
+            "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl",
+            "test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl",
+            "test/05_perf/web_render_chrome/web_gpu_paint_device_measured_spec.spl",
+            "test/05_perf/web_render_chrome/web_draw_ir_gpu_route_device_measured_spec.spl"
+        ]
+        for path in paths:
+            expect(file_exists(path)).to_equal(true)
+            expect(plan).to_contain(path)
+
+    it "keeps the prepared-host commands, evidence gate, and producer path":
+        val plan = file_read("doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md")
+        expect(plan).to_contain("test/03_system/gpu/metal_backend_mac_host_spec.spl")
+        expect(plan).to_contain("GPU_2D_LIVE_BACKEND=metal")
+        expect(plan).to_contain("sh scripts/check/check-macos-gpu-2d-live-evidence.shs")
+        expect(plan).to_contain("metal_generated_2d_readback_status=pass")
+        expect(plan).to_contain("Linux or unavailable output is not a pass.")
+
+        val host_spec = file_read("test/03_system/gpu/metal_backend_mac_host_spec.spl")
+        expect(host_spec).to_contain("backend.use_gpu_only()")
+        expect(host_spec).to_contain("expect(backend.gpu_frame_complete).to_equal(true)")
+        expect(host_spec).to_contain("expect(rect_readback.source).to_equal(\"device_readback\")")
+        expect(host_spec).to_contain("expect(rect_readback.backend_handle).to_equal(clear_readback.backend_handle)")
+        expect(host_spec).to_contain("expect(rect_readback.device_identity).to_equal(clear_readback.device_identity)")
+
+        val gate = file_read("scripts/check/check-macos-gpu-2d-live-evidence.shs")
+        val root_var = "$" + "ROOT_DIR"
+        val backend_var = "$" + "{" + "BACKEND" + "}"
+        expect(gate).to_contain("HARNESS=\"" + root_var + "/test/02_integration/rendering/macos_" + backend_var + "_2d_live_harness.spl\"")
+        expect(gate).to_contain("BACKEND_SOURCE=\"" + root_var + "/src/lib/gc_async_mut/gpu/engine2d/backend_" + backend_var + ".spl\"")
+        expect(gate).to_contain("gpu_2d_live_source")
+        expect(gate).to_contain("device_readback")
+        expect(gate).to_contain("gpu_2d_live_draw_ir_fallback_required")
+
+        val producer = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+        expect(producer).to_contain("me use_gpu_only():")
+        expect(producer).to_contain("metal_sffi_dispatch_compute")
+        expect(producer).to_contain("metal_sffi_commit_command_buffer")
+        expect(producer).to_contain("metal_sffi_wait_completed")
+        expect(producer).to_contain("readback_source_label(ReadbackSource.DeviceReadback)")
+
+    it "keeps GPU-only image blending on native Metal before explicit fallback":
+        val producer = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+        expect(producer).to_contain(
+            "val native_completed = self.draw_image_blend_checked(")
+        expect(producer).to_contain(
+            "not self._gpu_only_mask_emulation_active()")
+        expect(producer).to_contain("x, y, w, h, pixels, 1000)")
+        expect(producer).to_contain(
+            "if not self.initialized:")
+        expect(producer).to_contain(
+            "self.gpu_frame_complete = was_complete")
+        expect(producer).to_contain(
+            "self.last_image_blend_target = \"metal\"")
+        expect(producer).to_contain(
+            "return engine2d_readback([], \"completion_unknown\")")
+        expect(producer).to_contain(
+            "return engine2d_readback([], \"readback_failed\")")
+        expect(producer).to_contain("self.mirror.draw_image_blend(x, y, w, h, pixels)")
+
+        val readback_spec = file_read(
+            "test/02_integration/rendering/metal_engine2d_readback_spec.spl")
+        expect(readback_spec).to_contain("if is_macos():")
+        expect(readback_spec).to_contain(
+            "expect(is_macos()).to_equal(false)")
+        expect(readback_spec).to_contain(
+            "b.draw_image_blend(0, 0, 1, 1, [0x80ffffffu32])")
+        expect(readback_spec).to_contain(
+            "expect(b.last_image_blend_target).to_equal(\"metal\")")
+        expect(readback_spec).to_contain(
+            "expect(receipt.source).to_equal(\"device_readback\")")
+        expect(readback_spec).to_contain(
+            "expect(receipt.pixels[0]).to_equal(0xff808080u32)")
+
+    it "pins generated Metal submission, download, and exact checksum gates":
+        val generated = file_read(
+            "scripts/check/metal_generated_2d_readback_harness.spl")
+        val gate = file_read(
+            "scripts/check/check-metal-generated-2d-readback.shs")
+        val micro_gate = file_read(
+            "scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs")
+        expect(generated).to_contain("rt_metal_create_device(0)")
+        expect(generated).to_contain("rt_metal_create_compute_pipeline")
+        expect(generated).to_contain("rt_metal_dispatch_compute")
+        expect(generated).to_contain("rt_metal_commit_command_buffer")
+        expect(generated).to_contain("rt_metal_wait_completed")
+        expect(generated).to_contain("rt_metal_buffer_download")
+        expect(generated).to_contain("print(\"submit_attempted=")
+        expect(generated).to_contain("print(\"readback_available=")
+        expect(gate).to_contain(
+            "MTLDevice -> host upload -> compute pipeline -> submit -> wait -> host download")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_module_verified=$module_verified")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_submit_attempted=$h_submit")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_readback_available=$h_readback")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_expected_checksum=$h_expected")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_actual_checksum=$h_actual")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_mismatch_count=$h_mismatch_count")
+        expect(gate).to_contain("macos_gpu_trusted_manifest_admit")
+        expect(gate).to_contain("MACOS_GPU_ADMISSION_COMPILER")
+        expect(gate).to_contain("REQUESTED_METALLIB_PATH")
+        expect(gate).to_contain("metal_generated_source_sha256")
+        expect(gate).to_contain("metal_artifact_sha256")
+        expect(gate).to_contain(
+            "PROVENANCE_STATUS=\"trusted-build-admitted-toolchain-verified\"")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_harness_exit_code=$harness_exit")
+        expect(gate).to_contain("reason=\"harness-exit-status-$harness_exit\"")
+        expect(gate).to_contain("harness_exit=$?")
+        expect(gate).to_contain("command -v sha256sum")
+        expect(gate).to_contain("command -v shasum")
+        expect(micro_gate).to_contain("macos_gpu_trusted_manifest_admit")
+        expect(micro_gate).to_contain("command -v sha256sum")
+        expect(micro_gate).to_contain("command -v shasum")
+        expect(gate.contains(
+            ">\"$harness_out\" 2>\"$harness_err\" || true")).to_equal(false)
+        for op in ["fill", "copy", "alpha", "scroll"]:
+            expect(gate).to_contain("metal_generated_2d_readback_{op}_checksum=")
+            expect(gate).to_contain("metal_generated_2d_readback_{op}_expected=")
+        expect(gate).to_contain("reason=\"gpu-readback-verified\"")
+        expect(gate).to_contain(
+            "elif [ \"$h_actual\" != \"$h_expected\" ]; then")
+
+    it "pins device-origin framebuffer, parity, and no-fallback gates":
+        val framebuffer = file_read(
+            "scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs")
+        val parity_gate = file_read(
+            "scripts/check/check-engine2d-cpu-metal-parity-evidence.shs")
+        val parity_harness = file_read(
+            "test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl")
+        val live = file_read("scripts/check/check-macos-gpu-2d-live-evidence.shs")
+        val processing = file_read(
+            "test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl")
+        expect(framebuffer).to_contain(
+            "metal_buffer_download_ptr(host, self.d_framebuffer")
+        expect(framebuffer).to_contain("gpu_frame_complete")
+        expect(framebuffer).to_contain("raw-metal-framebuffer-download-proven")
+        expect(framebuffer).to_contain(
+            "metal_engine2d_framebuffer_exact_gpu_claimed=$read_pixels_gpu_download")
+        expect(framebuffer).to_contain(
+            "metal_engine2d_framebuffer_blur_or_tolerance_used=false")
+        expect(parity_harness).to_contain("gpu_frame_complete")
+        expect(parity_harness).to_contain(
+            "metal-fell-back-to-cpu-mirror gpu_ok=false")
+        expect(parity_harness).to_contain("MATCH mismatches=0/")
+        expect(parity_harness).to_contain("gpu_ok=true")
+        expect(parity_harness).to_contain("PARITY: pass")
+        expect(parity_gate).to_contain("REASON=cpu-metal-bitexact")
+        expect(parity_gate).to_contain("REASON=pixel-divergence")
+        expect(parity_gate).to_contain(
+            "engine2d_cpu_metal_parity_policy=exact-bitmap-no-blur-no-tolerance")
+        expect(live).to_contain("device_readback")
+        expect(live).to_contain("gpu_2d_live_draw_ir_fallback_required")
+        expect(live).to_contain("processing_ir_cpu_fallback")
+        expect(live).to_contain("processing-ir-receipt-cpu-fallback")
+        expect(live).to_contain("positive_integer \"$processing_ir_handle\"")
+        expect(live).to_contain("positive_integer \"$processing_ir_identity\"")
+        expect(live).to_contain("capture-header-mismatch")
+        expect(live).to_contain("pixel-sha256-invalid")
+        expect(live).to_contain("command -v sha256sum")
+        expect(live).to_contain("command -v shasum")
+        expect(processing).to_contain("require_processing_ir_receipt(receipt)")
+        expect(processing).to_contain("PROCESSING_IR_EXPECTED_CHECKSUM")
+        expect(processing).to_contain("PROCESSING_IR_ACTUAL_CHECKSUM")
+        expect(processing).to_contain("PROCESSING_IR_VALUES_EXACT")
+        expect(processing).to_contain("PROCESSING_IR_MISMATCH_COUNT")
+        expect(processing).to_contain("PROCESSING_IR_CPU_FALLBACK")
+
+    it "pins the prepared 21-pair revision-cache speed and provenance gate":
+        val cache_plan = file_read(
+            "doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md")
+        val cache = file_read(
+            "test/05_perf/browser/hosted_compositor_revision_cache_perf_spec.spl")
+        expect(cache_plan).to_contain("SIMPLE_HOSTED_REVISION_CACHE_BACKEND=metal")
+        expect(cache_plan).to_contain("SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan")
+        expect(cache_plan).to_contain(
+            "hosted compositor revision-cache benchmark records 21 paired forced and")
+        expect(cache_plan).to_contain(
+            "unchanged frames for both Metal and Vulkan.")
+        expect(cache_plan).to_contain("hit_p50_ns * 100 < forced_p50_ns * 95")
+        expect(cache_plan).to_contain("not a CPU mirror or fallback")
+        expect(cache).to_contain("val TIMED_PAIRS: i64 = 21")
+        expect(cache).to_contain("if (forced.pixels != expected_pixels or")
+        expect(cache).to_contain("provenance_mismatches")
+        expect(cache).to_contain("expect(mismatches).to_equal(0)")
+        expect(cache).to_contain("expect(provenance_mismatches).to_equal(0)")
+        expect(cache).to_contain(
+            "expect(hit_p50_ns * 100).to_be_less_than(forced_p50_ns * 95)")
+        expect(cache).to_contain("expect(readback_source).to_equal(\"device_readback\")")
+        expect(cache).to_contain("expect(backend_handle).to_be_greater_than(0)")
+        expect(cache).to_contain("expect(device_identity).to_be_greater_than(0)")
+        expect(cache).to_contain("expect(raster.revision_reuse_count).to_equal(")

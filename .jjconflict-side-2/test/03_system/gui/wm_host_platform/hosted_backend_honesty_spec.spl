@@ -1,0 +1,113 @@
+# @cover src/os/compositor/hosted_backend_cocoa.spl 0%
+# @cover src/os/compositor/hosted_backend_win32.spl 0%
+# @cover src/os/compositor/hosted_backend.spl 0%
+# @cover src/os/compositor/hosted_backend_gui_renderer.spl 0%
+# @req REQ-WM-HOST-PLATFORM-003
+"""
+# Hosted Backend Dispatch Honesty — Cluster 0 (sites 0a-0d)
+
+**Category:** Testing
+**Status:** Passing
+
+## Purpose and Audience
+
+Lane A1 of `doc/03_plan/ui/wm_platform_honesty_agent_lanes.md`. Cluster 0
+(`doc/04_architecture/ui/wm_host_platform_matrix.md` "False-success stubs,
+ranked") is the dispatch/capability-self-report layer that sits above every
+other WM host seam: a simulated host claiming to be native poisons every
+consumer that trusts the claim. This spec locks the honest-refusal fix for
+all four sites.
+
+## Scope and Preconditions
+
+- 0a/0b: `uses_native_cocoa_symbols()` / `uses_native_win32_symbols()` must
+  reflect the real host (`is_macos()` / `is_windows()`, a genuine `uname -s`
+  runtime probe), never a hardcoded literal.
+- 0c: `HostedCompositorBackend.create()` must refuse (return `nil`) rather
+  than fabricate a handle when there is no live winit backing.
+- 0d: `HostedGuiRendererBackend.create()` must never return a backend whose
+  pixel store length is 0 while reporting success.
+
+## Recovery and Troubleshooting
+
+A RED result here is a real regression toward false success, not a flaky
+test — see the sabotage notes in the owning lane's report.
+
+## Compatibility and Limitations
+
+0a/0b runtime assertions are evaluated against the EXECUTING host (this
+suite runs on Linux); the mac/win-true side of those two symbols is
+static-only per the plan's platform-executability rule and is not claimed
+green here.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{host_os, shell_output}
+
+use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
+use os.compositor.hosted_backend_win32.{HostedWin32Backend}
+use os.compositor.hosted_backend.{HostedCompositorBackend}
+use os.compositor.hosted_backend_gui_renderer.{HostedGuiRendererBackend}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer}
+
+# Returns the first non-comment, non-blank line strictly after the line
+# matching `needle` (i.e. the function's first real body statement), so a
+# hardcoded `true` cannot hide behind an explanatory comment block.
+fn first_body_statement(path: text, needle: text) -> text:
+    val cmd = "grep -A8 -- '" + needle + "' " + path + " | grep -vE '^[[:space:]]*#|^[[:space:]]*$' | sed -n '2p'"
+    shell_output(cmd).trim()
+
+# A no-SFFI GuiRenderer stand-in: win != 0 makes is_open() true without any
+# real dylib/window, so create()'s honest-path (pixel allocation) can be
+# exercised deterministically in a headless CI sandbox.
+fn fake_open_renderer() -> GuiRenderer:
+    GuiRenderer(
+        engine: "test-seam", el: 0, win: 1, width: 0, height: 0,
+        fp_poll: 0, fp_type: 0,
+        fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
+        fp_mouse_button: 0, fp_mouse_pressed: 0,
+        fp_mouse_x: 0, fp_mouse_y: 0, fp_wheel_x: 0, fp_wheel_y: 0,
+        fp_staging: 0, fp_stage_clear: 0, fp_stage_fill_rect: 0, fp_present: 0,
+        fp_event_free: 0, fp_window_free: 0, fp_loop_free: 0
+    )
+
+
+describe "0a/0b — native-symbol self-reports reflect the real host":
+
+    it "0a: uses_native_cocoa_symbols() is false on this (non-macOS) host":
+        expect(HostedCocoaBackend.uses_native_cocoa_symbols()).to_equal(host_os() == "macos")
+
+    it "0b: uses_native_win32_symbols() is false on this (non-Windows) host":
+        expect(HostedWin32Backend.uses_native_win32_symbols()).to_equal(host_os() == "windows")
+
+    it "0a-static: cocoa self-report body is not a hardcoded literal true":
+        val body = first_body_statement("src/os/compositor/hosted_backend_cocoa.spl", "static fn uses_native_cocoa_symbols")
+        expect(body == "true").to_equal(false)
+
+    it "0b-static: win32 self-report body is not a hardcoded literal true":
+        val body = first_body_statement("src/os/compositor/hosted_backend_win32.spl", "static fn uses_native_win32_symbols")
+        expect(body == "true").to_equal(false)
+
+
+describe "0c — hosted winit buffer refuses instead of fabricating a handle":
+
+    it "create() without a live window handle (window_id <= 0) returns nil":
+        val backend = HostedCompositorBackend.create(0, 100, 100, 0xFF000000)
+        expect(backend).to_equal(nil)
+
+
+describe "0d — gui-renderer create never reports success with an empty pixel store":
+
+    it "refuses when the renderer is not open":
+        val closed = GuiRenderer.empty()
+        expect(closed.is_open()).to_equal(false)
+        val backend = HostedGuiRendererBackend.create(closed, 4, 3, 0xFF000000)
+        expect(backend).to_equal(nil)
+
+    it "allocates a real w*h pixel store when it does report success":
+        val fake = fake_open_renderer()
+        expect(fake.is_open()).to_equal(true)
+        val backend = HostedGuiRendererBackend.create(fake, 4, 3, 0xFF000000)
+        expect(backend != nil).to_equal(true)
+        if backend != nil:
+            expect(backend.pixels.len()).to_equal(12)

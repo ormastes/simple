@@ -1,0 +1,326 @@
+"""Software Backend Damage Tracking Specification (WS-D3)
+
+@tag: gpu, engine2d, software, damage, present
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 40%
+
+Damage-driven present is only safe if the dirty-tile set covers every pixel
+the renderer actually wrote. A test scoped to the damaged region passes
+trivially when the damage set is WRONG -- which is exactly how a stale-pixel
+bug hides. Every correctness example here therefore compares the ENTIRE
+framebuffer produced through the damage path against a full-redraw reference.
+
+Regression coverage:
+  * WS-D3 hole #1 -- scale_alpha_in_place() rewrote every pixel and marked
+    nothing dirty.
+  * WS-D3 hole #2 -- init() filled the whole buffer with opaque black while
+    allocating dirty_tiles all-false, so frame 1 had empty damage.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+val W: i32 = 160
+val H: i32 = 128
+
+fn paint_scene(mut b: SoftwareBackend):
+    """The base scene both the reference and the damage backend start from."""
+    b.clear(0xFF101820)
+    b.draw_rect_filled(10, 10, 40, 30, 0xFF3050A0)
+    b.draw_rect_filled(96, 70, 50, 40, 0xFFA07030)
+
+fn count_mismatches(a: [u32], b: [u32]) -> i32:
+    """Whole-buffer comparison: number of differing pixels."""
+    if a.len() != b.len():
+        return -1
+    var diff = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            diff = diff + 1
+        i = i + 1
+    diff
+
+describe "SoftwareBackend damage tracking":
+
+    describe "WS-D3 hole #2: init() damage covers the buffer it wrote":
+        it "reports non-empty damage immediately after init":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                # init() fills the whole buffer with opaque black. Damage must
+                # not be empty, or frame 1 ships stale pixels.
+                assert_false(b.damage_is_empty())
+                b.shutdown()
+
+        it "init damage spans the full surface":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                val rects = b.damage_rects(16)
+                assert_true(rects.len() >= 4)
+                # Whole surface written => whole surface reported (the >60%
+                # bound collapses this to one full-screen rect).
+                assert_equal(rects.len(), 4)
+                assert_equal(rects[0], 0)
+                assert_equal(rects[1], 0)
+                assert_equal(rects[2], W)
+                assert_equal(rects[3], H)
+                b.shutdown()
+
+    describe "WS-D3 hole #1: scale_alpha_in_place marks damage":
+        it "reports non-empty damage after an in-place alpha scale":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                paint_scene(b)
+                b.present()               # damage cleared
+                assert_true(b.damage_is_empty())
+                b.scale_alpha_in_place(500)
+                assert_false(b.damage_is_empty())
+                b.shutdown()
+
+        it "damage-driven mirror matches a full redraw after alpha scale":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                # Seed the mirror, then clear damage so the next read is
+                # genuinely damage-driven.
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                ref_b.scale_alpha_in_place(500)
+                dmg_b.scale_alpha_in_place(500)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+    describe "whole-framebuffer damage correctness":
+        it "a rect straddling a tile boundary updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                # x=58..78 crosses the 64px tile seam; y=60..76 crosses y=64.
+                ref_b.draw_rect_filled(58, 60, 20, 16, 0xFF00FF00)
+                dmg_b.draw_rect_filled(58, 60, 20, 16, 0xFF00FF00)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a 1px horizontal line on a tile seam updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                ref_b.draw_rect_filled(0, 64, W, 1, 0xFFFF00FF)
+                dmg_b.draw_rect_filled(0, 64, W, 1, 0xFFFF00FF)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "an alpha-blended draw updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                ref_b.draw_rect_filled(20, 20, 70, 70, 0x8000FFFF)
+                dmg_b.draw_rect_filled(20, 20, 70, 70, 0x8000FFFF)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a draw_image straddling a tile boundary updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                # 24x24 image landing at (54,54): crosses both the x=64 and
+                # y=64 tile seams. Opaque arm of draw_image.
+                var img: [u32] = [0; 576]
+                var p = 0
+                while p < 576:
+                    img[p] = 0xFF00C0FF
+                    p = p + 1
+                ref_b.draw_image(54, 54, 24, 24, img)
+                dmg_b.draw_image(54, 54, 24, 24, img)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a draw_image_blend straddling a tile boundary updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                var img: [u32] = [0; 576]
+                var p = 0
+                while p < 576:
+                    img[p] = 0x90FF3060
+                    p = p + 1
+                ref_b.draw_image_blend(54, 54, 24, 24, img)
+                dmg_b.draw_image_blend(54, 54, 24, 24, img)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a clipped draw updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                # The clip rect is deliberately offset from the tile grid so a
+                # mark computed on the PRE-clip rect would over/under-cover.
+                ref_b.set_clip(70, 70, 30, 30)
+                dmg_b.set_clip(70, 70, 30, 30)
+                ref_b.draw_rect_filled(20, 20, 120, 120, 0xFF20E020)
+                dmg_b.draw_rect_filled(20, 20, 120, 120, 0xFF20E020)
+                ref_b.clear_clip()
+                dmg_b.clear_clip()
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a masked slow-path draw updates every pixel":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                # Sparse mask: forces the per-pixel masked slow path.
+                var mask: [u8] = [0; W * H]
+                var m = 0
+                while m < W * H:
+                    if (m % 3) == 0:
+                        mask[m] = 255
+                    m = m + 1
+                ref_b.set_mask(mask, W, H)
+                dmg_b.set_mask(mask, W, H)
+                ref_b.draw_rect_filled(50, 50, 60, 60, 0xFFE0E020)
+                dmg_b.draw_rect_filled(50, 50, 60, 60, 0xFFE0E020)
+                ref_b.clear_mask()
+                dmg_b.clear_mask()
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+        it "a clear() repaints every pixel through the damage path":
+            var ref_b = SoftwareBackend.create()
+            var dmg_b = SoftwareBackend.create()
+            if ref_b.init(W, H) and dmg_b.init(W, H):
+                paint_scene(ref_b)
+                paint_scene(dmg_b)
+                val seeded = dmg_b.read_pixels_damaged(16)
+                assert_equal(seeded.len(), W * H)
+                dmg_b.present()
+
+                ref_b.clear(0xFF224466)
+                dmg_b.clear(0xFF224466)
+
+                val truth = ref_b.read_pixels()
+                val mirror = dmg_b.read_pixels_damaged(16)
+                assert_equal(count_mismatches(mirror, truth), 0)
+                ref_b.shutdown()
+                dmg_b.shutdown()
+
+    describe "damage set shape":
+        it "a no-op frame yields zero rects":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                paint_scene(b)
+                b.present()
+                assert_equal(b.damage_rects(16).len(), 0)
+                assert_true(b.damage_is_empty())
+                b.shutdown()
+
+        it "a small draw yields a small, bounded damage set":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                paint_scene(b)
+                b.present()
+                b.draw_rect_filled(4, 4, 8, 8, 0xFFFFFFFF)
+                val rects = b.damage_rects(16)
+                # One 64x64 tile touched => exactly one rect, and it must be
+                # far smaller than the surface.
+                assert_equal(rects.len(), 4)
+                assert_true(rects[2] * rects[3] < W * H)
+                b.shutdown()
+
+        it "the rect count never exceeds the cap":
+            # A wide surface so the damage BOUND stays well under 60% of the
+            # area -- otherwise the 60% full-surface rule fires first and the
+            # cap branch is never evaluated (that made an earlier version of
+            # this example vacuous).
+            var b = SoftwareBackend.create()
+            if b.init(640, 512):
+                b.clear(0xFF101820)
+                b.present()
+                # Five isolated dirty tiles along a single tile row: bound is
+                # 576x64 of 640x512 == 11% of the surface.
+                var x = 2
+                while x < 576:
+                    b.draw_rect_filled(x, 2, 1, 1, 0xFFFFFFFF)
+                    x = x + 128
+                val uncapped = b.damage_rects(16)
+                assert_equal(uncapped.len() / 4, 5)
+                val capped = b.damage_rects(3)
+                assert_equal(capped.len() / 4, 1)
+                assert_true(capped[2] < 640)
+                b.shutdown()

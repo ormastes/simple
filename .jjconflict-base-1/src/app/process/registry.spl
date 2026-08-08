@@ -1,0 +1,118 @@
+# Persistent registry for the host process gateway.
+#
+# Tracks gateway-spawned processes in a small SDN file under the user cache dir.
+# `simple process list` reports ONLY these gateway-managed processes — it does
+# not scrape /proc (which offers no portable owner/command mapping). Kept free
+# of any access-grammar dependency so it can be unit-tested directly.
+
+use app.io.mod.{file_read, file_write, file_exists, dir_create, home}
+
+struct GwEntry:
+    pid: i64
+    cmd: text
+
+fn registry_dir() -> text:
+    "{home()}/.simple/cache"
+
+fn registry_path() -> text:
+    "{registry_dir()}/process_gateway.sdn"
+
+fn _escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if c == "\\":
+            out = out + "\\\\"
+        elif c == "\"":
+            out = out + "\\\""
+        elif c == "\n":
+            out = out + " "
+        else:
+            out = out + c
+        i = i + 1
+    out
+
+fn _first_quote_content(s: text) -> text:
+    var out = ""
+    var i = 0
+    var started = false
+    var esc = false
+    while i < s.len():
+        val c = s.slice(i, i + 1)
+        if esc:
+            out = out + c
+            esc = false
+        elif c == "\\":
+            if started:
+                esc = true
+        elif c == "\"":
+            if started:
+                return out
+            started = true
+        else:
+            if started:
+                out = out + c
+        i = i + 1
+    out
+
+fn _parse_pid_field(line: text) -> i64:
+    val parts = line.split("pid:")
+    if parts.len() < 2:
+        return -1
+    val rest = parts[1].trim()
+    var num = ""
+    var i = 0
+    while i < rest.len():
+        val c = rest.slice(i, i + 1)
+        if "0123456789".contains(c):
+            num = num + c
+        else:
+            i = rest.len()
+        i = i + 1
+    if num == "":
+        return -1
+    num.to_i64() ?? -1
+
+pub fn registry_load() -> [GwEntry]:
+    var entries: [GwEntry] = []
+    val path = registry_path()
+    if not file_exists(path):
+        return entries
+    val content = file_read(path)
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("{"):
+            val pid = _parse_pid_field(line)
+            val cmd = _first_quote_content(line)
+            if pid > 0:
+                entries = entries.push(GwEntry(pid: pid, cmd: cmd))
+    entries
+
+fn _serialize(entries: [GwEntry]) -> text:
+    var lines: [text] = [
+        "# Simple process gateway registry (SDN)",
+        "# Managed by `simple process`; covers gateway-spawned processes only.",
+        "entries: ["
+    ]
+    for e in entries:
+        lines = lines.push("  {{ pid: " + e.pid.to_text() + ", cmd: \"" + _escape(e.cmd) + "\" }}")
+    lines = lines.push("]")
+    lines.join("\n") + "\n"
+
+pub fn registry_save(entries: [GwEntry]):
+    dir_create(registry_dir(), true)
+    file_write(registry_path(), _serialize(entries))
+
+pub fn registry_add(pid: i64, cmd: text):
+    var entries = registry_load()
+    entries = entries.push(GwEntry(pid: pid, cmd: cmd))
+    registry_save(entries)
+
+pub fn registry_remove(pid: i64):
+    val entries = registry_load()
+    var kept: [GwEntry] = []
+    for e in entries:
+        if e.pid != pid:
+            kept = kept.push(e)
+    registry_save(kept)

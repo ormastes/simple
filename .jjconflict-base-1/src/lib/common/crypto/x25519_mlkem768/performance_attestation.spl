@@ -1,0 +1,598 @@
+# Typed, fail-closed performance admission for native X25519MLKEM768.
+#
+# This contract does not measure time itself.  It validates a retained pair of
+# same-run scalar/candidate measurements and binds the complete pair to one
+# canonical SHA-256 receipt.  Kernel-only and emulated measurements cannot be
+# promoted through this surface.
+
+mod lib.common.crypto.x25519_mlkem768.performance_attestation
+
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    x25519_mlkem768_evidence_backend_name}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification,
+    x25519_mlkem768_measurement_qualification_valid}
+use lib.common.crypto.x25519_mlkem768.qualified_timing.{
+    X25519MlKem768TimingRole,
+    X25519MlKem768WarmSetupReceipt,
+    X25519MlKem768TimedOperationReceipt,
+    X25519MlKem768PairedScheduleReceipt,
+    x25519_mlkem768_admit_warm_setup,
+    x25519_mlkem768_admit_timed_operations,
+    x25519_mlkem768_admit_paired_schedule,
+    x25519_mlkem768_timing_p50_us,
+    x25519_mlkem768_timing_p95_us,
+    x25519_mlkem768_timing_p99_us,
+    x25519_mlkem768_timing_operations_per_second,
+    x25519_mlkem768_qualified_timing_sha256}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+val X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA =
+    "x25519mlkem768-performance-attestation-v5"
+val X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI: i64 = 1500
+val X25519_MLKEM768_GPU_MINIMUM_SPEEDUP_MILLI: i64 = 1250
+val X25519_MLKEM768_PERFORMANCE_MINIMUM_SAMPLES: i64 = 30
+val X25519_MLKEM768_PERFORMANCE_MINIMUM_WARMUPS: i64 = 2
+val _X25519_MLKEM768_SPEEDUP_SAFE_MICROS_MAX: i64 = 9223372036854775
+
+struct X25519MlKem768PerformanceMetrics:
+    sample_count: i64
+    warmup_count: i64
+    p50_us: i64
+    p95_us: i64
+    p99_us: i64
+    operations_per_second: i64
+    max_rss_kb: i64
+
+struct X25519MlKem768PerformanceMeasurement:
+    backend: X25519MlKem768EvidenceBackend
+    selected_backend: X25519MlKem768EvidenceBackend?
+    backend_identity: text
+    qualification_sha256: text
+    qualified_timing_sha256: text
+    matrix_row_set_sha256: text
+    scalar_source_receipt_sha256: text
+    candidate_source_receipt_sha256: text
+    sample_set_sha256: text
+    host_os: text
+    host_arch: text
+    session_id: text
+    monotonic_clock_id: text
+    mode: X25519MlKem768EvidenceMode
+    scope: X25519MlKem768EvidenceScope
+    emulated: bool
+    fallback_used: bool
+    full_end_to_end: bool
+    oracle_match: bool
+    implementation_version: text
+    profile_version: text
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    workload_configuration_sha256: text
+    backend_configuration_sha256: text
+    compiler_artifact_sha256: text
+    compiler_provenance_sha256: text
+    compiler_source_revision: text
+    runner_source_sha256: text
+    runner_artifact_sha256: text
+    backend_artifact_sha256: text
+    crypto_source_sha256: text
+    accelerator_source_sha256: text
+    accelerator_artifact_sha256: text
+    accelerator_build_binding_sha256: text
+    batch_size: i64
+    metrics: X25519MlKem768PerformanceMetrics
+    gpu_transfer_included: bool
+    gpu_launch_included: bool
+    gpu_synchronization_included: bool
+    gpu_readback_included: bool
+
+struct X25519MlKem768PerformanceAttestation:
+    schema: text
+    status: X25519MlKem768EvidenceStatus
+    reason: text
+    candidate_backend: X25519MlKem768EvidenceBackend
+    backend_identity: text
+    speedup_milli: i64
+    minimum_speedup_milli: i64
+    receipt_sha256: text
+    qualification_sha256: text
+    qualified_timing_sha256: text
+    matrix_row_set_sha256: text
+    scalar_source_receipt_sha256: text
+    candidate_source_receipt_sha256: text
+    scalar_sample_set_sha256: text
+    candidate_sample_set_sha256: text
+    host_os: text
+    host_arch: text
+    session_id: text
+    monotonic_clock_id: text
+    implementation_version: text
+    profile_version: text
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    workload_configuration_sha256: text
+    backend_configuration_sha256: text
+    compiler_artifact_sha256: text
+    compiler_provenance_sha256: text
+    compiler_source_revision: text
+    runner_source_sha256: text
+    runner_artifact_sha256: text
+    crypto_source_sha256: text
+    accelerator_source_sha256: text
+    accelerator_artifact_sha256: text
+    accelerator_build_binding_sha256: text
+    batch_size: i64
+
+fn _performance_bool(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _performance_field_valid(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains("\n") and not value.contains("\r")
+
+fn _performance_selected_backend(
+        measurement: X25519MlKem768PerformanceMeasurement) -> text:
+    match measurement.selected_backend:
+        case Some(backend): x25519_mlkem768_evidence_backend_name(backend)
+        case nil: "none"
+
+fn _performance_metrics_material(label: text,
+        metrics: X25519MlKem768PerformanceMetrics) -> text:
+    [
+        label + ".sample_count=" + metrics.sample_count.to_text(),
+        label + ".warmup_count=" + metrics.warmup_count.to_text(),
+        label + ".p50_us=" + metrics.p50_us.to_text(),
+        label + ".p95_us=" + metrics.p95_us.to_text(),
+        label + ".p99_us=" + metrics.p99_us.to_text(),
+        label + ".operations_per_second=" +
+            metrics.operations_per_second.to_text(),
+        label + ".max_rss_kb=" + metrics.max_rss_kb.to_text()
+    ].join("\n") + "\n"
+
+fn _performance_measurement_material(label: text,
+        measurement: X25519MlKem768PerformanceMeasurement) -> text:
+    var lines: [text] = []
+    lines.push(label + ".backend=" +
+        x25519_mlkem768_evidence_backend_name(measurement.backend))
+    lines.push(label + ".selected_backend=" +
+        _performance_selected_backend(measurement))
+    lines.push(label + ".backend_identity=" + measurement.backend_identity)
+    lines.push(label + ".qualification_sha256=" +
+        measurement.qualification_sha256)
+    lines.push(label + ".qualified_timing_sha256=" +
+        measurement.qualified_timing_sha256)
+    lines.push(label + ".matrix_row_set_sha256=" +
+        measurement.matrix_row_set_sha256)
+    lines.push(label + ".scalar_source_receipt_sha256=" +
+        measurement.scalar_source_receipt_sha256)
+    lines.push(label + ".candidate_source_receipt_sha256=" +
+        measurement.candidate_source_receipt_sha256)
+    lines.push(label + ".sample_set_sha256=" +
+        measurement.sample_set_sha256)
+    lines.push(label + ".host_os=" + measurement.host_os)
+    lines.push(label + ".host_arch=" + measurement.host_arch)
+    lines.push(label + ".session_id=" + measurement.session_id)
+    lines.push(label + ".monotonic_clock_id=" +
+        measurement.monotonic_clock_id)
+    lines.push(label + ".native=" + _performance_bool(
+        measurement.mode == X25519MlKem768EvidenceMode.Native))
+    lines.push(label + ".full_operation=" + _performance_bool(
+        measurement.scope == X25519MlKem768EvidenceScope.FullOperation))
+    lines.push(label + ".emulated=" + _performance_bool(measurement.emulated))
+    lines.push(label + ".fallback_used=" +
+        _performance_bool(measurement.fallback_used))
+    lines.push(label + ".full_end_to_end=" +
+        _performance_bool(measurement.full_end_to_end))
+    lines.push(label + ".oracle_match=" +
+        _performance_bool(measurement.oracle_match))
+    lines.push(label + ".implementation_version=" +
+        measurement.implementation_version)
+    lines.push(label + ".profile_version=" + measurement.profile_version)
+    lines.push(label + ".fixture_id=" + measurement.fixture_id)
+    lines.push(label + ".fixture_manifest_sha256=" +
+        measurement.fixture_manifest_sha256)
+    lines.push(label + ".fixture_source_sha256=" +
+        measurement.fixture_source_sha256)
+    lines.push(label + ".workload_configuration_sha256=" +
+        measurement.workload_configuration_sha256)
+    lines.push(label + ".backend_configuration_sha256=" +
+        measurement.backend_configuration_sha256)
+    lines.push(label + ".compiler_artifact_sha256=" +
+        measurement.compiler_artifact_sha256)
+    lines.push(label + ".compiler_provenance_sha256=" +
+        measurement.compiler_provenance_sha256)
+    lines.push(label + ".compiler_source_revision=" +
+        measurement.compiler_source_revision)
+    lines.push(label + ".runner_source_sha256=" +
+        measurement.runner_source_sha256)
+    lines.push(label + ".runner_artifact_sha256=" +
+        measurement.runner_artifact_sha256)
+    lines.push(label + ".backend_artifact_sha256=" +
+        measurement.backend_artifact_sha256)
+    lines.push(label + ".crypto_source_sha256=" +
+        measurement.crypto_source_sha256)
+    lines.push(label + ".accelerator_source_sha256=" +
+        measurement.accelerator_source_sha256)
+    lines.push(label + ".accelerator_artifact_sha256=" +
+        measurement.accelerator_artifact_sha256)
+    lines.push(label + ".accelerator_build_binding_sha256=" +
+        measurement.accelerator_build_binding_sha256)
+    lines.push(label + ".batch_size=" + measurement.batch_size.to_text())
+    lines.push(label + ".gpu_transfer_included=" +
+        _performance_bool(measurement.gpu_transfer_included))
+    lines.push(label + ".gpu_launch_included=" +
+        _performance_bool(measurement.gpu_launch_included))
+    lines.push(label + ".gpu_synchronization_included=" +
+        _performance_bool(measurement.gpu_synchronization_included))
+    lines.push(label + ".gpu_readback_included=" +
+        _performance_bool(measurement.gpu_readback_included))
+    lines.join("\n") + "\n" +
+        _performance_metrics_material(label, measurement.metrics)
+
+fn x25519_mlkem768_performance_receipt_sha256(
+        scalar: X25519MlKem768PerformanceMeasurement,
+        candidate: X25519MlKem768PerformanceMeasurement) -> text:
+    val material = "schema=" + X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA + "\n" +
+        _performance_measurement_material("scalar", scalar) +
+        _performance_measurement_material("candidate", candidate)
+    sha256_text(material)
+
+fn _performance_selected_matches(
+        measurement: X25519MlKem768PerformanceMeasurement) -> bool:
+    match measurement.selected_backend:
+        case Some(selected): selected == measurement.backend
+        case nil: false
+
+fn _performance_metrics_valid(
+        metrics: X25519MlKem768PerformanceMetrics) -> bool:
+    metrics.sample_count >= X25519_MLKEM768_PERFORMANCE_MINIMUM_SAMPLES and
+    metrics.warmup_count >= X25519_MLKEM768_PERFORMANCE_MINIMUM_WARMUPS and
+    metrics.p50_us > 0 and metrics.p95_us > 0 and metrics.p99_us > 0 and
+    metrics.p50_us <= metrics.p95_us and metrics.p95_us <= metrics.p99_us and
+    metrics.p95_us <= _X25519_MLKEM768_SPEEDUP_SAFE_MICROS_MAX and
+    metrics.operations_per_second > 0 and metrics.max_rss_kb > 0
+
+fn _performance_is_simd(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Avx2 or
+    backend == X25519MlKem768EvidenceBackend.Neon or
+    backend == X25519MlKem768EvidenceBackend.Rvv
+
+fn _performance_is_gpu(backend: X25519MlKem768EvidenceBackend) -> bool:
+    backend == X25519MlKem768EvidenceBackend.Cuda or
+    backend == X25519MlKem768EvidenceBackend.Vulkan or
+    backend == X25519MlKem768EvidenceBackend.Metal
+
+fn _performance_accelerator_identity_valid(
+        measurement: X25519MlKem768PerformanceMeasurement) -> bool:
+    if _performance_is_gpu(measurement.backend):
+        return (sha256_lower_hex_valid(measurement.accelerator_source_sha256) and
+            sha256_lower_hex_valid(measurement.accelerator_artifact_sha256) and
+            sha256_lower_hex_valid(
+                measurement.accelerator_build_binding_sha256))
+    measurement.accelerator_source_sha256 == "" and
+        measurement.accelerator_artifact_sha256 == "" and
+        measurement.accelerator_build_binding_sha256 == ""
+
+fn _performance_measurement_valid(
+        measurement: X25519MlKem768PerformanceMeasurement) -> bool:
+    measurement.mode == X25519MlKem768EvidenceMode.Native and
+    measurement.scope == X25519MlKem768EvidenceScope.FullOperation and
+    not measurement.emulated and not measurement.fallback_used and
+    measurement.full_end_to_end and measurement.oracle_match and
+    _performance_selected_matches(measurement) and
+    _performance_field_valid(measurement.backend_identity) and
+    _performance_field_valid(measurement.host_os) and
+    _performance_field_valid(measurement.host_arch) and
+    _performance_field_valid(measurement.session_id) and
+    _performance_field_valid(measurement.monotonic_clock_id) and
+    measurement.implementation_version ==
+        X25519_MLKEM768_IMPLEMENTATION_VERSION and
+    measurement.profile_version == X25519_MLKEM768_PROFILE_VERSION and
+    _performance_field_valid(measurement.fixture_id) and
+    sha256_lower_hex_valid(measurement.qualification_sha256) and
+    sha256_lower_hex_valid(measurement.qualified_timing_sha256) and
+    sha256_lower_hex_valid(measurement.matrix_row_set_sha256) and
+    sha256_lower_hex_valid(measurement.scalar_source_receipt_sha256) and
+    sha256_lower_hex_valid(measurement.candidate_source_receipt_sha256) and
+    sha256_lower_hex_valid(measurement.sample_set_sha256) and
+    sha256_lower_hex_valid(measurement.fixture_manifest_sha256) and
+    sha256_lower_hex_valid(measurement.fixture_source_sha256) and
+    sha256_lower_hex_valid(measurement.workload_configuration_sha256) and
+    sha256_lower_hex_valid(measurement.backend_configuration_sha256) and
+    sha256_lower_hex_valid(measurement.compiler_artifact_sha256) and
+    sha256_lower_hex_valid(measurement.compiler_provenance_sha256) and
+    sha256_lower_hex_valid(measurement.compiler_source_revision) and
+    sha256_lower_hex_valid(measurement.runner_source_sha256) and
+    sha256_lower_hex_valid(measurement.runner_artifact_sha256) and
+    sha256_lower_hex_valid(measurement.backend_artifact_sha256) and
+    sha256_lower_hex_valid(measurement.crypto_source_sha256) and
+    _performance_accelerator_identity_valid(measurement) and
+    measurement.batch_size > 0 and
+    _performance_metrics_valid(measurement.metrics)
+
+fn _performance_identity_matches(
+        scalar: X25519MlKem768PerformanceMeasurement,
+        candidate: X25519MlKem768PerformanceMeasurement) -> bool:
+    if scalar.compiler_artifact_sha256 != candidate.compiler_artifact_sha256:
+        return false
+    if scalar.compiler_provenance_sha256 !=
+            candidate.compiler_provenance_sha256:
+        return false
+    if scalar.compiler_source_revision != candidate.compiler_source_revision:
+        return false
+    if scalar.crypto_source_sha256 != candidate.crypto_source_sha256:
+        return false
+    true
+
+fn _performance_qualification_matches(
+        qualification: X25519MlKem768MeasurementQualification,
+        scalar: X25519MlKem768PerformanceMeasurement,
+        candidate: X25519MlKem768PerformanceMeasurement) -> bool:
+    x25519_mlkem768_measurement_qualification_valid(qualification) and
+    candidate.backend == qualification.target.backend and
+    scalar.qualification_sha256 == qualification.qualification_sha256 and
+    candidate.qualification_sha256 == qualification.qualification_sha256 and
+    scalar.matrix_row_set_sha256 ==
+        qualification.target.matrix_row_set_sha256 and
+    candidate.matrix_row_set_sha256 ==
+        qualification.target.matrix_row_set_sha256 and
+    scalar.scalar_source_receipt_sha256 ==
+        qualification.scalar_source_receipt_sha256 and
+    candidate.scalar_source_receipt_sha256 ==
+        qualification.scalar_source_receipt_sha256 and
+    scalar.candidate_source_receipt_sha256 ==
+        qualification.candidate_source_receipt_sha256 and
+    candidate.candidate_source_receipt_sha256 ==
+        qualification.candidate_source_receipt_sha256 and
+    scalar.implementation_version == qualification.implementation_version and
+    candidate.implementation_version == qualification.implementation_version and
+    scalar.profile_version == qualification.profile_version and
+    candidate.profile_version == qualification.profile_version and
+    scalar.fixture_id == qualification.target.fixture_id and
+    candidate.fixture_id == qualification.target.fixture_id and
+    scalar.fixture_manifest_sha256 ==
+        qualification.target.fixture_manifest_sha256 and
+    candidate.fixture_manifest_sha256 ==
+        qualification.target.fixture_manifest_sha256 and
+    scalar.fixture_source_sha256 ==
+        qualification.target.fixture_source_sha256 and
+    candidate.fixture_source_sha256 ==
+        qualification.target.fixture_source_sha256 and
+    scalar.workload_configuration_sha256 ==
+        qualification.target.workload_configuration_sha256 and
+    candidate.workload_configuration_sha256 ==
+        qualification.target.workload_configuration_sha256 and
+    scalar.backend_configuration_sha256 ==
+        qualification.target.scalar_configuration_sha256 and
+    candidate.backend_configuration_sha256 ==
+        qualification.target.candidate_configuration_sha256 and
+    scalar.runner_source_sha256 == qualification.target.runner_source_sha256 and
+    candidate.runner_source_sha256 ==
+        qualification.target.runner_source_sha256 and
+    scalar.runner_artifact_sha256 ==
+        qualification.target.runner_artifact_sha256 and
+    candidate.runner_artifact_sha256 ==
+        qualification.target.runner_artifact_sha256 and
+    scalar.backend_artifact_sha256 ==
+        qualification.target.scalar_backend_artifact_sha256 and
+    candidate.backend_artifact_sha256 ==
+        qualification.target.backend_artifact_sha256 and
+    scalar.host_os == qualification.target.host_os and
+    candidate.host_os == qualification.target.host_os and
+    scalar.host_arch == qualification.target.host_arch and
+    candidate.host_arch == qualification.target.host_arch and
+    scalar.session_id == qualification.target.session_id and
+    candidate.session_id == qualification.target.session_id and
+    scalar.monotonic_clock_id == qualification.target.monotonic_clock_id and
+    candidate.monotonic_clock_id == qualification.target.monotonic_clock_id and
+    candidate.backend_identity == qualification.target.executor_identity and
+    scalar.backend_identity == qualification.target.scalar_backend_identity and
+    scalar.batch_size == qualification.batch_size and
+    candidate.batch_size == qualification.batch_size
+
+fn _performance_timing_metrics_match(
+        measurement: X25519MlKem768PerformanceMeasurement,
+        warm: X25519MlKem768WarmSetupReceipt,
+        timed: X25519MlKem768TimedOperationReceipt) -> bool:
+    measurement.sample_set_sha256 == timed.sample_set_sha256 and
+    measurement.metrics.sample_count == timed.samples_ns.len() and
+    measurement.metrics.warmup_count == warm.completed_full_exchanges and
+    measurement.metrics.p50_us == x25519_mlkem768_timing_p50_us(timed) and
+    measurement.metrics.p95_us == x25519_mlkem768_timing_p95_us(timed) and
+    measurement.metrics.p99_us == x25519_mlkem768_timing_p99_us(timed) and
+    measurement.metrics.operations_per_second ==
+        x25519_mlkem768_timing_operations_per_second(timed) and
+    measurement.metrics.max_rss_kb == timed.max_rss_kb
+
+fn _performance_timing_pair_reason(
+        qualification: X25519MlKem768MeasurementQualification,
+        scalar_warm: X25519MlKem768WarmSetupReceipt,
+        candidate_warm: X25519MlKem768WarmSetupReceipt,
+        scalar_timed: X25519MlKem768TimedOperationReceipt,
+        candidate_timed: X25519MlKem768TimedOperationReceipt,
+        schedule: X25519MlKem768PairedScheduleReceipt,
+        scalar: X25519MlKem768PerformanceMeasurement,
+        candidate: X25519MlKem768PerformanceMeasurement) -> text:
+    if scalar_warm.role != X25519MlKem768TimingRole.ScalarReference or
+            scalar_timed.role != X25519MlKem768TimingRole.ScalarReference or
+            candidate_warm.role != X25519MlKem768TimingRole.Candidate or
+            candidate_timed.role != X25519MlKem768TimingRole.Candidate:
+        return "qualified-timing-role-mismatch"
+    match x25519_mlkem768_admit_warm_setup(qualification, scalar_warm):
+        case Err(_): return "scalar-warm-setup-invalid"
+        case Ok(_): ()
+    match x25519_mlkem768_admit_warm_setup(qualification, candidate_warm):
+        case Err(_): return "candidate-warm-setup-invalid"
+        case Ok(_): ()
+    match x25519_mlkem768_admit_timed_operations(
+            qualification, scalar_warm, scalar_timed):
+        case Err(_): return "scalar-timed-operations-invalid"
+        case Ok(_): ()
+    match x25519_mlkem768_admit_timed_operations(
+            qualification, candidate_warm, candidate_timed):
+        case Err(_): return "candidate-timed-operations-invalid"
+        case Ok(_): ()
+    if scalar_timed.samples_ns.len() != candidate_timed.samples_ns.len():
+        return "qualified-timing-sample-count-mismatch"
+    match x25519_mlkem768_admit_paired_schedule(
+            qualification, scalar_warm, candidate_warm,
+            scalar_timed, candidate_timed, schedule):
+        case Err(_): return "qualified-timing-paired-schedule-invalid"
+        case Ok(_): ()
+    val timing_sha256 = x25519_mlkem768_qualified_timing_sha256(
+        qualification, scalar_warm, candidate_warm,
+        scalar_timed, candidate_timed, schedule)
+    if scalar.qualified_timing_sha256 != timing_sha256 or
+            candidate.qualified_timing_sha256 != timing_sha256:
+        return "qualified-timing-sha256-mismatch"
+    if not _performance_timing_metrics_match(
+            scalar, scalar_warm, scalar_timed) or
+            not _performance_timing_metrics_match(
+                candidate, candidate_warm, candidate_timed):
+        return "derived-timing-metrics-mismatch"
+    ""
+
+fn _performance_gpu_lifecycle_complete(
+        measurement: X25519MlKem768PerformanceMeasurement) -> bool:
+    measurement.gpu_transfer_included and measurement.gpu_launch_included and
+    measurement.gpu_synchronization_included and
+    measurement.gpu_readback_included
+
+fn _performance_result(status: X25519MlKem768EvidenceStatus, reason: text,
+        candidate: X25519MlKem768PerformanceMeasurement,
+        scalar_sample_set_sha256: text, speedup_milli: i64,
+        minimum_speedup_milli: i64,
+        receipt_sha256: text) -> X25519MlKem768PerformanceAttestation:
+    X25519MlKem768PerformanceAttestation(
+        schema: X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA,
+        status: status, reason: reason, candidate_backend: candidate.backend,
+        backend_identity: candidate.backend_identity,
+        speedup_milli: speedup_milli,
+        minimum_speedup_milli: minimum_speedup_milli,
+        receipt_sha256: receipt_sha256,
+        qualification_sha256: candidate.qualification_sha256,
+        qualified_timing_sha256: candidate.qualified_timing_sha256,
+        matrix_row_set_sha256: candidate.matrix_row_set_sha256,
+        scalar_source_receipt_sha256:
+            candidate.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256:
+            candidate.candidate_source_receipt_sha256,
+        scalar_sample_set_sha256: scalar_sample_set_sha256,
+        candidate_sample_set_sha256: candidate.sample_set_sha256,
+        host_os: candidate.host_os, host_arch: candidate.host_arch,
+        session_id: candidate.session_id,
+        monotonic_clock_id: candidate.monotonic_clock_id,
+        implementation_version: candidate.implementation_version,
+        profile_version: candidate.profile_version,
+        fixture_id: candidate.fixture_id,
+        fixture_manifest_sha256: candidate.fixture_manifest_sha256,
+        fixture_source_sha256: candidate.fixture_source_sha256,
+        workload_configuration_sha256:
+            candidate.workload_configuration_sha256,
+        backend_configuration_sha256:
+            candidate.backend_configuration_sha256,
+        compiler_artifact_sha256: candidate.compiler_artifact_sha256,
+        compiler_provenance_sha256: candidate.compiler_provenance_sha256,
+        compiler_source_revision: candidate.compiler_source_revision,
+        runner_source_sha256: candidate.runner_source_sha256,
+        runner_artifact_sha256: candidate.runner_artifact_sha256,
+        crypto_source_sha256: candidate.crypto_source_sha256,
+        accelerator_source_sha256: candidate.accelerator_source_sha256,
+        accelerator_artifact_sha256: candidate.accelerator_artifact_sha256,
+        accelerator_build_binding_sha256:
+            candidate.accelerator_build_binding_sha256,
+        batch_size: candidate.batch_size)
+
+fn x25519_mlkem768_admit_performance_attestation(
+        qualification: X25519MlKem768MeasurementQualification,
+        scalar_warm: X25519MlKem768WarmSetupReceipt,
+        candidate_warm: X25519MlKem768WarmSetupReceipt,
+        scalar_timed: X25519MlKem768TimedOperationReceipt,
+        candidate_timed: X25519MlKem768TimedOperationReceipt,
+        schedule: X25519MlKem768PairedScheduleReceipt,
+        scalar: X25519MlKem768PerformanceMeasurement,
+        candidate: X25519MlKem768PerformanceMeasurement,
+        expected_receipt_sha256: text) -> X25519MlKem768PerformanceAttestation:
+    if scalar.backend != X25519MlKem768EvidenceBackend.ScalarCpu:
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "scalar-reference-backend-required", candidate,
+            scalar.sample_set_sha256, 0, 0, "")
+    if not _performance_is_simd(candidate.backend) and
+            not _performance_is_gpu(candidate.backend):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "specialized-candidate-backend-required", candidate,
+            scalar.sample_set_sha256, 0, 0, "")
+    if not _performance_measurement_valid(scalar) or
+            not _performance_measurement_valid(candidate):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "invalid-native-full-operation-measurement", candidate,
+            scalar.sample_set_sha256, 0, 0, "")
+    if not _performance_qualification_matches(
+            qualification, scalar, candidate):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "measurement-qualification-mismatch", candidate,
+            scalar.sample_set_sha256, 0, 0, "")
+    val timing_reason = _performance_timing_pair_reason(
+        qualification, scalar_warm, candidate_warm,
+        scalar_timed, candidate_timed, schedule, scalar, candidate)
+    if timing_reason != "":
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            timing_reason, candidate, scalar.sample_set_sha256, 0, 0, "")
+    if not _performance_identity_matches(scalar, candidate):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "shared-workload-or-toolchain-identity-mismatch",
+            candidate, scalar.sample_set_sha256, 0, 0, "")
+    if _performance_is_gpu(candidate.backend) and
+            not _performance_gpu_lifecycle_complete(candidate):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "gpu-end-to-end-lifecycle-incomplete", candidate,
+            scalar.sample_set_sha256, 0,
+            X25519_MLKEM768_GPU_MINIMUM_SPEEDUP_MILLI, "")
+    if not sha256_lower_hex_valid(expected_receipt_sha256):
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "invalid-receipt-sha256", candidate,
+            scalar.sample_set_sha256, 0, 0, "")
+    val actual_receipt_sha256 =
+        x25519_mlkem768_performance_receipt_sha256(scalar, candidate)
+    if actual_receipt_sha256 != expected_receipt_sha256:
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "receipt-sha256-mismatch", candidate,
+            scalar.sample_set_sha256, 0, 0,
+            actual_receipt_sha256)
+    # Both p95 values are positive and bounded to MAX_I64 / 1000 above, so
+    # this exact fixed-point derivation cannot overflow.
+    val speedup_milli =
+        (scalar.metrics.p95_us * 1000) / candidate.metrics.p95_us
+    val minimum_speedup_milli = if _performance_is_simd(candidate.backend):
+        X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI
+    else:
+        X25519_MLKEM768_GPU_MINIMUM_SPEEDUP_MILLI
+    if speedup_milli < minimum_speedup_milli:
+        return _performance_result(X25519MlKem768EvidenceStatus.Blocked,
+            "full-operation-speedup-below-threshold", candidate,
+            scalar.sample_set_sha256, speedup_milli,
+            minimum_speedup_milli, actual_receipt_sha256)
+    _performance_result(X25519MlKem768EvidenceStatus.Pass,
+        "native-full-operation-performance-admitted", candidate,
+        scalar.sample_set_sha256, speedup_milli,
+        minimum_speedup_milli, actual_receipt_sha256)
+
+export X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA
+export X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI
+export X25519_MLKEM768_GPU_MINIMUM_SPEEDUP_MILLI
+export X25519_MLKEM768_PERFORMANCE_MINIMUM_SAMPLES
+export X25519_MLKEM768_PERFORMANCE_MINIMUM_WARMUPS
+export X25519MlKem768PerformanceMetrics
+export X25519MlKem768PerformanceMeasurement
+export X25519MlKem768PerformanceAttestation
+export x25519_mlkem768_performance_receipt_sha256
+export x25519_mlkem768_admit_performance_attestation

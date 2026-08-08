@@ -1,0 +1,231 @@
+# ============================================================================
+# common/structural/identity/entity_id.spl — FROZEN identity contract v1
+#
+# Architecture: doc/04_architecture/compiler/mdsoc/
+#   mdsoc_plus_tagged_structural_compute_architecture.md §4 (stable identity
+#   model), §26 (contract freeze), §27 (ID-TAG lane owns structural/identity).
+#
+# The two-identity rule from §4: every structural entity has
+#   1. EntityRef  — compact, snapshot-local, for hot loops and GPU kernels;
+#   2. EntityKey  — durable, for caches, source links, diagnostics, manifests
+#                   and cross-revision comparison.
+#
+# Composition only, no inheritance (repo rule). These are plain value structs;
+# behaviour lives in free functions so the types stay trivially serializable and
+# usable from the no-GC families without a vtable.
+#
+# FROZEN: fields, field order, and widths are part of the wire contract. Any
+# change is a schema-version bump, never an in-place edit (§26; gpu_web_scene
+# plan §10 rule 3).
+# ============================================================================
+
+# Schema version for every record in this module.
+val IDENTITY_SCHEMA_VERSION: i64 = 1
+
+# ----------------------------------------------------------------------------
+# Scalar newtype widths
+#
+# §4 names ArtifactId, EntitySchemaId, StringId, LanguageId, ExpansionContextId
+# and Hash128 without giving widths. The widths below are frozen here because
+# EntityKey cannot be encoded without them; see the "Underspecified in §4"
+# section of the contract document for the rationale and the open questions
+# raised back to the architecture owner.
+#
+#   EntitySchemaId      u32
+#   StringId            u32
+#   LanguageId          u32
+#   ExpansionContextId  u32
+#
+# They are carried as plain i64 fields holding a u32-range value; the codec
+# masks to 32 bits on write, so an out-of-range value cannot silently widen the
+# record.
+# ----------------------------------------------------------------------------
+
+struct Hash128:
+    """128-bit content hash, split into two 64-bit halves.
+
+    `hi` is the more significant half. Both halves are u64 bit patterns carried
+    in i64, so a hash with the top bit set appears negative; that is expected
+    and round-trips exactly.
+    """
+    hi: u64
+    lo: u64
+
+struct ArtifactId:
+    """Content-addressed identity of a whole artifact (§4.2).
+
+    `content_hash` addresses the artifact bytes. `schema_version` is the
+    parser/compiler/layout schema the artifact was produced under: §4.2 requires
+    the artifact identity to include it, so that a durable key can only resolve
+    against a compatible producer (§30.1).
+    """
+    content_hash: Hash128
+    schema_version: u32
+
+struct EntityRef:
+    """Compact snapshot-local reference (§4.1). Exactly 64 bits on the wire.
+
+    `object_slot` resolves through the Object VM descriptor table; `local_index`
+    addresses an element inside that object's arena. Deliberately carries no raw
+    address, and is valid only while the referenced snapshot/object lease is
+    valid.
+    """
+    object_slot: u32
+    local_index: u32
+
+struct EntityKey:
+    """Durable cross-revision entity identity (§4.2)."""
+    artifact: ArtifactId
+    schema: u32
+    local_identity: u64
+
+struct SemanticEntityKey:
+    """Durable identity for a source-level declaration (§4.2).
+
+    Permits cross-revision matching without assuming old node indexes remain
+    valid, which raw `local_identity` cannot do once a file is edited.
+    """
+    language: u32
+    qualified_name: u32
+    signature_hash: Hash128
+    definition_artifact: ArtifactId
+
+struct SourceAnchor:
+    """Byte-range anchor back into a source artifact (§4.3).
+
+    Both a spelling and an expansion context are carried because Clang needs to
+    distinguish where a token was written from where it was expanded. For Simple
+    the two are normally equal. Line and column are derived presentation data and
+    are deliberately absent: §4.3 makes byte offsets the authoritative identity.
+    """
+    file: ArtifactId
+    byte_start: u32
+    byte_end: u32
+    spelling_context: u32
+    expansion_context: u32
+
+struct SnapshotId:
+    """Identity of one immutable structural snapshot (§4.4)."""
+    root_artifact: ArtifactId
+    epoch: u64
+
+struct RevisionPair:
+    """The before/after snapshot pair a mutation moves between (§4.4)."""
+    before: SnapshotId
+    after: SnapshotId
+
+# ----------------------------------------------------------------------------
+# Encoded sizes — fixed, so downstream lanes can size arenas without probing.
+# ----------------------------------------------------------------------------
+
+val HASH128_LEN: i64 = 16
+val ARTIFACT_ID_LEN: i64 = 20
+val ENTITY_REF_LEN: i64 = 8
+val ENTITY_KEY_LEN: i64 = 32
+val SEMANTIC_ENTITY_KEY_LEN: i64 = 44
+val SOURCE_ANCHOR_LEN: i64 = 36
+val SNAPSHOT_ID_LEN: i64 = 28
+
+# ----------------------------------------------------------------------------
+# Constructors
+# ----------------------------------------------------------------------------
+
+fn hash128(hi: u64, lo: u64) -> Hash128:
+    Hash128(hi: hi, lo: lo)
+
+fn artifact_id(content_hash: Hash128, schema_version: u32) -> ArtifactId:
+    ArtifactId(content_hash: content_hash, schema_version: schema_version)
+
+fn entity_ref(object_slot: u32, local_index: u32) -> EntityRef:
+    EntityRef(object_slot: object_slot, local_index: local_index)
+
+fn entity_key(artifact: ArtifactId, schema: u32, local_identity: u64) -> EntityKey:
+    EntityKey(artifact: artifact, schema: schema, local_identity: local_identity)
+
+fn semantic_entity_key(language: u32, qualified_name: u32,
+                       signature_hash: Hash128,
+                       definition_artifact: ArtifactId) -> SemanticEntityKey:
+    SemanticEntityKey(language: language, qualified_name: qualified_name,
+                      signature_hash: signature_hash,
+                      definition_artifact: definition_artifact)
+
+fn source_anchor(file: ArtifactId, byte_start: u32, byte_end: u32,
+                 spelling_context: u32, expansion_context: u32) -> SourceAnchor:
+    SourceAnchor(file: file, byte_start: byte_start, byte_end: byte_end,
+                 spelling_context: spelling_context,
+                 expansion_context: expansion_context)
+
+fn snapshot_id(root_artifact: ArtifactId, epoch: u64) -> SnapshotId:
+    SnapshotId(root_artifact: root_artifact, epoch: epoch)
+
+fn revision_pair(before: SnapshotId, after: SnapshotId) -> RevisionPair:
+    RevisionPair(before: before, after: after)
+
+# ----------------------------------------------------------------------------
+# Structural equality
+#
+# Provided explicitly rather than relying on engine-provided struct equality,
+# which differs between the interpreter and native codegen for nested structs.
+# §30.1 requires that "hash collisions are verified by full identity bytes" —
+# these comparisons are that full-bytes check.
+# ----------------------------------------------------------------------------
+
+fn hash128_equal(a: Hash128, b: Hash128) -> bool:
+    a.hi == b.hi and a.lo == b.lo
+
+fn artifact_id_equal(a: ArtifactId, b: ArtifactId) -> bool:
+    hash128_equal(a.content_hash, b.content_hash)
+        and a.schema_version == b.schema_version
+
+fn entity_ref_equal(a: EntityRef, b: EntityRef) -> bool:
+    a.object_slot == b.object_slot and a.local_index == b.local_index
+
+fn entity_key_equal(a: EntityKey, b: EntityKey) -> bool:
+    artifact_id_equal(a.artifact, b.artifact)
+        and a.schema == b.schema
+        and a.local_identity == b.local_identity
+
+fn semantic_entity_key_equal(a: SemanticEntityKey, b: SemanticEntityKey) -> bool:
+    a.language == b.language
+        and a.qualified_name == b.qualified_name
+        and hash128_equal(a.signature_hash, b.signature_hash)
+        and artifact_id_equal(a.definition_artifact, b.definition_artifact)
+
+fn source_anchor_equal(a: SourceAnchor, b: SourceAnchor) -> bool:
+    artifact_id_equal(a.file, b.file)
+        and a.byte_start == b.byte_start
+        and a.byte_end == b.byte_end
+        and a.spelling_context == b.spelling_context
+        and a.expansion_context == b.expansion_context
+
+fn snapshot_id_equal(a: SnapshotId, b: SnapshotId) -> bool:
+    artifact_id_equal(a.root_artifact, b.root_artifact) and a.epoch == b.epoch
+
+# ----------------------------------------------------------------------------
+# Validity and compatibility predicates (§30.1)
+#
+# "stale snapshot/entity references fail; durable keys resolve only against
+#  compatible artifact/schema versions"
+#
+# These are the CPU-reference rules. They are pure predicates so that every
+# lane, and every execution mode, applies exactly the same test.
+# ----------------------------------------------------------------------------
+
+fn entity_key_resolvable_in(key: EntityKey, snapshot: SnapshotId) -> bool:
+    """A durable key resolves inside a snapshot only when it names the same
+    artifact, including the artifact's schema version. A key produced by a
+    different schema version of the same content is NOT resolvable: the node
+    numbering it refers to may have changed meaning."""
+    artifact_id_equal(key.artifact, snapshot.root_artifact)
+
+fn snapshot_supersedes(newer: SnapshotId, older: SnapshotId) -> bool:
+    """True when `newer` is a later epoch of the same artifact lineage."""
+    artifact_id_equal(newer.root_artifact, older.root_artifact)
+        and newer.epoch > older.epoch
+
+fn entity_ref_stale(ref_snapshot: SnapshotId, current: SnapshotId) -> bool:
+    """An EntityRef is snapshot-local (§4.1), so it is stale the moment the
+    current snapshot differs at all from the one it was minted against.
+    Deliberately strict: a mutation targeting a stale snapshot must fail rather
+    than silently modify newer state (§4.4)."""
+    not snapshot_id_equal(ref_snapshot, current)

@@ -1,0 +1,293 @@
+# Cell Number Formats and Styling
+#
+# A parallel format model for spreadsheet cells: maps A1 references to a
+# FormatSpec (Excel-style number format text, bold, and fg/bg colors).
+#
+# Deliberately NOT stored on Sheet/Cell (spreadsheet.spl / cell.spl) -- those
+# structs are owned by another change this round, and struct default-field
+# omission is broken in interpreter mode. SheetFormats lives beside the sheet
+# it describes and is threaded through explicitly by callers.
+#
+# Storage idiom: parallel arrays (keys/specs), not `Dict<text, FormatSpec>`
+# inside the struct. A probe (struct with a `Dict<text, i64>` field, mutated
+# via a copy-returning setter and read back) showed the interpreter corrupts
+# values written through a struct-embedded Dict -- e.g. Box{data:{"A1":42}}
+# read back as 336. `class Sheet` gets away with `cells: Dict<text, Cell>`
+# because it's a class (heap-identity, no copy-return), but SheetFormats must
+# have copy semantics per the design contract (`formats_set` returns a new
+# container), so it uses the same parallel-array + linear-scan idiom already
+# proven by `cond_format.spl`'s `[CondRule]` list.
+
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text}
+
+# =========================================================================
+# Format Spec
+# =========================================================================
+
+struct FormatSpec:
+    """A single cell's display format and styling.
+
+    Fields:
+        num_fmt: Excel format text ("0.00", "#,##0.00", "0.0%", "yyyy-mm-dd").
+                 "" means general (unformatted) display.
+        bold: Whether the cell text is bold.
+        bg: Background color for the cell's inline CSS (e.g. "#ffe4b5").
+            "" means no background override.
+        fg: Foreground (text) color for the cell's inline CSS (e.g. "#7a2e00").
+            "" means no foreground override.
+    """
+    num_fmt: text
+    bold: bool
+    bg: text
+    fg: text
+
+fn default_format_spec() -> FormatSpec:
+    """The general/default format: no number format, no styling."""
+    FormatSpec(num_fmt: "", bold: false, bg: "", fg: "")
+
+# =========================================================================
+# Sheet Formats Container
+# =========================================================================
+
+struct SheetFormats:
+    """A1-ref -> FormatSpec mapping, stored as parallel arrays (see module
+    docstring for why this is not a `Dict<text, FormatSpec>` field)."""
+    keys: [text]
+    specs: [FormatSpec]
+
+fn empty_sheet_formats() -> SheetFormats:
+    """An empty format container with no per-cell overrides."""
+    SheetFormats(keys: [], specs: [])
+
+fn formats_set(formats: SheetFormats, cell_a1: text, spec: FormatSpec) -> SheetFormats:
+    """Set (or replace) the format for one cell. Returns a new SheetFormats;
+    aggregates in this language copy on assignment, so callers must use the
+    returned container."""
+    val key = cell_a1.upper()
+    var keys = formats.keys
+    var specs = formats.specs
+    var i = 0
+    var found_idx = -1
+    while i < keys.len():
+        if keys[i] == key:
+            found_idx = i
+        i = i + 1
+    if found_idx >= 0:
+        specs[found_idx] = spec
+    else:
+        keys.push(key)
+        specs.push(spec)
+    SheetFormats(keys: keys, specs: specs)
+
+fn formats_get(formats: SheetFormats, cell_a1: text) -> FormatSpec:
+    """Look up a cell's format, or the general/default spec if unset."""
+    val key = cell_a1.upper()
+    var i = 0
+    while i < formats.keys.len():
+        if formats.keys[i] == key:
+            return formats.specs[i]
+        i = i + 1
+    default_format_spec()
+
+fn sheet_set_number_format(formats: SheetFormats, cell_a1: text, code: text) -> SheetFormats:
+    """Set only the number-format code for one cell, preserving any
+    existing bold/bg/fg styling already recorded for it (unlike
+    `formats_set`, which replaces the whole spec). Returns the updated
+    container; reassign at the call site (copy semantics). Single-cell
+    only -- no whole-column/range application.
+
+    Example: `fmts = sheet_set_number_format(fmts, "B2", "#,##0.00")`
+    """
+    val existing = formats_get(formats, cell_a1)
+    val spec = FormatSpec(num_fmt: code, bold: existing.bold, bg: existing.bg, fg: existing.fg)
+    formats_set(formats, cell_a1, spec)
+
+# =========================================================================
+# Display / CSS
+# =========================================================================
+
+fn format_cell_display(sheet: Sheet, formats: SheetFormats, cell_a1: text) -> text:
+    """Display text for a cell honoring its number format, if any.
+
+    Non-numeric cells (and numeric cells with num_fmt == "") fall back to the
+    sheet's own `cell_display_text` (general display)."""
+    val cell = sheet.get_cell(cell_a1)
+    val spec = formats_get(formats, cell_a1)
+    if spec.num_fmt != "":
+        match cell.value:
+            CellValue.NumberVal(v):
+                return _cf_excel_format(v, spec.num_fmt)
+            _:
+                pass
+    cell_display_text(cell)
+
+fn format_cell_css(formats: SheetFormats, cell_a1: text) -> text:
+    """Inline CSS fragment for a cell's bold/bg/fg overrides, e.g.
+    "font-weight:bold;background:#ffe4b5;color:#7a2e00". Only properties
+    present on the spec are emitted; "" when nothing is set."""
+    val spec = formats_get(formats, cell_a1)
+    var parts: [text] = []
+    if spec.bold:
+        parts.push("font-weight:bold")
+    if spec.bg != "":
+        parts.push("background:{spec.bg}")
+    if spec.fg != "":
+        parts.push("color:{spec.fg}")
+    parts.join(";")
+
+# =========================================================================
+# Excel number-format subset
+#
+# Copied (not imported) from `app.office.sheets.formula._excel_format` and
+# its private helpers. `_excel_format` is unexported (private-by-default,
+# per doc/07_guide/quick_reference/syntax_quick_reference.md "Visibility &
+# Friend Access": a bare `fn` is file-private) and its call graph reaches
+# `_find_marker`, which formula.spl relies on being defined by
+# `app.office.file_formats` under this interpreter's flat runtime symbol
+# table -- a probe (`use ... .{_excel_format}` from a standalone entry point
+# not otherwise loading file_formats.spl) reproduced "function `_find_marker`
+# not found". Rather than depend on unrelated modules being loaded first,
+# the minimal subset is copied here under a `_cf_` prefix (distinct from
+# formula.spl's private helper names) to avoid the interpreter's known
+# same-name global-symbol collision issue between modules.
+# =========================================================================
+
+fn _cf_find_marker(s: text, marker: text, from: i32) -> i32:
+    """Index of the next occurrence of marker at or after `from`, or -1."""
+    var i = from
+    val mlen = marker.len()
+    while i + mlen <= s.len():
+        if s.slice(i, i + mlen) == marker:
+            return i
+        i = i + 1
+    -1
+
+fn _cf_count_decimals_in_fmt(fmt: text) -> i32:
+    """Zeros after the decimal point in an Excel format ('0.00' -> 2)."""
+    val dot = _cf_find_marker(fmt, ".", 0)
+    if dot < 0:
+        return 0
+    var n = 0
+    var i = dot + 1
+    while i < fmt.len() and fmt.slice(i, i + 1) == "0":
+        n = n + 1
+        i = i + 1
+    n
+
+fn _cf_floor_f64(x: f64) -> f64:
+    """Largest integer <= x."""
+    val t = x.to_i64().to_f64()
+    if t > x:
+        return t - 1.0
+    t
+
+fn _cf_pow_f64(base: f64, exp: f64) -> f64:
+    """Simple power function for non-negative integer exponents."""
+    val int_exp = exp.to_i64()
+    if int_exp == 0:
+        return 1.0
+    var result = 1.0
+    var neg = false
+    var e = int_exp
+    if e < 0:
+        neg = true
+        e = 0 - e
+    var i: i64 = 0
+    while i < e:
+        result = result * base
+        i = i + 1
+    if neg:
+        return 1.0 / result
+    result
+
+fn _cf_fmt_decimals_grouped(v_in: f64, decimals: i32, grouped: bool) -> text:
+    """Round to N decimals; optionally group thousands with commas."""
+    var v = v_in
+    val neg = v < 0.0
+    if neg:
+        v = 0.0 - v
+    val scale = _cf_pow_f64(10.0, decimals.to_f64())
+    val scaled = _cf_floor_f64(v * scale + 0.5)
+    var int_part = (scaled / scale).to_i64()
+    val frac_scaled = scaled.to_i64() - int_part * scale.to_i64()
+    var int_txt = "{int_part}"
+    if grouped:
+        var out = ""
+        var count = 0
+        var i = int_txt.len() - 1
+        while i >= 0:
+            out = "{int_txt.slice(i, i + 1)}{out}"
+            count = count + 1
+            if count % 3 == 0 and i > 0:
+                out = ",{out}"
+            i = i - 1
+        int_txt = out
+    var result = int_txt
+    if decimals > 0:
+        var frac_txt = "{frac_scaled}"
+        while frac_txt.len() < decimals:
+            frac_txt = "0{frac_txt}"
+        result = "{int_txt}.{frac_txt}"
+    if neg:
+        return "-{result}"
+    result
+
+fn _cf_fmt_num_trim(v: f64) -> text:
+    """General-format a number: integer form when there's no fraction."""
+    val i = v.to_i64()
+    if v - i.to_f64() == 0.0:
+        return "{i}"
+    "{v}"
+
+fn _cf_pad2(n: i64) -> text:
+    if n < 10:
+        return "0{n}"
+    "{n}"
+
+fn _cf_days_from_civil(y_in: i64, m: i64, d: i64) -> i64:
+    """Days since 1970-01-01 for a civil date."""
+    var y = y_in
+    if m <= 2:
+        y = y - 1
+    val era = (if y >= 0: y else: y - 399) / 400
+    val yoe = y - era * 400
+    val mp = if m > 2: m - 3 else: m + 9
+    val doy = (153 * mp + 2) / 5 + d - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+
+fn _cf_civil_from_days(z_in: i64) -> [i64]:
+    """[year, month, day] for days since 1970-01-01."""
+    val z = z_in + 719468
+    val era = (if z >= 0: z else: z - 146096) / 146097
+    val doe = z - era * 146097
+    val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    val mp = (5 * doy + 2) / 153
+    val d = doy - (153 * mp + 2) / 5 + 1
+    val m = if mp < 10: mp + 3 else: mp - 9
+    val y = yoe + era * 400 + (if m <= 2: 1 else: 0)
+    [y, m, d]
+
+fn _cf_civil_from_serial(serial: f64) -> [i64]:
+    _cf_civil_from_days(serial.to_i64() - 25569)
+
+fn _cf_excel_format(v: f64, fmt_in: text) -> text:
+    """Excel TEXT() format subset: 0 / 0.00 / #,##0[.00] / 0%[.00%] /
+    yyyy-mm-dd / mm/dd/yyyy. Unknown formats fall back to general.
+    (See module docstring: copied from formula.spl's `_excel_format`.)"""
+    val fmt = fmt_in.lower()
+    if fmt.contains("y") and (fmt.contains("m") or fmt.contains("d")):
+        val ymd = _cf_civil_from_serial(v)
+        if fmt.contains("/"):
+            return "{_cf_pad2(ymd[1])}/{_cf_pad2(ymd[2])}/{ymd[0]}"
+        return "{ymd[0]}-{_cf_pad2(ymd[1])}-{_cf_pad2(ymd[2])}"
+    if fmt.ends_with("%"):
+        val decs = _cf_count_decimals_in_fmt(fmt)
+        return "{_cf_fmt_decimals_grouped(v * 100.0, decs, false)}%"
+    val grouped = fmt.contains(",")
+    val decs = _cf_count_decimals_in_fmt(fmt)
+    if fmt.starts_with("0") or fmt.starts_with("#"):
+        return _cf_fmt_decimals_grouped(v, decs, grouped)
+    _cf_fmt_num_trim(v)

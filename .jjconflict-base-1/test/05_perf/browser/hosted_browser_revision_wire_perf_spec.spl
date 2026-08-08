@@ -1,0 +1,170 @@
+# codex-system-test
+# @tag: web, rendering, engine2d, performance
+"""# Hosted browser revision-wire performance
+
+Measures changed and unchanged frames through the hosted render session,
+response SBRF7 encode/decode, and compositor route. This in-process response
+gate excludes request encoding and pipe transport.
+"""
+
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage,
+    browser_renderer_decoder_feed,
+    browser_renderer_decoder_new,
+    browser_renderer_frame_decode
+}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+
+val WIRE_WARMUP_PAIRS: i64 = 3
+val WIRE_TIMED_PAIRS: i64 = 11
+
+fn wire_perf_frame(wire: text):
+    browser_renderer_frame_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), wire
+        ).message,
+        64,
+        64
+    )
+
+fn wire_perf_sorted(values: [i64]) -> [i64]:
+    var sorted = values
+    var i: i64 = 1
+    while i < sorted.len():
+        val value = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > value:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = value
+        i = i + 1
+    sorted
+
+fn wire_perf_html(color: text) -> text:
+    "<main style='position:absolute;left:0;top:0;width:64px;height:64px;background:{color}'></main>"
+
+fn wire_perf_expected_pixels(color: text) -> [u32]:
+    if color == "#dc2626":
+        return [0xFFDC2626u32; 4096]
+    [0xFF2563EBu32; 4096]
+
+describe "hosted browser revision-wire performance":
+    it "keeps unchanged response routing faster than changed frames":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 64)
+        val initial = worker.handle(BrowserRendererMessage(
+            kind: "init",
+            generation: 7,
+            request_id: 2,
+            payload: wire_perf_html("#2563eb")
+        ))
+        val initial_frame = wire_perf_frame(initial.wire)
+        expect(initial_frame.ok).to_equal(true)
+        var raster = Engine2dCompositorBackend.create_named(
+            64, 64, "software")
+        val _ = raster.render_draw_ir_composition_resources_revision(
+            initial_frame.composition,
+            initial_frame.image_resources,
+            7,
+            initial_frame.composition_revision
+        )
+
+        var request_id: i64 = 3
+        var warmup: i64 = 0
+        while warmup < WIRE_WARMUP_PAIRS:
+            val unchanged = worker.handle(BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: request_id,
+                payload: str(request_id * 16)
+            ))
+            val unchanged_frame = wire_perf_frame(unchanged.wire)
+            val _ = raster.render_draw_ir_composition_resources_revision(
+                unchanged_frame.composition,
+                unchanged_frame.image_resources,
+                7,
+                unchanged_frame.composition_revision
+            )
+            request_id = request_id + 1
+            warmup = warmup + 1
+
+        val before_composition_revision = worker.render_session.counters.composition_revision
+        val before_reuse_count = worker.render_session.counters.reuse_count
+        var changed_samples: [i64] = []
+        var unchanged_samples: [i64] = []
+        var mismatches: i64 = 0
+        var sample: i64 = 0
+        while sample < WIRE_TIMED_PAIRS:
+            val color = if sample % 2 == 0: "#dc2626" else: "#2563eb"
+            val expected_pixels = wire_perf_expected_pixels(color)
+            expect(worker.browser.eval_script(
+                "document.body.innerHTML = \"" +
+                wire_perf_html(color) + "\""
+            ).is_ok()).to_equal(true)
+
+            val changed_start = time_now_nanos()
+            val changed = worker.handle(BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: request_id,
+                payload: str(request_id * 16)
+            ))
+            val changed_frame = wire_perf_frame(changed.wire)
+            val changed_render = raster.render_draw_ir_composition_resources_revision(
+                changed_frame.composition,
+                changed_frame.image_resources,
+                7,
+                changed_frame.composition_revision
+            )
+            changed_samples.push(time_now_nanos() - changed_start)
+            request_id = request_id + 1
+
+            val unchanged_start = time_now_nanos()
+            val unchanged = worker.handle(BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: request_id,
+                payload: str(request_id * 16)
+            ))
+            val unchanged_frame = wire_perf_frame(unchanged.wire)
+            val unchanged_render = raster.render_draw_ir_composition_resources_revision(
+                unchanged_frame.composition,
+                unchanged_frame.image_resources,
+                7,
+                unchanged_frame.composition_revision
+            )
+            unchanged_samples.push(time_now_nanos() - unchanged_start)
+            request_id = request_id + 1
+
+            if (not changed_frame.ok or not unchanged_frame.ok or
+                unchanged_frame.composition_revision !=
+                    changed_frame.composition_revision or
+                changed_render.pixels != expected_pixels or
+                unchanged_render.pixels != expected_pixels):
+                mismatches = mismatches + 1
+            sample = sample + 1
+
+        val after = worker.render_session.counters
+        val changed = wire_perf_sorted(changed_samples)
+        val unchanged = wire_perf_sorted(unchanged_samples)
+        val changed_p50_ns = changed[changed.len() / 2]
+        val unchanged_p50_ns = unchanged[unchanged.len() / 2]
+        expect(mismatches).to_equal(0)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision + WIRE_TIMED_PAIRS)
+        expect(after.reuse_count).to_equal(
+            before_reuse_count + WIRE_TIMED_PAIRS)
+        expect(raster.revision_render_count).to_equal(
+            1 + WIRE_TIMED_PAIRS)
+        expect(raster.revision_reuse_count).to_equal(
+            WIRE_WARMUP_PAIRS + WIRE_TIMED_PAIRS)
+        expect(changed_p50_ns).to_be_greater_than(0)
+        expect(unchanged_p50_ns).to_be_greater_than(0)
+        expect(unchanged_p50_ns).to_be_less_than(changed_p50_ns)
+        print "hosted_revision_wire_perf pairs={WIRE_TIMED_PAIRS} viewport=64x64 changed_p50_ns={changed_p50_ns} unchanged_p50_ns={unchanged_p50_ns} ratio_x1000={unchanged_p50_ns * 1000 / changed_p50_ns} render_count={raster.revision_render_count} reuse_count={raster.revision_reuse_count}"
+        raster.shutdown()
+        worker.close()

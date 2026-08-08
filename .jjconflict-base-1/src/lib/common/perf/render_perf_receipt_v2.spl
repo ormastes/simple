@@ -1,0 +1,147 @@
+# render_perf_receipt_v2 — engine-identity-mandatory performance receipts.
+#
+# Every performance number in this repo has repeatedly been mis-attributed:
+# "native"/"self-hosted" results that were actually the Rust seed, the JIT, or
+# a silent interpreted fallback (see doc/08_tracking/bug/ and memory notes:
+# SIMPLE_EXECUTION_MODE=native is NOT a mode; bin/simple test hard-defaults to
+# the tree-walk interpreter regardless of env). A receipt therefore CANNOT be
+# constructed without an engine identity and a caller-attested binary md5.
+#
+# What CAN be determined in-process:
+#   - the raw SIMPLE_EXECUTION_MODE env value;
+#   - the engine FAMILY implied by it ("interpret*" -> interpreter, anything
+#     else -> jit-family — there is no third mode; "native" et al are JIT).
+# What CANNOT be determined in-process (caller must attest, fail-closed):
+#   - seed vs pure-simple binary: size and banner both lie
+#     (reference_positive_capability_probe_for_binary_identity). The caller
+#     md5s the binary it actually invoked and passes it in.
+#   - under `bin/simple test` the engine is the tree-walk interpreter no
+#     matter what the env says; a spec-harness caller must attest
+#     ENGINE_INTERPRETER.
+#
+# Usage (benchmark script):
+#   val r = render_perf_receipt_new(ENGINE_SEED_JIT, "<md5 of bin/simple>")
+#   ... fill counters via perf_ctr_set(r!, PERF_CTR_RASTER_MS, t) ...
+#   print(perf_receipt_line(r!))
+#   val verdict = perf_receipt_gate(r!, ENGINE_SEED_JIT)   # "pass" or "refuse:*"
+
+extern fn rt_env_get(key: text) -> text
+
+pub val ENGINE_INTERPRETER: text = "interpreter"
+pub val ENGINE_SEED_JIT: text = "seed-jit"
+pub val ENGINE_PURE_SIMPLE_JIT: text = "pure-simple-jit"
+pub val ENGINE_AOT: text = "aot"
+
+# Counter indexes into RenderPerfReceiptV2.counters (§13.2 vocabulary).
+pub val PERF_CTR_STYLE_MS: i64 = 0
+pub val PERF_CTR_LAYOUT_MS: i64 = 1
+pub val PERF_CTR_SCENE_DELTA_MS: i64 = 2
+pub val PERF_CTR_COMMON_OPT_MS: i64 = 3
+pub val PERF_CTR_RASTER_MS: i64 = 4
+pub val PERF_CTR_PRESENT_MS: i64 = 5
+pub val PERF_CTR_ALLOCATIONS: i64 = 6
+pub val PERF_CTR_SCENE_COPY_BYTES: i64 = 7
+pub val PERF_CTR_DIRTY_PIXELS: i64 = 8
+pub val PERF_CTR_RASTERIZED_PIXELS: i64 = 9
+pub val PERF_CTR_CULLED_OPS: i64 = 10
+pub val PERF_CTR_KERNEL_CALLS: i64 = 11
+pub val PERF_CTR_FFI_CALLS: i64 = 12
+pub val PERF_CTR_UPLOAD_BYTES: i64 = 13
+pub val PERF_CTR_READBACK_BYTES: i64 = 14
+pub val PERF_CTR_GPU_SUBMITS: i64 = 15
+pub val PERF_CTR_PIPELINE_CREATIONS: i64 = 16
+pub val PERF_CTR_FORWARD_PHYSICAL_HOPS: i64 = 17
+pub val PERF_CTR_LAYER_VIEW_COPY_BYTES: i64 = 18
+pub val PERF_CTR_EVENT_ALLOCATIONS: i64 = 19
+pub val PERF_CTR_COUNT: i64 = 20
+
+pub struct RenderPerfReceiptV2:
+    engine: text            # one of the ENGINE_* constants, validated
+    binary_md5: text        # caller-attested md5 of the binary that ran
+    binary_path: text       # best-effort, informational
+    execution_mode_env: text  # raw SIMPLE_EXECUTION_MODE at construction
+    target_triple: text
+    cpu_features: text
+    fallback_status: text   # "none" | description of any fallback observed
+    counters: [i64]
+    notes: text
+
+fn perf_engine_id_known(id: text) -> bool:
+    (id == ENGINE_INTERPRETER or id == ENGINE_SEED_JIT
+        or id == ENGINE_PURE_SIMPLE_JIT or id == ENGINE_AOT)
+
+pub fn perf_probe_execution_mode_env() -> text:
+    rt_env_get("SIMPLE_EXECUTION_MODE")
+
+pub fn perf_probe_engine_family() -> text:
+    """Engine FAMILY from env only. "interpret*" -> interpreter; everything
+    else (incl. unset, "native", "jit") is the JIT — there is no third mode.
+    NOT authoritative under `bin/simple test` (always interpreter there)."""
+    val m = perf_probe_execution_mode_env()
+    if m == "interpret" or m == "interpreter":
+        return ENGINE_INTERPRETER
+    "jit-family"
+
+pub fn render_perf_receipt_new(engine: text, binary_md5: text) -> RenderPerfReceiptV2?:
+    """Fail-closed constructor: nil unless engine is a known identity AND the
+    caller attested a non-empty binary md5. There is deliberately no way to
+    build a receipt with an unknown engine."""
+    if not perf_engine_id_known(engine):
+        return nil
+    if binary_md5.len() == 0:
+        return nil
+    var ctrs: [i64] = []
+    var i = 0
+    while i < PERF_CTR_COUNT.to_i32():
+        ctrs.push(0)
+        i = i + 1
+    RenderPerfReceiptV2(
+        engine: engine,
+        binary_md5: binary_md5,
+        binary_path: rt_env_get("SIMPLE_BINARY_PATH"),
+        execution_mode_env: perf_probe_execution_mode_env(),
+        target_triple: rt_env_get("SIMPLE_TARGET_TRIPLE"),
+        cpu_features: "",
+        fallback_status: "none",
+        counters: ctrs,
+        notes: "")
+
+fn perf_ctr_set(r: RenderPerfReceiptV2, idx: i64, value: i64) -> RenderPerfReceiptV2:
+    var out = r
+    if idx >= 0 and idx < PERF_CTR_COUNT:
+        out.counters[idx.to_i32()] = value
+    out
+
+fn perf_ctr_get(r: RenderPerfReceiptV2, idx: i64) -> i64:
+    if idx >= 0 and idx < PERF_CTR_COUNT:
+        return r.counters[idx.to_i32()]
+    -1
+
+pub fn perf_receipt_gate(r: RenderPerfReceiptV2, required_engine: text) -> text:
+    """Fail-closed gate for benchmark scripts: a wrong-engine or
+    fallback-tainted number must never be reportable as a pass."""
+    if not perf_engine_id_known(required_engine):
+        return "refuse:unknown-required-engine:" + required_engine
+    if not perf_engine_id_known(r.engine):
+        return "refuse:unknown-receipt-engine:" + r.engine
+    if r.binary_md5.len() == 0:
+        return "refuse:missing-binary-attestation"
+    if r.engine != required_engine:
+        return "refuse:engine-mismatch:have=" + r.engine + ":need=" + required_engine
+    if r.fallback_status != "none":
+        return "refuse:fallback:" + r.fallback_status
+    "pass"
+
+pub fn perf_receipt_line(r: RenderPerfReceiptV2) -> text:
+    var line = "perf_receipt_v2 engine=" + r.engine
+        + " md5=" + r.binary_md5
+        + " mode_env=" + r.execution_mode_env
+        + " fallback=" + r.fallback_status
+    line = line + " raster_ms=" + perf_ctr_get(r, PERF_CTR_RASTER_MS).to_text()
+        + " dirty_px=" + perf_ctr_get(r, PERF_CTR_DIRTY_PIXELS).to_text()
+        + " culled_ops=" + perf_ctr_get(r, PERF_CTR_CULLED_OPS).to_text()
+        + " allocs=" + perf_ctr_get(r, PERF_CTR_ALLOCATIONS).to_text()
+        + " readback_bytes=" + perf_ctr_get(r, PERF_CTR_READBACK_BYTES).to_text()
+    if r.notes.len() > 0:
+        line = line + " notes=" + r.notes
+    line

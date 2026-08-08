@@ -1,0 +1,74 @@
+# LLM Caret - MCP/plugin capability discovery
+
+struct AgentDiscoverySet:
+    mcp_servers: [text]
+    plugins: [text]
+
+fn _add_unique(items: [text], item: text) -> [text]:
+    val trimmed = item.trim()
+    if trimmed == "":
+        return items
+    for existing in items:
+        if existing == trimmed:
+            return items
+    items + [trimmed]
+
+fn _between(text_value: text, left: text, right: text) -> text:
+    val parts = text_value.split(left)
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1]
+    val end_parts = rest.split(right)
+    if end_parts.len() == 0:
+        return ""
+    end_parts[0].trim()
+
+fn _line_value(manifest: text, key: text) -> text:
+    for line in manifest.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(key + ":"):
+            return trimmed.substring((key + ":").len()).trim()
+    ""
+
+pub fn parse_mcp_manifest(manifest: text) -> [text]:
+    var servers: [text] = []
+    servers = _add_unique(servers, _between(manifest, "\"name\":\"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"name\": \"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"identifier\":\"", "\""))
+    servers = _add_unique(servers, _between(manifest, "\"identifier\": \"", "\""))
+    servers = _add_unique(servers, _line_value(manifest, "mcp"))
+    servers
+
+pub fn parse_plugin_manifest(manifest: text) -> [text]:
+    var plugins: [text] = []
+    plugins = _add_unique(plugins, _between(manifest, "\"name\":\"", "\""))
+    plugins = _add_unique(plugins, _between(manifest, "\"name\": \"", "\""))
+    plugins = _add_unique(plugins, _line_value(manifest, "name"))
+    plugins
+
+pub fn discover_agent_capabilities(mcp_manifests: [text], plugin_manifests: [text]) -> AgentDiscoverySet:
+    var mcp_servers: [text] = []
+    var plugins: [text] = []
+    for manifest in mcp_manifests:
+        for server in parse_mcp_manifest(manifest):
+            mcp_servers = _add_unique(mcp_servers, server)
+    for manifest in plugin_manifests:
+        for plugin in parse_plugin_manifest(manifest):
+            plugins = _add_unique(plugins, plugin)
+    AgentDiscoverySet(mcp_servers: mcp_servers, plugins: plugins)
+
+pub fn build_plugin_install_args(plugin: text, installer: text, extra_args: [text]) -> [text]:
+    var args: [text] = []
+    if installer != "":
+        args = args + [installer]
+    else:
+        args = args + ["install-plugin"]
+    if plugin != "":
+        args = args + [plugin]
+    for arg in extra_args:
+        if arg != "":
+            args = args + [arg]
+    args
+
+export AgentDiscoverySet
+export parse_mcp_manifest, parse_plugin_manifest, discover_agent_capabilities, build_plugin_install_args

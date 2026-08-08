@@ -1,0 +1,96 @@
+# Regression: the LLVM IR backend must reconcile a call's argument count with
+# the callee's declared parameter count. When they differ (a method/short-form
+# call reaching the backend with fewer/more args than the callee `declare`s),
+# a bare `call @f(args)` is rejected by llc ("Incorrect number of arguments").
+# The backend emits an EXPLICIT function-type signature `call RET (argtys) @f(..)`
+# on a KNOWN mismatch, and the bare form (unchanged) when the arity matches.
+#
+# Mirrors the seed backend's indirect-call reconciliation; guards the
+# `mcall_direct` arg-count class of miscompile in the pure-Simple compiler.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn i64t() -> MirType:
+    MirType.i64()
+
+fn mk_fn(sym: i64, name: text, params: [MirType], locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym),
+        name: name,
+        signature: MirSignature(params: params, return_type: i64t(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn arg_local(id: i64, index: i64, name: text) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: i64t(), kind: LocalKind.Arg(index), is_ghost: false)
+
+fn callee3_fn() -> MirFunction:
+    # A well-formed 3-parameter function: signature params AND three Arg-kind
+    # locals, so the emitted `define` and the remembered param types both = 3.
+    mk_fn(1, "arity_callee3", [i64t(), i64t(), i64t()],
+        [arg_local(0, 0, "a"), arg_local(1, 1, "b"), arg_local(2, 2, "c")], [])
+
+fn func_ref(name: text, nparams: i64) -> MirOperand:
+    var ps: [MirType] = []
+    var i = 0
+    while i < nparams:
+        ps = ps.push(i64t())
+        i = i + 1
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: ps, return_type: i64t(), is_variadic: false)))))
+
+fn int_arg(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), i64t()))
+
+fn caller_with_args(sym: i64, name: text, nargs: i64) -> MirFunction:
+    var args: [MirOperand] = []
+    var i = 0
+    while i < nargs:
+        args = args.push(int_arg(i + 1))
+        i = i + 1
+    val call = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 10)), func_ref("arity_callee3", 3), args), span: nil)
+    mk_fn(sym, name, [], [MirLocal(id: LocalId(id: 10), name: Some("r"), type_: i64t(), kind: LocalKind.Temp, is_ghost: false)], [call])
+
+fn module_with(caller_fn: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    val c3 = callee3_fn()
+    functions[c3.symbol] = c3
+    functions[caller_fn.symbol] = caller_fn
+    MirModule(name: "test.llvm.arity", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "LLVM call arity reconciliation":
+    it "emits an explicit function signature when arg count is below declared params":
+        val translator = MirToLlvm.create("test.llvm.arity", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(module_with(caller_with_args(2, "arity_caller_short", 2)))
+        # 2 args vs 3 declared params -> explicit `(i64, i64)` signature keeps the
+        # call well-formed for llc instead of a bare 2-arg call to a 3-param decl.
+        expect(output).to_contain("call i64 (i64, i64) @arity_callee3")
+
+    it "emits a bare call (no explicit signature) when arg count matches declared params":
+        val translator = MirToLlvm.create("test.llvm.arity", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(module_with(caller_with_args(3, "arity_caller_exact", 3)))
+        expect(output).to_contain("call i64 @arity_callee3(")
+        expect(output.contains("(i64, i64, i64) @arity_callee3")).to_equal(false)

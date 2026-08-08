@@ -1,0 +1,157 @@
+# SoC Boot Simulation — Behavioral model boot runner
+#
+# Loads a test prog into the SoC behavioral model (soc_rtl/soc_top.spl),
+# runs tick-by-tick, and captures semihosting output from the mailbox.
+# Proves end-to-end: boot ROM → prog entry → UART/mailbox output → halt.
+
+use std.hardware.soc_rtl.soc_top.{SocState, SocTickResult, soc_create, soc_tick}
+use std.hardware.soc_rtl.ram.{ram_load_elf, ram_load_bytes}
+use std.hardware.soc_rtl.bootrom.DTB_BASE
+use std.hardware.soc_rtl.wb_interconnect.RAM_BASE
+
+# ============================================================================
+# RV32I Instruction Encoders
+# ============================================================================
+
+fn enc_lui(rd: u32, imm20: u32) -> u32:
+    (imm20 << 12) | (rd << 7) | 0x37
+
+fn enc_addi(rd: u32, rs1: u32, imm12: u32) -> u32:
+    ((imm12 & 0xFFF) << 20) | (rs1 << 15) | (rd << 7) | 0x13
+
+fn enc_sw(rs2: u32, rs1: u32, offset: u32) -> u32:
+    val hi = (offset >> 5) & 0x7F
+    val lo = offset & 0x1F
+    (hi << 25) | (rs2 << 20) | (rs1 << 15) | (0x2 << 12) | (lo << 7) | 0x23
+
+fn enc_jal(rd: u32, offset: i32) -> u32:
+    val imm = offset as u32
+    val bit20 = (imm >> 20) & 1
+    val bits10_1 = (imm >> 1) & 0x3FF
+    val bit11 = (imm >> 11) & 1
+    val bits19_12 = (imm >> 12) & 0xFF
+    (bit20 << 31) | (bits10_1 << 21) | (bit11 << 20) | (bits19_12 << 12) | (rd << 7) | 0x6F
+
+fn enc_ebreak() -> u32:
+    0x00100073
+
+# Register numbers
+val X0: u32 = 0
+val T0: u32 = 5
+val T1: u32 = 6
+val T3: u32 = 28
+val T4: u32 = 29
+
+# ============================================================================
+# Test Kernel Generator
+# ============================================================================
+
+pub fn generate_simpleos_test_prog() -> [u32]:
+    """Generates a minimal RV32I prog that prints 'SimpleOS' via mailbox
+    semihosting and then halts. Runs at 0x80000000 (RAM base).
+
+    Mailbox protocol (MB_BASE = 0x80FF0000):
+      ARG0 (offset 0x04) = character
+      CMD  (offset 0x00) = 1 (PUTC)
+      TRIGGER (offset 0x18) = 0xDEAD (magic, execute)
+    """
+    var code: [u32] = []
+
+    # Setup: t0 = mailbox base, t3 = CMD_PUTC (1), t4 = trigger magic (0xDEAD)
+    code = code.push(enc_lui(T0, 0x80FF0))
+    code = code.push(enc_addi(T3, X0, 1))
+    # 0xDEAD = 0xE000 + (-339); lui 0xE gives 0xE000, addi -339 gives 0xDEAD
+    # -339 as 12-bit signed = 0xEAD (sign-extended to 0xFFFFFEAD)
+    code = code.push(enc_lui(T4, 0xE))
+    code = code.push(enc_addi(T4, T4, 0xEAD))
+
+    # Print each character of "SimpleOS\n"
+    val msg = "SimpleOS\n"
+    var i = 0
+    while i < msg.len():
+        val ch = msg[i] as u32
+        code = code.push(enc_addi(T1, X0, ch))
+        code = code.push(enc_sw(T1, T0, 4))
+        code = code.push(enc_sw(T3, T0, 0))
+        code = code.push(enc_sw(T4, T0, 0x18))
+        i = i + 1
+
+    # Exit: CMD_EXIT (2) via mailbox
+    code = code.push(enc_addi(T1, X0, 2))
+    code = code.push(enc_sw(X0, T0, 4))
+    code = code.push(enc_sw(T1, T0, 0))
+    code = code.push(enc_sw(T4, T0, 0x18))
+
+    # Halt loop (EBREAK)
+    code = code.push(enc_ebreak())
+
+    code
+
+# ============================================================================
+# Boot Simulation Runner
+# ============================================================================
+
+pub struct BootSimResult:
+    """Result of a boot simulation run."""
+    output: text
+    cycles: u32
+    halted: bool
+    success: bool
+
+pub fn run_soc_boot_sim(prog: [u32], max_cycles: u32) -> BootSimResult:
+    """Run the SoC behavioral model with a prog loaded at RAM base.
+
+    Creates a 2MB SoC (512K words), loads the prog at offset 0 (= 0x80000000),
+    then ticks the SoC for up to max_cycles, collecting mailbox character output.
+
+    Returns the collected output string, cycle count, and success status.
+    """
+    val ram_words: u32 = 512 * 1024
+    var soc = soc_create(ram_words)
+
+    # Load prog into RAM at offset 0 (byte address 0 relative to RAM base)
+    soc.ram = ram_load_elf(soc.ram, 0, prog)
+
+    var output = ""
+    var cycle: u32 = 0
+    var halted = false
+
+    while cycle < max_cycles and not halted:
+        val result = soc_tick(soc)
+        soc = result.state
+
+        if result.ports.char_valid:
+            val ch = result.ports.char_out & 0xFF
+            if ch >= 0x20 and ch < 0x7F:
+                output = output + chr(ch)
+            else if ch == 0x0A:
+                output = output + "\n"
+
+        halted = result.ports.halted
+        cycle = cycle + 1
+
+    BootSimResult(
+        output: output,
+        cycles: cycle,
+        halted: halted,
+        success: output.starts_with("SimpleOS")
+    )
+
+val ASCII_TABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+fn chr(code: u32) -> text:
+    """Convert ASCII code (0x20-0x7E) to single-character text."""
+    val idx = code - 0x20
+    if idx < ASCII_TABLE.len() as u32:
+        ASCII_TABLE[idx as i64].to_text()
+    else:
+        "?"
+
+# ============================================================================
+# Convenience: Run default SimpleOS boot test
+# ============================================================================
+
+pub fn run_simpleos_boot_test() -> BootSimResult:
+    """Generate test prog and run boot simulation with 10000 cycle limit."""
+    val prog = generate_simpleos_test_prog()
+    run_soc_boot_sim(prog, 10000)

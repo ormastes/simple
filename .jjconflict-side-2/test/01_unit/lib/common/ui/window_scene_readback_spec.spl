@@ -1,0 +1,73 @@
+# @cover src/lib/common/ui/window_scene_draw_ir.spl 5%
+# @tag: unit, ui, wm, readback, perf
+#
+# T3 (render_perf_replan_parallel_teams_2026-08-07): the warm-path readback
+# `shared_wm_pixel_buffer_pixels` must cost ONE extern crossing per frame
+# (rt_u32s_from_raw), not one per pixel (230,400 rt_ptr_read_i64 calls at
+# 480x480 — doc/09_report/ws_f4_presentation_readback_audit_2026-08-06.md).
+# The pre-T3 per-pixel loop is retained as the bit-exactness oracle.
+
+use std.spec
+use common.ui.window_scene_draw_ir.{
+    SharedWmPixelBufferBackend,
+    shared_wm_pixel_buffer_pixels,
+    shared_wm_pixel_buffer_pixels_per_pixel_oracle,
+    shared_wm_pixel_buffer_count,
+    shared_wm_readback_ffi_calls
+}
+
+val W: i32 = 32
+val H: i32 = 16
+
+fn _painted_backend() -> SharedWmPixelBufferBackend:
+    """Fresh shared buffer with a nonzero background and a distinct rect, so
+    byte-equality cannot pass vacuously on two all-zero buffers."""
+    var backend = SharedWmPixelBufferBackend.new(W, H)
+    backend.clear(0xFF101010u32)
+    backend.fill_rect(2, 3, 10, 5, 0xFF3366CCu32)
+    backend
+
+describe "shared wm pixel buffer readback (T3)":
+
+    it "bulk readback is byte-identical to the per-pixel oracle on a nonzero frame":
+        var backend = _painted_backend()
+        val bulk = shared_wm_pixel_buffer_pixels(backend)
+        val oracle = shared_wm_pixel_buffer_pixels_per_pixel_oracle()
+        val count = (W as i64) * (H as i64)
+        expect(bulk.len().to_i64()).to_equal(count)
+        expect(oracle.len().to_i64()).to_equal(count)
+        var mismatches: i64 = 0
+        var nonzero: i64 = 0
+        var i: i64 = 0
+        while i < count:
+            if bulk[i] != oracle[i]:
+                mismatches = mismatches + 1
+            if bulk[i] != 0u32:
+                nonzero = nonzero + 1
+            i = i + 1
+        expect(mismatches).to_equal(0)
+        # Nonzero-pixel proof: an all-zero pair must not be able to pass.
+        expect(nonzero).to_equal(count)
+        # Spot-check the painted rect interior with the exact ARGB value.
+        val rect_idx = 4 * (W as i64) + 5
+        expect(bulk[rect_idx]).to_equal(0xFF3366CCu32)
+        expect(bulk[0]).to_equal(0xFF101010u32)
+
+    it "bulk readback costs one FFI call per frame while the oracle costs one per pixel":
+        var backend = _painted_backend()
+        val count = shared_wm_pixel_buffer_count()
+        expect(count).to_equal((W as i64) * (H as i64))
+        val c0 = shared_wm_readback_ffi_calls()
+        val _bulk = shared_wm_pixel_buffer_pixels(backend)
+        val c1 = shared_wm_readback_ffi_calls()
+        expect(c1 - c0).to_equal(1)
+        val _oracle = shared_wm_pixel_buffer_pixels_per_pixel_oracle()
+        val c2 = shared_wm_readback_ffi_calls()
+        expect(c2 - c1).to_equal(count)
+
+    it "empty buffer readback stays empty and free":
+        var backend = SharedWmPixelBufferBackend.new(0, 0)
+        val c0 = shared_wm_readback_ffi_calls()
+        val bulk = shared_wm_pixel_buffer_pixels(backend)
+        expect(bulk.len()).to_equal(0)
+        expect(shared_wm_readback_ffi_calls() - c0).to_equal(0)

@@ -1,0 +1,99 @@
+"""Query-By-Example (QBE) design-grid spec — qbe.spl.
+
+Ground truth is hand-computed against one small table:
+
+employees(name, dept, salary):
+  Alice, Eng,   90000
+  Bob,   Sales, 60000
+  Carol, Eng,   95000
+  Dave,  Sales, 55000
+
+Grid 1 — filter + project (name shown/sort asc no criteria, dept
+criteria "=Eng" shown, salary criteria ">90000" NOT shown):
+  Alice: dept Eng==Eng true, salary 90000>90000 false -> no
+  Bob:   dept Sales!=Eng -> no
+  Carol: dept Eng==Eng true, salary 95000>90000 true -> match
+  Dave:  dept Sales!=Eng -> no
+  => just Carol; salary hidden -> result cols = [name, dept], 1 row
+     (name=Carol, dept=Eng)
+
+Grid 2 — sort only (name shown/sort desc, dept shown, no criteria):
+  all 4 rows kept; sorted by name desc -> Dave, Carol, Bob, Alice
+  => result cols = [name, dept], 4 rows in that order
+"""
+
+use std.spec
+use app.office.database.table.{Table, table_new, table_insert, table_row_count, table_get, table_col_index}
+use app.office.database.qbe.{QbeColumn, qbe_col_new, Qbe, qbe_new, qbe_add, qbe_run, qbe_criteria_summary}
+
+fn _employees() -> Table:
+    var t = table_new("employees", ["name", "dept", "salary"])
+    t = table_insert(t, ["Alice", "Eng", "90000"])
+    t = table_insert(t, ["Bob", "Sales", "60000"])
+    t = table_insert(t, ["Carol", "Eng", "95000"])
+    t = table_insert(t, ["Dave", "Sales", "55000"])
+    t
+
+fn _names(t: Table) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < table_row_count(t):
+        out.push(table_get(t, i, "name"))
+        i = i + 1
+    out
+
+describe "qbe_col_new / qbe_new / qbe_add":
+    it "carries all four declared fields on QbeColumn":
+        val qcol = qbe_col_new("salary", ">90000", false, "")
+        expect(qcol.col).to_equal("salary")
+        expect(qcol.criteria).to_equal(">90000")
+        expect(qcol.shown).to_equal(false)
+        expect(qcol.sort).to_equal("")
+
+    it "starts empty and qbe_add RETURNS a new object with the column appended":
+        val qbe = qbe_new()
+        expect(qbe.columns.len()).to_equal(0)
+        val qbe2 = qbe_add(qbe, qbe_col_new("name", "", true, "asc"))
+        expect(qbe2.columns.len()).to_equal(1)
+        expect(qbe.columns.len()).to_equal(0)
+
+describe "qbe_run":
+    it "filters on dept=Eng AND salary>90000, sorts by name asc, hides salary -> just Carol/Eng":
+        val employees = _employees()
+        var qbe = qbe_new()
+        qbe = qbe_add(qbe, qbe_col_new("name", "", true, "asc"))
+        qbe = qbe_add(qbe, qbe_col_new("dept", "=Eng", true, ""))
+        qbe = qbe_add(qbe, qbe_col_new("salary", ">90000", false, ""))
+        val result = qbe_run(qbe, employees)
+        expect(result.cols).to_equal(["name", "dept"])
+        expect(table_row_count(result)).to_equal(1)
+        expect(table_get(result, 0, "name")).to_equal("Carol")
+        expect(table_get(result, 0, "dept")).to_equal("Eng")
+        expect(table_col_index(result, "salary")).to_equal(-1)
+
+    it "with no criteria, keeps all rows and sorts by the first sort column (name desc)":
+        val employees = _employees()
+        var qbe = qbe_new()
+        qbe = qbe_add(qbe, qbe_col_new("name", "", true, "desc"))
+        qbe = qbe_add(qbe, qbe_col_new("dept", "", true, ""))
+        val result = qbe_run(qbe, employees)
+        expect(result.cols).to_equal(["name", "dept"])
+        expect(table_row_count(result)).to_equal(4)
+        expect(_names(result)).to_equal(["Dave", "Carol", "Bob", "Alice"])
+
+describe "qbe_criteria_summary":
+    it "renders one preview line per column carrying a criterion or sort":
+        var qbe = qbe_new()
+        qbe = qbe_add(qbe, qbe_col_new("name", "", true, "asc"))
+        qbe = qbe_add(qbe, qbe_col_new("dept", "=Eng", true, ""))
+        qbe = qbe_add(qbe, qbe_col_new("salary", ">90000", false, ""))
+        val lines = qbe_criteria_summary(qbe)
+        expect(lines).to_equal([
+            "name  sort=asc shown=true",
+            "dept =Eng sort= shown=true",
+            "salary >90000 sort= shown=false",
+        ])
+
+    describe "tail execution probe":
+        it "confirms the final nested describe block actually runs":
+            expect(1 + 1).to_equal(2)

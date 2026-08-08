@@ -1,0 +1,1298 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_goal_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_goal_evidence_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+LANE_TIMEOUT_SECONDS="${LLM_GOAL_LANE_TIMEOUT_SECONDS:-180}"
+SVLLM_LANE_TIMEOUT_SECONDS="${LLM_GOAL_SVLLM_LANE_TIMEOUT_SECONDS:-}"
+STRICT_HOST=0
+LANES="context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard public_absence feature_db_reference prereq_doctor_contract dashboard_http_setup_contract vllm_host_env_contract torch_setup_contract finetune_setup_contract svllm_setup_contract"
+COMPLETION_LANES="context_ponytail dashboard vllm_host svllm_local torch_optimizer finetune_guard"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --strict-host)
+            STRICT_HOST=1
+            ;;
+        --help|-h)
+            echo "usage: sh scripts/check/check-llm-goal-evidence.shs [--strict-host]"
+            echo "  --strict-host  require full context/Ponytail replacement, live dashboard, live vLLM, native svLLM, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates to pass"
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH"
+
+lane_timeout_seconds() {
+    key="$1"
+    case "$key" in
+        svllm_local)
+            if [ -n "$SVLLM_LANE_TIMEOUT_SECONDS" ]; then
+                printf '%s\n' "$SVLLM_LANE_TIMEOUT_SECONDS"
+            elif [ "$LANE_TIMEOUT_SECONDS" -lt 120 ]; then
+                printf '%s\n' "120"
+            else
+                printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$LANE_TIMEOUT_SECONDS"
+            ;;
+    esac
+}
+
+run_lane() {
+    key="$1"
+    expected="$2"
+    shift 2
+    log="$BUILD_DIR/$key.log"
+    report_path="$BUILD_DIR/${key}_report.md"
+    timeout_seconds="$(lane_timeout_seconds "$key")"
+    exit_code=0
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout "$timeout_seconds" env -u BUILD_DIR REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
+            :
+        else
+            exit_code=$?
+        fi
+    elif env -u BUILD_DIR REPORT_PATH="$report_path" "$@" >"$log" 2>&1; then
+        :
+    else
+        exit_code=$?
+    fi
+    if grep -F "STATUS: PASS" "$log" >/dev/null 2>&1; then
+        status="pass"
+    elif grep -F "STATUS: WARN" "$log" >/dev/null 2>&1; then
+        status="warn"
+    else
+        status="fail"
+    fi
+    if [ "$exit_code" -ne 0 ]; then
+        status="fail"
+    fi
+    eval "${key}_status=\$status"
+    eval "${key}_exit=\$exit_code"
+    eval "${key}_expected=\$expected"
+    eval "${key}_timeout_seconds=\$timeout_seconds"
+    if [ "$exit_code" -eq 124 ]; then
+        printf '%s\n' "STATUS: FAIL llm-goal-evidence-lane-timeout lane=$key seconds=$timeout_seconds" >>"$log"
+    fi
+}
+
+run_producer() {
+    key="$1"
+    log="$2"
+    shift 2
+    exit_code=0
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout "$LANE_TIMEOUT_SECONDS" "$@" >"$log" 2>&1; then
+            :
+        else
+            exit_code=$?
+        fi
+    elif "$@" >"$log" 2>&1; then
+        :
+    else
+        exit_code=$?
+    fi
+    eval "${key}_producer_exit=\$exit_code"
+    eval "${key}_producer_log=\$log"
+    if [ "$exit_code" -eq 124 ]; then
+        printf '%s\n' "STATUS: FAIL llm-goal-evidence-producer-timeout producer=$key seconds=$LANE_TIMEOUT_SECONDS" >>"$log"
+    fi
+}
+
+clear_evidence_env() {
+    env_path="$1"
+    rm -f "$env_path"
+}
+
+gate_hint() {
+    case "$1" in
+        context_ponytail)
+            echo "check-llm-tooling-context-ponytail-full-replacement.shs evidence with llm_tooling_context_ponytail_full_replacement_status=pass"
+            ;;
+        dashboard)
+            echo "check-llm-dashboard-live-evidence.shs evidence with llm_dashboard_live_status=pass"
+            ;;
+        vllm_host)
+            echo "local vLLM/GPU host evidence through check-llm-runtime-vllm-host-probe.shs --strict"
+            ;;
+        svllm_local)
+            echo "check-llm-runtime-svllm-native-streaming-evidence.shs evidence with svllm_native_streaming_status=pass"
+            ;;
+        torch_optimizer)
+            echo "Simple/libtorch CUDA optimizer evidence through check-llm-runtime-torch-cuda-optimizer-probe.shs --strict"
+            ;;
+        finetune_guard)
+            echo "check-llm-finetune-acceptance-evidence.shs evidence with llm_finetune_acceptance_status=pass"
+            ;;
+        finetune_setup_contract)
+            echo "check-llm-finetune-setup-contract.shs evidence with retry5/retry6/retry7 blocker diagnostics and next actions"
+            ;;
+        svllm_setup_contract)
+            echo "check-llm-runtime-svllm-setup-contract.shs evidence with local readiness and native capability diagnostics"
+            ;;
+        public_absence)
+            echo "public absence rendering guard must pass with manifest evidence"
+            ;;
+        feature_db_reference)
+            echo "LLM feature database reference integrity guard must pass with path and stale-svLLM evidence"
+            ;;
+        *)
+            echo "see lane log"
+            ;;
+    esac
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    if [ -f "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+lane_required_gates() {
+    case "$1" in
+        context_ponytail)
+            env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_required_gates
+            ;;
+        dashboard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_required_gates
+            else
+                printf '%s\n' "route_and_collector_evidence"
+            fi
+            ;;
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_required_gates
+            ;;
+        svllm_local)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                printf '%s\n' "native_read_range,pinned_buffer,device_staging"
+            else
+                printf '%s\n' "local_readiness"
+            fi
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_required_gates
+            ;;
+        finetune_guard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_required_gates
+            else
+                env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_required_gates
+            fi
+            ;;
+        public_absence)
+            env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_required_gates
+            ;;
+        feature_db_reference)
+            env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_required_gates
+            ;;
+        prereq_doctor_contract)
+            printf '%s\n' "dashboard_next_action,vllm_next_action,svllm_next_action,torch_next_action,finetune_next_action"
+            ;;
+        dashboard_http_setup_contract)
+            printf '%s\n' "base_url,auth_configured,next_action"
+            ;;
+        vllm_host_env_contract)
+            printf '%s\n' "llm_vllm_base_model,llm_vllm_endpoint"
+            ;;
+        torch_setup_contract)
+            printf '%s\n' "python_torch,cuda_visibility,system_libtorch,surface_manifest,next_action"
+            ;;
+        finetune_setup_contract)
+            printf '%s\n' "retry5_cache_manifest,retry6_training_eval,retry7_acceptance,next_action,surface_manifest"
+            ;;
+        svllm_setup_contract)
+            printf '%s\n' "local_readiness,native_read_range,pinned_buffer,device_staging,capability_evidence,next_action"
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+lane_blocked_gates() {
+    case "$1" in
+        context_ponytail)
+            env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_blocked_gates
+            ;;
+        dashboard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_blocked_gates
+            else
+                printf '%s\n' "none"
+            fi
+            ;;
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_blocked_gates
+            ;;
+        svllm_local)
+            if [ "$STRICT_HOST" -ne 1 ]; then
+                printf '%s\n' "none"
+                return
+            fi
+            blocked="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_blocked_gates)"
+            printf '%s\n' "${blocked:-native_streaming_evidence}"
+            ;;
+        torch_optimizer)
+            blocked="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_blocked_gates)"
+            if [ -n "$blocked" ]; then
+                printf '%s\n' "$blocked"
+            else
+                env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_blocked_gate
+            fi
+            ;;
+        finetune_guard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_blocked_gates
+            else
+                env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_blocked_gates
+            fi
+            ;;
+        public_absence)
+            env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_blocked_gates
+            ;;
+        feature_db_reference)
+            env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_blocked_gates
+            ;;
+        prereq_doctor_contract)
+            if [ "$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_reason
+            fi
+            ;;
+        dashboard_http_setup_contract)
+            if [ "$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason
+            fi
+            ;;
+        vllm_host_env_contract)
+            if [ "$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_reason
+            fi
+            ;;
+        torch_setup_contract)
+            if [ "$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_reason
+            fi
+            ;;
+        finetune_setup_contract)
+            if [ "$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_reason
+            fi
+            ;;
+        svllm_setup_contract)
+            if [ "$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_status)" = "pass" ]; then
+                printf '%s\n' "none"
+            else
+                env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_reason
+            fi
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+lane_blocker_reason() {
+    case "$1" in
+        context_ponytail)
+            env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_reason
+            ;;
+        dashboard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_reason
+            else
+                printf '%s\n' "default_route_and_collector_evidence_only"
+            fi
+            ;;
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_reason
+            ;;
+        svllm_local)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_reason
+            else
+                printf '%s\n' "default_local_readiness_only"
+            fi
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_reason
+            ;;
+        finetune_guard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_reason
+            else
+                env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_blocker_reason
+            fi
+            ;;
+        public_absence)
+            env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_reason
+            ;;
+        feature_db_reference)
+            env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_reason
+            ;;
+        prereq_doctor_contract)
+            env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_reason
+            ;;
+        dashboard_http_setup_contract)
+            env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason
+            ;;
+        vllm_host_env_contract)
+            env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_reason
+            ;;
+        torch_setup_contract)
+            env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_reason
+            ;;
+        finetune_setup_contract)
+            env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_reason
+            ;;
+        svllm_setup_contract)
+            env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_reason
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+primary_blocked_gate_for() {
+    blocked="$1"
+    case "${blocked:-}" in
+        ""|none|n/a)
+            printf '%s\n' "none"
+            ;;
+        *)
+            printf '%s\n' "$blocked" | cut -d '|' -f 1 | cut -d ',' -f 1 | cut -d ':' -f 1
+            ;;
+    esac
+}
+
+lane_next_action() {
+    case "$1" in
+        context_ponytail)
+            next_action="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_next_action)"
+            if [ -n "$next_action" ]; then
+                printf '%s\n' "$next_action"
+            else
+                printf '%s\n' "run $(gate_hint context_ponytail) and resolve replacement surface failures"
+            fi
+            ;;
+        dashboard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                next_action="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_next_action)"
+                if [ -n "$next_action" ]; then
+                    printf '%s\n' "$next_action"
+                else
+                    printf '%s\n' "run $(gate_hint dashboard) and resolve live dashboard route or auth failures"
+                fi
+            else
+                next_action="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_next_action)"
+                printf '%s\n' "${next_action:-run --strict-host on a configured host when live authenticated dashboard completion evidence is required}"
+            fi
+            ;;
+        vllm_host)
+            env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_next_action
+            ;;
+        svllm_local)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                next_action="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_next_action)"
+                printf '%s\n' "${next_action:-collect strict svLLM native streaming evidence and resolve reported native blockers}"
+            else
+                next_action="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_next_action)"
+                printf '%s\n' "${next_action:-run --strict-host on a configured native svLLM host when native streaming completion evidence is required}"
+            fi
+            ;;
+        torch_optimizer)
+            env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_next_action
+            ;;
+        finetune_guard)
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_next_action
+            else
+                env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_next_action
+            fi
+            ;;
+        public_absence)
+            next_action="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_next_action)"
+            printf '%s\n' "${next_action:-rerun the public absence rendering guard after public manual or dashboard wording changes}"
+            ;;
+        feature_db_reference)
+            next_action="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_next_action)"
+            printf '%s\n' "${next_action:-rerun the LLM feature database reference integrity guard after feature DB or generated-doc path changes}"
+            ;;
+        prereq_doctor_contract)
+            status="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "strict host prereq doctor next-action contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-strict-host-prereq-doctor-contract.shs and restore missing next-action fields"
+            fi
+            ;;
+        dashboard_http_setup_contract)
+            status="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "dashboard live HTTP setup contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-dashboard-live-http-setup-contract.shs and restore missing setup blockers"
+            fi
+            ;;
+        vllm_host_env_contract)
+            status="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "vLLM host documented env contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-runtime-vllm-host-env-contract.shs and restore documented env handling"
+            fi
+            ;;
+        torch_setup_contract)
+            status="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "Torch setup diagnostic contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-runtime-torch-setup-contract.shs and restore setup diagnostic fields"
+            fi
+            ;;
+        finetune_setup_contract)
+            status="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "fine-tune setup diagnostic contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-finetune-setup-contract.shs and restore retry blocker diagnostics"
+            fi
+            ;;
+        svllm_setup_contract)
+            status="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_status)"
+            if [ "$status" = "pass" ]; then
+                printf '%s\n' "svLLM setup diagnostic contract is covered"
+            else
+                printf '%s\n' "run scripts/check/check-llm-runtime-svllm-setup-contract.shs and restore local/native diagnostic fields"
+            fi
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+lane_detail_values() {
+    key="$1"
+    case "$key" in
+        context_ponytail)
+            mimic_status="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_status)"
+            full_replacement_status="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_full_replacement_status)"
+            full_replacement_reason="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_full_replacement_reason)"
+            mimic_surface_manifest_count="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_surface_manifest_count)"
+            mimic_surface_manifest_size="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_surface_manifest_size)"
+            mimic_surface_manifest_sha256="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_surface_manifest_sha256)"
+            mimic_system_log_sha256="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_system_log_sha256)"
+            mimic_context_unit_log_sha256="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_context_unit_log_sha256)"
+            mimic_ponytail_unit_log_sha256="$(env_value build/llm_tooling_context_ponytail_mimic/evidence.env llm_tooling_context_ponytail_mimic_ponytail_unit_log_sha256)"
+            replacement_status="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_status)"
+            replacement_scope="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_scope)"
+            replacement_failures="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_failures)"
+            replacement_required="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_required_gates)"
+            replacement_blocked="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_blocked_gates)"
+            replacement_primary="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_primary_blocked_gate)"
+            replacement_next_action="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_next_action)"
+            replacement_manifest_count="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_surface_manifest_count)"
+            replacement_manifest_size="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_surface_manifest_size)"
+            replacement_manifest_sha256="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_surface_manifest_sha256)"
+            replacement_execution_log_size="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_execution_spec_log_size)"
+            replacement_execution_log_sha256="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_execution_spec_log_sha256)"
+            replacement_mimic_env_size="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_mimic_env_size)"
+            replacement_mimic_env_sha256="$(env_value build/llm_tooling_context_ponytail_full_replacement/evidence.env llm_tooling_context_ponytail_full_replacement_mimic_env_sha256)"
+            printf '%s\n' "mimic_status=${mimic_status:-n/a};full_replacement_status=${full_replacement_status:-n/a};full_replacement_reason=${full_replacement_reason:-n/a};mimic_surface_manifest_count=${mimic_surface_manifest_count:-n/a};mimic_surface_manifest_size=${mimic_surface_manifest_size:-n/a};mimic_surface_manifest_sha256=${mimic_surface_manifest_sha256:-n/a};mimic_system_log_sha256=${mimic_system_log_sha256:-n/a};mimic_context_unit_log_sha256=${mimic_context_unit_log_sha256:-n/a};mimic_ponytail_unit_log_sha256=${mimic_ponytail_unit_log_sha256:-n/a};replacement_status=${replacement_status:-n/a};replacement_scope=${replacement_scope:-n/a};replacement_required_gates=${replacement_required:-n/a};replacement_blocked_gates=${replacement_blocked:-none};replacement_primary_blocked_gate=${replacement_primary:-n/a};replacement_failures=${replacement_failures:-none};surface_manifest_count=${replacement_manifest_count:-n/a};surface_manifest_size=${replacement_manifest_size:-n/a};surface_manifest_sha256=${replacement_manifest_sha256:-n/a};execution_spec_log_size=${replacement_execution_log_size:-n/a};execution_spec_log_sha256=${replacement_execution_log_sha256:-n/a};mimic_env_size=${replacement_mimic_env_size:-n/a};mimic_env_sha256=${replacement_mimic_env_sha256:-n/a};next_action=${replacement_next_action:-n/a}"
+            ;;
+        dashboard)
+            dashboard_status="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_status)"
+            live_status="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_live_status)"
+            live_reason="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_live_reason)"
+            dashboard_surface_manifest_count="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_surface_manifest_count)"
+            dashboard_surface_manifest_size="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_surface_manifest_size)"
+            dashboard_surface_manifest_sha256="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_surface_manifest_sha256)"
+            dashboard_agent_dashboard_log_sha256="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_agent_dashboard_log_sha256)"
+            dashboard_vllm_control_route_log_sha256="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_vllm_control_route_log_sha256)"
+            dashboard_diagnostics_panel_log_sha256="$(env_value build/llm_dashboard_evidence/evidence.env llm_dashboard_evidence_diagnostics_panel_log_sha256)"
+            live_wrapper_status="not_collected"
+            live_wrapper_scope="strict_host_only"
+            live_wrapper_failures="not_collected"
+            if [ "$STRICT_HOST" -eq 1 ] || [ -f build/llm_dashboard_live/evidence.env ]; then
+                live_wrapper_status="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_status)"
+                live_wrapper_scope="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_scope)"
+                live_wrapper_failures="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_failures)"
+            fi
+            live_wrapper_required="not_collected"
+            live_wrapper_blocked="not_collected"
+            live_wrapper_primary="not_collected"
+            live_wrapper_next_action="run --strict-host on a configured host when live authenticated dashboard completion evidence is required"
+            live_surface_manifest_count="not_collected"
+            live_surface_manifest_size="not_collected"
+            live_surface_manifest_sha256="not_collected"
+            live_dashboard_env_size="not_collected"
+            live_dashboard_env_sha256="not_collected"
+            live_dashboard_log_size="not_collected"
+            live_dashboard_log_sha256="not_collected"
+            live_http_status="not_collected"
+            live_http_reason="not_collected"
+            live_http_base_url_status="not_collected"
+            live_http_base_url_scheme_status="not_collected"
+            live_http_auth_config_status="not_collected"
+            live_http_auth_source="not_collected"
+            live_http_timeout_seconds="not_collected"
+            live_http_blocked="not_collected"
+            live_http_primary="not_collected"
+            live_http_next_action="not_collected"
+            live_http_pass_integrity_status="not_collected"
+            live_http_pass_integrity_reason="not_collected"
+            live_http_dashboard_status="not_collected"
+            live_http_dashboard_reason="not_collected"
+            live_http_dashboard_code="not_collected"
+            live_http_dashboard_size="not_collected"
+            live_http_dashboard_sha256="not_collected"
+            live_http_agents_status="not_collected"
+            live_http_agents_reason="not_collected"
+            live_http_agents_code="not_collected"
+            live_http_agents_size="not_collected"
+            live_http_agents_sha256="not_collected"
+            live_http_control_status="not_collected"
+            live_http_control_reason="not_collected"
+            live_http_control_code="not_collected"
+            live_http_control_size="not_collected"
+            live_http_control_sha256="not_collected"
+            live_http_unauth_api_status="not_collected"
+            live_http_unauth_api_reason="not_collected"
+            live_http_unauth_api_code="not_collected"
+            live_http_unauth_api_size="not_collected"
+            live_http_unauth_api_sha256="not_collected"
+            live_http_surface_manifest_count="not_collected"
+            live_http_surface_manifest_size="not_collected"
+            live_http_surface_manifest_sha256="not_collected"
+            if [ "$STRICT_HOST" -eq 1 ] || [ -f build/llm_dashboard_live/evidence.env ]; then
+                live_wrapper_required="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_required_gates)"
+                live_wrapper_blocked="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_blocked_gates)"
+                live_wrapper_primary="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_primary_blocked_gate)"
+                live_wrapper_next_action="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_next_action)"
+                live_surface_manifest_count="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_surface_manifest_count)"
+                live_surface_manifest_size="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_surface_manifest_size)"
+                live_surface_manifest_sha256="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_surface_manifest_sha256)"
+                live_dashboard_env_size="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_dashboard_evidence_env_size)"
+                live_dashboard_env_sha256="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_dashboard_evidence_env_sha256)"
+                live_dashboard_log_size="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_dashboard_evidence_log_size)"
+                live_dashboard_log_sha256="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_dashboard_evidence_log_sha256)"
+                if [ -z "$live_wrapper_next_action" ]; then
+                    live_wrapper_next_action="run check-llm-dashboard-live-evidence.shs and resolve live dashboard route or auth failures"
+                fi
+                live_http_status="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_status)"
+                live_http_reason="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_reason)"
+                live_http_base_url_status="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_base_url_status)"
+                live_http_base_url_scheme_status="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_base_url_scheme_status)"
+                live_http_auth_config_status="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_auth_config_status)"
+                live_http_auth_source="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_auth_source)"
+                live_http_timeout_seconds="$(env_value build/llm_dashboard_live/evidence.env llm_dashboard_live_http_timeout_seconds)"
+                live_http_blocked="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_blocked_gates)"
+                live_http_primary="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_primary_blocked_gate)"
+                live_http_next_action="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_next_action)"
+                live_http_pass_integrity_status="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_pass_integrity_status)"
+                live_http_pass_integrity_reason="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_pass_integrity_reason)"
+                live_http_dashboard_status="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_dashboard_status)"
+                live_http_dashboard_reason="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_dashboard_reason)"
+                live_http_dashboard_code="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_dashboard_code)"
+                live_http_dashboard_size="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_dashboard_size)"
+                live_http_dashboard_sha256="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_dashboard_sha256)"
+                live_http_agents_status="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_agents_status)"
+                live_http_agents_reason="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_agents_reason)"
+                live_http_agents_code="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_agents_code)"
+                live_http_agents_size="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_agents_size)"
+                live_http_agents_sha256="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_agents_sha256)"
+                live_http_control_status="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_control_status)"
+                live_http_control_reason="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_control_reason)"
+                live_http_control_code="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_control_code)"
+                live_http_control_size="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_control_size)"
+                live_http_control_sha256="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_control_sha256)"
+                live_http_unauth_api_status="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_unauth_api_status)"
+                live_http_unauth_api_reason="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_unauth_api_reason)"
+                live_http_unauth_api_code="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_unauth_api_code)"
+                live_http_unauth_api_size="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_unauth_api_size)"
+                live_http_unauth_api_sha256="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_unauth_api_sha256)"
+                live_http_surface_manifest_count="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_surface_manifest_count)"
+                live_http_surface_manifest_size="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_surface_manifest_size)"
+                live_http_surface_manifest_sha256="$(env_value build/llm_dashboard_live_http/evidence.env llm_dashboard_live_http_surface_manifest_sha256)"
+            fi
+            printf '%s\n' "dashboard_status=${dashboard_status:-n/a};live_status=${live_status:-n/a};live_reason=${live_reason:-n/a};dashboard_surface_manifest_count=${dashboard_surface_manifest_count:-n/a};dashboard_surface_manifest_size=${dashboard_surface_manifest_size:-n/a};dashboard_surface_manifest_sha256=${dashboard_surface_manifest_sha256:-n/a};dashboard_agent_dashboard_log_sha256=${dashboard_agent_dashboard_log_sha256:-n/a};dashboard_vllm_control_route_log_sha256=${dashboard_vllm_control_route_log_sha256:-n/a};dashboard_diagnostics_panel_log_sha256=${dashboard_diagnostics_panel_log_sha256:-n/a};live_wrapper_status=${live_wrapper_status:-n/a};live_wrapper_scope=${live_wrapper_scope:-n/a};live_wrapper_required_gates=${live_wrapper_required:-n/a};live_wrapper_blocked_gates=${live_wrapper_blocked:-none};live_wrapper_primary_blocked_gate=${live_wrapper_primary:-n/a};live_wrapper_failures=${live_wrapper_failures:-none};live_surface_manifest_count=${live_surface_manifest_count:-n/a};live_surface_manifest_size=${live_surface_manifest_size:-n/a};live_surface_manifest_sha256=${live_surface_manifest_sha256:-n/a};live_dashboard_env_size=${live_dashboard_env_size:-n/a};live_dashboard_env_sha256=${live_dashboard_env_sha256:-n/a};live_dashboard_log_size=${live_dashboard_log_size:-n/a};live_dashboard_log_sha256=${live_dashboard_log_sha256:-n/a};live_http_status=${live_http_status:-n/a};live_http_reason=${live_http_reason:-n/a};live_http_base_url_status=${live_http_base_url_status:-n/a};live_http_base_url_scheme_status=${live_http_base_url_scheme_status:-n/a};live_http_auth_config_status=${live_http_auth_config_status:-n/a};live_http_auth_source=${live_http_auth_source:-n/a};live_http_timeout_seconds=${live_http_timeout_seconds:-n/a};live_http_blocked_gates=${live_http_blocked:-n/a};live_http_primary_blocked_gate=${live_http_primary:-n/a};live_http_pass_integrity_status=${live_http_pass_integrity_status:-n/a};live_http_pass_integrity_reason=${live_http_pass_integrity_reason:-n/a};live_http_dashboard_status=${live_http_dashboard_status:-n/a};live_http_dashboard_reason=${live_http_dashboard_reason:-n/a};live_http_dashboard_code=${live_http_dashboard_code:-n/a};live_http_dashboard_size=${live_http_dashboard_size:-n/a};live_http_dashboard_sha256=${live_http_dashboard_sha256:-n/a};live_http_agents_status=${live_http_agents_status:-n/a};live_http_agents_reason=${live_http_agents_reason:-n/a};live_http_agents_code=${live_http_agents_code:-n/a};live_http_agents_size=${live_http_agents_size:-n/a};live_http_agents_sha256=${live_http_agents_sha256:-n/a};live_http_control_status=${live_http_control_status:-n/a};live_http_control_reason=${live_http_control_reason:-n/a};live_http_control_code=${live_http_control_code:-n/a};live_http_control_size=${live_http_control_size:-n/a};live_http_control_sha256=${live_http_control_sha256:-n/a};live_http_unauth_api_status=${live_http_unauth_api_status:-n/a};live_http_unauth_api_reason=${live_http_unauth_api_reason:-n/a};live_http_unauth_api_code=${live_http_unauth_api_code:-n/a};live_http_unauth_api_size=${live_http_unauth_api_size:-n/a};live_http_unauth_api_sha256=${live_http_unauth_api_sha256:-n/a};live_http_surface_manifest_count=${live_http_surface_manifest_count:-n/a};live_http_surface_manifest_size=${live_http_surface_manifest_size:-n/a};live_http_surface_manifest_sha256=${live_http_surface_manifest_sha256:-n/a};live_http_next_action=${live_http_next_action:-n/a};next_action=${live_wrapper_next_action:-n/a}"
+            ;;
+        vllm_host)
+            vllm_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_status)"
+            vllm_reason="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_reason)"
+            required_gates="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_required_gates)"
+            blocked_gates="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_blocked_gates)"
+            base_model="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_base_model)"
+            endpoint="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_endpoint)"
+            endpoint_scheme_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_endpoint_scheme_status)"
+            endpoint_host_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_endpoint_host_status)"
+            wrapper_path="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_wrapper_path)"
+            wrapper_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_wrapper_sha256)"
+            control_cli_path="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_control_cli_path)"
+            control_cli_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_control_cli_sha256)"
+            probe_command_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_probe_command_sha256)"
+            cli_exit="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_cli_exit)"
+            event="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_event)"
+            local_vllm_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_local_vllm_status)"
+            vllm_command_path="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_vllm_command_path)"
+            vllm_version_log_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_vllm_version_log_size)"
+            vllm_version_log_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_vllm_version_log_sha256)"
+            python_vllm_module_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_python_vllm_module_status)"
+            python_vllm_origin="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_python_vllm_origin)"
+            python_vllm_version="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_python_vllm_version)"
+            python_vllm_probe_log_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_python_vllm_probe_log_size)"
+            python_vllm_probe_log_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_python_vllm_probe_log_sha256)"
+            local_gpu_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_local_gpu_status)"
+            nvidia_smi_path="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_nvidia_smi_path)"
+            gpu_probe_log_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_gpu_probe_log_size)"
+            gpu_probe_log_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_gpu_probe_log_sha256)"
+            preflight_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_preflight_status)"
+            readiness_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_readiness_status)"
+            endpoint_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_endpoint_status)"
+            models_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_models_status)"
+            models_reason="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_models_reason)"
+            surface_manifest_count="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_surface_manifest_count)"
+            surface_manifest_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_surface_manifest_size)"
+            surface_manifest_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_surface_manifest_sha256)"
+            log_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_log_size)"
+            log_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_log_sha256)"
+            serve_readiness_run_event_count="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_serve_readiness_run_event_count)"
+            primary_blocked_gate="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_primary_blocked_gate)"
+            pass_integrity_status="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_pass_integrity_status)"
+            pass_integrity_reason="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_pass_integrity_reason)"
+            report_path="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_report_path)"
+            report_size="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_report_size)"
+            report_sha256="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_report_sha256)"
+            next_action="$(env_value build/llm_runtime_vllm_host_probe/evidence.env llm_runtime_vllm_host_probe_next_action)"
+            if [ -z "$readiness_status" ]; then
+                readiness_status="$preflight_status"
+            fi
+            printf '%s\n' "vllm_status=${vllm_status:-n/a};vllm_reason=${vllm_reason:-n/a};required_gates=${required_gates:-n/a};blocked_gates=${blocked_gates:-n/a};base_model=${base_model:-n/a};endpoint=${endpoint:-n/a};endpoint_scheme_status=${endpoint_scheme_status:-n/a};endpoint_host_status=${endpoint_host_status:-n/a};wrapper_path=${wrapper_path:-n/a};wrapper_sha256=${wrapper_sha256:-n/a};control_cli_path=${control_cli_path:-n/a};control_cli_sha256=${control_cli_sha256:-n/a};probe_command_sha256=${probe_command_sha256:-n/a};cli_exit=${cli_exit:-n/a};event=${event:-n/a};surface_manifest_count=${surface_manifest_count:-n/a};surface_manifest_size=${surface_manifest_size:-n/a};surface_manifest_sha256=${surface_manifest_sha256:-n/a};local_vllm_status=${local_vllm_status:-n/a};vllm_command_path=${vllm_command_path:-n/a};vllm_version_log_size=${vllm_version_log_size:-n/a};vllm_version_log_sha256=${vllm_version_log_sha256:-n/a};python_vllm_module_status=${python_vllm_module_status:-n/a};python_vllm_origin=${python_vllm_origin:-n/a};python_vllm_version=${python_vllm_version:-n/a};python_vllm_probe_log_size=${python_vllm_probe_log_size:-n/a};python_vllm_probe_log_sha256=${python_vllm_probe_log_sha256:-n/a};local_gpu_status=${local_gpu_status:-n/a};nvidia_smi_path=${nvidia_smi_path:-n/a};gpu_probe_log_size=${gpu_probe_log_size:-n/a};gpu_probe_log_sha256=${gpu_probe_log_sha256:-n/a};readiness_status=${readiness_status:-n/a};preflight_status=${preflight_status:-n/a};endpoint_status=${endpoint_status:-n/a};models_status=${models_status:-n/a};models_reason=${models_reason:-n/a};log_size=${log_size:-n/a};log_sha256=${log_sha256:-n/a};serve_readiness_run_event_count=${serve_readiness_run_event_count:-n/a};primary_blocked_gate=${primary_blocked_gate:-n/a};pass_integrity_status=${pass_integrity_status:-n/a};pass_integrity_reason=${pass_integrity_reason:-n/a};report_path=${report_path:-n/a};report_size=${report_size:-n/a};report_sha256=${report_sha256:-n/a};next_action=${next_action:-n/a}"
+            ;;
+        svllm_local)
+            native_status="not_required"
+            native_reason="default_local_readiness_only"
+            local_readiness_status="n/a"
+            read_range_status="not_collected"
+            pinned_buffer_status="not_collected"
+            device_staging_status="not_collected"
+            local_read_bytes_status="not_collected"
+            local_readiness_env_size="not_collected"
+            local_readiness_env_sha256="not_collected"
+            local_readiness_log_size="not_collected"
+            local_readiness_log_sha256="not_collected"
+            local_readiness_report_size="not_collected"
+            local_readiness_report_sha256="not_collected"
+            native_surface_manifest_count="not_collected"
+            native_surface_manifest_size="not_collected"
+            native_surface_manifest_sha256="not_collected"
+            capability_source="not_collected"
+            capability_provenance_status="not_collected"
+            capability_evidence_path="not_collected"
+            capability_evidence_status="not_collected"
+            capability_evidence_sha256="not_collected"
+            capability_evidence_size="not_collected"
+            capability_evidence_mtime="not_collected"
+            capability_evidence_source="not_collected"
+            capability_evidence_schema_version="not_collected"
+            capability_probe_event="not_collected"
+            capability_probe_status="not_collected"
+            capability_probe_exit="not_collected"
+            capability_probe_report="not_collected"
+            capability_probe_report_size="not_collected"
+            capability_probe_report_sha256="not_collected"
+            capability_evidence_read_range_status="not_collected"
+            capability_evidence_pinned_buffer_status="not_collected"
+            capability_evidence_device_staging_status="not_collected"
+            pass_integrity_status="not_collected"
+            pass_integrity_reason="not_collected"
+            if [ "$STRICT_HOST" -eq 1 ] || [ -f build/llm_runtime_svllm_native_streaming/evidence.env ]; then
+                native_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_status)"
+                native_reason="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_reason)"
+                native_blocked_gates="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_blocked_gates)"
+                native_primary_blocked_gate="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_primary_blocked_gate)"
+                native_next_action="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_next_action)"
+                local_readiness_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_status)"
+                local_readiness_env_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_env_size)"
+                local_readiness_env_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_env_sha256)"
+                local_readiness_log_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_log_size)"
+                local_readiness_log_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_log_sha256)"
+                local_readiness_report_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_report_size)"
+                local_readiness_report_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_readiness_report_sha256)"
+                native_surface_manifest_count="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_surface_manifest_count)"
+                native_surface_manifest_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_surface_manifest_size)"
+                native_surface_manifest_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_surface_manifest_sha256)"
+                capability_source="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_source)"
+                capability_provenance_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_provenance_status)"
+                capability_evidence_path="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_path)"
+                capability_evidence_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_status)"
+                capability_evidence_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_sha256)"
+                capability_evidence_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_size)"
+                capability_evidence_mtime="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_mtime)"
+                capability_evidence_source="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_source)"
+                capability_evidence_schema_version="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_schema_version)"
+                capability_probe_event="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_event)"
+                capability_probe_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_status)"
+                capability_probe_exit="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_exit)"
+                capability_probe_report="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_report)"
+                capability_probe_report_size="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_report_size)"
+                capability_probe_report_sha256="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_probe_report_sha256)"
+                capability_evidence_read_range_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_reported_read_range_status)"
+                capability_evidence_pinned_buffer_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_reported_pinned_buffer_status)"
+                capability_evidence_device_staging_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_capability_evidence_reported_device_staging_status)"
+                pass_integrity_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_pass_integrity_status)"
+                pass_integrity_reason="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_pass_integrity_reason)"
+                read_range_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_read_range_status)"
+                pinned_buffer_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_pinned_buffer_status)"
+                device_staging_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_device_staging_status)"
+                local_read_bytes_status="$(env_value build/llm_runtime_svllm_native_streaming/evidence.env svllm_native_streaming_local_read_bytes_status)"
+            fi
+            default_readiness_status="$(env_value build/llm_runtime_svllm_local_readiness/evidence.env llm_runtime_svllm_local_readiness_status)"
+            default_surface_manifest_count="$(env_value build/llm_runtime_svllm_local_readiness/evidence.env llm_runtime_svllm_local_readiness_surface_manifest_count)"
+            default_surface_manifest_size="$(env_value build/llm_runtime_svllm_local_readiness/evidence.env llm_runtime_svllm_local_readiness_surface_manifest_size)"
+            default_surface_manifest_sha256="$(env_value build/llm_runtime_svllm_local_readiness/evidence.env llm_runtime_svllm_local_readiness_surface_manifest_sha256)"
+            printf '%s\n' "native_status=${native_status:-not_collected};native_reason=${native_reason:-n/a};native_blocked_gates=${native_blocked_gates:-n/a};native_primary_blocked_gate=${native_primary_blocked_gate:-n/a};local_readiness_status=${local_readiness_status:-n/a};default_readiness_status=${default_readiness_status:-n/a};default_surface_manifest_count=${default_surface_manifest_count:-n/a};default_surface_manifest_size=${default_surface_manifest_size:-n/a};default_surface_manifest_sha256=${default_surface_manifest_sha256:-n/a};native_surface_manifest_count=${native_surface_manifest_count:-n/a};native_surface_manifest_size=${native_surface_manifest_size:-n/a};native_surface_manifest_sha256=${native_surface_manifest_sha256:-n/a};local_readiness_env_size=${local_readiness_env_size:-n/a};local_readiness_env_sha256=${local_readiness_env_sha256:-n/a};local_readiness_log_size=${local_readiness_log_size:-n/a};local_readiness_log_sha256=${local_readiness_log_sha256:-n/a};local_readiness_report_size=${local_readiness_report_size:-n/a};local_readiness_report_sha256=${local_readiness_report_sha256:-n/a};capability_source=${capability_source:-n/a};capability_provenance_status=${capability_provenance_status:-n/a};capability_evidence_path=${capability_evidence_path:-n/a};capability_evidence_status=${capability_evidence_status:-n/a};capability_evidence_sha256=${capability_evidence_sha256:-n/a};capability_evidence_size=${capability_evidence_size:-n/a};capability_evidence_mtime=${capability_evidence_mtime:-n/a};capability_evidence_source=${capability_evidence_source:-n/a};capability_evidence_schema_version=${capability_evidence_schema_version:-n/a};capability_probe_event=${capability_probe_event:-n/a};capability_probe_status=${capability_probe_status:-n/a};capability_probe_exit=${capability_probe_exit:-n/a};capability_probe_report=${capability_probe_report:-n/a};capability_probe_report_size=${capability_probe_report_size:-n/a};capability_probe_report_sha256=${capability_probe_report_sha256:-n/a};capability_evidence_reported_read_range_status=${capability_evidence_read_range_status:-n/a};capability_evidence_reported_pinned_buffer_status=${capability_evidence_pinned_buffer_status:-n/a};capability_evidence_reported_device_staging_status=${capability_evidence_device_staging_status:-n/a};pass_integrity_status=${pass_integrity_status:-n/a};pass_integrity_reason=${pass_integrity_reason:-n/a};read_range_status=${read_range_status:-n/a};pinned_buffer_status=${pinned_buffer_status:-n/a};device_staging_status=${device_staging_status:-n/a};local_read_bytes_status=${local_read_bytes_status:-n/a};next_action=${native_next_action:-n/a}"
+            ;;
+        finetune_guard)
+            acceptance_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_status)"
+            acceptance_reason="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_reason)"
+            gate_exit="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_gate_exit)"
+            gate_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_gate_status)"
+            gate_log_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_gate_log_artifact_status)"
+            gate_log_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_gate_log_sha256)"
+            gate_log_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_gate_log_size)"
+            acceptance_surface_manifest_count="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_surface_manifest_count)"
+            acceptance_surface_manifest_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_surface_manifest_size)"
+            acceptance_surface_manifest_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_surface_manifest_sha256)"
+            blocked_gates="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_blocked_gates)"
+            primary_blocked_gate="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_primary_blocked_gate)"
+            training_allowed="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_training_allowed)"
+            upstream_attempt_record="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_attempt_record)"
+            upstream_attempt_record_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_attempt_record_artifact_status)"
+            upstream_attempt_record_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_attempt_record_sha256)"
+            upstream_attempt_record_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_attempt_record_size)"
+            upstream_cache_manifest="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_cache_manifest)"
+            upstream_cache_manifest_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_cache_manifest_artifact_status)"
+            upstream_cache_manifest_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_cache_manifest_sha256)"
+            upstream_cache_manifest_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_upstream_cache_manifest_size)"
+            attempt_record="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_attempt_record)"
+            attempt_record_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_attempt_record_artifact_status)"
+            attempt_record_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_attempt_record_sha256)"
+            attempt_record_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_attempt_record_size)"
+            model_manifest="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest)"
+            model_manifest_exists="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_exists)"
+            model_manifest_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_artifact_status)"
+            model_manifest_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_sha256)"
+            model_manifest_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_size)"
+            model_manifest_schema_version="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_schema_version)"
+            model_manifest_attempt_id="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_attempt_id)"
+            base_model="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_base_model)"
+            base_model_revision="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_base_model_revision)"
+            model_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_artifact_status)"
+            model_artifact_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_artifact_sha256)"
+            model_artifact_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_artifact_size)"
+            model_manifest_deployable="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_model_manifest_deployable)"
+            eval_result="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result)"
+            eval_result_exists="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_exists)"
+            eval_result_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_artifact_status)"
+            eval_result_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_sha256)"
+            eval_result_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_size)"
+            eval_result_schema_version="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_schema_version)"
+            eval_result_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_result_status)"
+            eval_metric_name="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_metric_name)"
+            eval_metric_value="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_metric_value)"
+            eval_metric_target="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_metric_target)"
+            eval_dataset_id="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_dataset_id)"
+            eval_dataset_checksum="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_dataset_checksum)"
+            eval_samples="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_eval_samples)"
+            target_eval_reached="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_target_eval_reached)"
+            required_accuracy="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_required_accuracy)"
+            retry6_next_action="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_retry6_next_action)"
+            decision_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_decision_status)"
+            license_constraints="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_license_constraints)"
+            safety_eval="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_safety_eval)"
+            deployment_evidence="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_deployment_evidence)"
+            handoff_doc_artifact_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_handoff_doc_artifact_status)"
+            handoff_doc_sha256="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_handoff_doc_sha256)"
+            handoff_doc_size="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_handoff_doc_size)"
+            handoff_usage="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_handoff_usage)"
+            app_handoff_doc_ready="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_app_handoff_doc_ready)"
+            pass_integrity_status="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_pass_integrity_status)"
+            pass_integrity_reason="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_pass_integrity_reason)"
+            next_action="$(env_value build/llm_finetune_acceptance/evidence.env llm_finetune_acceptance_next_action)"
+            guard_status="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_evidence_status)"
+            guard_strict="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_strict_ready)"
+            guard_blocked="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_blocked_gates)"
+            guard_primary="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_primary_blocked_gate)"
+            guard_reason="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_blocker_reason)"
+            guard_next="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_next_action)"
+            guard_acceptance_status="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_acceptance_status)"
+            guard_acceptance_reason="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_acceptance_reason)"
+            guard_acceptance_pass_integrity_status="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_acceptance_pass_integrity_status)"
+            guard_surface_manifest_count="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_surface_manifest_count)"
+            guard_surface_manifest_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_surface_manifest_size)"
+            guard_surface_manifest_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_surface_manifest_sha256)"
+            guard_data_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_data_quality_log_size)"
+            guard_data_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_data_quality_log_sha256)"
+            guard_retry5_cache_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_log_size)"
+            guard_retry5_cache_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_log_sha256)"
+            guard_retry5_cache_manifest_exists="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_manifest_exists)"
+            guard_retry5_cache_license_review="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_license_review)"
+            guard_retry5_cache_data_access="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_data_access)"
+            guard_retry5_cache_path="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_path)"
+            guard_retry5_cache_path_exists="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_path_exists)"
+            guard_retry5_cache_expected_checksum="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_expected_checksum)"
+            guard_retry5_cache_actual_checksum="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_actual_checksum)"
+            guard_retry5_cache_checksum_match="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_checksum_match)"
+            guard_retry5_cache_training_allowed="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_training_allowed)"
+            guard_retry5_cache_result="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry5_cache_result)"
+            guard_retry6_direct_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry6_direct_log_size)"
+            guard_retry6_direct_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry6_direct_log_sha256)"
+            guard_retry7_direct_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry7_direct_log_size)"
+            guard_retry7_direct_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry7_direct_log_sha256)"
+            guard_retry6_spec_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry6_spec_log_size)"
+            guard_retry6_spec_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry6_spec_log_sha256)"
+            guard_retry7_spec_log_size="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry7_spec_log_size)"
+            guard_retry7_spec_log_sha256="$(env_value build/llm_finetune_guard_evidence/evidence.env llm_finetune_guard_retry7_spec_log_sha256)"
+            if [ "$STRICT_HOST" -eq 1 ]; then
+                printf '%s\n' "guard_status=${guard_status:-n/a};guard_strict_ready=${guard_strict:-n/a};guard_acceptance_pass_integrity_status=${guard_acceptance_pass_integrity_status:-n/a};guard_surface_manifest_count=${guard_surface_manifest_count:-n/a};guard_surface_manifest_size=${guard_surface_manifest_size:-n/a};guard_surface_manifest_sha256=${guard_surface_manifest_sha256:-n/a};guard_data_log_size=${guard_data_log_size:-n/a};guard_data_log_sha256=${guard_data_log_sha256:-n/a};guard_retry5_cache_log_size=${guard_retry5_cache_log_size:-n/a};guard_retry5_cache_log_sha256=${guard_retry5_cache_log_sha256:-n/a};guard_retry5_cache_manifest_exists=${guard_retry5_cache_manifest_exists:-n/a};guard_retry5_cache_license_review=${guard_retry5_cache_license_review:-n/a};guard_retry5_cache_data_access=${guard_retry5_cache_data_access:-n/a};guard_retry5_cache_path=${guard_retry5_cache_path:-n/a};guard_retry5_cache_path_exists=${guard_retry5_cache_path_exists:-n/a};guard_retry5_cache_expected_checksum=${guard_retry5_cache_expected_checksum:-n/a};guard_retry5_cache_actual_checksum=${guard_retry5_cache_actual_checksum:-n/a};guard_retry5_cache_checksum_match=${guard_retry5_cache_checksum_match:-n/a};guard_retry5_cache_training_allowed=${guard_retry5_cache_training_allowed:-n/a};guard_retry5_cache_result=${guard_retry5_cache_result:-n/a};guard_retry6_direct_log_size=${guard_retry6_direct_log_size:-n/a};guard_retry6_direct_log_sha256=${guard_retry6_direct_log_sha256:-n/a};guard_retry7_direct_log_size=${guard_retry7_direct_log_size:-n/a};guard_retry7_direct_log_sha256=${guard_retry7_direct_log_sha256:-n/a};guard_retry6_spec_log_size=${guard_retry6_spec_log_size:-n/a};guard_retry6_spec_log_sha256=${guard_retry6_spec_log_sha256:-n/a};guard_retry7_spec_log_size=${guard_retry7_spec_log_size:-n/a};guard_retry7_spec_log_sha256=${guard_retry7_spec_log_sha256:-n/a};acceptance_status=${acceptance_status:-n/a};acceptance_reason=${acceptance_reason:-n/a};acceptance_surface_manifest_count=${acceptance_surface_manifest_count:-n/a};acceptance_surface_manifest_size=${acceptance_surface_manifest_size:-n/a};acceptance_surface_manifest_sha256=${acceptance_surface_manifest_sha256:-n/a};pass_integrity_status=${pass_integrity_status:-n/a};pass_integrity_reason=${pass_integrity_reason:-n/a};gate_exit=${gate_exit:-n/a};gate_status=${gate_status:-n/a};gate_log_artifact_status=${gate_log_artifact_status:-n/a};gate_log_sha256=${gate_log_sha256:-n/a};gate_log_size=${gate_log_size:-n/a};blocked_gates=${blocked_gates:-n/a};primary_blocked_gate=${primary_blocked_gate:-n/a};training_allowed=${training_allowed:-n/a};upstream_attempt_record=${upstream_attempt_record:-n/a};upstream_attempt_record_artifact_status=${upstream_attempt_record_artifact_status:-n/a};upstream_attempt_record_sha256=${upstream_attempt_record_sha256:-n/a};upstream_attempt_record_size=${upstream_attempt_record_size:-n/a};upstream_cache_manifest=${upstream_cache_manifest:-n/a};upstream_cache_manifest_artifact_status=${upstream_cache_manifest_artifact_status:-n/a};upstream_cache_manifest_sha256=${upstream_cache_manifest_sha256:-n/a};upstream_cache_manifest_size=${upstream_cache_manifest_size:-n/a};attempt_record=${attempt_record:-n/a};attempt_record_artifact_status=${attempt_record_artifact_status:-n/a};attempt_record_sha256=${attempt_record_sha256:-n/a};attempt_record_size=${attempt_record_size:-n/a};model_manifest=${model_manifest:-n/a};model_manifest_exists=${model_manifest_exists:-n/a};model_manifest_artifact_status=${model_manifest_artifact_status:-n/a};model_manifest_sha256=${model_manifest_sha256:-n/a};model_manifest_size=${model_manifest_size:-n/a};model_manifest_schema_version=${model_manifest_schema_version:-n/a};model_manifest_attempt_id=${model_manifest_attempt_id:-n/a};base_model=${base_model:-n/a};base_model_revision=${base_model_revision:-n/a};model_artifact_status=${model_artifact_status:-n/a};model_artifact_sha256=${model_artifact_sha256:-n/a};model_artifact_size=${model_artifact_size:-n/a};model_manifest_deployable=${model_manifest_deployable:-n/a};eval_result=${eval_result:-n/a};eval_result_exists=${eval_result_exists:-n/a};eval_result_artifact_status=${eval_result_artifact_status:-n/a};eval_result_sha256=${eval_result_sha256:-n/a};eval_result_size=${eval_result_size:-n/a};eval_result_schema_version=${eval_result_schema_version:-n/a};eval_result_status=${eval_result_status:-n/a};eval_metric_name=${eval_metric_name:-n/a};eval_metric_value=${eval_metric_value:-n/a};eval_metric_target=${eval_metric_target:-n/a};eval_dataset_id=${eval_dataset_id:-n/a};eval_dataset_checksum=${eval_dataset_checksum:-n/a};eval_samples=${eval_samples:-n/a};target_eval_reached=${target_eval_reached:-n/a};required_accuracy=${required_accuracy:-n/a};retry6_next_action=${retry6_next_action:-n/a};decision_status=${decision_status:-n/a};license_constraints=${license_constraints:-n/a};safety_eval=${safety_eval:-n/a};deployment_evidence=${deployment_evidence:-n/a};handoff_doc_artifact_status=${handoff_doc_artifact_status:-n/a};handoff_doc_sha256=${handoff_doc_sha256:-n/a};handoff_doc_size=${handoff_doc_size:-n/a};handoff_usage=${handoff_usage:-n/a};app_handoff_doc_ready=${app_handoff_doc_ready:-n/a};next_action=${next_action:-n/a}"
+            else
+                detail_next_action="${next_action:-}"
+                if [ -z "$detail_next_action" ]; then
+                    detail_next_action="${guard_next:-n/a}"
+                fi
+                printf '%s\n' "guard_status=${guard_status:-n/a};guard_strict_ready=${guard_strict:-n/a};guard_blocked_gates=${guard_blocked:-n/a};guard_primary_blocked_gate=${guard_primary:-n/a};guard_reason=${guard_reason:-n/a};guard_acceptance_pass_integrity_status=${guard_acceptance_pass_integrity_status:-n/a};guard_surface_manifest_count=${guard_surface_manifest_count:-n/a};guard_surface_manifest_size=${guard_surface_manifest_size:-n/a};guard_surface_manifest_sha256=${guard_surface_manifest_sha256:-n/a};guard_data_log_size=${guard_data_log_size:-n/a};guard_data_log_sha256=${guard_data_log_sha256:-n/a};guard_retry5_cache_log_size=${guard_retry5_cache_log_size:-n/a};guard_retry5_cache_log_sha256=${guard_retry5_cache_log_sha256:-n/a};guard_retry5_cache_manifest_exists=${guard_retry5_cache_manifest_exists:-n/a};guard_retry5_cache_license_review=${guard_retry5_cache_license_review:-n/a};guard_retry5_cache_data_access=${guard_retry5_cache_data_access:-n/a};guard_retry5_cache_path=${guard_retry5_cache_path:-n/a};guard_retry5_cache_path_exists=${guard_retry5_cache_path_exists:-n/a};guard_retry5_cache_expected_checksum=${guard_retry5_cache_expected_checksum:-n/a};guard_retry5_cache_actual_checksum=${guard_retry5_cache_actual_checksum:-n/a};guard_retry5_cache_checksum_match=${guard_retry5_cache_checksum_match:-n/a};guard_retry5_cache_training_allowed=${guard_retry5_cache_training_allowed:-n/a};guard_retry5_cache_result=${guard_retry5_cache_result:-n/a};guard_retry6_direct_log_size=${guard_retry6_direct_log_size:-n/a};guard_retry6_direct_log_sha256=${guard_retry6_direct_log_sha256:-n/a};guard_retry7_direct_log_size=${guard_retry7_direct_log_size:-n/a};guard_retry7_direct_log_sha256=${guard_retry7_direct_log_sha256:-n/a};guard_retry6_spec_log_size=${guard_retry6_spec_log_size:-n/a};guard_retry6_spec_log_sha256=${guard_retry6_spec_log_sha256:-n/a};guard_retry7_spec_log_size=${guard_retry7_spec_log_size:-n/a};guard_retry7_spec_log_sha256=${guard_retry7_spec_log_sha256:-n/a};acceptance_status=${acceptance_status:-n/a};acceptance_reason=${acceptance_reason:-n/a};acceptance_surface_manifest_count=${acceptance_surface_manifest_count:-n/a};acceptance_surface_manifest_size=${acceptance_surface_manifest_size:-n/a};acceptance_surface_manifest_sha256=${acceptance_surface_manifest_sha256:-n/a};acceptance_blocked_gates=${blocked_gates:-n/a};acceptance_primary_blocked_gate=${primary_blocked_gate:-n/a};pass_integrity_status=${pass_integrity_status:-n/a};pass_integrity_reason=${pass_integrity_reason:-n/a};gate_log_artifact_status=${gate_log_artifact_status:-n/a};gate_log_sha256=${gate_log_sha256:-n/a};gate_log_size=${gate_log_size:-n/a};training_allowed=${training_allowed:-n/a};upstream_attempt_record=${upstream_attempt_record:-n/a};upstream_attempt_record_artifact_status=${upstream_attempt_record_artifact_status:-n/a};upstream_attempt_record_sha256=${upstream_attempt_record_sha256:-n/a};upstream_attempt_record_size=${upstream_attempt_record_size:-n/a};upstream_cache_manifest=${upstream_cache_manifest:-n/a};upstream_cache_manifest_artifact_status=${upstream_cache_manifest_artifact_status:-n/a};upstream_cache_manifest_sha256=${upstream_cache_manifest_sha256:-n/a};upstream_cache_manifest_size=${upstream_cache_manifest_size:-n/a};attempt_record=${attempt_record:-n/a};attempt_record_artifact_status=${attempt_record_artifact_status:-n/a};attempt_record_sha256=${attempt_record_sha256:-n/a};attempt_record_size=${attempt_record_size:-n/a};model_manifest=${model_manifest:-n/a};model_manifest_exists=${model_manifest_exists:-n/a};model_manifest_artifact_status=${model_manifest_artifact_status:-n/a};model_manifest_sha256=${model_manifest_sha256:-n/a};model_manifest_size=${model_manifest_size:-n/a};model_manifest_schema_version=${model_manifest_schema_version:-n/a};model_manifest_attempt_id=${model_manifest_attempt_id:-n/a};base_model=${base_model:-n/a};base_model_revision=${base_model_revision:-n/a};model_artifact_status=${model_artifact_status:-n/a};model_artifact_sha256=${model_artifact_sha256:-n/a};model_artifact_size=${model_artifact_size:-n/a};model_manifest_deployable=${model_manifest_deployable:-n/a};eval_result=${eval_result:-n/a};eval_result_exists=${eval_result_exists:-n/a};eval_result_artifact_status=${eval_result_artifact_status:-n/a};eval_result_sha256=${eval_result_sha256:-n/a};eval_result_size=${eval_result_size:-n/a};eval_result_schema_version=${eval_result_schema_version:-n/a};eval_result_status=${eval_result_status:-n/a};eval_metric_name=${eval_metric_name:-n/a};eval_metric_value=${eval_metric_value:-n/a};eval_metric_target=${eval_metric_target:-n/a};eval_dataset_id=${eval_dataset_id:-n/a};eval_dataset_checksum=${eval_dataset_checksum:-n/a};eval_samples=${eval_samples:-n/a};target_eval_reached=${target_eval_reached:-n/a};required_accuracy=${required_accuracy:-n/a};retry6_next_action=${retry6_next_action:-n/a};decision_status=${decision_status:-n/a};license_constraints=${license_constraints:-n/a};safety_eval=${safety_eval:-n/a};deployment_evidence=${deployment_evidence:-n/a};handoff_doc_artifact_status=${handoff_doc_artifact_status:-n/a};handoff_doc_sha256=${handoff_doc_sha256:-n/a};handoff_doc_size=${handoff_doc_size:-n/a};handoff_usage=${handoff_usage:-n/a};app_handoff_doc_ready=${app_handoff_doc_ready:-n/a};next_action=$detail_next_action"
+            fi
+            ;;
+        torch_optimizer)
+            torch_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_normalized_status)"
+            torch_reason="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_normalized_reason)"
+            blocked_gates="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_blocked_gates)"
+            primary_blocked_gate="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_primary_blocked_gate)"
+            python_torch_module_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_module_status)"
+            python_torch_version="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_version)"
+            python_torch_file="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_file)"
+            python_torch_package_dir="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_package_dir)"
+            python_torch_library_dir="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_library_dir)"
+            python_torch_cmake_prefix_path="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_cmake_prefix_path)"
+            python_torch_library_paths="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_library_paths)"
+            python_torch_libtorch_bundle_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_libtorch_bundle_status)"
+            python_torch_cuda_library_bundle_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_cuda_library_bundle_status)"
+            python_torch_cuda_available="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_cuda_available)"
+            python_torch_cuda_device_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_cuda_device_count)"
+            python_torch_env_size="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_env_size)"
+            python_torch_env_sha256="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_python_torch_env_sha256)"
+            system_libtorch_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_system_libtorch_status)"
+            system_libtorch_probe_log_size="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_system_libtorch_probe_log_size)"
+            system_libtorch_probe_log_sha256="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_system_libtorch_probe_log_sha256)"
+            libtorch_env_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_libtorch_env_status)"
+            ld_library_path_libtorch_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_ld_library_path_libtorch_status)"
+            simple_runtime_torch_link_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_simple_runtime_torch_link_status)"
+            surface_manifest_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_surface_manifest_count)"
+            surface_manifest_size="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_surface_manifest_size)"
+            surface_manifest_sha256="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_surface_manifest_sha256)"
+            torch_available="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_torch_available_normalized)"
+            cuda_available="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_cuda_available_normalized)"
+            parameter_is_cuda="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_parameter_is_cuda_normalized)"
+            grad_handle="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_grad_handle_normalized)"
+            optimizer_step_attempted="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_optimizer_step_attempted_normalized)"
+            before_sum="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_before_sum_normalized)"
+            after_sum="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_after_sum_normalized)"
+            sum_decreased_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_sum_decreased_status)"
+            pass_integrity_status="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_pass_integrity_status)"
+            pass_integrity_reason="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_pass_integrity_reason)"
+            wrapper_exit="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_wrapper_exit)"
+            log_size="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_log_size)"
+            log_sha256="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_log_sha256)"
+            status_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_status_line_count)"
+            required_gates_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_required_gates_line_count)"
+            torch_available_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_torch_available_line_count)"
+            cuda_available_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_cuda_available_line_count)"
+            parameter_is_cuda_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_parameter_is_cuda_line_count)"
+            grad_handle_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_grad_handle_line_count)"
+            optimizer_step_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_optimizer_step_line_count)"
+            before_sum_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_before_sum_line_count)"
+            after_sum_line_count="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_after_sum_line_count)"
+            next_action="$(env_value build/llm_runtime_torch_cuda_optimizer_probe/evidence.env torch_cuda_optimizer_probe_next_action)"
+            printf '%s\n' "torch_status=${torch_status:-n/a};torch_reason=${torch_reason:-n/a};blocked_gates=${blocked_gates:-n/a};primary_blocked_gate=${primary_blocked_gate:-n/a};python_torch_module_status=${python_torch_module_status:-n/a};python_torch_version=${python_torch_version:-n/a};python_torch_file=${python_torch_file:-n/a};python_torch_package_dir=${python_torch_package_dir:-n/a};python_torch_library_dir=${python_torch_library_dir:-n/a};python_torch_cmake_prefix_path=${python_torch_cmake_prefix_path:-n/a};python_torch_library_paths=${python_torch_library_paths:-n/a};python_torch_libtorch_bundle_status=${python_torch_libtorch_bundle_status:-n/a};python_torch_cuda_library_bundle_status=${python_torch_cuda_library_bundle_status:-n/a};python_torch_cuda_available=${python_torch_cuda_available:-n/a};python_torch_cuda_device_count=${python_torch_cuda_device_count:-n/a};python_torch_env_size=${python_torch_env_size:-n/a};python_torch_env_sha256=${python_torch_env_sha256:-n/a};system_libtorch_status=${system_libtorch_status:-n/a};system_libtorch_probe_log_size=${system_libtorch_probe_log_size:-n/a};system_libtorch_probe_log_sha256=${system_libtorch_probe_log_sha256:-n/a};libtorch_env_status=${libtorch_env_status:-n/a};ld_library_path_libtorch_status=${ld_library_path_libtorch_status:-n/a};simple_runtime_torch_link_status=${simple_runtime_torch_link_status:-n/a};surface_manifest_count=${surface_manifest_count:-n/a};surface_manifest_size=${surface_manifest_size:-n/a};surface_manifest_sha256=${surface_manifest_sha256:-n/a};torch_available=${torch_available:-n/a};cuda_available=${cuda_available:-n/a};parameter_is_cuda=${parameter_is_cuda:-n/a};grad_handle=${grad_handle:-n/a};optimizer_step_attempted=${optimizer_step_attempted:-n/a};before_sum=${before_sum:-n/a};after_sum=${after_sum:-n/a};sum_decreased_status=${sum_decreased_status:-n/a};pass_integrity_status=${pass_integrity_status:-n/a};pass_integrity_reason=${pass_integrity_reason:-n/a};wrapper_exit=${wrapper_exit:-n/a};log_size=${log_size:-n/a};log_sha256=${log_sha256:-n/a};status_line_count=${status_line_count:-n/a};required_gates_line_count=${required_gates_line_count:-n/a};torch_available_line_count=${torch_available_line_count:-n/a};cuda_available_line_count=${cuda_available_line_count:-n/a};parameter_is_cuda_line_count=${parameter_is_cuda_line_count:-n/a};grad_handle_line_count=${grad_handle_line_count:-n/a};optimizer_step_line_count=${optimizer_step_line_count:-n/a};before_sum_line_count=${before_sum_line_count:-n/a};after_sum_line_count=${after_sum_line_count:-n/a};next_action=${next_action:-n/a}"
+            ;;
+        public_absence)
+            absence_status="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_status)"
+            absence_reason="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_reason)"
+            required_gates="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_required_gates)"
+            blocked_gates="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_blocked_gates)"
+            primary_blocked_gate="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_primary_blocked_gate)"
+            surface_manifest="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_surface_manifest)"
+            surface_manifest_count="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_surface_manifest_count)"
+            surface_manifest_size="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_surface_manifest_size)"
+            surface_manifest_sha256="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_surface_manifest_sha256)"
+            failure_count="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_failure_count)"
+            next_action="$(env_value build/llm_tooling_public_absence_rendering/evidence.env llm_tooling_public_absence_rendering_next_action)"
+            printf '%s\n' "absence_status=${absence_status:-n/a};absence_reason=${absence_reason:-n/a};required_gates=${required_gates:-n/a};blocked_gates=${blocked_gates:-n/a};primary_blocked_gate=${primary_blocked_gate:-n/a};surface_manifest=${surface_manifest:-n/a};surface_manifest_count=${surface_manifest_count:-n/a};surface_manifest_size=${surface_manifest_size:-n/a};surface_manifest_sha256=${surface_manifest_sha256:-n/a};failure_count=${failure_count:-n/a};next_action=${next_action:-n/a}"
+            ;;
+        feature_db_reference)
+            reference_status="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_status)"
+            reference_reason="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_reason)"
+            required_gates="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_required_gates)"
+            blocked_gates="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_blocked_gates)"
+            primary_blocked_gate="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_primary_blocked_gate)"
+            rows_checked="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_rows_checked)"
+            paths_checked="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_paths_checked)"
+            missing_count="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_missing_count)"
+            stale_svllm_path_count="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_stale_svllm_path_count)"
+            surface_manifest="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_surface_manifest)"
+            surface_manifest_count="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_surface_manifest_count)"
+            surface_manifest_size="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_surface_manifest_size)"
+            surface_manifest_sha256="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_surface_manifest_sha256)"
+            next_action="$(env_value build/llm_feature_db_reference_integrity/evidence.env llm_feature_db_reference_integrity_next_action)"
+            printf '%s\n' "reference_status=${reference_status:-n/a};reference_reason=${reference_reason:-n/a};required_gates=${required_gates:-n/a};blocked_gates=${blocked_gates:-n/a};primary_blocked_gate=${primary_blocked_gate:-n/a};rows_checked=${rows_checked:-n/a};paths_checked=${paths_checked:-n/a};missing_count=${missing_count:-n/a};stale_svllm_path_count=${stale_svllm_path_count:-n/a};surface_manifest=${surface_manifest:-n/a};surface_manifest_count=${surface_manifest_count:-n/a};surface_manifest_size=${surface_manifest_size:-n/a};surface_manifest_sha256=${surface_manifest_sha256:-n/a};next_action=${next_action:-n/a}"
+            ;;
+        prereq_doctor_contract)
+            contract_status="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_status)"
+            contract_reason="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_reason)"
+            checked_count="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_checked_count)"
+            doctor_exit="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_doctor_exit)"
+            doctor_env="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_doctor_env)"
+            doctor_report="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_doctor_report)"
+            doctor_stdout="$(env_value build/llm_strict_host_prereq_doctor_contract/evidence.env llm_strict_host_prereq_doctor_contract_doctor_stdout)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};doctor_exit=${doctor_exit:-n/a};doctor_env=${doctor_env:-n/a};doctor_report=${doctor_report:-n/a};doctor_stdout=${doctor_stdout:-n/a};next_action=$(lane_next_action prereq_doctor_contract)"
+            ;;
+        dashboard_http_setup_contract)
+            contract_status="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_status)"
+            contract_reason="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_reason)"
+            checked_count="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_checked_count)"
+            probe_exit="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_exit)"
+            probe_env="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_env)"
+            probe_report="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_report)"
+            probe_stdout="$(env_value build/llm_dashboard_live_http_setup_contract/evidence.env llm_dashboard_live_http_setup_contract_probe_stdout)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};probe_exit=${probe_exit:-n/a};probe_env=${probe_env:-n/a};probe_report=${probe_report:-n/a};probe_stdout=${probe_stdout:-n/a};next_action=$(lane_next_action dashboard_http_setup_contract)"
+            ;;
+        vllm_host_env_contract)
+            contract_status="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_status)"
+            contract_reason="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_reason)"
+            checked_count="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_checked_count)"
+            probe_exit="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_probe_exit)"
+            probe_env="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_probe_env)"
+            probe_report="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_probe_report)"
+            probe_stdout="$(env_value build/llm_runtime_vllm_host_env_contract/evidence.env llm_runtime_vllm_host_env_contract_probe_stdout)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};probe_exit=${probe_exit:-n/a};probe_env=${probe_env:-n/a};probe_report=${probe_report:-n/a};probe_stdout=${probe_stdout:-n/a};next_action=$(lane_next_action vllm_host_env_contract)"
+            ;;
+        torch_setup_contract)
+            contract_status="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_status)"
+            contract_reason="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_reason)"
+            checked_count="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_checked_count)"
+            probe_exit="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_probe_exit)"
+            probe_env="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_probe_env)"
+            probe_report="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_probe_report)"
+            probe_stdout="$(env_value build/llm_runtime_torch_setup_contract/evidence.env llm_runtime_torch_setup_contract_probe_stdout)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};probe_exit=${probe_exit:-n/a};probe_env=${probe_env:-n/a};probe_report=${probe_report:-n/a};probe_stdout=${probe_stdout:-n/a};next_action=$(lane_next_action torch_setup_contract)"
+            ;;
+        finetune_setup_contract)
+            contract_status="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_status)"
+            contract_reason="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_reason)"
+            checked_count="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_checked_count)"
+            guard_exit="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_guard_exit)"
+            acceptance_exit="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_acceptance_exit)"
+            guard_env="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_guard_env)"
+            acceptance_env="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_acceptance_env)"
+            guard_report="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_guard_report)"
+            acceptance_report="$(env_value build/llm_finetune_setup_contract/evidence.env llm_finetune_setup_contract_acceptance_report)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};guard_exit=${guard_exit:-n/a};acceptance_exit=${acceptance_exit:-n/a};guard_env=${guard_env:-n/a};acceptance_env=${acceptance_env:-n/a};guard_report=${guard_report:-n/a};acceptance_report=${acceptance_report:-n/a};next_action=$(lane_next_action finetune_setup_contract)"
+            ;;
+        svllm_setup_contract)
+            contract_status="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_status)"
+            contract_reason="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_reason)"
+            checked_count="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_checked_count)"
+            native_exit="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_native_exit)"
+            local_exit="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_local_exit)"
+            native_env="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_native_env)"
+            local_env="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_local_env)"
+            native_report="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_native_report)"
+            local_report="$(env_value build/llm_runtime_svllm_setup_contract/evidence.env llm_runtime_svllm_setup_contract_local_report)"
+            printf '%s\n' "contract_status=${contract_status:-n/a};contract_reason=${contract_reason:-n/a};checked_count=${checked_count:-n/a};native_exit=${native_exit:-n/a};local_exit=${local_exit:-n/a};native_env=${native_env:-n/a};local_env=${local_env:-n/a};native_report=${native_report:-n/a};local_report=${local_report:-n/a};next_action=$(lane_next_action svllm_setup_contract)"
+            ;;
+        *)
+            printf '%s\n' "n/a"
+            ;;
+    esac
+}
+
+if [ "$STRICT_HOST" -eq 1 ]; then
+    clear_evidence_env build/llm_tooling_context_ponytail_full_replacement/evidence.env
+    run_producer context_ponytail "$BUILD_DIR/context_ponytail_full_replacement.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/context_ponytail_full_replacement_report.md" sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+    run_lane context_ponytail pass env CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement
+else
+    clear_evidence_env build/llm_tooling_context_ponytail_full_replacement/evidence.env
+    run_producer context_ponytail "$BUILD_DIR/context_ponytail_full_replacement.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/context_ponytail_full_replacement_report.md" sh scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs
+    run_lane context_ponytail pass env CONTEXT_PONYTAIL_FULL_REPLACEMENT_EVIDENCE_ENV=build/llm_tooling_context_ponytail_full_replacement/evidence.env sh scripts/check/check-llm-tooling-context-ponytail-mimic.shs --strict-full-replacement
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    clear_evidence_env build/llm_dashboard_live_http/evidence.env
+    run_producer dashboard_http "$BUILD_DIR/dashboard_live_http.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_http_report.md" sh scripts/check/check-llm-dashboard-live-http-evidence.shs
+    clear_evidence_env build/llm_dashboard_live/evidence.env
+    run_producer dashboard "$BUILD_DIR/dashboard_live.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_report.md" sh scripts/check/check-llm-dashboard-live-evidence.shs
+    run_lane dashboard pass env LLM_DASHBOARD_LIVE_EVIDENCE_ENV=build/llm_dashboard_live/evidence.env sh scripts/check/check-llm-dashboard-evidence.shs --strict-live
+else
+    clear_evidence_env build/llm_dashboard_live_http/evidence.env
+    run_producer dashboard_http "$BUILD_DIR/dashboard_live_http.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_http_report.md" sh scripts/check/check-llm-dashboard-live-http-evidence.shs
+    clear_evidence_env build/llm_dashboard_live/evidence.env
+    run_producer dashboard "$BUILD_DIR/dashboard_live.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/dashboard_live_report.md" sh scripts/check/check-llm-dashboard-live-evidence.shs
+    run_lane dashboard pass sh scripts/check/check-llm-dashboard-evidence.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane vllm_host pass sh scripts/check/check-llm-runtime-vllm-host-probe.shs --strict
+else
+    run_lane vllm_host warn sh scripts/check/check-llm-runtime-vllm-host-probe.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    clear_evidence_env build/llm_runtime_svllm_native_streaming/evidence.env
+    run_producer svllm_local "$BUILD_DIR/svllm_native_streaming.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/svllm_native_streaming_report.md" sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
+    run_lane svllm_local pass env SVLLM_NATIVE_EVIDENCE_ENV=build/llm_runtime_svllm_native_streaming/evidence.env sh scripts/check/check-llm-runtime-svllm-local-readiness.shs --strict-native
+else
+    clear_evidence_env build/llm_runtime_svllm_native_streaming/evidence.env
+    run_producer svllm_local "$BUILD_DIR/svllm_native_streaming.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/svllm_native_streaming_report.md" sh scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs
+    run_lane svllm_local pass sh scripts/check/check-llm-runtime-svllm-local-readiness.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    run_lane torch_optimizer pass sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict
+else
+    run_lane torch_optimizer warn sh scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs
+fi
+if [ "$STRICT_HOST" -eq 1 ]; then
+    clear_evidence_env build/llm_finetune_acceptance/evidence.env
+    run_producer finetune_guard "$BUILD_DIR/finetune_acceptance.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/finetune_acceptance_report.md" sh scripts/check/check-llm-finetune-acceptance-evidence.shs
+    run_lane finetune_guard pass env FINETUNE_ACCEPTANCE_EVIDENCE_ENV=build/llm_finetune_acceptance/evidence.env sh scripts/check/check-llm-finetune-guard-evidence.shs --strict-ready
+else
+    clear_evidence_env build/llm_finetune_acceptance/evidence.env
+    run_producer finetune_guard "$BUILD_DIR/finetune_acceptance.log" env -u BUILD_DIR REPORT_PATH="$BUILD_DIR/finetune_acceptance_report.md" sh scripts/check/check-llm-finetune-acceptance-evidence.shs
+    run_lane finetune_guard pass sh scripts/check/check-llm-finetune-guard-evidence.shs
+fi
+run_lane public_absence pass sh scripts/check/check-llm-tooling-public-absence-rendering.shs
+run_lane feature_db_reference pass sh scripts/check/check-llm-feature-db-reference-integrity.shs
+run_lane prereq_doctor_contract pass sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs
+run_lane dashboard_http_setup_contract pass sh scripts/check/check-llm-dashboard-live-http-setup-contract.shs
+run_lane vllm_host_env_contract pass sh scripts/check/check-llm-runtime-vllm-host-env-contract.shs
+run_lane torch_setup_contract pass sh scripts/check/check-llm-runtime-torch-setup-contract.shs
+run_lane finetune_setup_contract pass sh scripts/check/check-llm-finetune-setup-contract.shs
+run_lane svllm_setup_contract pass sh scripts/check/check-llm-runtime-svllm-setup-contract.shs
+
+status="pass"
+warn_count=0
+fail_count=0
+warn_gates=""
+failed_gates=""
+failed_gate_hints=""
+for key in $LANES; do
+    eval "lane_status=\${${key}_status}"
+    eval "expected=\${${key}_expected}"
+    if [ "$lane_status" = "fail" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
+        hint="$(gate_hint "$key")"
+        if [ -z "$failed_gate_hints" ]; then
+            failed_gate_hints="$key:$hint"
+        else
+            failed_gate_hints="$failed_gate_hints|$key:$hint"
+        fi
+    elif [ "$lane_status" = "warn" ]; then
+        warn_count=$((warn_count + 1))
+        if [ -z "$warn_gates" ]; then
+            warn_gates="$key"
+        else
+            warn_gates="$warn_gates|$key"
+        fi
+        if [ "$expected" != "warn" ]; then
+            status="fail"
+            fail_count=$((fail_count + 1))
+            if [ -z "$failed_gates" ]; then
+                failed_gates="$key"
+            else
+                failed_gates="$failed_gates|$key"
+            fi
+            hint="$(gate_hint "$key")"
+            if [ -z "$failed_gate_hints" ]; then
+                failed_gate_hints="$key:$hint"
+            else
+                failed_gate_hints="$failed_gate_hints|$key:$hint"
+            fi
+        fi
+    elif [ "$lane_status" != "$expected" ] && [ "$expected" != "warn" ]; then
+        status="fail"
+        fail_count=$((fail_count + 1))
+        if [ -z "$failed_gates" ]; then
+            failed_gates="$key"
+        else
+            failed_gates="$failed_gates|$key"
+        fi
+        hint="$(gate_hint "$key")"
+        if [ -z "$failed_gate_hints" ]; then
+            failed_gate_hints="$key:$hint"
+        else
+            failed_gate_hints="$failed_gate_hints|$key:$hint"
+        fi
+    fi
+done
+
+{
+    printf '%s\n' "llm_goal_evidence_status=$status"
+    printf '%s\n' "llm_goal_evidence_strict_host=$STRICT_HOST"
+    printf '%s\n' "llm_goal_evidence_warn_count=$warn_count"
+    printf '%s\n' "llm_goal_evidence_fail_count=$fail_count"
+    printf '%s\n' "llm_goal_evidence_warn_gates=$warn_gates"
+    printf '%s\n' "llm_goal_evidence_failed_gates=$failed_gates"
+    printf '%s\n' "llm_goal_evidence_failed_gate_hints=$failed_gate_hints"
+    printf '%s\n' "llm_goal_evidence_lane_timeout_seconds=$LANE_TIMEOUT_SECONDS"
+    for key in $LANES; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
+        eval "producer_exit=\${${key}_producer_exit:-n/a}"
+        eval "producer_log=\${${key}_producer_log:-n/a}"
+        hint="$(gate_hint "$key")"
+        printf '%s\n' "llm_goal_evidence_${key}_status=$lane_status"
+        printf '%s\n' "llm_goal_evidence_${key}_expected=$expected"
+        printf '%s\n' "llm_goal_evidence_${key}_exit=$exit_code"
+        printf '%s\n' "llm_goal_evidence_${key}_producer_exit=$producer_exit"
+        printf '%s\n' "llm_goal_evidence_${key}_producer_log=$producer_log"
+        printf '%s\n' "llm_goal_evidence_${key}_timeout_seconds=$timeout_seconds"
+        printf '%s\n' "llm_goal_evidence_${key}_hint=$hint"
+        required="$(lane_required_gates "$key")"
+        blocked="$(lane_blocked_gates "$key")"
+        reason="$(lane_blocker_reason "$key")"
+        if [ "$exit_code" -eq 124 ]; then
+            blocked="lane_timeout"
+            reason="lane_timeout_${timeout_seconds}s"
+        fi
+        primary_blocked="$(primary_blocked_gate_for "${blocked:-n/a}")"
+        printf '%s\n' "llm_goal_evidence_${key}_required_gates=${required:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_blocked_gates=${blocked:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_primary_blocked_gate=$primary_blocked"
+        printf '%s\n' "llm_goal_evidence_${key}_blocker_reason=${reason:-n/a}"
+        printf '%s\n' "llm_goal_evidence_${key}_next_action=$(lane_next_action "$key")"
+        printf '%s\n' "llm_goal_evidence_${key}_detail=$(lane_detail_values "$key")"
+    done
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Goal Evidence\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf '%s\n' "- strict_host: \`true\`"
+    else
+        printf '%s\n' "- strict_host: \`false\`"
+    fi
+    printf '%s\n' "- warn_count: \`$warn_count\`"
+    printf '%s\n' "- fail_count: \`$fail_count\`"
+    if [ -n "$warn_gates" ]; then
+        printf '%s\n' "- warn_gates: \`$warn_gates\`"
+    else
+        printf '%s\n' "- warn_gates: \`none\`"
+    fi
+    if [ -n "$failed_gates" ]; then
+        printf '%s\n' "- failed_gates: \`$failed_gates\`"
+    else
+        printf '%s\n' "- failed_gates: \`none\`"
+    fi
+    if [ -n "$failed_gate_hints" ]; then
+        printf '%s\n' "- failed_gate_hints: \`$failed_gate_hints\`"
+    else
+        printf '%s\n' "- failed_gate_hints: \`none\`"
+    fi
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '%s\n' "- lane_timeout_seconds: \`$LANE_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- svllm_lane_timeout_seconds: \`$(lane_timeout_seconds svllm_local)\`"
+    printf '\n'
+    printf '| lane | status | expected | exit | producer_exit | timeout | log | producer_log |\n'
+    printf '|------|--------|----------|------|---------------|---------|-----|--------------|\n'
+    for key in $LANES; do
+        eval "lane_status=\${${key}_status}"
+        eval "exit_code=\${${key}_exit}"
+        eval "expected=\${${key}_expected}"
+        eval "timeout_seconds=\${${key}_timeout_seconds}"
+        eval "producer_exit=\${${key}_producer_exit:-n/a}"
+        eval "producer_log=\${${key}_producer_log:-n/a}"
+        printf '| %s | `%s` | `%s` | `%s` | `%s` | `%s` | `%s` | `%s` |\n' "$key" "$lane_status" "$expected" "$exit_code" "$producer_exit" "$timeout_seconds" "$BUILD_DIR/$key.log" "$producer_log"
+    done
+    printf '\n'
+    printf '## Strict Evidence Hints\n\n'
+    for key in $LANES; do
+        printf '%s\n' "- $key: \`$(gate_hint "$key")\`"
+    done
+    printf '\n'
+    printf '## Blocker Details\n\n'
+    printf '| lane | required_gates | blocked_gates | primary_blocked_gate | reason |\n'
+    printf '|------|----------------|---------------|----------------------|--------|\n'
+    for key in $COMPLETION_LANES; do
+        eval "exit_code=\${${key}_exit}"
+        required="$(lane_required_gates "$key")"
+        blocked="$(lane_blocked_gates "$key")"
+        reason="$(lane_blocker_reason "$key")"
+        if [ "$exit_code" -eq 124 ]; then
+            blocked="lane_timeout"
+            reason="lane_timeout_$(lane_timeout_seconds "$key")s"
+        fi
+        primary_blocked="$(primary_blocked_gate_for "${blocked:-n/a}")"
+        printf '| %s | `%s` | `%s` | `%s` | `%s` |\n' "$key" "${required:-n/a}" "${blocked:-n/a}" "$primary_blocked" "${reason:-n/a}"
+    done
+    printf '\n'
+    printf '## Next Actions\n\n'
+    printf '| lane | next_action |\n'
+    printf '|------|-------------|\n'
+    for key in $LANES; do
+        printf '| %s | `%s` |\n' "$key" "$(lane_next_action "$key")"
+    done
+    printf '\n'
+    printf '## Replacement, Dashboard, Host, svLLM, Torch, Acceptance, And Local Guard Details\n\n'
+    printf '| lane | details |\n'
+    printf '|------|---------|\n'
+    for key in $LANES; do
+        printf '| %s | `%s` |\n' "$key" "$(lane_detail_values "$key")"
+    done
+    printf '\n'
+    if [ "$STRICT_HOST" -eq 1 ]; then
+        printf 'This aggregate is strict host evidence: full context/Ponytail replacement, live dashboard operation, live vLLM serving, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer execution must pass through their focused strict wrappers. Any WARN or FAIL lane keeps the aggregate failed.\n'
+    else
+        printf 'This aggregate proves the current local LLM tooling evidence lanes remain reproducible. WARN lanes are expected only for host-dependent gates that are still open on this machine: live vLLM serving and Simple/libtorch CUDA optimizer execution. The context/Ponytail lane includes repo-local full-replacement surface evidence, the dashboard lane is route/collector evidence in default mode plus non-blocking live HTTP diagnostics, the vLLM host lane includes local command/module/GPU probes plus a checked runtime control/readiness surface manifest, the svLLM lane is local file-backed readiness in default mode plus non-blocking native streaming diagnostics, the Torch optimizer lane includes Python Torch/CUDA visibility plus a checked optimizer probe/source/spec surface manifest, the fine-tune lane includes guard evidence plus non-blocking retry7 acceptance blocker details, and local hygiene lanes prove public absence rendering plus LLM feature database reference integrity. This report is not release-completion evidence for live dashboard, live vLLM, native svLLM streaming, fine-tune acceptance, and Simple/libtorch CUDA optimizer gates; rerun with `--strict-host` on a configured host when those live gates must pass.\n'
+    fi
+} >"$REPORT_PATH"
+
+if [ "$status" = "pass" ]; then
+    echo "STATUS: PASS llm-goal-evidence warn_count=$warn_count"
+else
+    echo "STATUS: FAIL llm-goal-evidence warn_count=$warn_count fail_count=$fail_count"
+    exit 1
+fi

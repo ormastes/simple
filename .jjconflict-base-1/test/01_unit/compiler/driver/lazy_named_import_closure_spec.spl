@@ -1,0 +1,93 @@
+"""
+# `use lazy M.{sym}` named-import entry-closure contract
+
+Regression cover for defect #1 of
+`doc/08_tracking/bug/selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md`.
+
+`_driver_entry_import_module_paths` used to `continue` on ANY line starting
+`use lazy `, dropping the module from the entry closure. HIR lowering's
+`resolve_import_symbols` then found no module surface (`imported_key == ""`)
+and registered NOTHING, so every name in `use lazy M.{a, b}` reported
+`unresolved name` — e.g. `InterpreterBackendImpl` from
+`src/compiler/80.driver/driver.spl:20` and `driver_types.spl:19`, which carry a
+present and correctly written import.
+
+The split this spec locks:
+  - NAMED lazy imports (`M.{a, b}` / `M (a, b)`) declare a static name
+    dependency, so the module IS collected.
+  - Name-less lazy imports (`use lazy M`, `use lazy M.*`, `use lazy M as a`)
+    are dynamic-by-design and stay skipped — `src/lib/nogc_async_mut/mcp/
+    main_lazy.spl` (#LAZY-002) depends on that for startup cost.
+  - `export use lazy` / `pub use lazy` / `import lazy` used to fall past the
+    `use lazy ` prefix test entirely and collect the literal module path
+    `"lazy"`. They now yield the real module.
+"""
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths}
+
+val LB = "{"
+val RB = "}"
+
+describe "use lazy named-import entry closure":
+    it "collects the module of a named lazy import":
+        val imports = _driver_entry_import_module_paths(
+            "use lazy zqx.named." + LB + "Zqxsym" + RB + "\n")
+        expect(imports.len()).to_equal(1)
+        expect(imports).to_contain("zqx.named")
+
+    it "collects the module of a paren-form named lazy import":
+        val imports = _driver_entry_import_module_paths("use lazy zqx.parend (Zqxsym)\n")
+        expect(imports.len()).to_equal(1)
+        expect(imports).to_contain("zqx.parend")
+
+    it "collects the module of an aliased named lazy import":
+        val imports = _driver_entry_import_module_paths(
+            "use lazy zqx.aliasing." + LB + "Zqxsym as Zqxalias" + RB + "\n")
+        expect(imports.len()).to_equal(1)
+        expect(imports).to_contain("zqx.aliasing")
+
+    it "keeps name-less lazy imports deferred":
+        expect(_driver_entry_import_module_paths("use lazy zqx.bare\n").len()).to_equal(0)
+        expect(_driver_entry_import_module_paths("use lazy zqx.globby.*\n").len()).to_equal(0)
+        expect(_driver_entry_import_module_paths("use lazy zqx.mod as zq\n").len()).to_equal(0)
+
+    it "resolves the real module for export-use, pub-use and import lazy forms":
+        val exported = _driver_entry_import_module_paths(
+            "export use lazy zqx.exp." + LB + "Zqxsym" + RB + "\n")
+        expect(exported).to_contain("zqx.exp")
+        expect(exported.contains("lazy")).to_equal(false)
+        val published = _driver_entry_import_module_paths(
+            "pub use lazy zqx.pubm." + LB + "Zqxsym" + RB + "\n")
+        expect(published).to_contain("zqx.pubm")
+        expect(published.contains("lazy")).to_equal(false)
+        val imported = _driver_entry_import_module_paths(
+            "import lazy zqx.impm." + LB + "Zqxsym" + RB + "\n")
+        expect(imported).to_contain("zqx.impm")
+        expect(imported.contains("lazy")).to_equal(false)
+
+    it "does not mistake a module whose first segment starts with lazy":
+        val imports = _driver_entry_import_module_paths(
+            "use lazy_thing.mod." + LB + "Zqxsym" + RB + "\n")
+        expect(imports).to_contain("lazy_thing.mod")
+
+describe "in-tree lazy import sites":
+    it "puts the driver's lazy interpreter backend in its entry closure":
+        val driver = _driver_entry_import_module_paths(
+            file_read("src/compiler/80.driver/driver.spl"))
+        expect(driver).to_contain("compiler.backend.backend.interpreter")
+        expect(driver).to_contain("compiler.backend.backend_types")
+        expect(driver.contains("lazy")).to_equal(false)
+
+    it "puts driver_types' lazy interpreter backend in its entry closure":
+        val types = _driver_entry_import_module_paths(
+            file_read("src/compiler/80.driver/driver_types.spl"))
+        expect(types).to_contain("compiler.backend.backend.interpreter")
+
+    it "keeps the MCP lazy tool modules out of the entry closure":
+        val mcp = _driver_entry_import_module_paths(
+            file_read("src/lib/nogc_async_mut/mcp/main_lazy.spl"))
+        expect(mcp.contains("std.nogc_async_mut.mcp.main_lazy_diag_tools")).to_equal(false)
+        expect(mcp.contains("std.nogc_async_mut.mcp.main_lazy_debug_tools")).to_equal(false)
+        expect(mcp.contains("std.nogc_async_mut.mcp.main_lazy_power_tools")).to_equal(false)

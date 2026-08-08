@@ -1,0 +1,123 @@
+# Mutating-method coverage for the browser engine DOM node.
+#
+# Union coverage of dom.spl against every spec that reaches it by import was
+# 63% (50/79). Every uncovered line sat in a mutating `me` method
+# (`set_attr`, `remove_attr`, `add_child`, `set_style`,
+# `remove_event_listener_with_capture`, `prevent_default`) or in the manual
+# tree-dump helper -- code that only became measurable at all once coverage
+# defect B was fixed, and that no example had ever driven.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom.spl
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, BeDomEvent, be_dom_debug_manual_tree_dump}
+
+describe "BeDomNode attributes":
+
+    it "stores an attribute and reads it back":
+        var n = BeDomNode.element_with_id(1, "img")
+        n.set_attr("id", "hero")
+        expect(n.get_attr("id")).to_equal("hero")
+        expect(n.has_attr("id")).to_equal(true)
+
+    it "stores the three render-cache-invalidating attributes":
+        # src / poster / style each drop a cached render key before storing.
+        var n = BeDomNode.element_with_id(1, "img")
+        n.set_attr("src", "a.png")
+        n.set_attr("poster", "p.png")
+        n.set_attr("style", "color:red")
+        expect(n.get_attr("src")).to_equal("a.png")
+        expect(n.get_attr("poster")).to_equal("p.png")
+        expect(n.get_attr("style")).to_equal("color:red")
+
+    it "removes a render-cache-invalidating attribute":
+        var n = BeDomNode.element_with_id(1, "img")
+        n.set_attr("src", "a.png")
+        n.remove_attr("src")
+        expect(n.has_attr("src")).to_equal(false)
+
+    it "removes a plain attribute":
+        var n = BeDomNode.element_with_id(1, "img")
+        n.set_attr("id", "hero")
+        n.remove_attr("id")
+        expect(n.has_attr("id")).to_equal(false)
+
+describe "BeDomNode children":
+
+    it "adopts a child and stamps its parent id":
+        var parent = BeDomNode.element_with_id(7, "div")
+        val kid = BeDomNode.element_with_id(8, "span")
+        parent.add_child(kid)
+        expect(parent.children.len()).to_equal(1)
+        expect(parent.children[0].parent_id).to_equal(7)
+
+describe "BeDomNode inline style":
+
+    it "sets every named inline style property":
+        var s = BeDomNode.element_with_id(2, "p")
+        s.set_style("Display", " flex ")     # name lowered, value trimmed
+        s.set_style("float", "left")
+        s.set_style("clear", "both")
+        s.set_style("overflow", "hidden")
+        s.set_style("position", "absolute")
+        s.set_style("color", "red")
+        s.set_style("background-color", "blue")
+        s.set_style("font-weight", "bold")
+        s.set_style("text-align", "center")
+        expect(s.style.display).to_equal("flex")
+        expect(s.style.float_css).to_equal("left")
+        expect(s.style.clear_css).to_equal("both")
+        expect(s.style.overflow).to_equal("hidden")
+        expect(s.style.position).to_equal("absolute")
+        expect(s.style.color).to_equal("red")
+        expect(s.style.background_color).to_equal("blue")
+        expect(s.style.font_weight).to_equal("bold")
+        expect(s.style.text_align).to_equal("center")
+
+    it "ignores an unrecognised style property":
+        var s = BeDomNode.element_with_id(2, "p")
+        s.set_style("display", "block")
+        s.set_style("unknown-prop", "x")
+        expect(s.style.display).to_equal("block")
+
+describe "BeDomNode event listeners":
+
+    it "clears a listener that is not the first registered":
+        # Removal walks the list; tombstoning the second entry is what
+        # exercises the loop advance.
+        var l = BeDomNode.element_with_id(3, "button")
+        l.add_event_listener("click", "one")
+        l.add_event_listener("click", "two")
+        l.remove_event_listener("click", "two")
+        expect(l.event_listener_types.len()).to_equal(2)
+        expect(l.event_listener_actions[0]).to_equal("one")
+        expect(l.event_listener_actions[1]).to_equal("")
+
+describe "BeDomEvent default handling":
+
+    it "marks a cancelable event as default-prevented":
+        var e = BeDomEvent.create("click", "", true, true)
+        e.prevent_default()
+        expect(e.default_prevented).to_equal(true)
+
+    it "leaves a non-cancelable event unchanged":
+        var e = BeDomEvent.create("click", "", true, false)
+        e.prevent_default()
+        expect(e.default_prevented).to_equal(false)
+
+    it "stops propagation":
+        var e = BeDomEvent.create("click", "", true, false)
+        e.stop_propagation()
+        expect(e.propagation_stopped).to_equal(true)
+
+describe "BeDomNode manual tree dump":
+
+    it "walks a hand-built tree depth-first with attribute lengths intact":
+        # The helper exists to bisect a JIT struct-field-read defect; it must
+        # report the style attribute's real length and the real child counts.
+        val parts = be_dom_debug_manual_tree_dump().split("\n")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("0|#root|style_len=0|childcount=1")
+        expect(parts[1]).to_equal("1|div|style_len=34|childcount=1")
+        expect(parts[2]).to_equal("2|#text|style_len=0|childcount=0")
