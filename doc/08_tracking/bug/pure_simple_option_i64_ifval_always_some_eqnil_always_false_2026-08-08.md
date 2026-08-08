@@ -97,3 +97,77 @@ because it always says Some).
   nil/option lowering once the other session's WIP there is committed or resolved.
 - Re-sweep this exact probe (`/tmp/.../optprobe/main.spl`, preserved in this doc) once that
   lands, to confirm both defects close and the value-3 non-collision still holds.
+
+---
+
+## ROOT CAUSE (source-traced 2026-08-08) — both symptoms are ONE defect
+
+**Ignore the `case NilLit` / value-3-sentinel theory above.** It is a red herring:
+`??` and `.is_none()` are empirically correct for every payload including 3, so
+the untagged constant is not the fault.
+
+The chain, read straight from source:
+
+1. **`if val v = option.?` is parser-desugared to a raw binding followed by
+   `v != nil`** — stated explicitly at `mir_lowering_stmts.spl:1819-1820`. It is
+   a Binary comparison node, NOT an `ExistsCheck` node.
+
+2. **`lower_cond_expr` (`mir_lowering_stmts.spl:1773`) only special-cases
+   `HirExprKind.ExistsCheck`**, for which it emits a real `rt_is_some` call.
+   Everything else falls through to `case _: self.lower_expr(cond)`.
+
+3. So the desugared `v != nil` never reaches `rt_is_some`. It is lowered as an
+   ordinary Binary comparison and the branch tests the raw Option handle.
+
+4. That Binary comparison is the SAME representation-blind path fixed for
+   `Option<bool>` in `ab3af6f728e`: `bin_is_enum_eq` requires both operands to
+   resolve to the same enum id, but `lower_enum_construct_named` deliberately
+   skips `remember_local_hir_type` for `"Option"`, so `local_enum_type_id`
+   returns -1 for BOTH operands and it falls through to a raw scalar compare of a
+   boxed `rt_enum_new` handle against the raw sentinel word.
+
+**This explains both symptoms with one mechanism:**
+- `v == nil` is always FALSE — the boxed handle never equals the raw sentinel.
+- `if val` always takes Some — it *is* `v != nil`, and a comparison that is
+  always false makes its negation always true.
+
+**`lower_cond_expr`'s own docstring describes this exact hazard** and guards only
+the `.?` spelling:
+
+> "the nil sentinel is the NON-ZERO integer 3 (RT_NIL = (SPECIAL_NIL << 3) |
+> TAG_SPECIAL, runtime_value.h), so branching on that value directly is
+> unconditionally TRUE -- a silent wrong-branch bug, strictly worse than a loud
+> crash."
+
+That is precisely what happens to `if val`. The analysis was right; the guard was
+just never extended past the one syntactic form.
+
+## Why `bool?` already works and `i64?` does not
+
+`ab3af6f728e` made the Binary arm consult `option_value_locals` and box a raw
+literal via `ensure_option_handle` when exactly one side is a registered Option
+handle and the other is bool-typed or nil-marked. Measured after that fix:
+`nil == nil` is TRUE for `bool?`. The i64? case evidently does not satisfy the
+same operand-registration test.
+
+**Fix direction (two candidates, prefer whichever is smaller and provable):**
+- (a) Extend the `ab3af6f728e` Binary-arm handling so an i64?-typed (and
+  generally any-payload) Option operand compared against `nil` boxes/compares by
+  representation, not raw bits.
+- (b) Teach `lower_cond_expr` to recognise the desugared `v != nil` shape over an
+  Option-typed local and emit `rt_is_some` — the same treatment `.?` already
+  gets. This fixes `if val` at the branch, but NOT a bare `v == nil` in value
+  position, so (a) is likely still needed.
+
+Do NOT "fix" this by making `ensure_option_handle` guess a discriminant at
+runtime. Its comment ("Nil and the valid raw i64 payload 3 share the same bits.
+Only the lowering provenance can distinguish them; never guess at runtime") is
+correct for its own boxing job and must stay.
+
+## Verification bar for whoever implements this
+
+Sweep the full table — `Some(0..4)`, `Some(-1)`, real `nil` — across `if val`,
+`== nil`, `!= nil`, `??`, `.is_none()`, `.is_some()`, for payload types `i64?`,
+`bool?`, and `text?`. Rows whose correct answer is already "no-match"/"None" pass
+by coincidence and prove nothing; the match-expected rows are the ones that
+matter. `??`/`.is_none()`/`.is_some()` are correct TODAY and must not regress.
