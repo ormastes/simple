@@ -418,3 +418,51 @@ the backend, not the flag form, and not the environment.
    disc=… unresolved=true` is resolution failure over an enum-keyed table. With
    enum dispatch itself now eliminated, that lane's findings become the more
    promising thread, not a duplicate of this one.
+
+## 2026-08-08 follow-up: bounded re-bisection attempt, inconclusive within budget
+
+Re-diagnosed from scratch per the correction above (did not reuse the refuted
+enum-discriminant explanation). Attempted the item-1 scale-vs-construct
+bisection on `src/compiler/10.frontend/core` using the same preserved
+`S3FIX1/stage2-simple` (128,111,944 B, md5-stable) binary:
+
+```
+stage2-simple native-build --backend llvm --mode dynload \
+  --entry-closure src/compiler/10.frontend/core --output <scratch>/core_out
+```
+
+**Finding: `--entry-closure` on a subdirectory does not scope the build to
+that subtree.** It walks the full transitive import graph from every module
+under the given path, which — for `10.frontend/core` — pulls in unrelated
+`examples/10_tooling/trace32_tools/**` modules and all of
+`lib__nogc_sync_mut__fs`, each logged as `[llvm-entry-closure] N unresolved
+call(s) in module <X> before codegen; continuing`. Two independent runs (480s
+and a prior 120s cap) did not reach codegen completion; both were still
+resolving imports/emitting warnings for modules outside the target subtree
+when the time budget expired. No object or IR was produced by either run, so
+no vacuity/non-vacuity verdict was obtained.
+
+This is consistent with — but does not itself confirm — the "fails by scale"
+half of the item-1 hypothesis: the cost is dominated by the size of the
+resolved closure, not by the 7 or 25 files actually inside
+`10.frontend/core`. It does **not** distinguish scale from construct, because
+no run in this session reached a comparison point (small closure = correct
+per §1's probes; this attempt never produced output at all).
+
+**No fix was applied.** No `.spl` source was changed by this follow-up: the
+bounded-budget bisection did not reach a decision point, so per this
+document's own standard (do not fabricate a fix) none is recorded. The
+`--entry-closure`-pulls-the-whole-graph behavior noted above is itself a
+real observation worth a follow-up bug/lead if the next bisection attempt
+wants a *scoped* comparison point — e.g. an explicit `--source` allowlist
+(the "Stage-2 recipe" form already used successfully in item 2/3 above,
+which is scoped and did complete in 415s) rather than `--entry-closure` on a
+subdirectory, which is not scoped at all.
+
+**Recommended next step for whoever picks this up:** repeat item 6.1 using
+the Stage-2-recipe form (`--entry-closure` + explicit `--source src/compiler
+--source src/app --source src/lib` + `--entry`) restricted to a *reduced*
+`--source` set (e.g. only `src/compiler/10.frontend` + `src/compiler/00.*`
+scaffolding it needs) so the closure stays small enough to finish inside a
+single session's time budget, and compare vacuity there against the known-good
+1–3 module probes in §1 and the known-vacuous whole-compiler run.
