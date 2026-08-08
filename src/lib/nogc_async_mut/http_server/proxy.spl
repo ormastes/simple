@@ -1839,6 +1839,18 @@ fn async_proxy_parse_chunk_size(line: text) -> i64:
     val size_text = line.split(";")[0].trim()
     if size_text == "":
         return -1
+    # RFC 7230 §4.1: reject a chunk-size that does not fit i64 rather than
+    # wrapping it. `out = out * 16 + v` wraps modulo 2^64, so a 17-hex-digit
+    # size reads back small — "10000000000000000" (2^64) becomes 0 and would be
+    # accepted as the terminal last-chunk, desyncing this proxy from its peer
+    # (request smuggling). 15 hex digits (~1 EB) cannot overflow.
+    var z = 0
+    while z < size_text.len():
+        if size_text.slice(z, z + 1) != "0":
+            break
+        z = z + 1
+    if size_text.len() - z > 15:
+        return -1
     var out = 0
     var i = 0
     while i < size_text.len():

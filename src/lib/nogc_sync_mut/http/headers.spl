@@ -202,6 +202,14 @@ fn decode_chunked(encoded: text) -> Result<text, text>:
         if not header_is_hex_digits(size_str):
             return Err("invalid chunk size (RFC 7230 4.1: chunk-size = 1*HEXDIG)")
 
+        # RFC 7230 §4.1: a chunk-size that does not fit i64 must be rejected,
+        # not wrapped. parse_hex_text wraps modulo 2^64, so a 17-hex-digit size
+        # reads back small — "10000000000000000" becomes 0 and is accepted as
+        # the terminal last-chunk, desyncing us from a peer that rejects it
+        # (request smuggling).
+        if not header_hex_fits_i64(size_str):
+            return Err("chunk size overflows i64 (RFC 7230 4.1)")
+
         val chunk_size = parse_hex_text(size_str)
 
         if chunk_size == 0:
@@ -264,6 +272,16 @@ fn header_is_hex_digits(s: text) -> bool:
     return true
 
 # Parse hex text to integer
+# True when `s` (1*HEXDIG) fits i64. 15 hex digits (max ~1.15e18, ~1 EB) is the
+# widest token that cannot overflow the unchecked `acc * 16 + digit` below.
+fn header_hex_fits_i64(s: text) -> bool:
+    var i = 0
+    while i < s.length():
+        if s[i] != "0":
+            break
+        i = i + 1
+    return s.length() - i <= 15
+
 fn parse_hex_text(hex: text) -> i64:
     var result = 0
     var i = 0

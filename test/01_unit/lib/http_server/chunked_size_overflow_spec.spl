@@ -1,0 +1,72 @@
+# Chunked chunk-size integer-overflow rejection
+#
+# **Category:** HTTP Server Security
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# RFC 7230 §4.1 requires a chunk-size that does not fit the implementation's
+# integer type to be REJECTED, never wrapped. `parse_hex_text` (headers) and
+# `async_proxy_parse_chunk_size` (proxy) accumulate `acc * 16 + digit` with no
+# overflow check, so a 17-hex-digit size wraps modulo 2^64:
+#
+#   "10000000000000000" (2^64) reads back as 0  -> accepted as the LAST-CHUNK
+#   "10000000000000005"        reads back as 5  -> declares a 5-byte chunk
+#
+# Measured before the guard landed: `chunked_body_end("10000000000000000\r\nX\r\n\r\n")`
+# returned 24 (complete) and `async_proxy_chunked_body_complete` on the same
+# bytes returned true. A peer that correctly rejects the overflow disagrees with
+# us about where the message ends — an HTTP request-smuggling primitive on both
+# the server parser and the async proxy.
+#
+# These specs drive:
+#   - chunked_body_end / decode_chunked reject an overflowing chunk-size
+#   - async_proxy_chunked_body_complete does the same
+#   - negative controls: normal sizes, leading zeros, and the widest
+#     non-overflowing size are all still accepted
+
+use std.spec.*
+use std.nogc_async_mut.http.headers.{chunked_body_end, decode_chunked}
+use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete}
+
+describe "chunked_body_end — chunk-size overflow":
+    it "rejects a 2^64 chunk-size instead of wrapping it to a last-chunk":
+        # Pre-fix this returned 24: the size wrapped to 0, the body ended here,
+        # and "GET /admin ..." would have been read as a second request.
+        expect(chunked_body_end("10000000000000000\r\nX\r\n\r\n")).to_equal(-2)
+
+    it "rejects a 2^64+5 chunk-size instead of wrapping it to 5":
+        expect(chunked_body_end("10000000000000005\r\nABCDE\r\n0\r\n\r\n")).to_equal(-2)
+
+    it "rejects a 16-hex-digit chunk-size that exceeds i64":
+        expect(chunked_body_end("FFFFFFFFFFFFFFFF\r\nX\r\n0\r\n\r\n")).to_equal(-2)
+
+    it "rejects an overflowing chunk-size carrying a chunk extension":
+        expect(chunked_body_end("10000000000000000;a=b\r\nX\r\n\r\n")).to_equal(-2)
+
+describe "decode_chunked — chunk-size overflow":
+    it "returns Err for an overflowing chunk-size":
+        match decode_chunked("10000000000000000\r\nX\r\n\r\n"):
+            case Ok(_):
+                assert_true(false)
+            case Err(_):
+                assert_true(true)
+
+describe "async proxy — chunk-size overflow":
+    it "does not report a wrapped 2^64 chunk-size as a complete body":
+        # Pre-fix this returned true.
+        assert_false(async_proxy_chunked_body_complete("10000000000000000\r\nGET /admin HTTP/1.1\r\n\r\n"))
+
+    it "still reports a genuinely terminated stream as complete":
+        assert_true(async_proxy_chunked_body_complete("5\r\nhello\r\n0\r\n\r\n"))
+
+describe "negative controls — valid sizes are untouched":
+    it "accepts a normal terminated stream":
+        expect(chunked_body_end("5\r\nhello\r\n0\r\n\r\n")).to_equal(15)
+
+    it "accepts a size padded with many leading zeros":
+        val buf = "0000000000000000005\r\nhello\r\n0\r\n\r\n"
+        expect(chunked_body_end(buf)).to_equal(buf.len())
+
+    it "accepts the widest non-overflowing size and waits for its data":
+        expect(chunked_body_end("FFFFFFFFFFFFFFF\r\nX\r\n")).to_equal(-1)

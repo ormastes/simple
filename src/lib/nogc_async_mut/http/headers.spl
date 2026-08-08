@@ -203,6 +203,9 @@ fn decode_chunked(encoded: text) -> Result<text, text>:
         if not header_is_hex_digits(size_str):
             return Err("invalid chunk size (RFC 7230 4.1: chunk-size = 1*HEXDIG)")
 
+        if not header_hex_fits_i64(size_str):
+            return Err("chunk size overflows i64 (RFC 7230 4.1)")
+
         val chunk_size = parse_hex_text(size_str)
 
         if chunk_size == 0:
@@ -259,6 +262,8 @@ fn chunked_body_end(buffer: text) -> i64:
             size_str = size_str.substring(0, semi)
         if not header_is_hex_digits(size_str):
             return -2
+        if not header_hex_fits_i64(size_str):
+            return -2
         val chunk_size = parse_hex_text(size_str)
         if chunk_size == 0:
             # last-chunk: skip optional trailer section, ends at an empty line
@@ -307,6 +312,24 @@ fn header_is_hex_digits(s: text) -> bool:
             return false
         i = i + 1
     return true
+
+# RFC 7230 §4.1: a chunk-size that does not fit the implementation's integer
+# type MUST be rejected, never wrapped. parse_hex_text accumulates
+# `result * 16 + digit` with no overflow check, so a 17-hex-digit size wraps
+# modulo 2^64: "10000000000000000" (2^64) reads back as **0** and is accepted as
+# the terminal last-chunk, and "10000000000000005" reads back as 5. A peer that
+# rejects the overflow disagrees with us about where the message ends — that is
+# an HTTP request-smuggling primitive on a server AND on the proxy.
+#
+# 15 hex digits (max 0xFFFFFFFFFFFFFFF ~= 1.15e18) is the widest token that
+# cannot overflow i64, and is ~1 exabyte — far past any real chunk.
+fn header_hex_fits_i64(s: text) -> bool:
+    var i = 0
+    while i < s.length():
+        if s[i] != "0":
+            break
+        i = i + 1
+    return s.length() - i <= 15
 
 # Parse hex text to integer
 fn parse_hex_text(hex: text) -> i64:

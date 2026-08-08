@@ -1,0 +1,72 @@
+# Chunked chunk-size overflow rejection — nogc_sync_mut tier
+#
+# **Category:** HTTP Correctness
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Sibling of test/01_unit/lib/http_server/chunked_size_overflow_spec.spl. The
+# nogc_sync_mut tier carries its OWN chunked decoders — `http.headers`'s
+# `decode_chunked` (via unchecked `parse_hex_text`) and `http.http1`'s
+# `decode_chunked_with_trailers` (via unchecked `http1_parse_hex`). Both
+# accumulate `acc * 16 + digit` with no overflow check, so a 17-hex-digit
+# chunk-size wraps modulo 2^64 and "10000000000000000" (2^64) reads back as 0 —
+# accepted as the terminal last-chunk. That desyncs this recipient from a peer
+# that correctly rejects the overflow (RFC 7230 §4.1), an HTTP request-smuggling
+# primitive. The commit that added the boundary-aware detector fixed only the
+# nogc_async_mut tier; these two sites were left behind.
+
+use std.spec.*
+use std.nogc_sync_mut.http.headers.{decode_chunked}
+use std.nogc_sync_mut.http.http1.{decode_chunked_with_trailers}
+
+describe "nogc_sync_mut http.headers decode_chunked — chunk-size overflow":
+    it "rejects a 2^64 chunk-size instead of reading it as a last-chunk":
+        match decode_chunked("10000000000000000\r\nX\r\n\r\n"):
+            case Ok(_):
+                assert_true(false)
+            case Err(_):
+                assert_true(true)
+
+    it "rejects a 2^64+5 chunk-size instead of wrapping it to 5":
+        match decode_chunked("10000000000000005\r\nABCDE\r\n0\r\n\r\n"):
+            case Ok(_):
+                assert_true(false)
+            case Err(_):
+                assert_true(true)
+
+    it "still decodes a normal terminated stream":
+        match decode_chunked("5\r\nhello\r\n0\r\n\r\n"):
+            case Ok(b):
+                expect(b).to_equal("hello")
+            case Err(_):
+                assert_true(false)
+
+    it "still accepts a size padded with leading zeros":
+        match decode_chunked("0000000000000000005\r\nhello\r\n0\r\n\r\n"):
+            case Ok(b):
+                expect(b).to_equal("hello")
+            case Err(_):
+                assert_true(false)
+
+describe "nogc_sync_mut http1 decode_chunked_with_trailers — chunk-size overflow":
+    it "rejects a 2^64 chunk-size instead of reading it as a last-chunk":
+        match decode_chunked_with_trailers("10000000000000000\r\nX\r\n\r\n"):
+            case Ok(_):
+                assert_true(false)
+            case Err(_):
+                assert_true(true)
+
+    it "rejects a 2^64+5 chunk-size instead of wrapping it to 5":
+        match decode_chunked_with_trailers("10000000000000005\r\nABCDE\r\n0\r\n\r\n"):
+            case Ok(_):
+                assert_true(false)
+            case Err(_):
+                assert_true(true)
+
+    it "still decodes a normal terminated stream":
+        match decode_chunked_with_trailers("5\r\nhello\r\n0\r\n\r\n"):
+            case Ok(_):
+                assert_true(true)
+            case Err(_):
+                assert_true(false)

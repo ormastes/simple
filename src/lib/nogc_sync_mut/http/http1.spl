@@ -139,6 +139,16 @@ fn http1_hex_to_int(ch: text) -> i64:
         return ui
     return 0
 
+# True when `hex` (1*HEXDIG) fits i64. 15 hex digits (~1 EB) is the widest
+# token that cannot overflow the unchecked accumulate in http1_parse_hex.
+fn http1_hex_fits_i64(hex: text) -> bool:
+    var i = 0
+    while i < hex.length():
+        if hex[i] != "0":
+            break
+        i = i + 1
+    return hex.length() - i <= 15
+
 fn http1_parse_hex(hex: text) -> i64:
     var result = 0
     var i = 0
@@ -242,6 +252,12 @@ fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
             size_line = size_line.substring(0, semi)
         if not http1_is_hex_digits(size_line):
             return Err("invalid chunk size (RFC 7230 4.1: chunk-size = 1*HEXDIG)")
+        # RFC 7230 §4.1: reject a chunk-size that does not fit i64 rather than
+        # wrapping it. http1_parse_hex wraps modulo 2^64, so a 17-hex-digit size
+        # reads back small — "10000000000000000" becomes 0 and is accepted as
+        # the terminal last-chunk (request smuggling).
+        if not http1_hex_fits_i64(size_line):
+            return Err("chunk size overflows i64 (RFC 7230 4.1)")
         val chunk_size = http1_parse_hex(size_line)
 
         if chunk_size == 0:
