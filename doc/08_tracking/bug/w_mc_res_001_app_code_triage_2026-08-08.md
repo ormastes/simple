@@ -28,3 +28,47 @@ Classes: **TRUE** = real handle escapes unwrapped where a wrapper exists/should 
 No fixes applied here — report only. The three compiler-side TRUE positives in
 `src/compiler/70.backend/sffi_minimal.spl` (lines 178/181/253) were fixed the same day
 with `@unsafe` boundary decorators (verified 3 → 0 findings via the interpreter harness).
+
+## Update 2026-08-08 — the one TRUE finding is fixed; a mirror of it is NOT
+
+`src/app/debug/remote/dwarf.spl:116` (the single TRUE finding above) is
+**resolved**: the standalone `fn dwarf_load` convenience forwarder was
+deleted. It was a pure duplicate of the managed `DwarfInfo.load` wrapper in
+the same file, and a repo-wide sweep for `dwarf_load(` found only `fn`
+definitions and build/worktree snapshots — never a call site. The module's
+only importer (`src/app/debug/remote/feature/register_gdb.spl:11`) imports
+`DwarfInfo` alone, so the deletion breaks nothing. Checker evidence:
+that file goes `COUNT=1 (line_num=116)` -> `COUNT=0`. No `@unsafe` was used
+— this was a real leak, not a boundary.
+
+**Still open — a byte-near-identical mirror carries the same leak:**
+`src/lib/nogc_sync_mut/debug/remote/dwarf.spl` has the same
+`fn dwarf_load(path) -> i64: rt_dwarf_load(path)` returning a bare handle.
+It is *more* reachable than the copy that was fixed, because it is public
+API rather than a file-local convenience:
+
+```
+src/lib/nogc_sync_mut/debug/remote/__init__.spl:8   export dwarf_load, dwarf_free
+src/lib/nogc_async_mut/debug/remote/dwarf.spl:8     use ... dwarf_load ...
+src/lib/nogc_async_mut/debug/remote/__init__.spl:8  export dwarf_load, dwarf_free
+src/lib/nogc_async_mut/sffi/debug.spl:20            use ... dwarf_load ...
+```
+
+So removing it is not the same one-line deletion: it retires a re-exported
+symbol across two runtime tiers and five files. The sweep found no actual
+CALL site anywhere in `src/` or `test/` — the whole chain appears to be dead
+public surface — but "no caller today" is not the same as "safe to remove
+from a published tier boundary", and an unresolved `use` only WARNs here
+(fail-open), so a mistake would be silent rather than loud.
+
+**Unblock condition:** confirm the four re-export/import sites above are the
+complete set (they were found by grep, not by a resolver), then delete the
+mirror's `fn dwarf_load` together with all four references in one change,
+and re-run the checker over the mirror to confirm `COUNT=1 -> COUNT=0`.
+Deliberately not done in the same pass as the app-side fix, to keep a
+public-API retirement from riding along inside a leak fix.
+
+**One drift correction to the table above:** the
+`src/os/drivers/audio/hda_dma_resources.spl` finding is now at **line 92**,
+not 91 — the file shifted by one line since the triage. Same single finding,
+same BOUNDARY class. All five non-TRUE findings re-verified unchanged.
