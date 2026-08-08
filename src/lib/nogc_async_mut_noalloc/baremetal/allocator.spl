@@ -211,6 +211,15 @@ impl FreeListAllocator:
             if header.is_free and header.size >= total_size:
                 # Found suitable block
 
+                # `next_free` is what `current`'s slot in the list now points
+                # to AFTER this iteration's writes below — NOT `header.next`,
+                # which is a snapshot from before the split. Using
+                # `header.next` unconditionally here was the bug: on a split
+                # it discarded the freshly created remainder block, orphaning
+                # it (see
+                # doc/08_tracking/bug/baremetal_freelist_allocator_drops_free_list_on_first_split_2026-08-08.md).
+                var next_free: u32 = header.next
+
                 # Split block if large enough
                 val remainder = header.size - total_size
                 if remainder >= header_size + 16:  # Minimum 16-byte payload
@@ -232,6 +241,7 @@ impl FreeListAllocator:
                     updated_header.write_to_addr(current)
 
                     self.num_blocks = self.num_blocks + 1
+                    next_free = new_block_addr
                 else:
                     # Use entire block (no split)
                     val updated_header = BlockHeader(
@@ -243,7 +253,7 @@ impl FreeListAllocator:
 
                 # Update free list if this was first free block
                 if prev == 0:
-                    self.free_list = header.next
+                    self.free_list = next_free
 
                 self.allocated = self.allocated + total_size
 
@@ -265,7 +275,7 @@ impl FreeListAllocator:
         header.is_free = true
         header.write_to_addr(block_addr)
 
-        self.allocated = self.allocated - header.size
+        self.allocated = sat_sub(self.allocated, header.size)
 
         # Coalesce with next block if free
         if header.next != 0:
@@ -275,7 +285,7 @@ impl FreeListAllocator:
                 header.size = header.size + next_header.size
                 header.next = next_header.next
                 header.write_to_addr(block_addr)
-                self.num_blocks = self.num_blocks - 1
+                self.num_blocks = sat_sub(self.num_blocks, 1)
 
         # Coalesce with previous block if free
         self.coalesce_with_prev(block_addr)
@@ -293,7 +303,7 @@ impl FreeListAllocator:
                     header.size = header.size + target_header.size
                     header.next = target_header.next
                     header.write_to_addr(current)
-                    self.num_blocks = self.num_blocks - 1
+                    self.num_blocks = sat_sub(self.num_blocks, 1)
                 return
             current = header.next
 
@@ -429,11 +439,11 @@ impl FixedBlockAllocator:
         # Add block back to front of free list
         mem_write_u32(addr, self.free_list)
         self.free_list = addr
-        self.allocated = self.allocated - 1
+        self.allocated = sat_sub(self.allocated, 1)
 
     fn available() -> u32:
         """Get number of available blocks."""
-        self.capacity - self.allocated
+        sat_sub(self.capacity, self.allocated)
 
     fn is_exhausted() -> bool:
         """Check if pool is exhausted."""
@@ -571,6 +581,23 @@ fn mem_copy(dest: u32, src: u32, size: u32):
 fn align_up(value: u32, alignment: u32) -> u32:
     """Align value up to alignment (must be power of 2)."""
     (value + alignment - 1) & ~(alignment - 1)
+
+fn sat_sub(a: u32, b: u32) -> u32:
+    """Saturating subtraction: `a - b`, floored at 0 instead of wrapping.
+
+    `u32` has no negative range, so `a - b` when `b > a` wraps to a huge
+    value (e.g. `0u32 - 1u32` -> 4294967295) instead of going negative. Every
+    counter decrement in this module that isn't already guarded
+    (FixedBlockAllocator.available/dealloc, FreeListAllocator.dealloc,
+    coalesce_with_prev) has exactly this shape, so they route through here
+    instead of repeating an ad hoc guard at each site. See
+    doc/08_tracking/bug/baremetal_freelist_allocator_drops_free_list_on_first_split_2026-08-08.md
+    section 2.
+    """
+    if b > a:
+        0u32
+    else:
+        a - b
 
 var global_heap: FreeListAllocator = FreeListAllocator(
     base: 0,

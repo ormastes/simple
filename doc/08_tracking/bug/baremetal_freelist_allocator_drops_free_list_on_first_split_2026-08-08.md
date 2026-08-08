@@ -1,7 +1,8 @@
 # FreeListAllocator drops its free list on the first splitting alloc; memory paths remain unexecutable
 
-- **Status:** OPEN
+- **Status:** FIXED (§1 and §2 below; §3's host-address blocker is unchanged and still open)
 - **Found:** 2026-08-08, adversarial review of `c2b75d56dd46`
+- **Fixed:** 2026-08-08, this session
 - **File:** `src/lib/nogc_async_mut_noalloc/baremetal/allocator.spl`
 - **Related:** `doc/08_tracking/bug/baremetal_freelist_allocator_never_callable_and_header_overlaps_payload_2026-08-06.md`
 
@@ -69,7 +70,45 @@ split writes back (the *allocated* block gets `next: new_block_addr`) and in
 repair has to pick one meaning first; a point fix to line 236 alone is not
 obviously sufficient.
 
-**Not fixed here** because it cannot be taken RED→GREEN — see §3.
+### FIXED 2026-08-08
+
+`alloc()`'s split branch now tracks `var next_free: u32 = header.next` and
+overwrites it to `new_block_addr` only when a split actually happens; the
+`if prev == 0:` assignment at the end uses `next_free` instead of the stale
+`header.next` snapshot. Concretely (current `allocator.spl`, search loop
+body):
+
+```
+var next_free: u32 = header.next
+...
+if remainder >= header_size + 16:
+    ...
+    next_free = new_block_addr
+else:
+    ...
+if prev == 0:
+    self.free_list = next_free
+```
+
+This resolves the two-meanings-of-`next` question the way the rest of the
+module already assumes: `next` is a single chain that is simultaneously the
+free-list link (searched from `self.free_list`) and each block's physical
+successor once split (`num_free_blocks()` / `coalesce_with_prev()` walk it
+from `self.base` unconditionally, free or not) — `alloc()` just wasn't
+keeping its own head pointer in sync with the value it itself was writing to
+`current`'s slot. No other call site needed to change.
+
+Verified RED→GREEN by the same transcription technique the review used to
+produce its evidence (`init`/`alloc` transcribed verbatim over an `i64` array,
+since `FreeListAllocator` addresses are `u32` and cannot carry a real host
+pointer — see §3, still open): both the pre-fix ("buggy") and post-fix
+("fixed") control flow are transcribed side by side in
+`test/01_unit/lib/baremetal/allocator_freelist_split_and_underflow_spec.spl`.
+The buggy transcription reproduces exactly the reported symptom (`free_list`
+collapses to 0 after the first split, second alloc returns "out of memory");
+the fixed transcription keeps the remainder reachable and serves 10/10
+further allocations from it. All 7 examples in that spec file pass
+(`SPEC FILE VERDICT: ... passed=7 failed=0`).
 
 ## 2. Unsigned-underflow family is only half covered (MEDIUM)
 
@@ -88,6 +127,31 @@ wrap remains at every sibling site:
 These are less explosive than the `capacity - 1` loop (they corrupt a counter
 rather than write 4 GB of pointers), but `available()` returning ~4 billion is
 exactly the kind of value a caller sizes a loop from.
+
+### FIXED 2026-08-08
+
+Added a shared helper, `sat_sub(a: u32, b: u32) -> u32` (near `align_up` in
+`allocator.spl`): returns `0u32` when `b > a`, otherwise `a - b`. All five
+sites above now route through it:
+`FixedBlockAllocator.available()` / `.dealloc()`, `FreeListAllocator.dealloc()`
+(both the `allocated - header.size` and the merge-branch `num_blocks - 1`),
+and `coalesce_with_prev()`'s `num_blocks - 1`.
+
+`available()` needs no memory access (`self.capacity - self.allocated` is
+pure arithmetic on struct fields), so it and `sat_sub()` itself are tested
+directly against the real module — no transcription needed — in
+`allocator_freelist_split_and_underflow_spec.spl`. Positive control performed
+for both: reverted `available()`'s call to plain `self.capacity -
+self.allocated` → RED (`does not wrap to ~4 billion when allocated exceeds
+capacity` failed, `4 examples, 1 failure`); restored → GREEN. Separately
+reverted `sat_sub()`'s body to plain `a - b` → RED (2 failures, including the
+direct `sat_sub` examples); restored → GREEN, verified byte-identical to the
+pre-revert file by diff. The other three sites (`FreeListAllocator.dealloc()`
+x2, `FixedBlockAllocator.dealloc()`) still require a real memory write
+(`BlockHeader.from_addr` / `mem_write_u32`) and hit the same §3 host-address
+blocker as the split-path fix, so they are verified by code inspection
+(identical `sat_sub(...)` shape to the two directly-tested sites) rather than
+an independent RED→GREEN run.
 
 ## 3. The memory paths cannot be executed on the host — because addresses are `u32` (MEDIUM)
 
