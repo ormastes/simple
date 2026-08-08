@@ -1,0 +1,261 @@
+#!/bin/sh
+# Bounded post-build admission for a source-matched pure-Simple Stage4 CLI.
+#
+# This is a verifier only: it never builds, deploys, swaps, or falls back to
+# the Rust seed.  The existing essential-tools smoke remains the canonical
+# broad CLI/tooling check; this gate adds the small runtime ABI probes that
+# must run against the exact candidate selected by the caller.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$REPO_ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$REPO_ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+FIXTURE="$REPO_ROOT/scripts/check/cert/redeploy_gate/fixtures/stage4_runtime_abi.spl"
+FOCUSED_SPEC="$REPO_ROOT/test/01_unit/app/startup/dedicated_host_startup_spec.spl"
+ESSENTIAL="$REPO_ROOT/scripts/check/check-bootstrap-essential-tools-smoke.shs"
+STARTUP_WIRING="$REPO_ROOT/scripts/check/check-dedicated-host-startup-wiring.shs"
+
+timeout_bin() {
+    if command -v timeout >/dev/null 2>&1; then command -v timeout
+    elif command -v gtimeout >/dev/null 2>&1; then command -v gtimeout
+    else return 1
+    fi
+}
+
+run_bounded() {
+    seconds=$1
+    shift
+    tool=$(timeout_bin) || { echo 'error=timeout_required' >&2; return 1; }
+    "$tool" -k 5s "${seconds}s" "$@"
+}
+
+resolve_candidate() {
+    value=$1
+    case "$value" in
+        /*) printf '%s\n' "$value" ;;
+        *) printf '%s/%s\n' "$REPO_ROOT" "$value" ;;
+    esac
+}
+
+require_receipt_markers() {
+    receipt=$1
+    [ -f "$receipt" ] || { echo "error=essential_receipt_missing:$receipt" >&2; return 1; }
+    for marker in essential_tools_pure_simple_identity=true \
+        essential_test_runner_smoke=true essential_lint_smoke=true \
+        essential_duplicate_checker_smoke=true bootstrap_essential_tools_smoke=true; do
+        grep -Fxc "$marker" "$receipt" >/dev/null || {
+            echo "error=essential_receipt_marker_missing:$marker" >&2
+            return 1
+        }
+    done
+}
+
+check_identity() {
+    candidate=$1
+    case "$candidate" in
+        */target/debug/*|*/debug/simple|*/debug/simple.exe)
+            echo 'error=debug_candidate_forbidden' >&2; return 1 ;;
+    esac
+    version_file=$2
+    set +e
+    run_bounded "${STAGE4_RUNTIME_ABI_VERSION_TIMEOUT_S:-10}" \
+        env SIMPLE_BOOTSTRAP= SIMPLE_RUST_SEED_WARNING= "$candidate" --version \
+        >"$version_file" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "error=candidate_version_failed:$rc" >&2; return 1; }
+    [ -s "$version_file" ] || { echo 'error=candidate_version_empty' >&2; return 1; }
+    if grep -Eiq 'Rust-built|Rust bootstrap seed|bootstrap seed only|debug build' "$version_file"; then
+        echo 'error=rust_seed_candidate_forbidden' >&2
+        return 1
+    fi
+}
+
+check_test_help() {
+    candidate=$1
+    output=$2
+    set +e
+    run_bounded "${STAGE4_RUNTIME_ABI_HELP_TIMEOUT_S:-10}" \
+        env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$REPO_ROOT/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
+        "$candidate" test --help >"$output" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "error=test_help_failed_or_crashed:$rc" >&2; return 1; }
+    [ -s "$output" ] || { echo 'error=test_help_empty' >&2; return 1; }
+    grep -Eiq 'usage|test' "$output" || { echo 'error=test_help_marker_missing' >&2; return 1; }
+}
+
+check_fixture() {
+    candidate=$1
+    label=$2
+    expected=$3
+    output=$4
+    set +e
+    run_bounded "${STAGE4_RUNTIME_ABI_FIXTURE_TIMEOUT_S:-30}" \
+        env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$REPO_ROOT/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
+        "$candidate" run "$FIXTURE" >"$output" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "error=${label}_failed:$rc" >&2; return 1; }
+    grep -Fxc "$expected" "$output" >/dev/null || {
+        echo "error=${label}_marker_missing" >&2
+        return 1
+    }
+}
+
+check_focused_spec() {
+    candidate=$1
+    output=$2
+    set +e
+    run_bounded "${STAGE4_RUNTIME_ABI_SPEC_TIMEOUT_S:-60}" \
+        env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$REPO_ROOT/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
+        "$candidate" test "$FOCUSED_SPEC" --mode=interpreter --no-session-daemon \
+        --sequential --no-db --no-cache --assert-ran --fail-fast >"$output" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "error=focused_startup_spec_failed:$rc" >&2; return 1; }
+    grep -Eiq 'Results: [1-9][0-9]* total, [1-9][0-9]* passed, 0 failed' "$output" || {
+        echo 'error=focused_startup_spec_summary_missing' >&2
+        return 1
+    }
+}
+
+check_essential_tools() {
+    candidate=$1
+    receipt=$2
+    set +e
+    run_bounded "${STAGE4_RUNTIME_ABI_ESSENTIAL_TIMEOUT_S:-240}" \
+        env SIMPLE_BINARY="$candidate" sh "$ESSENTIAL" >"$receipt" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { echo "error=essential_tools_failed:$rc" >&2; return 1; }
+    require_receipt_markers "$receipt"
+}
+
+run_gate() {
+    candidate=$(resolve_candidate "$1")
+    provenance=${2:-"${candidate}.provenance.env"}
+    [ -x "$candidate" ] || { echo "error=candidate_missing_or_not_executable:$candidate" >&2; return 2; }
+    provenance=$(resolve_candidate "$provenance")
+    stage4_verify_source_provenance "$candidate" "$provenance" "$REPO_ROOT" || {
+        echo "error=source_matched_provenance_failed:$provenance" >&2
+        return 2
+    }
+    work=$(mktemp -d "${TMPDIR:-/tmp}/stage4-runtime-abi.XXXXXX")
+    trap 'rm -rf "$work"' EXIT INT TERM
+    check_identity "$candidate" "$work/version.log"
+    check_test_help "$candidate" "$work/test-help.log"
+    check_fixture "$candidate" env_abi STAGE4_RUNTIME_ENV_ABI_OK "$work/env.log"
+    check_focused_spec "$candidate" "$work/startup-spec.log"
+    startup_output=$(sh "$STARTUP_WIRING")
+    [ "$startup_output" = dedicated_host_startup_wiring=structural-pass ] || {
+        echo 'error=startup_mmap_hook_marker_missing' >&2; return 1;
+    }
+    check_essential_tools "$candidate" "$work/essential.log"
+    echo 'stage4_runtime_abi_source_provenance=true'
+    echo 'stage4_runtime_abi_non_seed_identity=true'
+    echo 'stage4_runtime_abi_env_set_get_delete=true'
+    echo 'stage4_runtime_abi_test_help=true'
+    echo 'stage4_runtime_abi_focused_spec=true'
+    echo 'stage4_runtime_abi_mmap_startup_hook=true'
+    echo 'stage4_runtime_abi_essential_tools=true'
+    echo 'stage4_runtime_abi_gate=pass'
+}
+
+self_test() {
+    work=$(mktemp -d "${TMPDIR:-/tmp}/stage4-runtime-abi-self-test.XXXXXX")
+    trap 'rm -rf "$work"' EXIT INT TERM
+    candidate="$work/simple"
+    cat >"$candidate" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) printf '%s\n' 'Simple Language self-hosted Stage4 fixture' ;;
+  test)
+    if [ "${2:-}" = --help ]; then printf '%s\n' 'Usage: simple test [spec]' ; else printf '%s\n' 'Results: 2 total, 2 passed, 0 failed'; fi ;;
+  run) printf '%s\n' 'STAGE4_RUNTIME_ENV_ABI_OK' ;;
+  *) printf '%s\n' 'fixture' ;;
+esac
+EOF
+    chmod +x "$candidate"
+    # The fixture must exercise the canonical authority hasher without paying
+    # to rescan this large checkout.  Its root mirrors the five owned source
+    # roots exactly, and the one derived revision is reused by the verifier.
+    fixture_root="$work/source-authority"
+    mkdir -p "$fixture_root/src/compiler" "$fixture_root/src/lib" \
+        "$fixture_root/src/app" "$fixture_root/src/runtime" \
+        "$fixture_root/examples/10_tooling"
+    printf '%s\n' 'compiler fixture' >"$fixture_root/src/compiler/main.spl"
+    printf '%s\n' 'library fixture' >"$fixture_root/src/lib/main.spl"
+    printf '%s\n' 'application fixture' >"$fixture_root/src/app/main.spl"
+    printf '%s\n' 'runtime fixture' >"$fixture_root/src/runtime/main.c"
+    printf '%s\n' 'tooling fixture' >"$fixture_root/examples/10_tooling/main.spl"
+    source_revision=$(stage4_source_revision "$fixture_root")
+    candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+    provenance="$candidate.provenance.env"
+    cat >"$provenance" <<EOF
+schema=simple-bootstrap-stage4-provenance-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+output_path=$candidate
+output_sha256=$candidate_sha
+source_revision_kind=content-sha256
+source_revision=$source_revision
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+EOF
+    # The receipt contract is checked independently so a missing marker cannot
+    # be hidden by a candidate that merely exits zero.
+    receipt="$work/essential.receipt"
+    printf '%s\n' essential_tools_pure_simple_identity=true \
+        essential_test_runner_smoke=true essential_lint_smoke=true \
+        essential_duplicate_checker_smoke=true bootstrap_essential_tools_smoke=true >"$receipt"
+    require_receipt_markers "$receipt"
+    check_identity "$candidate" "$work/version.log"
+    check_test_help "$candidate" "$work/help.log"
+    check_fixture "$candidate" env_abi STAGE4_RUNTIME_ENV_ABI_OK "$work/env.log"
+    check_focused_spec "$candidate" "$work/spec.log"
+    # Reuse the canonical source revision captured to make the fake receipt:
+    # the verifier still compares it to the candidate provenance, but avoids
+    # rehashing all source roots a second time in this self-test.
+    stage4_verify_source_provenance "$candidate" "$provenance" "$fixture_root" "$source_revision"
+    cp "$provenance" "$work/provenance.saved"
+    sed -i "s/^source_revision=.*/source_revision=0000000000000000000000000000000000000000000000000000000000000000/" \
+        "$provenance"
+    if stage4_verify_source_provenance "$candidate" "$provenance" "$fixture_root" "$source_revision"; then
+        echo 'error=self_test_stale_provenance_accepted' >&2; exit 1
+    fi
+    mv "$work/provenance.saved" "$provenance"
+    cp "$candidate" "$work/seed"
+    sed -i 's/Simple Language self-hosted Stage4 fixture/Rust-built bootstrap seed only/' "$work/seed"
+    if check_identity "$work/seed" "$work/seed-version.log"; then
+        echo 'error=self_test_seed_candidate_accepted' >&2; exit 1
+    fi
+    printf '%s\n' essential_tools_pure_simple_identity=true >"$work/bad.receipt"
+    if require_receipt_markers "$work/bad.receipt"; then
+        echo 'error=self_test_incomplete_receipt_accepted' >&2; exit 1
+    fi
+    printf '%s\n' 'stage4_runtime_abi_self_test=pass'
+}
+
+case "${1:-}" in
+    --self-test)
+        [ "$#" -eq 1 ] || { echo "usage: $0 [CANDIDATE [PROVENANCE]] | --self-test" >&2; exit 2; }
+        self_test
+        ;;
+    ''|-h|--help)
+        printf '%s\n' "usage: $0 CANDIDATE [PROVENANCE]" "       $0 --self-test"
+        [ -n "${1:-}" ] && exit 0
+        exit 2
+        ;;
+    *)
+        [ "$#" -le 2 ] || { echo "usage: $0 CANDIDATE [PROVENANCE]" >&2; exit 2; }
+        run_gate "$@"
+        ;;
+esac

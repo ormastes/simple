@@ -49,6 +49,49 @@ stage4_source_revision() (
   bootstrap_stage3_hash_file "$work/snapshot"
 )
 
+# Lightweight source-matched admission used by post-build runtime ABI gates.
+# The full Stage4 producer uses stage4_verify_candidate_provenance below and
+# additionally binds the Stage3 parent, build transcript, and smoke log.  A
+# deployed-candidate check must not require those producer-only paths, but it
+# must still reject a copied/stale binary or a receipt from another checkout.
+stage4_verify_source_provenance() (
+  [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || exit 1
+  binary="$(bootstrap_stage3_canonical_file "$1")" || exit 1
+  provenance="$(bootstrap_stage3_canonical_file "$2")" || exit 1
+  root="$(CDPATH= cd -- "$3" && pwd -P)" || exit 1
+  # A caller that already obtained the canonical Stage4 source revision during
+  # this admission may pass it as argument four.  This avoids a second
+  # full-tree hash without accepting a different source authority: it is
+  # still syntax-checked and must equal the candidate's signed-in-build
+  # provenance value.  Normal gate callers omit it and derive independently.
+  current_revision=${4:-}
+  if [ -z "$current_revision" ]; then
+    current_revision="$(stage4_source_revision "$root")" || exit 1
+  fi
+  printf '%s\n' "$current_revision" | awk '/^[0-9a-f]{64}$/ { ok=1 } END { exit(ok ? 0 : 1) }' || exit 1
+  [ "$provenance" = "${binary}.provenance.env" ] || exit 1
+  for key in schema status artifact_kind output_path output_sha256 \
+      source_revision_kind source_revision source_roots; do
+    bootstrap_stage3_manifest_value "$key" "$provenance" >/dev/null || exit 1
+  done
+  [ "$(bootstrap_stage3_manifest_value schema "$provenance")" = \
+    simple-bootstrap-stage4-provenance-v1 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value status "$provenance")" = pass ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value artifact_kind "$provenance")" = \
+    pure-simple-full-cli ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value output_path "$provenance")" = \
+    "$binary" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value output_sha256 "$provenance")" = \
+    "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value source_revision_kind "$provenance")" = \
+    content-sha256 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value source_roots "$provenance")" = \
+    src/compiler:src/lib:src/app:src/runtime:examples/10_tooling ] || exit 1
+  recorded="$(bootstrap_stage3_manifest_value source_revision "$provenance")" || exit 1
+  printf '%s\n' "$recorded" | awk '/^[0-9a-f]{64}$/ { ok=1 } END { exit(ok ? 0 : 1) }' || exit 1
+  [ "$recorded" = "$current_revision" ] || exit 1
+)
+
 stage4_validate_candidate_lane() (
   binary="$1"
   stage3_manifest="$2"
