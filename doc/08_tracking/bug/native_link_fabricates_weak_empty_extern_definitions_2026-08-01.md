@@ -1,8 +1,20 @@
-# Native link fabricates weak, empty definitions for unimplemented `@extern` fns
+# Native link fabricates strong, non-empty definitions for unimplemented `@extern` fns
 
 - **Date:** 2026-08-01
-- **Status:** FIXED (link-side guard landed). Codegen-side fabrication NOT fixed — see "Remaining".
-- **Lane:** C1, native link path (Rust seed).
+- **Status:** A link-time guard exists in the Rust seed's
+  `linker/native_binary` code (`check_no_fabricated_extern_definitions`), but
+  it is not reliably reached by the `native-build` CLI path — see the
+  2026-08-08 update for the routing/attribution correction. The pure-Simple
+  self-hosted compiler's own host-target `link_llvm_native` path is a
+  separate, untested-by-this-fence code path (see update below).
+- **Lane:** C1, native link path.
+- **Naming note:** the ID/filename says "weak, empty" for historical
+  continuity — the original 2026-08-01 evidence genuinely was a weak (`W`),
+  zero-size symbol. The evidence now confirmed live (2026-08-08 update) is a
+  **strong** (`T`), **non-empty** (3-byte) symbol instead — a different,
+  more silent variant of the same fabrication defect. A rename of this file to
+  `native_link_fabricates_strong_nonempty_extern_definitions` is recommended
+  but not done here.
 - **Family:** "an unregistered extern silently returns nil/0 on every lane."
   Interpreter lanes were fixed/gated earlier; this is the native-lane member.
 - **Component:** `src/compiler_rust/compiler/src/linker/native_binary/`
@@ -148,3 +160,131 @@ by `gen_stub_code` with a `return 0` body. Closing that requires teaching
 
 `scripts/check/check-extern-registration.shs` (report-only) gates the
 *declaration* side. This bug is the *link* side.
+
+## 2026-08-08 update: confirmed LIVE on the deployed self-hosted binary, no fence, false-green spec confirmed
+
+Re-audited as rank-3 finding of
+`doc/09_report/infra/aot_lane_regression_fence_audit_2026-08-07.md`.
+**Attribution correction:** the deployed `bin/simple` in this checkout IS the
+Rust seed (its `--version` prints the seed warning banner; `readlink -f
+bin/simple` resolves into `bin/release/x86_64-unknown-linux-gnu/simple`) —
+not the pure-Simple self-hosted binary CLAUDE.md names as the default
+tooling. So the reproduction below exercises the Rust seed's own
+`native-build` CLI path, and the guard's absence is NOT "the guard exists
+only in the Rust seed linker, and the pure-Simple host path lacks it" as
+originally framed. It is two separate failures inside the seed itself:
+`native-build` routes via `driver/src/cli/native_build.rs:34,610` to
+`NativeProjectBuilder` (`pipeline/native_project`), which has its own
+`linker.rs` that never calls `check_no_fabricated_extern_definitions` at
+all. That guard is called only from `linker/native_binary/builder.rs:95`,
+reachable only via `pipeline/execution.rs:801,925` — the single-module link
+pipeline, a different pipeline than the one `native-build` actually drives.
+Even if that pipeline were reached, the guard's own predicate
+(`*ty == 'W' && !*has_size`, `stubs.rs:551-553`) could not match the strong
+(`T`), size-3 symbol reproduced below — so the guard would still miss this
+case. Separately, and still true: the pure-Simple self-hosted compiler's own
+host-target link path (`link_llvm_native` in
+`src/compiler/70.backend/backend/llvm_native_link.spl:1045`) is untested by
+this fence — the reproduction below never executes it, so this document says
+nothing about whether that path has the same or a different gap.
+
+**Empirical reproduction** (`bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`,
+2026-08-08):
+
+```
+env -u SIMPLE_BOOTSTRAP bin/simple native-build --source test/fixtures \
+    --entry-closure --entry test/fixtures/native_extern_fabrication_probe/main.spl \
+    --cache-dir <tmp>/cache --output <tmp>/bin
+```
+
+with `main.spl` declaring `@extern fn lane_definitely_absent_probe(x: i64) -> i64`
+and no implementation anywhere in the tree:
+
+- Build exit: **0** (no diagnostic).
+- `nm -S <bin>`: `0000000000002650 0000000000000003 T lane_definitely_absent_probe`
+  — a STRONG (`T`), not even weak, 3-byte defined symbol (more silent than the
+  `W`-weak fabrication this doc originally described).
+- `nm -u <bin>`: empty for that symbol — never undefined, so no undefined-symbol
+  check can ever catch it.
+- Running the binary: prints `r=0` and exits 0 — silent wrong answer, not a
+  crash, not a fault.
+
+**`SIMPLE_NO_STUB_FALLBACK=1` gates NOTHING on this path.** Re-ran with
+`env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build ...`
+(same fixture): identical result — exit 0, same `nm -S` line, same `r=0`
+output. Root cause: `SIMPLE_NO_STUB_FALLBACK` is read in exactly one place
+relevant to fabrication, `simpleos_check_no_fabricated_rt_stubs`
+(`src/compiler/70.backend/backend/llvm_native_link.spl:2498`), which is wired
+**only** into the four SimpleOS freestanding link branches
+(`link_simpleos_x86_64/arm64/riscv64/riscv32`, lines 2674/2786/2960/3032 in the
+same file). The generic hosted-C-runtime branch that `native-build` actually
+takes for an x86_64-linux entry, `link_llvm_native`
+(`src/compiler/70.backend/backend/llvm_native_link.spl:1045`), never calls it
+— confirmed by reading the full function body (through its `hosted_cc`/
+`hosted_plan` setup and onward) for any `check_no_fabricated`/`fabricat` call;
+none exists. So the env var that exists specifically to make this class of
+defect fail loudly has no effect for the host lane at all, regardless of
+strictness setting.
+
+**Caveat (see attribution correction above):** this paragraph's premise that
+`native-build` "actually takes" the pure-Simple `link_llvm_native` is
+superseded — `bin/simple` here is the Rust seed, and the seed's own
+`native-build` CLI routes through `NativeProjectBuilder`/`linker.rs`
+(Rust), not through this `.spl` file. `link_llvm_native` remains real
+pure-Simple source with the described gap, but this reproduction does not
+establish that it is the code path exercised by the seed's `native-build`.
+
+**Codegen fabrication site**: not pinned down to an exact line this session —
+searches for the stub-emission logic in `src/compiler/` under the backend/
+codegen layers did not surface it directly; the original Rust-seed doc's
+`codegen/llvm/backend_core.rs:1051-1072` pointer does not apply to the
+pure-Simple codegen path. Left as an open item for whoever picks up the actual
+fix (see "Fix needed" below).
+
+**False-green spec confirmed**: `test/01_unit/compiler/linker/native_link_hardening_spec.spl`,
+`it "makes strict SimpleOS links disable fabrication debt baselines"` (line
+103) and the neighbouring WP-10 test (line 109) only assert that
+`llvm_native_link.spl`'s *source text* contains
+`env_get("SIMPLE_NO_STUB_FALLBACK")` and the `flight_closure` baseline-disable
+line — i.e. they prove the SimpleOS-only guard's code exists, via
+`rt_file_read_text` + `to_contain`, executed under the tree-walk interpreter
+(`bin/simple test`, per the systemic AOT-blind-spot finding). They never
+invoke `native-build`, never touch the host link path, and would stay green
+through the exact defect reproduced above. Nothing here is factually wrong,
+but the describe block name ("Native linker hardening") reads as broader
+coverage than it provides, and there was no companion spec/fence for the host
+lane before this session.
+
+**Fence added**: `scripts/check/check-native-extern-fabrication.shs` +
+`test/fixtures/native_extern_fabrication_probe/{main.spl,control.spl}`.
+Asserts a control fixture (no extern) still builds/runs correctly under
+`native-build` (so this gate cannot go vacuously green because native-build
+itself broke), then runs the genuinely-absent-extern case **both** with and
+without `SIMPLE_NO_STUB_FALLBACK=1`, hard-asserting the current fabrication
+via `nm -S`/`nm -u` evidence (`KNOWN-OPEN`, not a silent pass) and printing a
+loud `NOTE` if either case ever starts refusing the build (which would mean
+the gap closed and this script should be promoted to a hard assertion).
+Sabotage-verified 2026-08-08: mutating the control fixture's expected
+output/exit flips the gate to `FAIL`/exit 1; reverting flips it back to
+`PASS`/exit 0.
+
+## Fix needed (not done this session)
+
+Per repo rule ("Rust-seed cause -> document, do not patch"), the *documented*
+fix target (`check_no_fabricated_extern_definitions` in the Rust seed) is out
+of scope for pure-Simple work. But the LIVE defect here is in the pure-Simple
+self-hosted compiler's host link path, which is in scope and currently has
+**no fabrication guard of any kind** (not even the SimpleOS one). Two possible
+fixes, not attempted this session because both require either finding the
+exact pure-Simple codegen emission site (not located above) or porting/adapting
+`simpleos_check_no_fabricated_rt_stubs`'s classify-by-body logic to a
+hosted-ELF/Mach-O/PE-agnostic check inside `link_llvm_native` — neither is a
+small, contained change:
+
+1. Codegen should leave a truly-unimplemented `@extern fn` as an external
+   declaration (no body), letting the system linker report it as unresolved
+   natively — mirrors the Rust seed's stated long-term fix.
+2. At minimum, port an `nm -S`-based post-link guard (reject strong OR weak
+   zero/near-zero-size defined symbols matching known `@extern` declarations
+   with no implementation) into `link_llvm_native`'s hosted branch, gated the
+   same way the SimpleOS one is by `SIMPLE_NO_STUB_FALLBACK`/`SIMPLE_SAFETY_PROFILE`.

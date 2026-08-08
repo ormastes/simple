@@ -43,30 +43,108 @@ exposure — always also search for `: {`-style dict declarations.
 > enum/array/dict decode arms need no guard — their arm already passes the raw
 > word through untouched, so nil survives for free.
 >
-> **One row is confirmed still genuinely broken: `.get()` miss for `V = f64`.**
-> Reproduced live: `Dict<text, f64>` with one stored key, `.get()` on an absent
-> key, `== nil` is **false**. This is not a stale doc gap — it's a *deliberate,
-> commented* exclusion at `expr_dispatch.spl:987-990`: `guardable_value_type`
-> (line 991) only matches `mir_type_is_integer` or `mir_type_is_str`; f64 is
-> explicitly left out because `rt_value_as_float` cannot round-trip the `3`
-> sentinel through a float bit pattern, and the flat `Option<f64>` ABI has no
-> spare bits to carry a sentinel alongside a real float payload. Fixing this
-> needs an ABI change (e.g. a boxed/side-channel discriminant for float
-> Options), not a decode-arm guard — out of scope for a minimal fix. Tracked
-> with the bool case in
+> **One row was claimed still genuinely broken: `.get()` miss for `V = f64`.**
+> **RE-CHECKED 2026-08-08 — the claim, on inspection, splits into two separable
+> pieces: the symptom is real (unverified today, but plausible from the code),
+> the ABI rationale for it is WRONG, and the "confirmed live" evidence behind
+> the 2026-08-07 entry does not hold up.**
+>
+> **The ABI-capacity claim is false under the current representation.**
+> `guardable_value_type` (`expr_dispatch.spl:1053`) does exclude
+> `mir_type_is_f64` — that part is accurate — but the stated reason ("the flat
+> `Option<f64>` ABI has no spare bits to carry a sentinel alongside a real
+> float payload") does not match `src/runtime/runtime_native.c`. F64 values
+> that enter the tagged/boxed representation are **heap-boxed**
+> (`rt_value_float`, line 2086: `malloc`'d `RtCoreFloat`, tag `RT_VALUE_TAG_HEAP
+> = 0x1`, low 3 bits `001`) with a legacy inline fallback only on OOM
+> (`RT_VALUE_TAG_FLOAT = 0x2`, low 3 bits `010`). `rt_core_nil()` is
+> `RT_VALUE_TAG_SPECIAL = 0x3`, low 3 bits `011`. No legitimately-tagged f64
+> word — boxed or legacy-inline — can equal `3`: the three representations
+> occupy disjoint low-3-bit classes (`001`/`010`/`011` are all distinct, and a
+> malloc'd pointer's low 3 bits are `000` before the tag OR, an inline float's
+> are forced to `010` by `(bits & ~7) | 2`). `rt_value_as_float(3)` does not
+> crash or corrupt on the sentinel either — `rt_core_as_heap_float` rejects
+     it as non-heap-tagged, falls through to the legacy-inline decode, and
+> returns a harmless `0.0`. So a `raw == 3` guard, structurally identical to
+> the one `dict_get_preserve_flat_nil` already applies for `i64`/`text`, is
+> tag-space-safe for `f64` too. **A boxed/side-channel discriminant is not
+> required — the existing tag bits already are the spare bits.** If a fix is
+> attempted, note one landmine found while reading `dict_get_preserve_flat_nil`:
+> its nil lane does `emit_cast(nil_raw=3, merge_type)`, and for `f64`
+> `merge_type` is `f64` — casting the *integer* `3` to `f64` produces `3.0`,
+> not the bit pattern `3`. That lane needs an `emit_bitcast` (or an i64-typed
+> merge with a bitcast on the value lane) or the guard will compare a real
+> `3.0` against a real `3.0` and misfire on a *stored* `3.0`. A one-line
+> predicate addition to `guardable_value_type` alone is not sufficient.
+>
+> **The "confirmed live" 2026-08-07 evidence does not establish what it
+> claimed.** Both that entry and this doc's own re-verification note above it
+> ran `bin/simple run` against `bin/release/x86_64-unknown-linux-gnu/simple` —
+> which prints "this Rust-built Simple binary is a bootstrap seed only" at
+> every invocation. That banner is the tell: it is the **Rust seed**, not the
+> pure-Simple self-hosted binary. `guardable_value_type` and
+> `dict_get_preserve_flat_nil` live in `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+> — pure-Simple source, part of the self-hosted compiler's MIR lowering, which
+> the Rust seed's own Cranelift backend (`src/compiler_rust/compiler/src/codegen/`)
+> does not execute. So a probe run through the seed cannot exercise the guard
+> gap being described at all, in either direction. Session 2026-08-08 tried to
+> independently confirm real JIT engagement on the seed via a different
+> route (`strace`-based code-allocation and canary-divergence checks, below)
+> rather than the log route. **Correction:** this session's earlier claim
+> that no `env_logger`/`tracing_log::LogTracer` bridge exists, and that
+> `log`-crate-emitted lines are therefore physically unobtainable, is
+> REFUTED — `src/compiler_rust/driver/src/log.rs:8-9` sets up
+> `EnvFilter::try_from_env("SIMPLE_LOG").or_else(RUST_LOG)`, and
+> `tracing-subscriber` is declared without `default-features = false`
+> (`driver/Cargo.toml:52`), so `Cargo.lock:5440` shows it pulls in
+> `tracing-log`, which IS the bridge. The prior claim was reached by
+> grepping only the literal strings `env_logger`/`LogTracer` and missing this
+> real bridge. **Prior sessions' log-verified `cranelift_jit::backend`
+> evidence of real JIT engagement STANDS** — it is not invalidated by this
+> doc. `strace -e
+> trace=mmap,mprotect` across five minimal f64 probes on the seed showed no
+> anonymous RWX/RX code allocation at all, and three previously-"JIT-only"
+> divergent-behaviour canaries (array-OOB-miss text leak, `list.get` `<<3`
+> shift, `.filter()`) that used to distinguish JIT from interpreter on this
+> exact binary all now print the CORRECT (interpreter-matching) answer in
+> both `SIMPLE_EXECUTION_MODE=jit` (default) and `=interpret` — so those
+> canaries no longer discriminate either, and no working discriminator was
+> found this session. **Net: the f64-miss gap's current status on the
+> pure-Simple/self-hosted lane is UNVERIFIED, not confirmed-broken** — the
+> blocker is verification access to that lane, not the ABI.
+>
+> **Why the pure-Simple lane could not be reached directly either.** The
+> repo-managed `bootstrap/stage{1,2,3}/simple` binaries are byte-identical
+> (`md5sum` matches across all three, including
+> `bootstrap/stage3/x86_64-unknown-linux-gnu/simple`) and expose only
+> `compile --format=smf` and `native-build` — no `run` subcommand, so they
+> cannot execute a probe directly. `native-build` on the minimal f64 probes
+> segfaulted (rc 139) before producing an ELF, consistent with the open
+> stage-3 native-build instability tracked elsewhere in `doc/08_tracking/bug/`.
+> No bootstrap rebuild was performed (out of scope per task instructions).
+>
+> Tracked with the bool case in
 > `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md`.
-> Spec coverage for both the fixed rows and this open gap:
-> `test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl` (passes under the
-> interpreter always — see that file's lane-coverage warning; the f64 case is
-> not currently reproducible through the interpreter-only `bin/simple test`
-> runner, only through `bin/simple run`).
+> Spec coverage: `test/01_unit/compiler/dict_get_miss_returns_nil_spec.spl`
+> (passes under the interpreter always — see that file's lane-coverage
+> warning, now also flagged as unverified rather than confirmed for the
+> native/JIT lane; the interpreter itself has never been reported broken
+> here).
+>
+> **Recommended action, until someone can run a probe through the actual
+> pure-Simple `bin/simple run`/JIT lane:** keep treating `.get()` miss for
+> `V = f64` as unsafe and use the `contains_key(k)` + `d[k]` replacement below
+> — the workaround costs nothing whether or not the gap turns out to still be
+> real, and the tag-bit analysis above means a guard fix (with the
+> `emit_bitcast` correction noted) is a plausible, low-risk fix once someone
+> can verify it lands correctly on the JIT lane.
 
 | Operation | Native codegen result | Safe to use? |
 |---|---|---|
 | `d.len()` / `d.length()` | correct count since 2026-08-01 (measured: local **and** function parameter). The old **-1** does not reproduce; struct-field receivers remain unmeasured | yes for locals/params |
 | `d.get(k)` — miss, `V` = `i64` / `bool` | correct `nil` since 2026-08-01 — `== nil` true, `?? default` fires | yes |
 | `d.get(k)` — miss, `V` = `text` | correct `nil` — re-verified 2026-08-07 on current source (see re-verification note above); the row title below was stale | yes |
-| `d.get(k)` — miss, `V` = `f64` | **confirmed broken 2026-08-07** — `== nil` is false; flat Option ABI cannot carry a sentinel in a float word; deliberately unguarded, see note above | **NO** |
+| `d.get(k)` — miss, `V` = `f64` | **unverified on the JIT/self-hosted lane (re-checked 2026-08-08)** — deliberately unguarded in source (`guardable_value_type` excludes f64), but the prior "confirmed live" evidence was measured against the Rust seed, which never runs this code path; the ABI-out-of-bits rationale is also disproven by the tag-bit layout, see note above | **NO (treat as unsafe pending verification)** |
 | `d.get(k)` — hit, `V` = `bool`, value `true` | correct since 2026-08-01 (`.get()` on a bool dict now returns the raw 3-state word) | yes |
 | `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
 | `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
@@ -107,7 +185,8 @@ exposure — always also search for `: {`-style dict declarations.
   `text`, `.get(k)`'s miss handling (`== nil`, `?? default`) is correct on the
   current native/JIT lane — the guard above is still the right default for
   everything else (struct/enum/array/dict decode is unmeasured on a miss; `f64`
-  is confirmed still broken).
+  is unguarded in source and unverified at runtime on the self-hosted lane —
+  see the 2026-08-08 note above — so treat it as unsafe).
 - **Count** — `d.len()` is correct again as of 2026-08-01 for local and
   parameter receivers; the `d.keys().len()` workaround is no longer required
   for those, though it stays correct. Struct-field receivers have **not** been

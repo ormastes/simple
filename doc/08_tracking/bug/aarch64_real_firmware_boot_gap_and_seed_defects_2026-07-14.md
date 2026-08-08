@@ -1046,3 +1046,165 @@ task's explicit scope (no bootstrap rebuild, no fix attempted). **Status:
 still unconfirmed**, with the field-index-resolution-on-native-build path now
 the concrete next lead instead of the two stride/tag-mask candidates, which
 this pass demonstrates do not match the evidence at the instruction level.
+
+## Mystery instruction sequence identified as `guard_nonnull_receiver`; wrong-base hypothesis REFUTED by symbol-size evidence (2026-08-08)
+
+Followed the named next lead: ran the actual native-build/AOT pipeline
+targeting `aarch64-unknown-none-elf` (not just `bin/simple run` on x86_64),
+with a minimal, controlled, deletable probe. Evidence below is executed and
+byte-exact, not static reading.
+
+### Setup
+
+The deployed `bin/simple` in this checkout is the Rust bootstrap **seed**
+(`bin/simple --version` prints the seed WARNING banner; `readlink -f
+bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`), same as every
+prior real-kernel build in this doc (line 473: "`bin/simple`-equivalent seed
+`native-build`"). This is apples-to-apples with the original bug capture.
+
+Wrote a throwaway probe (`examples/09_embedded/simple_os/arch/aarch64/
+field_trace_probe.spl`, deleted after use, never committed) reproducing the
+exact shape of `_parse_hhdm`'s global: a `@repr("C") struct ProbeRequest {
+magic, id, revision, response: u64 }`, a module-level `var
+g_probe_request = ProbeRequest(magic: 0xC7B1DD30, id: 42, revision: 3,
+response: 0)`, and a `_start` that reads all four fields in order. Built it
+for real:
+
+```
+SIMPLE_MIR_FIELD_TRACE=1 SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  bin/simple native-build --backend cranelift --entry-closure \
+  --entry examples/09_embedded/simple_os/arch/aarch64/field_trace_probe.spl \
+  --target aarch64-unknown-none-elf \
+  --linker-script examples/09_embedded/simple_os/arch/aarch64/boot/linker_limine.ld \
+  -o .../probe.elf
+```
+
+Exit 0, real 69 KB static aarch64 ELF, `1 compiled, 0 cached`. **Zero
+`[field-idx-fallback0]` trace lines** — same result as the prior x86_64-JIT
+test, now also true on the actual native-build/aarch64 pipeline. This
+appears to refute `resolve_field_index`'s "defaults to 0" hypothesis
+everywhere it can be tested — **but the refutation is weaker than it looks**,
+per the next finding.
+
+### The `SIMPLE_MIR_FIELD_TRACE` test is not just weak here, it is INERT
+
+Also ran the same build against the real kernel entry
+(`examples/09_embedded/simple_os/arch/aarch64/limine_entry.spl`, the file
+that produced the original bug) — also zero fallback-trace lines, exit 0. At
+first this looked like a second independent refutation. It is not: grepping
+the whole Rust seed source for the literal panic string this bug's crash
+family is named after (`"runtime error: field access on nil receiver"`)
+turns up the ACTUAL FieldGet codegen —
+`src/compiler_rust/compiler/src/codegen/instr/fields.rs` — a hand-written
+Rust implementation, completely independent of `resolve_field_index`
+(`function_lowering.spl`) and `cranelift_codegen_adapter.spl`'s `GetField`
+case, both of which are pure-Simple `.spl` source the Rust seed's own
+codegen never executes. **`SIMPLE_MIR_FIELD_TRACE=1` can only ever fire when
+the pure-Simple compiler's own MIR lowering runs it — it is structurally
+blind to the Rust seed's codegen**, which is what every native-build in this
+doc (including the one that produced the original bug) actually used. The
+zero-trace result on both the x86_64-JIT test (prior session) and this
+native-build test is real evidence for the pure-Simple pipeline, and no
+evidence at all for the seed pipeline — two genuinely different
+implementations of the same lowering, confirming the project-memory note
+"THREE implementations, not two: seed, pure-Simple, and runtime C."
+
+### Disassembling the probe reproduces the mystery trace byte-for-byte
+
+`llvm-objdump -d` on the probe's `_start` (aka `spl_start`) shows, for the
+FIRST field access (`g_probe_request.magic`):
+
+```
+ldr x14, =0xffffffff80102000   ; &g_probe_request (== _bss_start)
+ldr x14, [x14]                 ; ***deref once*** -> loads magic (offset 0)
+and x15, x14, #0xfffffffffffffff8   ; mask
+cbnz x15, <ok>                      ; branch
+<fallthrough>: ldr x0,=<msg ptr>; mov x1,#0x2b; blr <fn>  ; panic call
+```
+
+This is **byte-identical in shape** to the original captured trace (doc,
+"Actual defect" paragraph): `ldr x11,=&hhdm_request; ldr x11,[x11]; and
+x12,x11,#-8; cbnz x12,...`. Cross-checking the two literal-pool targets in
+the panic path resolves it completely: `0x80101000` is a 43-byte `.rodata`
+string, `readelf -x .rodata` shows it is literally `"runtime error: field
+access on nil receiver"` (43 bytes — matches `mov x1, #0x2b` = 43 exactly),
+and the call target at `0x80100008` is the symbol `rt_eprintln_str`. This
+**is** `guard_nonnull_receiver` (`fields.rs:23-42`), called from
+`compile_field_get` (`fields.rs:44-81`) before every single `FieldGet`,
+unconditionally:
+
+```rust
+// fields.rs:53-60
+let obj_value = get_vreg_or_default(ctx, builder, &object);
+let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
+let obj_ptr = builder.ins().band(obj_value, tag_mask);
+guard_nonnull_receiver(ctx, builder, obj_ptr)?;   // load+mask+cbnz+panic-call
+```
+
+### Wrong-base hypothesis REFUTED: the global's storage is a pointer slot, not the struct itself
+
+`nm -S` on the built probe object shows `g_probe_request` is **8 bytes**
+(`.bss`, type `V`) — the global slot holds a **pointer**, so the single
+`*(&global)` dereference seen in the disassembly is the CORRECT base, not an
+off-by-one-indirection into the struct's own first field. The object also
+contains `__module_init_<mod>`/`_dynamic`, which is what populates that
+pointer at runtime. The previous section's "`x14` is STILL the magic value
+from field 1's guard" reading was an unverified inference from static
+disassembly — the probe's actual memory layout (the `nm -S` symbol size) was
+never checked before that claim was written, and it does not hold up: an
+8-byte global cannot itself be storing a 4-field, `magic`-first struct.
+
+The global's storage is an 8-byte pointer slot (`nm -S` = 8, not 32), so the
+single deref is correct. The guard fires because the pointer is nil —
+module-global-init does not run on this freestanding path. This matches the
+existing finding in
+`doc/08_tracking/bug/simpleos_userspace_crt0_missing_module_init_call_empty_init_array_2026-08-06.md`
+(freestanding crt0 never calls the module-init/`_dynamic` entry that would
+populate the global's pointer slot before first use) — see that doc for the
+init-array-not-called mechanism.
+
+### What is confirmed vs. what remains the next lead
+
+**Confirmed (executed evidence, not static reading):**
+- The mystery load-then-mask-then-branch instruction sequence is
+  `guard_nonnull_receiver` in `src/compiler_rust/compiler/src/codegen/instr/
+  fields.rs:23-42`, invoked unconditionally by `compile_field_get`
+  (`fields.rs:44-81`) / `compile_field_set` (`fields.rs:84-100`) for every
+  `FieldGet`/`FieldSet`, regardless of whether the receiver's real type is a
+  nilable/boxed reference (where the check is correct and intentional — see
+  the function's own doc comment) or a non-nilable `@repr("C")` value-type
+  global (where it is not).
+- Field byte-offset computation (0/8/16/24 for a 4-field struct) is correct.
+- The "field-index-resolves-to-0" hypothesis is refuted only for the
+  pure-Simple lowering path (the one `SIMPLE_MIR_FIELD_TRACE` actually
+  instruments); the seed path (`src/compiler_rust/compiler/src/codegen/
+  instr/fields.rs`) was never traced and remains unconfirmed either way.
+- `cranelift_codegen_adapter.spl`'s `GetField`/`SetField` (the pure-Simple
+  path) is confirmed NOT the code that ran here or in the original bug — the
+  Rust seed's `fields.rs` is a separate, independent implementation, and
+  `SIMPLE_MIR_FIELD_TRACE` cannot observe it.
+
+**Next lead, not yet located (this session ran out of scope for it):** the
+exact site in the Rust seed's HIR→MIR lowering
+(`src/compiler_rust/compiler/src/hir/lower/` and/or `src/compiler_rust/
+compiler/src/mir/`) that computes the `object` VReg for a `FieldGet` on a
+module-level `var` struct global. It should emit "address of the global"
+(a data-symbol-address op) but instead emits "load from the global" (a Load
+op) — correct for a reference-typed local (whose stored value genuinely is a
+heap pointer) but wrong for a `@repr("C")` value-type global (whose storage
+IS the struct, not a pointer to it). No file:line for this site yet; grepping
+`FieldGet` construction sites for "global"/"static" in
+`src/compiler_rust/compiler/src/{hir/lower,mir}/*.rs` returned nothing, so
+the construction is likely indirect (e.g. going through a generic "lower
+lvalue reference" helper shared with non-global locals). Whoever picks this
+up should start there rather than re-testing `resolve_field_index` or
+`cranelift_codegen_adapter.spl` — both are now confirmed off the critical
+path for this defect.
+
+**Not done this session:** locating the exact upstream lowering site (see
+above); re-running the real kernel through this same fully-disassembled
+methodology (only the minimal probe was disassembled field-by-field; the
+real `limine_entry.spl` build was built but not similarly dissected — the
+minimal probe was sufficient to nail the mechanism and is a strictly cleaner
+signal); fixing anything (no bootstrap rebuild, no fix attempted, per task
+scope). Probe file deleted after use, nothing committed.
