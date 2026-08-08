@@ -193,14 +193,36 @@ This upgrades two of the statuses below:
 
 ### Still NOT proven, and why
 
-An **executed** wrong value remains undemonstrated. The run's final link
-produced a vacuous 22,896-byte `stage3-simple` — 14 KB `.text`, 42 defined
-functions, 22 dynamic symbols all libc, no compiler symbols — which prints
-nothing on `--version` and exits 0. The real 209 KB-`.text` object was not
-linked into it. So the placeholder survives to codegen and to an object file,
-but the artifact that would exhibit the wrong value at runtime was never
-assembled. That vacuous-link failure is a *separate* defect from this one and
-must not be folded into it.
+An **executed** wrong value remains undemonstrated, because the binary Stage 3
+emits cannot execute anything.
+
+Stage 3 now **runs to completion and exits 0** — `STAGE3_EXIT=0`, `WALL=1202s`
+against a 3600s budget, peak RSS 10.7 GB — and the artifact it produces at `-o`
+is a vacuous 22,896-byte `stage3-simple`: 14 KB `.text`, 42 defined functions,
+22 dynamic symbols all libc. Its `main` calls `spl_init_args`,
+`__simple_runtime_init`, five stray `__module_init_*_dynamic` stubs, then
+`__simple_main` — which reads uninitialised stack and returns — then
+`__simple_runtime_shutdown`. There is no `dlopen`/`dlsym`, so this is not a
+dynload launcher despite `--mode dynload`; it is a fully linked program that
+does nothing. It prints nothing on `--version` and exits 0.
+
+Meanwhile the real object is written next to it and **never linked in**:
+`stage3-simple.app.cli.bootstrap_main.o`, 1.16 MB, 209 KB `.text`, **5,869**
+defined symbols including `bootstrap_compile_backend_from_args` and
+`app.io.cli_ops.cli_handle_compile`.
+
+This is reproducible and deterministic, not an interrupted-run artifact — three
+runs of materially different durations produced a **byte-identical** output
+(md5 `401436362a7c`): S3RUN12 529s, S3RUN_LONG 948s, S3RUN_3600 1202s/exit 0.
+The differing wall times rule out the harness budget as the cause.
+
+So the placeholder survives to codegen and to an object file, but the artifact
+that would exhibit the wrong value at runtime was never assembled. That
+vacuous-link failure is a *separate* defect from this one and must not be
+folded into it — though note that `set_bootstrap_entry_mir`,
+`emit_bootstrap_statics` and `lower_runtime_module_initializers` all appear in
+the const-0 census above, so a causal link between the two is **plausible and
+untested**, and is offered here strictly as a hypothesis, not a diagnosis.
 
 Consequence for anyone gating on this lane: `0 error: lines` and `failed=0`
 from a Stage 3 native-build run are **fail-open readings**, not evidence of a

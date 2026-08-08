@@ -427,3 +427,43 @@ never got this far; this run is the first to reach that ground. Attribution is
 stated as likely, not proven — no core-dump analysis was performed here.
 
 That MIR-lowering segfault is the new live head of task #18.
+
+## 2026-08-08 UPDATE: the segfault is GONE; the live head is now a vacuous binary
+
+The sentence above is superseded. Re-running Stage 3 on the same pinned
+worktree (`22dd136685d`) with the same stage2 (`S3FIX1`) and only the wall
+budget raised from 900s to 3600s:
+
+```
+STAGE3_EXIT=0   WALL=1202s   PEAK_RSS_KB=10,667,012
+last log line: [llvm-tools] read-bytes
+error: lines: 0     const-0 placeholder warnings: 3,629
+```
+
+**Stage 3 runs to completion and exits 0.** Exit 139 / "dumped core" did not
+reproduce. Note 1202s > the 900s budget the earlier FIX1RUN-era runs were given,
+so at least part of the previously-recorded instability was the budget, and the
+attribution of the 394s SIGSEGV should be treated as unreliable rather than
+carried forward. No core-dump analysis is claimed here either way.
+
+**But exit 0 is not success.** The `-o` artifact is a vacuous 22,896-byte
+`stage3-simple` — 14 KB `.text`, 42 functions, all-libc dynamic symbols, a
+`main` that calls `__simple_main` (which reads uninitialised stack and returns)
+and exits 0 printing nothing. The real object is written beside it and never
+linked: `stage3-simple.app.cli.bootstrap_main.o`, 1.16 MB, 209 KB `.text`,
+5,869 defined symbols including `bootstrap_compile_backend_from_args`.
+
+Reproducible and deterministic — three runs of different durations produced a
+byte-identical artifact (md5 `401436362a7c`): S3RUN12 529s, S3RUN_LONG 948s,
+S3RUN_3600 1202s/exit 0. The differing wall times rule out the harness budget.
+
+This is precisely the documented `native-build exits 0 producing nothing` trap.
+Any gate reading exit status or `error:` lines passes this run. The live head of
+task #18 is now **"the compiled object is not linked into the output binary"**,
+and the honest completion test is a symbol count on the emitted binary, not the
+exit code.
+
+Cross-referenced in
+`doc/08_tracking/bug/mir_unresolved_method_const0_fails_open_2026-07-28.md`,
+which also records the 3,629-substitution / 538-name census showing that
+`0 error: lines` is a fail-open reading in this lane.
