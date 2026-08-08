@@ -70,3 +70,11 @@ Proposed provider-capsule direction (not yet implemented or admitted):
   validating a caller-selected manifest only after the link is insufficient.
 - Replace colon-delimited provider transport before claiming Windows support;
   drive-letter paths make that representation ambiguous.
+- Treat LLVM archive-inspection tools as caller-owned authority, not fields a
+  provider can self-attest. The lane must pass an independently hashed LLVM
+  23.1 toolset receipt into snapshot admission.
+- Replay must compare every stable origin/snapshot field and copied-file hash;
+  a hash-addressed but unrelated origin receipt is not sufficient evidence.
+- Provider symbol namespaces are lane-owned allowlists. Reject renamed core
+  members and unapproved `rt_*`/compiler/runtime symbols even when a provider's
+  own symbol file lists them.

@@ -90,6 +90,24 @@ compiler-backfill identities, duplicate ids/paths/content/strong symbols, stale
 hashes, and foreign lane identities. Provider lists use receipt records rather
 than colon-delimited paths so Windows drive letters remain unambiguous.
 
+Provider validation cannot trust tools or symbol namespaces selected by the
+provider being validated. The bootstrap lane supplies a separately admitted
+LLVM 23.1 toolset receipt and expected receipt hash; that authority fixes the
+canonical `llvm-ar`, `llvm-nm`, and `llvm-readobj` paths/hashes/version used for
+archive inspection. Provider receipts may record that toolset identity but may
+not choose or override it. Likewise, the Stage4 lane owns the allowed provider
+ids and symbol-prefix contracts; a provider cannot authorize arbitrary `rt_*`
+or compiler/runtime ownership merely by listing those symbols itself.
+
+Snapshot replay compares every stable origin field with the sealed snapshot:
+provider/lane/ABI identity, source revision, artifact kind/format, symbol
+contract, producer identity, and LLVM toolset receipt. It then compares every
+origin-declared content hash with the private copied file. Merely proving that
+an unrelated origin receipt is well formed and hash-addressed is insufficient.
+Archive admission inspects every member as a relocatable object for the exact
+target format, architecture, bitness, endianness, and ABI; hostile/duplicate
+member names and mixed-target archives fail closed.
+
 A source change invalidates its interface and body.  An interface-hash change
 also invalidates every reverse-dependent interface/body archive.  A body-only
 change may retain dependent SHBs, but it invalidates that module's body archive.
