@@ -8,27 +8,29 @@
 #
 # Bug: doc/08_tracking/bug/native_object_cache_whole_build_fingerprint_granularity_2026-08-02.md
 #
-# Current known state (2026-08-08, independently re-verified against a fresh
-# 3-module fixture): `driver_native_build_cache_scope()` embeds
-# `driver_native_sources_fingerprint()` -- a hash of the ENTIRE loaded source
-# closure -- into the cache scope directory path
-# (`cache_scope_root = base_cache_scope_root/sources-{whole-closure-hash}`,
-# driver_aot_native_output.spl:266). Editing exactly ONE module changes that
-# closure hash, which changes the scope directory for EVERY module, so
-# `driver_native_build_filter_scoped_outputs()` rejects every previously
-# cached object as "not in scope" (driver_aot_native_output.spl:331-348) and
-# ALL objects rebuild -- not just the edited one. Measured on a 3-module
-# fixture (mod_a, mod_b, main): unchanged rebuild = 3 hits / 0 misses;
-# rebuild after editing exactly mod_b.spl = 0 hits / 3 misses.
-#
-# A prior audit (see bug doc) found the apparent one-line fix (drop the
-# closure hash) UNSAFE: per-object BuildCache entries record no
-# cross-module dependency interface hashes, so a narrower key cannot
-# currently distinguish "unrelated file changed" from "a dependency's public
-# shape changed". This script therefore asserts the CURRENT (known-broken)
-# behaviour as a canary: if a one-file edit ever starts reusing objects, the
-# whole-build-fingerprint defect has been fixed (or silently regressed to
-# something unsafe) and this gate should be promoted to a real assertion.
+# FIXED (2026-08-08): `driver_native_sources_fingerprint()`
+# (driver_aot_native_output.spl) now hashes each source's INTERFACE SURFACE
+# (`driver_native_source_interface_text`: struct/enum/bitfield/class/trait/impl
+# headers, field/variant lines, use/export/extern/const lines, and
+# function/method SIGNATURE lines) instead of the entire file content. A
+# function/method BODY-only edit no longer changes this fingerprint, so it no
+# longer changes `cache_scope_root` (`base_cache_scope_root/sources-{hash}`)
+# and no longer evicts every OTHER module's cached object via
+# `driver_native_build_filter_scoped_outputs()`. The edited module's OWN
+# object is still independently invalidated by BuildCache's per-source
+# FileFingerprint (full file content hash), so it still rebuilds. A change to
+# a struct/enum layout, a function/method signature, or a use/export line
+# anywhere in the closure still changes the interface-surface fingerprint and
+# still evicts the WHOLE scope -- deliberately conservative/fail-closed,
+# identical in spirit to the old whole-file behaviour, just scoped to the ABI-
+# visible part. Measured on the 3-module fixture below (mod_a, mod_b, main):
+# unchanged rebuild = 3 hits / 0 misses; rebuild after a BODY-only edit to
+# mod_b.spl (return value changed, signature untouched) = 2 hits / 1 miss.
+# Separately verified (not by this script): editing a struct's field list in
+# one module forces a full 0-hit rebuild of every module that imports it,
+# and in both cases the rebuilt binary's output reflects the edit (no stale
+# reuse) -- see the "safe intermediate" per-module design note in
+# doc/03_plan/compiler/bootstrap/stage3_native_cache_incrementality_2026-08-07.md.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -161,25 +163,36 @@ case "$onefile_hits" in
         ;;
 esac
 
-if [ "$onefile_hits" -gt 0 ]; then
-    # Hard-fail here on purpose: a gate that can never fail is no gate (see
-    # doc/08_tracking/bug/... "verification layer fail-open" family). This
-    # branch means the whole-build-fingerprint behaviour NARROWED — that is
-    # either the real fix landing (good, but must be verified safe before
-    # this script's assumptions are trusted) or an unsafe change that started
-    # reusing objects without the missing per-module dependency-interface
-    # hashing (bad, a correctness regression). Either way a human must look;
-    # exiting 0 here would silently absorb both cases.
-    echo "FAIL (promote-me) — a one-file edit reused $onefile_hits/3 objects ('$onefile_receipt')."
-    echo "       The whole-build-fingerprint defect in"
-    echo "       doc/08_tracking/bug/native_object_cache_whole_build_fingerprint_granularity_2026-08-02.md"
-    echo "       appears to have narrowed. Verify the change is SAFE (per-module"
-    echo "       dependency-interface hashing, not just a dropped closure hash)"
-    echo "       before rewriting this branch to a hard 'hits == 2' assertion."
+# Promoted assertion (2026-08-08): the interface-surface fingerprint fix
+# (driver_native_source_interface_text) makes exactly 2/3 the correct,
+# expected outcome for THIS fixture's edit (mod_b.spl's return value
+# changes, its signature does not) — mod_a and main are untouched by both
+# the file edit and the interface-surface hash, so they must hit; mod_b's
+# own content hash changed, so it must miss. Any OTHER count is now a
+# regression:
+#   - 0 hits would mean the interface-surface fingerprint stopped
+#     narrowing (the original whole-closure-fingerprint defect came back).
+#   - 3 hits would mean mod_b's own edit stopped invalidating its own
+#     object — a correctness regression (stale reuse), far worse than 0.
+#   - any other value indicates a scope-key or filter change worth
+#     investigating on its own.
+# A gate that can never fail is no gate: fail hard on every value but 2.
+if [ "$onefile_hits" -eq 2 ]; then
+    echo "PASS — a one-file BODY-only edit reused exactly 2/3 objects ('$onefile_receipt'):"
+    echo "       interface-surface cache-scope fingerprint granularity confirmed."
+elif [ "$onefile_hits" -eq 0 ]; then
+    echo "FAIL — a one-file edit reused 0/3 objects ('$onefile_receipt'): the interface-surface"
+    echo "       fingerprint narrowing appears to have regressed back to whole-closure hashing."
+    fail=1
+elif [ "$onefile_hits" -ge 3 ]; then
+    echo "FAIL — a one-file edit reused $onefile_hits/3 objects ('$onefile_receipt'): the EDITED"
+    echo "       module's own object was reused despite its content changing — this is unsound"
+    echo "       stale-object reuse, not a caching improvement. Investigate immediately."
     fail=1
 else
-    echo "KNOWN-OPEN — a one-file edit reused 0/3 objects ('$onefile_receipt'):"
-    echo "             whole-build fingerprint granularity confirmed still present."
+    echo "FAIL — a one-file edit reused $onefile_hits/3 objects ('$onefile_receipt'), expected"
+    echo "       exactly 2. Investigate the scope-key/filter change that produced this count."
+    fail=1
 fi
 
 exit "$fail"
