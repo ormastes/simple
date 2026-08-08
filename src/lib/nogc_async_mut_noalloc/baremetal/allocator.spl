@@ -9,15 +9,22 @@ struct BlockHeader:
     next: u32        # Address of next block (0 if last)
 
 impl BlockHeader:
-    fn header_size() -> u32:
-        """Size of block header (8 bytes)."""
-        8
+    # On-disk/in-memory field offsets. `next` used to live at +5, which made
+    # the header span bytes 0..8 inclusive (9 bytes) while header_size()
+    # reported 8 — so the payload pointer alloc() hands out (block + 8)
+    # aliased the top byte of `next`, and the first byte the caller wrote
+    # into its own allocation corrupted the free-list link. `next` is now
+    # 4-byte aligned at +8 and the header is 12 bytes, so payload and header
+    # never overlap.
+    static fn header_size() -> u32:
+        """Size of block header (12 bytes: size@0, is_free@4, next@8)."""
+        12
 
-    fn from_addr(addr: u32) -> BlockHeader:
+    static fn from_addr(addr: u32) -> BlockHeader:
         """Read block header from memory address."""
         val size_ptr = addr
         val is_free_ptr = addr + 4
-        val next_ptr = addr + 5
+        val next_ptr = addr + 8
 
         BlockHeader(
             size: mem_read_u32(size_ptr),
@@ -29,7 +36,7 @@ impl BlockHeader:
         """Write block header to memory address."""
         mem_write_u32(addr, self.size)
         mem_write_u8(addr + 4, if self.is_free: 1 else: 0)
-        mem_write_u32(addr + 5, self.next)
+        mem_write_u32(addr + 8, self.next)
 
 struct BumpAllocator:
     """Bump pointer allocator.
@@ -358,10 +365,18 @@ struct FixedBlockAllocator:
 impl FixedBlockAllocator:
     fn init():
         """Initialize free list linking all blocks."""
+        if self.capacity == 0:
+            # `capacity - 1` on u32 wraps to 4294967295 — the link loop would
+            # run away writing across all of memory. An empty pool has no
+            # blocks to link and starts exhausted.
+            self.free_list = 0
+            self.allocated = 0
+            return
+
         var addr = self.base
         var i: u32 = 0
 
-        while i < self.capacity - 1:
+        while i + 1 < self.capacity:
             # Write address of next block
             val next_addr = addr + self.block_size
             mem_write_u32(addr, next_addr)
@@ -453,10 +468,14 @@ impl MultiPoolAllocator:
 
     fn init_pool(base: u32, block_size: u32, capacity: u32):
         """Initialize a single pool's free list."""
+        if capacity == 0:
+            # See FixedBlockAllocator.init: `capacity - 1` on u32 wraps.
+            return
+
         var addr = base
         var i: u32 = 0
 
-        while i < capacity - 1:
+        while i + 1 < capacity:
             val next_addr = addr + block_size
             mem_write_u32(addr, next_addr)
             addr = next_addr
