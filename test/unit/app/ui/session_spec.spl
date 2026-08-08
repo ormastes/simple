@@ -6,11 +6,15 @@
 
 use std.spec.{describe, it, expect}
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent, UIMode}
-use common.ui.builder.{column, panel, text_widget}
+use common.ui.builder.{checkbox, column, panel, text_widget}
 use common.ui.widget_store.{WidgetStore}
 use common.ui.viewport.{Viewport}
-use common.ui.session.{UISession, new_session}
+use nogc_sync_mut.ui.session.{UISession, new_session}
+use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 use common.ui.surface.{SurfaceHandle}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+use app.io.mod.{file_read}
 
 
 # ============================================================================
@@ -40,6 +44,28 @@ describe "UISession creation":
         val store = WidgetStore.new()
         val session = UISession.new_with_store(tree, store)
         expect session.current_tree().root_id to_equal "sess_store_root"
+
+    it "resolves each tree theme without inheriting another session's WM material":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+
+        var default_session = UISession.new(UITree.new(checkbox("session_alias", "Alias", false)))
+        val default_frame = default_session.submit_widget_draw_ir(96, 32, "cpu")
+        expect default_frame.batches[0].commands[1].color to_equal snapshot.material.solid_fallback_rgba
+
+        var distinct_session = UISession.new(UITree.new(checkbox("session_distinct", "Distinct", false)).with_theme("ios_light"))
+        val distinct_frame = distinct_session.submit_widget_draw_ir(96, 32, "cpu")
+        val distinct_snapshot = theme_package_render_snapshot("ios_light")
+        expect distinct_frame.batches[0].commands[1].color to_equal distinct_snapshot.material.solid_fallback_rgba
+        expect distinct_frame.batches[0].commands[1].color == snapshot.material.window_fill_rgba to_equal false
+        reset_wm_chrome_theme()
+
+    it "avoids optional active-snapshot aggregate binding in the session native path":
+        val source = file_read("src/lib/nogc_sync_mut/ui/session.spl")
+        expect source to_contain "active_wm_theme_id()"
+        expect source to_contain "active_theme_id != \"\" and active_theme_id == resolved_theme"
+        expect source to_contain "active_wm_theme_snapshot_unchecked()"
+        expect source.contains("active_wm_theme_render_snapshot()") to_equal false
 
 
 # ============================================================================
