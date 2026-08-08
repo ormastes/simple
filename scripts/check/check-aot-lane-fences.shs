@@ -48,10 +48,12 @@ check-native-enum-match-payload
 check-native-extern-fabrication
 check-native-object-cache-granularity
 check-native-option-eq-representation
+check-native-option-bool-eq-vs-literal
 check-native-utf8-slice
 check-rt-io-file-native-jit-stub
 check-native-option-bool-llvm-verify
 check-u32-array-not-packed
+check-tuple-index-out-of-range
 "
 
 if [ "${1:-}" = "--list" ]; then
@@ -60,38 +62,10 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 only="${AOT_FENCE_ONLY:-}"
-
-# Fail closed on an empty roster: a `FENCES` list that got emptied by a bad edit
-# would otherwise sail through every loop below and print a green verdict having
-# run nothing at all.
-count_total=0
-for f in $FENCES; do count_total=$((count_total + 1)); done
-if [ "$count_total" -eq 0 ]; then
-    echo "ERROR — nothing was checked (the fence roster is empty)"
-    exit 2
-fi
-
-# Fail closed on a missing fence file: treating an absent script as a skip is how
-# a deleted or never-committed fence becomes invisible. Three of these nine were
-# uncommitted working-copy files as recently as 2026-08-08.
-missing=""
-for f in $FENCES; do
-    [ -f "scripts/check/$f.shs" ] || missing="$missing $f"
-done
-if [ -n "$missing" ]; then
-    echo "ERROR — nothing was checked; these fences are named in the roster but absent from the tree:$missing"
-    echo "        A missing fence is NOT a skip. Either restore it or remove it from FENCES."
-    exit 2
-fi
-
-LOG_DIR="${AOT_FENCE_LOG_DIR:-build/check/aot-lane-fences}"
-mkdir -p "$LOG_DIR" || { echo "ERROR — nothing was checked (cannot create $LOG_DIR)"; exit 2; }
-
-n_run=0
-n_pass=0
-n_fail=0
-n_error=0
-failed_names=""
+ran=0
+failed=0
+errored=0
+fail_names=""
 error_names=""
 
 for f in $FENCES; do
@@ -101,39 +75,45 @@ for f in $FENCES; do
             *) continue ;;
         esac
     fi
-    log="$LOG_DIR/$f.log"
-    printf '=== %s ===\n' "$f"
-    rc=0
-    sh "scripts/check/$f.shs" >"$log" 2>&1 || rc=$?
-    n_run=$((n_run + 1))
-    # Echo the fence's own verdict lines so CI output is readable without
-    # downloading artifacts. Each fence prints PASS/FAIL/KNOWN-OPEN/NOTE/ERROR
-    # at the start of a line by convention.
-    grep -E '^(PASS|FAIL|ERROR|WARN|NOTE|KNOWN-OPEN|SKIPPED)' "$log" || tail -n 5 "$log"
-    case "$rc" in
-        0) n_pass=$((n_pass + 1)) ;;
-        2) n_error=$((n_error + 1)); error_names="$error_names $f" ;;
-        *) n_fail=$((n_fail + 1)); failed_names="$failed_names $f" ;;
-    esac
-    printf '    -> rc=%s (log: %s)\n\n' "$rc" "$log"
+    script="scripts/check/$f.shs"
+    if [ ! -f "$script" ]; then
+        echo "ERROR — fence '$f' listed in roster but $script does not exist"
+        errored=$((errored + 1))
+        error_names="$error_names $f"
+        continue
+    fi
+    echo "=== running $f ==="
+    if sh "$script"; then
+        ran=$((ran + 1))
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "--- $f: ERROR (exit 2) ---"
+            errored=$((errored + 1))
+            error_names="$error_names $f"
+        else
+            echo "--- $f: FAIL (exit $rc) ---"
+            failed=$((failed + 1))
+            fail_names="$fail_names $f"
+        fi
+    fi
 done
 
-if [ "$n_run" -eq 0 ]; then
-    echo "ERROR — nothing was checked (AOT_FENCE_ONLY='$only' matched no fence in the roster)"
+total=$((ran + failed + errored))
+
+if [ "$total" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 fences ran; check AOT_FENCE_ONLY / roster)"
     exit 2
 fi
 
-if [ "$n_error" -gt 0 ]; then
-    echo "ERROR — $n_run fence(s) invoked, but$error_names could not measure anything (exit 2)."
-    echo "        This is NOT a pass and NOT a defect report — the gate did not run."
-    [ "$n_fail" -gt 0 ] && echo "        Additionally FAILED:$failed_names"
+if [ "$errored" -gt 0 ]; then
+    echo "ERROR — $errored fence(s) could not run:$error_names"
     exit 2
 fi
 
-if [ "$n_fail" -gt 0 ]; then
-    echo "FAIL — $n_run fence(s) checked, $n_pass passed, $n_fail failed:$failed_names"
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $failed of $total fence(s) regressed:$fail_names"
     exit 1
 fi
 
-echo "PASS — $n_run AOT-lane fence(s) checked, all $n_pass passed"
-exit 0
+echo "PASS — $ran fence(s) checked, all green"
