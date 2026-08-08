@@ -1,6 +1,9 @@
 # Stage-3 self-host: `Symbol` struct/type_alias conflict and nil-receiver crash
 
-Status: OPEN
+Status: PARTIALLY FIXED (2026-08-08) — part A (struct/type_alias conflict)
+fixed; part B (nil-receiver crash) is the SAME issue as the "nil-receiver
+SIGILL in lower_expr" bug being worked by another lane and was left for that
+lane to avoid duplicate/conflicting work. See "Part A fix" section below.
 Date: 2026-08-04
 Lane: stage-3 self-host blocker sweep
 
@@ -102,6 +105,42 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift
 LLVM is unavailable in this tree (a plain `cargo build -p simple-driver`
 overwrote the seed without `--features llvm`), so `--backend=cranelift` is
 required.
+
+## Part A fix (2026-08-08)
+
+Root cause: `struct Symbol` was declared twice under `90.tools`
+(`query_types.spl` and `sffi_gen/specs/compiler_query.spl`, the LSP/IDE query
+API types) while `type Symbol = text` is a distinct module-local alias used by
+several `30.types/*.spl` files and `00.common/effects.spl`. Once both spellings
+land in the same global name-keyed type registry within the Stage-3 driver
+closure, `module_lowering.spl`'s `claim_materialized_payload_binding` sees two
+different terminal kinds (`struct` vs `type_alias`) bound to the same local
+name `Symbol` and raises "enum payload dependency `Symbol` conflicts: ...".
+This is the same collision class previously fixed for `SymbolKind` /
+`SymbolTable` (see `00.common/dependency/symbol.spl`'s `DepSymbolKind` /
+`DepSymbolTable` rename comments) and for `Symbol`/`SymbolV2` itself partially
+via the pre-existing `QuerySymbolKind` rename in `query_types.spl` — the
+`Symbol` / `SymbolV2` struct names were simply never finished in that same
+rename pass.
+
+Fix: renamed the LSP/IDE query-API structs `Symbol` -> `QuerySymbol` and
+`SymbolV2` -> `QuerySymbolV2` in both `90.tools/query_types.spl` and
+`90.tools/sffi_gen/specs/compiler_query.spl` (plus their consumers
+`query_api.spl`, `query_helpers.spl`, and the `90.tools/__init__.spl`
+re-export list). No `struct Symbol` remains anywhere under `src/compiler`; the
+`type Symbol = text` aliases in `00.common/effects.spl` and `30.types/*.spl`
+are untouched and remain the sole owners of the name.
+
+Regression: `test/01_unit/compiler/bootstrap/hir_symbol_alias_owner_collision_spec.spl`,
+new `it "does not register a struct Symbol that collides with the
+module-local type_alias Symbol"` — RED before the fix (`1 failure`: the old
+`struct Symbol:` text was present in `query_types.spl` /
+`compiler_query.spl`), GREEN after (`4 examples, 0 failures`).
+
+Part B (the nil-receiver crash at origin `6fd61352ae7`) was determined during
+this investigation to be the same nil-receiver-through-a-nil-typed-alias
+failure mode as the "nil-receiver SIGILL in lower_expr" bug already assigned
+to a parallel lane, so it was intentionally left untouched here.
 
 ## Not landed
 
