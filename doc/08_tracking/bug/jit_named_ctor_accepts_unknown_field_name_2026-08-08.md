@@ -7,7 +7,17 @@ RESOLVED and has since been REOPENED as partially fixed; this is still a
 distinct defect)
 **Severity:** medium — a typo'd field name compiles and runs with no diagnostic,
 and the value lands in the wrong slot rather than being rejected
-**Engine:** seed JIT only. Interpreter is CORRECT.
+**Engine:** seed JIT only. The interpreter is correct **for this class of name
+only** — see the caveat below; it is not a safe reference lane in general.
+
+> **Caveat (added 2026-08-08 by adversarial re-review).** "Interpreter is
+> CORRECT" holds only for a name matching NEITHER a field NOR a parameter of a
+> `static fn new`. The interpreter attempts `new`-dispatch BEFORE it validates
+> against the field list, so `Font(path: "x", size: 8)` — where `path` is a
+> parameter of `new` and not a field — is silently routed to `static fn new`
+> instead of being rejected. That is the still-open hijack tracked in
+> `interp_static_fn_new_hijacks_named_ctor_2026-07-02.md` (REOPENED). Do not
+> treat the interpreter as an oracle for named-argument validation.
 
 ## Symptom
 
