@@ -211,6 +211,49 @@ under `bin/simple test` — the test runner's interpreter loads source
 directly, so no bootstrap rebuild is needed to iterate on this layer. That
 says nothing about the compiled/JIT path or `bin/simple run` (seed).
 
+### Span-bridge SIMD intrinsics missing from self-hosted MIR/LLVM (fixed, 2026-08-07)
+
+`rt_engine2d_simd_fill_span_u32`/`copy_span_u32` (and, in a follow-up,
+`blend_span_u32`/`blend_const_span_u32`) replaced the older row-based SIMD
+span primitives in the interpreter and `backend_software.spl`, but the
+native/AOT compilation path was never updated to match: MIR lowering's
+`bootstrap_resolved_call_return_type` didn't register their `[u32]` array
+return type (defaulted to i64, would corrupt the array on read), and the LLVM
+backend had no `declare` for either symbol (link failure under AOT/JIT).
+Fixed by registering all four alongside their row-based predecessors in
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` and adding
+their `declare ptr @...` lines in
+`src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl`
+(`a399483d` for fill/copy, `796d8484` for blend — the blend pair also needed
+the native-ABI symbols added to the runtime crate first, `ccf1b9f4`, since
+`engine2d_simd_ops.rs` — not the dead `runtime_simd_dispatch.c` — is what
+actually links). **Pattern for any future span-primitive addition:** the
+runtime symbol landing alone is not sufficient; this layer's array-return-type
+registration and the backend's `declare` are a separate, easily-missed step —
+grep both files for the sibling row-based symbol's registration line as the
+template. See [ui_render layer expert](../ui_render/skill.md) for the
+Engine2D/pixel-kernel perspective on the same landing.
+
+### JIT: named-function-as-value bypassed the lambda-only closure-ABI guard (fixed, 2026-08-07)
+
+Defect 2 of the JIT closure-ABI family (`jit_closure_abi_refuses_lambdas_and_
+miscompiles_fn_refs_2026-08-06.md`): a named function passed as a bare value
+(no lambda literal) bypassed the existing lambda-only JIT guard and hit the
+same closure-ABI break in `compile_indirect_call`, producing an ASLR-shaped
+garbage `i64` with **exit 0 and no diagnostic** — silent miscompile, not a
+crash. Fixed in the Rust seed JIT (`src/compiler_rust/compiler/src/codegen/
+jit.rs`, `Self::first_named_fn_value_load`): detects a `MirInst::GlobalLoad`
+whose name is a declared function but not a declared global (the shape
+`lower_global_expr`'s "static method reference" fallback emits) and refuses
+the module, matching Defect 1's existing loud interpreter-fallback shape
+instead of miscompiling. Verified against the full `jit_closure` fixture set
+(f01-f09): f06 goes from silent garbage to a loud `[INFO]` fallback + correct
+42; f01/f09 (no-fallback controls) unaffected, confirming no over-refusal of
+ordinary calls. This is JIT-codegen-layer, not MIR-lowering proper, but sits
+next to the SIMD-ISA-gating JIT note above in the same Rust seed codegen
+surface — see that entry for the sibling "silent wrong output, not a crash"
+failure shape in this file family.
+
 ### `struct_value_syms` provenance registration: every struct-value-producing site must register (2026-08-07)
 
 `struct_value_syms` (`Dict<LocalId, text>`, `expr_dispatch.spl`) is the

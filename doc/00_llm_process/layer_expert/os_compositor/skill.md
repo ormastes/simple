@@ -309,6 +309,20 @@ correct earlier plan text, so prefer these over the detail plans:
   `derived_engine2d_vulkan_status` (:117) never reads the device string. Any fix
   must *tighten*, never loosen. Venus (`vulkan_icd_virtio.spl`) is fully modeled.
 
+## `detect_virtio_gpu_device` was an existence check, not a device probe (fixed, 2026-08-07)
+
+`detect_virtio_gpu_device` (`vulkan_compositor_backend.spl`) was a bare
+`file_exists`, so it reported `true` for ANY existing path — including a
+plain file — misrouting `unavailable_reason()`'s branch selection downstream.
+Fixed to check `stat` mode bits via `test -c` so only a **character device**
+(the shape every DRM render node has) passes. Spec now covers missing path,
+plain file, and directory -> false; `/dev/null` (portable char device) ->
+true (`c2fc508a`). Resolves
+`doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md`.
+General pattern for this layer: any device/capability probe built on
+`file_exists` alone is suspect — check what `file_exists` actually proves
+before trusting a "device present" branch.
+
 ## Historical Handoff Notes (2026-07-03)
 
 - At that point both WM lanes routed through the shared CSS/GUI-web renderer

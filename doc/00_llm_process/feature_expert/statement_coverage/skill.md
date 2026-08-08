@@ -136,6 +136,50 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   flow, not for the common case (branches inside functions/specs) — file as
   a follow-up bug before trusting a per-file branch-coverage percentage.
 
+## CLI end-to-end + gate now 5/5, real collector blind spots pinned (2026-08-07)
+
+- **`spl-coverage --file` added to `dump`/`status`** (`70907278997`,
+  `9c5bcf07449`): cross-process artifact inspection no longer needs the
+  in-process global — pass a persisted `.sdn` path directly. Fixed alongside a
+  real import-path bug (`spl-coverage` imported nonexistent `app.io.mod`
+  symbols; dispatch was broken before this landed).
+- **`scripts/check/check-render2d-coverage.shs` now PASSes all 5 prereqs**
+  (`2effdbde400`, superseding the prior perma-`UNVERIFIED_BY_SCRIPT` rows for
+  prereqs 1/2): prereqs 1/2 compile a tiny branching probe via
+  `bin/simple compile --emit-mir=<path>` with `SIMPLE_COVERAGE` unset vs `=1`
+  and inspect the MIR JSON directly for a `DecisionProbe` instruction with a
+  real (non-`<source>`, non-`<entry>`, non-0/0) `file`/`line` — isolating
+  production MIR lowering from both the interpreter and the test-runner path
+  (an earlier draft comparing `bin/simple test --coverage` runs was
+  inconclusive: both gave `total_decisions=57`). Prereq 3 now sets
+  `SIMPLE_COVERAGE=1` before probing `spl-coverage status` (exit 1 on
+  *disabled* coverage is documented behavior, not a dispatch failure — testing
+  it unset conflated the two). Prereq 5 rolls up two independent runs of the
+  same spec and checks a decision id's `true_count` sums correctly (picked
+  nonzero-in-both so `0+0=0` can't read as a false MET) and the merged row
+  keeps per-file identity. **Caveat: this PASS depends on uncommitted Rust
+  seed source** (`interpreter_extern/coverage.rs`, `runtime/src/coverage.rs`)
+  not yet landed on `origin/main` as of this session — re-verify the gate
+  after that Rust work lands, don't cite PASS as durable until then.
+- **Known collector gaps, confirmed real (not yet fixed):** function
+  **signature lines and tail-expression lines are invisible** to the line
+  collector (only statement-body lines register a hit); **`elif`/`else`
+  header lines** don't register independently of their branch body;
+  `<entry>`-attributed hits (the seed's synthetic top-level-module
+  pseudo-function) don't map back to a real file/line; and **line sparsity in
+  large function bodies** — a function with many statements can show a hit
+  ratio well under 100% even when every logical branch executed, because only
+  a subset of statement-shaped lines are individually instrumented. Treat a
+  per-file percentage as a floor, not the true statement count, until these
+  are addressed.
+- **`spl-coverage rollup` prints a raw union dump, not a tautological
+  100%-of-observed summary** — the regenerated `summary:` block
+  (`coverage_sdn.spl`, see U1.3 note below) is computed fresh from the merged
+  `lines`/`decisions` sections, so a rollup that merges two partial runs
+  correctly shows less-than-100% where neither run alone touched a line —
+  verify this before trusting a rollup's summary as "coverage achieved"
+  rather than "coverage observed across the inputs given".
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,

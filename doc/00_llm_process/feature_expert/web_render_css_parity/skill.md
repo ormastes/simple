@@ -236,3 +236,19 @@ this codebase (see also the now-dead `css_bytes_*` helpers,
 `doc/08_tracking/bug/css_bytes_helpers_dead_code_2026-07-07.md`, which embody the losing idiom).
 `compute_styles`'s own residual superlinearity is unrelated and still open (selector-match chain,
 not parse-side).
+
+## 2026-08-07: `text-overflow: ellipsis` truncation wired into Draw IR emission (`34095840`)
+
+`_html_draw_ir_command` now calls `ellipsize_text_for_width` before emitting
+or measuring a Draw IR text run when `st.text_overflow_ellipsis` is set,
+matching the fixed-advance width model already used by the CPU-framebuffer
+raster loops — the two paths had drifted (raster truncated, Draw IR did not).
+Flips "text-overflow: ellipsis truncates a single-line overflowing box" from
+RED-by-design to green in `web_css_text_layout_spec.spl` (6 total, 5 passed,
+1 failed — the remaining failure is the unrelated, larger-scope
+overflow-wrap example, left RED-by-design). Same session triaged four other
+RED-by-design examples (CSS Grid `fr` tracks, `grid-template-areas`,
+`grid-auto-flow:column`, text `overflow-wrap`) as large-scope (new subsystem/
+parsing work), recorded in their own bug docs, left untouched per RED
+protocol — do not fold those into this feature's scope without a separate
+plan.

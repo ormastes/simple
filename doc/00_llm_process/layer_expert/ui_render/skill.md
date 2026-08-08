@@ -75,6 +75,32 @@ This layer is what the four SimpleOS screen targets are being unified onto — s
   per blended row (`:1464-1476`); the malloc-failure fallback is *also* per-pixel
   unbox/blend/box. There is currently **no allocation-free blend path at all**.
   The fix is either box-aware unpack once per span, or attacking the boxing.
+  **Partial progress (2026-08-07):** span-bounded (not row-bounded) SIMD
+  kernels landed across all three implementations — native ABI symbols
+  `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32` in the Rust
+  runtime crate (`engine2d_simd_ops.rs`, `ccf1b9f4`, mirroring the earlier
+  `fill_span_u32`/`copy_span_u32`), then self-hosted-compiler registration
+  (array-return type in `bootstrap_resolved_call_return_type` + LLVM
+  `declare`) so the same symbols are reachable under native/AOT/JIT, not just
+  the interpreter (`a399483d` for fill/copy, `796d8484` for blend — see
+  [mir_lowering layer expert](../mir_lowering/skill.md) for the compiler-side
+  half). This does not by itself remove the two-`malloc` row path above; it
+  adds a span-granularity alternative alongside it — do not read "SIMD span
+  kernels landed" as "the allocation is gone".
+- **`simd_config_mode()` nil-env fix (`1365d5a6`):** `rt_env_get` returns
+  `nil` (not `""`) for an unset `SIMPLE_2D_SIMD`; the mode resolver only
+  guarded `raw == ""` so the unset case fell through to `nil` instead of the
+  documented "auto" default. Same nil-vs-empty-string trap as `detect_os()`/
+  `detect_arch()` noted elsewhere in this doc — grep for `!= ""` env guards in
+  this layer before trusting one handles "unset".
+- **`paint_rect` row-bleed fixed (`d129996a`, `paint_chunk_rasterizer.spl`):**
+  clipped `py` to `[0, height)` per row but never clipped the x-span/
+  `row_offset` to `[0, stride)`, so a negative x (or `x+w` past the right
+  edge) computed a `row_offset` landing in an *adjacent row's* flat pixel
+  storage and bled the fill across the row boundary. Now the fill span is
+  clipped to `[max(x,0), min(x+w,stride))`, symmetric with the existing y
+  clip. Regression coverage: negative-x, right-edge-overflow, and partial
+  negative-y-overlap cases in `paint_chunk_rasterizer_spec.spl`.
 - Other measured root causes: the interpreter extern bridge repacks the *whole*
   framebuffer per span (must become O(count)); SIMD alpha-blend is net-negative
   (gather/scatter, no in-place `blend_span`); `simd_fill_row` is slower than
