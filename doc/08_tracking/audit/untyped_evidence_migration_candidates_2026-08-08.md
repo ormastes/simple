@@ -56,10 +56,10 @@ matching hit below is understood as DONE, not an outstanding candidate:
 
 | File | `it` block start line | Already migrated? |
 |---|---|---|
-| `test/01_unit/app/arch_check_spec.spl` | 524 | no |
+| `test/01_unit/app/arch_check_spec.spl` | 524 | yes |
 | `test/01_unit/app/arch_check_spec.spl` | 528 | no |
-| `test/01_unit/app/bug_add/bug_add_cli_spec.spl` | 16 | no |
-| `test/01_unit/app/bug_resolve/bug_resolve_cli_spec.spl` | 25 | no |
+| `test/01_unit/app/bug_add/bug_add_cli_spec.spl` | 16 | yes |
+| `test/01_unit/app/bug_resolve/bug_resolve_cli_spec.spl` | 25 | yes |
 | `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 4 | no |
 | `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 8 | no |
 | `test/01_unit/app/cli/bootstrap_focused_native_build_split_contract_spec.spl` | 5 | no |
