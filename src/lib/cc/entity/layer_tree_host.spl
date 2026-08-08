@@ -1,0 +1,60 @@
+# LayerTreeHost — owner of the compositor's pending and active layer trees.
+#
+# The host mirrors Chromium's two-tree model: the main thread mutates the
+# PENDING tree, and a commit atomically publishes a snapshot of it as the new
+# ACTIVE tree that the compositor draws from. The two trees must never alias,
+# so a commit copies rather than shares.
+#
+# Provides: LayerTreeImpl, LayerTreeHost.
+
+use std.cc.entity.layer.{Layer}
+
+# One layer tree. Ids are handed out monotonically and never reused, so an id
+# stays a stable handle for the lifetime of the tree.
+class LayerTreeImpl:
+    layers: [Layer]
+    next_id: i64
+
+    static fn empty() -> LayerTreeImpl:
+        LayerTreeImpl(layers: [], next_id: 1)
+
+    # Adds `layer`, assigning and returning its freshly-allocated id.
+    me add_layer(layer: Layer) -> i64:
+        val assigned = me.next_id
+        me.next_id = assigned + 1
+        me.layers.push(Layer(id: assigned, kind: layer.kind, bounds: layer.bounds,
+                             opacity: layer.opacity, draws_content: layer.draws_content))
+        assigned
+
+    fn layer_count() -> i64:
+        me.layers.len()
+
+    # An independent copy — used by commit so the published tree cannot be
+    # mutated through the tree it was copied from.
+    fn clone_tree() -> LayerTreeImpl:
+        LayerTreeImpl(layers: me.layers, next_id: me.next_id)
+
+class LayerTreeHost:
+    pending_tree: LayerTreeImpl
+    active_tree: LayerTreeImpl
+    needs_commit: bool
+    source_frame_number: i64
+
+    static fn new() -> LayerTreeHost:
+        LayerTreeHost(pending_tree: LayerTreeImpl.empty(),
+                      active_tree: LayerTreeImpl.empty(),
+                      needs_commit: false,
+                      source_frame_number: 0)
+
+    # Requests that the next commit actually run.
+    me set_needs_commit():
+        me.needs_commit = true
+
+    # Publishes the pending tree as the active tree and clears the request.
+    me commit():
+        me.active_tree = me.pending_tree.clone_tree()
+        me.needs_commit = false
+
+    # Starts a new main-frame; each begin advances the frame counter.
+    me begin_main_frame():
+        me.source_frame_number = me.source_frame_number + 1
