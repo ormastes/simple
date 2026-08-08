@@ -3,7 +3,7 @@
 
 - `common.spec.differential_trace` owns immutable `TraceEvent` and
   `NormalizedTrace`; production may emit them through an injected test sink.
-- `test.helpers.differential_conformance` owns comparison, environment policy,
+- `std.test.differential_conformance` owns comparison, environment policy,
   object-ID mapping, mutation rejection, and test-only oracle descriptors.
 - Future `std.gpu.reference_oracle_sffi` dynamically loads Mesa/Vulkan only as
   a verified test oracle; production never imports it.

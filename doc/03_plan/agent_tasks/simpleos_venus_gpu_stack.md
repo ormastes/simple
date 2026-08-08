@@ -14,6 +14,10 @@ renderers, event routers, or evidence schemas.
 | F: queue/fence/readback | `_Venus/queue.spl`, `fence.spl`, `readback.spl` | device execution evidence | after E |
 | G: compositor | existing `vulkan_compositor_backend.spl` and Engine2D tests | enable only from valid readback receipt | after F |
 | H: QEMU evidence | canonical QEMU wrapper/spec/manual only | boot, identity, submit, fence, readback, frame checksum | after G |
+| I: trace schema | `src/lib/common/spec/differential_trace.spl`, focused spec | immutable normalized records and bounded injected sink | after interface review |
+| J: comparator/profile | `test/helpers/differential_conformance.spl`, focused specs | semantic projection, handle mapping, GPU profiles | after I |
+| K: Mesa/Vulkan SFFI oracle | `src/lib/nogc_sync_mut/gpu/reference_oracle_sffi.spl`, `test/helpers/gpu_reference_oracle.spl`, compiled specs | dynload ABI/error/ownership and normalized trace | after I; test-only |
+| L: Chrome/Web consumer | existing Web performance test helpers/specs only | adopt generic trace/comparator without GPU imports | after J |
 
 Lower-model sidecars: lanes A, B, and pure test-gap inventory are suitable for
 Codex Luna/Claude Haiku after slots are available. Protocol classification and

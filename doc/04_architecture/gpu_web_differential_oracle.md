@@ -14,7 +14,7 @@ Use a two-capsule MDSOC boundary:
 ```text
 Pure-Simple production layer              Test-only conformance capsule
 --------------------------------------    ---------------------------------
-common.spec.differential_trace            test.helpers.differential_conformance
+common.spec.differential_trace            std.test.differential_conformance
  TraceEvent / NormalizedTrace               TraceComparator policy/result
  injected trace sink only                   GpuEnvironmentProfile
  no SFFI, no reference dependency           ReferenceOracleAdapter descriptor
@@ -29,7 +29,7 @@ common.spec.differential_trace            test.helpers.differential_conformance
 `common` owns the immutable cross-layer schema.  Venus transport/protocol/
 queue/fence/readback and Web style/layout/paint/composite may emit it through a
 test-injected sink, but neither imports the comparator, another renderer, or a
-foreign provider. `test.helpers` owns semantic projection and comparison. This
+foreign provider. `std.test` owns semantic projection and comparison. This
 keeps the value contract reusable while making test-oracle dependency one-way.
 
 ### Frozen schema and layer IDs
@@ -130,4 +130,3 @@ a driver dependency. Reference: [Vulkanized compute survey](https://vulkan.org/u
   replay is deliberately insufficient.
 - Neutral: existing bitmap/golden scripts continue to produce artifacts; they
   gain no automatic semantic equality claim until wrapped by an adapter.
-

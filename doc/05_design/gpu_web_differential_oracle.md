@@ -4,7 +4,7 @@
 ## Implemented shared slice
 
 - `src/lib/common/spec/differential_trace.spl`: immutable schema validation.
-- `test/helpers/differential_conformance.spl`: `GpuEnvironmentProfile`,
+- `src/lib/nogc_sync_mut/test/differential_conformance.spl`: `GpuEnvironmentProfile`,
   `ReferenceOracleAdapter`, semantic policy/result, comparison and profile
   admission.
 - `test/01_unit/lib/nogc_sync_mut/gpu/differential_oracle_spec.spl`: mapped
@@ -46,4 +46,3 @@ load/unload. The adapter must also prove it does not cause a production import
 and does not claim an unavailable provider as a pass. Reference output is
 evidence only; CPU scalar exact oracle and device-origin pixels remain separate
 requirements.
-
