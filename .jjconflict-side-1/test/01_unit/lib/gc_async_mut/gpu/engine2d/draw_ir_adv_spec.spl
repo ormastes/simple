@@ -777,6 +777,59 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.readback_checksum).to_equal(0)
         engine.shutdown()
 
+    it "renders straight EDGE and linear PATH through the shared line oracle":
+        var engine = Engine2D.create_with_backend(16, 12, "cpu")
+        engine.clear(BG)
+        val edge = draw_ir_edge_command(draw_edge(
+            "edge-1", "a", "b", DRAW_IR_EDGE_STRAIGHT,
+            [draw_ir_point(1, 1), draw_ir_point(5, 3)],
+            [draw_ir_style_prop("stroke-color", "{RED}"),
+             draw_ir_style_prop("stroke-width", "1")]
+        ))
+        val path = draw_ir_path_command(
+            "path-1",
+            [draw_ir_point(8, 2), draw_ir_point(8, 5), draw_ir_point(12, 5)],
+            [draw_ir_style_prop("stroke-color", "{GREEN}"),
+             draw_ir_style_prop("stroke-width", "1")]
+        )
+        val batch = draw_ir_batch(
+            "linear-primitives", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surface", "scene", 0, 0, 16, 12, 0, 1000, false),
+            [edge, path]
+        )
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.fallback_required).to_be(false)
+        # Independent Bresenham-oracle pixels (including both endpoints).
+        expect(result.pixels[1 * 16 + 1]).to_equal(RED)
+        expect(result.pixels[2 * 16 + 3]).to_equal(RED)
+        expect(result.pixels[3 * 16 + 5]).to_equal(RED)
+        expect(result.pixels[2 * 16 + 8]).to_equal(GREEN)
+        expect(result.pixels[5 * 16 + 12]).to_equal(GREEN)
+        engine.shutdown()
+
+    it "fails closed for curved EDGE and never counts it as rendered":
+        var engine = Engine2D.create_with_backend(12, 12, "cpu")
+        engine.clear(BG)
+        val curved = draw_ir_edge_command(draw_edge(
+            "curve-1", "a", "b", DRAW_IR_EDGE_BEZIER,
+            [draw_ir_point(1, 1), draw_ir_point(6, 6)],
+            [draw_ir_style_prop("stroke-color", "{RED}")]
+        ))
+        val batch = draw_ir_batch(
+            "curve-rejected", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surface", "scene", 0, 0, 12, 12, 0, 1000, false),
+            [curved]
+        )
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.fallback_required).to_be(true)
+        expect(result.fallback_reason).to_contain(DRAW_IR_COMMAND_EDGE)
+        expect(result.pixels[1 * 12 + 1]).to_equal(BG)
+        engine.shutdown()
+
     it "paints a border on a transparent-background box while the interior stays background color":
         # Regression: the executor used to collapse every RECT to a single flat
         # draw_rect_filled gated on background opacity, so a transparent box with
