@@ -111,13 +111,38 @@ fn inject_step_flow(source: text) -> text:
         i = i + 1
     out.join("\n")
 
+fn _ensure_spec_import(source: text) -> text:
+    # step() lives in std.spec (not a prelude global like describe/it/expect),
+    # so a modernized spec needs `use std.spec.*` to resolve under `run`.
+    if source.contains("use std.spec"):
+        return source
+    val lines = source.split("\n")
+    var out: [text] = []
+    var inserted = false
+    for line in lines:
+        if not inserted and line.trim().starts_with("use "):
+            out.push("use std.spec.*")
+            inserted = true
+        out.push(line)
+    if not inserted:
+        var with_import: [text] = ["use std.spec.*"]
+        for line in out:
+            with_import.push(line)
+        return with_import.join("\n")
+    out.join("\n")
+
 fn modernize_source(path: text, source: text) -> text:
     # 1. mechanical SSDOC fixes (MNT-003/006), then 2. step-flow injection (BEH-001).
     val fixes = safe_sspec_easyfixes(path, source)
     val mechanical = match apply_sspec_easyfixes_result(path, source, fixes):
         case Err(_): source
         case Ok(value): value
-    inject_step_flow(mechanical)
+    val stepped = inject_step_flow(mechanical)
+    if stepped != mechanical:
+        # step() calls were added; make sure they resolve.
+        _ensure_spec_import(stepped)
+    else:
+        stepped
 
 fn _modernize(args: [text]) -> i64:
     var positional: [text] = []

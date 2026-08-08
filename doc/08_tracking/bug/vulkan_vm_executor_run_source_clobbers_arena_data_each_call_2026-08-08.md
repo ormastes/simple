@@ -61,3 +61,30 @@ DATA" mode — e.g. `run_source_preserving_data(source, step_budget, entry_pc,
 prior_arena: [u8])` — so a future caller doesn't have to re-derive the
 byte-layout logic K6 duplicates here. Low priority: only one caller
 (`VulkanExec`) needs it today.
+
+## 2026-08-08 follow-up: workaround corrected, root-cause fix attempt reverted
+
+A same-day attempt to fix this at the root inside `vulkan_vm_executor.spl`
+(a new `build_svmg_arena_persisting_data` helper) introduced a real
+regression: it copied the persisted DATA region **relative to `data_off`**,
+but SVM-G STORE/LOAD instructions address the arena by **absolute** byte
+offset (same finding K5/`cuda_exec.spl` proved independently via live
+device testing for the CUDA side of this same bug class). The relative
+copy shifted stored values to the wrong address, so a load-only cell 2
+read back `0` instead of the value cell 1 stored — worse than this file's
+pre-existing zero-init behavior, which at least left the symptom obvious.
+That executor-level change was reverted (this file is shared with the
+GPU-remote-lanes test-runner feature and was under concurrent edit from
+another session, making a stable root-cause landing here impractical
+today).
+
+The workaround in `vulkan_exec.spl` (section above) is corrected instead,
+inline at the call site: the byte-splice now copies the persisted region
+verbatim at the same absolute offset in both the previous and new arena
+(`copy_start = max(data_off, prior_data_off)`, no relative shift), tracking
+`last_data_off` across cells the same way `cuda_exec.spl` already did.
+Verified: `test/02_integration/app/tools/notebook/vulkan_exec_spec.spl` —
+3/3 PASS (cross-cell arena DATA persistence, interrupt/`%reset` recovery),
+lint clean. The "suggested real fix" above remains open and unattempted;
+any future attempt must preserve absolute addressing, not `data_off`-relative
+offsets.

@@ -1,0 +1,124 @@
+# @req REQ-MM-PTE-001
+#
+# Reference example (Modern SSpec, E8c) for the binary/bitfield typed-evidence
+# lane: encode and decode a real x86_64 page-table entry using the actual
+# kernel accessors, run the decoded evidence through a closed oracle, and
+# render the generated QA manual byte table — all from the same
+# `format/binary_layout.spl` layout the comparator checks against, so this
+# example can never silently drift from what the manual shows.
+#
+# As a kernel/MM reviewer, I want a worked page-table-entry example so I can
+# see, in one place, that the manual's byte/bit table is generated evidence
+# and not a hand-typed transcription.
+#
+# Ground truth: src/os/kernel/types/bitfield.spl (`pte_make` and friends).
+
+use std.spec.{describe, it, step, assert_equal, assert_true}
+use std.common.spec.evidence.model.{
+    OracleSpec, oracle_spec, check_exact, EvidenceStatus,
+    ManualBlockKind, manual_block, EvidenceAudience,
+    evidence_manifest
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.manual_render.{render_manual}
+use std.common.spec.evidence.format.binary_layout.{
+    bytes_hex, u64_to_le_bytes, binary_field_table, decode_u64, pte_layout
+}
+use os.kernel.types.bitfield.{pte_make}
+
+# @manual_section Page-table entry format
+
+fn expected_pte_oracle() -> OracleSpec:
+    oracle_spec("x86_64_pte", [
+        check_exact("byte_order", "little"),
+        check_exact("bit_order", "lsb0"),
+        check_exact("present", "1"),
+        check_exact("writable", "1"),
+        check_exact("user", "0"),
+        check_exact("reserved_low", "0"),
+        check_exact("phys_addr", "74565"),   # 0x0000_0000_1234_5000 >> 12
+        check_exact("reserved_high", "0"),
+        check_exact("no_execute", "1")
+    ])
+
+describe "Page-table entry format (binary layout manual example)":
+
+    it "encodes a writable supervisor no-execute page using the real kernel pte_make":
+        """
+        As a kernel/MM reviewer, I want the reference PTE example to be built
+        by the actual production accessor (`pte_make` in
+        src/os/kernel/types/bitfield.spl), not a hand-rolled bit pattern, so
+        the example can never drift from what the kernel really encodes.
+        """
+        step("Encode the page-table entry")
+        val phys: i64 = 0x0000000012345000
+        val pte: i64 = pte_make(phys, true, true, false, true)
+
+        step("Verify the page address and protection flags")
+        assert_equal(pte, 0x8000000012345003)
+        assert_equal(bytes_hex(u64_to_le_bytes(pte)), "03 50 34 12 00 00 00 80")
+
+    it "decodes the encoded entry against a closed oracle over every field":
+        step("Encode the page-table entry")
+        val pte: i64 = pte_make(0x0000000012345000, true, true, false, true)
+
+        step("Verify the page address and protection flags")
+        val evidence = decode_u64(pte, pte_layout())
+        val result = compare_evidence(evidence, expected_pte_oracle())
+        assert_true(result.status == EvidenceStatus.passed)
+
+    it "changes exactly one decoded field on a one-hot bit flip, leaving neighbours untouched":
+        step("Encode the page-table entry")
+        val base: i64 = pte_make(0x0000000012345000, true, true, false, true)
+
+        step("Verify the page address and protection flags")
+        val flipped = base | (1 << 2)  # toggle the user bit only
+        val before = decode_u64(base, pte_layout())
+        val after = decode_u64(flipped, pte_layout())
+
+        var changed = 0
+        var i = 0
+        while i < before.nodes.len():
+            if before.nodes[i].value != after.nodes[i].value:
+                changed = changed + 1
+            i = i + 1
+        assert_equal(changed, 1)
+        assert_equal(after.nodes[4].path, "user")
+        assert_equal(after.nodes[4].value, "1")
+
+    it "generates the manual field table from the same layout the comparator decoded":
+        step("Encode the page-table entry")
+        val pte: i64 = pte_make(0x0000000012345000, true, true, false, true)
+
+        step("Verify the page address and protection flags")
+        val evidence = decode_u64(pte, pte_layout())
+        val rows = binary_field_table(pte, pte_layout())
+
+        # Table has a header row plus one row per layout field; assert the
+        # generated rows against the decoded evidence nodes (skip the two
+        # order/endianness nodes which have no table row), never against a
+        # hand-written literal.
+        assert_equal(rows.len() - 1, evidence.nodes.len() - 2)
+        var i = 0
+        while i < rows.len() - 1:
+            val node = evidence.nodes[i + 2]
+            assert_true(rows[i + 1].contains(node.path))
+            i = i + 1
+
+    it "renders the QA manual with the byte table present":
+        step("Encode the page-table entry")
+        val pte: i64 = pte_make(0x0000000012345000, true, true, false, true)
+
+        step("Verify the page address and protection flags")
+        val rows = binary_field_table(pte, pte_layout())
+        val block = manual_block(ManualBlockKind.byte_table, "PTE byte/field table", rows)
+        val manifest = evidence_manifest(
+            "pte-example-1", "x86_64_pte",
+            "test/03_system/tools/spipe/examples/binary_layout_manual_spec.spl",
+            "n/a", "binary_layout_manual_example", "1", "run-1", "local",
+            "n/a", EvidenceStatus.passed
+        )
+        val manual = render_manual("PTE Reference Manual", [block], EvidenceAudience.qa, manifest)
+        val text = manual.join("\n")
+        assert_true(text.contains("Field"))
+        assert_true(text.contains("phys_addr"))

@@ -1,0 +1,310 @@
+#!/bin/sh
+# Fence for the two DEFAULT build behaviours the user asked for:
+#   A. the build does NOT stop at the first error (collect-all is the default)
+#   B. an incremental rebuild actually reuses cached objects
+#
+# WHY THIS EXISTS
+# ---------------
+# Both behaviours were verified BY HAND on 2026-08-08 and neither had any
+# automated guard. A hand-verified behaviour is a behaviour that regresses
+# silently the next day. Worse, `bin/simple test` hard-defaults to the tree-walk
+# interpreter and TestExecutionMode has no AOT variant, so NO `*_spec.spl` can
+# ever observe the `native-build` lane these behaviours live on -- a script that
+# drives the real binary is the only thing that can fence them.
+#
+# EXIT CODES (repo convention -- 2 is NOT a pass)
+#   0  PASS  -- ran and both behaviours are correct
+#   1  FAIL  -- ran and found a regression
+#   2  ERROR -- nothing was measured (build died, receipt unparseable, timeout).
+#               Deliberately distinct from 1: "could not measure" and "measured
+#               a defect" demand different responses, and collapsing them is how
+#               a vacuous run gets mistaken for a green one.
+#
+# Env:
+#   BUILD_DEFAULTS_TIMEOUT   per-build timeout, default 900
+#   SIMPLE_BINARY            default bin/simple
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_TIMEOUT="${BUILD_DEFAULTS_TIMEOUT:-900}"
+WORK_DIR="${WORK_DIR:-/tmp/check-build-defaults.$$}"
+
+test -x "$SIMPLE_BINARY" || { echo "ERROR — nothing was checked ($SIMPLE_BINARY is not executable)"; exit 2; }
+mkdir -p "$WORK_DIR" || { echo "ERROR — nothing was checked (cannot create $WORK_DIR)"; exit 2; }
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+fail=0
+
+nb() {
+    # nb <srcdir> <entry> <cachedir> <outbin> <logfile>  -- always foreground.
+    timeout "$BUILD_TIMEOUT" env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+        "$SIMPLE_BINARY" native-build \
+        --source "$1" --entry-closure --entry "$2" \
+        --cache-dir "$3" --output "$4" >"$5" 2>&1
+}
+
+# =============================================================================
+# A. COLLECT-ALL IS THE DEFAULT (do not stop at the first error)
+# =============================================================================
+# Three INDEPENDENT errors in three separate modules. Independent on purpose:
+# if they were nested/dependent, a single root cause could legitimately produce
+# one diagnostic and we would not be able to tell collect-all from fail-fast.
+A_DIR="$WORK_DIR/collect_all"
+mkdir -p "$A_DIR"
+cat > "$A_DIR/mod_a.spl" <<'EOF'
+fn bad_a() -> i64:
+    return undefined_symbol_alpha
+EOF
+cat > "$A_DIR/mod_b.spl" <<'EOF'
+fn bad_b() -> i64:
+    return undefined_symbol_beta
+EOF
+cat > "$A_DIR/mod_c.spl" <<'EOF'
+fn bad_c() -> i64:
+    return undefined_symbol_gamma
+EOF
+cat > "$A_DIR/main.spl" <<'EOF'
+use mod_a
+use mod_b
+use mod_c
+
+fn main() -> i64:
+    return 0
+EOF
+
+a_log="$WORK_DIR/collect_all.log"
+a_rc=0
+nb "$A_DIR" "$A_DIR/main.spl" "$WORK_DIR/cache_a" "$WORK_DIR/bin_a" "$a_log" || a_rc=$?
+
+if [ "$a_rc" -eq 124 ]; then
+    echo "ERROR — collect-all build TIMED OUT after ${BUILD_TIMEOUT}s; nothing was measured."
+    echo "        This is not evidence about collect-all either way. Re-run on a less"
+    echo "        loaded host, or raise BUILD_DEFAULTS_TIMEOUT."
+    exit 2
+fi
+
+# A broken program MUST fail the build. If it exits 0 the whole premise is gone.
+if [ "$a_rc" -eq 0 ]; then
+    echo "FAIL — a program with three undefined symbols BUILT SUCCESSFULLY (rc=0)."
+    echo "       Errors are being swallowed entirely; this is worse than"
+    echo "       stop-at-first. Diagnostics are supposed to be fatal here."
+    fail=1
+else
+    # Count DISTINCT root-cause diagnostics, one per broken module.
+    a_hits=0
+    for sym in undefined_symbol_alpha undefined_symbol_beta undefined_symbol_gamma; do
+        if /usr/bin/grep -q "$sym" "$a_log" 2>/dev/null; then
+            a_hits=$((a_hits + 1))
+        fi
+    done
+
+    if [ "$a_hits" -eq 3 ]; then
+        echo "PASS — collect-all default: 3 independent errors produced 3 distinct"
+        echo "       root-cause diagnostics in ONE run (rc=$a_rc)."
+    elif [ "$a_hits" -le 1 ]; then
+        echo "FAIL — only $a_hits of 3 independent errors reported: the build is"
+        echo "       stopping at the first error. Collect-all is the required"
+        echo "       default (CompileContext.poison_budget() = 200;"
+        echo "       SIMPLE_COMPILE_FAIL_FAST=1 is the opt-out, not the default)."
+        fail=1
+    else
+        echo "FAIL — $a_hits of 3 independent errors reported. Collect-all is"
+        echo "       partially working; every independent error must surface."
+        fail=1
+    fi
+
+    # The opt-out must still work, or we have merely removed a feature.
+    b_log="$WORK_DIR/fail_fast.log"
+    timeout "$BUILD_TIMEOUT" env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_COMPILE_FAIL_FAST=1 "$SIMPLE_BINARY" native-build \
+        --source "$A_DIR" --entry-closure --entry "$A_DIR/main.spl" \
+        --cache-dir "$WORK_DIR/cache_ff" --output "$WORK_DIR/bin_ff" >"$b_log" 2>&1
+    ff_rc=$?
+    if [ "$ff_rc" -eq 124 ]; then
+        echo "ERROR — SIMPLE_COMPILE_FAIL_FAST=1 build timed out; opt-out UNMEASURED."
+        exit 2
+    fi
+    ff_hits=0
+    for sym in undefined_symbol_alpha undefined_symbol_beta undefined_symbol_gamma; do
+        if /usr/bin/grep -q "$sym" "$b_log" 2>/dev/null; then
+            ff_hits=$((ff_hits + 1))
+        fi
+    done
+    if [ "$ff_hits" -lt "$a_hits" ]; then
+        echo "PASS — SIMPLE_COMPILE_FAIL_FAST=1 opt-out still narrows output"
+        echo "       ($ff_hits vs $a_hits diagnostics)."
+    else
+        echo "FAIL — SIMPLE_COMPILE_FAIL_FAST=1 reported $ff_hits diagnostics, not fewer"
+        echo "       than the default's $a_hits. The stop-at-first opt-out is broken;"
+        echo "       collect-all must remain OPTIONAL, not mandatory."
+        fail=1
+    fi
+fi
+
+# =============================================================================
+# B. INCREMENTAL REBUILD ACTUALLY REUSES OBJECTS
+# =============================================================================
+# Three modules, one stable --cache-dir. A fresh cache dir is a cold build by
+# definition, so reusing the same dir across all three builds is the whole point.
+C_DIR="$WORK_DIR/incremental"
+C_CACHE="$WORK_DIR/cache_inc"
+mkdir -p "$C_DIR"
+cat > "$C_DIR/mod_x.spl" <<'EOF'
+fn x_val() -> i64:
+    1
+
+export x_val
+EOF
+cat > "$C_DIR/mod_y.spl" <<'EOF'
+fn y_val() -> i64:
+    2
+
+export y_val
+EOF
+cat > "$C_DIR/main.spl" <<'EOF'
+use mod_x
+use mod_y
+
+fn main() -> i64:
+    print("sum={x_val() + y_val()}\n")
+    return 0
+EOF
+
+receipt_hits() {
+    # Parse the `[NATIVE] cache: N hits` receipt. Echo the number, or nothing.
+    sed -n 's/.*cache: \([0-9]*\) hits.*/\1/p' "$1" | tail -1
+}
+
+cold_log="$WORK_DIR/inc_cold.log"
+cold_rc=0
+nb "$C_DIR" "$C_DIR/main.spl" "$C_CACHE" "$WORK_DIR/bin_cold" "$cold_log" || cold_rc=$?
+if [ "$cold_rc" -eq 124 ]; then
+    echo "ERROR — cold incremental build TIMED OUT; nothing measured for part B."
+    exit 2
+fi
+if [ "$cold_rc" -ne 0 ]; then
+    echo "ERROR — cold build of a VALID 3-module program failed (rc=$cold_rc)."
+    echo "        Part B cannot be measured; this is an environment/toolchain"
+    echo "        problem, not an incremental-cache finding."
+    /usr/bin/grep -vE '^\[mir-' "$cold_log" | tail -n 15
+    exit 2
+fi
+# The binary must actually work -- a cache test over a broken build is worthless.
+cold_out="$("$WORK_DIR/bin_cold" 2>/dev/null)"
+if [ "$cold_out" != "sum=3" ]; then
+    echo "ERROR — cold build produced a binary printing '$cold_out', expected 'sum=3'."
+    echo "        Refusing to measure cache behaviour against a wrong binary."
+    exit 2
+fi
+
+# --- B1: unchanged rebuild must reuse everything -----------------------------
+warm_log="$WORK_DIR/inc_warm.log"
+warm_rc=0
+nb "$C_DIR" "$C_DIR/main.spl" "$C_CACHE" "$WORK_DIR/bin_warm" "$warm_log" || warm_rc=$?
+if [ "$warm_rc" -eq 124 ]; then
+    echo "ERROR — warm rebuild TIMED OUT; part B unmeasured."
+    exit 2
+fi
+warm_hits="$(receipt_hits "$warm_log")"
+case "$warm_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a '[NATIVE] cache: N hits' receipt from the"
+        echo "        unchanged rebuild. NOTHING was measured: the trace format"
+        echo "        changed, or the receipt stopped being emitted. Absence of a"
+        echo "        number is never evidence of reuse."
+        exit 2
+        ;;
+esac
+if [ "$warm_hits" -ge 3 ]; then
+    echo "PASS — unchanged rebuild reused $warm_hits objects (full reuse)."
+else
+    echo "FAIL — unchanged rebuild reused only $warm_hits objects. A rebuild with"
+    echo "       ZERO source changes must be a full cache hit; if this regresses,"
+    echo "       incremental build is doing nothing at all."
+    fail=1
+fi
+
+# --- B2: one-file edit must still reuse the UNTOUCHED modules ----------------
+# This is the behaviour the user actually asked for. It is KNOWN-OPEN today:
+# driver_native_sources_fingerprint (driver_aot_native_output.spl:101) hashes
+# the ENTIRE source closure into cache_scope_root, so touching any one file
+# changes the whole scope and drops reuse to 0.
+cat > "$C_DIR/mod_y.spl" <<'EOF'
+fn y_val() -> i64:
+    40
+
+export y_val
+EOF
+edit_log="$WORK_DIR/inc_edit.log"
+edit_rc=0
+nb "$C_DIR" "$C_DIR/main.spl" "$C_CACHE" "$WORK_DIR/bin_edit" "$edit_log" || edit_rc=$?
+if [ "$edit_rc" -eq 124 ]; then
+    echo "ERROR — one-file-edit rebuild TIMED OUT; B2 unmeasured."
+    exit 2
+fi
+if [ "$edit_rc" -ne 0 ]; then
+    echo "ERROR — rebuild after a one-line edit FAILED (rc=$edit_rc); B2 unmeasured."
+    /usr/bin/grep -vE '^\[mir-' "$edit_log" | tail -n 15
+    exit 2
+fi
+
+# SOUNDNESS FIRST, speed second. A cache that reuses a stale object produces a
+# silently WRONG binary, which is far worse than a slow build. This assertion is
+# unconditional and must NEVER be relaxed to make a reuse number look better.
+edit_out="$("$WORK_DIR/bin_edit" 2>/dev/null)"
+if [ "$edit_out" = "sum=42" ]; then
+    echo "PASS — after editing one module, the rebuilt binary reflects the edit"
+    echo "       (sum=42). No stale object was served."
+else
+    echo "FAIL — STALE CACHE: after editing mod_y (2 -> 40) the binary printed"
+    echo "       '$edit_out', expected 'sum=42'. A reused object is serving stale"
+    echo "       code. This is a CORRECTNESS defect and outranks any build-speed"
+    echo "       consideration -- do not 'fix' it by relaxing this check."
+    fail=1
+fi
+
+edit_hits="$(receipt_hits "$edit_log")"
+case "$edit_hits" in
+    ''|*[!0-9]*)
+        echo "ERROR — could not parse a cache receipt from the one-file-edit rebuild;"
+        echo "        B2 reuse count UNMEASURED (the KNOWN-OPEN verdict below would"
+        echo "        otherwise be asserted against an absent number)."
+        exit 2
+        ;;
+esac
+
+if [ "$edit_hits" -gt 0 ]; then
+    # Hard-fail on purpose: this branch means the defect NARROWED, which is the
+    # outcome we want -- but a human must confirm the new key is SOUND (per-module
+    # interface hashing) rather than a dropped closure hash that will serve stale
+    # objects. Exiting 0 here would silently absorb both the fix and a regression.
+    echo "FAIL (promote-me) — a one-file edit reused $edit_hits object(s); previously 0."
+    echo "       The whole-closure fingerprint granularity appears to have been"
+    echo "       narrowed. VERIFY THE NEW KEY IS SOUND (per-module dependency-"
+    echo "       interface hashing, not merely a dropped closure hash) and then"
+    echo "       rewrite this branch into a hard assertion on the expected count."
+    echo "       Note the stale-output check above already passed, which is"
+    echo "       necessary but NOT sufficient -- it only proves this one fixture."
+    fail=1
+else
+    echo "KNOWN-OPEN — a one-file edit reused 0 objects. CORRECT behaviour is to"
+    echo "             reuse every module the edit did not affect (here: 2 of 3)."
+    echo "             Cause: driver_native_sources_fingerprint"
+    echo "             (driver_aot_native_output.spl:101) hashes the ENTIRE source"
+    echo "             closure into cache_scope_root, so any edit invalidates all."
+    echo "             Sound but useless: it always misses rather than serving"
+    echo "             stale. Tracked in"
+    echo "             doc/03_plan/compiler/bootstrap/stage3_native_cache_incrementality_2026-08-07.md"
+    echo "             (Layer 2)."
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "FAIL — build-default fences: at least one behaviour regressed (see above)"
+    exit 1
+fi
+
+echo "PASS — build defaults verified: collect-all is default and reversible; cache reuse is sound"
+exit 0

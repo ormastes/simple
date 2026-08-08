@@ -1,6 +1,13 @@
 # Modern SSpec Typed Evidence
 
-**Status:** Wave-0 contract landed 2026-08-08. Later lanes are design-only — see §8.
+**Status:** Wave-0 contract landed 2026-08-08, and Wave-1/Wave-2 lanes E2, E2b,
+E3, E4, E6, E7a, E7b landed the same day — the shared contract, every format
+adapter, action-trace, manual rendering, and the spec-to-spipe extension
+namespace all exist and are unit-covered. What has **not** landed: the
+`spipe_docgen` evidence loader/wiring (E5), the `sspec-maintain evidence`
+commands, any live capture provider, and the three reference example manuals
+(E8) — see §8. See §9a for four open red-team findings that gate treating the
+comparator as fully trustworthy.
 **Design:** `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`
 **Plan:** `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`
 **Research:** `doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md`
@@ -29,8 +36,12 @@ EvidenceRequest → provider → RawArtifact → format adapter
 |---|---|
 | Shared records, selectors, oracle modes, manifest, manual blocks | `src/lib/common/spec/evidence/model.spl` |
 | Fail-closed evaluation and manual projection | `src/lib/common/spec/evidence/evidence_comparator.spl` |
-| Executable behaviour of both | `test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl` |
-| Providers, format adapters, docgen wiring | not yet implemented — §8 |
+| Generic Markdown rendering of `ManualBlock`s | `src/lib/common/spec/evidence/manual_render.spl` |
+| GUI/TUI action-trace capture model | `src/lib/common/spec/evidence/action_trace.spl` |
+| Format adapters (TUI grid, text protocol, binary layout, 2D/3D scene, simulation/stats) | `src/lib/common/spec/evidence/format/*.spl` — see §7a |
+| Spec-to-SPipe evidence extension namespace | `src/lib/common/spec/evidence/spipe_extension.spl` |
+| Executable behaviour of all of the above | `test/01_unit/lib/common/spec/evidence/*_spec.spl` — 8 spec files, 1,862 lines, 124 `it` examples total |
+| `spipe_docgen` evidence loader + renderer wiring, live capture providers, `sspec-maintain evidence` commands, reference examples | not yet implemented — §8 |
 
 The runtime never renders Markdown. Capture and `spipe_docgen` run in separate processes
 sharing only files, so a `render_md()` on a runtime object (the shape of the superseded
