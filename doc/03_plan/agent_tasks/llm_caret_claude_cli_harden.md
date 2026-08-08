@@ -623,10 +623,36 @@ reasons, and required test cases were frozen by the design commit before the
 lanes started. The merge must preserve unrelated shared-worktree changes and
 must not claim live PTY execution until the qualified cached artifact exists.
 
-Verification note: the focused runner reported 19 outcomes while the current
-runtime spec defines 18 `it` blocks, and the mirrored manual still documents
-the old lifecycle contract. Treat that result as stale-runner/source identity
-evidence, not as an assertion-level verdict. Before a re-run, record the
-resolved spec path/hash and regenerate the mirrored manual from the qualified
-runtime; do not mark this lane executable-PASS until both identify the new
-`begin_tui/end_tui` contract.
+Verification note: the focused runtime spec defines 19 top-level `it` blocks
+and the runner reported 19 outcomes, so its count is source-consistent. The
+mirrored manual is nevertheless stale: it reports 22 conceptual scenarios and
+the old primitive lifecycle API. A direct run under the qualified macOS arm64
+self-hosted runtime instead fails before all examples: its parser rejects the
+canonical `describe "...":`/`it "...":` SSpec grammar. See
+`doc/08_tracking/bug/self_hosted_sspec_describe_colon_parser_2026-08-08.md`.
+Before an execution claim, repair that parser divergence, record the resolved
+spec path/hash, then regenerate the mirrored manual from the repaired qualified
+runtime. Do not mark this lane executable-PASS until the manual identifies the
+new `begin_tui/end_tui` contract and all assertions pass.
+
+### Next executable CLI-to-TUI proof: offline Claude cached wrapper
+
+Current parser source already supports canonical SSpec colon blocks through
+`try_parse_bare_ident_string_call` and `parse_trailing_colon_block_arg`; the
+existing `parse001_spec_files_spec.spl` covers that grammar. The deployed
+self-hosted artifact rejecting it is out of provenance and must be rebuilt
+before any execution claim. While that rebuild is pending, the next
+non-overlapping test slice is frozen as follows:
+
+| Owner | Frozen change |
+|---|---|
+| `scripts/check/check-llm-caret-tui-pty.shs` | Extend `run_pty_case(label, ui_mode, input_kind, geometry)` to `run_pty_case(label, ui_mode, input_kind, geometry, provider_mode)`. Existing calls pass `dummy`; `offline-claude` passes `fixture-claude`. `fixture-success` feeds `fixture-success` then `/exit`. |
+| Wrapper launch | `fixture-claude` uses fixed argv only: cached `bin/caret --config test/fixtures/llm_caret/mock_claude_cli.sdn --provider claude_cli --model sonnet --system "Be concise" --tui`; no shell evaluation, network, credentials, or provider fallback. |
+| Checker oracle | Require transcript `You: fixture-success` and `Assistant: fixture-ok`; reject `sk-ant-fixture-secret` and `unsupported --max-tokens`; retain cached-artifact provenance, exit, ANSI, raw cleanup, and isolated-session gates. |
+| `llm_caret_tui_pty_spec.spl` | Add one modern scenario with steps `Open the cached caret TUI with offline Claude CLI fixture`, `Send a prompt through the visible input`, and `Check transcript and status`; assert the `offline-claude` evidence reports PASS. |
+| Manual/merge owner | Regenerate the mirrored manual only with the rebuilt qualified runtime; report this scenario as designed/static until then. |
+
+The checker and SSpec lanes own distinct files. The merge owner must not alter
+the existing hidden/default/enabled/disabled cases: this one scenario adds
+offline end-to-end Claude argv, subprocess, JSON response, and transcript proof
+adjacent to their hidden-command coverage.

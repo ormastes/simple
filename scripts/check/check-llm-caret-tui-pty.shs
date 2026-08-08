@@ -17,7 +17,7 @@ FAILURES=0
 CASE_TIMEOUT_SECONDS=20
 
 usage() {
-    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|raw-failure|all>"
+    printf '%s\n' "usage: sh scripts/check/check-llm-caret-tui-pty.shs --case <prerequisites|routing|lifecycle|editing|hidden|promptless|offline-claude|raw-failure|all>"
 }
 
 fail_prerequisite() {
@@ -369,6 +369,9 @@ write_input() {
         promptless-bootstrap)
             printf '/bootstrap\r/exit\r' >"${input_path}"
             ;;
+        fixture-success)
+            printf 'fixture-success\r/exit\r' >"${input_path}"
+            ;;
         *)
             return 1
             ;;
@@ -492,8 +495,29 @@ printf '%s\n' "pty_baseline=${baseline}"
 printf '%s\n' "pty_geometry_before=${geometry_before}"
 
 if [ "${CARET_UI_MODE}" = "forced" ]; then
-    "${CARET_WRAPPER}" --provider dummy --tui
+    case "${CARET_PROVIDER_MODE}" in
+        dummy)
+            "${CARET_WRAPPER}" --provider dummy --tui
+            ;;
+        fixture-claude)
+            case "${CARET_FIXTURE_CONFIG}" in
+                "${CARET_REPO_ROOT}"/*)
+                    ;;
+                *)
+                    exit 90
+                    ;;
+            esac
+            [ -f "${CARET_FIXTURE_CONFIG}" ] || exit 90
+            [ -x "${CARET_FIXTURE_CLI}" ] || exit 90
+            cd "${CARET_REPO_ROOT}" || exit 90
+            "${CARET_WRAPPER}" --config "${CARET_FIXTURE_CONFIG}" --provider claude_cli --model sonnet --system "Be concise" --tui
+            ;;
+        *)
+            exit 90
+            ;;
+    esac
 else
+    [ "${CARET_PROVIDER_MODE}" = "dummy" ] || exit 90
     "${CARET_WRAPPER}" --provider dummy
 fi
 caret_status=$?
@@ -635,6 +659,7 @@ run_pty_case() {
     ui_mode=$2
     input_kind=$3
     geometry=$4
+    provider_mode=$5
     case_dir="${ARTIFACT_ROOT}/${label}"
     input="${case_dir}/input.bin"
     capture="${case_dir}/typescript.txt"
@@ -673,6 +698,10 @@ run_pty_case() {
     CARET_WRAPPER="${CARET_WRAPPER}"
     CARET_UI_MODE="${ui_mode}"
     CARET_GEOMETRY="${geometry}"
+    CARET_PROVIDER_MODE="${provider_mode}"
+    CARET_REPO_ROOT="${REPO_ROOT}"
+    CARET_FIXTURE_CONFIG="${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.sdn"
+    CARET_FIXTURE_CLI="${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.shs"
     HOME="${home_dir}"
     TERM=xterm-256color
     case "${input_kind}" in
@@ -688,7 +717,8 @@ run_pty_case() {
             unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
             ;;
     esac
-    export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY HOME TERM
+    export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY CARET_PROVIDER_MODE
+    export CARET_REPO_ROOT CARET_FIXTURE_CONFIG CARET_FIXTURE_CLI HOME TERM
     invoke_script "${capture}" "${runner}" "${input}" \
         "${driver_stdout}" "${driver_stderr}" "${timeout_marker}"
     status=$?
@@ -750,6 +780,20 @@ run_pty_case() {
     elif [ "${input_kind}" = "utf8-edit" ] &&
          ! grep -a -F "You: a界c!" "${capture}" >/dev/null 2>&1; then
         record_failure "${label}" "utf8_edited_submission_missing" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         ! grep -a -F "You: fixture-success" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_user_transcript_missing" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         ! grep -a -F "Assistant: fixture-ok" "${capture}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_assistant_transcript_missing" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         grep -a -F "sk-ant-fixture-secret" \
+             "${capture}" "${driver_stdout}" "${driver_stderr}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_secret_leaked" "${case_dir}"
+    elif [ "${provider_mode}" = "fixture-claude" ] &&
+         grep -a -F "unsupported --max-tokens" \
+             "${capture}" "${driver_stdout}" "${driver_stderr}" >/dev/null 2>&1; then
+        record_failure "${label}" "offline_claude_removed_flag_reached" "${case_dir}"
     elif { [ "${input_kind}" = "hidden-default" ] ||
            [ "${input_kind}" = "hidden-false" ]; } &&
          ! grep -a -F "system: Unknown command: /debug-tool-call (try /help)" \
@@ -905,41 +949,41 @@ run_raw_failure_case() {
 
 run_routing() {
     run_piped_auto_case
-    run_pty_case "forced-tui-route" "forced" "exit" ""
-    run_pty_case "auto-tty-route" "auto" "exit" ""
+    run_pty_case "forced-tui-route" "forced" "exit" "" "dummy"
+    run_pty_case "auto-tty-route" "auto" "exit" "" "dummy"
 }
 
 run_lifecycle() {
-    run_pty_case "restore-after-slash-exit" "forced" "exit" ""
-    run_pty_case "restore-after-ctrl-c" "forced" "ctrl-c" ""
-    run_pty_case "restore-after-ctrl-d" "forced" "ctrl-d" ""
-    run_pty_case "restore-after-eof" "forced" "eof" ""
+    run_pty_case "restore-after-slash-exit" "forced" "exit" "" "dummy"
+    run_pty_case "restore-after-ctrl-c" "forced" "ctrl-c" "" "dummy"
+    run_pty_case "restore-after-ctrl-d" "forced" "ctrl-d" "" "dummy"
+    run_pty_case "restore-after-eof" "forced" "eof" "" "dummy"
 }
 
 run_editing() {
-    run_pty_case "utf8-edit-navigation" "forced" "utf8-edit" ""
-    run_pty_case "small-terminal-geometry" "forced" "exit" "12x50"
+    run_pty_case "utf8-edit-navigation" "forced" "utf8-edit" "" "dummy"
+    run_pty_case "small-terminal-geometry" "forced" "exit" "12x50" "dummy"
 }
 
 run_hidden() {
-    run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80"
-    run_pty_case "hidden-false-rejected" "forced" "hidden-false" "12x80"
-    run_pty_case "hidden-enabled-executed" "forced" "hidden-enabled" "12x80"
-    run_pty_case "hidden-disabled-rejected" "forced" "hidden-disabled" "12x80"
+    run_pty_case "hidden-default-rejected" "forced" "hidden-default" "12x80" "dummy"
+    run_pty_case "hidden-false-rejected" "forced" "hidden-false" "12x80" "dummy"
+    run_pty_case "hidden-enabled-executed" "forced" "hidden-enabled" "12x80" "dummy"
+    run_pty_case "hidden-disabled-rejected" "forced" "hidden-disabled" "12x80" "dummy"
     run_pty_case \
-        "hidden-alias-default-rejected" "forced" "hidden-alias-default" "12x80"
+        "hidden-alias-default-rejected" "forced" "hidden-alias-default" "12x80" "dummy"
     run_pty_case \
-        "hidden-alias-enabled-executed" "forced" "hidden-alias-enabled" "12x80"
+        "hidden-alias-enabled-executed" "forced" "hidden-alias-enabled" "12x80" "dummy"
     run_pty_case \
-        "hidden-disabled-alias-rejected" "forced" "hidden-disabled-alias" "12x80"
+        "hidden-disabled-alias-rejected" "forced" "hidden-disabled-alias" "12x80" "dummy"
     unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
 }
 
 run_promptless() {
-    run_pty_case "promptless-compact" "forced" "promptless-compact" "12x80"
-    run_pty_case "promptless-summarize" "forced" "promptless-summarize" "12x80"
-    run_pty_case "promptless-init" "forced" "promptless-init" "12x80"
-    run_pty_case "promptless-bootstrap" "forced" "promptless-bootstrap" "12x80"
+    run_pty_case "promptless-compact" "forced" "promptless-compact" "12x80" "dummy"
+    run_pty_case "promptless-summarize" "forced" "promptless-summarize" "12x80" "dummy"
+    run_pty_case "promptless-init" "forced" "promptless-init" "12x80" "dummy"
+    run_pty_case "promptless-bootstrap" "forced" "promptless-bootstrap" "12x80" "dummy"
     run_plain_promptless_case \
         "plain-promptless-compact" "promptless-compact"
     run_plain_promptless_case \
@@ -948,6 +992,11 @@ run_promptless() {
         "plain-promptless-init" "promptless-init"
     run_plain_promptless_case \
         "plain-promptless-bootstrap" "promptless-bootstrap"
+}
+
+run_offline_claude() {
+    run_pty_case "offline-claude" "forced" "fixture-success" "12x80" \
+        "fixture-claude"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -998,6 +1047,9 @@ case "${CASE_NAME}" in
     promptless)
         run_promptless
         ;;
+    offline-claude)
+        run_offline_claude
+        ;;
     raw-failure)
         run_raw_failure_case
         ;;
@@ -1007,6 +1059,7 @@ case "${CASE_NAME}" in
         run_editing
         run_hidden
         run_promptless
+        run_offline_claude
         run_raw_failure_case
         ;;
     *)
