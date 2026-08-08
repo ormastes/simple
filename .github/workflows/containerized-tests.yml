@@ -298,6 +298,94 @@ jobs:
           test ${{ matrix.path }} --list --no-db --no-cover-check
 
   # ============================================================================
+  # render_2d coverage-tooling prerequisite gate (Wave-3 C1-C3 fail-closed
+  # gate, doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md).
+  # Needs a real `bin/simple` (spl-coverage, --emit-mir, test --coverage) but
+  # no docker/network/GPU deps beyond that binary, so this job builds the
+  # Rust bootstrap seed directly (same lightweight path as the Core + MCP
+  # Guard job in core-mcp-dev-pipeline.yml) rather than a full self-host
+  # bootstrap or the deps-only test-isolation container.
+  # ============================================================================
+  render2d-coverage-gate:
+    name: render_2d Coverage Prerequisite Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src/compiler_rust/target
+        key: render2d-coverage-gate-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+        restore-keys: |
+          render2d-coverage-gate-${{ runner.os }}-
+
+    - name: Build bootstrap runtime
+      working-directory: src/compiler_rust
+      run: cargo build --profile bootstrap -p simple-driver
+
+    - name: Deploy bin/simple
+      run: |
+        mkdir -p bin
+        ln -sfn "$(pwd)/src/compiler_rust/target/bootstrap/simple" bin/simple
+        bin/simple --version
+
+    - name: render_2d coverage prerequisite gate
+      run: sh scripts/check/check-render2d-coverage.shs
+
+  # ============================================================================
+  # render_2d container suite (Unit B3, doc/03_plan/ui/testing/
+  # render_2d_vulkan_functional_coverage_plan_2026-08-07.md). Runs the
+  # engine2d/render_opt/compositor/virtio-gpu 2D spec list inside the
+  # simple-test-isolation:local image the script builds/reuses itself.
+  # One spec (engine2d_render_evidence_spec.spl) is a pre-approved known-red
+  # (doc/08_tracking/bug/engine2d_render_evidence_spec_missing_module_2026-08-08.md);
+  # the script only fails the job on an UNEXPECTED failure.
+  # ============================================================================
+  render2d-container-suite:
+    name: render_2d Container Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          src/compiler_rust/target
+        key: render2d-container-suite-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+        restore-keys: |
+          render2d-container-suite-${{ runner.os }}-
+
+    - name: Build and deploy bin/release/x86_64-unknown-linux-gnu/simple
+      working-directory: src/compiler_rust
+      run: cargo build --release -p simple-driver
+
+    - name: Deploy release binary
+      run: |
+        mkdir -p bin/release/x86_64-unknown-linux-gnu
+        cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple
+        bin/release/x86_64-unknown-linux-gnu/simple --version
+
+    - name: render_2d container suite
+      run: sh scripts/check/check-render2d-container-suite.shs
+
+  # ============================================================================
   # Resource Limit Verification
   # ============================================================================
   resource-limits:
