@@ -230,17 +230,27 @@ class Environment:
     Scoped variable storage.
     Supports push/pop scope operations.
     """
-    scopes: [[Dict<text, Value>]]
+    # NOTE: this is `[Dict<text, Value>]` -- a list of scopes -- NOT
+    # `[[Dict<text, Value>]]`. The doubly-nested form made `self.scopes.last()`
+    # yield an Array, which is a VALUE type, so `current_scope[name] = value`
+    # mutated a temporary and every `define` was a silent no-op. (A Dict is
+    # reference-typed, so the same code is only broken because of the extra
+    # nesting.) Mirrors backend/env.spl's Environment, the live equivalent.
+    scopes: [Dict<text, Value>]
 
     static fn create() -> Environment:
         Environment(scopes: [{}])
 
     me define(name: text, value: Value):
         """Define variable in current scope."""
-        val current_scope = self.scopes.last()
-        current_scope[name] = value
+        # Index-assign into the stored scope rather than mutating the result of
+        # `.last()`: the write must land in `self.scopes`, and relying on
+        # `.last()` returning a live reference is an invariant this repo does
+        # not hold under native codegen.
+        val last_idx = self.scopes.len() - 1
+        self.scopes[last_idx][name] = value
 
-    fn lookup(name: text) -> text:
+    fn lookup(name: text) -> Result<Value, BackendError>:
         """Lookup variable in scopes (innermost to outermost)."""
         # Iterate innermost-to-outermost by index: `reverse` MUTATES the
         # receiver, and Dict.get on struct/enum-valued dicts is corrupt under
@@ -251,7 +261,7 @@ class Environment:
             if scope.contains_key(name):
                 return Ok(scope[name])
             i = i - 1
-        Err(BackendError.RuntimeError("undefined variable: {name}", nil))
+        Err(BackendError.runtime_error("undefined variable: {name}", nil))
 
     me push_scope():
         """Enter new scope."""
@@ -259,5 +269,9 @@ class Environment:
 
     me pop_scope():
         """Exit current scope."""
-        if self.scopes.length > 1:
+        # `.len()`, not `.length`: `.length` on an array receiver is a FIELD
+        # access with no HIR lowering ("cannot infer field type ... struct
+        # 'Array' field 'length'"), which silently drops the whole enclosing
+        # module out of JIT into the interpreter (~100-1000x slower).
+        if self.scopes.len() > 1:
             self.scopes = self.scopes.slice(0, -1)
