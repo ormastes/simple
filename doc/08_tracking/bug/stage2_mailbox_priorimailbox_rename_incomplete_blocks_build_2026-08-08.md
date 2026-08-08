@@ -1,5 +1,49 @@
 # Stage-2 build fails: incomplete `Mailbox` -> `PriorityMailbox` rename leaves a dangling symbol (2026-08-08)
 
+## RESOLVED (2026-08-08)
+
+Landed the exact fix shape validated by this doc's own "Auxiliary finding"
+scratch probe:
+
+- `src/lib/nogc_async_mut/actor_scheduler.spl`: `use mailbox_actor.{Mailbox,
+  ...}` -> `{PriorityMailbox, ...}` (line 7); `mailbox: Mailbox` field type
+  -> `mailbox: PriorityMailbox` (line 209); `Mailbox.new(MailboxConfig.default())`
+  constructor -> `PriorityMailbox.new(MailboxConfig.default())` (line 290).
+  Three references, matching the doc's root-cause enumeration exactly.
+- `src/lib/nogc_async_mut/__init__.spl`: removed the resurrected
+  `# Re-exported from mailbox.spl` block (`export Mailbox` +
+  `export mailbox_new, mailbox_send, mailbox_receive, mailbox_try_receive`
+  + `export mailbox_is_empty, mailbox_is_full, mailbox_size, mailbox_drain`)
+  that `a019ba19aa6` had re-added after `983058c5ff39` deleted it. No
+  importer of a root-level `Mailbox`/`mailbox_*` re-export was found
+  (`983058c5ff39` had already established this file/these functions no
+  longer exist), so removal — not correction — was the right call.
+
+Verified with a fresh worktree (`/home/ormastes/dev/simple-mbxfix-v1`,
+`git worktree add --detach origin/main`, distinct from the prior agent's
+`/home/ormastes/dev/simple-s3rv2` scratch probe) and the same
+`build_stage2.sh` invocation this doc used, re-pointed at the new worktree:
+
+```
+STAGE2_EXIT=0
+Linked: /home/ormastes/dev/simple-mbxfix-v1/build/cyc/MBX1/stage2-simple (125109 KB) via clang++
+Build complete: 794 compiled, 0 cached, 0 failed
+  Time: 189.5s compile + 100.4s link = 289.9s total
+```
+
+Family sweep: `git grep -n '\bMailbox\b' -- src/lib/nogc_async_mut` at the
+pre-fix tree showed no other bare `Mailbox` reference tied to
+`mailbox_actor.spl`'s `PriorityMailbox`. The other `Mailbox` declarations
+(`actors/actor.spl` `struct Mailbox`, `actors/__init__.spl`'s
+`use std.actors.mailbox.{Mailbox, ...}`) are a distinct, still-live
+`actors/` package with its own `struct Mailbox` — unrelated to this rename
+and correctly left untouched, matching this doc's own "Scope check"
+section.
+
+Out of scope, left open as filed: the Stage-3 `method=len` monomorphize
+SIGSEGV documented below under "Auxiliary finding" is a separate,
+unresolved bug and was not chased here.
+
 ## Task context
 
 Re-verify the Stage-2/Stage-3 self-host replay against current `origin/main`
