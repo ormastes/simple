@@ -194,6 +194,19 @@ before the typed model can land, which is exactly the kind of big-bang
 migration that stalls and leaves the codebase on two incompatible evidence
 models indefinitely.
 
+**Status: LANDED** 2026-08-08 — `src/lib/common/spec/evidence/legacy_facade.spl`
+converts `ScenarioEvidenceArtifact`/`ScenarioCheckerEvidence` into
+`CanonicalEvidence`/`ComparisonResult`/`ManualBlock` without modifying the
+frozen old API, reusing `scenario_evidence_manual_summary` so old and new
+captures render through the same `manual_render.render_block`. Redaction is
+preserved losslessly through the conversion. 6 examples
+(`test/01_unit/lib/common/spec/evidence/legacy_facade_spec.spl`), with a
+sabotage/revert proof on the redaction rule. Verified via the Rust bootstrap
+seed (`build/redeploy_runtime/simple`) as sanctioned temporary-repair
+evidence — the self-hosted binary was unavailable during landing because a
+concurrent session's Stage-3 bootstrap had removed it mid-build. Self-hosted
+re-verification is still owed once redeployed.
+
 ### Verified repository facts (2026-08-08)
 
 - `ScenarioEvidenceArtifact` is metadata-only — `kind`, `title`, `mime`,
