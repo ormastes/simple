@@ -47,11 +47,64 @@ set -u
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
+# 2026-08-08 (third amendment): TOPLEVEL PREFLIGHT.
+# `repo_root` below is the anchor for every guard this hook runs. On 2026-08-08
+# a stray `core.worktree = /tmp/simple-stage4-codex.QM6dqU` (plus `core.bare =
+# true`) in the SHARED .git/config made `git rev-parse --show-toplevel` resolve
+# to a temp worktree, so all four guards — including the tree-WIPE gate — were
+# scanning a tree nobody was pushing. It only surfaced because one guard is
+# fail-CLOSED and went loud; a content-dependent guard would have reported clean
+# on the wrong files and passed the push silently. See
+# doc/08_tracking/bug/shared_git_config_core_worktree_misdirects_prepush_guards_2026-08-08.md
+#
+# Git chdirs to the root of the working tree before invoking a hook, so in a
+# HEALTHY repo the resolved toplevel is this very directory. That holds for a
+# genuine LINKED worktree too: a linked worktree resolves its root through its
+# own gitdir/commondir pointer pair, so toplevel is that worktree's own root —
+# it differs from the main checkout, which is correct and must NOT be flagged.
+# The check is therefore "toplevel IS the invoking tree", not "toplevel is the
+# main checkout". Both sides are physically resolved (`pwd -P`) so a symlinked
+# path does not produce a spurious refusal, and an invocation from a
+# EQUALITY, NOT ANCESTRY. A first cut of this check also accepted "toplevel is
+# an ancestor of cwd", to tolerate invocation from a subdirectory. That is
+# fail-OPEN and was caught by a fixture: with `core.worktree = /tmp` and cwd
+# `/tmp/<scratch>/main`, the ancestor form PASSED the exact pathology it exists
+# to catch. Git chdirs to the working-tree root before invoking a hook, so
+# equality is the correct and strictest test here.
+is_bare=$(git rev-parse --is-bare-repository 2>/dev/null) || is_bare=""
+if [ "$is_bare" != "false" ]; then
+    echo "pre-push: git reports is-bare-repository='$is_bare' (expected 'false')" >&2
+    echo "pre-push: a stray core.bare in .git/config misdirects every guard — refusing to push blind" >&2
+    exit 1
+fi
+
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || repo_root=""
 if [ -z "$repo_root" ]; then
     echo "pre-push: cannot locate the repository toplevel — refusing to push blind" >&2
     exit 1
 fi
+
+here_phys=$(pwd -P) || here_phys=""
+root_phys=$(cd "$repo_root" 2>/dev/null && pwd -P) || root_phys=""
+if [ -z "$here_phys" ] || [ -z "$root_phys" ]; then
+    echo "pre-push: cannot physically resolve cwd ('$here_phys') or toplevel ('$root_phys')" >&2
+    echo "pre-push: refusing to push blind" >&2
+    exit 1
+fi
+case "$here_phys" in
+    "$root_phys") : ;;
+    *)
+        echo "pre-push: TOPLEVEL MISMATCH — refusing to push blind." >&2
+        echo "  git rev-parse --show-toplevel : $repo_root" >&2
+        echo "  resolved                      : $root_phys" >&2
+        echo "  invoking tree (pwd -P)        : $here_phys" >&2
+        echo "pre-push: the guards would scan a tree nobody is pushing." >&2
+        echo "pre-push: most likely a stray core.worktree in the SHARED .git/config —" >&2
+        echo "  check with: git config --show-origin --get-all core.worktree" >&2
+        echo "  and:        git config --show-origin --get-all core.bare" >&2
+        exit 1
+        ;;
+esac
 
 tree_guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
 markers_guard="$repo_root/scripts/check/check-no-conflict-markers-push.shs"

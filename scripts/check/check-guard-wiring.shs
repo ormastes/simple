@@ -240,6 +240,49 @@ if [ -z "$ROOT" ]; then
     echo "non-repo cwd while printing 'nothing to push'; this refuses instead."
     exit 2
 fi
+# TOPLEVEL PREFLIGHT (2026-08-08)
+# ROOT anchors the whole scan. On 2026-08-08 a stray `core.worktree` + `core.bare
+# = true` in the SHARED .git/config made `git rev-parse --show-toplevel` resolve
+# to an unrelated temp worktree, so every path-anchored guard — this one included
+# — scanned a tree nobody was pushing. Git chdirs to the working-tree root before
+# running a hook, and a genuine LINKED worktree resolves its own root through its
+# gitdir/commondir pointer pair, so in any healthy tree the toplevel IS the
+# invoking tree. Both sides are physically resolved so a symlinked path is not a
+# spurious refusal. The test is EQUALITY, not ancestry: an ancestry form is
+# fail-OPEN (with `core.worktree = /tmp` and cwd `/tmp/x/main` it passes the
+# exact pathology it exists to catch), and this script is documented as
+# run-from-the-repo-root anyway. See
+# doc/08_tracking/bug/shared_git_config_core_worktree_misdirects_prepush_guards_2026-08-08.md
+IS_BARE=$(git rev-parse --is-bare-repository 2>/dev/null) || IS_BARE=""
+if [ "$IS_BARE" != "false" ]; then
+    echo "check-guard-wiring: ERROR — nothing was checked: is-bare-repository="
+    echo "'$IS_BARE' (expected 'false'). A stray core.bare in .git/config"
+    echo "misdirects every path-anchored guard. Fix the config, not this script."
+    exit 2
+fi
+
+HERE_PHYS=$(pwd -P) || HERE_PHYS=""
+ROOT_PHYS=$(cd "$ROOT" 2>/dev/null && pwd -P) || ROOT_PHYS=""
+if [ -z "$HERE_PHYS" ] || [ -z "$ROOT_PHYS" ]; then
+    echo "check-guard-wiring: ERROR — nothing was checked: cannot physically"
+    echo "resolve cwd ('$HERE_PHYS') or toplevel ('$ROOT_PHYS')."
+    exit 2
+fi
+case "$HERE_PHYS" in
+    "$ROOT_PHYS") : ;;
+    *)
+        echo "check-guard-wiring: ERROR — nothing was checked: toplevel mismatch."
+        echo "  git rev-parse --show-toplevel : $ROOT"
+        echo "  resolved                      : $ROOT_PHYS"
+        echo "  invoking tree (pwd -P)        : $HERE_PHYS"
+        echo "The scan would anchor on a tree nobody is working in. Most likely a"
+        echo "stray core.worktree in the SHARED .git/config; check with:"
+        echo "  git config --show-origin --get-all core.worktree"
+        echo "  git config --show-origin --get-all core.bare"
+        exit 2
+        ;;
+esac
+
 OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
 
 WD=$(mktemp -d) || exit 2
