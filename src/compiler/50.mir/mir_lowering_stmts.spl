@@ -19,6 +19,7 @@ use compiler.frontend.resource_registry.{resource_is_declared}
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 extern fn rt_enum_discriminant(value: HirStmtKind) -> i64
 extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
+extern fn rt_env_get(key: text) -> text
 
 fn mir_stmt_symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
@@ -28,6 +29,29 @@ fn mir_stmt_local_id_value(local: LocalId) -> i64:
 
 fn mir_hir_stmt_kind_disc(k: HirStmtKind) -> i64:
     rt_enum_discriminant(k)
+
+# Rank-4 caller-of-lower_expr probe (stage3 self-host blocker, 2026-08-05:
+# doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md).
+# lower_expr itself was proven to complete cleanly on every crashing run to
+# date; the fault is in whatever CONSUMES a statement's lowering result. No
+# existing probe names the statement (discriminant + span) being lowered, so
+# a 32K-line log could not be localized to a file/line. Level-gated, default
+# OFF, zero cost on a normal run — mirrors mir_lower_garbage_debug_enabled()
+# in _MirLoweringExpr/expr_dispatch.spl.
+fn mir_stmt_caller_debug_enabled() -> bool:
+    rt_env_get("SIMPLE_MIR_STMT_CALLER_DEBUG") == "1"
+
+var mir_stmt_caller_debug_state: i64 = -1
+
+fn mir_stmt_caller_probe(tag: text, stmt: HirStmt):
+    if mir_stmt_caller_debug_state < 0:
+        if mir_stmt_caller_debug_enabled():
+            mir_stmt_caller_debug_state = 1
+        else:
+            mir_stmt_caller_debug_state = 0
+    if mir_stmt_caller_debug_state == 1 and stmt != nil:
+        val disc = mir_hir_stmt_kind_disc(stmt.kind)
+        eprint("[mir-stmt-caller] " + tag + " disc=" + disc.to_text() + " file=" + stmt.span.file + " line=" + stmt.span.line.to_text() + " col=" + stmt.span.col.to_text())
 
 fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
     """True when a HIR expression is a PLACE read -- it evaluates to the
@@ -545,7 +569,9 @@ impl MirLowering:
         if stmt != nil:
             b_save.current_span = Some(stmt.span)
         self.builder = b_save
+        mir_stmt_caller_probe("before", stmt)
         self.lower_stmt_impl(stmt)
+        mir_stmt_caller_probe("after", stmt)
         var b_restore = self.builder
         b_restore.current_span = saved_span
         self.builder = b_restore

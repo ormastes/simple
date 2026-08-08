@@ -125,3 +125,35 @@ describe "bootstrap MIR binary lowering source":
         expect(source).to_contain("b.emit_call(func_operand, [mir_operand_copy(arg_local)], MirType.unit())")
         expect(llvm_source).to_contain("declare void @rt_println(ptr)")
         expect(llvm_source).to_contain("bare_func_name == \"eprint\" or bare_func_name == \"rt_println\"")
+
+    it "qualifies enum-payload sub-pattern Wildcard arms against the HirPatternKind subject, not the parser's PatternKind":
+        # doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md
+        # Rank 2: emit_deep_subpattern / emit_enum_payload_deep match on
+        # `pat.kind` / `pats[i].kind`, whose static type is HirPatternKind, but
+        # bare `Wildcard` arms were written qualified as the PARSER's
+        # `PatternKind` -- a different enum with a different enum_id (only its
+        # low ordinals happen to coincide with HirPatternKind). A native-codegen
+        # match compares by enum_id, so a wrong-enum-qualified arm is either
+        # dead or matches by ordinal coincidence -- either way it is not the
+        # subject's own enum and must not appear in this lowering file.
+        val source = switch_operators_calls_source()
+
+        expect(source.contains("case PatternKind.Wildcard:")).to_equal(false)
+        expect(source).to_contain("case HirPatternKind.Wildcard:")
+
+    it "gates a level-gated stmt-caller probe naming the statement discriminant and span, default OFF":
+        # Rank 4: lower_expr itself always completes cleanly on the observed
+        # crashing runs (the last probe line before the fault is inside
+        # lower_expr's own span-restore tail); the fault is in whatever
+        # CONSUMES a statement's lowering result, and no existing probe names
+        # the statement (discriminant + file:line:col) being lowered around
+        # the crash. This probe closes that instrumentation gap; it must stay
+        # env-gated (default OFF) so it costs nothing on a normal build.
+        val source = mir_lowering_stmts_source()
+
+        expect(source).to_contain("fn mir_stmt_caller_debug_enabled() -> bool:")
+        expect(source).to_contain("rt_env_get(\"SIMPLE_MIR_STMT_CALLER_DEBUG\") == \"1\"")
+        expect(source).to_contain("fn mir_stmt_caller_probe(tag: text, stmt: HirStmt):")
+        expect(source).to_contain("mir_stmt_caller_probe(\"before\", stmt)")
+        expect(source).to_contain("self.lower_stmt_impl(stmt)")
+        expect(source).to_contain("mir_stmt_caller_probe(\"after\", stmt)")

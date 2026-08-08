@@ -1,7 +1,10 @@
 # Stage-3 self-host blocked by nil-receiver SIGILL in the caller of `lower_expr`
 
 Date: 2026-08-05
-Status: OPEN
+Status: PARTIALLY ADDRESSED — Rank 2 fix landed + Rank 4 diagnostic probe landed,
+NOT YET VERIFIED against a real stage3 SIGILL repro (see 2026-08-08 update at
+bottom). Full-bootstrap re-run against the crashing input is still required to
+close this out.
 Area: bootstrap / stage-3 self-host / 50.mir lowering
 
 ## Symptom
@@ -270,3 +273,80 @@ filing this (the deployed `bin/simple` is currently the Rust seed and reports
 
 Working notes for this investigation lived in a session-local scratchpad
 (`blocker10_findings.md`) which will not survive; the substance is reproduced above.
+
+## 2026-08-08 update — Rank 2 fix + Rank 4 probe landed, still UNVERIFIED by a real repro
+
+**What was done this session:**
+
+1. **Rank 2 fix applied** (cross-enum qualification): all five
+   `case PatternKind.Wildcard:` arms inside `emit_deep_subpattern` and
+   `emit_enum_payload_deep` in
+   `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (lines
+   1750, 1847, 1872, 2069, 2078 at time of fix) are now qualified as
+   `case HirPatternKind.Wildcard:`, matching the actual static type of the
+   `match` subject (`pat.kind` / `pats[i].kind`, both `HirPatternKind`). This
+   is a real correctness fix independent of whether it is THE cause of this
+   crash: a bare/qualified-wrong-enum arm inside a `match` over a different
+   enum is either dead (if the lowering compares by enum_id) or matches only
+   by ordinal coincidence (if it compares by ordinal) — both are latent
+   hazards per the doc's own Rank 2 analysis above.
+2. **Rank 4 diagnostic probe landed**: `src/compiler/50.mir/mir_lowering_stmts.spl`
+   gained `mir_stmt_caller_debug_enabled()` / `mir_stmt_caller_probe()`,
+   gated on `SIMPLE_MIR_STMT_CALLER_DEBUG=1` (default OFF, mirrors the
+   existing `SIMPLE_MIR_GARBAGE_EXPR_DEBUG` pattern), bracketing
+   `lower_stmt_impl` inside `lower_stmt` and printing
+   `[mir-stmt-caller] before/after disc=<N> file=<F> line=<L> col=<C>` for
+   every statement. This is exactly the "Instrumentation gap" the doc calls
+   out: no existing probe names the statement/module being lowered, so a
+   32K-line log could not be localized.
+3. **Regression spec added**: `test/01_unit/compiler/mir/bootstrap_binary_lowering_source_spec.spl`
+   gained two source-assertion `it` blocks — one asserting no
+   `PatternKind.Wildcard` text remains in `switch_operators_calls.spl` and
+   `HirPatternKind.Wildcard` does, one asserting the probe function/gate/
+   call-sites exist. Both were RED before the fix (verified by reverting the
+   two source files to their pre-fix content and re-running:
+   `10 examples, 8 failures` including both new tests) and GREEN after
+   (`10 examples, 6 failures`, the remaining 6 failures pre-existing and
+   unrelated — see below).
+
+**What could NOT be done, and why — be honest about this:**
+
+- **No local Rust seed exists** (`src/compiler_rust/target/bootstrap/simple`
+  is absent) and no in-progress `stage3` bootstrap output directory was found
+  under `build/`. Reproducing the actual SIGILL requires a full
+  `--full-bootstrap` run (cargo build the seed, build stage2, build stage3),
+  which is multi-hour and — per `.claude/rules/bootstrap.md`'s current KNOWN
+  BLOCKER note — stage3 was *already* failing earlier, at an unrelated
+  `unresolved type: ByteOrder` error, before ever reaching the MIR-lowering
+  region this bug is about. That earlier blocker is explicitly assigned to a
+  different parallel agent per this task's scope constraints, so a from-
+  scratch repro here would either (a) never reach this bug's failure site, or
+  (b) collide with that agent's concurrent edits to the same bootstrap
+  pipeline.
+- **Consequently the Rank 2 fix and Rank 4 probe are landed but UNVERIFIED
+  against the actual SIGILL.** The rename experiment's own "counter-evidence"
+  section above (Rank 1) already showed that plausible-sounding fixes in this
+  file can be no-ops once actually measured — the same caution applies here.
+  This entry explicitly does NOT claim the SIGILL is fixed.
+- **Shared-working-copy clobber during this session**: partway through, a
+  concurrent session's reconcile silently reverted both source edits in the
+  live working copy (and removed `.jj` entirely — `jj status` started
+  reporting "There is no jj repo in \".\""). Edits were reapplied from a
+  local backup and committed via `git` directly instead of `jj` because the
+  jj working-copy state was gone. This is the same class of hazard already
+  catalogued in `.claude/memory/ref_*` shared-WC entries; flagging it here
+  since it means any interrupted lane in this file should re-diff against the
+  committed blob, not trust an in-progress edit.
+
+**Next step for whoever picks this up:** once a stage3 build can actually
+reach the crashing region again (after the ByteOrder/Effect-facade blockers
+ahead of it are cleared), re-run with
+`SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` and read the
+`[mir-stmt-caller]` lines immediately preceding the fault — that names the
+exact statement/file/line for the first time in this investigation.
+
+**Status: NOT RESOLVED.** Two concrete, low-risk changes landed (one
+correctness fix, one instrumentation gap closed) with a passing regression
+spec, but the SIGILL itself remains unreproduced and unverified this session.
+Treat prior POSTPONED status as superseded by this more specific one, not as
+"fixed."
