@@ -11,6 +11,7 @@ use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visib
 use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_prefix_from_path};
 use crate::codegen::Codegen;
 use crate::hir::Lowerer;
+use crate::hir::dynamic_module_initializer_name;
 use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
@@ -31,6 +32,42 @@ fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), Strin
             Ok(existing) if existing == object => Ok(()),
             _ => Err(format!("persist cache object: {}", e.error)),
         },
+    }
+}
+
+fn assign_native_dynamic_initializer_identity(hir: &mut crate::hir::HirModule, module_prefix: &str) {
+    let empty_identity_name = dynamic_module_initializer_name("");
+    let stable_name = dynamic_module_initializer_name(module_prefix);
+    hir.name = Some(module_prefix.to_string());
+    for function in &mut hir.functions {
+        if function.name == "__module_init_dynamic" || function.name == empty_identity_name {
+            function.name = stable_name.clone();
+            function.module_path = module_prefix.to_string();
+        }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_initializer_identity_tests {
+    use super::*;
+
+    #[test]
+    fn empty_path_modules_receive_distinct_stable_native_identities() {
+        let mut first = crate::hir::HirModule::new();
+        let mut second = crate::hir::HirModule::new();
+        assign_native_dynamic_initializer_identity(&mut first, "src__alpha__one");
+        assign_native_dynamic_initializer_identity(&mut second, "src__beta__two");
+
+        assert_eq!(first.name.as_deref(), Some("src__alpha__one"));
+        assert_eq!(second.name.as_deref(), Some("src__beta__two"));
+        assert_ne!(
+            dynamic_module_initializer_name(first.name.as_deref().unwrap()),
+            dynamic_module_initializer_name(second.name.as_deref().unwrap())
+        );
+        let source = include_str!("compiler.rs");
+        let production = source.split("#[cfg(test)]").next().expect("production source");
+        assert!(production.contains("function.name == empty_identity_name"));
+        assert!(production.contains("function.module_path = module_prefix.to_string()"));
     }
 }
 
@@ -531,6 +568,8 @@ pub(crate) fn compile_file_to_object(
     let mut hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
+    let module_prefix = module_prefix_from_path(file_path, source_root);
+    assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
     let pipeline =
         crate::pipeline::CompilerPipeline::new().map_err(|e| format!("{}: pipeline: {e}", file_path.display()))?;
     pipeline.rewrite_hir_simd_loops(&mut hir);
@@ -538,7 +577,6 @@ pub(crate) fn compile_file_to_object(
     // MIR
     let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
         .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
-    let module_prefix = module_prefix_from_path(file_path, source_root);
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,

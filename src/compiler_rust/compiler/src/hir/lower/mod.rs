@@ -17,6 +17,7 @@ pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
 pub use module_lowering::module_with_hoisted_defs;
+pub(crate) use module_lowering::dynamic_module_initializer_name;
 
 use super::lifetime::LifetimeViolation;
 use super::types::HirModule;

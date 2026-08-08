@@ -1,0 +1,32 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "bootstrap dynamic initializer symbol contract":
+    it "gives every flattened bootstrap module a distinct dynamic initializer symbol":
+        val symbols = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/class_def.spl") ?? ""
+
+        expect(symbols).to_contain("if name == \"__module_init_dynamic\":")
+        expect(symbols).to_contain("if self.current_bootstrap_module >= 0:")
+        expect(symbols).to_contain("return \"__module_init_bootstrap_")
+        expect(symbols).to_contain("current_bootstrap_module")
+        expect(symbols).to_contain("_dynamic\"")
+        expect(symbols).to_contain(
+            "return \"__module_init_\" + self.builder.module_name.replace(\".\", \"_\") + \"_dynamic\"")
+        # This branch must precede no_mangle: bootstrap object emission uses
+        # no-mangle symbols, and Mach-O rejects a duplicate legacy name.
+        val dynamic_init = symbols.find("if name == \"__module_init_dynamic\":")
+        val no_mangle = symbols.find("if self.no_mangle:")
+        expect(dynamic_init).to_be_greater_than(-1)
+        expect(no_mangle).to_be_greater_than(dynamic_init)
+
+    it "routes bootstrap signatures and bodies through the symbol mapper":
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
+
+        expect(driver).to_contain(
+            "translator.current_bootstrap_module = bootstrap_mir_function_module_at(signature_idx)\n        val emitted_signature_name = if signature_name == \"main\": \"__simple_main\" else: translator.llvm_function_symbol_name(signature_name)")
+        expect(driver).to_contain(
+            "translator.current_bootstrap_module = bootstrap_mir_function_module_at(idx)\n        if bootstrap_trace_enabled():")
+        expect(driver).to_contain(
+            "val emitted_name = if name == \"main\": \"__simple_main\" else: translator.llvm_function_symbol_name(name)")
+        expect(driver).to_not_contain(
+            "if name == \"__module_init_dynamic\": \"__module_init_dynamic\"")
