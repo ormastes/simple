@@ -1,6 +1,8 @@
 # TODO — Migrate remaining untyped-evidence candidates onto `untyped_capture.spl`
 
-- Status: open, bounded, in progress. 7 of 1119 candidates migrated as of 2026-08-08.
+- Status: open, bounded, in progress. 24 of 1119 candidates migrated ("yes"),
+  64 explicitly rejected with recorded reasons ("reject: ..."), as of
+  2026-08-08 (batches 1-5 landed; batch 6 in flight).
 - Owner module: `src/lib/common/spec/evidence/untyped_capture.spl` (landed).
 - Design: `doc/05_design/infra/sspec/untyped_evidence_migration_design.md`.
 - Guide/worked examples: `doc/07_guide/infra/sspec_legacy_migration.md`.
