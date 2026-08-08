@@ -437,3 +437,45 @@ remains exported, and its name does not advertise that it is
 cryptographically unsuitable — a footgun for the next person who needs an IV.
 A deprecation banner has been added to it directing callers to the OS CSPRNG;
 removing it outright is a separate API-surface decision.
+
+## Addendum 2026-08-08: why the local PKCS#7 was not shared, and a correction
+
+Two points, both raised by review of the fix.
+
+**1. `src/lib/common/aes/padding.spl` `pkcs7_unpad` is not merely fail-open —
+it is non-functional.** Measured: it returns its input unchanged for VALID
+padding as well as invalid, so it never strips anything and a caller cannot
+distinguish success from rejection. Filed as
+`doc/08_tracking/bug/list_param_helper_functions_miscompile_2026-08-08.md`.
+The local `_pkcs7_pad_16`/`_pkcs7_unpad_16` in `modes.spl` were written for
+dialect reasons (`padding.spl` uses the old `list`/`.length()`/`.append()`
+dialect; `modes.spl` uses `[i64]`/`.len()`/`.push()`); this measurement
+independently confirms sharing the implementation would have been wrong. It
+was NOT fixed in place because its source reads correct and a verbatim local
+copy reproduces the failure, so the source-vs-engine question must be settled
+first — editing correct-looking source to route around a possible miscompile
+is a cover-up fix.
+
+**2. Correction to the `cipher.spl` finding recorded above and in
+`e51dcaaf8ba`.** The specific hex constants quoted for `cipher.spl`'s wrong
+output were produced by a probe-script hex helper that was itself
+miscompiling; they are wrong. Re-measured by comparing raw `list` values with
+no formatter, the conclusion holds and sharpens: `expand_key` yields a correct
+round key 0 but a wrong round key 1, so the whole scalar AES family runs on a
+garbage schedule. Corrected constants and the revised root-cause locus are in
+`doc/08_tracking/bug/aes_cipher_spl_block_functions_fail_fips197_c1_2026-08-08.md`.
+
+**This does not affect the CBC fix's verification.** The KAT specs landed in
+`23839a41331` compare raw lists via `expect(...).to_equal(...)` with no
+formatting helper anywhere in the path, which is why they produced exact
+FIPS-197 C.1/C.3 and NIST SP 800-38A F.2.1/F.2.5 matches and why the sabotage
+run turned them red. 18/18 and 8/8 stand as verified.
+
+**On the duplicate AES inverse cipher.** The tree now holds two: the new one
+in `aes_gcm.spl` (KAT-verified) and the pre-existing one in `aes/cipher.spl`
+(broken, per above). This duplication is real and is a genuine drift hazard.
+Consolidating onto the pre-existing one is not currently possible — it fails
+FIPS-197, and CBC *encrypt* runs on `aes_gcm.spl`'s schedule layout, so moving
+only decrypt would straddle CBC across two implementations with incompatible
+schedules. Consolidation becomes available once `expand_key` is fixed and
+KAT-gated, at which point CTR and GCM must move with it.
