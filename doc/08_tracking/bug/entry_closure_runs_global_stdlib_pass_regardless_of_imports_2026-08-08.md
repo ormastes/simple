@@ -224,3 +224,92 @@ logic — this is a performance defect in forced-interpret execution of
 compiler-internal passes (self-bootstrap + codegen), not a correctness/scoping
 bug. Do not attempt a fix here; this doc is investigation-only per the task
 that produced this update.
+
+## Update 2026-08-08c: retried the ACTUAL `rt_io_file_roundtrip` fixture with a full 590s budget — still doesn't finish, but for a NEW, localised reason
+
+Task: close the last unfenced AOT audit row now that the "stall" framing above
+is known-false. Three foreground attempts, each with the tool's own `timeout`
+parameter set to its max (600000ms) plus a shell-level `timeout 585`/`590`
+inside, so none of these are the silent-120s-cutoff mistake from before.
+
+1. **Parent CLI** (`bin/simple native-build --entry-closure --entry
+   test/fixtures/rt_io_file_roundtrip/main.spl`, 590s budget): rc=124, log
+   stops at 1510 lines — the same fixed self-bootstrap point seen in every
+   prior cold attempt. This measurement method is known-misleading (parent
+   stdout buffering hides the worker's real progress, per the analysis above)
+   and is **not** evidence of a stall by itself.
+2. **Direct worker, `SIMPLE_COMPILER_TRACE=1`** (same recipe as Update
+   2026-08-08b, 585s budget, real fixture instead of the minimal
+   FileMode/SeekFrom one): rc=124, log reached **9687 lines** (vs. 4091 for
+   the minimal fixture at 290s) — clear forward progress, not a repeat stall.
+   Phase breakdown from the `[BOOTSTRAP-PHASE]` markers:
+   - closure BFS: 6 files (`main.spl`, `io/file.spl`, `common/io/types.spl`,
+     `common/io/traits.spl`, `lib/common/io/types.spl`,
+     `common/string_core.spl`), done in **4.9s**.
+   - `phase2:parse:file` for `main.spl` (2155 chars): **77.3s**.
+   - `phase2:parse:file` for `src/std/nogc_sync_mut/io/file.spl` (16723
+     chars, the file/handle class definitions): **still in progress** at the
+     585s cutoff, stuck around parser line ~470 of that file. The trace shows
+     this is genuine recursive-descent expression parsing (nested
+     `pipe/compose/assignment/or/and/.../primary` calls per token), so the
+     verbose `[parser-expr]`/`[parser-primary]` print itself is also adding
+     real overhead — this trace flag is not overhead-free.
+3. **Direct worker, WITHOUT `SIMPLE_COMPILER_TRACE`** (585s budget, to
+   remove the print-tax and see the untraced cost): closure BFS again fast
+   (~11s total elapsed across all `closure timing` lines, same 6 files).
+   `[BOOTSTRAP-PHASE]` lines are gated behind `SIMPLE_COMPILER_TRACE` so no
+   further phase markers were visible, but real time still ran out at 585s
+   with **zero** output after closure-done — i.e. parsing/lowering/codegen of
+   `io/file.spl` still didn't finish even without the trace-print tax. This
+   rules out "it's only slow because of the trace printing" as the full
+   explanation; the underlying interpreted compile of that one file is
+   genuinely expensive.
+   - **Cache-dir check (the "warm worker" question):** `find $cache -type f`
+     was **0 files** after this run. Nothing is persisted to the cache dir
+     until a module's *entire* pipeline (parse→HIR→MIR→codegen→object)
+     completes, and no module got that far. So there is **no warm-cache
+     unblock available today** — a second invocation with the same
+     `--cache-dir` would restart from zero, identically to a cold run. This
+     directly answers the task's "warm worker" question: no.
+
+### Conclusion for this row
+
+Not a stall, not a scoping bug — confirmed slow-but-finite, and now
+**localised**: the bottleneck is the forced-interpret compile of
+`src/std/nogc_sync_mut/io/file.spl` itself (the `FileHandle`/`File` class
+definitions this fixture needs), which is large/class-heavy enough that even
+just its *parse* phase doesn't finish inside a 585s window, let alone
+HIR/MIR/LLVM codegen after it. This is consistent with (and sharpens) the
+"interpreter dispatch tax" finding in Update 2026-08-08b's codegen-phase
+observation, but now shown to dominate as early as **parsing**, before
+codegen is even reached, for this specific file.
+
+**No AOT branch was added to `check-rt-io-file-native-jit-stub.shs`.** The
+build never reaches a linked binary, so there is nothing to run to check
+whether `rt_io_file_*` is stubbed or working under AOT — that remains
+genuinely undetermined, not a KNOWN-OPEN stub result. Do not fabricate a
+pass/fail for it.
+
+### Next steps (updated)
+
+The `test/fixtures` composite budget (~590s cold, ~590s direct-worker,
+observed 3x now) is not enough for this fixture as things stand. Options for
+whoever picks this up next, roughly in order of leverage:
+1. Profile/fix why `io/file.spl` (16723 chars) takes minutes just to parse
+   under forced interpret — compare against `common/string_core.spl`
+   (11698 chars, closure n=6 above) which the earlier trace showed parsing
+   far faster per the elapsed_us in `closure timing` lines (3.8s) vs.
+   `io/file.spl`'s 4.7s for the closure-scan pass alone — the *closure scan*
+   costs are actually comparable across files; it's specifically the full
+   `phase2:parse` (a separate, apparently much slower pass than the
+   closure-scan's own lightweight import extraction) that blows up for
+   `file.spl`. That gap between "closure-scan parse" and "phase2 parse" of
+   the same file is itself worth investigating — they may not be the same
+   parser path.
+2. A run with a budget meaningfully larger than 590s (not reachable from a
+   single foreground agent tool call, which caps at 600000ms) would settle
+   whether this is "a few more minutes" or "an order of magnitude more."
+   Nothing in this session's data rules out either.
+3. Persisting partial per-module parse/HIR state to the cache dir earlier in
+   the pipeline (rather than only after a module fully reaches object code)
+   would make retries cheaper regardless of the root cause above.
