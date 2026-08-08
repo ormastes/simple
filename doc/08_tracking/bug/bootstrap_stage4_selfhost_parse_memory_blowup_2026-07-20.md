@@ -1,5 +1,24 @@
 # Stage-4 self-host full-CLI build: parse-phase memory blowup (~160MB/file, killed at 64GB)
 
+## 2026-08-08 Re-export traversal evidence
+
+A strict x86 candidate built from a clean worktree passed Stage 2, Stage 3,
+and the Stage-2 capability probe, then invoked the verified Stage-3 compiler
+for the canonical Stage-4 `main.spl` one-binary build. It did not reach
+codegen after roughly 49 minutes: the final trace window contained about 897
+`[reexport-chase]` markers per 512 KiB and only two lowering markers. RSS
+grew to roughly 14 GiB while the trace continued to grow, so this was
+forward CPU/I/O activity but a pathological repeated facade traversal, not a
+dead process.
+
+The scoped pending fix adds a root-result memo and an active-path cycle guard
+to `HirLowering.find_reexport_source`. Recursive depth-sensitive results are
+not persisted; only full root results (including exhaustive misses) are
+cached. Focused cyclic-miss and cyclic-positive HIR tests are present in the
+isolated worktree, but execution evidence is deferred after the session's
+three bounded verify/fix cycles. Do not classify this as resolved until a
+fresh focused test and a fresh strict Stage-4 admission run pass.
+
 - **ID:** bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20
 - **Status:** OPEN
 - **Severity:** high (blocks the stage3-compiled stage-4 lane entirely; seed-compiled fallback lane unaffected)

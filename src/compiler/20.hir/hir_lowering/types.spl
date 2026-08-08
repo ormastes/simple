@@ -43,6 +43,15 @@ type HirLocalStructTypes = {i64: text}
 type HirFieldOrderByName = {text: [text]}
 type HirLocalTupleTypes = {i64: [HirType]}
 
+struct HirReexportSource:
+    """Terminal result of resolving one re-export facade chain."""
+    found: bool
+    module_name: text
+    item_name: text
+
+type HirReexportSourceMemo = {text: HirReexportSource}
+type HirReexportActive = {text: bool}
+
 # HIR Lowering Context
 # ============================================================================
 
@@ -145,6 +154,13 @@ class HirLowering:
     # depth 8 can still be re-expanded from a shallower arrival, which is what
     # keeps the depth cap's reachable set intact.
     glob_expand_memo: {text: i64}
+    # Re-export facade resolution is queried for every imported item. Keep
+    # both successful and exhausted roots so repeated imports do not rescan
+    # a package's export graph. `reexport_active` is path-local cycle state:
+    # it is never retained as a negative result because an ancestor can still
+    # find the item through another branch.
+    reexport_source_memo: HirReexportSourceMemo
+    reexport_active: HirReexportActive
 
 struct LoweringError:
     message: text
@@ -177,6 +193,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     val empty_glob_expand_memo: {text: i64} = {}
+    val empty_reexport_source_memo: HirReexportSourceMemo = {}
+    val empty_reexport_active: HirReexportActive = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: errors,
@@ -204,7 +222,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         enum_variant_names: empty_enum_variant_names,
         registering_import_symbols: false,
         fn_tuple_returns: empty_fn_tuple_returns,
-        glob_expand_memo: empty_glob_expand_memo
+        glob_expand_memo: empty_glob_expand_memo,
+        reexport_source_memo: empty_reexport_source_memo,
+        reexport_active: empty_reexport_active
     )
 
 fn hirlowering_new() -> HirLowering:
@@ -259,6 +279,8 @@ impl HirLowering:
         self.registering_import_symbols = fresh.registering_import_symbols
         self.fn_tuple_returns = fresh.fn_tuple_returns
         self.glob_expand_memo = fresh.glob_expand_memo
+        self.reexport_source_memo = fresh.reexport_source_memo
+        self.reexport_active = fresh.reexport_active
 
     static fn new() -> HirLowering:
         hirlowering_new()

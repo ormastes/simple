@@ -1,0 +1,63 @@
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use std.spec.{describe, it, expect}
+
+fn cycle_memo_logger() -> Logger:
+    Logger(level: 0)
+
+describe "HIR re-export cycle memo":
+    it "terminates a cyclic miss and retains the root result for reuse":
+        val log = cycle_memo_logger()
+        val a_source = "use cycle.b.*"
+        val b_source = "use cycle.a.*"
+        val a = parse_full_frontend(a_source, "cycle.a", "cycle.a", log)
+        val b = parse_full_frontend(b_source, "cycle.b", "cycle.b", log)
+        var modules: Dict<text, Module> = {}
+        modules["cycle.a"] = a
+        modules["cycle.b"] = b
+        val sources = [
+            SourceFile(path: "cycle/a.spl", content: a_source, module_name: "cycle.a"),
+            SourceFile(path: "cycle/b.spl", content: b_source, module_name: "cycle.b")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        val facade = surfaces.surfaces[surfaces.index_by_name["cycle.a"]]
+        var lowering = hirlowering_for_module("cycle.consumer", surfaces)
+
+        val first = lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
+        expect(first.found).to_equal(false)
+        expect(lowering.reexport_source_memo.keys().len()).to_equal(1)
+
+        val second = lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
+        expect(second.found).to_equal(false)
+        expect(lowering.reexport_source_memo.keys().len()).to_equal(1)
+
+    it "retains a positive result reached through a cyclic facade graph":
+        val log = cycle_memo_logger()
+        val owner_source = "pub fn Stable() -> i64:\n    1"
+        val a_source = "use cycle.b.*"
+        val b_source = "use cycle.a.*\nuse cycle.owner.*"
+        val owner = parse_full_frontend(owner_source, "cycle.owner", "cycle.owner", log)
+        val a = parse_full_frontend(a_source, "cycle.a", "cycle.a", log)
+        val b = parse_full_frontend(b_source, "cycle.b", "cycle.b", log)
+        var modules: Dict<text, Module> = {}
+        modules["cycle.owner"] = owner
+        modules["cycle.a"] = a
+        modules["cycle.b"] = b
+        val sources = [
+            SourceFile(path: "cycle/owner.spl", content: owner_source, module_name: "cycle.owner"),
+            SourceFile(path: "cycle/a.spl", content: a_source, module_name: "cycle.a"),
+            SourceFile(path: "cycle/b.spl", content: b_source, module_name: "cycle.b")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+        val facade = surfaces.surfaces[surfaces.index_by_name["cycle.a"]]
+        var lowering = hirlowering_for_module("cycle.consumer", surfaces)
+
+        val resolved = lowering.find_reexport_source(facade, "cycle.a", "Stable", 0)
+        expect(resolved.found).to_equal(true)
+        expect(resolved.module_name).to_equal("cycle.owner")
+        expect(resolved.item_name).to_equal("Stable")

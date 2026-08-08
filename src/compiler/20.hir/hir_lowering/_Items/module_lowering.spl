@@ -11,7 +11,7 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.types.{HirLowering, HirReexportSource}
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -106,14 +106,6 @@ fn hir_pkg_canonical_module_name(name: text) -> text:
     if canonical.starts_with("std."):
         return "lib." + canonical.substring(4)
     canonical
-
-struct HirReexportSource:
-    """Result of chasing a re-export facade chain (find_reexport_source).
-    A struct (not an anonymous tuple) on purpose: multi-value tuple returns
-    are unreliable on the seed interpreter."""
-    found: bool
-    module_name: text
-    item_name: text
 
 struct HirMaterializedPayloadOrigin:
     """Terminal declaration behind one enum-payload lexical spelling."""
@@ -837,6 +829,22 @@ impl HirLowering:
         package_key
 
     me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
+        # Memoize only roots. Recursive calls have a smaller remaining depth
+        # budget, so caching them as final answers would be unsound. The root
+        # key is stable for one immutable ModuleSurfacesByName instance.
+        val memo_key = facade_name + "\t" + wanted
+        if depth == 0 and self.reexport_source_memo.contains_key(memo_key):
+            return self.reexport_source_memo[memo_key]
+        if self.reexport_active.contains_key(memo_key):
+            return HirReexportSource(found: false, module_name: "", item_name: "")
+        self.reexport_active[memo_key] = true
+        val resolved = self.find_reexport_source_inner(facade_mod, facade_name, wanted, depth)
+        self.reexport_active = self.reexport_active.remove(memo_key)
+        if depth == 0:
+            self.reexport_source_memo[memo_key] = resolved
+        resolved
+
+    me find_reexport_source_inner(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
         """Resolve which transitive module actually DECLARES `wanted` when
         `facade_mod` only re-exports it. Follows the facade's own imports
         (explicit items, alias-aware; glob imports too) up to a small depth
