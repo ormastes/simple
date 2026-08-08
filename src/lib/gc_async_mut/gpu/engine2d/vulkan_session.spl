@@ -31,7 +31,8 @@ use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
     vulkan_sffi_compile_glsl,
     vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
-    vulkan_sffi_init, vulkan_sffi_shutdown, vulkan_sffi_is_available,
+    vulkan_sffi_runtime_acquire, vulkan_sffi_runtime_release,
+    vulkan_sffi_is_available,
     vulkan_sffi_device_count, vulkan_sffi_select_device,
     vulkan_sffi_begin_compute, vulkan_sffi_submit_and_wait,
     vulkan_sffi_device_name, vulkan_sffi_device_type,
@@ -114,6 +115,7 @@ class VulkanSession:
     device_type: text
     driver_identity: text
     init_error: text
+    runtime_lease_held: bool
 
     ref_count: i64
     is_initialized: bool
@@ -162,6 +164,7 @@ class VulkanSession:
             device_type: "",
             driver_identity: "",
             init_error: "",
+            runtime_lease_held: false,
             ref_count: 0,
             is_initialized: false,
             generation: 0,
@@ -185,9 +188,10 @@ class VulkanSession:
             self.init_error = "availability"
             return 1
 
-        if not vulkan_sffi_init():
+        if not vulkan_sffi_runtime_acquire():
             self.init_error = "runtime-init"
             return 2
+        self.runtime_lease_held = true
 
         if vulkan_sffi_device_count() < 1:
             self.init_error = "device-count"
@@ -549,3 +553,6 @@ class VulkanSession:
         self.pipeline_cache = 0
         self.allocator = 0
         self.is_initialized = false
+        if self.runtime_lease_held:
+            vulkan_sffi_runtime_release()
+            self.runtime_lease_held = false

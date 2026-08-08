@@ -235,6 +235,14 @@ pub extern "C" fn rt_vulkan_selected_device_driver_identity_hash() -> i64 {
     0
 }
 
+#[cfg(feature = "vulkan")]
+fn is_physical_device_type(device_type: vk::PhysicalDeviceType) -> bool {
+    matches!(
+        device_type,
+        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{driver_identity, driver_identity_hash};
@@ -247,6 +255,17 @@ mod tests {
         );
         assert_eq!(driver_identity_hash("abc"), 96_354);
         assert_eq!(driver_identity_hash("😀"), 1_772_899);
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn physical_device_admission_is_fail_closed() {
+        use super::{is_physical_device_type, vk};
+        assert!(is_physical_device_type(vk::PhysicalDeviceType::DISCRETE_GPU));
+        assert!(is_physical_device_type(vk::PhysicalDeviceType::INTEGRATED_GPU));
+        assert!(!is_physical_device_type(vk::PhysicalDeviceType::VIRTUAL_GPU));
+        assert!(!is_physical_device_type(vk::PhysicalDeviceType::CPU));
+        assert!(!is_physical_device_type(vk::PhysicalDeviceType::OTHER));
     }
 }
 
@@ -306,6 +325,24 @@ pub extern "C" fn rt_vulkan_selected_device_type() -> *const c_char {
             _ => "other",
         });
     ty.map_or_else(empty_cstr, |ty| state.cached_cstr(ty.to_string()))
+}
+
+/// Stable scalar ABI for admission checks that must not retain a cached C string.
+/// Only hardware discrete/integrated devices are promotable; virtual, CPU,
+/// unknown, and absent selections fail closed.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_is_physical() -> i64 {
+    let state = STATE.lock();
+    state.device.as_ref().map_or(0, |device| {
+        if is_physical_device_type(device.physical_device().properties.device_type) { 1 } else { 0 }
+    })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_is_physical() -> i64 {
+    0
 }
 
 #[no_mangle]

@@ -2078,6 +2078,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_selected_device_name", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_device_type", gpu::rt_vulkan_device_type_fn);
     insert_simple!("rt_vulkan_selected_device_type", gpu::rt_vulkan_selected_device_type_fn);
+    insert_simple!(
+        "rt_vulkan_selected_device_is_physical",
+        gpu::rt_vulkan_selected_device_is_physical_fn
+    );
+    insert_simple!("rt_vulkan_runtime_acquire", gpu::rt_vulkan_init_fn);
+    insert_simple!("rt_vulkan_runtime_release", gpu::rt_vulkan_shutdown_fn);
     insert_simple!("rt_vulkan_dispatch", gpu::rt_vulkan_dispatch_fn);
     insert_simple!("rt_vulkan_end_compute", gpu::rt_vulkan_end_compute_fn);
     insert_simple!("rt_vulkan_end_graphics", gpu::rt_vulkan_graphics_unavailable_fn);

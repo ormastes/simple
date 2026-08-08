@@ -14,11 +14,10 @@ and every buffer / shader module / compute pipeline / descriptor pool /
 command buffer recorded in that state were orphaned without a single
 `vkDestroy*` call.
 
-Nothing on the `.spl` side compensates: `VulkanSession._cleanup()` destroys the
-shaders and pipelines it owns by handle and then merely ZEROES `instance`,
-`device`, `command_pool`, `pipeline_cache` and `allocator` — it never calls
-`vulkan_sffi_shutdown()`. So one whole device was stranded per
-`VulkanBackend.create() + init() + shutdown()` cycle.
+The ownership boundary is now explicit: `VulkanSession` holds a runtime lease
+after init and releases it only after its shaders and pipelines are destroyed.
+Other owners (for example daemon discovery and ProcessingIR) retain their own
+leases, so one surface shutdown cannot invalidate a live shared device.
 
 MEASURED, not estimated: on this host (TITAN RTX + RTX A6000) the loop failed
 at create #63 — the 64th device — with `init()` returning false and
@@ -36,11 +35,10 @@ creates, so specs were already brushing the ceiling, and any example past it
 failed for a reason unrelated to what it tested — a false red that reads like a
 rendering defect.
 
-THE FIX is not a cap and not a retry: `rt_vulkan_init_fn` no longer ACQUIRES a
-duplicate. It returns the live singleton, matching the compiled runtime's
-`rt_vulkan_init` (vulkan_graphics_runtime_core.rs), which has always
-short-circuited on `state.device.is_some()`. The interpreter extern was the
-divergent sibling.
+THE FIX is not a cap and not a retry: each successful `rt_vulkan_init` is a
+runtime lease. The final matching shutdown performs device teardown; nested
+owners only release their own lease. This preserves a discovery admission while
+render and ProcessingIR work completes.
 
 WHAT THIS SPEC CANNOT PROVE: it cannot observe VkInstance handles directly —
 the runtime exposes no instance-count accessor. It proves the OBSERVABLE

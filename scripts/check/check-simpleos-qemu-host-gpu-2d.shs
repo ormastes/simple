@@ -745,6 +745,35 @@ daemon_process_live() {
     case "$daemon_state" in ''|Z*) return 1 ;; esac
 }
 
+wire_u64_at() {
+    wire_file=$1
+    wire_offset=$2
+    LC_ALL=C od -An -tu8 -j "$wire_offset" -N 8 "$wire_file" 2>/dev/null | tr -d '[:space:]'
+}
+
+record_dead_daemon_evidence() {
+    evidence_shm=$1
+    evidence_log=$2
+    case ${daemon_pid:-} in ''|*[!0-9]*|0) return 0 ;; esac
+    daemon_process_live "$daemon_pid" && return 0
+    daemon_wait_status=0
+    if wait "$daemon_pid" 2>/dev/null; then
+        daemon_wait_status=0
+    else
+        daemon_wait_status=$?
+    fi
+    daemon_exit_kind=exit
+    daemon_exit_detail=$daemon_wait_status
+    if [ "$daemon_wait_status" -ge 128 ]; then
+        daemon_exit_kind=signal
+        daemon_exit_detail=$((daemon_wait_status - 128))
+    fi
+    daemon_last_request=$(wire_u64_at "$evidence_shm" 16 || true)
+    daemon_last_completion=$(wire_u64_at "$evidence_shm" 24 || true)
+    printf '%s\n' "HOST_GPU_DAEMON_EXIT kind=$daemon_exit_kind detail=$daemon_exit_detail wait_status=$daemon_wait_status request_generation=${daemon_last_request:-unknown} completion_generation=${daemon_last_completion:-unknown}" >>"$evidence_log"
+    daemon_pid=
+}
+
 daemon_instance_matches() {
     daemon_process=$1
     daemon_identity=$2
@@ -827,6 +856,32 @@ serial_reason() {
     else
         printf '%s\n' missing-correlated-device-receipt
     fi
+}
+
+daemon_failure_reason() {
+    failure_daemon_log=$1
+    failure_serial_log=$2
+    failure_isa=$3
+    daemon_exit=$(sed -n 's/^HOST_GPU_DAEMON_EXIT kind=\([^ ]*\) detail=\([^ ]*\).*/\1-\2/p' "$failure_daemon_log" 2>/dev/null | tail -n 1)
+    if [ -n "$daemon_exit" ]; then
+        printf 'daemon-%s\n' "$daemon_exit"
+        return
+    fi
+    if grep -aEq '^HOST_GPU_DAEMON_COMPLETE .* status=2 ' "$failure_daemon_log" 2>/dev/null; then
+        printf '%s\n' explicit-unsupported-completion
+        return
+    fi
+    last_request=$(sed -n 's/^HOST_GPU_DAEMON_REQUEST generation=\([^ ]*\).*/\1/p' "$failure_daemon_log" 2>/dev/null | tail -n 1)
+    last_completion=$(sed -n 's/^HOST_GPU_DAEMON_COMPLETE generation=\([^ ]*\).*/\1/p' "$failure_daemon_log" 2>/dev/null | tail -n 1)
+    if [ -n "$last_request" ] && [ "$last_request" != "$last_completion" ]; then
+        printf '%s\n' daemon-request-overbudget
+        return
+    fi
+    if grep -aEq "^HOST_GPU_NEGOTIATION_ATTEMPT scope=(probe|production) isa=$failure_isa " "$failure_serial_log" 2>/dev/null; then
+        printf '%s\n' transport-visibility-failure
+        return
+    fi
+    serial_reason "$failure_serial_log" "$failure_isa"
 }
 
 find_timeout() {
@@ -2865,6 +2920,7 @@ run_guest() {
     if run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"; then
         probe_qemu_lifetime_valid=1
     fi
+    record_dead_daemon_evidence "$shm" "$daemon_log"
     printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$qemu_device_args" >>"$serial"
     if [ "$probe_qemu_lifetime_valid" = 1 ] && serial_has_pass "$serial" "$isa" "$qemu_device_args"; then probe_valid=1; else probe_valid=0; fi
     if [ "$probe_valid" = 1 ] &&
@@ -2897,6 +2953,7 @@ run_guest() {
         if run_qemu_with_rss "$PRODUCTION_QEMU_TIMEOUT" "$production_serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"; then
             production_qemu_lifetime_valid=1
         fi
+        record_dead_daemon_evidence "$shm" "$daemon_log"
         printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$production_qemu_args" >>"$production_serial"
     fi
     cleanup_active_guest
@@ -2930,10 +2987,10 @@ run_guest() {
         emit_processing_perf_evidence "$host" "$isa" "$serial" "$daemon_log"
         row_result=0
     elif [ "$probe_qemu_lifetime_valid" != 1 ] || [ "$(rss_metric_value "$rss_file" daemon_lifetime || true)" = failed ]; then
-        emit_row "$host" "$isa" fail daemon-exited-during-qemu "$serial" "$(serial_processing_backend "$serial" "$isa")"
+        emit_row "$host" "$isa" fail "$(daemon_failure_reason "$daemon_log" "$serial" "$isa")" "$serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     elif [ "$probe_valid" != 1 ]; then
-        emit_row "$host" "$isa" fail "$(serial_reason "$serial" "$isa")" "$serial"
+        emit_row "$host" "$isa" fail "$(daemon_failure_reason "$daemon_log" "$serial" "$isa")" "$serial"
         row_result=1
     elif [ "$processing_perf_valid" != 1 ]; then
         emit_row "$host" "$isa" fail processing-perf-evidence-missing "$serial" "$(serial_processing_backend "$serial" "$isa")"
@@ -2945,7 +3002,7 @@ run_guest() {
         emit_row "$host" "$isa" fail production-execution-evidence-missing "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     elif [ "$production_qemu_lifetime_valid" != 1 ]; then
-        emit_row "$host" "$isa" fail daemon-exited-during-qemu "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
+        emit_row "$host" "$isa" fail "$(daemon_failure_reason "$daemon_log" "$production_serial" "$isa")" "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     else
         emit_row "$host" "$isa" fail production-frame-evidence-missing "$production_serial" "$(serial_processing_backend "$serial" "$isa")"

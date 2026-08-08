@@ -3048,6 +3048,7 @@ mod vulkan_dlopen {
         pub live_fences: Vec<u64>,
         pub last_error: String,
         pub selected_device_index: usize,
+        pub active_leases: u64,
         pub fns: VkFns,
     }
 
@@ -3124,7 +3125,7 @@ pub fn rt_oneapi_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
 
 /// `rt_vulkan_init() -> bool`
 ///
-/// IDEMPOTENT BY CONTRACT (leak fix 2026-08-05). This used to create a fresh
+/// LEASED BY CONTRACT (lifecycle fix 2026-08-08). This used to create a fresh
 /// VkInstance + VkDevice + VkCommandPool on EVERY call and then overwrite
 /// `VK_STATE` with the new `VulkanState`. `VulkanState` holds raw Vulkan
 /// handles and has no `Drop` impl, so the previous instance/device/command
@@ -3138,11 +3139,9 @@ pub fn rt_oneapi_is_available_fn(_args: &[Value]) -> Result<Value, CompileError>
 /// create failed with a bare `runtime-init`, capping GPU testing per process.
 ///
 /// The compiled runtime's `rt_vulkan_init` (vulkan_graphics_runtime_core.rs)
-/// has always short-circuited on `state.device.is_some()`; the interpreter
-/// extern was the divergent sibling. Returning the live singleton here makes
-/// the two agree, and it fixes the probe-then-create double cost at the root:
-/// the probe's create/init/shutdown and the subsequent real create now share
-/// one instance and one device instead of stranding one each.
+/// now owns a reference-counted runtime lease. Returning the live singleton
+/// here adds the same lease, and matching shutdown only tears the device down
+/// after the final owner releases it.
 ///
 /// This does NOT swallow genuine failures: `VK_STATE` is only `Some` once
 /// `vkCreateInstance`, `vkCreateDevice` and `vkCreateCommandPool` have all
@@ -3153,8 +3152,9 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use std::ptr;
     // Reuse the live singleton rather than stranding it. A state whose device
     // handle is null is not live, so it is rebuilt below.
-    if let Some(existing) = VK_STATE.lock().unwrap().as_ref() {
+    if let Some(existing) = VK_STATE.lock().unwrap().as_mut() {
         if !existing.device.is_null() {
+            existing.active_leases += 1;
             return Ok(Value::Bool(true));
         }
     }
@@ -3304,6 +3304,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             live_fences: Vec::new(),
             last_error: String::new(),
             selected_device_index: 0,
+            active_leases: 1,
             fns,
         };
         *VK_STATE.lock().unwrap() = Some(state);
@@ -3340,6 +3341,12 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::{VK_STATE, VK_SUCCESS};
     use std::ptr;
     let mut guard = VK_STATE.lock().unwrap();
+    if let Some(st) = guard.as_mut() {
+        if st.active_leases > 1 {
+            st.active_leases -= 1;
+            return Ok(Value::Bool(true));
+        }
+    }
     if let Some(st) = guard.take() {
         unsafe {
             let f = &st.fns;
@@ -3601,6 +3608,22 @@ pub fn rt_vulkan_selected_device_type_fn(_args: &[Value]) -> Result<Value, Compi
             .map(|p| vulkan_device_type_name(p.device_type).to_string())
             .unwrap_or_default(),
     ))
+}
+
+pub fn rt_vulkan_selected_device_is_physical_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let index = vulkan_dlopen::VK_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    let physical = index
+        .and_then(vulkan_device_properties)
+        .map(|p| {
+            let name = vulkan_device_type_name(p.device_type);
+            name == "discrete" || name == "integrated"
+        })
+        .unwrap_or(false);
+    Ok(Value::Bool(physical))
 }
 
 /// `rt_vulkan_alloc_buffer(byte_count: i64, usage: i64) -> i64`
