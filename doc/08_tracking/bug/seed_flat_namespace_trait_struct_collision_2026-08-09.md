@@ -87,3 +87,20 @@ with the existing `resolve_duplicate_global_field_variant` set-field path.
   by the in-flight `bootstrap_linux_repair` lane
   (`.spipe/bootstrap_linux_repair/state.md`), so parity could not be checked
   this session.
+
+## 2026-08-09 follow-up (gui/web/2D vulkan sweep): why Fix 2 does not help `simple run`
+
+`main_gui.spl` / `web_standards_showcase_gui.spl` still log the
+`GlyphBitmap.gbm_width` "Cannot infer field type" whole-module de-JIT under
+the rebuilt seed. Root cause narrowed down: `duplicate_global_struct_defs`
+(and `set_global_struct_defs`) are populated ONLY by the AOT pipeline
+(`pipeline/native_project/imports.rs` → `compiler.rs:668`). The JIT/`run`
+lane (`codegen/jit.rs` via `local_execution.rs`) never sets either registry,
+so the consensus-scan fallback in `try_resolve_global_field_for_struct`
+always sees `None` there and the Struct-arm lookup still fails closed. A
+complete fix needs the run lane to collect the same import struct registry
+the AOT lane builds (or an equivalent per-program duplicate-struct map
+threaded into the JIT lowerer). Until then `run` on any module whose closure
+contains same-named structs with divergent fields silently de-JITs the whole
+module (~100-1000x slowdown — observed: GUI showcase window mapped but first
+frame not presented after ~30 min interpreted).

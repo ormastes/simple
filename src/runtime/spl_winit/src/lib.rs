@@ -72,7 +72,7 @@ enum StoredEvent {
         origin_keycode: i64,
         origin_pressed: bool,
     },
-    MouseButton { window_id: i64, button: i64, pressed: bool },
+    MouseButton { window_id: i64, button: i64, pressed: bool, x: f64, y: f64 },
     MouseMoved { window_id: i64, x: f64, y: f64 },
     MouseWheel { window_id: i64, x: f64, y: f64 },
 }
@@ -139,6 +139,11 @@ struct Inner {
     create_results: HashMap<i64, i64>,
     activated: bool,
     shift_key: bool,
+    /// Last CursorMoved position. winit's MouseInput/MouseWheel records carry
+    /// no pointer coordinates, so button/wheel stored events are stamped with
+    /// this instead of (0, 0) -- otherwise every click hit-tests at the
+    /// top-left corner of the window.
+    last_cursor: (f64, f64),
 }
 
 struct PumpState {
@@ -287,15 +292,20 @@ impl Inner {
                     origin_pressed: false,
                 })
             }
-            WindowEvent::CursorMoved { position, .. } => Some(StoredEvent::MouseMoved {
-                window_id: wid,
-                x: position.x,
-                y: position.y,
-            }),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.last_cursor = (position.x, position.y);
+                Some(StoredEvent::MouseMoved {
+                    window_id: wid,
+                    x: position.x,
+                    y: position.y,
+                })
+            }
             WindowEvent::MouseInput { state, button, .. } => Some(StoredEvent::MouseButton {
                 window_id: wid,
                 button: mouse_button_to_simple(button),
                 pressed: state == ElementState::Pressed,
+                x: self.last_cursor.0,
+                y: self.last_cursor.1,
             }),
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y) = match delta {
@@ -933,6 +943,7 @@ pub extern "C" fn rt_winit_event_mouse_pressed(ev: i64) -> i64 {
 pub extern "C" fn rt_winit_event_mouse_x_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseMoved { x, .. } => (*x * 1000.0).round() as i64,
+        StoredEvent::MouseButton { x, .. } => (*x * 1000.0).round() as i64,
         _ => 0,
     })
     .unwrap_or(0)
@@ -942,6 +953,7 @@ pub extern "C" fn rt_winit_event_mouse_x_milli(ev: i64) -> i64 {
 pub extern "C" fn rt_winit_event_mouse_y_milli(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::MouseMoved { y, .. } => (*y * 1000.0).round() as i64,
+        StoredEvent::MouseButton { y, .. } => (*y * 1000.0).round() as i64,
         _ => 0,
     })
     .unwrap_or(0)
