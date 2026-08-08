@@ -1,0 +1,422 @@
+# Table Operations
+#
+# Pure functions for markdown table manipulation: insert/delete rows/columns,
+# set cell values, and get table dimensions. All operations work on the
+# RichDocument model without mutating input. Tables are stored as markdown
+# text within a Paragraph block (one row per line, with | delimiters).
+#
+# Markdown table format:
+#   | Header1 | Header2 |
+#   |---------|---------|
+#   | Cell1   | Cell2   |
+#
+# Out-of-range indices return the document unchanged (fail-safe).
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _is_table_line(line: text) -> bool:
+    """Check if a line looks like a markdown table row (starts and ends with |)."""
+    val trimmed = line.trim()
+    trimmed.starts_with("|") and trimmed.ends_with("|")
+
+fn _is_separator_line(line: text) -> bool:
+    """Check if a line is a table separator (dashes and pipes)."""
+    val trimmed = line.trim()
+    if not _is_table_line(trimmed):
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.slice(i, i + 1)
+        if ch != "|" and ch != "-" and ch != ":" and ch != " ":
+            return false
+        i = i + 1
+    true
+
+fn _parse_table_row(line: text) -> [text]:
+    """Parse a table row into cells, trimming pipes and cell content."""
+    val trimmed = line.trim()
+    if not _is_table_line(trimmed):
+        return []
+    # Remove leading and trailing pipes
+    val inner = trimmed.slice(1, trimmed.len() - 1)
+    val parts = inner.split("|")
+    var cells: [text] = []
+    for part in parts:
+        cells.push(part.trim())
+    cells
+
+fn _format_table_row(cells: [text]) -> text:
+    """Format cells into a markdown table row."""
+    var line = "|"
+    for cell in cells:
+        line = "{line} {cell} |"
+    line
+
+fn _get_table_block_lines(block: DocBlock) -> [text]:
+    """Extract table lines from a block (assumes block contains table markdown)."""
+    if block.spans.len() == 0:
+        return []
+    val text_content = block.spans.get(0).text
+    text_content.split("\n")
+
+fn _set_table_block_lines(block: DocBlock, lines: [text]) -> DocBlock:
+    """Update block with new table lines."""
+    val new_text = lines.join("\n")
+    var new_spans: [TextSpan] = []
+    new_spans.push(TextSpan(text: new_text, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: ""))
+    DocBlock(kind: block.kind, spans: new_spans)
+
+# =========================================================================
+# Table Operations
+# =========================================================================
+
+fn table_insert_row(doc: RichDocument, block_index: i64, row_index: i64, cells: [text]) -> RichDocument:
+    """Insert a row at row_index (0-based within table body, after separator).
+    Returns modified document; out-of-range block_index returns unchanged doc.
+    Fails silently if block is not a valid table."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return doc
+
+    val block = doc.blocks.get(block_index.to_i64())
+    val lines = _get_table_block_lines(block)
+
+    # Find separator line (first line with dashes)
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return doc  # No separator found, not a valid table
+
+    # Row index is relative to body (after separator)
+    val actual_idx = sep_idx + 1 + row_index
+
+    if actual_idx < 0 or actual_idx > lines.len().to_i64():
+        return doc  # Out of range
+
+    val new_row = _format_table_row(cells)
+    var new_lines: [text] = []
+    i = 0
+    while i < lines.len().to_i64():
+        if i == actual_idx:
+            new_lines.push(new_row)
+        new_lines.push(lines.get(i))
+        i = i + 1
+    # Handle insertion at the end (after all existing lines)
+    if actual_idx == lines.len().to_i64():
+        new_lines.push(new_row)
+
+    val new_block = _set_table_block_lines(block, new_lines)
+
+    var new_blocks: [DocBlock] = []
+    i = 0
+    while i < doc.blocks.len().to_i64():
+        if i == block_index:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(doc.blocks.get(i))
+        i = i + 1
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+fn table_delete_row(doc: RichDocument, block_index: i64, row_index: i64) -> RichDocument:
+    """Delete a row at row_index (0-based within table body).
+    Returns modified document; out-of-range indices return unchanged doc."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return doc
+
+    val block = doc.blocks.get(block_index)
+    val lines = _get_table_block_lines(block)
+
+    # Find separator line
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return doc
+
+    val actual_idx = sep_idx + 1 + row_index
+
+    if actual_idx < 0 or actual_idx >= lines.len().to_i64():
+        return doc  # Out of range
+
+    var new_lines: [text] = []
+    i = 0
+    while i < lines.len().to_i64():
+        if i != actual_idx:
+            new_lines.push(lines.get(i))
+        i = i + 1
+
+    val new_block = _set_table_block_lines(block, new_lines)
+
+    var new_blocks: [DocBlock] = []
+    i = 0
+    while i < doc.blocks.len().to_i64():
+        if i == block_index:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(doc.blocks.get(i))
+        i = i + 1
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+fn table_insert_col(doc: RichDocument, block_index: i64, col_index: i64, header: text, cells: [text]) -> RichDocument:
+    """Insert a column at col_index (0-based), with given header and cells.
+    The cells array length should match the table body row count.
+    Returns modified document; out-of-range indices return unchanged doc."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return doc
+
+    val block = doc.blocks.get(block_index)
+    val lines = _get_table_block_lines(block)
+
+    if lines.len() == 0:
+        return doc
+
+    # Find separator line and parse all rows
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return doc
+
+    # Parse all rows to get column count and validate column index
+    val header_row = _parse_table_row(lines.get(0))
+    if col_index < 0 or col_index > header_row.len().to_i64():
+        return doc
+
+    var new_lines: [text] = []
+    i = 0
+    while i < lines.len().to_i64():
+        val line = lines.get(i)
+        if i == 0:
+            # Insert into header
+            val row_cells = _parse_table_row(line)
+            var new_cells: [text] = []
+            var j: i64 = 0
+            while j < row_cells.len().to_i64():
+                if j == col_index:
+                    new_cells.push(header)
+                new_cells.push(row_cells.get(j))
+                j = j + 1
+            if col_index == row_cells.len().to_i64():
+                new_cells.push(header)
+            new_lines.push(_format_table_row(new_cells))
+        elif i == sep_idx:
+            # Insert into separator
+            val sep_cells = _parse_table_row(line)
+            var new_sep: [text] = []
+            j = 0
+            while j < sep_cells.len().to_i64():
+                if j == col_index:
+                    new_sep.push("-------")
+                new_sep.push(sep_cells.get(j))
+                j = j + 1
+            if col_index == sep_cells.len().to_i64():
+                new_sep.push("-------")
+            new_lines.push(_format_table_row(new_sep))
+        else:
+            # Insert into body row
+            val row_cells = _parse_table_row(line)
+            var new_row: [text] = []
+            val body_row_idx = i - sep_idx - 1
+            var cell_value = ""
+            if body_row_idx >= 0 and body_row_idx < cells.len().to_i64():
+                cell_value = cells.get(body_row_idx)
+
+            j = 0
+            while j < row_cells.len().to_i64():
+                if j == col_index:
+                    new_row.push(cell_value)
+                new_row.push(row_cells.get(j))
+                j = j + 1
+            if col_index == row_cells.len().to_i64():
+                new_row.push(cell_value)
+            new_lines.push(_format_table_row(new_row))
+        i = i + 1
+
+    val new_block = _set_table_block_lines(block, new_lines)
+
+    var new_blocks: [DocBlock] = []
+    i = 0
+    while i < doc.blocks.len().to_i64():
+        if i == block_index:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(doc.blocks.get(i))
+        i = i + 1
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+fn table_delete_col(doc: RichDocument, block_index: i64, col_index: i64) -> RichDocument:
+    """Delete a column at col_index (0-based).
+    Returns modified document; out-of-range indices return unchanged doc."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return doc
+
+    val block = doc.blocks.get(block_index)
+    val lines = _get_table_block_lines(block)
+
+    if lines.len() == 0:
+        return doc
+
+    # Find separator and validate column index
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return doc
+
+    val header_cells = _parse_table_row(lines.get(0))
+    if col_index < 0 or col_index >= header_cells.len().to_i64():
+        return doc
+
+    var new_lines: [text] = []
+    i = 0
+    while i < lines.len().to_i64():
+        val line = lines.get(i)
+        val row_cells = _parse_table_row(line)
+        var new_cells: [text] = []
+        var j: i64 = 0
+        while j < row_cells.len().to_i64():
+            if j != col_index:
+                new_cells.push(row_cells.get(j))
+            j = j + 1
+        new_lines.push(_format_table_row(new_cells))
+        i = i + 1
+
+    val new_block = _set_table_block_lines(block, new_lines)
+
+    var new_blocks: [DocBlock] = []
+    i = 0
+    while i < doc.blocks.len().to_i64():
+        if i == block_index:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(doc.blocks.get(i))
+        i = i + 1
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+fn table_set_cell(doc: RichDocument, block_index: i64, row_index: i64, col_index: i64, value: text) -> RichDocument:
+    """Set a cell value at (row_index, col_index) where row_index is 0-based
+    within the table body (after separator).
+    Returns modified document; out-of-range indices return unchanged doc."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return doc
+
+    val block = doc.blocks.get(block_index)
+    val lines = _get_table_block_lines(block)
+
+    if lines.len() == 0:
+        return doc
+
+    # Find separator
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return doc
+
+    val actual_row_idx = sep_idx + 1 + row_index
+
+    if actual_row_idx < 0 or actual_row_idx >= lines.len().to_i64():
+        return doc
+
+    val row_line = lines.get(actual_row_idx)
+    val cells = _parse_table_row(row_line)
+
+    if col_index < 0 or col_index >= cells.len().to_i64():
+        return doc
+
+    var new_cells: [text] = []
+    i = 0
+    while i < cells.len().to_i64():
+        if i == col_index:
+            new_cells.push(value)
+        else:
+            new_cells.push(cells.get(i))
+        i = i + 1
+
+    var new_lines: [text] = []
+    i = 0
+    while i < lines.len().to_i64():
+        if i == actual_row_idx:
+            new_lines.push(_format_table_row(new_cells))
+        else:
+            new_lines.push(lines.get(i))
+        i = i + 1
+
+    val new_block = _set_table_block_lines(block, new_lines)
+
+    var new_blocks: [DocBlock] = []
+    i = 0
+    while i < doc.blocks.len().to_i64():
+        if i == block_index:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(doc.blocks.get(i))
+        i = i + 1
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+fn table_dims(doc: RichDocument, block_index: i64) -> [i64]:
+    """Return [rows, cols] for a table at block_index.
+    Returns [0, 0] for out-of-range block or non-table block."""
+    if block_index < 0 or block_index >= doc.blocks.len().to_i64():
+        return [0, 0]
+
+    val block = doc.blocks.get(block_index)
+    val lines = _get_table_block_lines(block)
+
+    if lines.len() == 0:
+        return [0, 0]
+
+    # Find separator
+    var sep_idx: i64 = -1
+    var i: i64 = 0
+    while i < lines.len().to_i64():
+        if _is_separator_line(lines.get(i)):
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return [0, 0]
+
+    # Row count is lines after separator
+    val row_count = lines.len().to_i64() - sep_idx - 1
+
+    # Column count from header
+    val header_cells = _parse_table_row(lines.get(0))
+    val col_count = header_cells.len().to_i64()
+
+    [row_count, col_count]

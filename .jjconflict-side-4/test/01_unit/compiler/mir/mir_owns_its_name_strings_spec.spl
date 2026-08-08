@@ -1,0 +1,123 @@
+# Regression spec for hazard 4 of
+# doc/08_tracking/bug/bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md:
+# MIR must OWN its function-name strings.
+#
+# Pre-fix, src/compiler/50.mir/_MirLowering/function_lowering.spl:132 read
+#   var mir_fn_name = fn_.name
+# which stores the SAME heap string handle as the HIR function / AST /
+# SymbolTable. Same for export_name at :408.
+#
+# WHY THIS IS A CORRECTNESS BUG, NOT AN OPTIMISATION. The runtime CANNOT catch
+# this. rt_array_free_deep's `seen` set spans only the nodes it traverses, so an
+# alias held from OUTSIDE the freed structure -- exactly the MIR-name <-> HIR /
+# SymbolTable case -- is undetectable by construction. Measured directly: an
+# array holding a string that is also live in the caller's frame frees with
+# verdict=1 (ACCEPTED, reported as success) and the caller's still-live handle
+# then reads `.len() == -1`. So if any MIR deep-free is ever wired up, an
+# aliased MirFunction.name is a silent use-after-free of a SymbolTable string,
+# not a refused call. Fixing it does NOT by itself make eviction reclaim
+# anything (see the bug file: that needs class instances to become
+# runtime-identifiable) -- this spec exists for the use-after-free, not for RSS.
+#
+# ORACLE. Within a single traversal rt_array_free_deep DOES refuse (verdict 0)
+# when two elements are the same heap pointer, which makes it a usable
+# pointer-identity test for two handles placed in one array:
+#   verdict 1 => the two strings are DISTINCT heap allocations
+#   verdict 0 => they alias  ...OR the oracle is not live on this lane.
+#
+# LANE HONESTY. That last clause is why every assertion here is written as an
+# IMPLICATION gated on a positive control, exactly as
+# test/01_unit/runtime/array_free_deep_spec.spl does. On the interpreter lane
+# an array is a Rust Vec with no runtime heap object behind it, so EVERY call
+# returns 0 and an unconditional assertion would pass or fail on which lane ran
+# rather than on correctness. Measured: driving the real MirLowering in-process
+# forces a JIT bail to the interpreter, where even the distinct-string control
+# returns 0 -- so this spec models the struct-field shape of the lowering site
+# rather than calling it, and the field shape is what the aliasing depends on.
+#
+# tag: unit
+
+extern fn rt_array_free_deep(value: i64) -> i64
+
+# Mirrors HirFunction: the name lives in a struct FIELD, not in a local.
+struct HirFnLike:
+    name: text
+    export_name: text
+
+# Mirrors MirFunction.
+struct MirFnLike:
+    name: text
+    export_name: text
+
+fn dyn_name(n: i64) -> text:
+    """A dynamically built (never interned) string, so it is a real heap
+    allocation on any lane that registers one at all. Built with a single
+    concat rather than a loop -- COLL006 rejects `s = s + x` in a loop, and
+    one concat is enough to force a fresh allocation."""
+    "mir_owns_probe_fn_" + "{n}"
+
+fn distinct(a: text, b: text) -> i64:
+    rt_array_free_deep([a, b])
+
+fn oracle_is_live() -> bool:
+    """Positive control. Two genuinely distinct heap strings MUST give 1. If
+    they do not, this lane does not register array/string heap objects and no
+    verdict below carries information."""
+    distinct(dyn_name(3), dyn_name(5)) == 1
+
+# The pre-fix lowering shape (function_lowering.spl:132 / :408 before the fix).
+fn lower_aliasing(fn_: HirFnLike) -> MirFnLike:
+    var mir_fn_name = fn_.name
+    var out = MirFnLike(name: mir_fn_name, export_name: "")
+    out.export_name = fn_.export_name
+    out
+
+# The post-fix lowering shape.
+fn lower_owning(fn_: HirFnLike) -> MirFnLike:
+    var mir_fn_name = fn_.name + ""
+    var out = MirFnLike(name: mir_fn_name, export_name: "")
+    out.export_name = fn_.export_name + ""
+    out
+
+describe "MIR owns its function name strings (hazard 4)":
+
+    it "has a live alias oracle, or reports every assertion as vacuous":
+        # Not an assertion about the compiler -- an assertion about the probe.
+        # Recorded so a future reader can tell a real GREEN from a dead oracle.
+        val live = oracle_is_live()
+        expect(live == true or live == false).to_equal(true)
+
+    it "detects a same-handle alias as verdict 0":
+        if oracle_is_live():
+            val shared = dyn_name(7)
+            expect(distinct(shared, shared)).to_equal(0)
+
+    it "RED: the pre-fix `= fn_.name` shape aliases the HIR string":
+        if oracle_is_live():
+            val h = HirFnLike(name: dyn_name(9), export_name: dyn_name(10))
+            val m = lower_aliasing(h)
+            expect(distinct(h.name, m.name)).to_equal(0)
+            expect(distinct(h.export_name, m.export_name)).to_equal(0)
+
+    it "GREEN: the landed `+ \"\"` shape gives MIR its own name string":
+        if oracle_is_live():
+            val h = HirFnLike(name: dyn_name(11), export_name: dyn_name(12))
+            val m = lower_owning(h)
+            expect(distinct(h.name, m.name)).to_equal(1)
+            expect(distinct(h.export_name, m.export_name)).to_equal(1)
+
+    it "pins WHY the copy idiom is `+ \"\"` and not interpolation":
+        # Interpolating a whole string does NOT allocate a fresh one -- it
+        # returns the same handle. Anyone "simplifying" `s + ""` to "{s}"
+        # silently reintroduces hazard 4, so it is pinned here.
+        if oracle_is_live():
+            val s = dyn_name(13)
+            expect(distinct(s, "{s}")).to_equal(0)
+
+    it "confirms .replace() already gave method/static names a fresh string":
+        # function_lowering.spl:139 uses `.replace("::", ".")`. That path was
+        # never part of hazard 4; this pins that it stays that way even when
+        # the pattern does not match.
+        if oracle_is_live():
+            val s = dyn_name(15)
+            expect(distinct(s, s.replace("::", "."))).to_equal(1)

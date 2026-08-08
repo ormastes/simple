@@ -1,0 +1,141 @@
+# PBKDF2-HMAC-SHA-256 — Known-Answer Test Vectors
+#
+# Tests the pure-Simple [u8]-typed PBKDF2 implementation in
+# src/os/crypto/pbkdf2.spl against reference vectors from:
+#   - Python hashlib.pbkdf2_hmac (cross-checked with RFC 7914 §11)
+#
+# Coverage in interpreter mode:
+#   - V1: password="password", salt="salt", c=1, dkLen=32 — instant
+#   - V2: password="password", salt="salt", c=2, dkLen=32 — fast
+#
+# Higher iteration counts (c>=4096) exceed the 60s interpreter watchdog.
+# Filed: doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md
+#
+# Reference: RFC 2898 (PKCS#5 v2.0), RFC 8018 (PKCS#5 v2.1)
+# ============================================================================
+
+use std.spipe.*
+use os.crypto.pbkdf2.{pbkdf2_sha256}
+
+# ============================================================================
+# Helpers — module-level fns to avoid it-block var mutation drop
+# (per .claude/memory/feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: i64 = 0
+    while i < b.len():
+        val byte: u8 = b[i]
+        s = s + _hex_nibble((byte >> 4) & 0x0F)
+        s = s + _hex_nibble(byte & 0x0F)
+        i = i + 1
+    s
+
+# ASCII "password" = 70 61 73 73 77 6f 72 64
+fn _password_bytes() -> [u8]:
+    var arr: [u8] = []
+    var b0: u8 = 0x70
+    var b1: u8 = 0x61
+    var b2: u8 = 0x73
+    var b3: u8 = 0x73
+    var b4: u8 = 0x77
+    var b5: u8 = 0x6f
+    var b6: u8 = 0x72
+    var b7: u8 = 0x64
+    arr.push(b0)
+    arr.push(b1)
+    arr.push(b2)
+    arr.push(b3)
+    arr.push(b4)
+    arr.push(b5)
+    arr.push(b6)
+    arr.push(b7)
+    arr
+
+# ASCII "salt" = 73 61 6c 74
+fn _salt_bytes() -> [u8]:
+    var arr: [u8] = []
+    var b0: u8 = 0x73
+    var b1: u8 = 0x61
+    var b2: u8 = 0x6c
+    var b3: u8 = 0x74
+    arr.push(b0)
+    arr.push(b1)
+    arr.push(b2)
+    arr.push(b3)
+    arr
+
+# ASCII "passwd" = 70 61 73 73 77 64
+fn _passwd_bytes() -> [u8]:
+    var arr: [u8] = []
+    var b0: u8 = 0x70
+    var b1: u8 = 0x61
+    var b2: u8 = 0x73
+    var b3: u8 = 0x73
+    var b4: u8 = 0x77
+    var b5: u8 = 0x64
+    arr.push(b0)
+    arr.push(b1)
+    arr.push(b2)
+    arr.push(b3)
+    arr.push(b4)
+    arr.push(b5)
+    arr
+
+# Compute V1: password="password", salt="salt", c=1, dkLen=32
+fn _compute_v1() -> text:
+    val dk = pbkdf2_sha256(_password_bytes(), _salt_bytes(), 1, 32)
+    _bytes_hex(dk)
+
+# Compute V2: password="password", salt="salt", c=2, dkLen=32
+fn _compute_v2() -> text:
+    val dk = pbkdf2_sha256(_password_bytes(), _salt_bytes(), 2, 32)
+    _bytes_hex(dk)
+
+# Compute V3: password="passwd", salt="salt", c=1, dkLen=64 (RFC 7914 §11)
+fn _compute_v3() -> text:
+    val dk = pbkdf2_sha256(_passwd_bytes(), _salt_bytes(), 1, 64)
+    _bytes_hex(dk)
+
+# ============================================================================
+# Test Vectors
+# ============================================================================
+
+describe "PBKDF2-HMAC-SHA-256 — KAT (RFC 2898/8018)":
+
+    it "V1: password='password' salt='salt' c=1 dkLen=32":
+        val hex = _compute_v1()
+        expect(hex).to_equal(
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        )
+
+    it "V2: password='password' salt='salt' c=2 dkLen=32":
+        val hex = _compute_v2()
+        expect(hex).to_equal(
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        )
+
+    it "V3: password='passwd' salt='salt' c=1 dkLen=64 (RFC 7914 §11)":
+        val hex = _compute_v3()
+        expect(hex).to_equal(
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+        )

@@ -1,0 +1,213 @@
+# @cover src/os/crypto/x25519_mlkem768/hybrid_support.spl 100%
+# Behavioral coverage for byte ownership, digest, comparison, and admission
+# helpers shared by every scalar/SIMD/GPU X25519MLKEM768 evidence path.
+
+use std.spec
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519MlKem768SimdAdmission,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use os.crypto.x25519_mlkem768.hybrid_support.{
+    X25519MlKem768BufferError,
+    x25519_mlkem768_buffer_error_text,
+    x25519_mlkem768_wipe_owned,
+    x25519_mlkem768_wipe_owned_bytes,
+    x25519_mlkem768_slice_list,
+    x25519_mlkem768_slice_bytes,
+    x25519_mlkem768_digest,
+    x25519_mlkem768_keygen_fixture_digest,
+    x25519_mlkem768_encapsulate_fixture_digest,
+    x25519_mlkem768_decapsulate_fixture_digest,
+    x25519_mlkem768_append_bytes,
+    x25519_mlkem768_lists_equal,
+    x25519_mlkem768_bytes_valid,
+    x25519_mlkem768_bytes_all_zero}
+use os.crypto.x25519_mlkem768.execution_policy.{
+    x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test}
+
+fn expect_list_slice(result: Result<list, X25519MlKem768BufferError>,
+        expected: list):
+    match result:
+        case Ok(value): expect(value).to_equal(expected)
+        case Err(_): assert(false)
+
+fn expect_byte_slice(result: Result<[u8], X25519MlKem768BufferError>,
+        expected: [u8]):
+    match result:
+        case Ok(value): expect(value).to_equal(expected)
+        case Err(_): assert(false)
+
+fn expect_digest(result: Result<text, X25519MlKem768BufferError>,
+        expected: text):
+    match result:
+        case Ok(value): expect(value).to_equal(expected)
+        case Err(_): assert(false)
+
+fn expect_list_slice_error(
+        result: Result<list, X25519MlKem768BufferError>, expected: text):
+    match result:
+        case Ok(_): assert(false)
+        case Err(error):
+            expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+
+fn expect_byte_slice_error(
+        result: Result<[u8], X25519MlKem768BufferError>, expected: text):
+    match result:
+        case Ok(_): assert(false)
+        case Err(error):
+            expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+
+fn avx2_required_config() -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: X25519MlKem768Backend.Avx2,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+describe "X25519MLKEM768 hybrid support behavior":
+    it "wipes every owned list and byte-array element including empty inputs":
+        var values = [7, 8, 9]
+        var bytes: [u8] = [1.to_u8(), 2.to_u8(), 255.to_u8()]
+        var empty: list = []
+        var empty_bytes: [u8] = []
+        x25519_mlkem768_wipe_owned(values)
+        x25519_mlkem768_wipe_owned_bytes(bytes)
+        x25519_mlkem768_wipe_owned(empty)
+        x25519_mlkem768_wipe_owned_bytes(empty_bytes)
+        expect(values).to_equal([0, 0, 0])
+        expect(bytes).to_equal([0.to_u8(), 0.to_u8(), 0.to_u8()])
+        expect(empty.len()).to_equal(0)
+        expect(empty_bytes.len()).to_equal(0)
+
+    it "slices list and byte views at interior and zero-length boundaries":
+        val values = [10, 20, 30, 40]
+        val empty_list: list = []
+        val empty_bytes: [u8] = []
+        expect_list_slice(x25519_mlkem768_slice_list(values, 1, 2), [20, 30])
+        expect_list_slice(
+            x25519_mlkem768_slice_list(values, 4, 0), empty_list)
+        expect_byte_slice(x25519_mlkem768_slice_bytes(values, 2, 2),
+            [30.to_u8(), 40.to_u8()])
+        expect_byte_slice(
+            x25519_mlkem768_slice_bytes(values, 0, 0), empty_bytes)
+
+    it "returns exact structured errors for every list slice bound":
+        val values = [10, 20, 30, 40]
+        expect_list_slice_error(
+            x25519_mlkem768_slice_list(values, -1, 1),
+            "negative slice start -1 for buffer length 4")
+        expect_list_slice_error(
+            x25519_mlkem768_slice_list(values, 0, -2),
+            "negative slice count -2 for buffer length 4")
+        expect_list_slice_error(
+            x25519_mlkem768_slice_list(values, 5, 0),
+            "slice start 5 is past buffer length 4")
+        expect_list_slice_error(
+            x25519_mlkem768_slice_list(values, 3, 2),
+            "slice range start 3 count 2 exceeds buffer length 4")
+
+    it "returns exact structured errors for byte bounds and non-byte values":
+        val values = [10, 20, 30, 40]
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes(values, -3, 1),
+            "negative slice start -3 for buffer length 4")
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes(values, 0, -4),
+            "negative slice count -4 for buffer length 4")
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes(values, 6, 0),
+            "slice start 6 is past buffer length 4")
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes(values, 2, 3),
+            "slice range start 2 count 3 exceeds buffer length 4")
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes([7, 256, 9], 1, 1),
+            "buffer value at index 1 is not a byte: 256")
+        expect_byte_slice_error(
+            x25519_mlkem768_slice_bytes([7, -1, 9], 0, 3),
+            "buffer value at index 1 is not a byte: -1")
+
+    it "matches known SHA-256 bytes and keeps all operation aliases identical":
+        val values = [0, 1, 2, 255]
+        val expected = "3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56"
+        expect_digest(x25519_mlkem768_digest(values), expected)
+        expect_digest(x25519_mlkem768_keygen_fixture_digest(values), expected)
+        expect_digest(x25519_mlkem768_encapsulate_fixture_digest(values), expected)
+        expect_digest(x25519_mlkem768_decapsulate_fixture_digest(values), expected)
+        val empty: list = []
+        expect_digest(x25519_mlkem768_digest(empty),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    it "propagates exact non-byte errors through digest and all aliases":
+        val invalid = [1, 300, 2]
+        val expected = "buffer value at index 1 is not a byte: 300"
+        match x25519_mlkem768_digest(invalid):
+            case Ok(_): assert(false)
+            case Err(error):
+                expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+        match x25519_mlkem768_keygen_fixture_digest(invalid):
+            case Ok(_): assert(false)
+            case Err(error):
+                expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+        match x25519_mlkem768_encapsulate_fixture_digest(invalid):
+            case Ok(_): assert(false)
+            case Err(error):
+                expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+        match x25519_mlkem768_decapsulate_fixture_digest(invalid):
+            case Ok(_): assert(false)
+            case Err(error):
+                expect(x25519_mlkem768_buffer_error_text(error)).to_equal(expected)
+
+    it "appends typed bytes without changing their numeric values":
+        val joined = x25519_mlkem768_append_bytes(
+            [1, 2], [3.to_u8(), 255.to_u8()])
+        expect(joined).to_equal([1, 2, 3, 255])
+        val empty: [u8] = []
+        expect(x25519_mlkem768_append_bytes([1, 2], empty)).to_equal([1, 2])
+
+    it "compares equal, unequal, shorter-left, and shorter-right lists":
+        val empty: list = []
+        expect(x25519_mlkem768_lists_equal(empty, empty)).to_be(true)
+        expect(x25519_mlkem768_lists_equal([1, 2], [1, 2])).to_be(true)
+        expect(x25519_mlkem768_lists_equal([1, 2], [1, 3])).to_be(false)
+        expect(x25519_mlkem768_lists_equal([1], [1, 2])).to_be(false)
+        expect(x25519_mlkem768_lists_equal([1, 2], [1])).to_be(false)
+
+    it "accepts byte boundaries and rejects both underflow and overflow":
+        val empty: list = []
+        expect(x25519_mlkem768_bytes_valid(empty)).to_be(true)
+        expect(x25519_mlkem768_bytes_valid([0, 1, 254, 255])).to_be(true)
+        expect(x25519_mlkem768_bytes_valid([-1])).to_be(false)
+        expect(x25519_mlkem768_bytes_valid([256])).to_be(false)
+
+    it "aggregates all-zero status across empty, first, middle, and last positions":
+        val empty: [u8] = []
+        expect(x25519_mlkem768_bytes_all_zero(empty)).to_be(true)
+        expect(x25519_mlkem768_bytes_all_zero(
+            [0.to_u8(), 0.to_u8(), 0.to_u8()])).to_be(true)
+        expect(x25519_mlkem768_bytes_all_zero(
+            [1.to_u8(), 0.to_u8(), 0.to_u8()])).to_be(false)
+        expect(x25519_mlkem768_bytes_all_zero(
+            [0.to_u8(), 1.to_u8(), 0.to_u8()])).to_be(false)
+        expect(x25519_mlkem768_bytes_all_zero(
+            [0.to_u8(), 0.to_u8(), 1.to_u8()])).to_be(false)
+
+    it "fails closed when SIMD admission has no Stage-4 provenance":
+        val admission = X25519MlKem768SimdAdmission(
+            encoded_provenance: "",
+            actual_binary_sha256: "",
+            actual_provenance_sha256: "")
+        match x25519_mlkem768_resolve_simd_candidate_with_stage4_provenance_for_test(
+                avx2_required_config(), "keygen", 1,
+                admission.encoded_provenance,
+                admission.actual_binary_sha256,
+                admission.actual_provenance_sha256):
+            case Err(reason):
+                expect(reason).to_contain("stage4-source-roots-invalid")
+            case Ok(_):
+                assert(false)

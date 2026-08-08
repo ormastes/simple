@@ -1,0 +1,79 @@
+"""Regression: `expect(<T?>)` matchers must use nullable-aware equality.
+
+A nullable `T?` has two runtime representations. A literal assigned to a `T?`
+stays a bare value, but a function declared `-> T?` returns `Option::None` /
+`Option::Some(x)`. The BDD matcher builtins used raw equality, so on a
+function-returned nullable:
+
+  - `to_equal(nil)` on a genuinely-nil value reported a FALSE FAILURE
+  - `to_equal(x)`   on a genuinely-equal value reported a FALSE FAILURE
+  - `to_not_equal(nil)` on a genuinely-nil value reported a FALSE PASS
+  - `to_not_equal(x)`   on a genuinely-equal value reported a FALSE PASS
+
+The false-pass direction is the dangerous one: ~26 `to_not_equal(nil)` sites
+across kernel/loader/backend specs were asserting "this is not nil" and passing
+unconditionally. Fixed by routing both matcher arms and the interpreter's
+`==`/`!=` through `Value::nullable_eq` / `unwrap_option_payload`.
+"""
+
+use std.spec
+
+fn nil_i64() -> i64?:
+    nil
+
+fn some_i64() -> i64?:
+    7
+
+fn nil_text() -> text?:
+    nil
+
+fn some_text() -> text?:
+    "hi"
+
+describe("nullable-aware expect matchers"):
+
+    describe("to_equal must not FALSE-FAIL on a nullable receiver"):
+        it("matches nil against a function-returned nil i64?"):
+            expect(nil_i64()).to_equal(nil)
+
+        it("matches nil against a function-returned nil text?"):
+            expect(nil_text()).to_equal(nil)
+
+        it("matches the payload of a function-returned i64?"):
+            expect(some_i64()).to_equal(7)
+
+        it("matches the payload of a function-returned text?"):
+            expect(some_text()).to_equal("hi")
+
+    describe("to_equal must still reject genuine mismatches"):
+        it("rejects nil for a non-nil nullable"):
+            expect(some_i64() == nil).to_be_false()
+
+        it("rejects a wrong payload"):
+            expect(some_i64() == 8).to_be_false()
+
+        it("rejects a non-nil value for a nil nullable"):
+            expect(nil_i64() == 7).to_be_false()
+
+    describe("to_not_equal must not FALSE-PASS on a nullable receiver"):
+        # These are the regression's dangerous direction. Each asserts the
+        # NEGATIVE via `==` so the spec itself stays green while still pinning
+        # the semantics a false-passing `to_not_equal` would have violated.
+        it("treats a function-returned nil as equal to nil"):
+            expect(nil_i64() == nil).to_be_true()
+
+        it("treats a function-returned payload as equal to the bare value"):
+            expect(some_i64() == 7).to_be_true()
+
+        it("still reports a genuine difference"):
+            expect(some_i64()).to_not_equal(9)
+
+        it("still reports non-nil as not equal to nil"):
+            expect(some_i64()).to_not_equal(nil)
+
+    describe("to_be_nil agrees with to_equal(nil)"):
+        it("passes for a function-returned nil"):
+            expect(nil_i64()).to_be_nil()
+
+        it("passes to_not_be_nil for a function-returned payload"):
+            expect(some_i64()).to_not_be_nil()

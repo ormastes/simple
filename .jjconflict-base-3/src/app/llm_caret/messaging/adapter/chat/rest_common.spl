@@ -1,0 +1,102 @@
+"""Shared HTTP request and normalized-event records for chat adapters."""
+
+struct ChatHttpRequest:
+    accepted: bool
+    method: text
+    url: text
+    headers: [text]
+    body: text
+    idempotency_key: text
+    error: text
+
+struct ExternalChatEvent:
+    event_id: text
+    external_room_id: text
+    external_message_id: text
+    external_thread_id: text
+    sender_external_id: text
+    body: text
+    occurred_at: i64
+
+struct NormalizedChatEvent:
+    accepted: bool
+    duplicate: bool
+    event_kind: text
+    canonical_room_id: text
+    external_message_id: text
+    thread_root_id: text
+    sender_external_id: text
+    body: text
+    error: text
+
+struct RestRoomBinding:
+    binding_id: text
+    canonical_room_id: text
+    external_room_id: text
+
+struct CredentialHttpRequestTemplate:
+    accepted: bool
+    method: text
+    url_template: text
+    headers: [text]
+    body: text
+    credential_ref: text
+    credential_mode: text
+    idempotency_key: text
+    error: text
+
+fn json_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r")
+
+fn rejected_request(error: text) -> ChatHttpRequest:
+    ChatHttpRequest(accepted: false, method: "", url: "", headers: [], body: "",
+        idempotency_key: "", error: error)
+
+fn credential_request_template(request: ChatHttpRequest, credential_ref: text,
+        credential_mode: text, resolved_value: text) -> CredentialHttpRequestTemplate:
+    if not request.accepted:
+        return CredentialHttpRequestTemplate(accepted: false, method: "", url_template: "",
+            headers: [], body: "", credential_ref: credential_ref, credential_mode: credential_mode,
+            idempotency_key: "", error: request.error)
+    if not credential_ref.starts_with("secret://"):
+        return CredentialHttpRequestTemplate(accepted: false, method: "", url_template: "",
+            headers: [], body: "", credential_ref: credential_ref, credential_mode: credential_mode,
+            idempotency_key: "", error: "secret_reference_required")
+    if credential_mode != "bearer" and credential_mode != "bot" and credential_mode != "url_token":
+        return CredentialHttpRequestTemplate(accepted: false, method: "", url_template: "",
+            headers: [], body: "", credential_ref: credential_ref, credential_mode: credential_mode,
+            idempotency_key: "", error: "unsupported_credential_mode")
+    var safe_headers: [text] = []
+    for header in request.headers:
+        if not header.to_lower().starts_with("authorization:"): safe_headers.push(header)
+    var safe_url = request.url
+    if credential_mode == "url_token":
+        if resolved_value == "" or not safe_url.contains(resolved_value):
+            return CredentialHttpRequestTemplate(accepted: false, method: "", url_template: "",
+                headers: [], body: "", credential_ref: credential_ref, credential_mode: credential_mode,
+                idempotency_key: "", error: "url_credential_not_found")
+        safe_url = safe_url.replace(resolved_value, "__LLM_CARET_CREDENTIAL__")
+    CredentialHttpRequestTemplate(accepted: true, method: request.method, url_template: safe_url,
+        headers: safe_headers, body: request.body, credential_ref: credential_ref,
+        credential_mode: credential_mode, idempotency_key: request.idempotency_key, error: "")
+
+fn materialize_credential_request(request_template: CredentialHttpRequestTemplate,
+        resolved_value: text) -> ChatHttpRequest:
+    if not request_template.accepted: return rejected_request(request_template.error)
+    if resolved_value == "": return rejected_request("credential_unavailable")
+    var headers = request_template.headers
+    var url = request_template.url_template
+    if request_template.credential_mode == "bearer":
+        headers.push("Authorization: Bearer " + resolved_value)
+    elif request_template.credential_mode == "bot":
+        headers.push("Authorization: Bot " + resolved_value)
+    elif request_template.credential_mode == "url_token":
+        url = url.replace("__LLM_CARET_CREDENTIAL__", resolved_value)
+    else:
+        return rejected_request("unsupported_credential_mode")
+    ChatHttpRequest(accepted: true, method: request_template.method, url: url, headers: headers,
+        body: request_template.body, idempotency_key: request_template.idempotency_key, error: "")
+
+export ChatHttpRequest, ExternalChatEvent, NormalizedChatEvent, RestRoomBinding
+export CredentialHttpRequestTemplate
+export json_escape, rejected_request, credential_request_template, materialize_credential_request

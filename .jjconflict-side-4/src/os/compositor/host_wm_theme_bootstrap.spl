@@ -1,0 +1,48 @@
+# Hosted WM theme bootstrap owner.
+#
+# Resolve the registered package and install its immutable render snapshot
+# before any backend, compositor, or visible frame is created.
+
+use nogc_sync_mut.ui.theme_package.{default_theme_id, theme_package_render_snapshot}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome}
+use common.ui.wm_chrome_theme.{active_wm_theme_snapshot_present, active_wm_theme_snapshot_unchecked}
+use common.ui.wm_theme_css.{apply_wm_css_theme_text}
+
+fn install_host_wm_theme(theme_id: text) -> ThemeRenderSnapshot:
+    # Keep ResolvedThemePackage inside its owner. Hosted startup consumes only
+    # the immutable scalar-safe snapshot projection, so Stitch package CSS and
+    # material changes reach WM, GUI, and Web through one installed identity.
+    val snapshot = theme_package_render_snapshot(theme_id)
+    apply_theme_render_snapshot_to_wm_chrome(snapshot)
+    snapshot
+
+fn install_default_host_wm_theme() -> ThemeRenderSnapshot:
+    # Preserve an explicit earlier selection. Fresh hosted launches resolve the
+    # registry default package instead of bypassing it with a generated copy.
+    if active_wm_theme_snapshot_present():
+        val snapshot = active_wm_theme_snapshot_unchecked()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        return snapshot
+    install_host_wm_theme(default_theme_id())
+
+fn apply_host_wm_css_theme_override(css_text: text) -> bool:
+    """Apply a hosted user CSS/HTML override after package installation.
+
+    The entry point owns environment and filesystem access; this owner keeps
+    the WM-specific handoff explicit and preserves the package snapshot when
+    the file is empty, unreadable, or contains no --wm-* tokens."""
+    # The shared CSS owner derives/reinstalls the effective active snapshot
+    # before it retains CSS-only chrome fields. Keep the host boundary as the
+    # fs/env-free delegate; hosted_entry then reads that active snapshot for
+    # its ThemeInstall wire, backend clear color, and capture evidence.
+    apply_wm_css_theme_text(css_text)
+
+fn active_host_wm_theme_snapshot() -> ThemeRenderSnapshot:
+    """Return the effective snapshot after host bootstrap or CSS override.
+
+    Hosted entry code must read this after a successful override before it
+    creates the package-install wire, backend clear color, or capture evidence.
+    install_default_host_wm_theme() establishes the required active snapshot
+    before this helper is used."""
+    active_wm_theme_snapshot_unchecked()

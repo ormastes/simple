@@ -1,0 +1,562 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Recovery / prevention scenario suite (the deliverable, doc §8)
+# ============================================================================
+#
+# This spec IS the module's user manual for the recovery/prevention scenarios
+# that justify the Vt-byte build (doc §8, "the deliverable that justifies the
+# build"). Each `it` block is one datasheet-grade failure story driven end to
+# end through the emulator's host + fault interface, asserting ABSOLUTE oracles
+# (known values at known reference points), never self-comparison.
+#
+# Scenarios covered (doc §8 table): #1 retention read-retry, #3 read disturb,
+# #5 SPO during program, #9 factory bad blocks, #11 wear-out, #12/#13 copy-back
+# EDC, #14 Nop violation, #15 random-page-program violation. The remaining §8
+# rows are the physics-lane / chip_spec / cmd_fsm_spec territory.
+#
+# Determinism note: the Vt model is fully deterministic (per-cell splitmix seed,
+# no wall clock, doc §3.3), so every numeric oracle below is a fixed, replayable
+# value — the exact code the emulator produces at that reference point, computed
+# from the Appendix B coefficients, not a run-to-run artifact.
+#
+# Source of truth: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+#   §1.2 cycle map, §1.3 command set, §3.1 Vt encoding, §3.2 read-retry,
+#   §3.4 lazy drift, §7.2 legality rules, §7.3 physics, §8 scenario table, §9.4 API.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect, step}
+use hardware.nand_emu.nand_types.{NeProfile, NeOpKind}
+use hardware.nand_emu.chip.{NeChip, ne_chip_new}
+use hardware.nand_emu.fault.ne_fault_spo
+use hardware.nand_emu.cmd_fsm.{ne_check_nop, ne_check_page_order, ne_program_violation_kind_text}
+use hardware.nand_emu.edc.{ne_edc_parity, ne_edc_check, ne_edc_invalidate_on_subsector}
+use hardware.nand_emu.badblock.{ne_factory_bad_map, ne_bad_marker_column}
+use hardware.nand_emu.geometry.ne_profile_geometry
+
+# ----------------------------------------------------------------------------
+# Pin-sequence drivers (host-controller style; absolute cycle maps, doc §1.2).
+# Mirrors the chip_spec drivers so the scenario manual reads in the same voice.
+# ----------------------------------------------------------------------------
+
+fn drive_addr5(chip: NeChip, col: i64, row: i64) -> NeChip:
+    """Drive the 5-cycle read/program address (doc §1.2): 2 column cycles then
+    3 row cycles, masked to the documented field widths."""
+    var c = chip
+    c = c.addr(col & 0xFF)
+    c = c.addr((col >> 8) & 0x1F)
+    c = c.addr(row & 0xFF)
+    c = c.addr((row >> 8) & 0xFF)
+    c = c.addr((row >> 16) & 0x3)
+    c
+
+fn drive_addr_erase(chip: NeChip, row: i64) -> NeChip:
+    """Drive the 3-cycle block-erase (row-only) address (doc §1.2)."""
+    var c = chip
+    c = c.addr(row & 0xFF)
+    c = c.addr((row >> 8) & 0xFF)
+    c = c.addr((row >> 16) & 0x3)
+    c
+
+fn read_bytes(chip: NeChip, n: i64) -> [i64]:
+    """Stream n serial-output bytes from the chip's current output position."""
+    var c = chip
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out = out.push(c.data_out())
+        i = i + 1
+    out
+
+fn read_page_bytes(chip: NeChip, row: i64, start_col: i64, n: i64) -> [i64]:
+    """Full 00h/30h read: address the page, sense it, and stream n bytes from
+    start_col. Takes the chip by value so a read never perturbs the caller's
+    state (a copy is sensed; the caller's programmed Vt is untouched)."""
+    var c = chip
+    c = c.cmd(0x00)
+    c = drive_addr5(c, start_col, row)
+    c = c.cmd(0x30)
+    read_bytes(c, n)
+
+fn sense_page_inplace(chip: NeChip, row: i64) -> NeChip:
+    """Perform a full 00h/30h read and RETURN the updated chip — used when the
+    read's side effect (bumping the block neighbours' read-disturb counters,
+    doc §3.4) must persist across calls. read_page_bytes takes the chip by value
+    and so cannot accumulate disturb; this driver does."""
+    var c = chip
+    c = c.cmd(0x00)
+    c = drive_addr5(c, 0, row)
+    c = c.cmd(0x30)
+    c
+
+fn program_page(chip: NeChip, row: i64, start_col: i64, data: [i64]) -> NeChip:
+    """Full 80h/10h Page Program: address the page, load `data` into the page
+    register from start_col, and confirm. Returns the updated chip."""
+    var c = chip
+    c = c.cmd(0x80)
+    c = drive_addr5(c, start_col, row)
+    var i = 0
+    while i < data.len():
+        c = c.data_in(data[i])
+        i = i + 1
+    c = c.cmd(0x10)
+    c
+
+fn erase_block(chip: NeChip, row: i64) -> NeChip:
+    """Full 60h/D0h Block Erase of the block containing `row`. Returns the chip."""
+    var c = chip
+    c = c.cmd(0x60)
+    c = drive_addr_erase(c, row)
+    c = c.cmd(0xD0)
+    c
+
+fn status_of(chip: NeChip, reg: i64) -> i64:
+    """Select a status register (70h/F1h/7Bh) and read it back (doc §1.4)."""
+    var c = chip
+    c = c.cmd(reg)
+    c.read_status()
+
+fn make_bytes(value: i64, n: i64) -> [i64]:
+    """A length-n array of a repeated byte value (page-buffer test fixtures)."""
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out = out.push(value)
+        i = i + 1
+    out
+
+# ----------------------------------------------------------------------------
+# Wear-driver: stamp a block's pe_cycles directly (doc §3.4 wear input). Reaching
+# thousands of P/E via real erases is infeasible in a bounded interpreter run, so
+# the scenarios drive the physics input the FTL would accumulate over a device
+# lifetime by writing the public per-block counter (return-the-object pattern),
+# then let the ordinary physics act on it.
+# ----------------------------------------------------------------------------
+
+fn force_pe(chip: NeChip, blk: i64, pe: i64) -> NeChip:
+    """Set block `blk`'s program/erase cycle count to `pe` — the wear input the
+    erase-widening and retention physics read (doc §3.4 / §7.3). Arrays are
+    lazily allocated, so callers must have touched the block once (an erase)
+    first. Returns the updated chip."""
+    var c = chip
+    var bms = c.block_metas
+    var bm = bms[blk]
+    bm.pe_cycles = pe
+    bms[blk] = bm
+    c.block_metas = bms
+    c
+
+fn force_rd(chip: NeChip, page: i64, rd: i64) -> NeChip:
+    """Set page `page`'s accumulated read-disturb count to `rd` — the neighbour-
+    read input the disturb physics read at sense time (doc §3.4). Returns the
+    updated chip."""
+    var c = chip
+    var pms = c.page_metas
+    var m = pms[page]
+    m.rd_count = rd
+    pms[page] = m
+    c.page_metas = pms
+    c
+
+# ----------------------------------------------------------------------------
+# Small analysis helpers over readback bytes / Vt histograms.
+# ----------------------------------------------------------------------------
+
+fn count_eq(bytes: [i64], v: i64) -> i64:
+    """Number of elements of `bytes` exactly equal to `v`."""
+    var n = 0
+    var i = 0
+    while i < bytes.len():
+        if bytes[i] == v:
+            n = n + 1
+        i = i + 1
+    n
+
+fn hist_distinct(hist: [i64]) -> i64:
+    """Number of distinct Vt code bins occupied (a spread proxy, doc §9.4)."""
+    var n = 0
+    var i = 0
+    while i < 256:
+        if hist[i] > 0:
+            n = n + 1
+        i = i + 1
+    n
+
+fn hist_count_ge(hist: [i64], threshold: i64) -> i64:
+    """Number of cells whose stored Vt code is >= `threshold`."""
+    var n = 0
+    var i = threshold
+    while i < 256:
+        n = n + hist[i]
+        i = i + 1
+    n
+
+# ----------------------------------------------------------------------------
+# Datasheet-derived constants used by the retention scenario oracle.
+# ----------------------------------------------------------------------------
+
+fn one_year_seconds() -> f64: 31536000.0    # 365 * 24 * 3600 s
+
+fn main():
+
+    # ======================================================================
+    # Scenario #1 — Retention failure + read-retry recovery (doc §8 row 1)
+    # ======================================================================
+    describe("nand_emu scenario 1: retention failure recovered by read-retry"):
+        it("reads a worn+aged programmed page as erased at the default reference, then recovers it at a lowered reference"):
+            """doc §8 scenario 1 / §3.2 read-retry: charge leaks off programmed
+            cells over time, faster on a worn block (retention_delta ~ log10(time)
+            * (1 + P/E/1000), doc §7.3). After enough drift a programmed cell's Vt
+            sinks below the default read reference (128) and reads back as erased —
+            a retention bit-flip. The DUT's recovery is READ-RETRY: lower the read
+            reference onto the drifted-down programmed lobe so the cells read
+            correctly again. This is the whole reason the Vt byte exists (doc §8).
+
+            We program an all-cells-programmed region (00h), age it one year on a
+            heavily-worn block, and assert BOTH halves of the payoff: at the
+            default reference the page is wholly flipped to FFh (data lost), and at
+            a lowered reference the same physical page reads 00h again (recovered).
+
+            Wear calibration (honest deviation): the doc names 30 K P/E for this
+            row, but with the Appendix B ret_coef (2.0) a 30 K / 1-year cell
+            saturates to Vt=0 (total charge loss), which would need a sub-zero
+            reference to 'recover' — off the physical [0,255] scale, i.e. not a
+            genuine read-retry. We therefore drive the in-domain wear point where
+            the doc's own expectation ('correctable at retry level 2-3') actually
+            occurs in this model, ~5 K P/E: the drifted programmed lobe lands near
+            Vt~95, below the 128 default but above the floor, so a moderate
+            reference drop (offset -50 => vref 78) cleanly recovers it."""
+            step("Erase block 0 and program page 0's first 8 bytes to 00h (all cells programmed).")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, make_bytes(0x00, 8))
+
+            step("Confirm the fresh programmed page reads 00h before any aging (all 8 bytes).")
+            val fresh = read_page_bytes(chip, 0, 0, 8)
+            expect(count_eq(fresh, 0x00)).to_equal(8)
+
+            step("Stamp heavy wear (5000 P/E) on block 0 and advance the clock one year.")
+            chip = force_pe(chip, 0, 5000)
+            chip = chip.advance_time_s(one_year_seconds())
+
+            step("At the DEFAULT reference the retention-drifted page is wholly flipped to FFh (all 8 bytes) — the data is lost.")
+            val at_default = read_page_bytes(chip, 0, 0, 8)
+            expect(count_eq(at_default, 0xFF)).to_equal(8)
+
+            step("Apply a negative read-reference offset (-50 => vref 78) and re-read: read-retry recovers all 8 bytes to 00h.")
+            chip = chip.set_vref_offset(-50)
+            val at_retry = read_page_bytes(chip, 0, 0, 8)
+            expect(count_eq(at_retry, 0x00)).to_equal(8)
+
+    # ======================================================================
+    # Scenario #3 — Read disturb (doc §8 row 3)
+    # ======================================================================
+    describe("nand_emu scenario 3: read disturb accumulates on the neighbours of a hammered page"):
+        it("counts neighbour reads on exactly the adjacent pages and drifts hammered erased cells up past the reference"):
+            """doc §8 scenario 3 / §3.2 / §3.4: repeatedly reading page N stresses
+            the ERASED cells of its in-block neighbours (N±1) with the read pass
+            voltage, nudging their Vt up (disturb_delta = rd_count/10000, doc §7.3);
+            enough reads push an erased cell above the reference and it reads back
+            as programmed — a read-disturb bit-flip the DUT's read counter must
+            catch (block refresh) before it becomes uncorrectable.
+
+            Two absolute oracles: (a) the counted mechanism — five 00h/30h reads of
+            page 1 bump exactly its two block neighbours (pages 0 and 2) by 5 each,
+            while the hammered page itself (page 1) and a non-adjacent page (page 3)
+            stay at 0 — proving disturb is charged to neighbours, not self; and
+            (b) the physical payoff — a page whose read-disturb count is driven to a
+            device-lifetime 400 000 reads flips every one of its 32 erased bytes off
+            FFh, whereas the same page read fresh is entirely FFh."""
+            step("Erase block 0 so pages 0-3 are all erased (read FFh).")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+
+            step("Hammer page 1 with five full 00h/30h reads (side effects persisted).")
+            var k = 0
+            while k < 5:
+                chip = sense_page_inplace(chip, 1)
+                k = k + 1
+
+            step("Read disturb is counted on exactly the two in-block neighbours (pages 0 and 2), 5 each.")
+            expect(chip.page_metas[0].rd_count).to_equal(5)
+            expect(chip.page_metas[2].rd_count).to_equal(5)
+
+            step("The hammered page itself (page 1) and a non-adjacent page (page 3) accrue no disturb.")
+            expect(chip.page_metas[1].rd_count).to_equal(0)
+            expect(chip.page_metas[3].rd_count).to_equal(0)
+
+            step("A fresh erased page reads all FFh — the baseline before disturb bites.")
+            var chip2 = ne_chip_new(NeProfile.S1)
+            chip2 = erase_block(chip2, 0)
+            val before = read_page_bytes(chip2, 0, 0, 32)
+            expect(count_eq(before, 0xFF)).to_equal(32)
+
+            step("Drive page 0's read-disturb count to a device-lifetime 400000 reads and re-read.")
+            chip2 = force_rd(chip2, 0, 400000)
+            val after = read_page_bytes(chip2, 0, 0, 32)
+
+            step("Every one of the 32 erased bytes has drifted up past the reference and reads back non-FFh — the read-disturb failure.")
+            expect(count_eq(after, 0xFF)).to_equal(0)
+
+    # ======================================================================
+    # Scenario #5 — Sudden power-off during program (doc §8 row 5)
+    # ======================================================================
+    describe("nand_emu scenario 5: SPO during program leaves a detectably half-written page"):
+        it("re-reads a page interrupted mid-ISPP as neither fully erased nor the intended pattern"):
+            """doc §8 scenario 5 / §7.3: a sudden power-off aborts the ISPP
+            pulse-and-verify loop partway, so the page's cells are frozen at
+            intermediate Vt — some already above the reference, some not yet. On
+            the next power-up the FTL simply re-reads the page (there is no busy
+            state to resume in MODEL timing) and must DETECT the interruption: the
+            page is neither all-FFh (as if never written) nor the intended pattern
+            (as if fully written). That in-between readback is the signature the
+            power-up scan keys on to rebuild the block.
+
+            We arm SPO at ISPP pulse 6 (of the default 20-pulse budget) while
+            programming page 0 to the all-programmed pattern 00h, then re-read: the
+            page shows both still-erased bytes (FFh, cells that never crossed the
+            reference) AND partially-programmed bytes (non-FFh, non-00h) — the
+            unmistakable half-written fingerprint."""
+            step("Erase block 0, arm SPO at ISPP pulse 6 on page 0, then program page 0's first 32 bytes to 00h.")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = chip.inject(ne_fault_spo(NeOpKind.Program, 6, 0))
+            chip = program_page(chip, 0, 0, make_bytes(0x00, 32))
+
+            step("Power-cycle semantics in MODEL timing = simply re-read the page.")
+            val page = read_page_bytes(chip, 0, 0, 32)
+            val ff_bytes = count_eq(page, 0xFF)
+
+            step("The page is NOT fully erased: some bytes crossed the reference and read non-FFh.")
+            expect(ff_bytes).to_be_less_than(32)
+
+            step("The page is NOT the intended 00h pattern either: some cells never finished programming and still read FFh.")
+            expect(ff_bytes).to_be_greater_than(0)
+
+            step("Because it is a clean abort (not a program failure), the status byte stays C0h (ready, pass) — the half-write is caught by the readback scan, not the status.")
+            expect(status_of(chip, 0x70)).to_equal(0xC0)
+
+    # ======================================================================
+    # Scenario #9 — Factory bad blocks (doc §8 row 9)
+    # ======================================================================
+    describe("nand_emu scenario 9: the initial scan finds the factory bad-block markers"):
+        it("marks a deterministic set of blocks non-FFh at the documented marker column while block 0 stays good"):
+            """doc §8 scenario 9: the vendor marks factory-bad blocks with a
+            non-FFh byte at a fixed marker column of pages 0/1; block 0 is
+            guaranteed good so a bootloader always has one known block. The DUT's
+            bring-up scan reads that column on every block to build its bad-block
+            table, and must NEVER erase a marked block (erasing destroys the marker
+            one-way, scenario 10).
+
+            We drive both doors. First the map generator directly (a different door
+            than the chip): ne_factory_bad_map(S1, count=3, seed=1) deterministically
+            selects blocks {3,5,6} — never block 0. Then the chip: after stamping
+            that same map, page 0 of block 3 (row 12) reads non-FFh at the marker
+            column, while block 0 (row 0) and a good block (block 1, row 4) read FFh
+            there. The marker column is the main/spare boundary, 512 for S1
+            (sectors_per_page * 512, doc badblock.ne_bad_marker_column)."""
+            step("Ask the map generator directly for (S1, count=3, seed=1): the choice is deterministic and never block 0.")
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val bad = ne_factory_bad_map(geo, 3, 1)
+            expect(bad[0]).to_equal(false)
+            expect(bad[3]).to_equal(true)
+            expect(bad[5]).to_equal(true)
+            expect(bad[6]).to_equal(true)
+
+            step("The marker column for S1 is the 512-byte main/spare boundary.")
+            expect(ne_bad_marker_column(geo)).to_equal(512)
+
+            step("Stamp that factory map onto a fresh chip.")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = chip.set_factory_bad_blocks(3, 1)
+
+            step("The scan reads a non-FFh marker at column 512 of a bad block (block 3, page 0 = row 12).")
+            val bad_marker = read_page_bytes(chip, 12, 512, 1)
+            expect(bad_marker[0]).to_equal(0x00)
+
+            step("Block 0 (row 0) is guaranteed good and reads FFh at the marker column.")
+            val block0 = read_page_bytes(chip, 0, 512, 1)
+            expect(block0[0]).to_equal(0xFF)
+
+            step("A good block (block 1, row 4) also reads FFh at the marker column.")
+            val good = read_page_bytes(chip, 4, 512, 1)
+            expect(good[0]).to_equal(0xFF)
+
+    # ======================================================================
+    # Scenario #11 — Wear-out (doc §8 row 11)
+    # ======================================================================
+    describe("nand_emu scenario 11: wear widens the erase distribution until the block fails"):
+        it("shows a heavily cycled block's erased Vt spread far wider than a fresh block, past the reference"):
+            """doc §8 scenario 11 / §7.3: every erase stresses the oxide, and the
+            model widens the erased lobe with wear (sigma_eff = erase_sigma +
+            wear_coef * P/E/1000) and raises its floor (erase_floor_coef * P/E/1000).
+            Past enough cycles the erased distribution spreads so wide that its
+            upper tail crosses the read reference — erased cells that read back as
+            programmed — and the block fails. Wear leveling exists to stop any one
+            block reaching this; the emulator makes the failure visible through the
+            Vt histogram that is impossible to see on real silicon (doc §9.4).
+
+            Absolute oracles: a fresh (P/E=0) erased page keeps every cell well
+            below Vt 200 and in a narrow band of code bins; a 30 K-cycle block's
+            erased page occupies far more distinct code bins AND puts cells at/above
+            Vt 200 — a spread no fresh block ever shows — and reads non-FFh, i.e.
+            it can no longer even hold an erased state."""
+            step("Erase a fresh block 0 (P/E=0) and capture its erased Vt histogram.")
+            var fresh = ne_chip_new(NeProfile.S1)
+            fresh = erase_block(fresh, 0)
+            val fresh_hist = fresh.vt_histogram(0)
+            val fresh_distinct = hist_distinct(fresh_hist)
+
+            step("A fresh erased distribution is narrow: no cell reaches Vt 200.")
+            expect(hist_count_ge(fresh_hist, 200)).to_equal(0)
+
+            step("On a second chip, stamp 30000 P/E on block 0 and erase again so the erase widening acts at that wear.")
+            var worn = ne_chip_new(NeProfile.S1)
+            worn = erase_block(worn, 0)
+            worn = force_pe(worn, 0, 30000)
+            worn = erase_block(worn, 0)
+            val worn_hist = worn.vt_histogram(0)
+            val worn_distinct = hist_distinct(worn_hist)
+
+            step("The worn erased distribution occupies far more distinct code bins than the fresh one.")
+            expect(worn_distinct).to_be_greater_than(fresh_distinct)
+
+            step("The worn distribution's tail now reaches Vt 200+ — a spread the fresh block never produced.")
+            expect(hist_count_ge(worn_hist, 200)).to_be_greater_than(0)
+
+            step("The block has failed: its freshly-erased page no longer reads all-FFh.")
+            val worn_page = read_page_bytes(worn, 0, 0, 32)
+            expect(count_eq(worn_page, 0xFF)).to_be_less_than(32)
+
+    # ======================================================================
+    # Scenario #12 / #13 — Copy-back EDC (doc §8 rows 12-13)
+    # ======================================================================
+    describe("nand_emu scenario 12/13: copy-back carries an EDC that catches drift and invalidates on sub-sector input"):
+        it("detects a single-bit sector corruption via EDC parity and clears the 7Bh validity bit after sub-sector random input"):
+            """doc §8 scenarios 12-13 / §7.2 last rule: copy-back moves a page
+            without the data crossing the host bus, so a page whose Vt already
+            drifted would be blind-copied with its errors — which is why copy-back
+            carries an on-chip EDC (1 bit / 528 B). Two guards:
+
+            #12 accumulation: the EDC (a parity code here, a documented minimal
+            model of the datasheet's 1-bit/sector code) must FLAG a corrupted
+            sector so the DUT does not blind-copy. We compute a sector's parity,
+            flip a single bit, and assert the recomputed EDC no longer matches
+            (ne_edc_check == false) while the clean sector matches — the direct-door
+            proof the parity actually detects the error.
+
+            #13 invalidation: a sub-sector random data input (85h) during a
+            copy-back load corrupts the on-chip EDC, so the chip must clear the 7Bh
+            EDC-validity bit (I/O2 = 0) and force the DUT to fall back to
+            read-modify-write. We drive that whole sequence on the chip and assert
+            I/O2 reads 0."""
+            step("Direct EDC door: a clean 4-byte sector's parity round-trips (recompute matches stored).")
+            val sector: [u8] = [0x12 as u8, 0x34 as u8, 0x56 as u8, 0x78 as u8]
+            val parity = ne_edc_parity(sector)
+            expect(ne_edc_check(sector, parity)).to_equal(true)
+
+            step("Flip a single bit in the sector: the EDC recompute no longer matches — a drifted copy-back source would be caught, not blind-copied.")
+            val corrupt: [u8] = [0x13 as u8, 0x34 as u8, 0x56 as u8, 0x78 as u8]
+            expect(ne_edc_check(corrupt, parity)).to_equal(false)
+
+            step("The validity flag is one-way to invalid on sub-sector input (bit0 set).")
+            expect(ne_edc_invalidate_on_subsector(0)).to_equal(1)
+
+            step("On the chip: program a source page, then start a copy-back (00h/35h read into the register).")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0x12, 0x34, 0x56, 0x78])
+            var c = chip
+            c = c.cmd(0x00)
+            c = drive_addr5(c, 0, 0)
+            c = c.cmd(0x35)
+
+            step("Begin the copy-back program to page 1 (85h), then issue a sub-sector random data input (85h + column + data) before the 10h confirm.")
+            c = c.cmd(0x85)
+            c = drive_addr5(c, 0, 1)
+            c = c.cmd(0x85)
+            c = c.addr(1 & 0xFF)
+            c = c.addr((1 >> 8) & 0x1F)
+            c = c.data_in(0xAA)
+            c = c.cmd(0x10)
+
+            step("The 7Bh EDC-validity bit (I/O2) now reads 0 — the DUT must fall back to read-modify-write.")
+            val edc_status = status_of(c, 0x7B)
+            expect(edc_status & 0x04).to_equal(0)
+
+    # ======================================================================
+    # Scenario #14 — Nop violation (doc §8 row 14)
+    # ======================================================================
+    describe("nand_emu scenario 14: the 5th partial program to one page is a Nop violation the FTL must never reach"):
+        it("bumps the page Nop counter on each partial program and flags the budget spent before a 5th"):
+            """doc §8 scenario 14 / §7.2: SLC NAND allows at most 4 partial programs
+            (Nop <= 4) to a page between erases; the 5th corrupts already-written
+            data. The chip tallies each partial program in the page's nop_count, and
+            the FTL's legality gate (ne_check_nop) must refuse the 5th. Real firmware
+            should never even reach it — this scenario is the tripwire that proves
+            the gate fires.
+
+            We partial-program page 0 four times (the full legal budget), assert the
+            chip's nop_count reached exactly 4, then assert the gate: a 4th program
+            was still within budget (ne_check_nop(3) true) but a 5th (nop_count == 4)
+            is rejected and classified 'nop_exceeded'."""
+            step("Erase block 0, then partial-program page 0 four times (the full Nop budget).")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, make_bytes(0xF0, 1))
+            chip = program_page(chip, 0, 0, make_bytes(0xF0, 1))
+            chip = program_page(chip, 0, 0, make_bytes(0xF0, 1))
+            chip = program_page(chip, 0, 0, make_bytes(0xF0, 1))
+
+            step("The chip has tallied exactly 4 partial programs to page 0.")
+            expect(chip.page_metas[0].nop_count).to_equal(4)
+
+            step("The legality gate: a 4th partial program (from nop_count 3) was still within the Nop<=4 budget.")
+            expect(ne_check_nop(3)).to_equal(true)
+
+            step("But a 5th (from nop_count 4) exceeds the budget and is rejected.")
+            expect(ne_check_nop(4)).to_equal(false)
+
+            step("Classified as a Nop-exceeded violation (same page, budget spent).")
+            expect(ne_program_violation_kind_text(0, 0, 4)).to_equal("nop_exceeded")
+
+    # ======================================================================
+    # Scenario #15 — Random page program violation (doc §8 row 15)
+    # ======================================================================
+    describe("nand_emu scenario 15: programming a lower page after a higher one is a random-page-program violation"):
+        it("accepts forward LSB->MSB programs on the chip but flags a regress to a lower page"):
+            """doc §8 scenario 15 / §7.2: within a block, pages must be programmed
+            in order LSB -> MSB; jumping back to a lower page after a higher one
+            disturbs the partially-programmed word lines and is a
+            random-page-program violation. The chip programs whatever page it is
+            addressed (page-order legality is the FTL's contract, enforced by
+            ne_check_page_order), so this scenario proves the FTL gate: forward
+            steps pass, a regress is refused.
+
+            We program pages 0,1,2 of block 0 in order on the chip and confirm each
+            round-trips (the forward path is legal and lossless), then drive the
+            gate with in-block page indices: the first program of a fresh block
+            (last = -1) passes, each forward step passes, but a regress from the
+            last-programmed page 2 back to page 1 is rejected and classified
+            'random_page_program'."""
+            step("Program pages 0, 1, 2 of block 0 in ascending order and confirm each reads back.")
+            var chip = ne_chip_new(NeProfile.S1)
+            chip = erase_block(chip, 0)
+            chip = program_page(chip, 0, 0, [0xA0])
+            chip = program_page(chip, 1, 0, [0xA1])
+            chip = program_page(chip, 2, 0, [0xA2])
+            expect(read_page_bytes(chip, 0, 0, 1)[0]).to_equal(0xA0)
+            expect(read_page_bytes(chip, 1, 0, 1)[0]).to_equal(0xA1)
+            expect(read_page_bytes(chip, 2, 0, 1)[0]).to_equal(0xA2)
+
+            step("The FTL ordering gate: the first program of a fresh block (last page = -1) is a legal forward step.")
+            expect(ne_check_page_order(0, -1)).to_equal(true)
+
+            step("Each ascending step within the block is legal (page 2 after page 1).")
+            expect(ne_check_page_order(2, 1)).to_equal(true)
+
+            step("But a regress from the last-programmed page 2 back to page 1 is refused.")
+            expect(ne_check_page_order(1, 2)).to_equal(false)
+
+            step("Classified as a random-page-program violation.")
+            expect(ne_program_violation_kind_text(1, 2, 0)).to_equal("random_page_program")

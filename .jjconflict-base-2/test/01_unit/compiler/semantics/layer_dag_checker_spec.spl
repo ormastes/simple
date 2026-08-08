@@ -1,0 +1,81 @@
+# Spec for the layer DAG checker (M0 of doc/03_plan/compiler/forwarding/
+# zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# BINARY PROVENANCE: run under the Rust seed `bin/simple` (the only binary in
+# tree today, per doc/05_design/language/forwarding/
+# layer_forwarding_and_layer_eq_types.md §5). This exercises the checker's OWN
+# logic against synthetic LayerDagRegistry fixtures built directly in this
+# spec — it does NOT parse real `layer` source text through
+# src/compiler/10.frontend, because that frontend is pure-Simple source that
+# `bin/simple` (the seed) does not read at all. Parser wiring for the `layer`
+# keyword is explicitly NOT part of this milestone (see the plan doc's M0
+# file list and its own "done check" discrepancy note).
+
+use std.spec.{describe, it, expect, expect_not, assert_true}
+use compiler.semantics.layer_dag_checker.{
+    LayerDagRegistry, check_declared_upward, check_layer_cycles, check_layer_dag
+}
+
+describe "layer DAG checker":
+    it "accepts the sketch's acyclic DAG (draw <- gui <- web/wm)":
+        val reg = LayerDagRegistry.new()
+        reg.declare("draw")
+        reg.declare("gui")
+        reg.declare("web")
+        reg.declare("wm")
+        reg.uses("gui", "draw")
+        reg.uses("web", "gui")
+        reg.uses("web", "draw")
+        reg.uses("wm", "gui")
+        reg.uses("wm", "draw")
+        val v = check_layer_dag(reg)
+        assert_true(v.ok)
+        expect(v.diagnostic).to_equal("")
+
+    it "rejects a 2-cycle":
+        val reg = LayerDagRegistry.new()
+        reg.declare("a")
+        reg.declare("b")
+        reg.uses("a", "b")
+        reg.uses("b", "a")
+        val v = check_layer_cycles(reg)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("cycle"))
+
+    it "rejects a 3-cycle":
+        val reg = LayerDagRegistry.new()
+        reg.declare("a")
+        reg.declare("b")
+        reg.declare("c")
+        reg.uses("a", "b")
+        reg.uses("b", "c")
+        reg.uses("c", "a")
+        val v = check_layer_cycles(reg)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("cycle"))
+
+    it "rejects a self-edge":
+        val reg = LayerDagRegistry.new()
+        reg.declare("a")
+        reg.uses("a", "a")
+        val v = check_layer_cycles(reg)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("cycle"))
+
+    it "rejects a declared-upward uses edge":
+        val reg = LayerDagRegistry.new()
+        reg.declare("draw")
+        reg.declare("gui")
+        # "draw" is declared before "gui" but reaches upward to use it.
+        reg.uses("draw", "gui")
+        val v = check_declared_upward(reg)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("declared-upward"))
+
+    it "rejects a uses edge to an undeclared layer":
+        val reg = LayerDagRegistry.new()
+        reg.declare("gui")
+        reg.uses("gui", "draw")
+        val v = check_declared_upward(reg)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("undeclared"))

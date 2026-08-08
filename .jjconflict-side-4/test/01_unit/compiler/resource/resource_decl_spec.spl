@@ -1,0 +1,202 @@
+"""
+# `resource` declaration parsing — WP-A acceptance
+
+**Plan:** doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md (WP-A)
+**Design:** doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §1
+**Architecture:** doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md
+
+WP-A is parse + AST + clean errors only. Lowering, drop edges, RC and
+borrow-check enforcement are WP-C/E/G and are deliberately NOT asserted here.
+
+## Why this spec feeds source STRINGS instead of writing `resource` directly
+
+`bin/simple test` re-execs a child **Rust seed** binary, and the seed's parser
+is what reads a spec file's own module-level syntax — not the pure-Simple
+frontend in `src/compiler/10.frontend/**`. Control probe: `layer ProbeLayer`,
+an already-landed pure-Simple soft keyword, fails in a spec file with
+"function `layer` not found". So no pure-Simple frontend change can ever alter
+how a spec file's own declarations parse, and the plan's WP-A acceptance
+criterion (write `resource File` directly in a spec) is unreachable until
+stage-3 self-host lands.
+
+The reachable oracle is the one `test/01_unit/compiler/parser/const_spec.spl`
+uses: drive `parse_module_body()` over a source string, which runs the edited
+pure-Simple parser under the interpreter.
+
+## The load-bearing property
+
+`resource` is a **contextual (soft) keyword**, recognized only at
+declaration-start position. 112 identifier uses of `resource` exist in `src/`
+today — including inside the compiler's own source (`85.mdsoc/security.spl`,
+`85.mdsoc/weaving/join_point_kind.spl`) — so a hard/reserved keyword would
+break the compiler's own rebuild.
+"""
+
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_body, decl_get_name, decl_get_tag, DECL_VAL}
+use compiler.core.ast.{expr_get_tag, expr_get_args, expr_get_str, EXPR_CALL}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use std.spec
+
+# Parses `source` and returns the decls. Panics if the parser errored, so a
+# regression that turns a legal form into an error fails loudly.
+fn parse_ok(source: text) -> [i64]:
+    ast_reset()
+    parser_init_with_path(source, "resource_decl_spec.spl")
+    parse_module_body()
+    if parser_has_errors():
+        panic("resource parser produced errors for a source that must parse")
+    module_get_decls()
+
+# Same, but reports the error flag instead of panicking — for the fail-closed
+# cases (missing required key, unknown key).
+fn parse_reports_error(source: text) -> bool:
+    ast_reset()
+    parser_init_with_path(source, "resource_decl_spec.spl")
+    parse_module_body()
+    parser_has_errors()
+
+# Pulls the `meta_csv` second argument off the inert `__resource_decl(name,
+# meta_csv)` marker the parser lowers a `resource` declaration to.
+fn resource_meta_of(decl_idx: i64) -> text:
+    val body = decl_get_body(decl_idx)
+    if body.len() == 0:
+        return ""
+    val call = body[0]
+    if expr_get_tag(call) != EXPR_CALL:
+        return ""
+    val args = expr_get_args(call)
+    if args.len() < 2:
+        return ""
+    expr_get_str(args[1])
+
+fn resource_name_of(decl_idx: i64) -> text:
+    val body = decl_get_body(decl_idx)
+    if body.len() == 0:
+        return ""
+    val call = body[0]
+    if expr_get_tag(call) != EXPR_CALL:
+        return ""
+    val args = expr_get_args(call)
+    if args.len() < 1:
+        return ""
+    expr_get_str(args[0])
+
+describe "resource declaration: Grammar-A parsing":
+    it "parses `@sffi(prefix: ..., invalid: -1) resource File` into one decl":
+        val decls = parse_ok("@sffi(prefix: \"rt_io_file\", invalid: -1)\nresource File\n")
+        expect(decls.len()).to_equal(1)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_VAL)
+        expect(resource_name_of(decls[0])).to_equal("File")
+
+    it "round-trips the @sffi metadata onto the declaration":
+        val decls = parse_ok("@sffi(prefix: \"rt_io_file\", invalid: -1)\nresource File\n")
+        val meta = resource_meta_of(decls[0])
+        assert_contains(meta, "prefix=rt_io_file")
+        # Negative sentinels are TWO tokens (minus + int); dropping the sign
+        # here would silently record `invalid=1`.
+        assert_contains(meta, "invalid=-1")
+
+    it "accepts the full documented key schema":
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_image\", handle: i64, invalid: 0, retain: rt_image_ref, release: rt_image_unref, sharing: foreign, thread_safe: false)\n" +
+            "resource Image\n"
+        )
+        val meta = resource_meta_of(decls[0])
+        assert_contains(meta, "retain=rt_image_ref")
+        assert_contains(meta, "release=rt_image_unref")
+        assert_contains(meta, "sharing=foreign")
+        assert_contains(meta, "thread_safe=false")
+
+    it "does not leak @sffi metadata onto the next declaration":
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_cuda_primary_ctx\", sharing: foreign)\nresource CudaPrimaryContext\n" +
+            "@sffi(prefix: \"rt_io_file\", invalid: -1)\nresource File2\n"
+        )
+        expect(decls.len()).to_equal(2)
+        assert_contains(resource_meta_of(decls[0]), "sharing=foreign")
+        # File2 declared no `sharing:` — a leaked pending slot would show it.
+        assert_false(resource_meta_of(decls[1]).contains("sharing="))
+
+    it "does not leak @sffi metadata across an intervening fn declaration":
+        # The pending slot is cleared per-declaration, not only when a
+        # `resource` consumes it -- so an `@sffi` that lands on a non-resource
+        # decl must not survive to the next `resource`.
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_a\", sharing: foreign)\nfn f() -> i64:\n    1\n" +
+            "@sffi(prefix: \"rt_b\")\nresource B\n"
+        )
+        var b_meta = ""
+        for d in decls:
+            val m = resource_meta_of(d)
+            if m.contains("prefix=rt_b"):
+                b_meta = m
+        assert_false(b_meta.contains("sharing="))
+
+    it "does not leak @sffi metadata across an intervening pub fn declaration":
+        # `pub fn` goes through parse_module_decl_with_visibility, a separate
+        # dispatch path with its own reset placement.
+        val decls = parse_ok(
+            "@sffi(prefix: \"rt_a\", sharing: foreign)\npub fn g() -> i64:\n    1\n" +
+            "@sffi(prefix: \"rt_c\")\nresource C\n"
+        )
+        var c_meta = ""
+        for d in decls:
+            val m = resource_meta_of(d)
+            if m.contains("prefix=rt_c"):
+                c_meta = m
+        assert_false(c_meta.contains("sharing="))
+
+describe "resource declaration: fail-closed validation":
+    it "errors when the required prefix key is missing":
+        assert_true(parse_reports_error("@sffi(invalid: -1)\nresource File\n"))
+
+    it "errors on a key outside the documented schema":
+        assert_true(parse_reports_error("@sffi(prefix: \"rt_io_file\", bogus: 1)\nresource File\n"))
+
+    it "errors when the @sffi attribute is absent entirely":
+        assert_true(parse_reports_error("resource File\n"))
+
+describe "resource declaration: soft-keyword recognition boundary":
+    """
+    Declaration-start recognition requires `resource` to be followed by
+    whitespace then an identifier-start character — the same predicate shape
+    `layer`/`cli` use. Every other shape stays an ordinary identifier. Bare
+    `resource` at end of line is therefore NOT a malformed declaration; it is
+    a plain identifier reference, and treating it as a parse error would mean
+    `resource` had become a reserved word.
+    """
+
+    it "does not treat a bare `resource` at end of line as a declaration":
+        assert_false(parse_reports_error("val resource = 1\nval x = resource\n"))
+
+    it "does not treat `resource(` as a declaration":
+        assert_false(parse_reports_error("fn resource(n: i64) -> i64:\n    n\nval y = resource(1)\n"))
+
+    it "does not treat `resource.` as a declaration":
+        assert_false(parse_reports_error("class Box:\n    resource: text\nfn f(b: Box) -> text:\n    b.resource\n"))
+
+describe "resource declaration: contextual-keyword regression":
+    """
+    `resource` must stay an ordinary identifier everywhere except
+    declaration-start position. A hard-keyword implementation fails every case
+    below and breaks the compiler's own rebuild (112 identifier uses in src/).
+    """
+
+    it "keeps `var resource = ...` parsing (mirrors 85.mdsoc/security.spl:257)":
+        assert_false(parse_reports_error("var resource = \"x\"\n"))
+
+    it "keeps `val resource = ...` parsing":
+        assert_false(parse_reports_error("val resource = 1\n"))
+
+    it "keeps a parameter named `resource` parsing":
+        assert_false(parse_reports_error("fn takes(resource: i64) -> i64:\n    resource + 1\n"))
+
+    it "keeps a field named `resource` parsing (mirrors join_point_kind.spl:10)":
+        assert_false(parse_reports_error("class SecurityGate:\n    capability: text\n    resource: text\n"))
+
+    it "keeps a function named `resource` parsing":
+        assert_false(parse_reports_error("fn resource() -> i64:\n    1\n"))
+
+    it "keeps `resource` as a bare expression statement parsing":
+        assert_false(parse_reports_error("val resource = 1\nval other = resource\n"))

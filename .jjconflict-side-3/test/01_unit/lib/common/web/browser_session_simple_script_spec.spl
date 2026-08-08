@@ -1,0 +1,93 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.js.types.js_types.{JsValue}
+
+fn _display_js(v: JsValue) -> text:
+    match v:
+        JsValue.Undefined: "undefined"
+        JsValue.Null: "null"
+        JsValue.Boolean(b): if b: "true" else: "false"
+        JsValue.Number(n):
+            var s = "{n}"
+            if s.ends_with(".0"):
+                s = s.slice(0, s.len() - 2)
+            s
+        JsValue.String(s): s
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "BrowserSession Simple script support":
+    it "runs text simple beside JavaScript and WebAssembly globals":
+        var session = BrowserSession.new()
+        val html = "<html><body><script>var js_ok = 40 + 2;</script><script type='text/simple'>title \"SimpleScriptReady\"\nbody_text \"simple script beside js\"</script></body></html>"
+        val result = session.open_html("https://example.com/simple-script.html", html)
+        match result:
+            Ok(_):
+                expect(session.current_title).to_equal("SimpleScriptReady")
+                expect(session.current_body_html).to_equal("simple script beside js")
+                expect(session.warnings.len()).to_equal(0)
+            Err(err):
+                expect("unexpected load error: {err}").to_equal("")
+
+        val wasm_result = session.eval_script("typeof WebAssembly + ':' + typeof WebAssembly.instantiate + ':' + js_ok")
+        match wasm_result:
+            Ok(value):
+                expect(_display_js(value)).to_equal("object:function:42")
+            Err(err):
+                expect("unexpected js error: {err}").to_equal("")
+
+    it "records Simple 2D command evidence from text simple":
+        var session = BrowserSession.new()
+        val html = "<html><body><script type='text/simple'>simple2d.fill_rect 4 6 20 10 255\nsimple2d.text 8|16|\"simple 2d\"|12|16777215</script></body></html>"
+        val result = session.open_html("https://example.com/simple-2d.html", html)
+        match result:
+            Ok(_):
+                expect(session.current_body_html).to_contain("\"op\":\"fillRect\"")
+                expect(session.current_body_html).to_contain("\"op\":\"fillText\"")
+                expect(session.current_body_html).to_contain("simple 2d")
+                expect(session.warnings.len()).to_equal(0)
+            Err(err):
+                expect("unexpected load error: {err}").to_equal("")
+
+    it "records Simple 3D WebGPU upload evidence from text simple":
+        var session = BrowserSession.new()
+        val html = "<html><body><script type='text/simple'>simple3d.clear_color 255\nsimple3d.camera_perspective 60 1 1000\nsimple3d.triangle 0 1 0 -1 -1 0 1 -1 0 65535\nsimple3d.submit_webgpu</script></body></html>"
+        val result = session.open_html("https://example.com/simple-3d.html", html)
+        match result:
+            Ok(_):
+                expect(session.current_body_html).to_contain("\"status\":\"submitted-webgpu-3d-scene-upload\"")
+                expect(session.current_body_html).to_contain("\"type\":\"simple3d\"")
+                expect(session.current_body_html).to_contain("\"op\":\"triangle\"")
+                expect(session.current_body_html).to_contain("\"triangles\":1")
+                expect(session.current_body_html).to_contain("\"scenePayloadBytes\":217")
+                expect(session.current_body_html).to_contain("\"scenePayloadChecksum\":7331173752178674817")
+                expect(session.warnings.len()).to_equal(0)
+            Err(err):
+                expect("unexpected load error: {err}").to_equal("")
+
+    it "reports unsupported Simple script commands without running them as JavaScript":
+        var session = BrowserSession.new()
+        val html = "<html><body><script type='text/simple'>unknown_command 1 2 3</script></body></html>"
+        val result = session.open_html("https://example.com/simple-script-error.html", html)
+        match result:
+            Ok(_):
+                expect(session.warnings.len()).to_equal(1)
+                expect(session.warnings[0]).to_contain("simple script unsupported command")
+            Err(err):
+                expect("unexpected load error: {err}").to_equal("")
+
+    it "reports malformed Simple drawing numbers without partial evidence":
+        var session = BrowserSession.new()
+        val html = "<html><body><script type='text/simple'>body_text \"safe\"\nsimple2d.fill_rect 4 nope 20 10 255</script></body></html>"
+        val result = session.open_html("https://example.com/simple-script-numeric-error.html", html)
+        match result:
+            Ok(_):
+                expect(session.warnings.len()).to_equal(1)
+                expect(session.warnings[0]).to_contain("simple2d.fill_rect numeric argument is invalid")
+            Err(err):
+                expect("unexpected load error: {err}").to_equal("")

@@ -1,0 +1,131 @@
+#!/bin/sh
+# Runtime symbol lane-divergence gate.
+#
+# Repeat defect class (2026-07-20 session): the SAME rt_*/spl_* runtime
+# function gets implemented independently in more than one C translation
+# unit, and different native-build "lanes" (compiled-source-file sets) pick
+# up DIFFERENT copies. When the copies silently diverge in behavior, a
+# program is correct on one lane and silently wrong/corrupt on another with
+# no build error. Proven instances this session: spl_file_read (3 C copies:
+# runtime.c, runtime_legacy_core.c, + a Rust fallback — procfs bug, fixed);
+# rt_array_copy (Rust-only, C lane linked nothing, tagged-sentinel garbage);
+# rt_enum_new (runtime.c: raw untagged pointer vs runtime_native.c: interned
+# + RT_VALUE_TAG_HEAP-tagged handle — see doc bug filed alongside this
+# script). See .claude/memory feedback_recurring_problem_team_analysis_and_tests.
+#
+# This gate COMPILES each known lane's C source set (real cc -c, not text
+# heuristics) and nm's the resulting objects, so "defined" means "the linker
+# would actually see this symbol" — the same standard used to prove the
+# rt_array_copy bug (nm/objdump on the real linked artifact).
+#
+# For every rt_/spl_ symbol defined by 2+ DIFFERENT source files across the
+# known lanes, the pair is a divergence candidate: the same public name with
+# independent bodies that must be manually verified to agree. Pre-existing,
+# already-triaged pairs are baselined (ratchet pattern, see
+# check-core-lib-purity.shs for the same pattern). Only NEW pairs fail.
+#
+# Caveat: this compiles on the HOST platform only (no cross-compile). Symbols
+# gated behind platform #ifdefs not taken on the host (e.g. Windows-only
+# rt_pool_worker_main_win, macOS-only hosted_cocoa.c bodies) are invisible to
+# this pass — a divergence hiding behind a #ifdef the host doesn't take can
+# still slip through. Re-running under a different host OS widens coverage.
+#
+# This script is NOT wired into CI. Run manually:
+#   sh scripts/check/check-runtime-symbol-lane-divergence.shs
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+RUNTIME_DIR="src/runtime"
+BASELINE="scripts/check/runtime_symbol_lane_divergence_baseline.txt"
+CC="${CC:-cc}"
+command -v "$CC" >/dev/null 2>&1 || CC=gcc
+command -v "$CC" >/dev/null 2>&1 || CC=clang
+
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+# --- Known lanes (keep in sync with the cited source of truth for each) ---
+# Lane A: src/compiler_rust/runtime/build.rs `c_sources` (Rust-seed cdylib).
+LANE_A_FILES="runtime_memory.c runtime_time.c runtime_timestamp.c runtime_db.c runtime_pool.c runtime_framebuffer.c runtime_directx_core.c runtime_rocm.c runtime_hosted_signal.c runtime_hosted_fs.c runtime_font.c"
+# Lane B: src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
+# `build_c_runtime_library` unconditional `runtime_inputs` (core-c-bootstrap).
+LANE_B_FILES="runtime_native.c runtime_framebuffer.c runtime_directx_core.c runtime_legacy_core.c runtime_mcp_core.c runtime_fork.c runtime_memtrack.c runtime_process.c runtime_font.c runtime_pool.c runtime_simd_utf8.c runtime_simd_dispatch.c"
+# Lane C: src/app/compile/native.spl `rt_sources` (pure-Simple compile_native).
+LANE_C_FILES="runtime.c runtime_thread.c runtime_memtrack.c runtime_fork.c"
+
+MAP_FILE="$TMP_DIR/sym_map.tsv"
+: >"$MAP_FILE"
+
+compile_and_collect() {
+    lane="$1"
+    files="$2"
+    for f in $files; do
+        src="$RUNTIME_DIR/$f"
+        [ -f "$src" ] || { echo "warn: $lane missing source $src" >&2; continue; }
+        obj="$TMP_DIR/${lane}_${f}.o"
+        if ! "$CC" -c -std=gnu11 -I "$RUNTIME_DIR" -o "$obj" "$src" >"$TMP_DIR/${lane}_${f}.log" 2>&1; then
+            echo "warn: $lane failed to compile $f (see $TMP_DIR/${lane}_${f}.log) — skipped" >&2
+            continue
+        fi
+        nm -g --defined-only "$obj" 2>/dev/null | awk '{print $NF}' | grep -E '^(rt|spl)_[A-Za-z0-9_]+$' | while IFS= read -r sym; do
+            printf '%s\t%s\t%s\t%s\n' "$sym" "$lane" "$f" >>"$MAP_FILE"
+        done
+    done
+}
+
+compile_and_collect laneA "$LANE_A_FILES"
+compile_and_collect laneB "$LANE_B_FILES"
+compile_and_collect laneC "$LANE_C_FILES"
+
+sym_count=$(cut -f1 "$MAP_FILE" | sort -u | wc -l | tr -d ' ')
+echo "runtime_symbols_scanned=$sym_count"
+
+# A symbol is a divergence candidate if 2+ DISTINCT source files (regardless
+# of lane) define it. Same file reused by multiple lanes is NOT a divergence
+# (it's one implementation, just linked twice).
+FOUND="$TMP_DIR/found.txt"
+: >"$FOUND"
+cut -f1,3 "$MAP_FILE" | sort -u | cut -f1 | sort | uniq -d >"$TMP_DIR/dup_syms.txt"
+while IFS= read -r sym; do
+    [ -n "$sym" ] || continue
+    files=$(awk -F'\t' -v s="$sym" '$1==s {print $3}' "$MAP_FILE" | sort -u | tr '\n' ',' | sed 's/,$//')
+    echo "$sym	$files" >>"$FOUND"
+done <"$TMP_DIR/dup_syms.txt"
+sort -o "$FOUND" "$FOUND"
+
+total=$(wc -l <"$FOUND" | tr -d ' ')
+new_count=0
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if ! grep -qxF "$line" "$BASELINE" 2>/dev/null; then
+        echo "runtime_symbol_lane_divergence_new=$line"
+        new_count=$((new_count + 1))
+    fi
+done <"$FOUND"
+
+baseline_total=$(grep -cv '^#' "$BASELINE" 2>/dev/null || echo 0)
+echo "runtime_symbol_lane_divergence_baselined=$baseline_total"
+echo "runtime_symbol_lane_divergence_current=$total"
+echo "runtime_symbol_lane_divergence_new=$new_count"
+
+# Baseline entries that no longer reproduce (symbol renamed/removed/unified) —
+# report so the baseline can be shrunk, never auto-remove.
+while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    case "$b" in \#*) continue ;; esac
+    if ! grep -qxF "$b" "$FOUND"; then
+        echo "runtime_symbol_lane_divergence_stale_baseline=$b"
+    fi
+done <"$BASELINE"
+
+if [ "$new_count" -gt 0 ]; then
+    echo "runtime_symbol_lane_divergence_ok=false"
+    echo "A NEW rt_*/spl_* symbol is now implemented by 2+ different C files." >&2
+    echo "Verify the implementations agree (see diff_defs pattern in this bug's" >&2
+    echo "investigation notes), then either fix the divergent one or add the" >&2
+    echo "'symbol<TAB>file1,file2' line to $BASELINE with a one-line reason." >&2
+    exit 1
+fi
+echo "runtime_symbol_lane_divergence_ok=true"

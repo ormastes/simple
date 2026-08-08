@@ -1,0 +1,246 @@
+# Particle System — CPU-side particle emitter and simulation
+#
+# 2D/3D particle emission with deterministic pseudo-random spawning,
+# gravity, lifetime, size/alpha interpolation, and angular velocity.
+#
+# Usage:
+#   val config = default_emitter_config()
+#   var emitter = ParticleEmitter.new(config)
+#   emitter.set_position(100.0, 200.0)
+#   emitter.start()
+#   emitter.update(0.016)  # 60fps tick
+
+use std.common.math.{MATH_PI, math_abs, math_lerp, math_clamp}
+use std.common.engine.math2d.{Vec2}
+
+# ============================================================================
+# Particle — single particle state
+# ============================================================================
+
+struct Particle:
+    x: f64
+    y: f64
+    vx: f64
+    vy: f64
+    life: f64
+    max_life: f64
+    size: f64
+    color: i64
+    alpha: f64
+    rotation: f64
+    angular_velocity: f64
+
+# ============================================================================
+# EmitterConfig — particle spawning parameters
+# ============================================================================
+
+struct EmitterConfig:
+    max_particles: i32
+    spawn_rate: f64
+    life_min: f64
+    life_max: f64
+    speed_min: f64
+    speed_max: f64
+    size_start: f64
+    size_end: f64
+    color_start: i64
+    color_end: i64
+    angle_min: f64
+    angle_max: f64
+    gravity_x: f64
+    gravity_y: f64
+    spread: f64
+    is_looping: bool
+
+# ============================================================================
+# Default config
+# ============================================================================
+
+fn default_emitter_config() -> EmitterConfig:
+    """Sensible defaults: 100 max, rate 10/s, life 1-2s, full 360 spread."""
+    EmitterConfig(
+        max_particles: 100,
+        spawn_rate: 10.0,
+        life_min: 1.0,
+        life_max: 2.0,
+        speed_min: 20.0,
+        speed_max: 80.0,
+        size_start: 4.0,
+        size_end: 1.0,
+        color_start: 0xFFFFFF,
+        color_end: 0xFFFFFF,
+        angle_min: 0.0,
+        angle_max: MATH_PI * 2.0,
+        gravity_x: 0.0,
+        gravity_y: 0.0,
+        spread: 360.0,
+        is_looping: true
+    )
+
+# ============================================================================
+# Deterministic pseudo-random helper
+# ============================================================================
+
+fn _particle_rand(seed: f64) -> f64:
+    """Deterministic pseudo-random in [0, 1) from a seed value."""
+    val raw = (seed * 1103515245.0 + 12345.0) % 2147483648.0
+    var result = raw / 2147483648.0
+    if result < 0.0:
+        result = -result
+    result
+
+fn _particle_rand_range(seed: f64, min_val: f64, max_val: f64) -> f64:
+    """Deterministic pseudo-random in [min_val, max_val) from a seed value."""
+    min_val + _particle_rand(seed) * (max_val - min_val)
+
+# ============================================================================
+# Sin/cos approximation for angular spawning
+# ============================================================================
+
+fn _particle_sin(x: f64) -> f64:
+    """Taylor series sine approximation, normalized to [-PI, PI]."""
+    var a = x
+    val two_pi = MATH_PI * 2.0
+    while a > MATH_PI:
+        a = a - two_pi
+    while a < -MATH_PI:
+        a = a + two_pi
+    val x2 = a * a
+    val x3 = a * x2
+    val x5 = x3 * x2
+    val x7 = x5 * x2
+    val x9 = x7 * x2
+    a - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+
+fn _particle_cos(x: f64) -> f64:
+    """Cosine via sine shift."""
+    _particle_sin(x + MATH_PI / 2.0)
+
+# ============================================================================
+# ParticleEmitter — manages particle pool and emission
+# ============================================================================
+
+class ParticleEmitter:
+    config: EmitterConfig
+    particles: [Particle]
+    emit_accumulator: f64
+    emitter_x: f64
+    emitter_y: f64
+    active: bool
+    elapsed: f64
+
+impl ParticleEmitter:
+    static fn new(config: EmitterConfig) -> ParticleEmitter:
+        """Create a new particle emitter with the given configuration."""
+        ParticleEmitter(
+            config: config,
+            particles: [],
+            emit_accumulator: 0.0,
+            emitter_x: 0.0,
+            emitter_y: 0.0,
+            active: false,
+            elapsed: 0.0
+        )
+
+    me set_position(x: f64, y: f64):
+        """Set the emitter's world position."""
+        self.emitter_x = x
+        self.emitter_y = y
+
+    me start():
+        """Activate the emitter so it begins spawning particles."""
+        self.active = true
+
+    me stop():
+        """Deactivate the emitter. Existing particles continue until they die."""
+        self.active = false
+
+    me update(dt: f64):
+        """Advance the particle simulation by dt seconds."""
+        self.elapsed = self.elapsed + dt
+
+        # --- Spawn new particles ---
+        if self.active:
+            self.emit_accumulator = self.emit_accumulator + dt * self.config.spawn_rate
+            while self.emit_accumulator >= 1.0:
+                if self.particles.len() < self.config.max_particles:
+                    val seed_base = self.elapsed * 1000.0 + self.particles.len() as f64
+                    val life = _particle_rand_range(seed_base, self.config.life_min, self.config.life_max)
+                    val speed = _particle_rand_range(seed_base + 1.0, self.config.speed_min, self.config.speed_max)
+                    val angle = _particle_rand_range(seed_base + 2.0, self.config.angle_min, self.config.angle_max)
+                    val vx = _particle_cos(angle) * speed
+                    val vy = _particle_sin(angle) * speed
+                    val ang_vel = _particle_rand_range(seed_base + 3.0, -1.0, 1.0)
+                    val p = Particle(
+                        x: self.emitter_x,
+                        y: self.emitter_y,
+                        vx: vx,
+                        vy: vy,
+                        life: life,
+                        max_life: life,
+                        size: self.config.size_start,
+                        color: self.config.color_start,
+                        alpha: 1.0,
+                        rotation: 0.0,
+                        angular_velocity: ang_vel
+                    )
+                    self.particles = self.particles.push(p)
+                self.emit_accumulator = self.emit_accumulator - 1.0
+
+            # Handle non-looping emitters that have run out
+            if not self.config.is_looping:
+                if self.particles.len() >= self.config.max_particles:
+                    self.active = false
+
+        # --- Update existing particles ---
+        var alive: [Particle] = []
+        var i = 0
+        while i < self.particles.len():
+            var p = self.particles[i]
+            # Apply velocity
+            val new_x = p.x + p.vx * dt
+            val new_y = p.y + p.vy * dt
+            # Apply gravity
+            val new_vx = p.vx + self.config.gravity_x * dt
+            val new_vy = p.vy + self.config.gravity_y * dt
+            # Reduce life
+            val new_life = p.life - dt
+            # Angular velocity
+            val new_rotation = p.rotation + p.angular_velocity * dt
+
+            if new_life > 0.0:
+                # Interpolate size and alpha based on remaining life ratio
+                val t = 1.0 - new_life / p.max_life
+                val new_size = math_lerp(self.config.size_start, self.config.size_end, t)
+                val new_alpha = math_clamp(new_life / p.max_life, 0.0, 1.0)
+                val updated = Particle(
+                    x: new_x,
+                    y: new_y,
+                    vx: new_vx,
+                    vy: new_vy,
+                    life: new_life,
+                    max_life: p.max_life,
+                    size: new_size,
+                    color: p.color,
+                    alpha: new_alpha,
+                    rotation: new_rotation,
+                    angular_velocity: p.angular_velocity
+                )
+                alive = alive.push(updated)
+            i = i + 1
+        self.particles = alive
+
+    fn alive_count(self) -> i32:
+        """Return the number of living particles."""
+        self.particles.len()
+
+    fn is_active(self) -> bool:
+        """Return whether the emitter is currently spawning."""
+        self.active
+
+    me reset():
+        """Clear all particles and reset accumulator."""
+        self.particles = []
+        self.emit_accumulator = 0.0
+        self.elapsed = 0.0
+        self.active = false

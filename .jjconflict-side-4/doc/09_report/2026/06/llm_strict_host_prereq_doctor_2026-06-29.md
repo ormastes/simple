@@ -1,0 +1,70 @@
+# LLM Strict Host Prereq Doctor
+
+- status: `warn`
+- reason: `strict_host_prereqs_missing`
+- blocked_gate_count: `5`
+- blocked_gates: `dashboard_live_http|vllm_host|svllm_native|torch_libtorch|finetune_retry`
+- dashboard: `blocked`
+- vllm: `blocked`
+- svllm_native: `blocked`
+- torch_libtorch: `blocked`
+- finetune_retry: `blocked`
+- primary_blocked_gate: `dashboard_live_http`
+- dashboard_base_url: `missing`
+- dashboard_auth_source: `missing`
+- dashboard_next_action: `set LLM_DASHBOARD_LIVE_BASE_URL and one accepted dashboard auth source`
+- vllm_command: `missing`
+- vllm_base_model: `base-model`
+- vllm_base_model_status: `configured`
+- vllm_base_model_source: `default`
+- vllm_endpoint: `http://127.0.0.1:8000/v1`
+- vllm_endpoint_status: `configured`
+- vllm_endpoint_source: `default`
+- python_vllm_module: `missing`
+- local_gpu: `available`
+- vllm_next_action: `install local vllm command and Python module, keep GPU visible, then start the configured endpoint`
+- svllm_read_range: `missing`
+- svllm_pinned_buffer: `missing`
+- svllm_device_staging: `missing`
+- svllm_capability_source: `missing`
+- svllm_capability_source_status: `missing`
+- svllm_capability_evidence_path: ``
+- svllm_capability_evidence: `missing`
+- svllm_capability_evidence_sha256: `missing`
+- svllm_capability_evidence_source: `missing`
+- svllm_capability_evidence_schema_version: `missing`
+- svllm_capability_probe_event: `missing`
+- svllm_capability_probe_status: `missing`
+- svllm_capability_probe_exit: `missing`
+- svllm_capability_evidence_read_range: `missing`
+- svllm_capability_evidence_pinned_buffer: `missing`
+- svllm_capability_evidence_device_staging: `missing`
+- svllm_next_action: `provide matching SVLLM_NATIVE_CAPABILITY_SOURCE and schema-v1 capability evidence for read_range, pinned_buffer, and device_staging`
+- python_torch_cuda_available: `true`
+- python_torch_cuda_device_count: `2`
+- python_torch_error: `none`
+- system_libtorch: `missing`
+- system_libtorch_match_count: `0`
+- torch_next_action: `make Simple-visible libtorch available through SIMPLE_SFFI_PATH plus SCILIB_TORCH_ROOT or LIBTORCH`
+- retry5_cache_manifest: `missing`
+- retry6_model_manifest: `missing`
+- retry6_model_manifest_schema_version: `missing`
+- retry6_model_manifest_attempt_id: `missing`
+- retry6_model_manifest_base_model: `missing`
+- retry6_model_manifest_deployable: `missing`
+- retry6_model_manifest_model_artifact_path: `missing`
+- retry6_eval_result: `missing`
+- retry6_eval_result_schema_version: `missing`
+- retry6_eval_result_status_value: `missing`
+- retry6_eval_result_metric_value: `missing`
+- retry6_eval_result_metric_target: `missing`
+- retry6_eval_result_dataset_id: `missing`
+- retry6_eval_result_dataset_checksum: `missing`
+- retry6_eval_result_samples: `missing`
+- retry7_attempt: `ready`
+- finetune_next_action: `complete retry5 cache manifest, retry6 model/eval artifacts, and retry7 acceptance attempt evidence`
+- surface_manifest_count: `9`
+- surface_manifest_size: `1178`
+- surface_manifest_sha256: `3a67ff030ea72bcd5092d132e3c83be7f316418edf3bb4d70bd0b6ecb397513b`
+- next_action: `provide blocked host prerequisites, then rerun strict evidence wrappers`
+- env: `build/llm_strict_host_prereq_doctor/evidence.env`

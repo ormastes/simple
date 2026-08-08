@@ -1,0 +1,867 @@
+"""Engine2D Shared-Raster Parity Harness — emu vs software per-op oracle.
+
+This is the bit-exact parity gate that must pass before the Draw-IR backend
+unification (design D2, doc/05_design/ui/rendering/draw_ir_multibackend_design.md).
+
+For every core op it renders the operation two ways over the SAME core surface
+(a fresh 48x48 SoftwareBackend cleared to opaque black) and compares the two
+[u32] framebuffers pixel-for-pixel:
+
+  * SOFTWARE path  — SoftwareBackend's own hand-written method (e.g. draw_circle).
+  * EMU path       — the stateless emu_draw_* free function, which composes the
+                     same op out of core.draw_rect_filled / draw_image on a
+                     fresh SoftwareBackend core.
+
+emu_draw_* is the reference algorithm (each free function takes `core:
+RenderBackend` and builds ops from core primitives). backend_software re-writes
+~9 of these core ops independently and is NOT proven equal to emu — this harness
+is the permanent oracle that pins which ops are byte-identical and which diverge.
+
+Three op families:
+  A. Core primitives (clear / draw_rect_filled / draw_image) — emu builds ON
+     these; there is no independent emu reimplementation, so parity is identity
+     by construction.
+  B. Emu-delegating ops (draw_gradient_rect_h / draw_rect_blend /
+     draw_image_blend) — the SoftwareBackend method body literally calls the emu
+     free function, so parity is exact.
+  C. Independently hand-written ops — the real parity question. Some are
+     byte-exact (opaque rect outline, thin line, opaque gradient); several
+     DIVERGE and block unification until a single canonical algorithm is chosen.
+
+Alpha anchor: src-over 0x01020304 over 0x10203040 == 0x101E2D3C, verified
+directly through both blend ops (both route through _emu_blend_over at
+src/lib/gc_async_mut/gpu/engine2d/backend_emu_math.spl:33, which itself
+delegates to std.gpu.engine2d.color.blend()). Updated from the prior
+0x101F2F3F anchor when color.blend()'s straight-alpha-over-transparent-dst
+formula was fixed (doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md):
+0x10203040 has da=0x10 (mostly transparent), which is exactly the case the
+fix changes — 0x101F2F3F was the old (wrong) result of treating dst's RGB as
+if dst were opaque and never unpremultiplying by the true output alpha.
+
+@tag: gpu, engine2d, rendering, parity, draw-ir
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 55%
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 40%
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl 10%
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_math.spl 30%
+"""
+
+# @req D2 Draw-IR multi-backend unification — per-op bit-exact parity gate
+#      (doc/05_design/ui/rendering/draw_ir_multibackend_design.md)
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{
+    emu_draw_rect, emu_draw_line, emu_draw_circle, emu_draw_circle_filled,
+    emu_draw_rounded_rect, emu_draw_triangle_filled, emu_draw_gradient_rect,
+    emu_draw_gradient_rect_h, emu_draw_rect_blend, emu_draw_image_blend,
+    emu_draw_text, emu_draw_text_bg
+}
+use std.gc_async_mut.gpu.engine2d.glyph.{
+    glyph_height, glyph_advance, glyph_atlas_dense_values, glyph_atlas_index_for_char_code
+}
+
+# ============================================================================
+# Fixtures — kept as functions (no module globals) so spec blocks never read
+# stale interpreter state.
+# ============================================================================
+
+fn _bg() -> u32:
+    0xFF000000u32
+
+fn _fresh() -> SoftwareBackend:
+    var b = SoftwareBackend.create()
+    b.init(48, 48)
+    b.clear(_bg())
+    b
+
+fn _fresh_fill(c: u32) -> SoftwareBackend:
+    var b = SoftwareBackend.create()
+    b.init(48, 48)
+    b.clear(c)
+    b
+
+fn _mism(a: [u32], b: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _img(w: i32, h: i32, c: u32) -> [u32]:
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = c
+        i = i + 1
+    px
+
+# ============================================================================
+# Family A — core primitives (shared surface; identity by construction)
+# ============================================================================
+
+fn cmp_clear() -> i32:
+    var a = _fresh()
+    a.clear(0xFFFF0000u32)
+    var b = _fresh()
+    b.clear(0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_rect_filled_core() -> i32:
+    var a = _fresh()
+    a.draw_rect_filled(6, 6, 20, 15, 0xFFFF0000u32)
+    var b = _fresh()
+    b.draw_rect_filled(6, 6, 20, 15, 0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_image_core() -> i32:
+    val img = _img(16, 16, 0xFF00FFFFu32)
+    var a = _fresh()
+    a.draw_image(8, 8, 16, 16, img)
+    var b = _fresh()
+    b.draw_image(8, 8, 16, 16, img)
+    _mism(a.read_pixels(), b.read_pixels())
+
+# ============================================================================
+# Family B — emu-delegating ops (SoftwareBackend method forwards to emu free fn)
+# ============================================================================
+
+fn cmp_gradient_rect_h() -> i32:
+    var a = _fresh()
+    a.draw_gradient_rect_h(4, 4, 30, 30, 0xFFFF0000u32, 0xFF0000FFu32)
+    var b = _fresh()
+    emu_draw_gradient_rect_h(b, 4, 4, 30, 30, 0xFFFF0000u32, 0xFF0000FFu32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_rect_blend() -> i32:
+    var a = _fresh_fill(0x10203040u32)
+    a.draw_rect_blend(4, 4, 30, 30, 0x01020304u32)
+    var b = _fresh_fill(0x10203040u32)
+    emu_draw_rect_blend(b, 4, 4, 30, 30, 0x01020304u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn anchor_rect_blend() -> u32:
+    var a = _fresh_fill(0x10203040u32)
+    a.draw_rect_blend(4, 4, 30, 30, 0x01020304u32)
+    val p = a.read_pixels()
+    p[24 * 48 + 20]
+
+fn cmp_image_blend() -> i32:
+    val img = _img(16, 16, 0x01020304u32)
+    var a = _fresh_fill(0x10203040u32)
+    a.draw_image_blend(8, 8, 16, 16, img)
+    var b = _fresh_fill(0x10203040u32)
+    emu_draw_image_blend(b, 8, 8, 16, 16, img)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn anchor_image_blend() -> u32:
+    val img = _img(16, 16, 0x01020304u32)
+    var a = _fresh_fill(0x10203040u32)
+    a.draw_image_blend(8, 8, 16, 16, img)
+    val p = a.read_pixels()
+    p[16 * 48 + 16]
+
+# ============================================================================
+# Family C — independently hand-written ops
+# ============================================================================
+
+fn cmp_rect_opaque() -> i32:
+    var a = _fresh()
+    a.draw_rect(6, 6, 30, 20, 0xFFFF0000u32)
+    var b = _fresh()
+    emu_draw_rect(b, 6, 6, 30, 20, 0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_rect_alpha() -> i32:
+    var a = _fresh_fill(0xFF203040u32)
+    a.draw_rect(6, 6, 30, 20, 0x80FF0000u32)
+    var b = _fresh_fill(0xFF203040u32)
+    emu_draw_rect(b, 6, 6, 30, 20, 0x80FF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_line_thin() -> i32:
+    var a = _fresh()
+    a.draw_line(3, 4, 40, 30, 0xFF00FF00u32, 1)
+    var b = _fresh()
+    emu_draw_line(b, 3, 4, 40, 30, 0xFF00FF00u32, 1)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_line_thick() -> i32:
+    var a = _fresh()
+    a.draw_line(3, 4, 40, 30, 0xFF00FF00u32, 3)
+    var b = _fresh()
+    emu_draw_line(b, 3, 4, 40, 30, 0xFF00FF00u32, 3)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_circle() -> i32:
+    # r=9 lands on a midpoint decision-variable tie where sw's `d <= 0` and
+    # emu's textbook `d < 0` diverge.
+    var a = _fresh()
+    a.draw_circle(24, 24, 9, 0xFFFF0000u32)
+    var b = _fresh()
+    emu_draw_circle(b, 24, 24, 9, 0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_circle_r0() -> i32:
+    var a = _fresh()
+    a.draw_circle(24, 24, 0, 0xFFFF0000u32)
+    var b = _fresh()
+    emu_draw_circle(b, 24, 24, 0, 0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_circle_filled() -> i32:
+    var a = _fresh()
+    a.draw_circle_filled(24, 24, 15, 0xFF00FF00u32)
+    var b = _fresh()
+    emu_draw_circle_filled(b, 24, 24, 15, 0xFF00FF00u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_circle_filled_r0() -> i32:
+    var a = _fresh()
+    a.draw_circle_filled(24, 24, 0, 0xFF00FF00u32)
+    var b = _fresh()
+    emu_draw_circle_filled(b, 24, 24, 0, 0xFF00FF00u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_rounded_rect() -> i32:
+    var a = _fresh()
+    a.draw_rounded_rect(6, 6, 30, 24, 6, 0xFFFF0000u32)
+    var b = _fresh()
+    emu_draw_rounded_rect(b, 6, 6, 30, 24, 6, 0xFFFF0000u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_triangle() -> i32:
+    var a = _fresh()
+    a.draw_triangle_filled(24, 5, 5, 40, 42, 38, 0xFF00FF00u32)
+    var b = _fresh()
+    emu_draw_triangle_filled(b, 24, 5, 5, 40, 42, 38, 0xFF00FF00u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_triangle_degen() -> i32:
+    # Collinear vertices: barycentric determinant d == 0.
+    var a = _fresh()
+    a.draw_triangle_filled(5, 5, 10, 10, 20, 20, 0xFF00FF00u32)
+    var b = _fresh()
+    emu_draw_triangle_filled(b, 5, 5, 10, 10, 20, 20, 0xFF00FF00u32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_gradient_rect_opaque() -> i32:
+    var a = _fresh()
+    a.draw_gradient_rect(4, 4, 30, 30, 0xFFFF0000u32, 0xFF0000FFu32)
+    var b = _fresh()
+    emu_draw_gradient_rect(b, 4, 4, 30, 30, 0xFFFF0000u32, 0xFF0000FFu32)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_text() -> i32:
+    var a = _fresh()
+    a.draw_text(4, 8, "Hi", 0xFFFFFFFFu32, 8)
+    var b = _fresh()
+    emu_draw_text(b, 4, 8, "Hi", 0xFFFFFFFFu32, 8)
+    _mism(a.read_pixels(), b.read_pixels())
+
+fn cmp_text_bg() -> i32:
+    var a = _fresh()
+    a.draw_text_bg(4, 8, "Hi", 0xFFFFFFFFu32, 0xFF202020u32, 8)
+    var b = _fresh()
+    emu_draw_text_bg(b, 4, 8, "Hi", 0xFFFFFFFFu32, 0xFF202020u32, 8)
+    _mism(a.read_pixels(), b.read_pixels())
+
+# ============================================================================
+# GPU-dict pilot — indexed_fill CPU-lane oracle (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3/§4).
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl (Metal's
+# module graph is not safe to import into an SSpec — see that file's header).
+# Here, the CPU-lane oracle (SoftwareBackend.indexed_fill) is pinned against
+# `_dense_lut_lookup_ref`, an INDEPENDENT Simple-level replica of the design's
+# dense-kind lut_lookup formula (§3.2: `key < count ? palette[key] :
+# 0xFFFFFFFF`) — the same two-independent-implementations pattern the rest of
+# this harness uses (sw vs emu), applied to the new op.
+# ============================================================================
+
+fn _dense_lut_lookup_ref(palette: [u32], key: i32) -> u32:
+    if key >= 0 and key < palette.len():
+        return palette[key]
+    0xFFFFFFFFu32
+
+fn _cmp_indexed_fill(w: i32, h: i32, palette: [u32]) -> i32:
+    var idx: [u8] = [0u8; w * h]
+    var i = 0
+    while i < w * h:
+        idx[i] = (i % 257).to_u8()   # 0..255 byte sweep (to_u8 caps at 255, so it never exceeds a 256-entry palette): out-of-range sentinel misses arise only when the palette passed is smaller than 256 — the 1-entry row below exercises the sentinel through this helper; the 256-entry row keeps every key in range. The dedicated out-of-range assertion is the explicit [250u8] row.
+        i = i + 1
+    var sw = _fresh()
+    sw.indexed_fill(0, 0, w, h, idx, palette)
+    var want: [u32] = [0u32; w * h]
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            want[y * w + x] = _dense_lut_lookup_ref(palette, idx[y * w + x].to_i32())
+            x = x + 1
+        y = y + 1
+    val got = sw.read_pixels()
+    var mism = 0
+    var py = 0
+    while py < h:
+        var px = 0
+        while px < w:
+            val fb_idx = py * 48 + px
+            if got[fb_idx] != want[py * w + px]:
+                mism = mism + 1
+            px = px + 1
+        py = py + 1
+    mism
+
+fn _palette_256() -> [u32]:
+    var p: [u32] = [0u32; 256]
+    var i = 0
+    while i < 256:
+        p[i] = (0xFF000000u32) | (i.to_u32() * 0x00010101u32)
+        i = i + 1
+    p
+
+# ============================================================================
+# GPU-dict use case #2 — glyph_atlas_blit CPU-lane oracle (design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3/§4, W4).
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl (`text` and
+# `text_edge` rows — Metal's module graph is not safe to import into an SSpec,
+# see that file's header). Here, an INDEPENDENT Simple-level replica of
+# kernel_glyph_atlas_blit's per-pixel formula (dense atlas lookup keyed by
+# glyph_index*glyph_height()+row, then bit-extract by column) is pinned
+# against SoftwareBackend.draw_text — the same two-independent-implementations
+# pattern _dense_lut_lookup_ref uses for indexed_fill above, applied to the
+# second GPU-dict use case.
+# ============================================================================
+
+fn _atlas_row_bits_ref(atlas: [u32], gi: i32, row: i32, gh: i32) -> u32:
+    val key = gi * gh + row
+    if key >= 0 and key < atlas.len():
+        return atlas[key]
+    0xFFFFFFFFu32
+
+fn _render_text_via_atlas_ref(text_val: text, color: u32, font_size: i32, w: i32, h: i32) -> [u32]:
+    val atlas = glyph_atlas_dense_values()
+    val gh = glyph_height()
+    var scale = font_size / gh
+    if scale < 1:
+        scale = 1
+    val advance = glyph_advance(scale)
+    val text_len = text_val.len()
+    var buf: [u32] = [_bg(); w * h]
+    var i: i64 = 0
+    var cursor_x = 0
+    while i < text_len:
+        val code = text_val.char_code_at(i)
+        val gi = glyph_atlas_index_for_char_code(code)
+        var row = 0
+        while row < gh:
+            val row_bits = _atlas_row_bits_ref(atlas, gi, row, gh)
+            if row_bits != 0xFFFFFFFFu32:
+                var col = 0
+                while col < 5:
+                    val bit = (row_bits >> (4 - col)) & 1u32
+                    if bit != 0u32:
+                        var sy = 0
+                        while sy < scale:
+                            var sx = 0
+                            while sx < scale:
+                                val px = cursor_x + col * scale + sx
+                                val py = row * scale + sy
+                                if px >= 0 and px < w and py >= 0 and py < h:
+                                    buf[py * w + px] = color
+                                sx = sx + 1
+                            sy = sy + 1
+                    col = col + 1
+            row = row + 1
+        cursor_x = cursor_x + advance
+        i = i + 1
+    buf
+
+fn _cmp_text_via_atlas(text_val: text, color: u32, font_size: i32) -> i32:
+    var sw = _fresh()
+    sw.draw_text(0, 0, text_val, color, font_size)
+    val got = sw.read_pixels()
+    val gh = glyph_height()
+    var scale = font_size / gh
+    if scale < 1:
+        scale = 1
+    val text_w = text_val.len().to_i32() * glyph_advance(scale)
+    val text_h = gh * scale
+    val want = _render_text_via_atlas_ref(text_val, color, font_size, text_w, text_h)
+    var mism = 0
+    var py = 0
+    while py < text_h:
+        var px = 0
+        while px < text_w:
+            val fb_idx = py * 48 + px
+            if got[fb_idx] != want[py * text_w + px]:
+                mism = mism + 1
+            px = px + 1
+        py = py + 1
+    mism
+
+# ============================================================================
+# W3 (design cpu_gpu_dual_algorithm_plan.md) — draw_gradient_rect GPU-kernel
+# formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (`gradient_rect` row — Metal's module graph is not safe to import into an
+# SSpec, see that file's header). Here, an INDEPENDENT Simple-level replica
+# of kernel_draw_gradient_rect's per-pixel formula (lerp_channel row
+# interpolation, THEN blend_src_over against the destination — the kernel
+# fix landed alongside this row; a raw fb[idx]=c write diverged from the
+# CPU-lane oracle on any alpha<255 top/bottom color) is pinned against
+# SoftwareBackend.draw_gradient_rect (which delegates to the canonical
+# emu_draw_gradient_rect) — the same two-independent-implementations pattern
+# _dense_lut_lookup_ref/_atlas_row_bits_ref use above, applied to W3.
+# ============================================================================
+
+fn _gr_channel(c: u32, shift: i32) -> i32:
+    ((c >> shift) & 0xFFu32).to_i32()
+
+fn _gr_pack(r: i32, g: i32, b: i32, a: i32) -> u32:
+    ((a.to_u32() & 0xFFu32) << 24) | ((r.to_u32() & 0xFFu32) << 16) | ((g.to_u32() & 0xFFu32) << 8) | (b.to_u32() & 0xFFu32)
+
+# Independent replica of the MSL `lerp_channel` helper (backend_metal_msl.spl):
+# a + (b-a)*t/max_t, plain truncating integer division.
+fn _gradient_lerp_channel_ref(a: i32, b: i32, t: i32, max_t: i32) -> i32:
+    if max_t <= 0:
+        return a
+    a + (b - a) * t / max_t
+
+# Independent replica of the MSL `blend_src_over` helper — Porter-Duff
+# src-over, plain truncating integer division, no rounding term (same
+# formula backend_software.spl's core.blend() uses).
+fn _gradient_blend_src_over_ref(src: u32, dst: u32) -> u32:
+    val sa = _gr_channel(src, 24)
+    if sa == 255:
+        return src
+    if sa == 0:
+        return dst
+    val sr = _gr_channel(src, 16)
+    val sg = _gr_channel(src, 8)
+    val sb = _gr_channel(src, 0)
+    val dr = _gr_channel(dst, 16)
+    val dg = _gr_channel(dst, 8)
+    val db = _gr_channel(dst, 0)
+    val da = _gr_channel(dst, 24)
+    val inv_a = 255 - sa
+    val out_r = (sr * sa + dr * inv_a) / 255
+    val out_g = (sg * sa + dg * inv_a) / 255
+    val out_b = (sb * sa + db * inv_a) / 255
+    val out_a = sa + (da * inv_a) / 255
+    _gr_pack(out_r, out_g, out_b, out_a)
+
+# Independent replica of kernel_draw_gradient_rect's whole per-pixel formula:
+# interpolate the row color, then alpha-blend it over the destination pixel.
+fn _gradient_kernel_ref(top: u32, bottom: u32, row: i32, h: i32, dst: u32) -> u32:
+    var max_t = h - 1
+    if max_t < 1:
+        max_t = 1
+    val r = _gradient_lerp_channel_ref(_gr_channel(top, 16), _gr_channel(bottom, 16), row, max_t)
+    val g = _gradient_lerp_channel_ref(_gr_channel(top, 8), _gr_channel(bottom, 8), row, max_t)
+    val b = _gradient_lerp_channel_ref(_gr_channel(top, 0), _gr_channel(bottom, 0), row, max_t)
+    val a = _gradient_lerp_channel_ref(_gr_channel(top, 24), _gr_channel(bottom, 24), row, max_t)
+    _gradient_blend_src_over_ref(_gr_pack(r, g, b, a), dst)
+
+fn _cmp_gradient_kernel_formula(w: i32, h: i32, top: u32, bottom: u32, bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_gradient_rect(0, 0, w, h, top, bottom)
+    val got = sw.read_pixels()
+    var mism = 0
+    var row = 0
+    while row < h:
+        val want = _gradient_kernel_ref(top, bottom, row, h, bg)
+        var col = 0
+        while col < w:
+            val fb_idx = row * 48 + col
+            if got[fb_idx] != want:
+                mism = mism + 1
+            col = col + 1
+        row = row + 1
+    mism
+
+# ============================================================================
+# Rounded-rect FILL parity fix (2026-07-07) — kernel_draw_rounded_rect
+# GPU-kernel formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl
+# (`rounded_rect` row — Metal's module graph is not safe to import into an
+# SSpec, see that file's header). Here, an INDEPENDENT Simple-level replica
+# of kernel_draw_rounded_rect's per-pixel membership test (middle/side band
+# ranges, plus _rr_fill_hit's exact midpoint-circle corner-span replay,
+# backend_metal_msl.spl) is pinned against SoftwareBackend.draw_rounded_rect
+# (which delegates to the canonical emu_draw_rounded_rect) — the same
+# two-independent-implementations pattern the W3 gradient replica above uses.
+# Before this fix the kernel replayed the stale pre-2026-07-06 CPU OUTLINE
+# algorithm (edges + thin corner rings) instead of a FILL, diverging
+# 512/1024 pixels on engine2d_cpu_metal_parity_run.spl's rounded_rect scene.
+# ============================================================================
+
+# NOT a plain per-region membership test: CPU's emu_draw_rounded_rect issues
+# SEVEN core.draw_rect_filled calls in a fixed order (middle band, left band,
+# right band, then four _emu_corner_arc calls each doing up to r+1
+# midpoint-circle iterations x 2 spans), and these seven primitives' pixel
+# footprints OVERLAP AT THE SEAMS — e.g. a corner arc's first iteration
+# (py=0) draws its span at the arc-center row, which is the side band's
+# OWN first row, so that row gets blended by BOTH the band rect AND the
+# corner arc. For opaque color that's a harmless redundant overwrite; for
+# alpha<255 each blend re-composites over the prior result (not idempotent).
+# A per-region-exclusive model (blend once per pixel) was tried first and
+# diverged on the alpha case below (72, then 52 mismatches after a first
+# partial fix) — the only bit-exact approach is to literally replay all
+# seven primitives in CPU's exact order, blending every hit, matching
+# kernel_draw_rounded_rect's per-pixel thread doing the equivalent replay.
+fn _rr_rect_hit(lx: i32, ly: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool:
+    lx >= rx and lx < rx + rw and ly >= ry and ly < ry + rh
+
+# Independent replica of _emu_corner_arc's per-iteration span coverage test,
+# reused by the MSL kernel's corner-arc replay. Decision boundary is `d < 0`
+# (matching backend_emu.spl _emu_corner_arc's own midpoint loop) — DIFFERENT
+# from the `d <= 0` boundary the sw_corner_arc/_rr_ring_hit OUTLINE algorithm
+# uses; draw_rounded_rect and draw_rounded_rect_outline are independent
+# corner-arc algorithms.
+fn _rr_corner_arc_blend(cx: i32, cy: i32, rad: i32, dx_sign: i32, dy_sign: i32, lx: i32, ly: i32, color: u32, bg: u32) -> u32:
+    var px = rad
+    var py = 0
+    var d = 1 - rad
+    var dst = bg
+    while px >= py:
+        val row1 = cy + dy_sign * py
+        val col_a1 = cx
+        val col_b1 = cx + dx_sign * px
+        var lo1 = col_a1
+        var hi1 = col_b1
+        if col_b1 < col_a1:
+            lo1 = col_b1
+            hi1 = col_a1
+        if ly == row1 and lx >= lo1 and lx <= hi1:
+            dst = _gradient_blend_src_over_ref(color, dst)
+        val row2 = cy + dy_sign * px
+        val col_b2 = cx + dx_sign * py
+        var lo2 = col_a1
+        var hi2 = col_b2
+        if col_b2 < col_a1:
+            lo2 = col_b2
+            hi2 = col_a1
+        if ly == row2 and lx >= lo2 and lx <= hi2:
+            dst = _gradient_blend_src_over_ref(color, dst)
+        py = py + 1
+        if d < 0:
+            d = d + 2 * py + 1
+        else:
+            px = px - 1
+            d = d + 2 * (py - px) + 1
+    dst
+
+# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula:
+# literally replays emu_draw_rounded_rect's seven primitive draws, in the
+# same order, blending every one that covers (lx, ly).
+fn _rr_kernel_pixel_ref(lx: i32, ly: i32, w: i32, h: i32, radius: i32, color: u32, bg: u32) -> u32:
+    var r = radius
+    if r > w / 2:
+        r = w / 2
+    if r > h / 2:
+        r = h / 2
+    var dst = bg
+    if _rr_rect_hit(lx, ly, r, 0, w - 2 * r, h):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    if _rr_rect_hit(lx, ly, 0, r, r, h - 2 * r):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    if _rr_rect_hit(lx, ly, w - r, r, r, h - 2 * r):
+        dst = _gradient_blend_src_over_ref(color, dst)
+    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, color, dst)
+    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, color, dst)
+    dst
+
+fn _cmp_rounded_rect_kernel_formula(w: i32, h: i32, radius: i32, color: u32, bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_rounded_rect(0, 0, w, h, radius, color)
+    val got = sw.read_pixels()
+    var mism = 0
+    var ly = 0
+    while ly < h:
+        var lx = 0
+        while lx < w:
+            val want = _rr_kernel_pixel_ref(lx, ly, w, h, radius, color, bg)
+            val fb_idx = ly * 48 + lx
+            if got[fb_idx] != want:
+                mism = mism + 1
+            lx = lx + 1
+        ly = ly + 1
+    mism
+
+# ============================================================================
+# draw_image (blit) parity-sweep coverage close (2026-07-07) — kernel_blit_image
+# GPU-kernel formula oracle.
+#
+# The real Metal-vs-CPU device-readback proof lives in the run harness
+# test/02_integration/rendering/engine2d_gpu_offload_evidence.spl (`image`
+# row, added by this same 2026-07-07 parity sweep — Metal's module graph is
+# not safe to import into an SSpec, see that file's header). Here, an
+# INDEPENDENT Simple-level replica of kernel_blit_image's per-thread formula
+# (a raw, UNBLENDED src->fb copy with a px/py framebuffer-bounds clip — no
+# GpuLut, no blend_src_over, unlike the gradient_rect/rounded_rect kernels
+# above) is pinned against SoftwareBackend.draw_image's row-clipped copy
+# loop. Unlike the two ops above this was NOT a divergence: reproduction
+# (2026-07-07 sweep) found CPU vs Metal already bit-exact for draw_image,
+# which is expected — both sides implement the identical "clip then raw
+# copy" formula. This closes a real verification GAP (the op had a genuine
+# Metal dispatch path, backend_metal.spl draw_image() gated on
+# session.pipe_blit != 0, but zero parity coverage anywhere before this
+# sweep) rather than pinning a fix for an actual bug.
+# ============================================================================
+
+fn _img_varied(w: i32, h: i32) -> [u32]:
+    # Per-pixel-varied (non-solid) source so a transposition/stride bug in
+    # either the kernel or the CPU row-loop would show up as a mismatch
+    # rather than being masked by a uniform fill.
+    var px: [u32] = [0u32; w * h]
+    var i = 0
+    while i < w * h:
+        px[i] = (0xFF000000u32) + (((i as u32) * 2654435761u32) & 0x00FFFFFFu32)
+        i = i + 1
+    px
+
+fn _cmp_blit_kernel_formula(fb_w: i32, fb_h: i32, x: i32, y: i32, w: i32, h: i32, src: [u32], bg: u32) -> i32:
+    var sw = _fresh_fill(bg)
+    sw.draw_image(x, y, w, h, src)
+    val got = sw.read_pixels()
+    var mism = 0
+    var ly = 0
+    while ly < h:
+        var lx = 0
+        while lx < w:
+            val px_ = x + lx
+            val py_ = y + ly
+            if px_ >= 0 and px_ < fb_w and py_ >= 0 and py_ < fb_h:
+                val want = src[ly * w + lx]
+                val fb_idx = py_ * fb_w + px_
+                if got[fb_idx] != want:
+                    mism = mism + 1
+            lx = lx + 1
+        ly = ly + 1
+    mism
+
+# ============================================================================
+# Specification
+# ============================================================================
+
+describe "Engine2D shared-raster parity (emu vs software) — D2 unification gate":
+
+    context "Family A — core primitives are byte-identical (shared surface)":
+
+        it "clear paints an identical surface on both backends":
+            expect(cmp_clear()).to_equal(0)
+
+        it "draw_rect_filled — the primitive emu itself composes from — is identical":
+            expect(cmp_rect_filled_core()).to_equal(0)
+
+        it "draw_image blits an identical surface":
+            expect(cmp_image_core()).to_equal(0)
+
+    context "Family B — emu-delegating ops stay byte-exact":
+
+        it "draw_gradient_rect_h matches its emu delegate":
+            expect(cmp_gradient_rect_h()).to_equal(0)
+
+        it "draw_rect_blend matches emu and hits the src-over anchor 0x101E2D3C":
+            expect(cmp_rect_blend()).to_equal(0)
+            expect(anchor_rect_blend()).to_equal(0x101E2D3Cu32)
+
+        it "draw_image_blend matches emu and hits the src-over anchor 0x101E2D3C":
+            expect(cmp_image_blend()).to_equal(0)
+            expect(anchor_image_blend()).to_equal(0x101E2D3Cu32)
+
+    context "Family C — independently written ops that ARE byte-exact":
+
+        it "draw_rect (opaque outline) is byte-identical to emu":
+            expect(cmp_rect_opaque()).to_equal(0)
+
+        it "draw_line (thickness 1, Bresenham) is byte-identical to emu":
+            expect(cmp_line_thin()).to_equal(0)
+
+        it "draw_gradient_rect (opaque, integer lerp) is byte-identical to emu":
+            expect(cmp_gradient_rect_opaque()).to_equal(0)
+
+        it "draw_rounded_rect is byte-identical to emu — sw now FILLS (was a 1px OUTLINE bug) [de-faked; canonical: emu]":
+            expect(cmp_rounded_rect()).to_equal(0)
+
+        it "draw_text is byte-identical to emu — emu delegates to the real 5x7 glyph blit (was a placeholder box) [de-faked; canonical: sw]":
+            expect(cmp_text()).to_equal(0)
+
+        it "draw_text_bg is byte-identical to emu — emu delegates to the real AA blit (was bg-fill + placeholder box) [de-faked; canonical: sw]":
+            expect(cmp_text_bg()).to_equal(0)
+
+        it "draw_rect (alpha outline) is byte-identical to emu — sw now delegates to emu_draw_rect, so alpha edges blend instead of writing raw [reconciled to canonical emu 2026-07-06 (D2)]":
+            expect(cmp_rect_alpha()).to_equal(0)
+
+        it "draw_circle (outline) is byte-identical to emu at midpoint-tie radii — sw's decision variable unified to emu's textbook `d<0` (was `d<=0`) [reconciled to canonical emu 2026-07-06 (D2)]":
+            expect(cmp_circle()).to_equal(0)
+
+        it "draw_circle_filled is byte-identical to emu — emu body replaced with sw's exact per-row distance test (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]":
+            expect(cmp_circle_filled()).to_equal(0)
+
+        it "draw_triangle_filled is byte-identical to emu — emu body replaced with sw's integer barycentric fill (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]":
+            expect(cmp_triangle()).to_equal(0)
+
+        it "draw_triangle_filled (collinear, d==0) is byte-identical to emu — barycentric fill no-ops on a zero determinant, same as sw [reconciled to canonical sw 2026-07-06 (D2)]":
+            expect(cmp_triangle_degen()).to_equal(0)
+
+    context "Family C — DIVERGENT ops (unification blocked until unified)":
+        # Each `expect(... > 0)` pins a KNOWN divergence. If a future change
+        # unifies the op, its mismatch drops to 0 and this flips RED — the
+        # signal to move the op into the byte-exact set above and pick the
+        # single canonical algorithm named in each block.
+
+        it "draw_line (thick) diverges — sw parallel-offset lines vs emu per-point txt square [canonical: design review]":
+            expect(cmp_line_thick() > 0).to_equal(true)
+
+        it "draw_circle (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw guard]":
+            expect(cmp_circle_r0() > 0).to_equal(true)
+
+        it "draw_circle_filled (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw]":
+            expect(cmp_circle_filled_r0() > 0).to_equal(true)
+
+    context "equality matrix":
+
+        it "prints the full per-op equality matrix":
+            print("=== ENGINE2D SHARED-RASTER PARITY MATRIX (emu vs software) ===")
+            print("clear                | EQUAL   | mism={cmp_clear()}      | core primitive (shared)")
+            print("draw_rect_filled     | EQUAL   | mism={cmp_rect_filled_core()}      | core primitive (shared)")
+            print("draw_image           | EQUAL   | mism={cmp_image_core()}      | core primitive (shared)")
+            print("draw_gradient_rect_h | EQUAL   | mism={cmp_gradient_rect_h()}      | delegates to emu")
+            print("draw_rect_blend      | EQUAL   | mism={cmp_rect_blend()}      | delegates to emu; anchor={anchor_rect_blend()}")
+            print("draw_image_blend     | EQUAL   | mism={cmp_image_blend()}      | delegates to emu; anchor={anchor_image_blend()}")
+            print("draw_rect (opaque)   | EQUAL   | mism={cmp_rect_opaque()}      | consolidated to emu 2026-07-06 (D2): sw delegates to emu_draw_rect")
+            print("draw_line (thin)     | EQUAL   | mism={cmp_line_thin()}      | independent, byte-exact (not consolidated: perf, see D2 notes)")
+            print("draw_gradient_rect   | EQUAL   | mism={cmp_gradient_rect_opaque()}      | consolidated to emu 2026-07-06 (D2): sw delegates to emu_draw_gradient_rect")
+            print("draw_rect (alpha)    | EQUAL   | mism={cmp_rect_alpha()}      | reconciled to emu 2026-07-06 (D2): sw delegates to emu_draw_rect")
+            print("draw_line (thick)    | DIVERGE | mism={cmp_line_thick()}   | canonical=design review")
+            print("draw_circle          | EQUAL   | mism={cmp_circle()}      | reconciled to emu 2026-07-06 (D2): sw decision var d<0")
+            print("draw_circle r<=0     | DIVERGE | mism={cmp_circle_r0()}   | canonical=sw (no-op)")
+            print("draw_circle_filled   | EQUAL   | mism={cmp_circle_filled()}      | reconciled to sw 2026-07-06 (D2): emu distance-test (Metal-exact)")
+            print("draw_circle_filled r0| DIVERGE | mism={cmp_circle_filled_r0()}   | canonical=sw (no-op)")
+            print("draw_rounded_rect    | EQUAL   | mism={cmp_rounded_rect()} | de-faked: sw now FILLS (canonical=emu)")
+            print("draw_triangle_filled | EQUAL   | mism={cmp_triangle()}      | reconciled to sw 2026-07-06 (D2): emu barycentric (Metal-exact)")
+            print("draw_triangle degen  | EQUAL   | mism={cmp_triangle_degen()}      | reconciled to sw 2026-07-06 (D2): emu no-ops on d==0")
+            print("draw_text            | EQUAL   | mism={cmp_text()}   | de-faked: emu delegates to real glyphs (canonical=sw)")
+            print("draw_text_bg         | EQUAL   | mism={cmp_text_bg()}   | de-faked: emu delegates to AA blit (canonical=sw)")
+            print("=== END MATRIX ===")
+            expect(true).to_equal(true)
+
+    context "GPU-dict pilot — indexed_fill CPU-lane oracle (design cpu_gpu_dual_algorithm)":
+        # SoftwareBackend.indexed_fill (the design's CPU-lane oracle body,
+        # `palette[idx]` per pixel) vs an independent Simple replica of the
+        # dense-kind GpuLut lookup formula. Row D2-extension of this harness;
+        # the Metal device-readback proof is in the offload evidence run
+        # harness (Metal's module graph is unsafe to import here).
+
+        it "matches the dense-lut formula on a full 256-entry palette (byte 0..255 sweep)":
+            expect(_cmp_indexed_fill(16, 16, _palette_256())).to_equal(0)
+
+        it "matches the dense-lut formula on a minimal 1-entry palette (every non-zero key is an out-of-range miss)":
+            expect(_cmp_indexed_fill(8, 8, [0xFF445566u32])).to_equal(0)
+
+        it "resolves an out-of-range index to the SAME 0xFFFFFFFF sentinel the design's lut_lookup dense-miss path returns":
+            var idx: [u8] = [250u8]
+            var sw = _fresh()
+            sw.indexed_fill(0, 0, 1, 1, idx, [0xFF010203u32, 0xFF040506u32])
+            expect(sw.read_pixels()[0]).to_equal(0xFFFFFFFFu32)
+
+    context "GPU-dict use case #2 — glyph_atlas_blit CPU-lane oracle (design cpu_gpu_dual_algorithm W4)":
+        # SoftwareBackend.draw_text (the design's CPU-lane oracle body) vs an
+        # independent Simple replica of kernel_glyph_atlas_blit's dense-atlas
+        # lookup + bit-extract formula. The real Metal device-readback proof
+        # is in the offload evidence run harness (`text`/`text_edge` rows,
+        # Metal's module graph is unsafe to import here).
+
+        it "matches the atlas-lookup formula on an in-charset string at scale=2 (font_size=14)":
+            expect(_cmp_text_via_atlas("Hi", 0xFFFFFFFFu32, 14)).to_equal(0)
+
+        it "matches the atlas-lookup formula on out-of-charset glyphs at scale=1 (font_size=7) — unknown slot (index 88) resolves identically on both sides":
+            expect(_cmp_text_via_atlas("~$09", 0xFFFFFFFFu32, 7)).to_equal(0)
+
+        it "matches the atlas-lookup formula on a lowercase/digit/space mix":
+            expect(_cmp_text_via_atlas("Zz 9", 0xFF22C55Eu32, 14)).to_equal(0)
+
+    context "W3 — draw_gradient_rect GPU-kernel formula oracle (design cpu_gpu_dual_algorithm_plan W3)":
+        # SoftwareBackend.draw_gradient_rect (delegates to the canonical
+        # emu_draw_gradient_rect) vs an independent Simple replica of
+        # kernel_draw_gradient_rect's lerp+blend formula. The real Metal
+        # device-readback proof is in the offload evidence run harness
+        # (`gradient_rect` row, Metal's module graph is unsafe to import
+        # here). The alpha<255 rows below pin the fix landed alongside this
+        # spec: the kernel previously wrote the interpolated color raw
+        # (fb[idx]=c), diverging from the CPU-lane oracle's alpha blend on
+        # any non-opaque top/bottom color — now both sides call
+        # blend_src_over (short-circuits to a raw store when opaque, so the
+        # pre-existing opaque case stays bit-exact).
+
+        it "matches the lerp formula on an opaque top/bottom pair (h=24, the pre-existing bit-exact case)":
+            expect(_cmp_gradient_kernel_formula(30, 24, 0xFFFF0000u32, 0xFF0000FFu32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the lerp formula at h=1 (max_t clamps to 1, no divide-by-zero)":
+            expect(_cmp_gradient_kernel_formula(20, 1, 0xFF112233u32, 0xFF445566u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the lerp+blend formula on a semi-transparent top/bottom pair over a non-black destination":
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x80FFFFFFu32, 0x8000FF00u32, 0xFF202020u32)).to_equal(0)
+
+        it "matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)":
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)
+
+    context "Rounded-rect FILL parity fix (2026-07-07) — draw_rounded_rect GPU-kernel formula oracle":
+        # SoftwareBackend.draw_rounded_rect (delegates to the canonical
+        # emu_draw_rounded_rect fill, the 2026-07-06 outline-vs-fill fix) vs an
+        # independent Simple replica of kernel_draw_rounded_rect's band/corner
+        # membership formula. The real Metal device-readback proof is in the
+        # offload evidence run harness (`rounded_rect` row, Metal's module
+        # graph is unsafe to import here). Before the 2026-07-07 fix the
+        # kernel replayed the stale pre-fix CPU OUTLINE algorithm instead of a
+        # FILL — these rows pin the corner-radius clamp, the plain-radius
+        # case, and an alpha-blended fill.
+
+        it "matches the band/corner formula on the original bug-doc fixture (radius=6, well inside the corner-radius range)":
+            expect(_cmp_rounded_rect_kernel_formula(30, 24, 6, 0xFFFF0000u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the band/corner formula when radius == min(w,h)/2 (full corner-radius clamp, a 'stadium' shape)":
+            expect(_cmp_rounded_rect_kernel_formula(16, 16, 8, 0xFF33CC88u32, 0xFF000000u32)).to_equal(0)
+
+        it "matches the band/corner formula on a narrow strip (h < 2*radius forces the radius clamp on h, not w)":
+            expect(_cmp_rounded_rect_kernel_formula(40, 12, 8, 0xFF4488FFu32, 0xFF101010u32)).to_equal(0)
+
+        it "matches the band/corner-fill+blend formula on a semi-transparent fill over a non-black destination":
+            expect(_cmp_rounded_rect_kernel_formula(30, 20, 6, 0x80FFFFFFu32, 0xFF202020u32)).to_equal(0)
+
+        it "matches the band/corner formula at radius=0 (plain rect, no corner-arc dispatch)":
+            expect(_cmp_rounded_rect_kernel_formula(20, 14, 0, 0xFF00FF00u32, 0xFF000000u32)).to_equal(0)
+
+    context "draw_image (blit) parity-sweep coverage close (2026-07-07) — kernel_blit_image GPU-kernel formula oracle":
+        # SoftwareBackend.draw_image vs an independent Simple replica of
+        # kernel_blit_image's raw-copy-with-clip formula. The real Metal
+        # device-readback proof is in the offload evidence run harness
+        # (`image` row, Metal's module graph is unsafe to import here). These
+        # rows cover a fully on-surface blit and both directions of
+        # off-framebuffer-edge clipping (kernel's px/py bounds guard must
+        # clip exactly like the CPU bounds-clipped row loop).
+
+        it "matches the raw-copy formula on a fully on-surface blit":
+            expect(_cmp_blit_kernel_formula(48, 48, 10, 10, 16, 12, _img_varied(16, 12), 0xFF000000u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit straddling the right/bottom framebuffer edge":
+            expect(_cmp_blit_kernel_formula(48, 48, 40, 40, 16, 16, _img_varied(16, 16), 0xFF101820u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit straddling the left/top framebuffer edge (negative origin)":
+            expect(_cmp_blit_kernel_formula(48, 48, -6, -4, 16, 16, _img_varied(16, 16), 0xFF203040u32)).to_equal(0)
+
+        it "matches the raw-copy formula on a blit entirely off-surface (fully clipped, complete no-op)":
+            expect(_cmp_blit_kernel_formula(48, 48, -20, -20, 8, 8, _img_varied(8, 8), 0xFF556677u32)).to_equal(0)

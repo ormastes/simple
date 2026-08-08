@@ -1,0 +1,191 @@
+# SCV raw and policy working-copy diff.
+
+use app.io.mod (file_exists, file_read, dir_walk)
+use std.scv.core.{scv_status_index_path, scv_rel_path, scv_chunk_path, scv_line_set_contains}
+use std.scv.working_copy.{scv_should_skip, scv_line_for_path, scv_line_chunk}
+use std.scv.store.{scv_content_id_for_file, scv_hash_text}
+use std.scv.anchor.{scv_anchor_display}
+use std.scv.structural_match.{scv_default_match_config, scv_structural_diff_ops_for_file, scv_structural_diff_from_text}
+
+fn scv_trim_trailing_space(line: text) -> text:
+    var end = line.len()
+    while end > 0 and (line.char_at(end - 1) == " " or line.char_at(end - 1) == "\t"):
+        end = end - 1
+    line[0:end]
+
+fn scv_ignore_trailing_space_text(value: text) -> text:
+    var out = ""
+    var first = true
+    for line in value.split("\n"):
+        if not first:
+            out = out + "\n"
+        out = out + scv_trim_trailing_space(line)
+        first = false
+    out
+
+fn scv_collapse_horizontal_space(line: text) -> text:
+    var out = ""
+    var in_space = false
+    for ch in line.trim():
+        if ch == " " or ch == "\t":
+            if not in_space:
+                out = out + " "
+            in_space = true
+        else:
+            out = out + ch
+            in_space = false
+    out
+
+fn scv_syntax_view_text(value: text) -> text:
+    var out = ""
+    var line_no = 1
+    for line in value.split("\n"):
+        out = out + "line:{line_no}:{line}\n"
+        line_no = line_no + 1
+    out
+
+fn scv_format_policy_sensitive_path(path: text) -> bool:
+    path.ends_with(".py") or path.ends_with(".pyi") or path.ends_with(".yml") or path.ends_with(".yaml") or path.ends_with(".md") or path.ends_with("Makefile") or path.ends_with(".mk")
+
+fn scv_format_policy_view_text_for_path(path: text, value: text) -> text:
+    if scv_format_policy_sensitive_path(path):
+        return value
+    var out = ""
+    var line_no = 1
+    for line in value.split("\n"):
+        out = out + "line:{line_no}:{scv_collapse_horizontal_space(line)}\n"
+        line_no = line_no + 1
+    out
+
+fn scv_diff_view_hash(path: text, value: text, mode: text) -> text:
+    if mode == "--syntax":
+        scv_hash_text("syntax", scv_syntax_view_text(value))
+    elif mode == "--ignore-formatting":
+        scv_hash_text("semantic", scv_format_policy_view_text_for_path(path, value))
+    elif mode == "--ignore-trailing-space":
+        scv_hash_text("semantic", scv_ignore_trailing_space_text(value))
+    else:
+        scv_hash_text("raw", value)
+
+fn scv_diff_same_under_mode(root: text, path: text, old_chunk: text, mode: text) -> bool:
+    if mode != "--ignore-trailing-space" and mode != "--ignore-formatting" and mode != "--syntax":
+        return false
+    val old_path = scv_chunk_path(root, old_chunk)
+    if not file_exists(old_path):
+        return false
+    scv_diff_view_hash(path, file_read(old_path), mode) == scv_diff_view_hash(path, file_read(path), mode)
+
+fn scv_diff_row_path(row: text) -> text:
+    val parts = row.split("|")
+    if parts.len() >= 1:
+        parts[0]
+    else:
+        ""
+
+fn scv_diff_row_chunk(row: text) -> text:
+    val parts = row.split("|")
+    if parts.len() >= 2:
+        parts[1]
+    else:
+        ""
+
+fn scv_diff_find_row_by_chunk(rows: text, chunk: text, used_paths: text) -> text:
+    for row in rows.split("\n"):
+        val trimmed = row.trim()
+        if trimmed == "":
+            continue
+        val path = scv_diff_row_path(trimmed)
+        if scv_diff_row_chunk(trimmed) == chunk and not scv_line_set_contains(used_paths, path):
+            return trimmed
+    ""
+
+fn scv_diff_emit_renames(added_rows: text, deleted_rows: text) -> (text, text, text):
+    var out = ""
+    var used_added = ""
+    var used_deleted = ""
+    for row in deleted_rows.split("\n"):
+        val deleted = row.trim()
+        if deleted == "":
+            continue
+        val old_path = scv_diff_row_path(deleted)
+        val old_chunk = scv_diff_row_chunk(deleted)
+        val added = scv_diff_find_row_by_chunk(added_rows, old_chunk, used_added)
+        if added != "":
+            val new_path = scv_diff_row_path(added)
+            out = out + "renamed {old_path} -> {new_path}\n"
+            used_deleted = used_deleted + old_path + "\n"
+            used_added = used_added + new_path + "\n"
+    (out, used_added, used_deleted)
+
+fn scv_diff_emit_unmatched(prefix: text, rows: text, used_paths: text) -> text:
+    var out = ""
+    for row in rows.split("\n"):
+        val trimmed = row.trim()
+        if trimmed == "":
+            continue
+        val path = scv_diff_row_path(trimmed)
+        if not scv_line_set_contains(used_paths, path):
+            out = out + "{prefix} {path}\n"
+    out
+
+fn scv_diff_emit_structural_ops(root: text, rel: text, old_text: text, new_text: text) -> text:
+    val cfg = scv_default_match_config()
+    val ops = scv_structural_diff_from_text(old_text, new_text, cfg)
+    var result = ""
+    for op in ops:
+        val label = scv_anchor_display(op.anchor)
+        if op.kind == "move":
+            result = result + "moved {label}\n"
+        elif op.kind == "update":
+            result = result + "updated {label}\n"
+        elif op.kind == "insert":
+            result = result + "added {label}\n"
+        elif op.kind == "delete":
+            result = result + "deleted {label}\n"
+    result
+
+fn scv_diff(root: text, mode: text) -> text:
+    val index = if file_exists(scv_status_index_path(root)): file_read(scv_status_index_path(root)) else: ""
+    var out = ""
+    var seen = ""
+    var added_rows = ""
+    var deleted_rows = ""
+    for path in dir_walk(root):
+        if scv_should_skip(root, path):
+            continue
+        val rel = scv_rel_path(root, path)
+        seen = seen + rel + "\n"
+        val old_line = scv_line_for_path(index, rel)
+        if old_line == "":
+            added_rows = added_rows + "{rel}|{scv_content_id_for_file(path)}\n"
+        else:
+            val old_chunk = scv_line_chunk(old_line)
+            val new_chunk = scv_content_id_for_file(path)
+            if old_chunk != new_chunk and not scv_diff_same_under_mode(root, path, old_chunk, mode):
+                if mode == "--structural":
+                    val chunk_file = scv_chunk_path(root, old_chunk)
+                    val old_text = if file_exists(chunk_file): file_read(chunk_file) else: ""
+                    val new_text = file_read(path)
+                    val struct_ops = scv_diff_emit_structural_ops(root, rel, old_text, new_text)
+                    if struct_ops != "":
+                        out = out + struct_ops
+                    else:
+                        out = out + "modified {rel}\n"
+                else:
+                    out = out + "modified {rel}\n"
+    for line in index.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        val rel = parts[0]
+        if not scv_line_set_contains(seen, rel):
+            deleted_rows = deleted_rows + "{rel}|{scv_line_chunk(trimmed)}\n"
+    val (renames, used_added, used_deleted) = scv_diff_emit_renames(added_rows, deleted_rows)
+    out = out + renames
+    out = out + scv_diff_emit_unmatched("added", added_rows, used_added)
+    out = out + scv_diff_emit_unmatched("deleted", deleted_rows, used_deleted)
+    if out == "":
+        "no changes\n"
+    else:
+        out

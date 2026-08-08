@@ -1,0 +1,97 @@
+# @cover src/compiler/80.driver/driver.spl 80%
+# Compiler Interpret Pipeline - End-to-End Tests
+#
+# System-level tests verifying the full shared frontend → interpreter backend pipeline:
+# Source → Source Desugar → Preprocessor → Lexer → TreeSitter outline →
+# Block Resolver → Parser → AST Desugar → Type Check → HIR →
+# Monomorphize → InterpreterBackendImpl → result
+#
+# Tests write temporary .spl files to /tmp/, invoke interpret_file(path),
+# and verify CompileResult.is_success().
+
+use compiler.driver.driver_api.{interpret_file}
+
+val NL = "\n"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn write_spl(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn delete_spl(path: text) -> bool:
+    rt_file_delete(path)
+
+describe "Compiler Interpret Pipeline - Basic Execution":
+
+    it "basic arithmetic fn main succeeds":
+        val src_path = "/tmp/sml_cip_arith.spl"
+        write_spl(src_path, "fn main(): 6 * 7")
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    it "variable binding in fn main succeeds":
+        val src_path = "/tmp/sml_cip_vars.spl"
+        val src = "fn main():" + NL +
+            "    val x = 10" + NL +
+            "    val y = 20" + NL +
+            "    x + y"
+        write_spl(src_path, src)
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    it "nested arithmetic in fn main succeeds":
+        val src_path = "/tmp/sml_cip_nested_arith.spl"
+        write_spl(src_path, "fn main(): (2 + 3) * 4")
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    it "if else expression in fn main succeeds":
+        val src_path = "/tmp/sml_cip_ifelse.spl"
+        write_spl(src_path, "fn main(): if true: 1 else: 0")
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    it "function call across two fns succeeds":
+        val src_path = "/tmp/sml_cip_call.spl"
+        val src = "fn add(a, b): a + b" + NL + "fn main(): add(3, 4)"
+        write_spl(src_path, src)
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    it "source without fn main returns success":
+        val src_path = "/tmp/sml_cip_noname.spl"
+        write_spl(src_path, "val x = 42")
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    # #99 gaps #1 + #3: struct construction (try_construct_struct) and field
+    # access (HirExprKind.Field disc-dispatch) in InterpreterBackendImpl. Before
+    # commit 42abf4a6d74 the Call arm had no struct-constructor path (SIGILL) and
+    # eval_expr had no Field arm (not_implemented), so this program crashed/erred.
+    it "struct construction and field access in fn main succeed":
+        val src_path = "/tmp/sml_cip_struct_field.spl"
+        val src = "struct Pnt:" + NL +
+            "    x: i64" + NL +
+            "    y: i64" + NL +
+            "fn main():" + NL +
+            "    val p = Pnt(x: 7, y: 9)" + NL +
+            "    p.x + p.y"
+        write_spl(src_path, src)
+        val result = interpret_file(src_path)
+        expect(result.is_success()).to_equal(true)
+        delete_spl(src_path)
+
+    # NOTE (#99 gap #4, @cfg same-name variant dispatch): intentionally NOT a
+    # regression case here. interpret_file() exposes only is_success(), which is
+    # value-blind, and the misdispatch is a wrong-VALUE bug (returns the wrong
+    # arch variant, not an error) — is_success() stays true with the bug present,
+    # so it cannot discriminate. #4 is OPEN on the deployed binary; the value
+    # reproducer (arm64-first @cfg returns 32 instead of 64 on x86_64) is tracked
+    # in doc/08_tracking/bug/stage4_codegen_compact_form_hazards_2026-07-02.md.

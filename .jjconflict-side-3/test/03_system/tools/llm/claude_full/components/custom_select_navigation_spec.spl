@@ -1,0 +1,191 @@
+"""
+# Claude Full CustomSelect useSelectNavigation
+
+Checks real navigation parity for wrapping, disabled options, home/end, empty lists, and source helpers.
+"""
+
+use std.spec.*
+
+class SelectNavigationOption:
+    value: text
+    label: text
+    disabled: bool
+
+impl SelectNavigationOption:
+    static fn enabled(value: text, label: text) -> SelectNavigationOption:
+        SelectNavigationOption(value: value.trim(), label: label.trim(), disabled: false)
+
+    static fn unavailable(value: text, label: text) -> SelectNavigationOption:
+        SelectNavigationOption(value: value.trim(), label: label.trim(), disabled: true)
+
+class SelectNavigationState:
+    options: [SelectNavigationOption]
+    activeIndex: i64
+
+impl SelectNavigationState:
+    static fn new(options: [SelectNavigationOption], activeIndex: i64) -> SelectNavigationState:
+        SelectNavigationState(options: options, activeIndex: normalizeSelectNavigationIndex(options, activeIndex))
+
+    me next() -> SelectNavigationState:
+        SelectNavigationState(options: self.options, activeIndex: nextSelectNavigationIndex(self.options, self.activeIndex))
+
+    me previous() -> SelectNavigationState:
+        SelectNavigationState(options: self.options, activeIndex: previousSelectNavigationIndex(self.options, self.activeIndex))
+
+    me activeValue() -> text:
+        selectNavigationValueAt(self.options, self.activeIndex)
+
+    me isEmpty() -> bool:
+        firstEnabledSelectNavigationIndex(self.options) == -1
+
+fn createSelectNavigationState(options: [SelectNavigationOption], activeValue: text) -> SelectNavigationState:
+    SelectNavigationState.new(options, selectNavigationIndexByValue(options, activeValue))
+
+fn firstEnabledSelectNavigationIndex(options: [SelectNavigationOption]) -> i64:
+    var i = 0
+    while i < options.len():
+        if not options[i].disabled:
+            return i
+        i = i + 1
+    -1
+
+fn lastEnabledSelectNavigationIndex(options: [SelectNavigationOption]) -> i64:
+    var i = options.len() - 1
+    while i >= 0:
+        if not options[i].disabled:
+            return i
+        i = i - 1
+    -1
+
+fn normalizeSelectNavigationIndex(options: [SelectNavigationOption], index: i64) -> i64:
+    if options.len() == 0:
+        return -1
+    if index >= 0 and index < options.len() and not options[index].disabled:
+        return index
+    firstEnabledSelectNavigationIndex(options)
+
+fn nextSelectNavigationIndex(options: [SelectNavigationOption], currentIndex: i64) -> i64:
+    if options.len() == 0:
+        return -1
+    var index = currentIndex + 1
+    if currentIndex < 0 or currentIndex >= options.len():
+        index = 0
+    var scanned = 0
+    while scanned < options.len():
+        if index >= options.len():
+            index = 0
+        if not options[index].disabled:
+            return index
+        index = index + 1
+        scanned = scanned + 1
+    -1
+
+fn previousSelectNavigationIndex(options: [SelectNavigationOption], currentIndex: i64) -> i64:
+    if options.len() == 0:
+        return -1
+    var index = currentIndex - 1
+    if currentIndex < 0 or currentIndex >= options.len():
+        index = options.len() - 1
+    var scanned = 0
+    while scanned < options.len():
+        if index < 0:
+            index = options.len() - 1
+        if not options[index].disabled:
+            return index
+        index = index - 1
+        scanned = scanned + 1
+    -1
+
+fn homeSelectNavigationIndex(options: [SelectNavigationOption]) -> i64:
+    firstEnabledSelectNavigationIndex(options)
+
+fn endSelectNavigationIndex(options: [SelectNavigationOption]) -> i64:
+    lastEnabledSelectNavigationIndex(options)
+
+fn selectNavigationIndexByValue(options: [SelectNavigationOption], value: text) -> i64:
+    var i = 0
+    while i < options.len():
+        if options[i].value == value.trim() and not options[i].disabled:
+            return i
+        i = i + 1
+    firstEnabledSelectNavigationIndex(options)
+
+fn selectNavigationValueAt(options: [SelectNavigationOption], index: i64) -> text:
+    if index < 0 or index >= options.len():
+        return ""
+    if options[index].disabled:
+        return ""
+    options[index].value
+
+fn sampleSelectNavigationOptions() -> [SelectNavigationOption]:
+    [
+        SelectNavigationOption.enabled("alpha", "Alpha"),
+        SelectNavigationOption.unavailable("beta", "Beta"),
+        SelectNavigationOption.enabled("gamma", "Gamma"),
+        SelectNavigationOption.unavailable("delta", "Delta"),
+        SelectNavigationOption.enabled("epsilon", "Epsilon"),
+    ]
+
+fn useSelectNavigationModeledSourceFile() -> text:
+    "src/components/CustomSelect/use-select-navigation.ts"
+
+fn useSelectNavigationModeledHookName() -> text:
+    "useSelectNavigation"
+
+fn useSelectNavigationModeledSourceHelper() -> text:
+    "getNextSelectableOption"
+
+fn useSelectNavigationSourceLinesModeled() -> i64:
+    653
+
+describe "Claude full CustomSelect useSelectNavigation":
+    it "wraps next and previous while skipping disabled options":
+        step("Navigate over the sample list")
+        val options = sampleSelectNavigationOptions()
+        expect(nextSelectNavigationIndex(options, 0)).to_equal(2)
+        expect(nextSelectNavigationIndex(options, 2)).to_equal(4)
+        expect(nextSelectNavigationIndex(options, 4)).to_equal(0)
+        expect(previousSelectNavigationIndex(options, 0)).to_equal(4)
+        expect(previousSelectNavigationIndex(options, 4)).to_equal(2)
+        expect(previousSelectNavigationIndex(options, 2)).to_equal(0)
+
+    it "uses home and end for first and last enabled options":
+        step("Resolve boundary navigation")
+        val options = sampleSelectNavigationOptions()
+        expect(homeSelectNavigationIndex(options)).to_equal(0)
+        expect(endSelectNavigationIndex(options)).to_equal(4)
+        expect(firstEnabledSelectNavigationIndex(options)).to_equal(0)
+        expect(lastEnabledSelectNavigationIndex(options)).to_equal(4)
+
+    it "handles empty and all-disabled option lists":
+        step("Return no active index for empty data")
+        val empty: [SelectNavigationOption] = []
+        expect(nextSelectNavigationIndex(empty, 0)).to_equal(-1)
+        expect(previousSelectNavigationIndex(empty, 0)).to_equal(-1)
+        expect(homeSelectNavigationIndex(empty)).to_equal(-1)
+        expect(endSelectNavigationIndex(empty)).to_equal(-1)
+        expect(selectNavigationValueAt(empty, 0)).to_equal("")
+
+        step("Return no active index when every option is disabled")
+        val disabled = [SelectNavigationOption.unavailable("a", "A"), SelectNavigationOption.unavailable("b", "B")]
+        expect(nextSelectNavigationIndex(disabled, 0)).to_equal(-1)
+        expect(previousSelectNavigationIndex(disabled, 1)).to_equal(-1)
+        expect(createSelectNavigationState(disabled, "a").isEmpty()).to_equal(true)
+
+    it "creates state from values and normalizes disabled selections":
+        step("Keep enabled values and fall back from disabled ones")
+        val options = sampleSelectNavigationOptions()
+        val selected = createSelectNavigationState(options, "gamma")
+        expect(selected.activeIndex).to_equal(2)
+        expect(selected.activeValue()).to_equal("gamma")
+        expect(selected.next().activeValue()).to_equal("epsilon")
+        expect(selected.previous().activeValue()).to_equal("alpha")
+        expect(createSelectNavigationState(options, "beta").activeIndex).to_equal(0)
+        expect(selectNavigationIndexByValue(options, "missing")).to_equal(0)
+
+    it "exports source helper parity":
+        step("Pin upstream source helpers")
+        expect(useSelectNavigationModeledSourceFile()).to_equal("src/components/CustomSelect/use-select-navigation.ts")
+        expect(useSelectNavigationModeledHookName()).to_equal("useSelectNavigation")
+        expect(useSelectNavigationModeledSourceHelper()).to_equal("getNextSelectableOption")
+        expect(useSelectNavigationSourceLinesModeled()).to_equal(653)

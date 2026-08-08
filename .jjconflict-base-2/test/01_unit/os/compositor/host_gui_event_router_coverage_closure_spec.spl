@@ -1,0 +1,230 @@
+# @cover src/os/compositor/host_gui_event_router.spl 60%
+# @cover src/os/compositor/hosted_backend.spl 5%
+"""
+# Host GUI Event Router / Hosted Backend Dispatch — Coverage Closure (U4.2)
+
+Wave 4 of the WM/GUI/web system-test coverage plan
+(doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md,
+unit U4.2). Line coverage IS measurable now (commit `ae97a34cd365` fixed
+artifact export; U1.2 proved imported-module function-body attribution
+works end-to-end) — see
+doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md. Branch
+coverage remains unavailable; no branch percentage is claimed anywhere in
+this spec.
+
+`src/os/compositor/host_gui_event_router.spl` (233 lines, 7 fn/me):
+`host_glfw_key_name`, `HostGuiEventRouter.new`, `.window_focused`,
+`.update_client_target`, `.update_captured_target`, `.route`,
+`.route_scalar`. The pre-existing `host_gui_event_router_spec.spl` exercises
+`route_scalar` for POINTER_MOVE, POINTER_BUTTON (left+right), and TEXT, but
+never WHEEL, never KEY, never the `route()` wrapper directly, and never
+`host_glfw_key_name` directly. This spec closes those gaps:
+
+  host_glfw_key_name    — non-printable table + printable range + unknown
+  route()               — wrapper delegates to route_scalar with identical
+                           result, exercised via a real WindowEventRecord
+  route_scalar (WHEEL)  — both branches: pointer over content (dispatches
+                           and returns true) and pointer over chrome only
+                           (compositor state still updates, returns false)
+  route_scalar (KEY)    — ctrl+a select-all (real oracle: selection props),
+                           unknown key code (empty name -> false), and
+                           unfocused window (false) — closes window_focused
+                           for the false path the existing spec never hits
+
+`src/os/compositor/hosted_backend.spl` (379 lines) is FFI-heavy
+(`rt_winit_buffer_*`) with a single real winit implementation this repo has
+no native definition for at all (see the module's own header comment).
+Per the plan's justified exclusion for "SDL2/winit/win32 backend files —
+FFI+platform; covered by evidence scripts, not unit-coverable headlessly",
+this spec closes only the two pure/registered-extern functions:
+
+  hosted_surface_name(sel)  — all 4 branches (cocoa/win32/winit/unknown),
+                               pure text mapping, no FFI
+  hosted_surface_selector() — calls `rt_hosted_select_surface()`, which
+                               (unlike `rt_sdl2_init`) IS registered in the
+                               interpreter extern table
+                               (src/compiler_rust/compiler/src/interpreter_extern/mod.rs:1371);
+                               real oracle: result is one of the three known
+                               selector codes.
+
+`select_hosted_backend()` is deliberately NOT exercised here: on this
+(Linux) host with selector 0 it falls through to
+`HostedSdl2Backend.try_create`, which calls `rt_sdl2_init` — an extern with
+NO interpreter registration (confirmed by grep against
+interpreter_extern/mod.rs; only a comment about the resulting error message
+exists there, no `insert_simple!` entry). Calling it from a spec run under
+`bin/simple test` (interpreter engine) would abort with `unknown extern
+function: rt_sdl2_init`, not exercise real behaviour — this is the same gap
+`hosted_backend.spl`'s own module-header comment documents (lines 368-375).
+`HostedCompositorBackend.create(0, ...)` (window_id<=0 -> nil, no FFI
+reached) is already covered by
+`test/03_system/gui/wm_host_platform/hosted_backend_honesty_spec.spl` and is
+not duplicated here.
+"""
+
+use std.spec.{describe, it, expect}
+use common.io.window_event.{
+    WINDOW_ACTION_PRESS,
+    WINDOW_ACTION_RELEASE,
+    WINDOW_EVENT_KEY,
+    WINDOW_EVENT_POINTER_MOVE,
+    WINDOW_EVENT_WHEEL,
+    WINDOW_MOD_CTRL,
+    window_event_pointer,
+}
+use common.ui.builder.{build_tree, column, text_field, with_height}
+use common.ui.native_scalar_text.{ui_native_i64_text}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.host_gui_event_router.{HostGuiEventRouter, host_glfw_key_name}
+use os.compositor.hosted_backend.{hosted_surface_name, hosted_surface_selector}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+describe "host_glfw_key_name (U4.2 closure)":
+    it "maps every documented non-printable GLFW code to its name":
+        expect(host_glfw_key_name(256)).to_equal("escape")
+        expect(host_glfw_key_name(257)).to_equal("enter")
+        expect(host_glfw_key_name(258)).to_equal("tab")
+        expect(host_glfw_key_name(259)).to_equal("backspace")
+        expect(host_glfw_key_name(260)).to_equal("insert")
+        expect(host_glfw_key_name(261)).to_equal("delete")
+        expect(host_glfw_key_name(262)).to_equal("right")
+        expect(host_glfw_key_name(263)).to_equal("left")
+        expect(host_glfw_key_name(264)).to_equal("down")
+        expect(host_glfw_key_name(265)).to_equal("up")
+        expect(host_glfw_key_name(268)).to_equal("home")
+        expect(host_glfw_key_name(269)).to_equal("end")
+
+    it "lowercases the uppercase-letter range and passes the printable range through":
+        expect(host_glfw_key_name(65)).to_equal("a")
+        expect(host_glfw_key_name(90)).to_equal("z")
+        expect(host_glfw_key_name(48)).to_equal("0")
+
+    it "returns empty text for a code outside every documented range (both-directions oracle)":
+        expect(host_glfw_key_name(999)).to_equal("")
+        expect(host_glfw_key_name(0)).to_equal("")
+
+fn _router_win() -> HostCompositor:
+    # owner_port=0 keeps content_owner at HOST_CONTENT_OWNER_LOCAL_WEB so the
+    # window is not treated as an externally-owned browser frame (which would
+    # make handle_mouse_wheel's scroll bookkeeping a deliberate no-op).
+    var compositor = HostCompositor.new_headless(Size(width: 320, height: 180))
+    compositor.apply_bridge_request(
+        1, 0, COMP_CREATE_WINDOW.to_i64(), 0,
+        "Demo", 10, 10, 108, 96, "", 99, "demo"
+    )
+    compositor
+
+describe "HostGuiEventRouter.route (U4.2 closure)":
+    it "delegates to route_scalar with identical field-by-field results":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)]))
+        var session = UISession.new(tree)
+        var router = HostGuiEventRouter.new(window_id)
+        val record = window_event_pointer(
+            window_id, 1, 0, WINDOW_EVENT_POINTER_MOVE, 18000, 44000,
+            WINDOW_ACTION_RELEASE, 0
+        )
+        val result = router.route(record, compositor, session)
+        expect(result).to_equal(true)
+        expect(router.pointer_x).to_equal(18)
+        expect(router.pointer_y).to_equal(44)
+
+describe "HostGuiEventRouter.route_scalar WHEEL routing (U4.2 closure)":
+    it "accumulates the compositor scroll offset and dispatches when the pointer is over content":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)]))
+        var session = UISession.new(tree)
+        var router = HostGuiEventRouter.new(window_id)
+        expect(compositor.scroll_offset_for(window_id)).to_equal(0.0)
+        # handle_mouse_wheel hit-tests the COMPOSITOR's own pointer_x/pointer_y
+        # (not the router's), so a POINTER_MOVE must land the pointer first.
+        router.route_scalar(
+            WINDOW_EVENT_POINTER_MOVE, 0, 0, 0, 50000, 70000, 0, 0, compositor, session
+        )
+        val over_content = router.route_scalar(
+            WINDOW_EVENT_WHEEL, 0, 0, 0, 50000, 70000, 0, 5000, compositor, session
+        )
+        expect(over_content).to_equal(true)
+        expect(compositor.scroll_offset_for(window_id)).to_equal(5.0)
+
+    it "still updates compositor scroll state but returns false when the pointer is over chrome only":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)]))
+        var session = UISession.new(tree)
+        var router = HostGuiEventRouter.new(window_id)
+        router.route_scalar(
+            WINDOW_EVENT_POINTER_MOVE, 0, 0, 0, 15000, 15000, 0, 0, compositor, session
+        )
+        val over_chrome = router.route_scalar(
+            WINDOW_EVENT_WHEEL, 0, 0, 0, 15000, 15000, 0, 3000, compositor, session
+        )
+        expect(over_chrome).to_equal(false)
+        expect(compositor.scroll_offset_for(window_id)).to_equal(3.0)
+
+describe "HostGuiEventRouter.route_scalar KEY routing (U4.2 closure)":
+    it "ctrl+a on the focused widget writes real select-all selection state":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [with_height(text_field("name", "hello", "Name"), 24)]))
+        var session = UISession.new(tree)
+        # UISession.new focuses the tree's root node (verified: focused_widget()
+        # == "root" here, not "name" — a fresh session sets no explicit focus),
+        # so the select-all write lands on "root", the real focused_id.
+        var router = HostGuiEventRouter.new(window_id)
+        val handled = router.route_scalar(
+            WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, WINDOW_MOD_CTRL,
+            0, 0, 0, 0, compositor, session
+        )
+        expect(handled).to_equal(true)
+        expect(session.focused_widget()).to_equal("root")
+        val node = session.current_tree().find_widget("root")
+        expect(node.get_prop("selection_start")).to_equal("0")
+        expect(node.get_prop("selection_end")).to_equal(ui_native_i64_text(0))
+
+    it "returns false for a key code with no mapped name (both-directions oracle)":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        val tree = build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)]))
+        var session = UISession.new(tree)
+        var router = HostGuiEventRouter.new(window_id)
+        val handled = router.route_scalar(
+            WINDOW_EVENT_KEY, 999, WINDOW_ACTION_PRESS, 0,
+            0, 0, 0, 0, compositor, session
+        )
+        expect(handled).to_equal(false)
+
+    it "returns false when the routed window is not focused (closes window_focused's false path)":
+        val compositor = _router_win()
+        val window_id = compositor.windows[0].id
+        compositor.apply_bridge_request(
+            2, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Other", 160, 10, 108, 96, "", 100, "other"
+        )
+        compositor.focus_window(compositor.windows[1].id)
+        val tree = build_tree(column("root", [with_height(text_field("name", "", "Name"), 24)]))
+        var session = UISession.new(tree)
+        var router = HostGuiEventRouter.new(window_id)
+        val handled = router.route_scalar(
+            WINDOW_EVENT_KEY, 65, WINDOW_ACTION_PRESS, 0,
+            0, 0, 0, 0, compositor, session
+        )
+        expect(handled).to_equal(false)
+
+describe "hosted_surface_name (U4.2 closure)":
+    it "names every known selector code and falls back to unknown for the rest":
+        expect(hosted_surface_name(1)).to_equal("cocoa")
+        expect(hosted_surface_name(2)).to_equal("win32")
+        expect(hosted_surface_name(0)).to_equal("sdl2")
+        expect(hosted_surface_name(99)).to_equal("unknown")
+
+describe "hosted_surface_selector (U4.2 closure)":
+    it "returns one of the three documented selector codes via the registered extern":
+        val sel = hosted_surface_selector()
+        val known = sel == 0 or sel == 1 or sel == 2
+        expect(known).to_equal(true)
+        expect(hosted_surface_name(sel) == "unknown").to_equal(false)

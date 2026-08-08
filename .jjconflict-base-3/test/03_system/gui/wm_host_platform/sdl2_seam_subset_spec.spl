@@ -1,0 +1,166 @@
+# @cover src/os/compositor/hosted_backend_sdl2.spl 0%
+# @req REQ-WM-HOST-PLATFORM-006
+"""
+# WM/GUI Host Seam — SDL2 Seam-Subset Audit + Ratchet (Task lane C)
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+SDL2 is the host 2D-surface + event-source implementation for the WM
+compositor, not configuration data. The registered `rt_sdl2_*` surface is 66
+entry points; the WM host seam (`src/lib/nogc_async_mut/wm/host.spl`, trait
+`WmHost2d`) is 4 methods (`surface_acquire`, `surface_present`,
+`surface_release`, `event_poll`). This file answers, mechanically and on every
+run, the question the audit doc
+(`doc/04_architecture/ui/sdl2_seam_subset_audit.md`) answers once in prose:
+does compositor code reach only the seam-shaped subset, or does it reach the
+extras (timers, display bounds/DPI, window title/size/position/fullscreen,
+cursor grab/warp, clipboard, lifecycle)?
+
+Only `src/os/compositor/**/*.spl` and `src/lib/nogc_async_mut/wm/**/*.spl` are
+in scope. `game2d`, `web_ui`, `desktop/display.spl`, and `app/io/window_*`
+legitimately want the full SDL2 surface (window management, multi-display,
+clipboard) and are explicitly OUT of this ratchet — Rule 4 below proves that
+exclusion is doing real work, not vacuously passing.
+
+## Scope and Preconditions
+
+Text-reading stdlib entry points do not resolve under the current tooling
+binary (same constraint as `wm_host_false_success_guard_spec.spl`), so all
+source-shape checks below go through the shell via `shell_output`. Every
+shell pipeline used here is exit-code-safe (the last command in each pipeline
+always succeeds, even on zero matches) so `shell_output`'s "" on the empty
+case is never confused with its "" on command failure — see
+`src/lib/nogc_sync_mut/io_runtime.spl::shell_output`, which collapses both to
+the same string.
+
+## Recovery and Troubleshooting
+
+A RED result under Rule 2 means compositor or wm-seam code started calling an
+SDL2 entry point outside the seam allowlist that is not yet in
+`doc/08_tracking/wm_sdl2_extras_baseline.txt`. Either the call is a genuine
+new seam-shaped need (add it to the allowlist doc discussion first) or it is
+a hidden precondition (dependency-audit class C) that should route through
+the seam instead. A RED under Rule 3 means a baseline line no longer matches
+any real reference — delete the stale line in the same commit as whatever fix
+made it stale.
+
+## Compatibility and Limitations
+
+The scanner treats a `rt_sdl2_*` token on a non-full-line-comment line as a
+reference, including inside multi-line docstrings (it does not parse
+docstring boundaries) — this is deliberately conservative: a prose mention of
+an extern in a docstring still earns a baseline line rather than being
+silently ignored, so the ratchet cannot be defeated by moving a real call
+into a comment.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{shell_output}
+
+
+# ============================================================================
+# Source-shape helpers
+# ============================================================================
+
+val BASELINE_PATH = "doc/08_tracking/wm_sdl2_extras_baseline.txt"
+
+# The seam allowlist, spelled out as a shell `case` pattern: poll_event,
+# every event_* accessor, present_rgba, create_window, destroy_window — the
+# exact 16 symbols the audit doc's per-caller matrix records as `seam:*`.
+val SEAM_CASE_ARMS = 'rt_sdl2_poll_event|rt_sdl2_present_rgba|rt_sdl2_create_window|rt_sdl2_destroy_window|rt_sdl2_event_key_code|rt_sdl2_event_key_mod|rt_sdl2_event_key_sym|rt_sdl2_event_mouse_button|rt_sdl2_event_mouse_x|rt_sdl2_event_mouse_y|rt_sdl2_event_text|rt_sdl2_event_wheel_x|rt_sdl2_event_wheel_y|rt_sdl2_event_window_data1|rt_sdl2_event_window_data2|rt_sdl2_event_window_event_id'
+
+# Every `rt_sdl2_*` token referenced on a non-full-line-comment line of `path`
+# that is neither in the seam allowlist nor in the extras baseline, one
+# `VIOLATION:<path>:<symbol>` per line. Empty output = compliant.
+fn sdl2_violations_in(path_glob: text) -> text:
+    val cmd = 'for f in ' + path_glob + '; do for sym in $(sed -E "s/^[[:space:]]*#.*$/ /" "$f" | /usr/bin/grep -oE "rt_sdl2_[A-Za-z0-9_]+" | sort -u); do case "$sym" in ' + SEAM_CASE_ARMS + ') continue ;; esac; /usr/bin/grep -qF "$f:$sym:" ' + BASELINE_PATH + ' 2>/dev/null || echo "VIOLATION:$f:$sym"; done; done; true'
+    shell_output(cmd)
+
+# Same rule, applied to the real ratchet scope (compositor + wm seam),
+# discovering files dynamically so a NEW file with a stray extra is caught
+# without needing this spec to be edited.
+fn sdl2_compositor_scope_violations() -> text:
+    sdl2_violations_in('$(/usr/bin/grep -rlE "rt_sdl2_[A-Za-z0-9_]+" --include=*.spl src/os/compositor src/lib/nogc_async_mut/wm 2>/dev/null)')
+
+# Baseline lines whose `<symbol>` no longer appears anywhere in `<path>`,
+# one `STALE:<path>:<symbol>:<tag>` per line. Empty output = every baseline
+# line still corresponds to a real reference.
+fn sdl2_stale_baseline_lines() -> text:
+    val cmd = 'while IFS=: read -r path sym tag; do if [ -z "$path" ]; then continue; fi; if /usr/bin/grep -qF "$sym" "$path" 2>/dev/null; then continue; fi; echo "STALE:$path:$sym:$tag"; done < ' + BASELINE_PATH + '; true'
+    shell_output(cmd)
+
+# Measured count of registered `rt_sdl2_*` entry points: non-static function
+# definitions in the runtime C source (the internal `rt_sdl2_event_code`
+# helper is deliberately excluded from the interpreter dispatch table, see
+# `src/compiler_rust/compiler/src/interpreter_extern/sdl2.rs`).
+fn sdl2_registered_surface_count() -> text:
+    val cmd = '/usr/bin/grep -E "^[A-Za-z].*rt_sdl2_[A-Za-z0-9_]+\\(" src/runtime/runtime_sdl2.c | /usr/bin/grep -v "^static" | wc -l'
+    shell_output(cmd).trim()
+
+
+# ============================================================================
+# Rule 1 — the registered surface has not silently drifted
+# ============================================================================
+
+describe "SDL2 seam-subset audit — registered surface size":
+
+    it "the runtime registers the audited 66-entry-point surface":
+        # NON-VACUITY: this is a real count, not a hardcoded skip — if a new
+        # rt_sdl2_* function is added or removed from runtime_sdl2.c without
+        # updating the audit doc, this goes RED and says so.
+        expect(sdl2_registered_surface_count()).to_equal("66")
+
+
+# ============================================================================
+# Rule 2 — compositor + wm-seam code stays in the seam-shaped subset
+# ============================================================================
+
+describe "SDL2 seam-subset audit — compositor ratchet":
+
+    it "no compositor or wm-seam file reaches an SDL2 symbol outside the seam allowlist or the extras baseline":
+        # EXPECTED GREEN today: hosted_backend_sdl2.spl and
+        # hosted_input_sdl2.spl's non-seam references (init/quit/get_mouse_x/
+        # get_mouse_y plus several dangling externs) are all recorded in
+        # doc/08_tracking/wm_sdl2_extras_baseline.txt.
+        expect(sdl2_compositor_scope_violations()).to_equal("")
+
+    it "the compositor scan reaches the two SDL2 backend files (positive control)":
+        # Without this, a RED-then-fixed rule above could be a broken
+        # discovery glob rather than a real compliant scope.
+        val listing = shell_output('/usr/bin/grep -rlE "rt_sdl2_[A-Za-z0-9_]+" --include=*.spl src/os/compositor src/lib/nogc_async_mut/wm 2>/dev/null')
+        expect(listing.contains("hosted_backend_sdl2.spl")).to_equal(true)
+
+
+# ============================================================================
+# Rule 3 — the extras baseline stays honest (no stale lines)
+# ============================================================================
+
+describe "SDL2 seam-subset audit — baseline hygiene":
+
+    it "every extras-baseline line still corresponds to a real reference":
+        # EXPECTED GREEN today. A fix lane that removes a dangling extern or
+        # deletes hosted_input_sdl2.spl (per the platform-honesty lane plan,
+        # A4) must delete the matching baseline line in the same commit —
+        # this is what enforces that.
+        expect(sdl2_stale_baseline_lines()).to_equal("")
+
+
+# ============================================================================
+# Rule 4 — the ratchet's out-of-scope exclusion is not vacuous
+# ============================================================================
+
+describe "SDL2 seam-subset audit — non-compositor SDL2 consumers stay excluded":
+
+    it "desktop/display.spl is a real full-surface consumer (would fail if it were in scope)":
+        # Establishes the premise: if the exclusion below did nothing (e.g.
+        # display.spl happened to already be seam-only), excluding it would
+        # prove nothing about the ratchet's boundary.
+        val display_violations = sdl2_violations_in("src/lib/nogc_sync_mut/desktop/display.spl")
+        expect(display_violations.contains("VIOLATION:")).to_equal(true)
+
+    it "desktop/display.spl is never discovered by the compositor-scoped scan":
+        val listing = shell_output('/usr/bin/grep -rlE "rt_sdl2_[A-Za-z0-9_]+" --include=*.spl src/os/compositor src/lib/nogc_async_mut/wm 2>/dev/null')
+        expect(listing.contains("desktop/display.spl")).to_equal(false)

@@ -1,0 +1,123 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
+# @tag: unit, ui, engine2d, coverage-closure
+#
+# Coverage-closure spec for `engine.spl`'s worst-ratio gap (WM/GUI/web
+# coverage baseline, doc/09_report/ui/testing/wm_gui_web_coverage_baseline_2026-08-07.md):
+# 2% (27/1110 measured lines) — the lowest percentage of any non-excluded
+# file combined with the largest measured-line denominator in the whole
+# baseline. Every existing spec that references this module only calls
+# `Engine2D` instance methods (`clear`, `draw_rect`, `present`, ...); this
+# spec instead targets the handful of PURE MODULE-LEVEL `fn`s at the top of
+# the file (lines 92-181) that no spec anywhere in the tree exercised
+# before this unit: `engine2d_env_get`, `engine2d_shutdown_has_typed_route`,
+# `engine2d_scale_pixel_alpha`, and `engine2d_default_font_config_for`.
+#
+# `engine2d_env_backend_override` and `engine2d_font_atlas_subrect_pixels`
+# (the other two module-level fns in that block) already have dedicated
+# specs (`engine2d_env_backend_select_spec.spl`, `draw_text_bg_spec.spl`)
+# and are not duplicated here.
+
+use std.spec.{describe, it, assert_true, assert_false, assert_equal}
+use std.gc_async_mut.gpu.engine2d.engine.{
+    engine2d_env_get, engine2d_shutdown_has_typed_route,
+    engine2d_scale_pixel_alpha, engine2d_default_font_config_for
+}
+use std.gpu.engine2d.color.{rgba, color_r, color_g, color_b, color_a}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "engine2d_env_get":
+    """Thin passthrough to the process environment — read a variable this
+    test process itself controls, both set and unset."""
+
+    it "returns the value of a variable this test process just set":
+        rt_env_set("ENGINE2D_COV_PROBE", "closure-value")
+        assert_equal(engine2d_env_get("ENGINE2D_COV_PROBE"), "closure-value")
+        rt_env_set("ENGINE2D_COV_PROBE", "")
+
+    it "returns empty text for a variable that was cleared":
+        rt_env_set("ENGINE2D_COV_PROBE_UNSET", "")
+        assert_equal(engine2d_env_get("ENGINE2D_COV_PROBE_UNSET"), "")
+
+describe "engine2d_shutdown_has_typed_route":
+    """True only for the backend names Engine2D.shutdown() dispatches
+    through a typed field arm (see the fn's own doc comment); everything
+    else falls to the duck-typed self.backend.shutdown() path."""
+
+    it "is true for every documented typed-route backend name":
+        assert_true(engine2d_shutdown_has_typed_route("vulkan"))
+        assert_true(engine2d_shutdown_has_typed_route("vulkan-poisoned-software"))
+        assert_true(engine2d_shutdown_has_typed_route("cuda"))
+        assert_true(engine2d_shutdown_has_typed_route("metal"))
+        assert_true(engine2d_shutdown_has_typed_route("opencl"))
+        assert_true(engine2d_shutdown_has_typed_route("rocm"))
+        assert_true(engine2d_shutdown_has_typed_route("software"))
+
+    it "is false for a name outside the typed-route set":
+        assert_false(engine2d_shutdown_has_typed_route("cpu"))
+        assert_false(engine2d_shutdown_has_typed_route("directx"))
+        assert_false(engine2d_shutdown_has_typed_route(""))
+
+describe "engine2d_scale_pixel_alpha":
+    """Scales only the alpha channel of every pixel by opacity_milli/1000;
+    r/g/b must pass through unchanged."""
+
+    it "halves alpha at opacity_milli=500 and leaves r/g/b untouched":
+        val px = rgba(10, 20, 30, 200)
+        val out = engine2d_scale_pixel_alpha([px], 500)
+        assert_equal(out.len(), 1)
+        assert_equal(color_r(out[0]), 10)
+        assert_equal(color_g(out[0]), 20)
+        assert_equal(color_b(out[0]), 30)
+        assert_equal(color_a(out[0]), 100)
+
+    it "is a no-op at opacity_milli=1000 (full opacity)":
+        val px = rgba(1, 2, 3, 250)
+        val out = engine2d_scale_pixel_alpha([px], 1000)
+        assert_equal(color_a(out[0]), 250)
+
+    it "zeroes alpha at opacity_milli=0 across multiple pixels":
+        val px_a = rgba(5, 6, 7, 100)
+        val px_b = rgba(8, 9, 10, 40)
+        val out = engine2d_scale_pixel_alpha([px_a, px_b], 0)
+        assert_equal(out.len(), 2)
+        assert_equal(color_a(out[0]), 0)
+        assert_equal(color_a(out[1]), 0)
+        # r/g/b of the second pixel still pass through unchanged.
+        assert_equal(color_r(out[1]), 8)
+        assert_equal(color_g(out[1]), 9)
+        assert_equal(color_b(out[1]), 10)
+
+    it "returns an empty array for an empty input":
+        val out = engine2d_scale_pixel_alpha([], 500)
+        assert_equal(out.len(), 0)
+
+describe "engine2d_default_font_config_for":
+    """force_cpu_target pins execution_target to \"cpu\" (working around the
+    FontExecutionPolicy enum-equality defect documented at the fn's call
+    site); false leaves the base config's \"auto\" target untouched. size
+    always passes through."""
+
+    it "pins execution_target to cpu when force_cpu_target is true":
+        val cfg = engine2d_default_font_config_for(14, true)
+        assert_equal(cfg.execution_target, "cpu")
+        assert_equal(cfg.size, 14)
+
+    it "leaves execution_target at the base auto value when force_cpu_target is false":
+        val cfg = engine2d_default_font_config_for(20, false)
+        assert_equal(cfg.execution_target, "auto")
+        assert_equal(cfg.size, 20)
+
+    it "preserves every other base field when forcing cpu (only execution_target changes)":
+        val forced = engine2d_default_font_config_for(16, true)
+        val base = engine2d_default_font_config_for(16, false)
+        assert_equal(forced.family, base.family)
+        assert_equal(forced.category, base.category)
+        assert_equal(forced.language, base.language)
+        assert_equal(forced.script, base.script)
+        assert_equal(forced.weight, base.weight)
+        assert_equal(forced.style, base.style)
+        assert_equal(forced.hinting, base.hinting)
+        assert_equal(forced.antialiasing, base.antialiasing)
+        assert_equal(forced.atlas_policy, base.atlas_policy)
+        assert_true(forced.execution_target != base.execution_target)

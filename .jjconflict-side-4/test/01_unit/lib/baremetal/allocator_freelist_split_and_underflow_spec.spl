@@ -1,0 +1,211 @@
+"""
+# Bare-Metal Allocator — free-list split path + unsigned-underflow family
+
+**Category:** Baremetal
+
+## Overview
+
+Two defects filed in
+`doc/08_tracking/bug/baremetal_freelist_allocator_drops_free_list_on_first_split_2026-08-08.md`:
+
+1. `FreeListAllocator.alloc()`'s split path set `self.free_list = header.next`
+   — the OLD next captured before the split — instead of the new remainder
+   block's address, orphaning 99.8% of the heap after the very first
+   splitting allocation.
+2. A `u32` unsigned-underflow family beyond the already-guarded
+   `capacity == 0` loops: `FixedBlockAllocator.available()`,
+   `FixedBlockAllocator.dealloc()`, `FreeListAllocator.dealloc()` (twice),
+   and `coalesce_with_prev()`.
+
+`FreeListAllocator` addresses (`u32`) cannot be driven directly on the host:
+routing a real host pointer through any `u32` parameter mangles it (measured
+in the bug report), and there is no extern that returns a sub-4GB region. So
+the split-path example below transcribes `init`/`alloc` verbatim — same
+control flow, same field names — over a plain `i64` array instead of raw
+`u32` memory, exactly as the adversarial review did to produce its evidence.
+The underflow examples need no such workaround: `sat_sub()` is a plain `u32`
+function, and `FixedBlockAllocator.available()` touches no memory at all, so
+both are exercised directly against the real module.
+"""
+
+use std.baremetal.allocator.{FixedBlockAllocator, sat_sub}
+
+# ---------------------------------------------------------------------------
+# Transcription of FreeListAllocator.init()/.alloc() over an i64 array.
+#
+# Layout per block header (3 i64 "words" instead of allocator.spl's 16
+# packed bytes — the point being verified is the free-list linkage
+# algorithm, not the byte layout, which is separately pinned by
+# allocator_block_header_spec.spl):
+#   word 0: size (total block size including header)
+#   word 1: is_free (0/1)
+#   word 2: next (address of next block, 0 if none)
+# HEADER_WORDS = 3
+# ---------------------------------------------------------------------------
+val HEADER_WORDS: i64 = 3
+
+struct SimFreeList:
+    mem: [i64]
+    free_list: i64
+
+fn sim_read_header(mem: [i64], addr: i64) -> (i64, i64, i64):
+    (mem[addr], mem[addr + 1], mem[addr + 2])
+
+fn sim_write_header(mem: [i64], addr: i64, size: i64, is_free: i64, next: i64):
+    mem[addr] = size
+    mem[addr + 1] = is_free
+    mem[addr + 2] = next
+
+fn sim_init(mem: [i64], base: i64, size: i64) -> i64:
+    sim_write_header(mem, base, size, 1, 0)
+    base  # free_list
+
+fn make_sim_mem(len: i64) -> [i64]:
+    var mem: [i64] = []
+    var i: i64 = 0
+    while i < len:
+        mem.push(0)
+        i = i + 1
+    mem
+
+# Mirrors the FIXED allocator.spl split path (next_free tracks the block's
+# up-to-date successor rather than the pre-split snapshot).
+fn sim_alloc_fixed(mem: [i64], free_list: i64, req_size: i64) -> (i64, i64):
+    val total_size = HEADER_WORDS + req_size
+    var current = free_list
+    var prev: i64 = 0
+    var result: i64 = -1
+    var new_free_list = free_list
+
+    while current != 0 and result == -1:
+        val (size, is_free, next) = sim_read_header(mem, current)
+        if is_free == 1 and size >= total_size:
+            val remainder = size - total_size
+            var next_free = next
+            if remainder >= HEADER_WORDS + 1:
+                val new_block_addr = current + total_size
+                sim_write_header(mem, new_block_addr, remainder, 1, next)
+                sim_write_header(mem, current, total_size, 0, new_block_addr)
+                next_free = new_block_addr
+            else:
+                sim_write_header(mem, current, size, 0, next)
+
+            if prev == 0:
+                new_free_list = next_free
+
+            result = current + HEADER_WORDS
+        else:
+            prev = current
+            current = next
+
+    (result, new_free_list)
+
+# Mirrors the PRE-FIX allocator.spl split path exactly (bug reproduction):
+# `self.free_list = header.next` uses the pre-split snapshot unconditionally.
+fn sim_alloc_buggy(mem: [i64], free_list: i64, req_size: i64) -> (i64, i64):
+    val total_size = HEADER_WORDS + req_size
+    var current = free_list
+    var prev: i64 = 0
+    var result: i64 = -1
+    var new_free_list = free_list
+
+    while current != 0 and result == -1:
+        val (size, is_free, next) = sim_read_header(mem, current)
+        if is_free == 1 and size >= total_size:
+            val remainder = size - total_size
+            if remainder >= HEADER_WORDS + 1:
+                val new_block_addr = current + total_size
+                sim_write_header(mem, new_block_addr, remainder, 1, next)
+                sim_write_header(mem, current, total_size, 0, new_block_addr)
+            else:
+                sim_write_header(mem, current, size, 0, next)
+
+            if prev == 0:
+                new_free_list = next  # BUG: pre-split snapshot, not the remainder
+
+            result = current + HEADER_WORDS
+        else:
+            prev = current
+            current = next
+
+    (result, new_free_list)
+
+describe "FreeListAllocator split path":
+    context "reproduction of the pre-fix algorithm (transcribed over i64 memory)":
+        it "orphans the remainder after the first splitting alloc — confirms the filed bug":
+            # `bin/simple test` runs the tree-walk interpreter, where array
+            # `.push()` is O(n) per call (documented seed limitation), so
+            # these sizes are kept deliberately small — the algorithm being
+            # verified doesn't care about absolute magnitude.
+            val mem = make_sim_mem(150)
+            val fl0 = sim_init(mem, 10, 100)
+            val (addr1, fl1) = sim_alloc_buggy(mem, fl0, 8)
+            val (addr2, fl2) = sim_alloc_buggy(mem, fl1, 8)
+
+            expect(addr1).to_be_greater_than(0)
+            # This is the defect: the free list has collapsed to 0 even
+            # though most of the heap remains, so every later alloc fails.
+            expect(fl1).to_equal(0)
+            expect(addr2).to_equal(-1)
+
+    context "fixed algorithm (transcribed over i64 memory)":
+        it "keeps the remainder block reachable after a splitting alloc":
+            val mem = make_sim_mem(150)
+            val fl0 = sim_init(mem, 10, 100)
+            val (addr1, fl1) = sim_alloc_fixed(mem, fl0, 8)
+
+            expect(addr1).to_be_greater_than(0)
+            # free_list must now point at the remainder block, not 0.
+            expect(fl1).to_be_greater_than(0)
+            expect(fl1).to_equal(addr1 - HEADER_WORDS + (HEADER_WORDS + 8))
+
+        it "serves many further allocations out of the remainder":
+            # 10 allocs of 5 words (total_size 8 with the header) need >= 80
+            # words; 150 leaves room for split remainders.
+            val mem = make_sim_mem(200)
+            var fl = sim_init(mem, 10, 150)
+            var successes = 0
+            var i = 0
+            while i < 10:
+                val (addr, new_fl) = sim_alloc_fixed(mem, fl, 5)
+                fl = new_fl
+                if addr > 0:
+                    successes = successes + 1
+                i = i + 1
+
+            # Pre-fix, only the very first alloc succeeds (successes == 1).
+            expect(successes).to_equal(10)
+
+describe "u32 unsigned-underflow guards (sat_sub family)":
+    context "sat_sub() — the shared saturating-subtraction helper":
+        it "floors at 0 instead of wrapping when b > a":
+            expect(sat_sub(0u32, 1u32).to_i64()).to_equal(0)
+            expect(sat_sub(2u32, 5u32).to_i64()).to_equal(0)
+
+        it "behaves like ordinary subtraction when a >= b":
+            expect(sat_sub(5u32, 2u32).to_i64()).to_equal(3)
+            expect(sat_sub(5u32, 5u32).to_i64()).to_equal(0)
+
+    context "FixedBlockAllocator.available() — real code, no memory access needed":
+        it "does not wrap to ~4 billion when allocated exceeds capacity":
+            # Pathological but reachable state (e.g. after a caller double-
+            # counts or a future bug over-increments `allocated`): before the
+            # fix, `capacity - allocated` on u32 wraps to 4294967293.
+            val pool = FixedBlockAllocator(
+                base: 0u32,
+                block_size: 8u32,
+                capacity: 2u32,
+                free_list: 0u32,
+                allocated: 5u32
+            )
+            expect(pool.available().to_i64()).to_equal(0)
+
+        it "returns the ordinary remaining count in the normal case":
+            val pool = FixedBlockAllocator(
+                base: 0u32,
+                block_size: 8u32,
+                capacity: 10u32,
+                free_list: 0u32,
+                allocated: 3u32
+            )
+            expect(pool.available().to_i64()).to_equal(7)

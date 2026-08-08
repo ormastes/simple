@@ -1,0 +1,113 @@
+"""Live CUDA/Vulkan ProcessingIR failure seams with process-isolated env."""
+
+use std.spec.*
+use std.io_runtime.{get_args, process_run}
+use std.common.processing.processing_ir.{processing_ir_fill_u32}
+use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_injected}
+
+val GPU_FAULT_SPEC_PATH: text = "test/03_system/app/simpleos_gpu_host/gpu_backend_failure_injection_spec.spl"
+val VULKAN_RUNTIME_UNAVAILABLE: text = "VULKAN_RUNTIME_UNAVAILABLE"
+
+fn _arg_value(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _probe(backend: text, phase: text):
+    val ir = processing_ir_fill_u32(8, 0x01020304u32)
+    if backend == "cuda":
+        val result = processing_ir_execute_cuda(ir)
+        print("GPU_FAULT_PROBE backend={backend} phase={phase} fault_active={_bool_text(processing_ir_fault_injected(backend, phase))} completed={_bool_text(result.completed)} reason={result.reason} values={result.values.len()} handle={result.backend_handle} identity={result.device_identity}\n")
+    elif backend == "vulkan":
+        val result = processing_ir_execute_vulkan(ir)
+        print("GPU_FAULT_PROBE backend={backend} phase={phase} fault_active={_bool_text(processing_ir_fault_injected(backend, phase))} completed={_bool_text(result.completed)} reason={result.reason} values={result.values.len()} handle={result.backend_handle} identity={result.device_identity}\n")
+
+fn _probe_mode() -> bool:
+    _arg_value(get_args(), "--backend=") != "" and _arg_value(get_args(), "--phase=") != ""
+
+val GPU_FAULT_PROBE_BACKEND = _arg_value(get_args(), "--backend=")
+val GPU_FAULT_PROBE_PHASE = _arg_value(get_args(), "--phase=")
+if GPU_FAULT_PROBE_BACKEND != "" and GPU_FAULT_PROBE_PHASE != "":
+    _probe(GPU_FAULT_PROBE_BACKEND, GPU_FAULT_PROBE_PHASE)
+
+fn _run_case(backend: text, phase: text, test_gate: bool, selector: bool) -> text:
+    var args = ["-u", "SIMPLE_GPU_TEST", "-u", "SIMPLE_GPU_FAULT_INJECT", "-u", "SIMPLE_RUNTIME_MODE", "SIMPLE_LIB=src", "SIMPLE_RUNTIME_MODE=interpreter"]
+    if test_gate:
+        args = args + ["SIMPLE_GPU_TEST=1"]
+    if selector:
+        args = args + ["SIMPLE_GPU_FAULT_INJECT=" + backend + ":" + phase]
+    args = args + ["bin/simple", "run", GPU_FAULT_SPEC_PATH, "--backend=" + backend, "--phase=" + phase]
+    val (out, err, code) = process_run("env", args)
+    if backend == "vulkan" and code != 0 and err.contains("unknown extern function: rt_vulkan_dependency_quarantine_lock"):
+        return VULKAN_RUNTIME_UNAVAILABLE
+    expect(code).to_equal(0)
+    out
+
+fn _assert_default(backend: text) -> text:
+    val out = _run_case(backend, "none", false, false)
+    expect(out).to_contain("GPU_FAULT_PROBE backend=" + backend + " phase=none fault_active=false")
+    expect(out.contains("reason=cuda-init-failed")).to_equal(false)
+    expect(out.contains("reason=vulkan-init-failed")).to_equal(false)
+    if out.contains("completed=true"):
+        expect(out).to_contain("reason=ok")
+    out
+
+fn _assert_injected(backend: text, phase: text, reason: text) -> bool:
+    val out = _run_case(backend, phase, true, true)
+    if out == VULKAN_RUNTIME_UNAVAILABLE:
+        return false
+    expect(out).to_contain("GPU_FAULT_PROBE backend=" + backend + " phase=" + phase + " fault_active=true completed=false reason=" + reason + " values=0 handle=0 identity=0")
+    true
+
+describe "live CUDA and Vulkan ProcessingIR fault injection":
+    it "leaves the CUDA production default unmodified when the gate is absent":
+        if _probe_mode(): return
+        expect(_assert_default("cuda")).to_contain(
+            "backend=cuda phase=none fault_active=false")
+
+    it "leaves the Vulkan production default unmodified when the gate is absent":
+        if _probe_mode(): return
+        val out = _run_case("vulkan", "none", false, false)
+        if out == VULKAN_RUNTIME_UNAVAILABLE:
+            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
+            return
+        expect(out).to_contain("GPU_FAULT_PROBE backend=vulkan phase=none fault_active=false")
+        expect(out.contains("reason=vulkan-init-failed")).to_equal(false)
+        if out.contains("completed=true"):
+            expect(out).to_contain("reason=ok")
+
+    it "requires both fault gate variables":
+        if _probe_mode(): return
+        expect(_run_case("cuda", "init", true, false)).to_contain(
+            "phase=init fault_active=false")
+        expect(_run_case("cuda", "init", false, true)).to_contain(
+            "phase=init fault_active=false")
+
+    it "returns typed CUDA unavailable, init, submit, readback, and mismatch failures":
+        if _probe_mode(): return
+        expect(_assert_injected("cuda", "unavailable", "cuda-unavailable")).to_equal(true)
+        expect(_assert_injected("cuda", "init", "cuda-init-failed")).to_equal(true)
+        expect(_assert_injected("cuda", "submit", "cuda-submit-failed")).to_equal(true)
+        expect(_assert_injected("cuda", "readback", "cuda-readback-failed")).to_equal(true)
+        expect(_assert_injected("cuda", "mismatch", "checksum-mismatch")).to_equal(true)
+
+    it "returns typed Vulkan lifecycle and dispatch failures":
+        if _probe_mode(): return
+        val unavailable = _run_case("vulkan", "unavailable", true, true)
+        if unavailable == VULKAN_RUNTIME_UNAVAILABLE:
+            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")
+            return
+        expect(unavailable).to_contain(
+            "backend=vulkan phase=unavailable fault_active=true completed=false reason=vulkan-unavailable values=0 handle=0 identity=0")
+        if not _assert_injected("vulkan", "init", "vulkan-init-failed") or
+           not _assert_injected("vulkan", "submit", "vulkan-submit-failed") or
+           not _assert_injected("vulkan", "readback", "vulkan-readback-failed") or
+           not _assert_injected("vulkan", "mismatch", "checksum-mismatch") or
+           not _assert_injected("vulkan", "dispatch-ineligible", "vulkan-dispatch-ineligible"):
+            pending("existing runtime lacks rt_vulkan_dependency_quarantine_lock")

@@ -1,0 +1,130 @@
+# @req REQ-MEM-GUARD-RATE-001
+"""
+# Sampled Guard-Page Allocator Gate (SIMPLE_MEM_GUARD_RATE)
+
+## Overview
+
+`SIMPLE_MEM_GUARD_RATE=N` (plan M2 §1-2,
+`src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs`) is a
+GWP-ASan-style sampled guard-page allocator layered onto the hosted
+`rt_alloc`/`rt_free` path: 1-in-N allocations land on their own
+`mmap`'d slot with unmapped guard pages, so a small overflow (or a
+use-after-free) traps instead of corrupting a neighbor. Unset/0 is the
+zero-overhead-when-off default — `mem_guard_should_sample` degenerates to a
+single cached `OnceLock<u64>` read.
+
+This spec locks in the three-part contract `mem_extern_parity_spec.spl`
+leaves untested: the sampled count is exactly 0 with the gate unset (not
+merely "non-negative"), it is non-zero once the gate is set, and at rate=1
+every single allocation is sampled (an exact count, not just ">0").
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| SIMPLE_MEM_GUARD_RATE | Env var gate; unset/`0` = disabled, `N` = 1-in-N sampling |
+| rt_mem_guard_stats | Total hosted `rt_alloc` calls ever routed onto a guard slot |
+| Deterministic sampling | `counter % rate == 0`, never `rand()` — rate=1 samples every call |
+
+## Related Specifications
+
+- test/01_unit/runtime/mem_extern_parity_spec.spl — sibling callable/sanity spec (no gate proof)
+- doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md
+"""
+
+# @tag: unit, runtime, memory, mem-guard, m2
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+extern fn rt_mem_guard_stats() -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+
+val FIXTURE = "test/fixture/mem_infra/guard_rate_workload.spl"
+val ALLOC_COUNT = 50
+
+# Mirrors the SIMPLE_TEST_BINARY override convention used by sibling specs
+# (mem_attr_report_spec.spl, mem_infra_flag_spec.spl): defaults to the
+# deployed self-hosted bin/simple, honors an explicit override.
+fn contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override
+    "bin/simple"
+
+# The env var must be observed by a fresh process: `bin/simple test` spec
+# bodies run under the session daemon, which scrubs env vars set mid-run, and
+# `mem_guard_should_sample`'s rate is cached in a `OnceLock` on first read
+# regardless — so this always spawns a genuine child process rather than
+# trying to flip the gate in-process. Forced onto the interpreter engine: the
+# default (cranelift) engine's `rt_alloc`/`rt_free` do not route through
+# `interpreter_extern::mem_guard` at all (verified: guard_after stays 0 under
+# cranelift even at rate=1) — mirrors the interpreter-only scoping already
+# documented on rt_mem_attr_set_owner in mem_attr_report_spec.spl.
+fn run_with(binary: text) -> (text, text, i64):
+    val cmd = "SIMPLE_MEM_GUARD_RATE=1 SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpreter '{binary}' run '{FIXTURE}'"
+    process_run("/bin/sh", ["-c", cmd])
+
+# @step: Run the guard-rate workload in a child process with SIMPLE_MEM_GUARD_RATE=1
+fn run_guard_workload_child() -> (text, text, i64):
+    val (out, err, code) = run_with(contract_binary())
+    if out.contains("guard_rate_workload: after="):
+        return (out, err, code)
+    # A deployed bin/simple that predates the rt_mem_guard_* externs reports
+    # "unknown extern function" until the next bootstrap redeploy (extern
+    # additions require a bootstrap rebuild). Self-heal onto the bootstrap
+    # seed instead of red-lining the suite on a stale deploy.
+    val (probe, _pe, _pc) = process_run("/bin/sh",
+        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
+    if probe.contains("yes"):
+        return run_with("src/compiler_rust/target/release/simple")
+    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
+        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
+    if probe2.contains("yes"):
+        return run_with("src/compiler_rust/target/debug/simple")
+    (out, err, code)
+
+# Extracts the integer following `key=` up to the next newline (or end of
+# text), trimmed. Returns -1 if `key` is absent.
+fn extract_field(output: text, key: text) -> i64:
+    val idx = output.find(key)
+    if idx < 0:
+        return -1
+    val start = idx + key.len()
+    val rest = output.substring(start, output.len())
+    val nl = rest.find("\n")
+    val field = if nl < 0: rest else: rest.substring(0, nl)
+    field.trim().parse_int() ?? -1
+
+describe "SIMPLE_MEM_GUARD_RATE sampled guard-page allocator":
+
+    it "is disabled by default: the sampled count is exactly 0 in this process":
+        step("Query rt_mem_guard_stats() without SIMPLE_MEM_GUARD_RATE set")
+        val before = rt_mem_guard_stats()
+        assert_equal(before, 0)
+
+    it "stays at 0 across allocations while the gate is unset (zero-overhead-off)":
+        step("Run 50 rt_alloc/rt_free cycles with no SIMPLE_MEM_GUARD_RATE set")
+        var i = 0
+        while i < ALLOC_COUNT:
+            val p = rt_alloc(64)
+            rt_free(p)
+            i = i + 1
+
+        step("Confirm rt_mem_guard_stats() is still exactly 0 - nothing was sampled")
+        assert_equal(rt_mem_guard_stats(), 0)
+
+    it "samples every single allocation at rate=1 in a child process with SIMPLE_MEM_GUARD_RATE=1":
+        step("Run the guard-rate workload fixture with SIMPLE_MEM_GUARD_RATE=1")
+        val (out, err, code) = run_guard_workload_child()
+
+        step("Confirm the child process exited cleanly")
+        assert_equal(code, 0)
+        assert_equal(err.contains("unknown extern function"), false)
+
+        step("Confirm the pre-sampling count was 0 and the post count equals the exact allocation count")
+        val before = extract_field(out, "guard_rate_workload: before=")
+        val after = extract_field(out, "guard_rate_workload: after=")
+        assert_equal(before, 0)
+        assert_equal(after, ALLOC_COUNT)

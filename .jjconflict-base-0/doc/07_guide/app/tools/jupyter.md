@@ -94,6 +94,32 @@ Output: `Hello from Simple!`
 
 ---
 
+## Notebook Lanes
+
+Run Simple code in different execution environments within the same notebook:
+
+```simple
+%lanes
+```
+
+The `%lanes` magic probes available execution lanes (local, remote, CUDA, Vulkan) and displays their current status. **Output shown below is ILLUSTRATIVE** — the actual availability of lanes depends on your system configuration and which executors have been started in your session.
+
+Example output:
+
+```text
+default: local
+remote: blocked: network unavailable
+local-cuda: available
+```
+
+- `default: local` — the session's default execution mode is local
+- `remote: blocked: network unavailable` — remote execution is not currently available
+- `local-cuda: available` — local CUDA execution is available and ready
+
+For comprehensive lane documentation, see `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` and `doc/00_llm_process/feature_expert/notebook_lanes/skill.md`.
+
+---
+
 ## How It Works
 
 ### Architecture

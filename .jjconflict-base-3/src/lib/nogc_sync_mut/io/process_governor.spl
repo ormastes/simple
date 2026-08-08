@@ -1,0 +1,154 @@
+# Process Governor - Global Concurrent Process Limit
+#
+# Caps the total number of child processes the runtime can have alive at once.
+# Configure via SIMPLE_MAX_PROCS env var. Default: min(cpu_count * 4, 64).
+#
+# Usage:
+#   proc_slot_acquire()   # call before spawning; blocks until a slot is free
+#   proc_slot_release()   # call after process exits/is-killed
+#   proc_slot_reset(n)    # call to bulk-release n slots (e.g. after kill-all)
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_thread_sleep(millis: i64)
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
+use std.nogc_sync_mut.io.signal_stubs.{signal_dispatch_pending}
+
+# ============================================================================
+# Module State
+# ============================================================================
+#
+# NOTE: the active-process counter is a lazily-created raw atomic *handle*
+# (i64), not a module-level `AtomicI64` class instance. A module-level `val`
+# whose declared type is a class imported from a different module resolves to
+# a nil receiver when read from inside a function body under the bootstrap
+# seed's interpreter (confirmed by isolated repro; see
+# doc/08_tracking/bug/std_process_run_standalone_crash_2026-07-17.md). Raw
+# extern-backed i64 handles, lazily created on first use inside a function,
+# do not hit this landmine. Do not reintroduce an `AtomicI64` (or similar
+# imported-class) module-level global here without re-verifying against that
+# bug.
+
+val _ACQUIRE_WARN_ITERATIONS: i64 = 600
+var _active_procs_handle: i64 = -1
+
+fn _active_procs_h() -> i64:
+    if _active_procs_handle < 0:
+        _active_procs_handle = rt_atomic_int_new(0)
+    _active_procs_handle
+
+# ============================================================================
+# CPU Count Helper (inlined so this file has no extra imports)
+# ============================================================================
+
+extern fn spl_thread_cpu_count() -> i64
+
+fn _cpu_count() -> i64:
+    val n = spl_thread_cpu_count()
+    if n < 1: 4 else: n
+
+# ============================================================================
+# Initialisation (lazy, called on first acquire)
+# ============================================================================
+
+fn _proc_gov_positive_int_or_zero(value: text) -> i64:
+    val trimmed = value.trim()
+    if trimmed == "" or trimmed.len() > 18:
+        return 0
+    for ch in trimmed:
+        if ch < "0" or ch > "9":
+            return 0
+    int(trimmed)
+
+fn _proc_slot_limit() -> i64:
+    val env_val = rt_env_get("SIMPLE_MAX_PROCS")
+    if env_val != nil and env_val != "":
+        val n = _proc_gov_positive_int_or_zero(env_val)
+        if n > 0:
+            return n
+    val default_val = _cpu_count() * 4
+    if default_val > 64:
+        return 64
+    if default_val < 4:
+        return 4
+    default_val
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn proc_slot_max() -> i64:
+    """Return the configured maximum concurrent processes."""
+    _proc_slot_limit()
+
+fn proc_slot_active() -> i64:
+    """Return the current number of active (tracked) processes."""
+    rt_atomic_int_load(_active_procs_h())
+
+fn proc_slot_acquire():
+    """
+    Claim a process slot before spawning.
+
+    Blocks (with exponential back-off up to 500 ms) until a slot is free.
+    Warns periodically while preserving the configured hard cap.
+    Must be paired with proc_slot_release() after the process exits.
+    """
+    var delay_ms: i64 = 10
+    var iteration: i64 = 0
+    val handle = _active_procs_h()
+    while true:
+        signal_dispatch_pending()
+        val active = rt_atomic_int_load(handle)
+        if active < _proc_slot_limit() and rt_atomic_int_compare_exchange(
+            handle, active, active + 1
+        ):
+            return
+        rt_thread_sleep(delay_ms)
+        if delay_ms < 500:
+            delay_ms = delay_ms * 2
+            if delay_ms > 500:
+                delay_ms = 500
+        iteration = iteration + 1
+        if iteration >= _ACQUIRE_WARN_ITERATIONS:
+            print "[process-governor] still waiting for a child-process slot"
+            iteration = 0
+
+fn proc_slot_release():
+    """
+    Free a process slot after the process has exited or been killed.
+
+    Safe to call even when _active_procs is already 0 (no-op).
+    """
+    val handle = _active_procs_h()
+    var active = rt_atomic_int_load(handle)
+    while active > 0:
+        if rt_atomic_int_compare_exchange(handle, active, active - 1):
+            return
+        active = rt_atomic_int_load(handle)
+
+fn proc_slot_reset(count: i64):
+    """
+    Bulk-release `count` slots.
+
+    Use after tracker_kill_all_children() which clears the whole list at once.
+    """
+    if count <= 0:
+        return
+    val handle = _active_procs_h()
+    var active = rt_atomic_int_load(handle)
+    while active > 0:
+        val next = if count >= active: 0 else: active - count
+        if rt_atomic_int_compare_exchange(handle, active, next):
+            return
+        active = rt_atomic_int_load(handle)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export proc_slot_max
+export proc_slot_active
+export proc_slot_acquire
+export proc_slot_release
+export proc_slot_reset

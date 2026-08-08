@@ -1,0 +1,154 @@
+# ============================================================================
+# test/fixtures/structural/mapping_golden_v1.spl
+#
+# GOLDEN VECTORS for the frozen MappingKind / compressed mapping contract v1.
+#
+# Every hex string below was derived BY HAND from the frozen layout in
+# doc/05_design/platform/structural_compute/mapping_contract_v1.md, not captured
+# from encoder output. That is what makes them an oracle: the spec asserts
+# encoder output EQUALS these bytes, so a codec regression cannot silently
+# redefine the contract.
+#
+# Follows the golden-vector convention established by the ID-TAG lane in
+# test/fixtures/structural/identity_tagmap_golden_v1.spl: pure data, no file
+# I/O, lowercase unseparated hex, one vector per record shape plus zero and
+# all-ones edge cases, mirrored byte for byte in the sibling .sdn, never edited
+# in place.
+#
+# Envelope = magic(4 ASCII, LE) | version u16 | reserved u16.
+#   "SMED" = 53 4d 45 44   MappingEdge      -> 534d454401000000
+#   "SMKS" = 53 4d 4b 53   MappingKindSet   -> 534d4b5301000000
+#   "SMSH" = 53 4d 53 48   MappingShard     -> 534d534801000000
+#
+# MappingEdge body, 27 bytes, no padding:
+#   from EntityRef 8 | to EntityRef 8 | kind u8 | transform u32
+#   | flags u32 | weight_milli u16
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# MappingEdge
+# ----------------------------------------------------------------------------
+
+# MappingEdge(from = EntityRef(0,0), to = EntityRef(0,0), ParsedFrom,
+#             transform = 0, flags = 0, weight_milli = 0) — zero case.
+val GOLDEN_EDGE_ZERO: text =
+    "534d454401000000"
+        + "00000000000000000000000000000000"
+        + "00"
+        + "00000000"
+        + "00000000"
+        + "0000"
+
+# MappingEdge(from = EntityRef(1,2), to = EntityRef(3,4), LoweredFrom = 4,
+#             transform = 0x11223344, flags = WEIGHT_VALID, weight_milli = 600).
+# Asymmetric on every field, so a byte-order or field-order error cannot pass.
+# 600 = 0x0258 -> LE 58 02. The 600/400 split is §6.2's own worked example.
+val GOLDEN_EDGE_BASIC: text =
+    "534d454401000000"
+        + "01000000020000000300000004000000"
+        + "04"
+        + "44332211"
+        + "01000000"
+        + "5802"
+
+# MappingEdge all-ones with the MAXIMUM kind discriminant
+# (InvalidatedBy = 16 = 0x10) and every known flag bit set (7).
+# Catches sign extension on the u32 fields and pins the top of the enum.
+val GOLDEN_EDGE_MAX: text =
+    "534d454401000000"
+        + "ffffffffffffffffffffffffffffffff"
+        + "10"
+        + "ffffffff"
+        + "07000000"
+        + "ffff"
+
+# MappingEdge(from = EntityRef(0,0), to = EntityRef(7,9), GeneratedFrom = 9,
+#             transform = 2, flags = SYNTHETIC|DISCARDED = 6, weight_milli = 0).
+# The §6.5 case: a synthesized entity whose origin was discarded with reason.
+val GOLDEN_EDGE_SYNTHETIC: text =
+    "534d454401000000"
+        + "00000000000000000700000009000000"
+        + "09"
+        + "02000000"
+        + "06000000"
+        + "0000"
+
+# ----------------------------------------------------------------------------
+# MappingKindSet — u32 bitset, bit i = MappingKind discriminant i.
+# ----------------------------------------------------------------------------
+
+# Empty mask.
+val GOLDEN_KIND_SET_EMPTY: text = "534d4b5301000000" + "00000000"
+
+# All 17 kinds: bits 0..16 = 0x0001FFFF -> LE ff ff 01 00.
+# This vector is what pins MAPPING_KIND_COUNT at 17; adding an 18th kind
+# without a version bump changes these bytes.
+val GOLDEN_KIND_SET_ALL: text = "534d4b53010000" + "00" + "ffff0100"
+
+# {LayoutOf = 13, PaintOf = 14} -> bits 13,14 = 0x6000 -> LE 00 60 00 00.
+val GOLDEN_KIND_SET_LAYOUT_PAINT: text = "534d4b5301000000" + "00600000"
+
+# ----------------------------------------------------------------------------
+# MappingShard — the compressed sparse-adjacency format (§6.3).
+#
+# Header: version u32 | node_count u32 | edge_count u32 | has_reverse u8,
+# then from_offsets u32 * (node_count + 1), then edge_count MappingEdge bodies,
+# then the optional reverse tail.
+# ----------------------------------------------------------------------------
+
+# Empty shard: version 1, 0 nodes, 0 edges, no reverse, from_offsets = [0].
+# The single offset entry is not optional — a CSR array always has n+1 entries,
+# so even an empty shard carries the terminator.
+val GOLDEN_SHARD_EMPTY: text =
+    "534d534801000000"
+        + "01000000"
+        + "00000000"
+        + "00000000"
+        + "00"
+        + "00000000"
+
+# The shared 3-edge fixture body used by both shard vectors below.
+#
+#   e0: EntityRef(0,0) -> EntityRef(0,1)  LoweredFrom(4)   transform 1
+#   e1: EntityRef(0,0) -> EntityRef(0,2)  LoweredFrom(4)   transform 1
+#   e2: EntityRef(0,1) -> EntityRef(0,2)  OptimizedFrom(8) transform 2,
+#                                         WEIGHT_VALID, 400 milli (0x0190)
+#
+# e0/e1 are the §6.1 "one source expression lowers to several MIR instructions"
+# case; e2 is the §6.1 "several expressions fold into one" case, which is why
+# node 1 and node 0 both reach entity 2.
+val GOLDEN_SHARD_EDGES: text =
+    "00000000000000000000000001000000" + "04" + "01000000" + "00000000" + "0000"
+        + "00000000000000000000000002000000" + "04" + "01000000" + "00000000" + "0000"
+        + "00000000010000000000000002000000" + "08" + "02000000" + "01000000" + "9001"
+
+# Forward-only shard: 2 nodes, 3 edges, from_offsets = [0, 2, 3].
+# This is the cheap form §6.3 says a stage emits first.
+val GOLDEN_SHARD_FORWARD: text =
+    "534d534801000000"
+        + "01000000"
+        + "02000000"
+        + "03000000"
+        + "00"
+        + "00000000" + "02000000" + "03000000"
+        + GOLDEN_SHARD_EDGES
+
+# The same shard with the reverse index built for 3 target nodes.
+#   targets: e0 -> 1, e1 -> 2, e2 -> 2
+#   reverse_offsets = [0, 0, 1, 3]   (node 0 has no incoming edges)
+#   reverse_edges   = [0, 1, 2]      (indices into the forward edge list)
+# reverse_edges holds INDICES, not duplicated edge bodies; that is what makes
+# the reverse index cheap to build lazily and impossible to disagree with the
+# forward list.
+val GOLDEN_SHARD_REVERSE: text =
+    "534d534801000000"
+        + "01000000"
+        + "02000000"
+        + "03000000"
+        + "01"
+        + "00000000" + "02000000" + "03000000"
+        + GOLDEN_SHARD_EDGES
+        + "03000000"
+        + "03000000"
+        + "00000000" + "00000000" + "01000000" + "03000000"
+        + "00000000" + "01000000" + "02000000"

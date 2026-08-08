@@ -1,0 +1,133 @@
+"""
+# `resource` MIR-interpreter drop parity -- WP-I acceptance
+
+**Plan:** doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md (WP-I)
+**Depends on:** WP-E (`794bbf6642f`) -- new `MirInstKind.Drop`, emitted by the
+SAME `MirLowering` every backend shares (implicit scope end, explicit
+`return`, `?` Err/None early-return, and `.close()` as a consuming drop).
+
+Because drop TIMING is produced by `MirLowering` itself (not by any backend),
+`SIMPLE_EXECUTION_MODE=interpreter` running `resource_mir_drop_spec.spl`
+(WP-E's own spec, which drives `MirLowering.lower_function` directly and
+never executes a function) already proves timing parity by construction --
+there is only one lowering implementation to diverge from. What that spec
+CANNOT prove is that the MIR interpreter (`compiler.interp.mir_interpreter`,
+used by the interpreter backend, `src/compiler/70.backend/backend/interpreter.spl`)
+can actually EXECUTE a function containing the `Drop` instructions WP-E now
+emits. Before this change it could not: `MirInterpreter.execute_instruction`
+had no `Drop` arm and fell through to `case _:`, returning
+`InterpError.UnsupportedOperation("unknown instruction")` -- so ANY
+resource-typed local, or any `.close()` call, made the containing function
+uninterpretable. This spec is the sabotage-able oracle for that gap.
+"""
+
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter, InterpError}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_kinds.*
+use compiler.mir.mir_instructions.{MirInst, MirFunction}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind, MethodResolution}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.frontend.resource_registry.*
+
+fn mk_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn resource_type(sym: SymbolId) -> HirType:
+    val named = HirType(kind: HirTypeKind.Named(sym, []), span: mk_span(0))
+    HirType(kind: HirTypeKind.Isolated(named), span: mk_span(0))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span(0))
+
+fn var_read(sym: SymbolId, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(sym), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn resource_param(sym: SymbolId, res_sym: SymbolId) -> HirParam:
+    HirParam(symbol: sym, name: "a", type_: resource_type(res_sym), has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+
+fn make_fn(params: [HirParam], body_stmts: [HirStmt], tail: HirExpr, fn_symbol_id: i64) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: fn_symbol_id),
+        name: "take",
+        type_params: [],
+        params: params,
+        return_type: i64_type(),
+        body: HirBlock(stmts: body_stmts, has: true, value: tail, span: mk_span(1)),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn declare_res_symbol(symbols: SymbolTable) -> (SymbolTable, SymbolId):
+    var table = symbols
+    val sym = table.define("Res", SymbolKind.Struct, nil, mk_span(0), Visibility.Public, false, nil)
+    (table, sym)
+
+fn setup() -> (SymbolTable, SymbolId):
+    resource_registry_reset()
+    resource_registry_declare("Res", "prefix=rt_res")
+    val (table, res_sym) = declare_res_symbol(SymbolTable.new())
+    (table, res_sym)
+
+fn drop_local_inst(id: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Drop(LocalId(id: id)), span: nil)
+
+describe "WP-I: MIR interpreter executes MirInstKind.Drop directly":
+    it "treats a bare Drop instruction as a no-op, not an unsupported operation":
+        var interp = MirInterpreter.create()
+        val err = interp.execute_instruction(drop_local_inst(1))
+        expect(err).to_be_nil()
+
+describe "WP-I: MIR interpreter executes a lowered resource-param function containing Drop":
+    it "runs a function with an owned resource param (implicit scope-end drop) to completion":
+        val (table, res_sym) = setup()
+        val fn_ = make_fn([resource_param(SymbolId(id: 1), res_sym)], [], int_lit(42, 10), 5)
+        var lowering = MirLowering.new(table)
+        val fn_result = lowering.lower_function(fn_)
+
+        var interp = MirInterpreter.create()
+        val (ret, err) = interp.execute_function(fn_result)
+        expect(err).to_be_nil()
+        expect(ret.unwrap()).to_equal(42)
+
+    it "runs a function whose `.close()` lowers to a consuming Drop to completion":
+        val (table, res_sym) = setup()
+        val a_sym = SymbolId(id: 1)
+        val close_stmt = HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.MethodCall(var_read(a_sym, 10), "close", [], MethodResolution.Unresolved), has_type_: false, type_: i64_type(), span: mk_span(10))), span: mk_span(10))
+        val fn_ = make_fn([resource_param(a_sym, res_sym)], [close_stmt], int_lit(7, 12), 5)
+        var lowering = MirLowering.new(table)
+        val fn_result = lowering.lower_function(fn_)
+
+        var interp = MirInterpreter.create()
+        val (ret, err) = interp.execute_function(fn_result)
+        expect(err).to_be_nil()
+        expect(ret.unwrap()).to_equal(7)

@@ -1,0 +1,182 @@
+# JSON Serializer
+#
+# Serialize JSON values to text and reformat JSON text.
+#
+# Value model (see lib.json.types):
+#   ("null", nil) | ("boolean", bool) | ("number", f64)
+#   ("string", text) | ("array", [any]) | ("object", {text: any})
+
+use std.common.json.types.{json_get_type}
+use std.common.json.parser.{json_parse_with_error}
+
+val _JSON_HEX_DIGITS: text = "0123456789abcdef"
+
+fn json_indent(level: i64, size: i64) -> text:
+    """Build an indentation string of `level` steps, `size` spaces each."""
+    if level <= 0:
+        return ""
+    var out = ""
+    var i = 0
+    val total = level * size
+    while i < total:
+        out = out + " "
+        i = i + 1
+    out
+
+fn _json_has_control_byte(s: text) -> bool:
+    """True if any byte of `s` is a C0 control byte (< 0x20).
+
+    Byte walk: `byte_at` is byte-indexed and `len()` is byte length, so the
+    walk is index-consistent on every engine (the same reason parser.spl's
+    `json_string_escapes_are_valid` uses `byte_at` instead of `s[i:i + 1]`).
+    Every byte of a multi-byte UTF-8 sequence is >= 0x80, so a byte walk can
+    never mistake one for a control character."""
+    var i = 0
+    while i < s.len():
+        if s.byte_at(i) < 32:
+            return true
+        i = i + 1
+    false
+
+fn _json_escape_control_chars(s: text) -> text:
+    """Escape every remaining C0 control character as `\\b`, `\\f` or `\\u00XX`.
+
+    RFC 8259 forbids ANY unescaped character below U+0020 inside a string
+    literal. The `.replace()` chain in `json_escape_string` only covers
+    newline/tab/carriage-return, so backspace (0x08), form feed (0x0C) and
+    the other 26 C0 controls used to be emitted RAW -- producing invalid
+    JSON that this library's own parser rejects with "Invalid string escape".
+
+    Walks `chars()` (not byte indices) so multi-byte codepoints are copied
+    whole; `s[i:i + 1]` is deliberately NOT used because it slices chars
+    under the interpreter and bytes under compiled code."""
+    var out = ""
+    for ch in s.chars():
+        val code = ch.ord()
+        if code >= 32:
+            out = out + ch
+        elif code == 8:
+            out = out + "\\b"
+        elif code == 12:
+            out = out + "\\f"
+        else:
+            out = out + "\\u00" + _JSON_HEX_DIGITS[code / 16:code / 16 + 1] + _JSON_HEX_DIGITS[code % 16:code % 16 + 1]
+    out
+
+fn json_escape_string(s: text) -> text:
+    """Escape special characters so `s` is safe inside a JSON string literal."""
+    var out = s.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\t", "\\t")
+    out = out.replace("\r", "\\r")
+    # The chain above leaves 0x08, 0x0C and the other C0 controls raw, which
+    # RFC 8259 forbids. Only rebuild the string when one is actually present.
+    if _json_has_control_byte(out):
+        return _json_escape_control_chars(out)
+    out
+
+fn _json_join(parts: [text], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            out = out + sep
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn json_serialize(value: any) -> text:
+    """Serialize a JSON value to compact text."""
+    if value == nil:
+        return "null"
+    val t = json_get_type(value)
+    if t == "null":
+        return "null"
+    if t == "boolean":
+        if value.1:
+            return "true"
+        return "false"
+    if t == "number":
+        return "{value.1}"
+    if t == "string":
+        return "\"" + json_escape_string(value.1) + "\""
+    if t == "array":
+        return _json_serialize_array(value.1)
+    if t == "object":
+        return _json_serialize_object(value.1)
+    "null"
+
+fn _json_serialize_array(items: any) -> text:
+    if items == nil:
+        return "[]"
+    var parts = []
+    for item in items:
+        parts.push(json_serialize(item))
+    "[" + _json_join(parts, ",") + "]"
+
+fn _json_serialize_object(pairs: any) -> text:
+    if pairs == nil:
+        return "{}"
+    var parts = []
+    for key in pairs.keys():
+        parts.push("\"" + json_escape_string(key) + "\":" + json_serialize(pairs.get(key)))
+    "{" + _json_join(parts, ",") + "}"
+
+fn json_stringify(value: any) -> text:
+    """Alias for `json_serialize`."""
+    json_serialize(value)
+
+fn json_format(value: any, level: i64, size: i64) -> text:
+    """Serialize a JSON value with newline/indent formatting."""
+    if value == nil:
+        return "null"
+    val t = json_get_type(value)
+    if t == "array":
+        return _json_format_array(value.1, level, size)
+    if t == "object":
+        return _json_format_object(value.1, level, size)
+    json_serialize(value)
+
+fn _json_format_array(items: any, level: i64, size: i64) -> text:
+    if items == nil:
+        return "[]"
+    if items.len() == 0:
+        return "[]"
+    val inner = json_indent(level + 1, size)
+    val close = json_indent(level, size)
+    var parts = []
+    for item in items:
+        parts.push(inner + json_format(item, level + 1, size))
+    "[\n" + _json_join(parts, ",\n") + "\n" + close + "]"
+
+fn _json_format_object(pairs: any, level: i64, size: i64) -> text:
+    if pairs == nil:
+        return "{}"
+    val keys = pairs.keys()
+    if keys.len() == 0:
+        return "{}"
+    val inner = json_indent(level + 1, size)
+    val close = json_indent(level, size)
+    var parts = []
+    for key in keys:
+        parts.push(inner + "\"" + json_escape_string(key) + "\": " + json_format(pairs.get(key), level + 1, size))
+    "{\n" + _json_join(parts, ",\n") + "\n" + close + "}"
+
+fn json_pretty(value: any) -> text:
+    """Serialize a JSON value with 2-space indentation."""
+    json_format(value, 0, 2)
+
+fn json_minify(src: text) -> text:
+    """Reparse JSON text and re-serialize compactly; return input unchanged if invalid."""
+    val parsed = json_parse_with_error(src)
+    if parsed.1 != "":
+        return src
+    json_serialize(parsed.0)
+
+fn json_beautify(src: text) -> text:
+    """Reparse JSON text and pretty-print; return input unchanged if invalid."""
+    val parsed = json_parse_with_error(src)
+    if parsed.1 != "":
+        return src
+    json_pretty(parsed.0)

@@ -1,0 +1,32 @@
+# Hosted NVMe queue notification wait.
+#
+# The base nvme_queue module is syscall-free so freestanding/system boot code
+# can reuse queue submission and polling without importing hosted waits.
+
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+impl NvmeQueuePair:
+    me wait_completion_notify(notif_id: u64, timeout_polls: u32) -> bool:
+        """Wait for completion using notification-based sleep.
+
+        First does a quick poll check. If the CQE is not ready, blocks on
+        the IRQ notification via syscall 26 (NotificationWait). After wakeup,
+        polls again to consume the CQE. Falls back to a limited spin-poll
+        to handle spurious wakeups or coalesced IRQs.
+        """
+        if self.poll_completion():
+            return true
+
+        syscall(26, notif_id, 0, 0, 0, 0)
+
+        if self.poll_completion():
+            return true
+
+        var i: u32 = 0
+        while i < timeout_polls:
+            if self.poll_completion():
+                return true
+            i = i + 1
+        false

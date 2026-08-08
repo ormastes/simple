@@ -1,0 +1,98 @@
+"""
+# Claude Full Sessions WebSocket
+
+Checks remote session websocket state, messages, sends, and reconnect policy.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.remote.SessionsWebSocket.*
+
+describe "Claude full SessionsWebSocket":
+    it "should connect to the session subscribe URL and open":
+        step("Connect and open websocket")
+        val ws = SessionsWebSocket.new("sess-1", "org-1", "tok")
+        ws.connect("https://api.anthropic.com")
+        expect(ws.state).to_equal("connecting")
+        expect(ws.sent[0]).to_equal("connect:wss://api.anthropic.com/v1/sessions/ws/sess-1/subscribe?organization_uuid=org-1:Bearer tok")
+        ws.open()
+        expect(ws.isConnected()).to_equal(true)
+        expect(ws.pingIntervalActive).to_equal(true)
+        expect(ws.callbacks[0]).to_equal("connected")
+
+    it "should parse and forward sessions messages":
+        step("Handle typed messages and parse failures")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.handleMessage("assistant:hello")
+        ws.handleMessage("control_request:req")
+        ws.handleParseError("{bad")
+        expect(ws.messages).to_equal(["assistant:hello", "control_request:req"])
+        expect(ws.errors[0]).to_equal("Failed to parse message: {bad")
+        expect(isSessionsMessage(parseSessionsMessage("x:y"))).to_equal(true)
+
+    it "should stop reconnecting on permanent close code":
+        step("Close with unauthorized code")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.connect("https://api")
+        ws.open()
+        ws.handleClose(4003)
+        expect(ws.state).to_equal("closed")
+        expect(ws.callbacks[1]).to_equal("close")
+        expect(ws.reconnectTimerActive).to_equal(false)
+
+    it "should retry session-not-found closes with increasing delay":
+        step("Handle transient 4001 closes")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.connect("https://api")
+        ws.open()
+        ws.handleClose(4001)
+        expect(ws.callbacks[1]).to_equal("reconnecting")
+        expect(ws.reconnectLabels[0]).to_equal("4001 attempt 1/3:2000")
+        ws.state = "connected"
+        ws.handleClose(4001)
+        ws.state = "connected"
+        ws.handleClose(4001)
+        ws.state = "connected"
+        ws.handleClose(4001)
+        expect(ws.callbacks[4]).to_equal("close")
+
+    it "should reconnect transient connected closes up to max attempts":
+        step("Handle normal transient close")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.connect("https://api")
+        ws.open()
+        ws.handleClose(1006)
+        expect(ws.reconnectAttempts).to_equal(1)
+        expect(ws.reconnectLabels[0]).to_equal("attempt 1/5:2000")
+
+    it "should guard sends by connection state and ping when connected":
+        step("Send control messages only while connected")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.sendControlRequest("interrupt")
+        expect(ws.errors[0]).to_equal("Cannot send: not connected")
+        ws.connect("https://api")
+        ws.open()
+        ws.sendControlRequest("interrupt")
+        ws.sendControlResponse("ok")
+        ws.ping()
+        expect(ws.sent[1]).to_equal("control_request:uuid:interrupt")
+        expect(ws.sent[2]).to_equal("control_response:ok")
+        expect(ws.sent[3]).to_equal("ping")
+
+    it "should close and force reconnect with timer cleanup":
+        step("Close then force reconnect")
+        val ws = SessionsWebSocket.new("sess", "org", "tok")
+        ws.connect("https://api")
+        ws.open()
+        ws.close()
+        expect(ws.state).to_equal("closed")
+        expect(ws.wsActive).to_equal(false)
+        expect(ws.pingIntervalActive).to_equal(false)
+        ws.reconnectAttempts = 3
+        ws.sessionNotFoundRetries = 2
+        ws.reconnect()
+        expect(ws.reconnectAttempts).to_equal(0)
+        expect(ws.sessionNotFoundRetries).to_equal(0)
+        expect(ws.reconnectLabels[0]).to_equal("force:500")
+        expect(maxReconnectAttempts()).to_equal(5)
+        expect(pingIntervalMs()).to_equal(30000)
+        expect(sessionsWebSocketSourceLinesModeled()).to_equal(403)

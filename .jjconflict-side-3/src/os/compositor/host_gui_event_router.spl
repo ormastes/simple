@@ -1,0 +1,249 @@
+# Normalized host events routed once through WM chrome, then client-local UI.
+
+use common.io.window_event.{
+    WINDOW_ACTION_RELEASE,
+    WINDOW_EVENT_KEY,
+    WINDOW_EVENT_POINTER_BUTTON,
+    WINDOW_EVENT_POINTER_MOVE,
+    WINDOW_EVENT_TEXT,
+    WINDOW_EVENT_WHEEL,
+    WINDOW_MOD_ALT,
+    WINDOW_MOD_CTRL,
+    WINDOW_MOD_SHIFT,
+    WINDOW_MOD_SUPER,
+    WindowEventRecord,
+}
+use common.ui.widget.{UIEvent}
+use common.ui.window_scene_draw_ir.{shared_wm_browser_content_extra_height}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.host_compositor_core.{HostCompositor}
+
+fn host_glfw_key_name(key: i64) -> text:
+    if key >= 65 and key <= 90:
+        val lowered_byte: u8 = (key + 32).to_u8()
+        return lowered_byte.to_char()
+    if key >= 32 and key <= 126:
+        val printable_byte: u8 = key.to_u8()
+        return printable_byte.to_char()
+    match key:
+        256: "escape"
+        257: "enter"
+        258: "tab"
+        259: "backspace"
+        260: "insert"
+        261: "delete"
+        262: "right"
+        263: "left"
+        264: "down"
+        265: "up"
+        268: "home"
+        269: "end"
+        _: ""
+
+class HostGuiEventRouter:
+    internal_window_id: i64
+    pointer_x: i32
+    pointer_y: i32
+    last_local_x: i32
+    last_local_y: i32
+    client_pointer_captured: bool
+
+impl HostGuiEventRouter:
+    static fn new(internal_window_id: i64) -> HostGuiEventRouter:
+        HostGuiEventRouter(
+            internal_window_id: internal_window_id,
+            pointer_x: 0,
+            pointer_y: 0,
+            last_local_x: 0,
+            last_local_y: 0,
+            client_pointer_captured: false
+        )
+
+    fn window_focused(compositor: HostCompositor) -> bool:
+        for window in compositor.windows:
+            if window.id == self.internal_window_id:
+                return window.focused and not window.minimized
+        false
+
+    me update_client_target(compositor: HostCompositor) -> bool:
+        var target_window_id: i64 = 0
+        for window in compositor.windows:
+            val content_x = window.x + 4
+            val content_y = window.y + 32 + (
+                shared_wm_browser_content_extra_height(window.app_id)
+            )
+            val content_width = window.w - 8
+            val content_height = window.h - 36 - (
+                shared_wm_browser_content_extra_height(window.app_id)
+            )
+            if (
+                not window.minimized and
+                self.pointer_x >= content_x and
+                self.pointer_x < content_x + content_width and
+                self.pointer_y >= content_y and
+                self.pointer_y < content_y + content_height
+            ):
+                val local_x = self.pointer_x - content_x
+                val local_y = self.pointer_y - content_y
+                if (
+                    window.passthrough_w > 0 and window.passthrough_h > 0 and
+                    local_x >= window.passthrough_x and
+                    local_x < window.passthrough_x + window.passthrough_w and
+                    local_y >= window.passthrough_y and
+                    local_y < window.passthrough_y + window.passthrough_h
+                ):
+                    continue
+                target_window_id = window.id
+                self.last_local_x = local_x
+                self.last_local_y = local_y
+        target_window_id == self.internal_window_id
+
+    me update_captured_target(compositor: HostCompositor) -> bool:
+        # Deliberately ignores passthrough_*: an explicit pointer capture
+        # (e.g. mid-drag) is exclusive by construction -- the capturing
+        # window already won the interaction, so a click-through region
+        # declared for ordinary hit-testing must not un-capture it mid-grab.
+        for window in compositor.windows:
+            if (window.id == self.internal_window_id and
+                not window.minimized):
+                self.last_local_x = self.pointer_x - window.x - 4
+                self.last_local_y = self.pointer_y - window.y - 32
+                return true
+        false
+
+    me route(
+        event: WindowEventRecord,
+        compositor: HostCompositor,
+        session: UISession,
+        committed_text: text = ""
+    ) -> bool:
+        self.route_scalar(
+            event.kind,
+            event.key,
+            event.action,
+            event.modifiers,
+            event.x_milli,
+            event.y_milli,
+            event.delta_x_milli,
+            event.delta_y_milli,
+            compositor,
+            session,
+            committed_text
+        )
+
+    me route_scalar(
+        kind: i64,
+        key_code: i64,
+        action: i64,
+        modifiers: i64,
+        x_milli: i64,
+        y_milli: i64,
+        delta_x_milli: i64,
+        delta_y_milli: i64,
+        compositor: HostCompositor,
+        session: UISession,
+        committed_text: text = ""
+    ) -> bool:
+        if kind == WINDOW_EVENT_POINTER_MOVE:
+            self.pointer_x = (x_milli / 1000).to_i32()
+            self.pointer_y = (y_milli / 1000).to_i32()
+            if self.client_pointer_captured and not self.window_focused(compositor):
+                self.client_pointer_captured = false
+            compositor.handle_mouse_move(self.pointer_x, self.pointer_y)
+            val in_client = self.update_client_target(compositor)
+            if (not in_client and self.client_pointer_captured and
+                not self.update_captured_target(compositor)):
+                self.client_pointer_captured = false
+                return false
+            if in_client or self.client_pointer_captured:
+                session.dispatch(UIEvent.MouseEvent(
+                    self.last_local_x.to_f64(),
+                    self.last_local_y.to_f64(),
+                    "",
+                    "move"
+                ))
+                return true
+            return false
+
+        if (kind == WINDOW_EVENT_POINTER_BUTTON and
+            key_code >= 0 and key_code <= 2):
+            self.pointer_x = (x_milli / 1000).to_i32()
+            self.pointer_y = (y_milli / 1000).to_i32()
+            val down = action != WINDOW_ACTION_RELEASE
+            val left = key_code == 0
+            val capture_lost = (
+                self.client_pointer_captured and
+                not self.window_focused(compositor)
+            )
+            if capture_lost:
+                self.client_pointer_captured = false
+            if down and left:
+                self.client_pointer_captured = false
+                compositor.cancel_pointer_interaction()
+            compositor.handle_mouse_move(self.pointer_x, self.pointer_y)
+            val in_client = self.update_client_target(compositor)
+            if (not in_client and self.client_pointer_captured and
+                not self.update_captured_target(compositor)):
+                self.client_pointer_captured = false
+                return false
+            compositor.handle_mouse_button(key_code, down)
+            if capture_lost and left and not down:
+                return false
+            if down and left and in_client:
+                self.client_pointer_captured = true
+            # The shared reducer currently treats every mouse button as a
+            # primary click, so only left may cross the widget boundary.
+            if left and (in_client or self.client_pointer_captured):
+                session.dispatch(UIEvent.MouseEvent(
+                    self.last_local_x.to_f64(),
+                    self.last_local_y.to_f64(),
+                    "left",
+                    if down: "down" else: "up"
+                ))
+                if not down:
+                    self.client_pointer_captured = false
+                return true
+            if not down and left:
+                self.client_pointer_captured = false
+            return in_client
+
+        if kind == WINDOW_EVENT_WHEEL:
+            compositor.handle_mouse_wheel(
+                delta_x_milli.to_f64() / 1000.0,
+                delta_y_milli.to_f64() / 1000.0
+            )
+            if self.update_client_target(compositor):
+                session.dispatch(UIEvent.ScrollEvent(
+                    self.last_local_x.to_f64(),
+                    self.last_local_y.to_f64(),
+                    (0 - delta_x_milli).to_f64() / 100.0,
+                    (0 - delta_y_milli).to_f64() / 100.0
+                ))
+                return true
+            return false
+
+        if kind == WINDOW_EVENT_TEXT:
+            if committed_text != "" and self.window_focused(compositor):
+                session.dispatch(UIEvent.CompositionCommit(committed_text))
+                return true
+            return false
+
+        if kind == WINDOW_EVENT_KEY and (
+            action != WINDOW_ACTION_RELEASE
+        ) and self.window_focused(compositor):
+            val key = host_glfw_key_name(key_code)
+            if key == "":
+                return false
+            val shift = (modifiers & WINDOW_MOD_SHIFT) != 0
+            if key == "tab":
+                session.dispatch(if shift: UIEvent.FocusPrev else: UIEvent.FocusNext)
+            else:
+                session.dispatch_key_with_modifiers(
+                    key,
+                    (modifiers & WINDOW_MOD_CTRL) != 0,
+                    shift,
+                    (modifiers & WINDOW_MOD_ALT) != 0,
+                    (modifiers & WINDOW_MOD_SUPER) != 0
+                )
+            return true
+        false

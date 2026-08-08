@@ -1,0 +1,185 @@
+# Table of Contents Generation
+#
+# Pure functions for generating table of contents from a RichDocument.
+# Provides: toc_entries, toc_generate, heading_numbering.
+#
+# Numbering Rule:
+# When encountering a heading at level L (1=H1, 2=H2, 3=H3):
+# 1. For any intermediate level M where 1 <= M < L and counters[M] == 0, set counters[M] = 1
+# 2. Increment counters[L]
+# 3. Reset counters[L+1..3] to 0
+# 4. Render the number as counters[1] + "." + counters[2] + ... + counters[L]
+#    (skipping any zero counters in rendering)
+#
+# Examples:
+# - H1: [1,0,0] -> "1"
+# - H2 under H1: [1,1,0] -> "1.1"
+# - H3 directly under H1 (skipping H2): [1,1,1] -> "1.1.1"
+# - H2 after H3: [1,2,0] -> "1.2"
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, block_to_plain_text}
+
+# =========================================================================
+# Shared Numbering Helper
+# =========================================================================
+
+fn _heading_level(kind: BlockKind) -> i32:
+    """Map BlockKind to heading level (1,2,3) or -1 if not a heading."""
+    match kind:
+        case Heading1: return 1
+        case Heading2: return 2
+        case Heading3: return 3
+        _: return -1
+
+fn _compute_heading_number(level: i32, counters: [i32]) -> text:
+    """Format counters[0..level-1] as "1.2.3"."""
+    if level <= 0:
+        return ""
+    var parts: [text] = []
+    var i = 0
+    while i < level and i < counters.len():
+        val counter = counters[i]
+        parts.push("{counter}")
+        i = i + 1
+    var result = ""
+    var first = true
+    for part in parts:
+        result = if first: part else: "{result}.{part}"
+        first = false
+    result
+
+fn _build_counters_for_level(level: i32) -> [i32]:
+    """Create a counters array with enough slots for the given level."""
+    var c: [i32] = []
+    var i = 0
+    while i < level:
+        c.push(0)
+        i = i + 1
+    c
+
+fn _set_counter(counters: [i32], index: i32, value: i32) -> [i32]:
+    """Return a new counters array with counters[index] = value."""
+    var result: [i32] = []
+    var i = 0
+    while i < counters.len():
+        val v = if i == index: value else: counters.get(i)
+        result.push(v)
+        i = i + 1
+    result
+
+# =========================================================================
+# TOC Entry Generation
+# =========================================================================
+
+fn toc_entries(doc: RichDocument, max_depth: i32) -> [text]:
+    """Extract heading blocks from document and return formatted TOC entries.
+    Each entry is "1 Title", "1.1 Subtitle", etc., with hierarchical numbering.
+    Only includes headings at level <= max_depth."""
+    var entries: [text] = []
+    var counters = _build_counters_for_level(4)  # Support up to level 3
+
+    for block in doc.blocks:
+        val level = _heading_level(block.kind)
+        if level <= 0 or level > max_depth:
+            continue
+
+        # Auto-increment intermediate levels if they're still 0
+        var work_counters = counters
+        var i = 0
+        while i < level - 1:
+            if work_counters.get(i) == 0:
+                work_counters = _set_counter(work_counters, i, 1)
+            i = i + 1
+
+        # Increment current level
+        work_counters = _set_counter(work_counters, level - 1, work_counters.get(level - 1) + 1)
+
+        # Reset deeper levels
+        i = level
+        while i < work_counters.len():
+            work_counters = _set_counter(work_counters, i, 0)
+            i = i + 1
+
+        counters = work_counters
+
+        # Compute the number string
+        val number = _compute_heading_number(level, counters)
+        val text = block_to_plain_text(block)
+        entries.push("{number} {text}")
+
+    entries
+
+# =========================================================================
+# TOC Document Generation
+# =========================================================================
+
+fn toc_generate(doc: RichDocument, max_depth: i32, title: text) -> RichDocument:
+    """Generate a new document with TOC inserted at the top.
+    Returns: a new document with a heading block (title, level 1) followed by
+    paragraph blocks for each TOC entry, then all original document blocks."""
+    val entries = toc_entries(doc, max_depth)
+
+    # Build new blocks: TOC title + entries + original blocks
+    var new_blocks: [DocBlock] = []
+
+    # Add TOC title heading
+    val title_block = DocBlock(kind: BlockKind.Heading1, spans: [TextSpan(text: title, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")])
+    new_blocks.push(title_block)
+
+    # Add TOC entries as paragraphs
+    for entry in entries:
+        val entry_block = DocBlock(kind: BlockKind.Paragraph, spans: [TextSpan(text: entry, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")])
+        new_blocks.push(entry_block)
+
+    # Add original blocks
+    for block in doc.blocks:
+        new_blocks.push(block)
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)
+
+# =========================================================================
+# Heading Numbering
+# =========================================================================
+
+fn heading_numbering(doc: RichDocument) -> RichDocument:
+    """Return a new document where each heading's text is prefixed with its
+    hierarchical number ("1 ", "1.1 ", etc.)."""
+    var new_blocks: [DocBlock] = []
+    var counters = _build_counters_for_level(4)
+
+    for block in doc.blocks:
+        val level = _heading_level(block.kind)
+
+        if level > 0:
+            # Auto-increment intermediate levels if they're still 0
+            var work_counters = counters
+            var i = 0
+            while i < level - 1:
+                if work_counters.get(i) == 0:
+                    work_counters = _set_counter(work_counters, i, 1)
+                i = i + 1
+
+            # Increment current level
+            work_counters = _set_counter(work_counters, level - 1, work_counters.get(level - 1) + 1)
+
+            # Reset deeper levels
+            i = level
+            while i < work_counters.len():
+                work_counters = _set_counter(work_counters, i, 0)
+                i = i + 1
+
+            counters = work_counters
+
+            # Compute the number and prefix the first span
+            val number = _compute_heading_number(level, counters)
+            val original_text = block_to_plain_text(block)
+            val new_text = "{number} {original_text}"
+
+            var new_spans: [TextSpan] = []
+            new_spans.push(TextSpan(text: new_text, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: ""))
+            val new_block = DocBlock(kind: block.kind, spans: new_spans)
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(block)
+
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: doc.revisions)

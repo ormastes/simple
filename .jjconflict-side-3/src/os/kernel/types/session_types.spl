@@ -1,0 +1,155 @@
+# Session Types — Privilege Session Hierarchy (OCap S1)
+#
+# A Session is the temporal + authority envelope around a principal's activity.
+# A login mints a root User session holding the principal's CEILING capability
+# set; a sub-role irreversibly narrows it (pledge drop); teardown bumps the
+# session epoch to bulk-revoke every capability bound to the session subtree.
+# This is the SurfaceHandle / capability generation-counter pattern applied to
+# whole sessions instead of individual tokens: one epoch bump invalidates every
+# bound capability in O(1), no per-token walk.
+#
+# Kernel-side, pure Simple — seed-run verifiable
+# (test/01_unit/os/security/session_hierarchy_spec.spl). This file holds only
+# the value types + pure containment helpers; the session TABLE and the
+# login/open_subrole/session_teardown operations live on CapabilityManager in
+# os.kernel.ipc.capability (which owns the per-task records they gate).
+
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
+
+enum SessionKind:
+    """Privilege tier of a session.
+
+    System   — kernel / init authority (the root of trust).
+    Tenant   — an isolation domain (org / namespace) under System.
+    User     — an authenticated principal login (the sshd case).
+    SubRole  — an irreversibly narrowed slice of a parent session (pledge drop).
+    Llm      — a model-driven agent session (least-authority by default).
+    """
+    System
+    Tenant
+    User
+    SubRole
+    Llm
+
+struct Session:
+    """One node in the privilege-session hierarchy.
+
+    id        — unique monotone session id (0 = invalid / no session).
+    kind      — SessionKind tier.
+    epoch     — generation counter; bumping it invalidates every capability
+                bound to this session at its prior epoch (O(1) bulk revoke).
+    principal — the authenticated identity string ("root", "alice", ...).
+    ceiling   — the maximum authority this session may EVER hold. Invariant,
+                enforced at creation: ceiling(child) ⊆ current(parent).
+    current   — the authority currently in effect (⊆ ceiling; only shrinks).
+    budget    — hierarchical resource budget; refunded upward on teardown.
+    parent    — parent session id (0 = root session).
+    children  — child session ids (maintained on open_subrole).
+    sealed    — true once torn down; a sealed session denies every check.
+    """
+    id: u64
+    kind: SessionKind
+    epoch: u64
+    principal: text
+    ceiling: CapabilitySet
+    current: CapabilitySet
+    budget: u64
+    parent: u64
+    children: [u64]
+    sealed: bool
+
+fn capset_subset(sub: CapabilitySet, sup: CapabilitySet) -> bool:
+    """Return true iff every concrete capability in `sub` is authorized by
+    `sup` — the `sub ⊆ sup` monotonic containment test used to enforce
+    ceiling(child) ⊆ current(parent). An empty `sub` is vacuously a subset.
+
+    Uses CapabilitySet.has (capability_kind_allows) so path/rights containment
+    is respected, not just exact equality.
+
+    SECURITY (fail-closed): an ambient-full `sub` (unpledged + zero tokens =
+    ALL authority) has no concrete tokens to iterate, so the loop below would
+    VACUOUSLY return true — letting ambient authority slip under a narrow `sup`
+    (OCap escalation at every call site: child sessions AND containers). Guard
+    it: an ambient-full set is contained only by another ambient-full set. A
+    deny-all set (pledged + zero tokens) is NOT ambient and stays a subset of
+    everything, as intended.
+    """
+    val sub_ambient = (not sub.is_pledged) and (sub.caps.len() == 0)
+    if sub_ambient:
+        val sup_ambient = (not sup.is_pledged) and (sup.caps.len() == 0)
+        return sup_ambient
+    for t in sub.caps:
+        if not sup.has(t.kind):
+            return false
+    true
+
+fn capset_clone_unpledged(cs: CapabilitySet) -> CapabilitySet:
+    """Copy a capability set's tokens into a FRESH unpledged set so a subsequent
+    pledge() actually filters. (CapabilitySet.pledge no-ops on an already-pledged
+    set, so a subrole drop must start from an unpledged clone.) The clone can
+    only ever be narrowed, never widened, because it begins as exactly the
+    parent's tokens.
+    """
+    var toks: [CapabilityToken] = []
+    for t in cs.caps:
+        toks.push(t)
+    CapabilitySet(caps: toks, is_pledged: false)
+
+# ============================================================================
+# S5 — Container (CSpace + budget + namespace, session-owned, epoch-bound)
+#
+# A Container is NOT a new authority object; it is a SHAPE of a CSpace
+# (research §3.6/§17): a namespace of visible objects (its cspace), a sub-budget
+# charged from its owning session, and a set of labels. Its keystone property:
+# a container is owned by EXACTLY ONE session and captures that session's epoch
+# at creation, so a session teardown (epoch bump) kills every container it owns
+# in O(1) — the container cap dies with its session (Fuchsia realm kill).
+# ============================================================================
+
+struct Container:
+    """One session-owned container = CSpace + budget + label-namespace.
+
+    id            — unique monotone container id (0 = invalid).
+    owner_session — the Session.id that owns this container (its epoch backs it).
+    cspace        — the container's visible-object namespace. Invariant, enforced
+                    at creation: cspace ⊆ owner_session.current (never wider).
+    budget        — sub-budget charged from the owning session's budget.
+    labels        — role-neutral names of the objects visible in this container.
+    epoch         — the owner session's epoch captured at creation. The container
+                    is live only while owner_session is live at THIS epoch; a
+                    teardown epoch bump revokes it with no per-container walk.
+    """
+    id: u64
+    owner_session: u64
+    cspace: CapabilitySet
+    budget: u64
+    labels: [text]
+    epoch: u64
+
+# ============================================================================
+# S5 — Escrow cap (cross-session single-use cowork)
+#
+# The "scheduler-LLM hands ticketing-LLM a one-shot create-ticket cap" flow
+# (research §17): a single-use attenuated cap MINTED INTO THE RECEIVER'S arena,
+# bound to the RECEIVER'S session epoch (so it dies with the receiver, never
+# leaking authority out of a dead sender), consumed on first use, and monotonic
+# (never exceeds the sender's CURRENT authority).
+# ============================================================================
+
+struct EscrowCap:
+    """A single-use capability escrowed from one session into another.
+
+    id           — unique monotone escrow id (0 = invalid).
+    from_session — the sender session whose CURRENT authorized the cap (monotone).
+    to_session   — the receiver session into whose arena the cap was minted.
+    to_epoch     — the receiver's epoch at mint time; the escrow is live only
+                   while to_session is live at this epoch (dies with the receiver).
+    cap          — the single-use capability token being handed over.
+    consumed     — true once redeemed; a second consume is denied (single-use).
+    """
+    id: u64
+    from_session: u64
+    to_session: u64
+    to_epoch: u64
+    cap: CapabilityToken
+    consumed: bool

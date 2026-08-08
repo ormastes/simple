@@ -1,0 +1,67 @@
+# Free helpers: IPC buffer packing and socket-protocol predicates.
+use os.services.netstack.netstack_service.*
+# Network Stack Service -- User-Space TCP/IP on IPC Port 2
+#
+# MDSOC: feature dimension, network layer
+# Owns the VirtIO-net driver in-process (exokernel/libOS pattern).
+# Receives raw Ethernet frames, processes through protocol layers
+# (ARP, IPv4, ICMP, TCP, UDP), and delivers to application sockets.
+# Receives IPC requests from applications for socket operations.
+#
+# Wire protocol (IPC):
+#   Request:  method(u32) | payload(bytes)
+#   Response: status(i32) | payload(bytes)
+
+use os.drivers.virtio.virtio_net.{VirtioNetDriver}
+use os.services.netstack.ethernet.{
+    EthAddress, EthFrame, eth_parse, eth_build,
+    ETHERTYPE_IPV4, ETHERTYPE_ARP, ETH_MAX_FRAME
+}
+use os.services.netstack.arp.{
+    ArpTable, ArpPacket, arp_parse, arp_build_request, arp_build_reply,
+    ARP_REQUEST, ARP_REPLY
+}
+use os.services.netstack.ipv4.{
+    Ipv4Address, Ipv4Packet, Ipv4Header, ipv4_parse, ipv4_build, RoutingTable,
+    IP_PROTO_ICMP, IP_PROTO_TCP, IP_PROTO_UDP
+}
+use os.services.netstack.icmp.{
+    IcmpPacket, icmp_parse, icmp_build_echo_reply,
+    ICMP_ECHO_REQUEST
+}
+use os.services.netstack.udp.{
+    UdpDatagram, UdpTable, udp_parse, udp_build
+}
+use os.services.netstack.tcp.{
+    TcpState, TcpSegment, TcpHeader, tcp_parse, tcp_build_with_checksum, tcp_checksum,
+    TCP_FLAG_SYN, TCP_FLAG_ACK, tcp_has_flag
+}
+use os.services.netstack.tcp_connection.{TcpConnection}
+use os.services.netstack.socket.{
+    OsSocket, SocketTable, SockAddr, SocketProtocol, SocketState
+}
+use os.userlib.syscall_raw.{syscall}
+
+use os.kernel.log.klog_api.{log_raw_println}
+extern fn unsafe_addr_of(ref: any) -> u64
+
+# IPC method constants for network syscalls
+fn _push_i32(buf: [u8], value: i32):
+    val u = value.to_u32()
+    buf.push((u & 0xFF).to_u8())
+    buf.push(((u >> 8) & 0xFF).to_u8())
+    buf.push(((u >> 16) & 0xFF).to_u8())
+    buf.push(((u >> 24) & 0xFF).to_u8())
+
+fn _ipc_send_raw(dst_port: u64, src_port: u64, data: [u8]):
+    """Send raw bytes via IPC syscall."""
+    # Simple [u8] arrays are heap objects with a 16-byte header before items.
+    # IPC expects a pointer to the first byte payload, not the array header.
+    val data_ptr = unsafe_addr_of(data) + 16
+    val data_len = data.len().to_u64()
+    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)
+
+fn _is_proto_tcp(protocol: SocketProtocol) -> bool:
+    match protocol:
+        SocketProtocol.Tcp: true
+        SocketProtocol.Udp: false

@@ -1,0 +1,140 @@
+"""
+# CPU Software Oracle — Budget Exhaustion Must Not Read As Success
+
+## Overview
+
+The pure-Simple CPU software renderer allocates its framebuffer at
+`width * height` **before** paint, so a render that trips its wall-clock budget
+returns a correctly-sized buffer holding only whatever finished before the
+deadline — commonly the canvas background and nothing else. Byte-shaped exactly
+like a successful render of a blank page, it used to be indistinguishable from
+one: a comparison against this oracle could pass by both sides being empty, or
+fail spuriously, depending only on host load.
+
+Reproduced deterministically by shrinking the budget rather than by loading the
+host: the same page at a 600000 ms budget paints 596 ink pixels, and at a 1 ms
+budget paints 0, with both returns being `[u32]` of length 6144.
+
+This spec pins the honest signal:
+
+- the verdict travels **on the result** (`render_degraded`, `degrade_reason`),
+  not only in a module global that the next render clears;
+- `degrade_reason` names a concrete exhaustion site from the enumerated
+  `WEB_BUDGET_SITE_*` family, so a blank page can be attributed to a phase;
+- `simple_web_layout_software_pixels_presentable` refuses to present it, and
+  the decision string names the decline with a reason — the same shape as the
+  GPU lane's `reason=readback-not-device-proven`;
+- the honest direction holds too: a completed render must never report
+  exhaustion.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_software_decision,
+    simple_web_layout_software_pixels_presentable,
+    simple_web_layout_software_present_decision,
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
+
+val W: i32 = 96
+val H: i32 = 64
+
+# A page whose only content is text, so "did anything render" is answerable by
+# counting non-background pixels.
+val INK_HTML: text = "<html><body style=\"margin:0\"><p style=\"color:#101010;font-size:16px\">Hello oracle text</p></body></html>"
+
+# Non-background pixel count. The canvas base for this page is opaque white, so
+# every non-white pixel is content the renderer actually produced.
+fn _ink(pixels: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    val total = pixels.len()
+    while i < total:
+        if pixels[i] != 0xFFFFFFFFu32:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "CPU software oracle budget exhaustion":
+
+    it "returns a blank but correctly sized framebuffer when the budget is exhausted":
+        step("Render a text page under a generous 600s budget and count ink pixels")
+        val complete = simple_web_layout_render_html_software_result(INK_HTML, W, H, 600000)
+        expect(complete.pixels.len()).to_equal(W * H)
+        expect(_ink(complete.pixels) > 0).to_equal(true)
+        step("Render the identical page under a 1ms budget: same size, but no ink at all")
+        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        expect(starved.pixels.len()).to_equal(W * H)
+        expect(_ink(starved.pixels)).to_equal(0)
+        step("Confirm the two returns are pixel-buffer-indistinguishable in shape — the reason a status is required")
+        expect(starved.pixels.len()).to_equal(complete.pixels.len())
+
+    it "carries the exhaustion verdict on the result instead of only in a module global":
+        step("Render starved, then render complete, and only THEN read both verdicts")
+        # This is the ordering that makes a module global useless: an oracle-vs-lane
+        # comparison renders both sides before comparing. The global describes the
+        # LAST render; the result fields describe their own render.
+        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        val complete = simple_web_layout_render_html_software_result(INK_HTML, W, H, 600000)
+        step("The global now reports the completed render, having forgotten the starved one")
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+        step("The starved result still reports its own exhaustion")
+        expect(starved.render_degraded).to_equal(true)
+        expect(complete.render_degraded).to_equal(false)
+
+    it "names a concrete exhaustion site rather than degrading anonymously":
+        step("Render under a 1ms budget and read the reason recorded on the result")
+        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        expect(starved.render_degraded).to_equal(true)
+        step("The reason is non-empty and is one of the enumerated WEB_BUDGET_SITE_* names")
+        expect(starved.degrade_reason == "").to_equal(false)
+        val known = (
+            starved.degrade_reason == "style-cascade" or
+            starved.degrade_reason == "style-selector-groups" or
+            starved.degrade_reason == "style-candidate-decls" or
+            starved.degrade_reason == "style-important-decls" or
+            starved.degrade_reason == "layout-subtree" or
+            starved.degrade_reason == "paint-backgrounds" or
+            starved.degrade_reason == "paint-relative-roots" or
+            starved.degrade_reason == "paint-absolute-low-z" or
+            starved.degrade_reason == "paint-scrollbars" or
+            starved.degrade_reason == "paint-text"
+        )
+        expect(known).to_equal(true)
+
+    it "refuses to present an exhausted render and names the decline with a reason":
+        step("An exhausted render is not presentable")
+        val starved = simple_web_layout_render_html_software_result(INK_HTML, W, H, 1)
+        expect(simple_web_layout_software_pixels_presentable(starved)).to_equal(false)
+        step("Its decision string declares the decline and carries the exhaustion site")
+        val declined = simple_web_layout_software_present_decision(starved)
+        expect(declined).to_start_with("software-oracle:declined:")
+        expect(declined).to_contain("reason=budget-exhausted:")
+        expect(declined).to_contain(starved.degrade_reason)
+
+    it "presents a completed render and reports no exhaustion (the honest direction)":
+        step("A render with an adequate budget is presentable")
+        val complete = simple_web_layout_render_html_software_result(INK_HTML, W, H, 600000)
+        expect(complete.render_degraded).to_equal(false)
+        expect(complete.degrade_reason).to_equal("")
+        expect(simple_web_layout_software_pixels_presentable(complete)).to_equal(true)
+        step("Its decision string reports a full presented frame, never a decline")
+        val decision = simple_web_layout_software_present_decision(complete)
+        expect(decision).to_equal("software-oracle:presented:full-frame:reason=budget-complete")
+
+    it "exposes the same verdict through the single-call probe entry":
+        step("The probe entry declines under a starved budget")
+        expect(simple_web_layout_render_html_software_decision(INK_HTML, W, H, 1)).to_start_with("software-oracle:declined:")
+        step("and presents under a generous one")
+        expect(simple_web_layout_render_html_software_decision(INK_HTML, W, H, 600000)).to_equal("software-oracle:presented:full-frame:reason=budget-complete")
+
+    it "keeps the plain pixel entry working unchanged for existing callers":
+        step("The [u32] entry still returns a full-size buffer with real ink under a normal budget")
+        val pixels = simple_web_layout_render_html_software_pixels(INK_HTML, W, H, 600000)
+        expect(pixels.len()).to_equal(W * H)
+        expect(_ink(pixels) > 0).to_equal(true)
+        expect(simple_web_layout_last_render_degrade_reason()).to_equal("")

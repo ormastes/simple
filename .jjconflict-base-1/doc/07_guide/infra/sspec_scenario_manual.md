@@ -326,6 +326,83 @@ System and environmental tests use the same manual form. Their evidence may be:
 Do not force environmental tests to fake screenshots. Capture the evidence a
 human manual would need to reproduce and understand the scenario.
 
+## Notebook Lane Spec Pattern
+
+Notebook execution lanes (CUDA, Vulkan, remote JTAG, local interpreter) are
+optional per-host features. Specs that exercise a lane must follow the
+**host-aware probing** pattern to remain SKIP-clean when the lane is absent.
+
+### Pattern: Probe, Skip, Execute
+
+```simple
+it "CUDA lane compiles and runs a kernel":
+    # Probe: check if the lane is available on this host
+    val status = CudaExecutor.probe()
+    case status:
+        when "available":
+            step("Compile a sample kernel")
+            val executor = CudaExecutor.start(kernel_opts)
+            step("Execute the kernel and collect output")
+            val result = executor.execute_cell("kernel_code()")
+            expect(result.status).to_equal("completed")
+        when "skip: <reason>":
+            # Lane absent on this host; test does not fail
+            step("Lane unavailable (reason: {reason}), skipping")
+        when "blocked: <reason>":
+            # Lane held by another session or broken; defer
+            step("Lane currently blocked (reason: {reason}), skipping")
+```
+
+### Lane Status Wording Convention
+
+Lane probing returns one of three status strings, shared with the test runner:
+
+- **`available`** — the lane can start a new session immediately.
+- **`skip: <reason>`** — the lane is not available on this host (no GPU, QEMU
+  not installed, cross-platform incompatibility). The spec exits cleanly
+  without executing the lane-gated assertions.
+- **`blocked: <reason>`** — the lane exists but is temporarily unavailable
+  (held by another notebook session, device in recovery, watchdog timeout).
+  The spec exits cleanly and may be retried later.
+
+### Interrupt-Contract Assertion Pattern
+
+The `NotebookExecutor` trait guarantees that `interrupt()` resolves within
+2×`timeout` worst-case. To verify this contract in your spec:
+
+```simple
+# @step: Interrupt resolves within timeout
+it "CUDA interrupt completes reliably":
+    val executor = CudaExecutor.start(opts)
+    step("Launch a long-running kernel")
+    executor.execute_cell("kernel_long_running()")
+    
+    step("Send interrupt signal while kernel is running")
+    val start = time.now()
+    executor.interrupt()
+    val elapsed = time.now() - start
+    
+    step("Verify interrupt completed within contract")
+    val max_allowed_ms = opts.timeout_ms * 2
+    expect(elapsed).to_be_less_than(max_allowed_ms)
+    
+    step("Verify lane is usable after interrupt")
+    val post_interrupt = executor.execute_cell("simple_test()")
+    expect(post_interrupt.status).to_equal("completed")
+```
+
+The executor escalates when needed (cooperative cancel → force path → session
+teardown with `blocked:` status). Your assertions verify that the executor
+honors both the deadline and the usability contract — the lane either completes
+the interrupt in time or marks itself `blocked:` for recovery.
+
+### Cross-Reference
+
+For detailed lane architecture, executor trait, and session lifecycle, see
+`doc/05_design/app/tools/notebook_lanes_architecture.md` (§4.1, §5.3, §8.4).
+For implementation guidance, see the knowledge hub at
+`doc/00_llm_process/feature_expert/notebook_lanes/skill.md`.
+
 ## MCP Manual Pattern
 
 MCP specs are the first exemplar for non-UI scenario manuals. A good generated

@@ -1,0 +1,248 @@
+# @cover src/lib/nogc_async_mut/host_io/fileio.spl 80%
+
+"""
+# Host FileIO Async Wrapper Specification
+
+**Feature IDs:** #host-io-001
+**Category:** Infrastructure | Stdlib
+**Difficulty:** 1/5
+**Status:** Active
+
+## Overview
+
+BDD specs for the thin host file I/O wrapper in
+`std.nogc_async_mut.host_io.fileio`. Covers both sync delegates and
+async variants (v1: eager HostFuture). Content round-trips are verified
+with exact string equality.
+
+## Related Specifications
+
+- [io_runtime](src/lib/nogc_sync_mut/io_runtime.spl) — sync backend
+- [async_host](src/lib/nogc_async_mut/async_host/future.spl) — HostFuture type
+"""
+
+use std.spec
+use std.nogc_async_mut.host_io.fileio.{
+    read_text,
+    write_text,
+    exists,
+    delete,
+    size,
+    copy,
+    ensure_dir,
+    path_is_dir,
+    path_is_file,
+    read_text_async,
+    write_text_async,
+    exists_async,
+    delete_async,
+    size_async,
+}
+use std.async_host.future.{HostFuture}
+use std.async_host.waker.{Waker, Context}
+use std.nogc_async_mut.async.poll.{Poll}
+
+# ---------------------------------------------------------------------------
+# Test artifact directory (created once, reused across all specs)
+# ---------------------------------------------------------------------------
+
+val ARTIFACT_DIR = "build/test-artifacts/host_io"
+
+fn artifact_path(name: text) -> text:
+    "{ARTIFACT_DIR}/{name}"
+
+fn setup_dir():
+    ensure_dir(ARTIFACT_DIR)
+
+# Build a no-op Context for polling already-ready futures.
+# Waker.new(0, 0) is a sentinel waker that will never be invoked because
+# HostFuture.ready() is already in the Ready state.
+fn noop_ctx() -> Context:
+    Context.from_waker(Waker.new(0, 0))
+
+# ---------------------------------------------------------------------------
+# Sync delegate specs
+# ---------------------------------------------------------------------------
+
+describe "fileio sync delegates":
+
+    it "ensure_dir creates the test artifact directory":
+        val ok = ensure_dir(ARTIFACT_DIR)
+        expect(ok).to_equal(true)
+
+    it "write_text creates a new file":
+        setup_dir()
+        val path = artifact_path("sync_write_test.txt")
+        val ok = write_text(path, "hello sync")
+        expect(ok).to_equal(true)
+
+    it "read_text returns exact content written":
+        setup_dir()
+        val path = artifact_path("sync_roundtrip.txt")
+        val original = "round-trip content 42"
+        write_text(path, original)
+        val readback = read_text(path)
+        expect(readback).to_equal(original)
+
+    it "exists returns true for a written file":
+        setup_dir()
+        val path = artifact_path("sync_exists_check.txt")
+        write_text(path, "exists")
+        expect(exists(path)).to_equal(true)
+
+    it "exists returns false for a missing file":
+        val path = artifact_path("sync_no_such_file_xyzzy.txt")
+        expect(exists(path)).to_equal(false)
+
+    it "delete removes the file":
+        setup_dir()
+        val path = artifact_path("sync_delete_test.txt")
+        write_text(path, "to be deleted")
+        val del_ok = delete(path)
+        expect(del_ok).to_equal(true)
+        expect(exists(path)).to_equal(false)
+
+    it "size returns the correct byte count":
+        setup_dir()
+        val content = "exactly_some_bytes"
+        val path = artifact_path("sync_size_test.txt")
+        write_text(path, content)
+        val reported = size(path)
+        expect(reported).to_equal(content.len())
+
+    it "path_is_file returns true for a written file":
+        setup_dir()
+        val path = artifact_path("sync_is_file.txt")
+        write_text(path, "file check")
+        expect(path_is_file(path)).to_equal(true)
+
+    it "path_is_dir returns true for the artifact directory":
+        setup_dir()
+        expect(path_is_dir(ARTIFACT_DIR)).to_equal(true)
+
+    it "copy produces an identical file":
+        setup_dir()
+        val src = artifact_path("sync_copy_src.txt")
+        val dst = artifact_path("sync_copy_dst.txt")
+        val content = "copy oracle content"
+        write_text(src, content)
+        val ok = copy(src, dst)
+        expect(ok).to_equal(true)
+        val readback = read_text(dst)
+        expect(readback).to_equal(content)
+
+    it "read_text returns empty string for missing file":
+        val path = artifact_path("sync_missing_read_xyzzy.txt")
+        val result = read_text(path)
+        expect(result).to_equal("")
+
+# ---------------------------------------------------------------------------
+# Async variant specs (v1: eager HostFuture)
+# ---------------------------------------------------------------------------
+
+describe "fileio async variants (v1 eager futures)":
+
+    it "read_text_async returns a ready future":
+        setup_dir()
+        val path = artifact_path("async_read_test.txt")
+        val content = "async read oracle"
+        write_text(path, content)
+        val fut = read_text_async(path)
+        expect(fut.is_ready()).to_equal(true)
+
+    it "read_text_async future resolves to correct content":
+        setup_dir()
+        val path = artifact_path("async_read_roundtrip.txt")
+        val original = "async round-trip oracle 99"
+        write_text(path, original)
+        val fut = read_text_async(path)
+        val cx = noop_ctx()
+        var got = ""
+        match fut.poll(cx):
+            case Poll.Ready(v):
+                got = v
+            case Poll.Pending:
+                got = "__PENDING__"
+        expect(got).to_equal(original)
+
+    it "write_text_async returns a ready future":
+        setup_dir()
+        val path = artifact_path("async_write_test.txt")
+        val fut = write_text_async(path, "async write oracle")
+        expect(fut.is_ready()).to_equal(true)
+
+    it "write_text_async then read_text_async round-trips content":
+        setup_dir()
+        val path = artifact_path("async_write_read_roundtrip.txt")
+        val original = "async write then read oracle"
+        val wfut = write_text_async(path, original)
+        expect(wfut.is_ready()).to_equal(true)
+        val rfut = read_text_async(path)
+        val cx = noop_ctx()
+        var got = ""
+        match rfut.poll(cx):
+            case Poll.Ready(v):
+                got = v
+            case Poll.Pending:
+                got = "__PENDING__"
+        expect(got).to_equal(original)
+
+    it "exists_async returns ready true for written file":
+        setup_dir()
+        val path = artifact_path("async_exists_check.txt")
+        write_text(path, "exists async")
+        val fut = exists_async(path)
+        expect(fut.is_ready()).to_equal(true)
+        val cx = noop_ctx()
+        var got = false
+        match fut.poll(cx):
+            case Poll.Ready(v):
+                got = v
+            case Poll.Pending:
+                got = false
+        expect(got).to_equal(true)
+
+    it "exists_async returns ready false for missing file":
+        val path = artifact_path("async_no_such_file_xyzzy.txt")
+        val fut = exists_async(path)
+        expect(fut.is_ready()).to_equal(true)
+        val cx = noop_ctx()
+        var got = true
+        match fut.poll(cx):
+            case Poll.Ready(v):
+                got = v
+            case Poll.Pending:
+                got = true
+        expect(got).to_equal(false)
+
+    it "delete_async removes the file and returns ready true":
+        setup_dir()
+        val path = artifact_path("async_delete_test.txt")
+        write_text(path, "to be deleted async")
+        val fut = delete_async(path)
+        expect(fut.is_ready()).to_equal(true)
+        val cx = noop_ctx()
+        var del_ok = false
+        match fut.poll(cx):
+            case Poll.Ready(v):
+                del_ok = v
+            case Poll.Pending:
+                del_ok = false
+        expect(del_ok).to_equal(true)
+        expect(exists(path)).to_equal(false)
+
+    it "size_async returns a ready future with positive value":
+        setup_dir()
+        val content = "size async content"
+        val path = artifact_path("async_size_test.txt")
+        write_text(path, content)
+        val fut = size_async(path)
+        expect(fut.is_ready()).to_equal(true)
+        val cx = noop_ctx()
+        var sz: i64 = 0
+        match fut.poll(cx):
+            case Poll.Ready(v):
+                sz = v
+            case Poll.Pending:
+                sz = 0
+        expect(sz > 0).to_equal(true)

@@ -1,0 +1,721 @@
+# Simple Lab HTTP/WS API — Stream L, task L3.
+#
+# Design: doc/05_design/app/tools/notebook_lanes_architecture.md §7.4
+# Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L3)
+#
+# Wires L2's in-process `KernelSessionManager` (K1) behind real HTTP/WS
+# endpoints, on the repo's own `SimpleHttpServer`/`Router` pieces
+# (`src/lib/nogc_sync_mut/http_server/{router,parser,response,types}.spl`).
+#
+# ============================================================================
+# Plan-path correction (recorded here, not silently worked around):
+# `SimpleHttpServer.handle_connection` (http_server/server.spl:78) parses one
+# request, dispatches it through `Router`, writes the response, and
+# unconditionally closes the socket — there is no way to keep the connection
+# open for a WebSocket upgrade through that entrypoint. This module therefore
+# runs its own accept loop (`lab_serve_loop`) that reuses the library's
+# `Router` (for path/method dispatch and its `path_is_safe` traversal guard),
+# `parse_request` and `write_response` for every ordinary HTTP route, and only
+# special-cases the `GET .../events` path to perform the WebSocket handshake
+# itself before taking the raw `TcpStream` over for framed writes. This is the
+# same shape the repo already uses for `app.ui.web.server.WebServer` (which
+# hand-rolls its own loop for the identical reason) and for the loopback test
+# fixture `test/fixture/net/simple_http_server.spl` (single connection
+# handled fully before the next `accept()`, avoiding the documented
+# interpreter trap where `thread_spawn_with_args` marshals a `TcpStream` into
+# a worker whose writes then don't reliably deliver).
+#
+# Streaming semantics: design §7.1 says "buffered lanes flush at cell end" —
+# L2's `LabLocalExec` executor is subprocess-per-cell and only ever returns a
+# *complete* `CellResult`, so there is nothing to stream incrementally within
+# a cell. `POST .../execute` runs the cell synchronously and appends the
+# resulting `stream` + `status` frames to that session's small in-memory
+# event buffer; a WS connection to `.../events` drains (and clears) whatever
+# is buffered for that session at connect time. Because the accept loop is
+# single-connection-at-a-time, there is no cross-thread race on that buffer.
+# A client that wants "live" behavior connects the WS stream before issuing
+# the `execute` POST (as the driving system spec does), same ordering that
+# other single-threaded loopback dev servers in this repo (`app.ui.web`) use.
+#
+# Auth/hardening (token, origin allow-list, size caps): task H1 (design
+# §8.1-8.2). The auth/origin/bounds primitives live in
+# `app.simple_lab.lab_hardening` (independently unit-spec-able without a
+# socket); this module reads them once into `LAB_CONFIG` at process start
+# and applies them at the single dispatch gate in `LabServer.handle_connection`
+# plus the per-route bound checks that need request-shaped data (cell size,
+# session count). Gating is scoped to `/api/lab/*` — the `/api/test/...`
+# shared UI contract mount (task L4, below) is local test-tooling surface,
+# not the notebook data-plane design §8.2 describes, and is left as L4
+# landed it.
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod, http_method_to_text, http_status_from_code}
+use std.nogc_sync_mut.http_server.parser.{parse_request_with_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE}
+use std.nogc_sync_mut.http_server.response.{write_response}
+use std.nogc_sync_mut.http_server.router.{Router, path_is_safe}
+use app.simple_lab.lab_hardening.{
+    LabHardeningConfig, lab_hardening_config_from_env,
+    lab_bearer_token_from_header, lab_token_matches,
+    lab_is_loopback_host, lab_bind_allowed,
+    lab_origin_allowed, lab_notebook_name_is_safe,
+    lab_json_body_is_valid, lab_truncate_with_marker
+}
+use common.ui.widget.{UIEvent}
+use nogc_sync_mut.ui.session.{UISession}
+use app.ui.test_api.handler.{handle_test_request}
+use app.simple_lab.main.{SimpleLabApp}
+use std.notebook.types.{CellResult}
+use std.notebook.session_manager.{KernelSessionManager}
+use std.nogc_sync_mut.notebook.magics.{dispatch_magics, MagicsState}
+use std.nogc_sync_mut.notebook.snb_sdn.{snb_parse}
+use std.nogc_sync_mut.notebook.ipynb.{ipynb_parse}
+use std.nogc_sync_mut.notebook.local_exec.{LocalExecFactory}
+use app.ui.web.ws_handler.{compute_ws_accept, escape_json_string}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
+use std.io_runtime.{file_read, file_write, file_exists, mkdir_p, env_get, getpid}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn lab_text_to_bytes(s: text) -> [u8]:
+    rt_text_to_bytes(s)
+
+val LAB_PROTOCOL_VERSION: text = "1"
+
+# ============================================================================
+# JSON body helpers — thin wrappers over std.common.json (the repo's real
+# JSON library), never a hand-rolled parser.
+# ============================================================================
+
+fn _lab_json_text_field(body: text, key: text) -> text:
+    val parsed = json_parse(body)
+    val raw = json_to_string(json_object_get(parsed, key))
+    if raw == nil:
+        ""
+    else:
+        raw
+
+# ============================================================================
+# State
+# ============================================================================
+
+struct LabApiCell:
+    id: text
+    source: text
+
+struct LabApiSession:
+    id: text
+    default_mode: text
+    cells: [LabApiCell]
+    events: [text]
+
+class LabApiState:
+    session_mgr: KernelSessionManager
+    magics_state: MagicsState
+    sessions: [LabApiSession]
+    next_session_seq: i64
+
+    static fn create() -> LabApiState:
+        LabApiState(
+            session_mgr: KernelSessionManager.create(LocalExecFactory()),
+            magics_state: MagicsState.create(),
+            sessions: [],
+            next_session_seq: 0
+        )
+
+    me find_session_index(session_id: text) -> i64:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].id == session_id:
+                return i
+            i = i + 1
+        -1
+
+    me new_session_id() -> text:
+        self.next_session_seq = self.next_session_seq + 1
+        "sess_{self.next_session_seq}"
+
+    me has_cell(session_idx: i64, cell_id: text) -> bool:
+        val session = self.sessions[session_idx]
+        var i = 0
+        while i < session.cells.len():
+            if session.cells[i].id == cell_id:
+                return true
+            i = i + 1
+        false
+
+    me record_cell(session_idx: i64, cell_id: text, source: text):
+        var session = self.sessions[session_idx]
+        var found = -1
+        var i = 0
+        while i < session.cells.len():
+            if session.cells[i].id == cell_id:
+                found = i
+            i = i + 1
+        if found >= 0:
+            session.cells[found] = LabApiCell(id: cell_id, source: source)
+        else:
+            session.cells.push(LabApiCell(id: cell_id, source: source))
+        self.sessions[session_idx] = session
+
+    me push_event(session_idx: i64, frame_json: text):
+        var session = self.sessions[session_idx]
+        session.events.push(frame_json)
+        self.sessions[session_idx] = session
+
+    me drain_events(session_idx: i64) -> [text]:
+        var session = self.sessions[session_idx]
+        val drained = session.events
+        session.events = []
+        self.sessions[session_idx] = session
+        drained
+
+var LAB_STATE: LabApiState = LabApiState.create()
+var LAB_CONFIG: LabHardeningConfig = lab_hardening_config_from_env()
+
+# ============================================================================
+# Auth gate — design §8.2 "Auth": bearer token required on every
+# `/api/lab/*` call (constant-time compare), and as a `token` query param on
+# the WS upgrade. Applied once, centrally, in `LabServer.handle_connection`
+# (below) rather than duplicated per handler.
+# ============================================================================
+
+fn _lab_authorized_http(req: HttpRequest) -> bool:
+    val candidate = lab_bearer_token_from_header(req.header("Authorization"))
+    lab_token_matches(candidate, LAB_CONFIG.token)
+
+fn _lab_authorized_ws(req: HttpRequest) -> bool:
+    val candidate = req.query_param("token")
+    lab_token_matches(candidate, LAB_CONFIG.token)
+
+# ============================================================================
+# Parser-error status mapping (H1). `parse_request_with_limits` prefixes its
+# `Err` message with the HTTP status it wants (e.g. "413 Content-Length too
+# large: ...", "431 Too many headers: ..."); this maps that prefix back to
+# an `HttpStatus` so oversized-body really answers 413, not a blanket 400.
+# ============================================================================
+
+fn _lab_status_from_parser_error(e: text) -> HttpStatus:
+    if e.starts_with("413"):
+        return HttpStatus.PayloadTooLarge
+    if e.starts_with("431"):
+        return HttpStatus.RequestHeaderFieldsTooLarge
+    if e.starts_with("501"):
+        return HttpStatus.NotImplemented
+    HttpStatus.BadRequest
+
+# ============================================================================
+# Shared UI contract — /api/test/... (Stream L, task L4).
+#
+# Design: doc/04_architecture/ui/shared_ui_contract.md
+# Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L4)
+#
+# Reuses `app.ui.test_api.handler.handle_test_request` (`app.ui.web` and
+# `app.ui.tui_web` mount the same handler; see mount.spl) — no new verbs, no
+# new state, only this module's route-match + `UISession` wiring. The widget
+# tree comes from L2's `SimpleLabApp.build_ui()` (`app.simple_lab.main`),
+# which already documents every stable element id (lab_root, lab_toolbar,
+# cell_<n>, cell_<n>_editor, ...).
+#
+# Read-after-write scope: injected events flow through TWO layers —
+#  1. `LAB_UI_SESSION.dispatch(event)` — the generic widget-level layer every
+#     surface in this repo uses (this is what makes plain `KeyPress`/`Focus`
+#     events from `/api/test/type` visible on the next `/api/test/elements`
+#     read, exactly like `app.ui.web.AsyncWebServer.process_events`).
+#  2. For `Action`/`InputChange` only, ALSO `SimpleLabApp.handle_event` (cell
+#     add/run/reset, source edits) followed by a `build_ui()` + `update_tree`
+#     refresh, so a `/api/test/click` on `lab_add_cell` or `cell_<n>_run` is
+#     reflected in a following `/api/test/elements` read.
+# `KeyPress`/`Focus` events deliberately skip the rebuild step: SimpleLabApp's
+# own `cells[i].source` field is the source of truth for cell execution, and
+# is only written through `InputChange` — a raw `/api/test/type` character
+# stream updates the generic widget tree (visible to `/api/test/element`)
+# without laundering through app state, the same layering every other UI
+# surface's test API has.
+# ============================================================================
+
+var LAB_UI_APP: SimpleLabApp = SimpleLabApp.create()
+var LAB_UI_SESSION: UISession = UISession.new(LAB_UI_APP.build_ui())
+
+fn _lab_test_api_should_rebuild(event: UIEvent) -> bool:
+    match event:
+        UIEvent.Action(_):
+            true
+        UIEvent.InputChange(_, _):
+            true
+        _:
+            false
+
+fn _lab_test_api_app_event(event: UIEvent) -> UIEvent:
+    """Resolve the shared contract's semantic click action into the app's own
+    action vocabulary before forwarding to `SimpleLabApp.handle_event`.
+
+    `/api/test/click {"id":X}` arrives as `Action("click_<widget_id>")`
+    (`semantic_contract.spl` convention; `_handle_click` in
+    `app.ui.test_api.handler`), but `SimpleLabApp.handle_action` matches the
+    button's *declared* action name (`builder.button`'s third argument, e.g.
+    id `lab_add_cell` -> action "lab_add_cell", id `cell_0_run` -> action
+    "cell_run_0"). Look the widget up in the live tree and substitute its
+    `action` prop; anything unresolvable passes through unchanged."""
+    match event:
+        UIEvent.Action(name):
+            if not name.starts_with("click_"):
+                return event
+            val widget_id = name.substring(6, name.length())
+            val found = LAB_UI_SESSION.current_state().tree.find_widget(widget_id)
+            if found == nil:
+                return event
+            val action_name = found.get_prop("action")
+            if action_name == "":
+                return event
+            return UIEvent.Action(name: action_name)
+        _:
+            return event
+    event
+
+fn lab_test_api_inject_event(event: UIEvent):
+    LAB_UI_SESSION.dispatch(event)
+    if _lab_test_api_should_rebuild(event):
+        LAB_UI_APP.handle_event(_lab_test_api_app_event(event))
+        LAB_UI_SESSION.update_tree(LAB_UI_APP.build_ui())
+
+fn _lab_test_api_protocol_header(content_type: text, body: text) -> text:
+    if content_type.contains("draw-ir") or body.contains("\"protocol_version\":2"):
+        return "2"
+    "1"
+
+fn _lab_test_api_full_path(req: HttpRequest) -> text:
+    # `HttpRequest.path` never carries the query string (the parser splits it
+    # into `path`/`query` — parser.spl:64-69); `handle_test_request` expects
+    # a single path it strips its own query from (`_extract_query_param`
+    # re-splits on "?"), so this reassembles what the parser tore apart.
+    if req.query == "":
+        return req.path
+    "{req.path}?{req.query}"
+
+fn lab_route_test_api(req: HttpRequest) -> HttpResponse:
+    val method_text = http_method_to_text(req.method)
+    val full_path = _lab_test_api_full_path(req)
+    val result = handle_test_request(full_path, method_text, req.body, LAB_UI_SESSION.current_state(), lab_test_api_inject_event, LAB_UI_SESSION)
+    val status = http_status_from_code(result.0)
+    HttpResponse(
+        status: status,
+        headers: [("Content-Type", result.1), ("X-UI-Protocol-Version", _lab_test_api_protocol_header(result.1, result.2))],
+        body: result.2
+    )
+
+fn _lab_notebook_root() -> text:
+    val configured = env_get("SIMPLE_LAB_NOTEBOOK_ROOT")
+    if configured != nil and configured != "":
+        return configured
+    "lab_notebooks"
+
+# ============================================================================
+# Response helpers — every response carries X-Lab-Protocol-Version (design
+# §7.4 "All responses carry X-Lab-Protocol-Version: 1"), success or error.
+# ============================================================================
+
+fn _lab_versioned(resp: HttpResponse) -> HttpResponse:
+    resp.with_header("X-Lab-Protocol-Version", LAB_PROTOCOL_VERSION)
+
+fn _lab_json(body: text) -> HttpResponse:
+    _lab_versioned(HttpResponse.json(body))
+
+fn _lab_error(status: HttpStatus, message: text) -> HttpResponse:
+    _lab_versioned(HttpResponse.error(status, "{\"error\":\"{escape_json_string(message)}\"}").with_content_type("application/json; charset=utf-8"))
+
+fn _lab_path_segments(path: text) -> [text]:
+    var out: [text] = []
+    for part in path.split("/"):
+        if part != "":
+            out.push(part)
+    out
+
+# ============================================================================
+# Routes: GET /api/lab/status, GET /api/lab/lanes
+# ============================================================================
+
+fn lab_route_status(req: HttpRequest) -> HttpResponse:
+    val n = LAB_STATE.sessions.len()
+    _lab_json("{\"version\":1,\"auth_mode\":\"bearer\",\"session_count\":{n}}")
+
+fn lab_route_lanes(req: HttpRequest) -> HttpResponse:
+    val session_id = req.query_param("session_id")
+    if session_id == "":
+        return _lab_json("{\"lanes\":\"\"}")
+    val idx = LAB_STATE.find_session_index(session_id)
+    if idx < 0:
+        return _lab_error(HttpStatus.NotFound, "unknown session: {session_id}")
+    val result = dispatch_magics(LAB_STATE.session_mgr, session_id, LAB_STATE.magics_state, "%lanes")
+    if result.error != "":
+        return _lab_error(HttpStatus.InternalError, result.error)
+    _lab_json("{\"lanes\":\"{escape_json_string(result.message)}\"}")
+
+# ============================================================================
+# Routes: POST /api/lab/sessions
+# ============================================================================
+
+fn lab_route_create_session(req: HttpRequest) -> HttpResponse:
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    if LAB_STATE.sessions.len() >= LAB_CONFIG.max_sessions:
+        return _lab_error(HttpStatus.TooManyRequests, "max sessions reached ({LAB_CONFIG.max_sessions})")
+    var default_mode = _lab_json_text_field(req.body, "default_mode")
+    if default_mode == "":
+        default_mode = "interpreter"
+    val session_id = LAB_STATE.new_session_id()
+    val diag = LAB_STATE.session_mgr.create_session(session_id, default_mode)
+    if diag != "":
+        return _lab_error(HttpStatus.BadRequest, diag)
+    LAB_STATE.sessions.push(LabApiSession(id: session_id, default_mode: default_mode, cells: [], events: []))
+    _lab_versioned(HttpResponse(
+        status: HttpStatus.Created,
+        headers: [("Content-Type", "application/json; charset=utf-8")],
+        body: "{\"id\":\"{session_id}\"}"
+    ))
+
+# ============================================================================
+# Routes: POST /api/lab/sessions/{id}/cells/{cid}/execute
+# ============================================================================
+
+fn lab_route_execute(req: HttpRequest) -> HttpResponse:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 7:
+        return _lab_error(HttpStatus.BadRequest, "malformed execute path")
+    val session_id = segments[3]
+    val cell_id = segments[5]
+    val idx = LAB_STATE.find_session_index(session_id)
+    if idx < 0:
+        return _lab_error(HttpStatus.NotFound, "unknown session: {session_id}")
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+
+    val source = _lab_json_text_field(req.body, "source")
+    val mode_override = _lab_json_text_field(req.body, "mode")
+
+    if source.len() > LAB_CONFIG.max_cell_bytes:
+        return _lab_error(HttpStatus.PayloadTooLarge, "cell source exceeds max size ({LAB_CONFIG.max_cell_bytes} bytes)")
+    if not LAB_STATE.has_cell(idx, cell_id) and LAB_STATE.sessions[idx].cells.len() >= LAB_CONFIG.max_cells_per_session:
+        return _lab_error(HttpStatus.BadRequest, "too many cells in session (max {LAB_CONFIG.max_cells_per_session})")
+
+    LAB_STATE.record_cell(idx, cell_id, source)
+    val result: CellResult = LAB_STATE.session_mgr.execute_cell(session_id, source, cell_id, mode_override)
+    val stdout_capped = lab_truncate_with_marker(result.stdout_delta, LAB_CONFIG.max_output_bytes)
+
+    val stream_frame = "{\"type\":\"stream\",\"cell_id\":\"{cell_id}\",\"text\":\"{escape_json_string(stdout_capped)}\"}"
+    val ok_text = if result.is_ok(): "true" else: "false"
+    val status_frame = "{\"type\":\"status\",\"cell_id\":\"{cell_id}\",\"ok\":{ok_text},\"error\":\"{escape_json_string(result.error)}\"}"
+    LAB_STATE.push_event(idx, stream_frame)
+    LAB_STATE.push_event(idx, status_frame)
+
+    _lab_json("{\"ok\":{ok_text},\"stdout_delta\":\"{escape_json_string(stdout_capped)}\",\"error\":\"{escape_json_string(result.error)}\",\"duration_ms\":{result.duration_ms}}")
+
+# ============================================================================
+# Routes: POST /api/lab/sessions/{id}/interrupt, /reset
+# ============================================================================
+
+fn lab_route_interrupt(req: HttpRequest) -> HttpResponse:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 5:
+        return _lab_error(HttpStatus.BadRequest, "malformed interrupt path")
+    val session_id = segments[3]
+    val idx = LAB_STATE.find_session_index(session_id)
+    if idx < 0:
+        return _lab_error(HttpStatus.NotFound, "unknown session: {session_id}")
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    val mode_spec = _lab_json_text_field(req.body, "mode_spec")
+    val diag = LAB_STATE.session_mgr.interrupt_session(session_id, mode_spec)
+    if diag != "":
+        return _lab_error(HttpStatus.BadRequest, diag)
+    _lab_json("{\"interrupted\":true}")
+
+fn lab_route_reset(req: HttpRequest) -> HttpResponse:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 5:
+        return _lab_error(HttpStatus.BadRequest, "malformed reset path")
+    val session_id = segments[3]
+    val idx = LAB_STATE.find_session_index(session_id)
+    if idx < 0:
+        return _lab_error(HttpStatus.NotFound, "unknown session: {session_id}")
+    if not lab_json_body_is_valid(req.body):
+        return _lab_error(HttpStatus.BadRequest, "malformed JSON body")
+    val diag = LAB_STATE.session_mgr.reset_session(session_id)
+    if diag != "":
+        return _lab_error(HttpStatus.BadRequest, diag)
+    _lab_json("{\"reset\":true}")
+
+# ============================================================================
+# Routes: GET/PUT /api/lab/notebooks/{name}
+#
+# {name} is a single path segment (no subdirectories): Router's pattern
+# matcher (`match_route_pattern`, router.spl:96) requires equal segment
+# counts between pattern and path, so a multi-segment notebook path would
+# never match `/api/lab/notebooks/:name`. That is the deliberate scope for
+# L3 — a flat notebook directory jailed under `SIMPLE_LAB_NOTEBOOK_ROOT`
+# (default "lab_notebooks"). `path_is_safe` (already enforced by
+# `Router.dispatch`, router.spl:76) rejects "..", so the single segment can't
+# escape the jail even before this handler's own extension check.
+# ============================================================================
+
+fn _lab_notebook_content_type(name: text) -> text:
+    if name.ends_with(".ipynb"):
+        return "application/json; charset=utf-8"
+    "application/sdn; charset=utf-8"
+
+fn lab_route_notebook_get(req: HttpRequest) -> HttpResponse:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 4:
+        return _lab_error(HttpStatus.BadRequest, "malformed notebook path")
+    val name = segments[3]
+    if not lab_notebook_name_is_safe(name):
+        return _lab_error(HttpStatus.Forbidden, "invalid notebook name: {name}")
+    val path = "{_lab_notebook_root()}/{name}"
+    if not file_exists(path):
+        return _lab_error(HttpStatus.NotFound, "notebook not found: {name}")
+    val content = file_read(path)
+    _lab_versioned(HttpResponse(
+        status: HttpStatus.Ok,
+        headers: [("Content-Type", _lab_notebook_content_type(name))],
+        body: content
+    ))
+
+fn lab_route_notebook_put(req: HttpRequest) -> HttpResponse:
+    val segments = _lab_path_segments(req.path)
+    if segments.len() < 4:
+        return _lab_error(HttpStatus.BadRequest, "malformed notebook path")
+    val name = segments[3]
+    if not lab_notebook_name_is_safe(name):
+        return _lab_error(HttpStatus.Forbidden, "invalid notebook name: {name}")
+
+    if name.ends_with(".snb.sdn"):
+        match snb_parse(req.body):
+            Err(msg):
+                return _lab_error(HttpStatus.BadRequest, "invalid .snb.sdn: {msg}")
+            Ok(_nb):
+                pass_do_nothing("validated; fall through to write")
+    elif name.ends_with(".ipynb"):
+        match ipynb_parse(req.body):
+            Err(msg):
+                return _lab_error(HttpStatus.BadRequest, "invalid .ipynb: {msg}")
+            Ok(_nb):
+                pass_do_nothing("validated; fall through to write")
+    else:
+        return _lab_error(HttpStatus.BadRequest, "unsupported notebook extension: {name}")
+
+    val root = _lab_notebook_root()
+    val _mk = mkdir_p(root)
+    val path = "{root}/{name}"
+    val wrote = file_write(path, req.body)
+    if not wrote:
+        return _lab_error(HttpStatus.InternalError, "failed to write notebook: {name}")
+    _lab_json("{\"saved\":true,\"path\":\"{escape_json_string(path)}\"}")
+
+# ============================================================================
+# Router wiring
+# ============================================================================
+
+fn lab_build_router() -> Router:
+    var router = Router.new()
+    router.get("/api/lab/status", lab_route_status)
+    router.get("/api/lab/lanes", lab_route_lanes)
+    router.post("/api/lab/sessions", lab_route_create_session)
+    router.post("/api/lab/sessions/:id/cells/:cid/execute", lab_route_execute)
+    router.post("/api/lab/sessions/:id/interrupt", lab_route_interrupt)
+    router.post("/api/lab/sessions/:id/reset", lab_route_reset)
+    router.get("/api/lab/notebooks/:name", lab_route_notebook_get)
+    router.put("/api/lab/notebooks/:name", lab_route_notebook_put)
+    # Shared UI contract (task L4) — /api/test/... prefix mount. `Router`'s
+    # prefix-route matching (router.spl:83-85) does not filter by HTTP
+    # method, so this single mount serves both the GET and POST endpoints
+    # the contract defines (doc/04_architecture/ui/shared_ui_contract.md §3.3).
+    router.mount("/api/test/", lab_route_test_api)
+    router
+
+# ============================================================================
+# WebSocket event stream: GET /api/lab/sessions/{id}/events
+#
+# Frame writer is deliberately a raw-bytes `TcpStream` helper (never
+# `ConnStream.write_all_bytes`) — `app.ui.web.server.send_ws_tcp_frame`
+# carries this exact note: ConnStream's `tcp_stream: Any` field can't
+# downcast back to `TcpStream` reliably under the interpreter, so every
+# working raw-socket WS sender in this repo (`app.ui.web.server`,
+# `web_dashboard.terminal_ws`) writes bytes straight to `TcpStream`. Copied
+# here (not imported) to keep this module's only cross-app dependency on
+# `app.ui.web` limited to the pure-text handshake helpers.
+# ============================================================================
+
+fn _lab_ws_frame_bytes(message: text) -> [u8]:
+    val payload = lab_text_to_bytes(message)
+    val len = payload.len()
+    var frame: [u8] = [0x81]
+    if len < 126:
+        frame.push(len & 0xFF)
+    elif len < 65536:
+        frame.push(126)
+        frame.push((len / 256) & 0xFF)
+        frame.push(len & 0xFF)
+    else:
+        frame.push(127)
+        frame.push(0)
+        frame.push(0)
+        frame.push(0)
+        frame.push(0)
+        frame.push((len / 16777216) & 0xFF)
+        frame.push((len / 65536) & 0xFF)
+        frame.push((len / 256) & 0xFF)
+        frame.push(len & 0xFF)
+    frame + payload
+
+fn lab_send_ws_text(stream: TcpStream, message: text) -> bool:
+    val capped = lab_truncate_with_marker(message, LAB_CONFIG.max_ws_frame_bytes)
+    match stream.write_all(_lab_ws_frame_bytes(capped)):
+        Err(_):
+            false
+        Ok(()):
+            true
+
+fn _lab_is_ws_events_path(path: text) -> bool:
+    val segments = _lab_path_segments(path)
+    segments.len() == 5 and segments[0] == "api" and segments[1] == "lab" and segments[2] == "sessions" and segments[4] == "events"
+
+fn lab_handle_ws_events(stream: TcpStream, req: HttpRequest):
+    val segments = _lab_path_segments(req.path)
+    val session_id = segments[3]
+    val idx = LAB_STATE.find_session_index(session_id)
+    if idx < 0:
+        val _ = write_response(stream, _lab_error(HttpStatus.NotFound, "unknown session: {session_id}"))
+        return
+
+    val key = req.header("Sec-WebSocket-Key")
+    if key == "":
+        val _ = write_response(stream, _lab_error(HttpStatus.BadRequest, "missing Sec-WebSocket-Key"))
+        return
+    val accept = compute_ws_accept(key)
+
+    var response = "HTTP/1.1 101 Switching Protocols\r\n"
+    response = "{response}Upgrade: websocket\r\n"
+    response = "{response}Connection: Upgrade\r\n"
+    response = "{response}Sec-WebSocket-Accept: {accept}\r\n"
+    response = "{response}X-Lab-Protocol-Version: {LAB_PROTOCOL_VERSION}\r\n"
+    response = "{response}\r\n"
+    match stream.write_text(response):
+        Err(_):
+            return
+        Ok(()):
+            pass_do_nothing("handshake sent; proceed to drain buffered frames")
+
+    val events = LAB_STATE.drain_events(idx)
+    for frame in events:
+        val _sent = lab_send_ws_text(stream, frame)
+
+# ============================================================================
+# Accept loop (see the plan-path correction docstring at the top of this
+# file for why this can't be `SimpleHttpServer.start()`).
+# ============================================================================
+
+class LabServer:
+    router: Router
+
+    static fn create() -> LabServer:
+        LabServer(router: lab_build_router())
+
+    me serve_forever(listener: TcpListener):
+        var running = true
+        while running:
+            match listener.accept():
+                Ok(stream):
+                    self.handle_connection(stream)
+                Err(_e):
+                    running = false
+
+    me serve_bounded(listener: TcpListener, max_requests: i64, accept_timeout_ms: i64):
+        """Serve up to `max_requests` connections, one at a time, then stop.
+        Used by the test entrypoint so the server process exits on its own."""
+        var served = 0
+        var running = true
+        while running:
+            if served >= max_requests:
+                running = false
+            else:
+                match listener.accept_timeout(accept_timeout_ms):
+                    Ok(stream):
+                        self.handle_connection(stream)
+                        served = served + 1
+                    Err(_e):
+                        running = false
+
+    me handle_connection(stream: TcpStream):
+        match parse_request_with_limits(stream, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, LAB_CONFIG.max_body_bytes):
+            Ok(req):
+                if req.method == HttpMethod.Get and _lab_is_ws_events_path(req.path):
+                    if not lab_origin_allowed(req.header("Origin"), LAB_CONFIG):
+                        val _r1 = write_response(stream, _lab_error(HttpStatus.Forbidden, "origin not allowed"))
+                    elif not _lab_authorized_ws(req):
+                        val _r2 = write_response(stream, _lab_error(HttpStatus.Unauthorized, "missing or invalid token"))
+                    else:
+                        lab_handle_ws_events(stream, req)
+                elif req.path.starts_with("/api/lab/") and not _lab_authorized_http(req):
+                    val _r3 = write_response(stream, _lab_error(HttpStatus.Unauthorized, "missing or invalid bearer token"))
+                else:
+                    val resp = self.router.dispatch(req)
+                    val _ok = write_response(stream, resp)
+            Err(e):
+                val _ok = write_response(stream, _lab_error(_lab_status_from_parser_error(e), e))
+        val _c = stream.close()
+
+# ============================================================================
+# Env-configured entrypoint (mirrors test/fixture/net/simple_http_server.spl
+# so the server can be spawned as a real OS process by a system spec, and by
+# `bin/simple run src/app/simple_lab/lab_server.spl` for manual use).
+# ============================================================================
+
+fn _lab_env_or(key: text, fallback: text) -> text:
+    val v = env_get(key)
+    if v == nil or v == "":
+        fallback
+    else:
+        v
+
+fn lab_server_main():
+    val host = _lab_env_or("SIMPLE_LAB_HTTP_HOST", "127.0.0.1")
+    val port_text = _lab_env_or("SIMPLE_LAB_HTTP_PORT", "0")
+    val max_text = _lab_env_or("SIMPLE_LAB_HTTP_MAX", "1")
+    val portfile = _lab_env_or("SIMPLE_LAB_HTTP_PORTFILE", "")
+    val timeout_text = _lab_env_or("SIMPLE_LAB_HTTP_ACCEPT_TIMEOUT_MS", "20000")
+
+    if not lab_bind_allowed(host, LAB_CONFIG):
+        print "SIMPLE_LAB_BIND_REFUSED {host}: non-localhost bind requires SIMPLE_LAB_ALLOW_REMOTE=1"
+        return
+
+    print "SIMPLE_LAB_TOKEN {LAB_CONFIG.token}"
+
+    val bind_addr = "{host}:{port_text}"
+    val listener_res = TcpListener.bind(bind_addr)
+    match listener_res:
+        Err(e):
+            print "SIMPLE_LAB_BIND_FAILED {bind_addr}: {e}"
+            return
+        Ok(listener):
+            var bound = bind_addr
+            val local_res = listener.local_addr()
+            if local_res.is_ok():
+                bound = local_res.unwrap()
+            print "SIMPLE_LAB_LISTENING {bound}"
+
+            if portfile != "":
+                val _wrote = rt_file_write_text(portfile, bound)
+
+            val server = LabServer.create()
+            server.serve_bounded(listener, max_text.to_i64(), timeout_text.to_i64())
+            val _lc = listener.close()
+            print "SIMPLE_LAB_DONE"
+
+export LabServer, LabApiState, lab_build_router, lab_server_main
+export lab_route_status, lab_route_lanes, lab_route_create_session, lab_route_execute
+export lab_route_interrupt, lab_route_reset, lab_route_notebook_get, lab_route_notebook_put
+export lab_route_test_api, lab_test_api_inject_event
+
+lab_server_main()

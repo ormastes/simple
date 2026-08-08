@@ -1,0 +1,229 @@
+#!/bin/sh
+set -eu
+
+# Optimization-Soundness / Execution-Mode Differential Harness
+#   (cert Phase-4 — optimization soundness + verification-of-output evidence)
+#
+# DO-178C §6.4.4.2 (verification of the outputs of the integration process) and
+# ISO 26262-6 §9 require evidence that compiler OPTIMIZATION / code generation
+# does not change the observable behaviour of a program. The Simple tree-walking
+# INTERPRETER is the reference oracle; the default COMPILED backend (JIT/native)
+# is the article under test.
+#
+# For every fixture this harness runs the SAME program twice with one binary:
+#     interpret : SIMPLE_EXECUTION_MODE=interpret  <bin> run FIXTURE
+#     compiled  :                                   <bin> run FIXTURE   (default)
+# Each fixture PINS its expected stdout in a header block:
+#     # expected stdout:
+#     # <line1>
+#     # <line2>
+# A fixture is SOUND+CORRECT only if BOTH modes produce stdout byte-identical to
+# that pinned expected value. This deliberately does NOT count "both modes
+# produced the same (empty/crashed/wrong) output" as agreement — mutual failure
+# is a defect, not evidence. Three failure classes are distinguished:
+#     DIVERGE      interpret != compiled            (codegen/optimization defect)
+#     BOTH-WRONG   interpret == compiled != expected (shared miscompile / wrong)
+#     NO-OUTPUT    a mode produced empty output      (crash / did not run)
+# stderr (JIT-fallback [INFO], warnings) is discarded — only stdout is evidence.
+#
+# This is NOT stage-4-wall gated: the wall is seed-only. The deployed pure-Simple
+# binary is clean, so this evidence is verifiable now.
+#
+# Usage:
+#   sh scripts/check/cert/soundness-diff.shs [CORPUS]   # run corpus (dir or .spl)
+#   sh scripts/check/cert/soundness-diff.shs --self-test # prove the harness discriminates
+#   sh scripts/check/cert/soundness-diff.shs --help
+#
+# Exit status:
+#   0  every fixture: interpret == compiled == its pinned expected stdout
+#   1  at least one DIVERGE / BOTH-WRONG / NO-OUTPUT, or a fixture missing an
+#      `# expected stdout:` block
+#
+# Env knobs:
+#   SIMPLE_BIN  compiler binary
+#               (default: /home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple)
+#   CORPUS      corpus dir/file (overridden by the positional CORPUS argument)
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+
+SIMPLE_BIN="${SIMPLE_BIN:-/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple}"
+CORPUS="${CORPUS:-$REPO_ROOT/test/cert/soundness}"
+
+usage() {
+    sed -n '3,49p' "$0"
+    exit 0
+}
+
+# Globals populated by check_fixture so the caller can report them.
+INTERP_OUT=""
+COMPILED_OUT=""
+EXPECT_OUT=""
+FAIL_KIND=""
+
+# parse_expected FIXTURE -> prints the pinned expected stdout (may be empty if
+# the fixture has no `# expected stdout:` block).
+parse_expected() {
+    awk '
+        /^#[[:space:]]*expected stdout:/ { grab=1; next }
+        grab==1 {
+            if ($0 ~ /^#/) { line=$0; sub(/^#[[:space:]]?/, "", line); print line }
+            else { exit }
+        }
+    ' "$1"
+}
+
+# run_one MODE FIXTURE -> prints stdout of the program (stderr discarded).
+# `|| true` keeps `set -e` from aborting when a program exits non-zero; a crash
+# then surfaces as empty/mismatched output, which check_fixture treats as a
+# defect (NOT as agreement).
+run_one() {
+    _mode="$1"; _f="$2"
+    if [ "$_mode" = interpret ]; then
+        SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BIN" run "$_f" 2>/dev/null || true
+    else
+        env -u SIMPLE_EXECUTION_MODE "$SIMPLE_BIN" run "$_f" 2>/dev/null || true
+    fi
+}
+
+# check_fixture FIXTURE -> 0 if interpret == compiled == expected (non-empty),
+# else 1 with FAIL_KIND set to DIVERGE / BOTH-WRONG / NO-OUTPUT / NO-EXPECT.
+check_fixture() {
+    _f="$1"
+    FAIL_KIND=""
+    EXPECT_OUT=$(parse_expected "$_f")
+    INTERP_OUT=$(run_one interpret "$_f")
+    COMPILED_OUT=$(run_one compiled "$_f")
+
+    if [ -z "$EXPECT_OUT" ]; then
+        FAIL_KIND="NO-EXPECT"          # fixture did not pin an expected stdout
+        return 1
+    fi
+    if [ -z "$INTERP_OUT" ] || [ -z "$COMPILED_OUT" ]; then
+        FAIL_KIND="NO-OUTPUT"          # a mode crashed / produced nothing
+        return 1
+    fi
+    if [ "$INTERP_OUT" != "$COMPILED_OUT" ]; then
+        FAIL_KIND="DIVERGE"            # the soundness defect this harness hunts
+        return 1
+    fi
+    if [ "$INTERP_OUT" != "$EXPECT_OUT" ]; then
+        FAIL_KIND="BOTH-WRONG"         # agree, but both wrong (shared miscompile)
+        return 1
+    fi
+    return 0
+}
+
+_indent() { printf '%s' "$2" | sed "1s/^/$1/;2,\$s/^/          | /"; printf '\n'; }
+
+report_fixture() {
+    printf '  fixture : %s  [%s]\n' "$1" "$FAIL_KIND"
+    _indent '  expect  | ' "$EXPECT_OUT"
+    _indent '  interp  | ' "$INTERP_OUT"
+    _indent '  compiled| ' "$COMPILED_OUT"
+}
+
+# ---- corpus run --------------------------------------------------------------
+run_corpus() {
+    _corpus="$1"
+    if [ -d "$_corpus" ]; then
+        _fixtures=$(find "$_corpus" -type f -name '*.spl' | sort)
+    elif [ -f "$_corpus" ]; then
+        _fixtures="$_corpus"
+    else
+        printf 'error: corpus not found: %s\n' "$_corpus" >&2
+        exit 1
+    fi
+    if [ -z "$_fixtures" ]; then
+        printf 'error: no .spl fixtures under %s\n' "$_corpus" >&2
+        exit 1
+    fi
+
+    printf '== optimization-soundness differential (interpret vs compiled vs expected) ==\n'
+    printf 'binary : %s\n' "$SIMPLE_BIN"
+    printf 'corpus : %s\n\n' "$_corpus"
+
+    _total=0
+    _bad=0
+    for _f in $_fixtures; do
+        _total=$((_total + 1))
+        if check_fixture "$_f"; then
+            printf 'PASS      %s\n' "$_f"
+        else
+            _bad=$((_bad + 1))
+            printf '%-9s %s\n' "$FAIL_KIND" "$_f"
+            report_fixture "$_f"
+        fi
+    done
+
+    printf '\n-- summary: %d fixture(s), %d sound+correct, %d defect(s) --\n' \
+        "$_total" "$((_total - _bad))" "$_bad"
+    if [ "$_bad" -ne 0 ]; then
+        printf 'RESULT: FAIL (soundness/correctness defect(s) found)\n'
+        return 1
+    fi
+    printf 'RESULT: PASS (interpret == compiled == expected on all fixtures)\n'
+    return 0
+}
+
+# ---- self test ---------------------------------------------------------------
+# Proves the harness DISCRIMINATES on all failure classes, in particular that a
+# program which fails in BOTH modes is NOT counted as agreement (the false-GREEN
+# this version fixes).
+self_test() {
+    _tmp=$(mktemp -d)
+    trap 'rm -rf "$_tmp"' EXIT
+    _fail=0
+
+    # (1) sound+correct: both modes print 42, expected 42 -> PASS
+    _ok="$_tmp/ok.spl"
+    { printf '# expected stdout:\n# 42\nfn main():\n    print(21 + 21)\n'; } > "$_ok"
+    printf '== self-test 1: sound+correct fixture (must PASS) ==\n'
+    if check_fixture "$_ok"; then
+        printf 'OK   passed (interp=%s compiled=%s)\n\n' "$INTERP_OUT" "$COMPILED_OUT"
+    else
+        printf 'BAD  reported %s\n' "$FAIL_KIND"; report_fixture "$_ok"; _fail=1
+    fi
+
+    # (2) divergence: interp=42, compiled wrong (frozen Result.unwrap bug), exp 42
+    #     -> must be flagged DIVERGE. NOTE: this oracle relies on that frozen bug;
+    #     if redeploy fixes it, this case stops diverging and the self-test FAILS
+    #     loudly here, signalling the fixture must be refreshed.
+    _div="$_tmp/div.spl"
+    { printf '# expected stdout:\n# 42\nfn main():\n    val r = Ok(42)\n    print(r.unwrap())\n'; } > "$_div"
+    printf '== self-test 2: divergent fixture (must be flagged DIVERGE) ==\n'
+    if check_fixture "$_div"; then
+        printf 'BAD  divergence NOT flagged (interp=%s compiled=%s)\n\n' "$INTERP_OUT" "$COMPILED_OUT"; _fail=1
+    elif [ "$FAIL_KIND" = DIVERGE ] || [ "$FAIL_KIND" = BOTH-WRONG ] || [ "$FAIL_KIND" = NO-OUTPUT ]; then
+        printf 'OK   flagged %s:\n' "$FAIL_KIND"; report_fixture "$_div"; printf '\n'
+    else
+        printf 'BAD  unexpected kind %s\n\n' "$FAIL_KIND"; _fail=1
+    fi
+
+    # (3) THE false-GREEN guard: a program that FAILS IN BOTH MODES (undefined
+    #     symbol -> empty stdout both times) must NOT be counted as agreement.
+    _crash="$_tmp/crash.spl"
+    { printf '# expected stdout:\n# 42\nfn main():\n    print(undefined_symbol_xyz)\n'; } > "$_crash"
+    printf '== self-test 3: both-modes-fail fixture (must NOT be PASS) ==\n'
+    if check_fixture "$_crash"; then
+        printf 'BAD  mutual failure counted as agreement (false-GREEN)\n\n'; _fail=1
+    else
+        printf 'OK   mutual failure flagged %s (not agreement)\n\n' "$FAIL_KIND"
+    fi
+
+    if [ "$_fail" -ne 0 ]; then
+        printf 'SELF-TEST: FAIL (harness does not discriminate correctly)\n'
+        return 1
+    fi
+    printf 'SELF-TEST: PASS (discriminates PASS / DIVERGE / mutual-failure)\n'
+    return 0
+}
+
+# ---- dispatch ----------------------------------------------------------------
+case "${1:-}" in
+    --help|-h) usage ;;
+    --self-test) self_test ;;
+    "") run_corpus "$CORPUS" ;;
+    -*) printf 'error: unknown option: %s\n' "$1" >&2; exit 1 ;;
+    *) run_corpus "$1" ;;
+esac

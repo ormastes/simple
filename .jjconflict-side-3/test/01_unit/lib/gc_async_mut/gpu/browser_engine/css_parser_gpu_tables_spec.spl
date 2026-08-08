@@ -1,0 +1,686 @@
+# CSS parser GPU-table lane spec
+#
+# Covers the style-block parsing pipeline, the GPU-friendly rule-index
+# tables, the resolver's selector matching, and CPU parity between the
+# direct selector-matching lane and the indexed/table lookup lane.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_block_parse.spl 90%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_rule_index.spl 90%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/style_block_resolve.spl 90%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/selector_matcher.spl 90%
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.style_block.{CssRule, CssDecl, css_decls_contain}
+use std.gc_async_mut.gpu.browser_engine.style_block_parse.{
+    extract_style_blocks, parse_css_rules, parse_declarations,
+    collect_css_vars, resolve_css_vars_in_rules, expand_flex_flow,
+    extract_keyframes}
+use std.gc_async_mut.gpu.browser_engine.style_block_resolve.{
+    selector_matches, simple_selector_matches}
+use std.gc_async_mut.gpu.browser_engine.selector_matcher.{
+    br_tag_name_from_content,
+    br_selector_list_contains_not_self,
+    br_selector_list_contains_attr_self,
+    br_selector_list_contains_multi_class}
+use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
+    br_style_block_rule_for_class,
+    br_style_block_rule_for_id,
+    br_style_block_rule_for_tag,
+    br_style_block_rule_for_universal,
+    br_style_block_rule_for_tag_class,
+    br_style_block_rule_for_tag_id,
+    br_style_block_rule_for_descendant,
+    br_style_block_rule_for_child,
+    br_style_block_rule_for_multi_class,
+    br_style_block_rule_for_selector}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+
+# ---------------------------------------------------------------------------
+# Fixture helpers
+# ---------------------------------------------------------------------------
+
+fn make_element(tag: text, class_value: text, id_value: text) -> BeDomNode:
+    val node = BeDomNode.element(tag)
+    if class_value.len() > 0:
+        node.set_attr("class", class_value)
+    if id_value.len() > 0:
+        node.set_attr("id", id_value)
+    node
+
+fn direct_matched_props(css: text, node: BeDomNode, nth: i32, sibling_count: i32) -> text:
+    """Direct lane: parse the stylesheet, run the resolver's selector
+    matcher on every rule and concatenate matched declarations."""
+    val rules = parse_css_rules(css)
+    var out = ""
+    var i = 0
+    while i < rules.len():
+        val rule = rules[i]
+        i = i + 1
+        if selector_matches(rule.selector, node, nil, nth, sibling_count):
+            var j = 0
+            while j < rule.declarations.len():
+                val d = rule.declarations[j]
+                j = j + 1
+                out = out + d.property + ":" + d.value + ";"
+    out
+
+fn parity_css() -> text:
+    ".btn { color: red; } " +
+    "#main { width: 100px; } " +
+    "div { margin-top: 3px; } " +
+    "* { box-sizing: border-box; } " +
+    ".btn.big { color: navy; } " +
+    "p { padding-top: 9px; }"
+
+fn parity_doc() -> text:
+    "<html><head><style>" + parity_css() +
+        "</style></head><body><div class=\"btn big\" id=\"main\"></div></body></html>"
+
+describe "css parser gpu tables — style block parsing":
+
+    it "extracts multiple style blocks from html":
+        val html = "<html><head><style>p { color: red; }</style>" +
+            "<style type=\"text/css\">.a { margin-top: 1px; }</style></head></html>"
+        val blocks = extract_style_blocks(html)
+        expect(blocks.len()).to_equal(2)
+        expect(blocks[0].contains("color: red")).to_be_true()
+        expect(blocks[1].contains("margin-top: 1px")).to_be_true()
+
+    it "returns no blocks when html has no style element":
+        val blocks = extract_style_blocks("<html><body><p>hi</p></body></html>")
+        expect(blocks.len()).to_equal(0)
+
+    it "parses a simple rule into selector and declarations":
+        val rules = parse_css_rules("h1 { color: blue; font-size: 20px; }")
+        expect(rules.len()).to_equal(1)
+        expect(rules[0].selector).to_equal("h1")
+        expect(css_decls_contain(rules[0].declarations, "color", "blue")).to_be_true()
+        expect(css_decls_contain(rules[0].declarations, "font-size", "20px")).to_be_true()
+
+    it "splits a selector list into one rule per selector":
+        val rules = parse_css_rules("h1, h2 { color: green; }")
+        expect(rules.len()).to_equal(2)
+        expect(rules[0].selector).to_equal("h1")
+        expect(rules[1].selector).to_equal("h2")
+        expect(css_decls_contain(rules[1].declarations, "color", "green")).to_be_true()
+
+    it "skips comments between rules":
+        val rules = parse_css_rules("/* lead comment */ p { color: red; } /* tail */ span { color: blue; }")
+        expect(rules.len()).to_equal(2)
+        expect(rules[0].selector).to_equal("p")
+        expect(rules[1].selector).to_equal("span")
+
+    it "recovers from a truncated rule without crashing":
+        val rules = parse_css_rules("p { color: red; } div { margin-top: 1px")
+        expect(rules.len()).to_equal(1)
+        expect(rules[0].selector).to_equal("p")
+
+    it "parses declarations skipping malformed segments":
+        val decls = parse_declarations("color: red;; not-a-decl ; width: 10px;")
+        expect(decls.len()).to_equal(2)
+        expect(css_decls_contain(decls, "color", "red")).to_be_true()
+        expect(css_decls_contain(decls, "width", "10px")).to_be_true()
+
+    it "keeps !important in the declaration value":
+        val decls = parse_declarations("color: red !important")
+        expect(decls.len()).to_equal(1)
+        expect(decls[0].property).to_equal("color")
+        expect(decls[0].value.contains("!important")).to_be_true()
+        expect(decls[0].value.contains("red")).to_be_true()
+
+    it "expands margin box shorthand to four sides":
+        val decls = parse_declarations("margin: 1px 2px 3px 4px")
+        expect(decls.len()).to_equal(4)
+        expect(css_decls_contain(decls, "margin-top", "1px")).to_be_true()
+        expect(css_decls_contain(decls, "margin-right", "2px")).to_be_true()
+        expect(css_decls_contain(decls, "margin-bottom", "3px")).to_be_true()
+        expect(css_decls_contain(decls, "margin-left", "4px")).to_be_true()
+
+    it "expands flex-flow into direction and wrap":
+        val decls = expand_flex_flow("column wrap")
+        expect(decls.len()).to_equal(2)
+        expect(css_decls_contain(decls, "flex-direction", "column")).to_be_true()
+        expect(css_decls_contain(decls, "flex-wrap", "wrap")).to_be_true()
+
+    it "collects custom properties from :root and resolves var() references":
+        val css = ":root { --main-color: red; } p { color: var(--main-color); }"
+        val rules = parse_css_rules(css)
+        val vars = collect_css_vars(rules)
+        expect(vars.len()).to_equal(1)
+        expect(vars[0].property).to_equal("--main-color")
+        expect(vars[0].value).to_equal("red")
+        val resolved = resolve_css_vars_in_rules(rules, vars)
+        var found = false
+        var i = 0
+        while i < resolved.len():
+            val rule = resolved[i]
+            i = i + 1
+            if rule.selector == "p":
+                found = css_decls_contain(rule.declarations, "color", "red")
+        expect(found).to_be_true()
+
+    it "extracts keyframes with normalized offsets":
+        val css = "@keyframes fade { from { opacity: 0; } 50% { opacity: 0.5; } to { opacity: 1; } }"
+        val registry = extract_keyframes(css)
+        expect(registry.entries.len()).to_equal(1)
+        expect(registry.entries[0].name).to_equal("fade")
+        val frames = registry.entries[0].frames
+        expect(frames.len()).to_equal(3)
+        expect(frames[0].offset).to_equal(0.0)
+        expect(frames[1].offset).to_equal(0.5)
+        expect(frames[2].offset).to_equal(1.0)
+
+    it "strips @keyframes bodies from the flat rule table":
+        val css = "@keyframes slide { from { left: 0px; } to { left: 10px; } } p { color: red; }"
+        val rules = parse_css_rules(css)
+        expect(rules.len()).to_equal(1)
+        expect(rules[0].selector).to_equal("p")
+
+    it "surfaces rules inside @supports and @layer blocks":
+        val css = "@supports (display: flex) { .s { color: red; } } @layer base { .l { color: blue; } }"
+        val rules = parse_css_rules(css)
+        var s_found = false
+        var l_found = false
+        var i = 0
+        while i < rules.len():
+            val rule = rules[i]
+            i = i + 1
+            if rule.selector == ".s":
+                s_found = css_decls_contain(rule.declarations, "color", "red")
+            if rule.selector == ".l":
+                l_found = css_decls_contain(rule.declarations, "color", "blue")
+        expect(s_found).to_be_true()
+        expect(l_found).to_be_true()
+
+    it "flattens parent-referencing nested rules":
+        val css = ".card { color: red; & .inner { color: blue; } }"
+        val rules = parse_css_rules(css)
+        var nested_found = false
+        var i = 0
+        while i < rules.len():
+            val rule = rules[i]
+            i = i + 1
+            if rule.selector == ".card .inner":
+                nested_found = css_decls_contain(rule.declarations, "color", "blue")
+        expect(nested_found).to_be_true()
+
+describe "css parser gpu tables — selector matcher":
+
+    it "extracts the tag name from bracketed tag content":
+        expect(br_tag_name_from_content("<div class=\"x\" id=\"y\">")).to_equal("div")
+        expect(br_tag_name_from_content("<SPAN>")).to_equal("span")
+        expect(br_tag_name_from_content("no brackets")).to_equal("")
+
+    it "matches :not against attribute substring options":
+        val tag = "a href=\"https://example.test/docs\" class=\"nav\""
+        expect(br_selector_list_contains_not_self("a:not([href*=\"admin\"])", "a", tag)).to_be_true()
+        val admin_tag = "a href=\"https://example.test/admin\" class=\"nav\""
+        expect(br_selector_list_contains_not_self("a:not([href*=\"admin\"])", "a", admin_tag)).to_be_false()
+
+    it "matches attribute-self substring options against tag content":
+        # Only the [attr*="value"] substring operator is supported by the
+        # option matcher; exact [attr="value"] is not implemented there.
+        val tag = "input type=\"text\" name=\"q\""
+        expect(br_selector_list_contains_attr_self("input[type*=\"tex\"]", "input", tag)).to_be_true()
+        expect(br_selector_list_contains_attr_self("input[type*=\"radio\"]", "input", tag)).to_be_false()
+
+    it "matches compound tag.class options against tag content":
+        val tag = "button class=\"primary big\""
+        expect(br_selector_list_contains_attr_self("button.primary", "button", tag)).to_be_true()
+        expect(br_selector_list_contains_attr_self("button.ghost", "button", tag)).to_be_false()
+        expect(br_selector_list_contains_attr_self("a.primary", "button", tag)).to_be_false()
+
+    it "requires every class for multi-class selectors":
+        expect(br_selector_list_contains_multi_class(".a.b { }", ["a", "b"])).to_be_true()
+        expect(br_selector_list_contains_multi_class(".a { }", ["a", "b"])).to_be_false()
+
+describe "css parser gpu tables — rule index tables":
+
+    # The former arity bug (style_rule_index.spl:711 calling
+    # br_selector_list_contains_simple with 2 args) is fixed, so the
+    # selector-driven table lookups below now exercise the previously
+    # unrunnable non-empty style-block lanes. The table matcher is a
+    # substring check on the rule's selector list.
+
+    it "returns empty for a blank selector or missing style block":
+        expect(br_style_block_rule_for_selector("<html></html>", ".x")).to_equal("")
+        expect(br_style_block_rule_for_selector("<html><style>.x { color: red; }</style></html>", "")).to_equal("")
+
+    it "returns empty for blank class, id and combinator arguments":
+        val html = "<html><head><style>.a { color: red; }</style></head><body></body></html>"
+        expect(br_style_block_rule_for_class(html, "")).to_equal("")
+        expect(br_style_block_rule_for_id(html, "  ")).to_equal("")
+        expect(br_style_block_rule_for_tag_class(html, "div", "")).to_equal("")
+        expect(br_style_block_rule_for_tag_id(html, "div", "")).to_equal("")
+        expect(br_style_block_rule_for_descendant(html, "", "span")).to_equal("")
+        expect(br_style_block_rule_for_child(html, "ul", " ")).to_equal("")
+
+    it "returns empty from selector lookups when the document has no style block":
+        val bare = "<html><body><div class=\"a\"></div></body></html>"
+        expect(br_style_block_rule_for_class(bare, "a")).to_equal("")
+        expect(br_style_block_rule_for_id(bare, "main")).to_equal("")
+        expect(br_style_block_rule_for_tag(bare, "div")).to_equal("")
+        expect(br_style_block_rule_for_universal(bare)).to_equal("")
+
+    it "matches multi-class table entries only when all classes present":
+        val html = "<html><head><style>.a.b { color: red; }</style></head><body></body></html>"
+        expect(br_style_block_rule_for_multi_class(html, "a b").contains("color: red")).to_be_true()
+        expect(br_style_block_rule_for_multi_class(html, "a ghost")).to_equal("")
+        # fewer than two classes never consults the multi-class table
+        expect(br_style_block_rule_for_multi_class(html, "a")).to_equal("")
+
+    it "merges multi-class rules found across multiple style blocks":
+        val html = "<html><head><style>.a.b { color: red; }</style>" +
+            "<style>.a.b { width: 7px; }</style></head><body></body></html>"
+        val out = br_style_block_rule_for_multi_class(html, "a b")
+        expect(out.contains("color: red")).to_be_true()
+        expect(out.contains("width: 7px")).to_be_true()
+
+    it "for_selector returns declarations from a non-empty style block":
+        val html = "<html><head><style>.x { color: red; } .y { width: 4px; }</style></head><body></body></html>"
+        expect(br_style_block_rule_for_selector(html, ".x").contains("color: red")).to_be_true()
+        expect(br_style_block_rule_for_selector(html, ".x").contains("width: 4px")).to_be_false()
+        expect(br_style_block_rule_for_selector(html, ".zz")).to_equal("")
+
+    it "merges for_selector declarations across multiple style blocks":
+        val html = "<html><head><style>.x { color: red; }</style>" +
+            "<style>.x { width: 7px; }</style></head><body></body></html>"
+        val out = br_style_block_rule_for_selector(html, ".x")
+        expect(out.contains("color: red")).to_be_true()
+        expect(out.contains("width: 7px")).to_be_true()
+
+    it "class and id table lookups surface rules from a non-empty style block":
+        val html = "<html><head><style>.btn { color: red; } #main { width: 100px; }</style></head><body></body></html>"
+        expect(br_style_block_rule_for_class(html, "btn").contains("color: red")).to_be_true()
+        expect(br_style_block_rule_for_class(html, "ghost")).to_equal("")
+        expect(br_style_block_rule_for_id(html, "main").contains("width: 100px")).to_be_true()
+        expect(br_style_block_rule_for_id(html, "other")).to_equal("")
+
+    it "tag and universal table lookups surface rules from a non-empty style block":
+        val html = "<html><head><style>div { margin-top: 3px; } * { box-sizing: border-box; }</style></head><body></body></html>"
+        expect(br_style_block_rule_for_tag(html, "div").contains("margin-top: 3px")).to_be_true()
+        expect(br_style_block_rule_for_tag(html, "em")).to_equal("")
+        expect(br_style_block_rule_for_universal(html).contains("box-sizing: border-box")).to_be_true()
+
+    it "tag.class and tag#id compound lookups surface their rules":
+        val html = "<html><head><style>div.btn { color: navy; } div#main { width: 7px; } span.btn { color: olive; }</style></head><body></body></html>"
+        val tc = br_style_block_rule_for_tag_class(html, "div", "btn")
+        expect(tc.contains("color: navy")).to_be_true()
+        expect(tc.contains("color: olive")).to_be_false()
+        expect(br_style_block_rule_for_tag_class(html, "em", "btn")).to_equal("")
+        expect(br_style_block_rule_for_tag_id(html, "div", "main").contains("width: 7px")).to_be_true()
+        expect(br_style_block_rule_for_tag_id(html, "div", "other")).to_equal("")
+
+    it "descendant and child combinator lookups surface their rules":
+        val html = "<html><head><style>ul li { color: green; } ul > li { color: teal; } ol li { color: gray; }</style></head><body></body></html>"
+        val desc = br_style_block_rule_for_descendant(html, "ul", "li")
+        expect(desc.contains("color: green")).to_be_true()
+        expect(desc.contains("color: gray")).to_be_false()
+        expect(br_style_block_rule_for_descendant(html, "nav", "li")).to_equal("")
+        val child_out = br_style_block_rule_for_child(html, "ul", "li")
+        expect(child_out.contains("color: teal")).to_be_true()
+        expect(child_out.contains("color: green")).to_be_false()
+        expect(br_style_block_rule_for_child(html, "ol", "li")).to_equal("")
+
+describe "css parser gpu tables — resolver selector matching":
+
+    it "matches tag, class, id and universal selectors":
+        val node = make_element("div", "btn primary", "main")
+        expect(selector_matches("div", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches(".btn", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("#main", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("*", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("span", node, nil, 1, 1)).to_be_false()
+        expect(selector_matches(".ghost", node, nil, 1, 1)).to_be_false()
+        expect(selector_matches("#other", node, nil, 1, 1)).to_be_false()
+
+    it "matches compound and chained class selectors":
+        val node = make_element("div", "btn primary", "main")
+        expect(selector_matches("div.btn", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("div#main", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches(".btn.primary", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("span.btn", node, nil, 1, 1)).to_be_false()
+        expect(selector_matches(".btn.ghost", node, nil, 1, 1)).to_be_false()
+
+    it "matches positional pseudo-classes by nth and sibling count":
+        val node = make_element("li", "", "")
+        expect(simple_selector_matches("li:first-child", node, 1, 3)).to_be_true()
+        expect(simple_selector_matches("li:first-child", node, 2, 3)).to_be_false()
+        expect(simple_selector_matches("li:last-child", node, 3, 3)).to_be_true()
+        expect(simple_selector_matches("li:only-child", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches("li:only-child", node, 1, 2)).to_be_false()
+        expect(simple_selector_matches("li:nth-child(2)", node, 2, 4)).to_be_true()
+        expect(simple_selector_matches("li:nth-child(2)", node, 3, 4)).to_be_false()
+
+    it "matches nth-child keyword and formula arguments":
+        val node = make_element("li", "", "")
+        expect(simple_selector_matches("li:nth-child(odd)", node, 3, 5)).to_be_true()
+        expect(simple_selector_matches("li:nth-child(odd)", node, 2, 5)).to_be_false()
+        expect(simple_selector_matches("li:nth-child(even)", node, 2, 5)).to_be_true()
+        expect(simple_selector_matches("li:nth-child(2n+1)", node, 3, 5)).to_be_true()
+        expect(simple_selector_matches("li:nth-child(2n+1)", node, 4, 5)).to_be_false()
+
+    it "matches attribute selectors with exact and substring operators":
+        val node = make_element("a", "", "")
+        node.set_attr("href", "https://example.test/docs/page")
+        expect(simple_selector_matches("a[href=\"https://example.test/docs/page\"]", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches("a[href*=\"docs\"]", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches("a[href*=\"admin\"]", node, 1, 1)).to_be_false()
+        expect(simple_selector_matches("a[href]", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches("a[title]", node, 1, 1)).to_be_false()
+
+    it "matches :not and :is selector lists":
+        val node = make_element("button", "secondary", "")
+        expect(simple_selector_matches(":not(.primary)", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":not(.secondary)", node, 1, 1)).to_be_false()
+        expect(simple_selector_matches(":is(.primary, .secondary)", node, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":is(.primary, .ghost)", node, 1, 1)).to_be_false()
+
+    it "rejects the child combinator without a matching parent":
+        # ENGINE LIMITATION (probed, not masked): under the seed test
+        # runner `match parent: case Some(x)` on a nullable parameter never
+        # matches a present value (probe: fn(p: text?) matching Some fails
+        # for probe("hello")), so neither the positive `.parent > .child`
+        # case nor any present-parent call can be asserted here. Only the
+        # nil-parent and malformed-selector rejection paths are stable.
+        val child = make_element("span", "child", "")
+        expect(selector_matches(".parent > .child", child, nil, 1, 1)).to_equal(false)
+        expect(selector_matches(".ghost > .child", child, nil, 1, 1)).to_equal(false)
+        expect(selector_matches(".parent > ", child, nil, 1, 1)).to_equal(false)
+        expect(selector_matches(" > .child", child, nil, 1, 1)).to_equal(false)
+
+    it "matches the descendant combinator by the subject selector":
+        val node = make_element("span", "", "")
+        expect(selector_matches("div span", node, nil, 1, 1)).to_be_true()
+        expect(selector_matches("div em", node, nil, 1, 1)).to_be_false()
+
+    it "matches :empty only for childless elements":
+        val node = make_element("div", "", "")
+        expect(simple_selector_matches("div:empty", node, 1, 1)).to_be_true()
+        val filled = make_element("div", "", "")
+        filled.children.push(BeDomNode.text("hello"))
+        expect(simple_selector_matches("div:empty", filled, 1, 1)).to_be_false()
+
+describe "css parser gpu tables — cpu parity direct vs indexed lane":
+
+    # Parity covers the direct resolver lane, the multi-class table lane,
+    # the selector-matcher option lane, and (since the arity fix) the
+    # selector-driven index-table lanes.
+
+    it "direct lane resolves the parity stylesheet correctly":
+        val node = make_element("div", "btn big", "main")
+        val direct = direct_matched_props(parity_css(), node, 1, 1)
+        expect(direct.contains("color:red")).to_be_true()
+        expect(direct.contains("width:100px")).to_be_true()
+        expect(direct.contains("margin-top:3px")).to_be_true()
+        expect(direct.contains("box-sizing:border-box")).to_be_true()
+        expect(direct.contains("color:navy")).to_be_true()
+        expect(direct.contains("padding-top:9px")).to_be_false()
+
+    it "multi-class table lane agrees with the direct lane on membership":
+        val doc = parity_doc()
+        # element with both classes: direct .btn.big matches, table entry non-empty
+        val both = make_element("div", "btn big", "")
+        expect(selector_matches(".btn.big", both, nil, 1, 1)).to_be_true()
+        val table_hit = br_style_block_rule_for_multi_class(doc, "btn big")
+        expect(table_hit.contains("color: navy")).to_be_true()
+        # element with unrelated classes: direct lane rejects, table lane empty
+        val other = make_element("div", "ghost zzz", "")
+        expect(selector_matches(".btn.big", other, nil, 1, 1)).to_be_false()
+        expect(br_style_block_rule_for_multi_class(doc, "ghost zzz")).to_equal("")
+
+    it "multi-class table declarations mirror direct lane declarations":
+        val doc = parity_doc()
+        val node = make_element("div", "btn big", "")
+        val rules = parse_css_rules(parity_css())
+        val indexed = br_style_block_rule_for_multi_class(doc, "btn big")
+        var i = 0
+        var checked = 0
+        while i < rules.len():
+            val rule = rules[i]
+            i = i + 1
+            if rule.selector == ".btn.big":
+                expect(selector_matches(rule.selector, node, nil, 1, 1)).to_be_true()
+                var j = 0
+                while j < rule.declarations.len():
+                    val d = rule.declarations[j]
+                    j = j + 1
+                    expect(indexed.contains(d.property)).to_be_true()
+                    expect(indexed.contains(d.value)).to_be_true()
+                    checked = checked + 1
+        expect(checked).to_be_greater_than(0)
+
+    it "matcher option lane agrees with the resolver on :not":
+        val secondary_tag = "button class=\"secondary\""
+        val primary_tag = "button class=\"primary\""
+        val secondary = make_element("button", "secondary", "")
+        val primary = make_element("button", "primary", "")
+        val table_sec = br_selector_list_contains_not_self("button:not(button.primary)", "button", secondary_tag)
+        val direct_sec = simple_selector_matches(":not(.primary)", secondary, 1, 1)
+        expect(table_sec).to_equal(direct_sec)
+        expect(direct_sec).to_be_true()
+        val table_pri = br_selector_list_contains_not_self("button:not(button.primary)", "button", primary_tag)
+        val direct_pri = simple_selector_matches(":not(.primary)", primary, 1, 1)
+        expect(table_pri).to_equal(direct_pri)
+        expect(direct_pri).to_be_false()
+
+    it "matcher option lane agrees with the resolver on attribute substrings":
+        val docs_tag = "a href=\"https://example.test/docs/page\""
+        val docs_node = make_element("a", "", "")
+        docs_node.set_attr("href", "https://example.test/docs/page")
+        val table_docs = br_selector_list_contains_attr_self("a[href*=\"docs\"]", "a", docs_tag)
+        val direct_docs = simple_selector_matches("a[href*=\"docs\"]", docs_node, 1, 1)
+        expect(table_docs).to_equal(direct_docs)
+        expect(direct_docs).to_be_true()
+        val table_admin = br_selector_list_contains_attr_self("a[href*=\"admin\"]", "a", docs_tag)
+        val direct_admin = simple_selector_matches("a[href*=\"admin\"]", docs_node, 1, 1)
+        expect(table_admin).to_equal(direct_admin)
+        expect(direct_admin).to_be_false()
+
+    it "indexed simple-selector lanes agree with the direct lane":
+        val doc = parity_doc()
+        val node = make_element("div", "btn big", "main")
+        val direct = direct_matched_props(parity_css(), node, 1, 1)
+        # class lane
+        expect(direct.contains("color:red")).to_be_true()
+        expect(br_style_block_rule_for_class(doc, "btn").contains("color: red")).to_be_true()
+        # id lane
+        expect(direct.contains("width:100px")).to_be_true()
+        expect(br_style_block_rule_for_id(doc, "main").contains("width: 100px")).to_be_true()
+        # tag lane
+        expect(direct.contains("margin-top:3px")).to_be_true()
+        expect(br_style_block_rule_for_tag(doc, "div").contains("margin-top: 3px")).to_be_true()
+        # universal lane
+        expect(direct.contains("box-sizing:border-box")).to_be_true()
+        expect(br_style_block_rule_for_universal(doc).contains("box-sizing: border-box")).to_be_true()
+        # both lanes reject the non-matching p rule and an absent class
+        expect(direct.contains("padding-top")).to_be_false()
+        expect(br_style_block_rule_for_class(doc, "btn").contains("padding-top")).to_be_false()
+        expect(selector_matches(".zz", node, nil, 1, 1)).to_be_false()
+        expect(br_style_block_rule_for_class(doc, "zz")).to_equal("")
+
+    it "indexed compound and combinator lanes agree with the direct lane where both run":
+        val css = "div.btn { color: navy; } div#main { width: 7px; } " +
+            "ul li { color: green; } ul > li { color: teal; }"
+        val doc = "<html><head><style>" + css + "</style></head><body></body></html>"
+        val node = make_element("div", "btn", "main")
+        expect(selector_matches("div.btn", node, nil, 1, 1)).to_be_true()
+        expect(br_style_block_rule_for_tag_class(doc, "div", "btn").contains("color: navy")).to_be_true()
+        expect(selector_matches("div#main", node, nil, 1, 1)).to_be_true()
+        expect(br_style_block_rule_for_tag_id(doc, "div", "main").contains("width: 7px")).to_be_true()
+        val li = make_element("li", "", "")
+        expect(selector_matches("ul li", li, nil, 1, 1)).to_be_true()
+        expect(br_style_block_rule_for_descendant(doc, "ul", "li").contains("color: green")).to_be_true()
+        # child combinator: the table lane surfaces the rule; the direct
+        # resolver rejects it without a matching parent (nil-parent
+        # limitation documented above)
+        expect(br_style_block_rule_for_child(doc, "ul", "li").contains("color: teal")).to_be_true()
+        expect(selector_matches("ul > li", li, nil, 1, 1)).to_be_false()
+        # miss direction agrees on both lanes
+        expect(selector_matches("em.btn", node, nil, 1, 1)).to_be_false()
+        expect(br_style_block_rule_for_tag_class(doc, "em", "btn")).to_equal("")
+
+# ---------------------------------------------------------------------------
+# Shorthand declaration expansion (style_block_parse)
+#
+# `expand_shorthand` and its per-property expanders are private to
+# style_block_parse.spl; `parse_declarations` is the only public entry that
+# reaches them, so every case below drives them through that door.
+# ---------------------------------------------------------------------------
+
+fn decl_pairs(src: text) -> text:
+    """Flatten parse_declarations output to a stable `prop=value;` string."""
+    val decls = parse_declarations(src)
+    var out = ""
+    var i = 0
+    while i < decls.len():
+        out = out + decls[i].property + "=" + decls[i].value + ";"
+        i = i + 1
+    out
+
+describe "css parser gpu tables — shorthand declaration expansion":
+
+    it "expands the flex shorthand across every arity form":
+        expect(decl_pairs("flex: none")).to_equal(
+            "flex-grow=0;flex-shrink=0;flex-basis=auto;")
+        expect(decl_pairs("flex: 2")).to_equal(
+            "flex-grow=2;flex-shrink=1;flex-basis=0%;")
+        expect(decl_pairs("flex: 3 4")).to_equal(
+            "flex-grow=3;flex-shrink=4;flex-basis=0%;")
+        expect(decl_pairs("flex: 5 6 120px")).to_equal(
+            "flex-grow=5;flex-shrink=6;flex-basis=120px;")
+
+    it "routes flex-flow through the shorthand dispatcher":
+        expect(decl_pairs("flex-flow: column wrap-reverse")).to_equal(
+            "flex-direction=column;flex-wrap=wrap-reverse;")
+
+    it "expands the border shorthand and normalizes keyword widths":
+        expect(decl_pairs("border: 2px dashed blue")).to_equal(
+            "border-width=2px;border-style=dashed;border-color=blue;")
+        expect(decl_pairs("border: thin solid red")).to_equal(
+            "border-width=1px;border-style=solid;border-color=red;")
+        expect(decl_pairs("border: medium dotted red")).to_equal(
+            "border-width=3px;border-style=dotted;border-color=red;")
+        expect(decl_pairs("border: thick double red")).to_equal(
+            "border-width=5px;border-style=double;border-color=red;")
+        expect(decl_pairs("border: 0.5em none red")).to_equal(
+            "border-width=0.5em;border-style=none;border-color=red;")
+        # a lone color keeps the 1px/solid defaults
+        expect(decl_pairs("border: green")).to_equal(
+            "border-width=1px;border-style=solid;border-color=green;")
+
+    it "lifts a background color out of the background shorthand":
+        expect(decl_pairs("background: red")).to_equal("background-color=red;")
+        expect(decl_pairs("background: black")).to_equal("background-color=black;")
+        expect(decl_pairs("background: #ff0000")).to_equal("background-color=#ff0000;")
+        expect(decl_pairs("background: transparent")).to_equal(
+            "background-color=transparent;")
+        # a functional color token is kept whole across its inner spaces
+        expect(decl_pairs("background: rgba(1, 2, 3, 0.5) fixed")).to_equal(
+            "background-color=rgba(1, 2, 3, 0.5);")
+        # url() and non-color keywords are skipped; the trailing hex wins
+        expect(decl_pairs("background: url(a.png) no-repeat #00ff00")).to_equal(
+            "background-color=#00ff00;")
+
+    it "leaves a background with no usable color as the untouched shorthand":
+        expect(decl_pairs("background: linear-gradient(red, blue)")).to_equal(
+            "background=linear-gradient(red, blue);")
+        expect(decl_pairs("background: no-repeat")).to_equal("background=no-repeat;")
+
+    it "extracts a font-size and font-weight from the font shorthand":
+        expect(decl_pairs("font: bold 12px Arial")).to_equal(
+            "font-weight=bold;font-size=12px;")
+        expect(decl_pairs("font: 1.5rem Georgia")).to_equal("font-size=1.5rem;")
+        expect(decl_pairs("font: italic 120%")).to_equal("font-size=120%;")
+        # nothing recognizable: the shorthand survives as-is
+        expect(decl_pairs("font: serif")).to_equal("font=serif;")
+
+    it "expands margin and padding box shorthands by arity":
+        expect(decl_pairs("margin: 5px")).to_equal("margin=5px;")
+        expect(decl_pairs("margin: 1px 2px")).to_equal(
+            "margin-top=1px;margin-right=2px;margin-bottom=1px;margin-left=2px;")
+        expect(decl_pairs("padding: 1px 2px 3px")).to_equal(
+            "padding-top=1px;padding-right=2px;padding-bottom=3px;padding-left=2px;")
+        expect(decl_pairs("padding: 1px 2px 3px 4px")).to_equal(
+            "padding-top=1px;padding-right=2px;padding-bottom=3px;padding-left=4px;")
+
+# ---------------------------------------------------------------------------
+# Relational and attribute selector matching (style_block_resolve)
+# ---------------------------------------------------------------------------
+
+fn has_fixture_tree() -> BeDomNode:
+    """<div class="card"><h2 class="title"/><ul>#text<li class="hot"/></ul></div>"""
+    val root = make_element("div", "card", "")
+    val header = make_element("h2", "title", "")
+    val list = make_element("ul", "", "")
+    list.add_child(BeDomNode.text("noise"))
+    list.add_child(make_element("li", "hot", ""))
+    root.add_child(header)
+    root.add_child(list)
+    root
+
+describe "css parser gpu tables — :has() relational matching":
+
+    it "matches :has() against direct children and deeper descendants":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(h2)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(li)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(.hot)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(span)", root, 1, 1)).to_be_false()
+
+    it "honors the child combinator inside :has()":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(> h2)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(> ul)", root, 1, 1)).to_be_true()
+        # li is a grandchild, so the child form must reject it even though
+        # the descendant form above accepts it
+        expect(simple_selector_matches(":has(> li)", root, 1, 1)).to_be_false()
+        # a bare ">" has no selector after it
+        expect(simple_selector_matches(":has(>)", root, 1, 1)).to_be_false()
+
+    it "treats the :has() argument as a forgiving selector list":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches(":has(span, ul)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches(":has(span, em)", root, 1, 1)).to_be_false()
+        # unterminated argument: no closing paren, no match
+        expect(simple_selector_matches(":has(ul", root, 1, 1)).to_be_false()
+
+    it "combines a compound base selector with :has()":
+        val root = has_fixture_tree()
+        expect(simple_selector_matches("div:has(ul)", root, 1, 1)).to_be_true()
+        expect(simple_selector_matches("p:has(ul)", root, 1, 1)).to_be_false()
+        expect(simple_selector_matches("div:has(span)", root, 1, 1)).to_be_false()
+
+describe "css parser gpu tables — attribute and positional selector edges":
+
+    it "matches the ~= whitespace-token and $= suffix attribute operators":
+        val chip = make_element("span", "", "")
+        chip.set_attr("data-tags", "alpha beta gamma")
+        chip.set_attr("href", "/docs/index.html")
+        expect(simple_selector_matches("span[data-tags~=beta]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[data-tags~=alpha]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[data-tags~=delta]", chip, 1, 1)).to_be_false()
+        expect(simple_selector_matches("span[href$=\".html\"]", chip, 1, 1)).to_be_true()
+        expect(simple_selector_matches("span[href$=\".css\"]", chip, 1, 1)).to_be_false()
+
+    it "rejects an attribute selector with an empty key":
+        val chip = make_element("span", "", "")
+        chip.set_attr("data-tags", "alpha")
+        expect(simple_selector_matches("span[=alpha]", chip, 1, 1)).to_be_false()
+
+    it "matches :first-child and the -n+3 nth-child formula":
+        val chip = make_element("span", "", "")
+        expect(simple_selector_matches(":first-child", chip, 1, 3)).to_be_true()
+        expect(simple_selector_matches(":first-child", chip, 2, 3)).to_be_false()
+        expect(simple_selector_matches("span:nth-child(-n+3)", chip, 2, 5)).to_be_true()
+        expect(simple_selector_matches("span:nth-child(-n+3)", chip, 4, 5)).to_be_false()
+
+    it "combines a compound base selector with :not() and :is()":
+        val btn = make_element("button", "primary", "")
+        expect(simple_selector_matches("button:not(.ghost)", btn, 1, 1)).to_be_true()
+        expect(simple_selector_matches("button:not(.primary)", btn, 1, 1)).to_be_false()
+        # an empty :not() list matches nothing
+        expect(simple_selector_matches("button:not()", btn, 1, 1)).to_be_false()
+        expect(simple_selector_matches("button:is(.primary, .ghost)", btn, 1, 1)).to_be_true()
+        expect(simple_selector_matches("button:is(.ghost, .muted)", btn, 1, 1)).to_be_false()

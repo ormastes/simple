@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_list_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR + " && cat > " + FIXTURE_DIR + "/simple.sdn <<'EOF'\nname: list-fixture\nversion: 1.2.3\ndependencies:\n  alpha: \"*\"\n  beta: \"*\"\ndev_dependencies:\n  gamma: \"*\"\nEOF"
+    ])
+
+fn _run_list(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/list/main.spl\" " + joined
+    ])
+
+describe "list log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_list(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports log-mode json":
+        _setup_fixture()
+        val (out, err, code) = _run_list(["--log-mode=json"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("\"dependencies\":{\"alpha\":\"*\",\"beta\":\"*\"}")
+        expect(out).to_contain("\"dev_dependencies\":{\"gamma\":\"*\"}")
+
+    it "supports dot progress":
+        _setup_fixture()
+        val (out, err, code) = _run_list(["--progress=dot"])
+        expect(code).to_equal(0)
+        expect(out).to_start_with(".")
+        expect(out).to_contain("list-fixture v1.2.3")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_list(["--log-mode=noisy"])
+        expect(code).to_equal(1)

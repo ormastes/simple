@@ -1,0 +1,82 @@
+"""
+Dict<text, StructValue>.get() Returns a Corrupt Option on a Hit (Native)
+
+Bug doc: doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md
+Related: doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md
+
+Mirrors probe B/C from the bug doc: a struct-valued dict field
+(`Holder.traits: Dict<text, Tr>`) with one real entry. `contains_key`, the
+index read `d[k]`, and a manually-constructed `Some(d[k])` all behave
+correctly on both hit and miss. `.get(k)` is correct on a MISS (nil) but on a
+HIT returns a non-nil Option whose payload is corrupt -- unwrapping it and
+reading a field segfaults under native codegen (isolated probe evidence in
+the bug doc; this spec asserts the safe alternatives plus the desired -- not
+today's -- contract for the hit case).
+
+EXPECTED RED (one scenario only): "get() on a hit yields a usable value" is
+deliberately red under native codegen until the `.get()` lowering is fixed to
+decode identically to `d[k]` (see bug doc "Suggested fix"). Per repo
+convention for filed defects (precedent: nil_dict_receiver_phantom_option_spec.spl,
+rv32_trap_completeness_spec.spl), it must stay visibly red -- do NOT skip()
+it. All other scenarios in this file pin behavior that is already correct
+today and must stay green.
+"""
+
+use std.spec
+
+struct Tr:
+    name: text
+    n: i64
+
+struct Holder:
+    traits: Dict<text, Tr>
+
+fn make_holder() -> Holder:
+    var d: Dict<text, Tr> = {}
+    d["Read"] = Tr(name: "Read", n: 5)
+    Holder(traits: d)
+
+describe "Dict<text, StructValue> contains_key and index read (correct today)":
+    it "contains_key reports true on a hit and false on a miss":
+        val h = make_holder()
+        expect(h.traits.contains_key("Read")).to_equal(true)
+        expect(h.traits.contains_key("Nope")).to_equal(false)
+
+    it "index read on a hit returns a usable struct with correct fields":
+        val h = make_holder()
+        val idx = h.traits["Read"]
+        expect(idx.name).to_equal("Read")
+        expect(idx.n).to_equal(5)
+
+describe "Some(index_read) manual wrap round-trips correctly (safe alternative)":
+    it "Some(d[k]) is non-nil and unwraps to the correct struct":
+        val h = make_holder()
+        val v = h.traits["Read"]
+        val o: Tr? = Some(v)
+        expect(o == nil).to_equal(false)
+        expect(o.unwrap().name).to_equal("Read")
+        expect(o.unwrap().n).to_equal(5)
+
+    it "a nil Tr? stays nil through the same shape":
+        val n: Tr? = nil
+        expect(n == nil).to_equal(true)
+
+describe "Dict<text, StructValue>.get() (native corrupt-Option bug)":
+    it "get() on a miss is correctly nil":
+        val h = make_holder()
+        val miss = h.traits.get("Nope")
+        expect(miss == nil).to_equal(true)
+
+    it "get() on a hit yields a usable value":
+        # DELIBERATE RED under native codegen (bug
+        # native_dict_get_struct_value_corrupt_option_2026-07-27.md, Probe B):
+        # h.traits.get("Read") returns a non-nil Option, but the payload is
+        # corrupt -- .unwrap().name segfaults on the native binary today.
+        # Do NOT skip() this scenario; it stays red until the .get() MIR
+        # lowering decodes struct-valued dict results identically to the
+        # d[k] index-read path (see bug doc "Suggested fix").
+        val h = make_holder()
+        val hit = h.traits.get("Read")
+        expect(hit == nil).to_equal(false)
+        expect(hit.unwrap().name).to_equal("Read")
+        expect(hit.unwrap().n).to_equal(5)

@@ -1,0 +1,98 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+# Lane TAL1 `type-alias-capture` (mission-critical robustness campaign,
+# 2026-07-29). See doc/08_tracking/bug/
+# type_alias_declarations_discarded_at_parse_2026-07-29.md.
+#
+# `type X = Y` used to be skipped to newline at parse time with zero capture
+# (enum_module_body.spl's `par_kind_get() == 35` branch): no arena decl kind
+# existed for it, and `_FlatAstBridge` hardcoded `module.type_aliases: {}`
+# unconditionally. This is PURE PLUMBING: a new `DECL_TYPE_ALIAS` arena kind
+# captures name + aliased-type tag at parse time, and the FlatAstBridge now
+# threads real entries into `module.type_aliases` instead of the hardcoded
+# empty dict. No semantic alias registry is built here (a later lane resumes
+# that scope) -- these specs only assert the populated-but-unconsumed state.
+#
+# HARNESS NOTE (matches convert_nodes_loud_fallback_spec.spl /
+# iso_parse_pipeline_spec.spl / enum_match_unknown_variant_diagnostic_spec.spl
+# in this same area): the parse call is inlined in each `it` block on
+# purpose -- routing it through a shared module-level helper fn has
+# previously been shown (interpreter struct-mutation-visibility family) to
+# lose recorded parser/lowering state when read back afterward.
+#
+# Dict landmine (see .claude/rules/code-style.md): `type_aliases` values are
+# TypeAlias STRUCTS, so presence/lookup below always goes through
+# `contains_key(...)` + index read (`dict[key]`), never `.get()`. Emptiness
+# is checked via `.keys().len()`, never `.len()`.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+
+fn array_element_name(kind: TypeKind) -> text:
+    match kind:
+        case TypeKind.Array(element, _):
+            parser_type_kind_named_name(element.kind)
+        case _:
+            ""
+
+describe "type alias declarations are captured, not discarded, at parse time":
+    it "captures a simple alias (type MyInt = i64) into module.type_aliases with the right target":
+        val src = "type MyInt = i64\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_tal1_simple.spl", "fixture_tal1_simple", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.type_aliases.contains_key("MyInt"))
+        val alias = parsed.type_aliases["MyInt"]
+        assert_equal(alias.name, "MyInt")
+        assert_equal(parser_type_kind_named_name(alias.type_.kind), "i64")
+
+    it "captures two aliases with other declarations between them":
+        val src = "type MyInt = i64\n" +
+            "\n" +
+            "val shared: i64 = 5\n" +
+            "\n" +
+            "type MyText = text\n" +
+            "\n" +
+            "fn get_shared() -> i64:\n" +
+            "    shared\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_tal1_two.spl", "fixture_tal1_two", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.type_aliases.contains_key("MyInt"))
+        assert_true(parsed.type_aliases.contains_key("MyText"))
+        val my_int = parsed.type_aliases["MyInt"]
+        val my_text = parsed.type_aliases["MyText"]
+        assert_equal(parser_type_kind_named_name(my_int.type_.kind), "i64")
+        assert_equal(parser_type_kind_named_name(my_text.type_.kind), "text")
+        assert_equal(parsed.type_aliases.keys().len(), 2)
+
+    it "captures an alias to a compound type (type Names = [text]) at whatever fidelity the field supports":
+        val src = "type Names = [text]\n" +
+            "\n" +
+            "fn count(names: [text]) -> i64:\n" +
+            "    names.len()\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_tal1_compound.spl", "fixture_tal1_compound", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.type_aliases.contains_key("Names"))
+        val names_alias = parsed.type_aliases["Names"]
+        assert_equal(names_alias.name, "Names")
+        # The arena captures the aliased type's flat tag; convert_flat_type
+        # recovers it as an Array(text) TypeKind (same fidelity a `[text]`
+        # function param/return gets elsewhere in this bridge) -- not a
+        # deeper structural round-trip than that.
+        assert_equal(array_element_name(names_alias.type_.kind), "text")
+
+    it "leaves module.type_aliases empty with zero parser errors for a program with no aliases":
+        val src = "fn add(a: i64, b: i64) -> i64:\n" +
+            "    a + b\n" +
+            "\n" +
+            "fn main() -> i64:\n" +
+            "    add(1, 2)\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_tal1_none.spl", "fixture_tal1_none", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_equal(parsed.type_aliases.keys().len(), 0)

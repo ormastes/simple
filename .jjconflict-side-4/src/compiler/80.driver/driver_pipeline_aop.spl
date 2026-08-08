@@ -1,0 +1,127 @@
+# CompilerDriver AOP weaving and debug trace instrumentation.
+
+use compiler.hir.hir.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.frontend.core.aop.{
+    weave_function,
+    weavingconfig_all_rules,
+    WeavingConfig
+}
+use compiler.frontend.core.aop_log_policy.{
+    AopLogInstrumentationConfig,
+    aop_log_weaving_rules,
+    aop_log_with_compile_level,
+    aop_log_with_runtime_level
+}
+use compiler.mir.mir_aop_injection.{
+    extract_mir_block_info,
+    apply_weaving_result,
+    aop_weave_accounting_reset,
+    aop_weave_accounting_add
+}
+use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
+use compiler.mdsoc.weaving.weaving_config.{
+    weavingconfig_from_hir_advices
+}
+use compiler.frontend.core.aop_conflict_detect.{detect_advice_conflicts}
+use compiler.frontend.core.aop_predicate_parser.{
+    validate_predicate,
+    validate_advice_form
+}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_log_helpers.{log_debug}
+
+extern fn rt_env_get(key: text) -> text
+
+fn driver_aop_env_bool(key: text) -> bool:
+    val value = (rt_env_get(key) ?? "").to_lower()
+    value == "1" or value == "true" or value == "yes" or value == "on"
+
+impl CompilerDriver:
+    me weave_aop():
+        var all_advices: [HirAopAdvice] = []
+        for name in self.ctx.hir_modules.keys():
+            val hir_mod = self.ctx.hir_modules[name]
+            for advice in hir_mod.aop_advices:
+                all_advices.push(advice)
+
+        aop_weave_accounting_reset(all_advices.len())
+        for advice in all_advices:
+            val pred_err = validate_predicate(advice.predicate_text)
+            if pred_err.len() > 0:
+                self.ctx.errors.push(
+                    "[AOP] {pred_err} in advice '{advice.advice_function}'")
+            val form_err = validate_advice_form(advice.form)
+            if form_err.len() > 0:
+                self.ctx.errors.push(
+                    "[AOP] {form_err} in advice '{advice.advice_function}'")
+
+        var config = weavingconfig_from_hir_advices(all_advices)
+        var log_config = AopLogInstrumentationConfig.for_debug(
+            driver_aop_env_bool("SIMPLE_AOP_LOG_CALLS"),
+            driver_aop_env_bool("SIMPLE_AOP_LOG_ASSIGNMENTS")
+        )
+        log_config = aop_log_with_compile_level(
+            log_config,
+            rt_env_get("SIMPLE_AOP_COMPILE_LOG_LEVEL") ?? "debug"
+        )
+        log_config = aop_log_with_runtime_level(
+            log_config,
+            rt_env_get("SIMPLE_AOP_RUNTIME_LOG_LEVEL") ?? "debug"
+        )
+        val log_rules = aop_log_weaving_rules(log_config)
+        if log_rules.len() > 0:
+            var combined_rules = weavingconfig_all_rules(config)
+            for log_rule in log_rules:
+                combined_rules.push(log_rule)
+            config = WeavingConfig.from_rules(combined_rules)
+        if not config.enabled:
+            log_debug(
+                "AOP weaving: no advice declarations or enabled log instrumentation found, skipping")
+            return
+
+        val all_rules = weavingconfig_all_rules(config)
+        log_debug("AOP weaving")
+        val conflicts = detect_advice_conflicts(all_rules)
+        for conflict in conflicts:
+            if conflict.is_error():
+                self.ctx.errors.push("[AOP] {conflict.message}")
+            elif conflict.is_warning():
+                self.ctx.warnings.push("[AOP] {conflict.message}")
+
+        for mod_name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[mod_name]
+            var woven_functions: Dict<SymbolId, MirFunction> = {}
+            for func in mir_module.functions.values():
+                val blocks = extract_mir_block_info(func.blocks)
+                val result = weave_function(
+                    config, func.name, mod_name, [], [], blocks)
+                if result.advices_inserted > 0:
+                    val woven_func = apply_weaving_result(func, result)
+                    woven_functions[func.symbol] = woven_func
+                    aop_weave_accounting_add(result.advices_inserted)
+                else:
+                    woven_functions[func.symbol] = func
+                for diag in result.diagnostics:
+                    if diag.is_error():
+                        self.ctx.errors.push("[AOP] {diag.message}")
+                    elif diag.is_warning():
+                        self.ctx.warnings.push("[AOP] {diag.message}")
+            self.ctx.mir_modules[mod_name] = MirModule(
+                name: mir_module.name,
+                functions: woven_functions,
+                statics: mir_module.statics,
+                constants: mir_module.constants,
+                types: mir_module.types
+            )
+
+    me apply_debug_trace():
+        val level = self.ctx.options.debug_trace_level
+        if level == "" or level == "none":
+            return
+
+        log_debug("debug trace injection: level={level}")
+        for name in self.ctx.mir_modules.keys():
+            self.ctx.mir_modules[name] = inject_debug_trace(
+                self.ctx.mir_modules[name], level)

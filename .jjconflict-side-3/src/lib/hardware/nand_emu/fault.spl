@@ -1,0 +1,86 @@
+# ============================================================================
+# nand_emu — Fault injection
+# ============================================================================
+#
+# Builds and applies NeFault descriptors: sudden power-off at pulse N, program
+# failure, erase failure, and time advance (the retention/disturb driver).
+# These are the introspection hooks impossible on real silicon that drive the
+# recovery/prevention scenario suite (doc §8 scenarios 5-8, 19).
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §8
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{NeFault, NeFaultKind, NeOpKind}
+
+# ----------------------------------------------------------------------------
+# Fault constructors — IMPLEMENTED (descriptors only; application is stubbed).
+# ----------------------------------------------------------------------------
+
+pub fn ne_fault_none() -> NeFault:
+    """The no-op fault (nothing injected)."""
+    NeFault(kind: NeFaultKind.NoFault, op: NeOpKind.Read, at_pulse: -1, target_row: -1, target_block: -1, arg_ns: 0)
+
+pub fn ne_fault_spo(op: NeOpKind, at_pulse: i64, target_row: i64) -> NeFault:
+    """Sudden-power-off: abort `op` at ISPP pulse `at_pulse` on `target_row`
+    (doc §8 scenario 5)."""
+    NeFault(kind: NeFaultKind.SuddenPowerOff, op: op, at_pulse: at_pulse, target_row: target_row, target_block: -1, arg_ns: 0)
+
+pub fn ne_fault_prog_fail(target_row: i64) -> NeFault:
+    """Force a program failure on `target_row` (status I/O0=1, doc §8 sc. 7)."""
+    NeFault(kind: NeFaultKind.ProgramFail, op: NeOpKind.Program, at_pulse: -1, target_row: target_row, target_block: -1, arg_ns: 0)
+
+pub fn ne_fault_erase_fail(target_block: i64) -> NeFault:
+    """Force an erase failure on `target_block` (block retire, doc §8 sc. 8)."""
+    NeFault(kind: NeFaultKind.EraseFail, op: NeOpKind.Erase, at_pulse: -1, target_row: -1, target_block: target_block, arg_ns: 0)
+
+pub fn ne_fault_time_advance(ns: i64) -> NeFault:
+    """Advance emulated time by `ns` (retention/disturb driver, doc §3.4 / §8)."""
+    NeFault(kind: NeFaultKind.TimeAdvance, op: NeOpKind.Read, at_pulse: -1, target_row: -1, target_block: -1, arg_ns: ns)
+
+# ----------------------------------------------------------------------------
+# Fault application predicates — IMPLEMENTED.
+#
+# All three are pure predicates over an NeFault descriptor: no mutation, no
+# I/O. `ne_fault_matches` is the shared op/location matcher; the target-row
+# (-1) and target-block (-1) "not applicable" sentinels set by the fault
+# constructors above mean that dimension never blocks a match, so a single
+# helper works for both the program-fail (row-scoped) and erase-fail
+# (block-scoped) cases.
+# ----------------------------------------------------------------------------
+
+pub fn ne_fault_matches(f: NeFault, op_kind: NeOpKind, block: i64, page: i64) -> bool:
+    """True when fault `f` targets operation `op_kind` at the given
+    `block`/`page`. `f.target_block == -1` or `f.target_row == -1` means that
+    dimension is not applicable to this fault kind and never blocks a match
+    (e.g. a ProgramFail fault only ever sets `target_row`). Callers still need
+    to check `f.kind` themselves — this helper only matches op + location."""
+    if f.op != op_kind:
+        return false
+    if f.target_block != -1 and f.target_block != block:
+        return false
+    if f.target_row != -1 and f.target_row != page:
+        return false
+    true
+
+pub fn ne_fault_aborts_pulse(f: NeFault, op: NeOpKind, pulse: i64) -> bool:
+    """True when a SuddenPowerOff fault should abort the ISPP loop at `pulse`
+    of operation `op` (doc §8 scenario 5). Aborts once the current pulse has
+    reached the armed pulse: `pulse >= f.at_pulse` (SPO armed at pulse 8 does
+    NOT abort at pulse 7, but does at pulse 8 and every pulse after)."""
+    if f.kind != NeFaultKind.SuddenPowerOff:
+        return false
+    if f.op != op:
+        return false
+    pulse >= f.at_pulse
+
+pub fn ne_fault_forces_program_fail(f: NeFault, row: i64) -> bool:
+    """True when a ProgramFail fault targets `row` (doc §8 scenario 7)."""
+    if f.kind != NeFaultKind.ProgramFail:
+        return false
+    ne_fault_matches(f, NeOpKind.Program, -1, row)
+
+pub fn ne_fault_forces_erase_fail(f: NeFault, blk: i64) -> bool:
+    """True when an EraseFail fault targets `blk` (doc §8 scenario 8)."""
+    if f.kind != NeFaultKind.EraseFail:
+        return false
+    ne_fault_matches(f, NeOpKind.Erase, blk, -1)

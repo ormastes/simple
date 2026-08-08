@@ -1,0 +1,365 @@
+# MIR instruction graph and function/module owners.
+
+use compiler.hir.hir_types.{SymbolId, HirType}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, VhdlHardwareMetadata}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_kinds.*
+
+struct MirInst:
+    """MIR instruction."""
+    kind: MirInstKind
+    span: Span?
+
+impl MirInst:
+    fn bootstrap_store_global_symbol_id() -> i64:
+        match self.kind:
+            case StoreGlobal(symbol, _): symbol.id
+            case _: -1
+
+    fn bootstrap_store_global_value_kind() -> i64:
+        """Return 1=Copy, 2=Move, 3=Const, or 0=not StoreGlobal."""
+        match self.kind:
+            case StoreGlobal(_, value):
+                match value.kind:
+                    case Copy(_): 1
+                    case Move(_): 2
+                    case Const(_, _): 3
+            case _: 0
+
+    fn bootstrap_store_global_value_local_id() -> i64:
+        match self.kind:
+            case StoreGlobal(_, value):
+                match value.kind:
+                    case Copy(local) | Move(local): local.id
+                    case _: -1
+            case _: -1
+
+    fn bootstrap_store_global_const_kind() -> i64:
+        """Return 1=Int, 2=Float, 3=Bool, 4=Str, 5=Zero, 6=Array, 7=Tuple, 8=Struct."""
+        match self.kind:
+            case StoreGlobal(_, value):
+                match value.kind:
+                    case Const(const_value, _):
+                        match const_value:
+                            case Int(_): 1
+                            case Float(_): 2
+                            case Bool(_): 3
+                            case Str(_): 4
+                            case Zero: 5
+                            case Array(_): 6
+                            case Tuple(_): 7
+                            case Struct(_): 8
+                    case _: 0
+            case _: 0
+
+    fn bootstrap_store_global_const_scalar_text() -> text:
+        match self.kind:
+            case StoreGlobal(_, value):
+                match value.kind:
+                    case Const(const_value, _):
+                        match const_value:
+                            case Int(v): "{v}"
+                            case Float(v): "{v}"
+                            case Bool(v): if v: "1" else: "0"
+                            case Str(v): v
+                            case Zero: "0"
+                            case Array(_): "zeroinitializer"
+                            case Tuple(_): "zeroinitializer"
+                            case Struct(_): "zeroinitializer"
+                    case _: "0"
+            case _: "0"
+
+struct MirBlock:
+    """Basic block."""
+    id: BlockId
+    label: text?
+    instructions: [MirInst]
+    terminator: MirTerminator
+
+impl MirBlock:
+    me bootstrap_block_id_value() -> i64:
+        """Project the nested block identifier through the MirBlock owner."""
+        self.id.id
+
+    fn bootstrap_ret_kind() -> i64:
+        """Return 0=nil, 1=Copy, 2=Move, 3=Const, or -1=not Ret."""
+        match self.terminator:
+            case Ret(value):
+                if value == nil:
+                    0
+                else:
+                    val payload = value ?? mir_operand_const_int(0)
+                    match payload.kind:
+                        case Copy(_): 1
+                        case Move(_): 2
+                        case Const(_, _): 3
+            case _: -1
+
+    fn bootstrap_ret_local_id() -> i64:
+        match self.terminator:
+            case Ret(value):
+                if value != nil:
+                    val payload = value ?? mir_operand_const_int(0)
+                    match payload.kind:
+                        case Copy(local) | Move(local): local.id
+                        case _: -1
+                else:
+                    -1
+            case _: -1
+
+    fn bootstrap_ret_const_kind() -> i64:
+        """Return 1=Int, 2=Float, 3=Bool, 4=Str, 5=Zero, 6=Array, 7=Tuple, 8=Struct."""
+        match self.terminator:
+            case Ret(value):
+                if value != nil:
+                    val payload = value ?? mir_operand_const_int(0)
+                    match payload.kind:
+                        case Const(const_value, _):
+                            match const_value:
+                                case Int(_): 1
+                                case Float(_): 2
+                                case Bool(_): 3
+                                case Str(_): 4
+                                case Zero: 5
+                                case Array(_): 6
+                                case Tuple(_): 7
+                                case Struct(_): 8
+                        case _: 0
+                else:
+                    0
+            case _: 0
+
+    fn bootstrap_ret_const_scalar_text() -> text:
+        match self.terminator:
+            case Ret(value):
+                if value != nil:
+                    val payload = value ?? mir_operand_const_int(0)
+                    match payload.kind:
+                        case Const(const_value, _):
+                            match const_value:
+                                case Int(v): "{v}"
+                                case Float(v): "{v}"
+                                case Bool(v): if v: "1" else: "0"
+                                case Str(v): v
+                                case Zero: "0"
+                                case Array(_): "zeroinitializer"
+                                case Tuple(_): "zeroinitializer"
+                                case Struct(_): "zeroinitializer"
+                        case _: "0"
+                else:
+                    "0"
+            case _: "0"
+
+# ==========================================================================
+# MIR Module and Function (depend on MirBlock)
+# ==========================================================================
+
+struct MirFunction:
+    """Function in MIR."""
+    symbol: SymbolId
+    name: text
+    signature: MirSignature
+    locals: [MirLocal]
+    blocks: [MirBlock]
+    entry_block: BlockId
+    span: Span
+
+    # Generic template metadata for .smf template storage
+    generic_params: [text]
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, HirType>
+
+    # Layout optimization metadata for native binary compilation
+    layout_phase: LayoutPhase?
+
+    # GPU kernel flag - set when function has @gpu_kernel decorator
+    is_kernel: bool
+    gpu_target: text
+    gpu_backend_order: text
+
+    # C ABI export flag - set when function has @export("C") attribute
+    is_export_c: bool
+    export_name: text    # Custom C symbol name, empty = use default
+
+    # Driver manifest attribute - set when function has @driver/@native_lib
+    # # DESUGARED: driver_manifest_attr: DriverManifestAttr
+    has_driver_manifest_attr: bool
+    driver_manifest_attr: DriverManifestAttr
+
+    # VHDL hardware metadata - set from @hardware/@generic/@clocked attributes
+    # # DESUGARED: vhdl_metadata: VhdlHardwareMetadata
+    has_vhdl_metadata: bool
+    vhdl_metadata: VhdlHardwareMetadata
+
+    # Fast-math permission flag — set by frontend when parsing #[fast_math] or
+    # --ffast-math equivalent.  Default false (IEEE-strict).
+    # When false, the auto-vectorizer MUST refuse FP reductions (§8 failure mode F3).
+    has_fast_math: bool
+
+    # FPGA kernel performance attributes (W3.2) — threaded from @unroll/@pipeline/@memory decorators.
+    # 0 = absent/default (no attribute applied).
+    unroll_factor: i64      # @unroll(n) structural unroll count
+    pipeline_ii: i64        # @pipeline(n)/@pipeline(ii=n) initiation interval
+    memory_banks: i64       # @memory(n)/@memory(banks=n) port banking count
+
+impl MirFunction:
+    # update field list when MirFunction gains fields — spread operator fails cross-module
+    static fn with_blocks(func: MirFunction, new_blocks: [MirBlock]) -> MirFunction:
+        MirFunction(
+            symbol: func.symbol,
+            name: func.name,
+            signature: func.signature,
+            locals: func.locals,
+            blocks: new_blocks,
+            entry_block: func.entry_block,
+            span: func.span,
+            generic_params: func.generic_params,
+            is_generic_template: func.is_generic_template,
+            specialization_of: func.specialization_of,
+            type_bindings: func.type_bindings,
+            layout_phase: func.layout_phase,
+            is_kernel: func.is_kernel,
+            gpu_target: func.gpu_target,
+            gpu_backend_order: func.gpu_backend_order,
+            is_export_c: func.is_export_c,
+            export_name: func.export_name,
+            has_driver_manifest_attr: func.has_driver_manifest_attr,
+            driver_manifest_attr: func.driver_manifest_attr,
+            has_vhdl_metadata: func.has_vhdl_metadata,
+            vhdl_metadata: func.vhdl_metadata,
+            has_fast_math: func.has_fast_math,
+            unroll_factor: func.unroll_factor,
+            pipeline_ii: func.pipeline_ii,
+            memory_banks: func.memory_banks
+        )
+
+"""Function body wrapper for borrow checking."""
+struct MirBody:
+    name: text
+    blocks: [MirBlock]
+    locals: [MirLocal]
+    arg_count: i64
+    return_ty: MirType
+
+impl MirBody:
+    static fn from_bootstrap_parts(
+        name: text,
+        blocks: [MirBlock],
+        locals: [MirLocal],
+        arg_count: i64
+    ) -> MirBody:
+        """Create a flat-bootstrap body without crossing a MirType ABI."""
+        MirBody(
+            name: name,
+            blocks: blocks,
+            locals: locals,
+            arg_count: arg_count,
+            return_ty: MirType.unit()
+        )
+
+    static fn from_parts(
+        name: text,
+        blocks: [MirBlock],
+        locals: [MirLocal],
+        arg_count: i64,
+        return_ty: MirType
+    ) -> MirBody:
+        """Create MirBody through its owner layout."""
+        MirBody(
+            name: name,
+            blocks: blocks,
+            locals: locals,
+            arg_count: arg_count,
+            return_ty: return_ty
+        )
+
+    static fn from_function(func: MirFunction) -> MirBody:
+        """Create MirBody from MirFunction for borrow checking."""
+        MirBody(
+            name: func.name,
+            blocks: func.blocks,
+            locals: func.locals,
+            arg_count: func.signature.params.len(),
+            return_ty: func.signature.return_type
+        )
+
+    me bootstrap_return_type() -> MirType:
+        """Read the return type through the MirBody owner layout."""
+        self.return_ty
+
+# ============================================================================
+# Constant Folding
+# ============================================================================
+
+fn mir_fold_binop(op: MirBinOp, left: MirConstValue, right: MirConstValue) -> MirConstValue?:
+    match (left, right):
+        case (Int(l), Int(r)):
+            var has_result = true
+            var result = 0
+            match op:
+                case Add: result = l + r
+                case Sub: result = l - r
+                case Mul: result = l * r
+                case Div:
+                    if r != 0:
+                        result = l / r
+                    else:
+                        has_result = false
+                case Rem:
+                    if r != 0:
+                        result = l % r
+                    else:
+                        has_result = false
+                case Pow: result = l ** r
+                case BitAnd: result = l & r
+                case BitOr: result = l | r
+                case BitXor: result = l xor r
+                case Shl: result = l << (r & 63)
+                case Shr: result = l >> (r & 63)
+                case Eq: result = if l == r: 1 else: 0
+                case Ne: result = if l != r: 1 else: 0
+                case Lt: result = if l < r: 1 else: 0
+                case Le: result = if l <= r: 1 else: 0
+                case Gt: result = if l > r: 1 else: 0
+                case Ge: result = if l >= r: 1 else: 0
+                case _: has_result = false
+            if not has_result:
+                return nil
+            Some(MirConstValue.Int(result))
+
+        case (Float(l), Float(r)):
+            var has_result = true
+            var result = 0.0
+            match op:
+                case Add: result = l + r
+                case Sub: result = l - r
+                case Mul: result = l * r
+                case Div:
+                    if r != 0.0:
+                        result = l / r
+                    else:
+                        has_result = false
+                case Pow: result = l ** r
+                case _: has_result = false
+            if not has_result:
+                return nil
+            Some(MirConstValue.Float(result))
+
+        case _:
+            nil
+
+# Keep MirModule last.  The bootstrap parser currently leaves declaration
+# parsing in expression mode after generic Dict fields, which corrupts the
+# declaration immediately following the struct.
+struct MirModule:
+    """Complete MIR module."""
+    name: text
+    functions: Dict<SymbolId, MirFunction>
+    statics: Dict<SymbolId, MirStatic>
+    constants: Dict<SymbolId, MirConstant>
+    types: Dict<SymbolId, MirTypeDef>
+
+export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop

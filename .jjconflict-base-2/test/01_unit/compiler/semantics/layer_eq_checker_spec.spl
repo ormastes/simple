@@ -1,0 +1,224 @@
+# Spec for the @layer_eq structural-equivalence checker (first slice).
+# Runs under the Rust seed bin/simple — noted per measurement policy.
+
+use std.spec.{describe, it, expect, expect_not, assert_true}
+use compiler.semantics.layer_eq_checker (LayerEqField, LayerEqType, check_layer_eq)
+
+fn f(name: text, ty: text, off: i64, sz: i64) -> LayerEqField:
+    LayerEqField(name: name, type_name: ty, offset: off, size: sz, mapped_name: "",
+        ownership: "owned", mutable: true, address_space: "",
+        unit_tag: "", space_tag: "", color_tag: "", alpha_tag: "")
+
+fn ftag(name: text, ty: text, off: i64, sz: i64, target: text) -> LayerEqField:
+    LayerEqField(name: name, type_name: ty, offset: off, size: sz, mapped_name: target,
+        ownership: "owned", mutable: true, address_space: "",
+        unit_tag: "", space_tag: "", color_tag: "", alpha_tag: "")
+
+# Full-control field constructor for the obligation 5-8 spec cases below.
+fn ftagged(name: text, ty: text, off: i64, sz: i64, ownership: text, mutable: bool,
+        address_space: text, unit_tag: text, space_tag: text, color_tag: text,
+        alpha_tag: text) -> LayerEqField:
+    LayerEqField(name: name, type_name: ty, offset: off, size: sz, mapped_name: "",
+        ownership: ownership, mutable: mutable, address_space: address_space,
+        unit_tag: unit_tag, space_tag: space_tag, color_tag: color_tag, alpha_tag: alpha_tag)
+
+fn device_rect() -> LayerEqType:
+    LayerEqType(name: "draw.DeviceRect", total_size: 16, align: 4, fields: [
+        f("x", "i32", 0, 4), f("y", "i32", 4, 4),
+        f("width", "i32", 8, 4), f("height", "i32", 12, 4)],
+        is_enum: false, discriminants: [])
+
+fn enum_target() -> LayerEqType:
+    LayerEqType(name: "draw.DeviceTag", total_size: 4, align: 4, fields: [
+        f("none", "unit", 0, 0), f("solid", "unit", 0, 0), f("gradient", "unit", 0, 0)],
+        is_enum: true, discriminants: [0, 1, 2])
+
+describe "layer_eq checker":
+    it "accepts a same-name implicit view":
+        val view = LayerEqType(name: "gui.GuiDeviceRect", total_size: 16, align: 4, fields: [
+            f("x", "i32", 0, 4), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, device_rect())
+        assert_true(v.ok)
+        expect(v.diagnostic).to_equal("")
+
+    it "accepts a fully @layer_field-tagged rename view":
+        val view = LayerEqType(name: "gui.GuiBounds", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), ftag("top", "i32", 4, 4, "y"),
+            ftag("extent_x", "i32", 8, 4, "width"), ftag("extent_y", "i32", 12, 4, "height")],
+            is_enum: false, discriminants: [])
+        assert_true(check_layer_eq(view, device_rect()).ok)
+
+    it "rejects a size mismatch":
+        val view = LayerEqType(name: "gui.WideRect", total_size: 32, align: 8, fields: [
+            f("x", "i64", 0, 8), f("y", "i64", 8, 8),
+            f("width", "i64", 16, 8), f("height", "i64", 24, 8)],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("error[layer_eq]"))
+
+    it "rejects a field-type mismatch":
+        val view = LayerEqType(name: "gui.FloatRect", total_size: 16, align: 4, fields: [
+            f("x", "f32", 0, 4), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("f32"))
+
+    it "rejects a partial @layer_field tag set":
+        val view = LayerEqType(name: "gui.HalfTagged", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), f("y", "i32", 4, 4),
+            f("width", "i32", 8, 4), f("height", "i32", 12, 4)],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("tag all fields or none"))
+
+    it "rejects a field-count mismatch":
+        val view = LayerEqType(name: "gui.Point", total_size: 8, align: 4, fields: [
+            f("x", "i32", 0, 4), f("y", "i32", 4, 4)],
+            is_enum: false, discriminants: [])
+        expect_not(check_layer_eq(view, device_rect()).ok)
+
+    it "rejects a mapping to a nonexistent target field":
+        val view = LayerEqType(name: "gui.BadMap", total_size: 16, align: 4, fields: [
+            ftag("left", "i32", 0, 4, "x"), ftag("top", "i32", 4, 4, "y"),
+            ftag("extent_x", "i32", 8, 4, "width"), ftag("extent_y", "i32", 12, 4, "depth")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, device_rect())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("depth"))
+
+    # ------------------------------------------------------------------
+    # Obligation 5: enum discriminants
+    # ------------------------------------------------------------------
+
+    it "accepts matching enum discriminants in the same positions":
+        val view = LayerEqType(name: "gui.GuiTag", total_size: 4, align: 4, fields: [
+            f("none", "unit", 0, 0), f("solid", "unit", 0, 0), f("gradient", "unit", 0, 0)],
+            is_enum: true, discriminants: [0, 1, 2])
+        assert_true(check_layer_eq(view, enum_target()).ok)
+
+    it "rejects an is_enum view whose discriminants array doesn't cover every field (fails closed, never silently skips)":
+        val view = LayerEqType(name: "gui.GuiTagShort", total_size: 4, align: 4, fields: [
+            f("none", "unit", 0, 0), f("solid", "unit", 0, 0), f("gradient", "unit", 0, 0)],
+            is_enum: true, discriminants: [0, 1])
+        val v = check_layer_eq(view, enum_target())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("discriminants"))
+
+    it "SABOTAGE: rejects an enum view whose discriminant values diverge (reordered tags)":
+        val view = LayerEqType(name: "gui.GuiTagSwapped", total_size: 4, align: 4, fields: [
+            f("none", "unit", 0, 0), f("solid", "unit", 0, 0), f("gradient", "unit", 0, 0)],
+            is_enum: true, discriminants: [0, 2, 1])
+        val v = check_layer_eq(view, enum_target())
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("discriminant"))
+
+    # ------------------------------------------------------------------
+    # Obligation 6: ownership / mutability class
+    # ------------------------------------------------------------------
+
+    it "accepts matching owned+mutable fields on both sides":
+        val view = LayerEqType(name: "gui.OwnedView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.OwnedTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        assert_true(check_layer_eq(view, target).ok)
+
+    it "SABOTAGE: rejects a borrowed view over an owned target":
+        val view = LayerEqType(name: "gui.BorrowedView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "borrowed", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.OwnedTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("ownership"))
+
+    it "SABOTAGE: rejects an immutable view over a mutable target":
+        val view = LayerEqType(name: "gui.ImmutView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", false, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.MutTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("mutable"))
+
+    # ------------------------------------------------------------------
+    # Obligation 7: address space / lifetime
+    # ------------------------------------------------------------------
+
+    it "accepts matching default (host/stack) address spaces on both sides":
+        val view = LayerEqType(name: "gui.HostView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.HostTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        assert_true(check_layer_eq(view, target).ok)
+
+    it "SABOTAGE: rejects a device-address-space view over a host target":
+        val view = LayerEqType(name: "gpu.DeviceView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "device", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.HostTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("address_space"))
+
+    # ------------------------------------------------------------------
+    # Obligation 8: unit / space / color / alpha semantic-vocabulary tags
+    # ------------------------------------------------------------------
+
+    it "accepts matching @unit/@space tags on both sides (DevicePixelRect self-eq)":
+        val view = LayerEqType(name: "gui.DevicePixelView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "device_px", "document", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.DevicePixelTarget", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "device_px", "document", "", "")],
+            is_enum: false, discriminants: [])
+        assert_true(check_layer_eq(view, target).ok)
+
+    it "SABOTAGE: rejects CssLogicalRect (@unit css_px) over DevicePixelRect (@unit device_px) — never equivalent":
+        val view = LayerEqType(name: "css.CssLogicalRectView", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "css_px", "document", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.DevicePixelRect", total_size: 4, align: 4, fields: [
+            ftagged("x", "i32", 0, 4, "owned", true, "", "device_px", "document", "", "")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("@unit"))
+
+    it "SABOTAGE: absent tag is NOT equivalent to a present tag (@color srgb8 vs untagged)":
+        val view = LayerEqType(name: "gui.UntaggedColorView", total_size: 4, align: 4, fields: [
+            ftagged("c", "i32", 0, 4, "owned", true, "", "", "", "", "")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.Srgb8ColorTarget", total_size: 4, align: 4, fields: [
+            ftagged("c", "i32", 0, 4, "owned", true, "", "", "", "srgb8", "")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("@color"))
+
+    it "SABOTAGE: rejects straight vs premultiplied @alpha (never silently coerced)":
+        val view = LayerEqType(name: "gui.StraightAlphaView", total_size: 4, align: 4, fields: [
+            ftagged("c", "i32", 0, 4, "owned", true, "", "", "", "srgb8", "straight")],
+            is_enum: false, discriminants: [])
+        val target = LayerEqType(name: "draw.PremultipliedAlphaTarget", total_size: 4, align: 4, fields: [
+            ftagged("c", "i32", 0, 4, "owned", true, "", "", "", "srgb8", "premultiplied")],
+            is_enum: false, discriminants: [])
+        val v = check_layer_eq(view, target)
+        expect_not(v.ok)
+        assert_true(v.diagnostic.contains("@alpha"))

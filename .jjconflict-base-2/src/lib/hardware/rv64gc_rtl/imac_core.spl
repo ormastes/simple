@@ -1,0 +1,513 @@
+# Integer-only RV64IMAC datapath/controller for the synthesizable protected root.
+# Behavioral F/D support remains in core.spl and is intentionally unreachable here.
+
+use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MISC_MEM}
+use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
+use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv64gc_rtl.pkg.{SEMI_ENTRY, SEMI_BREAK, SEMI_EXIT, SYS_EXIT}
+use std.hardware.rv64gc_rtl.decode.{DecodeResult64, decode_instruction_64, sign_extend_to_64}
+use std.hardware.rv64gc_rtl.decode.{RvcExpansion, rvc_expand}
+use std.hardware.rv64gc_rtl.alu.{AluResult64, alu64_compute, i64_signed_lt}
+use std.hardware.rv64gc_rtl.regfile.{RegFile64, RegReadResult64, regfile64_create, regfile64_read, regfile64_write}
+use std.hardware.rv64gc_rtl.lsu.lsu64_load
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_ready, muldiv_execute, mul_div_start, mul_div_tick}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MUL, MULDIV_MULH, MULDIV_MULHSU, MULDIV_MULHU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_DIVU, MULDIV_REM, MULDIV_REMU}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_MULW, MULDIV_DIVW, MULDIV_DIVUW, MULDIV_REMW, MULDIV_REMUW}
+use std.hardware.rv64gc_rtl.atomics.{AtomicsState, atomics_create, atomics_lr, atomics_sc, atomics_invalidate, amo_compute}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
+use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_create, csr64_read, csr64_write, csr64_tick, csr64_retire}
+use std.hardware.rv64gc_rtl.csr.{CsrExt64, csr_ext64_create, csr_ext64_read, csr_ext64_write, csr_ext64_known}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPP_MASK, MSTATUS_MPP_LO_BIT, MSTATUS_FS_MASK, MSTATUS_SD_MASK, MIP_MEIP_MASK, MIP_MSIP_MASK, MIP_MTIP_MASK}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_create, csr_s64_read, csr_s64_write}
+use std.hardware.rv64gc_rtl.trap.{trap64_mret, trap64_sret, trap64_sret_csr}
+use std.hardware.rv64gc_rtl.trap.{InterruptCheckResult64, trap64_check_interrupt_deleg, trap64_enter, trap64_state_init}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_ILLEGAL_INSN, CAUSE_BREAKPOINT, cause_mei, cause_msi, cause_mti}
+use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
+use std.hardware.rv64gc_rtl.mmu_sv39.{MmuState64, mmu64_create, mmu64_flush, mmu64_set_satp}
+use std.hardware.rv64gc_rtl.mmu_sv39.{ACCESS_FETCH_64, ACCESS_LOAD_64, ACCESS_STORE_64}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SIE_MASK_64, SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.memory_access.MemoryAccessState64
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start, memory64_start_atomic_read}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_lr, memory64_start_atomic_store}
+use std.hardware.rv64gc_rtl.memory_access.{memory64_start_conditional_store, memory64_cycle}
+use std.hardware.rv64gc_rtl.pmp.PmpEntries64
+use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_entries_reset, pmp64_csr_read, pmp64_csr_write}
+use std.hardware.rv64gc_rtl.rvfi_base.{RvfiTrace64, rvfi64_mask_for_width}
+use std.hardware.rv64gc_rtl.imac_types.{CoreImacState64, CoreImacCsrAccess64, CoreImacCombResult64}
+use std.hardware.rv64gc_rtl.imac_types.{CORE64_FETCH_LOW, CORE64_MSTATUS_MPRV_MASK}
+use std.hardware.rv64gc_rtl.imac_helpers.{i64_signed_ge, i64_unsigned_lt, i64_unsigned_ge, eval_branch_64}
+use std.hardware.rv64gc_rtl.imac_helpers.{core64_imac_mem_misaligned, core64_imac_mem_misalign_cause}
+use std.hardware.rv64gc_rtl.imac_helpers.{core64_imac_instruction_legal, core64_imac_privileged_instruction_legal}
+use std.hardware.rv64gc_rtl.imac_helpers.{core64_imac_csr_source, core64_imac_csr_next_value, core64_imac_csr_access, core64_imac_sync_sstatus}
+use std.hardware.rv64gc_rtl.imac_helpers.{core64_imac_force_fs_off}
+
+# ============================================================================
+# Combinational datapath
+# ============================================================================
+
+fn core64_imac_combinational(state: CoreImacState64, imem_data: u32, dmem_rdata: i64, rf: RegFile64) -> CoreImacCombResult64:
+    """Compute all combinational signals for one cycle."""
+
+    val pc = state.pc
+
+    # RV64C: if the fetched word is a 16-bit parcel (low 2 bits != 0b11),
+    # expand it to its 32-bit equivalent and advance pc by 2 (link = pc+2);
+    # otherwise it is a normal 32-bit instruction (pc += 4).  IALIGN=16 when C
+    # is implemented, so 2-byte-aligned fetch/branch targets are legal.
+    val exp = rvc_expand(imem_data)
+    val eff_insn = exp.insn
+    val pc_incr: i64 = if exp.compressed: 2 else: 4
+    # pc_plus4 carries the sequential-next PC (= link value); named for the
+    # historical RV32 field.  For a compressed insn this is pc+2.
+    val pc_plus4 = pc + pc_incr
+
+    val imem_addr = pc
+
+    # Decode the (possibly expanded) 32-bit instruction
+    val dec = decode_instruction_64(eff_insn)
+
+    # Register file read
+    val rr = regfile64_read(rf, dec.rs1, dec.rs2)
+    val rs1_data = rr.rs1_data
+    val rs2_data = rr.rs2_data
+
+    # ALU input muxes
+    var alu_a: i64 = rs1_data
+    if dec.opcode == OP_AUIPC or dec.opcode == OP_JAL:
+        alu_a = pc
+
+    var alu_b: i64 = rs2_data
+    if dec.alu_src:
+        alu_b = dec.imm
+
+    # ALU
+    val alu_res = alu64_compute(alu_a, alu_b, dec.alu_op)
+
+    # Branch evaluation
+    var branch_taken: bool = false
+    if dec.branch:
+        branch_taken = eval_branch_64(dec.funct3, rs1_data, rs2_data)
+
+    val branch_target = pc + dec.imm
+
+    # Next PC mux
+    var pc_next: i64 = pc_plus4
+    if dec.opcode == OP_JALR:
+        # JALR always clears bit zero of the computed target.
+        pc_next = alu_res.result & -2
+    else if branch_taken or dec.jump:
+        pc_next = branch_target
+
+    # Write-back data mux
+    var rd_data: i64 = alu_res.result
+    var rd_write = dec.reg_write
+    if dec.mem_to_reg:
+        rd_data = lsu64_load(dmem_rdata, dec.funct3)
+    else if dec.jump:
+        rd_data = pc_plus4
+    else if dec.is_muldiv:
+        # M extension: decode routes funct7==1 through the ALU as an ADD
+        # placeholder; override rd here with the real product/quotient/
+        # remainder. is_word selects the .W (32-bit, sign-extended) forms.
+        rd_data = muldiv_execute(dec.opcode == OP_OP_32, dec.funct3, rs1_data, rs2_data)
+    else if dec.is_csr:
+        val source = core64_imac_csr_source(dec.funct3, dec.rs1, rs1_data)
+        val csr_access = core64_imac_csr_access(state, dec.csr_addr, source,
+            dec.funct3)
+        if csr_access.valid:
+            rd_data = csr_access.old_value
+            rd_write = true
+        else:
+            rd_write = false
+
+    # Data memory interface
+    var dmem_addr = alu_res.result
+    var dmem_wdata = rs2_data
+    var dmem_we = dec.mem_write and (state.semi_suppress == false)
+    var dmem_re = dec.mem_read
+    val dmem_width = dec.funct3 & 0x3
+
+    # ── A extension (OP_AMO): LR / SC / AMO read-modify-write ──
+    # Address = rs1 (decode routes imm=0 through the ALU for OP_AMO, so
+    # dmem_addr already equals rs1). funct3=2 → .W (4 bytes, sign-extended
+    # into rd via lsu64_load), funct3=3 → .D (8 bytes). The SoC tick reads
+    # old memory at step 4 and writes dmem_wdata at step 6 of the SAME
+    # cycle, so an AMO is a true single-cycle atomic RMW.
+    if dec.is_amo:
+        val amo_funct5 = dec.funct7 >> 2
+        if amo_funct5 == AMO_LR:
+            # LR: plain load + reservation set (reservation is sequential
+            # state — core64_imac_update marks it).
+            dmem_re = true
+            rd_data = lsu64_load(dmem_rdata, dec.funct3)
+        else if amo_funct5 == AMO_SC:
+            # SC: store rs2 iff the reservation is valid and matches this
+            # address; rd = 0 on success, 1 on failure.
+            val sc_ok = state.atomics.reservation_valid and
+                        state.atomics.reservation_addr == dmem_addr
+            dmem_we = sc_ok and (state.semi_suppress == false)
+            if sc_ok:
+                rd_data = 0
+            else:
+                rd_data = 1
+        else:
+            # AMOSWAP/ADD/XOR/AND/OR/MIN/MAX/MINU/MAXU: rd gets the
+            # (sign-extended for .W) old value, memory gets the computed
+            # new value. For .W the rs2 operand is sign-extended from its
+            # low 32 bits so signed and unsigned 32-bit min/max order
+            # correctly in the 64-bit comparator; the 4-byte store
+            # truncates the result back to 32 bits.
+            dmem_re = true
+            dmem_we = state.semi_suppress == false
+            val amo_old = lsu64_load(dmem_rdata, dec.funct3)
+            var amo_rs2 = rs2_data
+            if dec.funct3 == 2:
+                amo_rs2 = sign_extend_to_64(rs2_data & 0xFFFF_FFFF, 32)
+            val amo = amo_compute(amo_funct5, amo_old, amo_rs2)
+            dmem_wdata = amo.new_value
+            rd_data = amo_old
+
+    # ── Misaligned load/store/AMO: suppress the memory access and the rd
+    #    writeback; core64_imac_update raises CAUSE_LOAD_MISALIGNED (4) /
+    #    CAUSE_STORE_MISALIGNED (6) through the trap path BEFORE any access. ──
+    if core64_imac_mem_misaligned(dec, dmem_addr):
+        dmem_re = false
+        dmem_we = false
+        rd_write = false
+
+    CoreImacCombResult64(
+        dec: dec,
+        rs1_data: rs1_data,
+        rs2_data: rs2_data,
+        a0_val: rr.a0_val,
+        a1_val: rr.a1_val,
+        alu_result: alu_res.result,
+        alu_zero: alu_res.zero,
+        branch_taken: branch_taken,
+        branch_target: branch_target,
+        pc_next: pc_next,
+        pc_plus4: pc_plus4,
+        rd_data: rd_data,
+        rd_write: rd_write,
+        dmem_addr: dmem_addr,
+        dmem_wdata: dmem_wdata,
+        dmem_we: dmem_we,
+        dmem_re: dmem_re,
+        dmem_width: dmem_width,
+        imem_addr: imem_addr
+    )
+
+@hardware
+fn core64_imac_combinational_length(state: CoreImacState64, instruction: u32,
+                               dmem_rdata: i64, rf: RegFile64,
+                               instruction_bytes: u32) -> CoreImacCombResult64:
+    """Apply the committed 16/32-bit instruction length to PC and link data."""
+    var comb = core64_imac_combinational(state, instruction, dmem_rdata, rf)
+    val sequential_pc = state.pc + instruction_bytes as i64
+    comb.pc_plus4 = sequential_pc
+    if comb.dec.jump:
+        comb.rd_data = sequential_pc
+    if comb.dec.opcode != OP_JALR and not comb.branch_taken and not comb.dec.jump:
+        comb.pc_next = sequential_pc
+    comb
+
+# ============================================================================
+# Sequential update (clocked logic)
+# ============================================================================
+
+fn core64_imac_wfi_wakeup_pending(state: CoreImacState64) -> bool:
+    """Locally enabled pending state, intentionally ignoring global gates."""
+    val pending_m = state.csr_m.mie & state.csr_m.mip
+    val pending_s = state.csr_s.sie & state.csr_s.sip & state.csr_m.mideleg
+    pending_m != 0 or pending_s != 0
+
+fn core64_imac_update(state: CoreImacState64, imem_data: u32, comb: CoreImacCombResult64, a0_val: i64, a1_val: i64) -> CoreImacState64:
+    """Update sequential state on rising clock edge.
+    Handles PC advancement, semihosting detection, and halt."""
+
+    # RV64C: re-derive the expansion so SYSTEM literal matches see the EXPANDED
+    # 32-bit insn (e.g. c.ebreak -> 0x00100073 -> BREAKPOINT), and so a
+    # reserved 16-bit parcel raises illegal-instruction (cause 2) fail-closed.
+    # eff_insn == imem_data for a normal 32-bit instruction.
+    val exp = rvc_expand(imem_data)
+    val eff_insn = exp.insn
+    # Illegal-instruction tval: the 16-bit parcel for a compressed insn, else
+    # the full 32-bit word (RISC-V mtval carries the faulting instruction).
+    val ill_tval: i64 = if exp.compressed: (imem_data as i64) & 0xFFFF else: eff_insn as i64
+
+    var new_pc = state.pc
+    var new_halt = state.halt
+    var new_semi_phase = state.semi_phase
+    var new_semi_op = state.semi_op
+    var new_semi_param = state.semi_param
+    var new_semi_suppress = state.semi_suppress
+    var new_semi_trigger: bool = false
+    var new_wfi_wait = state.wfi_wait
+    var new_mul_div = state.mul_div
+    var new_atomics = state.atomics
+    var new_priv_mode = state.priv_mode
+    var new_csr_m = state.csr_m
+    var new_csr_ext = state.csr_ext
+    var new_csr_s = state.csr_s
+    var new_mmu = state.mmu
+    var new_pmp = state.pmp
+    var new_rf = state.rf
+
+    if state.halt == false:
+        if state.instruction_bytes == 4 and imem_data == SEMI_ENTRY and state.semi_phase == 0:
+            new_semi_phase = 1
+            new_pc = comb.pc_plus4
+
+        else if state.instruction_bytes == 4 and imem_data == SEMI_BREAK and state.semi_phase == 1:
+            new_semi_phase = 2
+            new_semi_op = a0_val
+            new_semi_param = a1_val
+            new_semi_suppress = true
+            new_pc = comb.pc_plus4
+
+        else if state.instruction_bytes == 4 and imem_data == SEMI_EXIT and state.semi_phase == 2:
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_semi_trigger = true
+            val exit_code: i64 = SYS_EXIT as i64
+            if new_semi_op == exit_code:
+                new_halt = true
+            else:
+                new_pc = comb.pc_plus4
+
+        else if exp.compressed and (exp.legal == false) and state.semi_phase == 0:
+            # Reserved / unsupported (F/D) 16-bit parcel: raise illegal-
+            # instruction (cause 2) with the 16-bit parcel as mtval.  Fail
+            # closed — never a silent NOP.  pc stays at the faulting insn
+            # (trap sets mepc = pc).
+            val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+            new_pc = trap.trap_pc
+            new_priv_mode = trap.target_mode
+            new_csr_m = trap.csr
+            new_csr_s = trap.csr_s
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_atomics = atomics_create()
+
+        else if comb.dec.is_mret and state.semi_phase == 0:
+            val result = trap64_mret(state.csr_m)
+            new_pc = result.return_pc
+            new_priv_mode = result.target_mode
+            new_csr_m = result.csr
+            if result.target_mode != 3:
+                new_csr_m.mstatus = new_csr_m.mstatus & (CORE64_MSTATUS_MPRV_MASK ^ -1)
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_wfi_wait = false
+
+        else if comb.dec.is_sret and state.semi_phase == 0:
+            val result = trap64_sret(state.csr_s)
+            new_pc = result.return_pc
+            new_priv_mode = result.target_mode
+            new_csr_s = trap64_sret_csr(state.csr_s)
+            if result.target_mode != 3:
+                new_csr_m.mstatus = new_csr_m.mstatus & (CORE64_MSTATUS_MPRV_MASK ^ -1)
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_wfi_wait = false
+
+        else if comb.dec.is_sfence_vma and state.semi_phase == 0:
+            new_pc = comb.pc_plus4
+            new_mmu = mmu64_flush(state.mmu)
+            new_semi_phase = 0
+            new_semi_suppress = false
+
+        else if comb.dec.is_csr and state.semi_phase == 0:
+            val source = core64_imac_csr_source(comb.dec.funct3, comb.dec.rs1, comb.rs1_data)
+            val csr_access = core64_imac_csr_access(state, comb.dec.csr_addr, source, comb.dec.funct3)
+            if csr_access.valid:
+                new_pc = comb.pc_plus4
+                new_csr_m = csr_access.csr_m
+                new_csr_ext = csr_access.csr_ext
+                new_csr_s = csr_access.csr_s
+                new_mmu = csr_access.mmu
+                new_pmp = csr_access.pmp
+                new_semi_phase = 0
+                new_semi_suppress = false
+            else:
+                val trap = trap64_enter(trap64_state_init(), CAUSE_ILLEGAL_INSN,
+                    ill_tval, state.pc, state.priv_mode, state.csr_m, state.csr_s)
+                new_pc = trap.trap_pc
+                new_priv_mode = trap.target_mode
+                new_csr_m = trap.csr
+                new_csr_s = trap.csr_s
+                new_semi_phase = 0
+                new_semi_suppress = false
+                new_atomics = atomics_create()
+
+        else if comb.dec.is_wfi and state.semi_phase == 0:
+            # WFI — wait for interrupt. Chosen semantics (documented):
+            #   * retire as a NOP (pc <- pc+4) when an enabled interrupt is
+            #     already pending (mie & mip != 0) — the SoC's step-8
+            #     interrupt take then fires with mepc = wfi+4, so mret
+            #     resumes AFTER the wfi (RISC-V: mepc = next instruction);
+            #   * retire as a NOP when mstatus.MIE = 0 — the spec allows
+            #     WFI to be a no-op, and this avoids a permanent hang when
+            #     interrupts are globally disabled (OpenSBI relies on this
+            #     in its early idle paths);
+            #   * otherwise hold pc (stall). Peripherals (CLINT/PLIC) keep
+            #     ticking in the SoC loop, so future locally-enabled pending
+            #     state wakes the core on the cycle it pends.
+            new_semi_phase = 0
+            new_semi_suppress = false
+            val wfi_mie_on = (state.csr_m.mstatus & MSTATUS_MIE_MASK) != 0
+            val wfi_pending = core64_imac_wfi_wakeup_pending(state)
+            if wfi_pending or wfi_mie_on == false:
+                new_pc = comb.pc_plus4
+            # else: new_pc stays state.pc — architectural stall
+
+        else if comb.dec.opcode == OP_SYSTEM and state.semi_phase == 0:
+            # Compare the EXPANDED insn so c.ebreak (-> 0x00100073) is a
+            # breakpoint, not an illegal instruction.
+            var cause = CAUSE_ILLEGAL_INSN
+            var tval = ill_tval
+            if eff_insn == 0x00000073:
+                cause = if state.priv_mode == 0: 8 else if state.priv_mode == 1: 9 else: 11
+                tval = 0
+            else if eff_insn == 0x00100073:
+                cause = CAUSE_BREAKPOINT
+                tval = 0
+            val trap = trap64_enter(trap64_state_init(), cause, tval,
+                state.pc, state.priv_mode, state.csr_m, state.csr_s)
+            new_pc = trap.trap_pc
+            new_priv_mode = trap.target_mode
+            new_csr_m = trap.csr
+            new_csr_s = trap.csr_s
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_atomics = atomics_create()
+
+        else if core64_imac_mem_misaligned(comb.dec, comb.dmem_addr) and state.semi_phase == 0:
+            # Misaligned load/store/AMO: enter a synchronous exception with
+            # cause 4 (load) / 6 (store/AMO) and the faulting address as
+            # tval. The memory access was suppressed in the combinational
+            # path, so no data was read or written. Clear the reservation.
+            val cause = core64_imac_mem_misalign_cause(comb.dec)
+            val trap = trap64_enter(trap64_state_init(), cause, comb.dmem_addr,
+                state.pc, state.priv_mode, state.csr_m, state.csr_s)
+            new_pc = trap.trap_pc
+            new_priv_mode = trap.target_mode
+            new_csr_m = trap.csr
+            new_csr_s = trap.csr_s
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_atomics = atomics_create()
+
+        else:
+            new_semi_phase = 0
+            new_semi_suppress = false
+            new_pc = comb.pc_next
+            # A-extension reservation tracking (single-hart rule,
+            # documented): LR sets the reservation on its address; SC
+            # ALWAYS clears it (success or fail); any other store — plain
+            # SW/SD/... or an AMO — to the reserved address clears it;
+            # synchronous trap entry clears it (branches above). A store
+            # to a DIFFERENT address leaves the reservation intact, which
+            # is architecturally sound on a single hart (the reserved
+            # location cannot have changed).
+            if comb.dec.is_amo:
+                val amo_funct5 = comb.dec.funct7 >> 2
+                if amo_funct5 == AMO_LR:
+                    new_atomics = atomics_lr(state.atomics, comb.dmem_addr)
+                else if amo_funct5 == AMO_SC:
+                    val sc = atomics_sc(state.atomics, comb.dmem_addr)
+                    new_atomics = sc.state
+                else:
+                    new_atomics = atomics_invalidate(state.atomics, comb.dmem_addr)
+            else if comb.dec.mem_write:
+                new_atomics = atomics_invalidate(state.atomics, comb.dmem_addr)
+
+        new_rf = regfile64_write(state.rf, comb.dec.rd, comb.rd_data, comb.rd_write)
+
+    new_csr_m = core64_imac_force_fs_off(new_csr_m)
+    new_csr_s = core64_imac_sync_sstatus(new_csr_s, new_csr_m)
+    CoreImacState64(
+        pc: new_pc,
+        halt: new_halt,
+        semi_phase: new_semi_phase,
+        semi_op: new_semi_op,
+        semi_param: new_semi_param,
+        semi_suppress: new_semi_suppress,
+        semi_trigger: new_semi_trigger,
+        wfi_wait: new_wfi_wait,
+        mul_div: new_mul_div,
+        atomics: new_atomics,
+        atomic_old: state.atomic_old,
+        atomic_reservation_size: state.atomic_reservation_size,
+        atomic_bus_exclusive: state.atomic_bus_exclusive,
+        priv_mode: new_priv_mode,
+        csr_m: new_csr_m,
+        csr_ext: new_csr_ext,
+        csr_s: new_csr_s,
+        mmu: new_mmu,
+        pmp: new_pmp,
+        rf: new_rf,
+        time_value: state.time_value,
+        memory: state.memory,
+        pipeline_phase: state.pipeline_phase,
+        fetch_low: state.fetch_low,
+        instruction: state.instruction,
+        instruction_bytes: state.instruction_bytes,
+        rvfi_order: state.rvfi_order,
+        rvfi_valid: state.rvfi_valid,
+        rvfi_trap: state.rvfi_trap,
+        rvfi_insn: if state.instruction_bytes == 2: state.rvfi_insn else: eff_insn,
+        rvfi_pc_wdata: new_pc,
+        rvfi_intr_pending: state.rvfi_intr_pending
+    )
+
+# ============================================================================
+# Full initialization with privilege and CSR state
+# ============================================================================
+
+fn core64_imac_init(reset_vec: i64) -> CoreImacState64:
+    """Create full initial core state with privilege mode and CSR state.
+    Starts in M-mode (priv_mode=3) with all CSRs zeroed."""
+    val mmu = mmu64_create()
+    val pmp = pmp64_entries_reset()
+    var csr_m = core64_imac_force_fs_off(csr64_create(0))
+    val csr_s = core64_imac_sync_sstatus(csr_s64_create(), csr_m)
+    CoreImacState64(
+        pc: reset_vec,
+        halt: false,
+        semi_phase: 0,
+        semi_op: 0,
+        semi_param: 0,
+        semi_suppress: false,
+        semi_trigger: false,
+        wfi_wait: false,
+        mul_div: MulDivState(busy: false, op: 0, a: 0, b: 0, result: 0, cycles_left: 0),
+        atomics: atomics_create(),
+        atomic_old: 0,
+        atomic_reservation_size: 0,
+        atomic_bus_exclusive: false,
+        priv_mode: 3,
+        csr_m: csr_m,
+        csr_ext: csr_ext64_create(),
+        csr_s: csr_s,
+        mmu: mmu,
+        pmp: pmp,
+        rf: regfile64_create(),
+        time_value: 0,
+        memory: memory64_start(mmu, pmp, reset_vec, ACCESS_FETCH_64, 2,
+            3, false, false, 0),
+        pipeline_phase: CORE64_FETCH_LOW,
+        fetch_low: 0,
+        instruction: 0,
+        instruction_bytes: 4,
+        rvfi_order: 0,
+        rvfi_valid: false,
+        rvfi_trap: false,
+        rvfi_insn: 0,
+        rvfi_pc_wdata: reset_vec,
+        rvfi_intr_pending: false
+    )

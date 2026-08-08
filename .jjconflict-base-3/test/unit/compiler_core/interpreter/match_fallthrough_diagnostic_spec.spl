@@ -1,0 +1,82 @@
+"""
+# Match Fall-Through Diagnostic
+
+Guards BUG-2026-08-01-match-fallthrough: a `match` on an enum where NO arm
+fires used to take no branch and emit no diagnostic. The statement form was a
+silent no-op; the expression form silently yielded nil (which reads back as the
+integer 3 under the nil-sentinel encoding).
+
+These examples pin the CONTENT of the diagnostic, not merely its existence.
+A message that said only "no arm matched" would not have shortened the
+investigation the defect caused, so each required part is asserted separately:
+the enum name, the value that matched nothing, the arms that WERE covered, and
+the bare-name-collision note that fires when the arms are textually exhaustive.
+
+Non-vacuity: every example below fails if `match_fallthrough_message` is
+stubbed to return a constant, or if any single component is dropped from the
+message. There is no merge/backfill path that can restore the text.
+"""
+
+use std.spec
+use compiler.core.interpreter.eval_tables.{match_fallthrough_message}
+
+describe "match fall-through diagnostic content":
+
+    it "names the enum that was matched on":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("ChangeKind")).to_equal(true)
+
+    it "names the value that matched nothing":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("Style")).to_equal(true)
+
+    it "names the source location":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("layout/invalidation.spl")).to_equal(true)
+
+    it "lists the arms that were covered":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("Insert")).to_equal(true)
+        expect(msg.contains("Remove")).to_equal(true)
+
+    it "suggests the missing arm when coverage is genuinely incomplete":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("case Style:")).to_equal(true)
+
+    it "calls out a bare-name collision when the arms ARE textually exhaustive":
+        # This is the reproduced instance: the arms name every variant, yet no
+        # arm fired, because the value's enum is a DIFFERENT declaration of the
+        # same bare name. A plain "missing variant" message would be actively
+        # misleading here, so the diagnostic must switch wording.
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove", "Style"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("bare-name collision")).to_equal(true)
+
+    it "does NOT claim a missing arm when the variant is textually covered":
+        val msg = match_fallthrough_message(
+            "ChangeKind", "Style", "enum", ["Insert", "Remove", "Style"], "layout/invalidation.spl"
+        )
+        expect(msg.contains("case Style:")).to_equal(false)
+
+    it "degrades readably when the enum could not be resolved":
+        val msg = match_fallthrough_message("", "", "int", [], "x.spl")
+        expect(msg.contains("<unresolved enum>")).to_equal(true)
+        expect(msg.contains("no arm covered any variant")).to_equal(true)
+
+    it "is not a constant - different inputs give different text":
+        # Kills the "stub it to a fixed string" degenerate implementation that
+        # would otherwise satisfy every `contains` assertion above.
+        val a = match_fallthrough_message("A", "V1", "enum", ["V2"], "a.spl")
+        val b = match_fallthrough_message("B", "V3", "enum", ["V4"], "b.spl")
+        expect(a == b).to_equal(false)

@@ -1,0 +1,672 @@
+# Track Changes — Word-style revision marking over RichDocument.
+#
+# Provides: tracked_insert, tracked_delete, accept_revision, reject_revision,
+#           accept_all, reject_all, revisions_summary, final_text.
+#
+# Office semantics: deletions are MARKED, not removed — a `tracked_delete`
+# span stays physically in the document (its text is still returned by
+# `spans_to_plain_text`/`document_plain_text` in edit_ops.spl, the "display /
+# show markup" view) until `accept_revision`/`accept_all` actually drops it.
+# `final_text` below is the OTHER reading: the "final" accepted-preview that
+# a reviewer sees with Show Markup off — delete-marked spans are excluded,
+# insert-marked spans are included (inserts are accepted by default in that
+# view; only deletes need suppressing).
+#
+# Scope: `tracked_insert`/`tracked_delete` act within a SINGLE block
+# (paragraph) at a time — a block's spans form one flat character sequence
+# and inserts/deletes split spans at exact offsets within it, mirroring how
+# `document_replace` in word/edit_ops.spl already operates per-block.
+#
+# Cross-block (multi-paragraph) tracked edits — `tracked_delete_range`,
+# `tracked_insert_block`, `tracked_split_block` — are provided below. Same
+# ceiling as docx serialization of revisions (file_formats.spl/odf_ooxml.spl
+# are untouched by this file; a concurrent lane owns DOCX serialization of
+# these revision kinds — see the module docstring addendum near the bottom
+# of this file for what that lane needs to know).
+#
+# Revision ids are auto-assigned sequentially ("1", "2", ...) off
+# `doc.revisions.len() + 1` — insert and delete revisions share one id space
+# (mirrors how comment ids are assigned in office_api.spl's
+# macro_new_document). `RevisionDef.kind` is a plain `text` field (not an
+# enum) so the cross-block ops below add THREE MORE STRING VALUES to the
+# existing "insert"/"delete" vocabulary — no changes to the RevisionDef
+# struct or attributed_text.spl were needed:
+#   - "delete_range" — a `tracked_delete_range` spanning 2+ blocks. Same
+#     span-tagging shape as "delete" (one id, N tagged spans, possibly
+#     across several blocks) but ACCEPT additionally merges the touched
+#     block range into one block (see `accept_revision`) and `final_text`
+#     additionally suppresses the paragraph break across the touched range
+#     (see `final_text`) — Word shows a cross-paragraph pending delete as
+#     already visually flowing together in the "final" reading, since the
+#     paragraph mark itself is what's marked deleted.
+#   - "insert_block" — a `tracked_insert_block`: whole new paragraphs marked
+#     as inserted. ACCEPT reuses the plain "insert" per-span strip-the-mark
+#     path (the block already exists; nothing structural to do). REJECT is
+#     special: it removes the whole block(s), not just their spans — an
+#     ordinary insert's reject drops only the tagged spans and leaves the
+#     (now-empty) block behind, which is right for text inserted into an
+#     existing paragraph, but wrong for a paragraph that only ever existed
+#     because of this revision.
+#   - "split" — a `tracked_split_block`: pressing Enter mid-paragraph. The
+#     pending representation is an ACTUAL split into two blocks, with the
+#     new paragraph mark modeled as a zero-length marker `TextSpan` (text
+#     "") carrying the revision id, prepended to the tail block's spans.
+#     ACCEPT drops the marker span (same "drop tagged spans" shape as
+#     "delete"/"delete_range" — the marker is inert once the split is kept).
+#     REJECT is special: it re-joins the head block and the marker's block
+#     back into one block (the exact inverse of the split), dropping the
+#     marker. This choice — model the split as two real blocks plus an
+#     inert zero-length owner marker, rather than e.g. a single block with
+#     an internal "pending paragraph break" flag — is what makes
+#     accept/reject exact structural inverses of the split operation without
+#     any new fields on DocBlock/TextSpan/RevisionDef.
+#
+# Quirk hit while writing this file: a local named `skip` fails to parse
+# ("Unexpected token: expected expression, found Assign", no line number —
+# same no-line-number failure mode as the documented `grid`/`unit` identifier
+# bug) — `skip` collides with `std.spec`'s `skip(name, reason)` test-skip
+# builtin at the parser level, even though this file never imports std.spec.
+# Renamed to `excluded` in `final_text` below; avoid `skip` (or `block_skip`,
+# hit again writing the cross-block `final_text` extension — the collision
+# is on the bare token `skip` anywhere in an identifier is safe; it's an
+# EXACT-match reserved word, not a substring ban) as a local name anywhere in
+# this codebase.
+
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, RevisionDef, revision_def_for, spans_to_plain_text}
+
+# =========================================================================
+# Span splitting helpers
+# =========================================================================
+
+fn _clone_span_with_revision(s: TextSpan, new_text: text, new_revision_id: text) -> TextSpan:
+    """Copy a span's style/link/footnote/comment metadata onto new text and
+    a new revision_id — the one place both tracked_insert and tracked_delete
+    build a "same style, different text/revision" span."""
+    TextSpan(text: new_text, style: s.style, link_url: s.link_url, footnote_id: s.footnote_id, comment_id: s.comment_id, revision_id: new_revision_id)
+
+fn _split_spans_for_insert(spans: [TextSpan], offset: i32, new_span: TextSpan) -> [TextSpan]:
+    """Walk spans accumulating character offset; when the target offset falls
+    inside (or at the boundary of) a span, split it into a before-part, the
+    new inserted span, and an after-part (either part omitted if empty).
+    An offset at/after the end of all spans appends the new span last."""
+    var result: [TextSpan] = []
+    var pos: i32 = 0
+    var placed = false
+    for s in spans:
+        val slen = s.text.len()
+        if not placed and offset >= pos and offset <= pos + slen:
+            val local = offset - pos
+            if local > 0:
+                result.push(_clone_span_with_revision(s, s.text.slice(0, local), s.revision_id))
+            result.push(new_span)
+            if local < slen:
+                result.push(_clone_span_with_revision(s, s.text.slice(local, slen), s.revision_id))
+            placed = true
+        else:
+            result.push(s)
+        pos = pos + slen
+    if not placed:
+        result.push(new_span)
+    result
+
+fn _split_spans_for_delete(spans: [TextSpan], from: i32, to: i32, rev_id: text) -> [TextSpan]:
+    """Walk spans accumulating character offset; any span overlapping
+    [from, to) splits into an untouched pre-part, a delete-marked middle
+    part (revision_id = rev_id), and an untouched post-part (parts omitted
+    if empty). A delete spanning 3 spans marks the middle of the first, all
+    of the second, and the start of the third — three separate splits, same
+    loop."""
+    var result: [TextSpan] = []
+    var pos: i32 = 0
+    for s in spans:
+        val slen = s.text.len()
+        val s_start = pos
+        val s_end = pos + slen
+        val ov_start = if s_start > from: s_start else: from
+        val ov_end = if s_end < to: s_end else: to
+        if slen == 0 or ov_start >= ov_end:
+            result.push(s)
+        else:
+            val pre_len = ov_start - s_start
+            val post_start = ov_end - s_start
+            if pre_len > 0:
+                result.push(_clone_span_with_revision(s, s.text.slice(0, pre_len), s.revision_id))
+            result.push(_clone_span_with_revision(s, s.text.slice(pre_len, post_start), rev_id))
+            if post_start < slen:
+                result.push(_clone_span_with_revision(s, s.text.slice(post_start, slen), s.revision_id))
+        pos = pos + slen
+    result
+
+fn _head_spans_at(spans: [TextSpan], offset: i32) -> [TextSpan]:
+    """Spans strictly before `offset` (a block-splitting cut, not a delete):
+    a span straddling the boundary keeps only its pre-offset slice. Paired
+    with `_tail_spans_at` — concatenating both results' text reproduces the
+    original spans' text exactly (used by `tracked_split_block`)."""
+    var head: [TextSpan] = []
+    var pos: i32 = 0
+    var placed = false
+    for s in spans:
+        val slen = s.text.len()
+        if not placed:
+            if offset >= pos + slen:
+                head.push(s)
+            else:
+                if offset > pos:
+                    val local = offset - pos
+                    head.push(_clone_span_with_revision(s, s.text.slice(0, local), s.revision_id))
+                placed = true
+        pos = pos + slen
+    head
+
+fn _tail_spans_at(spans: [TextSpan], offset: i32) -> [TextSpan]:
+    """Spans at/after `offset` — the complement of `_head_spans_at`; a span
+    straddling the boundary keeps only its post-offset slice."""
+    var tail: [TextSpan] = []
+    var pos: i32 = 0
+    var placed = false
+    for s in spans:
+        val slen = s.text.len()
+        if placed:
+            tail.push(s)
+        else:
+            if offset <= pos:
+                tail.push(s)
+                placed = true
+            else:
+                if offset < pos + slen:
+                    val local = offset - pos
+                    tail.push(_clone_span_with_revision(s, s.text.slice(local, slen), s.revision_id))
+                    placed = true
+        pos = pos + slen
+    tail
+
+# =========================================================================
+# Revision id assignment
+# =========================================================================
+
+fn _next_revision_id(doc: RichDocument) -> text:
+    (doc.revisions.len() + 1).to_text()
+
+fn _replace_block(doc: RichDocument, block_idx: i32, new_block: DocBlock) -> [DocBlock]:
+    """Rebuild the blocks list with `new_block` substituted at block_idx."""
+    var new_blocks: [DocBlock] = []
+    var i = 0
+    for block in doc.blocks:
+        if i == block_idx:
+            new_blocks.push(new_block)
+        else:
+            new_blocks.push(block)
+        i = i + 1
+    new_blocks
+
+# =========================================================================
+# Insert / Delete
+# =========================================================================
+
+fn tracked_insert(doc: RichDocument, block_idx: i32, offset: i32, text_: text, author: text) -> RichDocument:
+    """Insert `text_` at `offset` (character offset into the concatenated
+    plain text of block `block_idx`), splitting spans as needed. The new
+    text becomes its own span carrying a fresh insert-kind RevisionDef.
+    Out-of-range block_idx is a no-op (returns doc unchanged)."""
+    if block_idx < 0 or block_idx >= doc.blocks.len():
+        return doc
+    val rev_id = _next_revision_id(doc)
+    val new_span = TextSpan(text: text_, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: rev_id)
+    val block = doc.blocks[block_idx]
+    val new_spans = _split_spans_for_insert(block.spans, offset, new_span)
+    val new_block = DocBlock(kind: block.kind, spans: new_spans)
+    val new_blocks = _replace_block(doc, block_idx, new_block)
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        new_revisions.push(r)
+    new_revisions.push(RevisionDef(id: rev_id, author: author, kind: "insert", timestamp_text: ""))
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+fn tracked_delete(doc: RichDocument, block_idx: i32, from: i32, to: i32, author: text) -> RichDocument:
+    """Mark the character range [from, to) of block `block_idx` as deleted —
+    splitting spans at the boundaries as needed (a range crossing multiple
+    spans splits each overlapping one). The text STAYS in the document,
+    revision_id-tagged with a fresh delete-kind RevisionDef, until accepted.
+    Out-of-range block_idx is a no-op (returns doc unchanged)."""
+    if block_idx < 0 or block_idx >= doc.blocks.len():
+        return doc
+    val rev_id = _next_revision_id(doc)
+    val block = doc.blocks[block_idx]
+    val new_spans = _split_spans_for_delete(block.spans, from, to, rev_id)
+    val new_block = DocBlock(kind: block.kind, spans: new_spans)
+    val new_blocks = _replace_block(doc, block_idx, new_block)
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        new_revisions.push(r)
+    new_revisions.push(RevisionDef(id: rev_id, author: author, kind: "delete", timestamp_text: ""))
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+# =========================================================================
+# Cross-block operations
+# =========================================================================
+
+fn _blocks_touched_by(doc: RichDocument, id: text) -> [i32]:
+    """Returns [lo, hi] — the inclusive block-index range containing any
+    span tagged with `id` — or [-1, -1] if no span carries it. Used by
+    "delete_range" accept (block merge) — the range is discovered
+    structurally by scanning, not stored, so it stays correct even after
+    unrelated blocks are inserted/removed elsewhere in the same doc."""
+    var lo: i32 = -1
+    var hi: i32 = -1
+    var i: i32 = 0
+    for block in doc.blocks:
+        var found = false
+        for s in block.spans:
+            if s.revision_id == id:
+                found = true
+        if found:
+            if lo == -1:
+                lo = i
+            hi = i
+        i = i + 1
+    [lo, hi]
+
+fn _find_split_tail_block(doc: RichDocument, id: text) -> i32:
+    """Returns the index of the block holding the "split" marker span
+    tagged with `id` (the tail half created by `tracked_split_block`), or
+    -1 if not found. The head half is always the immediately preceding
+    block (both are pushed adjacently at split time and nothing before this
+    round re-merges arbitrary non-adjacent blocks)."""
+    var idx: i32 = -1
+    var i: i32 = 0
+    for block in doc.blocks:
+        for s in block.spans:
+            if s.revision_id == id:
+                idx = i
+        i = i + 1
+    idx
+
+fn tracked_delete_range(doc: RichDocument, from_block: i32, from_off: i32, to_block: i32, to_off: i32, author: text) -> RichDocument:
+    """Mark a deletion spanning block `from_block` (tail, from `from_off` to
+    its end) through block `to_block` (head, from its start to `to_off`),
+    with every block strictly between them marked in full — one revision id
+    for the whole logical delete, kind "delete_range". Text STAYS in the
+    document (same as `tracked_delete`) until accepted. `from_block ==
+    to_block` degenerates to an ordinary same-block delete (the merge logic
+    in `accept_revision` also degenerates to a no-op single-block filter in
+    that case, so no separate code path is needed). Out-of-range indices or
+    `from_block > to_block` is a no-op."""
+    if from_block < 0 or to_block >= doc.blocks.len() or from_block > to_block:
+        return doc
+    val rev_id = _next_revision_id(doc)
+    var new_blocks: [DocBlock] = []
+    var i = 0
+    for block in doc.blocks:
+        if i == from_block and i == to_block:
+            val new_spans = _split_spans_for_delete(block.spans, from_off, to_off, rev_id)
+            new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+        else:
+            if i == from_block:
+                val blen = spans_to_plain_text(block.spans).len()
+                val new_spans = _split_spans_for_delete(block.spans, from_off, blen, rev_id)
+                new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+            else:
+                if i == to_block:
+                    val new_spans = _split_spans_for_delete(block.spans, 0, to_off, rev_id)
+                    new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+                else:
+                    if i > from_block and i < to_block:
+                        val blen = spans_to_plain_text(block.spans).len()
+                        val new_spans = _split_spans_for_delete(block.spans, 0, blen, rev_id)
+                        new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+                    else:
+                        new_blocks.push(block)
+        i = i + 1
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        new_revisions.push(r)
+    new_revisions.push(RevisionDef(id: rev_id, author: author, kind: "delete_range", timestamp_text: ""))
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+fn tracked_insert_block(doc: RichDocument, after_block_index: i32, paragraphs: [text], author: text) -> RichDocument:
+    """Insert whole new paragraph blocks (one per entry of `paragraphs`,
+    each becoming one single-span DocBlock) right after
+    `after_block_index` (-1 inserts at the very start), all tagged with one
+    fresh "insert_block" revision. Out-of-range index or an empty
+    `paragraphs` list is a no-op."""
+    if after_block_index < -1 or after_block_index >= doc.blocks.len():
+        return doc
+    if paragraphs.len() == 0:
+        return doc
+    val rev_id = _next_revision_id(doc)
+    var inserted: [DocBlock] = []
+    for p in paragraphs:
+        val span = TextSpan(text: p, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: rev_id)
+        inserted.push(DocBlock(kind: BlockKind.Paragraph, spans: [span]))
+    var new_blocks: [DocBlock] = []
+    if after_block_index == -1:
+        for nb in inserted:
+            new_blocks.push(nb)
+    var i = 0
+    for block in doc.blocks:
+        new_blocks.push(block)
+        if i == after_block_index:
+            for nb in inserted:
+                new_blocks.push(nb)
+        i = i + 1
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        new_revisions.push(r)
+    new_revisions.push(RevisionDef(id: rev_id, author: author, kind: "insert_block", timestamp_text: ""))
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+fn tracked_split_block(doc: RichDocument, block_idx: i32, offset: i32, author: text) -> RichDocument:
+    """Track "pressing Enter mid-paragraph": splits block `block_idx` at
+    character `offset` into two blocks — a head (text before `offset`) and
+    a tail (text at/after `offset`) — of the same kind as the original. The
+    new paragraph mark is modeled as a zero-length marker `TextSpan` (text
+    "") tagged with a fresh "split" revision, prepended to the tail block's
+    spans; `accept_revision` drops the (inert) marker, `reject_revision`
+    re-joins head+tail back into one block. Out-of-range `block_idx` or an
+    `offset` outside [0, block text length] is a no-op."""
+    if block_idx < 0 or block_idx >= doc.blocks.len():
+        return doc
+    val block = doc.blocks[block_idx]
+    val blen = spans_to_plain_text(block.spans).len()
+    if offset < 0 or offset > blen:
+        return doc
+    val rev_id = _next_revision_id(doc)
+    val head_spans = _head_spans_at(block.spans, offset)
+    val tail_rest = _tail_spans_at(block.spans, offset)
+    val marker = TextSpan(text: "", style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: rev_id)
+    var tail_spans: [TextSpan] = [marker]
+    for s in tail_rest:
+        tail_spans.push(s)
+    val head_block = DocBlock(kind: block.kind, spans: head_spans)
+    val tail_block = DocBlock(kind: block.kind, spans: tail_spans)
+    var new_blocks: [DocBlock] = []
+    var i = 0
+    for b in doc.blocks:
+        if i == block_idx:
+            new_blocks.push(head_block)
+            new_blocks.push(tail_block)
+        else:
+            new_blocks.push(b)
+        i = i + 1
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        new_revisions.push(r)
+    new_revisions.push(RevisionDef(id: rev_id, author: author, kind: "split", timestamp_text: ""))
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+# =========================================================================
+# Accept / Reject
+# =========================================================================
+
+fn _drop_tagged_spans(doc: RichDocument, id: text) -> [DocBlock]:
+    """Every span tagged `id` is removed outright, block count unchanged.
+    Shared shape for: accepting a "delete"/"delete_range" (drop the deleted
+    text), accepting a "split" (drop the now-inert zero-length marker), and
+    rejecting an "insert" (undo the insertion)."""
+    var new_blocks: [DocBlock] = []
+    for block in doc.blocks:
+        var new_spans: [TextSpan] = []
+        for s in block.spans:
+            if s.revision_id != id:
+                new_spans.push(s)
+        new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+    new_blocks
+
+fn _unmark_tagged_spans(doc: RichDocument, id: text) -> [DocBlock]:
+    """Every span tagged `id` keeps its text but loses the mark, block count
+    unchanged. Shared shape for: accepting an "insert"/"insert_block", and
+    rejecting a "delete"/"delete_range" (undo the deletion)."""
+    var new_blocks: [DocBlock] = []
+    for block in doc.blocks:
+        var new_spans: [TextSpan] = []
+        for s in block.spans:
+            if s.revision_id == id:
+                new_spans.push(_clone_span_with_revision(s, s.text, ""))
+            else:
+                new_spans.push(s)
+        new_blocks.push(DocBlock(kind: block.kind, spans: new_spans))
+    new_blocks
+
+fn _accept_delete_range_merge(doc: RichDocument, id: text) -> [DocBlock]:
+    """Accepting a "delete_range": drop every span tagged `id` (same as a
+    plain delete) AND merge the whole touched block range [lo, hi] into one
+    block — the surviving head of `lo` concatenated with the surviving tail
+    of `hi`, dropping any fully-consumed blocks strictly between them
+    entirely (they don't survive as empty paragraphs). `lo == hi`
+    (same-block delete_range) degenerates to a plain single-block filter.
+
+    Known limitation: `lo`/`hi` are the MIN/MAX touched-block index, not a
+    verified-contiguous run — if another pending revision (e.g. a
+    `tracked_insert_block`) landed a foreign, untouched block strictly
+    between `lo` and `hi` after this delete_range was created but before it
+    is accepted, that foreign block's surviving spans get absorbed into the
+    merge instead of staying a separate paragraph, and the foreign
+    revision's own block-level accept/reject (if it depended on being a
+    whole standalone block, e.g. "insert_block") can no longer find it as
+    one. Multi-author cases in this round keep the two revisions'
+    block ranges disjoint (see `track_changes_spec.spl`'s
+    "multi-author interleaved" cases); a revision landing INSIDE another
+    pending delete_range's span is an open edge case, not solved here."""
+    val range = _blocks_touched_by(doc, id)
+    val lo = range[0]
+    val hi = range[1]
+    if lo == -1:
+        return _drop_tagged_spans(doc, id)
+    var merged_spans: [TextSpan] = []
+    var k = lo
+    while k <= hi:
+        val block = doc.blocks[k]
+        for s in block.spans:
+            if s.revision_id != id:
+                merged_spans.push(s)
+        k = k + 1
+    val merged_block = DocBlock(kind: doc.blocks[lo].kind, spans: merged_spans)
+    var new_blocks: [DocBlock] = []
+    var j = 0
+    for block in doc.blocks:
+        if j == lo:
+            new_blocks.push(merged_block)
+        else:
+            if j < lo or j > hi:
+                new_blocks.push(block)
+        j = j + 1
+    new_blocks
+
+fn accept_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Resolve revision `id` as ACCEPTED:
+    - "insert"/"insert_block": spans keep their text but lose the mark.
+    - "delete"/"split": tagged spans (deleted text, or the split's inert
+      zero-length marker) are removed outright.
+    - "delete_range": tagged spans removed AND the touched block range
+      merges into one block (see `_accept_delete_range_merge`).
+    Unknown id is a no-op."""
+    val rd = revision_def_for(doc.revisions, id)
+    if rd.id == "":
+        return doc
+    var new_blocks: [DocBlock] = []
+    if rd.kind == "delete_range":
+        new_blocks = _accept_delete_range_merge(doc, id)
+    else:
+        if rd.kind == "delete" or rd.kind == "split":
+            new_blocks = _drop_tagged_spans(doc, id)
+        else:
+            new_blocks = _unmark_tagged_spans(doc, id)
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        if r.id != id:
+            new_revisions.push(r)
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+fn _reject_insert_block_remove(doc: RichDocument, id: text) -> [DocBlock]:
+    """Rejecting an "insert_block": remove the whole block(s) that exist
+    only because of this revision (every span in the block tagged `id`),
+    instead of leaving an empty paragraph behind — the inverse of what
+    `tracked_insert_block` created."""
+    var new_blocks: [DocBlock] = []
+    for block in doc.blocks:
+        var all_tagged = block.spans.len() > 0
+        for s in block.spans:
+            if s.revision_id != id:
+                all_tagged = false
+        if not all_tagged:
+            new_blocks.push(block)
+    new_blocks
+
+fn _reject_split_rejoin(doc: RichDocument, id: text) -> [DocBlock]:
+    """Rejecting a "split": re-join the head block and the marker's tail
+    block back into one block (the marker span is dropped) — the exact
+    inverse of `tracked_split_block`. Falls back to `doc.blocks` unchanged
+    if the marker (or a preceding head block) can't be found."""
+    val tail_idx = _find_split_tail_block(doc, id)
+    if tail_idx < 1:
+        return doc.blocks
+    val head_idx = tail_idx - 1
+    val head_block = doc.blocks[head_idx]
+    val tail_block = doc.blocks[tail_idx]
+    var merged_spans: [TextSpan] = []
+    for s in head_block.spans:
+        merged_spans.push(s)
+    for s in tail_block.spans:
+        if s.revision_id != id:
+            merged_spans.push(s)
+    val merged_block = DocBlock(kind: head_block.kind, spans: merged_spans)
+    var new_blocks: [DocBlock] = []
+    var j = 0
+    for block in doc.blocks:
+        if j == head_idx:
+            new_blocks.push(merged_block)
+        else:
+            if j != tail_idx:
+                new_blocks.push(block)
+        j = j + 1
+    new_blocks
+
+fn reject_revision(doc: RichDocument, id: text) -> RichDocument:
+    """Resolve revision `id` as REJECTED (the inverse of accept):
+    - "insert": tagged spans (the inserted text) are removed outright.
+    - "delete"/"delete_range": tagged spans keep their text but lose the
+      mark (the deletion is cancelled); block count is unchanged — blocks
+      stay separate in place, "everything unmarks in place" (see the module
+      docstring's "delete_range" note).
+    - "insert_block": the whole block(s) that exist only because of this
+      revision are removed (see `_reject_insert_block_remove`).
+    - "split": the head block and the marker's tail block re-join into one
+      block (see `_reject_split_rejoin`).
+    Unknown id is a no-op."""
+    val rd = revision_def_for(doc.revisions, id)
+    if rd.id == "":
+        return doc
+    var new_blocks: [DocBlock] = []
+    if rd.kind == "insert_block":
+        new_blocks = _reject_insert_block_remove(doc, id)
+    else:
+        if rd.kind == "split":
+            new_blocks = _reject_split_rejoin(doc, id)
+        else:
+            if rd.kind == "insert":
+                new_blocks = _drop_tagged_spans(doc, id)
+            else:
+                new_blocks = _unmark_tagged_spans(doc, id)
+    var new_revisions: [RevisionDef] = []
+    for r in doc.revisions:
+        if r.id != id:
+            new_revisions.push(r)
+    RichDocument(title: doc.title, blocks: new_blocks, comments: doc.comments, revisions: new_revisions)
+
+fn accept_all(doc: RichDocument) -> RichDocument:
+    """Accept every pending revision, author-mixed or not."""
+    var d = doc
+    var ids: [text] = []
+    for r in d.revisions:
+        ids.push(r.id)
+    for id in ids:
+        d = accept_revision(d, id)
+    d
+
+fn reject_all(doc: RichDocument) -> RichDocument:
+    """Reject every pending revision, author-mixed or not."""
+    var d = doc
+    var ids: [text] = []
+    for r in d.revisions:
+        ids.push(r.id)
+    for id in ids:
+        d = reject_revision(d, id)
+    d
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn revisions_summary(doc: RichDocument) -> [text]:
+    """One "<id>|<author>|<kind>|<affected text>" line per pending revision,
+    in doc.revisions order; affected text is every span currently tagged
+    with that revision's id, concatenated across all blocks."""
+    var lines: [text] = []
+    for r in doc.revisions:
+        var affected = ""
+        for block in doc.blocks:
+            for s in block.spans:
+                if s.revision_id == r.id:
+                    affected = affected + s.text
+        lines.push("{r.id}|{r.author}|{r.kind}|{affected}")
+    lines
+
+fn final_text(doc: RichDocument) -> text:
+    """The accepted-preview reading ("Show Markup" off): blocks joined by
+    newlines, delete-marked spans excluded ("delete" and "delete_range"
+    alike), everything else (including insert-marked spans and the "split"
+    zero-length marker, all accepted by default in this view) included.
+    Contrast with `spans_to_plain_text`/`document_plain_text` in
+    edit_ops.spl, which is the "display / show markup" view and includes
+    delete-marked text unchanged.
+
+    A pending "delete_range" additionally suppresses the paragraph breaks
+    across its whole touched block range: any block strictly between the
+    range's first and last block is dropped entirely (not rendered as a
+    blank line), and every break inside the range is joined with no
+    separator — this is the accepted-preview reading of "the paragraph
+    marks between these blocks are pending-deleted", the same visual merge
+    `accept_revision` performs structurally."""
+    var block_skip: [bool] = []
+    var no_sep: [bool] = []
+    var z = 0
+    while z < doc.blocks.len():
+        block_skip.push(false)
+        no_sep.push(false)
+        z = z + 1
+    for r in doc.revisions:
+        if r.kind == "delete_range":
+            val range = _blocks_touched_by(doc, r.id)
+            val lo = range[0]
+            val hi = range[1]
+            if lo != -1:
+                var k = lo + 1
+                while k <= hi:
+                    no_sep[k] = true
+                    if k < hi:
+                        block_skip[k] = true
+                    k = k + 1
+    var out = ""
+    var first = true
+    var i = 0
+    for block in doc.blocks:
+        if not block_skip[i]:
+            var block_text = ""
+            for s in block.spans:
+                var excluded = false
+                if s.revision_id != "":
+                    val rd = revision_def_for(doc.revisions, s.revision_id)
+                    if rd.kind == "delete" or rd.kind == "delete_range":
+                        excluded = true
+                if not excluded:
+                    block_text = block_text + s.text
+            if first:
+                out = out + block_text
+                first = false
+            else:
+                if no_sep[i]:
+                    out = out + block_text
+                else:
+                    out = out + "\n" + block_text
+        i = i + 1
+    out

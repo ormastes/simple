@@ -1,0 +1,116 @@
+# @platform: baremetal
+#
+# RTOS checkpoint — extends bm_checkpoint with RTOS-specific state.
+# Captures scheduler + task table + PRNG + replay ring position
+# so tests can restore to a known state without full QEMU restart.
+
+use std.replay.bm_checkpoint (
+    bm_save_checkpoint, bm_restore_checkpoint, bm_find_checkpoint_before,
+    bm_clear_checkpoints, BmCheckpoint
+)
+
+class RtosCheckpoint:
+    """Full RTOS state checkpoint for test session restore."""
+    id: i32
+    tick: u64
+    current_task: i32
+    priority_bitmap: i32
+    rng_s0: u64
+    rng_s1: u64
+    rng_s2: u64
+    rng_s3: u64
+    task_states: [i32]
+    task_stack_ptrs: [u64]
+
+var rtos_checkpoints: [RtosCheckpoint] = []
+var max_checkpoints: i32 = 32
+
+fn rtos_checkpoint_save(id: i32):
+    """Save full RTOS checkpoint: scheduler + tasks + PRNG + bm ring."""
+    val tick = sched_get_tick()
+    val current = sched_get_current()
+    val bitmap = sched_get_bitmap()
+    val rng = rng_get_state()
+
+    var states: [i32] = []
+    var sps: [u64] = []
+    var i = 0
+    while i < 16:
+        val t = task_get(i)
+        states.push(t.state)
+        sps.push(t.stack_ptr)
+        i = i + 1
+
+    val cp = RtosCheckpoint(
+        id: id,
+        tick: tick,
+        current_task: current,
+        priority_bitmap: bitmap,
+        rng_s0: if rng.length() > 0: rng[0] else: 0u64,
+        rng_s1: if rng.length() > 1: rng[1] else: 0u64,
+        rng_s2: if rng.length() > 2: rng[2] else: 0u64,
+        rng_s3: if rng.length() > 3: rng[3] else: 0u64,
+        task_states: states,
+        task_stack_ptrs: sps
+    )
+
+    # Update or append
+    var found = false
+    var j = 0
+    while j < rtos_checkpoints.length():
+        if rtos_checkpoints[j].id == id:
+            rtos_checkpoints[j] = cp
+            found = true
+        j = j + 1
+    if not found:
+        if rtos_checkpoints.length() < max_checkpoints:
+            rtos_checkpoints.push(cp)
+
+    # Also save to bm_checkpoint for ring buffer position
+    bm_save_checkpoint(id, tick.to_i64(), 0, 0)
+
+fn rtos_checkpoint_restore(id: i32) -> bool:
+    """Restore RTOS state from checkpoint. Returns false if not found."""
+    var i = 0
+    while i < rtos_checkpoints.length():
+        if rtos_checkpoints[i].id == id:
+            val cp = rtos_checkpoints[i]
+
+            sched_set_tick(cp.tick)
+            sched_set_current(cp.current_task)
+            sched_set_bitmap(cp.priority_bitmap)
+
+            var rng_state: [u64] = []
+            rng_state.push(cp.rng_s0)
+            rng_state.push(cp.rng_s1)
+            rng_state.push(cp.rng_s2)
+            rng_state.push(cp.rng_s3)
+            rng_set_state(rng_state)
+
+            var j = 0
+            while j < 16 and j < cp.task_states.length():
+                task_set_state(j, cp.task_states[j])
+                task_set_stack_ptr(j, cp.task_stack_ptrs[j])
+                j = j + 1
+
+            return true
+        i = i + 1
+    false
+
+fn rtos_checkpoint_clear():
+    """Clear all RTOS checkpoints."""
+    rtos_checkpoints = []
+    bm_clear_checkpoints()
+
+fn rtos_checkpoint_find_before(tick: u64) -> i32:
+    """Find the latest checkpoint before the given tick. Returns id or -1."""
+    var best_id: i32 = -1
+    var best_tick: u64 = 0u64
+    var i = 0
+    while i < rtos_checkpoints.length():
+        val cp = rtos_checkpoints[i]
+        if cp.tick <= tick and cp.tick >= best_tick:
+            best_id = cp.id
+            best_tick = cp.tick
+        i = i + 1
+    best_id

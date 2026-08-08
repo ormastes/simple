@@ -1,0 +1,1770 @@
+# CUDA Backend - NVIDIA CUDA/PTX Code Generation
+#
+# Compiles MIR to CUDA PTX assembly code.
+# PTX can be JIT-compiled by NVIDIA driver or assembled offline.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.backend.backend_api.*
+use compiler.backend.backend.backend_types.{compileerror_backend_error}
+use compiler.backend.spec_const_registry.{spec_const_resolve}
+use compiler.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel, gpu_backend_plan_module_kernels, gpu_backend_supports_target}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
+use compiler.backend.cuda_type_mapper.{CudaTypeMapper, cuda_type_mapper_create_sm}
+use compiler.backend.cuda.ptx_builder.{PtxBuilder}
+use compiler.hir.hir_types.{MemorySpace, SymbolId}
+use compiler.backend.backend.common.type_mapper.{PrimitiveType}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+# ============================================================================
+# Layout helpers
+# ============================================================================
+
+fn cuda_align_to(offset: i64, align: i64) -> i64:
+    """Round offset up to the given alignment (align <= 1 is a no-op)."""
+    if align <= 1:
+        offset
+    else:
+        ((offset + align - 1) / align) * align
+
+fn cuda_mapper_can_size(ty: MirType) -> bool:
+    """
+    True when CudaTypeMapper.size_of/align_of can compute this type's layout
+    with no symbol table at all (module-independent primitives/aggregates).
+    Struct(SymbolId)/Enum(SymbolId) are always false here — resolving those
+    needs the MIR module's type table, which only CudaBackend.cuda_can_size
+    carries (via self.type_defs). The mapper also has no size_of arm for
+    Ref/FuncPtr — callers must fall back for those.
+    """
+    match ty.kind:
+        case I64 | U64 | F64 | I32 | U32 | F32 | I16 | U16 | I8 | U8 | Bool | Unit | Ptr(_, _): true
+        case Array(elem, _): cuda_mapper_can_size(elem)
+        case Tuple(elements):
+            for e in elements:
+                if not cuda_mapper_can_size(e):
+                    return false
+            true
+        case _: false
+
+# ============================================================================
+# CUDA Backend
+# ============================================================================
+
+class CudaBackend:
+    """
+    CUDA backend for GPU code generation.
+
+    Compiles MIR modules to PTX assembly code for NVIDIA GPUs.
+    PTX is a virtual instruction set that gets JIT-compiled to
+    native GPU machine code (SASS) by the NVIDIA driver.
+
+    Features:
+    - Full MIR instruction support
+    - Kernel function generation
+    - Device function generation
+    - Shared memory allocation
+    - Atomic operations
+    - Synchronization barriers
+
+    Usage:
+        val backend = CudaBackend.create((8, 6))  # SM 8.6
+        val result = backend.compile(mir_module)
+    """
+
+    type_mapper: CudaTypeMapper
+    compute_capability: (i64, i64)
+    options: CompileOptions
+    function_signatures: Dict<text, MirSignature>
+    # MIR module's Struct/Enum symbol table, threaded in from compile() so
+    # field_layout/cuda_can_size/cuda_type_size/cuda_type_align can resolve
+    # Struct(SymbolId)/Enum(SymbolId) instead of hitting the legacy 8-byte
+    # WARN fallback. Empty until compile() runs (matches function_signatures).
+    type_defs: Dict<SymbolId, MirTypeDef>
+    pointer_spaces: Dict<i64, MemorySpace>
+
+    static fn create(compute_cap: (i64, i64)) -> CudaBackend:
+        """Create CUDA backend for specific compute capability."""
+        val base = compileoptions_default_options()
+        val opts = CompileOptions(target: CodegenTarget.CudaPtx, opt_level: base.opt_level, debug_info: base.debug_info, emit_assembly: base.emit_assembly, emit_llvm_ir: base.emit_llvm_ir, emit_mir: base.emit_mir, verify_output: base.verify_output, target_opt_ctx: base.target_opt_ctx, backend_kind: base.backend_kind, allowed_families: base.allowed_families)
+        CudaBackend(
+            type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
+            compute_capability: compute_cap,
+            options: opts,
+            function_signatures: {},
+            type_defs: {},
+            pointer_spaces: {}
+        )
+
+    static fn create_with_options(compute_cap: (i64, i64), opts: CompileOptions) -> CudaBackend:
+        """Create CUDA backend with custom options."""
+        CudaBackend(
+            type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
+            compute_capability: compute_cap,
+            options: opts,
+            function_signatures: {},
+            type_defs: {},
+            pointer_spaces: {}
+        )
+
+    static fn for_target(target: CodegenTarget) -> Result<CudaBackend, CompileError>:
+        """Create CUDA backend from target."""
+        if target == CodegenTarget.CudaPtx:
+            return Ok(CudaBackend.create((8, 6)))
+        Err(compileerror_backend_error(
+            BackendKind.Cuda,
+            "Target is not a CUDA target"
+        ))
+
+    me compile(module: MirModule) -> Result<CudaCompiledModule, CompileError>:
+        """Compile MIR module to PTX."""
+        val plan: GpuBackendKernelPlan = CudaBackend.plan_module_kernels(module)
+        if not plan.ready:
+            return Err(compileerror_backend_error(BackendKind.Cuda, plan.diagnostic))
+
+        val builder = PtxBuilder.create(self.compute_capability)
+
+        # Emit module header
+        builder.emit_module_header(module.name)
+
+        # Collect kernel functions
+        var kernels: [CudaKernel] = []
+        var device_functions: [CudaDeviceFunction] = []
+
+        # Resolve static direct calls from module declarations instead of
+        # destructuring FuncPtr payloads inside a nested MirOperand match. The
+        # bootstrap interpreter currently misbinds that payload accessor.
+        self.function_signatures = {}
+        for signature_value in module.functions.values():
+            val signature_func: MirFunction = signature_value
+            self.function_signatures[signature_func.name] = signature_func.signature
+
+        # Carry the module's Struct/Enum symbol table so field/aggregate/GEP
+        # layout can resolve Struct(SymbolId)/Enum(SymbolId) below instead of
+        # falling back to legacy 8-byte slots (see cuda_can_size/cuda_type_size).
+        self.type_defs = module.types
+
+        for function_value in module.functions.values():
+            val func: MirFunction = function_value
+            if not CudaBackend.accepts_gpu_kernel_target(func):
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend cannot compile GPU kernel '{func.name}' with target '{func.gpu_target}'"
+                ))
+            val result = self.compile_function(builder, func)
+            match result:
+                case Ok(kern):
+                    if kern.is_kernel:
+                        kernels = kernels.push(CudaKernel(
+                            name: kern.name,
+                            ptx: kern.ptx,
+                            param_count: func.signature.params.len()
+                        ))
+                    else:
+                        device_functions = device_functions.push(CudaDeviceFunction(
+                            name: kern.name,
+                            ptx: kern.ptx
+                        ))
+                case Err(e):
+                    return Err(e)
+
+        val ptx_code = builder.build()
+
+        Ok(CudaCompiledModule(
+            name: module.name,
+            ptx: ptx_code,
+            kernels: kernels,
+            device_functions: device_functions,
+            compute_capability: self.compute_capability
+        ))
+
+    me compile_function(builder: PtxBuilder, func: MirFunction) -> Result<CompiledFunction, CompileError>:
+        val is_kernel = func.is_kernel
+        self.compile_function_with_kind(builder, func, is_kernel)
+
+    me compile_function_with_kind(builder: PtxBuilder, func: MirFunction, is_kernel: bool) -> Result<CompiledFunction, CompileError>:
+        """Compile a single function."""
+        if func.blocks.len() > 1 and self.function_uses_non_global_pointer_origin(func):
+            return Err(compileerror_backend_error(
+                BackendKind.Cuda,
+                "CUDA multi-block shared/local pointer provenance requires CFG dataflow lowering"
+            ))
+
+        for local in func.locals:
+            if not self.cuda_type_supported(local.type_):
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support local type: {local.type_.kind}"))
+
+        if is_kernel:
+            builder.emit_kernel_entry(func.name, func.locals)
+        else:
+            builder.emit_device_function(
+                func.name,
+                func.locals,
+                func.signature.return_type
+            )
+
+        for local in func.locals:
+            builder.reserve_reg_id(local.id.id)
+
+        # Emit register declarations for locals
+        for local in func.locals:
+            match local.kind:
+                case Arg(_):
+                    val reg = "%r{local.id.id}"
+                    match local.type_.kind:
+                        case Bool:
+                            builder.emit_pred_decl(reg)
+                            match local.kind:
+                                case Arg(index): builder.emit_bool_param_load(reg, index)
+                                case _: ()
+                        case _:
+                            val prim_ty = self.mir_type_to_primitive(local.type_)
+                            builder.emit_reg_decl(reg, prim_ty)
+                            match local.kind:
+                                case Arg(index): builder.emit_param_load(reg, prim_ty, index)
+                                case _: ()
+                case Var | Temp | Return:
+                    self.emit_local_decl(builder, local)
+
+        # Compile each basic block
+        self.pointer_spaces = {}
+        for local in func.locals:
+            match local.kind:
+                case Arg(_):
+                    if is_kernel:
+                        match local.type_.kind:
+                            case Ptr(_, _) | Ref(_, _):
+                                self.pointer_spaces[local.id.id] = MemorySpace.Global
+                            case _:
+                                ()
+                case _:
+                    ()
+        for block in func.blocks:
+            val label = "BB{block.id.id}"
+            builder.emit_label(label)
+
+            for inst in block.instructions:
+                val result = self.compile_instruction(builder, inst, func)
+                if result.is_err():
+                    return Err(result.unwrap_err())
+
+            val terminator_result = self.compile_terminator(builder, block.terminator, is_kernel, func.signature.return_type)
+            if terminator_result.is_err():
+                return Err(terminator_result.unwrap_err())
+
+        if is_kernel:
+            builder.emit_kernel_end()
+        else:
+            builder.emit_function_end()
+
+        Ok(CompiledFunction(
+            name: func.name,
+            ptx: "",  # PTX is accumulated in builder
+            is_kernel: is_kernel
+        ))
+
+    fn function_uses_non_global_pointer_origin(func: MirFunction) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case GpuSharedAlloc(_, _, _) | Alloc(_, _):
+                        return true
+                    case _:
+                        ()
+        false
+
+    static fn accepts_gpu_kernel(func: MirFunction) -> bool:
+        gpu_backend_accepts_kernel(BackendKind.Cuda, func)
+
+    static fn accepts_gpu_kernel_target(func: MirFunction) -> bool:
+        CudaBackend.accepts_gpu_kernel(func)
+
+    static fn plan_module_kernels(module: MirModule) -> GpuBackendKernelPlan:
+        gpu_backend_plan_module_kernels(BackendKind.Cuda, module)
+
+    me emit_local_decl(builder: PtxBuilder, local: MirLocal):
+        """Emit local variable declaration."""
+        val reg = "%r{local.id.id}"
+        match local.type_.kind:
+            case I64: builder.emit_reg_decl(reg, PrimitiveType.I64)
+            case I32: builder.emit_reg_decl(reg, PrimitiveType.I32)
+            case I16: builder.emit_reg_decl(reg, PrimitiveType.I16)
+            case I8: builder.emit_reg_decl(reg, PrimitiveType.I8)
+            case U64: builder.emit_reg_decl(reg, PrimitiveType.U64)
+            case U32: builder.emit_reg_decl(reg, PrimitiveType.U32)
+            case U16: builder.emit_reg_decl(reg, PrimitiveType.U16)
+            case U8: builder.emit_reg_decl(reg, PrimitiveType.U8)
+            case F64: builder.emit_reg_decl(reg, PrimitiveType.F64)
+            case F32: builder.emit_reg_decl(reg, PrimitiveType.F32)
+            case Bool: builder.emit_pred_decl(reg)
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): builder.emit_reg_decl(reg, PrimitiveType.U64)
+            case _: ()
+
+    me compile_instruction(builder: PtxBuilder, inst: MirInst, func: MirFunction) -> Result<(), CompileError>:
+        """Compile a single MIR instruction to PTX."""
+        match inst.kind:
+            case Const(dest, value, ty):
+                self.pointer_spaces.remove(dest.id)
+                match value:
+                    case Int(_) | Float(_) | Bool(_): ()
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support constant: {value}"))
+                self.compile_const(builder, dest, value, ty)
+
+            case Copy(dest, src):
+                self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)
+                self.propagate_pointer_space(dest, MirOperand.copy(src))
+
+            case Move(dest, src):
+                self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)  # Same as copy in PTX
+                self.propagate_pointer_space(dest, MirOperand.move(src))
+
+            case BinOp(dest, op, left, right):
+                self.pointer_spaces.remove(dest.id)
+                match op:
+                    case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge: ()
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support binary operation: {op}"))
+                val dest_ty = self.local_primitive_type(func, dest)?
+                val op_ty = match op:
+                    case Eq | Ne | Lt | Le | Gt | Ge:
+                        if dest_ty != PrimitiveType.Bool:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison destination must be Bool"))
+                        val left_ty = self.operand_primitive_type(func, left)?
+                        if self.operand_primitive_type(func, right)? != left_ty:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operand types must match"))
+                        match left_ty:
+                            case I32 | I64 | U32 | U64 | F32 | F64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operands must be I32, I64, U32, U64, F32, or F64"))
+                        left_ty
+                    case _:
+                        dest_ty
+                self.compile_binop(builder, dest, op, left, right, op_ty)
+
+            case UnaryOp(dest, op, operand):
+                self.pointer_spaces.remove(dest.id)
+                val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+                val operand_mir_ty = self.operand_mir_type(func, operand)?
+                if dest_mir_ty.kind != operand_mir_ty.kind:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA unary destination and operand types must match"))
+                match op:
+                    case Neg:
+                        match dest_mir_ty.kind:
+                            case I16 | I32 | I64 | U16 | U32 | U64 | F32 | F64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA negation requires a 16-bit, 32-bit, or 64-bit integer or F32/F64 operand"))
+                    case Not:
+                        if dest_mir_ty.kind != MirTypeKind.Bool:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA logical Not requires a Bool operand"))
+                    case BitNot:
+                        match dest_mir_ty.kind:
+                            case I16 | I32 | I64 | U16 | U32 | U64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA BitNot requires a 16-bit, 32-bit, or 64-bit integer operand"))
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support unary operation: {op}"))
+                self.compile_unaryop(builder, dest, op, operand, self.mir_type_to_primitive(dest_mir_ty))
+
+            case Load(dest, ptr):
+                self.pointer_spaces.remove(dest.id)
+                val load_ty = self.local_primitive_type(func, dest)?
+                if self.pointer_pointee_primitive_type(func, ptr)? != load_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA load result must match pointer element type"))
+                self.compile_load(builder, dest, ptr, load_ty, self.pointer_memory_space(ptr, self.pointer_spaces)?)
+
+            case Store(ptr, value):
+                val store_ty = self.operand_primitive_type(func, value)?
+                if self.pointer_pointee_primitive_type(func, ptr)? != store_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA store value must match pointer element type"))
+                self.compile_store(builder, ptr, value, store_ty, self.pointer_memory_space(ptr, self.pointer_spaces)?)
+
+            # GPU-specific instructions
+            case GpuGlobalId(dest, dim):
+                self.pointer_spaces.remove(dest.id)
+                return self.compile_gpu_index(builder, dest, dim, func, "global")
+
+            case GpuLocalId(dest, dim):
+                self.pointer_spaces.remove(dest.id)
+                return self.compile_gpu_index(builder, dest, dim, func, "local")
+
+            case GpuBlockId(dest, dim):
+                self.pointer_spaces.remove(dest.id)
+                return self.compile_gpu_index(builder, dest, dim, func, "block")
+
+            case GpuBlockDim(dest, dim):
+                self.pointer_spaces.remove(dest.id)
+                return self.compile_gpu_index(builder, dest, dim, func, "block_dim")
+
+            case GpuGridDim(dest, dim):
+                self.pointer_spaces.remove(dest.id)
+                return self.compile_gpu_index(builder, dest, dim, func, "grid_dim")
+
+            case GpuBarrier(scope):
+                match scope:
+                    case Workgroup:
+                        builder.emit_barrier()
+                    case Device:
+                        builder.emit_membar_gl()
+                    case Subgroup:
+                        builder.emit_line("bar.warp.sync 0xffffffff;")
+
+            case GpuMemFence(scope):
+                match scope:
+                    case Workgroup:
+                        builder.emit_membar_cta()
+                    case Device:
+                        builder.emit_membar_gl()
+                    case All:
+                        builder.emit_membar_sys()
+                    case _:
+                        builder.emit_membar_cta()
+
+            case GpuSharedAlloc(dest, ty, size):
+                if size <= 0:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA shared allocation size must be positive"))
+                val name = "shared_{dest.id}"
+                val prim_ty = self.mir_type_to_primitive(ty)
+                if self.pointer_pointee_primitive_type(func, MirOperand.copy(dest))? != prim_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA shared allocation type must match destination pointer element type"))
+                builder.emit_shared_memory(name, prim_ty, size)
+                builder.emit_shared_address("%r{dest.id}", name)
+                self.pointer_spaces[dest.id] = MemorySpace.Shared
+
+            case GpuAtomicOp(dest, op, ptr, value):
+                self.pointer_spaces.remove(dest.id)
+                if op == GpuAtomicOpKind.CompareExchange:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA compare-exchange requires GpuAtomicCas"))
+                val atomic_ty = self.local_primitive_type(func, dest)?
+                if not self.integer_atomic_type_supported(atomic_ty):
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA generic atomics require a 32-bit or 64-bit integer type"))
+                if self.pointer_pointee_primitive_type(func, ptr)? != atomic_ty or self.operand_primitive_type(func, value)? != atomic_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic value and result must match pointer element type"))
+                val atomic_space = self.atomic_memory_space(ptr, self.pointer_spaces)?
+                self.compile_mir_atomic(builder, dest, op, ptr, value, atomic_ty, atomic_space)
+
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                self.pointer_spaces.remove(dest.id)
+                val cas_ty = self.local_primitive_type(func, dest)?
+                if not self.integer_atomic_type_supported(cas_ty):
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic CAS requires a 32-bit or 64-bit integer type"))
+                if self.pointer_pointee_primitive_type(func, ptr)? != cas_ty or self.operand_primitive_type(func, expected)? != cas_ty or self.operand_primitive_type(func, desired)? != cas_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic CAS operands and result must match pointer element type"))
+                val cas_space = self.atomic_memory_space(ptr, self.pointer_spaces)?
+                self.compile_mir_atomic_cas(builder, dest, ptr, expected, desired, cas_ty, cas_space)
+
+            # --- Function Calls ---
+
+            case Call(dest, callee, args):
+                if dest.?:
+                    self.pointer_spaces.remove(dest.unwrap().id)
+                val call_result = self.compile_call(func, builder, dest, callee, args)
+                if call_result.is_err():
+                    return Err(call_result.unwrap_err())
+
+            case CallIndirect(dest, ptr, args, sig):
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend does not support indirect GPU calls"
+                ))
+
+            # --- Aggregate Operations ---
+
+            case Aggregate(dest, kind, operands):
+                self.pointer_spaces.remove(dest.id)
+                self.compile_aggregate(builder, dest, kind, operands, func)
+
+            case GetField(dest, base, field):
+                self.pointer_spaces.remove(dest.id)
+                self.compile_get_field(builder, dest, base, field, func)
+
+            case SetField(base, field, value):
+                self.compile_set_field(builder, base, field, value, func)
+
+            # --- Cast Operations ---
+
+            case Cast(dest, operand, target):
+                self.compile_cast(builder, dest, operand, target, func)
+                self.propagate_pointer_space(dest, operand)
+
+            case Bitcast(dest, operand, target):
+                val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+                if dest_mir_ty.kind != target.kind:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast destination type must match target type"))
+                val dest_width = match dest_mir_ty.kind:
+                    case I32 | U32 | F32: 32
+                    case I64 | U64 | F64: 64
+                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer target"))
+                val source_mir_ty = self.operand_mir_type(func, operand)?
+                val source_width = match source_mir_ty.kind:
+                    case I32 | U32 | F32: 32
+                    case I64 | U64 | F64: 64
+                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer source"))
+                if source_width != dest_width:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast source and target widths must match"))
+                val dest_reg = "%r{dest.id}"
+                val src_reg = self.operand_to_reg(builder, operand)
+                builder.emit_line("mov.b{dest_width} {dest_reg}, {src_reg};")
+                self.propagate_pointer_space(dest, operand)
+
+            # --- Memory Allocation ---
+
+            case Alloc(dest, type_):
+                val alloc_ty = self.mir_type_to_primitive(type_)
+                if self.pointer_pointee_primitive_type(func, MirOperand.copy(dest))? != alloc_ty:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA local allocation type must match destination pointer element type"))
+                self.compile_alloc(builder, dest, type_)
+                self.pointer_spaces[dest.id] = MemorySpace.Local
+
+            case GetElementPtr(dest, base, indices):
+                val base_space = self.pointer_memory_space(base, self.pointer_spaces)?
+                self.compile_gep(builder, dest, base, indices, func)
+                self.pointer_spaces[dest.id] = base_space
+
+            # --- Checked Arithmetic ---
+
+            case CheckedBinOp(dest, op, left, right):
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support checked arithmetic"))
+
+            # --- Intrinsics ---
+
+            case Intrinsic(dest, name, args):
+                if dest.?:
+                    self.pointer_spaces.remove(dest.unwrap().id)
+                val validation = self.validate_intrinsic(name, dest, args.len())
+                if validation.is_err():
+                    return Err(validation.unwrap_err())
+                if name == "bounds_check":
+                    return self.compile_bounds_check(builder, args, func)
+                return self.compile_intrinsic(builder, dest, name, args, func, self.pointer_spaces)
+
+            # --- Debug ---
+
+            case DebugValue(local, name):
+                builder.emit_comment("debug: {name} = %r{local.id}")
+
+            case Nop:
+                ()
+
+            case _:
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "Unsupported instruction: {inst.kind}"
+                ))
+
+        Ok(())
+
+    me compile_gpu_index(builder: PtxBuilder, dest: LocalId, dim: i64, func: MirFunction, intrinsic: text) -> Result<(), CompileError>:
+        if dim < 0 or dim > 2:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index dimension must be 0, 1, or 2"))
+
+        val dest_ty = self.local_primitive_type(func, dest)?
+        val dest_reg = "%r{dest.id}"
+        if intrinsic == "global":
+            match dest_ty:
+                case U32:
+                    builder.emit_compute_global_id(dest_reg, dim)
+                    return Ok(())
+                case I64 | U64:
+                    self.compile_wide_global_index(builder, dest_reg, dim, dest_ty)
+                    return Ok(())
+                case _:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index destination must be U32, I64, or U64"))
+
+        var value_reg = dest_reg
+        match dest_ty:
+            case U32:
+                ()
+            case I64 | U64:
+                value_reg = builder.alloc_reg(PrimitiveType.U32)
+                builder.emit_reg_decl(value_reg, PrimitiveType.U32)
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index destination must be U32, I64, or U64"))
+
+        match intrinsic:
+            case "local":
+                builder.emit_get_thread_id(value_reg, dim)
+            case "block":
+                builder.emit_get_block_id(value_reg, dim)
+            case "block_dim":
+                builder.emit_get_block_dim(value_reg, dim)
+            case "grid_dim":
+                builder.emit_get_grid_dim(value_reg, dim)
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend received unknown GPU index intrinsic: {intrinsic}"))
+
+        match dest_ty:
+            case I64:
+                builder.emit_line("cvt.s64.u32 {dest_reg}, {value_reg};")
+            case U64:
+                builder.emit_line("cvt.u64.u32 {dest_reg}, {value_reg};")
+            case _:
+                ()
+        Ok(())
+
+    me compile_wide_global_index(builder: PtxBuilder, dest_reg: text, dim: i64, ty: PrimitiveType):
+        val tid32 = builder.alloc_reg(PrimitiveType.U32)
+        val bid32 = builder.alloc_reg(PrimitiveType.U32)
+        val bdim32 = builder.alloc_reg(PrimitiveType.U32)
+        builder.emit_reg_decl(tid32, PrimitiveType.U32)
+        builder.emit_reg_decl(bid32, PrimitiveType.U32)
+        builder.emit_reg_decl(bdim32, PrimitiveType.U32)
+        builder.emit_get_thread_id(tid32, dim)
+        builder.emit_get_block_id(bid32, dim)
+        builder.emit_get_block_dim(bdim32, dim)
+
+        val tid64 = builder.alloc_reg(ty)
+        val bid64 = builder.alloc_reg(ty)
+        val bdim64 = builder.alloc_reg(ty)
+        val tmp64 = builder.alloc_reg(ty)
+        builder.emit_reg_decl(tid64, ty)
+        builder.emit_reg_decl(bid64, ty)
+        builder.emit_reg_decl(bdim64, ty)
+        builder.emit_reg_decl(tmp64, ty)
+        val suffix = if ty == PrimitiveType.I64: ".s64" else: ".u64"
+        builder.emit_line("cvt{suffix}.u32 {tid64}, {tid32};")
+        builder.emit_line("cvt{suffix}.u32 {bid64}, {bid32};")
+        builder.emit_line("cvt{suffix}.u32 {bdim64}, {bdim32};")
+        builder.emit_line("mul.lo{suffix} {tmp64}, {bid64}, {bdim64};")
+        builder.emit_line("add{suffix} {dest_reg}, {tmp64}, {tid64};")
+
+    me compile_const(builder: PtxBuilder, dest: LocalId, value: MirConstValue, ty: MirType):
+        """Compile constant load."""
+        val reg = "%r{dest.id}"
+        match value:
+            case Int(v):
+                val prim_ty = self.mir_type_to_primitive(ty)
+                builder.emit_const_int(reg, prim_ty, v)
+            case Float(v):
+                val prim_ty = self.mir_type_to_primitive(ty)
+                builder.emit_const_float(reg, prim_ty, v)
+            case Bool(v):
+                val val_int = if v: 1 else: 0
+                builder.emit_const_int(reg, PrimitiveType.Bool, val_int)
+            case _:
+                builder.emit_comment("Unsupported constant type")
+
+    me compile_copy(builder: PtxBuilder, dest: LocalId, src: LocalId, ty: PrimitiveType):
+        """Compile copy/move."""
+        val dest_reg = "%r{dest.id}"
+        val src_reg = "%r{src.id}"
+        # Use mov instruction
+        val ptx_ty = self.type_mapper.ptx_type(ty)
+        builder.emit_line("mov{ptx_ty} {dest_reg}, {src_reg};")
+
+    me compile_binop(builder: PtxBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand, ty: PrimitiveType):
+        """Compile binary operation."""
+        val dest_reg = "%r{dest.id}"
+        val left_reg = self.operand_to_reg(builder, left)
+        val right_reg = self.operand_to_reg(builder, right)
+
+        match op:
+            case Add:
+                builder.emit_add(dest_reg, ty, left_reg, right_reg)
+            case Sub:
+                builder.emit_sub(dest_reg, ty, left_reg, right_reg)
+            case Mul:
+                builder.emit_mul(dest_reg, ty, left_reg, right_reg)
+            case Div:
+                builder.emit_div(dest_reg, ty, left_reg, right_reg)
+            case Eq:
+                builder.emit_compare(dest_reg, "eq", ty, left_reg, right_reg)
+            case Ne:
+                builder.emit_compare(dest_reg, "ne", ty, left_reg, right_reg)
+            case Lt:
+                builder.emit_compare(dest_reg, "lt", ty, left_reg, right_reg)
+            case Le:
+                builder.emit_compare(dest_reg, "le", ty, left_reg, right_reg)
+            case Gt:
+                builder.emit_compare(dest_reg, "gt", ty, left_reg, right_reg)
+            case Ge:
+                builder.emit_compare(dest_reg, "ge", ty, left_reg, right_reg)
+            case _:
+                builder.emit_comment("Unsupported binop: {op}")
+
+    me compile_unaryop(builder: PtxBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand, ty: PrimitiveType):
+        """Compile unary operation."""
+        val dest_reg = "%r{dest.id}"
+        val src_reg = self.operand_to_reg(builder, operand)
+        match op:
+            case Neg:
+                builder.emit_neg(dest_reg, ty, src_reg)
+            case Not:
+                builder.emit_line("not.pred {dest_reg}, {src_reg};")
+            case BitNot:
+                builder.emit_bitnot(dest_reg, ty, src_reg)
+            case _:
+                builder.emit_comment("Unsupported unaryop: {op}")
+
+    me compile_load(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, ty: PrimitiveType, space: MemorySpace):
+        """Compile load instruction."""
+        val dest_reg = "%r{dest.id}"
+        val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
+        builder.emit_load(dest_reg, ty, addr_reg, space)
+
+    me compile_store(builder: PtxBuilder, ptr: MirOperand, value: MirOperand, ty: PrimitiveType, space: MemorySpace):
+        """Compile store instruction."""
+        val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
+        val value_reg = self.operand_to_reg(builder, value)
+        builder.emit_store(ty, addr_reg, value_reg, space)
+
+    me compile_mir_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand, ty: PrimitiveType, space: MemorySpace):
+        """Compile atomic operation."""
+        val dest_reg = "%r{dest.id}"
+        val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
+        val value_reg = self.operand_to_reg(builder, value)
+        match op:
+            case Add:
+                builder.emit_atomic_add(dest_reg, ty, addr_reg, value_reg, space)
+            case Sub:
+                builder.emit_atomic_sub(dest_reg, ty, addr_reg, value_reg, space)
+            case And:
+                builder.emit_atomic_and(dest_reg, ty, addr_reg, value_reg, space)
+            case Or:
+                builder.emit_atomic_or(dest_reg, ty, addr_reg, value_reg, space)
+            case Xor:
+                builder.emit_atomic_xor(dest_reg, ty, addr_reg, value_reg, space)
+            case Min:
+                builder.emit_atomic_min(dest_reg, ty, addr_reg, value_reg, space)
+            case Max:
+                builder.emit_atomic_max(dest_reg, ty, addr_reg, value_reg, space)
+            case Exchange:
+                builder.emit_atomic_exch(dest_reg, ty, addr_reg, value_reg, space)
+            case GpuAtomicOpKind.CompareExchange:
+                # CAS via GpuAtomicOp is deprecated — use GpuAtomicCas instead
+                builder.emit_comment("atom.cas via GpuAtomicOp deprecated; use GpuAtomicCas instruction")
+            case _:
+                builder.emit_comment("Unsupported atomic op: {op}")
+
+    me compile_mir_atomic_cas(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand, ty: PrimitiveType, space: MemorySpace):
+        """Compile atomic compare-and-swap (3-operand CAS)."""
+        val dest_reg = "%r{dest.id}"
+        val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
+        val cmp_reg = self.operand_to_reg(builder, expected)
+        val val_reg = self.operand_to_reg(builder, desired)
+        builder.emit_atomic_cas(dest_reg, ty, addr_reg, cmp_reg, val_reg, space)
+
+    me memory_address_reg(builder: PtxBuilder, generic_addr: text, space: MemorySpace) -> text:
+        if space != MemorySpace.Shared:
+            return generic_addr
+        val shared_addr = builder.alloc_reg(PrimitiveType.U64)
+        builder.emit_reg_decl(shared_addr, PrimitiveType.U64)
+        builder.emit_line("cvta.to.shared.u64 {shared_addr}, {generic_addr};")
+        shared_addr
+
+    fn pointer_memory_space(ptr: MirOperand, pointer_spaces: Dict<i64, MemorySpace>) -> Result<MemorySpace, CompileError>:
+        match ptr.kind:
+            case Copy(local) | Move(local):
+                if pointer_spaces.has(local.id):
+                    return Ok(pointer_spaces[local.id])
+            case _:
+                ()
+        val local_id = match ptr.kind:
+            case Copy(local) | Move(local): local.id
+            case _: -1
+        Err(compileerror_backend_error(
+            BackendKind.Cuda,
+            "CUDA pointer has no memory-space provenance for local {local_id}; tracked={pointer_spaces.keys().len()}"
+        ))
+
+    me pointer_pointee_primitive_type(func: MirFunction, ptr: MirOperand) -> Result<PrimitiveType, CompileError>:
+        val ptr_type = self.operand_mir_type(func, ptr)?
+        match ptr_type.kind:
+            case Ptr(pointee, _) | Ref(pointee, _):
+                Ok(self.mir_type_to_primitive(pointee))
+            case _:
+                Err(compileerror_backend_error(BackendKind.Cuda, "CUDA memory operation requires a pointer operand"))
+
+    me validate_typed_atomic_intrinsic(func: MirFunction, dest: LocalId?, args: [MirOperand], expected: PrimitiveType) -> Result<(), CompileError>:
+        if not dest.? or self.local_primitive_type(func, dest.unwrap())? != expected:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA typed atomic destination type does not match intrinsic"))
+        if self.pointer_pointee_primitive_type(func, args[0])? != expected:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA typed atomic pointer element type does not match intrinsic"))
+        for i in 1..args.len():
+            if self.operand_primitive_type(func, args[i])? != expected:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA typed atomic value type does not match intrinsic"))
+        Ok(())
+
+    me validate_f32_vector_memory_intrinsic(func: MirFunction, name: text, args: [MirOperand]) -> Result<(), CompileError>:
+        if self.pointer_pointee_primitive_type(func, args[0])? != PrimitiveType.F32:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA F32 vector memory intrinsic requires an F32 pointer"))
+        if self.operand_primitive_type(func, args[1])? != PrimitiveType.U64:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA F32 vector memory intrinsic index must be U64"))
+        if name == "gpu_vec4_store_f32" or name == "gpu_vec2_store_f32":
+            for i in 2..args.len():
+                if self.operand_primitive_type(func, args[i])? != PrimitiveType.F32:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA F32 vector store values must be F32"))
+        Ok(())
+
+    fn integer_atomic_type_supported(ty: PrimitiveType) -> bool:
+        match ty:
+            case I32 | U32 | I64 | U64:
+                true
+            case _:
+                false
+
+    fn atomic_memory_space(ptr: MirOperand, pointer_spaces: Dict<i64, MemorySpace>) -> Result<MemorySpace, CompileError>:
+        val space = self.pointer_memory_space(ptr, pointer_spaces)?
+        if space == MemorySpace.Local:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomics require global or shared memory"))
+        Ok(space)
+
+    me propagate_pointer_space(dest: LocalId, source: MirOperand):
+        val source_id = match source.kind:
+            case Copy(local) | Move(local):
+                local.id
+            case _:
+                -1
+        val source_has_space = source_id >= 0 and self.pointer_spaces.has(source_id)
+        val source_space = if source_has_space: self.pointer_spaces[source_id] else: MemorySpace.Global
+        self.pointer_spaces.remove(dest.id)
+        if source_has_space:
+            self.pointer_spaces[dest.id] = source_space
+
+    me compile_call(func: MirFunction, builder: PtxBuilder, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
+        """Compile device function call."""
+        var func_name = ""
+        var return_ty = PrimitiveType.I64
+        var returns_value = false
+        var arg_types: [PrimitiveType] = []
+        var arg_regs: [text] = []
+        var arg_i = 0
+        match callee.kind:
+            case Const(Str(name), ty):
+                func_name = name
+                if not self.function_signatures.contains_key(name):
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call target is not defined in the MIR module: {name}"))
+                val sig: MirSignature = self.function_signatures[name]
+                if sig.params.len() != args.len():
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument count does not match its signature"))
+                while arg_i < args.len():
+                    val arg = args[arg_i]
+                    val param_ty = sig.params[arg_i]
+                    val arg_primitive = self.mir_type_to_primitive(self.operand_mir_type(func, arg)?)
+                    val param_primitive = self.mir_type_to_primitive(param_ty)
+                    if arg_primitive != param_primitive:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument {arg_i} type does not match its signature"))
+                    if param_ty.kind == MirTypeKind.Bool:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean parameters"))
+                    arg_types = arg_types.push(self.mir_type_to_primitive(param_ty))
+                    arg_regs = arg_regs.push(self.operand_to_reg(builder, arg))
+                    arg_i = arg_i + 1
+                returns_value = sig.return_type.kind != MirTypeKind.Unit
+                if sig.return_type.kind == MirTypeKind.Bool:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean return values"))
+                return_ty = self.mir_type_to_primitive(sig.return_type)
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call requires a statically named callee"))
+
+        if dest.? and not returns_value:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA void device call cannot have a destination"))
+        if not dest.? and returns_value:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA value-returning device call requires a destination"))
+        if dest.?:
+            val dest_reg = "%r{dest.unwrap().id}"
+            builder.emit_call(dest_reg, return_ty, func_name, arg_regs, arg_types)
+        else:
+            builder.emit_call_void(func_name, arg_regs, arg_types)
+        Ok(())
+
+    me compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand], func: MirFunction):
+        """Compile aggregate construction via local memory using real field layout."""
+        val dest_reg = "%r{dest.id}"
+        # Store each field to local memory at its aligned offset
+        builder.emit_comment("aggregate construct -> {dest_reg}")
+        var offset = 0
+        for operand in operands:
+            val src_reg = self.operand_to_reg(builder, operand)
+            var stored = false
+            match self.operand_mir_type(func, operand):
+                case Ok(field_ty):
+                    if self.cuda_can_size(field_ty):
+                        offset = cuda_align_to(offset, self.cuda_type_align(field_ty))
+                        val st_ty = self.ptx_mem_type(field_ty)
+                        builder.emit_line("st.local{st_ty} [{dest_reg}+{offset}], {src_reg};")
+                        offset = offset + self.cuda_type_size(field_ty)
+                        stored = true
+                case Err(_): ()
+            if not stored:
+                # FALLBACK: the operand's MIR type is not resolvable/sizable here.
+                # Known Struct(SymbolId)/Enum(SymbolId) now resolve via
+                # self.cuda_can_size/self.type_defs; this only fires for a
+                # symbol genuinely absent from the module's type table.
+                # Legacy 8-byte slot — WRONG for sub-8-byte fields; kept loud so
+                # bad layout is visible in the emitted PTX.
+                builder.emit_comment("WARN: unresolved aggregate field type; falling back to 8-byte slot")
+                builder.emit_line("st.local.u64 [{dest_reg}+{offset}], {src_reg};")
+                offset = offset + 8
+
+    me compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64, func: MirFunction):
+        """Compile field access via offset load using real field layout."""
+        val dest_reg = "%r{dest.id}"
+        val base_reg = self.operand_to_reg(builder, base)
+        match self.field_layout(func, base, field):
+            case Ok(layout):
+                val offset = layout.0
+                val ld_ty = self.ptx_mem_type(layout.1)
+                builder.emit_line("ld.local{ld_ty} {dest_reg}, [{base_reg}+{offset}];")
+            case Err(_):
+                # FALLBACK: aggregate layout not resolvable at this call site
+                # (base type opaque, or a Struct(SymbolId) absent from
+                # self.type_defs — known struct symbols resolve in field_layout).
+                # Legacy 8-byte slots — matches compile_aggregate's fallback path.
+                builder.emit_comment("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
+                val offset = field * 8
+                builder.emit_line("ld.local.u64 {dest_reg}, [{base_reg}+{offset}];")
+
+    me compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand, func: MirFunction):
+        """Compile field write via offset store using real field layout."""
+        val base_reg = self.operand_to_reg(builder, base)
+        val value_reg = self.operand_to_reg(builder, value)
+        match self.field_layout(func, base, field):
+            case Ok(layout):
+                val offset = layout.0
+                val st_ty = self.ptx_mem_type(layout.1)
+                builder.emit_line("st.local{st_ty} [{base_reg}+{offset}], {value_reg};")
+            case Err(_):
+                # FALLBACK: see compile_get_field — legacy 8-byte slots.
+                builder.emit_comment("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
+                val offset = field * 8
+                builder.emit_line("st.local.u64 [{base_reg}+{offset}], {value_reg};")
+
+    me compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType, func: MirFunction):
+        """Compile type conversion using PTX cvt instruction."""
+        val dest_reg = "%r{dest.id}"
+        val src_reg = self.operand_to_reg(builder, operand)
+        val dest_ty = self.mir_type_to_primitive(target)
+        # Derive the source type from the MIR operand (local type or const type).
+        val src_ty = match self.operand_primitive_type(func, operand):
+            case Ok(t): t
+            case Err(_):
+                # Last-resort fallback: operand references an unknown local, so
+                # its type cannot be derived — assume I64 (legacy behavior).
+                PrimitiveType.I64
+        builder.emit_convert(dest_reg, dest_ty, src_reg, src_ty)
+
+    me compile_alloc(builder: PtxBuilder, dest: LocalId, type_: MirType):
+        """Compile local memory allocation."""
+        val dest_reg = "%r{dest.id}"
+        val prim_ty = self.mir_type_to_primitive(type_)
+        val size = type_.size_bytes()
+        val alloc_name = "local_{dest.id}"
+        builder.emit_local_alloc(alloc_name, prim_ty, 1)
+        # Load address of local allocation into dest register
+        builder.emit_line("mov.u64 {dest_reg}, {alloc_name};")
+
+    me compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand], func: MirFunction):
+        """Compile GetElementPtr - pointer arithmetic with indices."""
+        val dest_reg = "%r{dest.id}"
+        val base_reg = self.operand_to_reg(builder, base)
+        # For simple single-index GEP, compute base + index * element_size
+        if indices.len() > 0:
+            # Derive element size from the base operand's MIR type.
+            var elem_size = 8
+            var resolved = false
+            match self.operand_mir_type(func, base):
+                case Ok(base_ty):
+                    match base_ty.kind:
+                        case Ptr(pointee, _):
+                            if self.cuda_can_size(pointee):
+                                elem_size = self.cuda_type_size(pointee)
+                                resolved = true
+                        case Ref(referent, _):
+                            if self.cuda_can_size(referent):
+                                elem_size = self.cuda_type_size(referent)
+                                resolved = true
+                        case Array(elem, _):
+                            if self.cuda_can_size(elem):
+                                elem_size = self.cuda_type_size(elem)
+                                resolved = true
+                        case Slice(selem):
+                            if self.cuda_can_size(selem):
+                                elem_size = self.cuda_type_size(selem)
+                                resolved = true
+                        case _: ()
+                case Err(_): ()
+            if not resolved:
+                # FALLBACK: base element type not resolvable/sizable at this
+                # call site — legacy 8-byte assumption, kept loud in the PTX.
+                builder.emit_comment("WARN: GEP element type unresolved; assuming 8-byte elements")
+            val idx_reg = self.operand_to_reg(builder, indices[0])
+            val tmp = builder.alloc_reg(PrimitiveType.U64)
+            builder.emit_reg_decl(tmp, PrimitiveType.U64)
+            builder.emit_line("mul.lo.u64 {tmp}, {idx_reg}, {elem_size};")
+            builder.emit_line("add.u64 {dest_reg}, {base_reg}, {tmp};")
+        else:
+            builder.emit_line("mov.u64 {dest_reg}, {base_reg};")
+
+    me compile_bounds_check(builder: PtxBuilder, args: [MirOperand], func: MirFunction) -> Result<(), CompileError>:
+        val index_mir_type = self.operand_mir_type(func, args[0])?
+        val length_mir_type = self.operand_mir_type(func, args[1])?
+        match index_mir_type.kind:
+            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8:
+                ()
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bounds_check index must be an integer"))
+        if length_mir_type.kind != MirTypeKind.I64:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bounds_check length must be I64"))
+
+        val index_type = self.mir_type_to_primitive(index_mir_type)
+        var index = self.operand_to_reg(builder, args[0])
+        if index_type != PrimitiveType.I64:
+            val widened = builder.alloc_reg(PrimitiveType.I64)
+            builder.emit_reg_decl(widened, PrimitiveType.I64)
+            builder.emit_convert(widened, PrimitiveType.I64, index, index_type)
+            index = widened
+        val length = self.operand_to_reg(builder, args[1])
+        val negative = builder.alloc_pred_reg()
+        val too_large = builder.alloc_pred_reg()
+        builder.emit_pred_decl(negative)
+        builder.emit_pred_decl(too_large)
+        builder.emit_compare(negative, "lt", PrimitiveType.I64, index, "0")
+        builder.emit_line("@{negative} trap;")
+        builder.emit_compare(too_large, "ge", PrimitiveType.I64, index, length)
+        builder.emit_line("@{too_large} trap;")
+        Ok(())
+
+    me compile_intrinsic(builder: PtxBuilder, dest: LocalId?, name: text, args: [MirOperand], func: MirFunction, pointer_spaces: Dict<i64, MemorySpace>) -> Result<(), CompileError>:
+        """Compile math and GPU intrinsics."""
+        val ty = PrimitiveType.F32  # Default to F32 for math intrinsics
+        match name:
+            case "gpu_atomic_add_i64" | "gpu_atomic_min_i64" | "gpu_atomic_max_i64" | "gpu_atomic_cas_i64":
+                self.validate_typed_atomic_intrinsic(func, dest, args, PrimitiveType.I64)?
+            case "gpu_atomic_add_i32":
+                self.validate_typed_atomic_intrinsic(func, dest, args, PrimitiveType.I32)?
+            case "gpu_atomic_add_f32":
+                self.validate_typed_atomic_intrinsic(func, dest, args, PrimitiveType.F32)?
+            case "gpu_vec4_load_f32" | "gpu_vec4_store_f32" | "gpu_vec2_load_f32" | "gpu_vec2_store_f32":
+                self.validate_f32_vector_memory_intrinsic(func, name, args)?
+            case _:
+                ()
+
+        match name:
+            case "sin":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_sin(d, ty, src)
+            case "cos":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_cos(d, ty, src)
+            case "sqrt":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_sqrt(d, ty, src)
+            case "abs":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_abs(d, ty, src)
+            case "min":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
+                builder.emit_intrinsic_min(d, ty, a, b)
+            case "max":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
+                builder.emit_intrinsic_max(d, ty, a, b)
+            case "fma":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(builder, args[0])
+                val b = self.operand_to_reg(builder, args[1])
+                val c = self.operand_to_reg(builder, args[2])
+                builder.emit_intrinsic_fma(d, ty, a, b, c)
+            case "exp2":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_ex2(d, ty, src)
+            case "log2":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_lg2(d, ty, src)
+            case "rcp":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(builder, args[0])
+                builder.emit_intrinsic_rcp(d, ty, src)
+            # Atomic intrinsics (typed variants)
+            case "gpu_atomic_add_i64":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val val_reg = self.operand_to_reg(builder, args[1])
+                builder.emit_atomic_add(d, PrimitiveType.I64, ptr_reg, val_reg, space)
+            case "gpu_atomic_add_i32":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val val_reg = self.operand_to_reg(builder, args[1])
+                builder.emit_atomic_add(d, PrimitiveType.I32, ptr_reg, val_reg, space)
+            case "gpu_atomic_add_f32":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val val_reg = self.operand_to_reg(builder, args[1])
+                builder.emit_atomic_add(d, PrimitiveType.F32, ptr_reg, val_reg, space)
+            case "gpu_atomic_min_i64":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val val_reg = self.operand_to_reg(builder, args[1])
+                builder.emit_atomic_min(d, PrimitiveType.I64, ptr_reg, val_reg, space)
+            case "gpu_atomic_max_i64":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val val_reg = self.operand_to_reg(builder, args[1])
+                builder.emit_atomic_max(d, PrimitiveType.I64, ptr_reg, val_reg, space)
+            case "gpu_atomic_cas_i64":
+                val d = "%r{dest.unwrap().id}"
+                val space = self.atomic_memory_space(args[0], pointer_spaces)?
+                val ptr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, args[0]), space)
+                val cmp_reg = self.operand_to_reg(builder, args[1])
+                val val_reg = self.operand_to_reg(builder, args[2])
+                builder.emit_atomic_cas(d, PrimitiveType.I64, ptr_reg, cmp_reg, val_reg, space)
+            # Sub-group / warp intrinsics
+            case "gpu_lane_id":
+                val d2 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d2, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d2}, %laneid;")
+            case "gpu_warp_id":
+                val d3 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d3, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d3}, %warpid;")
+            case "gpu_warp_size":
+                val d4 = "%r{dest.unwrap().id}"
+                builder.emit_reg_decl(d4, PrimitiveType.I32)
+                builder.emit_line("mov.u32 {d4}, %WARP_SZ;")
+            case "gpu_warp_shuffle":
+                val d5 = "%r{dest.unwrap().id}"
+                val src5 = self.operand_to_reg(builder, args[0])
+                val lane5 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d5, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.idx.b32 {d5}, {src5}, {lane5}, 0x1f, 0xffffffff;")
+            case "gpu_warp_shuffle_down":
+                val d6 = "%r{dest.unwrap().id}"
+                val src6 = self.operand_to_reg(builder, args[0])
+                val delta6 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d6, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.down.b32 {d6}, {src6}, {delta6}, 0x1f, 0xffffffff;")
+            case "gpu_warp_shuffle_up":
+                val d7 = "%r{dest.unwrap().id}"
+                val src7 = self.operand_to_reg(builder, args[0])
+                val delta7 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d7, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.up.b32 {d7}, {src7}, {delta7}, 0x0, 0xffffffff;")
+            case "gpu_warp_shuffle_xor":
+                val d8 = "%r{dest.unwrap().id}"
+                val src8 = self.operand_to_reg(builder, args[0])
+                val mask8 = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(d8, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.bfly.b32 {d8}, {src8}, {mask8}, 0x1f, 0xffffffff;")
+            case "gpu_warp_ballot":
+                val d9 = "%r{dest.unwrap().id}"
+                val pred9 = self.operand_to_reg(builder, args[0])
+                builder.emit_reg_decl(d9, PrimitiveType.I32)
+                builder.emit_line("vote.sync.ballot.b32 {d9}, {pred9}, 0xffffffff;")
+            case "gpu_warp_reduce_add":
+                # Butterfly warp reduction: 5 shfl.sync.bfly steps for warp size 32
+                val dra = "%r{dest.unwrap().id}"
+                val srcra = self.operand_to_reg(builder, args[0])
+                val tmp_ra0 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_ra1 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_ra2 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_ra3 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_ra4 = builder.alloc_reg(PrimitiveType.I32)
+                builder.emit_reg_decl(dra, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_ra0, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_ra1, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_ra2, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_ra3, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_ra4, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.bfly.b32 {tmp_ra0}, {srcra}, 16, 0x1f, 0xffffffff;")
+                builder.emit_line("add.s32 {tmp_ra0}, {srcra}, {tmp_ra0};")
+                builder.emit_line("shfl.sync.bfly.b32 {tmp_ra1}, {tmp_ra0}, 8, 0x1f, 0xffffffff;")
+                builder.emit_line("add.s32 {tmp_ra1}, {tmp_ra0}, {tmp_ra1};")
+                builder.emit_line("shfl.sync.bfly.b32 {tmp_ra2}, {tmp_ra1}, 4, 0x1f, 0xffffffff;")
+                builder.emit_line("add.s32 {tmp_ra2}, {tmp_ra1}, {tmp_ra2};")
+                builder.emit_line("shfl.sync.bfly.b32 {tmp_ra3}, {tmp_ra2}, 2, 0x1f, 0xffffffff;")
+                builder.emit_line("add.s32 {tmp_ra3}, {tmp_ra2}, {tmp_ra3};")
+                builder.emit_line("shfl.sync.bfly.b32 {tmp_ra4}, {tmp_ra3}, 1, 0x1f, 0xffffffff;")
+                builder.emit_line("add.s32 {dra}, {tmp_ra3}, {tmp_ra4};")
+            case "gpu_warp_broadcast":
+                # Broadcast: shfl.sync.idx — same as shuffle by lane index
+                val dbc = "%r{dest.unwrap().id}"
+                val srcbc = self.operand_to_reg(builder, args[0])
+                val lanebc = self.operand_to_reg(builder, args[1])
+                builder.emit_reg_decl(dbc, PrimitiveType.I32)
+                builder.emit_line("shfl.sync.idx.b32 {dbc}, {srcbc}, {lanebc}, 0x1f, 0xffffffff;")
+            case "gpu_warp_scan_add":
+                # Inclusive prefix scan: 5 shfl.sync.up steps for warp size 32
+                val dsc = "%r{dest.unwrap().id}"
+                val srcsc = self.operand_to_reg(builder, args[0])
+                val tmp_sc0 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_sc1 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_sc2 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_sc3 = builder.alloc_reg(PrimitiveType.I32)
+                val tmp_sc4 = builder.alloc_reg(PrimitiveType.I32)
+                val lane_sc = builder.alloc_reg(PrimitiveType.I32)
+                val pred_sc0 = builder.alloc_pred_reg()
+                val pred_sc1 = builder.alloc_pred_reg()
+                val pred_sc2 = builder.alloc_pred_reg()
+                val pred_sc3 = builder.alloc_pred_reg()
+                val pred_sc4 = builder.alloc_pred_reg()
+                builder.emit_reg_decl(dsc, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_sc0, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_sc1, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_sc2, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_sc3, PrimitiveType.I32)
+                builder.emit_reg_decl(tmp_sc4, PrimitiveType.I32)
+                builder.emit_reg_decl(lane_sc, PrimitiveType.I32)
+                builder.emit_pred_decl(pred_sc0)
+                builder.emit_pred_decl(pred_sc1)
+                builder.emit_pred_decl(pred_sc2)
+                builder.emit_pred_decl(pred_sc3)
+                builder.emit_pred_decl(pred_sc4)
+                builder.emit_line("mov.u32 {lane_sc}, %laneid;")
+                builder.emit_line("mov.s32 {dsc}, {srcsc};")
+                builder.emit_line("shfl.sync.up.b32 {tmp_sc0}, {dsc}, 1, 0x0, 0xffffffff;")
+                builder.emit_line("setp.ge.u32 {pred_sc0}, {lane_sc}, 1;")
+                builder.emit_line("@{pred_sc0} add.s32 {dsc}, {dsc}, {tmp_sc0};")
+                builder.emit_line("shfl.sync.up.b32 {tmp_sc1}, {dsc}, 2, 0x0, 0xffffffff;")
+                builder.emit_line("setp.ge.u32 {pred_sc1}, {lane_sc}, 2;")
+                builder.emit_line("@{pred_sc1} add.s32 {dsc}, {dsc}, {tmp_sc1};")
+                builder.emit_line("shfl.sync.up.b32 {tmp_sc2}, {dsc}, 4, 0x0, 0xffffffff;")
+                builder.emit_line("setp.ge.u32 {pred_sc2}, {lane_sc}, 4;")
+                builder.emit_line("@{pred_sc2} add.s32 {dsc}, {dsc}, {tmp_sc2};")
+                builder.emit_line("shfl.sync.up.b32 {tmp_sc3}, {dsc}, 8, 0x0, 0xffffffff;")
+                builder.emit_line("setp.ge.u32 {pred_sc3}, {lane_sc}, 8;")
+                builder.emit_line("@{pred_sc3} add.s32 {dsc}, {dsc}, {tmp_sc3};")
+                builder.emit_line("shfl.sync.up.b32 {tmp_sc4}, {dsc}, 16, 0x0, 0xffffffff;")
+                builder.emit_line("setp.ge.u32 {pred_sc4}, {lane_sc}, 16;")
+                builder.emit_line("@{pred_sc4} add.s32 {dsc}, {dsc}, {tmp_sc4};")
+            # Specialization constants (W2.5): gpu_spec_const_i64(name, default)
+            case "gpu_spec_const_i64":
+                val const_name = match args[0].kind:
+                    case Const(value, _):
+                        match value:
+                            case Str(s): s
+                            case _: ""
+                    case _: ""
+                val default_val = match args[1].kind:
+                    case Const(value, _):
+                        match value:
+                            case Int(v): v
+                            case _: 0
+                    case _: 0
+                if const_name == "":
+                    builder.emit_comment("gpu_spec_const_i64 requires a string literal constant name")
+                else:
+                    val resolved = spec_const_resolve(const_name, default_val)
+                    if dest.?:
+                        val dsc = "%r{dest.unwrap().id}"
+                        builder.emit_reg_decl(dsc, PrimitiveType.I64)
+                        builder.emit_line("mov.s64 {dsc}, {resolved};")
+                    else:
+                        builder.emit_comment("gpu_spec_const_i64 discarded (no dest)")
+            # Vector load/store (W2.6)
+            case "gpu_vec4_load_f32":
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA vector loads require MIR vector result lowering"))
+            case "gpu_vec4_store_f32":
+                if args.len() < 6:
+                    builder.emit_comment("gpu_vec4_store_f32 missing arguments")
+                else:
+                    val ptr_vs4 = self.operand_to_reg(builder, args[0])
+                    val idx_vs4 = self.operand_to_reg(builder, args[1])
+                    val v0s4 = self.operand_to_reg(builder, args[2])
+                    val v1s4 = self.operand_to_reg(builder, args[3])
+                    val v2s4 = self.operand_to_reg(builder, args[4])
+                    val v3s4 = self.operand_to_reg(builder, args[5])
+                    val addr_vs4 = builder.alloc_reg(PrimitiveType.U64)
+                    builder.emit_reg_decl(addr_vs4, PrimitiveType.U64)
+                    val off_vs4 = builder.alloc_reg(PrimitiveType.U64)
+                    builder.emit_reg_decl(off_vs4, PrimitiveType.U64)
+                    builder.emit_line("mul.lo.u64 {off_vs4}, {idx_vs4}, 16;")
+                    builder.emit_line("add.u64 {addr_vs4}, {ptr_vs4}, {off_vs4};")
+                    val space_kind_vs4 = self.pointer_memory_space(args[0], pointer_spaces)?
+                    val space_vs4 = self.type_mapper.ptx_state_space(space_kind_vs4)
+                    val store_addr_vs4 = self.memory_address_reg(builder, addr_vs4, space_kind_vs4)
+                    builder.emit_line("st{space_vs4}.v4.f32 [{store_addr_vs4}], {{{v0s4}, {v1s4}, {v2s4}, {v3s4}}};")
+            case "gpu_vec2_load_f32":
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA vector loads require MIR vector result lowering"))
+            case "gpu_vec2_store_f32":
+                if args.len() < 4:
+                    builder.emit_comment("gpu_vec2_store_f32 missing arguments")
+                else:
+                    val ptr_vs2 = self.operand_to_reg(builder, args[0])
+                    val idx_vs2 = self.operand_to_reg(builder, args[1])
+                    val v0s2 = self.operand_to_reg(builder, args[2])
+                    val v1s2 = self.operand_to_reg(builder, args[3])
+                    val addr_vs2 = builder.alloc_reg(PrimitiveType.U64)
+                    builder.emit_reg_decl(addr_vs2, PrimitiveType.U64)
+                    val off_vs2 = builder.alloc_reg(PrimitiveType.U64)
+                    builder.emit_reg_decl(off_vs2, PrimitiveType.U64)
+                    builder.emit_line("mul.lo.u64 {off_vs2}, {idx_vs2}, 8;")
+                    builder.emit_line("add.u64 {addr_vs2}, {ptr_vs2}, {off_vs2};")
+                    val space_kind_vs2 = self.pointer_memory_space(args[0], pointer_spaces)?
+                    val space_vs2 = self.type_mapper.ptx_state_space(space_kind_vs2)
+                    val store_addr_vs2 = self.memory_address_reg(builder, addr_vs2, space_kind_vs2)
+                    builder.emit_line("st{space_vs2}.v2.f32 [{store_addr_vs2}], {{{v0s2}, {v1s2}}};")
+            case _:
+                builder.emit_comment("Unknown intrinsic: {name}")
+        Ok(())
+
+    me compile_terminator(builder: PtxBuilder, term: MirTerminator, is_kernel: bool, return_type: MirType) -> Result<(), CompileError>:
+        """Compile block terminator."""
+        match term:
+            case Ret(value):
+                if is_kernel:
+                    if value.?:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA kernels cannot return a value"))
+                    builder.emit_exit()
+                else:
+                    if value.?:
+                        val src = self.operand_to_reg(builder, value.unwrap())
+                        builder.emit_return_value(self.mir_type_to_primitive(return_type), src)
+                    elif return_type.kind != MirTypeKind.Unit:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA device function must return a value"))
+                    builder.emit_ret()
+            case Goto(target):
+                builder.emit_branch("BB{target.id}")
+            # A `case Branch(...)` arm stood here. `Branch` is not a
+            # MirTerminator variant (the conditional terminator is `If`),
+            # so it never matched and only duplicated the `If` arm below.
+            # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+            case If(cond, true_target, false_target):
+                val cond_reg = self.operand_to_reg(builder, cond)
+                builder.emit_branch_if(cond_reg, "BB{true_target.id}")
+                builder.emit_branch("BB{false_target.id}")
+            case Unreachable:
+                builder.emit_line("trap;")
+            case _:
+                return Err(compileerror_backend_error(
+                    BackendKind.Cuda,
+                    "CUDA backend does not support terminator: {term}"
+                ))
+        Ok(())
+
+    me operand_to_reg(builder: PtxBuilder, operand: MirOperand) -> text:
+        """Convert operand to register name, materializing constants into temp registers."""
+        match operand.kind:
+            case Copy(local): "%r{local.id}"
+            case Move(local): "%r{local.id}"
+            case Const(value, ty):
+                # Emit mov to a temp register for constant values
+                val prim_ty = self.mir_type_to_primitive(ty)
+                val tmp = builder.alloc_reg(prim_ty)
+                builder.emit_reg_decl(tmp, prim_ty)
+                match value:
+                    case Int(v):
+                        builder.emit_const_int(tmp, prim_ty, v)
+                    case Float(v):
+                        builder.emit_const_float(tmp, prim_ty, v)
+                    case Bool(v):
+                        val int_val = if v: 1 else: 0
+                        builder.emit_const_int(tmp, PrimitiveType.Bool, int_val)
+                    case _:
+                        builder.emit_const_int(tmp, PrimitiveType.I64, 0)
+                tmp
+
+    fn mir_type_to_primitive(ty: MirType) -> PrimitiveType:
+        """Convert MIR type to PrimitiveType."""
+        match ty.kind:
+            case I64: PrimitiveType.I64
+            case I32: PrimitiveType.I32
+            case I16: PrimitiveType.I16
+            case I8: PrimitiveType.I8
+            case U64: PrimitiveType.U64
+            case U32: PrimitiveType.U32
+            case U16: PrimitiveType.U16
+            case U8: PrimitiveType.U8
+            case F64: PrimitiveType.F64
+            case F32: PrimitiveType.F32
+            case Bool: PrimitiveType.Bool
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): PrimitiveType.U64
+            case _: PrimitiveType.I64
+
+    fn cuda_type_supported(ty: MirType) -> bool:
+        match ty.kind:
+            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8 | F64 | F32 | Bool | Unit | Ptr(_, _) | Ref(_, _) | FuncPtr(_): true
+            case _: false
+
+    me local_primitive_type(func: MirFunction, id: LocalId) -> Result<PrimitiveType, CompileError>:
+        for local in func.locals:
+            if local.id == id:
+                return Ok(self.mir_type_to_primitive(local.type_))
+        Err(compileerror_backend_error(BackendKind.Cuda, "CUDA MIR references unknown local %{id.id}"))
+
+    me operand_primitive_type(func: MirFunction, operand: MirOperand) -> Result<PrimitiveType, CompileError>:
+        match operand.kind:
+            case Copy(id) | Move(id): self.local_primitive_type(func, id)
+            case Const(_, ty): Ok(self.mir_type_to_primitive(ty))
+
+    me operand_mir_type(func: MirFunction, operand: MirOperand) -> Result<MirType, CompileError>:
+        """Resolve the full MIR type of an operand (local type or const type)."""
+        match operand.kind:
+            case Copy(id) | Move(id):
+                for local in func.locals:
+                    if local.id == id:
+                        return Ok(local.type_)
+                Err(compileerror_backend_error(BackendKind.Cuda, "CUDA MIR references unknown local %{id.id}"))
+            case Const(_, ty): Ok(ty)
+
+    me ptx_mem_type(ty: MirType) -> text:
+        """PTX memory access type suffix for ld/st (predicates load/store as .u8)."""
+        val prim = self.mir_type_to_primitive(ty)
+        match prim:
+            case Bool: ".u8"  # .pred is not a valid ld/st type
+            case _: self.type_mapper.ptx_type(prim)
+
+    me cuda_can_size(ty: MirType) -> bool:
+        """
+        True when this backend can compute ty's layout: either the plain
+        primitive/Array/Tuple rules in cuda_mapper_can_size, or a
+        Struct(SymbolId)/Enum(SymbolId) whose definition is present in
+        self.type_defs — the MIR module's type table, threaded in from
+        compile(). Genuinely-unknown symbols still return false so callers
+        keep emitting the loud WARN fallback for them.
+        """
+        match ty.kind:
+            case Struct(symbol) | Enum(symbol): self.type_defs.contains_key(symbol)
+            case Array(elem, _): self.cuda_can_size(elem)
+            case Tuple(elements):
+                for e in elements:
+                    if not self.cuda_can_size(e):
+                        return false
+                true
+            case _: cuda_mapper_can_size(ty)
+
+    me cuda_type_size(ty: MirType) -> i64:
+        """
+        Byte size of ty for CUDA layout purposes. Struct(SymbolId)/
+        Enum(SymbolId) resolve against self.type_defs; everything else
+        defers to CudaTypeMapper.size_of (which cannot see symbols at all,
+        and whose own Struct arm assumes a different payload shape — never
+        route a Struct/Enum kind into it). Callers must gate on
+        cuda_can_size first; an unresolvable symbol here falls back to a
+        legacy 8-byte slot rather than touching the mapper.
+        """
+        match ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.cuda_struct_size(fields)
+                        case _: 8
+                else:
+                    8
+            case Enum(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Enum(variants): self.cuda_enum_size(variants)
+                        case _: 8
+                else:
+                    8
+            case Array(elem, size): self.cuda_type_size(elem) * size
+            case Tuple(elements):
+                var total = 0
+                for e in elements:
+                    total = total + self.cuda_type_size(e)
+                total
+            case _: self.type_mapper.size_of(ty)
+
+    me cuda_type_align(ty: MirType) -> i64:
+        """Alignment in bytes of ty, resolving Struct/Enum the same way as cuda_type_size."""
+        match ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.cuda_struct_align(fields)
+                        case _: 8
+                else:
+                    8
+            case Enum(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Enum(variants): self.cuda_enum_align(variants)
+                        case _: 8
+                else:
+                    8
+            case Array(elem, _): self.cuda_type_align(elem)
+            case Tuple(elements):
+                if elements.len() == 0:
+                    1
+                else:
+                    var best = 1
+                    for e in elements:
+                        val a = self.cuda_type_align(e)
+                        if a > best:
+                            best = a
+                    best
+            case _: self.type_mapper.align_of(ty)
+
+    me cuda_struct_size(fields: [MirFieldDef]) -> i64:
+        """
+        Total struct size: the last field's precomputed offset plus its own
+        size, rounded up to the struct's alignment. Offsets are trusted as
+        computed by MIR lowering (compute_struct_layout in module_lowering.spl)
+        rather than re-derived here.
+        """
+        if fields.len() == 0:
+            return 0
+        val last = fields[fields.len() - 1]
+        val end = last.offset + self.cuda_type_size(last.type_)
+        cuda_align_to(end, self.cuda_struct_align(fields))
+
+    me cuda_struct_align(fields: [MirFieldDef]) -> i64:
+        if fields.len() == 0:
+            return 1
+        var best = 1
+        for f in fields:
+            val a = self.cuda_type_align(f.type_)
+            if a > best:
+                best = a
+        best
+
+    me cuda_enum_size(variants: [MirVariantDef]) -> i64:
+        """Tagged-union layout: 8-byte discriminant + largest payload, aligned to the widest member."""
+        var payload_max = 0
+        for v in variants:
+            match v.payload:
+                case Some(p):
+                    val sz = self.cuda_type_size(p)
+                    if sz > payload_max:
+                        payload_max = sz
+                case None: ()
+        cuda_align_to(8 + payload_max, self.cuda_enum_align(variants))
+
+    me cuda_enum_align(variants: [MirVariantDef]) -> i64:
+        var best = 8
+        for v in variants:
+            match v.payload:
+                case Some(p):
+                    val a = self.cuda_type_align(p)
+                    if a > best:
+                        best = a
+                case None: ()
+        best
+
+    me field_layout(func: MirFunction, base: MirOperand, field: i64) -> Result<(i64, MirType), CompileError>:
+        """
+        Compute (byte offset, field type) for field access on the base
+        operand's aggregate type. Struct(SymbolId) resolves against
+        self.type_defs (the MIR module's type table); Tuple/Array use
+        CudaTypeMapper size/alignment rules. Errs when the aggregate type
+        is not resolvable at this call site (e.g. a Struct symbol absent
+        from the module's type table).
+        """
+        val base_ty = self.operand_mir_type(func, base)?
+        val agg_ty = match base_ty.kind:
+            case Ptr(pointee, _): pointee
+            case Ref(referent, _): referent
+            case _: base_ty
+        match agg_ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.struct_field_layout(fields, field)
+                        case _: Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: type table entry for struct symbol is not a struct"))
+                else:
+                    Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: struct symbol not found in module type table"))
+            case Tuple(elements):
+                self.field_offset_in(elements, field)
+            case Array(elem, _):
+                if not self.cuda_can_size(elem):
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: array element type is not sizable"))
+                Ok((field * self.cuda_type_size(elem), elem))
+            case _:
+                Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type not resolvable at this call site"))
+
+    me struct_field_layout(fields: [MirFieldDef], field: i64) -> Result<(i64, MirType), CompileError>:
+        """
+        Look up (offset, type) for a struct field by index using the
+        precomputed offsets already carried on MirFieldDef — no
+        re-derivation needed since the module's type table has them.
+        """
+        if field < 0 or field >= fields.len():
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: struct field index {field} out of range"))
+        val f = fields[field]
+        Ok((f.offset, f.type_))
+
+    me field_offset_in(elements: [MirType], field: i64) -> Result<(i64, MirType), CompileError>:
+        """Walk element types accumulating aligned offsets up to `field`."""
+        if field < 0 or field >= elements.len():
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field index {field} out of range"))
+        var offset = 0
+        var i = 0
+        while i <= field:
+            val ft = elements[i]
+            if not self.cuda_can_size(ft):
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field type is not sizable"))
+            offset = cuda_align_to(offset, self.cuda_type_align(ft))
+            if i == field:
+                return Ok((offset, ft))
+            offset = offset + self.cuda_type_size(ft)
+            i = i + 1
+        Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field walk failed"))
+
+    me validate_intrinsic(name: text, dest: LocalId?, arg_count: i64) -> Result<(), CompileError>:
+        if name == "bounds_check":
+            if arg_count != 2:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic 'bounds_check' requires exactly 2 arguments"))
+            if dest.?:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic 'bounds_check' does not produce a destination"))
+            return Ok(())
+        var required_args = -1
+        var requires_dest = true
+        match name:
+            case "sin" | "cos" | "sqrt" | "abs" | "exp2" | "log2" | "rcp" | "gpu_warp_reduce_add" | "gpu_lane_id" | "gpu_warp_id" | "gpu_warp_size": required_args = if name == "gpu_lane_id" or name == "gpu_warp_id" or name == "gpu_warp_size": 0 else: 1
+            case "min" | "max" | "gpu_atomic_add_i64" | "gpu_atomic_add_i32" | "gpu_atomic_add_f32" | "gpu_atomic_min_i64" | "gpu_atomic_max_i64" | "gpu_warp_shuffle" | "gpu_warp_shuffle_down" | "gpu_warp_shuffle_up" | "gpu_warp_shuffle_xor" | "gpu_warp_ballot" | "gpu_warp_broadcast" | "gpu_warp_scan_add" | "gpu_spec_const_i64" | "gpu_vec4_load_f32" | "gpu_vec2_load_f32": required_args = 2
+            case "fma" | "gpu_atomic_cas_i64": required_args = 3
+            case "gpu_vec4_store_f32":
+                required_args = 6
+                requires_dest = false
+            case "gpu_vec2_store_f32":
+                required_args = 4
+                requires_dest = false
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support intrinsic: {name}"))
+        if arg_count != required_args:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic '{name}' requires exactly {required_args} arguments"))
+        if requires_dest and not dest.?:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic '{name}' requires a destination"))
+        if not requires_dest and dest.?:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic '{name}' does not produce a destination"))
+        Ok(())
+
+# ============================================================================
+# CUDA Compilation Results
+# ============================================================================
+
+struct CudaCompiledModule:
+    """Result of CUDA compilation."""
+    name: text
+    ptx: text
+    kernels: [CudaKernel]
+    device_functions: [CudaDeviceFunction]
+    compute_capability: (i64, i64)
+
+struct CudaKernel:
+    """Compiled CUDA kernel."""
+    name: text
+    ptx: text
+    param_count: i64
+
+struct CudaDeviceFunction:
+    """Compiled CUDA device function."""
+    name: text
+    ptx: text
+
+struct CompiledFunction:
+    """Internal compiled function result."""
+    name: text
+    ptx: text
+    is_kernel: bool
+
+# ============================================================================
+# Codegen Trait Implementation
+# ============================================================================
+
+impl Codegen for CudaBackend:
+    fn backend_kind() -> BackendKind: BackendKind.Cuda
+    fn backend_name() -> text: "cuda"
+    fn supports_target(target: CodegenTarget) -> bool:
+        gpu_backend_supports_target(BackendKind.Cuda, target)
+    fn output_kind() -> CodegenOutputKind: CodegenOutputKind.GpuCode
+
+    me compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val result = self.compile(module)
+        match result:
+            case Ok(cuda_module):
+                Ok(CodegenOutput.gpu_output(module.name, cuda_module.ptx))
+            case Err(e):
+                Err(e)
+
+# ============================================================================
+# GpuCodegen Trait Implementation
+# ============================================================================
+
+impl GpuCodegen for CudaBackend:
+    me compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
+        val builder = PtxBuilder.create(self.compute_capability)
+        var param_types: [MirType] = []
+        var pi = 0
+        while pi < body.arg_count:
+            val loc: MirLocal = body.locals[pi]
+            param_types = param_types.push(loc.type_)
+            pi = pi + 1
+        val sig = MirSignature(params: param_types, return_type: body.return_ty, is_variadic: false)
+        val func = MirFunction(
+            symbol: SymbolId(id: 0), name: func_name, signature: sig,
+            locals: body.locals, blocks: body.blocks, entry_block: BlockId.entry(), span: Span.empty(),
+            generic_params: [], is_generic_template: false, specialization_of: nil,
+            type_bindings: {}, layout_phase: nil, is_kernel: true,
+            gpu_target: "cuda", gpu_backend_order: "cuda", is_export_c: false,
+            export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+            has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+        )
+        val result = self.compile_function_with_kind(builder, func, true)
+        match result:
+            case Ok(_):
+                Ok(builder.build())
+            case Err(e):
+                Err(e)
+
+    me compile_device_function(func_name: text, body: MirBody) -> Result<text, CompileError>:
+        val builder = PtxBuilder.create(self.compute_capability)
+        var param_types2: [MirType] = []
+        var pi2 = 0
+        while pi2 < body.arg_count:
+            val loc2: MirLocal = body.locals[pi2]
+            param_types2 = param_types2.push(loc2.type_)
+            pi2 = pi2 + 1
+        val sig2 = MirSignature(params: param_types2, return_type: body.return_ty, is_variadic: false)
+        val func = MirFunction(
+            symbol: SymbolId(id: 0), name: func_name, signature: sig2,
+            locals: body.locals, blocks: body.blocks, entry_block: BlockId.entry(), span: Span.empty(),
+            generic_params: [], is_generic_template: false, specialization_of: nil,
+            type_bindings: {}, layout_phase: nil, is_kernel: false,
+            gpu_target: "cuda", gpu_backend_order: "cuda", is_export_c: false,
+            export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+            has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
+        )
+        val result = self.compile_function_with_kind(builder, func, false)
+        match result:
+            case Ok(_):
+                Ok(builder.build())
+            case Err(e):
+                Err(e)
+
+    fn compile_gpu_instruction(inst: MirInst) -> text:
+        "// cuda instruction"
+
+    fn compile_barrier(scope: GpuBarrierScope) -> text:
+        match scope:
+            case Workgroup: "bar.sync 0;"
+            case Device: "membar.gl;"
+            case Subgroup: "bar.warp.sync 0xffffffff;"
+
+    fn compile_atomic(op: GpuAtomicOpKind, dest: LocalId, ptr: MirOperand, value: MirOperand) -> text:
+        "// atomic op"
+
+    fn gpu_memory_model() -> text:
+        "PTX unified memory"
+
+    fn is_kernel_function(body: MirBody) -> bool:
+        val _ = body
+        false
+
+# ============================================================================
+# Export
+# ============================================================================

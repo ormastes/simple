@@ -1,0 +1,121 @@
+use std.spec.*
+use std.play.types.{WindowInfo}
+use std.play.wm.mod.{WM_PROCESS_TIMEOUT_MS, WM_LINUX_INVENTORY_SCRIPT, WM_MACOS_INVENTORY_SCRIPT, WM_LINUX_TARGET_TYPE_SCRIPT, WM_MACOS_WINDOW_ACTION_SCRIPT, _wm_process_timeout, _wm_timeout_error, _wm_parse_window_rows, _wm_parse_linux_inventory, _wm_linux_target_type_args, _wm_macos_window_action_args, _wm_windows_target_type_script}
+use app.play.wm_access_cli.{WM_ACCESS_TIMEOUT_MS, wm_access_descriptors, wm_access_is_command, wm_access_snapshot_from_windows, wm_access_validate_action_args, wm_access_action_positionals, wm_access_generation, wm_access_generation_matches}
+use common.ui.access.{ACCESS_OPERATION_LIST, access_find_descriptor, access_result_from_snapshot, access_render_json, win_text_host_wm_single_window_snapshot}
+
+fn _window(id: text, title: text, focused: bool) -> WindowInfo:
+    WindowInfo(window_id: id, target_id: id, title: title, url: "", x: 0, y: 0, width: 800, height: 600, focused: focused)
+
+describe "Play WM access CLI adapter":
+    it "shares the windows grammar without removing wm-list":
+        expect(wm_access_is_command("windows")).to_be(true)
+        expect(wm_access_is_command("wm-list")).to_be(true)
+        match access_find_descriptor("wm-list", "", wm_access_descriptors()):
+            Some(descriptor): expect(descriptor.operation).to_equal(ACCESS_OPERATION_LIST)
+            nil: fail("wm-list compatibility alias was not found")
+
+    it "normalizes scalar WM snapshots and delegates deterministic rendering":
+        val snapshot = wm_access_snapshot_from_windows([_window("20", "Zulu", false), _window("10", "Alpha", true)], 1000)
+        val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "host_wm", "", snapshot.access, 100)
+        expect(result.rows.len()).to_equal(3)
+        expect(result.rows[1][0]).to_equal("wm:10")
+        expect(result.rows[1][1]).to_equal("Alpha")
+        expect(result.rows[1][6]).to_equal("yes")
+        expect(result.rows[2][0]).to_equal("wm:20")
+        expect(access_render_json(result)).to_contain("\"source\":{\"id\":\"host_wm\"")
+        expect(access_render_json(result)).to_contain("\"generation\":\"")
+
+    it "preserves known WM capture metadata without inventing geometry":
+        val snapshot = win_text_host_wm_single_window_snapshot("10", "10", "Alpha", "", 0, 0, 800, 600, false, 1000, 5, 2000)
+        val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "host_wm", "", snapshot.access, 100)
+        val json = access_render_json(result)
+        expect(json).to_contain("\"surface_kind\":\"host_window\",\"state\":\"ready\",\"geometry\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"focused\":false,\"visible\":true,\"parent_id\":null,\"capabilities\":[\"focus\",\"type_text\"],\"captured_revision\":0,\"captured_at\":\"1000\"")
+        expect(json).to_contain("\"generation\":\"")
+        expect(json).to_contain("\"stale\":true")
+
+    it "rejects a reused native ID whose generation metadata changed":
+        val before = wm_access_snapshot_from_windows([_window("10", "Alpha", false)], 1000)
+        val after = wm_access_snapshot_from_windows([_window("10", "Replacement", false)], 1001)
+        val target = "wm:10#root"
+        val generation = wm_access_generation(before.access, target)
+        assert_not_equal(generation, "")
+        expect(wm_access_generation_matches(before.access, target, generation)).to_be(true)
+        expect(wm_access_generation_matches(after.access, target, generation)).to_be(false)
+
+    it "advertises the bounded end-to-end WM command budget":
+        expect(WM_ACCESS_TIMEOUT_MS).to_equal(20000)
+        for descriptor in wm_access_descriptors():
+            expect(descriptor.safety.timeout_ms).to_equal(WM_ACCESS_TIMEOUT_MS)
+
+    it "clamps every owner subprocess to the remaining request budget":
+        expect(_wm_process_timeout(0, 1000)).to_equal(WM_PROCESS_TIMEOUT_MS)
+        expect(_wm_process_timeout(5000, 1000)).to_equal(WM_PROCESS_TIMEOUT_MS)
+        expect(_wm_process_timeout(2500, 1000)).to_equal(1500)
+        expect(_wm_process_timeout(1000, 1000)).to_equal(0)
+        expect(_wm_timeout_error("list_windows").code).to_equal("TIMEOUT")
+
+    it "preserves coherent owner identity title and real focus metadata":
+        val windows = _wm_parse_window_rows("10\ttrue\tEditor\n20\tfalse\tTerminal\n")
+        expect(windows.len()).to_equal(2)
+        expect(windows[0].window_id).to_equal("10")
+        expect(windows[0].title).to_equal("Editor")
+        expect(windows[0].focused).to_be(true)
+        expect(windows[1].focused).to_be(false)
+        val mac = _wm_parse_window_rows("mac::123::456\ttrue\tEditor\n")
+        expect(mac[0].window_id).to_equal("mac::123::456")
+
+    it "parses one batched Linux inventory without per-window commands":
+        val raw = "ACTIVE=20\nWINDOW=10\nX=-2\nY=3\nWIDTH=640\nHEIGHT=480\nSCREEN=0\nWINDOW=20\nX=4\nY=5\nWIDTH=800\nHEIGHT=600\nSCREEN=0\nEditor\nTerminal\n"
+        val windows = _wm_parse_linux_inventory(raw)
+        expect(windows.len()).to_equal(2)
+        expect(windows[0].window_id).to_equal("10")
+        expect(windows[0].title).to_equal("Editor")
+        expect(windows[0].x).to_equal(-2)
+        expect(windows[0].y).to_equal(3)
+        expect(windows[0].width).to_equal(640)
+        expect(windows[0].height).to_equal(480)
+        expect(windows[1].focused).to_be(true)
+        expect(WM_LINUX_INVENTORY_SCRIPT).to_contain("getwindowgeometry --shell %@ getwindowname %@")
+        expect(WM_LINUX_INVENTORY_SCRIPT.contains("while IFS=")).to_be(false)
+
+    it "keeps literal text outside platform scripts and binds it to the exact window":
+        val literal = "'$(){}+^%~ [x] \\ \"\nnext"
+        val linux_args = _wm_linux_target_type_args("20", literal)
+        expect(linux_args[3]).to_equal("20")
+        expect(linux_args[4]).to_equal(literal)
+        expect(WM_LINUX_TARGET_TYPE_SCRIPT).to_contain("--window \"$1\"")
+        expect(WM_LINUX_TARGET_TYPE_SCRIPT).to_contain("\"$2\"")
+        val mac_args = match _wm_macos_window_action_args("mac::123::456", "Editor", "type_text", literal):
+            Some(found): found
+            nil: fail("valid macOS target identity was rejected")
+        expect(mac_args[6]).to_equal(literal)
+        expect(WM_MACOS_INVENTORY_SCRIPT).to_contain("unix id of p")
+        expect(WM_MACOS_INVENTORY_SCRIPT).to_contain("AXWindowNumber")
+        expect(WM_MACOS_INVENTORY_SCRIPT).to_contain("if windowNumber is not \"\" then")
+        expect(WM_MACOS_WINDOW_ACTION_SCRIPT).to_contain("count matchingWindows) is not 1")
+        expect(WM_MACOS_WINDOW_ACTION_SCRIPT).to_contain("target title changed")
+        if _wm_macos_window_action_args("Editor::2", "Editor", "type_text", literal) != nil: fail("unstable macOS process/index identity was accepted")
+        if _wm_macos_window_action_args("mac::123::456", "", "focus", "") == nil: fail("stable legacy focus identity was rejected")
+        val windows_script = _wm_windows_target_type_script("20", literal)
+        expect(windows_script.contains(literal)).to_be(false)
+        expect(windows_script).to_contain("GetForegroundWindow() -ne $h")
+        expect(windows_script).to_contain("SendMessage($i.hwndFocus")
+
+    it "selects the focused WM surface as active instead of the first row":
+        val snapshot = wm_access_snapshot_from_windows([_window("10", "First", false), _window("20", "Focused", true)], 1000)
+        expect(snapshot.access.active_surface).to_equal("wm:20")
+        val unfocused = wm_access_snapshot_from_windows([_window("10", "First", false), _window("20", "Second", false)], 1000)
+        expect(unfocused.access.active_surface).to_equal("")
+
+    it "rejects unbounded or malformed WM action arguments before dispatch":
+        if not wm_access_validate_action_args("focus", ["target", "focus"]).is_err(): fail("missing generation was accepted")
+        if not wm_access_validate_action_args("type_text", ["target", "type_text", "--generation", "1", "x" * 4097]).is_err(): fail("oversized type_text was accepted")
+        if not wm_access_validate_action_args("click_xy", ["target", "click_xy", "--generation", "1", "0", "0"]).is_err(): fail("desktop-global click was accepted as target-scoped")
+        if not wm_access_validate_action_args("screenshot", ["target", "screenshot", "out.png", "--generation", "1"]).is_err(): fail("desktop screenshot was accepted as target-scoped")
+        if not wm_access_validate_action_args("type_text", ["target", "--generation", "1", "type_text", "ok"]).is_ok(): fail("generation before action corrupted type_text")
+        match wm_access_action_positionals(["target", "type_text", "--generation=1", "hello"]):
+            Err(_): fail("inline generation was rejected")
+            Ok(positionals): expect(positionals).to_equal(["target", "type_text", "hello"])
+        if not wm_access_validate_action_args("focus", ["target", "focus", "--generation", "1", "--generation", "2"]).is_err(): fail("duplicate generation was accepted")
+        if not wm_access_validate_action_args("focus", ["target", "focus", "--generation", "1", "--unknown"]).is_err(): fail("unknown option was accepted")

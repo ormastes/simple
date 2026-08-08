@@ -1,0 +1,53 @@
+# SimpleOS web service entry — in-process route dispatch (Item 2).
+#
+# web_service.spl bridges SimpleOS to the real std.http_server stack: it builds
+# a ServerConfig + HandlerRegistry with one demo route registered, and
+# dispatches requests in-process through that registry (no socket, no worker
+# threads — start() is the production path that binds/serves). These specs
+# construct the service and assert the registered demo route resolves and
+# dispatches, and that reflected request data is HTML-escaped in the response.
+
+use std.spec
+use os.services.web.web_service.{
+    WebService, web_service_new, web_service_dispatch, web_demo_handler
+}
+use std.http_server.{HttpRequestData, HttpResponseData, default_location_config}
+
+fn _request(method: text, path: text) -> HttpRequestData:
+    HttpRequestData(
+        method: method,
+        path: path,
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+describe "web_service_dispatch":
+
+    it "resolves GET / through the registered demo handler (not 501)":
+        val service = web_service_new(8080)
+        val resp = web_service_dispatch(service, _request("GET", "/"))
+        expect(resp.status).to_equal(200)
+        expect(resp.body.contains("SimpleOS Web")).to_equal(true)
+
+    it "returns 404 for an unregistered route":
+        val service = web_service_new(8080)
+        val resp = web_service_dispatch(service, _request("GET", "/nope"))
+        expect(resp.status).to_equal(404)
+
+    it "returns 404 for a non-GET method on /":
+        val service = web_service_new(8080)
+        val resp = web_service_dispatch(service, _request("POST", "/"))
+        expect(resp.status).to_equal(404)
+
+describe "web_demo_handler HTML escaping":
+
+    it "escapes reflected request path so markup cannot be injected":
+        val req = _request("GET", "/<script>alert(1)</script>")
+        val resp = web_demo_handler(req, default_location_config())
+        expect(resp.status).to_equal(200)
+        expect(resp.body.contains("&lt;script&gt;")).to_equal(true)
+        expect(resp.body.contains("<script>")).to_equal(false)

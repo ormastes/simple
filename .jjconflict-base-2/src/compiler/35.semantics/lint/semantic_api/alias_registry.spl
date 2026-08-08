@@ -1,0 +1,239 @@
+# semantic_api alias registry — closes the FAIL-OPEN alias hook (lane ALS1)
+#
+# type_walk.spl's semantic_api_resolve_alias used to always return "" because
+# "no alias registry exists" at this layer. Lane TAL1 (commit 5df3b3f5b40,
+# bug type_alias_declarations_discarded_at_parse_2026-07-29) fixed the
+# upstream gap: `type X = Y` is now captured into a real
+# `module.type_aliases: Dict<text, ParserTypeAlias>` (parser_types.spl:406-413 —
+# {name, type_params, type_: Type, visibility, is_public, span}). This file
+# is the registry that consumes that data and answers the hook.
+#
+# Design: module-level accumulator (populate once per module via
+# alias_registry_populate, read via alias_registry_resolve) — the
+# struct-accumulator shape is intentional; see checker.spl/type_walk.spl for
+# the sibling "standalone library, not yet pipeline-wired" precedent this
+# follows (no production caller threads a real Module through yet either).
+#
+# Chaining: alias_registry_resolve returns the alias's FULLY resolved
+# non-alias (or unknown) type text in one call — it walks the whole
+# name -> name -> ... chain itself using a per-call local `visited` set, so
+# type_walk.spl's existing recursion (_sa_classify_leaf ->
+# semantic_api_primitive_leaves(resolved) -> ... -> semantic_api_resolve_alias
+# again) only ever needs ONE hop through an alias name; nested compound
+# expressions (e.g. an alias to `Dict<text, OtherAlias>`) are still walked by
+# type_walk.spl's own recursive generic/array/tuple/union handling exactly as
+# today, since alias_registry_resolve stops as soon as the text it is about
+# to return is no longer itself a registered alias NAME.
+#
+# Cycle safety: the local `visited` set guarantees termination in at most
+# (number of registered aliases + 1) hops — a genuine cycle (self `type A =
+# A`, or mutual `type A = B` / `type B = A`) is detected and bailed (returns
+# "", loud eprint) instead of hanging. This is required: type_walk.spl's own
+# `resolved != name` guard only catches the trivial *immediate* self-alias
+# case, not a 2-or-more cycle, and this file must not rely on editing that
+# recursion (out of ALS1's surgical scope).
+#
+# Known, pre-existing lossiness this does NOT fix (separate scope): TAL1
+# threads the alias's underlying type through convert_flat_type(), the SAME
+# arena-tag reconstruction type_walk.spl's own header already documents as
+# lossy for un-specialized generics (e.g. `type X = Option<i32>` collapses
+# to bare `Option` with no type args unless the specific tag was registered,
+# same as everywhere else convert_flat_type is used). Aliases to primitives,
+# named/domain types, and the specialized generics (Dict<K,V>, Result<T,E>,
+# Option<i64/f64/text/bool>, tuples) resolve correctly; a deeper
+# un-specialized generic nested inside an alias inherits the pre-existing
+# gap, not a new one introduced here.
+
+use compiler.frontend.parser_types.{ParserTypeAlias}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, parser_type_kind_named_name, parser_type_kind_named_args}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+# ---------------------------------------------------------------------------
+# Type -> text rendering
+# ---------------------------------------------------------------------------
+# Mirrors the shapes semantic_api_primitive_leaves already parses: generics
+# Name<A,B>, arrays [T], tuples (A,B), suffix optional T?, unions A|B, fn
+# types fn(A,B) -> R.
+#
+# Disc-dispatch + ISOLATED single-arm matches, deliberately NOT one big
+# `match k: case TypeKind.X(...): ...` multi-arm match. This mirrors the
+# idiom proven necessary in compiler.hir.hir_lowering.types.lower_type (bug
+# doc iterations 18-20): a multi-arm match over qualified TypeKind arms
+# mis-routes on stage4 because TypeKind's variant names collide with other
+# in-scope names (e.g. `struct Function` shadows `TypeKind.Function`), making
+# an early arm compile as an irrefutable binding that swallows every value.
+# Reference-discriminant dispatch (rt_enum_discriminant, called on freshly
+# constructed probe values) sidesteps that; each payload is then pulled out
+# in its own single-arm `match k: case TypeKind.X(...): ...  case _: pass`,
+# never a shared multi-arm match.
+
+extern fn rt_enum_discriminant(value: TypeKind) -> i64
+
+fn _tk_disc(k: TypeKind) -> i64:
+    rt_enum_discriminant(k)
+
+fn _tk_join_types(types: [Type], sep: text) -> text:
+    var out = ""
+    var i = 0
+    while i < types.len():
+        if i > 0:
+            out = out + sep
+        out = out + type_to_text(types[i])
+        i = i + 1
+    out
+
+fn type_to_text(t: Type) -> text:
+    """Render `t` back to the flat type-TEXT shape semantic_api_primitive_leaves
+    parses. Unknown/erased kinds (Infer, Error) render as "" (unresolvable —
+    the leaf classifier then correctly treats the enclosing name as opaque)."""
+    val k = t.kind
+    val disc = _tk_disc(k)
+
+    val d_named = _tk_disc(TypeKind.Named("", []))
+    if disc == d_named:
+        val name = parser_type_kind_named_name(k)
+        val args = parser_type_kind_named_args(k)
+        if args.len() == 0:
+            return name
+        return name + "<" + _tk_join_types(args, ", ") + ">"
+
+    val d_tuple = _tk_disc(TypeKind.Tuple([]))
+    if disc == d_tuple:
+        var elems: [Type] = []
+        match k:
+            case TypeKind.Tuple(e):
+                elems = e
+            case _:
+                pass
+        return "(" + _tk_join_types(elems, ", ") + ")"
+
+    val d_array = _tk_disc(TypeKind.Array(t, nil))
+    if disc == d_array:
+        var elem: Type = t
+        match k:
+            case TypeKind.Array(e, _):
+                elem = e
+            case _:
+                pass
+        return "[" + type_to_text(elem) + "]"
+
+    val d_func = _tk_disc(TypeKind.Function([], t))
+    if disc == d_func:
+        var params: [Type] = []
+        var ret: Type = t
+        match k:
+            case TypeKind.Function(p, r):
+                params = p
+                ret = r
+            case _:
+                pass
+        return "fn(" + _tk_join_types(params, ", ") + ") -> " + type_to_text(ret)
+
+    val d_opt = _tk_disc(TypeKind.Optional(t))
+    if disc == d_opt:
+        var inner: Type = t
+        match k:
+            case TypeKind.Optional(i):
+                inner = i
+            case _:
+                pass
+        return type_to_text(inner) + "?"
+
+    val d_union = _tk_disc(TypeKind.Union([]))
+    if disc == d_union:
+        var members: [Type] = []
+        match k:
+            case TypeKind.Union(m):
+                members = m
+            case _:
+                pass
+        return _tk_join_types(members, " | ")
+
+    val d_ref = _tk_disc(TypeKind.Reference(t, false))
+    if disc == d_ref:
+        # Reference is a modifier, not a leaf shape type_walk.spl recognizes —
+        # unwrap to the inner type text so a wrapped primitive is still
+        # reachable rather than silently opaque.
+        var inner: Type = t
+        match k:
+            case TypeKind.Reference(i, _):
+                inner = i
+            case _:
+                pass
+        return type_to_text(inner)
+
+    val d_atomic = _tk_disc(TypeKind.Atomic(t))
+    if disc == d_atomic:
+        var inner: Type = t
+        match k:
+            case TypeKind.Atomic(i):
+                inner = i
+            case _:
+                pass
+        return type_to_text(inner)
+
+    val d_isolated = _tk_disc(TypeKind.Isolated(t))
+    if disc == d_isolated:
+        var inner: Type = t
+        match k:
+            case TypeKind.Isolated(i):
+                inner = i
+            case _:
+                pass
+        return type_to_text(inner)
+
+    val d_proj = _tk_disc(TypeKind.Projection(t, ""))
+    if disc == d_proj:
+        var base: Type = t
+        var field: text = ""
+        match k:
+            case TypeKind.Projection(b, f):
+                base = b
+                field = f
+            case _:
+                pass
+        return type_to_text(base) + "." + field
+
+    # Infer / Error / any unrecognized disc: unresolvable, fail-open empty.
+    ""
+
+# ---------------------------------------------------------------------------
+# registry state
+# ---------------------------------------------------------------------------
+
+var ALIAS_TEXT: Dict<text, text> = {}
+
+fn alias_registry_clear():
+    """Reset all registry state. Call between independent modules/specs so
+    one caller's aliases never leak into another's resolution."""
+    ALIAS_TEXT = {}
+
+fn alias_registry_populate(type_aliases: Dict<text, ParserTypeAlias>):
+    """Populate the registry from a module's captured type aliases
+    (module.type_aliases, TAL1). One entry per alias name -> its immediate
+    (one-hop) underlying type text."""
+    for name in type_aliases.keys():
+        if type_aliases.contains_key(name):
+            val ta = type_aliases[name]
+            ALIAS_TEXT[name] = type_to_text(ta.type_)
+
+fn alias_registry_resolve(name: text) -> text:
+    """Resolve `name` through the whole alias chain to the first non-alias
+    (or unknown) type text, or "" when `name` is not a known alias OR a
+    cycle was detected. Never hangs: `visited` is local to this call and
+    strictly grows, so termination is bounded by the number of registered
+    aliases regardless of chain shape."""
+    if not ALIAS_TEXT.contains_key(name):
+        return ""
+    var visited: Dict<text, bool> = {}
+    var current = name
+    while ALIAS_TEXT.contains_key(current):
+        if visited.contains_key(current):
+            eprint("[alias_registry] alias cycle detected resolving '{name}' (repeats at '{current}') -- bailing safely, no violation reported through this alias")
+            return ""
+        visited[current] = true
+        current = ALIAS_TEXT[current]
+    current
+
+export type_to_text
+export alias_registry_clear, alias_registry_populate, alias_registry_resolve

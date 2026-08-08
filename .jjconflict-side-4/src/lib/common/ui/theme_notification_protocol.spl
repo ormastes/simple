@@ -1,0 +1,276 @@
+# Canonical renderer-neutral theme-change notification wire contract.
+#
+# The protocol belongs in `common`: it contains no kernel/runtime imports and
+# can be shared by hosted and bare-metal publishers/consumers. Delivery wiring
+# is deliberately separate from ThemeService transaction ownership.
+#
+# V1 wire layout:
+#   method:u32-le | version:u8 | id_len:u16-le | canonical UTF-8 id
+#   | source_manifest_sha256:64 ASCII | material_sha256:64 ASCII
+#   | revision:u64-le
+
+use std.common.base_encoding.utilities.{bytes_to_text, text_to_bytes}
+
+pub val THEME_CHANGED_V1_METHOD: u32 = 4u32
+pub val THEME_CHANGED_V1_VERSION: u8 = 1u8
+pub val THEME_CHANGED_V1_MAX_ID_BYTES: i64 = 128
+pub val THEME_CHANGED_V1_HASH_BYTES: i64 = 64
+pub val THEME_CHANGED_V1_FIXED_BYTES: i64 = 143
+pub val THEME_CHANGED_V1_MIN_PAYLOAD_BYTES: i64 = 144
+pub val THEME_CHANGED_V1_MAX_PAYLOAD_BYTES: i64 = 271
+
+# Transport flags and host-independent status policy. These are adapter
+# values, not imports or aliases of kernel IPC declarations.
+pub val THEME_NOTIFICATION_SEND_ASYNC: u32 = 1u32
+pub val THEME_NOTIFICATION_STATUS_OK: i64 = 0
+pub val THEME_NOTIFICATION_STATUS_STALE: i64 = -1
+pub val THEME_NOTIFICATION_STATUS_RETRYABLE: i64 = -2
+pub val THEME_NOTIFICATION_STATUS_DENIED: i64 = -3
+
+pub struct ThemeChangedV1:
+    canonical_theme_id: text
+    source_manifest_sha256: text
+    material_sha256: text
+    revision: u64
+
+pub struct ThemeNotificationTransport:
+    """Injected notification adapter.
+
+    `send_payload_fn` receives source port, destination port, method, flags,
+    payload address, and payload byte length. It MUST synchronously copy every
+    payload byte before returning. Only that owned copy may be queued for
+    asynchronous delivery. The callback must not retain the caller address and
+    must not re-enter `theme_notification_send_all`.
+    """
+    source_port: u64
+    send_payload_fn: fn(u64, u64, u32, u32, u64, u64) -> i64
+
+pub struct ThemeNotificationDeliveryReport:
+    attempted_ports: [u64]
+    statuses: [i64]
+    delivered_ports: [u64]
+    stale_ports: [u64]
+    retryable_ports: [u64]
+    denied_ports: [u64]
+    unknown_failure_ports: [u64]
+
+fn _theme_notification_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _theme_changed_id_bytes(theme_id: text) -> Result<[u8], text>:
+    val raw = text_to_bytes(theme_id)
+    if raw.len() == 0:
+        return Err("theme_changed_v1: canonical_theme_id is empty")
+    if raw.len() > THEME_CHANGED_V1_MAX_ID_BYTES:
+        return Err("theme_changed_v1: canonical_theme_id exceeds 128 UTF-8 bytes")
+    if theme_id.strip() != theme_id:
+        return Err("theme_changed_v1: canonical_theme_id has surrounding whitespace")
+    if bytes_to_text(raw) != theme_id or not _theme_notification_bytes_equal(text_to_bytes(bytes_to_text(raw)), raw):
+        return Err("theme_changed_v1: canonical_theme_id is not canonical UTF-8")
+    var i = 0
+    while i < raw.len():
+        val b = raw[i].to_i64()
+        if b < 32 or b == 127:
+            return Err("theme_changed_v1: canonical_theme_id contains a control byte")
+        i = i + 1
+    Ok(raw)
+
+fn _theme_changed_hash_valid(value: text) -> bool:
+    val raw = text_to_bytes(value)
+    if raw.len() != THEME_CHANGED_V1_HASH_BYTES:
+        return false
+    var i = 0
+    while i < raw.len():
+        val b = raw[i].to_i64()
+        if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)):
+            return false
+        i = i + 1
+    true
+
+fn _theme_changed_push_u16_le(bytes: [u8], value: u16) -> [u8]:
+    var out = bytes
+    out = out.push((value.to_u64() & 0xFFu64).to_u8())
+    out = out.push(((value.to_u64() >> 8) & 0xFFu64).to_u8())
+    out
+
+fn _theme_changed_push_u32_le(bytes: [u8], value: u32) -> [u8]:
+    var out = bytes
+    var shift: u64 = 0
+    while shift < 32:
+        out = out.push(((value.to_u64() >> shift) & 0xFFu64).to_u8())
+        shift = shift + 8
+    out
+
+fn _theme_changed_push_u64_le(bytes: [u8], value: u64) -> [u8]:
+    var out = bytes
+    var shift: u64 = 0
+    while shift < 64:
+        out = out.push(((value >> shift) & 0xFFu64).to_u8())
+        shift = shift + 8
+    out
+
+fn _theme_changed_read_le(bytes: [u8], offset: i64, count: i64) -> u64:
+    var value: u64 = 0
+    var i = 0
+    while i < count:
+        value = value | (bytes[offset + i].to_u64() << (i.to_u64() * 8))
+        i = i + 1
+    value
+
+fn _theme_changed_copy(bytes: [u8], offset: i64, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out = out.push(bytes[offset + i])
+        i = i + 1
+    out
+
+pub fn theme_changed_v1_encode(message: ThemeChangedV1) -> Result<[u8], text>:
+    val id_bytes = _theme_changed_id_bytes(message.canonical_theme_id)?
+    if not _theme_changed_hash_valid(message.source_manifest_sha256):
+        return Err("theme_changed_v1: source_manifest_sha256 must be exactly 64 lowercase hex characters")
+    if not _theme_changed_hash_valid(message.material_sha256):
+        return Err("theme_changed_v1: material_sha256 must be exactly 64 lowercase hex characters")
+    if message.revision == 0u64:
+        return Err("theme_changed_v1: revision must be greater than zero")
+
+    var out: [u8] = []
+    out = _theme_changed_push_u32_le(out, THEME_CHANGED_V1_METHOD)
+    out = out.push(THEME_CHANGED_V1_VERSION)
+    out = _theme_changed_push_u16_le(out, id_bytes.len().to_u16())
+    for byte in id_bytes:
+        out = out.push(byte)
+    for byte in text_to_bytes(message.source_manifest_sha256):
+        out = out.push(byte)
+    for byte in text_to_bytes(message.material_sha256):
+        out = out.push(byte)
+    out = _theme_changed_push_u64_le(out, message.revision)
+    Ok(out)
+
+pub fn theme_changed_v1_decode(bytes: [u8]) -> Result<ThemeChangedV1, text>:
+    if bytes.len() < THEME_CHANGED_V1_MIN_PAYLOAD_BYTES:
+        return Err("theme_changed_v1: truncated payload")
+    if bytes.len() > THEME_CHANGED_V1_MAX_PAYLOAD_BYTES:
+        return Err("theme_changed_v1: oversized payload")
+
+    val method = _theme_changed_read_le(bytes, 0, 4).to_u32()
+    if method != THEME_CHANGED_V1_METHOD:
+        return Err("theme_changed_v1: unexpected method")
+    if bytes[4] != THEME_CHANGED_V1_VERSION:
+        return Err("theme_changed_v1: unsupported version")
+
+    val id_len = _theme_changed_read_le(bytes, 5, 2).to_i64()
+    if id_len <= 0 or id_len > THEME_CHANGED_V1_MAX_ID_BYTES:
+        return Err("theme_changed_v1: invalid canonical_theme_id length")
+    val expected_len = THEME_CHANGED_V1_FIXED_BYTES + id_len
+    if bytes.len() < expected_len:
+        return Err("theme_changed_v1: truncated payload")
+    if bytes.len() > expected_len:
+        return Err("theme_changed_v1: trailing bytes")
+
+    val id_offset = 7
+    val source_offset = id_offset + id_len
+    val material_offset = source_offset + THEME_CHANGED_V1_HASH_BYTES
+    val revision_offset = material_offset + THEME_CHANGED_V1_HASH_BYTES
+    val id_raw = _theme_changed_copy(bytes, id_offset, id_len)
+    val canonical_theme_id = bytes_to_text(id_raw)
+    val validated_id = _theme_changed_id_bytes(canonical_theme_id)?
+    if not _theme_notification_bytes_equal(validated_id, id_raw):
+        return Err("theme_changed_v1: canonical_theme_id has malformed UTF-8")
+
+    val source_manifest_sha256 = bytes_to_text(_theme_changed_copy(bytes, source_offset, THEME_CHANGED_V1_HASH_BYTES))
+    val material_sha256 = bytes_to_text(_theme_changed_copy(bytes, material_offset, THEME_CHANGED_V1_HASH_BYTES))
+    if not _theme_changed_hash_valid(source_manifest_sha256):
+        return Err("theme_changed_v1: malformed source_manifest_sha256")
+    if not _theme_changed_hash_valid(material_sha256):
+        return Err("theme_changed_v1: malformed material_sha256")
+    val revision = _theme_changed_read_le(bytes, revision_offset, 8)
+    if revision == 0u64:
+        return Err("theme_changed_v1: revision must be greater than zero")
+
+    Ok(ThemeChangedV1(
+        canonical_theme_id: canonical_theme_id,
+        source_manifest_sha256: source_manifest_sha256,
+        material_sha256: material_sha256,
+        revision: revision
+    ))
+
+fn _theme_notification_contains_port(ports: [u64], port: u64) -> bool:
+    for existing in ports:
+        if existing == port:
+            return true
+    false
+
+pub fn theme_notification_unique_subscribers(subscribers: [u64]) -> [u64]:
+    """Stable first-wins de-duplication. Every distinct subscriber is tried."""
+    var unique: [u64] = []
+    for port in subscribers:
+        if not _theme_notification_contains_port(unique, port):
+            unique = unique.push(port)
+    unique
+
+pub fn theme_notification_send_all(
+    transport: ThemeNotificationTransport,
+    subscribers: [u64],
+    payload_addr: u64,
+    payload_len: u64
+) -> Result<ThemeNotificationDeliveryReport, text>:
+    """Synchronously hand an immutable payload view to every unique subscriber.
+
+    This helper never stores `payload_addr`. The injected callback must copy
+    before return and may enqueue only its owned copy. A failure for one
+    subscriber never prevents later subscribers from being attempted.
+    """
+    if transport.source_port == 0u64:
+        return Err("theme_notification: source_port must be nonzero")
+    if payload_addr == 0u64:
+        return Err("theme_notification: payload address must be nonzero")
+    if payload_len < THEME_CHANGED_V1_MIN_PAYLOAD_BYTES.to_u64():
+        return Err("theme_notification: payload is shorter than the protocol minimum")
+    if payload_len > THEME_CHANGED_V1_MAX_PAYLOAD_BYTES.to_u64():
+        return Err("theme_notification: payload exceeds protocol maximum")
+
+    val unique = theme_notification_unique_subscribers(subscribers)
+    var statuses: [i64] = []
+    var delivered: [u64] = []
+    var stale: [u64] = []
+    var retryable: [u64] = []
+    var denied: [u64] = []
+    var unknown: [u64] = []
+    for port in unique:
+        val status = transport.send_payload_fn(
+            transport.source_port,
+            port,
+            THEME_CHANGED_V1_METHOD,
+            THEME_NOTIFICATION_SEND_ASYNC,
+            payload_addr,
+            payload_len
+        )
+        statuses = statuses.push(status)
+        if status == THEME_NOTIFICATION_STATUS_OK:
+            delivered = delivered.push(port)
+        elif status == THEME_NOTIFICATION_STATUS_STALE:
+            stale = stale.push(port)
+        elif status == THEME_NOTIFICATION_STATUS_RETRYABLE:
+            retryable = retryable.push(port)
+        elif status == THEME_NOTIFICATION_STATUS_DENIED:
+            denied = denied.push(port)
+        else:
+            unknown = unknown.push(port)
+
+    Ok(ThemeNotificationDeliveryReport(
+        attempted_ports: unique,
+        statuses: statuses,
+        delivered_ports: delivered,
+        stale_ports: stale,
+        retryable_ports: retryable,
+        denied_ports: denied,
+        unknown_failure_ports: unknown
+    ))

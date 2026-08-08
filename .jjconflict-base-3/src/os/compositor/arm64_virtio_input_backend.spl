@@ -1,0 +1,390 @@
+# Canonical VirtIO input adapter for the compositor.
+#
+# ARM64 MMIO and RV64 PCI owners inject the same raw-event poll contract. This
+# adapter keeps pointer records together until SYN_REPORT, retains keyboard
+# press/release edges, and exposes both through the shared InputBackend trait.
+
+use os.compositor.input_backend.{InputBackend, host_event_from_polled}
+use common.ui.host_input_event.{HostInputEvent}
+use os.drivers.input.ps2_keyboard.{Key, KeyEvent}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.drivers.virtio.virtio_input_ops.{
+    BTN_LEFT,
+    BTN_MIDDLE,
+    BTN_RIGHT,
+    EV_KEY,
+    EV_REL,
+    EV_SYN,
+    KEY_LEFTALT,
+    KEY_LEFTCTRL,
+    KEY_LEFTSHIFT,
+    KEY_RIGHTALT,
+    KEY_RIGHTCTRL,
+    KEY_RIGHTSHIFT,
+    KEY_VALUE_RELEASE,
+    REL_X,
+    REL_Y,
+    SYN_REPORT,
+    VIRTIO_INPUT_DEVICE_KEYBOARD,
+    VIRTIO_INPUT_DEVICE_POINTER,
+    VirtioInputEvent,
+    VirtioMouseAccum,
+    virtio_input_key_event
+}
+use os.kernel.arch.arm64.virtio_input.{arm64_virtio_input_poll}
+
+class Arm64VirtioInputBackend:
+    poll_event: fn() -> VirtioInputEvent?
+    # Site 25 of doc/04_architecture/ui/wm_host_platform_matrix.md:
+    # rt_arm64_virtio_input_poll (and its sibling rt_arm64_virtio_input_*
+    # accessors) have no native OR interpreter definition anywhere in the
+    # repo, so calling one is a hard "unknown extern function" error at
+    # runtime, not a silent zero default -- there is nothing to probe. A
+    # permanently-unreached poll loop would otherwise be indistinguishable
+    # from a genuinely idle-but-present device. create() sets _available to
+    # the honest static false (see create()'s comment); callers can check
+    # available() to tell "no backend" from "backend present, nothing
+    # queued right now" instead of reading a silent empty queue as healthy.
+    _available: bool
+    mouse: VirtioMouseAccum
+    pending_key: KeyEvent?
+    pending_mouse: MouseEvent?
+    pending_key_sequence: i64
+    pending_mouse_sequence: i64
+    pending_key_code: u16
+    pending_key_value: u32
+    pending_key_irq_status: u32
+    pending_pointer_type: u16
+    pending_pointer_code: u16
+    pending_pointer_value: u32
+    pending_pointer_rel_x_seen: bool
+    pending_pointer_rel_x: i64
+    pending_pointer_rel_y_seen: bool
+    pending_pointer_rel_y: i64
+    pending_pointer_left_edge: bool
+    pending_pointer_left_value: u32
+    pending_pointer_right_edge: bool
+    pending_pointer_right_value: u32
+    pending_pointer_middle_edge: bool
+    pending_pointer_middle_value: u32
+    pending_pointer_irq_status: u32
+    pointer_frame_open: bool
+    pointer_frame_sequence: i64
+    input_sequence: i64
+    delivered_key: KeyEvent?
+    delivered_key_sequence: i64
+    delivered_key_code: u16
+    delivered_key_value: u32
+    delivered_key_irq_status: u32
+    delivered_mouse_sequence: i64
+    delivered_pointer_type: u16
+    delivered_pointer_code: u16
+    delivered_pointer_value: u32
+    delivered_pointer_rel_x_seen: bool
+    delivered_pointer_rel_x: i64
+    delivered_pointer_rel_y_seen: bool
+    delivered_pointer_rel_y: i64
+    delivered_pointer_left_edge: bool
+    delivered_pointer_left_value: u32
+    delivered_pointer_right_edge: bool
+    delivered_pointer_right_value: u32
+    delivered_pointer_middle_edge: bool
+    delivered_pointer_middle_value: u32
+    delivered_pointer_irq_status: u32
+    left_alt: bool
+    right_alt: bool
+    left_shift: bool
+    right_shift: bool
+    left_ctrl: bool
+    right_ctrl: bool
+
+impl Arm64VirtioInputBackend:
+    static fn create(screen_width: i64, screen_height: i64) -> Arm64VirtioInputBackend:
+        # Site 25: every rt_arm64_virtio_input_* extern (init, poll, and all
+        # event-field accessors) has no native OR interpreter definition
+        # anywhere in the repo -- there is no honest "-1/unavailable" stub to
+        # probe, unlike hosted_backend_cocoa.spl/hosted_backend_win32.spl's
+        # uses_native_*_symbols() (site 0a/0b), because the symbol does not
+        # exist at all: calling it is a hard "unknown extern function" error,
+        # not a silent zero default. So there is nothing to probe at
+        # runtime; the honest static answer is unavailable, full stop, until
+        # a real ARM64 virtio-input runtime exists to link against.
+        Arm64VirtioInputBackend.create_with_poller(
+            screen_width,
+            screen_height,
+            arm64_virtio_input_poll,
+            false
+        )
+
+    static fn create_with_poller(
+        screen_width: i64,
+        screen_height: i64,
+        poll_event: fn() -> VirtioInputEvent?,
+        available: bool = true
+    ) -> Arm64VirtioInputBackend:
+        Arm64VirtioInputBackend(
+            poll_event: poll_event,
+            _available: available,
+            mouse: VirtioMouseAccum.create(screen_width, screen_height),
+            pending_key: nil,
+            pending_mouse: nil,
+            pending_key_sequence: 0,
+            pending_mouse_sequence: 0,
+            pending_key_code: 0u16,
+            pending_key_value: 0u32,
+            pending_key_irq_status: 0u32,
+            pending_pointer_type: 0u16,
+            pending_pointer_code: 0u16,
+            pending_pointer_value: 0u32,
+            pending_pointer_rel_x_seen: false,
+            pending_pointer_rel_x: 0,
+            pending_pointer_rel_y_seen: false,
+            pending_pointer_rel_y: 0,
+            pending_pointer_left_edge: false,
+            pending_pointer_left_value: 0u32,
+            pending_pointer_right_edge: false,
+            pending_pointer_right_value: 0u32,
+            pending_pointer_middle_edge: false,
+            pending_pointer_middle_value: 0u32,
+            pending_pointer_irq_status: 0u32,
+            pointer_frame_open: false,
+            pointer_frame_sequence: 0,
+            input_sequence: 0,
+            delivered_key: nil,
+            delivered_key_sequence: 0,
+            delivered_key_code: 0u16,
+            delivered_key_value: 0u32,
+            delivered_key_irq_status: 0u32,
+            delivered_mouse_sequence: 0,
+            delivered_pointer_type: 0u16,
+            delivered_pointer_code: 0u16,
+            delivered_pointer_value: 0u32,
+            delivered_pointer_rel_x_seen: false,
+            delivered_pointer_rel_x: 0,
+            delivered_pointer_rel_y_seen: false,
+            delivered_pointer_rel_y: 0,
+            delivered_pointer_left_edge: false,
+            delivered_pointer_left_value: 0u32,
+            delivered_pointer_right_edge: false,
+            delivered_pointer_right_value: 0u32,
+            delivered_pointer_middle_edge: false,
+            delivered_pointer_middle_value: 0u32,
+            delivered_pointer_irq_status: 0u32,
+            left_alt: false,
+            right_alt: false,
+            left_shift: false,
+            right_shift: false,
+            left_ctrl: false,
+            right_ctrl: false
+        )
+
+    me feed_raw_event(
+        device_kind: u32,
+        type_: u16,
+        code: u16,
+        value: u32,
+        irq_status: u32 = 0u32
+    ) -> bool:
+        """Ingest one already-owned raw record without dropping pending edges.
+
+        This method is also the hardware-free test seam. The MMIO poller calls
+        it only while neither translated event slot is occupied.
+        """
+        if self.pending_key != nil or self.pending_mouse != nil:
+            return false
+
+        if device_kind == VIRTIO_INPUT_DEVICE_KEYBOARD:
+            if type_ != EV_KEY:
+                return false
+            self.input_sequence = self.input_sequence + 1
+            self.pending_key_sequence = self.input_sequence
+            self.pending_key_code = code
+            self.pending_key_value = value
+            self.pending_key_irq_status = irq_status
+            val pressed = value != KEY_VALUE_RELEASE
+            if code == KEY_LEFTALT:
+                self.left_alt = pressed
+            elif code == KEY_RIGHTALT:
+                self.right_alt = pressed
+            elif code == KEY_LEFTSHIFT:
+                self.left_shift = pressed
+            elif code == KEY_RIGHTSHIFT:
+                self.right_shift = pressed
+            elif code == KEY_LEFTCTRL:
+                self.left_ctrl = pressed
+            elif code == KEY_RIGHTCTRL:
+                self.right_ctrl = pressed
+            self.pending_key = virtio_input_key_event(code, value)
+            return true
+
+        if device_kind != VIRTIO_INPUT_DEVICE_POINTER:
+            return false
+        if not self.pointer_frame_open:
+            self.input_sequence = self.input_sequence + 1
+            self.pointer_frame_sequence = self.input_sequence
+            self.pointer_frame_open = true
+            self.pending_pointer_rel_x_seen = false
+            self.pending_pointer_rel_x = 0
+            self.pending_pointer_rel_y_seen = false
+            self.pending_pointer_rel_y = 0
+            self.pending_pointer_left_edge = false
+            self.pending_pointer_left_value = 0u32
+            self.pending_pointer_right_edge = false
+            self.pending_pointer_right_value = 0u32
+            self.pending_pointer_middle_edge = false
+            self.pending_pointer_middle_value = 0u32
+            self.pending_pointer_irq_status = 0u32
+
+        self.pending_pointer_type = type_
+        self.pending_pointer_code = code
+        self.pending_pointer_value = value
+        self.pending_pointer_irq_status = self.pending_pointer_irq_status | irq_status
+        if type_ == EV_KEY and code >= BTN_LEFT:
+            if code == BTN_LEFT:
+                self.pending_pointer_left_edge = true
+                self.pending_pointer_left_value = value
+            elif code == BTN_RIGHT:
+                self.pending_pointer_right_edge = true
+                self.pending_pointer_right_value = value
+            elif code == BTN_MIDDLE:
+                self.pending_pointer_middle_edge = true
+                self.pending_pointer_middle_value = value
+            self.mouse.feed_key(code, value != KEY_VALUE_RELEASE)
+        elif type_ == EV_REL:
+            if code == REL_X:
+                self.pending_pointer_rel_x_seen = true
+                self.pending_pointer_rel_x = self.pending_pointer_rel_x + value.to_i32().to_i64()
+            elif code == REL_Y:
+                self.pending_pointer_rel_y_seen = true
+                self.pending_pointer_rel_y = self.pending_pointer_rel_y + value.to_i32().to_i64()
+            self.mouse.feed_rel(code, value.to_i32().to_i64())
+        elif type_ == EV_SYN and code == SYN_REPORT:
+            self.pending_mouse = self.mouse.feed_syn()
+            self.pending_mouse_sequence = self.pointer_frame_sequence
+            self.pointer_frame_open = false
+        true
+
+    me _pump_one() -> bool:
+        val raw_event = self.poll_event()
+        if val event = raw_event:
+            return self.feed_raw_event(
+                event.device_kind,
+                event.type_,
+                event.code,
+                event.value,
+                event.irq_status
+            )
+        false
+
+    me _pump_until_pending():
+        if not self._available:
+            # Honest refusal (site 25): do not attempt to pump a poller that
+            # never reported real capability — attempting it would only
+            # produce the same silent "empty queue" the dangling extern
+            # always returns, which is exactly the false-idle signal being
+            # fixed here.
+            return
+        var budget = 64
+        while budget > 0 and self.pending_key == nil and self.pending_mouse == nil:
+            budget = budget - 1
+            if not self._pump_one():
+                return
+
+    fn available() -> bool:
+        """True only when arm64_virtio_input_init() reported real keyboard +
+        pointer readiness (create()), or a test explicitly injected an
+        available poller (create_with_poller(..., available: true), the
+        default). False means poll_key()/poll_mouse() will never pump —
+        there is no live backend, not merely an idle one.
+        """
+        self._available
+
+impl InputBackend for Arm64VirtioInputBackend:
+
+    me poll_event() -> HostInputEvent?:
+        """The ONE trait-level ingress: next input as a `HostInputEvent`.
+
+        Key before mouse, matching every other backend. `poll_key`/`poll_mouse`
+        are inherent to this class now (Workstream C step 6 removed them from
+        the trait) and are composed here through the shared free helper.
+        """
+        val key_opt: KeyEvent? = self.poll_key()
+        var ch = ""
+        if val key_event = key_opt:
+            if val Press(pressed_key) = key_event:
+                if val Some(c) = self.key_to_char(pressed_key):
+                    ch = c
+            return host_event_from_polled(
+                key_opt, nil, ch,
+                self.shift_held(), self.ctrl_held(), self.alt_held()
+            )
+        val mouse_opt: MouseEvent? = self.poll_mouse()
+        host_event_from_polled(
+            nil, mouse_opt, "",
+            self.shift_held(), self.ctrl_held(), self.alt_held()
+        )
+    me poll_key() -> KeyEvent?:
+        if self.pending_key == nil and self.pending_mouse == nil:
+            self._pump_until_pending()
+        if val event = self.pending_key:
+            self.pending_key = nil
+            self.delivered_key = event
+            self.delivered_key_sequence = self.pending_key_sequence
+            self.delivered_key_code = self.pending_key_code
+            self.delivered_key_value = self.pending_key_value
+            self.delivered_key_irq_status = self.pending_key_irq_status
+            return event
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        if self.pending_key == nil and self.pending_mouse == nil:
+            self._pump_until_pending()
+        if val event = self.pending_mouse:
+            self.pending_mouse = nil
+            self.delivered_mouse_sequence = self.pending_mouse_sequence
+            self.delivered_pointer_type = self.pending_pointer_type
+            self.delivered_pointer_code = self.pending_pointer_code
+            self.delivered_pointer_value = self.pending_pointer_value
+            self.delivered_pointer_rel_x_seen = self.pending_pointer_rel_x_seen
+            self.delivered_pointer_rel_x = self.pending_pointer_rel_x
+            self.delivered_pointer_rel_y_seen = self.pending_pointer_rel_y_seen
+            self.delivered_pointer_rel_y = self.pending_pointer_rel_y
+            self.delivered_pointer_left_edge = self.pending_pointer_left_edge
+            self.delivered_pointer_left_value = self.pending_pointer_left_value
+            self.delivered_pointer_right_edge = self.pending_pointer_right_edge
+            self.delivered_pointer_right_value = self.pending_pointer_right_value
+            self.delivered_pointer_middle_edge = self.pending_pointer_middle_edge
+            self.delivered_pointer_middle_value = self.pending_pointer_middle_value
+            self.delivered_pointer_irq_status = self.pending_pointer_irq_status
+            return event
+        nil
+
+    fn alt_held() -> bool:
+        self.left_alt or self.right_alt
+
+    fn shift_held() -> bool:
+        self.left_shift or self.right_shift
+
+    fn ctrl_held() -> bool:
+        self.left_ctrl or self.right_ctrl
+
+    fn key_to_char(key: Key) -> text?:
+        match key:
+            Key.Tab: "\t"
+            Key.Num1: "1"
+            Key.Num2: "2"
+            Key.Num3: "3"
+            Key.Num4: "4"
+            Key.Num5: "5"
+            Key.Num6: "6"
+            Key.Num7: "7"
+            Key.Num8: "8"
+            Key.Num9: "9"
+            Key.Q: "q"
+            Key.M: "m"
+            Key.W: "w"
+            Key.R: "r"
+            Key.T: "t"
+            _: nil
+
+alias VirtioInputBackend = Arm64VirtioInputBackend

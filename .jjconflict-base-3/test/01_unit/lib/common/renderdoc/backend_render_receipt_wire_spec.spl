@@ -1,0 +1,170 @@
+# codex-system-test
+# @req REQ-017 REQ-018
+"""# Backend Render Receipt Serial Wire
+
+Checks the bounded production serial codec that carries one ordered guest
+render receipt to the host without accepting malformed or partial evidence.
+"""
+use std.spec.*
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BackendRenderReceiptHeader,
+    BackendRenderReceiptEvent,
+    BackendRenderReceiptTrailer,
+    backend_render_receipt_header_wire_byte_count,
+    backend_render_receipt_event_wire_byte_count,
+    backend_render_receipt_trailer_wire_byte_count,
+    backend_render_receipt_header_wire_byte_at,
+    backend_render_receipt_event_wire_byte_at,
+    backend_render_receipt_trailer_wire_byte_at
+}
+use std.common.string_core.{char_from_code_inline}
+use common.renderdoc.backend_render_receipt_wire.{
+    backend_render_receipt_header_line,
+    backend_render_receipt_event_line,
+    backend_render_receipt_trailer_line,
+    parse_backend_render_receipt_wire,
+    backend_render_receipt_capture_identity_status,
+    backend_render_receipt_target_status
+}
+use test.helpers.simpleos_render_evidence_fixture.{
+    SIMPLEOS_EVIDENCE_HASH,
+    simpleos_target_evidence
+}
+
+val WIRE_FIRMWARE_HASH: text = "0000000000000001000000000000000200000000000000030000000000000004"
+val WIRE_PIXEL_HASH: text = "0000000000000005000000000000000600000000000000070000000000000008"
+
+fn wire_header() -> BackendRenderReceiptHeader:
+    BackendRenderReceiptHeader(
+        version: 1u32, arch_code: 1u32, runtime_code: 1u32, backend_code: 1u32,
+        firmware_hash_word0: 1u64, firmware_hash_word1: 2u64,
+        firmware_hash_word2: 3u64, firmware_hash_word3: 4u64,
+        boot_id: 11u64, frame_id: 12u64, surface_handle: 42u64,
+        width: 4u32, height: 4u32, stride: 16u32, format_code: 1u32)
+
+fn wire_event(sequence: u32) -> BackendRenderReceiptEvent:
+    BackendRenderReceiptEvent(
+        sequence: sequence, operation_code: sequence, resource_id: 13u64,
+        state_before: sequence - 1u32, state_after: sequence,
+        value_hash: sequence.to_u64())
+
+fn wire_trailer(event_count: u32) -> BackendRenderReceiptTrailer:
+    BackendRenderReceiptTrailer(
+        event_count: event_count, frame_complete: true,
+        pixel_hash_word0: 5u64, pixel_hash_word1: 6u64,
+        pixel_hash_word2: 7u64, pixel_hash_word3: 8u64,
+        nonblank_pixel_count: 16u64, reason_code: 0u32)
+
+fn valid_wire() -> text:
+    "unrelated boot log\n" +
+        backend_render_receipt_header_line(wire_header()) + "\n" +
+        backend_render_receipt_event_line(wire_event(1u32)) + "\n" +
+        backend_render_receipt_event_line(wire_event(2u32)) + "\n" +
+        backend_render_receipt_trailer_line(wire_trailer(2u32)) + "\n"
+
+fn header_wire_bytes(header: BackendRenderReceiptHeader) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < backend_render_receipt_header_wire_byte_count():
+        out = out + char_from_code_inline(
+            backend_render_receipt_header_wire_byte_at(header, index).to_i64())
+        index = index + 1
+    out
+
+fn event_wire_bytes(event: BackendRenderReceiptEvent) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < backend_render_receipt_event_wire_byte_count():
+        out = out + char_from_code_inline(
+            backend_render_receipt_event_wire_byte_at(event, index).to_i64())
+        index = index + 1
+    out
+
+fn trailer_wire_bytes(trailer: BackendRenderReceiptTrailer) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < backend_render_receipt_trailer_wire_byte_count():
+        out = out + char_from_code_inline(
+            backend_render_receipt_trailer_wire_byte_at(trailer, index).to_i64())
+        index = index + 1
+    out
+
+describe "Backend render receipt serial wire":
+    it "keeps allocation-free guest bytes identical to host codec lines":
+        step("Stream header event and trailer through the no-allocation byte codec")
+        expect(header_wire_bytes(wire_header())).to_equal(
+            backend_render_receipt_header_line(wire_header()) + "\n")
+        expect(event_wire_bytes(wire_event(1u32))).to_equal(
+            backend_render_receipt_event_line(wire_event(1u32)) + "\n")
+        expect(trailer_wire_bytes(wire_trailer(1u32))).to_equal(
+            backend_render_receipt_trailer_line(wire_trailer(1u32)) + "\n")
+
+    it "round-trips one ordered receipt and binds capture identity":
+        step("Encode a complete guest receipt among unrelated serial lines")
+        val parsed = parse_backend_render_receipt_wire(valid_wire())
+        expect(parsed.valid).to_be(true)
+        expect(parsed.code).to_equal("pass")
+        expect(parsed.events.len()).to_equal(2)
+
+        step("Bind the captured frame to the same boot frame and surface")
+        expect(backend_render_receipt_capture_identity_status(
+            parsed, 11u64, 12u64, 42u64)).to_equal("pass")
+        expect(backend_render_receipt_capture_identity_status(
+            parsed, 11u64, 99u64, 42u64)).to_equal("frame-correlation-mismatch")
+
+        step("Join full firmware and raw-pixel digests to retained QMP evidence")
+        val target = simpleos_target_evidence(
+            "qemu", "x86_64", "", "", "11", "12",
+            SIMPLEOS_EVIDENCE_HASH, 0, WIRE_FIRMWARE_HASH, WIRE_PIXEL_HASH)
+        expect(backend_render_receipt_target_status(parsed, target)).to_equal("pass")
+
+    # @manual: folded
+    it "rejects corrupt and oversized hexadecimal fields":
+        step("Replace the header version with non-hexadecimal input")
+        val corrupt = valid_wire().replace(
+            "BRR1 H 0000000000000001 ", "BRR1 H xxxxxxxxxxxxxxxx ")
+        expect(parse_backend_render_receipt_wire(corrupt).code).to_equal("invalid-hex")
+
+        step("Submit a field wider than unsigned 64-bit")
+        val overflow = valid_wire().replace(
+            "BRR1 H 0000000000000001 ", "BRR1 H 10000000000000000 ")
+        expect(parse_backend_render_receipt_wire(overflow).code).to_equal("invalid-width")
+
+    # @manual: folded
+    it "rejects reordered duplicate and truncated records":
+        step("Move an event before the header")
+        val reordered = backend_render_receipt_event_line(wire_event(1u32)) +
+            "\n" + backend_render_receipt_header_line(wire_header()) + "\n"
+        expect(parse_backend_render_receipt_wire(reordered).code).to_equal("event-out-of-order")
+
+        step("Duplicate the header")
+        val duplicate = backend_render_receipt_header_line(wire_header()) + "\n" +
+            backend_render_receipt_header_line(wire_header()) + "\n"
+        expect(parse_backend_render_receipt_wire(duplicate).code).to_equal(
+            "duplicate-or-reordered-header")
+
+        step("Omit the trailer")
+        val truncated = backend_render_receipt_header_line(wire_header()) + "\n" +
+            backend_render_receipt_event_line(wire_event(1u32)) + "\n"
+        expect(parse_backend_render_receipt_wire(truncated).code).to_equal("truncated-receipt")
+
+    # @manual: folded
+    it "rejects oversized serial and receipt lines":
+        step("Exceed the bounded serial snapshot")
+        expect(parse_backend_render_receipt_wire("x".repeat(1048577)).code).to_equal(
+            "serial-too-large")
+
+        step("Exceed the bounded receipt line")
+        val oversized_line = "BRR1 " + "x".repeat(513)
+        expect(parse_backend_render_receipt_wire(oversized_line).code).to_equal(
+            "line-too-large")
+
+        step("Exceed the bounded event count without corrupting event order")
+        var too_many_events = backend_render_receipt_header_line(wire_header()) + "\n"
+        var sequence = 1u32
+        while sequence <= 65u32:
+            too_many_events = too_many_events +
+                backend_render_receipt_event_line(wire_event(sequence)) + "\n"
+            sequence = sequence + 1u32
+        expect(parse_backend_render_receipt_wire(too_many_events).code).to_equal(
+            "too-many-events")

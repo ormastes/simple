@@ -1,0 +1,492 @@
+# std.game2d.audio.sound_asset_sdn — sound.sdn loader (Step 3, sound_music_effects_plan)
+#
+# Recognised top-level shape:
+#   sound:
+#     kind: "sfx" | "sequence" | "pattern"     # default "sfx"
+#     sample_rate: 22050                       # default 22050
+#     source: { type: "tone", wave: "sine" | "square" | "noise", freq_hz: 440, duration_ms: 200, seed: 0 }
+#     envelope: { attack_ms: 0, decay_ms: 0, sustain: 1.0, release_ms: 0 }
+#     effects: [ { type: "lowpass", cutoff_hz: 800 }, { type: "delay", time_ms: 120, feedback: 0.3 },
+#                { type: "reverb", room_size: 0.5, wet: 0.3 }, { type: "pitch", pitch: 1.25 } ]
+#     events: [ { at_ms: 0, clip: "kick.wav", gain: 1.0 } ]   # "sequence" kind only
+#     pattern:                                                # "pattern" kind only
+#       bpm: 120
+#       steps_per_beat: 4
+#       repeat: 2
+#       tracks:
+#         - { clip: "kick.sdn", steps: "x...x...x...x..." }
+#         - { clip: "hat.wav",  steps: "..x...x...x...x." }
+#
+# `source.type` is required for kind "sfx" — the only source type this loader
+# renders is "tone" (sine/square/noise via sound_synth.spl); "sequence"
+# events reference external clip files and are parsed/validated here but not
+# rendered (rendering them needs a WAV *decoder*, out of scope — see the
+# plan's Step 4 priority notes).
+#
+# "pattern" is a step-sequencer front end over the same flat event list: each
+# `tracks[].steps` string is one character per step — `x` triggers the
+# track's clip at gain 0.7, `X` triggers it (accented) at gain 1.0, `.` is a
+# rest. Step duration is `60000 / bpm / steps_per_beat` ms; step `i` of
+# repeat `r` fires at `(r * steps.len() + i) * step_ms`. All tracks in a
+# pattern must have equal-length `steps` strings. `simple sound`'s CLI lowers
+# this to `events` (src/app/sound/main.spl) and renders it through the exact
+# same sequence mixer — no new mixing code for "pattern".
+#
+# ponytail: uses a plain Result<T, text> with path-qualified messages (the
+# model3d.spl CLI loader pattern), not the GAME-ASSET-NNN AssetError family —
+# that family models the game-manifest asset pipeline (images/sounds/fonts
+# referenced from game.sdn); a standalone sound.sdn description isn't part of
+# that pipeline, so reusing its diagnostic codes would misrepresent them.
+
+# NOTE: import via the explicit std.common.sdn.{parser,value} path (the
+# game_sdn.spl pattern), not the `std.sdn` facade — under the interpreter,
+# a bare `use std.sdn.{SdnValue, parse}` in a small/standalone module resolves
+# to a variant-incomplete SdnValue and crashes on `SdnValue.String(...)`
+# construction inside the parser ("unknown variant or method 'String' on enum
+# SdnValue"); the explicit common.sdn path does not hit this. See
+# doc/08_tracking/bug/ for a similar module-resolution-ambiguity class of bug.
+use std.common.sdn.parser.{parse_with_spans}
+use std.common.sdn.value.{SdnValue, Span}
+use std.io_runtime.{file_exists, file_read}
+
+class SoundSource:
+    kind: text
+    wave: text
+    freq_hz: f64
+    duration_ms: f64
+    seed: i64
+
+    static fn default() -> SoundSource:
+        SoundSource(kind: "", wave: "sine", freq_hz: 440.0, duration_ms: 200.0, seed: 0)
+
+class SoundEnvelope:
+    attack_ms: f64
+    decay_ms: f64
+    sustain: f64
+    release_ms: f64
+
+    static fn default() -> SoundEnvelope:
+        SoundEnvelope(attack_ms: 0.0, decay_ms: 0.0, sustain: 1.0, release_ms: 0.0)
+
+class SoundEffectSpec:
+    kind: text
+    cutoff_hz: f64
+    time_ms: f64
+    feedback: f64
+    room_size: f64
+    wet: f64
+    pitch: f64
+
+class SoundEvent:
+    at_ms: i64
+    clip: text
+    gain: f64
+
+class SoundPatternTrack:
+    clip: text
+    steps: text
+
+class SoundPattern:
+    bpm: f64
+    steps_per_beat: i64
+    tracks: [SoundPatternTrack]
+    repeat: i64
+
+    static fn default() -> SoundPattern:
+        SoundPattern(bpm: 120.0, steps_per_beat: 4, tracks: [], repeat: 1)
+
+class SoundAsset:
+    kind: text
+    sample_rate: i64
+    source: SoundSource
+    envelope: SoundEnvelope
+    effects: [SoundEffectSpec]
+    events: [SoundEvent]
+    pattern: SoundPattern
+
+    static fn default() -> SoundAsset:
+        SoundAsset(
+            kind: "sfx",
+            sample_rate: 22050,
+            source: SoundSource.default(),
+            envelope: SoundEnvelope.default(),
+            effects: [],
+            events: [],
+            pattern: SoundPattern.default()
+        )
+
+# ============================================================================
+# Field extraction helpers
+# ============================================================================
+
+fn _f64_of(v: SdnValue, what: text, fallback: f64) -> Result<f64, text>:
+    if val Some(f) = v.as_f64():
+        return Ok(f)
+    Err("{what}: expected a number (got {v.type_name()})")
+
+fn _i64_of(v: SdnValue, what: text) -> Result<i64, text>:
+    if val Some(f) = v.as_f64():
+        return Ok(f as i64)
+    Err("{what}: expected a number (got {v.type_name()})")
+
+fn _text_of(v: SdnValue, what: text) -> Result<text, text>:
+    if val Some(s) = v.as_str():
+        return Ok(s)
+    Err("{what}: expected a string (got {v.type_name()})")
+
+# ============================================================================
+# source / envelope / effects / events parsing
+# ============================================================================
+
+fn _parse_source(v: SdnValue, what: text) -> Result<SoundSource, text>:
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var src = SoundSource.default()
+    if val Some(tv) = v.get("type"):
+        val r = _text_of(tv, "{what}.type")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            src.kind = s
+    else:
+        return Err("{what}: missing required field `type`")
+    if val Some(wv) = v.get("wave"):
+        val r = _text_of(wv, "{what}.wave")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            if (s != "sine" and s != "square" and s != "noise"):
+                return Err("{what}.wave: unsupported wave \"{s}\" (supported: sine, square, noise)")
+            src.wave = s
+    if val Some(fv) = v.get("freq_hz"):
+        val r = _f64_of(fv, "{what}.freq_hz", src.freq_hz)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            src.freq_hz = f
+    if val Some(dv) = v.get("duration_ms"):
+        val r = _f64_of(dv, "{what}.duration_ms", src.duration_ms)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            src.duration_ms = f
+    if val Some(sv) = v.get("seed"):
+        val r = _i64_of(sv, "{what}.seed")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(i) = r:
+            src.seed = i
+    Ok(src)
+
+fn _parse_envelope(v: SdnValue, what: text) -> Result<SoundEnvelope, text>:
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var env = SoundEnvelope.default()
+    if val Some(av) = v.get("attack_ms"):
+        val r = _f64_of(av, "{what}.attack_ms", env.attack_ms)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            env.attack_ms = f
+    if val Some(dv) = v.get("decay_ms"):
+        val r = _f64_of(dv, "{what}.decay_ms", env.decay_ms)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            env.decay_ms = f
+    if val Some(sv) = v.get("sustain"):
+        val r = _f64_of(sv, "{what}.sustain", env.sustain)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            env.sustain = f
+    if val Some(rv) = v.get("release_ms"):
+        val r = _f64_of(rv, "{what}.release_ms", env.release_ms)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            env.release_ms = f
+    Ok(env)
+
+fn _parse_effect(v: SdnValue, idx: i64) -> Result<SoundEffectSpec, text>:
+    val what = "effects[{idx}]"
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var kind = ""
+    if val Some(tv) = v.get("type"):
+        val r = _text_of(tv, "{what}.type")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            kind = s
+    else:
+        return Err("{what}: missing required field `type`")
+    if (kind != "lowpass" and kind != "highpass" and kind != "delay" and kind != "reverb" and kind != "pitch"):
+        return Err("{what}: unsupported effect type \"{kind}\" (supported: lowpass, highpass, delay, reverb, pitch)")
+    var cutoff_hz = 1000.0
+    var time_ms = 100.0
+    var feedback = 0.3
+    var room_size = 0.5
+    var wet = 0.3
+    var pitch = 1.0
+    if val Some(cv) = v.get("cutoff_hz"):
+        val r = _f64_of(cv, "{what}.cutoff_hz", cutoff_hz)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            cutoff_hz = f
+    if val Some(tmv) = v.get("time_ms"):
+        val r = _f64_of(tmv, "{what}.time_ms", time_ms)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            time_ms = f
+    if val Some(fv) = v.get("feedback"):
+        val r = _f64_of(fv, "{what}.feedback", feedback)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            feedback = f
+    if val Some(rv) = v.get("room_size"):
+        val r = _f64_of(rv, "{what}.room_size", room_size)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            if (f < 0.0 or f > 1.0):
+                return Err("{what}.room_size: must be in [0,1] (got {f})")
+            room_size = f
+    if val Some(wv) = v.get("wet"):
+        val r = _f64_of(wv, "{what}.wet", wet)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            if (f < 0.0 or f > 1.0):
+                return Err("{what}.wet: must be in [0,1] (got {f})")
+            wet = f
+    if val Some(pv) = v.get("pitch"):
+        val r = _f64_of(pv, "{what}.pitch", pitch)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            if f <= 0.0:
+                return Err("{what}.pitch: must be > 0 (got {f})")
+            pitch = f
+    Ok(SoundEffectSpec(kind: kind, cutoff_hz: cutoff_hz, time_ms: time_ms, feedback: feedback, room_size: room_size, wet: wet, pitch: pitch))
+
+fn _parse_event(v: SdnValue, idx: i64) -> Result<SoundEvent, text>:
+    val what = "events[{idx}]"
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var at_ms: i64 = 0
+    if val Some(av) = v.get("at_ms"):
+        val r = _i64_of(av, "{what}.at_ms")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(i) = r:
+            at_ms = i
+    else:
+        return Err("{what}: missing required field `at_ms`")
+    var clip = ""
+    if val Some(cv) = v.get("clip"):
+        val r = _text_of(cv, "{what}.clip")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            clip = s
+    else:
+        return Err("{what}: missing required field `clip`")
+    var gain = 1.0
+    if val Some(gv) = v.get("gain"):
+        val r = _f64_of(gv, "{what}.gain", gain)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            gain = f
+    Ok(SoundEvent(at_ms: at_ms, clip: clip, gain: gain))
+
+fn _parse_pattern_track(v: SdnValue, idx: i64) -> Result<SoundPatternTrack, text>:
+    val what = "pattern.tracks[{idx}]"
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var clip = ""
+    if val Some(cv) = v.get("clip"):
+        val r = _text_of(cv, "{what}.clip")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            clip = s
+    else:
+        return Err("{what}: missing required field `clip`")
+    var steps = ""
+    if val Some(sv) = v.get("steps"):
+        val r = _text_of(sv, "{what}.steps")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(s) = r:
+            steps = s
+    else:
+        return Err("{what}: missing required field `steps`")
+    if steps == "":
+        return Err("{what}.steps: must not be empty")
+    var i: i64 = 0
+    while i < steps.len():
+        val c = steps.substring(i, i + 1)
+        if (c != "x" and c != "X" and c != "."):
+            return Err("{what}.steps: invalid step char \"{c}\" at index {i} (expected \"x\", \"X\", or \".\")")
+        i = i + 1
+    Ok(SoundPatternTrack(clip: clip, steps: steps))
+
+fn _parse_pattern(v: SdnValue, what: text) -> Result<SoundPattern, text>:
+    if not v.is_dict():
+        return Err("{what}: expected a dict (got {v.type_name()})")
+    var pat = SoundPattern.default()
+    if val Some(bv) = v.get("bpm"):
+        val r = _f64_of(bv, "{what}.bpm", pat.bpm)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            if f <= 0.0:
+                return Err("{what}.bpm: must be > 0 (got {f})")
+            pat.bpm = f
+    if val Some(sv) = v.get("steps_per_beat"):
+        val r = _i64_of(sv, "{what}.steps_per_beat")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(i) = r:
+            if i <= 0:
+                return Err("{what}.steps_per_beat: must be > 0 (got {i})")
+            pat.steps_per_beat = i
+    if val Some(rv) = v.get("repeat"):
+        val r = _i64_of(rv, "{what}.repeat")
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(i) = r:
+            if i < 1:
+                return Err("{what}.repeat: must be >= 1 (got {i})")
+            pat.repeat = i
+    if val Some(tv) = v.get("tracks"):
+        if val Some(items) = tv.as_array():
+            if items.len() == 0:
+                return Err("{what}.tracks: must have at least one track")
+            var tracks: [SoundPatternTrack] = []
+            var i: i64 = 0
+            var step_len: i64 = -1
+            while i < items.len():
+                val r = _parse_pattern_track(items[i], i)
+                if val Err(e) = r:
+                    return Err(e)
+                if val Ok(t) = r:
+                    if step_len < 0:
+                        step_len = t.steps.len()
+                    elif t.steps.len() != step_len:
+                        return Err("{what}.tracks[{i}].steps: length {t.steps.len()} does not match tracks[0].steps length {step_len}")
+                    tracks.push(t)
+                i = i + 1
+            pat.tracks = tracks
+        else:
+            return Err("{what}.tracks: expected an array (got {tv.type_name()})")
+    else:
+        return Err("{what}.tracks: missing required field `tracks`")
+    Ok(pat)
+
+# ============================================================================
+# Top-level load
+# ============================================================================
+
+pub fn load_sound_asset(path: text) -> Result<SoundAsset, text>:
+    """Parse and validate a sound.sdn file. Defaults applied for any missing
+    optional key; required keys report a path-qualified error."""
+    if not file_exists(path):
+        return Err("sound file not found: {path}")
+    val src = file_read(path)
+    val parsed = parse(src)
+    if val Err(e) = parsed:
+        return Err("{path}: invalid SDN: {e}")
+    var root = SdnValue.null()
+    if val Ok(v) = parsed:
+        root = v
+    var sd = SdnValue.null()
+    if val Some(s) = root.get("sound"):
+        sd = s
+    else:
+        return Err("{path}: missing top-level `sound` block")
+    if not sd.is_dict():
+        return Err("{path}: `sound` must be a dict (got {sd.type_name()})")
+
+    var asset = SoundAsset.default()
+
+    if val Some(kv) = sd.get("kind"):
+        if val Some(s) = kv.as_str():
+            if (s != "sfx" and s != "sequence" and s != "pattern"):
+                return Err("{path}: sound.kind must be \"sfx\", \"sequence\", or \"pattern\" (got \"{s}\")")
+            asset.kind = s
+        else:
+            return Err("{path}: sound.kind must be a string (got {kv.type_name()})")
+
+    if val Some(srv) = sd.get("sample_rate"):
+        val r = _i64_of(srv, "sound.sample_rate")
+        if val Err(e) = r:
+            return Err("{path}: {e}")
+        if val Ok(i) = r:
+            if i <= 0:
+                return Err("{path}: sound.sample_rate must be > 0 (got {i})")
+            asset.sample_rate = i
+
+    if val Some(sv) = sd.get("source"):
+        val r = _parse_source(sv, "sound.source")
+        if val Err(e) = r:
+            return Err("{path}: {e}")
+        if val Ok(s) = r:
+            asset.source = s
+    elif asset.kind == "sfx":
+        return Err("{path}: sound.source: missing required field `source.type`")
+
+    if val Some(ev) = sd.get("envelope"):
+        val r = _parse_envelope(ev, "sound.envelope")
+        if val Err(e) = r:
+            return Err("{path}: {e}")
+        if val Ok(en) = r:
+            asset.envelope = en
+
+    if val Some(fxv) = sd.get("effects"):
+        if val Some(items) = fxv.as_array():
+            var effects: [SoundEffectSpec] = []
+            var i: i64 = 0
+            while i < items.len():
+                val r = _parse_effect(items[i], i)
+                if val Err(e) = r:
+                    return Err("{path}: {e}")
+                if val Ok(fx) = r:
+                    effects.push(fx)
+                i = i + 1
+            asset.effects = effects
+        else:
+            return Err("{path}: sound.effects must be an array (got {fxv.type_name()})")
+
+    if val Some(evv) = sd.get("events"):
+        if val Some(items) = evv.as_array():
+            var events: [SoundEvent] = []
+            var i: i64 = 0
+            while i < items.len():
+                val r = _parse_event(items[i], i)
+                if val Err(e) = r:
+                    return Err("{path}: {e}")
+                if val Ok(ev2) = r:
+                    events.push(ev2)
+                i = i + 1
+            asset.events = events
+        else:
+            return Err("{path}: sound.events must be an array (got {evv.type_name()})")
+    elif asset.kind == "sequence":
+        return Err("{path}: sound.events: missing required field (kind \"sequence\" requires at least one event)")
+
+    if val Some(pv) = sd.get("pattern"):
+        val r = _parse_pattern(pv, "sound.pattern")
+        if val Err(e) = r:
+            return Err("{path}: {e}")
+        if val Ok(p) = r:
+            asset.pattern = p
+    elif asset.kind == "pattern":
+        return Err("{path}: sound.pattern: missing required field (kind \"pattern\" requires bpm/steps_per_beat/tracks)")
+
+    Ok(asset)

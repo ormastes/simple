@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect}
+use compiler.mir_opt.{
+    TargetFamily,
+    target_family_from_triple,
+    target_family_enum_from_triple,
+    target_family_name,
+    target_feature_set_new
+}
+use compiler.mir.{
+    MirInstKind,
+    GpuBarrierScope,
+    GpuAtomicOpKind,
+    VhdlProcessKind,
+    LocalId,
+    BlockId,
+    MirOperand
+}
+
+fn package_gpu_barrier_is_workgroup(kind: MirInstKind) -> bool:
+    match kind:
+        case GpuBarrier(scope): scope == GpuBarrierScope.Workgroup
+        case _: false
+
+fn package_gpu_atomic_is_add(kind: MirInstKind) -> bool:
+    match kind:
+        case GpuAtomicOp(dest, op, _, _): dest.id == 3 and op == GpuAtomicOpKind.Add
+        case _: false
+
+fn package_vhdl_process_is_combinational(kind: MirInstKind) -> bool:
+    match kind:
+        case VhdlProcess(process_kind, body_block):
+            match process_kind:
+                case Combinational(sensitivity): body_block.id == 7 and sensitivity.len() == 2
+                case _: false
+        case _: false
+
+describe "MIR optimizer target-family package surface":
+    it "classifies representative hosted and embedded triples":
+        expect(target_family_from_triple("x86_64-unknown-linux-gnu")).to_equal("X86_64")
+        expect(target_family_enum_from_triple("aarch64-apple-macosx")).to_equal(TargetFamily.Aarch64)
+        expect(target_family_name(TargetFamily.Rv32)).to_equal("Rv32")
+
+    it "builds target feature metadata through the package API":
+        val features = target_feature_set_new("riscv64-unknown-linux-gnu", ["v", "zbb"])
+        expect(features.family).to_equal(TargetFamily.Rv64)
+        expect(features.features.len()).to_equal(2)
+        expect(features.features[0]).to_equal("v")
+        expect(features.features[1]).to_equal("zbb")
+        expect(features.strict).to_be(false)
+        expect(features.opt_level).to_equal(2)
+
+    it "constructs MIR variants whose payload types are part of the package facade":
+        val pointer = MirOperand.copy(LocalId(id: 1))
+        val value = MirOperand.copy(LocalId(id: 2))
+        val barrier = MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup)
+        val atomic = MirInstKind.GpuAtomicOp(LocalId(id: 3), GpuAtomicOpKind.Add, pointer, value)
+        val process = MirInstKind.VhdlProcess(VhdlProcessKind.Combinational(["clock", "reset"]), BlockId(id: 7))
+
+        expect(package_gpu_barrier_is_workgroup(barrier)).to_be(true)
+        expect(package_gpu_atomic_is_add(atomic)).to_be(true)
+        expect(package_vhdl_process_is_combinational(process)).to_be(true)

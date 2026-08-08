@@ -1,0 +1,550 @@
+# Canonical flight-rule registry — `flight-core-v1` (WP-0, 2026-08-07).
+#
+# Plan:     doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+# Research: doc/01_research/language/assurance/aerospace_grade_hardening_research_2026-08-07.md (S5, S7, S9)
+#
+# This file is the SINGLE source of truth for `FLT-*` rules. Lint severity
+# tables, compiler diagnostics, the human coding guide, the standards
+# cross-reference, the deviation template, the binary rule-set hash and the
+# release-gate requirement list are all meant to be GENERATED from it
+# (see docgen.spl). It lives in 00.common because every layer above needs it
+# and 00.common may not import upward.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE USING THE `analyzer` FIELD
+# ---------------------------------------------------------------------------
+# `analyzer` names the checker that ACTUALLY enforces the rule today, or the
+# literal "none". It is deliberately pessimistic: most rows are "none" because
+# the corresponding checker does not exist, or exists and is not wired
+# (plan premises 7, 11, 12). Do NOT set it to a checker that is merely
+# defined — the plan's whole point is that this repo has a history of rules
+# that appear in requirements and config but are never invoked.
+#
+# `analyzer == "none"` means TWO different things. Discriminate with
+# `critical_level`:
+#   * critical_level == Intrinsic  -> no analyzer is NEEDED. The language
+#     cannot express the violation (no `goto`, no inheritance). Not a gap.
+#   * critical_level != Intrinsic  -> a real, unfilled enforcement gap.
+# WP-2's baseline census MUST use this discriminator or its counts are noise.
+#
+# Where a rule IS enforced, `analyzer` names the twin that actually FIRES, not
+# the semantically nicer one that is dead (premises 12b/13: the live
+# `required_comment` and STUB003 emitters are the TEXT reimplementations in
+# `90.tools/lint/_LintMain/lint_checks.spl`, not the `35.semantics/lint/*`
+# checkers).
+#
+# ---------------------------------------------------------------------------
+# THE THREE LEVEL FIELDS
+# ---------------------------------------------------------------------------
+# Research S5 writes some severities as arrows ("Should -> Will"). The three
+# level columns exist to carry that, and the reading is fixed here as an
+# ESCALATION LADDER across assurance grades, not a "today -> target" roadmap:
+#   critical_level -> level under the `critical` strictness profile
+#   aero_a_level   -> level under assurance grade `aero-a`
+#   space_a_level  -> level under assurance grade `space-a`
+# The ladder is MONOTONE: a higher grade never relaxes a rule. Verified by
+# spec (`flight_rules_spec.spl`, "ladder is monotone").
+#
+# Levels that research S5 phrases as conditionals ("Shall if unclassified",
+# "Shall at external boundaries", "link error if unknown") are recorded as
+# `Shall` plus the appropriate `enforcement_phase`; the CONDITION lives in
+# `fix`/`deviation_policy`. The level enum is frozen for four work packages —
+# do not widen it for a scope note.
+#
+# ---------------------------------------------------------------------------
+# `sources` ARE UNVERIFIED CITATIONS
+# ---------------------------------------------------------------------------
+# Network fetch is blocked in this environment, so no external standard was
+# checked against a controlled document. Every rendering of `sources` must
+# carry `source_verification_note()`. Re-verify before any of this becomes
+# certification evidence.
+
+# Where a rule sits in the flight taxonomy.
+enum RuleCategory:
+    ControlFlow     # termination, recursion, structured flow
+    Memory          # allocation, stack, bounds
+    Data            # scope, initialization, arithmetic, representation
+    Abstraction     # closure of dispatch, pointers, macros, libraries
+    MatchCoverage   # enum / match exhaustiveness (research S7)
+    Implementation  # placeholders, stubs, completeness obligations (research S6)
+
+impl RuleCategory:
+    fn name() -> text:
+        match self:
+            RuleCategory.ControlFlow: "control_flow"
+            RuleCategory.Memory: "memory"
+            RuleCategory.Data: "data"
+            RuleCategory.Abstraction: "abstraction"
+            RuleCategory.MatchCoverage: "match_coverage"
+            RuleCategory.Implementation: "implementation"
+
+    static fn from_name(raw: text) -> RuleCategory:
+        if raw == "control_flow":
+            return RuleCategory.ControlFlow
+        if raw == "memory":
+            return RuleCategory.Memory
+        if raw == "data":
+            return RuleCategory.Data
+        if raw == "abstraction":
+            return RuleCategory.Abstraction
+        if raw == "match_coverage":
+            return RuleCategory.MatchCoverage
+        RuleCategory.Implementation
+
+# When the rule is decided. A rule whose answer needs the whole program or the
+# final object cannot be a compile-phase rule.
+enum EnforcementPhase:
+    Compile      # decidable per compilation unit
+    Integration  # needs the link/whole-program closure (stack, symbol closure)
+    Release      # needs evidence artifacts (tests, proofs, waivers) at gate time
+
+impl EnforcementPhase:
+    fn name() -> text:
+        match self:
+            EnforcementPhase.Compile: "compile"
+            EnforcementPhase.Integration: "integration"
+            EnforcementPhase.Release: "release"
+
+    static fn from_name(raw: text) -> EnforcementPhase:
+        if raw == "compile":
+            return EnforcementPhase.Compile
+        if raw == "integration":
+            return EnforcementPhase.Integration
+        EnforcementPhase.Release
+
+# Obligation strength at a given assurance grade.
+enum RuleLevel:
+    Intrinsic  # the language cannot express the violation; nothing to check
+    Shall      # violation is an error
+    Will       # violation is an error unless a reviewed deviation exists
+    Should     # advisory; reported, never fails a build
+    Evidence   # not a code gate; an artifact must exist at release time
+
+impl RuleLevel:
+    fn name() -> text:
+        match self:
+            RuleLevel.Intrinsic: "intrinsic"
+            RuleLevel.Shall: "shall"
+            RuleLevel.Will: "will"
+            RuleLevel.Should: "should"
+            RuleLevel.Evidence: "evidence"
+
+    static fn from_name(raw: text) -> RuleLevel:
+        if raw == "intrinsic":
+            return RuleLevel.Intrinsic
+        if raw == "shall":
+            return RuleLevel.Shall
+        if raw == "will":
+            return RuleLevel.Will
+        if raw == "should":
+            return RuleLevel.Should
+        RuleLevel.Evidence
+
+    # Strictness rank used ONLY to check the grade ladder is monotone.
+    # Intrinsic is the ceiling: it cannot be relaxed because it is not
+    # checkable in the first place.
+    fn rank() -> i64:
+        match self:
+            RuleLevel.Intrinsic: 4
+            RuleLevel.Shall: 3
+            RuleLevel.Will: 2
+            RuleLevel.Evidence: 1
+            RuleLevel.Should: 0
+
+# What a project may do when it cannot satisfy a rule.
+enum DeviationPolicy:
+    Prohibited      # no deviation is possible (usually paired with Intrinsic)
+    ReviewedWaiver  # per rule-id + SymbolId record, hazard/mitigation/expiry
+    ProjectApproval # project-level approval, no per-symbol record required
+    NotApplicable   # rule carries no gate, so nothing to waive
+
+impl DeviationPolicy:
+    fn name() -> text:
+        match self:
+            DeviationPolicy.Prohibited: "prohibited"
+            DeviationPolicy.ReviewedWaiver: "reviewed_waiver"
+            DeviationPolicy.ProjectApproval: "project_approval"
+            DeviationPolicy.NotApplicable: "not_applicable"
+
+    static fn from_name(raw: text) -> DeviationPolicy:
+        if raw == "prohibited":
+            return DeviationPolicy.Prohibited
+        if raw == "reviewed_waiver":
+            return DeviationPolicy.ReviewedWaiver
+        if raw == "project_approval":
+            return DeviationPolicy.ProjectApproval
+        DeviationPolicy.NotApplicable
+
+# ============================================================================
+# FlightRuleV1 — FROZEN SCHEMA (WP-0). Do not add or reorder fields; a new
+# field means FlightRuleV2 and a rule-set hash break.
+# ============================================================================
+struct FlightRuleV1:
+    """One canonical flight rule.
+
+    Fields:
+    - id: stable identifier, `FLT-<CAT>-<NNN>`. Never reused, never renumbered.
+    - title: one-line imperative statement of the obligation.
+    - sources: external standard references. AS-CITED, UNVERIFIED — see
+      `source_verification_note()`.
+    - category: taxonomy bucket.
+    - enforcement_phase: compile | integration | release.
+    - critical_level / aero_a_level / space_a_level: obligation strength per
+      grade; monotone non-decreasing.
+    - analyzer: id of the checker that ACTUALLY enforces this today, or
+      "none". See the module header before setting this.
+    - deviation_policy: what a project may do when it cannot comply.
+    - diagnostic: diagnostic code emitted on violation, e.g. `E-FLT-ENUM-001`.
+      "-" when no diagnostic exists yet.
+    - fix: one-line remediation text shown to the author.
+    """
+    id: text
+    title: text
+    sources: [text]
+    category: RuleCategory
+    enforcement_phase: EnforcementPhase
+    critical_level: RuleLevel
+    aero_a_level: RuleLevel
+    space_a_level: RuleLevel
+    analyzer: text
+    deviation_policy: DeviationPolicy
+    diagnostic: text
+    fix: text
+
+impl FlightRuleV1:
+    # True when no analyzer enforces this rule AND the language does not make
+    # it impossible — i.e. a real enforcement gap. WP-2 keys its census here.
+    fn is_enforcement_gap() -> bool:
+        if self.analyzer != "none":
+            return false
+        match self.critical_level:
+            RuleLevel.Intrinsic: false
+            _: true
+
+    # Canonical one-line serialization; the rule-set hash is built from these.
+    # Fixed field order, every enum rendered through its own name().
+    fn canonical_line() -> text:
+        val src = self.sources.join(";")
+        (self.id + "|" + self.title + "|" + src + "|" + self.category.name()
+            + "|" + self.enforcement_phase.name()
+            + "|" + self.critical_level.name()
+            + "|" + self.aero_a_level.name()
+            + "|" + self.space_a_level.name()
+            + "|" + self.analyzer
+            + "|" + self.deviation_policy.name()
+            + "|" + self.diagnostic
+            + "|" + self.fix)
+
+# Marker that every rendering of `sources` must carry (plan: "Not verified, by
+# decision" — network fetch is blocked here).
+pub fn source_verification_note() -> text:
+    "as-cited, unverified — no external standard was checked against a controlled document"
+
+fn mk(id: text, title: text, sources: [text], category: RuleCategory,
+      phase: EnforcementPhase, crit: RuleLevel, aero: RuleLevel,
+      space: RuleLevel, analyzer: text, dev: DeviationPolicy,
+      diagnostic: text, fix: text) -> FlightRuleV1:
+    FlightRuleV1(id: id, title: title, sources: sources, category: category,
+        enforcement_phase: phase, critical_level: crit, aero_a_level: aero,
+        space_a_level: space, analyzer: analyzer, deviation_policy: dev,
+        diagnostic: diagnostic, fix: fix)
+
+# ============================================================================
+# The registry.
+#
+# Built fresh on every call ON PURPOSE: a module-level `val` initialised from
+# a function call reads zero under native codegen
+# ([[reference_jit_module_level_val_from_function_call_reads_zero]]).
+# There is deliberately no Dict index — struct-valued dicts corrupt under
+# native codegen. ~30 rules; linear scan is correct here.
+# ============================================================================
+pub fn flight_rules() -> [FlightRuleV1]:
+    [
+        # ---- Control flow -------------------------------------------------
+        mk("FLT-CF-001", "No goto, setjmp or longjmp",
+            ["P10-1", "JSF-AV 189", "MISRA C 2012 R15.1"],
+            RuleCategory.ControlFlow, EnforcementPhase.Compile,
+            RuleLevel.Intrinsic, RuleLevel.Intrinsic, RuleLevel.Intrinsic,
+            "none", DeviationPolicy.Prohibited, "-",
+            "Not expressible: Simple's grammar has no goto/setjmp/longjmp. No analyzer is needed or wanted."),
+        mk("FLT-CF-002", "No uncontrolled recursion",
+            ["P10-1", "JSF-AV 119", "ECSS-Q-ST-80C"],
+            RuleCategory.ControlFlow, EnforcementPhase.Integration,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-CF-002",
+            "Remove the recursion, or prove a finite `decreases:` measure. flight-core-v1 rejects direct AND indirect (call-graph SCC) recursion outright."),
+        mk("FLT-CF-003", "Every loop has a statically known bound",
+            ["P10-2", "JSF-AV 191"],
+            RuleCategory.ControlFlow, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-CF-003",
+            "Iterate a range, a fixed-size collection, a refinement-typed count or a constant; otherwise supply `invariant:`/`decreases:` or a target constraint. An unknown bound is an error, not a warning."),
+        mk("FLT-CF-004", "Functions stay small by semantic measure",
+            ["P10-4", "JSF-AV 1"],
+            RuleCategory.ControlFlow, EnforcementPhase.Compile,
+            RuleLevel.Should, RuleLevel.Will, RuleLevel.Will,
+            "none", DeviationPolicy.ProjectApproval, "W-FLT-CF-004",
+            "Split the function. Counted by semantic statements, nesting depth, exit count and cyclomatic complexity — NEVER by physical source lines."),
+
+        # ---- Memory -------------------------------------------------------
+        mk("FLT-MEM-001", "No allocation after initialization",
+            ["P10-3", "JSF-AV 206", "ECSS-Q-ST-80C"],
+            RuleCategory.Memory, EnforcementPhase.Integration,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-MEM-001",
+            "Classify the symbol none/init_only/bounded_pool and seal runtime topology after startup; unbounded and unknown are errors. NOTE: `35.semantics/noalloc_checker.spl` exists but is NOT a gate (plan premise 7) and its family manifest exempts its own allocators (premise 7b) — WP-11/WP-12."),
+        mk("FLT-MEM-002", "Stack usage is bounded and known",
+            ["P10-3", "JSF-AV 206"],
+            RuleCategory.Memory, EnforcementPhase.Integration,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-MEM-002",
+            "Bound = final object frame sizes + longest call chain + interrupt nesting + coroutine state. Unknown is a LINK error, which is why this is an integration-phase rule."),
+        mk("FLT-MEM-003", "Every array access is in bounds",
+            ["P10-9", "JSF-AV 15", "MISRA C 2012 R18.1"],
+            RuleCategory.Memory, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-MEM-003",
+            "Prove the index range in HIR/MIR or retain the runtime bounds check. Unclassified accesses are errors."),
+
+        # ---- Data ---------------------------------------------------------
+        mk("FLT-DAT-001", "Data is declared at the smallest possible scope",
+            ["P10-6", "JSF-AV 135"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Will, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "W-FLT-DAT-001",
+            "Sink the declaration to its HIR use-range. A module-level mutable global needs an approved owner and a declared sync model."),
+        mk("FLT-DAT-002", "No unencapsulated global mutable state",
+            ["P10-6", "JSF-AV 135", "ECSS-Q-ST-80C"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-002",
+            "Move the state inside an MDSOC capsule with a declared owner; read/write sets must be analyzable."),
+        mk("FLT-DAT-003", "Every value is initialized before use",
+            ["P10-8", "JSF-AV 142", "MISRA C 2012 R9.1"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-DAT-003",
+            "Assign on every path before the first read. Definite-initialization is path-sensitive; a declaration is not an initialization."),
+        mk("FLT-DAT-004", "No dummy initializer hiding a missed assignment",
+            ["P10-8"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Will, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "W-FLT-DAT-004",
+            "Delete the placeholder default. A default that exists only to silence uninitialized analysis is a write-before-read defect, not an initialization."),
+        mk("FLT-DAT-005", "Return values and resource handles are checked",
+            ["P10-7", "JSF-AV 115", "MISRA C 2012 D4.7"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-005",
+            "Consume the Result/status/handle, or discard it explicitly and visibly. Silent discard of a must-use value is an error."),
+        mk("FLT-DAT-006", "External inputs are validated at the boundary",
+            ["P10-7", "JSF-AV 114", "ECSS-Q-ST-80C"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-006",
+            "Applies at EXTERNAL boundaries only (FFI, MMIO, message, storage, operator input): use a refinement type, an `in:` contract, a domain type, or an explicit decoder that can reject."),
+        mk("FLT-DAT-007", "Arithmetic is proved or checked",
+            ["JSF-AV 164", "MISRA C 2012 R12.2", "ECSS-Q-ST-80C"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-007",
+            "Overflow, division by zero, invalid shift and narrowing conversion must each be proved impossible or checked at runtime. Neither proved nor checked is an error."),
+        mk("FLT-DAT-008", "Floating point is deterministic",
+            ["JSF-AV 202", "ECSS-Q-ST-80C"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-008",
+            "No fast-math anywhere in the flight closure; state the NaN/Inf, rounding-mode and contraction policy explicitly."),
+        mk("FLT-DAT-009", "Representation assumptions are explicit",
+            ["JSF-AV 183", "MISRA C 2012 R11.3"],
+            RuleCategory.Data, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-DAT-009",
+            "Declare the layout, generate the serializer, and assert size/offset statically. Do not infer layout from the host compiler."),
+
+        # ---- Language abstraction (research S5, second table) --------------
+        mk("FLT-ABS-001", "Macro and compile-time expansion is resolved before analysis",
+            ["P10-8", "JSF-AV 26", "MISRA C 2012 D4.9"],
+            RuleCategory.Abstraction, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ABS-001",
+            "Expand macros, compile-time AOP and conditional variants before assurance analysis; retain and hash the expansion. An unresolved conditional variant is an error."),
+        mk("FLT-ABS-002", "Indirect call target sets are closed",
+            ["P10-9", "JSF-AV 159"],
+            RuleCategory.Abstraction, EnforcementPhase.Integration,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-ABS-002",
+            "Every callback, trait dispatch, event, DI binding and AOP advice site in the critical closure must resolve to an enumerable target set."),
+        mk("FLT-ABS-003", "Raw pointers live only inside a reviewed boundary",
+            ["P10-9", "JSF-AV 215"],
+            RuleCategory.Abstraction, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-ABS-003",
+            "Confine SFFI, MMIO and backend pointer primitives to a declared unsafe/representation boundary with a reviewed contract."),
+        mk("FLT-ABS-004", "No unhandled escape from the critical closure",
+            ["JSF-AV 208", "ECSS-Q-ST-80C"],
+            RuleCategory.Abstraction, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ABS-004",
+            "Panics, unchecked traps and uncaught runtime errors must not cross the closure boundary. Recover through a typed Result or enum."),
+        mk("FLT-ABS-005", "No deep or ambiguous inheritance",
+            ["JSF-AV 87", "JSF-AV 94"],
+            RuleCategory.Abstraction, EnforcementPhase.Compile,
+            RuleLevel.Intrinsic, RuleLevel.Intrinsic, RuleLevel.Intrinsic,
+            "none", DeviationPolicy.Prohibited, "-",
+            "Not expressible: Simple has no inheritance (composition/traits/mixins only), so hierarchy depth is structurally bounded. Trait method resolution ambiguity is covered by FLT-ABS-002."),
+        mk("FLT-ABS-006", "Dynamic binding is closed-world in a flight build",
+            ["JSF-AV 159", "ECSS-Q-ST-80C"],
+            RuleCategory.Abstraction, EnforcementPhase.Integration,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ABS-006",
+            "No loader plugin, runtime AOP weaving or late binding may add a call target after the flight link."),
+        mk("FLT-ABS-007", "Casts are explicit and validated",
+            ["JSF-AV 185", "MISRA C 2012 R11.3"],
+            RuleCategory.Abstraction, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-ABS-007",
+            "A representation conversion or FFI layout cast needs an explicit boundary plus size, alignment and range validation."),
+        mk("FLT-ABS-008", "Every provider in the closure is qualified",
+            ["ECSS-Q-ST-80C", "JSF-AV 8"],
+            RuleCategory.Abstraction, EnforcementPhase.Release,
+            RuleLevel.Evidence, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ReviewedWaiver, "E-FLT-ABS-008",
+            "Every stdlib, native and SFFI provider needs a per-symbol qualified-dependency manifest entry. A weak or fabricated provider never qualifies."),
+        mk("FLT-ABS-009", "The supported configuration set is enumerated",
+            ["ECSS-Q-ST-80C", "MISRA C 2012 D4.9"],
+            RuleCategory.Abstraction, EnforcementPhase.Release,
+            RuleLevel.Evidence, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.ProjectApproval, "E-FLT-ABS-009",
+            "Enumerate every supported target/feature configuration and prove or test each released one. Combinatorial config explosion is not a defence."),
+
+        # ---- Match coverage (research S7) ---------------------------------
+        # Diagnostic codes E-FLT-ENUM-001..005 are fixed by research S7.
+        # Analyzer is "none" for all five: `35.semantics/lint/match_exhaustiveness.spl`
+        # is dead (plan premise 11 — MEXH001-006 are registered but nothing
+        # emits them; a text EasyFix fires instead), and the lint
+        # `wildcard_match` rule is inert, not warning (premise 10c).
+        mk("FLT-ENUM-001", "Every variant of a closed enum is covered",
+            ["research S7"],
+            RuleCategory.MatchCoverage, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ENUM-001",
+            "List the omitted variants explicitly. Coverage is keyed by scrutinee_type_id + enum_symbol_id + variant ids, never by variant spelling."),
+        mk("FLT-ENUM-002", "No wildcard arm on a closed enum",
+            ["research S7"],
+            RuleCategory.MatchCoverage, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ENUM-002",
+            "Replace `_` with the remaining variants so adding a variant breaks the build. Bare lowercase binder arms are wildcards too."),
+        mk("FLT-ENUM-003", "No duplicate or unreachable match arm",
+            ["research S7"],
+            RuleCategory.MatchCoverage, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ENUM-003",
+            "Delete the shadowed arm. A duplicate arm means the intended condition is unreachable."),
+        mk("FLT-ENUM-004", "An @evolving enum has an explicit Unknown arm",
+            ["research S7"],
+            RuleCategory.MatchCoverage, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ENUM-004",
+            "Wire/FFI/storage enums declare `@evolving` and match `Unknown(raw)` explicitly — never `_`."),
+        mk("FLT-ENUM-005", "Invalid discriminants are rejected at the boundary",
+            ["research S7"],
+            RuleCategory.MatchCoverage, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "none", DeviationPolicy.Prohibited, "E-FLT-ENUM-005",
+            "Validate the discriminant where it crosses a representation boundary. The runtime fall-through guard stays as defence against corruption, not as the check."),
+
+        # ---- Implementation completeness (research S6) ---------------------
+        # FLT-IMP-001 still names the TEXT reimplementation in 90.tools/lint
+        # (plan premise 13; WP-8 flips it). FLT-IMP-002 was flipped by WP-7:
+        # the live REQC001 emitter is now the AST-based semantic checker
+        # (35.semantics/lint/required_comment.spl), wired into
+        # `lint_cli_source` (90.tools/lint/_LintMain/entry_and_fixes.spl); the
+        # old text scanner in lint_checks.spl (`check_required_comment_source`)
+        # has been deleted.
+        mk("FLT-IMP-001", "No placeholder body in a concrete function",
+            ["research S6"],
+            RuleCategory.Implementation, EnforcementPhase.Compile,
+            RuleLevel.Shall, RuleLevel.Shall, RuleLevel.Shall,
+            "lint.text.stub_impl:STUB003", DeviationPolicy.ReviewedWaiver, "E-FLT-IMP-001",
+            "Implement the body or make the symbol explicitly abstract. `pass_todo`, `pass_dn`, bare `pass`, an empty body, `todo(...)`, a fabricated `Ok(nil)` and a `_noop_` name without a typed NoOp contract are all placeholders. A NAME is never sufficient."),
+        mk("FLT-IMP-002", "Deviating code carries a substantive rationale",
+            ["research S6", "ECSS-Q-ST-80C"],
+            RuleCategory.Implementation, EnforcementPhase.Compile,
+            RuleLevel.Will, RuleLevel.Shall, RuleLevel.Shall,
+            "lint.ast.required_comment:REQC001", DeviationPolicy.ReviewedWaiver, "W-FLT-IMP-002",
+            "State why, not what. The live predicate is the AST-based semantic checker (empty, under 10 characters, or a filler word, evaluated on the real comment-argument AST node — not a per-line text scan).")
+    ]
+
+# Linear lookup by id. No dict: struct-valued dicts corrupt under native
+# codegen and `Dict.len()` returns -1.
+#
+# CALLERS: test the result with `.?` in condition position —
+# `if find_flight_rule(id).?:`. A BARE optional as a condition takes the
+# PRESENT branch even on a miss, because RT_NIL is the sentinel value 3 and is
+# therefore truthy. Open defect:
+# doc/08_tracking/bug/bare_optional_in_condition_position_wrong_branch_2026-08-01.md
+pub fn find_flight_rule(id: text) -> FlightRuleV1?:
+    val rules = flight_rules()
+    var i = 0
+    while i < rules.len():
+        if rules[i].id == id:
+            return rules[i]
+        i = i + 1
+    nil
+
+pub fn flight_rules_in_category(category: RuleCategory) -> [FlightRuleV1]:
+    val rules = flight_rules()
+    val wanted = category.name()
+    var out: [FlightRuleV1] = []
+    var i = 0
+    while i < rules.len():
+        if rules[i].category.name() == wanted:
+            out.push(rules[i])
+        i = i + 1
+    out
+
+# Rules with no analyzer that are NOT intrinsic — the real enforcement gaps.
+pub fn flight_rule_enforcement_gaps() -> [FlightRuleV1]:
+    val rules = flight_rules()
+    var out: [FlightRuleV1] = []
+    var i = 0
+    while i < rules.len():
+        if rules[i].is_enforcement_gap():
+            out.push(rules[i])
+        i = i + 1
+    out
+
+# Canonical text of the whole registry, in declaration order.
+pub fn flight_rules_canonical_text() -> text:
+    val rules = flight_rules()
+    var parts: [text] = ["flight-core-v1"]
+    var i = 0
+    while i < rules.len():
+        parts.push(rules[i].canonical_line())
+        i = i + 1
+    parts.join("\n")
+
+# Deterministic polynomial hash. Hand-rolled on purpose:
+#  - no built-in hash (address-based results would differ per process);
+#  - modular arithmetic keeps every intermediate well inside i64, so there is
+#    no overflow behaviour to depend on;
+#  - the input is the canonical text above, so the hash is sensitive to every
+#    field of every rule and stable across processes.
+# WP-3's acceptance ("lint/check/build/run/test resolve an identical hash")
+# depends on exactly that cross-process determinism.
+pub fn assurance_text_hash(input: text) -> text:
+    var h: i64 = 1469598103
+    var i = 0
+    val n = input.len()
+    while i < n:
+        val c = input.char_code_at(i)
+        h = (h * 131 + c + 7) % 1000000007
+        i = i + 1
+    h.to_text()
+
+# Stable identity of the rule set a build was compiled against. Goes into
+# AssuranceStampV1.rule_set_hash and into the policy hash.
+pub fn flight_rules_hash() -> text:
+    "FLTV1-" + assurance_text_hash(flight_rules_canonical_text())

@@ -1,0 +1,174 @@
+# Shared JIT Types
+#
+# Canonical types shared by local and remote JIT backends.
+# All orchestration, layout planning, and execution code uses these
+# types so that local and remote paths stay structurally consistent.
+
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+
+# ============================================================================
+# Backend Kind
+# ============================================================================
+
+enum JitBackendKind:
+    """Identifies the execution backend without importing backend-specific code."""
+    Local
+    RemoteOpenOCD
+    RemoteGDB
+    RemoteWLink
+    QemuArm
+    QemuRiscV32
+
+impl JitBackendKind:
+    fn to_string() -> text:
+        match self:
+            Local: "local"
+            RemoteOpenOCD: "remote_openocd"
+            RemoteGDB: "remote_gdb"
+            RemoteWLink: "remote_wlink"
+            QemuArm: "qemu_arm"
+            QemuRiscV32: "qemu_rv32"
+
+    fn is_remote() -> bool:
+        match self:
+            Local: false
+            _: true
+
+    fn is_local() -> bool:
+        not self.is_remote()
+
+# ============================================================================
+# Memory Limits
+# ============================================================================
+
+class JitMemoryLimits:
+    """Memory constraints for a JIT target.
+
+    Remote targets have fixed limits that must fail early on overflow.
+    Local targets may mark allow_expand = true.
+    """
+    code_start: i64
+    code_capacity: i64
+    data_start: i64
+    data_capacity: i64
+    stack_top: i64
+    allow_expand: bool
+
+    fn code_end() -> i64:
+        self.code_start + self.code_capacity
+
+    fn data_end() -> i64:
+        self.data_start + self.data_capacity
+
+    fn fits_binary(binary_size: i64) -> bool:
+        """Check whether a binary of the given size fits in the code region."""
+        self.allow_expand or binary_size <= self.code_capacity
+
+    static fn local() -> JitMemoryLimits:
+        """Local JIT -- expandable, no fixed limits."""
+        JitMemoryLimits(
+            code_start: 0,
+            code_capacity: 0x7FFFFFFF,
+            data_start: 0,
+            data_capacity: 0x7FFFFFFF,
+            stack_top: 0,
+            allow_expand: true
+        )
+
+    static fn stm32h7_remote() -> JitMemoryLimits:
+        """STM32H7 SRAM (D1 domain): 512 KB usable."""
+        JitMemoryLimits(
+            code_start: 0x24010000,
+            code_capacity: 0x00070000,
+            data_start: 0x24080000,
+            data_capacity: 0x00040000,
+            stack_top: 0x240C0000,
+            allow_expand: false
+        )
+
+    static fn qemu_rv32() -> JitMemoryLimits:
+        """QEMU riscv32 virt machine default RAM layout."""
+        JitMemoryLimits(
+            code_start: 0x80010000,
+            code_capacity: 0x000F0000,
+            data_start: 0x80100000,
+            data_capacity: 0x00100000,
+            stack_top: 0x80200000,
+            allow_expand: false
+        )
+
+    static fn qemu_arm() -> JitMemoryLimits:
+        """QEMU ARM virt machine default RAM layout."""
+        JitMemoryLimits(
+            code_start: 0x40010000,
+            code_capacity: 0x000F0000,
+            data_start: 0x40100000,
+            data_capacity: 0x00100000,
+            stack_top: 0x40200000,
+            allow_expand: false
+        )
+
+    static fn ch32v307() -> JitMemoryLimits:
+        """CH32V307 SRAM region."""
+        JitMemoryLimits(
+            code_start: 0x20002000,
+            code_capacity: 0x00006000,
+            data_start: 0x20008000,
+            data_capacity: 0x00004000,
+            stack_top: 0x2000C000,
+            allow_expand: false
+        )
+
+# ============================================================================
+# Binary
+# ============================================================================
+
+class JitBinary:
+    """Compiled binary bytes ready for layout planning and upload."""
+    name: text
+    bytes: [i32]
+    entry_offset: i64
+    stack_bytes: i64
+    arch: Architecture
+
+    fn size() -> i64:
+        self.bytes.len()
+
+    static fn empty(arch: Architecture) -> JitBinary:
+        JitBinary(name: "", bytes: [], entry_offset: 0, stack_bytes: 0, arch: arch)
+
+# ============================================================================
+# Layout Plan
+# ============================================================================
+
+class JitLayoutPlan:
+    """Computed placement of a binary in target memory."""
+    code_base: i64
+    code_size: i64
+    entry_point: i64
+    halt_addr: i64
+    stack_top: i64
+    can_expand: bool
+
+    fn end_addr() -> i64:
+        self.code_base + self.code_size
+
+# ============================================================================
+# Execution Result
+# ============================================================================
+
+class JitExecResult:
+    """Result of running a JIT binary on any backend."""
+    return_value: i64
+    duration_ms: i64
+    halt_reason: text
+    error: text
+
+    fn is_ok() -> bool:
+        self.error == ""
+
+    static fn success(value: i64, duration: i64, reason: text) -> JitExecResult:
+        JitExecResult(return_value: value, duration_ms: duration, halt_reason: reason, error: "")
+
+    static fn failure(msg: text) -> JitExecResult:
+        JitExecResult(return_value: 0, duration_ms: 0, halt_reason: "error", error: msg)

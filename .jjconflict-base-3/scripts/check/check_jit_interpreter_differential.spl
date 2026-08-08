@@ -1,0 +1,271 @@
+# JIT-vs-interpreter differential harness.
+#
+# `bin/simple test` can NEVER exercise the Cranelift JIT lane: the runner
+# unconditionally overwrites SIMPLE_EXECUTION_MODE to "interpret" before
+# every child spec run (src/lib/nogc_sync_mut/test_runner/
+# test_runner_execute.spl:86, test_runner_single.spl:168) -- so no exported
+# env var, however set, can route the suite through cranelift. JIT is also
+# the DEFAULT engine for plain `simple run`. That combination means the
+# whole spec suite is structurally blind to JIT-only defects -- and this
+# session alone found several by hand, all silent-wrong-answer, none
+# crashing, so the suite reports green through every one of them.
+#
+# This script sidesteps the runner entirely: it shells out to `simple run`
+# directly under both engines for a small corpus of known repro programs
+# and diffs the outputs against a pinned ground-truth value AND against
+# each other. Disagreement between the two engines is itself a signal --
+# both engines have independently been found untrustworthy in different
+# ways this session, so neither serves as ground truth alone; the pinned
+# `expected` value (established by hand from the original bug reports) is
+# what actually decides correctness.
+#
+# See doc/08_tracking/bug/jit_test_suite_blind_spot_2026-07-30.md for the
+# investigation into why the runner forces interpret mode, and why this
+# script -- not a change to the runner -- was chosen as the vehicle.
+#
+# Usage: bin/simple run scripts/check/check_jit_interpreter_differential.spl
+# Optional: SIMPLE_BIN=<path> to target a specific binary.
+# Exit code: number of fixtures whose `known_good` engine(s) failed to
+# match the pinned expected value (0 = every known-good engine is still
+# behaving as documented; known, still-open JIT bugs do NOT count as a
+# failure here -- they are expected to keep failing until fixed).
+
+use std.io.{process_run, env_get}
+
+struct Fixture:
+    name: text
+    path: text
+    expected: text
+    known_good: text
+    # Set on entries where a JIT-side "pass" is contested by another lane's
+    # observation on the same deployed binary hash (see
+    # doc/08_tracking/bug/jit_test_suite_blind_spot_2026-07-30.md section 3a).
+    # Empty string for uncontested fixtures.
+    contested_note: text
+
+fn fixtures() -> [Fixture]:
+    [
+        Fixture(
+            name: "chained_to_i64_twice",
+            path: "test/fixtures/jit_differential/chained_to_i64_twice.spl",
+            expected: "pw=480 ph=360",
+            known_good: "interpret",
+            contested_note: "UNRESOLVED cross-lane contradiction: lane a894 reports this reproduces (garbage, 32 apart) on the same binary hash this ran against. Do NOT re-pin as fixed -- see doc section 3a.",
+        ),
+        Fixture(
+            # FIXED (was known_good: "interpret"): the write-side half of the
+            # module-global defect -- a function-call initializer's result never
+            # reached the slot. Re-measured 2026-08-01 at 19f3241f568: correct
+            # on both engines, uncontested. known_good is now "both".
+            name: "module_level_val_from_call",
+            path: "test/fixtures/jit_differential/module_level_val_from_call.spl",
+            expected: "X=42",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED 2026-08-01 (was known_good: "interpret"): `HirStmt::Assign`
+            # has no operator field, so hir/lower/stmt_lowering.rs discarded
+            # `assign.op` and every `x op= v` lowered to `x = v`. Nothing ever
+            # "loaded zero" and it was never struct-specific -- plain locals and
+            # `xs[i] +=` dropped the operator too; the doc title is kept for
+            # searchability. known_good is now "both" -- a JIT failure here is a
+            # real regression, not a re-pin decision.
+            name: "struct_field_compound_assign",
+            path: "test/fixtures/jit_differential/struct_field_compound_assign.spl",
+            expected: "n=7",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # The SIBLING the 2026-08-01 sweep left behind: the same dropped
+            # operator for the four suspension compound forms (`~+= ~-= ~*=
+            # ~/=`), which `compound_assign_binop` mapped to None. Silent wrong
+            # answer on the JIT (stored the bare RHS), correct on the
+            # interpreter. Fixed 2026-08-01 by folding them exactly as
+            # interpreter/node_exec.rs has always done; `~=` stays unfolded.
+            name: "suspend_compound_assign",
+            path: "test/fixtures/jit_differential/suspend_compound_assign.spl",
+            expected: "sadd=7 ssub=3 smul=15 sdiv=5",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            name: "list_get_shifted",
+            path: "test/fixtures/jit_differential/list_get_shifted.spl",
+            expected: "idx=5 get=5",
+            known_good: "interpret",
+            contested_note: "UNRESOLVED: this lane could not reproduce the documented value<<3 shift bug on the deployed binary despite repeat runs. Do NOT re-pin as fixed -- see doc section 3a.",
+        ),
+        Fixture(
+            name: "sentinel_basic_arithmetic",
+            path: "test/fixtures/jit_differential/sentinel_basic_arithmetic.spl",
+            expected: "sum=30",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED 2026-07-30 (was known_good: "interpret"): the read-side
+            # defect this fixture exercised was fixed in
+            # hir/lower/module_lowering/module_pass.rs's Node::Let arm (see
+            # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
+            # section 11). known_good is now "both" -- a JIT regression here
+            # is a real regression, not a re-pin decision.
+            name: "cross_module_global_import",
+            path: "test/fixtures/jit_differential/cross_module_global_import/main_entry.spl",
+            expected: "Y_direct=99 Y_via_fn=99",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED 2026-07-30 -- see cross_module_global_import's comment
+            # above; same fix, same doc section 11. The original "gap 10"
+            # @cfg diagnosis was corrected in section 7 (the @cfg stripping
+            # itself was never broken); this fixture is now a genuine,
+            # passing @cfg(<arch>) regression test.
+            name: "cfg_arch_global_variants",
+            path: "test/fixtures/jit_differential/cfg_arch_global_variants.spl",
+            expected: "PLATFORM_ID=64",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED 2026-07-30 -- see cross_module_global_import's comment
+            # above; same fix, same doc section 11.
+            name: "module_global_direct_read_untagged",
+            path: "test/fixtures/jit_differential/module_global_direct_read_untagged.spl",
+            expected: "X=100",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED (was known_good: "interpret"): same write-side fix as
+            # module_level_val_from_call above. Re-measured 2026-08-01 at
+            # 19f3241f568: correct on both engines, uncontested. known_good is
+            # now "both".
+            name: "module_global_from_fn_call_reads_zero",
+            path: "test/fixtures/jit_differential/module_global_from_fn_call_reads_zero.spl",
+            expected: "X=42",
+            known_good: "both",
+            contested_note: "",
+        ),
+        Fixture(
+            # FIXED 2026-07-30 -- BeDomNode.element's two co-compiled
+            # `static fn element` overloads (differing arity) corrupted
+            # every subsequently constructed/stored BeDomNode's struct
+            # fields under JIT; interpreter was always correct. Root-caused
+            # via bisection down to a tokenizer-free repro, fixed by
+            # renaming the rare 2-arg overload to `element_with_id`. See
+            # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
+            # section 16.2. Also the concrete mechanism behind the
+            # multi-layer vector-font-evidence misdiagnosis in section 16.1
+            # (blank pixels -> wrong font -> missing computed style ->
+            # unparsed attribute were all the same JIT defect wearing
+            # different masks).
+            name: "bedom_overload_style_attr",
+            path: "test/fixtures/jit_differential/bedom_overload_style_attr.spl",
+            expected: "1|div|style_len=34|childcount=1",
+            known_good: "both",
+            contested_note: "",
+        ),
+    ]
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+# Prints the exact binary identity (resolved path + sha256) being tested.
+# The "deployed bin/simple" is a moving target in a shared, multi-lane
+# environment -- recording the hash at test time is what makes a later
+# cross-lane reconciliation possible (see doc section 3a / "moving target"
+# lesson in section 5).
+fn print_binary_identity(binary: text):
+    val (resolved, _e1, _c1) = process_run("/bin/sh", ["-c", "readlink -f " + binary])
+    val (hash_line, _e2, _c2) = process_run("/bin/sh", ["-c", "sha256sum " + binary + " 2>/dev/null"])
+    print("resolved path: {resolved.trim()}")
+    print("sha256: {hash_line.trim()}")
+
+# Classifies a wrong JIT value as "address-shaped" (implausibly large in
+# magnitude, consistent with a leaked frame/spill-slot address rather than a
+# computed result) versus "other". Diagnostic only -- does not affect
+# pass/fail, which stays a literal ground-truth comparison (see doc section
+# 3a for why literal, not structural, ground truth was kept for this
+# corpus).
+fn looks_address_shaped(output: text) -> bool:
+    for token in output.split(" "):
+        val cleaned = token.trim()
+        if cleaned.len() >= 6:
+            var all_digits = true
+            for ch in cleaned.chars():
+                if ch < "0" or ch > "9":
+                    all_digits = false
+            if all_digits:
+                return true
+    false
+
+fn run_engine(binary: text, path: text, mode_env: text) -> text:
+    val command = mode_env + " " + binary + " run " + path
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+fn main() -> i64:
+    val binary = simple_binary()
+    var unexpected_failures = 0
+    var known_bug_count = 0
+    print("JIT-vs-interpreter differential harness -- binary: {binary}")
+    print_binary_identity(binary)
+    print("")
+    for f in fixtures():
+        val interp_out = run_engine(binary, f.path, "SIMPLE_EXECUTION_MODE=interpret")
+        val jit_out = run_engine(binary, f.path, "SIMPLE_EXECUTION_MODE=jit")
+        val interp_ok = interp_out.contains(f.expected)
+        val jit_ok = jit_out.contains(f.expected)
+        val agree = interp_out == jit_out
+
+        var status = "?"
+        var is_unexpected = false
+        if f.known_good == "both":
+            if interp_ok and jit_ok:
+                status = "OK (both correct)"
+            else:
+                status = "REGRESSION"
+                is_unexpected = true
+        else:
+            # known_good == "interpret": interpreter must still match ground
+            # truth; the JIT side is a KNOWN, still-open bug and is reported
+            # informationally, not counted as a failure -- unless it has been
+            # fixed (jit_ok true), which is good news, printed, not a failure,
+            # UNLESS the fixture is `contested` (see Fixture.contested_note):
+            # a "pass" there is NOT reported as fixed, because another lane
+            # has reported the opposite result on the same binary hash and
+            # this contradiction is unresolved -- see doc section 3a.
+            if interp_ok:
+                if jit_ok:
+                    if f.contested_note.len() > 0:
+                        status = "JIT passed THIS run, but CONTESTED -- do not re-pin (see note below)"
+                    else:
+                        status = "JIT BUG APPEARS FIXED (re-pin this fixture)"
+                else:
+                    status = "known JIT bug, still present (expected)"
+                    known_bug_count = known_bug_count + 1
+            else:
+                status = "REGRESSION (interpreter itself now wrong)"
+                is_unexpected = true
+
+        if is_unexpected:
+            unexpected_failures = unexpected_failures + 1
+
+        print("[{f.name}] expected={f.expected}")
+        print("  interpret: ok={interp_ok} agree_with_jit={agree}")
+        print("  jit:       ok={jit_ok} address_shaped_if_wrong={looks_address_shaped(jit_out)}")
+        print("  status: {status}")
+        if f.contested_note.len() > 0:
+            print("  NOTE: {f.contested_note}")
+        print("")
+
+    print("---")
+    print("known open JIT bugs reproduced: {known_bug_count}")
+    print("unexpected failures (regressions): {unexpected_failures}")
+    unexpected_failures

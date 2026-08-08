@@ -1,0 +1,109 @@
+# codex-system-test
+# @tag: system, gpu, environment, hal, external, hardware, blocked
+# @req REQ-013 REQ-014 REQ-015 NFR-007
+"""Aggregate external-dependency qualification for GPU processing/rendering.
+
+Presence and loadability never satisfy this spec. Physical rows require retained
+execution/readback parity. Emulator rows remain typed as emulator. Missing
+macOS Metal or Windows DirectX evidence deliberately keeps the aggregate red.
+"""
+
+use std.spec.{describe, it, expect, step, fail_test}
+use std.io_runtime.{file_read}
+
+val VULKAN_ENV = "build/test-artifacts/02_integration/rendering/vulkan_environment_hal_communication/environment.receipt"
+val VULKAN_COMM = "build/test-artifacts/02_integration/rendering/vulkan_environment_hal_communication/communication.receipt"
+val VULKAN_COMPILER = "build/test-artifacts/02_integration/rendering/vulkan_compiler_fill_rect_live/compiler_fill_rect_vulkan.receipt"
+val VULKAN_WEB = "build/test-artifacts/02_integration/rendering/web_vulkan_production_readback/production_web_vulkan.receipt"
+val VULKAN_WEB_IMAGE = "build/test-artifacts/02_integration/rendering/web_vulkan_production_readback/production_web_vulkan.ppm"
+val VULKAN_WEB_EVENTS = "build/test-artifacts/02_integration/rendering/web_vulkan_production_readback/production_web_vulkan.events.jsonl"
+val CUDA_RECEIPT = "build/test-artifacts/02_integration/rendering/processing_cuda_hal_live/receipt.log"
+val METAL_EMULATOR = "build/test-artifacts/01_unit/lib/gc_async_mut/processing/metal_emulator/evidence.env"
+
+describe "GPU external environment qualification":
+    it "should define fail-closed external environment evidence in the glossary":
+        step("Probe backend environment and wrapper ownership")
+        val glossary = file_read("doc/glossary.md")
+        expect(glossary).to_contain("## Environment Test")
+        expect(glossary).to_contain("presence")
+        expect(glossary).to_contain("loadability")
+        expect(glossary).to_contain("fully environment-qualified")
+        expect(glossary).to_contain("physical-device")
+        expect(glossary).to_contain("emulator")
+        expect(glossary).to_contain("CPU/GPU Communication Qualification")
+
+    it "should qualify physical Vulkan through its HAL and exact readback receipts":
+        step("Upload CPU input through the HAL")
+        val environment = file_read(VULKAN_ENV)
+        val communication = file_read(VULKAN_COMM)
+        expect(environment).to_contain("evidence_class=physical-device")
+        expect(environment).to_contain("owner=VulkanSession+Engine2D")
+        expect(environment).to_contain("loader=")
+        expect(environment).to_contain("loader_sha256=")
+        expect(environment).to_contain("validator=spirv-val")
+        expect(environment).to_contain("readiness=ready")
+        step("Dispatch offloaded GPU rendering logic")
+        expect(communication).to_contain("dispatch_count=2")
+        expect(communication).to_contain("byte_parity=pass")
+        expect(communication).to_contain("backend_handle=")
+        expect(communication).to_contain("device_identity=")
+        val compiler = file_read(VULKAN_COMPILER)
+        expect(compiler).to_contain("artifact_sha256=")
+        expect(compiler).to_contain("device_name=NVIDIA RTX A6000")
+        expect(compiler).to_contain("mismatch_count=0")
+        expect(compiler).to_contain("parity=pass")
+        val web = file_read(VULKAN_WEB)
+        expect(web).to_contain("producer=SimpleWebLayout+DrawIR+Engine2D")
+        expect(web).to_contain("readback_source=device_readback")
+        expect(web).to_contain("image_path=" + VULKAN_WEB_IMAGE)
+        expect(web).to_contain("event_log_path=" + VULKAN_WEB_EVENTS)
+        expect(web).to_contain("mismatch_count=0")
+        expect(web).to_contain("parity=pass")
+        val events = file_read(VULKAN_WEB_EVENTS)
+        expect(events).to_contain("\"sequence\":1,\"stage\":\"producer\"")
+        expect(events).to_contain("\"sequence\":2,\"stage\":\"draw_ir\"")
+        expect(events).to_contain("\"sequence\":3,\"stage\":\"engine2d\"")
+        expect(events).to_contain("\"sequence\":4,\"stage\":\"gpu_dispatch\"")
+        expect(events).to_contain("\"sequence\":5,\"stage\":\"device_readback\"")
+        expect(events).to_contain("\"backend_handle\":")
+        expect(events).to_contain("\"device_identity\":")
+        expect(events).to_contain("\"checksum\":248204808491526")
+
+    it "should qualify physical CUDA upload dispatch download and invalid transfers":
+        step("Download GPU output through the HAL")
+        val receipt = file_read(CUDA_RECEIPT)
+        expect(receipt).to_contain("PROCESSING_CUDA_HAL_HAPPY status=pass")
+        expect(receipt).to_contain("output=8,9,17,107")
+        expect(receipt).to_contain("PROCESSING_CUDA_HAL_REPEAT status=pass")
+        expect(receipt).to_contain("stable_identity=true")
+        expect(receipt).to_contain("PROCESSING_CUDA_HAL_ERROR status=pass")
+        expect(receipt).to_contain("invalid_upload_status=-1")
+        expect(receipt).to_contain("invalid_download_status=-1")
+        expect(receipt).to_contain("cpu_fallback=false")
+
+    it "should retain the external environment classification matrix contract":
+        step("Classify physical emulated and blocked evidence")
+        val matrix = "linux-vulkan=physical-device\nlinux-cuda=physical-device\nmetal-emulator=emulator\nmacos-metal=blocked\nwindows-directx=blocked\n"
+        expect(matrix).to_contain("linux-vulkan=physical-device")
+        expect(matrix).to_contain("linux-cuda=physical-device")
+        expect(matrix).to_contain("metal-emulator=emulator")
+        expect(matrix).to_contain("macos-metal=blocked")
+        expect(matrix).to_contain("windows-directx=blocked")
+
+    it "should classify Metal emulation without promoting it to physical execution":
+        step("Classify physical emulated and blocked evidence")
+        val receipt = file_read(METAL_EMULATOR)
+        expect(receipt).to_contain("evidence_class=emulator")
+        expect(receipt).to_contain("native_device=false")
+        expect(receipt).to_contain("hal_owner=std.gc_async_mut.processing.metal_emulator")
+        expect(receipt).to_contain("rendering_parity=exact")
+        expect(receipt).to_contain("reason=ok")
+
+    it "should keep the external matrix incomplete until native Metal and DirectX pass":
+        step("Verify communication and rendering parity")
+        val todos = file_read("doc/08_tracking/todo/todo_db.sdn")
+        expect(todos).to_contain("652, TODO, gpu, P1")
+        expect(todos).to_contain("653, TODO, gpu, P1")
+        expect(todos).to_contain("macOS")
+        expect(todos).to_contain("Windows x86_64")
+        fail_test("BLOCKED external environment matrix: native macOS Metal and Windows DirectX physical evidence remain open under TODO 652/653")

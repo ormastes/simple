@@ -1,0 +1,121 @@
+# RenderSurface — a normal GUI panel backed by a child surface handle.
+#
+# Raster ownership stays in WmContentFrame. This widget owns only layout,
+# clipping, fit, focus proxy, and pointer-coordinate translation.
+
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.widget.{WidgetKind, WidgetNode, WidgetRect}
+use common.ui.native_scalar_text.{ui_native_i64_text}
+
+val RENDER_SURFACE_FIT_NATIVE: text = "native"
+val RENDER_SURFACE_FIT_STRETCH: text = "stretch"
+val RENDER_SURFACE_FIT_CONTAIN: text = "contain"
+
+struct RenderSurfaceTarget:
+    found: bool
+    child_surface_handle: i64
+    local_x: i32
+    local_y: i32
+    capture_pointer: bool
+
+fn render_surface(
+    id: text,
+    child_surface_handle: i64,
+    child_width: i32,
+    child_height: i32,
+    fit_mode: text,
+) -> WidgetNode:
+    var node = WidgetNode.new(id, WidgetKind.Image.to_wire())
+    node = node.set_prop("widget_role", "render_surface")
+    node = node.set_prop(
+        "child_surface_handle", ui_native_i64_text(child_surface_handle)
+    )
+    node = node.set_prop(
+        "child_width", ui_native_i64_text(child_width as i64)
+    )
+    node = node.set_prop(
+        "child_height", ui_native_i64_text(child_height as i64)
+    )
+    node = node.set_prop(
+        "fit_mode",
+        if render_surface_fit_valid(fit_mode): fit_mode else: RENDER_SURFACE_FIT_CONTAIN
+    )
+    node = node.set_prop("clip", "true")
+    node = node.set_prop("focus_proxy", "true")
+    node = node.set_prop("capture_pointer", "false")
+    node
+
+fn render_surface_fit_valid(fit_mode: text) -> bool:
+    fit_mode == RENDER_SURFACE_FIT_NATIVE or
+        fit_mode == RENDER_SURFACE_FIT_STRETCH or
+        fit_mode == RENDER_SURFACE_FIT_CONTAIN
+
+fn render_surface_is_node(node: WidgetNode) -> bool:
+    node.get_prop("widget_role") == "render_surface"
+
+fn _render_surface_target_none() -> RenderSurfaceTarget:
+    RenderSurfaceTarget(
+        found: false,
+        child_surface_handle: 0,
+        local_x: 0,
+        local_y: 0,
+        capture_pointer: false
+    )
+
+fn render_surface_pointer_target(
+    root: WidgetNode,
+    width: i32,
+    height: i32,
+    surface_id: text,
+    x: i32,
+    y: i32,
+) -> RenderSurfaceTarget:
+    val node = WidgetNode(id: surface_id)
+    if not render_surface_is_node(node):
+        return _render_surface_target_none()
+    val handle = node.get_prop("child_surface_handle").to_int() ?? 0
+    val child_width = node.get_prop("child_width").to_int() ?? 0
+    val child_height = node.get_prop("child_height").to_int() ?? 0
+    if handle <= 0 or child_width <= 0 or child_height <= 0:
+        return _render_surface_target_none()
+    val rects = compute_layout(root, 0, 0, width, height)
+    match find_rect(rects, surface_id):
+        case Some(rect):
+            return _render_surface_translate(node, rect, x, y)
+        case _:
+            return _render_surface_target_none()
+
+fn _render_surface_translate(
+    node: WidgetNode, rect: WidgetRect, x: i32, y: i32
+) -> RenderSurfaceTarget:
+    if x < rect.x or y < rect.y or x >= rect.x + rect.w or y >= rect.y + rect.h:
+        return _render_surface_target_none()
+    val handle = node.get_prop("child_surface_handle").to_int() ?? 0
+    val child_width = node.get_prop("child_width").to_int() ?? 0
+    val child_height = node.get_prop("child_height").to_int() ?? 0
+    val fit = node.get_prop("fit_mode")
+    var draw_x = rect.x
+    var draw_y = rect.y
+    var draw_w = child_width.to_i32()
+    var draw_h = child_height.to_i32()
+    if fit == RENDER_SURFACE_FIT_STRETCH:
+        draw_w = rect.w
+        draw_h = rect.h
+    elif fit == RENDER_SURFACE_FIT_CONTAIN:
+        val scale_x = rect.w * 1000 / child_width.to_i32()
+        val scale_y = rect.h * 1000 / child_height.to_i32()
+        val scale = if scale_x < scale_y: scale_x else: scale_y
+        draw_w = child_width.to_i32() * scale / 1000
+        draw_h = child_height.to_i32() * scale / 1000
+        draw_x = rect.x + (rect.w - draw_w) / 2
+        draw_y = rect.y + (rect.h - draw_h) / 2
+    if (draw_w <= 0 or draw_h <= 0 or x < draw_x or y < draw_y or
+        x >= draw_x + draw_w or y >= draw_y + draw_h):
+        return _render_surface_target_none()
+    RenderSurfaceTarget(
+        found: true,
+        child_surface_handle: handle,
+        local_x: (x - draw_x) * child_width.to_i32() / draw_w,
+        local_y: (y - draw_y) * child_height.to_i32() / draw_h,
+        capture_pointer: node.get_prop("capture_pointer") == "true"
+    )

@@ -1,0 +1,83 @@
+# @cover src/lib/common/ui/ui_frame_clock.spl 80%
+"""
+# FrameClock Port Spec
+
+## Overview
+
+`FrameClock` is the portable time seam for the WM/GUI/web/2D lane (tranche
+W1 of doc/03_plan/ui/wm_lane_boundary_ratchet_lanes.md): lane code depends on
+the trait and receives a concrete instance by injection instead of importing
+`io.time_ops` or declaring raw `rt_time_now_*`/`rt_sleep_nanos` externs
+directly. This spec proves the pure test double (`FixedStepClock`) is
+deterministic -- it starts at zero and only moves when driven, either by
+`advance()` or by `sleep_until()` -- and that the real adapter
+(`HostFrameClock`, src/lib/nogc_sync_mut/ui/host_frame_clock.spl) reports a
+monotonic wall clock.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/ui/wm_lane_boundary_ratchet_lanes.md (W1)
+
+## Design
+
+**Design:** N/A
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+`FixedStepClock.new(step_us)` starts at 0. `advance(step_us)` moves the
+clock forward by exactly that amount, twice in a row, proving it is not a
+constant. `sleep_until(deadline)` jumps forward to the deadline when the
+deadline is ahead of "now", and falls back to advancing by `step_us` when
+the deadline is not ahead (never goes backwards). `HostFrameClock` is
+sampled twice back-to-back and the second reading must not be earlier than
+the first.
+"""
+
+use std.spec.*
+use common.ui.ui_frame_clock.{FrameClock, FixedStepClock}
+use nogc_sync_mut.ui.host_frame_clock.{HostFrameClock}
+
+describe "FrameClock -- FixedStepClock (pure test double)":
+
+    it "starts at time zero":
+        step("A freshly constructed clock has not been driven yet")
+        var clock = FixedStepClock.new(1000)
+        expect(clock.now_micros()).to_equal(0)
+
+    it "advance() moves the clock forward deterministically, not a constant":
+        step("Two successive advance() calls each move the clock by step_us")
+        var clock = FixedStepClock.new(500)
+        clock.advance(500)
+        expect(clock.now_micros()).to_equal(500)
+        clock.advance(500)
+        expect(clock.now_micros()).to_equal(1000)
+
+    it "sleep_until() jumps forward to a deadline ahead of the current time":
+        step("A deadline ahead of now becomes the new current time exactly")
+        var clock = FixedStepClock.new(1000)
+        clock.sleep_until(5000)
+        expect(clock.now_micros()).to_equal(5000)
+
+    it "sleep_until() with a deadline not ahead of now still advances by step_us":
+        step("A deadline at or behind now never moves the clock backwards")
+        var clock = FixedStepClock.new(1000)
+        clock.advance(2000)
+        clock.sleep_until(500)
+        expect(clock.now_micros()).to_equal(3000)
+
+describe "FrameClock -- HostFrameClock (real adapter)":
+
+    it "now_micros() is monotonic across two back-to-back calls":
+        step("Sample the real clock twice; the second reading must not be earlier")
+        var clock = HostFrameClock.new()
+        val t1 = clock.now_micros()
+        val t2 = clock.now_micros()
+        assert_true(t2 >= t1)

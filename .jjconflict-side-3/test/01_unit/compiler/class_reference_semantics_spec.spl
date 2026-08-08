@@ -1,0 +1,72 @@
+# @tag: compiler, class-identity, lane-f1
+#
+# CONTRACT: `class` has identity/reference semantics — assigning a class to a
+# field or array slot copies the REFERENCE, and mutation through one alias is
+# visible through every alias.
+#
+# THE ENGINE THIS RUNNER USES VIOLATES THAT CONTRACT. Measured 2026-08-06
+# (Rust seed, md5 ed53cc5f255e269ca27c4cd83b17aef9): under `bin/simple test`
+# every field/array store VALUE-COPIES the class instance; only fn parameters
+# alias. Under the default JIT (`bin/simple run`) all cases alias correctly,
+# and the optional-class-field case crashes the JIT with a core dump.
+# Truth table + localization:
+#   doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md
+#   test/fixtures/repro/compiler/class_identity/class_field_reference_semantics_repro.spl
+#
+# This spec PINS CURRENT BEHAVIOR so the divergence is executable and loud:
+# every example marked TODO(class-identity-contract) asserts the WRONG
+# (value-copy) result on purpose. When reference semantics are fixed, these
+# examples flip red — then invert each assertion to the contract value and
+# delete the markers. DO NOT "fix" a red example here by re-pinning the copy
+# value. Never convert these TODOs to NOTEs.
+
+use std.spec.{describe, it, expect, assert_true}
+
+class CrsCell:
+    n: i64
+
+class CrsHolder:
+    cell: CrsCell
+
+class CrsOuter:
+    inner: CrsHolder
+
+fn _crs_bump(c: CrsCell):
+    c.n = c.n + 1
+
+describe "class reference semantics (divergence pinned, contract in comments)":
+    it "TODO(class-identity-contract): holder field snapshots — contract wants 11":
+        val c = CrsCell(n: 10)
+        val h = CrsHolder(cell: c)
+        c.n = 11
+        expect(h.cell.n).to_equal(10)
+
+    it "TODO(class-identity-contract): field-alias mutation lost — contract wants 21":
+        val c = CrsCell(n: 20)
+        val h = CrsHolder(cell: c)
+        h.cell.n = 21
+        expect(c.n).to_equal(20)
+
+    it "TODO(class-identity-contract): nested field snapshots — contract wants 31":
+        val c = CrsCell(n: 30)
+        val o = CrsOuter(inner: CrsHolder(cell: c))
+        o.inner.cell.n = 31
+        expect(c.n).to_equal(30)
+
+    it "TODO(class-identity-contract): array element snapshots — contract wants 41":
+        val c = CrsCell(n: 40)
+        val arr = [c]
+        arr[0].n = 41
+        expect(c.n).to_equal(40)
+
+    it "a class parameter aliases the caller's instance (contract HOLDS here)":
+        val c = CrsCell(n: 50)
+        _crs_bump(c)
+        expect(c.n).to_equal(51)
+
+    it "TODO(class-identity-contract): field re-assign snapshots — contract wants 81":
+        val h = CrsHolder(cell: CrsCell(n: 70))
+        val c = CrsCell(n: 80)
+        h.cell = c
+        c.n = 81
+        expect(h.cell.n).to_equal(80)

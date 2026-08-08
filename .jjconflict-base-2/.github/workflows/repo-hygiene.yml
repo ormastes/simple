@@ -1,0 +1,336 @@
+name: Repo Hygiene Gate
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # File-type hygiene content gate (forbidden .py/.sh, secrets, naming, staged
+  # root-guard). Kept in its own job: it is currently RED on pre-existing debt
+  # (tracked .py/.sh files that predate this workflow), so it must not gate the
+  # green idiom/structural ratchets below — a shared job would mask their
+  # per-gate pass/fail signal. Fixing that debt is a separate task.
+  repo-hygiene:
+    name: Repo Hygiene Regression Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Path fix: the script moved scripts/ -> scripts/check/ in 2c8b2e6138
+      # (Jun 4); the old dead path aborted this job at step 1, which also made
+      # the hot-loop gate (now relocated to the code-idiom-gates job) unreachable.
+      - name: Repo hygiene regression gate
+        run: |
+          sh scripts/check/check-repo-hygiene.shs
+
+  # Idiom / structural ratchet gates. Every gate here self-passes green on the
+  # current tree and ratchets: a NEW violation fails its step and this job. This
+  # is the authoritative, non-bypassable enforcement lane — jj bypasses the
+  # pre-commit git hook and build-lint routes the CLI lane to clippy, so CI is
+  # the only place these gates are guaranteed to run.
+  code-idiom-gates:
+    name: Code Idiom & Structural Ratchet Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Most gates below hard-depend on ripgrep; install once for the job.
+      - name: Install ripgrep
+        run: |
+          command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
+
+      # Every gate step below carries `if: ${{ !cancelled() }}`.
+      #
+      # Without it, steps run in sequence and the FIRST red gate aborts the job,
+      # so every later gate reports "skipped" and its signal is invisible. That
+      # is not hypothetical: on 2026-08-01 the CPU hot-loop gate below was red on
+      # every push to main, and as a direct result the UI backend-isolation, TUI
+      # standalone-closure, workspace root-guard, guard-wiring and extern-report
+      # gates had NOT EXECUTED ONCE. The UI gate in particular had been failing
+      # since at least 2026-07-25 (23 unbaselined violations at 37cda4befdc) and
+      # nobody could see it -- CI masked it and jj bypasses the pre-commit hook.
+      #
+      # This is the same masking bug the repo-hygiene job above was split out to
+      # avoid; putting five gates in one sequential job reintroduced it one step
+      # further down. `!cancelled()` makes each gate report its own pass/fail
+      # while the job still fails if ANY gate fails -- enforcement is unchanged,
+      # only visibility improves. Do NOT replace this with continue-on-error,
+      # which would make the gates advisory.
+      #
+      # CPU-lane per-element-loop hot-path gate (design §6.1 / plan W2).
+      # Relocated here from the repo-hygiene job so it actually runs (that job
+      # aborted at its first step, leaving this gate dead). Command unchanged.
+      - name: CPU-lane hot-loop hot-path gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-cpu-hotloop-idiom.shs
+
+      # UI backend-isolation: apps/examples/UI-libs must call rendering facades,
+      # never declare/call rt_* backend externs or construct backend classes.
+      # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
+      - name: UI backend-isolation ratchet gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-ui-backend-isolation.shs
+
+      # Standalone TUI import-closure: the generated TUI lane must route through
+      # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
+      # or a hosted runtime bundle into the standalone binary.
+      - name: TUI standalone-closure gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-tui-standalone-closure.shs
+
+      # Workspace root write guard: enforces the root-directory placement policy
+      # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
+      - name: Workspace root write guard
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check-workspace-root-guard.shs
+
+      # Guard-wiring ratchet. A check script that no hook and no CI job runs is
+      # decoration: on 2026-08-01, 366 of 413 tracked shell guards were
+      # reachable from nothing at all. This gate fails when a guard is neither
+      # wired nor listed in scripts/check/guard_wiring_optout.txt with a reason,
+      # so adding a guard wires it automatically and SKIPPING one becomes the
+      # deliberate act that needs justification. It also fails when an installed
+      # .git/hooks entry is a copy rather than a symlink -- a copied hook goes
+      # stale silently, which is how a two-revisions-behind pre-push hook ran
+      # without any of that session's fail-open fixes.
+      # See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
+      - name: Guard-wiring ratchet gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-guard-wiring.shs
+
+      # JIT runtime-symbol manifest gate.
+      #
+      # The JIT symbol table is generated from a HAND-MAINTAINED list,
+      # RUNTIME_SYMBOL_NAMES in src/compiler_rust/common/src/runtime_symbols.rs.
+      # There is no scanner. A symbol codegen emits but the list omits is never
+      # registered, the JIT import fails to resolve, and the WHOLE module falls
+      # back to the interpreter -- correct, and ~1000x slower (rt_index_of took
+      # compute_styles from 369ms to over ten minutes, fixed in 5c75a1bbce0).
+      # Because de-JITted code stays CORRECT, nothing else catches this.
+      #
+      # Wired 2026-08-01 from guard_wiring_optout.txt. It was red on three
+      # symbols at the time (rt_array_at, rt_at, rt_mem_attr_set_owner); those
+      # were added to the manifest in the same change rather than baselined.
+      - name: JIT runtime-symbol manifest gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-jit-runtime-symbol-manifest.shs
+
+      # .spipe/spipe gitlink shape gate.
+      #
+      # Index/tree corruption class. When a submodule gitlink (mode 160000) is
+      # flattened into a tracked file tree, or a tracked tree collapses into a
+      # gitlink, the parent index silently changes shape and a clone gets the
+      # wrong content. main was wiped to near-zero twice in 24h on 2026-08-01
+      # through adjacent index-shape failures, so this class gets a gate.
+      # Runs in ~0s and needs nothing but git.
+      - name: spipe submodule gitlink shape gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-spipe-submodule-gitlinks.shs
+
+      # Lint-census classifier self-test.
+      #
+      # check-lint-census.shs exists because `simple lint` can DIE mid-file with
+      # no summary line, and a census that scores by summary lines reads that
+      # crash as success -- a lint census was retracted on 2026-08-01 for
+      # exactly that vacuous oracle. The census itself needs a built bin/simple
+      # and explicit targets so it cannot gate here, but its classifier can:
+      # --self-test drives 11 synthetic runs (clean, not-linted, arena-OOB
+      # crash, crash-with-rc-0, timeout, SIGKILL, missing log) through the real
+      # classify_run and asserts each verdict. If the classifier ever regresses
+      # to scoring a crash as LINTED, this step goes red.
+      - name: Lint-census classifier self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-lint-census.shs --self-test
+
+      # Runnable-probe gate, scorer self-test.
+      #
+      # A *_spec.spl CANNOT execute under the Cranelift JIT -- describe/it/expect
+      # are Rust interpreter intrinsics and a module with no `fn main` de-JITs
+      # regardless -- so a spec pinning engine-dependent behaviour is green by
+      # construction against a JIT-only defect. The repo's answer is the runnable
+      # PROBE (test/**/*_jit_probe.spl), a self-scoring program run once per
+      # engine. On 2026-08-02 an audit found no hook and no workflow executed any
+      # of them: the only cover for that whole defect class asserted nothing.
+      #
+      # The full gate needs a built Simple binary, so it runs in the Core + MCP
+      # Dev Pipeline where one exists. What gates HERE is its scorer and its
+      # fail-closed paths: --self-test drives 25 synthetic assertions (both
+      # verdict shapes, unscoreable output, timeout/signal kill, exit-code
+      # independence proved in both directions, the two discovery branches, and
+      # the four ERROR exits for zero probes / short list / unknown engine /
+      # missing binary) through the real score_verdict and discover_probes. It
+      # was checked against 14 branch sabotages and goes red on every one. If the
+      # scorer ever regresses to reading a FAIL as a PASS, this step goes red.
+      - name: Runnable-probe scorer self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-runnable-probes.shs --self-test
+
+      # Unregistered-extern gate, REPORT-ONLY for now.
+      #
+      # An @extern symbol with no registration does not fail to link: depending
+      # on lane it returns a silent nil/0 or NULL-jumps. This has shipped real
+      # wrong answers (b9ae3d91c07). The guard was landed and hardened on
+      # 2026-08-01 and was wired into NOTHING -- it is the case that motivated
+      # the wiring ratchet above.
+      #
+      # It runs WITHOUT --strict deliberately. --strict currently exits 1 at
+      # ~2,377 unregistered symbols; that backlog is a program needing an owner,
+      # not something to be silenced. Report-only makes the number visible in
+      # every run so it can be driven down. When it reaches zero, add --strict
+      # here. Do NOT add an allowlist and do NOT weaken the guard's vacuity
+      # bound or self-tests to shrink the number.
+      - name: Unregistered-extern report (report-only, not yet enforcing)
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-extern-registration.shs
+
+      # Crypto verify/sign symbol collisions. The seed interpreter's function
+      # registry is FLAT and GLOBAL, so two modules defining the same verifier
+      # name with the SAME signature collide silently -- one wins by module
+      # load order, with no diagnostic and no symptom saying which. On
+      # 2026-08-02 this was proved to break TLS 1.3 certificate Ed25519
+      # verification: importing ANY symbol from signature_sffi registers all of
+      # that module's functions and replaced the explicitly-imported pure
+      # verifier, so a valid RFC 8032 signature verified as FALSE.
+      #
+      # This one DOES enforce (exit 1). Five known pure-vs-native collisions
+      # are recorded in crypto_verify_symbol_collisions_baseline.txt so the
+      # gate fails on anything NEW without being permanently red on debt it did
+      # not cause. That baseline is a ratchet: it may only ever shrink. Do NOT
+      # add a line to it to make a new collision pass.
+      - name: Crypto verify symbol collision gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-crypto-verify-symbol-collisions.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 1 (2026-08-02).
+      #
+      # These four guards were the entire set that check-guard-wiring.shs
+      # reported as unwired AND unexcused at 66974acc (7 reported; the other
+      # three need a built bin/simple or a Stage-4 corpus and cannot run in
+      # this job). They are pure textual/structural checks -- sh, grep, find,
+      # awk, and rg which this job already installs -- so there was never a
+      # capability reason for them to sit outside CI.
+      #
+      # Each was verified non-vacuous by sabotaging the IMPLEMENTATION it
+      # guards and confirming it goes red; see the wiring batch commit body.
+      # ---------------------------------------------------------------------
+
+      # Memory deallocation ownership: every arena tier must reach its owning
+      # free operation and drop its backing reference, and the hosted/native/
+      # SimpleOS free families must keep their shared native owner. A tier that
+      # allocates but never reaches sys_free leaks silently -- nothing else in
+      # the tree tests that the release path is CONNECTED rather than present.
+      - name: Memory deallocation ownership gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-memory-deallocation-ownership.shs
+
+      # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
+      # pointer. rt_free is defined in five places (native runtime, hosted
+      # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
+      # Rust SFFI shim); an arity drift in any one of them is a silent
+      # miscompile, not a link error, because -z muldefs makes duplicate C
+      # symbols first-definition-wins.
+      - name: rt_free ABI consistency gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rt-free-abi.shs
+
+      # Stage-4 generated-facade hint-scan fast path: the exact-marker guard
+      # must precede the empty return, which must precede the line split, and
+      # the marker test must keep the generator's COMPLETE prefix
+      # ("# Re-exported from ", trailing space included). Widening it to
+      # "# Re-exported" admits ordinary prose comments into the facade scan.
+      - name: Module-surface hint-scan fast-path gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-module-surface-hint-scan-fast-path.shs
+
+      # Bootstrap progress watcher: live / exited / stale-PID coverage.
+      #
+      # Wiring this one was a truth reveal. It had rotted while orphaned: its
+      # live-sample assertion ended in `main_log_bytes=3$`, anchoring on that
+      # field being LAST on the line, and the watcher has since gained
+      # phase/unit_kind/tasks_* fields. The guard failed against a watcher that
+      # was working correctly. Fixed by matching main_log_bytes as a whole
+      # field instead of by position -- exactness preserved, ordering coupling
+      # removed. This is precisely the decay an unwired guard accumulates.
+      - name: Bootstrap progress-watcher coverage gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-bootstrap-progress-watch.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 2 (2026-08-06).
+      #
+      # Found by auditing guard_wiring_optout.txt for FALSE exemptions, after
+      # line 22 (the core-C capsule gate) was proved to claim "needs QEMU, an
+      # FPGA or a physical dev board" while in fact needing only cc/ar/nm --
+      # and to have been RED at origin/main the whole time nothing ran it.
+      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
+      # ---------------------------------------------------------------------
+
+      # Reserved keywords used as binding identifiers. The Rust seed parser
+      # accepts `val match = ...` where the self-hosted parser rejects it, so
+      # such code lands clean and detonates hours later at bootstrap Stage 4
+      # attributed to an innocent file (3 stdlib files did exactly that on
+      # 2026-07-27). Needs only git and grep; runs in ~3s.
+      #
+      # Its opt-out reason was honest -- "prints a bare OK with no count, which
+      # violates the guard contract" -- and named its own precondition. The
+      # count (plus a >=500-file vacuity floor and an ERROR exit) is added in
+      # this same change, so the entry is removed and the gate is wired here.
+      # Verified non-vacuous: with a `val match = 1` .spl staged into a scratch
+      # index it reports "FAIL — 34480 .spl file(s) checked, 1 violation(s)"
+      # and exits 1.
+      - name: Keyword-identifier binding gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-keyword-identifier-bindings.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 3 (2026-08-06).
+      #
+      # From triaging the 127 "not yet triaged" guard_wiring_optout entries by
+      # RUNNING all of them. These four LLM-runtime/finetune setup-contract
+      # gates are pure-source: they were re-run from a pristine
+      # `git archive origin/main` tree under `env -i PATH=/usr/bin:/bin
+      # HOME=/nonexistent` and passed there, which is the only evidence that
+      # supports wiring (a stripped env alone still sees working-tree build
+      # artifacts -- see the batch-3 method note in the bug doc).
+      #
+      # Each already reported checked_count=N; this change adds the missing
+      # half of the guard contract -- a `PASS - <n> contract case(s) checked`
+      # verdict plus a vacuity floor that exits 2 with `ERROR - nothing was
+      # checked`. Each floor was PROVED live by neutering the counter in a
+      # throwaway tree: all four then exit 2 with checked_count=0.
+      #   svllm 41 case(s) / torch 33 / finetune 34 / prereq-doctor 10
+      # See doc/08_tracking/bug/guard_wiring_optout_false_exemptions_2026-08-06.md.
+      # ---------------------------------------------------------------------
+      - name: LLM runtime and finetune setup-contract gates
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-llm-runtime-svllm-setup-contract.shs
+          sh scripts/check/check-llm-runtime-torch-setup-contract.shs
+          sh scripts/check/check-llm-finetune-setup-contract.shs
+          sh scripts/check/check-llm-strict-host-prereq-doctor-contract.shs

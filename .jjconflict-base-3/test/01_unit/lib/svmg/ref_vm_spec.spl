@@ -1,0 +1,228 @@
+# SVM-G Task D2 unit spec — host reference VM.
+#
+# Byte offsets in the hand-assembled programs below are computed from the
+# fixed instruction encodings in opcodes.spl (see comments on each
+# program): PUSHI/PUSHF=5 bytes, HALT/TRAP=2 bytes, JMP/JZ/JNZ=3 bytes,
+# CALL/PARFOR=3 bytes, everything else (ADD, SYS_RESULT, DUP, SWAP, RET,
+# NOP, ...)=1 byte. The assembler has no labels (Task D1 scope), so control
+# flow targets are computed by hand and double-checked against the
+# executed record/sentinel, which is what actually proves them correct.
+
+use std.spipe.*
+use std.common.svmg.assembler.{svmg_asm}
+use std.common.svmg.ref_vm.{assemble_and_run, read_log, read_records}
+use std.common.svmg.mailbox_const.{
+    SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT, TRAP_OOB, TRAP_OOB_EXIT_CODE, TRAP_DIV0,
+    RAM_SENTINEL_OFFSET, ARENA_DATA_SIZE,
+}
+
+fn _u32_le(bytes: [u8], idx: i64) -> i64:
+    (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8) | ((bytes[idx + 2] as i64) << 16) | ((bytes[idx + 3] as i64) << 24)
+
+describe "svmg reference VM (Task D2) — arithmetic and SYS_RESULT":
+    it "adds two integers and records the result":
+        # PUSHI 1(pass) PUSHI 3 PUSHI 4 ADD SYS_RESULT HALT 0
+        val bytes = svmg_asm("PUSHI 1\nPUSHI 3\nPUSHI 4\nADD\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.halted, true)
+        assert_equal(result.trapped, false)
+        assert_equal(result.timed_out, false)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 7)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+    it "computes SUB/MUL/DIV/REM correctly (10, 3)":
+        val bytes = svmg_asm("PUSHI 1\nPUSHI 10\nPUSHI 3\nSUB\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 7)
+
+        val bytes2 = svmg_asm("PUSHI 1\nPUSHI 10\nPUSHI 3\nMUL\nSYS_RESULT\nHALT 0")
+        val result2 = assemble_and_run(bytes2, 1000, 0)
+        val records2 = read_records(result2.arena, result2.log_cap, result2.record_count)
+        assert_equal(records2[0].value, 30)
+
+        val bytes3 = svmg_asm("PUSHI 1\nPUSHI 10\nPUSHI 3\nDIV\nSYS_RESULT\nHALT 0")
+        val result3 = assemble_and_run(bytes3, 1000, 0)
+        val records3 = read_records(result3.arena, result3.log_cap, result3.record_count)
+        assert_equal(records3[0].value, 3)
+
+        val bytes4 = svmg_asm("PUSHI 1\nPUSHI 10\nPUSHI 3\nREM\nSYS_RESULT\nHALT 0")
+        val result4 = assemble_and_run(bytes4, 1000, 0)
+        val records4 = read_records(result4.arena, result4.log_cap, result4.record_count)
+        assert_equal(records4[0].value, 1)
+
+    it "computes bitwise AND/OR/XOR/SHL/SHR":
+        val bytes = svmg_asm("PUSHI 1\nPUSHI 12\nPUSHI 10\nAND\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 8)
+
+        val bytes2 = svmg_asm("PUSHI 1\nPUSHI 1\nPUSHI 4\nSHL\nSYS_RESULT\nHALT 0")
+        val result2 = assemble_and_run(bytes2, 1000, 0)
+        val records2 = read_records(result2.arena, result2.log_cap, result2.record_count)
+        assert_equal(records2[0].value, 16)
+
+    it "SHR is logical (zero-fill) and SAR is arithmetic (sign-preserving) on negatives":
+        # -1 (0xFFFFFFFF) SHR 28 must be 15 (0x0000000F): logical, no sign fill.
+        val bytes = svmg_asm("PUSHI 1\nPUSHI -1\nPUSHI 28\nSHR\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 15)
+
+        # -16 SAR 2 must be -4: arithmetic, sign preserved.
+        val bytes2 = svmg_asm("PUSHI 1\nPUSHI -16\nPUSHI 2\nSAR\nSYS_RESULT\nHALT 0")
+        val result2 = assemble_and_run(bytes2, 1000, 0)
+        val records2 = read_records(result2.arena, result2.log_cap, result2.record_count)
+        assert_equal(records2[0].value, -4)
+
+    it "computes float FADD via PUSHF":
+        val bytes = svmg_asm("PUSHI 1\nPUSHF 1.5\nPUSHF 2.25\nFADD\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        # FADD's result bit pattern for 3.75f (1.5 + 2.25): sign=0,
+        # exp=128(1+127), mantissa=0b111<<20 -> 0x40700000 = 1081081856.
+        assert_equal(records[0].value, 1081081856)
+
+describe "svmg reference VM (Task D2) — control flow":
+    it "JMP skips a dead HALT and reaches the live SYS_RESULT":
+        # pc0 JMP 2 (len3,next3, target = next(3)+2 = 5)
+        # pc3 HALT 99 (len2)             <- skipped
+        # pc5 PUSHI 1 (len5,next10)
+        # pc10 PUSHI 55 (len5,next15)
+        # pc15 SYS_RESULT (len1,next16)
+        # pc16 HALT 0 (len2)
+        val bytes = svmg_asm("JMP 2\nHALT 99\nPUSHI 1\nPUSHI 55\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 55)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+    it "JZ takes the zero branch":
+        # pc0 PUSHI 0 (len5,next5)                 cond = 0
+        # pc5 JZ 13 (len3,next8, target=8+13=21)
+        # pc8 PUSHI 1 (len5,next13)                 nonzero-path pass
+        # pc13 PUSHI 111 (len5,next18)               nonzero-path value
+        # pc18 SYS_RESULT (len1,next19)
+        # pc19 HALT 1 (len2,next21)
+        # pc21 PUSHI 1 (len5)                        zero-path pass  <- JZ lands here
+        # pc26 PUSHI 222 (len5)
+        # pc31 SYS_RESULT (len1)
+        # pc32 HALT 0 (len2)
+        val bytes = svmg_asm("PUSHI 0\nJZ 13\nPUSHI 1\nPUSHI 111\nSYS_RESULT\nHALT 1\nPUSHI 1\nPUSHI 222\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 222)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+    it "JNZ takes the nonzero branch":
+        # Same shape as the JZ program but with a nonzero condition and JNZ.
+        val bytes = svmg_asm("PUSHI 5\nJNZ 13\nPUSHI 1\nPUSHI 111\nSYS_RESULT\nHALT 1\nPUSHI 1\nPUSHI 222\nSYS_RESULT\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 222)
+
+    it "CALL/RET runs a subroutine and returns to the caller":
+        # pc0 PUSHI 21 (len5,next5)
+        # pc5 CALL 17 (len3,next8)          -> pushes return addr 8, jumps to 17
+        # pc8 PUSHI 1 (len5,next13)          <- RET lands back here
+        # pc13 SWAP (len1,next14)
+        # pc14 SYS_RESULT (len1,next15)
+        # pc15 HALT 0 (len2,next17)
+        # pc17 DUP (len1,next18)             <- subroutine "double"
+        # pc18 ADD (len1,next19)
+        # pc19 RET (len1)
+        val bytes = svmg_asm("PUSHI 21\nCALL 17\nPUSHI 1\nSWAP\nSYS_RESULT\nHALT 0\nDUP\nADD\nRET")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 42)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+describe "svmg reference VM (Task D2) — traps":
+    it "traps LOAD32 out-of-bounds with CMD_RESULT(pass=0, value=TRAP_OOB) + CMD_EXIT(0x7F)":
+        val bytes = svmg_asm("PUSHI 65536\nLOAD32\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.trapped, true)
+        assert_equal(result.halted, true)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].passed, 0)
+        assert_equal(records[0].value, TRAP_OOB)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE)
+
+    it "traps STORE8 out-of-bounds (negative offset)":
+        val bytes = svmg_asm("PUSHI -1\nPUSHI 7\nSTORE8\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.trapped, true)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, TRAP_OOB)
+
+    it "does NOT trap a LOAD32 at the last valid word":
+        val bytes = svmg_asm("PUSHI 65532\nLOAD32\nDROP\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.trapped, false)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+    it "traps DIV by zero":
+        val bytes = svmg_asm("PUSHI 5\nPUSHI 0\nDIV\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.trapped, true)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, TRAP_DIV0)
+
+    it "explicit TRAP opcode writes its immediate code as the result value":
+        val bytes = svmg_asm("TRAP 42\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.trapped, true)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 42)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | TRAP_OOB_EXIT_CODE)
+
+describe "svmg reference VM (Task D2) — step budget":
+    it "exhausts the step budget on an infinite loop and writes SENTINEL_TIMEOUT":
+        # pc0 NOP (len1,next1)
+        # pc1 JMP -4 (len3,next4, target = 4-4 = 0)
+        val bytes = svmg_asm("NOP\nJMP -4")
+        val result = assemble_and_run(bytes, 10, 0)
+        assert_equal(result.timed_out, true)
+        assert_equal(result.halted, true)
+        assert_equal(result.trapped, false)
+        assert_equal(result.sentinel, SENTINEL_TIMEOUT)
+        assert_equal(result.steps_used, 10)
+
+    it "does not time out when the program halts before the budget runs out":
+        val bytes = svmg_asm("NOP\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.timed_out, false)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 0)
+
+describe "svmg reference VM (Task D2) — PUTC/RESULT/EXIT land in the correct arena offsets":
+    it "SYS_PUTC bytes land in the LOG ring and decode back to the expected text":
+        val bytes = svmg_asm("PUSHI 72\nSYS_PUTC\nPUSHI 105\nSYS_PUTC\nHALT 0")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(read_log(result.arena, result.log_cap), "Hi")
+
+    it "the exit sentinel is written at the documented RAM_SENTINEL_OFFSET":
+        val bytes = svmg_asm("HALT 5")
+        val result = assemble_and_run(bytes, 1000, 0)
+        # Read the sentinel directly out of the raw arena bytes at the
+        # design §3.1 offset, independent of the ref_vm's own helper, to
+        # prove the write landed at the documented address and not just
+        # wherever read_sentinel happens to look.
+        val raw = _u32_le(result.arena, RAM_SENTINEL_OFFSET)
+        assert_equal(raw, SENTINEL_EXIT_MASK | 5)
+        assert_true(RAM_SENTINEL_OFFSET < ARENA_DATA_SIZE)
+
+    it "SYS_EXIT pops its code and writes the exit sentinel":
+        val bytes = svmg_asm("PUSHI 1\nPUSHI 9\nSYS_RESULT\nPUSHI 3\nSYS_EXIT")
+        val result = assemble_and_run(bytes, 1000, 0)
+        assert_equal(result.record_count, 1)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records[0].value, 9)
+        assert_equal(result.sentinel, SENTINEL_EXIT_MASK | 3)

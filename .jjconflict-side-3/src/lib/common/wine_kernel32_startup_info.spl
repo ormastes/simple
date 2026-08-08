@@ -1,0 +1,61 @@
+"""Bounded KERNEL32 startup-info bridge for Wine process startup probes."""
+
+class WineKernel32StartupInfo:
+    show_window: i64
+    std_input: i64
+    std_output: i64
+    std_error: i64
+    desktop: text
+    title: text
+
+class WineKernel32StartupInfoResult:
+    ok: bool
+    error: text
+    show_window: i64
+    std_input: i64
+    std_output: i64
+    std_error: i64
+    desktop: text
+    title: text
+    operations: text
+
+fn _info(show_window: i64, std_input: i64, std_output: i64, std_error: i64, desktop: text, title: text) -> WineKernel32StartupInfo:
+    WineKernel32StartupInfo(show_window: show_window, std_input: std_input, std_output: std_output, std_error: std_error, desktop: desktop, title: title)
+
+fn _result(ok: bool, error: text, show_window: i64, std_input: i64, std_output: i64, std_error: i64, desktop: text, title: text, operations: text) -> WineKernel32StartupInfoResult:
+    WineKernel32StartupInfoResult(ok: ok, error: error, show_window: show_window, std_input: std_input, std_output: std_output, std_error: std_error, desktop: desktop, title: title, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-startup-info"
+    for symbol in symbols:
+        if symbol != "GetStartupInfoW" and symbol != "GetStdHandle":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 4:
+        return "kernel32-startup-info-sequence-count-mismatch"
+    if symbols[0] != "GetStartupInfoW":
+        return "kernel32-startup-info-sequence-expected:GetStartupInfoW"
+    if symbols[1] != "GetStdHandle":
+        return "kernel32-startup-info-sequence-expected:GetStdHandle"
+    if symbols[2] != "GetStdHandle":
+        return "kernel32-startup-info-sequence-expected:GetStdHandle"
+    if symbols[3] != "GetStdHandle":
+        return "kernel32-startup-info-sequence-expected:GetStdHandle"
+    "ready"
+
+pub fn wine_kernel32_startup_info_default() -> WineKernel32StartupInfo:
+    _info(1, -10, -11, -12, "winsta0\\default", "SimpleOS Wine")
+
+pub fn wine_kernel32_execute_startup_info(symbols: [text], info: WineKernel32StartupInfo) -> WineKernel32StartupInfoResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, 0, 0, 0, 0, "", "", "")
+    if info.desktop == "":
+        return _result(false, "GetStartupInfoW:missing-desktop", 0, 0, 0, 0, "", "", "")
+    if info.std_input != -10:
+        return _result(false, "GetStdHandle:invalid-stdin", info.show_window, info.std_input, 0, 0, info.desktop, info.title, "GetStartupInfoW")
+    if info.std_output != -11:
+        return _result(false, "GetStdHandle:invalid-stdout", info.show_window, info.std_input, info.std_output, 0, info.desktop, info.title, "GetStartupInfoW GetStdHandle")
+    if info.std_error != -12:
+        return _result(false, "GetStdHandle:invalid-stderr", info.show_window, info.std_input, info.std_output, info.std_error, info.desktop, info.title, "GetStartupInfoW GetStdHandle GetStdHandle")
+    _result(true, "", info.show_window, info.std_input, info.std_output, info.std_error, info.desktop, info.title, "GetStartupInfoW GetStdHandle GetStdHandle GetStdHandle")

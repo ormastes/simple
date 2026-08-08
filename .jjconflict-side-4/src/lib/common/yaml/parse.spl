@@ -1,0 +1,187 @@
+# YAML parsing: scalars, flow collections, and block collections.
+
+use std.common.yaml.types.{yaml_null, yaml_boolean, yaml_number, yaml_string, yaml_sequence, yaml_mapping}
+
+fn _yaml_split(s: text, delim: text) -> [text]:
+    # substring()/slice() are byte-indexed: accumulating one raw byte at a
+    # time (the old `cur = cur + ch`) shreds multi-byte UTF-8 characters
+    # into separate U+FFFD replacement characters. `delim` is a single
+    # ASCII byte, so byte-stepping to find it is safe; the fix is to copy
+    # whole runs via substring() between delimiter hits instead of
+    # rebuilding byte-by-byte.
+    var out = []
+    var seg_start = 0
+    var i = 0
+    while i < s.length():
+        val ch = s.substring(i, i + 1)
+        if ch == delim:
+            out.push(s.substring(seg_start, i))
+            seg_start = i + 1
+        i = i + 1
+    out.push(s.substring(seg_start, s.length()))
+    out
+
+fn _yaml_is_number_text(t: text) -> bool:
+    if t == "":
+        return false
+    val digits = "0123456789"
+    val signs = "+-.eE"
+    var has_digit = false
+    var i = 0
+    while i < t.length():
+        val ch = t.substring(i, i + 1)
+        if digits.contains(ch):
+            has_digit = true
+        else:
+            if not signs.contains(ch):
+                return false
+        i = i + 1
+    has_digit
+
+fn yaml_parse_scalar(s: any) -> any:
+    val t = "{s}".trim()
+    if t == "" or t == "null" or t == "~":
+        return yaml_null()
+    if t == "true":
+        return yaml_boolean(true)
+    if t == "false":
+        return yaml_boolean(false)
+    if _yaml_is_number_text(t):
+        return yaml_number(t)
+    if t.length() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        return yaml_string(t.substring(1, t.length() - 1))
+    # YAML 1.2 single-quoted flow scalar: no backslash escapes, and a literal
+    # quote is written as the doubled `''`.
+    if t.length() >= 2 and t.starts_with("'") and t.ends_with("'"):
+        return yaml_string(t.substring(1, t.length() - 1).replace("''", "'"))
+    yaml_string(t)
+
+fn yaml_parse_flow_sequence(s: text) -> any:
+    var inner = s.trim()
+    if not inner.starts_with("[") or not inner.ends_with("]"):
+        return yaml_null()
+    inner = inner.substring(1, inner.length() - 1)
+    inner = inner.trim()
+    if inner == "":
+        return yaml_sequence([])
+    var out = []
+    for part in _yaml_split(inner, ","):
+        out.push(yaml_parse_scalar(part.trim()))
+    yaml_sequence(out)
+
+fn yaml_parse_flow_mapping(s: text) -> any:
+    var inner = s.trim()
+    if not inner.starts_with("{") or not inner.ends_with("}"):
+        return yaml_null()
+    inner = inner.substring(1, inner.length() - 1)
+    inner = inner.trim()
+    if inner == "":
+        return yaml_mapping([])
+    var out = []
+    for part in _yaml_split(inner, ","):
+        val kv = _yaml_split(part, ":")
+        if kv.length() >= 2:
+            out.push((kv[0].trim(), yaml_parse_scalar(kv[1].trim())))
+    yaml_mapping(out)
+
+fn _yaml_indent_of(line: text) -> i64:
+    # Byte count of the leading space/tab run. `line` is only ever indented
+    # with ASCII whitespace, so byte-stepping is safe here.
+    var i = 0
+    while i < line.length():
+        val ch = line.substring(i, i + 1)
+        if ch != " " and ch != "\t":
+            return i
+        i = i + 1
+    line.length()
+
+fn _yaml_dedent(lines: [text], start: i64, stop: i64, amount: i64) -> text:
+    # Re-join lines [start, stop) with `amount` leading whitespace bytes
+    # removed, so a nested block can be re-parsed as a document of its own
+    # without its relative indentation being distorted by the outer level.
+    var out: [text] = []
+    var i = start
+    while i < stop:
+        val ln = lines[i]
+        var cut = amount
+        val ind = _yaml_indent_of(ln)
+        if ind < cut:
+            cut = ind
+        out.push(ln.substring(cut, ln.length()))
+        i = i + 1
+    out.join("\n")
+
+fn yaml_parse_block(s: text) -> any:
+    val t = s.trim()
+    val lines = _yaml_split(t, "\n")
+    var is_seq = false
+    if lines.length() > 0:
+        val first = lines[0].trim()
+        if first.starts_with("- ") or first == "-":
+            is_seq = true
+    if is_seq:
+        var items = []
+        var i = 0
+        while i < lines.length():
+            val ln = lines[i].trim()
+            if ln.starts_with("- "):
+                items.push(yaml_parse_scalar(ln.substring(2, ln.length()).trim()))
+            else:
+                if ln == "-":
+                    items.push(yaml_null())
+            i = i + 1
+        return yaml_sequence(items)
+    var pairs = []
+    var i = 0
+    while i < lines.length():
+        val raw = lines[i]
+        val ln = raw.trim()
+        if ln == "":
+            i = i + 1
+        else:
+            val base = _yaml_indent_of(raw)
+            val kv = _yaml_split(ln, ":")
+            if kv.length() < 2:
+                i = i + 1
+            else:
+                val key = kv[0].trim()
+                # Take everything after the FIRST colon so a value containing
+                # ':' survives; the old kv[1]-only read silently truncated it.
+                val rest = ln.substring(kv[0].length() + 1, ln.length()).trim()
+                # Scan forward over the lines indented deeper than this key;
+                # they are its nested block, not siblings.
+                var j = i + 1
+                var child_end = i
+                while j < lines.length():
+                    val cand = lines[j]
+                    if cand.trim() == "":
+                        j = j + 1
+                    else:
+                        if _yaml_indent_of(cand) > base:
+                            j = j + 1
+                            child_end = j
+                        else:
+                            break
+                if rest == "" and child_end > i + 1:
+                    val child_indent = _yaml_indent_of(lines[i + 1])
+                    val child_text = _yaml_dedent(lines, i + 1, child_end, child_indent)
+                    pairs.push((key, yaml_parse_block(child_text)))
+                    i = child_end
+                else:
+                    pairs.push((key, yaml_parse_scalar(rest)))
+                    i = i + 1
+    yaml_mapping(pairs)
+
+fn yaml_parse(s: text) -> any:
+    val t = s.trim()
+    if t == "":
+        return yaml_null()
+    if t.starts_with("["):
+        return yaml_parse_flow_sequence(t)
+    if t.starts_with("{"):
+        return yaml_parse_flow_mapping(t)
+    if t.contains("\n"):
+        return yaml_parse_block(t)
+    if t.contains(":") and not t.starts_with("\""):
+        return yaml_parse_block(t)
+    yaml_parse_scalar(t)

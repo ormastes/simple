@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+# Regression coverage for cross-language profile Simple-binary auto-selection.
+# Auto mode must skip executable wrapper scripts that cannot run `--version`,
+# otherwise stale release wrappers can make every Simple row look like a compile
+# failure while C and Go still work.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+fail() {
+    echo "profile_binary_autoselect=false"
+    echo "error=$1"
+    exit 1
+}
+
+simple_binary_usable() {
+    candidate="$1"
+    [ -x "$candidate" ] || return 1
+    "$candidate" --version >/dev/null 2>&1 || return 1
+}
+
+expected="bin/simple"
+if simple_binary_usable "bin/simple"; then
+    expected="bin/simple"
+elif simple_binary_usable "bin/release/simple"; then
+    expected="bin/release/simple"
+elif simple_binary_usable "bin/release/x86_64-unknown-linux-gnu/simple"; then
+    expected="bin/release/x86_64-unknown-linux-gnu/simple"
+elif simple_binary_usable "src/compiler_rust/target/debug/simple"; then
+    expected="src/compiler_rust/target/debug/simple"
+fi
+
+build_dir="build/tmp/profile_binary_autoselect"
+report_path="build/tmp/profile_binary_autoselect.md"
+mkdir -p "$build_dir"
+rm -f "$report_path"
+
+SKIP_PROFILE_REPORT_CONTRACT=1 \
+RUNS=1 WARM_IN_PROCESS=1 CPU_WORKERS=1 OS_THREAD_WORKERS=1 \
+MULTICORE_GREEN_WORKERS=1 COOPERATIVE_GREEN_WORKERS=1 \
+FANOUT_WORKERS=2 FANOUT_MULTICORE_GREEN_WORKERS=2 \
+FANOUT_COOPERATIVE_GREEN_WORKERS=2 FANOUT_STRESS_WORKERS=2 \
+FANOUT_ITERS=1 FANOUT_STRESS_ITERS=1 RUN_TIMEOUT=5 \
+BUILD_DIR="$build_dir" REPORT_PATH="$report_path" \
+sh scripts/check/check-cross-language-perf.shs >/dev/null 2>&1 ||
+    fail "cross-language profile smoke failed"
+
+attempts=0
+while ! grep -q '^- Simple binary: `' "$report_path" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 20 ] || fail "missing Simple binary marker"
+    sleep 0.1
+done
+
+selected="$(sed -n 's/^- Simple binary: `\(.*\)`$/\1/p' "$report_path" | tail -1)"
+[ -n "$selected" ] || fail "missing Simple binary marker"
+
+if [ "$selected" != "$expected" ]; then
+    fail "selected $selected, expected $expected"
+fi
+
+echo "profile_binary_autoselect=true"
+echo "selected_simple_binary=$selected"

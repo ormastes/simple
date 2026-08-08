@@ -1,0 +1,2142 @@
+# @cover src/os/hosted/hosted_browser_renderer_worker.spl 80%
+
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand, draw_ir_composition}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource
+}
+use std.common.image.png_encode.{encode_argb_to_png}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_WORKER_ARG,
+    BrowserRendererMessage,
+    browser_renderer_bookmark_snapshot_decode,
+    browser_renderer_bookmark_snapshot_encode,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_fetch_request_decode,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_decode_with_retained_images,
+    browser_renderer_message_encode,
+    browser_renderer_navigation_decode,
+    browser_renderer_navigation_encode,
+    browser_renderer_network_response_encode,
+    browser_renderer_resize_encode,
+    browser_renderer_scroll_encode,
+    browser_renderer_text_encode
+}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession,
+    hosted_browser_renderer_handle_init,
+    hosted_browser_renderer_handle_request,
+    hosted_browser_renderer_worker_main
+}
+use os.hosted.hosted_browser_renderer_policy.{
+    HostedBrowserNavigationPermit,
+    hosted_browser_renderer_request_policy
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess,
+    HostedBrowserRendererResult
+}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_init_encode,
+    hosted_theme_ready_payload_matches,
+    HOSTED_THEME_INIT_MAX_WIRE_BYTES
+}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_full_html_with_install_wire
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use common.ui.generated.aetheric_dark_theme_snapshot.{
+    aetheric_dark_theme_render_snapshot
+}
+use common.ui.theme_package_wire.{
+    THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES,
+    theme_package_install_wire_v1_encode
+}
+
+extern fn rt_file_read_text(path: text) -> text
+use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_route}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomNodeRoute}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_hit_test_index
+}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserSession
+}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.pair.{Pair}
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+val SCRIPT_ANIMATION_HTML = "<!DOCTYPE html><html><head><style>#stage { width:32px; height:24px; background-color:#ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
+val CSS_ANIMATION_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+
+fn _worker_dom_route(
+    worker: HostedBrowserRendererWorkerSession, author_id: text
+) -> DomNodeRoute:
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    index.route_for_author_id(author_id).unwrap()
+
+fn _worker_focused_author_id(
+    worker: HostedBrowserRendererWorkerSession
+) -> text:
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    val route = match be_dom_focused_route(worker.browser.dom_root(), index):
+        Some(value): value
+        nil: return ""
+    index.author_id_for_route(route) ?? ""
+
+fn _worker_selection_author_id(
+    worker: HostedBrowserRendererWorkerSession
+) -> text:
+    val route = match worker.browser.text_selection_route:
+        Some(value): value
+        nil: return ""
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    index.author_id_for_route(route) ?? ""
+
+fn _render(html: text, time_ms: i64):
+    hosted_browser_renderer_handle_init(
+        BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 1, payload: html
+        ),
+        64,
+        48,
+        time_ms,
+        2
+    )
+
+fn _worker_png_hex(pixel: u32) -> text:
+    var out = ""
+    for byte in encode_argb_to_png([pixel], 1, 1):
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
+fn _worker_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return i
+        i = i + 1
+    -1
+
+fn _ok_renderer_result(generation: i64) -> HostedBrowserRendererResult:
+    HostedBrowserRendererResult(
+        ok: true,
+        reason: "ok",
+        next_animation_ms: -1,
+        producer_generation: generation,
+        composition_revision: 0,
+        composition: draw_ir_composition("", "", "auto", []),
+        image_resources: [],
+        cpu_composited_count: 0,
+        cpu_composited_sha256: "",
+        solid_material_count: 0,
+        solid_material_sha256: "",
+        diagnostics: ""
+    )
+
+describe "hosted browser renderer worker":
+
+    it "orders accepted theme before canonical themed HTML":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val themed_html = (
+            simple_web_content_full_html_with_install_wire(
+                wire, 1, "Worker", "<main>glass</main>", 64, 48
+            )
+        )
+        var before_theme = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        val raw_first = before_theme.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main>raw</main>"
+        ))
+        expect(raw_first.ok).to_be(false)
+        expect(raw_first.reason).to_equal("expected-theme-init")
+        expect(raw_first.wire).to_equal("")
+
+        var themed = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        val theme_ready = themed.handle(BrowserRendererMessage(
+            kind: "theme_init", generation: 7, request_id: 2,
+            payload: hosted_theme_init_encode(1, wire).unwrap()
+        ))
+        expect(theme_ready.ok).to_be(true)
+        expect(theme_ready.initialized).to_be(false)
+        val ready_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), theme_ready.wire
+        ).message
+        expect(ready_message.kind).to_equal("theme_ready")
+        expect(hosted_theme_ready_payload_matches(
+            1, wire, ready_message.payload
+        )).to_be(true)
+        expect(hosted_theme_ready_payload_matches(
+            2, wire, ready_message.payload
+        )).to_be(false)
+        expect(hosted_theme_ready_payload_matches(
+            1,
+            wire,
+            ready_message.payload.replace(
+                snapshot.id, "wrong-theme"
+            )
+        )).to_be(false)
+        val raw_after_theme = themed.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 3,
+            payload: "<main>raw replay</main>"
+        ))
+        expect(raw_after_theme.ok).to_be(false)
+        expect(raw_after_theme.reason).to_equal(
+            "unthemed-init-rejected"
+        )
+        expect(raw_after_theme.wire).to_equal("")
+
+        var accepted = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        expect(accepted.handle(BrowserRendererMessage(
+            kind: "theme_init", generation: 7, request_id: 2,
+            payload: hosted_theme_init_encode(1, wire).unwrap()
+        )).ok).to_be(true)
+        val frame = accepted.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 3,
+            payload: themed_html
+        ))
+        expect(frame.ok).to_be(true)
+
+    it "restarts a themed generation before replaying saved navigation":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val restart_html = (
+            simple_web_content_full_html_with_install_wire(
+                wire, 4, "", "", 64, 48
+            )
+        )
+        expect(restart_html).to_contain(
+            "data-wm-theme=\"{snapshot.id}\""
+        )
+
+        val target_url = "https://account.victim.test/private"
+        var registry = HostedBrowserRendererRegistry.create_with_theme(
+            "/definitely/missing/simple-browser-renderer",
+            "https://home.test/",
+            4,
+            wire
+        )
+        expect(registry.ensure(
+            91, "", 64, 48, 1000, 1000
+        )).to_equal("failed")
+        var entry = registry.entries[0]
+        entry.renderer = HostedBrowserRendererProcess.create_with_theme(
+            8, 64, 48, 4, wire
+        )
+        entry.renderer.state = "await-theme-init"
+        entry.renderer.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: target_url,
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: "",
+            redirect_count: 0
+        )
+        entry.renderer.site_lock = "https://victim.test"
+        entry.renderer.site_swap_pending = true
+        entry.renderer.site_swap_site = "https://victim.test"
+        entry.renderer_closed = false
+        entry.failure_reason = ""
+        entry.failure_published = false
+        entry.startup_html = restart_html
+        registry.entries[0] = entry
+        expect(entry.renderer.generation).to_equal(8)
+        expect(entry.renderer.requires_theme_handshake).to_be(true)
+        expect(entry.renderer.theme_revision).to_equal(4)
+        expect(entry.renderer.theme_wire_text).to_equal(wire)
+
+        var worker = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        expect(registry._accept_polled_result(
+            0, _ok_renderer_result(8), "", "", 1000, 1000
+        )).to_equal("none")
+        entry = registry.entries[0]
+        val theme_init_wire = entry.renderer.pending_wire
+        entry.renderer._complete_pending_wire_write()
+        val theme_init_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), theme_init_wire
+        ).message
+        val ready = worker.handle(theme_init_message)
+        expect(ready.ok).to_be(true)
+        expect(ready.initialized).to_be(false)
+        val ready_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8),
+            ready.wire
+        ).message
+        expect(hosted_theme_ready_payload_matches(
+            entry.renderer.theme_revision,
+            entry.renderer.theme_wire_text,
+            ready_message.payload
+        )).to_be(true)
+        val ready_result = entry.renderer._accept_theme_ready_message(
+            ready_message
+        )
+        registry.entries[0] = entry
+        expect(registry._accept_polled_result(
+            0, ready_result, "", "", 1001, 1001
+        )).to_equal("none")
+
+        entry = registry.entries[0]
+        val init_wire = entry.renderer.pending_wire
+        entry.renderer._complete_pending_wire_write()
+        val init_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), init_wire
+        ).message
+        val bootstrap = worker.handle(init_message)
+        expect(bootstrap.ok).to_be(true)
+        expect(bootstrap.initialized).to_be(true)
+        val bootstrap_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), bootstrap.wire
+        ).message
+        val bootstrap_frame = (
+            browser_renderer_frame_decode_with_retained_images(
+                bootstrap_message, 64, 48, []
+            )
+        )
+        val bootstrap_result = entry.renderer._accept_decoded_frame(
+            bootstrap_frame, 8
+        )
+        registry.entries[0] = entry
+        expect(registry._accept_polled_result(
+            0, bootstrap_result, "", "", 1002, 1002
+        )).to_equal("none")
+        entry = registry.entries[0]
+        expect(entry.pending_frame.checksum).to_equal(0u64)
+        expect(entry.pending_frame.pixels.len()).to_equal(0)
+        expect(entry.ready).to_be(false)
+        val resumed = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8),
+            entry.renderer.pending_wire
+        )
+        expect(resumed.status).to_equal("message")
+        val navigation = browser_renderer_navigation_decode(
+            resumed.message
+        )
+        expect(navigation.ok).to_be(true)
+        expect(navigation.action).to_equal("open")
+        expect(navigation.url).to_equal(target_url)
+        expect(entry.renderer.site_swap_pending).to_be(false)
+
+    it "reserves theme envelope bytes below the codec maximum":
+        expect(HOSTED_THEME_INIT_MAX_WIRE_BYTES).to_be_less_than(
+            THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES
+        )
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        expect(hosted_theme_init_encode(1, wire).?).to_be(true)
+
+    it "reuses an unchanged semantic frame without rerunning render stages":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initial_result = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='stable'>unchanged</main>"
+        ))
+        expect(initial_result.ok).to_be(true)
+        val initial_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initial_result.wire
+            ).message,
+            64,
+            48
+        )
+        expect(initial_frame.ok).to_be(true)
+        val before_composition_revision = (
+            worker.render_session.counters.composition_revision
+        )
+        expect(initial_frame.composition_revision).to_equal(
+            before_composition_revision
+        )
+        val reused_result = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        ))
+        expect(reused_result.ok).to_be(true)
+        val reused_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), reused_result.wire
+            ).message,
+            64,
+            48
+        )
+        expect(reused_frame.ok).to_be(true)
+        val after = worker.render_session.counters
+
+        expect(after.serialize_count).to_equal(1)
+        expect(after.parse_count).to_equal(1)
+        expect(after.css_count).to_equal(1)
+        expect(after.style_count).to_equal(1)
+        expect(after.layout_count).to_equal(1)
+        expect(after.paint_count).to_equal(1)
+        expect(after.reuse_count).to_equal(1)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        expect(reused_frame.composition_revision).to_equal(
+            before_composition_revision
+        )
+        expect(worker.render_session.checksum_revision).to_equal(-1)
+        expect(worker.render_session.checksum_cache).to_equal("")
+        val requested_checksum = worker.render_session.composition_checksum()
+        expect(requested_checksum.len()).to_equal(64)
+        expect(worker.render_session.checksum_revision).to_equal(
+            after.composition_revision
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+        expect(worker.render_session.checksum_revision).to_equal(
+            after.composition_revision
+        )
+        expect(worker.render_session.checksum_cache).to_equal(
+            requested_checksum
+        )
+        expect(
+            worker.render_session.composition_checksum()
+        ).to_equal(requested_checksum)
+        expect(after.retained_node_count).to_be_greater_than(0)
+        expect(after.retained_style_count).to_be_greater_than(0)
+        expect(after.retained_box_count).to_be_greater_than(0)
+        expect(after.retained_command_count).to_be_greater_than(0)
+        worker.close()
+        expect(worker.render_session.counters.retained_node_count).to_equal(0)
+        expect(worker.render_session.counters.retained_style_count).to_equal(0)
+        expect(worker.render_session.counters.retained_box_count).to_equal(0)
+        expect(worker.render_session.counters.retained_command_count).to_equal(0)
+
+    it "selectively invalidates image viewport animation scroll and caret paint":
+        var image_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        image_worker.browser.register_resource(
+            "https://assets.test/pixel.png",
+            _worker_png_hex(0xFF123456u32)
+        )
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<img src='https://assets.test/pixel.png'>"
+        )).ok).to_be(true)
+        val image_uri = image_worker.browser.image_resources[0].image_uri
+        val image_checksum = (
+            image_worker.render_session.composition_checksum()
+        )
+        image_worker.browser.image_resources = [
+            simpleos_host_gpu_image_resource(
+                image_uri, 1, 1, [0xFFABCDEFu32]
+            )
+        ]
+        image_worker.browser._advance_resource_revision()
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val image_after = image_worker.render_session.counters
+        expect(image_after.parse_count).to_equal(1)
+        expect(image_after.css_count).to_equal(1)
+        expect(image_after.style_count).to_equal(1)
+        expect(image_after.layout_count).to_equal(1)
+        expect(image_after.paint_count).to_equal(2)
+        expect(image_after.composition_revision).to_equal(2)
+        expect(image_worker.render_session.checksum_revision).to_equal(-1)
+        expect(image_worker.render_session.checksum_cache).to_equal("")
+        expect(
+            image_worker.render_session.composition_checksum()
+        ).to_equal(image_checksum)
+
+        var viewport_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(viewport_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@media(min-width:80px){main{width:80px}}main{width:32px;height:8px}</style><main></main>"
+        )).ok).to_be(true)
+        val resize = browser_renderer_resize_encode(7, 3, 96, 48)
+        expect(viewport_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resize.wire
+        ).message).ok).to_be(true)
+        val viewport_after = viewport_worker.render_session.counters
+        expect(viewport_after.parse_count).to_equal(1)
+        expect(viewport_after.css_count).to_equal(2)
+        expect(viewport_after.style_count).to_equal(2)
+        expect(viewport_after.layout_count).to_equal(2)
+        expect(viewport_after.paint_count).to_equal(2)
+        expect(viewport_after.composition_revision).to_equal(2)
+
+        step("Reuse parsed layout work across unchanged animation frames")
+        step("Render HTML and CSS through canonical Draw IR")
+        var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes unusedLayout{from{width:1px}to{width:2px}}@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
+        )).ok).to_be(true)
+        val animation_checksum = (
+            animation_worker.render_session.composition_checksum()
+        )
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        val animation_after = animation_worker.render_session.counters
+        expect(animation_after.parse_count).to_equal(1)
+        expect(animation_after.css_count).to_equal(1)
+        expect(animation_after.style_count).to_equal(2)
+        expect(animation_after.layout_count).to_equal(1)
+        expect(animation_after.paint_count).to_equal(2)
+        expect(
+            animation_worker.render_session.composition_checksum() ==
+            animation_checksum
+        ).to_be(false)
+        val animation_result = (
+            animation_worker.render_session.current_result.unwrap()
+        )
+        val animation_commands = animation_result.composition.batches[0].commands
+        val animation_stage = _worker_command_index(
+            animation_commands, "stage"
+        )
+        expect(animation_stage).to_be_greater_than(-1)
+        expect(animation_commands[animation_stage].color).to_equal(
+            0xFF8A5397u32
+        )
+        val animation_raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val animation_pixels = animation_raster.render_draw_ir_composition(
+            animation_result.composition, []
+        )
+        animation_raster.shutdown()
+        var animation_midpoint_pixels: i64 = 0
+        for pixel in animation_pixels.pixels:
+            if pixel == 0xFF8A5397u32:
+                animation_midpoint_pixels = animation_midpoint_pixels + 1
+        expect(animation_midpoint_pixels).to_equal(32 * 24)
+        expect(animation_pixels.skipped_command_count).to_equal(0)
+
+        var shadowed_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(shadowed_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}@keyframes grow{}#shadowed{width:24px;height:16px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='shadowed'></div>"
+        )).ok).to_be(true)
+        val shadowed_initial = (
+            shadowed_worker.render_session.current_result.unwrap()
+        )
+        val shadowed_initial_commands = (
+            shadowed_initial.composition.batches[0].commands
+        )
+        val shadowed_initial_stage = _worker_command_index(
+            shadowed_initial_commands, "shadowed"
+        )
+        expect(shadowed_initial_stage).to_be_greater_than(-1)
+        expect(shadowed_initial_commands[shadowed_initial_stage].width).to_equal(
+            24
+        )
+        expect(shadowed_initial.animation_property_work_count).to_equal(0)
+        val shadowed_checksum = (
+            shadowed_worker.render_session.composition_checksum()
+        )
+        expect(shadowed_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        val shadowed_after = shadowed_worker.render_session.counters
+        expect(shadowed_after.parse_count).to_equal(1)
+        expect(shadowed_after.css_count).to_equal(1)
+        expect(shadowed_after.style_count).to_equal(2)
+        expect(shadowed_after.layout_count).to_equal(1)
+        expect(shadowed_after.paint_count).to_equal(2)
+        expect(shadowed_after.composition_revision).to_equal(2)
+        val shadowed_result = (
+            shadowed_worker.render_session.current_result.unwrap()
+        )
+        val shadowed_commands = shadowed_result.composition.batches[0].commands
+        val shadowed_stage = _worker_command_index(
+            shadowed_commands, "shadowed"
+        )
+        expect(shadowed_stage).to_be_greater_than(-1)
+        expect(shadowed_commands[shadowed_stage].width).to_equal(24)
+        expect(shadowed_result.animation_property_work_count).to_equal(0)
+        expect(
+            shadowed_worker.render_session.composition_checksum()
+        ).to_equal(shadowed_checksum)
+
+        var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(scroll_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main style='height:160px'>scroll</main>"
+        )).ok).to_be(true)
+        val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)
+        val scroll_checksum = (
+            scroll_worker.render_session.composition_checksum()
+        )
+        expect(scroll_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), scroll.wire
+        ).message).ok).to_be(true)
+        val scroll_after = scroll_worker.render_session.counters
+        expect(scroll_after.parse_count).to_equal(1)
+        expect(scroll_after.css_count).to_equal(1)
+        expect(scroll_after.style_count).to_equal(1)
+        expect(scroll_after.layout_count).to_equal(1)
+        expect(scroll_after.paint_count).to_equal(2)
+        expect(scroll_after.composition_revision).to_equal(2)
+        expect(
+            scroll_worker.render_session.composition_checksum() ==
+            scroll_checksum
+        ).to_be(false)
+
+        var caret_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<input id='field' data-focused value='caret'>"
+        )).ok).to_be(true)
+        val caret_checksum = (
+            caret_worker.render_session.composition_checksum()
+        )
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "600"
+        )).ok).to_be(true)
+        val caret_after = caret_worker.render_session.counters
+        expect(caret_after.parse_count).to_equal(1)
+        expect(caret_after.css_count).to_equal(1)
+        expect(caret_after.style_count).to_equal(1)
+        expect(caret_after.layout_count).to_equal(1)
+        expect(caret_after.paint_count).to_equal(2)
+        expect(caret_after.composition_revision).to_equal(2)
+        expect(
+            caret_worker.render_session.composition_checksum() ==
+            caret_checksum
+        ).to_be(false)
+
+    it "replaces document stages without growing retained state":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='first'>first</main>"
+        )).ok).to_be(true)
+        val first_checksum = worker.render_session.composition_checksum()
+        val first_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        expect(worker.browser.eval_script(
+            "document.body.innerHTML = '<main id=\"second\">second</main>'"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        worker.browser.current_style_html = (
+            "<style>main { color:#2563eb; }</style>"
+        )
+        worker.browser._advance_style_revision()
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "simple-renderer://replacement",
+            "<main id='third'>third</main>"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 5, payload: "48"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(4)
+        expect(after.parse_count).to_equal(4)
+        expect(after.css_count).to_equal(4)
+        expect(after.style_count).to_equal(4)
+        expect(after.layout_count).to_equal(4)
+        expect(after.paint_count).to_equal(4)
+        expect(after.composition_revision).to_equal(4)
+        expect(
+            worker.render_session.composition_checksum() == first_checksum
+        ).to_be(false)
+        expect(
+            after.retained_command_count
+        ).to_be_less_than(first_commands + 2)
+
+    it "invalidates every semantic stage for a title-only mutation":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<title>before</title><main>same pixels</main>"
+        )).ok).to_be(true)
+        val before_checksum = worker.render_session.composition_checksum()
+        expect(worker.browser.eval_script(
+            "document.title = 'after'"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(2)
+        expect(after.parse_count).to_equal(2)
+        expect(after.css_count).to_equal(2)
+        expect(after.style_count).to_equal(2)
+        expect(after.layout_count).to_equal(2)
+        expect(after.paint_count).to_equal(2)
+        expect(after.composition_revision).to_equal(2)
+        expect(
+            worker.render_session.composition_checksum()
+        ).to_equal(before_checksum)
+
+    it "closes the real browser document resource and runtime owners":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        worker.browser.register_resource(
+            "https://assets.test/pixel.png",
+            _worker_png_hex(0xFF123456u32)
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<img src='https://assets.test/pixel.png'>"
+        )).ok).to_be(true)
+        expect(worker.browser.eval_script(
+            "setTimeout(function(){ document.title = 'late'; }, 1000)"
+        ).is_ok()).to_be(true)
+        expect(worker.browser.begin_network_navigation(
+            "https://next.test/", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        expect(worker.browser.image_resources.len()).to_equal(1)
+        expect(
+            worker.browser.admitted_image_sources.len()
+        ).to_equal(1)
+        expect(worker.browser.has_pending_requests()).to_be(true)
+        expect(worker.browser.runtime_state != nil).to_be(true)
+        expect(
+            worker.browser.next_script_timer_due_ms()
+        ).to_be_greater_than(-1)
+
+        worker.close()
+        expect(worker.browser.image_resources.len()).to_equal(0)
+        expect(worker.browser.admitted_image_sources.len()).to_equal(0)
+        expect(worker.browser.has_pending_requests()).to_be(false)
+        expect(worker.browser.inflight_requests.len()).to_equal(0)
+        expect(worker.browser.active_load).to_be_nil()
+        expect(worker.browser.runtime_state).to_be_nil()
+        expect(worker.browser.next_script_timer_due_ms()).to_equal(-1)
+        expect(worker.browser.resource_overrides.len()).to_equal(0)
+        expect(worker.browser.current_body_html).to_equal("")
+        expect(worker.browser.current_style_html).to_equal("")
+        expect(worker.browser.source_html).to_equal("")
+        expect(worker.browser.history.len()).to_equal(0)
+
+    it "releases retained image pixels when the renderer process closes":
+        var process = HostedBrowserRendererProcess.create(19, 64, 48)
+        process.retained_image_resources = [
+            simpleos_host_gpu_image_resource(
+                "https://example.test/frame.png",
+                4,
+                4,
+                [0xff010203u32; 16]
+            )
+        ]
+        expect(process.close()).to_be(true)
+        expect(process.retained_image_resources.len()).to_equal(0)
+
+    it "restores bounded bookmarks into a fresh external renderer":
+        val saved_url = "https://restart.test/saved"
+        val snapshot = BrowserBookmarkSnapshot.create([
+            Pair(first: saved_url, second: "Saved bookmark")
+        ])
+        var process = HostedBrowserRendererProcess.create(19, 64, 48)
+        process.state = "active"
+        expect(process.begin_bookmark_snapshot(
+            snapshot, 2000
+        ).is_ok()).to_be(true)
+        val process_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(19), process.pending_wire
+        )
+        expect(browser_renderer_bookmark_snapshot_decode(
+            process_message.message
+        ).ok).to_be(true)
+
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>fresh renderer</p>"
+        )).ok).to_be(true)
+        val encoded = browser_renderer_bookmark_snapshot_encode(
+            7, 3, [saved_url], ["Saved bookmark"]
+        )
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        )
+        expect(worker.handle(decoded.message).ok).to_be(true)
+        val bookmarks = ui_access_find_nodes(
+            worker.browser.ui_access_snapshot(),
+            "browser:session", "link", "Saved bookmark", 1
+        )
+        expect(bookmarks.len()).to_equal(1)
+        expect(bookmarks[0].canonical_id).to_equal(
+            "browser:session#bookmark_{worker.browser.ui_access_revision}_0"
+        )
+        worker.browser.register_resource(
+            saved_url, "<p>restored bookmark</p>"
+        )
+        expect(worker.browser.ui_access_act(WinTextActionRequest(
+            target_id: bookmarks[0].canonical_id,
+            action: "click", text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(worker.browser.current_url).to_equal(saved_url)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "bookmark-snapshot", generation: 7, request_id: 4,
+            payload: "SBB1\t1\n%%%\t%%%"
+        )).ok).to_be(false)
+        var too_many_urls: [text] = []
+        var too_many_titles: [text] = []
+        var index = 0
+        while index < 257:
+            too_many_urls.push("https://restart.test/{index}")
+            too_many_titles.push("bookmark")
+            index = index + 1
+        expect(browser_renderer_bookmark_snapshot_encode(
+            7, 4, too_many_urls, too_many_titles
+        ).ok).to_be(false)
+        val host = (
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        expect(host).to_contain("profile.load_bookmarks()")
+        expect(host).to_contain(
+            "browser_renderer.begin_bookmark_snapshot("
+        )
+
+    it "releases the previous hit graph before repaint allocation":
+        val source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        val release_at = source.find("self.last_hit_index = nil")
+        val repaint_at = source.find("val frame = _worker_frame(")
+        expect(release_at).to_be_greater_than(-1)
+        expect(repaint_at).to_be_greater_than(release_at)
+
+    it "routes document snapshots through one retained semantic render session":
+        val source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        expect(source).to_contain(
+            "val snapshot = session.render_snapshot_since("
+        )
+        expect(source).to_contain(
+            "session.prepare_css_animation_instances_with_html(width, document_html)"
+        )
+        expect(source).to_contain(
+            "val layout = render_session.render("
+        )
+
+    it "rejects hidden worker markers outside the exact spawn shape":
+        expect(hosted_browser_renderer_worker_main([
+            "hosted-entry", "extra", BROWSER_RENDERER_WORKER_ARG,
+            "7", "64", "48"
+        ])).to_equal(64)
+        expect(hosted_browser_renderer_worker_main([
+            "hosted-entry", BROWSER_RENDERER_WORKER_ARG,
+            "7", "64", "48", "tail"
+        ])).to_equal(64)
+
+    it "drains a coalesced Stop already buffered behind a command":
+        val init = browser_renderer_message_encode(
+            "init", 7, 2, "<p>pending navigation</p>"
+        )
+        val stop = browser_renderer_navigation_encode(
+            7, 3, "stop", "", "", "", "", ""
+        )
+        val first = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), init.wire + stop.wire
+        )
+        expect(first.status).to_equal("message")
+        expect(first.decoder.buffer_len).to_be_greater_than(0)
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(first.message).ok).to_be(true)
+
+        val second = browser_renderer_decoder_feed(first.decoder, "")
+        expect(second.status).to_equal("message")
+        expect(browser_renderer_navigation_decode(
+            second.message
+        ).action).to_equal("stop")
+        expect(worker.handle(second.message).ok).to_be(true)
+        expect(second.decoder.buffer_len).to_equal(0)
+
+        val source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        expect(source).to_contain("if decoder.buffer_len > 0:")
+        expect(source).to_contain(
+            "browser_renderer_decoder_feed(decoder, \"\")"
+        )
+
+    it "renders HTML CSS Simple Script JavaScript and CSS animation into bounded DrawIR":
+        val script_first = _render(SCRIPT_ANIMATION_HTML, 0)
+        val script_animated = _render(SCRIPT_ANIMATION_HTML, 16)
+        val css_first = _render(CSS_ANIMATION_HTML, 0)
+        val css_middle = _render(CSS_ANIMATION_HTML, 500)
+        val css_last = _render(CSS_ANIMATION_HTML, 1000)
+
+        expect(script_first.ok).to_be(true)
+        expect(script_animated.ok).to_be(true)
+        expect(css_first.ok).to_be(true)
+        expect(css_middle.ok).to_be(true)
+        expect(css_last.ok).to_be(true)
+        expect(script_first.wire == script_animated.wire).to_be(false)
+        expect(css_first.wire == css_middle.wire).to_be(false)
+        expect(css_middle.wire == css_last.wire).to_be(false)
+
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), script_animated.wire
+        )
+        expect(decoded.status).to_equal("message")
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.ok).to_be(true)
+        expect(frame.composition.batches[0].commands.len()).to_be_greater_than(0)
+        expect(frame.next_animation_ms).to_equal(-1)
+
+        val script_initial_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), script_first.wire
+        )
+        expect(browser_renderer_frame_decode(
+            script_initial_message.message, 64, 48
+        ).next_animation_ms).to_equal(16)
+        val css_initial_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), css_first.wire
+        )
+        expect(browser_renderer_frame_decode(
+            css_initial_message.message, 64, 48
+        ).next_animation_ms).to_equal(16)
+        val css_last_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), css_last.wire
+        )
+        expect(browser_renderer_frame_decode(
+            css_last_message.message, 64, 48
+        ).next_animation_ms).to_equal(-1)
+
+    it "sleeps until a delayed CSS animation can start":
+        val initialized = _render(
+            "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation-name:pulse;animation-duration:1000ms;animation-delay:3600000ms;animation-timing-function:linear}</style><div id='stage'></div>",
+            0
+        )
+        expect(initialized.ok).to_be(true)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), initialized.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.next_animation_ms).to_equal(3600000)
+
+    it "rejects non-init input":
+        val rejected = hosted_browser_renderer_handle_init(
+            BrowserRendererMessage(
+                kind: "state", generation: 7, request_id: 1, payload: ""
+            ),
+            64,
+            48,
+            0,
+            2
+        )
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("expected-init")
+
+    it "retains one browser session across animation frames":
+        var session = BrowserSession.new()
+        val first = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "init",
+                generation: 7,
+                request_id: 2,
+                payload: SCRIPT_ANIMATION_HTML
+            ),
+            64,
+            48,
+            false,
+            0,
+            2
+        )
+        val animated = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 3,
+                payload: "16"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+
+        expect(first.ok).to_be(true)
+        expect(animated.ok).to_be(true)
+        expect(first.wire == animated.wire).to_be(false)
+        expect(animated.animation_time_ms).to_equal(16)
+
+    it "schedules frames after script starts a late CSS animation":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#a,#b{width:32px;height:16px;background-color:#ef4444}#a,.running{animation:pulse 500ms linear forwards}</style><div id='a'></div><div id='b'></div><script>setTimeout(function(){document.getElementById('b').className='running';},500);</script>"
+        ))
+        expect(initialized.ok).to_be(true)
+
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "500"
+        ))
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.next_animation_ms).to_equal(516)
+
+    it "caps warning diagnostics before encoding animation frames":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>bounded diagnostics</p>"
+        )).ok).to_be(true)
+        expect(worker.last_hit_index != nil).to_be(true)
+        var index = 0
+        while index < 256:
+            worker.browser._append_warning(
+                "warning-{index}-abcdefghijklmnopqrstuvwxyz0123456789"
+            )
+            index = index + 1
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        ))
+        expect(worker.last_hit_index != nil).to_be(true)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.ok).to_be(true)
+        expect(frame.diagnostics.len()).to_equal(4096)
+        expect(frame.diagnostics).to_start_with("warning-0-")
+
+    it "resizes the existing session and emits matching frame bounds":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<div style='width:100%;height:100%'></div>"
+        ))
+        expect(initialized.ok).to_be(true)
+        val encoded = browser_renderer_resize_encode(7, 3, 96, 64)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        )
+        val resized = worker.handle(decoded.message)
+        expect(resized.ok).to_be(true)
+        val frame_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resized.wire
+        )
+        expect(browser_renderer_frame_decode(
+            frame_message.message, 96, 64
+        ).ok).to_be(true)
+        expect(worker.width).to_equal(96)
+        expect(worker.height).to_equal(64)
+
+    it "scrolls pixels and hit testing together within document bounds":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#top{height:20px;background:#ef4444}#space{height:80px}#below{display:block;width:40px;height:20px;background:#2563eb}</style><div id='top'></div><div id='space'></div><button id='below'>Below</button>"
+        ))
+        val initial_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initialized.wire
+            ).message,
+            80, 50
+        )
+        expect(initial_frame.ok).to_be(true)
+        expect(_worker_command_index(
+            initial_frame.composition.batches[0].commands, "below"
+        )).to_equal(-1)
+
+        val half_a = browser_renderer_scroll_encode(7, 3, 1, 500)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), half_a.wire
+        ).message).ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(500)
+        val half_b = browser_renderer_scroll_encode(7, 4, 2, 500)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), half_b.wire
+        ).message).ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(1000)
+        val encoded = browser_renderer_scroll_encode(7, 5, 3, 69000)
+        val scrolled = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        ).message)
+        val scrolled_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), scrolled.wire
+            ).message,
+            80, 50
+        )
+        expect(scrolled_frame.ok).to_be(true)
+        expect(_worker_command_index(
+            scrolled_frame.composition.batches[0].commands, "below"
+        )).to_be_greater_than(-1)
+        expect(worker.scroll_milli_y).to_equal(70000)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 5, 35
+        )).to_equal("id:below")
+
+    it "resets scroll when cached history changes the document":
+        val tall = "<style>body{{margin:0}}main{height:240px}</style><input id='field' value='abc' data-focused data-input-dirty onblur=\"history.pushState(null, '', '/blurred')\"><main></main>"
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: tall
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://b.test/", tall
+        ).is_ok()).to_be(true)
+
+        worker.scroll_milli_y = 12000
+        worker.pressed_target_id = "held-target"
+        worker.pressed_pointer_default_prevented = true
+        worker.pressed_chrome_control = "address"
+        worker.chrome_focus = "address"
+        worker.address_replace_on_text = true
+        worker.input_view_target_key = "id:field"
+        worker.input_view_start_byte = 2
+        worker.caret_blink_epoch_ms = 42
+        worker.browser.text_selection_route = Some(
+            _worker_dom_route(worker, "field")
+        )
+        worker.browser.text_selection_anchor_byte = 1
+        worker.browser.text_selection_focus_byte = 2
+        val mismatched = browser_renderer_navigation_encode(
+            7, 3, "back", "https://wrong.test/", "GET", "", "", ""
+        )
+        val rejected = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), mismatched.wire
+        ).message)
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("navigation-target-mismatch")
+        expect(worker.scroll_milli_y).to_equal(12000)
+        expect(worker.browser.current_url).to_equal("https://b.test/")
+        expect(worker.browser.current_index).to_equal(1)
+        expect(worker.browser.history_back_url()).to_equal(
+            "simple-renderer://document"
+        )
+        expect(worker.browser.history_forward_url()).to_equal("")
+        expect(worker.pressed_target_id).to_equal("held-target")
+        expect(worker.pressed_pointer_default_prevented).to_be(true)
+        expect(worker.pressed_chrome_control).to_equal("address")
+        expect(worker.chrome_focus).to_equal("address")
+        expect(worker.address_replace_on_text).to_be(true)
+        expect(worker.input_view_target_key).to_equal("id:field")
+        expect(worker.input_view_start_byte).to_equal(2)
+        expect(worker.caret_blink_epoch_ms).to_equal(42)
+        expect(_worker_focused_author_id(worker)).to_equal("field")
+        expect(_worker_selection_author_id(worker)).to_equal("field")
+        expect(worker.browser.text_selection_anchor_byte).to_equal(1)
+        expect(worker.browser.text_selection_focus_byte).to_equal(2)
+        expect(worker.expected_request_id).to_equal(3)
+
+        val back = browser_renderer_navigation_encode(
+            7, 3, "back", "simple-renderer://document", "GET", "", "", ""
+        )
+        val back_result = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), back.wire
+        ).message)
+        expect(back_result.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(back_result.resolved_scroll_y).to_equal(0)
+        val back_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), back_result.wire
+            ).message,
+            80, 50
+        )
+        expect(back_frame.history_state_present).to_be(true)
+        expect(back_frame.history_current_url).to_equal(
+            "simple-renderer://document"
+        )
+        expect(back_frame.history_forward_url).to_equal("https://b.test/")
+
+        worker.scroll_milli_y = 9000
+        val mismatched_forward = browser_renderer_navigation_encode(
+            7, 4, "forward", "https://wrong.test/", "GET", "", "", ""
+        )
+        val rejected_forward = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), mismatched_forward.wire
+        ).message)
+        expect(rejected_forward.ok).to_be(false)
+        expect(rejected_forward.reason).to_equal("navigation-target-mismatch")
+        expect(worker.browser.current_url).to_equal(
+            "simple-renderer://document"
+        )
+        expect(worker.browser.history_forward_url()).to_equal("https://b.test/")
+        expect(worker.scroll_milli_y).to_equal(9000)
+        expect(worker.expected_request_id).to_equal(4)
+
+        val forward = browser_renderer_navigation_encode(
+            7, 4, "forward", "https://b.test/", "GET", "", "", ""
+        )
+        val forward_result = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), forward.wire
+        ).message)
+        expect(forward_result.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(forward_result.resolved_scroll_y).to_equal(0)
+        val forward_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), forward_result.wire
+            ).message,
+            80, 50
+        )
+        expect(forward_frame.history_current_url).to_equal("https://b.test/")
+        expect(forward_frame.history_back_url).to_equal("")
+
+        worker.chrome_focus = "address"
+        val mismatched_reload = browser_renderer_navigation_encode(
+            7, 5, "reload", "https://wrong.test/", "GET", "", "", ""
+        )
+        val rejected_reload = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), mismatched_reload.wire
+        ).message)
+        expect(rejected_reload.ok).to_be(false)
+        expect(rejected_reload.reason).to_equal("navigation-target-mismatch")
+        expect(worker.browser.current_url).to_equal("https://b.test/")
+        expect(worker.browser.is_loading).to_be(false)
+        expect(worker.chrome_focus).to_equal("address")
+        expect(worker.expected_request_id).to_equal(5)
+
+        val reload = browser_renderer_navigation_encode(
+            7, 5, "reload", "https://b.test/", "GET", "", "", ""
+        )
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), reload.wire
+        ).message).ok).to_be(true)
+        expect(worker.browser.is_loading).to_be(true)
+        expect(_worker_focused_author_id(worker)).to_equal("")
+        expect(worker.browser.current_body_html.contains(
+            "data-input-dirty"
+        )).to_be(false)
+        expect(worker.browser.current_url).to_equal("https://b.test/")
+
+        val stop = browser_renderer_navigation_encode(
+            7, 6, "stop", "", "", "", "", ""
+        )
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), stop.wire
+        ).message).ok).to_be(true)
+        expect(worker.browser.is_loading).to_be(false)
+        expect(worker.browser.current_url).to_equal("https://b.test/")
+        expect(worker.browser.current_body_html.contains(
+            "data-input-dirty"
+        )).to_be(false)
+
+    it "clips hidden descendants from scrolling painting and hit testing":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#clip{position:relative;width:10px;height:20px;overflow:hidden}button{position:absolute;width:20px;height:10px}#hidden{left:20px;top:0}#deep{left:0;top:100px}</style><div id='clip'><button id='hidden'>Hidden</button><button id='deep'>Deep</button></div>"
+        )).ok).to_be(true)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 25, 5
+        ) == "id:hidden").to_be(false)
+        val encoded = browser_renderer_scroll_encode(7, 3, 1, 100000)
+        val scrolled = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        ).message)
+        val frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), scrolled.wire
+            ).message,
+            80, 50
+        )
+        expect(frame.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(_worker_command_index(
+            frame.composition.batches[0].commands, "hidden"
+        )).to_equal(-1)
+        expect(_worker_command_index(
+            frame.composition.batches[0].commands, "deep"
+        )).to_equal(-1)
+
+    it "starts navigated CSS animation on the document clock":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>old</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "5000"
+        )).ok).to_be(true)
+        worker.scroll_milli_y = 12000
+        val navigation = browser_renderer_navigation_encode(
+            7, 4, "open", "https://example.test/", "GET", "", "", ""
+        )
+        val navigation_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), navigation.wire
+        )
+        val requested = worker.handle(navigation_message.message)
+        val fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), requested.wire
+        )
+        val fetch = browser_renderer_fetch_request_decode(
+            fetch_message.message
+        )
+        expect(fetch.credentials).to_equal("include")
+        val response = browser_renderer_network_response_encode(
+            7, 5, fetch.request_id, fetch.kind, fetch.url,
+            200, "Content-Type: text/html", CSS_ANIMATION_HTML, ""
+        )
+        val response_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), response.wire
+        )
+        val committed = worker.handle(response_message.message)
+        val frame_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), committed.wire
+        )
+        val frame = browser_renderer_frame_decode(
+            frame_message.message, 64, 48
+        )
+        expect(frame.ok).to_be(true)
+        expect(worker.browser.animation_start_time_ms).to_equal(5000)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(frame.next_animation_ms).to_equal(5016)
+
+    it "emits ordered hosted script cookie writes outside cookie-free fetch headers":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://safe.test/", "<p>safe</p>"
+        ).is_ok()).to_be(true)
+        val _ = worker.browser.eval_script(
+            "document.cookie = 'first=one; Path=/'; " +
+            "document.cookie = 'second=two; Path=/'; " +
+            "fetch('/data', { credentials: 'include' })"
+        )
+
+        val emitted = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "A1\t0"
+        ))
+        expect(emitted.ok).to_be(true)
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), emitted.wire
+        )
+        expect(message.message.kind).to_equal("fetch_request")
+        val fetch = browser_renderer_fetch_request_decode(message.message)
+        expect(fetch.ok).to_be(true)
+        expect(fetch.credentials).to_equal("include")
+        expect(fetch.headers.contains("Cookie:")).to_be(false)
+        expect(fetch.script_cookie_writes.len()).to_equal(2)
+        expect(fetch.script_cookie_writes[0]).to_equal("first=one; Path=/")
+        expect(fetch.script_cookie_writes[1]).to_equal("second=two; Path=/")
+        expect(
+            worker.browser.take_pending_script_cookie_writes().len()
+        ).to_equal(0)
+
+    it "brokers a clicked form submission as a validated document navigation":
+        val html = (
+            "<style>html,body{{margin:0}}button{width:40px;height:20px}</style>" +
+            "<form action='/go' method='post'>" +
+            "<button id='go' type='submit'>Go</button></form>"
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: html
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://source.test/page", html
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "0"
+        )).ok).to_be(true)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 5, 5
+        )).to_equal("id:go")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t1\t5\t5\t1"
+        )).ok).to_be(true)
+        val clicked = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 5,
+            payload: "P1\t2\t5\t5\t0"
+        ))
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), clicked.wire
+        )
+        val navigation = browser_renderer_fetch_request_decode(
+            message.message
+        )
+        expect(navigation.kind).to_equal("document")
+        expect(navigation.url).to_equal("https://source.test/go")
+        expect(navigation.method).to_equal("POST")
+        expect(navigation.credentials).to_equal("include")
+
+        var broker = HostedBrowserRendererProcess.create(7, 80, 40)
+        broker.document_url = "https://source.test/page"
+        broker.document_origin = "https://source.test"
+        expect(broker.authorize_renderer_navigation(navigation)).to_be(true)
+        val policy = hosted_browser_renderer_request_policy(
+            broker.document_origin,
+            broker.navigation_permit,
+            navigation,
+            navigation.url
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.consumes_navigation).to_be(true)
+
+    it "activates a focused submit input on Space release":
+        val html = (
+            "<form action='/space' method='post'>" +
+            "<input id='go' type='submit' data-focused value='Go'></form>"
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: html
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://source.test/page", html
+        ).is_ok()).to_be(true)
+        expect(_worker_focused_author_id(worker)).to_equal("go")
+
+        val down = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 3,
+            payload: "K1\t1\t32\t1"
+        ))
+        val down_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), down.wire
+        )
+        expect(down_message.message.kind).to_equal("frame")
+
+        val up = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 4,
+            payload: "K1\t2\t32\t0"
+        ))
+        val up_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), up.wire
+        )
+        val navigation = browser_renderer_fetch_request_decode(
+            up_message.message
+        )
+        expect(navigation.kind).to_equal("document")
+        expect(navigation.url).to_equal("https://source.test/space")
+        expect(navigation.method).to_equal("POST")
+
+    it "preserves canonical keyboard payload through the K2 worker path":
+        val html = (
+            "<button id='stay' data-focused>Stay</button>" +
+            "<button id='next'>Next</button>" +
+            "<script>var stay=document.getElementById('stay');" +
+            "stay.addEventListener('keydown',function(event){" +
+            "document.title=event.key+'|'+event.code+'|'+event.shiftKey+'|'+" +
+            "event.altKey+'|'+event.ctrlKey+'|'+event.metaKey+'|'+event.repeat;" +
+            "if(event.key==='Tab'&&event.shiftKey){event.preventDefault();}});" +
+            "stay.addEventListener('keyup',function(event){" +
+            "document.title=event.type+'|'+event.key+'|'+event.code;});</script>"
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: html
+        )).ok).to_be(true)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 3,
+            payload: "K2\t1\t65\t1\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.current_title).to_equal(
+            "A|KeyA|true|false|false|false|false"
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 4,
+            payload: "K2\t2\t37\t1\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_title).to_equal(
+            "ArrowLeft|ArrowLeft|false|false|false|false|false"
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K2\t3\t37\t0\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_title).to_equal(
+            "keyup|ArrowLeft|ArrowLeft"
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K2\t4\t9\t1\t1"
+        )).ok).to_be(true)
+        expect(_worker_focused_author_id(worker)).to_equal("stay")
+
+    it "fails closed when a script exceeds the cookie write batch":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://safe.test/", "<p>safe</p>"
+        ).is_ok()).to_be(true)
+        var i: i64 = 0
+        while i < 33:
+            val _ = worker.browser.eval_script(
+                "document.cookie = 'queued{i}=yes; Path=/'"
+            )
+            i = i + 1
+        val result = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "A1\t0"
+        ))
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("renderer-script-cookie-write-limit")
+
+    it "keeps DOM focus and trusted chrome state across bounded actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init",
+            generation: 7,
+            request_id: 2,
+            payload: "<input id='name' value='' onkeydown='set-attr:data-down=yes' onkeyup='set-attr:data-up=yes'>"
+        ))
+        expect(initialized.ok).to_be(true)
+        expect(worker.last_hit_index != nil).to_be(true)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t5\t5\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t5\t5\t0"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t3\t87\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 6,
+            payload: "T1\t4\t1\nw"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 7,
+            payload: "K1\t5\t87\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_body_html).to_contain("value=\"w\"")
+        expect(worker.browser.current_body_html).to_contain("data-down=\"yes\"")
+        expect(worker.browser.current_body_html).to_contain("data-up=\"yes\"")
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 8,
+            payload: "C1\t6\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 9,
+            payload: "C1\t7\t0\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 10,
+            payload: "T1\t8\t20\nhttps://example.test"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("https://example.test")
+
+        val submitted = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 11,
+            payload: "K1\t9\t13\t1"
+        ))
+        expect(submitted.ok).to_be(false)
+        expect(submitted.reason).to_equal("navigation-command-required")
+
+        worker.browser.apply_set_cookie_header(
+            "sid=broker-owned; Secure; Path=/",
+            "https://example.test/"
+        )
+        val navigation_wire = browser_renderer_navigation_encode(
+            7, 11, "open", "https://example.test", "GET", "", "", ""
+        )
+        val navigation_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), navigation_wire.wire
+        )
+        val requested = worker.handle(navigation_message.message)
+        expect(requested.ok).to_be(true)
+        val fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), requested.wire
+        )
+        expect(fetch_message.message.kind).to_equal("fetch_request")
+        val fetch = browser_renderer_fetch_request_decode(
+            fetch_message.message
+        )
+        expect(fetch.ok).to_be(true)
+        expect(fetch.reply_to_request_id).to_equal(11)
+        expect(fetch.kind).to_equal("document")
+        expect(fetch.credentials).to_equal("include")
+        expect(fetch.headers.contains("Cookie:")).to_be(false)
+        expect(fetch.url.starts_with("https://example.test")).to_be(true)
+
+        val response_wire = browser_renderer_network_response_encode(
+            7, 12, fetch.request_id, fetch.kind, fetch.url,
+            200, "Content-Type: text/html",
+            "<style>body{{color:#2563eb}}</style><button id='loaded'>Loaded</button>",
+            ""
+        )
+        val response_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), response_wire.wire
+        )
+        val committed = worker.handle(response_message.message)
+        expect(committed.ok).to_be(true)
+        expect(worker.browser.current_body_html).to_contain("Loaded")
+
+    it "keeps clicked native controls focused for keyboard activation":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        step("Open a native checkbox in the isolated browser worker")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}input{display:block;width:20px;height:18px}</style><input id='text' value='abc' data-focused><input id='toggle' type='checkbox'>"
+        )).ok).to_be(true)
+        expect(_worker_selection_author_id(worker)).to_equal("text")
+        expect(worker.input_view_target_key).not.to_equal("")
+        worker.input_view_start_byte = 2
+        worker.caret_blink_epoch_ms = 17
+
+        step("Click the checkbox and retain its DOM focus")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t5\t25\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t5\t25\t0"
+        )).ok).to_be(true)
+        expect(_worker_focused_author_id(worker)).to_equal("toggle")
+        expect(worker.browser.text_selection_route).to_be_nil()
+        expect(worker.input_view_target_key).to_equal("")
+        expect(worker.input_view_start_byte).to_equal(0)
+        expect(worker.caret_blink_epoch_ms).to_equal(0)
+        expect(worker.browser.current_body_html).to_contain(
+            "checked=\"checked\""
+        )
+
+        step("Activate the focused checkbox with Space")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t3\t32\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t32\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_body_html.contains(
+            "checked=\"checked\""
+        )).to_be(false)
+
+    it "edits the focused address draft by UTF-8 scalar through worker actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+
+        val korean = browser_renderer_text_encode(7, 5, 3, "한")
+        val korean_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), korean.wire
+        )
+        expect(worker.handle(korean_message.message).ok).to_be(true)
+        val accented = browser_renderer_text_encode(7, 6, 4, "é")
+        val accented_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), accented.wire
+        )
+        expect(worker.handle(accented_message.message).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("한é")
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 7,
+            payload: "K1\t5\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("한")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 8,
+            payload: "K1\t6\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("")
+
+    it "accepts 2048 UTF-8 address bytes and atomically rejects 2049":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+
+        val exact = "é".repeat(1024)
+        val exact_wire = browser_renderer_text_encode(7, 5, 3, exact)
+        expect(exact_wire.ok).to_be(true)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), exact_wire.wire
+        ).message).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(exact)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 6,
+            payload: "C1\t4\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 7,
+            payload: "C1\t5\t0\t7\naddress"
+        )).ok).to_be(true)
+        val oversized_wire = browser_renderer_text_encode(
+            7, 8, 6, exact + "x"
+        )
+        expect(oversized_wire.ok).to_be(true)
+        val rejected = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), oversized_wire.wire
+        ).message)
+
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("address-too-long")
+        expect(worker.browser.address_draft).to_equal(exact)
+        expect(worker.chrome_focus).to_equal("address")
+        expect(worker.address_replace_on_text).to_be(true)
+
+    it "restores the committed address or about blank on Escape":
+        var committed = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(committed.browser.open_html(
+            "https://committed.test/page", "<p>committed</p>"
+        ).is_ok()).to_be(true)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val draft_wire = browser_renderer_text_encode(
+            7, 5, 3, "https://draft.test/"
+        )
+        expect(committed.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), draft_wire.wire
+        ).message).ok).to_be(true)
+        val committed_escape = committed.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t27\t1"
+        ))
+        expect(committed_escape.ok).to_be(true)
+        expect(committed.browser.address_draft).to_equal(
+            "https://committed.test/page"
+        )
+        expect(committed.chrome_focus).to_equal("")
+        expect(committed.address_replace_on_text).to_be(false)
+
+        var blank = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val blank_draft_wire = browser_renderer_text_encode(
+            7, 5, 3, "https://draft.test/"
+        )
+        expect(blank.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blank_draft_wire.wire
+        ).message).ok).to_be(true)
+        val blank_escape = blank.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t27\t1"
+        ))
+        expect(blank_escape.ok).to_be(true)
+        expect(blank.browser.address_draft).to_equal("about:blank")
+        expect(blank.chrome_focus).to_equal("")
+        expect(blank.address_replace_on_text).to_be(false)
+
+    it "fails closed on malformed UTF-8 address drafts through Backspace actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val invalid_continuation = rt_bytes_to_text([0xE2u8, 0x28u8, 0xA1u8])
+        expect(invalid_continuation.len()).to_equal(3)
+        expect(invalid_continuation.byte_at(0)).to_equal(0xE2.to_u8())
+        expect(invalid_continuation.byte_at(1)).to_equal(0x28.to_u8())
+        expect(invalid_continuation.byte_at(2)).to_equal(0xA1.to_u8())
+        worker.browser.address_draft = invalid_continuation
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t1\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(invalid_continuation)
+
+        val truncated = rt_bytes_to_text([0xE2u8, 0x82u8])
+        expect(truncated.len()).to_equal(2)
+        worker.browser.address_draft = truncated
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t2\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(truncated)
+
+    it "maps pointer x through UTF-8 source boundaries before insertion":
+        var worker = HostedBrowserRendererWorkerSession.create(120, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:100px;height:20px}</style><input id='q' value='aéz'>"
+        )).ok).to_be(true)
+        val hit = worker.last_hit_index.unwrap().input_text_hits[0]
+        val x = hit.boundary_x_px[2]
+        val y = hit.y + 1
+        val down = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{x}\t{y}\t1"
+        ))
+        val up = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t{x}\t{y}\t0"
+        ))
+        val typed = worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 5,
+            payload: "T1\t3\t1\nX"
+        ))
+        expect(down.ok).to_be(true)
+        expect(up.ok).to_be(true)
+        expect(typed.ok).to_be(true)
+        expect(down.wire).not.to_equal("")
+        expect(up.wire).not.to_equal("")
+        expect(typed.wire).not.to_equal("")
+        expect(worker.browser.current_body_html).to_contain(
+            "value=\"aéXz\""
+        )
+
+    it "uses initial centered and right-aligned paint baselines for click x":
+        var centered = HostedBrowserRendererWorkerSession.create(140, 40)
+        val centered_init = centered.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:120px;height:20px;text-align:center}</style><input id='q' value='abc'>"
+        ))
+        val centered_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), centered_init.wire
+            ).message,
+            140, 40
+        )
+        val centered_commands = (
+            centered_frame.composition.batches[0].commands
+        )
+        val centered_text_x = centered_commands[_worker_command_index(
+            centered_commands, "q_value"
+        )].x
+        val centered_hit = centered.last_hit_index.unwrap().input_text_hits[0]
+        expect(centered_hit.boundary_x_px[0]).to_equal(centered_text_x)
+        expect(centered.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{centered_hit.boundary_x_px[1]}\t{centered_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(centered.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 4,
+            payload: "T1\t2\t1\nX"
+        )).ok).to_be(true)
+        expect(centered.browser.current_body_html).to_contain(
+            "value=\"aXbc\""
+        )
+
+        var right = HostedBrowserRendererWorkerSession.create(140, 40)
+        val right_init = right.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:120px;height:20px;text-align:right}</style><input id='q' value='abc'>"
+        ))
+        val right_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), right_init.wire
+            ).message,
+            140, 40
+        )
+        val right_commands = right_frame.composition.batches[0].commands
+        val right_text_x = right_commands[_worker_command_index(
+            right_commands, "q_value"
+        )].x
+        val right_hit = right.last_hit_index.unwrap().input_text_hits[0]
+        expect(right_hit.boundary_x_px[0]).to_equal(right_text_x)
+        expect(right.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{right_hit.boundary_x_px[1]}\t{right_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(right.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 4,
+            payload: "T1\t2\t1\nX"
+        )).ok).to_be(true)
+        expect(right.browser.current_body_html).to_contain(
+            "value=\"aXbc\""
+        )
+
+    it "schedules 500ms caret edges and cancels after blank blur":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:40px;height:18px}</style><input id='q' value='a' data-focused>"
+        ))
+        val initialized_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), initialized.wire
+        )
+        val initialized_frame = browser_renderer_frame_decode(
+            initialized_message.message, 80, 40
+        )
+        expect(initialized_frame.next_animation_ms).to_equal(500)
+        expect(_worker_command_index(
+            initialized_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "500"
+        ))
+        val advanced_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val advanced_frame = browser_renderer_frame_decode(
+            advanced_message.message, 80, 40
+        )
+        expect(advanced_frame.next_animation_ms).to_equal(1000)
+        expect(_worker_command_index(
+            advanced_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+
+        val visible_again = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4,
+            payload: "1000"
+        ))
+        val visible_again_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), visible_again.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            visible_again_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+
+        val blurred = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 5,
+            payload: "P1\t1\t79\t39\t1"
+        ))
+        val blurred_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blurred.wire
+        )
+        val blurred_frame = browser_renderer_frame_decode(
+            blurred_message.message, 80, 40
+        )
+        expect(blurred_frame.next_animation_ms).to_equal(-1)
+        expect(_worker_command_index(
+            blurred_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+        expect(worker.browser.text_selection_route).to_be_nil()
+
+    it "preserves focused selection view and blink when pointer default is prevented":
+        var worker = HostedBrowserRendererWorkerSession.create(60, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:24px;height:18px}</style><input id='q' value='abcdefghij' data-focused onpointerdown='prevent-default' onmousedown='prevent-default'>"
+        )).ok).to_be(true)
+        val retained_view = worker.input_view_start_byte
+        val retained_anchor = worker.browser.text_selection_anchor_byte
+        val retained_focus = worker.browser.text_selection_focus_byte
+        val retained_epoch = worker.caret_blink_epoch_ms
+        val hit = worker.last_hit_index.unwrap().input_text_hits[0]
+        val kept = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{hit.boundary_x_px[hit.boundary_x_px.len() - 1]}\t{hit.y + 1}\t1"
+        ))
+        expect(kept.ok).to_be(true)
+        expect(_worker_focused_author_id(worker)).to_equal("q")
+        expect(_worker_selection_author_id(worker)).to_equal("q")
+        expect(worker.browser.text_selection_anchor_byte).to_equal(
+            retained_anchor
+        )
+        expect(worker.browser.text_selection_focus_byte).to_equal(
+            retained_focus
+        )
+        expect(worker.input_view_start_byte).to_equal(retained_view)
+        expect(worker.caret_blink_epoch_ms).to_equal(retained_epoch)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t{hit.boundary_x_px[hit.boundary_x_px.len() - 1]}\t{hit.y + 1}\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.text_selection_anchor_byte).to_equal(
+            retained_anchor
+        )
+        expect(worker.browser.text_selection_focus_byte).to_equal(
+            retained_focus
+        )
+        expect(worker.input_view_start_byte).to_equal(retained_view)
+        expect(worker.caret_blink_epoch_ms).to_equal(retained_epoch)
+
+    it "clears page caret state and scheduling when chrome takes focus":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}#q{width:40px;height:18px}</style><input id='q' value='abc' data-focused>"
+        ))
+        val initialized_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initialized.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            initialized_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+        val chrome = worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        ))
+        val chrome_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), chrome.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            chrome_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+        expect(chrome_frame.next_animation_ms).to_equal(-1)
+        expect(_worker_focused_author_id(worker)).to_equal("")
+        expect(worker.browser.text_selection_route).to_be_nil()
+        expect(worker.input_view_target_key).to_equal("")
+        expect(worker.input_view_start_byte).to_equal(0)
+        expect(worker.caret_blink_epoch_ms).to_equal(0)
+
+    it "retains focused view across frames and resets it for a new target":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{{margin:0}}input{display:block;width:24px;height:18px}</style><input id='first' value='abcdefghij' data-focused><input id='second' value='xy'>"
+        )).ok).to_be(true)
+        val first_view = worker.input_view_start_byte
+        expect(first_view).to_be_greater_than(0)
+        expect(worker.input_view_target_key).to_equal("id:first")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "100"
+        )).ok).to_be(true)
+        expect(worker.input_view_start_byte).to_equal(first_view)
+        val second_hit = worker.last_hit_index.unwrap().input_text_hits[1]
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t1\t{second_hit.boundary_x_px[0]}\t{second_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(worker.input_view_target_key).to_equal("id:second")
+        expect(worker.input_view_start_byte).to_equal(0)
+
+    it "rejects skipped ids and backward animation time":
+        var session = BrowserSession.new()
+        val first = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "init",
+                generation: 7,
+                request_id: 2,
+                payload: CSS_ANIMATION_HTML
+            ),
+            64,
+            48,
+            false,
+            0,
+            2
+        )
+        val skipped = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 4,
+                payload: "500"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+        val advanced = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 3,
+                payload: "500"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+        val backward = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 4,
+                payload: "16"
+            ),
+            64,
+            48,
+            advanced.initialized,
+            advanced.animation_time_ms,
+            4
+        )
+
+        expect(skipped.ok).to_be(false)
+        expect(skipped.reason).to_equal("unexpected-request-id")
+        expect(advanced.ok).to_be(true)
+        expect(backward.ok).to_be(false)
+        expect(backward.reason).to_equal("invalid-animation-time")

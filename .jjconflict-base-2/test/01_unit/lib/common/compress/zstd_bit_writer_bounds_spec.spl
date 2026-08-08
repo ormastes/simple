@@ -1,0 +1,64 @@
+use std.spec
+use std.common.compress.{CompressionError}
+use std.common.compress.zstd_bits.{ZstdBitWriter, zstd_bit_writer_append_lsb, zstd_bit_writer_finish, zstd_bit_writer_bits_used}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "Zstd bit writer bounds validation":
+    it "rejects negative reservoir width before appending":
+        val state = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: -1)
+        val written = zstd_bit_writer_append_lsb(state, 1u64, 1)
+        check(written.is_err())
+        val err = written.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("reservoir"))
+            _:
+                check(false)
+
+    it "rejects oversized reservoir width before appending":
+        val state = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 65)
+        val written = zstd_bit_writer_append_lsb(state, 1u64, 1)
+        check(written.is_err())
+        val err = written.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("reservoir"))
+            _:
+                check(false)
+
+    it "rejects malformed reservoir width before finishing":
+        val state = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 65)
+        val finished = zstd_bit_writer_finish(state)
+        check(finished.is_err())
+        val err = finished.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("reservoir"))
+            _:
+                check(false)
+
+    it "does not report malformed reservoir widths":
+        val negative = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: -1)
+        val oversized = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 65)
+        check(zstd_bit_writer_bits_used(negative) == 0)
+        check(zstd_bit_writer_bits_used(oversized) == 0)
+
+    it "rejects full reservoir width before shifting":
+        val state = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 64)
+        val written = zstd_bit_writer_append_lsb(state, 1u64, 1)
+        check(written.is_err())
+        val finished = zstd_bit_writer_finish(state)
+        check(finished.is_err())
+
+    it "rejects append widths that overflow the reservoir":
+        val state = ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 63)
+        val written = zstd_bit_writer_append_lsb(state, 3u64, 2)
+        check(written.is_err())
+        val err = written.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("overflow"))
+            _:
+                check(false)

@@ -1,0 +1,157 @@
+#!/bin/sh
+set -eu
+
+# f64 call-result ABI check — production (self-hosted) compiler.
+#
+# Guards the f64 function-call-result codegen bug: an f64 returned from a
+# non-inlined function, then bound to a local / fed into a binop / passed as an
+# argument / printed, must produce the real value (not 0.0 or garbage).
+#
+# The Rust *seed* compiler is already fixed and guarded by the cargo tests
+#   src/compiler_rust/.../codegen/jit::tests::test_jit_f64_call_result_{value,print}
+# so measuring the seed here proves NOTHING — it is green by construction.
+# This script targets the deployed self-hosted binary, whose JIT/codegen still
+# has the analogous bug (see
+#   doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md).
+#
+# FAIL-CLOSED CONTRACT (2026-07-28):
+#   This script used to resolve `bin/simple` and assume it was self-hosted. It
+#   is not — `bin/simple` currently resolves to the Rust seed, so the check
+#   printed "PASS — self-hosted f64 call-result codegen is fixed" while having
+#   measured the seed. A check that cannot fail is worse than no check.
+#   Therefore: the target's identity is verified BEFORE any ABI test runs, and
+#   every "could not actually test this" outcome exits NON-ZERO. There is no
+#   silent fallback to the seed and no PASS on an untested target.
+#
+# Exit status:
+#   0  self-hosted target verified AND interpret correct AND JIT either correct
+#      (PASS) or the known-open, tracked 0.0 (XFAIL — see bug doc above)
+#   1  a real failure: interpreter wrong, or JIT produced an UNEXPECTED value
+#   2  could NOT test: target missing, unreadable, refuses --version, or is the
+#      Rust bootstrap seed rather than the self-hosted binary
+#
+# Override the target with SIMPLE_BIN=/path/to/self-hosted/simple.
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE="${SIMPLE_BIN:-bin/simple}"
+
+untestable() {
+    echo "SKIPPED (cannot test): $*" >&2
+    echo "  This is NOT a pass. The f64 call-result ABI property was never exercised." >&2
+    echo "  Deploy a pure-Simple self-hosted binary (bin/simple build bootstrap) or set" >&2
+    echo "  SIMPLE_BIN=/path/to/self-hosted/simple, then re-run." >&2
+    exit 2
+}
+
+echo "== f64 call-result ABI check =="
+
+# ---------------------------------------------------------------------------
+# Stage 0 — resolve the target EXPLICITLY and verify its identity BEFORE
+# running any ABI test. Nothing below may run against an unverified binary.
+# ---------------------------------------------------------------------------
+if [ -x "$SIMPLE" ] && [ -f "$SIMPLE" ]; then
+    SIMPLE_PATH="$SIMPLE"
+elif SIMPLE_PATH="$(command -v -- "$SIMPLE" 2>/dev/null)" && [ -n "$SIMPLE_PATH" ]; then
+    :
+else
+    untestable "target '$SIMPLE' is not an executable file and is not on PATH"
+fi
+
+# Report the *real* file, not the symlink, so the evidence is unambiguous.
+SIMPLE_REAL="$(readlink -f -- "$SIMPLE_PATH" 2>/dev/null || printf '%s' "$SIMPLE_PATH")"
+echo "target:    $SIMPLE  ->  $SIMPLE_REAL"
+
+if VERSION_OUT="$("$SIMPLE_PATH" --version 2>&1)"; then
+    :
+else
+    untestable "'$SIMPLE_REAL --version' exited non-zero; cannot establish identity"
+fi
+
+if [ -z "$VERSION_OUT" ]; then
+    untestable "'$SIMPLE_REAL --version' produced no output; cannot establish identity"
+fi
+
+# The Rust seed self-identifies on stderr (src/compiler_rust/driver/src/seed_warning.rs).
+case "$VERSION_OUT" in
+    *"bootstrap seed only"*|*"Rust-built Simple binary"*)
+        echo "identity:  Rust bootstrap SEED (banner present)" >&2
+        untestable "target is the Rust bootstrap seed, not the self-hosted compiler.
+  The seed's f64 call-result codegen is already fixed and covered by cargo tests,
+  so testing it here would be green by construction and prove nothing about the
+  self-hosted compiler this check exists to guard."
+        ;;
+esac
+
+echo "identity:  self-hosted (no seed banner)  OK"
+
+PROG="$(mktemp -t f64_call_abi.XXXXXX.spl)"
+trap 'rm -f "$PROG"' EXIT
+
+cat > "$PROG" <<'SPL'
+fn half() -> f64:
+    return 21.5
+fn add(a: f64, b: f64) -> f64:
+    return a + b
+fn main():
+    print(half())            # call result printed   -> 21.5
+    print(add(1.5, 2.25))    # binop on params       -> 3.75
+    print(half() + half())   # two call results binop -> 43
+SPL
+
+# Expected first value, normalised (strip a trailing .0 and any exponent noise).
+# NOTE: norm() collapses every zero spelling ("0", "0.0", "-0") to the EMPTY
+# string. So a normalised "" means "the value was zero", NOT "there was no
+# output". Emptiness of the *raw* line is therefore always tested first, before
+# normalising — otherwise a crashed run and the known-bad 0.0 are indistinguishable.
+norm() { sed 's/\.0*$//; s/0*$//; s/\.$//'; }
+
+# ---------------------------------------------------------------------------
+# Stage 1 — interpreter is the always-correct baseline. Hard requirement.
+# stderr is kept: a crashed run must not masquerade as a wrong value.
+# ---------------------------------------------------------------------------
+if INTERP_RAW="$(SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
+    :
+else
+    untestable "interpreter run of the probe program exited non-zero; the target cannot run Simple source"
+fi
+INTERP_LINE="$(printf '%s' "$INTERP_RAW" | sed -n '1p')"
+if [ -z "$INTERP_LINE" ]; then
+    untestable "interpreter run produced no output; the ABI property was not exercised"
+fi
+INTERP="$(printf '%s' "$INTERP_LINE" | norm)"
+if [ "$INTERP" != "21.5" ]; then
+    echo "FAIL: interpreter baseline wrong (got '$INTERP_LINE', want 21.5)" >&2
+    exit 1
+fi
+echo "interpret: 21.5  OK"
+
+# ---------------------------------------------------------------------------
+# Stage 2 — JIT (compiled) path, the one the bug lives in.
+# ---------------------------------------------------------------------------
+if JIT_OUT="$("$SIMPLE_PATH" run "$PROG" 2>/dev/null)"; then
+    :
+else
+    untestable "JIT run of the probe program exited non-zero; the ABI property was not exercised"
+fi
+JIT_RAW="$(printf '%s' "$JIT_OUT" | sed -n '1p')"
+if [ -z "$JIT_RAW" ]; then
+    # Empty output is NOT the known-bad 0.0 — it means nothing was measured.
+    untestable "JIT run produced no output; the ABI property was not exercised"
+fi
+JIT="$(printf '%s' "$JIT_RAW" | norm)"
+case "$JIT" in
+    21.5)
+        echo "jit:       21.5  PASS — self-hosted f64 call-result codegen is fixed"
+        exit 0 ;;
+    0|0.0|"-0"|"")
+        # "" here is a normalised zero, not absent output: JIT_RAW was proven
+        # non-empty above, so this arm is only reachable for a real 0.0/-0 value.
+        echo "jit:       $JIT_RAW  XFAIL — known-open self-hosted codegen bug, not yet ported"
+        echo "  tracked: doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md"
+        exit 0 ;;
+    *)
+        echo "FAIL: jit produced an UNEXPECTED value '$JIT_RAW' (want 21.5, known-bad 0.0)" >&2
+        exit 1 ;;
+esac

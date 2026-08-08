@@ -1,0 +1,101 @@
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+enum VisibilitySurface:
+    Public
+    Boundary
+    Private
+
+struct VisibilitySymbol:
+    name: text
+    visibility: VisibilitySurface
+
+fn visibility_display(surface: VisibilitySurface) -> text:
+    match surface:
+        case VisibilitySurface.Public:
+            "public"
+        case VisibilitySurface.Boundary:
+            "boundary"
+        case VisibilitySurface.Private:
+            "private"
+
+fn visibility_rank(surface: VisibilitySurface) -> i64:
+    match surface:
+        case VisibilitySurface.Public:
+            0
+        case VisibilitySurface.Boundary:
+            1
+        case VisibilitySurface.Private:
+            2
+
+fn workspace_match_rank(name: text, query: text, surface: VisibilitySurface) -> i64:
+    var score = 1000
+    if name == query:
+        score = score - 300
+    elif name.starts_with(query):
+        score = score - 220
+    elif name.contains(query):
+        score = score - 120
+    score + visibility_rank(surface)
+
+fn should_include_in_completion(surface: VisibilitySurface) -> bool:
+    surface != VisibilitySurface.Private
+
+fn should_include_in_workspace(surface: VisibilitySurface) -> bool:
+    surface != VisibilitySurface.Private
+
+fn format_visibility_detail(symbol: VisibilitySymbol, boundary: text, exported: bool) -> text:
+    var detail = visibility_display(symbol.visibility)
+    if exported:
+        return detail + " (exported from " + boundary + ")"
+    if symbol.visibility == VisibilitySurface.Boundary:
+        return detail + " (boundary: " + boundary + ")"
+    detail
+
+describe "LSP Visibility Metadata":
+    it "formats public symbols with exported provenance":
+        val symbol = VisibilitySymbol(name: "Router", visibility: VisibilitySurface.Public)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", true)
+
+        check(detail.contains("public"))
+        check(detail.contains("exported from crate.sys.http"))
+
+    it "formats boundary symbols with boundary provenance":
+        val symbol = VisibilitySymbol(name: "route_debug", visibility: VisibilitySurface.Boundary)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
+
+        check(detail == "boundary (boundary: crate.sys.http)")
+
+    it "keeps private symbols private in metadata":
+        val symbol = VisibilitySymbol(name: "internal_helper", visibility: VisibilitySurface.Private)
+        val detail = format_visibility_detail(symbol, "crate.sys.http", false)
+
+        check(detail == "private")
+
+    it "filters private symbols from completion and workspace symbol surfaces":
+        check(should_include_in_completion(VisibilitySurface.Public))
+        check(should_include_in_completion(VisibilitySurface.Boundary))
+        check(not should_include_in_completion(VisibilitySurface.Private))
+        check(should_include_in_workspace(VisibilitySurface.Public))
+        check(should_include_in_workspace(VisibilitySurface.Boundary))
+        check(not should_include_in_workspace(VisibilitySurface.Private))
+
+    it "ranks public before boundary before private":
+        check(visibility_rank(VisibilitySurface.Public) < visibility_rank(VisibilitySurface.Boundary))
+        check(visibility_rank(VisibilitySurface.Boundary) < visibility_rank(VisibilitySurface.Private))
+
+    it "ranks exact workspace matches before prefix and substring matches":
+        val exact = workspace_match_rank("query", "query", VisibilitySurface.Public)
+        val prefix = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
+        val substring = workspace_match_rank("visibility_query", "query", VisibilitySurface.Public)
+
+        check(exact < prefix)
+        check(prefix < substring)
+
+    it "prefers more visible workspace results when match quality ties":
+        val public_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Public)
+        val boundary_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Boundary)
+        val private_rank = workspace_match_rank("query_visibility", "query", VisibilitySurface.Private)
+
+        check(public_rank < boundary_rank)
+        check(boundary_rank < private_rank)

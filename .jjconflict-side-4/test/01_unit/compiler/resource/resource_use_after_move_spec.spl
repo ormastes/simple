@@ -1,0 +1,165 @@
+"""
+# `resource` invariant 2 -- use-after-move is a compile error
+
+**WP:** WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
+**Architecture:** `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
+§8, invariant 2 ("use-after-move is a compile error").
+
+**Finding: no new checker code was needed for this invariant.** A
+resource-typed HIR type is `HirTypeKind.Isolated(HirTypeKind.Named(sym))`
+around a symbol the frontend registered via `resource_registry_declare`
+(`mir_hir_type_is_resource`, `mir_lowering_stmts.spl`) -- the exact same
+`Isolated` wrapper LANE ISO1's move machinery already keys off
+(`mir_hir_type_is_isolated`). A resource-typed place-read binding
+(`val b = a` where `a` is resource-owned) therefore ALREADY lowers to a
+real `MirBuilder.emit_move`, and the borrow checker's existing
+`record_move`/`moved_now` forward propagation (proven since LANE ISO1,
+`borrow_graph.spl`) already flags the second read. Resources inherit
+invariant 2 for free from the already-landed `iso` move pipeline; this
+spec is the acceptance proof, not new enforcement.
+
+Same hand-built-HIR technique and even the same fixture shape as
+`iso_move_return_spec.spl`, the difference being the parameter's type is
+resource-wrapped (`Isolated(Named(sym-for-a-declared-resource))`, with the
+symbol registered in BOTH the HIR `SymbolTable` and
+`compiler.frontend.resource_registry` -- both are required for
+`mir_hir_type_is_resource` to return true; a `SymbolTable.new()` with no
+matching symbol would make this spec pass for the wrong reason (silently
+falling back to a plain Copy that the checker also happens to not flag,
+since a Copy is never a move-out)).
+"""
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.borrow.borrow_check.*
+use compiler.common.attributes.{FunctionAttr}
+use compiler.frontend.resource_registry.{resource_registry_reset, resource_registry_declare}
+
+fn mk_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span(0))
+
+fn var_read(sym: SymbolId, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(sym), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+# Builds a symbol table with ONE Struct symbol named "File" (the "resource
+# type" the parameter refers to) and returns (table, its SymbolId) so the
+# caller can build a matching `Named(sym, [])` type. Also declares "File" in
+# the frontend resource registry -- both halves are required for
+# `mir_hir_type_is_resource` to resolve true (see docstring above).
+fn make_resource_symbol_table() -> (SymbolTable, SymbolId):
+    resource_registry_reset()
+    resource_registry_declare("File", "prefix=rt_file;handle=i64;invalid=-1;release=rt_file_close")
+    var table = SymbolTable.new()
+    val sym = table.define("File", SymbolKind.Struct, nil, mk_span(0), Visibility.Public, false, nil)
+    (table, sym)
+
+fn resource_type(sym: SymbolId) -> HirType:
+    val named = HirType(kind: HirTypeKind.Named(sym, []), span: mk_span(0))
+    HirType(kind: HirTypeKind.Isolated(named), span: mk_span(0))
+
+fn resource_param(sym: SymbolId, res_type: HirType) -> HirParam:
+    HirParam(symbol: sym, name: "a", type_: res_type, has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+
+fn make_fn(params: [HirParam], body_stmts: [HirStmt], tail: HirExpr) -> HirFunction:
+    val body = HirBlock(stmts: body_stmts, has: true, value: tail, span: mk_span(1))
+    HirFunction(
+        symbol: SymbolId(id: 100),
+        name: "take",
+        type_params: [],
+        params: params,
+        return_type: i64_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn make_hir_module(symbols: SymbolTable, fn_: HirFunction) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[fn_.symbol] = fn_
+    HirModule(
+        name: "resource_use_after_move_test",
+        path: "synthetic/resource_use_after_move_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: symbols,
+        functions: functions,
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn lower_and_check(symbols: SymbolTable, fn_: HirFunction) -> [NLLError]:
+    val hir_module = make_hir_module(symbols, fn_)
+    var mir_lowering = MirLowering.new(symbols)
+    val mir_module = mir_lowering.lower_module(hir_module)
+    check_mir_module(mir_module)
+
+describe "resource-typed value: a second use after a place-read move is a real Move (invariant 2)":
+    it "reports a borrow diagnostic for `fn take(a: resource File) -> i64: val b = a; a` (used again after move)":
+        val (symbols, res_sym) = make_resource_symbol_table()
+        val a_sym = SymbolId(id: 1)
+        val res_ty = resource_type(res_sym)
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(a_sym, 15)), span: mk_span(15))
+        val fn_ = make_fn([resource_param(a_sym, res_ty)], [let_b], var_read(a_sym, 20))
+        val errors = lower_and_check(symbols, fn_)
+        assert_true(errors.len() > 0)
+
+    it "reports no diagnostic for a plain return of an unmoved resource-typed value":
+        val (symbols, res_sym) = make_resource_symbol_table()
+        val a_sym = SymbolId(id: 1)
+        val res_ty = resource_type(res_sym)
+        val fn_ = make_fn([resource_param(a_sym, res_ty)], [], var_read(a_sym, 20))
+        val errors = lower_and_check(symbols, fn_)
+        assert_true(errors.len() == 0)
+
+    it "reports no diagnostic for the identical shape when the parameter is a plain (non-isolated, non-resource) i64":
+        # Control: proves the diagnostic above is keyed on the Isolated
+        # wrapper the resource type carries, not merely on repeating the
+        # same variable name twice in a function body.
+        val (symbols, _res_sym) = make_resource_symbol_table()
+        val a_sym = SymbolId(id: 1)
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(a_sym, 15)), span: mk_span(15))
+        val plain_param = HirParam(symbol: a_sym, name: "a", type_: i64_type(), has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+        val fn_ = make_fn([plain_param], [let_b], var_read(a_sym, 20))
+        val errors = lower_and_check(symbols, fn_)
+        assert_true(errors.len() == 0)

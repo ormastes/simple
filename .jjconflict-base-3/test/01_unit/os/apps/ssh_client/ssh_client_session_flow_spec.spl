@@ -1,0 +1,312 @@
+"""
+# Pure-Simple SSH Client — Full Socket-Free Session Flow
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+Drives the complete client state machine end to end without a socket: banner
+exchange, KEXINIT, curve25519 key exchange with host-key pinning, NEWKEYS,
+service request, password userauth, session channel open, `exec`, output
+collection and exit status.
+
+The peer is the real sshd code wherever a builder exists (`ssh_build_kexinit`,
+`ssh_build_kex_ecdh_reply`, `ssh_build_newkeys`, `ssh_build_service_accept`,
+`ssh_build_auth_success`) plus the real curve25519/ed25519 primitives, so this
+is a genuine in-process client<->server run rather than a mock.
+
+Covers:
+  1. Every state transition in order, with the expected outbound payload.
+  2. `exec` output and exit status reaching the caller.
+  3. The same flow REFUSED at the key-exchange step when the host key is not
+     pinned — the session never reaches userauth, so no password is ever sent
+     to an unverified peer.
+
+tag: unit, ssh, ssh_client, session, security
+"""
+
+use std.spipe.*
+use os.apps.ssh_client.ssh_client_session.{
+    SshClientConfig, SshClientSession, SshClientStep,
+    ssh_client_session_new, ssh_client_session_start, ssh_client_session_step,
+    SSH_ST_BANNER, SSH_ST_KEXINIT, SSH_ST_KEXREPLY, SSH_ST_NEWKEYS,
+    SSH_ST_SERVICE, SSH_ST_AUTH, SSH_ST_CHANNEL, SSH_ST_EXEC,
+    SSH_ST_RUNNING, SSH_ST_DONE, SSH_AUTH_PASSWORD
+}
+use os.apps.ssh_client.ssh_known_hosts.{
+    SshKnownHostsDb, ssh_known_hosts_parse, ssh_known_hosts_line
+}
+use os.apps.ssh_client.ssh_client_version.{ssh_client_version_bytes}
+use os.apps.ssh_client.ssh_client_kexinit.{ssh_client_build_kexinit}
+use os.apps.ssh_client.ssh_client_channel.{ssh_client_channel_text}
+use os.apps.sshd.ssh_transport.{ssh_build_kexinit, ssh_build_service_accept}
+use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_build_newkeys, ssh_parse_kex_ecdh_init}
+use os.apps.sshd.ssh_kex_core.{
+    ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash
+}
+use os.apps.sshd.ssh_kex_primitives.{ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_auth.{ssh_build_auth_success}
+use os.apps.sshd.ssh_packet.{
+    ssh_put_u32, ssh_put_text, ssh_put_string, ssh_ascii_text_to_bytes, ssh_ascii_bytes_to_text
+}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+
+# ============================================================================
+# Deterministic fixtures
+# ============================================================================
+
+fn seed32(base: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(base + i.to_u8())
+        i = i + 1
+    out
+
+fn cookie16() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        out.push(0x11)
+        i = i + 1
+    out
+
+fn bstr(s: text) -> [u8]:
+    var src = ssh_ascii_text_to_bytes(s)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn banner_wire(s: text) -> [u8]:
+    var out = bstr(s)
+    out.push(0x0D)
+    out.push(0x0A)
+    out
+
+fn server_banner_text() -> text:
+    "SSH-2.0-SimpleOS_1.0"
+
+fn host_pub() -> [u8]:
+    ed25519_keypair_from_seed(seed32(1)).1
+
+fn host_priv() -> [u8]:
+    ed25519_keypair_from_seed(seed32(1)).0
+
+fn host_blob() -> [u8]:
+    ssh_build_ed25519_host_key_blob(host_pub())
+
+fn mitm_blob() -> [u8]:
+    ssh_build_ed25519_host_key_blob(ed25519_keypair_from_seed(seed32(2)).1)
+
+fn known_hosts_pinned() -> SshKnownHostsDb:
+    ssh_known_hosts_parse(ssh_known_hosts_line("simpleos", "ssh-ed25519", host_blob())).unwrap()
+
+fn known_hosts_empty() -> SshKnownHostsDb:
+    ssh_known_hosts_parse("").unwrap()
+
+fn client_config() -> SshClientConfig:
+    SshClientConfig(
+        host: "simpleos",
+        user: "root",
+        command: "uname -a",
+        auth_method: SSH_AUTH_PASSWORD,
+        password: "hunter2",
+        user_key_blob: [],
+        user_private_seed: [],
+        user_public_key: [],
+        kex_private: seed32(9),
+        kexinit_cookie: cookie16()
+    )
+
+fn signature_blob(raw: [u8]) -> [u8]:
+    var buf: [u8] = []
+    buf = ssh_put_text(buf, "ssh-ed25519")
+    buf = ssh_put_string(buf, raw)
+    buf
+
+fn server_reply(blob: [u8]) -> [u8]:
+    """The real sshd KEX_ECDH_REPLY for our fixed client key."""
+    val client_public = ssh_kex_public_from_private(seed32(9))
+    val server_private = seed32(90)
+    val server_public = ssh_kex_public_from_private(server_private)
+    val shared = ssh_kex_compute_shared(server_private, client_public)
+    val hash = ssh_kex_compute_exchange_hash(
+        ssh_client_version_bytes(),
+        bstr(server_banner_text()),
+        ssh_client_build_kexinit(cookie16()),
+        ssh_build_kexinit(),
+        blob,
+        client_public,
+        server_public,
+        shared
+    )
+    val raw = ed25519_sign(host_priv(), host_pub(), hash)
+    ssh_build_kex_ecdh_reply(blob, server_public, signature_blob(raw))
+
+fn channel_open_confirmation() -> [u8]:
+    var buf: [u8] = []
+    buf.push(91)
+    buf = ssh_put_u32(buf, 0)
+    buf = ssh_put_u32(buf, 5)
+    buf = ssh_put_u32(buf, 2097152)
+    buf = ssh_put_u32(buf, 32768)
+    buf
+
+fn channel_success() -> [u8]:
+    var buf: [u8] = []
+    buf.push(99)
+    buf = ssh_put_u32(buf, 0)
+    buf
+
+fn channel_data(payload: text) -> [u8]:
+    var buf: [u8] = []
+    buf.push(94)
+    buf = ssh_put_u32(buf, 0)
+    buf = ssh_put_string(buf, bstr(payload))
+    buf
+
+fn channel_exit_status(status: u32) -> [u8]:
+    var buf: [u8] = []
+    buf.push(98)
+    buf = ssh_put_u32(buf, 0)
+    buf = ssh_put_text(buf, "exit-status")
+    buf.push(0)
+    buf = ssh_put_u32(buf, status)
+    buf
+
+fn channel_close() -> [u8]:
+    var buf: [u8] = []
+    buf.push(97)
+    buf = ssh_put_u32(buf, 0)
+    buf
+
+# ============================================================================
+
+describe "SSH client full session flow without a socket":
+
+    it "runs banner through exec and collects output and exit status":
+        var session = ssh_client_session_new(client_config(), known_hosts_pinned())
+
+        # The client speaks first.
+        val started = ssh_client_session_start(session)
+        expect(started.is_ok()).to_equal(true)
+        expect(started.unwrap().has_outbound).to_equal(true)
+        expect(started.unwrap().outbound.len()).to_equal(23)
+        session = started.unwrap().session
+        expect(session.state).to_equal(SSH_ST_BANNER)
+
+        # Server banner -> client KEXINIT.
+        val after_banner = ssh_client_session_step(session, banner_wire(server_banner_text()))
+        expect(after_banner.is_ok()).to_equal(true)
+        session = after_banner.unwrap().session
+        expect(session.state).to_equal(SSH_ST_KEXINIT)
+        expect(session.server_banner).to_equal(server_banner_text())
+        expect(after_banner.unwrap().outbound[0]).to_equal(20)
+
+        # Real sshd KEXINIT -> client KEX_ECDH_INIT, and sshd must parse it.
+        val after_kexinit = ssh_client_session_step(session, ssh_build_kexinit())
+        expect(after_kexinit.is_ok()).to_equal(true)
+        session = after_kexinit.unwrap().session
+        expect(session.state).to_equal(SSH_ST_KEXREPLY)
+        expect(session.negotiated_kex).to_equal("curve25519-sha256")
+        expect(session.negotiated_host_key).to_equal("ssh-ed25519")
+        expect(ssh_parse_kex_ecdh_init(after_kexinit.unwrap().outbound).is_ok()).to_equal(true)
+
+        # Real sshd KEX_ECDH_REPLY -> client NEWKEYS, with keys derived.
+        val after_kex = ssh_client_session_step(session, server_reply(host_blob()))
+        expect(after_kex.is_ok()).to_equal(true)
+        session = after_kex.unwrap().session
+        expect(session.state).to_equal(SSH_ST_NEWKEYS)
+        expect(session.session_id.len()).to_equal(32)
+        expect(session.keys.enc_key_c2s.len()).to_equal(32)
+        expect(after_kex.unwrap().outbound[0]).to_equal(21)
+
+        # NEWKEYS -> SERVICE_REQUEST ssh-userauth.
+        val after_newkeys = ssh_client_session_step(session, ssh_build_newkeys())
+        expect(after_newkeys.is_ok()).to_equal(true)
+        session = after_newkeys.unwrap().session
+        expect(session.state).to_equal(SSH_ST_SERVICE)
+        expect(after_newkeys.unwrap().outbound[0]).to_equal(5)
+
+        # SERVICE_ACCEPT -> USERAUTH_REQUEST (password).
+        val after_service = ssh_client_session_step(session, ssh_build_service_accept("ssh-userauth"))
+        expect(after_service.is_ok()).to_equal(true)
+        session = after_service.unwrap().session
+        expect(session.state).to_equal(SSH_ST_AUTH)
+        expect(after_service.unwrap().outbound[0]).to_equal(50)
+        expect(ssh_ascii_bytes_to_text(after_service.unwrap().outbound)).to_contain("hunter2")
+
+        # USERAUTH_SUCCESS -> CHANNEL_OPEN session.
+        val after_auth = ssh_client_session_step(session, ssh_build_auth_success())
+        expect(after_auth.is_ok()).to_equal(true)
+        session = after_auth.unwrap().session
+        expect(session.state).to_equal(SSH_ST_CHANNEL)
+        expect(after_auth.unwrap().outbound[0]).to_equal(90)
+
+        # OPEN_CONFIRMATION -> exec request on the peer's channel id.
+        val after_open = ssh_client_session_step(session, channel_open_confirmation())
+        expect(after_open.is_ok()).to_equal(true)
+        session = after_open.unwrap().session
+        expect(session.state).to_equal(SSH_ST_EXEC)
+        expect(session.remote_channel).to_equal(5)
+        expect(after_open.unwrap().outbound[0]).to_equal(98)
+        expect(ssh_ascii_bytes_to_text(after_open.unwrap().outbound)).to_contain("uname -a")
+
+        # CHANNEL_SUCCESS -> running.
+        val after_exec = ssh_client_session_step(session, channel_success())
+        expect(after_exec.is_ok()).to_equal(true)
+        session = after_exec.unwrap().session
+        expect(session.state).to_equal(SSH_ST_RUNNING)
+        expect(after_exec.unwrap().has_outbound).to_equal(false)
+
+        # Output, exit status, close.
+        val d1 = ssh_client_session_step(session, channel_data("SimpleOS "))
+        expect(d1.is_ok()).to_equal(true)
+        session = d1.unwrap().session
+        val d2 = ssh_client_session_step(session, channel_data("x86_64"))
+        expect(d2.is_ok()).to_equal(true)
+        session = d2.unwrap().session
+        expect(ssh_ascii_bytes_to_text(session.stdout_bytes)).to_equal("SimpleOS x86_64")
+
+        val st = ssh_client_session_step(session, channel_exit_status(0))
+        expect(st.is_ok()).to_equal(true)
+        session = st.unwrap().session
+        expect(session.got_exit_status).to_equal(true)
+        expect(session.exit_status).to_equal(0)
+
+        val cl = ssh_client_session_step(session, channel_close())
+        expect(cl.is_ok()).to_equal(true)
+        session = cl.unwrap().session
+        expect(session.state).to_equal(SSH_ST_DONE)
+        expect(cl.unwrap().outbound[0]).to_equal(97)
+
+    it "REFUSES a man-in-the-middle at key exchange and never sends the password":
+        var session = ssh_client_session_new(client_config(), known_hosts_pinned())
+        session = ssh_client_session_start(session).unwrap().session
+        session = ssh_client_session_step(session, banner_wire(server_banner_text())).unwrap().session
+        session = ssh_client_session_step(session, ssh_build_kexinit()).unwrap().session
+        expect(session.state).to_equal(SSH_ST_KEXREPLY)
+
+        # A different, perfectly valid ed25519 host key is presented.
+        val refused = ssh_client_session_step(session, server_reply(mitm_blob()))
+        expect(refused.is_ok()).to_equal(false)
+        expect(refused.unwrap_err()).to_contain("HOST KEY MISMATCH")
+        # The session never advanced past key exchange, so no secret left the client.
+        expect(session.state).to_equal(SSH_ST_KEXREPLY)
+        expect(session.session_id.len()).to_equal(0)
+
+    it "REFUSES an unknown host and stops before userauth":
+        var session = ssh_client_session_new(client_config(), known_hosts_empty())
+        session = ssh_client_session_start(session).unwrap().session
+        session = ssh_client_session_step(session, banner_wire(server_banner_text())).unwrap().session
+        session = ssh_client_session_step(session, ssh_build_kexinit()).unwrap().session
+        val refused = ssh_client_session_step(session, server_reply(host_blob()))
+        expect(refused.is_ok()).to_equal(false)
+        expect(refused.unwrap_err()).to_contain("unknown host key")
+        expect(session.session_id.len()).to_equal(0)

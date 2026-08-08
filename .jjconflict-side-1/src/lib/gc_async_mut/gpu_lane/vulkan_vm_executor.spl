@@ -57,6 +57,14 @@ pub struct SvmgRunOutcome:
     exit_code: i64
     log_text: text
     records: [SvmgResultRecord]
+    # Full ARENA_TOTAL_SIZE output arena from this call's readback (empty on
+    # any error path before a successful `arena_read`), plus the logical
+    # DATA-region start offset it was built at (`SGP_HEADER_SIZE +
+    # code.len()`). Feed both back into `run_source_persisting_data` as
+    # `prior_arena`/`prior_data_off` to preserve this call's DATA/LOG/RECORD
+    # state into the next call -- see `run_source_persisting_data` docstring.
+    out_arena: [u8]
+    data_off: i64
 
 fn _u32_le_at(bytes: [u8], idx: i64) -> i64:
     (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8) | ((bytes[idx + 2] as i64) << 16) | ((bytes[idx + 3] as i64) << 24)
@@ -110,6 +118,40 @@ fn build_svmg_arena(code: [u8], step_budget: i64, entry_pc: i64) -> [u8]:
     arena[LOG_CAP_OFFSET + 1] = ((DEFAULT_LOG_CAP >> 8) & 0xFF) as u8
     arena[LOG_CAP_OFFSET + 2] = ((DEFAULT_LOG_CAP >> 16) & 0xFF) as u8
     arena[LOG_CAP_OFFSET + 3] = ((DEFAULT_LOG_CAP >> 24) & 0xFF) as u8
+    arena
+
+# Root-cause fix for
+# doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md:
+# same host-side splice `vulkan_exec.spl`'s `execute_cell` workaround
+# implemented at the call site, now owned here so callers don't have to
+# re-derive it. `prior_arena` must be a previous call's full
+# ARENA_TOTAL_SIZE output arena (anything else, including the default `[]`,
+# is treated as "no prior state" and this degrades to plain
+# `build_svmg_arena` -- i.e. the fresh-every-call behavior `run_source`
+# still needs for its OWN stateless one-shot conformance-vector contract,
+# see module docstring). `prior_data_off` is the logical DATA-region start
+# offset that `prior_arena` was laid out at (its own `code_off + code_len`)
+# -- copying by this LOGICAL offset, not a raw byte offset, means a
+# shorter/longer cell body doesn't corrupt or lose prior globals as code
+# length shifts release to release.
+fn build_svmg_arena_persisting_data(code: [u8], step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> [u8]:
+    var arena = build_svmg_arena(code, step_budget, entry_pc)
+    if prior_arena.len() != ARENA_TOTAL_SIZE:
+        return arena
+    val data_off = SGP_HEADER_SIZE + code.len()
+    val copy_len = ARENA_DATA_SIZE - (if data_off > prior_data_off: data_off else: prior_data_off)
+    var k = 0
+    while k < copy_len:
+        arena[data_off + k] = prior_arena[prior_data_off + k]
+        k = k + 1
+    # LOG/RECORD ring region lives at FIXED absolute offsets (>=
+    # ARENA_DATA_SIZE, see mailbox_const) -- carried forward verbatim so a
+    # program's SYS_PUTC/SYS_RESULT output accumulates across calls instead
+    # of being wiped by the next rebuild.
+    var j = ARENA_DATA_SIZE
+    while j < ARENA_TOTAL_SIZE:
+        arena[j] = prior_arena[j]
+        j = j + 1
     arena
 
 fn read_sentinel(arena: [u8]) -> i64:

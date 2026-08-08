@@ -1,0 +1,371 @@
+# GMB-1 GPU Mailbox Protocol — host-side library.
+#
+# Pure byte-buffer logic over the mailbox arena layout described in
+# doc/05_design/runtime/gpu_remote_interpreter_architecture.md §3.1, which is
+# a byte-buffer relocation of the GHDL RV32 mailbox protocol documented at
+# doc/04_architecture/hardware/ghdl_rv32_mailbox_protocol.md (constants
+# re-verified 2026-08-07: identical offsets, magic numbers, command codes and
+# sentinel values — only "address" becomes "byte offset into the arena").
+#
+# No GPU calls here — this module never touches CUDA/Vulkan; it only reads
+# and writes an in-memory `[u8]` arena, so it is unit-testable on any host.
+# Task A2 of doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md.
+
+# =========================================================================
+# Protocol constants (GMB-1 — identical to the GHDL RV32 mailbox protocol)
+# =========================================================================
+
+val TRIGGER_MAGIC: u32 = 0x0000DEADu32
+val SENTINEL_TIMEOUT: u32 = 0xDEAD0000u32
+val SENTINEL_EXIT_MASK: u32 = 0xCAFE0000u32
+
+val CMD_PUTC: u32 = 0x01u32
+val CMD_EXIT: u32 = 0x02u32
+val CMD_RESULT: u32 = 0x03u32
+
+# =========================================================================
+# Arena layout (design §3.1)
+# =========================================================================
+
+val ARENA_DATA_SIZE: i64 = 0x10000     # 64 KiB DATA region ("RAM")
+val ARENA_SIZE: i64 = 0x20000          # DATA + control half = 128 KiB total
+
+val OFF_DATA: i64 = 0x00000
+val OFF_RAM_SENTINEL: i64 = 0x08000    # mirrors 0x80008000 = RAM base + 0x8000
+
+val OFF_REG_BASE: i64 = 0x10000        # mirrors 0x80FF0000
+val OFF_REG_CMD: i64 = OFF_REG_BASE + 0x00
+val OFF_REG_ARG0: i64 = OFF_REG_BASE + 0x04
+val OFF_REG_ARG1: i64 = OFF_REG_BASE + 0x08
+val OFF_REG_STATUS: i64 = OFF_REG_BASE + 0x0C
+val OFF_REG_RESULT: i64 = OFF_REG_BASE + 0x10
+val OFF_REG_SEQ_ID: i64 = OFF_REG_BASE + 0x14
+val OFF_REG_TRIGGER: i64 = OFF_REG_BASE + 0x18
+val REG_BLOCK_LEN: i64 = 0x1C          # 28 bytes, CMD..TRIGGER inclusive
+
+val OFF_LOG_RING: i64 = 0x10020        # NEW: Vulkan-required, CUDA-optional
+val OFF_LOG_HEAD: i64 = OFF_LOG_RING + 0x00
+val OFF_LOG_CAP: i64 = OFF_LOG_RING + 0x04
+val OFF_LOG_DATA: i64 = OFF_LOG_RING + 0x08
+
+val RECORD_BYTES: i64 = 12             # (seq: u32, pass: u32, value: i32)
+
+# =========================================================================
+# SGP program container (design §4.2)
+# =========================================================================
+
+val SGP_MAGIC: u32 = 0x53474250u32     # "SGPB"
+val SGP_VERSION: u32 = 1u32
+val SGP_HEADER_LEN: i64 = 32           # magic,version,code_off,code_len,
+                                        # data_off,data_len,step_budget,
+                                        # entry_pc,reserved[1] = 9 u32 words
+
+# =========================================================================
+# Sentinel decode result
+# =========================================================================
+
+enum SentinelState:
+    Exit
+    Timeout
+    Running
+
+struct ResultRecord:
+    seq: i64
+    pass: bool
+    value: i64
+
+fn decode_sentinel(raw: u32) -> SentinelState:
+    """Decode the sentinel word written to +OFF_RAM_SENTINEL.
+
+    - `0xCAFE0000 | exit_code` -> Exit
+    - `0xDEAD0000` (exactly)   -> Timeout
+    - anything else (0 at reset, or not-yet-written) -> Running
+    """
+    if raw == SENTINEL_TIMEOUT:
+        return SentinelState.Timeout
+    val high16 = raw & 0xFFFF0000u32
+    if high16 == SENTINEL_EXIT_MASK:
+        return SentinelState.Exit
+    SentinelState.Running
+
+fn sentinel_exit_code(raw: u32) -> i64:
+    """Low 16 bits of an Exit sentinel; 0 if `raw` does not decode as Exit."""
+    if decode_sentinel(raw) != SentinelState.Exit:
+        return 0
+    (raw & 0xFFFFu32) as i64
+
+# =========================================================================
+# Byte helpers (little-endian, matching std.common.binary_io)
+# =========================================================================
+
+fn _u32_to_bytes_le(value: u32) -> [u8]:
+    [
+        (value & 0xFFu32) as u8,
+        ((value >> 8) & 0xFFu32) as u8,
+        ((value >> 16) & 0xFFu32) as u8,
+        ((value >> 24) & 0xFFu32) as u8
+    ]
+
+fn _bytes_to_u32_le(b0: u8, b1: u8, b2: u8, b3: u8) -> u32:
+    (b0 as u32) |
+    ((b1 as u32) << 8) |
+    ((b2 as u32) << 16) |
+    ((b3 as u32) << 24)
+
+fn zero_bytes(size: i64) -> [u8]:
+    """Allocate a zero-filled byte buffer of `size` bytes via doubling
+    concatenation (O(log size) concats) — avoids O(n) single-element
+    `.push()` growth, which is O(n^2) for arena-sized buffers."""
+    if size <= 0:
+        return []
+    var buf: [u8] = [0u8]
+    while buf.len() < size:
+        buf = buf.concat(buf)
+    if buf.len() > size:
+        return buf[0:size]
+    buf
+
+# =========================================================================
+# MailboxArena — mutable view over a byte buffer
+# =========================================================================
+
+class MailboxArena:
+    bytes: [u8]
+
+    static fn new(size: i64) -> MailboxArena:
+        """Allocate a fresh zero-filled arena of `size` bytes."""
+        MailboxArena(bytes: zero_bytes(size))
+
+    static fn from_bytes(bytes: [u8]) -> MailboxArena:
+        """Wrap an existing byte buffer (e.g. a synthetic test fixture)."""
+        MailboxArena(bytes: bytes)
+
+    me fn len() -> i64:
+        self.bytes.len()
+
+    me fn get_u8(offset: i64) -> u8:
+        if offset < 0 or offset >= self.bytes.len():
+            return 0u8
+        self.bytes[offset]
+
+    me set_u8(offset: i64, value: u8):
+        if offset < 0 or offset >= self.bytes.len():
+            return
+        self.bytes[offset] = value
+
+    me fn get_u32(offset: i64) -> u32:
+        if offset < 0 or offset + 4 > self.bytes.len():
+            return 0u32
+        _bytes_to_u32_le(self.bytes[offset], self.bytes[offset + 1],
+            self.bytes[offset + 2], self.bytes[offset + 3])
+
+    me set_u32(offset: i64, value: u32):
+        if offset < 0 or offset + 4 > self.bytes.len():
+            return
+        val le = _u32_to_bytes_le(value)
+        self.bytes[offset] = le[0]
+        self.bytes[offset + 1] = le[1]
+        self.bytes[offset + 2] = le[2]
+        self.bytes[offset + 3] = le[3]
+
+    # --- Register block accessors (design §3.1) ---
+
+    me fn cmd() -> u32: self.get_u32(OFF_REG_CMD)
+    me fn arg0() -> u32: self.get_u32(OFF_REG_ARG0)
+    me fn arg1() -> u32: self.get_u32(OFF_REG_ARG1)
+    me fn seq_id() -> u32: self.get_u32(OFF_REG_SEQ_ID)
+    me fn trigger() -> u32: self.get_u32(OFF_REG_TRIGGER)
+
+    me set_trigger(value: u32): self.set_u32(OFF_REG_TRIGGER, value)
+
+    me fn is_triggered() -> bool:
+        self.trigger() == TRIGGER_MAGIC
+
+    me fn read_sentinel() -> SentinelState:
+        decode_sentinel(self.get_u32(OFF_RAM_SENTINEL))
+
+    # --- Device-side test helper: fire a command like the device would ---
+
+    me fire_command(cmd: u32, arg0: u32, arg1: u32, seq: u32):
+        """Test/device-simulation helper: write CMD/ARG0/ARG1/SEQ_ID then the
+        TRIGGER magic, mirroring the GHDL protocol sequence (order of the
+        first three registers does not matter; TRIGGER always goes last)."""
+        self.set_u32(OFF_REG_CMD, cmd)
+        self.set_u32(OFF_REG_ARG0, arg0)
+        self.set_u32(OFF_REG_ARG1, arg1)
+        self.set_u32(OFF_REG_SEQ_ID, seq)
+        self.set_u32(OFF_REG_TRIGGER, TRIGGER_MAGIC)
+
+    # --- LOG ring ---
+
+    me init_log_ring(capacity: i64):
+        """Host-side initialization of the LOG ring capacity (bytes)."""
+        self.set_u32(OFF_LOG_HEAD, 0u32)
+        self.set_u32(OFF_LOG_CAP, capacity as u32)
+
+    me fn log_capacity() -> i64:
+        self.get_u32(OFF_LOG_CAP) as i64
+
+    me fn log_head() -> i64:
+        self.get_u32(OFF_LOG_HEAD) as i64
+
+    me append_log_byte(value: u8):
+        """Device-simulation helper: append one PUTC byte to the LOG ring,
+        atomicAdd-style (design §3.2 buffered mode); silently drops once the
+        ring is full."""
+        val cap = self.log_capacity()
+        val head = self.log_head()
+        if cap <= 0 or head >= cap:
+            return
+        self.set_u8(OFF_LOG_DATA + head, value)
+        self.set_u32(OFF_LOG_HEAD, (head + 1) as u32)
+
+    me fn record_ring_offset() -> i64:
+        """RECORD ring immediately follows the LOG ring's data bytes."""
+        OFF_LOG_DATA + self.log_capacity()
+
+    me init_record_ring(capacity_records: i64):
+        """Host-side initialization of the RECORD ring capacity (records)."""
+        val base = self.record_ring_offset()
+        self.set_u32(base + 0, 0u32)
+        self.set_u32(base + 4, capacity_records as u32)
+
+    me fn record_head() -> i64:
+        self.get_u32(self.record_ring_offset() + 0) as i64
+
+    me fn record_capacity() -> i64:
+        self.get_u32(self.record_ring_offset() + 4) as i64
+
+    me append_record(seq: u32, pass_flag: u32, value: i64):
+        """Device-simulation helper: append a 12-byte CMD_RESULT record."""
+        val cap = self.record_capacity()
+        val head = self.record_head()
+        if cap <= 0 or head >= cap:
+            return
+        val base = self.record_ring_offset() + 8 + head * RECORD_BYTES
+        self.set_u32(base + 0, seq)
+        self.set_u32(base + 4, pass_flag)
+        self.set_u32(base + 8, value as u32)
+        self.set_u32(self.record_ring_offset() + 0, (head + 1) as u32)
+
+# Printable ASCII table for codes 32..126 inclusive (95 chars), used to
+# render PUTC bytes to text without depending on a global char-from-code
+# runtime intrinsic.
+val _ASCII_TABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+fn drain_log(arena: MailboxArena) -> text:
+    """Drain the LOG ring into text (printable ASCII 32-126 and newline are
+    kept, matching the GHDL testbench's CMD_PUTC behavior; other byte values
+    are silently dropped)."""
+    val head = arena.log_head()
+    var out = ""
+    var i: i64 = 0
+    while i < head:
+        val b = arena.get_u8(OFF_LOG_DATA + i)
+        val code = b as i64
+        if code == 10:
+            out = out + "\n"
+        elif code >= 32 and code <= 126:
+            val table_idx = code - 32
+            out = out + _ASCII_TABLE[table_idx:table_idx + 1]
+        i = i + 1
+    out
+
+fn drain_records(arena: MailboxArena) -> [ResultRecord]:
+    """Drain all CMD_RESULT records written to the RECORD ring."""
+    val head = arena.record_head()
+    val base = arena.record_ring_offset() + 8
+    var out: [ResultRecord] = []
+    var i: i64 = 0
+    while i < head:
+        val off = base + i * RECORD_BYTES
+        val seq = arena.get_u32(off + 0)
+        val pass_raw = arena.get_u32(off + 4)
+        val value = arena.get_u32(off + 8)
+        out = out.push(ResultRecord(seq: seq as i64, pass: pass_raw != 0u32, value: value as i64))
+        i = i + 1
+    out
+
+# =========================================================================
+# service_trigger — interactive host servicer (design §3.2, interactive mode)
+# =========================================================================
+
+struct ServiceOutcome:
+    serviced: bool
+    exited: bool
+    exit_code: i64
+    putc_byte: i64          # -1 if this trigger was not a PUTC
+    result_seq: i64          # -1 if this trigger was not a CMD_RESULT
+
+fn service_trigger(arena: MailboxArena) -> ServiceOutcome:
+    """Interactive dispatch of one pending TRIGGER: CMD_PUTC appends to the
+    LOG ring, CMD_EXIT writes the sentinel and reports exit, CMD_RESULT
+    appends a record. TRIGGER is cleared to 0 after processing, mirroring the
+    GHDL testbench's protocol sequence step 6."""
+    if not arena.is_triggered():
+        return ServiceOutcome(serviced: false, exited: false, exit_code: 0,
+            putc_byte: -1, result_seq: -1)
+
+    val cmd = arena.cmd()
+    val arg0 = arena.arg0()
+    val arg1 = arena.arg1()
+    val seq = arena.seq_id()
+
+    var exited = false
+    var exit_code: i64 = 0
+    var putc_byte: i64 = -1
+    var result_seq: i64 = -1
+
+    if cmd == CMD_PUTC:
+        arena.append_log_byte((arg0 & 0xFFu32) as u8)
+        putc_byte = (arg0 & 0xFFu32) as i64
+    elif cmd == CMD_EXIT:
+        val sentinel = SENTINEL_EXIT_MASK | (arg0 & 0xFFFFu32)
+        arena.set_u32(OFF_RAM_SENTINEL, sentinel)
+        exited = true
+        exit_code = (arg0 & 0xFFFFu32) as i64
+    elif cmd == CMD_RESULT:
+        arena.append_record(seq, arg0, arg1 as i64)
+        result_seq = seq as i64
+
+    arena.set_trigger(0u32)
+    ServiceOutcome(serviced: true, exited: exited, exit_code: exit_code,
+        putc_byte: putc_byte, result_seq: result_seq)
+
+# =========================================================================
+# write_sgp_header — SGP blob header (design §4.2)
+# =========================================================================
+
+fn write_sgp_header(arena: MailboxArena, header_offset: i64, code_off: i64, code_len: i64,
+        data_off: i64, data_len: i64, step_budget: i64, entry_pc: i64):
+    """Write the 9-word SGP program container header into the arena's DATA
+    region starting at `header_offset` (normally 0x0000)."""
+    arena.set_u32(header_offset + 0, SGP_MAGIC)
+    arena.set_u32(header_offset + 4, SGP_VERSION)
+    arena.set_u32(header_offset + 8, code_off as u32)
+    arena.set_u32(header_offset + 12, code_len as u32)
+    arena.set_u32(header_offset + 16, data_off as u32)
+    arena.set_u32(header_offset + 20, data_len as u32)
+    arena.set_u32(header_offset + 24, step_budget as u32)
+    arena.set_u32(header_offset + 28, entry_pc as u32)
+
+fn read_sgp_magic(arena: MailboxArena, header_offset: i64) -> u32:
+    arena.get_u32(header_offset + 0)
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export TRIGGER_MAGIC, SENTINEL_TIMEOUT, SENTINEL_EXIT_MASK
+export CMD_PUTC, CMD_EXIT, CMD_RESULT
+export ARENA_DATA_SIZE, ARENA_SIZE
+export OFF_DATA, OFF_RAM_SENTINEL, OFF_REG_BASE
+export OFF_REG_CMD, OFF_REG_ARG0, OFF_REG_ARG1, OFF_REG_STATUS, OFF_REG_RESULT
+export OFF_REG_SEQ_ID, OFF_REG_TRIGGER, REG_BLOCK_LEN
+export OFF_LOG_RING, OFF_LOG_HEAD, OFF_LOG_CAP, OFF_LOG_DATA
+export RECORD_BYTES
+export SGP_MAGIC, SGP_VERSION, SGP_HEADER_LEN
+export SentinelState, ResultRecord, ServiceOutcome, MailboxArena
+export decode_sentinel, sentinel_exit_code
+export zero_bytes, drain_log, drain_records, service_trigger, write_sgp_header
+export read_sgp_magic

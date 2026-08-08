@@ -1,0 +1,162 @@
+# codex-system-test
+# @tag: web, rendering, engine2d, performance
+"""# Hosted compositor revision-cache lookup performance
+
+Measures paired forced renders and exact revision-cache hits. The fixture is
+rebuilt before every hit so recursive comparison and retained-result transfer
+cannot hide behind shared composition handles.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{
+    DrawIrCommand,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val WARMUP_PAIRS: i64 = 3
+val TIMED_PAIRS: i64 = 21
+
+fn cache_perf_timed_pairs() -> i64:
+    if env_get("SIMPLE_HOSTED_REVISION_CACHE_SMOKE") == "1":
+        return 3
+    TIMED_PAIRS
+
+fn cache_perf_composition(backend: text):
+    var commands: [DrawIrCommand] = []
+    var index: i32 = 0
+    while index < 256:
+        val x = (index % 16) * 8
+        val y = (index / 16) * 8
+        commands.push(draw_ir_rect(
+            "cell-{index}", x, y, 8, 8,
+            (0xFF000000u32 + (index * 65793).to_u32())
+        ))
+        index = index + 1
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 128, 128, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache-perf", "hosted-web", backend, [
+            draw_ir_batch("body", backend, embedding, commands)
+        ])
+
+fn cache_perf_expected_pixels() -> [u32]:
+    var pixels: [u32] = []
+    var y: i32 = 0
+    while y < 128:
+        var x: i32 = 0
+        while x < 128:
+            val index = (y / 8) * 16 + x / 8
+            pixels.push(
+                0xFF000000u32 + (index * 65793).to_u32())
+            x = x + 1
+        y = y + 1
+    pixels
+
+fn sorted_i64(values: [i64]) -> [i64]:
+    var sorted = values
+    var i: i64 = 1
+    while i < sorted.len():
+        val value = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > value:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = value
+        i = i + 1
+    sorted
+
+describe "hosted compositor revision-cache performance":
+    it "makes an exact cache hit faster than a forced render":
+        val configured = env_get(
+            "SIMPLE_HOSTED_REVISION_CACHE_BACKEND") ?? ""
+        val requested = if configured == "": "software" else: configured
+        expect(
+            requested == "software" or requested == "metal" or
+            requested == "vulkan" or requested == "cuda"
+        ).to_equal(true)
+        val composition = cache_perf_composition(requested)
+        val timed_pairs = cache_perf_timed_pairs()
+        var raster = Engine2dCompositorBackend.create_named(
+            128, 128, requested)
+        var revision: i64 = 1
+        var warmup: i64 = 0
+        while warmup < WARMUP_PAIRS:
+            val _ = raster.render_draw_ir_composition_resources_revision(
+                composition, [], 7, revision)
+            val equivalent = cache_perf_composition(requested)
+            val _ = raster.render_draw_ir_composition_resources_revision(
+                equivalent, [], 7, revision)
+            revision = revision + 1
+            warmup = warmup + 1
+
+        val expected_pixels = cache_perf_expected_pixels()
+        var forced_samples: [i64] = []
+        var hit_samples: [i64] = []
+        var mismatches: i64 = 0
+        var provenance_mismatches: i64 = 0
+        var readback_source = ""
+        var backend_handle: i64 = 0
+        var device_identity: i64 = 0
+        var sample: i64 = 0
+        while sample < timed_pairs:
+            val equivalent = cache_perf_composition(requested)
+            val forced_start = time_now_nanos()
+            val forced = raster.render_draw_ir_composition_resources_revision(
+                composition, [], 7, revision)
+            forced_samples.push(time_now_nanos() - forced_start)
+            val hit_start = time_now_nanos()
+            val hit = raster.render_draw_ir_composition_resources_revision(
+                equivalent, [], 7, revision)
+            hit_samples.push(time_now_nanos() - hit_start)
+            if (forced.pixels != expected_pixels or
+                hit.pixels != expected_pixels):
+                mismatches = mismatches + 1
+            if requested != "software":
+                if sample == 0:
+                    readback_source = forced.readback_source
+                    backend_handle = forced.backend_handle
+                    device_identity = forced.device_identity
+                    if (hit.readback_source != readback_source or
+                        hit.backend_handle != backend_handle or
+                        hit.device_identity != device_identity):
+                        provenance_mismatches = provenance_mismatches + 1
+                elif (forced.readback_source != readback_source or
+                    forced.backend_handle != backend_handle or
+                    forced.device_identity != device_identity or
+                    hit.readback_source != readback_source or
+                    hit.backend_handle != backend_handle or
+                    hit.device_identity != device_identity):
+                    provenance_mismatches = provenance_mismatches + 1
+            else:
+                readback_source = forced.readback_source
+                backend_handle = forced.backend_handle
+                device_identity = forced.device_identity
+            revision = revision + 1
+            sample = sample + 1
+
+        val forced = sorted_i64(forced_samples)
+        val hit = sorted_i64(hit_samples)
+        val forced_p50_ns = forced[forced.len() / 2]
+        val hit_p50_ns = hit[hit.len() / 2]
+        expect(mismatches).to_equal(0)
+        expect(provenance_mismatches).to_equal(0)
+        expect(raster.revision_render_count).to_equal(
+            WARMUP_PAIRS + timed_pairs)
+        expect(raster.revision_reuse_count).to_equal(
+            WARMUP_PAIRS + timed_pairs)
+        expect(forced_p50_ns).to_be_greater_than(0)
+        expect(hit_p50_ns).to_be_greater_than(0)
+        expect(hit_p50_ns * 100).to_be_less_than(forced_p50_ns * 95)
+        if requested != "software":
+            expect(raster.engine.backend_name()).to_equal(requested)
+            expect(readback_source).to_equal("device_readback")
+            expect(backend_handle).to_be_greater_than(0)
+            expect(device_identity).to_be_greater_than(0)
+        print "hosted_revision_cache_perf backend={requested} commands=256 viewport=128x128 samples={timed_pairs} forced_p50_ns={forced_p50_ns} hit_p50_ns={hit_p50_ns} ratio_x1000={hit_p50_ns * 1000 / forced_p50_ns} readback_source={readback_source} backend_handle={backend_handle} device_identity={device_identity}"
+        raster.shutdown()

@@ -1,0 +1,103 @@
+"""SqlitePool.close() must close every connection it owns.
+
+Regression guard for the reader-connection leak: `close()` used to propagate
+the first failing `close()` with `?`, so a single failure (the writer's, or an
+earlier reader's) aborted the loop and left every remaining reader connection
+open. Closing is a shutdown operation — it must be total, and the error is
+reported in aggregate afterwards rather than short-circuiting the cleanup.
+"""
+
+mod nogc_sync_mut.database.sql.pool
+mod nogc_sync_mut.database.sql.connection
+mod nogc_sync_mut.database.sql.types
+
+use std.database.sql.pool.{SqlitePool, SqlitePoolConfig}
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbError}
+
+fn spec_config(readers: i64) -> SqlitePoolConfig:
+    SqlitePoolConfig(
+        max_readers: readers,
+        idle_timeout_ms: 30000,
+        acquire_timeout_ms: 5000,
+    )
+
+# A connection that is still open answers `close()` with Ok; one that is
+# already closed answers Err(DbError.Closed). That difference is the only
+# observable proof that `pool.close()` really reached a connection.
+fn count_still_open(pool: SqlitePool, from_index: i64) -> i64:
+    var still_open = 0
+    var i = from_index
+    while i < pool.readers.len():
+        val again = pool.readers[i].close()
+        match again:
+            Ok(_): still_open = still_open + 1
+            Err(_): nil
+        i = i + 1
+    still_open
+
+describe "SqlitePool.close — cleanup is total":
+    """close() must not abandon connections when one close fails."""
+
+    it "closes every reader even when an earlier reader close fails":
+        val opened = SqlitePool.open(":memory:", spec_config(3))
+        var leaked = -1
+        match opened:
+            Err(_): leaked = -1
+            Ok(pool):
+                # Close reader 0 out of band so pool.close() meets a failure
+                # on its very first reader.
+                val pre = pool.readers[0].close()
+                expect(pre.is_ok()).to_equal(true)
+
+                val closed = pool.close()
+
+                # Readers 1..N must have been closed regardless of reader 0.
+                leaked = count_still_open(pool, 1)
+        expect(leaked).to_equal(0)
+
+    it "closes every reader even when the writer close fails":
+        val opened = SqlitePool.open(":memory:", spec_config(3))
+        var leaked = -1
+        match opened:
+            Err(_): leaked = -1
+            Ok(pool):
+                # Close the writer out of band: the old code returned at the
+                # very first statement and never entered the reader loop.
+                val pre = pool.writer.close()
+                expect(pre.is_ok()).to_equal(true)
+
+                val closed = pool.close()
+
+                leaked = count_still_open(pool, 0)
+        expect(leaked).to_equal(0)
+
+    it "reports the failure instead of swallowing it":
+        val opened = SqlitePool.open(":memory:", spec_config(2))
+        var reported_err = false
+        match opened:
+            Err(_): reported_err = false
+            Ok(pool):
+                val pre = pool.writer.close()
+                expect(pre.is_ok()).to_equal(true)
+
+                # Cleanup is total, but the writer failure is still surfaced.
+                val closed = pool.close()
+                reported_err = closed.is_err()
+        expect(reported_err).to_equal(true)
+
+    it "is idempotent: a second close reports an error but leaks nothing":
+        val opened = SqlitePool.open(":memory:", spec_config(2))
+        var second_is_err = false
+        var leaked = -1
+        match opened:
+            Err(_): leaked = -1
+            Ok(pool):
+                val first = pool.close()
+                expect(first.is_ok()).to_equal(true)
+
+                val second = pool.close()
+                second_is_err = second.is_err()
+                leaked = count_still_open(pool, 0)
+        expect(leaked).to_equal(0)
+        expect(second_is_err).to_equal(true)

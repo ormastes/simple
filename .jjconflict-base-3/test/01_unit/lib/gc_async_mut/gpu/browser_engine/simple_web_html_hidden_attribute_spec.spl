@@ -1,0 +1,73 @@
+"""
+# Simple Web HTML Hidden Attribute Specification
+
+The canonical HTML semantic/style pipeline treats the boolean `hidden`
+attribute as a lowest-priority presentational default. Author CSS may override
+it. The distinct `hidden="until-found"` state remains unsupported.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_software_pixels
+}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _command_index(commands: [DrawIrCommand], component_id: text) -> i32:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return i
+        i = i + 1
+    -1
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            count = count + 1
+        i = i + 1
+    count
+
+describe "Simple Web HTML hidden attribute":
+
+    it "suppresses an exact hidden subtree in software and Draw IR":
+        val html = "<html><head><style>html,body{margin:0;background:#fff}.panel{width:8px;height:8px;background:#ef4444}</style></head><body><section id='hidden' hidden><div id='child' class='panel'></div></section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 16, 16)
+        val commands = composition.batches[0].commands
+        val pixels = simple_web_layout_render_html_software_pixels(html, 16, 16)
+
+        expect(simple_web_layout_debug_style_by_id(html, "hidden", "display")).to_equal("none")
+        expect(_command_index(commands, "hidden")).to_equal(-1)
+        expect(_command_index(commands, "child")).to_equal(-1)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+
+    it "does not confuse similarly named or quoted attributes with hidden":
+        val html = "<html><body><section id='data' data-hidden></section><section id='suffix' hiddenx></section><section id='quoted' title=' hidden '></section></body></html>"
+
+        expect(simple_web_layout_debug_style_by_id(html, "data", "display")).to_equal("block")
+        expect(simple_web_layout_debug_style_by_id(html, "suffix", "display")).to_equal("block")
+        expect(simple_web_layout_debug_style_by_id(html, "quoted", "display")).to_equal("block")
+
+    it "keeps hidden until-found outside the supported plain-hidden subset":
+        val html = "<html><body><section Id='future' HiDdEn='until-found'></section></body></html>"
+
+        expect(simple_web_layout_debug_style_by_id(html, "future", "display")).to_equal("block")
+
+    it "matches mixed-case HTML attribute names without folding values":
+        val html = "<html><head><style>.probe{display:inline}</style></head><body><section ID='MiXeD' ClAsS='probe' HIDDEN></section><section iD='class-sanity' cLaSs='probe'></section></body></html>"
+
+        expect(simple_web_layout_debug_style_by_id(html, "MiXeD", "display")).to_equal("none")
+        expect(simple_web_layout_debug_style_by_id(html, "class-sanity", "display")).to_equal("inline")
+
+    it "lets author display override the hidden presentational default":
+        val html = "<html><head><style>html,body{margin:0;background:#fff}#shown{display:block;width:8px;height:8px;background:#22c55e}</style></head><body><section id='shown' hidden></section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 16, 16)
+        val commands = composition.batches[0].commands
+        val pixels = simple_web_layout_render_html_software_pixels(html, 16, 16)
+
+        expect(simple_web_layout_debug_style_by_id(html, "shown", "display")).to_equal("block")
+        expect(_command_index(commands, "shown")).to_be_greater_than(-1)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)

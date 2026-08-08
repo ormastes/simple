@@ -1,0 +1,677 @@
+#!/bin/sh
+# Aggregate status gate for the HTML/CSS traceability + RenderDoc goal.
+# This does not launch Chrome. It reports whether existing Simple, original
+# Chrome, and Electron RenderDoc evidence is enough to close the goal and points
+# at any missing capture gate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/html-css-goal-status}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_renderdoc_goal_status_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_magic_of() {
+    path="$1"
+    if [ -n "$path" ] && [ ! -L "$path" ] && [ -s "$path" ]; then
+        dd if="$path" bs=4 count=1 2>/dev/null || true
+    fi
+}
+
+file_exists_status() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo "missing"
+    elif [ -L "$path" ]; then
+        echo "symlink"
+    elif [ -s "$path" ]; then
+        echo "pass"
+    else
+        echo "missing"
+    fi
+}
+
+traceability_status="unavailable"
+traceability_reason="missing-html-css-sspec-traceability-check"
+configured_traceability_env="${HTML_CSS_TRACEABILITY_EVIDENCE_ENV:-}"
+traceability_env="${configured_traceability_env:-$BUILD_DIR/sspec-traceability/evidence.env}"
+traceability_html_count=""
+traceability_css_count=""
+traceability_css_supported_count=""
+traceability_required_html_count=""
+traceability_required_css_min_count=""
+if [ -s "$traceability_env" ]; then
+    traceability_status="$(value_of html_css_sspec_traceability_status "$traceability_env")"
+    traceability_reason="$(value_of html_css_sspec_traceability_reason "$traceability_env")"
+elif [ "$configured_traceability_env" != "" ]; then
+    traceability_status="fail"
+    traceability_reason="missing-configured-html-css-traceability-evidence"
+elif [ -x "scripts/check/check-html-css-sspec-traceability.shs" ]; then
+    if BUILD_DIR="$BUILD_DIR/sspec-traceability" \
+        REPORT_PATH="$BUILD_DIR/sspec-traceability/report.md" \
+        sh scripts/check/check-html-css-sspec-traceability.shs >"$BUILD_DIR/sspec-traceability.out" 2>&1; then
+        traceability_status="$(value_of html_css_sspec_traceability_status "$traceability_env")"
+        traceability_reason="$(value_of html_css_sspec_traceability_reason "$traceability_env")"
+    else
+        traceability_status="$(value_of html_css_sspec_traceability_status "$traceability_env")"
+        traceability_reason="$(value_of html_css_sspec_traceability_reason "$traceability_env")"
+    fi
+fi
+traceability_html_count="$(value_of html_css_sspec_traceability_html_tag_count "$traceability_env")"
+traceability_css_count="$(value_of html_css_sspec_traceability_css_property_count "$traceability_env")"
+traceability_css_supported_count="$(value_of html_css_sspec_traceability_implemented_css_property_count "$traceability_env")"
+traceability_required_html_count="$(value_of html_css_sspec_traceability_required_html_tag_count "$traceability_env")"
+traceability_required_css_min_count="$(value_of html_css_sspec_traceability_required_css_property_min_count "$traceability_env")"
+if [ "$traceability_status" = "" ]; then
+    traceability_status="fail"
+fi
+if [ "$traceability_reason" = "" ]; then
+    traceability_reason="html-css-sspec-traceability-check-failed"
+fi
+
+rendering_manifest_status="unavailable"
+rendering_manifest_reason="missing-rendering-manifest-traceability-check"
+configured_rendering_manifest_env="${HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV:-}"
+rendering_manifest_env="${configured_rendering_manifest_env:-$BUILD_DIR/rendering-manifest/evidence.env}"
+if [ -s "$rendering_manifest_env" ]; then
+    rendering_manifest_status="$(value_of html_css_rendering_manifest_traceability_status "$rendering_manifest_env")"
+    rendering_manifest_reason="$(value_of html_css_rendering_manifest_traceability_reason "$rendering_manifest_env")"
+elif [ "$configured_rendering_manifest_env" != "" ]; then
+    rendering_manifest_status="fail"
+    rendering_manifest_reason="missing-configured-html-css-rendering-manifest-traceability-evidence"
+elif [ -x "scripts/check/check-html-css-rendering-manifest-traceability.shs" ]; then
+    if BUILD_DIR="$BUILD_DIR/rendering-manifest" \
+        REPORT_PATH="$BUILD_DIR/rendering-manifest/report.md" \
+        sh scripts/check/check-html-css-rendering-manifest-traceability.shs >"$BUILD_DIR/rendering-manifest.out" 2>&1; then
+        rendering_manifest_status="$(value_of html_css_rendering_manifest_traceability_status "$rendering_manifest_env")"
+        rendering_manifest_reason="$(value_of html_css_rendering_manifest_traceability_reason "$rendering_manifest_env")"
+    else
+        rendering_manifest_status="$(value_of html_css_rendering_manifest_traceability_status "$rendering_manifest_env")"
+        rendering_manifest_reason="$(value_of html_css_rendering_manifest_traceability_reason "$rendering_manifest_env")"
+    fi
+fi
+if [ "$rendering_manifest_status" = "" ]; then
+    rendering_manifest_status="fail"
+fi
+if [ "$rendering_manifest_reason" = "" ]; then
+    rendering_manifest_reason="rendering-manifest-traceability-check-failed"
+fi
+
+simple_env="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}"
+simple_capture_status="$(value_of rdoc_capture_status "$simple_env")"
+simple_capture_magic="$(value_of rdoc_capture_magic "$simple_env")"
+simple_capture_file="$(value_of rdoc_capture_file "$simple_env")"
+simple_capture_file_magic="$(file_magic_of "$simple_capture_file")"
+simple_status="fail"
+simple_reason="missing-simple-rdoc"
+simple_gate_env="$BUILD_DIR/simple-gate/evidence.env"
+simple_gate_status=""
+simple_gate_reason=""
+simple_gate_capture_file_magic=""
+simple_gate_runtime_backend=""
+simple_gate_renderdoc_available=""
+simple_gate_renderdoc_start=""
+simple_gate_renderdoc_end=""
+simple_gate_renderdoc_num_captures=""
+simple_gate_pixel_count=""
+simple_gate_runtime_metadata_status=""
+simple_gate_missing_runtime_metadata=""
+if [ -x "scripts/check/check-renderdoc-simple-gate.shs" ]; then
+    if RDOC_SIMPLE_EVIDENCE_ENV="$simple_env" \
+        BUILD_DIR="$BUILD_DIR/simple-gate" \
+        REPORT_PATH="$BUILD_DIR/simple-gate/report.md" \
+        sh scripts/check/check-renderdoc-simple-gate.shs >"$BUILD_DIR/simple-gate.out" 2>&1; then
+        simple_gate_status="$(value_of rdoc_simple_gate_status "$simple_gate_env")"
+        simple_gate_reason="$(value_of rdoc_simple_gate_reason "$simple_gate_env")"
+        simple_gate_capture_file_magic="$(value_of rdoc_simple_gate_capture_file_magic "$simple_gate_env")"
+    else
+        simple_gate_status="$(value_of rdoc_simple_gate_status "$simple_gate_env")"
+        simple_gate_reason="$(value_of rdoc_simple_gate_reason "$simple_gate_env")"
+        simple_gate_capture_file_magic="$(value_of rdoc_simple_gate_capture_file_magic "$simple_gate_env")"
+    fi
+fi
+simple_gate_runtime_backend="$(value_of rdoc_simple_gate_runtime_backend "$simple_gate_env")"
+simple_gate_renderdoc_available="$(value_of rdoc_simple_gate_renderdoc_available "$simple_gate_env")"
+simple_gate_renderdoc_start="$(value_of rdoc_simple_gate_renderdoc_start "$simple_gate_env")"
+simple_gate_renderdoc_end="$(value_of rdoc_simple_gate_renderdoc_end "$simple_gate_env")"
+simple_gate_renderdoc_num_captures="$(value_of rdoc_simple_gate_renderdoc_num_captures "$simple_gate_env")"
+simple_gate_pixel_count="$(value_of rdoc_simple_gate_pixel_count "$simple_gate_env")"
+simple_gate_runtime_metadata_status="$(value_of rdoc_simple_gate_runtime_metadata_status "$simple_gate_env")"
+simple_gate_missing_runtime_metadata="$(value_of rdoc_simple_gate_missing_runtime_metadata "$simple_gate_env")"
+if [ "$simple_gate_status" = "" ]; then
+    simple_gate_status="unavailable"
+    simple_gate_reason="missing-simple-renderdoc-gate-evidence"
+fi
+if [ "$simple_gate_status" = "pass" ]; then
+    simple_status="pass"
+    simple_reason="pass"
+else
+    simple_reason="$simple_gate_reason"
+    if [ "$simple_reason" = "" ]; then
+        simple_reason="missing-simple-rdoc"
+    fi
+fi
+
+external_env="${RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV:-${RDOC_HTML_EVIDENCE_ENV:-build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env}}"
+external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+external_capture_env="$(value_of rdoc_external_host_capture_env "$external_env")"
+external_capture_status="$(value_of rdoc_external_host_capture_status_raw "$external_env")"
+external_capture_reason="$(value_of rdoc_external_host_capture_reason_raw "$external_env")"
+external_capture_file="$(value_of rdoc_external_host_capture_file "$external_env")"
+external_capture_file_status="$(value_of rdoc_external_host_capture_file_status "$external_env")"
+external_capture_magic="$(value_of rdoc_external_host_capture_magic "$external_env")"
+external_capture_file_magic="$(value_of rdoc_external_host_capture_file_magic "$external_env")"
+external_capture_html_path="$(value_of rdoc_external_host_capture_html_path "$external_env")"
+external_capture_log="$(value_of rdoc_external_host_capture_log "$external_env")"
+external_gpu_process_exit_status="$(value_of rdoc_external_host_gpu_process_exit_status "$external_env")"
+external_gpu_process_exit_count="$(value_of rdoc_external_host_gpu_process_exit_count "$external_env")"
+external_gpu_process_exit_codes="$(value_of rdoc_external_host_gpu_process_exit_codes "$external_env")"
+external_gpu_process_exit_reason="$(value_of rdoc_external_host_gpu_process_exit_reason "$external_env")"
+external_gate_status="$(value_of rdoc_external_host_gate_status "$external_env")"
+external_gate_reason="$(value_of rdoc_external_host_gate_reason "$external_env")"
+external_gate_scene="$(value_of rdoc_external_host_gate_scene "$external_env")"
+external_gate_html_path="$(value_of rdoc_external_host_gate_html_path "$external_env")"
+external_gate_capture_file_status="$(value_of rdoc_external_host_gate_capture_file_status "$external_env")"
+external_gate_capture_file_magic="$(value_of rdoc_external_host_gate_capture_file_magic "$external_env")"
+external_gate_requested_api="$(value_of rdoc_external_host_gate_requested_api "$external_env")"
+external_gate_requested_angle="$(value_of rdoc_external_host_gate_requested_angle "$external_env")"
+external_gate_requested_features="$(value_of rdoc_external_host_gate_requested_features "$external_env")"
+external_gate_launch_flags="$(value_of rdoc_external_host_gate_launch_flags "$external_env")"
+if [ "$external_status" = "" ] && [ "$(value_of rdoc_backend "$external_env")" = "original" ]; then
+    external_status="$(value_of rdoc_capture_status "$external_env")"
+    external_reason="$(value_of rdoc_capture_reason "$external_env")"
+    external_capture_env="$external_env"
+    external_capture_status="$external_status"
+    external_capture_reason="$external_reason"
+    external_capture_file="$(value_of rdoc_capture_file "$external_env")"
+    external_capture_file_status="$(file_exists_status "$external_capture_file")"
+    external_capture_magic="$(value_of rdoc_capture_magic "$external_env")"
+    external_capture_file_magic="$(file_magic_of "$external_capture_file")"
+    external_capture_html_path="$(value_of rdoc_html_path "$external_env")"
+    external_capture_log="$(value_of rdoc_log "$external_env")"
+    external_gate_status="$external_status"
+    external_gate_reason="$external_reason"
+    external_gate_scene="$(value_of rdoc_scene "$external_env")"
+    external_gate_html_path="$external_capture_html_path"
+    external_gate_capture_file_status="$external_capture_file_status"
+    external_gate_capture_file_magic="$external_capture_file_magic"
+    external_gate_requested_api="$(value_of rdoc_chromium_requested_api "$external_env")"
+    external_gate_requested_angle="$(value_of rdoc_chromium_requested_angle "$external_env")"
+    external_gate_requested_features="$(value_of rdoc_chromium_requested_features "$external_env")"
+    external_gate_launch_flags="$(value_of rdoc_chromium_launch_flags "$external_env")"
+fi
+if [ "$external_status" = "" ]; then
+    if BUILD_DIR="$BUILD_DIR/external-readiness" \
+        REPORT_PATH="$BUILD_DIR/external-readiness/report.md" \
+        sh scripts/check/check-renderdoc-external-host-capture.shs >"$BUILD_DIR/external-readiness.out" 2>&1; then
+        external_env="$BUILD_DIR/external-readiness/evidence.env"
+        external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+        external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+        external_capture_env="$(value_of rdoc_external_host_capture_env "$external_env")"
+        external_capture_status="$(value_of rdoc_external_host_capture_status_raw "$external_env")"
+        external_capture_reason="$(value_of rdoc_external_host_capture_reason_raw "$external_env")"
+        external_capture_file="$(value_of rdoc_external_host_capture_file "$external_env")"
+        external_capture_magic="$(value_of rdoc_external_host_capture_magic "$external_env")"
+        external_capture_file_magic="$(value_of rdoc_external_host_capture_file_magic "$external_env")"
+        external_capture_html_path="$(value_of rdoc_external_host_capture_html_path "$external_env")"
+        external_capture_log="$(value_of rdoc_external_host_capture_log "$external_env")"
+        external_gpu_process_exit_status="$(value_of rdoc_external_host_gpu_process_exit_status "$external_env")"
+        external_gpu_process_exit_count="$(value_of rdoc_external_host_gpu_process_exit_count "$external_env")"
+        external_gpu_process_exit_codes="$(value_of rdoc_external_host_gpu_process_exit_codes "$external_env")"
+        external_gpu_process_exit_reason="$(value_of rdoc_external_host_gpu_process_exit_reason "$external_env")"
+        external_gate_status="$(value_of rdoc_external_host_gate_status "$external_env")"
+        external_gate_reason="$(value_of rdoc_external_host_gate_reason "$external_env")"
+        external_gate_scene="$(value_of rdoc_external_host_gate_scene "$external_env")"
+        external_gate_html_path="$(value_of rdoc_external_host_gate_html_path "$external_env")"
+        external_gate_capture_file_magic="$(value_of rdoc_external_host_gate_capture_file_magic "$external_env")"
+        external_gate_requested_api="$(value_of rdoc_external_host_gate_requested_api "$external_env")"
+        external_gate_requested_angle="$(value_of rdoc_external_host_gate_requested_angle "$external_env")"
+        external_gate_requested_features="$(value_of rdoc_external_host_gate_requested_features "$external_env")"
+        external_gate_launch_flags="$(value_of rdoc_external_host_gate_launch_flags "$external_env")"
+    else
+        external_env="$BUILD_DIR/external-readiness/evidence.env"
+        external_status="$(value_of rdoc_external_host_capture_status "$external_env")"
+        external_reason="$(value_of rdoc_external_host_capture_reason "$external_env")"
+        external_capture_env="$(value_of rdoc_external_host_capture_env "$external_env")"
+        external_capture_status="$(value_of rdoc_external_host_capture_status_raw "$external_env")"
+        external_capture_reason="$(value_of rdoc_external_host_capture_reason_raw "$external_env")"
+        external_capture_file="$(value_of rdoc_external_host_capture_file "$external_env")"
+        external_capture_magic="$(value_of rdoc_external_host_capture_magic "$external_env")"
+        external_capture_file_magic="$(value_of rdoc_external_host_capture_file_magic "$external_env")"
+        external_capture_html_path="$(value_of rdoc_external_host_capture_html_path "$external_env")"
+        external_capture_log="$(value_of rdoc_external_host_capture_log "$external_env")"
+        external_gpu_process_exit_status="$(value_of rdoc_external_host_gpu_process_exit_status "$external_env")"
+        external_gpu_process_exit_count="$(value_of rdoc_external_host_gpu_process_exit_count "$external_env")"
+        external_gpu_process_exit_codes="$(value_of rdoc_external_host_gpu_process_exit_codes "$external_env")"
+        external_gpu_process_exit_reason="$(value_of rdoc_external_host_gpu_process_exit_reason "$external_env")"
+        external_gate_status="$(value_of rdoc_external_host_gate_status "$external_env")"
+        external_gate_reason="$(value_of rdoc_external_host_gate_reason "$external_env")"
+        external_gate_scene="$(value_of rdoc_external_host_gate_scene "$external_env")"
+        external_gate_html_path="$(value_of rdoc_external_host_gate_html_path "$external_env")"
+        external_gate_capture_file_magic="$(value_of rdoc_external_host_gate_capture_file_magic "$external_env")"
+        external_gate_requested_api="$(value_of rdoc_external_host_gate_requested_api "$external_env")"
+        external_gate_requested_angle="$(value_of rdoc_external_host_gate_requested_angle "$external_env")"
+        external_gate_requested_features="$(value_of rdoc_external_host_gate_requested_features "$external_env")"
+        external_gate_launch_flags="$(value_of rdoc_external_host_gate_launch_flags "$external_env")"
+    fi
+fi
+external_capture_file_magic="$(file_magic_of "$external_capture_file")"
+if [ "$external_capture_file_status" = "" ]; then
+    external_capture_file_status="$(file_exists_status "$external_capture_file")"
+fi
+if [ "$external_gate_capture_file_status" = "" ]; then
+    external_gate_capture_file_status="$external_capture_file_status"
+fi
+external_gate_capture_file_magic="$external_capture_file_magic"
+if [ "$external_status" = "" ]; then
+    external_status="unavailable"
+    external_reason="missing-external-capture-evidence"
+fi
+case "$external_gate_html_path" in
+    *test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html)
+        external_gate_html_path_matches="1"
+        ;;
+    *)
+        external_gate_html_path_matches="0"
+        ;;
+esac
+case "$external_gate_requested_features" in
+    *Vulkan*)
+        external_gate_requested_features_matches="1"
+        ;;
+    *)
+        external_gate_requested_features_matches="0"
+        ;;
+esac
+case " $external_gate_launch_flags " in
+    *" --enable-features=Vulkan "*|*" --enable-features=Vulkan,"*|*" --enable-features="*",Vulkan,"*|*" --enable-features="*",Vulkan "*)
+        external_gate_launch_flags_enable_features="1"
+        ;;
+    *)
+        external_gate_launch_flags_enable_features="0"
+        ;;
+esac
+case " $external_gate_launch_flags " in
+    *" --use-angle=vulkan "*)
+        external_gate_launch_flags_use_angle="1"
+        ;;
+    *)
+        external_gate_launch_flags_use_angle="0"
+        ;;
+esac
+
+electron_env="${RDOC_ELECTRON_EVIDENCE_ENV:-${RDOC_ELECTRON_HTML_EVIDENCE_ENV:-build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env}}"
+electron_gate_env="$BUILD_DIR/electron-gate/evidence.env"
+electron_gate_status=""
+electron_gate_reason=""
+electron_gate_source_env=""
+electron_gate_backend=""
+electron_gate_scene=""
+electron_gate_capture_status=""
+electron_gate_capture_reason=""
+electron_gate_capture_file=""
+electron_gate_capture_magic=""
+electron_gate_capture_file_magic=""
+electron_gate_html_path=""
+electron_gate_binary=""
+electron_gate_capture_script=""
+electron_gate_argb_path=""
+electron_gate_argb_status=""
+electron_gate_argb_reason=""
+electron_gate_argb_width=""
+electron_gate_argb_height=""
+electron_gate_argb_format=""
+electron_gate_argb_producer=""
+electron_gate_argb_pixel_count=""
+electron_gate_argb_nonblank_pixel_count=""
+electron_gate_requested_api=""
+electron_gate_requested_angle=""
+electron_gate_requested_features=""
+electron_gate_launch_flags=""
+electron_gate_log=""
+electron_gate_vulkan_log_status=""
+electron_gate_vulkan_log_reason=""
+electron_gate_required_electron_suffix=""
+if [ -x "scripts/check/check-renderdoc-electron-html-gate.shs" ]; then
+    if RDOC_ELECTRON_HTML_EVIDENCE_ENV="$electron_env" \
+        BUILD_DIR="$BUILD_DIR/electron-gate" \
+        REPORT_PATH="$BUILD_DIR/electron-gate/report.md" \
+        sh scripts/check/check-renderdoc-electron-html-gate.shs >"$BUILD_DIR/electron-gate.out" 2>&1; then
+        electron_gate_status="$(value_of rdoc_electron_html_gate_status "$electron_gate_env")"
+        electron_gate_reason="$(value_of rdoc_electron_html_gate_reason "$electron_gate_env")"
+    else
+        electron_gate_status="$(value_of rdoc_electron_html_gate_status "$electron_gate_env")"
+        electron_gate_reason="$(value_of rdoc_electron_html_gate_reason "$electron_gate_env")"
+    fi
+fi
+electron_gate_source_env="$(value_of rdoc_electron_html_gate_source_env "$electron_gate_env")"
+electron_gate_backend="$(value_of rdoc_electron_html_gate_backend "$electron_gate_env")"
+electron_gate_scene="$(value_of rdoc_electron_html_gate_scene "$electron_gate_env")"
+electron_gate_capture_status="$(value_of rdoc_electron_html_gate_capture_status "$electron_gate_env")"
+electron_gate_capture_reason="$(value_of rdoc_electron_html_gate_capture_reason "$electron_gate_env")"
+electron_gate_capture_file="$(value_of rdoc_electron_html_gate_capture_file "$electron_gate_env")"
+electron_gate_capture_file_status="$(value_of rdoc_electron_html_gate_capture_file_status "$electron_gate_env")"
+electron_gate_capture_magic="$(value_of rdoc_electron_html_gate_capture_magic "$electron_gate_env")"
+electron_gate_capture_file_magic="$(value_of rdoc_electron_html_gate_capture_file_magic "$electron_gate_env")"
+electron_gate_html_path="$(value_of rdoc_electron_html_gate_html_path "$electron_gate_env")"
+electron_gate_binary="$(value_of rdoc_electron_html_gate_electron "$electron_gate_env")"
+electron_gate_capture_script="$(value_of rdoc_electron_html_gate_capture_script "$electron_gate_env")"
+electron_gate_argb_path="$(value_of rdoc_electron_html_gate_argb_path "$electron_gate_env")"
+electron_gate_argb_status="$(value_of rdoc_electron_html_gate_argb_status "$electron_gate_env")"
+electron_gate_argb_reason="$(value_of rdoc_electron_html_gate_argb_reason "$electron_gate_env")"
+electron_gate_argb_width="$(value_of rdoc_electron_html_gate_argb_width "$electron_gate_env")"
+electron_gate_argb_height="$(value_of rdoc_electron_html_gate_argb_height "$electron_gate_env")"
+electron_gate_argb_format="$(value_of rdoc_electron_html_gate_argb_format "$electron_gate_env")"
+electron_gate_argb_producer="$(value_of rdoc_electron_html_gate_argb_producer "$electron_gate_env")"
+electron_gate_argb_pixel_count="$(value_of rdoc_electron_html_gate_argb_pixel_count "$electron_gate_env")"
+electron_gate_argb_nonblank_pixel_count="$(value_of rdoc_electron_html_gate_argb_nonblank_pixel_count "$electron_gate_env")"
+electron_gate_requested_api="$(value_of rdoc_electron_html_gate_requested_api "$electron_gate_env")"
+electron_gate_requested_angle="$(value_of rdoc_electron_html_gate_requested_angle "$electron_gate_env")"
+electron_gate_requested_features="$(value_of rdoc_electron_html_gate_requested_features "$electron_gate_env")"
+electron_gate_launch_flags="$(value_of rdoc_electron_html_gate_launch_flags "$electron_gate_env")"
+electron_gate_log="$(value_of rdoc_electron_html_gate_log "$electron_gate_env")"
+electron_gate_vulkan_log_status="$(value_of rdoc_electron_html_gate_vulkan_log_status "$electron_gate_env")"
+electron_gate_vulkan_log_reason="$(value_of rdoc_electron_html_gate_vulkan_log_reason "$electron_gate_env")"
+electron_gate_required_electron_suffix="$(value_of rdoc_electron_html_gate_required_electron_suffix "$electron_gate_env")"
+if [ "$electron_gate_status" = "" ]; then
+    electron_gate_status="unavailable"
+    electron_gate_reason="missing-electron-renderdoc-gate-evidence"
+fi
+
+macos_env="${RDOC_MACOS_EVIDENCE_ENV:-build/renderdoc/macos-portability-probe/evidence.env}"
+macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+if [ "$macos_status" = "" ]; then
+    if BUILD_DIR="$BUILD_DIR/macos-probe" \
+        REPORT_PATH="$BUILD_DIR/macos-probe/report.md" \
+        sh scripts/check/check-renderdoc-macos-portability-probe.shs >"$BUILD_DIR/macos-probe.out" 2>&1; then
+        macos_env="$BUILD_DIR/macos-probe/evidence.env"
+        macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+        macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+    else
+        macos_env="$BUILD_DIR/macos-probe/evidence.env"
+        macos_status="$(value_of rdoc_macos_probe_status "$macos_env")"
+        macos_reason="$(value_of rdoc_macos_probe_reason "$macos_env")"
+    fi
+fi
+if [ "$macos_status" = "" ]; then
+    macos_status="unavailable"
+    macos_reason="missing-macos-probe-evidence"
+fi
+macos_uname_s="$(value_of rdoc_macos_uname_s "$macos_env")"
+macos_uname_m="$(value_of rdoc_macos_uname_m "$macos_env")"
+macos_version="$(value_of rdoc_macos_version "$macos_env")"
+macos_gpu_summary="$(value_of rdoc_macos_gpu_summary "$macos_env")"
+macos_vulkan_status="$(value_of rdoc_macos_vulkan_status "$macos_env")"
+macos_vulkan_device="$(value_of rdoc_macos_vulkan_device "$macos_env")"
+macos_vulkan_driver="$(value_of rdoc_macos_vulkan_driver "$macos_env")"
+macos_renderdoc_status="$(value_of rdoc_macos_renderdoc_status "$macos_env")"
+macos_run_captures="$(value_of rdoc_macos_run_captures "$macos_env")"
+macos_capture_simple_status="$(value_of rdoc_macos_capture_simple_status "$macos_env")"
+macos_capture_html_status="$(value_of rdoc_macos_capture_html_status "$macos_env")"
+macos_html_gate_status="$(value_of rdoc_macos_html_gate_status "$macos_env")"
+macos_capture_electron_status="$(value_of rdoc_macos_capture_electron_status "$macos_env")"
+macos_electron_gate_status="$(value_of rdoc_macos_electron_gate_status "$macos_env")"
+
+overall_status="fail"
+overall_reason="original-renderdoc-evidence-missing"
+if [ "$traceability_status" = "pass" ] \
+    && [ "$rendering_manifest_status" = "pass" ] \
+    && [ "$simple_status" = "pass" ] \
+    && [ "$external_status" = "pass" ] \
+    && [ "$external_capture_file_status" = "pass" ] \
+    && [ "$external_capture_file_magic" = "RDOC" ] \
+    && [ "$external_gate_scene" = "html-css-chrome" ] \
+    && [ "$external_gate_html_path_matches" = "1" ] \
+    && [ "$external_gate_requested_api" = "vulkan" ] \
+    && [ "$external_gate_requested_angle" = "vulkan" ] \
+    && [ "$external_gate_requested_features_matches" = "1" ] \
+    && [ "$external_gate_launch_flags_enable_features" = "1" ] \
+    && [ "$external_gate_launch_flags_use_angle" = "1" ] \
+    && [ "$electron_gate_status" = "pass" ]; then
+    overall_status="pass"
+    overall_reason="pass"
+elif [ "$traceability_status" = "fail" ]; then
+    overall_reason="$traceability_reason"
+elif [ "$rendering_manifest_status" != "pass" ]; then
+    overall_reason="$rendering_manifest_reason"
+elif [ "$simple_status" != "pass" ]; then
+    overall_reason="$simple_reason"
+elif [ "$external_status" != "pass" ]; then
+    overall_reason="$external_reason"
+elif [ "$external_capture_file_status" = "symlink" ] || [ "$external_gate_capture_file_status" = "symlink" ]; then
+    overall_reason="external-renderdoc-artifact-symlink"
+elif [ "$external_capture_file_magic" != "RDOC" ] \
+    || [ "$external_gate_scene" != "html-css-chrome" ] \
+    || [ "$external_gate_html_path_matches" != "1" ] \
+    || [ "$external_gate_requested_api" != "vulkan" ] \
+    || [ "$external_gate_requested_angle" != "vulkan" ] \
+    || [ "$external_gate_requested_features_matches" != "1" ] \
+    || [ "$external_gate_launch_flags_enable_features" != "1" ] \
+    || [ "$external_gate_launch_flags_use_angle" != "1" ]; then
+    overall_reason="external-renderdoc-metadata-missing"
+elif [ "$electron_gate_status" != "pass" ]; then
+    overall_reason="$electron_gate_reason"
+fi
+
+blocked_gates=""
+blocked_gate_count=0
+append_blocked_gate() {
+    gate="$1"
+    if [ "$blocked_gates" = "" ]; then
+        blocked_gates="$gate"
+    else
+        blocked_gates="$blocked_gates|$gate"
+    fi
+    blocked_gate_count=$((blocked_gate_count + 1))
+}
+
+if [ "$traceability_status" != "pass" ]; then
+    append_blocked_gate "HTML/CSS SSpec traceability evidence"
+fi
+if [ "$rendering_manifest_status" != "pass" ]; then
+    append_blocked_gate "HTML/CSS rendering manifest traceability evidence"
+fi
+if [ "$simple_status" != "pass" ] || [ "$simple_gate_status" != "pass" ]; then
+    append_blocked_gate "Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic"
+fi
+if [ "$external_status" != "pass" ] \
+    || [ "$external_capture_file_status" != "pass" ] \
+    || [ "$external_capture_file_magic" != "RDOC" ] \
+    || [ "$external_gate_scene" != "html-css-chrome" ] \
+    || [ "$external_gate_html_path_matches" != "1" ] \
+    || [ "$external_gate_requested_api" != "vulkan" ] \
+    || [ "$external_gate_requested_angle" != "vulkan" ] \
+    || [ "$external_gate_requested_features_matches" != "1" ] \
+    || [ "$external_gate_launch_flags_enable_features" != "1" ] \
+    || [ "$external_gate_launch_flags_use_angle" != "1" ]; then
+    append_blocked_gate "original Chrome-on-Vulkan RenderDoc .rdc with RDOC magic"
+fi
+if [ "$electron_gate_status" != "pass" ]; then
+    append_blocked_gate "Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof"
+fi
+blocked_gate="${blocked_gates%%|*}"
+
+{
+    echo "html_css_renderdoc_goal_status=$overall_status"
+    echo "html_css_renderdoc_goal_reason=$overall_reason"
+    echo "html_css_traceability_status=$traceability_status"
+    echo "html_css_traceability_reason=$traceability_reason"
+    echo "html_css_traceability_command=sh scripts/check/check-html-css-sspec-traceability.shs"
+    echo "html_css_traceability_evidence_env=$traceability_env"
+    echo "html_css_traceability_html_tag_count=$traceability_html_count"
+    echo "html_css_traceability_required_html_tag_count=$traceability_required_html_count"
+    echo "html_css_traceability_css_property_count=$traceability_css_count"
+    echo "html_css_traceability_required_css_property_min_count=$traceability_required_css_min_count"
+    echo "html_css_traceability_implemented_css_property_count=$traceability_css_supported_count"
+    echo "html_css_rendering_manifest_traceability_status=$rendering_manifest_status"
+    echo "html_css_rendering_manifest_traceability_reason=$rendering_manifest_reason"
+    echo "html_css_rendering_manifest_traceability_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs"
+    echo "simple_renderdoc_status=$simple_status"
+    echo "simple_renderdoc_reason=$simple_reason"
+    echo "simple_renderdoc_evidence_env=$simple_env"
+    echo "simple_renderdoc_capture_status=$simple_capture_status"
+    echo "simple_renderdoc_capture_magic=$simple_capture_magic"
+    echo "simple_renderdoc_capture_file_magic=$simple_capture_file_magic"
+    echo "simple_renderdoc_capture_file=$simple_capture_file"
+    echo "simple_renderdoc_gate_env=$simple_gate_env"
+    echo "simple_renderdoc_gate_status=$simple_gate_status"
+    echo "simple_renderdoc_gate_reason=$simple_gate_reason"
+    echo "simple_renderdoc_gate_capture_file_magic=$simple_gate_capture_file_magic"
+    echo "simple_renderdoc_gate_runtime_backend=$simple_gate_runtime_backend"
+    echo "simple_renderdoc_gate_renderdoc_available=$simple_gate_renderdoc_available"
+    echo "simple_renderdoc_gate_renderdoc_start=$simple_gate_renderdoc_start"
+    echo "simple_renderdoc_gate_renderdoc_end=$simple_gate_renderdoc_end"
+    echo "simple_renderdoc_gate_renderdoc_num_captures=$simple_gate_renderdoc_num_captures"
+    echo "simple_renderdoc_gate_pixel_count=$simple_gate_pixel_count"
+    echo "simple_renderdoc_gate_runtime_metadata_status=$simple_gate_runtime_metadata_status"
+    echo "simple_renderdoc_gate_missing_runtime_metadata=$simple_gate_missing_runtime_metadata"
+    echo "simple_renderdoc_gate_required_backend=simple"
+    echo "simple_renderdoc_gate_required_scene=vulkan-engine2d"
+    echo "simple_renderdoc_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl"
+    echo "simple_renderdoc_gate_required_status=pass"
+    echo "simple_renderdoc_gate_required_magic=RDOC"
+    echo "simple_renderdoc_gate_required_runtime_backend=vulkan"
+    echo "simple_renderdoc_gate_required_renderdoc_available=1"
+    echo "simple_renderdoc_gate_required_renderdoc_start=1"
+    echo "simple_renderdoc_gate_required_renderdoc_end_recorded=1"
+    echo "simple_renderdoc_gate_required_num_captures_min=1"
+    echo "simple_renderdoc_gate_required_pixel_count_min=1"
+    echo "external_renderdoc_status=$external_status"
+    echo "external_renderdoc_reason=$external_reason"
+    echo "external_renderdoc_evidence_env=$external_env"
+    echo "external_renderdoc_capture_env=$external_capture_env"
+    echo "external_renderdoc_capture_status=$external_capture_status"
+    echo "external_renderdoc_capture_reason=$external_capture_reason"
+    echo "external_renderdoc_capture_file=$external_capture_file"
+    echo "external_renderdoc_capture_file_status=$external_capture_file_status"
+    echo "external_renderdoc_capture_magic=$external_capture_magic"
+    echo "external_renderdoc_capture_file_magic=$external_capture_file_magic"
+    echo "external_renderdoc_capture_html_path=$external_capture_html_path"
+    echo "external_renderdoc_capture_log=$external_capture_log"
+    echo "external_renderdoc_gpu_process_exit_status=$external_gpu_process_exit_status"
+    echo "external_renderdoc_gpu_process_exit_count=$external_gpu_process_exit_count"
+    echo "external_renderdoc_gpu_process_exit_codes=$external_gpu_process_exit_codes"
+    echo "external_renderdoc_gpu_process_exit_reason=$external_gpu_process_exit_reason"
+    echo "external_renderdoc_gate_status=$external_gate_status"
+    echo "external_renderdoc_gate_reason=$external_gate_reason"
+    echo "external_renderdoc_gate_scene=$external_gate_scene"
+    echo "external_renderdoc_gate_html_path=$external_gate_html_path"
+    echo "external_renderdoc_gate_capture_file_status=$external_gate_capture_file_status"
+    echo "external_renderdoc_gate_capture_file_magic=$external_gate_capture_file_magic"
+    echo "external_renderdoc_gate_requested_api=$external_gate_requested_api"
+    echo "external_renderdoc_gate_requested_angle=$external_gate_requested_angle"
+    echo "external_renderdoc_gate_requested_features=$external_gate_requested_features"
+    echo "external_renderdoc_gate_launch_flags=$external_gate_launch_flags"
+    echo "electron_renderdoc_gate_env=$electron_gate_env"
+    echo "electron_renderdoc_gate_source_env=$electron_gate_source_env"
+    echo "electron_renderdoc_gate_status=$electron_gate_status"
+    echo "electron_renderdoc_gate_reason=$electron_gate_reason"
+    echo "electron_renderdoc_gate_backend=$electron_gate_backend"
+    echo "electron_renderdoc_gate_scene=$electron_gate_scene"
+    echo "electron_renderdoc_gate_capture_status=$electron_gate_capture_status"
+    echo "electron_renderdoc_gate_capture_reason=$electron_gate_capture_reason"
+    echo "electron_renderdoc_gate_capture_file=$electron_gate_capture_file"
+    echo "electron_renderdoc_gate_capture_file_status=$electron_gate_capture_file_status"
+    echo "electron_renderdoc_gate_capture_magic=$electron_gate_capture_magic"
+    echo "electron_renderdoc_gate_capture_file_magic=$electron_gate_capture_file_magic"
+    echo "electron_renderdoc_gate_html_path=$electron_gate_html_path"
+    echo "electron_renderdoc_gate_binary=$electron_gate_binary"
+    echo "electron_renderdoc_gate_capture_script=$electron_gate_capture_script"
+    echo "electron_renderdoc_gate_argb_path=$electron_gate_argb_path"
+    echo "electron_renderdoc_gate_argb_status=$electron_gate_argb_status"
+    echo "electron_renderdoc_gate_argb_reason=$electron_gate_argb_reason"
+    echo "electron_renderdoc_gate_argb_width=$electron_gate_argb_width"
+    echo "electron_renderdoc_gate_argb_height=$electron_gate_argb_height"
+    echo "electron_renderdoc_gate_argb_format=$electron_gate_argb_format"
+    echo "electron_renderdoc_gate_argb_producer=$electron_gate_argb_producer"
+    echo "electron_renderdoc_gate_argb_pixel_count=$electron_gate_argb_pixel_count"
+    echo "electron_renderdoc_gate_argb_nonblank_pixel_count=$electron_gate_argb_nonblank_pixel_count"
+    echo "electron_renderdoc_gate_requested_api=$electron_gate_requested_api"
+    echo "electron_renderdoc_gate_requested_angle=$electron_gate_requested_angle"
+    echo "electron_renderdoc_gate_requested_features=$electron_gate_requested_features"
+    echo "electron_renderdoc_gate_launch_flags=$electron_gate_launch_flags"
+    echo "electron_renderdoc_gate_log=$electron_gate_log"
+    echo "electron_renderdoc_gate_vulkan_log_status=$electron_gate_vulkan_log_status"
+    echo "electron_renderdoc_gate_vulkan_log_reason=$electron_gate_vulkan_log_reason"
+    echo "electron_renderdoc_gate_required_backend=electron"
+    echo "electron_renderdoc_gate_required_scene=html-css-electron"
+    echo "electron_renderdoc_gate_required_status=pass"
+    echo "electron_renderdoc_gate_required_magic=RDOC"
+    echo "electron_renderdoc_gate_required_api=vulkan"
+    echo "electron_renderdoc_gate_required_angle=vulkan"
+    echo "electron_renderdoc_gate_required_features=Vulkan"
+    echo "electron_renderdoc_gate_required_electron_suffix=$electron_gate_required_electron_suffix"
+    echo "electron_renderdoc_gate_required_argb_status=pass"
+    echo "electron_renderdoc_gate_required_argb_format=argb-u32"
+    echo "electron_renderdoc_gate_required_argb_producer=electron-chromium-capture"
+    echo "electron_renderdoc_gate_required_argb_nonblank_pixel_count_min=1"
+    echo "electron_renderdoc_gate_required_vulkan_log_no_angle_failure=1"
+    echo "macos_portability_status=$macos_status"
+    echo "macos_portability_reason=$macos_reason"
+    echo "macos_portability_evidence_env=$macos_env"
+    echo "macos_portability_uname_s=$macos_uname_s"
+    echo "macos_portability_uname_m=$macos_uname_m"
+    echo "macos_portability_version=$macos_version"
+    echo "macos_portability_gpu_summary=$macos_gpu_summary"
+    echo "macos_portability_vulkan_status=$macos_vulkan_status"
+    echo "macos_portability_vulkan_device=$macos_vulkan_device"
+    echo "macos_portability_vulkan_driver=$macos_vulkan_driver"
+    echo "macos_portability_renderdoc_status=$macos_renderdoc_status"
+    echo "macos_portability_run_captures=$macos_run_captures"
+    echo "macos_portability_capture_simple_status=$macos_capture_simple_status"
+    echo "macos_portability_capture_html_status=$macos_capture_html_status"
+    echo "macos_portability_html_gate_status=$macos_html_gate_status"
+    echo "macos_portability_capture_electron_status=$macos_capture_electron_status"
+    echo "macos_portability_electron_gate_status=$macos_electron_gate_status"
+    echo "required_external_backend=original"
+    echo "required_external_scene=html-css-chrome"
+    echo "required_external_status=pass"
+    echo "required_external_magic=RDOC"
+    echo "required_external_api=vulkan"
+    echo "required_external_angle=vulkan"
+    echo "required_external_features=Vulkan"
+    echo "required_external_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
+    echo "required_external_launch_flag_enable_features=--enable-features=Vulkan"
+    echo "required_external_launch_flag_use_angle=--use-angle=vulkan"
+    echo "renderdoc_goal_blocked_gate=$blocked_gate"
+    echo "renderdoc_goal_blocked_gate_count=$blocked_gate_count"
+    echo "renderdoc_goal_blocked_gates=$blocked_gates"
+} >"$OUT_ENV"
+
+{
+    echo "# HTML/CSS RenderDoc Goal Status"
+    echo
+    echo "- status: $overall_status"
+    echo "- reason: $overall_reason"
+    echo "- HTML/CSS traceability: $traceability_status ($traceability_reason)"
+    echo "- HTML/CSS rendering manifest traceability: $rendering_manifest_status ($rendering_manifest_reason)"
+    echo "- Simple RenderDoc: $simple_status ($simple_reason)"
+    echo "- External RenderDoc: $external_status ($external_reason)"
+    echo "- Electron RenderDoc gate: $electron_gate_status ($electron_gate_reason)"
+    echo "- macOS portability: $macos_status ($macos_reason)"
+    echo "- macOS Vulkan: $macos_vulkan_status ($macos_vulkan_device / $macos_vulkan_driver)"
+    echo "- macOS RenderDoc: $macos_renderdoc_status"
+    echo "- blocked completion gates: $blocked_gate_count"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$overall_status" = "pass" ]; then
+    exit 0
+fi
+
+exit 1

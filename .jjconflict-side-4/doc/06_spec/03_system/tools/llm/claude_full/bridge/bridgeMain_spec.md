@@ -1,0 +1,368 @@
+# Claude Full Bridge Lifecycle
+
+> Deterministic supporting parts-bin evidence for the Claude remote-control
+> bridge lifecycle owners.
+
+| Field | Value |
+|---|---|
+| Source | `test/03_system/tools/llm/claude_full/bridge/bridgeMain_spec.spl` |
+| Executable scenarios | 26 |
+| Execution in this tranche | 0 scenarios executed |
+| Result | Not executed; no PASS is claimed |
+| Requirement | N/A; supporting Claude-full parts-bin evidence |
+
+## Scope and Claim Boundary
+
+The 26 scenarios cover the multi-session gate truth table, spawn argument and
+result ownership, heartbeat precedence, status transitions, completion and
+cleanup idempotence, acknowledgement effects, exact stop retry attempts and
+delays, timeout state, stdin actions, and signal transitions.
+
+The trace arrays are deterministic state/effect records. They do not claim that
+a live process, request, heartbeat, timer, stdin reader, or OS signal handler
+ran. The pinned upstream TypeScript source is absent, so this manual does not
+claim exact upstream parity or shipped CLI/TUI reachability.
+
+## Scenario Flow
+
+### Supporting gate and spawn owner behavior
+
+1. **should enable multi-session spawn for either gate** — Evaluate all cached
+   and blocking gate combinations.
+2. **should prepend the script path only for npm mode** — Compare bundled, npm,
+   and missing script launch inputs.
+3. **should return direct safe-spawn success and failure details** — Invoke the
+   spawn owner with a session and an error.
+4. **should mutate lifecycle state only for successful spawns** — Record one
+   successful and one failed spawn.
+
+### Supporting heartbeat and status owner behavior
+
+5. **should prioritize fatal and auth heartbeat outcomes** — Evaluate fatal,
+   auth, active, and empty heartbeat inputs.
+6. **should record each modeled heartbeat result exactly once** — Spawn a
+   session and record active then fatal heartbeats.
+7. **should accept only the canonical status interval** — Invoke the direct
+   snapshot, start, and stop status owners.
+8. **should make status lifecycle transitions idempotent** — Start twice and
+   stop twice.
+
+### Supporting completion and cleanup owner behavior
+
+9. **should stop a cleanup tracker only once** — Invoke the direct cleanup owner
+   twice.
+10. **should expose direct session completion decisions** — Compare
+    multi-session, single-session, and timeout results.
+11. **should complete and clean a work item idempotently** — Complete the same
+    active work item twice.
+12. **should preserve single-session timeout completion state** — Complete a
+    timed-out single session.
+13. **should preserve direct bridge-loop state** — Build active, completed,
+    stopped, and auth-failed loop snapshots.
+
+### Supporting acknowledgement and stop retry owner behavior
+
+14. **should return direct acknowledgement success and failure details** —
+    Acknowledge one work item successfully and one with an API error.
+15. **should commit successful acknowledgement once and retain each error** —
+    Repeat one successful acknowledgement and record two failures.
+16. **should stop immediately on success or a fatal error** — Compare
+    first-attempt success and fatal failure.
+17. **should retry with exact exponential delays before success** — Compare one
+    and two retryable failures.
+18. **should stop after three attempts without a terminal sleep** — Exhaust
+    retryable failures and clamp a negative delay.
+19. **should aggregate modeled stop delays in lifecycle order** — Run successful
+    and exhausted stop operations.
+
+### Supporting timeout stdin and signal owner behavior
+
+20. **should format direct timeout kill decisions** — Invoke millisecond and
+    second timeout owners.
+21. **should record one timeout transition per session** — Timeout the same
+    session twice and a second session once.
+22. **should classify direct stdin commands** — Invoke worktree, quit, and
+    ignored stdin branches.
+23. **should apply stdin toggles and quit to lifecycle state** — Toggle worktree
+    twice, ignore input, then quit.
+24. **should expose direct SIGINT and SIGTERM abort decisions** — Invoke both
+    signal owners.
+25. **should make repeated SIGINT an idempotent abort transition** — Deliver
+    SIGINT twice.
+26. **should preserve the first abort signal and ignore unknown signals** —
+    Deliver SIGTERM, SIGINT, and an unknown signal.
+
+## Complete Executable SSpec
+
+The folded source below is synchronized exactly with every executable scenario
+body in the canonical spec.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+describe "Claude full bridge lifecycle":
+    describe "supporting gate and spawn owner behavior":
+        it "should enable multi-session spawn for either gate":
+            step("Evaluate all cached and blocking gate combinations")
+            expect([
+                isMultiSessionSpawnEnabled(false, false),
+                isMultiSessionSpawnEnabled(false, true),
+                isMultiSessionSpawnEnabled(true, false),
+                isMultiSessionSpawnEnabled(true, true),
+            ]).to_equal([false, true, true, true])
+
+        it "should prepend the script path only for npm mode":
+            step("Compare bundled, npm, and missing script launch inputs")
+            expect(spawnScriptArgs(true, "/cli.js")).to_equal([])
+            expect(spawnScriptArgs(false, "/cli.js")).to_equal(["/cli.js"])
+            expect(spawnScriptArgs(false, "")).to_equal([])
+
+        it "should return direct safe-spawn success and failure details":
+            step("Invoke the spawn owner with a session and an error")
+            val spawned = safeSpawn("", "session-1")
+            val failed = safeSpawn("boom", "session-2")
+            expect(spawned.ok).to_equal(true)
+            expect(spawned.sessionId).to_equal("session-1")
+            expect(spawned.error).to_equal("")
+            expect(failed.ok).to_equal(false)
+            expect(failed.sessionId).to_equal("")
+            expect(failed.error).to_equal("Session spawn failed: boom")
+
+        it "should mutate lifecycle state only for successful spawns":
+            step("Record one successful and one failed spawn")
+            val model = BridgeLifecycleModel.new()
+            model.spawn("", "session-1")
+            model.spawn("capacity reached", "session-2")
+            expect(model.activeSessions).to_equal(1)
+            expect(model.trace.spawnSessionIds).to_equal(["session-1"])
+            expect(model.trace.spawnErrors).to_equal(["Session spawn failed: capacity reached"])
+
+    describe "supporting heartbeat and status owner behavior":
+        it "should prioritize fatal and auth heartbeat outcomes":
+            step("Evaluate fatal, auth, active, and empty heartbeat inputs")
+            expect([
+                heartbeatActiveWorkItems(3, 1, 1),
+                heartbeatActiveWorkItems(3, 1, 0),
+                heartbeatActiveWorkItems(3, 0, 0),
+                heartbeatActiveWorkItems(0, 0, 0),
+            ]).to_equal(["fatal", "auth_failed", "ok", "failed"])
+
+        it "should record each modeled heartbeat result exactly once":
+            step("Spawn a session and record active then fatal heartbeats")
+            val model = BridgeLifecycleModel.new()
+            model.spawn("", "session-1")
+            expect(model.heartbeat(0, 0)).to_equal("ok")
+            expect(model.heartbeat(0, 1)).to_equal("fatal")
+            expect(model.trace.heartbeatStatuses).to_equal(["ok", "fatal"])
+
+        it "should accept only the canonical status interval":
+            step("Invoke the direct snapshot, start, and stop status owners")
+            val snapshot = updateStatusDisplay(true, 3, "worktree", true)
+            expect(snapshot.attached).to_equal(true)
+            expect(snapshot.sessionCount).to_equal(3)
+            expect(snapshot.mode).to_equal("worktree")
+            expect(snapshot.failed).to_equal(true)
+            expect(startStatusUpdates(1000)).to_equal(true)
+            expect(startStatusUpdates(999)).to_equal(false)
+            expect(stopStatusUpdates(false)).to_equal(true)
+            expect(stopStatusUpdates(true)).to_equal(false)
+
+        it "should make status lifecycle transitions idempotent":
+            step("Start twice and stop twice")
+            val model = BridgeLifecycleModel.new()
+            expect(model.startStatus(1000)).to_equal(true)
+            expect(model.startStatus(1000)).to_equal(true)
+            expect(model.stopStatus()).to_equal(true)
+            expect(model.stopStatus()).to_equal(true)
+            expect(model.statusUpdatesActive).to_equal(false)
+            expect(model.statusIntervalMs).to_equal(1000)
+            expect(model.trace.statusEvents).to_equal(["start", "stop"])
+
+    describe "supporting completion and cleanup owner behavior":
+        it "should stop a cleanup tracker only once":
+            step("Invoke the direct cleanup owner twice")
+            val tracker = trackCleanup("session-1", "work-1")
+            expect(tracker.stop()).to_equal(true)
+            expect(tracker.stop()).to_equal(false)
+            expect(tracker.stopped).to_equal(true)
+            expect(tracker.stopCalls).to_equal(2)
+
+        it "should expose direct session completion decisions":
+            step("Compare multi-session, single-session, and timeout results")
+            val multi = onSessionDone("work-1", false, false)
+            val single = onSessionDone("work-2", true, false)
+            val timed = onSessionDone("work-3", false, true)
+            expect(multi.shouldStopLoop).to_equal(false)
+            expect(multi.completedWorkId).to_equal("work-1")
+            expect(single.shouldStopLoop).to_equal(true)
+            expect(timed.timedOut).to_equal(true)
+
+        it "should complete and clean a work item idempotently":
+            step("Complete the same active work item twice")
+            val model = BridgeLifecycleModel.new()
+            model.spawn("", "session-1")
+            model.complete("session-1", "work-1", false, false)
+            model.complete("session-1", "work-1", false, false)
+            expect(model.activeSessions).to_equal(0)
+            expect(model.completedWorkIds).to_equal(["work-1"])
+            expect(model.trace.cleanedSessionIds).to_equal(["session-1"])
+            expect(model.trace.cleanedWorkIds).to_equal(["work-1"])
+            expect(model.stopped).to_equal(false)
+
+        it "should preserve single-session timeout completion state":
+            step("Complete a timed-out single session")
+            val model = BridgeLifecycleModel.new()
+            model.spawn("", "session-1")
+            val result = model.complete("session-1", "work-1", true, true)
+            expect(result.shouldStopLoop).to_equal(true)
+            expect(result.timedOut).to_equal(true)
+            expect(model.stopped).to_equal(true)
+            expect(model.activeSessions).to_equal(0)
+            expect(model.trace.cleanedWorkIds).to_equal(["work-1"])
+
+        it "should preserve direct bridge-loop state":
+            step("Build active, completed, stopped, and auth-failed loop snapshots")
+            val running = runBridgeLoop(2, ["work-1"], false, "ok")
+            val stopped = runBridgeLoop(0, ["work-1", "work-2"], true, "auth_failed")
+            expect(running.activeSessions).to_equal(2)
+            expect(running.completedWorkIds).to_equal(["work-1"])
+            expect(running.stopped).to_equal(false)
+            expect(stopped.stopped).to_equal(true)
+            expect(stopped.authFailed).to_equal(true)
+
+    describe "supporting acknowledgement and stop retry owner behavior":
+        it "should return direct acknowledgement success and failure details":
+            step("Acknowledge one work item successfully and one with an API error")
+            val ok = ackWork("work-1", "session-1", "")
+            val failed = ackWork("work-2", "session-2", "offline")
+            expect(ok.ok).to_equal(true)
+            expect(ok.sessionId).to_equal("session-1")
+            expect(failed.ok).to_equal(false)
+            expect(failed.error).to_equal("Failed to ack work work-2: offline")
+
+        it "should commit successful acknowledgement once and retain each error":
+            step("Repeat one successful acknowledgement and record two failures")
+            val model = BridgeLifecycleModel.new()
+            model.ack("work-1", "session-1", "")
+            model.ack("work-1", "session-1", "")
+            model.ack("work-2", "session-2", "offline")
+            model.ack("work-2", "session-2", "offline")
+            expect(model.acknowledgedWorkIds).to_equal(["work-1"])
+            expect(model.trace.ackWorkIds).to_equal(["work-1"])
+            expect(model.trace.ackErrors).to_equal([
+                "Failed to ack work work-2: offline",
+                "Failed to ack work work-2: offline",
+            ])
+
+        it "should stop immediately on success or a fatal error":
+            step("Compare first-attempt success and fatal failure")
+            val ok = stopWorkWithRetry(0, false, 1000)
+            val fatal = stopWorkWithRetry(3, true, 1000)
+            expect(ok.attempts).to_equal(1)
+            expect(ok.ok).to_equal(true)
+            expect(ok.delaysMs).to_equal([])
+            expect(ok.attemptStatuses).to_equal(["success"])
+            expect(fatal.attempts).to_equal(1)
+            expect(fatal.ok).to_equal(false)
+            expect(fatal.fatal).to_equal(true)
+            expect(fatal.delaysMs).to_equal([])
+            expect(fatal.attemptStatuses).to_equal(["fatal-error"])
+
+        it "should retry with exact exponential delays before success":
+            step("Compare one and two retryable failures")
+            val once = stopWorkWithRetry(1, false, 1000)
+            val twice = stopWorkWithRetry(2, false, 1000)
+            expect(once.attempts).to_equal(2)
+            expect(once.ok).to_equal(true)
+            expect(once.delaysMs).to_equal([1000])
+            expect(once.lastDelayMs).to_equal(1000)
+            expect(once.attemptStatuses).to_equal(["retryable-error", "success"])
+            expect(twice.attempts).to_equal(3)
+            expect(twice.ok).to_equal(true)
+            expect(twice.delaysMs).to_equal([1000, 2000])
+            expect(twice.lastDelayMs).to_equal(2000)
+            expect(twice.attemptStatuses).to_equal(["retryable-error", "retryable-error", "success"])
+
+        it "should stop after three attempts without a terminal sleep":
+            step("Exhaust retryable failures and clamp a negative delay")
+            val exhausted = stopWorkWithRetry(4, false, 1000)
+            val clamped = stopWorkWithRetry(2, false, -5)
+            expect(exhausted.attempts).to_equal(3)
+            expect(exhausted.ok).to_equal(false)
+            expect(exhausted.delaysMs).to_equal([1000, 2000])
+            expect(exhausted.attemptStatuses).to_equal(["retryable-error", "retryable-error", "retryable-error"])
+            expect(clamped.delaysMs).to_equal([0, 0])
+
+        it "should aggregate modeled stop delays in lifecycle order":
+            step("Run successful and exhausted stop operations")
+            val model = BridgeLifecycleModel.new()
+            model.stopWork("work-1", 1, false, 500)
+            model.stopWork("work-2", 4, false, 500)
+            expect(model.trace.stopWorkIds).to_equal(["work-1", "work-2"])
+            expect(model.trace.stopDelaysMs).to_equal([500, 500, 1000])
+
+    describe "supporting timeout stdin and signal owner behavior":
+        it "should format direct timeout kill decisions":
+            step("Invoke millisecond and second timeout owners")
+            val short = onSessionTimeout("session-1", 750)
+            val long = onSessionTimeout("session-2", 30000)
+            expect(short.sessionId).to_equal("session-1")
+            expect(short.message).to_equal("Session timed out after 750ms")
+            expect(short.killed).to_equal(true)
+            expect(long.message).to_equal("Session timed out after 30.0s")
+
+        it "should record one timeout transition per session":
+            step("Timeout the same session twice and a second session once")
+            val model = BridgeLifecycleModel.new()
+            model.timeout("session-1", 1000)
+            model.timeout("session-1", 2000)
+            model.timeout("session-2", 3000)
+            expect(model.trace.timeoutSessionIds).to_equal(["session-1", "session-2"])
+
+        it "should classify direct stdin commands":
+            step("Invoke worktree, quit, and ignored stdin branches")
+            expect(onStdinData("w")).to_equal("toggle-worktree")
+            expect(onStdinData("q")).to_equal("quit")
+            expect(onStdinData("x")).to_equal("ignored")
+            expect(onStdinData("W")).to_equal("ignored")
+
+        it "should apply stdin toggles and quit to lifecycle state":
+            step("Toggle worktree twice, ignore input, then quit")
+            val model = BridgeLifecycleModel.new()
+            model.stdin("w")
+            model.stdin("x")
+            model.stdin("w")
+            model.stdin("q")
+            expect(model.worktreeMode).to_equal(false)
+            expect(model.stopped).to_equal(true)
+            expect(model.trace.stdinActions).to_equal(["toggle-worktree", "ignored", "toggle-worktree", "quit"])
+
+        it "should expose direct SIGINT and SIGTERM abort decisions":
+            step("Invoke both signal owners")
+            expect(onSigint()).to_equal("abort")
+            expect(onSigterm()).to_equal("abort")
+
+        it "should make repeated SIGINT an idempotent abort transition":
+            step("Deliver SIGINT twice")
+            val model = BridgeLifecycleModel.new()
+            expect(model.signal("SIGINT")).to_equal("abort")
+            expect(model.signal("SIGINT")).to_equal("abort")
+            expect(model.aborted).to_equal(true)
+            expect(model.stopped).to_equal(true)
+            expect(model.abortSignal).to_equal("SIGINT")
+            expect(model.abortTransitions).to_equal(1)
+            expect(model.trace.receivedSignals).to_equal(["SIGINT", "SIGINT"])
+
+        it "should preserve the first abort signal and ignore unknown signals":
+            step("Deliver SIGTERM, SIGINT, and an unknown signal")
+            val model = BridgeLifecycleModel.new()
+            expect(model.signal("SIGTERM")).to_equal("abort")
+            expect(model.signal("SIGINT")).to_equal("abort")
+            expect(model.signal("SIGHUP")).to_equal("ignored")
+            expect(model.abortSignal).to_equal("SIGTERM")
+            expect(model.abortTransitions).to_equal(1)
+            expect(model.trace.receivedSignals).to_equal(["SIGTERM", "SIGINT", "SIGHUP"])
+```
+
+</details>

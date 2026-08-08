@@ -1,0 +1,247 @@
+# ============================================================================
+# test/fixtures/structural/mutation_golden_v1.spl
+#
+# GOLDEN VECTORS for the frozen MutationIR / conflict order contract v1.
+#
+# Every hex string below was derived BY HAND from the frozen layout in
+# doc/05_design/platform/structural_compute/mutation_contract_v1.md, not
+# captured from encoder output. That is what makes them an oracle: the spec
+# asserts encoder output EQUALS these bytes, so a codec regression cannot
+# silently redefine the contract. A round-trip test would pass a symmetric
+# encode/decode defect straight through; these vectors will not.
+#
+# Follows the golden-vector convention established by the ID-TAG lane in
+# identity_tagmap_golden_v1.spl, the MAP lane in mapping_golden_v1.spl and the
+# QUERY lane in query_golden_v1.spl: pure data, no file I/O, lowercase
+# unseparated hex, one vector per record shape plus zero and maximum edge cases,
+# mirrored byte for byte in the sibling .sdn, never edited in place.
+#
+# Envelope = magic(4 ASCII, LE) | version u16 | reserved u16.
+#   "SMEF" = 53 4d 45 46   MutationEffect        -> 534d454601000000
+#   "SMOR" = 53 4d 4f 52   MutationOrigin        -> 534d4f5201000000
+#   "SMOP" = 53 4d 4f 50   MutationOp            -> 534d4f5001000000
+#   "SMPL" = 53 4d 50 4c   MutationPlan          -> 534d504c01000000
+#   "SMRC" = 53 4d 52 43   MutationCommitReceipt -> 534d524301000000
+#
+# Absent u32 arena index (payload / precondition) = 0xffffffff -> ffffffff.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# MutationEffect — reads u32 | writes u32 | creates u32 | deletes u32
+#                  | invalidates u32 | flags u8.  21 bytes, no padding.
+# ----------------------------------------------------------------------------
+
+# The empty effect: every kind set empty, no dirty bits, no flags. This is the
+# rejection carrier's shape, and it is deliberately NOT a legal op effect —
+# `mutation_op_well_formed` refuses an op whose effect changes nothing.
+val GOLDEN_EFFECT_NONE: text =
+    "534d454601000000"
+        + "00000000"
+        + "00000000"
+        + "00000000"
+        + "00000000"
+        + "00000000"
+        + "00"
+
+# reads = MirInstruction(16) | BasicBlock(32) = 48 = 0x30;
+# writes = MirInstruction(16) = 0x10; creates and deletes empty;
+# invalidates = 0x00000003 (opaque DirtyMask slot, INVALIDATE lane owns the
+# vocabulary); flags = may_change_control_flow only.
+# Distinct value in reads and writes so a field-order error cannot pass.
+val GOLDEN_EFFECT_MIR: text =
+    "534d454601000000"
+        + "30000000"
+        + "10000000"
+        + "00000000"
+        + "00000000"
+        + "03000000"
+        + "01"
+
+# Maximum effect: every known EntityKindSet bit (8191 = 0x1fff) in reads and
+# writes, every dirty bit set, and all four §8.3 flags (0x0f). Pins the top of
+# both the kind-set space and the flags space: adding a 14th entity kind or a
+# 5th flag without a version bump changes what these bytes mean.
+val GOLDEN_EFFECT_MAX: text =
+    "534d454601000000"
+        + "ff1f0000"
+        + "ff1f0000"
+        + "00000000"
+        + "00000000"
+        + "ffffffff"
+        + "0f"
+
+# ----------------------------------------------------------------------------
+# MutationOrigin — producer u8 | stable_name u32 | source_order u32.
+# 9 bytes, no padding.
+# ----------------------------------------------------------------------------
+
+# MutationOrigin(AopAdvice = 0, stable_name = 0x11223344, source_order = 7).
+# Asymmetric interned name so a byte-order error cannot pass.
+val GOLDEN_ORIGIN_AOP: text =
+    "534d4f5201000000" + "00" + "44332211" + "07000000"
+
+# MutationOrigin(Plugin = 5, stable_name = 0, source_order = 0xffffffff).
+# Maximum producer discriminant and maximum source order.
+val GOLDEN_ORIGIN_PLUGIN_MAX: text =
+    "534d4f5201000000" + "05" + "00000000" + "ffffffff"
+
+# ----------------------------------------------------------------------------
+# MutationOp bodies — 105 bytes, no padding:
+#
+#   kind u8 | phase u8 | reserved u8
+#   | target EntityKey (32)         = content_hash.hi u64 | content_hash.lo u64
+#                                     | artifact.schema_version u32
+#                                     | schema u32 | local_identity u64
+#   | expected_revision ArtifactId (20)
+#   | payload u32 | precondition u32
+#   | origin MutationOrigin (9)
+#   | priority i32 (4) | stable_order u64 (8)
+#   | effect MutationEffect (21)
+#
+# The bodies are named separately from the framed vectors because a plan embeds
+# them unframed; the spec asserts both the framed op and the plan that contains
+# it, so one hand-derived body pins two records.
+# ----------------------------------------------------------------------------
+
+# Op A — MutationKind.AddTag(0), phase Insert(2) DERIVED from the kind.
+#   target   = EntityKey(artifact(hash128(0x0102030405060708,
+#                                         0x1112131415161718), 1), 2, 3)
+#   revision = ArtifactId(hash128(0, 0x99), 1)
+#   payload = 5, precondition = absent, origin = AOP advice above,
+#   priority = 10, stable_order = 1
+#   effect: reads/writes/creates = Tag(1), invalidates = 3, no flags.
+# The effect names Tag in `creates`, which is what makes the op well formed:
+# AddTag's target kind is Tag, and §8.3's summary must admit the change.
+val GOLDEN_OP_ADD_TAG_BODY: text =
+    "00"
+        + "02"
+        + "00"
+        + "0807060504030201" + "1817161514131211" + "01000000"
+        + "02000000" + "0300000000000000"
+        + "0000000000000000" + "9900000000000000" + "01000000"
+        + "05000000"
+        + "ffffffff"
+        + "00" + "44332211" + "07000000"
+        + "0a000000"
+        + "0100000000000000"
+        + "01000000" + "01000000" + "01000000" + "00000000" + "03000000" + "00"
+
+val GOLDEN_OP_ADD_TAG: text = "534d4f5001000000" + GOLDEN_OP_ADD_TAG_BODY
+
+# Op B — identical to op A on §8.4 ordering keys 1..5 and differing only in key
+# 6 (stable_order 1 -> 2), so it must sort strictly AFTER op A. payload 5 -> 6
+# so the two bodies are not byte-identical.
+val GOLDEN_OP_ADD_TAG_NEXT_BODY: text =
+    "00"
+        + "02"
+        + "00"
+        + "0807060504030201" + "1817161514131211" + "01000000"
+        + "02000000" + "0300000000000000"
+        + "0000000000000000" + "9900000000000000" + "01000000"
+        + "06000000"
+        + "ffffffff"
+        + "00" + "44332211" + "07000000"
+        + "0a000000"
+        + "0200000000000000"
+        + "01000000" + "01000000" + "01000000" + "00000000" + "03000000" + "00"
+
+# Op MAX — the maximum MutationKind (ChangePlacementHint = 25 = 0x19), whose
+# derived phase is Replace(1). Pins the top of the kind enum: adding a 27th
+# kind without a version bump changes what this byte means.
+#   target   = EntityKey(artifact(hash128(0x99aabbccddeeff00,
+#                                         0x1122334455667788), 0xffffffff),
+#                        0xffffffff, 0x99aabbccddeeff00)
+#              — content_hash.hi, local_identity and stable_order all have the
+#                u64 top bit set, which Simple carries as a NEGATIVE i64. They
+#                round-trip by bit pattern, and they are what makes the §8.4
+#                order's unsigned comparison observable.
+#   revision = ArtifactId(hash128(0, 0), 0) — the zero revision.
+#   payload = absent, precondition = 0 (present, arena index 0),
+#   origin = Plugin(5) / name 0 / source_order 0xffffffff,
+#   priority = -1  -> two's complement u32 ffffffff. Reading this field back as
+#             a bare u32 would yield 4294967295 and invert HighestPriorityWins
+#             on every negative priority, so the sign extension is pinned here.
+#   effect: writes = PlacementHint(4096 = 0x1000), all four flags set.
+val GOLDEN_OP_MAX_BODY: text =
+    "19"
+        + "01"
+        + "00"
+        + "00ffeeddccbbaa99" + "8877665544332211" + "ffffffff"
+        + "ffffffff" + "00ffeeddccbbaa99"
+        + "0000000000000000" + "0000000000000000" + "00000000"
+        + "ffffffff"
+        + "00000000"
+        + "05" + "00000000" + "ffffffff"
+        + "ffffffff"
+        + "00ffeeddccbbaa99"
+        + "00000000" + "00100000" + "00000000" + "00000000" + "00000000" + "0f"
+
+val GOLDEN_OP_MAX: text = "534d4f5001000000" + GOLDEN_OP_MAX_BODY
+
+# ----------------------------------------------------------------------------
+# MutationPlan — envelope(8) | policy u8 | schema_version u32 | op_count u32
+#                | ops MutationOp * op_count.
+# The count sits ahead of the run so a decoder bounds the region before
+# allocating for it.
+# ----------------------------------------------------------------------------
+
+# Single-op plan under ConflictPolicy.DomainResolver(4), the maximum policy
+# discriminant, carrying the maximum op.
+val GOLDEN_PLAN_SINGLE_MAX: text =
+    "534d504c01000000"
+        + "04"
+        + "01000000"
+        + "01000000"
+        + GOLDEN_OP_MAX_BODY
+
+# Two-op plan under ConflictPolicy.ComposeIfDisjoint(2), in strict §8.4 order.
+# Swapping the two bodies produces a buffer the decoder MUST reject, which is
+# the assertion that proves the order is actually enforced on the wire and not
+# merely documented.
+val GOLDEN_PLAN_ORDERED_PAIR: text =
+    "534d504c01000000"
+        + "02"
+        + "01000000"
+        + "02000000"
+        + GOLDEN_OP_ADD_TAG_BODY
+        + GOLDEN_OP_ADD_TAG_NEXT_BODY
+
+# ----------------------------------------------------------------------------
+# MutationCommitReceipt — input_snapshot SnapshotId (28)
+#   | output_snapshot SnapshotId (28) | plan_hash Hash128 (16)
+#   | matched_entities u64 | applied_ops u64 | skipped_ops u64 | conflicts u64.
+# 104 bytes, no padding.
+#
+# SnapshotId = root_artifact ArtifactId (20) | epoch u64.
+# ----------------------------------------------------------------------------
+
+# A commit that applied work: same artifact lineage, epoch 7 -> 8, so the output
+# snapshot supersedes the input. matched 4, applied 3, skipped 1, conflicts 1.
+val GOLDEN_RECEIPT_APPLIED: text =
+    "534d524301000000"
+        + "0000000000000000" + "1000000000000000" + "01000000"
+        + "0700000000000000"
+        + "0000000000000000" + "1000000000000000" + "01000000"
+        + "0800000000000000"
+        + "00ffeeddccbbaa99" + "8877665544332211"
+        + "0400000000000000"
+        + "0300000000000000"
+        + "0100000000000000"
+        + "0100000000000000"
+
+# §30.5's "failed validation leaves the original snapshot unchanged": nothing
+# applied, so the output snapshot is byte-identical to the input, and all four
+# matched ops were skipped as conflicts. A receipt claiming applied ops with an
+# unchanged output — or more conflicts than skips — is refused by BOTH the
+# encoder and the decoder.
+val GOLDEN_RECEIPT_NO_OP: text =
+    "534d524301000000"
+        + "0000000000000000" + "1000000000000000" + "01000000"
+        + "0700000000000000"
+        + "0000000000000000" + "1000000000000000" + "01000000"
+        + "0700000000000000"
+        + "0000000000000000" + "0000000000000000"
+        + "0400000000000000"
+        + "0000000000000000"
+        + "0400000000000000"
+        + "0400000000000000"

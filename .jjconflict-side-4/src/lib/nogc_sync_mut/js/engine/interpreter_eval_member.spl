@@ -1,0 +1,686 @@
+# JsInterpreter — member access, assignment, array/object literals, template literals, delete.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.js_types.JsObject
+use std.js.types.js_types.JsProperty
+use std.js.types.ast_types.{DestructProp, JsExpression}
+use std.js.types.ast_types.JsStatement
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.nogc_sync_mut.js.engine.interpreter.{
+    JsInterpreter, JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS,
+    JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+}
+use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
+
+fn _next_host_generation(generation: i64) -> i64:
+    if generation >= 9223372036854775807:
+        return 0
+    generation + 1
+
+fn _js_location_find_text(haystack: text, needle: text, start: i64) -> i64:
+    if start < 0 or start > haystack.len() or needle.len() == 0:
+        return -1
+    var idx = start
+    val last = haystack.len() - needle.len()
+    val first = needle.slice(0, 1)
+    while idx <= last:
+        if haystack.slice(idx, idx + 1) == first:
+            if haystack.slice(idx, idx + needle.len()) == needle:
+                return idx
+        idx = idx + 1
+    -1
+
+fn _js_location_without_fragment(url: text) -> text:
+    val idx = _js_location_find_text(url, "#", 0)
+    if idx < 0:
+        return url
+    url.slice(0, idx)
+
+fn _js_location_without_query(url: text) -> text:
+    val clean = _js_location_without_fragment(url)
+    val idx = _js_location_find_text(clean, "?", 0)
+    if idx < 0:
+        return clean
+    clean.slice(0, idx)
+
+fn _js_location_protocol(url: text) -> text:
+    if url.starts_with("https://"):
+        return "https:"
+    if url.starts_with("http://"):
+        return "http:"
+    if url.starts_with("file://"):
+        return "file:"
+    if url.starts_with("about:"):
+        return "about:"
+    ""
+
+fn _js_location_host(url: text) -> text:
+    val scheme_pos = _js_location_find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = _js_location_find_text(url, "/", host_start)
+    if path_start < 0:
+        return url.slice(host_start, url.len())
+    url.slice(host_start, path_start)
+
+fn _js_location_origin(url: text) -> text:
+    val scheme_pos = _js_location_find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = _js_location_find_text(url, "/", host_start)
+    if path_start < 0:
+        return url
+    url.slice(0, path_start)
+
+fn _js_location_pathname(url: text) -> text:
+    if url.starts_with("file://"):
+        return _js_location_without_query(url.slice(7, url.len()))
+    if url.starts_with("about:"):
+        return url
+    val scheme_pos = _js_location_find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return "/"
+    val path_start = _js_location_find_text(url, "/", scheme_pos + 3)
+    if path_start < 0:
+        return "/"
+    _js_location_without_query(url.slice(path_start, url.len()))
+
+fn _js_location_search(url: text) -> text:
+    val clean = _js_location_without_fragment(url)
+    val idx = _js_location_find_text(clean, "?", 0)
+    if idx < 0:
+        return ""
+    clean.slice(idx, clean.len())
+
+fn _js_location_hash(url: text) -> text:
+    val idx = _js_location_find_text(url, "#", 0)
+    if idx < 0:
+        return ""
+    url.slice(idx, url.len())
+
+impl JsInterpreter:
+    # Member access: obj.prop
+    # Look up property on object, with recursive prototype chain fallback
+    me _proto_lookup(obj_id: i64, property: text) -> JsValue:
+        var current_id = obj_id
+        var depth = 0
+        while current_id >= 0 and depth < 64:
+            val prop = self.get_object_property(current_id, property)
+            if not strict_equals(prop, JsValue.Undefined):
+                return prop
+            val proto = self.get_object_property(current_id, "__proto__")
+            val proto_id = _get_obj_id(proto)
+            if proto_id < 0 or proto_id == current_id:
+                return JsValue.Undefined
+            current_id = proto_id
+            depth = depth + 1
+        JsValue.Undefined
+
+    me eval_member(object: JsExpression, property: text, env: i64) -> BrowserResult<JsValue>:
+        var object_name = ""
+        match object:
+            JsExpression.Identifier(name):
+                object_name = name
+            _: pass_dn
+        if object_name == "process" and self.node_compat_enabled:
+            if property == "env":
+                if val Some(env_value) = self.lookup_global_value("__simple_node_env"):
+                    return Ok(env_value)
+                val env_id = self.create_object()
+                var env_i = 0
+                while env_i < self.node_credential_grant_names.len():
+                    self.set_object_property(env_id, self.node_credential_grant_names.get(env_i), JsValue.String(v: self.node_credential_grant_values.get(env_i)))
+                    env_i = env_i + 1
+                return Ok(JsValue.Object(id: env_id))
+            if property == "argv":
+                val argv_id = self.create_object()
+                self.set_object_property(argv_id, "0", JsValue.String(v: "simple"))
+                self.set_object_property(argv_id, "1", JsValue.String(v: ""))
+                self.set_object_property(argv_id, "0.0", JsValue.String(v: "simple"))
+                self.set_object_property(argv_id, "1.0", JsValue.String(v: ""))
+                self.set_object_property(argv_id, "length", JsValue.Number(v: 2.0))
+                return Ok(JsValue.Array(id: argv_id))
+            if property == "versions":
+                val versions_id = self.create_object()
+                self.set_object_property(versions_id, "node", JsValue.String(v: "0.0.0-simple"))
+                self.set_object_property(versions_id, "v8", JsValue.String(v: "simple-js"))
+                self.set_object_property(versions_id, "uv", JsValue.String(v: "unavailable"))
+                return Ok(JsValue.Object(id: versions_id))
+        if object_name == "Symbol" and property == "asyncIterator":
+            return Ok(JsValue.String(v: "Symbol.asyncIterator"))
+        if object_name == "Symbol" and property == "iterator":
+            return Ok(JsValue.String(v: "Symbol.iterator"))
+        if object_name == "Symbol" and property == "toPrimitive":
+            return Ok(JsValue.String(v: "Symbol.toPrimitive"))
+        if object_name == "ArrayBuffer" and property == "name":
+            return Ok(JsValue.String(v: "ArrayBuffer"))
+        if object_name == "ArrayBuffer" and property == "length":
+            return Ok(JsValue.Number(v: 1.0))
+        if object_name == "ArrayBuffer" and property == "prototype":
+            return Ok(self._native_array_buffer_prototype())
+        if object_name == "Uint8Array" and property == "BYTES_PER_ELEMENT":
+            return Ok(JsValue.Number(v: 1.0))
+        if object_name == "Uint8Array" and property == "name":
+            return Ok(JsValue.String(v: "Uint8Array"))
+        if object_name == "Uint8Array" and property == "length":
+            return Ok(JsValue.Number(v: 3.0))
+        if object_name == "Uint8Array" and property == "prototype":
+            return Ok(self._native_uint8_array_prototype())
+        if object_name == "DataView" and property == "name":
+            return Ok(JsValue.String(v: "DataView"))
+        if object_name == "DataView" and property == "length":
+            return Ok(JsValue.Number(v: 1.0))
+        if object_name == "DataView" and property == "prototype":
+            return Ok(self._native_data_view_prototype())
+
+        val obj_val = self.eval_expression(object, env)?
+        val obj_id = _get_obj_id(obj_val)
+        if obj_id >= 0:
+            if obj_id == self.host_document_id:
+                if property == "title" and not strict_equals(self.host_document_title_value, JsValue.Undefined):
+                    return Ok(self.host_document_title_value)
+                if property == "cookie":
+                    if not strict_equals(self.host_document_cookie_value, JsValue.Undefined):
+                        return Ok(self.host_document_cookie_value)
+                    match self.get_object_property(obj_id, "cookie"):
+                        JsValue.String(v):
+                            return Ok(JsValue.String(v: v))
+                        _:
+                            return Ok(JsValue.String(v: ""))
+                if property == "body" and self.host_body_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_body_id))
+                if property == "location" and self.host_location_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_location_id))
+            if obj_id == self.host_body_id:
+                if property == "innerHTML" and not strict_equals(self.host_body_inner_html_value, JsValue.Undefined):
+                    return Ok(self.host_body_inner_html_value)
+                if property == "textContent" and not strict_equals(self.host_body_text_content_value, JsValue.Undefined):
+                    return Ok(self.host_body_text_content_value)
+            # Object or Array — check array length first
+            if property == "length":
+                val len_val = self.get_object_property(obj_id, "length")
+                if not strict_equals(len_val, JsValue.Undefined):
+                    return Ok(len_val)
+            return Ok(self._proto_lookup(obj_id, property))
+        # String — use typeof_value to avoid match destructuring
+        val tv = typeof_value(obj_val)
+        if tv == "string":
+            if property == "length":
+                val str_val = js_to_string(obj_val)
+                return Ok(JsValue.Number(v: str_val.len().to_f64()))
+        # TypeError: Cannot read properties of undefined/null
+        if tv == "undefined" or strict_equals(obj_val, JsValue.Null):
+            self.thrown_value = JsValue.String(v: "TypeError: Cannot read properties of " + tv)
+            self.control_thrown = true
+            return Ok(JsValue.Undefined)
+        Ok(JsValue.Undefined)
+
+    me _publish_host_body_mutation(property: text, rhs: JsValue):
+        val value = js_to_string(rhs)
+        val plan = self.host_body_mutation_hook(property, value)
+        if plan.handled and not plan.ok:
+            return
+        if plan.ok:
+            var retained_objects: i64 = 1
+            var retained_bytes = (
+                plan.canonical_body_html.len() +
+                plan.canonical_body_text.len()
+            )
+            for element in plan.elements:
+                if element.style_names.len() != element.style_values.len():
+                    return
+                if not element.is_body:
+                    retained_objects = retained_objects + 2
+                retained_bytes = (
+                    retained_bytes + element.tag_name.len() +
+                    element.author_id.len() + element.class_name.len() +
+                    element.value.len() + element.text_content.len() +
+                    element.inner_html.len() + element.style_snapshot.len()
+                )
+                for style_name in element.style_names:
+                    retained_bytes = retained_bytes + style_name.len()
+                for style_value in element.style_values:
+                    retained_bytes = retained_bytes + style_value.len()
+            if (
+                retained_objects > JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS -
+                    self.host_dom_mutation_retained_objects or
+                retained_bytes > JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES -
+                    self.host_dom_mutation_retained_bytes
+            ):
+                return
+            val old_style_id = _get_obj_id(
+                self.get_object_property(self.host_body_id, "style")
+            )
+            val set_property_fn = self.get_object_property(
+                old_style_id, "setProperty"
+            )
+            val get_property_fn = self.get_object_property(
+                old_style_id, "getPropertyValue"
+            )
+            val remove_property_fn = self.get_object_property(
+                old_style_id, "removeProperty"
+            )
+            var body_id_snapshot = js_to_string(
+                self.get_object_property(self.host_body_id, "id")
+            )
+            var body_class_snapshot = js_to_string(
+                self.get_object_property(self.host_body_id, "className")
+            )
+            var body_value_snapshot = js_to_string(
+                self.get_object_property(self.host_body_id, "value")
+            )
+            var body_style_snapshot = ""
+            var old_index = 0
+            while old_index < self.host_dom_element_ids.len():
+                if self.host_dom_element_ids[old_index] == self.host_body_id:
+                    if old_index < self.host_dom_id_snapshots.len():
+                        body_id_snapshot = self.host_dom_id_snapshots[old_index]
+                    if old_index < self.host_dom_class_snapshots.len():
+                        body_class_snapshot = self.host_dom_class_snapshots[old_index]
+                    if old_index < self.host_dom_value_snapshots.len():
+                        body_value_snapshot = self.host_dom_value_snapshots[old_index]
+                    if old_index < self.host_dom_style_snapshots.len():
+                        body_style_snapshot = self.host_dom_style_snapshots[old_index]
+                old_index = old_index + 1
+            val element_list_id = self.create_object()
+            var element_ids: [i64] = []
+            var style_ids: [i64] = []
+            var id_snapshots: [text] = []
+            var class_snapshots: [text] = []
+            var value_snapshots: [text] = []
+            var style_snapshots: [text] = []
+            var index = 0
+            for element in plan.elements:
+                val element_id = if element.is_body:
+                    self.host_body_id
+                else:
+                    self.create_object()
+                val style_id = if element.is_body:
+                    old_style_id
+                else:
+                    self.create_object()
+                if not element.is_body:
+                    self.set_object_property(
+                        style_id, "cssText", JsValue.String(v: "")
+                    )
+                    var style_index = 0
+                    while style_index < element.style_names.len():
+                        self.set_object_property(
+                            style_id,
+                            element.style_names[style_index],
+                            JsValue.String(v: element.style_values[style_index])
+                        )
+                        style_index = style_index + 1
+                    if not strict_equals(set_property_fn, JsValue.Undefined):
+                        self.set_object_property(
+                            style_id, "setProperty", set_property_fn
+                        )
+                    if not strict_equals(get_property_fn, JsValue.Undefined):
+                        self.set_object_property(
+                            style_id, "getPropertyValue", get_property_fn
+                        )
+                    if not strict_equals(remove_property_fn, JsValue.Undefined):
+                        self.set_object_property(
+                            style_id, "removeProperty", remove_property_fn
+                        )
+                self.set_object_property(
+                    element_id, "style", JsValue.Object(id: style_id)
+                )
+                if not element.is_body:
+                    self.set_object_property(
+                        element_id, "tagName",
+                        JsValue.String(v: element.tag_name)
+                    )
+                    self.set_object_property(
+                        element_id, "id", JsValue.String(v: element.author_id)
+                    )
+                    self.set_object_property(
+                        element_id, "className",
+                        JsValue.String(v: element.class_name)
+                    )
+                    self.set_object_property(
+                        element_id, "value", JsValue.String(v: element.value)
+                    )
+                self.set_object_property(
+                    element_id, "textContent",
+                    JsValue.String(v: element.text_content)
+                )
+                self.set_object_property(
+                    element_id, "innerHTML",
+                    JsValue.String(v: element.inner_html)
+                )
+                self.set_object_property(
+                    element_list_id, "{index}",
+                    JsValue.Object(id: element_id)
+                )
+                element_ids.push(element_id)
+                style_ids.push(style_id)
+                id_snapshots.push(if element.is_body:
+                    body_id_snapshot
+                else:
+                    element.author_id)
+                class_snapshots.push(if element.is_body:
+                    body_class_snapshot
+                else:
+                    element.class_name)
+                value_snapshots.push(if element.is_body:
+                    body_value_snapshot
+                else:
+                    element.value)
+                style_snapshots.push(if element.is_body:
+                    body_style_snapshot
+                else:
+                    element.style_snapshot)
+                index = index + 1
+            self.set_object_property(
+                element_list_id, "length",
+                JsValue.Number(v: element_ids.len().to_f64())
+            )
+            self.set_object_property(
+                self.host_document_id, "__simple_elements",
+                JsValue.Array(id: element_list_id)
+            )
+            self.host_dom_element_list_id = element_list_id
+            self.host_dom_element_ids = element_ids
+            self.host_dom_style_ids = style_ids
+            self.host_dom_id_snapshots = id_snapshots
+            self.host_dom_class_snapshots = class_snapshots
+            self.host_dom_value_snapshots = value_snapshots
+            self.host_dom_style_snapshots = style_snapshots
+            self.host_dom_bridge_generation = _next_host_generation(
+                self.host_dom_bridge_generation
+            )
+            self.host_dom_mutation_retained_objects = (
+                self.host_dom_mutation_retained_objects + retained_objects
+            )
+            self.host_dom_mutation_retained_bytes = (
+                self.host_dom_mutation_retained_bytes + retained_bytes
+            )
+            self.host_body_inner_html_value = JsValue.String(
+                v: plan.canonical_body_html
+            )
+            self.host_body_text_content_value = JsValue.String(
+                v: plan.canonical_body_text
+            )
+        elif property == "innerHTML":
+            self.host_body_inner_html_value = rhs
+        else:
+            self.host_body_text_content_value = rhs
+        if property == "innerHTML":
+            self.host_body_inner_html_dirty = true
+            self.host_body_text_content_dirty = false
+        else:
+            self.host_body_text_content_dirty = true
+            self.host_body_inner_html_dirty = false
+
+    fn _host_dom_observes_property(obj_id: i64, property: text) -> bool:
+        var dom_index = 0
+        while dom_index < self.host_dom_element_ids.len():
+            if (
+                self.host_dom_element_ids[dom_index] == obj_id and
+                (property == "id" or property == "className" or
+                 property == "value")
+            ):
+                return true
+            if (
+                dom_index < self.host_dom_style_ids.len() and
+                self.host_dom_style_ids[dom_index] == obj_id and
+                property != "setProperty" and
+                property != "getPropertyValue" and
+                property != "removeProperty" and
+                not property.starts_with("__")
+            ):
+                return true
+            dom_index = dom_index + 1
+        false
+
+    fn _host_dom_style_object(obj_id: i64) -> bool:
+        for style_id in self.host_dom_style_ids:
+            if style_id == obj_id:
+                return true
+        false
+
+    fn _host_dom_style_assignment_changes(
+        obj_id: i64, property: text, rhs: JsValue
+    ) -> bool:
+        val store = self.object_store
+        var css_text_index = -1
+        var property_index = -1
+        var index = 0
+        while index < store.prop_obj_ids.len():
+            if store.prop_obj_ids[index] == obj_id:
+                if store.prop_keys[index] == "cssText":
+                    css_text_index = index
+                if store.prop_keys[index] == property:
+                    property_index = index
+            index = index + 1
+        if not strict_equals(self.get_object_property(obj_id, property), rhs):
+            return true
+        if property != "cssText":
+            return property_index <= css_text_index
+        index = css_text_index + 1
+        while index < store.prop_obj_ids.len():
+            if (
+                store.prop_obj_ids[index] == obj_id and
+                store.prop_keys[index] != "cssText" and
+                store.prop_keys[index] != "setProperty" and
+                store.prop_keys[index] != "getPropertyValue" and
+                store.prop_keys[index] != "removeProperty" and
+                not store.prop_keys[index].starts_with("__")
+            ):
+                return true
+            index = index + 1
+        false
+
+    me _mark_host_dom_mutation():
+        self.host_dom_mutation_generation = _next_host_generation(
+            self.host_dom_mutation_generation
+        )
+
+    me _assign_object_property(obj_id: i64, property: text, rhs: JsValue):
+        if obj_id == self.host_document_id:
+            if property == "title":
+                self.host_document_title_value = rhs
+                return
+            if property == "cookie":
+                val cookie_text = js_to_string(rhs)
+                if self.pending_host_document_cookie_writes.len() >= 32:
+                    self.host_document_cookie_write_overflow = true
+                else:
+                    self.pending_host_document_cookie_writes.push(cookie_text)
+                self.host_document_cookie_value = JsValue.String(
+                    v: cookie_text
+                )
+                self.set_object_property(
+                    self.host_document_id, "cookie",
+                    JsValue.String(v: cookie_text)
+                )
+                return
+        if obj_id == self.host_body_id and (
+            property == "innerHTML" or property == "textContent"
+        ):
+            self._publish_host_body_mutation(property, rhs)
+            return
+        if obj_id == self.host_location_id and property == "href":
+            val href = js_to_string(rhs)
+            self.set_object_property_direct(
+                obj_id, "href", JsValue.String(v: href)
+            )
+            self.set_object_property_direct(
+                obj_id, "protocol",
+                JsValue.String(v: _js_location_protocol(href))
+            )
+            self.set_object_property_direct(
+                obj_id, "host", JsValue.String(v: _js_location_host(href))
+            )
+            self.set_object_property_direct(
+                obj_id, "origin",
+                JsValue.String(v: _js_location_origin(href))
+            )
+            self.set_object_property_direct(
+                obj_id, "pathname",
+                JsValue.String(v: _js_location_pathname(href))
+            )
+            self.set_object_property_direct(
+                obj_id, "search",
+                JsValue.String(v: _js_location_search(href))
+            )
+            self.set_object_property_direct(
+                obj_id, "hash", JsValue.String(v: _js_location_hash(href))
+            )
+            return
+        if (
+            obj_id == self.host_session_storage_id or
+            obj_id == self.host_local_storage_id
+        ):
+            val storage_value = js_to_string(rhs)
+            if self._storage_write_allowed(
+                obj_id, property, storage_value
+            ):
+                self.set_object_property_direct(
+                    obj_id, self._storage_property_key(property),
+                    JsValue.String(v: storage_value)
+                )
+                self._sync_storage_length(obj_id)
+            else:
+                self.logger.warn("Web Storage quota reached")
+            return
+        val observed_dom_property = self._host_dom_observes_property(
+            obj_id, property
+        )
+        val before = self.get_object_property(obj_id, property)
+        val is_style_property = (
+            observed_dom_property and self._host_dom_style_object(obj_id)
+        )
+        val style_changes = (
+            is_style_property and
+            self._host_dom_style_assignment_changes(obj_id, property, rhs) and
+            not self._is_object_frozen(obj_id)
+        )
+        if style_changes:
+            # CSS declarations are ordered writes. Re-appending preserves the
+            # reset boundary established by a later cssText assignment.
+            self.object_store.remove_property(obj_id, property)
+        self.set_object_property_direct(obj_id, property, rhs)
+        val stored = self.get_object_property(obj_id, property)
+        if (
+            (style_changes and strict_equals(stored, rhs)) or
+            (observed_dom_property and not is_style_property and
+             not strict_equals(before, stored))
+        ):
+            self._mark_host_dom_mutation()
+
+    # Assignment: target = value
+    me eval_assignment(target: JsExpression, value: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        val rhs = self.eval_expression(value, env)?
+
+        match target:
+            JsExpression.Identifier(name):
+                self.env_stack.set_var(env, name, rhs)
+                return Ok(rhs)
+            JsExpression.Member(object, property):
+                val obj_id = _get_obj_id(self.eval_expression(object, env)?)
+                if obj_id >= 0:
+                    self._assign_object_property(obj_id, property, rhs)
+                return Ok(rhs)
+            JsExpression.ComputedMember(object, property):
+                val obj_val = self.eval_expression(object, env)?
+                val key_val = self.eval_expression(property, env)?
+                val obj_id = _get_obj_id(obj_val)
+                if obj_id >= 0:
+                    var key_str = js_to_string(key_val)
+                    match key_val:
+                        JsValue.Number(n):
+                            key_str = "{f64_to_i64(n)}"
+                        _:
+                            pass_dn
+                    self._assign_object_property(obj_id, key_str, rhs)
+                return Ok(rhs)
+            _:
+                self.logger.warn("Invalid assignment target")
+                return Ok(rhs)
+
+    # Array literal — supports spread: [1, ...arr, 2]
+    me eval_array(elements: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        val arr_id = self.create_object()
+        var idx = 0
+        var i = 0
+        val len = elements.len()
+        while i < len:
+            val elem_expr = elements.get(i)
+            match elem_expr:
+                JsExpression.SpreadElement(arg):
+                    val spread_val = self.eval_expression(arg, env)?
+                    match spread_val:
+                        JsValue.Array(src_id):
+                            val src_len = self.object_store.array_length(src_id)
+                            var si = 0
+                            while si < src_len:
+                                val sv = self.object_store.get_by_index(src_id, si)
+                                self.set_object_property(arr_id, "{idx}", sv)
+                                idx = idx + 1
+                                si = si + 1
+                        _:
+                            self.set_object_property(arr_id, "{idx}", spread_val)
+                            idx = idx + 1
+                _:
+                    val elem = self.eval_expression(elem_expr, env)?
+                    self.set_object_property(arr_id, "{idx}", elem)
+                    idx = idx + 1
+            i = i + 1
+        self.set_object_property(arr_id, "length", JsValue.Number(v: idx.to_f64()))
+        Ok(JsValue.Array(id: arr_id))
+
+    # Object literal
+    me eval_object(properties: [DestructProp], env: i64) -> BrowserResult<JsValue>:
+        val obj_id = self.create_object()
+        var i = 0
+        val len = properties.len()
+        while i < len:
+            val prop = properties.get(i)
+            val pv = self.eval_expression(prop.value, env)?
+            self.set_object_property(obj_id, prop.key, pv)
+            i = i + 1
+        Ok(JsValue.Object(id: obj_id))
+
+    # Template literal: `hello ${name}!`
+    me eval_template_literal(quasis: [text], expressions: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        var result = ""
+        var i = 0
+        val qlen = quasis.len()
+        while i < qlen:
+            result = result + quasis.get(i)
+            if i < expressions.len():
+                val expr_val = self.eval_expression(expressions.get(i), env)?
+                result = result + js_to_string(expr_val)
+            i = i + 1
+        Ok(JsValue.String(v: result))
+
+    # Delete operator: delete obj.prop
+    me eval_delete(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        match expr:
+            JsExpression.Member(object, property):
+                val obj_val = self.eval_expression(object, env)?
+                match obj_val:
+                    JsValue.Object(id):
+                        val observed = self._host_dom_observes_property(
+                            id, property
+                        )
+                        val before = self.get_object_property(id, property)
+                        self.object_store.remove_property(id, property)
+                        if observed and not strict_equals(
+                            before, self.get_object_property(id, property)
+                        ):
+                            self._mark_host_dom_mutation()
+                        return Ok(JsValue.Boolean(v: true))
+                    _:
+                        return Ok(JsValue.Boolean(v: true))
+            _:
+                return Ok(JsValue.Boolean(v: true))
+
+export use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}

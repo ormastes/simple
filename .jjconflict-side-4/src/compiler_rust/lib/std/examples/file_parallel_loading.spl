@@ -1,0 +1,71 @@
+# Parallel File Loading Example
+#
+# Demonstrates loading multiple files in parallel using unified io.fs API.
+# For production parallel processing, see fs.spawn_workers_with_staging().
+
+use io.fs as fs
+use std.io
+
+async fn main():
+    # List of files to process
+    val file_paths = [
+        "data1.txt"_filepath,
+        "data2.txt"_filepath,
+        "data3.txt"_filepath,
+        "data4.txt"_filepath
+    ]
+
+    # Start all files loading in parallel (mmap)
+    io.println("Starting parallel file loading...")
+    var mmap_futures = []
+    for path in file_paths:
+        val future = fs.open_mmap(path)
+        mmap_futures.push(future)
+        io.println("  Started loading: {path}")
+
+    # Do other work while files load
+    io.println("Files loading in background...")
+    initialize_processing()
+
+    # Wait for all files to be ready and process them
+    io.println("Processing files as they become ready...")
+    var total_bytes = 0
+    for future in mmap_futures:
+        # Wait for this file to be ready
+        async with await future? as mmap:
+            val size = mmap.len()
+            total_bytes = total_bytes + size
+            io.println("  Processed file: {size} bytes")
+
+            # Process the file
+            process_file(mmap.as_bytes())
+
+    io.println("Total bytes processed: {total_bytes}")
+
+    # Alternative: Use staging API for advanced parallel processing
+    io.println("\n=== Advanced: Mold-inspired file staging ===")
+
+    # Stage files with shared mmap (zero-copy across workers)
+    await fs.stage(StageMode::MmapShared, ...file_paths)?
+
+    # Spawn workers with pre-staged files (like mold linker)
+    val workers = await fs.spawn_workers_with_staging(
+        file_paths,
+        StageMode::MmapShared,
+        4,  # 4 worker processes
+        worker_fn
+    )?
+
+    for worker in workers:
+        await worker.join()?
+
+fn worker_fn() -> i64:
+    # Worker function for parallel processing
+    return 0
+
+fn initialize_processing():
+    io.println("Initializing processing engine...")
+
+fn process_file(data: &[u8]):
+    # Simulate file processing
+    pass

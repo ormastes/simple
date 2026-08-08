@@ -1,0 +1,95 @@
+"""Mail HTML render spec.
+
+Verifies the Mail surface HTML renderer — the "render mail like Gmail" slice of
+the office suite. `render_message_html` renders a single email (sender, subject,
+date, body; unread subject bold) and `render_mailbox_html` renders the mailbox
+as a folder sidebar plus a message list over `MailApp.new()` demo data.
+
+All assertions are over the produced HTML string, so they run on the test
+runner without the f64/i32 toolchain fragility.
+"""
+
+use std.spec
+use app.office.mail.html_render.{render_message_html, render_mailbox_html}
+use app.office.mail.message.{Email, EmailAddress}
+use app.office.mail.mail_app.{MailApp}
+
+fn _addr(name: text, address: text) -> EmailAddress:
+    EmailAddress(name: name, address: address)
+
+fn _msg(subject: text, body: text, read: bool) -> Email:
+    Email(
+        id: "spec_1",
+        from_addr: _addr("Alex Rivera", "alex@example.com"),
+        to: [_addr("Me", "me@simple.local")],
+        cc: [],
+        subject: subject,
+        body: body,
+        date: "2026-03-24",
+        read: read,
+        starred: false,
+        thread_id: "thread_spec",
+        folder: "Inbox",
+        attachments: []
+    )
+
+describe "mail HTML render: single message":
+    """A single email renders its sender, subject, date and body inside a styled
+    <article> fragment, with an unread subject in bold."""
+
+    it "renders the sender and subject":
+        val html = render_message_html(_msg("Quarterly draft is ready", "Please review.", false))
+        expect(html).to_start_with("<article class=\"mail-message\"")
+        expect(html).to_contain("Alex Rivera")
+        expect(html).to_contain("alex@example.com")
+        expect(html).to_contain("Quarterly draft is ready")
+        expect(html).to_contain("Please review.")
+        expect(html).to_contain("2026-03-24")
+
+    it "renders an unread subject in bold":
+        val html = render_message_html(_msg("Unread mail", "body", false))
+        expect(html).to_contain("font-weight: 700;")
+
+    it "renders a read subject in normal weight":
+        val html = render_message_html(_msg("Read mail", "body", true))
+        expect(html).to_contain("font-weight: 400;")
+
+    it "HTML-escapes a <script> in the subject":
+        val html = render_message_html(_msg("<script>alert(1)</script>", "body", false))
+        expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+        expect(html.contains("<script>")).to_be(false)
+
+describe "mail HTML render: mailbox list":
+    """The mailbox view lists every demo email with a folder sidebar and an
+    unread summary."""
+
+    it "wraps the mailbox in a styled container":
+        val html = render_mailbox_html(MailApp.new())
+        expect(html).to_start_with("<div class=\"mailbox\"")
+
+    it "lists all demo emails":
+        val html = render_mailbox_html(MailApp.new())
+        expect(html).to_contain("Quarterly draft is ready")
+        expect(html).to_contain("Updated staffing sheet")
+        expect(html).to_contain("Slides for product review")
+        expect(html).to_contain("Follow-up draft")
+        expect(html).to_contain("Old vendor thread")
+
+    it "shows the folder sidebar":
+        val html = render_mailbox_html(MailApp.new())
+        expect(html).to_contain("class=\"mail-sidebar\"")
+        expect(html).to_contain("Inbox")
+        expect(html).to_contain("Sent")
+        expect(html).to_contain("Drafts")
+        expect(html).to_contain("Trash")
+
+    it "shows the unread count":
+        val html = render_mailbox_html(MailApp.new())
+        expect(html).to_contain("2 unread")
+
+    it "escapes email content in the list":
+        var app = MailApp.new()
+        app.emails = [_msg("<b>x</b>", "body", false)]
+        val html = render_mailbox_html(app)
+        expect(html).to_contain("&lt;b&gt;x&lt;/b&gt;")
+        expect(html.contains("<b>x</b>")).to_be(false)

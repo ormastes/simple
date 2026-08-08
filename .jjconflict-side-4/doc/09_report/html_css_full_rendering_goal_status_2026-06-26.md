@@ -1,0 +1,58 @@
+# HTML/CSS Full Rendering Goal Status
+
+- status: incomplete
+- reason: full-css-rendering-incomplete
+- all HTML elements ready: pass
+- implemented CSS ready: pass
+- full CSS inventory ready: incomplete
+- HTML tags rendered: 105/105
+- implemented CSS rendered: 131/131 (implemented-simple-web-css)
+- full CSS rendered: 131/394
+- full CSS unrendered: 263
+- animation CSS rendered: 0/0 (pass)
+- manifest cases: 50/50
+
+## Raw Evidence
+- html_css_full_rendering_goal_status=incomplete
+- html_css_full_rendering_goal_reason=full-css-rendering-incomplete
+- html_css_full_rendering_goal_ready_status=incomplete
+- html_css_full_rendering_goal_ready_reason=full-css-rendering-incomplete
+- html_css_full_rendering_goal_sspec_command=sh scripts/check/check-html-css-sspec-traceability.shs
+- html_css_full_rendering_goal_sspec_exit_code=0
+- html_css_full_rendering_goal_sspec_status=pass
+- html_css_full_rendering_goal_sspec_reason=pass
+- html_css_full_rendering_goal_rendering_manifest_command=sh scripts/check/check-html-css-rendering-manifest-traceability.shs
+- html_css_full_rendering_goal_rendering_manifest_exit_code=0
+- html_css_full_rendering_goal_rendering_manifest_status=pass
+- html_css_full_rendering_goal_rendering_manifest_reason=pass
+- html_css_full_rendering_goal_html_tag_status=pass
+- html_css_full_rendering_goal_all_html_elements_ready_status=pass
+- html_css_full_rendering_goal_all_html_elements_ready_reason=pass
+- html_css_full_rendering_goal_html_tag_total_count=105
+- html_css_full_rendering_goal_html_tag_required_count=105
+- html_css_full_rendering_goal_html_tag_rendered_count=105
+- html_css_full_rendering_goal_html_tag_missing=
+- html_css_full_rendering_goal_implemented_css_status=pass
+- html_css_full_rendering_goal_all_implemented_css_ready_status=pass
+- html_css_full_rendering_goal_all_implemented_css_ready_reason=pass
+- html_css_full_rendering_goal_implemented_css_scope=implemented-simple-web-css
+- html_css_full_rendering_goal_implemented_css_total_count=131
+- html_css_full_rendering_goal_implemented_css_rendered_count=131
+- html_css_full_rendering_goal_implemented_css_missing=
+- html_css_full_rendering_goal_full_css_status=incomplete
+- html_css_full_rendering_goal_all_css_properties_ready_status=incomplete
+- html_css_full_rendering_goal_all_css_properties_ready_reason=full-css-rendering-incomplete
+- html_css_full_rendering_goal_full_css_total_count=394
+- html_css_full_rendering_goal_full_css_required_min_count=390
+- html_css_full_rendering_goal_full_css_rendered_count=131
+- html_css_full_rendering_goal_full_css_unrendered_count=263
+- html_css_full_rendering_goal_full_css_unrendered_properties=accent-color,all,aspect-ratio,azimuth,backface-visibility,background-attachment,background-blend-mode,block-size,border-block,border-block-color,border-block-end,border-block-end-color,border-block-end-style,border-block-end-width,border-block-start,border-block-start-color,border-block-start-style,border-block-start-width,border-block-style,border-block-width,border-collapse,border-end-end-radius,border-end-start-radius,border-image,border-image-outset,border-image-repeat,border-image-slice,border-image-source,border-image-width,border-inline,border-inline-color,border-inline-end,border-inline-end-color,border-inline-end-style,border-inline-end-width,border-inline-start,border-inline-start-color,border-inline-start-style,border-inline-start-width,border-inline-style,border-inline-width,border-spacing,border-start-end-radius,border-start-start-radius,box-decoration-break,break-after,break-before,break-inside,caption-side,clear,clip,clip-path,clip-rule,color-adjust,color-interpolation-filters,color-scheme,column-count,column-fill,column-rule,column-rule-color,column-rule-style,column-rule-width,column-span,column-width,columns,contain,content,content-visibility,counter-increment,counter-reset,counter-set,elevation,empty-cells,filter,flex-flow,float,flood-color,flood-opacity,font-family,font-feature-settings,font-kerning,font-language-override,font-optical-sizing,font-palette,font-size-adjust,font-stretch,font-synthesis,font-synthesis-position,font-synthesis-small-caps,font-synthesis-style,font-synthesis-weight,font-variant,font-variant-alternates,font-variant-caps,font-variant-east-asian,font-variant-emoji,font-variant-ligatures,font-variant-numeric,font-variant-position,font-variation-settings,font-width,forced-color-adjust,glyph-orientation-vertical,grid,grid-area,grid-auto-columns,grid-auto-flow,grid-auto-rows,grid-column,grid-column-end,grid-column-gap,grid-column-start,grid-gap,grid-row,grid-row-end,grid-row-gap,grid-row-start,grid-template,grid-template-areas,grid-template-columns,grid-template-rows,hanging-punctuation,hyphenate-character,hyphens,image-orientation,image-rendering,inline-size,inset,inset-block,inset-block-end,inset-block-start,inset-inline,inset-inline-end,inset-inline-start,isolation,justify-items,justify-self,lighting-color,line-break,list-style,list-style-image,list-style-position,list-style-type,margin-block,margin-block-end,margin-block-start,margin-inline,margin-inline-end,margin-inline-start,marker-side,mask,mask-border,mask-border-mode,mask-border-outset,mask-border-repeat,mask-border-slice,mask-border-source,mask-border-width,mask-clip,mask-composite,mask-image,mask-mode,mask-origin,mask-position,mask-repeat,mask-size,mask-type,max-block-size,max-inline-size,min-block-size,min-inline-size,mix-blend-mode,object-fit,object-position,offset,offset-anchor,offset-distance,offset-path,offset-position,offset-rotate,orphans,overflow-anchor,padding-block,padding-block-end,padding-block-start,padding-inline,padding-inline-end,padding-inline-start,page-break-after,page-break-before,page-break-inside,perspective,perspective-origin,pitch,pitch-range,place-content,place-items,place-self,play-during,print-color-adjust,property-name,quotes,rest,rest-after,rest-before,richness,rotate,scale,scroll-margin,scroll-margin-block,scroll-margin-block-end,scroll-margin-block-start,scroll-margin-bottom,scroll-margin-inline,scroll-margin-inline-end,scroll-margin-inline-start,scroll-margin-left,scroll-margin-right,scroll-margin-top,scroll-padding,scroll-padding-block,scroll-padding-block-end,scroll-padding-block-start,scroll-padding-bottom,scroll-padding-inline,scroll-padding-inline-end,scroll-padding-inline-start,scroll-padding-left,scroll-padding-right,scroll-padding-top,scroll-snap-align,scroll-snap-stop,scroll-snap-type,scrollbar-color,scrollbar-width,shape-image-threshold,shape-margin,shape-outside,speak-as,speak-header,speak-numeral,speak-punctuation,speech-rate,stress,table-layout,text-align-all,text-box,text-box-edge,text-box-trim,text-combine-upright,text-emphasis,text-emphasis-color,text-emphasis-position,text-emphasis-style,text-justify,text-orientation,translate,vertical-align,view-transition-name,voice-balance,voice-duration,voice-pitch,voice-range,voice-rate,voice-stress,voice-volume,volume,widows,will-change,writing-mode
+- html_css_full_rendering_goal_animation_css_status=pass
+- html_css_full_rendering_goal_animation_css_scope=animation-transition-transform-css
+- html_css_full_rendering_goal_animation_css_total_count=0
+- html_css_full_rendering_goal_animation_css_rendered_count=0
+- html_css_full_rendering_goal_animation_css_unrendered_count=0
+- html_css_full_rendering_goal_animation_css_unrendered_properties=
+- html_css_full_rendering_goal_unsupported_css_inventory_count=270
+- html_css_full_rendering_goal_manifest_case_count=50
+- html_css_full_rendering_goal_manifest_required_case_count=50

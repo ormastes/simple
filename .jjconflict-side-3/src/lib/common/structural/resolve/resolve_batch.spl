@@ -1,0 +1,247 @@
+# ============================================================================
+# common/structural/resolve/resolve_batch.spl — columnar batch flattening
+#
+# CPU-side columnar transforms for hybrid batch preparation (LINK lane,
+# hybrid_batch_notes.md). Hybrid GPU batch stages consume one array per
+# record field ("structure of arrays") instead of arrays of records; this
+# module provides the pure in-memory flatten/rebuild pair for the frozen
+# contract-v1 record shapes.
+#
+# IMPORTANT SCOPE LIMITS (per contract §6 — batch layouts stay deferred):
+#   - In-memory only. Nothing here is a wire format; nothing here is frozen.
+#   - The frozen wire codec in resolve_codec.spl stays the oracle: rebuilding
+#     a flattened batch and encoding it MUST be byte-identical to encoding
+#     the original records (asserted by resolve_batch_spec.spl).
+#
+# Column widths mirror the frozen §3 field set exactly:
+#   DefinitionRecord / ReferenceRecord (44 B on the wire):
+#     name_hash_hi u64 | name_hash_lo u64 | space u32
+#     | owner_object_slot u32 | owner_local_index u32
+#     | attributes u64 | order u64
+#   Name blob (hash-batch input, layout NOT frozen — notes §"open questions"):
+#     blob [u8] concatenated UTF-8 bytes | offsets [u32], len = names + 1,
+#     offsets[0] == 0, offsets[last] == blob.len().
+#
+# All rebuild paths are total: malformed shapes (offset discipline broken,
+# column length mismatch, non-UTF-8 blob segment) return ok=false, never trap.
+# ============================================================================
+
+use std.common.base_encoding.utilities.{
+    text_to_bytes_linear,
+    validated_utf8_bytes_to_text_linear
+}
+use std.common.structural.identity.entity_id.{entity_ref, hash128}
+use std.common.structural.resolve.resolve_types.{
+    DefinitionRecord,
+    ReferenceRecord,
+    definition_record,
+    reference_record,
+    resolve_key
+}
+
+# ----------------------------------------------------------------------------
+# Result carriers — explicit `ok` structs, same rationale as resolve_codec.
+# ----------------------------------------------------------------------------
+
+struct NameBatch:
+    """Flattened name column: concatenated UTF-8 bytes + n+1 element offsets."""
+    ok: bool
+    blob: [u8]
+    offsets: [u32]
+
+struct NameRebuildResult:
+    ok: bool
+    names: [text]
+
+struct DefinitionBatch:
+    """DefinitionRecord columns — one array per frozen §3 field."""
+    ok: bool
+    name_hash_hi: [u64]
+    name_hash_lo: [u64]
+    space: [u32]
+    owner_object_slot: [u32]
+    owner_local_index: [u32]
+    attributes: [u64]
+    order: [u64]
+
+struct DefinitionRebuildResult:
+    ok: bool
+    records: [DefinitionRecord]
+
+struct ReferenceBatch:
+    """ReferenceRecord columns — one array per frozen §3 field."""
+    ok: bool
+    name_hash_hi: [u64]
+    name_hash_lo: [u64]
+    space: [u32]
+    owner_object_slot: [u32]
+    owner_local_index: [u32]
+    attributes: [u64]
+    order: [u64]
+
+struct ReferenceRebuildResult:
+    ok: bool
+    records: [ReferenceRecord]
+
+# ----------------------------------------------------------------------------
+# Name blob flatten / rebuild
+# ----------------------------------------------------------------------------
+
+fn batch_flatten_names(names: [text]) -> NameBatch:
+    """Flatten names into one byte blob plus a u32 offsets array.
+
+    offsets.len() == names.len() + 1; element i spans
+    blob[offsets[i] .. offsets[i+1]]. Empty names yield equal adjacent
+    offsets. Flatten is total on valid text input, so ok is always true here;
+    the flag exists so callers handle flatten and rebuild uniformly.
+    """
+    var blob: [u8] = []
+    var offsets: [u32] = []
+    offsets.push(0 as u32)
+    for name in names:
+        val bytes = text_to_bytes_linear(name)
+        var i = 0
+        while i < bytes.len():
+            blob.push(bytes[i])
+            i = i + 1
+        offsets.push(blob.len() as u32)
+    NameBatch(ok: true, blob: blob, offsets: offsets)
+
+fn batch_rebuild_names(batch: NameBatch) -> NameRebuildResult:
+    """Exact inverse of batch_flatten_names.
+
+    Hard-rejects (ok=false): empty offsets array, offsets[0] != 0, final
+    offset != blob.len(), non-monotonic offsets, or a segment that is not
+    valid UTF-8. Never traps on malformed input.
+    """
+    val none: [text] = []
+    if batch.offsets.len() < 1:
+        return NameRebuildResult(ok: false, names: none)
+    if (batch.offsets[0] as i64) != 0:
+        return NameRebuildResult(ok: false, names: none)
+    val count = batch.offsets.len() - 1
+    if (batch.offsets[count] as i64) != batch.blob.len():
+        return NameRebuildResult(ok: false, names: none)
+    var i = 0
+    while i < count:
+        if (batch.offsets[i] as i64) > (batch.offsets[i + 1] as i64):
+            return NameRebuildResult(ok: false, names: none)
+        i = i + 1
+    var names: [text] = []
+    i = 0
+    while i < count:
+        var segment: [u8] = []
+        var j = batch.offsets[i] as i64
+        val end = batch.offsets[i + 1] as i64
+        while j < end:
+            segment.push(batch.blob[j])
+            j = j + 1
+        val decoded = match validated_utf8_bytes_to_text_linear(segment):
+            Err(_): return NameRebuildResult(ok: false, names: none)
+            Ok(t): t
+        names.push(decoded)
+        i = i + 1
+    NameRebuildResult(ok: true, names: names)
+
+# ----------------------------------------------------------------------------
+# DefinitionRecord flatten / rebuild
+# ----------------------------------------------------------------------------
+
+fn batch_flatten_definitions(records: [DefinitionRecord]) -> DefinitionBatch:
+    """Flatten records into columnar arrays, one per frozen §3 field."""
+    var hi: [u64] = []
+    var lo: [u64] = []
+    var space: [u32] = []
+    var slot: [u32] = []
+    var index: [u32] = []
+    var attributes: [u64] = []
+    var order: [u64] = []
+    for r in records:
+        hi.push(r.key.name_hash.hi)
+        lo.push(r.key.name_hash.lo)
+        space.push(r.key.space)
+        slot.push(r.owner.object_slot)
+        index.push(r.owner.local_index)
+        attributes.push(r.attributes)
+        order.push(r.order)
+    DefinitionBatch(ok: true, name_hash_hi: hi, name_hash_lo: lo,
+        space: space, owner_object_slot: slot, owner_local_index: index,
+        attributes: attributes, order: order)
+
+fn batch_rebuild_definitions(batch: DefinitionBatch) -> DefinitionRebuildResult:
+    """Exact inverse of batch_flatten_definitions.
+
+    Hard-rejects (ok=false) when any column length disagrees with
+    name_hash_hi — a ragged batch can never silently drop or invent fields.
+    """
+    val none: [DefinitionRecord] = []
+    val n = batch.name_hash_hi.len()
+    if (batch.name_hash_lo.len() != n
+            or batch.space.len() != n
+            or batch.owner_object_slot.len() != n
+            or batch.owner_local_index.len() != n
+            or batch.attributes.len() != n
+            or batch.order.len() != n):
+        return DefinitionRebuildResult(ok: false, records: none)
+    var records: [DefinitionRecord] = []
+    var i = 0
+    while i < n:
+        records.push(definition_record(
+            resolve_key(
+                hash128(batch.name_hash_hi[i], batch.name_hash_lo[i]),
+                batch.space[i]),
+            entity_ref(batch.owner_object_slot[i], batch.owner_local_index[i]),
+            batch.attributes[i],
+            batch.order[i]))
+        i = i + 1
+    DefinitionRebuildResult(ok: true, records: records)
+
+# ----------------------------------------------------------------------------
+# ReferenceRecord flatten / rebuild
+# ----------------------------------------------------------------------------
+
+fn batch_flatten_references(records: [ReferenceRecord]) -> ReferenceBatch:
+    """Flatten records into columnar arrays, one per frozen §3 field."""
+    var hi: [u64] = []
+    var lo: [u64] = []
+    var space: [u32] = []
+    var slot: [u32] = []
+    var index: [u32] = []
+    var attributes: [u64] = []
+    var order: [u64] = []
+    for r in records:
+        hi.push(r.key.name_hash.hi)
+        lo.push(r.key.name_hash.lo)
+        space.push(r.key.space)
+        slot.push(r.owner.object_slot)
+        index.push(r.owner.local_index)
+        attributes.push(r.attributes)
+        order.push(r.order)
+    ReferenceBatch(ok: true, name_hash_hi: hi, name_hash_lo: lo,
+        space: space, owner_object_slot: slot, owner_local_index: index,
+        attributes: attributes, order: order)
+
+fn batch_rebuild_references(batch: ReferenceBatch) -> ReferenceRebuildResult:
+    """Exact inverse of batch_flatten_references. Same ragged-batch hard
+    reject as batch_rebuild_definitions."""
+    val none: [ReferenceRecord] = []
+    val n = batch.name_hash_hi.len()
+    if (batch.name_hash_lo.len() != n
+            or batch.space.len() != n
+            or batch.owner_object_slot.len() != n
+            or batch.owner_local_index.len() != n
+            or batch.attributes.len() != n
+            or batch.order.len() != n):
+        return ReferenceRebuildResult(ok: false, records: none)
+    var records: [ReferenceRecord] = []
+    var i = 0
+    while i < n:
+        records.push(reference_record(
+            resolve_key(
+                hash128(batch.name_hash_hi[i], batch.name_hash_lo[i]),
+                batch.space[i]),
+            entity_ref(batch.owner_object_slot[i], batch.owner_local_index[i]),
+            batch.attributes[i],
+            batch.order[i]))
+        i = i + 1
+    ReferenceRebuildResult(ok: true, records: records)

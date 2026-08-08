@@ -1,0 +1,229 @@
+# UI State Management and Event System Specification
+#
+# Tests init_state, init_state_with_mode, update_state, focus cycling,
+# quit detection, keypress dispatch, and mode switching.
+
+use std.spec.*
+
+use common.ui.widget.{UIState, UITree, UIMode, UIEvent, WidgetNode}
+use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.state.{init_state, init_state_with_mode, update_state, is_quit_event, is_quit_command}
+
+# ============================================================================
+# Helper: build a simple tree with 3 focusable widgets
+# ============================================================================
+
+fn make_test_tree() -> UITree:
+    val root = column("se_root", [
+        text_widget("se_w1", "First"),
+        text_widget("se_w2", "Second"),
+        text_widget("se_w3", "Third")
+    ])
+    return build_tree(root)
+
+# ============================================================================
+# State Initialization
+# ============================================================================
+
+describe "init_state":
+
+    it "creates state with Normal mode":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        expect(state.mode_name()).to_equal("NORMAL")
+
+    it "sets focused_id to first widget id":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        # all_widget_ids returns root first
+        val first_id = tree.all_widget_ids()[0]
+        expect(state.focused_id).to_equal(first_id)
+
+describe "init_state_with_mode":
+
+    it "sets Command mode when given command string":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "command")
+        expect(state.mode_name()).to_equal("COMMAND")
+
+    it "sets Insert mode when given insert string":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "insert")
+        expect(state.mode_name()).to_equal("INSERT")
+
+    it "sets Menu mode when given menu string":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "menu")
+        expect(state.mode_name()).to_equal("MENU")
+
+    it "defaults to Normal mode for unknown string":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "unknown")
+        expect(state.mode_name()).to_equal("NORMAL")
+
+# ============================================================================
+# Focus Navigation
+# ============================================================================
+
+describe "focus navigation":
+
+    it "advances focused_id on FocusNext":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        val s2 = update_state(state, UIEvent.FocusNext)
+        # Should move from first id to second id
+        expect(s2.focused_id).to_equal(ids[1])
+
+    it "retreats focused_id on FocusPrev":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        # Move forward first, then back
+        val s2 = update_state(state, UIEvent.FocusNext)
+        val s3 = update_state(s2, UIEvent.FocusPrev)
+        expect(s3.focused_id).to_equal(ids[0])
+
+    it "wraps around at end of list":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        # Navigate forward through all widgets to wrap
+        var s = state
+        var i = 0
+        while i < ids.len():
+            s = update_state(s, UIEvent.FocusNext)
+            i = i + 1
+        # After len() FocusNext events, should wrap to first
+        expect(s.focused_id).to_equal(ids[0])
+
+    it "wraps around at beginning of list":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        # FocusPrev from first element should wrap to last
+        val s2 = update_state(state, UIEvent.FocusPrev)
+        expect(s2.focused_id).to_equal(ids[ids.len() - 1])
+
+# ============================================================================
+# Quit Detection
+# ============================================================================
+
+describe "quit detection":
+
+    it "is_quit_event returns true for Quit":
+        expect(is_quit_event(UIEvent.Quit)).to_equal(true)
+
+    it "is_quit_event returns false for FocusNext":
+        expect(is_quit_event(UIEvent.FocusNext)).to_equal(false)
+
+    it "is_quit_event returns false for KeyPress":
+        expect(is_quit_event(UIEvent.KeyPress(key: "q"))).to_equal(false)
+
+# ============================================================================
+# Keypress Handling in Normal Mode
+# ============================================================================
+
+describe "keypress normal mode":
+
+    it "j triggers focus next":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        val s2 = update_state(state, UIEvent.KeyPress(key: "j"))
+        expect(s2.focused_id).to_equal(ids[1])
+
+    it "k triggers focus prev":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val ids = tree.all_widget_ids()
+        # Move forward first so we can go back
+        val s2 = update_state(state, UIEvent.KeyPress(key: "j"))
+        val s3 = update_state(s2, UIEvent.KeyPress(key: "k"))
+        expect(s3.focused_id).to_equal(ids[0])
+
+    it "colon switches to Command mode":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val s2 = update_state(state, UIEvent.KeyPress(key: ":"))
+        expect(s2.mode_name()).to_equal("COMMAND")
+
+    it "i switches to Insert mode":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val s2 = update_state(state, UIEvent.KeyPress(key: "i"))
+        expect(s2.mode_name()).to_equal("INSERT")
+
+# ============================================================================
+# Escape Key Handling
+# ============================================================================
+
+describe "escape key handling":
+
+    it "escape in Command mode returns to Normal":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "command")
+        val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
+        expect(s2.mode_name()).to_equal("NORMAL")
+
+    it "escape in Insert mode returns to Normal":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "insert")
+        val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
+        expect(s2.mode_name()).to_equal("NORMAL")
+
+    it "escape in Menu mode returns to Normal":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "menu")
+        val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
+        expect(s2.mode_name()).to_equal("NORMAL")
+
+# ============================================================================
+# Mode Name
+# ============================================================================
+
+describe "mode_name":
+
+    it "returns NORMAL for Normal mode":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "normal")
+        expect(state.mode_name()).to_equal("NORMAL")
+
+    it "returns COMMAND for Command mode":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "command")
+        expect(state.mode_name()).to_equal("COMMAND")
+
+    it "returns INSERT for Insert mode":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "insert")
+        expect(state.mode_name()).to_equal("INSERT")
+
+    it "returns MENU for Menu mode":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "menu")
+        expect(state.mode_name()).to_equal("MENU")
+
+# ============================================================================
+# Mode Switching via Events
+# ============================================================================
+
+describe "mode switching via events":
+
+    it "CommandMode event switches to Command":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val s2 = update_state(state, UIEvent.CommandMode)
+        expect(s2.mode_name()).to_equal("COMMAND")
+
+    it "InsertMode event switches to Insert":
+        val tree = make_test_tree()
+        val state = init_state(tree)
+        val s2 = update_state(state, UIEvent.InsertMode)
+        expect(s2.mode_name()).to_equal("INSERT")
+
+    it "NormalMode event switches to Normal":
+        val tree = make_test_tree()
+        val state = init_state_with_mode(tree, "command")
+        val s2 = update_state(state, UIEvent.NormalMode)
+        expect(s2.mode_name()).to_equal("NORMAL")

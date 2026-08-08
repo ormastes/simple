@@ -1,0 +1,95 @@
+# GPU memory-profile instrumentation skeleton tests (M7 remainder)
+# Covers std.gc_async_mut.gpu.mem_profile — no GPU required.
+#
+# See doc/05_design/runtime/memory_analysis/gc_gpu_instrumentation_design.md
+# GPU section (§2) for the design this implements.
+
+use std.spec.*
+use std.nogc_sync_mut.gpu_profile.mem_profile.{
+    DeviceAllocEvent,
+    run_under_compute_sanitizer,
+    device_trace_to_memory_viz
+}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "run_under_compute_sanitizer":
+
+    it "returns a clear 127 result when compute-sanitizer is not on PATH":
+        # Force a PATH that cannot contain compute-sanitizer, regardless of
+        # whether this box has CUDA installed, so the test is deterministic
+        # on both GPU and GPU-less machines.
+        val saved_path = rt_env_get("PATH")
+        rt_env_set("PATH", "/nonexistent_dir_for_gpu_sanitize_test")
+
+        val (out, err, code) = run_under_compute_sanitizer("memcheck", ["echo", "hi"])
+
+        rt_env_set("PATH", saved_path)
+
+        expect(code).to_equal(127)
+        expect(err).to_equal("compute-sanitizer not found")
+        expect(out).to_equal("")
+
+describe "device_trace_to_memory_viz":
+
+    it "emits a well-formed, versioned JSON snapshot with the right event count":
+        val events = [
+            DeviceAllocEvent(ts: 1000, owner: "mod_a", ptr: 4096, bytes: 256, kind: "alloc"),
+            DeviceAllocEvent(ts: 1010, owner: "mod_b", ptr: 8192, bytes: 512, kind: "alloc"),
+            DeviceAllocEvent(ts: 1020, owner: "mod_a", ptr: 4096, bytes: 256, kind: "free")
+        ]
+
+        val json = device_trace_to_memory_viz(events)
+
+        expect(json).to_contain("\"schema\":\"simple-gpu-trace\"")
+        expect(json).to_contain("\"version\":1")
+        expect(json).to_contain("\"event_count\":3")
+
+    it "names each event's owner and records ptr/bytes/kind":
+        val events = [
+            DeviceAllocEvent(ts: 5, owner: "cuda_owner_1", ptr: 111, bytes: 64, kind: "alloc"),
+            DeviceAllocEvent(ts: 6, owner: "cuda_owner_2", ptr: 222, bytes: 128, kind: "free")
+        ]
+
+        val json = device_trace_to_memory_viz(events)
+
+        expect(json).to_contain("\"owner\":\"cuda_owner_1\"")
+        expect(json).to_contain("\"owner\":\"cuda_owner_2\"")
+        expect(json).to_contain("\"ptr\":111")
+        expect(json).to_contain("\"bytes\":128")
+        expect(json).to_contain("\"kind\":\"alloc\"")
+        expect(json).to_contain("\"kind\":\"free\"")
+
+    it "produces balanced braces/brackets (structurally parseable JSON)":
+        val events = [
+            DeviceAllocEvent(ts: 1, owner: "a", ptr: 1, bytes: 1, kind: "alloc")
+        ]
+        val json = device_trace_to_memory_viz(events)
+
+        var open_braces = 0
+        var close_braces = 0
+        var open_brackets = 0
+        var close_brackets = 0
+        var i = 0
+        while i < json.len():
+            val ch = json.slice(i, i + 1)
+            if ch == "{":
+                open_braces = open_braces + 1
+            elif ch == "}":
+                close_braces = close_braces + 1
+            elif ch == "[":
+                open_brackets = open_brackets + 1
+            elif ch == "]":
+                close_brackets = close_brackets + 1
+            i = i + 1
+
+        expect(open_braces).to_equal(close_braces)
+        expect(open_brackets).to_equal(close_brackets)
+
+    it "handles zero events without producing malformed output":
+        val events: [DeviceAllocEvent] = []
+        val json = device_trace_to_memory_viz(events)
+
+        expect(json).to_contain("\"event_count\":0")
+        expect(json).to_contain("\"events\":[]")

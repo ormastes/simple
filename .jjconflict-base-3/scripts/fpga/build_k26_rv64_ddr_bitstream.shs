@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# build_k26_rv64_ddr_bitstream.shs -- ONE Vivado 2025.2 build of the KV260
+# (xck26) bitstream that boots rv64 SimpleOS on the Simple soft-core out of
+# PS DDR4. Direct mirror of the silicon-proven build_k26_rv32_ddr_bitstream.shs.
+#
+# Design (see examples/09_embedded/fpga_riscv/rtl/soc_top_rv64_k26_ddr.vhd):
+#
+#   rv64_exec_core_axi  --mem_*(64b)-->  rv64_axi4_mem_adapter  --M_AXI_HP-->
+#       SmartConnect --> zynq_ultra_ps_e S_AXI_HP0_FPD --> PS DDR4
+#
+#   zynq M_AXI_HPM0_FPD --> SmartConnect --> rv32_ctrl_obs_slave (S_AXI_CTRL,
+#       reused unchanged; 64-bit debug taps truncated to low 32 bits)
+#
+# The rv64 image spans core 0x80200000..~0x84A20000 (~74 MB incl. stack+heap)
+# plus the FAT32 ramdisk window at 0x88000000; an xck26 has only ~2.9 MB of
+# fabric BRAM, so the working set MUST live in PS DDR. The adapter remaps the
+# core's 0x80000000-based window into the DDR aperture at 0x10000000.
+#
+# TIMING: the rv32 lane closed at WNS -0.115 ns @ 100 MHz and ran anyway; the
+# 64-bit datapath is wider, so this build runs the PL at 50 MHz
+# (PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ 50). Timing must MEET (WNS >= 0).
+#
+# RESOURCE RULE: exactly ONE Vivado at a time, and never alongside a compiler /
+# native build -- that combination has previously driven the host to 122 GB of
+# 125 GB. This script refuses to start if either is detected.
+#
+# Vivado's settings64.sh uses `source`, so this must run under bash even when
+# invoked as `sh scripts/fpga/build_k26_rv64_ddr_bitstream.shs`.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VIVADO_SETTINGS="${VIVADO_SETTINGS:-$HOME/Xilinx/2025.2/Vivado/settings64.sh}"
+BUILD_DIR="build/fpga/k26_rv64_ddr"
+PROJECT="k26_rv64_ddr"
+# RTL_DIR is env-overridable so a staged directory (e.g. generated cores from
+# build/os/rtl via src/lib/hardware/vhdl_gen) can feed the same build flow.
+RTL_DIR="${RTL_DIR:-examples/09_embedded/fpga_riscv/rtl}"
+OUT_BIT="$BUILD_DIR/${PROJECT}.bit"
+OUT_XSA="$BUILD_DIR/${PROJECT}.xsa"
+SYNTH_ONLY="0"
+[ "${1:-}" = "--synth-only" ] && SYNTH_ONLY="1"
+
+[ -f "$VIVADO_SETTINGS" ] || { echo "FAIL: vivado settings missing $VIVADO_SETTINGS"; exit 1; }
+
+# --- serialization guards -------------------------------------------------
+# The bracketed first character keeps these patterns from matching a shell whose
+# command line merely CONTAINS the pattern text.
+if pgrep -f '[l]nx64\.o/vivado' >/dev/null 2>&1; then
+    echo "FAIL: a Vivado is already running (exactly one at a time)"; exit 1
+fi
+if [ "${ALLOW_CONCURRENT_BUILD:-0}" != "1" ] && pgrep -f '[s]imple .*native-build' >/dev/null 2>&1; then
+    echo "FAIL: a 'simple native-build' is running; Vivado + native build has OOM'd this host before."
+    echo "      Wait for it to finish, or set ALLOW_CONCURRENT_BUILD=1 if you know the host is idle."
+    exit 1
+fi
+avail_gb="$(awk '/MemAvailable/{printf "%d", $2/1048576}' /proc/meminfo)"
+if [ "${ALLOW_LOW_MEM:-0}" != "1" ] && [ "$avail_gb" -lt 30 ]; then
+    echo "FAIL: only ${avail_gb} GB available; need >=30 GB headroom for Vivado."
+    echo "      Wait for memory to free, or set ALLOW_LOW_MEM=1 to override."
+    exit 1
+fi
+echo "INFO: ${avail_gb} GB available, no competing Vivado/native-build"
+
+for f in "$RTL_DIR/rv64_exec_core_axi.vhd" "$RTL_DIR/rv64_axi4_mem_adapter.vhd" \
+         "$RTL_DIR/rv32_ctrl_obs_slave.vhd" "$RTL_DIR/soc_top_rv64_k26_ddr.vhd"; do
+    [ -s "$f" ] || { echo "FAIL: RTL missing: $f"; exit 1; }
+done
+
+# shellcheck disable=SC1090
+. "$VIVADO_SETTINGS"
+mkdir -p "$BUILD_DIR"
+
+cat > "$BUILD_DIR/pins.xdc" <<'XDC'
+# Fabric UART TX on PMOD J2 pin H12. NOT wired to the onboard FT4232H on the
+# KV260 carrier -- present only for an optional external 3.3 V USB-UART.
+set_property PACKAGE_PIN H12 [get_ports uart_tx]
+set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]
+set_false_path -to [get_ports uart_tx]
+XDC
+
+cat > "$BUILD_DIR/build.tcl" <<TCL
+set synth_only $SYNTH_ONLY
+create_project $PROJECT $BUILD_DIR/$PROJECT -part xck26-sfvc784-2lv-c -force
+set_property board_part xilinx.com:kv260_som:part0:1.4 [current_project]
+
+add_files [list \\
+  $RTL_DIR/rv64_exec_core_axi.vhd \\
+  $RTL_DIR/rv64_axi4_mem_adapter.vhd \\
+  $RTL_DIR/rv32_ctrl_obs_slave.vhd \\
+  $RTL_DIR/soc_top_rv64_k26_ddr.vhd ]
+add_files -fileset constrs_1 $BUILD_DIR/pins.xdc
+update_compile_order -fileset sources_1
+
+create_bd_design ps_bd
+create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:3.5 ps
+apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e \\
+  -config {apply_board_preset "1"} [get_bd_cells ps]
+# S_AXI_HP0_FPD (GP2) = soft-core -> DDR.  M_AXI_HPM0_FPD (GP0) = PS -> control.
+# PL0 clock pinned to 50 MHz so the 64-bit datapath MEETS timing (rv32 @100 MHz
+# closed at -0.115 ns WNS; do not repeat that gamble on a wider core).
+set_property -dict [list \\
+  CONFIG.PSU__USE__S_AXI_GP2 {1} \\
+  CONFIG.PSU__USE__M_AXI_GP0 {1} \\
+  CONFIG.PSU__USE__M_AXI_GP1 {0} \\
+  CONFIG.PSU__MAXIGP0__DATA_WIDTH {32} \\
+  CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ {50} ] [get_bd_cells ps]
+
+create_bd_cell -type module -reference soc_top_rv64_k26_ddr rv64
+create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 sc_mem
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] [get_bd_cells sc_mem]
+create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 sc_ctrl
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] [get_bd_cells sc_ctrl]
+
+# soft-core master -> PS DDR
+connect_bd_intf_net [get_bd_intf_pins rv64/M_AXI_HP] [get_bd_intf_pins sc_mem/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins sc_mem/M00_AXI] [get_bd_intf_pins ps/S_AXI_HP0_FPD]
+# PS -> control/observation slave
+connect_bd_intf_net [get_bd_intf_pins ps/M_AXI_HPM0_FPD] [get_bd_intf_pins sc_ctrl/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M00_AXI] [get_bd_intf_pins rv64/S_AXI_CTRL]
+
+connect_bd_net [get_bd_pins ps/pl_clk0] \\
+  [get_bd_pins ps/saxihp0_fpd_aclk] [get_bd_pins ps/maxihpm0_fpd_aclk] \\
+  [get_bd_pins sc_mem/aclk] [get_bd_pins sc_ctrl/aclk] [get_bd_pins rv64/clk]
+connect_bd_net [get_bd_pins ps/pl_resetn0] \\
+  [get_bd_pins sc_mem/aresetn] [get_bd_pins sc_ctrl/aresetn] [get_bd_pins rv64/rst_n]
+
+create_bd_port -dir O uart_tx
+connect_bd_net [get_bd_ports uart_tx] [get_bd_pins rv64/uart_tx]
+
+assign_bd_address
+# Pin the control slave at 0xA0000000 so the bring-up script has a fixed base.
+# The slave segment of a module-reference AXI-Lite interface is <cell>/<intf>/Reg.
+if {[catch {
+  assign_bd_address -offset 0xA0000000 -range 0x00010000 \\
+    -target_address_space [get_bd_addr_spaces ps/Data] \\
+    [get_bd_addr_segs rv64/S_AXI_CTRL/Reg] -force
+} e]} {
+  puts "CTRL_SEG_EXPLICIT_FAILED: \$e"
+  # Fall back: find any ps/Data segment that lives in the rv64 cell.
+  foreach sg [get_bd_addr_segs -of_objects [get_bd_addr_spaces ps/Data]] {
+    if {[string match "*rv64*" \$sg]} {
+      catch { set_property offset 0xA0000000 \$sg ; puts "CTRL_SEG_FALLBACK=\$sg" }
+    }
+  }
+}
+validate_bd_design
+save_bd_design
+# report_bd_address does not exist in 2025.2; dump the segment map directly so
+# the bring-up script can confirm the control slave's base address.
+set afh [open $BUILD_DIR/bd_address.rpt w]
+foreach spc [get_bd_addr_spaces] {
+  foreach sg [get_bd_addr_segs -of_objects \$spc] {
+    catch {
+      puts \$afh "SPACE=\$spc SEG=\$sg OFFSET=[get_property offset \$sg] RANGE=[get_property range \$sg]"
+    }
+  }
+}
+close \$afh
+foreach sg [get_bd_addr_segs -of_objects [get_bd_addr_spaces ps/Data]] {
+  catch { puts "PS_SEG \$sg OFFSET=[get_property offset \$sg] RANGE=[get_property range \$sg]" }
+}
+
+set wrap [make_wrapper -files [get_files ps_bd.bd] -top]
+add_files -norecurse \$wrap
+set_property top ps_bd_wrapper [current_fileset]
+update_compile_order -fileset sources_1
+
+launch_runs synth_1 -jobs 8
+wait_on_run synth_1
+if {[get_property PROGRESS [get_runs synth_1]] != "100%"} { puts "SYNTH_FAILED"; exit 5 }
+open_run synth_1
+report_utilization -file $BUILD_DIR/util_synth.rpt
+puts "SYNTH_WNS=[get_property STATS.WNS [get_runs synth_1]]"
+if {\$synth_only} { puts "SYNTH_ONLY_DONE"; exit 0 }
+
+launch_runs impl_1 -to_step write_bitstream -jobs 8
+wait_on_run impl_1
+if {[get_property PROGRESS [get_runs impl_1]] != "100%"} { puts "IMPL_FAILED"; exit 6 }
+open_run impl_1
+report_timing_summary -file $BUILD_DIR/timing_routed.rpt
+report_utilization -file $BUILD_DIR/util_routed.rpt
+set wns [get_property STATS.WNS [get_runs impl_1]]
+set whs [get_property STATS.WHS [get_runs impl_1]]
+puts "IMPL_WNS=\$wns IMPL_WHS=\$whs"
+file copy -force $BUILD_DIR/$PROJECT/$PROJECT.runs/impl_1/ps_bd_wrapper.bit $OUT_BIT
+write_hw_platform -fixed -include_bit -force -file $OUT_XSA
+puts "BITSTREAM_WRITTEN=$OUT_BIT"
+if {\$wns < 0.0 || \$whs < 0.0} { puts "TIMING_NOT_MET"; exit 3 }
+puts "TIMING_MET"
+TCL
+
+echo "=== ONE Vivado build: rv64 soft-core + AXI4 -> PS DDR4 (xck26) ==="
+vivado -mode batch -source "$BUILD_DIR/build.tcl" \
+    -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -30
+
+grep -E 'SYNTH_WNS|IMPL_WNS|BITSTREAM_WRITTEN|TIMING_(MET|NOT_MET)|SYNTH_FAILED|IMPL_FAILED' \
+    "$BUILD_DIR/vivado.log" || true
+
+if [ "$SYNTH_ONLY" = "1" ]; then exit 0; fi
+[ -f "$OUT_BIT" ] || { echo "FAIL: no bitstream; see $BUILD_DIR/vivado.log"; exit 4; }
+echo "SUCCESS: bitstream at $OUT_BIT"

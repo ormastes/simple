@@ -1,0 +1,137 @@
+# XHCI Probe Boot — QEMU/hardware proof-of-enumeration serial markers.
+#
+# MDSOC: feature dimension, drivers layer
+#
+# Thin boot-time wrapper around the real xhci_driver/xhci_enum stack (PCI
+# probe -> xHCI §4.2 init -> port scan -> Enable Slot -> Address Device ->
+# EP0 GET_DESCRIPTOR) that emits one greppable serial line per verified
+# step. Used by the QEMU xhci gate (scripts/check/check-simpleos-usb-xhci-qemu.shs)
+# to assert the controller actually enumerates real devices under QEMU
+# (`-device qemu-xhci -device usb-kbd -device usb-mouse`), not just that the
+# source compiles.
+#
+# Every "=pass" marker below corresponds to a real hardware/QEMU-model
+# interaction (MMIO reads, a Command Ring TRB round-trip through the real
+# xHCI event ring, or a real EP0 control transfer) — there is no
+# simulated/short-circuited success path here.
+
+use os.drivers.usb.xhci_driver.{XhciController, xhci_probe, xhci_init, xhci_send_command_with_slot, xhci_op_read32}
+use os.drivers.usb.xhci_enum.{xhci_enumerate, UsbDevice}
+use os.drivers.usb.xhci_regs.{XhciPortRegs, XHCI_OP_USBSTS}
+use os.drivers.usb.xhci_trb.{TRB_TYPE_CMD_ENABLE_SLOT}
+use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
+
+fn _usb_xhci_count_connected_ports(ctrl: XhciController) -> i64:
+    """Scan all ports and count how many currently report CCS=1 (connected).
+
+    A pre-enumeration read of PORTSC on every port; distinct from (and
+    performed before) xhci_enumerate's own per-port reset+attach sequence so
+    the gate can assert "a port status change was observed" independently of
+    whether the subsequent Enable Slot/Address Device steps succeed.
+    """
+    var connected: i64 = 0
+    var port: u32 = 0
+    while port < ctrl.max_ports:
+        val regs = XhciPortRegs.new(ctrl.op_base, port)
+        if regs.is_connected():
+            connected = connected + 1
+        port = port + 1
+    connected
+
+fn _usb_xhci_device_line(dev: UsbDevice) -> text:
+    "[usb-xhci] device slot=" + dev.slot.to_text() +
+        " port=" + dev.port.to_text() +
+        " vid=" + dev.vid.to_text() +
+        " pid=" + dev.pid.to_text() +
+        " class=" + dev.dev_class.to_text() +
+        " subclass=" + dev.dev_subclass.to_text() +
+        " protocol=" + dev.protocol.to_text() +
+        " speed=" + dev.speed.to_text()
+
+fn usb_xhci_probe_serial_lines() -> [text]:
+    """Probe, initialize, and enumerate the real xHCI controller.
+
+    Returns one marker line per verified step, in this fixed order:
+      [usb-xhci] xhci_pci=present|absent
+      [usb-xhci] cap_op_mapped=pass|fail          (CAPLENGTH/RTSOFF/DBOFF mapped, controller reset+started)
+      [usb-xhci] controller_running=pass
+      [usb-xhci] port_status_change=pass|none     (>=1 port reports CCS=1)
+      [usb-xhci] device_count=<n>
+      [usb-xhci] enable_slot=pass                 (only when device_count > 0)
+      [usb-xhci] address_device=pass              (only when device_count > 0)
+      [usb-xhci] device slot=.. port=.. vid=.. pid=.. ...   (one per device)
+      [usb-xhci] device_descriptor_read=pass vid=.. pid=..  (one per device, VID/PID must be non-zero)
+    """
+    var lines: [text] = []
+
+    var found_ctrl = false
+    if val Some(ctrl) = xhci_probe():
+        found_ctrl = true
+        lines.push("[usb-xhci] xhci_pci=present")
+
+        val init_result = xhci_init(ctrl)
+        if val Err(detail) = init_result:
+            lines.push("[usb-xhci] cap_op_mapped=fail detail=" + detail)
+            return lines
+
+        if ctrl.cap_length == 0 or ctrl.op_base <= ctrl.mmio_base:
+            lines.push("[usb-xhci] cap_op_mapped=fail detail=zero-cap-length-or-op-base")
+            return lines
+        lines.push(
+            "[usb-xhci] cap_op_mapped=pass cap_length=" + ctrl.cap_length.to_text() +
+            " max_slots=" + ctrl.max_slots.to_text() +
+            " max_ports=" + ctrl.max_ports.to_text()
+        )
+        lines.push("[usb-xhci] controller_running=pass")
+
+        val connected = _usb_xhci_count_connected_ports(ctrl)
+        if connected > 0:
+            lines.push("[usb-xhci] port_status_change=pass connected=" + connected.to_text())
+        else:
+            lines.push("[usb-xhci] port_status_change=none connected=0")
+
+        val devices = xhci_enumerate(ctrl)
+        lines.push("[usb-xhci] device_count=" + devices.len().to_text())
+
+        if devices.len() == 0 and connected > 0:
+            # Fail-closed diagnostic: ports are connected but nothing
+            # enumerated. Issue one raw Enable Slot and report exactly what
+            # the command/event path did so the gate log localizes the fault.
+            val diag = xhci_send_command_with_slot(ctrl, TRB_TYPE_CMD_ENABLE_SLOT, 0, 0)
+            if val Ok(diag_cc) = diag:
+                lines.push(
+                    "[usb-xhci] diag_enable_slot=ok cc=" + diag_cc.completion_code.to_text() +
+                    " slot=" + diag_cc.slot_id.to_text()
+                )
+            else:
+                if val Err(diag_err) = diag:
+                    lines.push("[usb-xhci] diag_enable_slot=err detail=" + diag_err)
+            val sts = xhci_op_read32(ctrl, XHCI_OP_USBSTS)
+            lines.push("[usb-xhci] diag_usbsts=" + sts.to_text())
+            val ev_param = mmio_read64(ctrl.event_ring_base)
+            val ev_status = mmio_read32(ctrl.event_ring_base + 8)
+            val ev_control = mmio_read32(ctrl.event_ring_base + 12)
+            lines.push(
+                "[usb-xhci] diag_event0 param=" + ev_param.to_text() +
+                " status=" + ev_status.to_text() +
+                " control=" + ev_control.to_text() +
+                " dequeue=" + ctrl.event_ring_dequeue.to_text()
+            )
+
+        if devices.len() > 0:
+            lines.push("[usb-xhci] enable_slot=pass")
+            lines.push("[usb-xhci] address_device=pass")
+
+        for dev in devices:
+            lines.push(_usb_xhci_device_line(dev))
+            if dev.vid.to_u32() != 0 or dev.pid.to_u32() != 0:
+                lines.push(
+                    "[usb-xhci] device_descriptor_read=pass vid=" + dev.vid.to_text() +
+                    " pid=" + dev.pid.to_text()
+                )
+            else:
+                lines.push("[usb-xhci] device_descriptor_read=fail vid=0 pid=0")
+
+    if not found_ctrl:
+        lines.push("[usb-xhci] xhci_pci=absent")
+    lines

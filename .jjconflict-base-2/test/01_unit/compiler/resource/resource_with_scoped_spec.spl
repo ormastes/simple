@@ -1,0 +1,194 @@
+"""
+# `with EXPR as NAME:` scoped resource form -- WP-K acceptance
+
+**Plan:** doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md (WP-K)
+**Design:** doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md
+**Architecture:** doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md
+
+Per the resource-ownership feature expert skill's "acceptance oracle is
+probably unreachable" note: `bin/simple test` re-execs a child Rust seed
+whose parser reads a spec file's own module-level syntax, so real `with ...`
+source written directly in an `it` body can never reach the pure-Simple
+frontend edited here. This spec uses the SAME source-string harness
+`resource_decl_spec.spl` (WP-A) uses: feed a source string to
+`parse_module_body()` and assert on the resulting AST.
+
+## Soft-keyword collision, resolved POSITIONALLY
+
+`with` already has a pre-existing meaning at CLASS-HEADER position:
+`class X with Read, Write:` (mixin list, `fn_struct_decls.spl`'s
+`parse_struct_or_trait_decl`, checked right after the optional `(Parent)`
+clause, before the body colon). WP-K adds a SECOND meaning at
+STATEMENT-START position inside a function body (`parser_stmts.spl`'s
+`parse_statement`, mirroring the `unsafe:`/`danger:` contextual-block
+technique already in that function).
+
+These two forms are recognized by two entirely different parser functions,
+reached from two entirely different call sites (`parse_struct_or_trait_decl`
+is only ever entered while parsing a `class`/`struct`/`trait` declaration's
+header; `parse_statement` is only ever entered while parsing a statement
+inside a function/block body). No single token-stream position can ever be
+interpreted by both parsers, so there is no runtime ambiguity to resolve --
+this is the same positional-disambiguation technique WP-A used to make
+`resource` a soft keyword with no new reserved token. If statement-start
+`with` is NOT followed by `EXPR as NAME:`, the parser backtracks (lexer +
+token snapshot restore) and `with` falls through to ordinary
+identifier-expression parsing, so it stays usable as a plain identifier
+(e.g. a function literally named `with`) everywhere else.
+
+## The desugar
+
+`with ACQUIRE as NAME: BODY` desugars to one nested block:
+
+    val NAME = ACQUIRE
+    BODY
+    NAME.close()
+
+This reuses WP-E's existing MIR drop-edge machinery (`mir_lowering_stmts.spl`
+/ `function_lowering.spl` / `switch_operators_calls.spl`) with ZERO new
+per-exit-path code: WP-E already emits a `Drop` for any resource-owned local
+at every explicit `return` and at every `?` early-return arm, for the
+lifetime of the whole enclosing FUNCTION (not just the nested block) --  so
+an early exit from inside BODY is covered automatically once NAME is
+registered as a resource-owned local. The trailing `NAME.close()` this
+desugar appends covers the one exit WP-E's per-function machinery does not
+already give for free: BODY's own normal fall-through (`.close()` lowers to
+a consuming Drop and marks NAME consumed, so the function-end sweep does not
+double-drop it on that path). If ACQUIRE itself ends in `?` and that `?`
+short-circuits (e.g. `with R.open(...)? as x:`), the early-return happens
+INSIDE the `val NAME = ACQUIRE` initializer, strictly before NAME is ever
+bound -- so the block body never runs and there is nothing to close. See
+`resource_with_scoped_mir_drop_spec.spl` for the MIR-level proof of the
+drop-edge/close claims; this spec covers parsing + AST shape only.
+
+## A real, load-bearing gap this WP found and closed
+
+WP-E's `resource_owned_locals` registration (the side-table
+`emit_pending_resource_drops` walks) only fired at TWO sites: a resource-
+typed function PARAMETER, and a `val b = a` MOVE of an ALREADY resource-
+owned place. A FRESH acquire result (`val x = R.open(...)`, exactly what
+`with`'s desugar produces) took the plain `emit_copy` branch and was never
+registered -- meaning a `with`-bound resource would silently get no
+automatic drop on an early return/`?` inside its body, with only the
+desugar's own trailing `.close()` protecting it. `mir_lowering_stmts.spl`
+now also registers a FRESH resource-typed binding (same
+`mir_hir_type_is_resource` helper, no new logic), gated on whichever HIR
+type actually got remembered on the local (inferred, or the declared
+`let_type` when inference found nothing) so an explicitly annotated
+`val x: iso Res = fresh_call()` registers too.
+"""
+
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_body, decl_get_name, decl_get_tag}
+use compiler.core.ast.{DECL_STRUCT, DECL_FN}
+use compiler.core.ast.{stmt_get_tag, stmt_get_name, stmt_get_expr, STMT_VAL_DECL, STMT_EXPR}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_stmts}
+use compiler.core.ast.{EXPR_IDENT, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_TRY}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use std.spec
+
+fn parse_ok(source: text) -> [i64]:
+    ast_reset()
+    parser_init_with_path(source, "resource_with_scoped_spec.spl")
+    parse_module_body()
+    if parser_has_errors():
+        panic("with-statement parser produced errors for a source that must parse")
+    module_get_decls()
+
+fn parse_reports_error(source: text) -> bool:
+    ast_reset()
+    parser_init_with_path(source, "resource_with_scoped_spec.spl")
+    parse_module_body()
+    parser_has_errors()
+
+# Finds the first decl with the given tag+name (there are two decls in most
+# probes below: the class and the fn).
+fn find_decl(decls: [i64], tag: i64, name: text) -> i64:
+    for d in decls:
+        if decl_get_tag(d) == tag and decl_get_name(d) == name:
+            return d
+    -1
+
+# Unwraps the with-desugar: a fn body of exactly one statement, a
+# stmt_expr_stmt wrapping an expr_block, and returns that block's own
+# statement list [val_decl, ...body..., close_call].
+fn with_desugar_stmts(fn_decl: i64) -> [i64]:
+    val body = decl_get_body(fn_decl)
+    if body.len() != 1:
+        panic("expected exactly one top-level statement (the with-desugar block)")
+    val outer = body[0]
+    if stmt_get_tag(outer) != STMT_EXPR:
+        panic("with-desugar's outer statement must be an expr-statement")
+    val block_expr = stmt_get_expr(outer)
+    if expr_get_tag(block_expr) != EXPR_BLOCK:
+        panic("with-desugar must wrap an EXPR_BLOCK")
+    expr_get_stmts(block_expr)
+
+describe "with-statement: soft-keyword collision with class-header `with` mixin":
+    it "resolves positionally -- both forms parse correctly from the same source":
+        val src = "class Box with Read, Write:\n    n: i64\n\nfn take(r: i64):\n    with r as x:\n        print x\n"
+        val decls = parse_ok(src)
+        assert_false(parser_has_errors())
+
+        val class_decl = find_decl(decls, DECL_STRUCT, "Box")
+        assert_true(class_decl >= 0)
+        assert_equal(decl_get_name(class_decl), "Box")
+
+        val fn_decl = find_decl(decls, DECL_FN, "take")
+        assert_true(fn_decl >= 0)
+        val stmts = with_desugar_stmts(fn_decl)
+        assert_equal(stmts.len(), 3)
+
+    it "keeps `with` usable as a plain identifier (a function literally named `with`)":
+        # Statement-start `with` NOT followed by `EXPR as NAME:` must
+        # backtrack cleanly and re-parse as an ordinary call statement.
+        assert_false(parse_reports_error("fn with(n: i64) -> i64:\n    n\n\nfn call_it() -> i64:\n    with(1)\n"))
+
+describe "with-statement: desugared AST shape":
+    it "desugars to [val NAME = ACQUIRE, ...BODY, NAME.close()]":
+        val src = "fn take(r: i64):\n    with r as x:\n        print x\n"
+        val decls = parse_ok(src)
+        val fn_decl = find_decl(decls, DECL_FN, "take")
+        val stmts = with_desugar_stmts(fn_decl)
+        assert_equal(stmts.len(), 3)
+
+        # [0] val x = r
+        assert_equal(stmt_get_tag(stmts[0]), STMT_VAL_DECL)
+        assert_equal(stmt_get_name(stmts[0]), "x")
+        val acquire_expr = stmt_get_expr(stmts[0])
+        assert_equal(expr_get_tag(acquire_expr), EXPR_IDENT)
+        assert_equal(expr_get_str(acquire_expr), "r")
+
+        # [2] x.close() -- the normal-fall-through-exit close, present
+        # unconditionally regardless of what BODY contains (case b).
+        assert_equal(stmt_get_tag(stmts[2]), STMT_EXPR)
+        val close_expr = stmt_get_expr(stmts[2])
+        assert_equal(expr_get_tag(close_expr), EXPR_METHOD_CALL)
+        assert_equal(expr_get_str(close_expr), "close")
+        val close_recv = expr_get_left(close_expr)
+        assert_equal(expr_get_tag(close_recv), EXPR_IDENT)
+        assert_equal(expr_get_str(close_recv), "x")
+
+    it "threads a trailing `?` on ACQUIRE into the val-decl initializer":
+        # `with R.open(...)? as x:` -- the `?` is part of the ACQUIRE
+        # expression parsed by ordinary parse_expr(), not with-specific
+        # code. A failed acquire short-circuits INSIDE this initializer,
+        # strictly before `x` is ever bound (case e) -- see the MIR-level
+        # spec for the runtime proof.
+        val src = "fn take(r: i64):\n    with r.open()? as x:\n        print x\n"
+        val decls = parse_ok(src)
+        val fn_decl = find_decl(decls, DECL_FN, "take")
+        val stmts = with_desugar_stmts(fn_decl)
+        assert_equal(stmt_get_tag(stmts[0]), STMT_VAL_DECL)
+        val acquire_expr = stmt_get_expr(stmts[0])
+        assert_equal(expr_get_tag(acquire_expr), EXPR_TRY)
+
+    it "supports a multi-statement BODY between the acquire and the close":
+        val src = "fn take(r: i64):\n    with r as x:\n        print x\n        print x\n"
+        val decls = parse_ok(src)
+        val fn_decl = find_decl(decls, DECL_FN, "take")
+        val stmts = with_desugar_stmts(fn_decl)
+        # val-decl + 2 body statements + close = 4
+        assert_equal(stmts.len(), 4)
+        assert_equal(stmt_get_tag(stmts[3]), STMT_EXPR)
+        assert_equal(expr_get_str(stmt_get_expr(stmts[3])), "close")

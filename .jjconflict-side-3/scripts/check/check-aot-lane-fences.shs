@@ -1,0 +1,119 @@
+#!/bin/sh
+# check-aot-lane-fences.shs — run every AOT-lane regression fence, fail closed.
+#
+# WHY THIS EXISTS
+# ---------------
+# `bin/simple test` hard-defaults to the tree-walk interpreter and
+# TestExecutionMode has no AOT/native variant, so NO SPEC CAN EVER OBSERVE the
+# `native-build` lane. AOT defects therefore hide behind a fully green spec
+# corpus. The only working fence for that lane is a script that drives the real
+# native-build binary — which is what each script listed below does.
+#
+# But on 2026-08-08 an audit found that none of those nine scripts was
+# referenced by any workflow, hook, or aggregate gate. Nine fences that nothing
+# runs are ADVERTISED COVERAGE THAT DOES NOT EXIST — arguably worse than no
+# fence, because their presence in the tree reads as protection. This aggregator
+# is the missing caller.
+#
+# EXIT CODES (matching the repo's pre-push guard convention)
+#   0  PASS  — every fence ran and passed. The verdict line states how many.
+#   1  FAIL  — at least one fence reported a real regression.
+#   2  ERROR — nothing (or not everything) was actually measured. NOT a pass.
+#
+# An exit 2 is deliberately distinct from exit 1: "the gate could not run" and
+# "the gate ran and found a defect" demand different responses, and collapsing
+# them is how a vacuous run gets mistaken for a green one.
+#
+# Individual fences use exit 2 for the same meaning (missing llvm-as, absent
+# strace, an unparseable cache receipt, a native-build timeout). Those propagate
+# here as ERROR, never as PASS.
+#
+# Usage:
+#   sh scripts/check/check-aot-lane-fences.shs            # run all
+#   sh scripts/check/check-aot-lane-fences.shs --list     # print the roster
+#
+# Env:
+#   AOT_FENCE_ONLY="name1 name2"   run only these (basename, no .shs)
+set -u
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+# The roster. Adding an AOT fence WITHOUT adding it here leaves it unrun, which
+# is the exact failure this script was written to end.
+FENCES="
+check-native-tuple-to-text
+check-native-enum-match-payload
+check-native-extern-fabrication
+check-native-object-cache-granularity
+check-native-option-eq-representation
+check-native-option-bool-eq-vs-literal
+check-native-utf8-slice
+check-rt-io-file-native-jit-stub
+check-native-option-bool-llvm-verify
+check-u32-array-not-packed
+check-tuple-index-out-of-range
+"
+
+if [ "${1:-}" = "--list" ]; then
+    for f in $FENCES; do echo "$f"; done
+    exit 0
+fi
+
+only="${AOT_FENCE_ONLY:-}"
+ran=0
+failed=0
+errored=0
+fail_names=""
+error_names=""
+
+for f in $FENCES; do
+    if [ -n "$only" ]; then
+        case " $only " in
+            *" $f "*) ;;
+            *) continue ;;
+        esac
+    fi
+    script="scripts/check/$f.shs"
+    if [ ! -f "$script" ]; then
+        echo "ERROR — fence '$f' listed in roster but $script does not exist"
+        errored=$((errored + 1))
+        error_names="$error_names $f"
+        continue
+    fi
+    echo "=== running $f ==="
+    if sh "$script"; then
+        ran=$((ran + 1))
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            echo "--- $f: ERROR (exit 2) ---"
+            errored=$((errored + 1))
+            error_names="$error_names $f"
+        else
+            echo "--- $f: FAIL (exit $rc) ---"
+            failed=$((failed + 1))
+            fail_names="$fail_names $f"
+        fi
+    fi
+done
+
+total=$((ran + failed + errored))
+
+if [ "$total" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 fences ran; check AOT_FENCE_ONLY / roster)"
+    exit 2
+fi
+
+if [ "$errored" -gt 0 ]; then
+    echo "ERROR — $errored fence(s) could not run:$error_names"
+    exit 2
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $failed of $total fence(s) regressed:$fail_names"
+    exit 1
+fi
+
+echo "PASS — $ran fence(s) checked, all green"

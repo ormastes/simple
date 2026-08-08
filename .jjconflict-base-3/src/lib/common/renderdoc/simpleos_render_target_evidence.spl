@@ -1,0 +1,161 @@
+# codex-impl
+# Host-side validation of a guest receipt correlated with QMP or board capture.
+
+struct SimpleOsRenderTargetEvidence:
+    runtime_kind: text
+    architecture: text
+    board_id: text
+    board_model: text
+    board_revision: text
+    board_serial_hash: text
+    firmware_hash: text
+    boot_transport: text
+    display_controller: text
+    driver_id: text
+    scanout_id: i64
+    resource_id: i64
+    dma_mode: text
+    cache_mode: text
+    iommu_mode: text
+    width: i64
+    height: i64
+    stride: i64
+    format: text
+    surface_handle: i64
+    present_sequence: i64
+    frame_complete: bool
+    guest_readback_source: text
+    guest_pixel_hash: text
+    serial_log_path: text
+    serial_log_hash: text
+    capture_kind: text
+    capture_path: text
+    capture_hash: text
+    capture_pixel_hash: text
+    capture_tool: text
+    boot_id: text
+    frame_id: text
+    capture_boot_id: text
+    capture_frame_id: text
+    oracle_hash: text
+    oracle_mismatch_count: i64
+
+struct SimpleOsRenderTargetValidation:
+    valid: bool
+    code: text
+    path: text
+
+fn _simpleos_target_invalid(code: text, path: text) -> SimpleOsRenderTargetValidation:
+    SimpleOsRenderTargetValidation(valid: false, code: code, path: path)
+
+fn _simpleos_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+fn validate_simpleos_render_target_evidence(evidence: SimpleOsRenderTargetEvidence) -> SimpleOsRenderTargetValidation:
+    if evidence.runtime_kind != "qemu" and evidence.runtime_kind != "physical-board":
+        return _simpleos_target_invalid("invalid-runtime", "runtime_kind")
+    if evidence.architecture != "x86_64" and evidence.architecture != "aarch64" and evidence.architecture != "rv64":
+        return _simpleos_target_invalid("invalid-architecture", "architecture")
+    if evidence.board_model == "":
+        return _simpleos_target_invalid("missing-platform-identity", "board_model")
+    if evidence.board_revision == "":
+        return _simpleos_target_invalid("missing-platform-identity", "board_revision")
+    if not _simpleos_sha256(evidence.firmware_hash):
+        return _simpleos_target_invalid("invalid-firmware-hash", "firmware_hash")
+    if evidence.boot_transport == "":
+        return _simpleos_target_invalid("missing-boot-transport", "boot_transport")
+    if evidence.display_controller == "":
+        return _simpleos_target_invalid("missing-display-path-identity", "display_controller")
+    if evidence.scanout_id <= 0:
+        return _simpleos_target_invalid("missing-display-path-identity", "scanout_id")
+    if evidence.resource_id <= 0:
+        return _simpleos_target_invalid("missing-display-path-identity", "resource_id")
+    if evidence.dma_mode == "":
+        return _simpleos_target_invalid("missing-memory-path-identity", "dma_mode")
+    if evidence.cache_mode == "":
+        return _simpleos_target_invalid("missing-memory-path-identity", "cache_mode")
+    if evidence.iommu_mode == "":
+        return _simpleos_target_invalid("missing-memory-path-identity", "iommu_mode")
+    if evidence.boot_id == "":
+        return _simpleos_target_invalid("missing-correlation", "boot_id")
+    if evidence.frame_id == "":
+        return _simpleos_target_invalid("missing-correlation", "frame_id")
+    if evidence.capture_boot_id == "":
+        return _simpleos_target_invalid("missing-capture-correlation", "capture_boot_id")
+    if evidence.capture_frame_id == "":
+        return _simpleos_target_invalid("missing-capture-correlation", "capture_frame_id")
+    if evidence.boot_id != evidence.capture_boot_id:
+        return _simpleos_target_invalid("frame-correlation-mismatch", "capture_boot_id")
+    if evidence.frame_id != evidence.capture_frame_id:
+        return _simpleos_target_invalid("frame-correlation-mismatch", "capture_frame_id")
+    if evidence.format != "argb-u32":
+        return _simpleos_target_invalid("unsupported-pixel-format", "format")
+    if evidence.width <= 0:
+        return _simpleos_target_invalid("invalid-dimensions", "width")
+    if evidence.height <= 0:
+        return _simpleos_target_invalid("invalid-dimensions", "height")
+    if evidence.stride <= 0:
+        return _simpleos_target_invalid("invalid-dimensions", "stride")
+    val max_i64: i64 = 9223372036854775807
+    if evidence.width > max_i64 / 4:
+        return _simpleos_target_invalid("invalid-dimensions", "width")
+    if evidence.stride < evidence.width * 4:
+        return _simpleos_target_invalid("invalid-dimensions", "stride")
+    if evidence.height > max_i64 / evidence.stride:
+        return _simpleos_target_invalid("frame-byte-size-overflow", "height")
+    if evidence.surface_handle <= 0:
+        return _simpleos_target_invalid("incomplete-frame", "surface_handle")
+    if evidence.present_sequence <= 0:
+        return _simpleos_target_invalid("incomplete-frame", "present_sequence")
+    if not evidence.frame_complete:
+        return _simpleos_target_invalid("incomplete-frame", "frame_complete")
+    if evidence.serial_log_path == "":
+        return _simpleos_target_invalid("missing-serial-evidence", "serial_log_path")
+    if not _simpleos_sha256(evidence.serial_log_hash):
+        return _simpleos_target_invalid("missing-serial-evidence", "serial_log_hash")
+    if evidence.capture_kind == "":
+        return _simpleos_target_invalid("missing-capture-evidence", "capture_kind")
+    if evidence.capture_path == "":
+        return _simpleos_target_invalid("missing-capture-evidence", "capture_path")
+    if not _simpleos_sha256(evidence.capture_hash):
+        return _simpleos_target_invalid("missing-capture-evidence", "capture_hash")
+    if evidence.capture_tool == "":
+        return _simpleos_target_invalid("missing-capture-tool", "capture_tool")
+    if not _simpleos_sha256(evidence.capture_pixel_hash):
+        return _simpleos_target_invalid("missing-capture-pixel-evidence", "capture_pixel_hash")
+    if evidence.guest_readback_source != "device_readback":
+        return _simpleos_target_invalid("not-guest-device-readback", "guest_readback_source")
+    if evidence.driver_id == "":
+        return _simpleos_target_invalid("missing-driver-identity", "driver_id")
+    if not _simpleos_sha256(evidence.guest_pixel_hash):
+        return _simpleos_target_invalid("missing-guest-pixel-evidence", "guest_pixel_hash")
+    if not _simpleos_sha256(evidence.oracle_hash):
+        return _simpleos_target_invalid("oracle-mismatch", "oracle_hash")
+    if evidence.oracle_mismatch_count != 0:
+        return _simpleos_target_invalid("oracle-mismatch", "oracle_mismatch_count")
+    if evidence.oracle_hash != evidence.capture_pixel_hash:
+        return _simpleos_target_invalid("oracle-mismatch", "oracle_hash")
+    if evidence.guest_pixel_hash != evidence.capture_pixel_hash:
+        return _simpleos_target_invalid("guest-capture-mismatch", "guest_pixel_hash")
+    if evidence.runtime_kind == "physical-board":
+        if evidence.board_id == "":
+            return _simpleos_target_invalid("missing-board-identity", "board_id")
+        if not _simpleos_sha256(evidence.board_serial_hash):
+            return _simpleos_target_invalid("missing-board-identity", "board_serial_hash")
+    SimpleOsRenderTargetValidation(valid: true, code: "pass", path: "")
+
+fn simpleos_render_target_status(evidence: SimpleOsRenderTargetEvidence) -> text:
+    val validation = validate_simpleos_render_target_evidence(evidence)
+    if not validation.valid:
+        return "fail"
+    if evidence.runtime_kind == "physical-board":
+        return "board-verified"
+    "qemu-verified"

@@ -1,0 +1,84 @@
+# Tests for app.build.opt_remarks
+# Covers parse_opt_remarks, opt_remark_config_disabled, and emit_cipher_remark.
+
+use app.build.opt_remarks.{
+    OptRemarkConfig,
+    opt_remark_config_disabled,
+    parse_opt_remarks,
+    emit_cipher_remark,
+    emit_cipher_remark_if
+}
+
+describe "app.build.opt_remarks":
+
+    describe "opt_remark_config_disabled":
+
+        it "returns all-false config":
+            val cfg = opt_remark_config_disabled()
+            expect(cfg.cipher_enabled).to_equal(false)
+            expect(cfg.simd_enabled).to_equal(false)
+
+    describe "parse_opt_remarks":
+
+        it "parses 'cipher' => cipher enabled":
+            val cfg = parse_opt_remarks("cipher")
+            expect(cfg.cipher_enabled).to_equal(true)
+            expect(cfg.simd_enabled).to_equal(false)
+
+        it "parses 'simd' => simd enabled":
+            val cfg = parse_opt_remarks("simd")
+            expect(cfg.cipher_enabled).to_equal(false)
+            expect(cfg.simd_enabled).to_equal(true)
+
+        it "parses 'cipher,simd' => both enabled":
+            val cfg = parse_opt_remarks("cipher,simd")
+            expect(cfg.cipher_enabled).to_equal(true)
+            expect(cfg.simd_enabled).to_equal(true)
+
+        it "parses empty string => all disabled":
+            val cfg = parse_opt_remarks("")
+            expect(cfg.cipher_enabled).to_equal(false)
+            expect(cfg.simd_enabled).to_equal(false)
+
+        it "is whitespace tolerant around categories":
+            val cfg = parse_opt_remarks(" cipher , simd ")
+            expect(cfg.cipher_enabled).to_equal(true)
+            expect(cfg.simd_enabled).to_equal(true)
+
+        it "ignores unrecognised categories":
+            val cfg = parse_opt_remarks("cipher,future-category")
+            expect(cfg.cipher_enabled).to_equal(true)
+            expect(cfg.simd_enabled).to_equal(false)
+
+        it "parses whitespace-only string as all disabled":
+            val cfg = parse_opt_remarks("   ")
+            expect(cfg.cipher_enabled).to_equal(false)
+            expect(cfg.simd_enabled).to_equal(false)
+
+    describe "emit_cipher_remark":
+
+        it "completes without error for typical inputs":
+            # We call emit_cipher_remark and verify it runs without panic.
+            # Output goes to stdout; test just checks the call doesn't crash.
+            emit_cipher_remark("aes_enc_rule", "soft_aes_enc", "llvm.x86.aesni.aesenc", "x86_64")
+            expect(true).to_equal(true)
+
+        it "completes for AArch64 remark":
+            emit_cipher_remark("aes_arm_rule", "soft_aes_enc_arm", "llvm.aarch64.crypto.aese", "aarch64")
+            expect(true).to_equal(true)
+
+        it "completes for RV64 remark":
+            emit_cipher_remark("zvkned_rule", "soft_aes_enc_rv", "llvm.riscv.vaesem.vv", "rv64")
+            expect(true).to_equal(true)
+
+    describe "emit_cipher_remark_if":
+
+        it "does not panic when cipher_enabled is false":
+            val cfg = opt_remark_config_disabled()
+            emit_cipher_remark_if(cfg, "some_rule", "callee", "intrinsic", "x86_64")
+            expect(true).to_equal(true)
+
+        it "does not panic when cipher_enabled is true":
+            val cfg = OptRemarkConfig(cipher_enabled: true, simd_enabled: false)
+            emit_cipher_remark_if(cfg, "aes_enc_rule", "soft_aes", "llvm.x86.aesni.aesenc", "x86_64")
+            expect(true).to_equal(true)

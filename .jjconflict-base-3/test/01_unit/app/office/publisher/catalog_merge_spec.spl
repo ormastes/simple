@@ -1,0 +1,87 @@
+# Publisher catalog-merge spec.
+#
+# Verifies merge_tile's `{FieldName}` substitution and catalog_merge's
+# grid-tiling placement (hand-computed ground truth below).
+#
+# Template: tile_w=200, tile_h=100, field_lines = ["{Name}", "${Price}"]
+# field_names = ["Name", "Price"]
+# records:
+#   0: ["Apple",  "2"]
+#   1: ["Banana", "1"]
+#   2: ["Cherry", "5"]
+# Page: 400 x 200, cols = 2
+#
+# Grid placement (row = i/cols, col = i%cols; x = col*tile_w, y = row*tile_h):
+#   i=0 "tile0": row=0/2=0, col=0/2=0 -> x=0*200=0,   y=0*100=0
+#   i=1 "tile1": row=1/2=0, col=1/2=1 -> x=1*200=200, y=0*100=0
+#   i=2 "tile2": row=2/2=1, col=2/2=0 -> x=0*200=0,   y=1*100=100
+#
+# merge_tile(record 0): line0 "{Name}" -> "Apple"; line1 "${Price}" ->
+#   "{Price}" substituted to "2" leaving literal "$" prefix -> "$2".
+#   Joined with "\n" -> "Apple\n$2".
+
+use std.spec
+use app.office.publisher.catalog_merge.{CatalogTemplate, catalog_template_new, merge_tile, catalog_merge, catalog_tile_count, catalog_render_html}
+use app.office.publisher.page_layout.{frame_text}
+
+# Placeholder braces must never appear as a literal "{Name}" in Simple string
+# source (it would be parsed as interpolation, looking up a variable named
+# `Name`) — build them by concatenation.
+fn _ph(field: text) -> text:
+    "{" + field + "}"
+
+fn _template() -> CatalogTemplate:
+    val name_line = _ph("Name")
+    val price_line = "$" + _ph("Price")
+    catalog_template_new(200, 100, [name_line, price_line])
+
+val FIELD_NAMES: [text] = ["Name", "Price"]
+val RECORDS: [[text]] = [["Apple", "2"], ["Banana", "1"], ["Cherry", "5"]]
+
+describe "catalog merge: tile substitution":
+    it "fills a tile's placeholders from the parallel field values":
+        val filled = merge_tile(_template(), FIELD_NAMES, ["Apple", "2"])
+        expect(filled).to_equal("Apple\n$2")
+
+    it "fills a different record's values into the same template":
+        val filled = merge_tile(_template(), FIELD_NAMES, ["Banana", "1"])
+        expect(filled).to_equal("Banana\n$1")
+
+describe "catalog merge: tile count":
+    it "produces exactly one frame per data record":
+        val page = catalog_merge(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(catalog_tile_count(page)).to_equal(3)
+
+describe "catalog merge: grid placement":
+    it "places record 0 in the top-left tile":
+        val page = catalog_merge(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(frame_text(page, "tile0")).to_contain("Apple")
+
+    it "places record 1 in column 1 of row 0 (x=200, y=0)":
+        val html = catalog_render_html(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(html).to_contain("Banana")
+        expect(html).to_contain("left:200px;top:0px")
+
+    it "places record 2 in column 0 of row 1 (x=0, y=100)":
+        val page = catalog_merge(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(frame_text(page, "tile2")).to_contain("Cherry")
+
+    it "renders record 2's tile at the row-1 offset in html":
+        val html = catalog_render_html(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(html).to_contain("left:0px;top:100px")
+
+describe "catalog merge: html rendering":
+    it "includes every record's fields in the rendered catalog page":
+        val html = catalog_render_html(_template(), 400, 200, 2, FIELD_NAMES, RECORDS)
+        expect(html).to_contain("Apple")
+        expect(html).to_contain("Banana")
+        expect(html).to_contain("Cherry")
+
+    describe "deliberate-fail probe (must stay green)":
+        it "sanity-checks the hand-computed substitution ground truth":
+            val filled = merge_tile(_template(), FIELD_NAMES, ["Apple", "2"])
+            # Probe verified live: asserting filled equals "Apple\n$1"
+            # (record 1's price instead of record 0's) failed with a
+            # mismatch, confirming the harness executes this assertion.
+            # Correct ground truth: record 0's own price is "$2".
+            expect(filled).to_equal("Apple\n$2")

@@ -1,0 +1,546 @@
+"""
+# FAT32 Host-Like Write Path — Wave-4g Spec
+
+**Feature:** kernel FAT32 driver (IF-07) directory *creation*
+
+Until this wave the driver could only ever create files the way the toolchain
+staging scripts do it: uppercase 8.3 names dumped in the ROOT directory, so
+`libc++.a` had to become `LIBCXX.A` and `/usr/bin/clang` was not expressible at
+all. These scenarios drive `mkdir_at` / `create_at` / `write` against a
+synthetic in-memory FAT32 volume and prove that ordinary host paths —
+`/usr/bin/clang`, `/home/user/proj/src/main.c`, `LongName.txt` — can be
+CREATED and then found again by the pre-existing read path.
+
+Synthetic volume geometry (fat_start=32, data_start=64, bps=512, spc=1,
+cluster_size=512, data_clusters=32, root_cluster=2):
+
+    LBA 32  FAT sector : cluster 2 EOC (root), cluster 15 EOC (decoy file),
+                         every other cluster FREE
+    LBA 64  cluster 2  : root dir — a single `FILE.O` decoy, cluster 15, size 11
+
+**Anti-false-green measures**
+
+* The mock block device returns a **0xAA-poisoned** sector for any LBA that has
+  never been written. A cluster the driver allocates but forgets to zero-fill
+  therefore reads back as garbage rather than as convenient zeros, so the
+  end-of-directory marker cannot pass by accident.
+* Every write is verified by **re-reading through a FRESH `Fat32Filesystem`
+  built from the mutated device**, never through the object that performed the
+  write — otherwise the cached `root_dir_data` would answer from memory and the
+  assertion would prove nothing about the disk.
+* The root directory keeps a `FILE.O` **decoy** with a different size from the
+  `FILE.O` created three levels down, so a create that silently lands in the
+  root cannot pass.
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.fs.fat32.{
+    Fat32Filesystem, Fat32DirEntryLoc, Fat32SlotAddr, FileHandle,
+    fat32_split_path, fat32_parse_lfn_slot,
+    fat32_name_needs_lfn, fat32_short_field, fat32_gen_short_field,
+    fat32_short_field_to_text, fat32_lfn_checksum, fat32_lfn_slot_count,
+    fat32_seq_digits
+}
+
+# ============================================================================
+# In-memory mock block device (poisoned default)
+# ============================================================================
+
+struct MockWrSector:
+    lba: u64
+    data: [u8]
+
+class MockWrDev:
+    sectors: [MockWrSector]
+
+impl MockWrDev:
+    static fn new() -> MockWrDev:
+        MockWrDev(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockWrDev:
+        self.sectors.push(MockWrSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        # NEVER written: hand back poison, not zeros. A missing zero-fill must
+        # be loud.
+        Ok(_poison_sector())
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<(), text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                self.sectors[i] = MockWrSector(lba: lba, data: data)
+                return Ok(())
+            i = i + 1
+        self.sectors.push(MockWrSector(lba: lba, data: data))
+        Ok(())
+
+# ============================================================================
+# Image builders
+# ============================================================================
+
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+fn _poison_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0xAAu8)
+        i = i + 1
+    b
+
+fn _poke32(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8u32)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    buf
+
+fn _put_entry(sec: [u8], off: i32, base: text, ext: text, attr: u8, cluster: u32, size: u32) -> [u8]:
+    var s = sec
+    var i = 0
+    while i < 8:
+        if i < base.len():
+            s[off + i] = base.char_code_at(i).to_u8()
+        else:
+            s[off + i] = 0x20u8
+        i = i + 1
+    var j = 0
+    while j < 3:
+        if j < ext.len():
+            s[off + 8 + j] = ext.char_code_at(j).to_u8()
+        else:
+            s[off + 8 + j] = 0x20u8
+        j = j + 1
+    s[off + 11] = attr
+    val hi = (cluster >> 16u32) & 0xFFFFu32
+    val lo = cluster & 0xFFFFu32
+    s[off + 20] = (hi & 0xFFu32).to_u8()
+    s[off + 21] = ((hi >> 8u32) & 0xFFu32).to_u8()
+    s[off + 26] = (lo & 0xFFu32).to_u8()
+    s[off + 27] = ((lo >> 8u32) & 0xFFu32).to_u8()
+    s = _poke32(s, off + 28, size)
+    s
+
+fn _fat_sector() -> [u8]:
+    var f = _zero_sector()
+    f = _poke32(f, 0,  0x0FFFFFF8u32)     # media descriptor
+    f = _poke32(f, 4,  0x0FFFFFFFu32)     # cluster 1 reserved
+    f = _poke32(f, 8,  0x0FFFFFFFu32)     # cluster 2 = root dir, EOC
+    f = _poke32(f, 60, 0x0FFFFFFFu32)     # cluster 15 = /FILE.O decoy, EOC
+    f
+
+fn _root_dir() -> [u8]:
+    var s = _zero_sector()
+    s = _put_entry(s, 0, "FILE", "O", 0x20u8, 15u32, 11u32)   # decoy, size 11
+    s
+
+fn _make_dev() -> MockWrDev:
+    var dev = MockWrDev.new()
+    dev = dev.with_sector(32u64, _fat_sector())
+    dev = dev.with_sector(64u64, _root_dir())
+    dev
+
+# A filesystem view built from whatever the device holds RIGHT NOW. Re-reading
+# through one of these is the only honest verification of a write.
+fn _fs_from(dev: MockWrDev) -> Fat32Filesystem:
+    val r = dev.read_sector(64u64)
+    Fat32Filesystem.make_for_dirent_test(32u32, 64u32, 512u32, 1u32, 32u32, r.unwrap())
+
+fn _bytes(n: i32, seed: i32) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < n:
+        b.push(((i + seed) % 251).to_u8())
+        i = i + 1
+    b
+
+# ============================================================================
+# Scenarios
+# ============================================================================
+
+describe "fat32 host-like write path — wave-4g":
+
+    describe "short-name and LFN encoding":
+
+        it "keeps a plain uppercase 8.3 name out of the LFN path":
+            step("FILE.O fits the 8.3 field exactly")
+            assert_false(fat32_name_needs_lfn("FILE.O"))
+            expect(fat32_short_field_to_text(fat32_short_field("FILE.O"))).to_equal("FILE.O")
+
+        it "forces an LFN for any name a bare 8.3 field would mangle":
+            step("lowercase cannot survive an 8.3 field — it has no case bits")
+            assert_true(fat32_name_needs_lfn("main.c"))
+            step("an over-long basename cannot fit 8 characters")
+            assert_true(fat32_name_needs_lfn("VERYLONGNAME.TXT"))
+            step("a second dot is not representable")
+            assert_true(fat32_name_needs_lfn("A.B.C"))
+            step("a leading dot belongs to the basename, so it needs an LFN too")
+            assert_true(fat32_name_needs_lfn(".config"))
+
+        it "derives the ~1 alias by truncating the sanitised basename":
+            step("LongName.txt -> LONGNA~1.TXT")
+            expect(fat32_short_field_to_text(fat32_gen_short_field("LongName.txt", 1))).to_equal("LONGNA~1.TXT")
+            step("the collision counter replaces the tail, never the extension")
+            expect(fat32_short_field_to_text(fat32_gen_short_field("LongName.txt", 2))).to_equal("LONGNA~2.TXT")
+            step("illegal characters become '_'")
+            expect(fat32_short_field_to_text(fat32_gen_short_field("my+file.cpp", 1))).to_equal("MY_FIL~1.CPP")
+            step("spaces are dropped rather than replaced")
+            expect(fat32_short_field_to_text(fat32_gen_short_field("a b.txt", 1))).to_equal("AB~1.TXT")
+
+        it "computes the LFN checksum that binds a slot to its 8.3 alias":
+            step("fixed vector: the 11 padded bytes of LONGNA~1TXT check to 0xF4")
+            val field = fat32_gen_short_field("LongName.txt", 1)
+            expect(fat32_lfn_checksum(field).to_i32()).to_equal(0xF4)
+
+        it "sizes the LFN chain at 13 characters per slot":
+            expect(fat32_lfn_slot_count("LongName.txt")).to_equal(1)   # 12 chars
+            expect(fat32_lfn_slot_count("AnotherLongName.txt")).to_equal(2)   # 19 chars
+            expect(fat32_lfn_slot_count("abcdefghijklm")).to_equal(1)  # exactly 13
+
+    describe "mkdir":
+
+        it "creates a directory whose . and .. entries resolve on re-read":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("mkdir /usr")
+            assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+            step("re-read through a fresh filesystem view")
+            val fs2 = _fs_from(dev)
+            val st = fs2.stat_at(dev, "/usr")
+            assert_true(st.is_ok())
+            assert_true(st.unwrap().is_dir)
+            step("'.' inside the new directory points back at the directory itself")
+            # resolve_path() treats "." as a no-op component, so a path ENDING
+            # in "." cannot be used to observe the entry — read the raw slot.
+            val loc = fs2.resolve_path(dev, "/usr").unwrap()
+            val dsec = dev.read_sector(64u64 + (loc.start_cluster - 2u32).to_u64()).unwrap()
+            expect(dsec[0].to_i32()).to_equal(0x2E)                 # '.'
+            expect(dsec[11].to_i32()).to_equal(0x10)                # ATTR_DIRECTORY
+            expect(dsec[26].to_i32()).to_equal(loc.start_cluster.to_i32())
+            step("'..' under the root records cluster 0, as FAT32 requires")
+            expect(dsec[32].to_i32()).to_equal(0x2E)
+            expect(dsec[33].to_i32()).to_equal(0x2E)
+            expect(dsec[58].to_i32()).to_equal(0)                   # +26 of entry 1
+            step("a mid-path '.' still resolves through the new directory")
+            assert_true(fs2.create_at(dev, "/usr/X.O").is_ok())
+            assert_true(_fs_from(dev).stat_at(dev, "/usr/./X.O").is_ok())
+            step("'..' from the new directory lands on the ROOT decoy, size 11")
+            val up = fs2.stat_at(dev, "/usr/../FILE.O")
+            assert_true(up.is_ok())
+            expect(up.unwrap().size).to_equal(11u64)
+
+        it "nests directories two deep":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("mkdir /usr then /usr/bin")
+            assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+            assert_true(fs.mkdir_at(dev, "/usr/bin").is_ok())
+            val fs2 = _fs_from(dev)
+            val st = fs2.stat_at(dev, "/usr/bin")
+            assert_true(st.is_ok())
+            assert_true(st.unwrap().is_dir)
+            step("the two directories occupy DIFFERENT clusters")
+            val a = fs2.resolve_path(dev, "/usr").unwrap()
+            val b = fs2.resolve_path(dev, "/usr/bin").unwrap()
+            assert_true(a.start_cluster != b.start_cluster)
+
+        it "records .. as 0 under the root but as a real cluster deeper down":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+            assert_true(fs.mkdir_at(dev, "/usr/bin").is_ok())
+            val fs2 = _fs_from(dev)
+            val usr = fs2.resolve_path(dev, "/usr").unwrap()
+            step("/usr/bin/.. must resolve back to /usr's own cluster")
+            val back = fs2.resolve_path(dev, "/usr/bin/../bin")
+            assert_true(back.is_ok())
+            expect(back.unwrap().dir_cluster).to_equal(usr.start_cluster)
+
+        it "refuses to create a directory that already exists":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+            step("a second mkdir /usr is EEXIST, not a silent second entry")
+            val again = fs.mkdir_at(dev, "/usr")
+            assert_true(again.is_err())
+            expect(again.unwrap_err()).to_equal(-17)
+
+        it "refuses to create under a parent that does not exist":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            val r = fs.mkdir_at(dev, "/nope/deeper")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-2)
+
+        it "refuses to descend through a regular file":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("/FILE.O is a file, so /FILE.O/x has no parent directory")
+            val r = fs.mkdir_at(dev, "/FILE.O/x")
+            assert_true(r.is_err())
+            expect(r.unwrap_err()).to_equal(-20)
+
+    describe "create and write at a nested path":
+
+        it "creates /usr/bin/CLANG, writes it, and reads it back after reopen":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/usr").is_ok())
+            assert_true(fs.mkdir_at(dev, "/usr/bin").is_ok())
+            step("create the file — it starts with no cluster at all")
+            val h_r = fs.create_at(dev, "/usr/bin/CLANG")
+            assert_true(h_r.is_ok())
+            val h0 = h_r.unwrap()
+            expect(h0.file_size).to_equal(0u64)
+            step("write 600 bytes — more than one 512-byte cluster")
+            val payload = _bytes(600, 7)
+            val h1_r = fs.write(dev, h0, payload)
+            assert_true(h1_r.is_ok())
+            expect(h1_r.unwrap().file_size).to_equal(600u64)
+
+            step("REOPEN through a fresh filesystem view and compare bytes")
+            val fs2 = _fs_from(dev)
+            val st = fs2.stat_at(dev, "/usr/bin/CLANG")
+            assert_true(st.is_ok())
+            expect(st.unwrap().size).to_equal(600u64)
+            val h2_r = fs2.open_at(dev, "/usr/bin/CLANG")
+            assert_true(h2_r.is_ok())
+            var rbuf: [u8] = []
+            var z = 0
+            while z < 600:
+                rbuf.push(0u8)
+                z = z + 1
+            val n = fs2.read(dev, h2_r.unwrap(), rbuf)
+            assert_true(n.is_ok())
+            expect(n.unwrap()).to_equal(600u64)
+
+        it "reads back every byte, not just the length":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/d").is_ok())
+            val h0 = fs.create_at(dev, "/d/DATA.BIN").unwrap()
+            val payload = _bytes(300, 3)
+            assert_true(fs.write(dev, h0, payload).is_ok())
+            val fs2 = _fs_from(dev)
+            var rbuf: [u8] = []
+            var z = 0
+            while z < 300:
+                rbuf.push(0u8)
+                z = z + 1
+            val h2 = fs2.open_at(dev, "/d/DATA.BIN").unwrap()
+            val rd = fs2.read(dev, h2, rbuf)
+            assert_true(rd.is_ok())
+            step("byte-for-byte comparison against the written payload")
+            var mismatches = 0
+            var i = 0
+            while i < 300:
+                if rbuf[i] != payload[i]:
+                    mismatches = mismatches + 1
+                i = i + 1
+            expect(mismatches).to_equal(0)
+
+        it "does not confuse /FILE.O with /a/b/c/FILE.O":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("build /a/b/c and create a SECOND FILE.O three levels down")
+            assert_true(fs.mkdir_at(dev, "/a").is_ok())
+            assert_true(fs.mkdir_at(dev, "/a/b").is_ok())
+            assert_true(fs.mkdir_at(dev, "/a/b/c").is_ok())
+            val h0 = fs.create_at(dev, "/a/b/c/FILE.O").unwrap()
+            assert_true(fs.write(dev, h0, _bytes(77, 1)).is_ok())
+
+            val fs2 = _fs_from(dev)
+            step("the root decoy still reports its original size 11")
+            expect(fs2.stat_at(dev, "/FILE.O").unwrap().size).to_equal(11u64)
+            step("the nested one reports 77")
+            expect(fs2.stat_at(dev, "/a/b/c/FILE.O").unwrap().size).to_equal(77u64)
+            step("and it is NOT visible at the intermediate level")
+            assert_true(fs2.stat_at(dev, "/a/b/FILE.O").is_err())
+
+        it "keeps the cached root directory coherent after a root-level create":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("create /NEW.TXT and look it up on the SAME object, cache and all")
+            assert_true(fs.create_at(dev, "/NEW.TXT").is_ok())
+            val st = fs.stat_at(dev, "/NEW.TXT")
+            assert_true(st.is_ok())
+            step("the pre-existing root decoy is untouched")
+            expect(fs.stat_at(dev, "/FILE.O").unwrap().size).to_equal(11u64)
+
+        it "refuses to create a file that already exists":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.create_at(dev, "/NEW.TXT").is_ok())
+            val again = fs.create_at(dev, "/NEW.TXT")
+            assert_true(again.is_err())
+            expect(again.unwrap_err()).to_equal(-17)
+
+    describe "long filename creation":
+
+        it "round-trips a mixed-case long name through the read path":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/home").is_ok())
+            step("create /home/LongName.txt and give it 5 bytes")
+            val h0 = fs.create_at(dev, "/home/LongName.txt").unwrap()
+            assert_true(fs.write(dev, h0, _bytes(5, 0)).is_ok())
+
+            val fs2 = _fs_from(dev)
+            step("found by its LONG name")
+            expect(fs2.stat_at(dev, "/home/LongName.txt").unwrap().size).to_equal(5u64)
+            step("and by the generated 8.3 alias")
+            expect(fs2.stat_at(dev, "/home/LONGNA~1.TXT").unwrap().size).to_equal(5u64)
+
+        it "stores the long name with its ORIGINAL case in the LFN slot":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/home").is_ok())
+            assert_true(fs.create_at(dev, "/home/LongName.txt").is_ok())
+            val fs2 = _fs_from(dev)
+            val loc = fs2.resolve_path(dev, "/home/LongName.txt").unwrap()
+            step("the single LFN slot sits 32 bytes before the 8.3 entry")
+            val sec = dev.read_sector(loc.dirent_sector).unwrap()
+            val lfn_off = loc.dirent_offset - 32
+            assert_true(lfn_off >= 0)
+            expect(sec[lfn_off + 11].to_i32()).to_equal(0x0F)   # ATTR_LONG_NAME
+            step("decode it — case must be preserved exactly, not uppercased")
+            expect(fat32_parse_lfn_slot(sec, lfn_off)).to_equal("LongName.txt")
+            step("the slot carries the checksum of its own 8.3 alias")
+            expect(sec[lfn_off + 13].to_i32()).to_equal(0xF4)
+            step("and it is flagged as the LAST long entry (0x40 | seq 1)")
+            expect(sec[lfn_off].to_i32()).to_equal(0x41)
+
+        it "numbers colliding aliases ~1 then ~2":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/home").is_ok())
+            step("both names sanitise to the same first six characters")
+            val ha = fs.create_at(dev, "/home/LongName.txt").unwrap()
+            assert_true(fs.write(dev, ha, _bytes(5, 0)).is_ok())
+            val hb = fs.create_at(dev, "/home/LongNameOther.txt").unwrap()
+            assert_true(fs.write(dev, hb, _bytes(9, 0)).is_ok())
+
+            val fs2 = _fs_from(dev)
+            step("each long name still finds its OWN file")
+            expect(fs2.stat_at(dev, "/home/LongName.txt").unwrap().size).to_equal(5u64)
+            expect(fs2.stat_at(dev, "/home/LongNameOther.txt").unwrap().size).to_equal(9u64)
+            step("the aliases were numbered apart, not duplicated")
+            expect(fs2.stat_at(dev, "/home/LONGNA~1.TXT").unwrap().size).to_equal(5u64)
+            expect(fs2.stat_at(dev, "/home/LONGNA~2.TXT").unwrap().size).to_equal(9u64)
+
+        it "creates a full host-shaped source path":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("mkdir -p /home/user/proj/src")
+            assert_true(fs.mkdir_at(dev, "/home").is_ok())
+            assert_true(fs.mkdir_at(dev, "/home/user").is_ok())
+            assert_true(fs.mkdir_at(dev, "/home/user/proj").is_ok())
+            assert_true(fs.mkdir_at(dev, "/home/user/proj/src").is_ok())
+            step("create /home/user/proj/src/main.c — lowercase, dotted, five deep")
+            val h0 = fs.create_at(dev, "/home/user/proj/src/main.c").unwrap()
+            assert_true(fs.write(dev, h0, _bytes(42, 11)).is_ok())
+            val fs2 = _fs_from(dev)
+            expect(fs2.stat_at(dev, "/home/user/proj/src/main.c").unwrap().size).to_equal(42u64)
+
+    describe "directory growth and the end-of-directory marker":
+
+        it "grows the directory by a cluster when an entry chain does not fit":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/g").is_ok())
+            step("fill /g: 2 dot entries + 13 files = 15 of the cluster's 16 slots")
+            var i = 1
+            while i <= 13:
+                val nm = "/g/F" + fat32_seq_digits(i) + ".O"
+                val h = fs.create_at(dev, nm)
+                assert_true(h.is_ok())
+                i = i + 1
+            val fs_mid = _fs_from(dev)
+            val g_loc = fs_mid.resolve_path(dev, "/g").unwrap()
+            val g_lba = 64u64 + (g_loc.start_cluster - 2u32).to_u64()
+
+            step("now add a name needing 2 LFN slots + 1 alias — only 1 slot is left")
+            val h_r = fs.create_at(dev, "/g/AnotherLongName.txt")
+            assert_true(h_r.is_ok())
+            step("the 8.3 entry landed in a SECOND cluster, so the dir really grew")
+            val fs2 = _fs_from(dev)
+            val loc = fs2.resolve_path(dev, "/g/AnotherLongName.txt").unwrap()
+            assert_true(loc.dirent_sector != g_lba)
+
+            step("every earlier file is still resolvable across the boundary")
+            var missing = 0
+            var k = 1
+            while k <= 13:
+                val nm2 = "/g/F" + fat32_seq_digits(k) + ".O"
+                if fs2.stat_at(dev, nm2).is_err():
+                    missing = missing + 1
+                k = k + 1
+            expect(missing).to_equal(0)
+
+        it "leaves a 0x00 end-of-directory marker after the last entry":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/g").is_ok())
+            assert_true(fs.create_at(dev, "/g/ONE.O").is_ok())
+            val fs2 = _fs_from(dev)
+            val loc = fs2.resolve_path(dev, "/g/ONE.O").unwrap()
+            step("the slot immediately after the new entry must still read 0x00")
+            val sec = dev.read_sector(loc.dirent_sector).unwrap()
+            expect(sec[loc.dirent_offset + 32].to_i32()).to_equal(0)
+            step("and an absent sibling is reported ENOENT, not matched against poison")
+            assert_true(fs2.stat_at(dev, "/g/TWO.O").is_err())
+
+        it "zero-fills a freshly allocated directory cluster":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            step("the mock hands back 0xAA for any never-written sector")
+            assert_true(fs.mkdir_at(dev, "/z").is_ok())
+            val fs2 = _fs_from(dev)
+            val loc = fs2.resolve_path(dev, "/z").unwrap()
+            val lba = 64u64 + (loc.start_cluster - 2u32).to_u64()
+            val sec = dev.read_sector(lba).unwrap()
+            step("past the . and .. entries the cluster must be zeros, not 0xAA")
+            var poisoned = 0
+            var i = 64
+            while i < 512:
+                if sec[i] != 0u8:
+                    poisoned = poisoned + 1
+                i = i + 1
+            expect(poisoned).to_equal(0)
+
+    describe "dirent size write-back":
+
+        it "persists the size across a reopen, not just in the live handle":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/s").is_ok())
+            val h0 = fs.create_at(dev, "/s/GROW.BIN").unwrap()
+            step("append in two rounds so the size must be rewritten twice")
+            val h1 = fs.write(dev, h0, _bytes(100, 0)).unwrap()
+            val h2 = fs.write(dev, h1, _bytes(150, 5)).unwrap()
+            expect(h2.file_size).to_equal(250u64)
+            step("a fresh view of the disk agrees")
+            expect(_fs_from(dev).stat_at(dev, "/s/GROW.BIN").unwrap().size).to_equal(250u64)
+
+        it "flush() writes the dirent back on demand instead of returning ENOSYS":
+            val dev = _make_dev()
+            var fs = _fs_from(dev)
+            assert_true(fs.mkdir_at(dev, "/s").is_ok())
+            val h0 = fs.create_at(dev, "/s/F.BIN").unwrap()
+            val h1 = fs.write(dev, h0, _bytes(64, 2)).unwrap()
+            step("an explicit flush of an unchanged handle is a no-op success")
+            assert_true(fs.flush(dev, h1).is_ok())
+            expect(_fs_from(dev).stat_at(dev, "/s/F.BIN").unwrap().size).to_equal(64u64)

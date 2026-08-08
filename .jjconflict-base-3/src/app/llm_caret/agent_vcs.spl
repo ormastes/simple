@@ -1,0 +1,38 @@
+# LLM Caret - Agent VCS changed-file discovery
+
+use app.io.mod.{process_run}
+use app.llm_caret.agent_plan.{AgentFileChangeSet}
+
+struct AgentVcsChangeResult:
+    status: text
+    reason: text
+    changes: AgentFileChangeSet
+
+fn _add_unique(items: [text], item: text) -> [text]:
+    if item == "":
+        return items
+    for existing in items:
+        if existing == item:
+            return items
+    items + [item]
+
+pub fn parse_vcs_changed_files(agent_id: text, stdout: text) -> AgentFileChangeSet:
+    var files: [text] = []
+    for line in stdout.split("\n"):
+        files = _add_unique(files, line.trim())
+    AgentFileChangeSet(agent_id: agent_id, changed_files: files)
+
+pub fn discover_agent_vcs_changes(agent_id: text, vcs_path: text, args: [text]) -> AgentVcsChangeResult:
+    var cmd = vcs_path
+    if cmd == "":
+        cmd = "jj"
+    var final_args = args
+    if final_args.len() == 0:
+        final_args = ["diff", "--name-only"]
+    val (stdout, stderr, code) = process_run(cmd, final_args)
+    if code != 0:
+        return AgentVcsChangeResult(status: "error", reason: stderr, changes: AgentFileChangeSet(agent_id: agent_id, changed_files: []))
+    AgentVcsChangeResult(status: "ok", reason: "vcs_changed_files", changes: parse_vcs_changed_files(agent_id, stdout))
+
+export AgentVcsChangeResult
+export parse_vcs_changed_files, discover_agent_vcs_changes

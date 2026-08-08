@@ -1,0 +1,192 @@
+use std.spec.*
+use nogc_sync_mut.ui.theme_package.{
+    default_theme_id,
+    resolve_theme_alias,
+    resolve_wm_window_gradient_for_css,
+    load_theme_package,
+    theme_package_render_snapshot,
+    invalidate_theme_package_cache,
+    invalidate_all_theme_package_cache,
+    resolved_theme_css,
+    theme_glass_config,
+    theme_icon_defaults,
+    theme_numeric_colors,
+    theme_package_color_bg,
+    theme_package_color_accent,
+    validate_default_theme_package,
+    render_theme_validation_report
+}
+use app.ui.web.html.{generate_css}
+use os.compositor.browser_backend.{theme_bg, theme_accent}
+use app.io.mod.{file_read}
+
+describe "Folder theme packages":
+
+    it "uses aetheric_dark as the registry default":
+        expect(default_theme_id()).to_equal("aetheric_dark")
+
+    it "keeps glass_obsidian_dark as a compatibility alias":
+        expect(resolve_theme_alias("glass_obsidian_dark")).to_equal("aetheric_dark")
+
+    it "resolves the Aetheric package metadata and source reference":
+        val pkg = load_theme_package("aetheric_dark")
+        expect(pkg.id).to_equal("aetheric_dark")
+        expect(pkg.family_id).to_equal("aetheric")
+        expect(pkg.source_reference).to_end_with("config/themes/raw/simple_os_dark_refined_alignment/code.html")
+        expect(pkg.theme_path).to_equal("config/themes/aetheric_dark/theme.sdn")
+        expect(pkg.family_path).to_equal("config/themes/families/aetheric/theme.sdn")
+
+    it "builds a stable content-addressed render snapshot":
+        invalidate_all_theme_package_cache()
+        val direct = load_theme_package("aetheric_dark")
+        val aliased = load_theme_package("glass_obsidian_dark")
+        expect(direct.fingerprint.len()).to_equal(64)
+        expect(direct.snapshot.source_manifest_sha256.len()).to_equal(64)
+        expect(direct.snapshot.material_sha256.len()).to_equal(64)
+        expect(direct.fingerprint).to_equal(direct.snapshot.source_manifest_sha256)
+        expect(aliased.fingerprint).to_equal(direct.fingerprint)
+        expect(aliased.snapshot.material_sha256).to_equal(direct.snapshot.material_sha256)
+        val projected = theme_package_render_snapshot("glass_obsidian_dark")
+        expect(projected.material_sha256).to_equal(direct.snapshot.material_sha256)
+        invalidate_theme_package_cache("glass_obsidian_dark")
+        val reloaded = load_theme_package("aetheric_dark")
+        expect(reloaded.fingerprint).to_equal(direct.fingerprint)
+        expect(reloaded.snapshot.material_sha256).to_equal(direct.snapshot.material_sha256)
+
+    it "preserves exact Aetheric RGBA and material semantics":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val material = snapshot.material
+        expect(snapshot.background_rgba).to_equal(0xFF0E0E10)
+        expect(snapshot.semantic.info_rgba).to_equal(0xFF9BDCFF)
+        expect(snapshot.semantic.success_rgba).to_equal(0xFFB1B1FF)
+        expect(snapshot.semantic.warning_rgba).to_equal(0xFFF4BD78)
+        expect(snapshot.semantic.error_rgba).to_equal(0xFFFFB4AB)
+        expect(material.desktop_fill_rgba).to_equal(0xFF131315)
+        expect(material.window_fill_rgba).to_equal(0xCC1F1F21)
+        expect(material.active_title_fill_rgba).to_equal(0xE02A2A2C)
+        expect(material.border_rgba).to_equal(0x338B90A0)
+        expect(material.surface_alpha_milli).to_equal(800)
+        expect(material.backdrop_blur_px).to_equal(30)
+        expect(material.backdrop_saturation_milli).to_equal(1700)
+        expect(material.corner_radius_px).to_equal(18)
+        expect(material.font_size_px).to_equal(14)
+        expect(material.font_weight).to_equal(400)
+        expect(material.secondary_text_rgba).to_equal(0xADC1C6D7)
+        expect(material.solid_fallback_rgba).to_equal(0xFF1F1F21)
+        expect(material.window_gradient_available).to_be(true)
+        expect(material.window_gradient_start_rgba).to_equal(0x14FFFFFF)
+        expect(material.window_gradient_end_rgba).to_equal(0x06FFFFFF)
+        expect(material.fallback_contrast_milli).to_be_greater_than(4500)
+        expect(material.active_shadows.len()).to_equal(1)
+        expect(material.active_shadows[0].offset_y_px).to_equal(28)
+        expect(material.active_shadows[0].blur_radius_px).to_equal(76)
+        expect(material.active_shadows[0].rgba).to_equal(0x75000000)
+        expect(material.inactive_shadows.len()).to_equal(1)
+        expect(material.inactive_shadows[0].rgba).to_equal(0x57000000)
+
+    it "keeps the tracked bare-metal snapshot in exact package parity":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val generated = file_read("src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl")
+        expect(generated).to_contain(snapshot.source_manifest_sha256)
+        expect(generated).to_contain(snapshot.material_sha256)
+        expect(generated).to_contain("desktop_fill_rgba: {snapshot.material.desktop_fill_rgba}u32")
+        expect(generated).to_contain("backdrop_saturation_milli: {snapshot.material.backdrop_saturation_milli}")
+
+    it "assembles family shape CSS, base CSS, widgets, and icon defaults":
+        val css = resolved_theme_css("aetheric_dark")
+        expect(css).to_contain("--radius-md")
+        expect(css).to_contain("--ui-accent: #adc6ff")
+        expect(css).to_contain(".widget-panel")
+        expect(css).to_contain(".widget-dialog, .wm-window")
+        expect(css).to_contain(".widget-label, .wm-title")
+        expect(css).to_contain(".widget-tab-bar, .wm-titlebar")
+        expect(css).to_contain("--theme-icon-terminal")
+        expect(css).to_contain("--theme-icon-command-palette")
+
+    it "keeps per-widget CSS and tokens on the resolved package":
+        val pkg = load_theme_package("aetheric_dark")
+        expect(pkg.token_map.get("--ui-accent") ?? "").to_equal("#adc6ff")
+        expect(pkg.widget_css_by_name.get("panel") ?? "").to_contain(".widget-panel")
+        expect(pkg.ui_theme.name).to_equal("aetheric_dark")
+
+    it "resolves numeric colors for BrowserBackend from the package":
+        val colors = theme_numeric_colors("aetheric_dark")
+        expect(colors.bg).to_equal(0xFF0E0E10)
+        expect(colors.accent).to_equal(0xFFADC6FF)
+        expect(theme_package_color_bg("aetheric_dark")).to_equal(colors.bg)
+        expect(theme_package_color_accent("aetheric_dark")).to_equal(colors.accent)
+        expect(theme_bg("aetheric_dark")).to_equal(colors.bg)
+        expect(theme_accent("aetheric_dark")).to_equal(colors.accent)
+
+    it "resolves compositor glass config from the same package colors":
+        val colors = theme_numeric_colors("aetheric_dark")
+        val cfg = theme_glass_config("aetheric_dark")
+        expect(cfg.accent_color).to_equal(colors.accent & 0x00FFFFFF)
+        expect(cfg.bg_top).to_equal(colors.bg & 0x00FFFFFF)
+        expect(cfg.blur_radius).to_equal(30)
+
+    it "resolves all default icon roles with labels colors and sizes":
+        val icons = theme_icon_defaults("aetheric_dark")
+        match icons.get("terminal"):
+            case Some(icon):
+                expect(icon.icon_id).to_equal("terminal")
+                expect(icon.label).to_equal("Terminal")
+                expect(icon.color_token).to_equal("var(--ui-success)")
+                expect(icon.size_role).to_equal("app")
+            case _:
+                expect("missing terminal icon").to_equal("resolved terminal icon")
+        match icons.get("command_palette"):
+            case Some(icon):
+                expect(icon.icon_id).to_equal("command_palette")
+                expect(icon.size_role).to_equal("action")
+            case _:
+                expect("missing command palette icon").to_equal("resolved command palette icon")
+        match icons.get("error"):
+            case Some(icon):
+                expect(icon.color_token).to_equal("var(--ui-error)")
+                expect(icon.size_role).to_equal("status")
+            case _:
+                expect("missing error icon").to_equal("resolved error icon")
+
+    it "web CSS includes package tokens and local widget overrides":
+        val css = generate_css("aetheric_dark")
+        expect(css).to_contain("Folder theme package")
+        expect(css).to_contain("--app-background-image")
+        expect(css).to_contain("0 0 40px var(--glass-accent)")
+
+    it "resolves only the final exact WM window vertical two-stop gradient":
+        val css = """
+        .wm-window.focused { background: linear-gradient(90deg, #ff0000, #00ff00); }
+        .wm-window-extra { background: linear-gradient(180deg, #ffffff, #ffffff); }
+        .wm-window { background: linear-gradient(180deg, #010203, #040506); }
+        .wm-window { background: linear-gradient(to bottom, rgba(255,255,255,0.5), rgba(255,0,0,0.25)); }
+        """
+        val gradient = resolve_wm_window_gradient_for_css(css, 0xff000000u32)
+
+        expect(gradient.available).to_be(true)
+        expect(gradient.start_rgba).to_equal(0x80FFFFFFu32)
+        expect(gradient.end_rgba).to_equal(0x40FF0000u32)
+        expect(gradient.source_css).to_contain("to bottom")
+
+    it "rejects unsupported WM gradient direction and multi-stop reduction":
+        val horizontal = resolve_wm_window_gradient_for_css(
+            ".wm-window { background: linear-gradient(90deg, #010203, #040506); }",
+            0xff111111u32
+        )
+        val multi = resolve_wm_window_gradient_for_css(
+            ".wm-window { background: linear-gradient(180deg, #010203, #040506, #070809); }",
+            0xff222222u32
+        )
+
+        expect(horizontal.available).to_be(false)
+        expect(horizontal.start_rgba).to_equal(0xff111111u32)
+        expect(multi.available).to_be(false)
+        expect(multi.end_rgba).to_equal(0xff222222u32)
+
+    it "validates the checked-in theme package graph":
+        val issues = validate_default_theme_package()
+        expect(issues.len()).to_equal(0)
+
+    it "renders a PASS validation report":
+        val report = render_theme_validation_report(validate_default_theme_package())
+        expect(report).to_contain("STATUS: PASS")

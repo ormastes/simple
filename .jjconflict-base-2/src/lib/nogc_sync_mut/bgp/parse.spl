@@ -1,0 +1,226 @@
+# BGP-4 (RFC 4271) wire parsing.
+#
+# MDSOC: feature dimension, network routing layer.
+#
+# BUG(byvalue_reader_cursor_no_advance_cross_module_2026-06-15):
+# Do NOT delegate ByteReader to helper fns in multi-file module context.
+# All reads are inlined directly in each parse function.
+
+use std.common.net.byte_cursor.{ByteReader}
+use std.common.net.addr.{AsNumber, Ipv4Addr, ip_addr_v4}
+use std.common.net.routing.{RoutePrefix, RouterId, RoutingMetric, route_prefix, routing_metric}
+use std.nogc_sync_mut.bgp.types.{BgpHeader, BgpOpenMsg, BgpPathAttribute, BgpUpdateMsg, BgpNotificationMsg, BGP_MARKER_LEN, BGP_MSG_OPEN, BGP_MSG_UPDATE, BGP_MSG_NOTIFICATION, BGP_MSG_KEEPALIVE, BGP_PA_FLAG_EXT_LEN}
+
+# ============================================================================
+# Parse BGP common header (19 bytes)
+# ============================================================================
+
+fn bgp_header_parse(data: [u8]) -> Result<BgpHeader, text>:
+    """Parse the 19-byte BGP message header."""
+    if data.len() < 19:
+        return Err("bgp_header_parse: need 19 bytes, got {data.len()}")
+    var r = ByteReader.new(data)
+    # read 16-byte marker
+    val marker_bytes = r.read_bytes(16)?
+    val length = r.read_u16()?
+    val msg_type = r.read_u8()?
+    # validate marker: all bytes must be 0xFF
+    var i: u64 = 0
+    while i < 16:
+        if marker_bytes[i] != 0xFF:
+            return Err("bgp_header_parse: invalid marker byte at {i}")
+        i = i + 1
+    var marker: [u8] = []
+    i = 0
+    while i < 16:
+        marker.push(marker_bytes[i])
+        i = i + 1
+    Ok(BgpHeader(marker: marker, length: length, msg_type: msg_type))
+
+# ============================================================================
+# Parse BGP OPEN message body (starts at offset 19)
+# ============================================================================
+
+fn bgp_open_parse(data: [u8], offset: u64) -> Result<BgpOpenMsg, text>:
+    """Parse BGP OPEN body starting at `offset` (after the 19-byte header)."""
+    if data.len() < offset + 10:
+        return Err("bgp_open_parse: truncated at offset {offset}")
+    var r = ByteReader.new(data)
+    var i: u64 = 0
+    while i < offset:
+        r.read_u8()?
+        i = i + 1
+    val version = r.read_u8()?
+    if version != 4:
+        return Err("bgp_open_parse: unsupported version {version}")
+    # my_as is 2 bytes on the wire for legacy BGP (RFC 4271)
+    val as_val = r.read_u16()?
+    val hold_time = r.read_u16()?
+    # BGP identifier: 4 bytes
+    # BUG(byvalue_reader_cursor_no_advance_cross_module_2026-06-15): inline 4x u8
+    val id0 = r.read_u8()?
+    val id1 = r.read_u8()?
+    val id2 = r.read_u8()?
+    val id3 = r.read_u8()?
+    var id_b: [u8] = []
+    id_b.push(id0)
+    id_b.push(id1)
+    id_b.push(id2)
+    id_b.push(id3)
+    val bgp_id = RouterId.from_bytes(id_b)?
+    val opt_len = r.read_u8()?
+    var opt_params: [u8] = []
+    var j: u64 = 0
+    while j < opt_len.to_u64():
+        val b = r.read_u8()?
+        opt_params.push(b)
+        j = j + 1
+    Ok(BgpOpenMsg(
+        version: version,
+        my_as: AsNumber.new(as_val.to_u32()),
+        hold_time: hold_time,
+        bgp_id: bgp_id,
+        opt_params: opt_params
+    ))
+
+# ============================================================================
+# Parse NLRI prefix list (RFC 4271 §4.3): variable-length entries
+# Each entry: prefix_len(1) + ceil(prefix_len/8) bytes of address
+# ============================================================================
+
+fn bgp_parse_prefixes(data: [u8], start: u64, end_off: u64) -> Result<[RoutePrefix], text>:
+    """Parse a sequence of length-value prefixes from data[start..end_off]."""
+    var prefixes: [RoutePrefix] = []
+    var r = ByteReader.new(data)
+    var i: u64 = 0
+    while i < start:
+        r.read_u8()?
+        i = i + 1
+    var off: u64 = start
+    while off < end_off:
+        val prefix_len = r.read_u8()?
+        off = off + 1
+        val nbytes: u64 = (prefix_len.to_u64() + 7) / 8
+        if off + nbytes > end_off:
+            return Err("bgp_parse_prefixes: truncated prefix at offset {off}")
+        var addr_b: [u8] = []
+        addr_b.push(0)
+        addr_b.push(0)
+        addr_b.push(0)
+        addr_b.push(0)
+        var k: u64 = 0
+        while k < nbytes:
+            val ab = r.read_u8()?
+            addr_b[k] = ab
+            k = k + 1
+            off = off + 1
+        val ip = ip_addr_v4(Ipv4Addr.from_bytes(addr_b[0], addr_b[1], addr_b[2], addr_b[3]))
+        prefixes.push(route_prefix(ip, prefix_len))
+    Ok(prefixes)
+
+# ============================================================================
+# Parse a single path attribute TLV
+# Returns (attribute, next_offset)
+# ============================================================================
+
+fn bgp_attr_parse_one(data: [u8], offset: u64) -> Result<(BgpPathAttribute, u64), text>:
+    """Parse one BGP path attribute at `offset`. Returns (attr, next_offset)."""
+    if data.len() < offset + 3:
+        return Err("bgp_attr_parse_one: truncated at {offset}")
+    var r = ByteReader.new(data)
+    var i: u64 = 0
+    while i < offset:
+        r.read_u8()?
+        i = i + 1
+    val flags = r.read_u8()?
+    val type_code = r.read_u8()?
+    # extended length flag
+    var attr_len: u64 = 0
+    var hdr_size: u64 = 3
+    if (flags & BGP_PA_FLAG_EXT_LEN) != 0:
+        val hi = r.read_u8()?
+        val lo = r.read_u8()?
+        attr_len = (hi.to_u64() << 8) | lo.to_u64()
+        hdr_size = 4
+    else:
+        # BUG(question_op_method_chain_wraps_value): `?.method()` applies to wrapped value
+        val attr_len_b = r.read_u8()?
+        attr_len = attr_len_b.to_u64()
+    if data.len() < offset + hdr_size + attr_len:
+        return Err("bgp_attr_parse_one: attr value truncated")
+    var value: [u8] = []
+    var k: u64 = 0
+    while k < attr_len:
+        val vb = r.read_u8()?
+        value.push(vb)
+        k = k + 1
+    val next_off = offset + hdr_size + attr_len
+    Ok((BgpPathAttribute(flags: flags, type_code: type_code, value: value), next_off))
+
+# ============================================================================
+# Parse BGP UPDATE message body (RFC 4271 §4.3)
+# ============================================================================
+
+fn bgp_update_parse(data: [u8], offset: u64) -> Result<BgpUpdateMsg, text>:
+    """Parse BGP UPDATE body starting at `offset` (after the 19-byte header)."""
+    if data.len() < offset + 4:
+        return Err("bgp_update_parse: truncated at {offset}")
+    var r = ByteReader.new(data)
+    var i: u64 = 0
+    while i < offset:
+        r.read_u8()?
+        i = i + 1
+    # BUG(question_op_method_chain_wraps_value): `?.method()` applies to wrapped value
+    val wd_len_b = r.read_u16()?
+    val wd_len = wd_len_b.to_u64()
+    val wd_start = offset + 2
+    val wd_end = wd_start + wd_len
+    val withdrawn = bgp_parse_prefixes(data, wd_start, wd_end)?
+    # advance r past withdrawn routes
+    var rj: u64 = 0
+    while rj < wd_len:
+        r.read_u8()?
+        rj = rj + 1
+    # BUG(question_op_method_chain_wraps_value): `?.method()` applies to wrapped value
+    val pa_len_b = r.read_u16()?
+    val pa_len = pa_len_b.to_u64()
+    val pa_start = wd_end + 2
+    val pa_end = pa_start + pa_len
+    var path_attributes: [BgpPathAttribute] = []
+    var pa_off = pa_start
+    while pa_off < pa_end:
+        val res = bgp_attr_parse_one(data, pa_off)?
+        path_attributes.push(res.0)
+        pa_off = res.1
+    val nlri_start = pa_end
+    val nlri_end = data.len()
+    val nlri = bgp_parse_prefixes(data, nlri_start, nlri_end)?
+    Ok(BgpUpdateMsg(
+        withdrawn: withdrawn,
+        path_attributes: path_attributes,
+        nlri: nlri
+    ))
+
+# ============================================================================
+# Parse BGP NOTIFICATION message body (RFC 4271 §4.5)
+# ============================================================================
+
+fn bgp_notification_parse(data: [u8], offset: u64) -> Result<BgpNotificationMsg, text>:
+    """Parse BGP NOTIFICATION body starting at `offset`."""
+    if data.len() < offset + 2:
+        return Err("bgp_notification_parse: truncated")
+    var r = ByteReader.new(data)
+    var i: u64 = 0
+    while i < offset:
+        r.read_u8()?
+        i = i + 1
+    val error_code = r.read_u8()?
+    val error_subcode = r.read_u8()?
+    var diag: [u8] = []
+    val remaining = data.len() - (offset + 2)
+    var k: u64 = 0
+    while k < remaining:
+        val db = r.read_u8()?
+        diag.push(db)
+        k = k + 1
+    Ok(BgpNotificationMsg(error_code: error_code, error_subcode: error_subcode, data: diag))

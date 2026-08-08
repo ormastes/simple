@@ -1,0 +1,226 @@
+# Mutation-check harness for REQ-MC-* critical requirements — WP-23 of the
+# aerospace hardening plan.
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# WHAT THIS IS: an automated "sabotage-verify" runner. Every WP this session
+# has been required to do this BY HAND before claiming a spec is a live
+# oracle: run the spec green against real enforcement code, programmatically
+# break the enforcement, confirm the spec goes RED, then revert and confirm
+# green again. This tool automates exactly that three-phase cycle for a
+# fixed, hand-picked list of REQ-MC-* checks (see MUTATION_CHECKS below) —
+# it is NOT a generic mutation-testing framework (see the plan's WP-23 scope
+# note: "build the WORKING harness for your chosen 3-5 cases ... rather than
+# half-building a generic system"). Generalization path is documented at the
+# bottom of this file.
+#
+# MECHANISM: for each MutationCheck, this tool
+#   1. reads the target source file and asserts the exact `positive_snippet`
+#      occurs exactly once (guards against a stale/already-drifted snippet
+#      silently no-op'ing the sabotage — the same "confirm the probe can
+#      fail" discipline the WP-14/WP-2 census scanners use);
+#   2. runs `bin/simple test <spec_path>` and captures the verbatim
+#      `Results:` line — this is the POSITIVE run, expected green;
+#   3. writes the file with `positive_snippet` replaced by
+#      `sabotage_snippet`, re-runs the same spec, captures the verbatim
+#      `Results:` line — this is the SABOTAGE run, expected RED. If it is
+#      NOT red, that is exactly the vacuity this WP exists to catch, and is
+#      reported as a genuine finding (`mutation_live: false`), not
+#      suppressed;
+#   4. restores the original file content byte-for-byte and re-runs the same
+#      spec, captures the verbatim `Results:` line — the REVERT run,
+#      expected green again (proves step 3's file edit, not something else,
+#      caused the red).
+#
+# The target file is ALWAYS restored (step 4 runs unconditionally, even if
+# step 3's spec run itself errors) — this tool must never leave the tree in
+# a sabotaged state. Real invocations only: this file never fabricates a
+# `Results:` line. Every line in the printed report was produced by an
+# actual `bin/simple test` subprocess.
+
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use app.io.mod.{shell, ProcessResult}
+
+pub struct MutationCheck:
+    req_id: text
+    name: text
+    target_file: text
+    spec_path: text
+    positive_snippet: text
+    sabotage_snippet: text
+
+pub struct PhaseResult:
+    phase: text  # "positive" | "sabotage" | "revert"
+    results_line: text
+    exit_code: i64
+
+pub struct MutationCheckOutcome:
+    check: MutationCheck
+    snippet_occurrences: i64
+    positive: PhaseResult
+    sabotage: PhaseResult
+    revert: PhaseResult
+    mutation_live: bool  # true iff sabotage phase actually went red
+
+# ============================================================================
+# The 3 chosen REQ-MC-* checks — real, landed enforcement code + real specs
+# from this session (picked per the plan's WP-23 instructions).
+# ============================================================================
+
+fn mutation_checks() -> [MutationCheck]:
+    [
+        MutationCheck(
+            req_id: "REQ-MC-023 / W-MC-RES-001",
+            name: "unwrapped foreign resource must not escape its acquire call site",
+            target_file: "src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl",
+            spec_path: "test/01_unit/compiler/lint/unwrapped_foreign_resource_spec.spl",
+            positive_snippet: ("fn _ufr_is_acquire_name(name: text) -> bool:\n"
+                + "    if not name.starts_with(\"rt_\"):\n"
+                + "        return false\n"
+                + "    for verb in acquire_verbs():\n"
+                + "        if name.ends_with(\"_\" + verb):\n"
+                + "            return true\n"
+                + "    false\n"),
+            sabotage_snippet: ("fn _ufr_is_acquire_name(name: text) -> bool:\n"
+                + "    false  # WP-23 mutation-check sabotage (reverted before commit)\n"),
+        ),
+        MutationCheck(
+            req_id: "WP-8 / STUB003",
+            name: "empty concrete function body is a hard error under critical",
+            target_file: "src/compiler/35.semantics/lint/stub_impl.spl",
+            spec_path: "test/01_unit/compiler/lint/stub_impl_spec.spl",
+            positive_snippet: ("fn _empty_body_is_error(profile_name: text) -> bool:\n"
+                + "    strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical)\n"),
+            sabotage_snippet: ("fn _empty_body_is_error(profile_name: text) -> bool:\n"
+                + "    false  # WP-23 mutation-check sabotage (reverted before commit)\n"),
+        ),
+        MutationCheck(
+            req_id: "WP-6",
+            name: "MIR lowering refuses an incomplete critical match with no wildcard",
+            target_file: "src/compiler/35.semantics/match_exhaustiveness.spl",
+            spec_path: "test/01_unit/compiler/semantics/match_coverage_critical_spec.spl",
+            positive_snippet: ("fn match_coverage_requires_hard_error(coverage: ResolvedMatchCoverage, strictness_name: text) -> bool:\n"
+                + "    if coverage.is_exhaustive():\n"
+                + "        return false\n"
+                + "    val canonical = normalize_profile_name(strictness_name)\n"
+                + "    val strictness = AssuranceStrictness.from_name(canonical)\n"
+                + "    match strictness:\n"
+                + "        AssuranceStrictness.Critical: true\n"
+                + "        _: false\n"),
+            sabotage_snippet: ("fn match_coverage_requires_hard_error(coverage: ResolvedMatchCoverage, strictness_name: text) -> bool:\n"
+                + "    false  # WP-23 mutation-check sabotage (reverted before commit)\n"),
+        ),
+    ]
+
+# ============================================================================
+# Mechanism
+# ============================================================================
+
+fn _count_occurrences(haystack: text, needle: text) -> i64:
+    var count = 0
+    var start = 0
+    while true:
+        val idx = haystack[start:haystack.len()].find(needle)
+        if idx < 0:
+            break
+        count = count + 1
+        start = start + idx + needle.len()
+    count
+
+fn _extract_results_line(stdout: text) -> text:
+    for line in stdout.split("\n"):
+        if line.trim().starts_with("Results:"):
+            return line.trim()
+    "<no Results: line found>"
+
+fn _run_spec(spec_path: text) -> PhaseResult:
+    val cmd = "cd /home/ormastes/dev/pub/simple && timeout 180 bin/simple test {spec_path} 2>&1"
+    val r: ProcessResult = shell(cmd)
+    PhaseResult(phase: "", results_line: _extract_results_line(r.stdout), exit_code: r.exit_code)
+
+pub fn run_one_check(check: MutationCheck) -> MutationCheckOutcome:
+    val original = file_read(check.target_file)
+    val occurrences = _count_occurrences(original, check.positive_snippet)
+
+    if occurrences != 1:
+        # Guard: refuse to sabotage on a stale/ambiguous snippet match.
+        val err = PhaseResult(phase: "aborted", results_line: "positive_snippet occurs {occurrences} time(s), expected exactly 1 — refusing to sabotage", exit_code: -1)
+        return MutationCheckOutcome(check: check, snippet_occurrences: occurrences,
+            positive: err, sabotage: err, revert: err, mutation_live: false)
+
+    var positive = _run_spec(check.spec_path)
+    positive = PhaseResult(phase: "positive", results_line: positive.results_line, exit_code: positive.exit_code)
+
+    val sabotaged = original.replace(check.positive_snippet, check.sabotage_snippet)
+    file_write(check.target_file, sabotaged)
+    var sabotage = _run_spec(check.spec_path)
+    sabotage = PhaseResult(phase: "sabotage", results_line: sabotage.results_line, exit_code: sabotage.exit_code)
+
+    # Restore unconditionally before returning.
+    file_write(check.target_file, original)
+    var revert = _run_spec(check.spec_path)
+    revert = PhaseResult(phase: "revert", results_line: revert.results_line, exit_code: revert.exit_code)
+
+    # A missing `Results:` line (compile error, crash, harness timeout) is
+    # NOT proof of a live oracle — it is a no-verdict, the exact false
+    # signal this repo's own traps catalog warns about (sigterm truncation,
+    # exit-255-no-output, buried verdict). Require the line to be present
+    # AND to name a nonzero failure count, not merely "differ from positive".
+    val sabotage_has_verdict = sabotage.results_line.starts_with("Results:")
+    val sabotage_shows_failure = sabotage.results_line.contains("failed") and not sabotage.results_line.contains("0 failed")
+    val mutation_live = sabotage_has_verdict and sabotage_shows_failure
+
+    MutationCheckOutcome(check: check, snippet_occurrences: occurrences,
+        positive: positive, sabotage: sabotage, revert: revert, mutation_live: mutation_live)
+
+pub fn run_all_checks() -> [MutationCheckOutcome]:
+    var out: [MutationCheckOutcome] = []
+    for check in mutation_checks():
+        out.push(run_one_check(check))
+    out
+
+pub fn format_report(outcomes: [MutationCheckOutcome]) -> text:
+    var lines: [text] = []
+    lines.push("Mutation-check harness (WP-23) — sabotage-verify for 3 REQ-MC-* checks")
+    lines.push("Every Results: line below is a real `bin/simple test` invocation, not a hypothetical.")
+    lines.push("")
+    var live_count = 0
+    for o in outcomes:
+        lines.push("== {o.check.req_id} — {o.check.name} ==")
+        lines.push("  target: {o.check.target_file}")
+        lines.push("  spec:   {o.check.spec_path}")
+        lines.push("  positive_snippet occurrences: {o.snippet_occurrences}")
+        lines.push("  positive: {o.positive.results_line}")
+        lines.push("  sabotage: {o.sabotage.results_line}")
+        lines.push("  revert:   {o.revert.results_line}")
+        lines.push("  mutation_live: {o.mutation_live}")
+        if o.mutation_live:
+            live_count = live_count + 1
+        lines.push("")
+    lines.push("Summary: {live_count} / {outcomes.len()} checks proved a LIVE oracle (sabotage went red).")
+    lines.join("\n")
+
+# ============================================================================
+# Generalization path (NOT built here — see plan's WP-23 scope note)
+#
+# To cover arbitrary future REQ-MC-* requirements automatically, a future WP
+# would need:
+#   1. A structured requirement->enforcement->spec mapping (today this file
+#      hardcodes 3 entries by hand; the plan doc's REQ-MC-* sections and the
+#      per-WP landing log in the plan table are the closest thing to a
+#      machine-readable index today, and they are prose, not data).
+#   2. A safer sabotage strategy than exact-snippet string replace — this
+#      harness's occurrence-count guard catches drift for its 3 hardcoded
+#      snippets, but a generic version needs either an AST-level mutation
+#      (flip a boolean literal, negate a condition, delete a return) or a
+#      much larger snippet library, to avoid both false "already drifted"
+#      aborts and accidental multi-site sabotage.
+#   3. A parallel-session-safe execution mode: this harness mutates real
+#      source files on disk sequentially and restores them before returning,
+#      which is unsafe to run concurrently with another session editing the
+#      same files (see this repo's shared-WC traps memory) — a generic
+#      runner would need a private worktree per check, not the main WC.
+# ============================================================================
+
+fn main():
+    print(format_report(run_all_checks()))

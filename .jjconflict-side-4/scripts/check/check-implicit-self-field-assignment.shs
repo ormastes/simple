@@ -1,0 +1,141 @@
+#!/bin/sh
+# Guard: a bare `field = value` inside a method must be a HARD ERROR on EVERY
+# engine — never a silent no-op that discards the write.
+#
+# Bug: doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
+#
+# WHY THIS IS A SHELL SCRIPT AND NOT A `*_spec.spl`
+# -------------------------------------------------
+# `bin/simple test` runs the tree-walk AST interpreter, and the AST interpreter
+# has rejected this shape since `941605d43d9`. The broken lane is the OTHER one:
+# `bin/simple run` (Cranelift JIT, via the HIR lowering path), which accepted the
+# program and silently dropped the write. A spec therefore cannot observe the
+# defect at all — it is green on the engine specs run and red on the engine it
+# cannot reach. Only a plain `.spl` script shelled through `run` reaches it.
+# Same structural gap as doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md.
+#
+# WHAT IS ASSERTED
+# ----------------
+# For BOTH engines, on a class with a `bool` field `flag` initialised to false:
+#
+#   1. `me set_it(): flag = true`      (implicit, no `self.`)  MUST be rejected,
+#      and the diagnostic must NAME the field — an anonymous "syntax error"
+#      would satisfy a bare non-zero-exit test while telling the user nothing.
+#   2. `me set_it_explicit(): self.flag = true`  MUST still work and set the
+#      field. This is the sabotage sentinel: a check that only asserts (1) also
+#      passes on a compiler that rejects ALL assignment, which would be a far
+#      worse regression.
+#   3. The specific broken OUTPUT must never appear: a run that prints
+#      `implicit -> false` is the exact silent-no-op signature and is a FAIL
+#      even if the process also exits non-zero for some unrelated reason.
+#
+# BINARY UNDER TEST
+# -----------------
+# `SIMPLE_BIN` (default `bin/simple`). At the time this guard landed the fix was
+# in seed SOURCE but `bin/release/<triple>/simple` had NOT been redeployed (the
+# repo's Stage-3 self-host blocker, .claude/rules/bootstrap.md), so this guard is
+# RED against the deployed binary and GREEN against a freshly built seed:
+#   SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-implicit-self-field-assignment.shs
+# That is expected and is recorded in the bug doc. It closes on the next seed
+# redeploy. The guard is deliberately NOT written to pass vacuously in the
+# meantime.
+#
+# FAIL-CLOSED CONTRACT — verdict line is always the LAST line of stdout:
+#   PASS — <n> engine setting(s) checked: ...   exit 0   (n is always > 0)
+#   FAIL — ...                                  exit 1
+#   ERROR — nothing was checked: ...            exit 2
+
+set -u
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_RUST_SEED_WARNING=0
+export SIMPLE_RUST_SEED_WARNING
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+[ -x "$SIMPLE_BIN" ] || command -v "$SIMPLE_BIN" >/dev/null 2>&1 \
+  || oops "compiler not executable at '$SIMPLE_BIN' (set SIMPLE_BIN to override)"
+
+work="$(mktemp -d)" || oops "mktemp failed"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+# Probe 1 — the defect itself. Must be REJECTED.
+implicit="$work/implicit_field_assign.spl"
+cat > "$implicit" <<'IMPLICIT_EOF'
+class C:
+    flag: bool
+    me set_it():
+        flag = true
+
+fn main():
+    var a = C(flag: false)
+    a.set_it()
+    print "implicit -> {a.flag}"
+main()
+IMPLICIT_EOF
+[ -s "$implicit" ] || oops "implicit probe was not written"
+
+# Probe 2 — the sentinel. Must still COMPILE AND RUN correctly. Without this a
+# compiler that rejected every assignment would pass the guard.
+explicit="$work/explicit_field_assign.spl"
+cat > "$explicit" <<'EXPLICIT_EOF'
+class C:
+    flag: bool
+    me set_it_explicit():
+        self.flag = true
+
+fn main():
+    var b = C(flag: false)
+    b.set_it_explicit()
+    print "explicit -> {b.flag}"
+main()
+EXPLICIT_EOF
+[ -s "$explicit" ] || oops "explicit probe was not written"
+
+checked=0
+engines=""
+
+for mode in interpreter jit; do
+  eout="$work/explicit.$mode"
+  SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$explicit" > "$eout" 2>&1
+  erc=$?
+
+  # Sentinel FIRST. If the good program does not run, every assertion about the
+  # bad program is vacuous — that is an ERROR, not a pass.
+  [ "$erc" -eq 0 ] \
+    || oops "engine '$mode': the CORRECT program (self.flag = true) failed with exit $erc — assertions would be vacuous: $(tr '\n' '|' < "$eout")"
+  /usr/bin/grep -aq '^explicit -> true$' "$eout" \
+    || oops "engine '$mode': explicit \`self.flag = true\` did not set the field; expected 'explicit -> true', got: $(tr '\n' '|' < "$eout")"
+
+  iout="$work/implicit.$mode"
+  SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$implicit" > "$iout" 2>&1
+  irc=$?
+
+  # 1. The silent-no-op signature must never appear.
+  if /usr/bin/grep -aq '^implicit -> false$' "$iout"; then
+    fail "engine '$mode': implicit field assignment SILENTLY NO-OPPED — the program ran to completion and printed 'implicit -> false', so the write to \`flag\` was discarded with no diagnostic"
+  fi
+  # Nor may it "succeed" by accidentally routing the write to the field: the
+  # chosen fix direction is a hard error, not implicit-self resolution. If this
+  # ever becomes the desired contract, change the bug doc and this guard
+  # together — do not let it drift silently.
+  if /usr/bin/grep -aq '^implicit -> true$' "$iout"; then
+    fail "engine '$mode': implicit field assignment was ACCEPTED and routed to the field; the recorded contract (fix direction 2) is a hard error — see the bug doc before changing this"
+  fi
+
+  # 2. It must actually be rejected.
+  [ "$irc" -ne 0 ] \
+    || fail "engine '$mode': implicit field assignment exited 0 — it must be a hard error"
+
+  # 3. The diagnostic must name the field, so the user can act on it.
+  /usr/bin/grep -aq 'flag' "$iout" \
+    || fail "engine '$mode': the program was rejected but the diagnostic does not mention the field \`flag\`; an anonymous error is not an acceptable fix: $(tr '\n' '|' < "$iout")"
+
+  checked=$((checked + 1))
+  engines="${engines:+$engines,}$mode"
+done
+
+[ "$checked" -gt 0 ] || oops "no engine was exercised"
+printf 'PASS — %d engine setting(s) checked: %s — implicit `field = ...` in a method is a hard error naming the field, and explicit `self.field = ...` still works\n' "$checked" "$engines"
+exit 0

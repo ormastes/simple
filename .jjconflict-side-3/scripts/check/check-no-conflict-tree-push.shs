@@ -1,0 +1,218 @@
+#!/bin/sh
+# Refuse to push a jj conflict commit.
+#
+# jj encodes a conflicted commit in git as a tree whose ONLY entries are
+# .jjconflict-base-0/, .jjconflict-side-0/, .jjconflict-side-1/ — the real
+# source tree is absent. Pushing one leaves `main` with no files: a clone gets
+# an empty repo, and every commit stacked on top inherits the empty tree.
+#
+# This happened on 2026-07-25: commit 857e26b0cbc was pushed while
+# scripts/os/make_os_disk.c was still 2-sided-conflicted, an FPGA commit landed
+# on top, and main carried no source files until 37cda4b restored it.
+# `jj git push` did NOT block it — jj considers pushing a conflict legal.
+#
+# Diagnosing this after the fact is unobvious: `git cat-file -p <sha>:<path>`
+# reports "exists on disk, but not in <sha>", which reads as one missing file
+# rather than a broken tree. `git ls-tree` on the commit is what shows the cause.
+#
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED CONTRACT (added 2026-08-01 after a proved cwd fail-open)
+# ---------------------------------------------------------------------------
+# Until 2026-08-01 this guard FAILED OPEN on the working directory. Run from a
+# directory that is not a git repository — which is exactly what the standard
+# landing workflow produces, because agents build in a `git archive` worktree
+# under /dev/shm or /run/user/1000 that has no .git — it printed
+#
+#     check-no-conflict-tree-push: nothing to push in <range>
+#
+# and exited 0, having checked nothing at all. PROVED 2026-08-01: with the
+# conflict-tree fixture commit ee6ac5c6683 in range, this guard exited 1 from
+# the repo root and 0 from an archived worktree. `main` had by then been wiped
+# to near-zero files twice in 24 hours, each time with "every other guard
+# passed" in the record. This guard is the backstop; a backstop that reports
+# success without running is worse than no backstop.
+#
+# The rules now are:
+#   * Every `git` invocation's exit status is checked. A git failure is an
+#     ERROR (exit 2), never a clean result.
+#   * cwd must be inside a git repository, and both range endpoints must
+#     actually exist as commits in it. Otherwise: ERROR (exit 2).
+#   * An EXPLICITLY SUPPLIED range that resolves to zero commits is a
+#     contradiction — the caller asked for a range and there is nothing in it.
+#     That is an ERROR (exit 2), not a pass.
+#   * The verdict line names how many commits were actually examined, so a
+#     vacuous run cannot be mistaken for a real one.
+#
+# NOTE ON PIPES: a piped exit status is the LAST command's, so `guard | tail`
+# discards this script's status entirely. Redirect to a FILE and read the file.
+# To limit the damage when that rule is forgotten, the final verdict line always
+# goes to stdout and always begins with PASS:, FAIL: or ERROR:.
+#
+# Usage: check-no-conflict-tree-push.shs [rev-range | --<rev-list args>...]
+#   default range: main@origin..@-   (what a `jj git push --bookmark main` sends)
+#   An explicit range MUST contain ".." — a bare rev means "all history
+#   reachable from it" to git and is rejected rather than silently
+#   reinterpreted.
+#   RAW REV-LIST MODE: `--rev-list-args <args>...` passes <args> to
+#   `git rev-list` verbatim and skips endpoint verification (there are no
+#   endpoints to verify). This exists for the pre-push hook, which must express
+#   "everything on this new ref that origin does not already have" as
+#   `<sha> --not --remotes=origin`. Every other fail-closed rule still applies,
+#   including "resolved to 0 commits is an ERROR, not a pass".
+#
+#   ARGUMENT ORDER IS LOAD-BEARING. `git rev-list --not --remotes=origin <sha>`
+#   puts <sha> AFTER --not, so <sha> is EXCLUDED and the walk yields ZERO
+#   commits. The pre-push hook shipped exactly that string until 2026-08-01;
+#   combined with the old "0 commits => nothing to push => exit 0" behaviour it
+#   meant every new-ref push was waved through completely unchecked. PROVED
+#   2026-08-01: the old guard exited 0 on
+#   "--not --remotes=origin ee6ac5c6683f5f8b0a158da5a1dd54d5f5fd65d6", a range
+#   whose only commit is a conflict tree. The positive rev must come FIRST:
+#   `<sha> --not --remotes=origin`.
+# Exit 0 = safe to push, 1 = conflict commit found, 2 = could not determine.
+
+set -u
+
+SELF=check-no-conflict-tree-push
+
+# Pin grep: the interactive default on this machine is ugrep, not GNU grep.
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+die() {
+    # $1 = exit code, rest = message
+    code=$1
+    shift
+    echo "$SELF: ERROR — $*" >&2
+    echo "$SELF: ERROR — nothing was checked (exit $code)"
+    exit "$code"
+}
+
+range="${1:-}"
+explicit=0
+rawmode=0
+[ -n "$range" ] && explicit=1
+case "$range" in
+    --rev-list-args)
+        rawmode=1
+        shift
+        [ "$#" -gt 0 ] || { echo "$SELF: ERROR — --rev-list-args needs arguments" >&2
+                            echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+        ;;
+    --*)
+        echo "$SELF: ERROR — unknown option '$range'; raw mode is '--rev-list-args <args>...'" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        exit 2
+        ;;
+esac
+
+# --- 1. cwd must be inside a git repository ---------------------------------
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || toplevel=""
+if [ -z "$toplevel" ]; then
+    die 2 "cwd '$(pwd)' is not inside a git repository.
+  This guard must run from the repo root of the clone you are about to push.
+  A 'git archive' worktree under /dev/shm or /run/user/1000 has no .git and
+  CANNOT be checked from — cd to the real clone and re-run."
+fi
+toplevel=$(CDPATH= cd -- "$toplevel" && pwd -P) || die 2 "cannot canonicalise toplevel"
+
+# --- 2. cross-check: are we checking the repo this script ships in? ---------
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || script_dir=""
+if [ -n "$script_dir" ]; then
+    script_root=$(CDPATH= cd -- "$script_dir/../.." 2>/dev/null && pwd -P) || script_root=""
+fi
+if [ -n "${script_root:-}" ] && [ "$script_root" != "$toplevel" ]; then
+    if [ -e "$script_root/.git" ]; then
+        die 2 "repository mismatch.
+  This script lives in the git repo at: $script_root
+  but cwd resolves to the git repo at:  $toplevel
+  Refusing to report on a different repository than the one being guarded."
+    fi
+    echo "$SELF: WARNING — script at $script_dir is outside the repo being checked ($toplevel)" >&2
+fi
+
+# --- 3. resolve the range, fail closed -------------------------------------
+if [ "$explicit" -eq 0 ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null) || base=""
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null) || tip=""
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        die 2 "cannot resolve main@origin..@- via jj (is jj available and is this a jj workspace?).
+  Pass an explicit range instead, e.g. $SELF '<base-sha>..<tip-sha>'."
+    fi
+    range="$base..$tip"
+elif [ "$rawmode" -eq 0 ]; then
+    case "$range" in
+        *..*) : ;;
+        *) die 2 "explicit range '$range' does not contain '..'.
+  A bare revision means 'all history reachable from it' to git, which is not
+  what this guard is for. Pass '<base>..<tip>'." ;;
+    esac
+fi
+
+# --- 4. both endpoints must exist as commits in THIS repo ------------------
+# Skipped in raw rev-list mode: there is no "<a>..<b>" to split, and git itself
+# errors out on an unknown revision there, which step 5 turns into an ERROR.
+if [ "$rawmode" -eq 0 ]; then
+    left=${range%%..*}
+    right=${range#*..}
+    right=${right#.}          # tolerate the A...B form
+    [ -n "$left" ]  || die 2 "range '$range' has an empty left endpoint"
+    [ -n "$right" ] || die 2 "range '$range' has an empty right endpoint"
+    for ep in "$left" "$right"; do
+        git rev-parse --verify --quiet "$ep^{commit}" >/dev/null 2>&1 \
+            || die 2 "revision '$ep' (from range '$range') does not exist in the repository at $toplevel.
+  Either you are in the wrong clone, or the commit was never fetched here."
+    done
+fi
+
+# --- 5. enumerate the range, checking git's exit status --------------------
+if [ "$rawmode" -eq 1 ]; then
+    range="rev-list-args: $*"
+    revs=$(git rev-list "$@" 2>/dev/null)
+else
+    revs=$(git rev-list "$range" 2>/dev/null)
+fi
+rl=$?
+[ "$rl" -eq 0 ] || die 2 "git rev-list '$range' failed with status $rl"
+
+n=0
+for rev in $revs; do n=$((n + 1)); done
+
+if [ "$n" -eq 0 ]; then
+    if [ "$explicit" -eq 1 ]; then
+        die 2 "explicit range '$range' resolved to 0 commits.
+  You asked this guard to check a range and there is nothing in it. That is a
+  caller error (wrong base, wrong tip, or endpoints already equal) — it is NOT
+  a clean result, so it is reported as a failure rather than a pass."
+    fi
+    echo "$SELF: NOTHING TO PUSH — $range is empty; NO COMMITS WERE CHECKED"
+    exit 0
+fi
+
+# --- 6. the actual check ---------------------------------------------------
+found=0
+for rev in $revs; do
+    entries=$(git ls-tree --name-only "$rev" 2>/dev/null)
+    lt=$?
+    [ "$lt" -eq 0 ] || die 2 "git ls-tree failed (status $lt) on $rev — cannot verify this commit"
+    if printf '%s\n' "$entries" | "$GREP" -q '^\.jjconflict'; then
+        echo "CONFLICT COMMIT: $rev $(git log -1 --format=%s "$rev" 2>/dev/null)" >&2
+        found=1
+    fi
+done
+
+if [ "$found" -ne 0 ]; then
+    cat >&2 <<'EOF'
+
+DO NOT PUSH. The commits above are jj conflict commits with no real source tree.
+
+Resolve first, then re-check:
+  jj resolve --list                 # what is conflicted
+  jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
+EOF
+    echo "$SELF: FAIL — conflict tree(s) found in $range ($n commit(s) checked)"
+    exit 1
+fi
+
+echo "$SELF: PASS — $n commit(s) checked in $range, 0 conflict trees (repo $toplevel)"
+exit 0

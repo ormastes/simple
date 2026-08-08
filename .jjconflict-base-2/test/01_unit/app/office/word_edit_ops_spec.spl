@@ -1,0 +1,217 @@
+"""Word document editing operations spec.
+
+Verifies pure-function edit operations: find/replace, word/character/paragraph
+counts, and plain-text extraction. All functions work over the RichDocument
+model without mutating input."""
+
+use std.spec
+use app.office.file_formats.{parse_markdown_document, document_to_markdown}
+use app.office.word.edit_ops.{document_find, document_replace, document_stats, document_word_count_new, document_character_count, document_paragraph_count, document_plain_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+
+# Helper: build a test document from markdown
+fn _test_doc(md: text, title: text) -> RichDocument:
+    parse_markdown_document(md, title)
+
+# Helper: simple block
+fn _para(text_: text) -> DocBlock:
+    DocBlock(kind: BlockKind.Paragraph, spans: [TextSpan(text: text_, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")])
+
+# Helper: block with multiple spans (to test span-level replacement)
+fn _para_mixed(normal: text, bold: text, normal2: text) -> DocBlock:
+    DocBlock(kind: BlockKind.Paragraph, spans: [
+        TextSpan(text: normal, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: ""),
+        TextSpan(text: bold, style: InlineStyle.Bold, link_url: "", footnote_id: "", comment_id: "", revision_id: ""),
+        TextSpan(text: normal2, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+    ])
+
+describe "document find: locate text occurrences":
+    """Find returns hit locations as 'blockIndex:charOffset' strings."""
+
+    it "finds a single occurrence in a paragraph":
+        val doc = _test_doc("Hello world", "test")
+        val hits = document_find(doc, "world")
+        expect(hits.len()).to_equal(1)
+        expect(hits.get(0)).to_equal("0:6")
+
+    it "finds multiple occurrences in the same block":
+        val doc = _test_doc("hello hello hello", "test")
+        val hits = document_find(doc, "hello")
+        expect(hits.len()).to_equal(3)
+        expect(hits.get(0)).to_equal("0:0")
+        expect(hits.get(1)).to_equal("0:6")
+        expect(hits.get(2)).to_equal("0:12")
+
+    it "finds occurrences across multiple blocks":
+        val doc = _test_doc("Find me\n\nFind me again", "test")
+        val hits = document_find(doc, "Find")
+        expect(hits.len()).to_equal(2)
+        expect(hits.get(0)).to_equal("0:0")
+        expect(hits.get(1)).to_equal("1:0")
+
+    it "is case-sensitive":
+        val doc = _test_doc("Find FIND find", "test")
+        val hits = document_find(doc, "find")
+        expect(hits.len()).to_equal(1)
+        expect(hits.get(0)).to_equal("0:10")
+
+    it "returns empty array when text not found":
+        val doc = _test_doc("hello world", "test")
+        val hits = document_find(doc, "xyz")
+        expect(hits.len()).to_equal(0)
+
+describe "document replace: modify text in spans":
+    """Replace all occurrences; preserves styles and block structure."""
+
+    it "replaces a single occurrence":
+        val doc = _test_doc("Hello world", "test")
+        val replaced = document_replace(doc, "world", "Simple")
+        val text = document_to_markdown(replaced)
+        expect(text).to_contain("Hello Simple")
+        expect(text.contains("world")).to_be(false)
+
+    it "replaces multiple occurrences":
+        val doc = _test_doc("cat cat cat", "test")
+        val replaced = document_replace(doc, "cat", "dog")
+        val text = document_to_markdown(replaced)
+        expect(text).to_equal("dog dog dog")
+
+    it "preserves span styles during replacement":
+        val doc = RichDocument(title: "test", blocks: [_para_mixed("prefix ", "bold", " suffix")], comments: [], revisions: [])
+        val replaced = document_replace(doc, "prefix", "new")
+        val block = replaced.blocks.get(0)
+        val span0 = block.spans.get(0)
+        expect(span0.text).to_equal("new ")
+        expect(span0.style).to_equal(InlineStyle.Normal)
+        val span1 = block.spans.get(1)
+        expect(span1.style).to_equal(InlineStyle.Bold)
+
+    it "replaces text within bold spans":
+        val doc = RichDocument(title: "test", blocks: [_para_mixed("", "find me", "")], comments: [], revisions: [])
+        val replaced = document_replace(doc, "find", "found")
+        val span = replaced.blocks.get(0).spans.get(1)
+        expect(span.text).to_equal("found me")
+        expect(span.style).to_equal(InlineStyle.Bold)
+
+    it "replaces across block boundaries (separately in each block)":
+        val doc = _test_doc("The cat\n\nThe dog", "test")
+        val replaced = document_replace(doc, "The", "A")
+        val text = document_to_markdown(replaced)
+        expect(text).to_contain("A cat")
+        expect(text).to_contain("A dog")
+
+    it "returns unchanged document when needle not found":
+        val doc = _test_doc("hello world", "test")
+        val replaced = document_replace(doc, "xyz", "abc")
+        val text = document_to_markdown(replaced)
+        expect(text).to_equal("hello world")
+
+    it "handles empty needle (returns unchanged)":
+        val doc = _test_doc("hello", "test")
+        val replaced = document_replace(doc, "", "x")
+        val text = document_to_markdown(replaced)
+        expect(text).to_equal("hello")
+
+describe "document plain text: extract unformatted text":
+    """Plain text drops all markup, prefixes bullets, removes heading markers."""
+
+    it "joins blocks with newlines":
+        val doc = _test_doc("First\n\nSecond", "test")
+        val plain = document_plain_text(doc)
+        expect(plain).to_contain("First")
+        expect(plain).to_contain("Second")
+        # Should have a newline between them
+        expect(plain.contains("First\n")).to_be(true)
+
+    it "drops inline styles (bold/italic/code)":
+        val doc = _test_doc("This **is bold** and *italic*.", "test")
+        val plain = document_plain_text(doc)
+        expect(plain).to_equal("This is bold and italic.")
+
+    it "prefixes bullet items with '- '":
+        val doc = _test_doc("- item one\n- item two", "test")
+        val plain = document_plain_text(doc)
+        expect(plain).to_contain("- item one")
+        expect(plain).to_contain("- item two")
+
+    it "removes heading markers":
+        val doc = _test_doc("# Title\n\n## Subtitle", "test")
+        val plain = document_plain_text(doc)
+        expect(plain).to_contain("Title")
+        expect(plain).to_contain("Subtitle")
+        expect(plain.contains("#")).to_be(false)
+
+describe "document statistics: word/character/paragraph counts":
+    """Counts are accurate for real documents."""
+
+    it "counts words correctly (whitespace-separated tokens)":
+        val doc = _test_doc("one two three", "test")
+        val count = document_word_count_new(doc)
+        expect(count).to_equal(3)
+
+    it "counts words in multiple paragraphs":
+        val doc = _test_doc("one two\n\nthree four five", "test")
+        val count = document_word_count_new(doc)
+        expect(count).to_equal(5)
+
+    it "ignores extra whitespace when counting words":
+        val doc = _test_doc("one  two   three", "test")
+        val count = document_word_count_new(doc)
+        expect(count).to_equal(3)
+
+    it "counts characters (text without markup)":
+        val doc = _test_doc("hello world", "test")
+        val count = document_character_count(doc)
+        # "hello world" = 11 characters
+        expect(count).to_equal(11)
+
+    it "counts characters across multiple blocks":
+        val doc = _test_doc("five\n\nfour", "test")
+        val count = document_character_count(doc)
+        # "five" = 4, "four" = 4, total 8
+        expect(count).to_equal(8)
+
+    it "counts paragraphs (non-empty text blocks)":
+        val doc = _test_doc("para 1\n\npara 2\n\npara 3", "test")
+        val count = document_paragraph_count(doc)
+        expect(count).to_equal(3)
+
+    it "excludes empty blocks from paragraph count":
+        val doc = RichDocument(title: "test", blocks: [
+            _para("text"),
+            _para(""),
+            _para("more")
+        ], comments: [], revisions: [])
+        val count = document_paragraph_count(doc)
+        # Only 2 non-empty blocks
+        expect(count).to_equal(2)
+
+    it "returns all stats via document_stats struct":
+        val doc = _test_doc("one two\n\nthree four", "test")
+        val stats = document_stats(doc)
+        expect(stats.words).to_equal(4)
+        expect(stats.paragraphs).to_equal(2)
+        expect(stats.characters).to_be_greater_than(0)
+
+describe "round-trip workflow: find-replace-verify":
+    """Realistic workflow: find text, replace it, verify result."""
+
+    it "replaces **bold** text and keeps the bold markup":
+        val orig = "This **bold** word"
+        val doc = _test_doc(orig, "test")
+        val replaced = document_replace(doc, "bold", "EMPHASIZED")
+        val markdown = document_to_markdown(replaced)
+        expect(markdown).to_contain("**EMPHASIZED**")
+        expect(markdown.contains("**bold**")).to_be(false)
+
+    it "finds and replaces multiple instances, counts remain accurate":
+        val orig = "cat and cat and cat"
+        val doc = _test_doc(orig, "test")
+        val before_words = document_word_count_new(doc)
+        val replaced = document_replace(doc, "cat", "dog")
+        val after_words = document_word_count_new(replaced)
+        # Word count doesn't change (same number of words)
+        expect(before_words).to_equal(after_words)
+        val markdown = document_to_markdown(replaced)
+        expect(markdown.contains("cat")).to_be(false)
+        expect(markdown).to_contain("dog and dog and dog")

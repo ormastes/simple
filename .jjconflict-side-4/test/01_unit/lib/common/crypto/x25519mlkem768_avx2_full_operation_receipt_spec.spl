@@ -1,0 +1,215 @@
+# @tag: unit, crypto, x25519mlkem768, avx2, evidence, security
+
+use std.spec.{describe, it, expect, fail, step}
+use std.common.crypto.sha256.{sha256_text}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768Evidence,
+    X25519MlKem768KeyPair, X25519MlKem768Encapsulation,
+    X25519MlKem768Decapsulation,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceStatus}
+use lib.common.crypto.x25519_mlkem768.performance_attestation.{
+    X25519MlKem768PerformanceAttestation,
+    X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA,
+    X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI}
+use lib.common.crypto.x25519_mlkem768.avx2_full_operation_receipt.{
+    X25519MlKem768Avx2ReceiptBinding,
+    x25519_mlkem768_compose_avx2_full_operation_receipt}
+
+val _AVX2_SOURCE = "a" * 64
+val _AVX2_BINARY = "b" * 64
+val _AVX2_PROVENANCE = "c" * 64
+val _AVX2_CONFIGURATION = "d" * 64
+val _AVX2_RUNNER_ARTIFACT = "8" * 64
+val _AVX2_CRYPTO_SOURCE = "9" * 64
+
+fn _values(count: i64, value: i64) -> list:
+    var out = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _bytes(count: i64, value: u8) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < count:
+        out.push(value)
+        index = index + 1
+    out
+
+fn _evidence(operation: text, output_digest: text) -> X25519MlKem768Evidence:
+    X25519MlKem768Evidence(
+        requested_backend: X25519MlKem768Backend.Avx2,
+        selected_backend: X25519MlKem768Backend.Avx2,
+        attempts: ["candidate-only: not production-promoted"],
+        fallback_used: false,
+        fallback_reason: "",
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        configuration_digest: _AVX2_CONFIGURATION,
+        input_fixture_digest: "e" * 64,
+        source_digest: _AVX2_SOURCE,
+        artifact_digest: _AVX2_BINARY,
+        execution_proof_digest: _AVX2_BINARY,
+        kernel_invocations: 0,
+        simd_chunk_hits: 2,
+        observed_rvv_vlen_bits: 0,
+        operation: operation,
+        batch_size: 1,
+        output_digest: output_digest,
+        executor_identity: "native-avx2-candidate",
+        compiled: false,
+        submitted: false,
+        fence_completed: false,
+        device_readback: false,
+        oracle_match: true)
+
+fn _binding(keygen_output: text, encapsulate_output: text,
+        decapsulate_output: text) -> X25519MlKem768Avx2ReceiptBinding:
+    X25519MlKem768Avx2ReceiptBinding(
+        fixture_id: "x25519mlkem768-v1",
+        fixture_manifest_sha256: "1" * 64,
+        fixture_source_sha256: "2" * 64,
+        runner_source_sha256: "3" * 64,
+        runner_artifact_sha256: _AVX2_RUNNER_ARTIFACT,
+        crypto_source_sha256: _AVX2_CRYPTO_SOURCE,
+        stage4_source_revision: _AVX2_SOURCE,
+        stage4_binary_sha256: _AVX2_BINARY,
+        stage4_provenance_sha256: _AVX2_PROVENANCE,
+        measurement_qualification_sha256: "a" * 64,
+        qualified_timing_sha256: "0" * 64,
+        matrix_row_set_sha256: "b" * 64,
+        scalar_source_receipt_sha256: "c" * 64,
+        candidate_source_receipt_sha256: "d" * 64,
+        scalar_sample_set_sha256: "e" * 64,
+        candidate_sample_set_sha256: "f" * 64,
+        host_os: "linux", host_arch: "x86_64",
+        session_id: "synthetic-avx2-unit-session",
+        monotonic_clock_id: "monotonic-raw-nanoseconds",
+        expected_keygen_digest: sha256_text(keygen_output),
+        expected_encapsulate_digest: sha256_text(encapsulate_output),
+        expected_decapsulate_digest: sha256_text(decapsulate_output),
+        batch_size: 1)
+
+fn _roundtrip() -> (X25519MlKem768KeyPair,
+        X25519MlKem768Encapsulation, X25519MlKem768Decapsulation):
+    val keygen_output = "4" * 64
+    val encapsulate_output = "5" * 64
+    val shared = _values(64, 7)
+    val key_pair = X25519MlKem768KeyPair(
+        client_key_share: _values(1216, 1),
+        decapsulation_key: _values(2400, 2),
+        x25519_private_key: _bytes(32, 3),
+        evidence: _evidence("keygen", keygen_output))
+    val encapsulation = X25519MlKem768Encapsulation(
+        server_key_share: _values(1120, 4),
+        shared_secret: shared,
+        evidence: _evidence("encapsulate", encapsulate_output))
+    val decapsulation = X25519MlKem768Decapsulation(
+        shared_secret: shared,
+        evidence: _evidence("decapsulate", encapsulate_output))
+    (key_pair, encapsulation, decapsulation)
+
+fn _performance_attestation() -> X25519MlKem768PerformanceAttestation:
+    X25519MlKem768PerformanceAttestation(
+        schema: X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA,
+        status: X25519MlKem768EvidenceStatus.Pass,
+        reason: "native-full-operation-performance-admitted",
+        candidate_backend: X25519MlKem768EvidenceBackend.Avx2,
+        backend_identity: "cpu:avx2-native-device",
+        speedup_milli: X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI,
+        minimum_speedup_milli: X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI,
+        receipt_sha256: "6" * 64,
+        qualification_sha256: "a" * 64,
+        qualified_timing_sha256: "0" * 64,
+        matrix_row_set_sha256: "b" * 64,
+        scalar_source_receipt_sha256: "c" * 64,
+        candidate_source_receipt_sha256: "d" * 64,
+        scalar_sample_set_sha256: "e" * 64,
+        candidate_sample_set_sha256: "f" * 64,
+        host_os: "linux", host_arch: "x86_64",
+        session_id: "synthetic-avx2-unit-session",
+        monotonic_clock_id: "monotonic-raw-nanoseconds",
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        fixture_id: "x25519mlkem768-v1",
+        fixture_manifest_sha256: "1" * 64,
+        fixture_source_sha256: "2" * 64,
+        workload_configuration_sha256: "7" * 64,
+        backend_configuration_sha256: _AVX2_CONFIGURATION,
+        compiler_artifact_sha256: _AVX2_BINARY,
+        compiler_provenance_sha256: _AVX2_PROVENANCE,
+        compiler_source_revision: _AVX2_SOURCE,
+        runner_source_sha256: "3" * 64,
+        runner_artifact_sha256: _AVX2_RUNNER_ARTIFACT,
+        crypto_source_sha256: _AVX2_CRYPTO_SOURCE,
+        accelerator_source_sha256: "",
+        accelerator_artifact_sha256: "",
+        accelerator_build_binding_sha256: "",
+        batch_size: 1)
+
+describe "X25519MLKEM768 native AVX2 full-operation receipt":
+    it "emits a promotable receipt only with a matching typed performance attestation":
+        val (key_pair, encapsulation, decapsulation) = _roundtrip()
+        val result = x25519_mlkem768_compose_avx2_full_operation_receipt(
+            _binding(key_pair.evidence.output_digest,
+                encapsulation.evidence.output_digest,
+                decapsulation.evidence.output_digest),
+            key_pair, encapsulation, decapsulation,
+            Some(_performance_attestation()))
+        expect(result.is_ok()).to_be(true)
+        val receipt = result.unwrap()
+        expect(receipt.promotion_eligible).to_be(true)
+        expect(receipt.reason).to_equal(
+            "native-avx2-full-operation-performance-admitted")
+
+    it "validates native SIMD outputs but blocks correctness-only promotion":
+        step("Validate one complete AVX2 keygen encapsulate and decapsulate result")
+        val (key_pair, encapsulation, decapsulation) = _roundtrip()
+        val binding = _binding(
+            key_pair.evidence.output_digest,
+            encapsulation.evidence.output_digest,
+            decapsulation.evidence.output_digest)
+        val result = x25519_mlkem768_compose_avx2_full_operation_receipt(
+            binding, key_pair, encapsulation, decapsulation)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal(
+            "avx2-performance-attestation-missing")
+
+    it "rejects a scalar fallback disguised as AVX2 evidence":
+        step("Tamper one selected backend before receipt composition")
+        val (key_pair, encapsulation, decapsulation) = _roundtrip()
+        var tampered = encapsulation
+        tampered.evidence.selected_backend = X25519MlKem768Backend.ScalarCpu
+        val result = x25519_mlkem768_compose_avx2_full_operation_receipt(
+            _binding(key_pair.evidence.output_digest,
+                encapsulation.evidence.output_digest,
+                decapsulation.evidence.output_digest),
+            key_pair, tampered, decapsulation)
+        expect(result.is_err()).to_be(true)
+
+    it "rejects mismatched compiler artifacts and absolute outputs":
+        step("Bind a different Stage-4 binary than the operation executed")
+        val (key_pair, encapsulation, decapsulation) = _roundtrip()
+        var wrong_binary = _binding(
+            key_pair.evidence.output_digest,
+            encapsulation.evidence.output_digest,
+            decapsulation.evidence.output_digest)
+        wrong_binary.stage4_binary_sha256 = "f" * 64
+        val artifact_result = x25519_mlkem768_compose_avx2_full_operation_receipt(
+            wrong_binary, key_pair, encapsulation, decapsulation)
+        expect(artifact_result.is_err()).to_be(true)
+
+        step("Bind an absolute-oracle digest for different public output")
+        var wrong_oracle = _binding(
+            key_pair.evidence.output_digest,
+            encapsulation.evidence.output_digest,
+            decapsulation.evidence.output_digest)
+        wrong_oracle.expected_decapsulate_digest = "0" * 64
+        val oracle_result = x25519_mlkem768_compose_avx2_full_operation_receipt(
+            wrong_oracle, key_pair, encapsulation, decapsulation)
+        expect(oracle_result.is_err()).to_be(true)

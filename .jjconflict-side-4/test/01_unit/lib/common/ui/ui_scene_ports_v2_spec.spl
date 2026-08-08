@@ -1,0 +1,332 @@
+# @cover src/lib/common/ui/ui_scene_slice.spl 70%
+# @cover src/lib/common/ui/draw_ir_v3_ports_v2.spl 70%
+# @tag: unit, ui, draw_ir, draw_ir_v3, unified_packed_ui_scene, l1
+
+use std.spec
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_NO_ID,
+    DrawIrV3Command,
+    DrawIrV3Geometry,
+    DrawIrV3Paint,
+    DrawIrV3TextRun,
+    DrawIrV3Glyph,
+    DrawIrV3Resource,
+    DrawIrV3PathSpan,
+    DrawIrV3PathPoint,
+    DrawIrV3Clip,
+    DrawIrV3Transform,
+    DrawIrV3HitShape,
+    DrawIrV3Provenance,
+    draw_ir_v3_empty_command
+}
+use common.ui.ui_scene_counts.{
+    UiSceneCounts,
+    UiSceneRanges,
+    UiSceneRange,
+    UiSceneOverflowReceipt,
+    UI_SCENE_TABLE_COMMANDS,
+    UI_SCENE_TABLE_OWNER_RECORDS,
+    UI_SCENE_OVERFLOW_DEFICIT,
+    UI_PRODUCER_GUI,
+    ui_scene_counts_zero,
+    ui_scene_ranges_zero
+}
+use common.ui.ui_scene_owner_table.{UiOwnerRecord, MenuActionBinding}
+use common.ui.ui_scene_slice.{
+    UiSceneSlice,
+    UiSceneWriteVerdict,
+    UiSceneEmitResult,
+    DrawIrV3Writer,
+    UiOwnerWriter,
+    UiActionWriter,
+    UiPackedProducer
+}
+use common.ui.draw_ir_v3_ports_v2.{
+    PackedSceneRef,
+    Prepared2DRef,
+    DirtyRangeRef,
+    DrawIrV3SubmitReceipt,
+    PackedDrawPortV2,
+    DRAW_IR_V3_PORT_V2_REASON_OK,
+    DRAW_IR_V3_PORT_V2_REASON_STALE_GENERATION
+}
+
+# --- fakes: minimal trait implementations proving the vocabulary is
+# implementable, not production writers/producers/ports. -------------------
+
+class FakeDrawIrV3Writer:
+    command_count: u32
+    command_cap: u32
+
+impl DrawIrV3Writer for FakeDrawIrV3Writer:
+    me put_command(row: DrawIrV3Command) -> bool:
+        if self.command_count >= self.command_cap:
+            return false
+        self.command_count = self.command_count + 1u32
+        true
+    me put_geometry(row: DrawIrV3Geometry) -> bool:
+        true
+    me put_paint(row: DrawIrV3Paint) -> bool:
+        true
+    me put_text_run(row: DrawIrV3TextRun) -> bool:
+        true
+    me put_glyph(row: DrawIrV3Glyph) -> bool:
+        true
+    me put_resource(row: DrawIrV3Resource) -> bool:
+        true
+    me put_path_span(row: DrawIrV3PathSpan) -> bool:
+        true
+    me put_path_point(row: DrawIrV3PathPoint) -> bool:
+        true
+    me put_clip(row: DrawIrV3Clip) -> bool:
+        true
+    me put_transform(row: DrawIrV3Transform) -> bool:
+        true
+    me put_hit_shape(row: DrawIrV3HitShape) -> bool:
+        true
+    me put_provenance(row: DrawIrV3Provenance) -> bool:
+        true
+    me cursor(table_id: u16) -> u32:
+        self.command_count
+    me finish() -> UiSceneWriteVerdict:
+        if self.command_count == self.command_cap:
+            return UiSceneWriteVerdict.Exact
+        UiSceneWriteVerdict.Deficit(
+            table_id: UI_SCENE_TABLE_COMMANDS,
+            n: self.command_cap - self.command_count
+        )
+
+class FakeUiOwnerWriter:
+    count: u32
+    cap: u32
+
+impl UiOwnerWriter for FakeUiOwnerWriter:
+    me put_owner_record(row: UiOwnerRecord) -> bool:
+        if self.count >= self.cap:
+            return false
+        self.count = self.count + 1u32
+        true
+    me cursor() -> u32:
+        self.count
+    me finish() -> UiSceneWriteVerdict:
+        if self.count == self.cap:
+            return UiSceneWriteVerdict.Exact
+        UiSceneWriteVerdict.Deficit(table_id: UI_SCENE_TABLE_OWNER_RECORDS, n: self.cap - self.count)
+
+class FakeUiActionWriter:
+    count: u32
+
+impl UiActionWriter for FakeUiActionWriter:
+    me put_action_binding(row: MenuActionBinding) -> bool:
+        self.count = self.count + 1u32
+        true
+    me cursor() -> u32:
+        self.count
+    me finish() -> UiSceneWriteVerdict:
+        UiSceneWriteVerdict.Exact
+
+class FakeUiPackedProducer:
+    kind: u16
+    id_val: u32
+    commands_to_emit: u32
+
+impl UiPackedProducer for FakeUiPackedProducer:
+    me producer_kind() -> u16:
+        self.kind
+    me producer_id() -> u32:
+        self.id_val
+    me count(snapshot_id: u64, counts: UiSceneCounts) -> UiSceneCounts:
+        counts
+    me emit(
+        snapshot_id: u64, ranges: UiSceneRanges,
+        draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
+    ) -> UiSceneEmitResult:
+        var written = 0u32
+        while written < self.commands_to_emit:
+            draw.put_command(draw_ir_v3_empty_command())
+            written = written + 1u32
+        val verdict = draw.finish()
+        match verdict:
+            UiSceneWriteVerdict.Exact:
+                return UiSceneEmitResult.Emitted(
+                    UiSceneSlice(
+                        scene_slot: 1u32, scene_generation: 1u32,
+                        root_component_id: 0u32, ranges: ranges
+                    )
+                )
+            UiSceneWriteVerdict.Deficit(table_id, n):
+                return UiSceneEmitResult.Refused(
+                    UiSceneOverflowReceipt(
+                        table_id: table_id, kind: UI_SCENE_OVERFLOW_DEFICIT,
+                        required: n, capacity: 0u32,
+                        producer_kind: self.kind, producer_id: self.id_val,
+                        snapshot_id: snapshot_id
+                    )
+                )
+            UiSceneWriteVerdict.Surplus(table_id, n):
+                return UiSceneEmitResult.Refused(
+                    UiSceneOverflowReceipt(
+                        table_id: table_id, kind: UI_SCENE_OVERFLOW_DEFICIT,
+                        required: n, capacity: 0u32,
+                        producer_kind: self.kind, producer_id: self.id_val,
+                        snapshot_id: snapshot_id
+                    )
+                )
+
+class FakePackedDrawPortV2:
+    caps: u32
+    present_ok: bool
+
+impl PackedDrawPortV2 for FakePackedDrawPortV2:
+    me capabilities() -> u32:
+        self.caps
+    me submit_scene_ref(
+        scene: PackedSceneRef, prepared: Prepared2DRef, dirty: DirtyRangeRef
+    ) -> DrawIrV3SubmitReceipt:
+        if scene.scene_generation != prepared.scene_generation:
+            return DrawIrV3SubmitReceipt(
+                accepted: false, reason: DRAW_IR_V3_PORT_V2_REASON_STALE_GENERATION,
+                scene_generation: scene.scene_generation, commands_seen: 0u32
+            )
+        DrawIrV3SubmitReceipt(
+            accepted: true, reason: DRAW_IR_V3_PORT_V2_REASON_OK,
+            scene_generation: scene.scene_generation, commands_seen: 4u32
+        )
+    me present(scene_generation: u32) -> bool:
+        self.present_ok
+
+describe "UiPackedProducer / writer contract (design section 2.2, 2.3)":
+    """A producer that writes exactly the reserved rows gets Emitted; one
+    that writes fewer gets Refused with a Deficit receipt naming the exact
+    shortfall. Emit never clamps."""
+
+    it "should emit a slice when the producer writes exactly the reserved COMMANDS rows":
+        step("A writer reserved for 2 commands, a producer that writes exactly 2")
+        val writer = FakeDrawIrV3Writer(command_count: 0u32, command_cap: 2u32)
+        val owners = FakeUiOwnerWriter(count: 0u32, cap: 0u32)
+        val actions = FakeUiActionWriter(count: 0u32)
+        val producer = FakeUiPackedProducer(kind: UI_PRODUCER_GUI, id_val: 5u32, commands_to_emit: 2u32)
+
+        val result = producer.emit(1u64, ui_scene_ranges_zero(), writer, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(1u32)
+                expect(slice.scene_generation).to_equal(1u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+    it "should refuse with a Deficit receipt when the producer writes fewer rows than reserved":
+        step("A writer reserved for 3 commands, a producer that writes only 2")
+        val writer = FakeDrawIrV3Writer(command_count: 0u32, command_cap: 3u32)
+        val owners = FakeUiOwnerWriter(count: 0u32, cap: 0u32)
+        val actions = FakeUiActionWriter(count: 0u32)
+        val producer = FakeUiPackedProducer(kind: UI_PRODUCER_GUI, id_val: 5u32, commands_to_emit: 2u32)
+
+        val result = producer.emit(9u64, ui_scene_ranges_zero(), writer, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(true).to_equal(false)
+            UiSceneEmitResult.Refused(receipt):
+                expect(receipt.table_id).to_equal(UI_SCENE_TABLE_COMMANDS)
+                expect(receipt.required).to_equal(1u32)
+                expect(receipt.kind).to_equal(UI_SCENE_OVERFLOW_DEFICIT)
+                expect(receipt.snapshot_id).to_equal(9u64)
+
+    it "should refuse a bounds-checked put_command once the writer's capacity is reached":
+        step("A writer reserved for 1 command sees 2 attempted writes")
+        val writer = FakeDrawIrV3Writer(command_count: 0u32, command_cap: 1u32)
+        val first = writer.put_command(draw_ir_v3_empty_command())
+        val second = writer.put_command(draw_ir_v3_empty_command())
+
+        expect(first).to_equal(true)
+        expect(second).to_equal(false)
+        expect(writer.cursor(UI_SCENE_TABLE_COMMANDS)).to_equal(1u32)
+
+    it "should construct a UiSceneWriteVerdict.Surplus carrying the table and overage":
+        val verdict = UiSceneWriteVerdict.Surplus(table_id: UI_SCENE_TABLE_COMMANDS, n: 5u32)
+        match verdict:
+            UiSceneWriteVerdict.Exact:
+                expect(true).to_equal(false)
+            UiSceneWriteVerdict.Deficit(table_id, n):
+                expect(true).to_equal(false)
+            UiSceneWriteVerdict.Surplus(table_id, n):
+                expect(table_id).to_equal(UI_SCENE_TABLE_COMMANDS)
+                expect(n).to_equal(5u32)
+
+    it "should let an owner writer reach Exact when the reserved row count is written":
+        val owners = FakeUiOwnerWriter(count: 0u32, cap: 1u32)
+        val put_ok = owners.put_owner_record(
+            UiOwnerRecord(
+                producer_kind: UI_PRODUCER_GUI, event_policy: 0u16,
+                semantic_id: 1u32, semantic_generation: 1u32,
+                parent_owner_id: DRAW_IR_V3_NO_ID, action_binding_id: DRAW_IR_V3_NO_ID
+            )
+        )
+        expect(put_ok).to_equal(true)
+        match owners.finish():
+            UiSceneWriteVerdict.Exact:
+                expect(owners.cursor()).to_equal(1u32)
+            UiSceneWriteVerdict.Deficit(table_id, n):
+                expect(true).to_equal(false)
+            UiSceneWriteVerdict.Surplus(table_id, n):
+                expect(true).to_equal(false)
+
+    it "should construct a UiSceneSlice directly from its four fields":
+        val slice = UiSceneSlice(
+            scene_slot: 3u32, scene_generation: 7u32,
+            root_component_id: 11u32, ranges: ui_scene_ranges_zero()
+        )
+        expect(slice.scene_slot).to_equal(3u32)
+        expect(slice.scene_generation).to_equal(7u32)
+        expect(slice.root_component_id).to_equal(11u32)
+
+    it "should track an action writer's row count via cursor":
+        val actions = FakeUiActionWriter(count: 0u32)
+        val binding = MenuActionBinding(
+            app_id: 1u32, app_generation: 1u32, menu_revision: 1u32,
+            action_id: 2u32, default_target_owner_id: DRAW_IR_V3_NO_ID
+        )
+        actions.put_action_binding(binding)
+        actions.put_action_binding(binding)
+        expect(actions.cursor()).to_equal(2u32)
+        match actions.finish():
+            UiSceneWriteVerdict.Exact:
+                expect(true).to_equal(true)
+            UiSceneWriteVerdict.Deficit(table_id, n):
+                expect(true).to_equal(false)
+            UiSceneWriteVerdict.Surplus(table_id, n):
+                expect(true).to_equal(false)
+
+describe "PackedDrawPortV2 / versioned reference submission (design section 2.6)":
+    """Submission is by stable reference (slot+generation), never by value;
+    a stale generation between the scene ref and its Prepared2D sidecar is
+    refused with the new port-level reason code, not silently accepted."""
+
+    it "should accept a submission when scene and Prepared2D generations match":
+        val port = FakePackedDrawPortV2(caps: 3u32, present_ok: true)
+        val scene = PackedSceneRef(object_slot: 1u32, object_generation: 1u32, scene_id: 9u32, scene_generation: 4u32)
+        val prepared = Prepared2DRef(batches: UiSceneRange(start: 0u32, count: 2u32), scene_generation: 4u32)
+        val dirty = DirtyRangeRef(dirty_upload: UiSceneRange(start: 0u32, count: 1u32), scene_generation: 4u32)
+
+        val receipt = port.submit_scene_ref(scene, prepared, dirty)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.reason).to_equal(DRAW_IR_V3_PORT_V2_REASON_OK)
+        expect(receipt.scene_generation).to_equal(4u32)
+        expect(receipt.commands_seen).to_equal(4u32)
+
+    it "should refuse a submission when the Prepared2D generation is stale relative to the scene":
+        val port = FakePackedDrawPortV2(caps: 3u32, present_ok: true)
+        val scene = PackedSceneRef(object_slot: 1u32, object_generation: 1u32, scene_id: 9u32, scene_generation: 5u32)
+        val prepared = Prepared2DRef(batches: UiSceneRange(start: 0u32, count: 2u32), scene_generation: 4u32)
+        val dirty = DirtyRangeRef(dirty_upload: UiSceneRange(start: 0u32, count: 1u32), scene_generation: 5u32)
+
+        val receipt = port.submit_scene_ref(scene, prepared, dirty)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(DRAW_IR_V3_PORT_V2_REASON_STALE_GENERATION)
+
+    it "should report present() as a pass-through capability call":
+        val ok_port = FakePackedDrawPortV2(caps: 1u32, present_ok: true)
+        val down_port = FakePackedDrawPortV2(caps: 1u32, present_ok: false)
+        expect(ok_port.present(4u32)).to_equal(true)
+        expect(down_port.present(4u32)).to_equal(false)
+        expect(ok_port.capabilities()).to_equal(1u32)

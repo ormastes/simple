@@ -798,6 +798,25 @@ Avoid boolean-wrapper assertions such as `expect(a == b).to_equal(true)` or
 `to_equal`, `to_be_greater_than`, `to_contain`, or `to_be_nil`; use
 `to_be(true/false)` only when the boolean itself is the behavior being tested.
 
+### Notebook lanes
+
+Notebook-lane specs verify interactive Python/computational-notebook sessions
+(Jupyter, Codex) without requiring host QEMU, CUDA, or Vulkan. The
+`NotebookExecutor` trait (`src/lib/nogc_sync_mut/notebook/executor.spl`) is the
+session seam: mode selection (`%mode`/`%%mode` magics), cell execution, probing
+(available/skip:/blocked:), and interrupt/reset/shutdown.
+
+Lane-gated specs use the composite spec grammar verbatim (`test_executor_composite_parse.spl`) and
+reuse probing wording (skip: / blocked:) with the test runner. Test tiers:
+- `test/01_unit/lib/notebook/` — unit tests for session lifecycle, cell-delta
+  execution, magics parsing, and lane locks
+- `test/03_system/jupyter/` — system specs for live Jupyter sessions
+
+Write SKIP-clean specs: lanes must gracefully skip when hardware is absent
+(no host GPU, no QEMU boot). Link `doc/00_llm_process/feature_expert/notebook_lanes/skill.md`
+for design and magics reference. See `doc/07_guide/app/tools/jupyter.md` for the user-facing
+Jupyter integration guide.
+
 ### GPU-offload and effect discriminators
 
 When a feature claims work is offloaded to the GPU (or that an effect like

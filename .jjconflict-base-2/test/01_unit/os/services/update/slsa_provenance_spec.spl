@@ -1,0 +1,252 @@
+# @cover src/os/services/update/slsa_provenance.spl 80%
+"""
+# SLSA Provenance Attestation Verifier Specification (Phase 5 — updates/recovery)
+
+**Category:** Update security
+**Status:** Model
+
+## Overview
+
+Models a SLSA-style build provenance attestation and verifier that
+complements the TUF metadata trust model (`tuf_metadata.spl`): TUF verifies
+WHAT is trusted (signed metadata, freshness, non-rollback); SLSA verifies HOW
+an artifact was built (a trusted builder, from pinned source, at a sufficient
+provenance level). Attestation signatures are modeled as already verified —
+no real crypto, build system, or network here.
+
+Absolute oracles: a well-formed attestation from a trusted builder, for the
+exact artifact, at the required SLSA level, is ACCEPTED; each of four gaps is
+REJECTED with its own distinct reason code; and the combined TUF+SLSA gate
+accepts only when BOTH sides accept.
+"""
+
+use std.spec
+use os.services.update.tuf_metadata.{VerifyOutcome}
+use os.services.update.slsa_provenance.{
+    BuilderIdentity,
+    Provenance,
+    verify_builder_trusted,
+    verify_subject_matches,
+    verify_source_pinned,
+    verify_level,
+    verify_provenance,
+    verify_tuf_and_slsa,
+    SLSA_ACCEPTED,
+    SLSA_UNTRUSTED_BUILDER,
+    SLSA_SUBJECT_MISMATCH,
+    SLSA_UNPINNED_SOURCE,
+    SLSA_LEVEL_TOO_LOW
+}
+
+# ----------------------------------------------------------------------------
+# Builders — return fresh, well-formed values.
+# ----------------------------------------------------------------------------
+
+fn mk_trusted_builders() -> List<BuilderIdentity>:
+    return [
+        BuilderIdentity(id: "simpleos-ci-builder-1", trusted: true),
+        BuilderIdentity(id: "legacy-builder-revoked", trusted: false)
+    ]
+
+fn mk_provenance(level: u32) -> Provenance:
+    return Provenance(
+        subject_name: "simple-cli-1.4.0",
+        subject_digest: "sha256:artifactdigestabc123",
+        builder_id: "simpleos-ci-builder-1",
+        build_type: "https://simpleos.dev/build-types/spipe@v1",
+        source_uri: "git+https://github.com/ormastes/simple@main",
+        source_digest: "sha256:sourcedigestdef456",
+        materials: ["toolchain:clang-18", "base:simpleos-minimal"],
+        slsa_level: level)
+
+fn mk_tuf_accepted() -> VerifyOutcome:
+    return VerifyOutcome(accepted: true, reason_code: 0, reason: "accepted")
+
+fn mk_tuf_rejected() -> VerifyOutcome:
+    return VerifyOutcome(accepted: false, reason_code: 1, reason: "signer key not in root trusted set")
+
+# ----------------------------------------------------------------------------
+# Verifier primitives
+# ----------------------------------------------------------------------------
+
+describe "SLSA verifier primitives":
+    """The pure per-check functions each enforce one provenance defense."""
+
+    it "verify_builder_trusted accepts a known, trusted builder":
+        """The provenance's builder_id is present and marked trusted."""
+        val prov = mk_provenance(3)
+        assert_true(verify_builder_trusted(prov, mk_trusted_builders()))
+
+    it "verify_builder_trusted rejects an unlisted builder":
+        """A builder_id absent from the trusted list is denied."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "unknown-builder", build_type: "t", source_uri: "u",
+            source_digest: "d", materials: [], slsa_level: 3)
+        assert_false(verify_builder_trusted(prov, mk_trusted_builders()))
+
+    it "verify_builder_trusted rejects a listed-but-revoked builder":
+        """A builder_id present in the list but marked untrusted is denied."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "legacy-builder-revoked", build_type: "t", source_uri: "u",
+            source_digest: "d", materials: [], slsa_level: 3)
+        assert_false(verify_builder_trusted(prov, mk_trusted_builders()))
+
+    it "verify_subject_matches accepts the exact attested artifact":
+        """Name and digest both match the presented artifact."""
+        val prov = mk_provenance(3)
+        assert_true(verify_subject_matches(prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123"))
+
+    it "verify_subject_matches rejects a digest for a different artifact":
+        """A validly-attested subject for ANOTHER artifact must not pass."""
+        val prov = mk_provenance(3)
+        assert_false(verify_subject_matches(prov, "simple-cli-1.4.0", "sha256:swappeddigest999"))
+
+    it "verify_source_pinned accepts a non-empty source uri and digest":
+        """Both source_uri and source_digest are present."""
+        assert_true(verify_source_pinned(mk_provenance(3)))
+
+    it "verify_source_pinned rejects an empty source_digest":
+        """An unpinned source cannot back a supply-chain claim."""
+        val prov = Provenance(
+            subject_name: "n", subject_digest: "d", builder_id: "simpleos-ci-builder-1",
+            build_type: "t", source_uri: "git+https://example/src", source_digest: "",
+            materials: [], slsa_level: 3)
+        assert_false(verify_source_pinned(prov))
+
+    it "verify_level accepts a level at or above the required floor":
+        """slsa_level 3 satisfies a required level of 3."""
+        assert_true(verify_level(mk_provenance(3), 3))
+
+    it "verify_level rejects a level below the required floor":
+        """slsa_level 1 does not satisfy a required level of 3."""
+        assert_false(verify_level(mk_provenance(1), 3))
+
+# ----------------------------------------------------------------------------
+# Full pipeline — acceptance
+# ----------------------------------------------------------------------------
+
+describe "SLSA full verification — well-formed attestation":
+    """A trusted-builder, subject-matched, pinned-source, sufficient-level
+    attestation passes."""
+
+    it "accepts a well-formed attestation":
+        """All four checks pass; outcome is accepted with reason code 0."""
+        val prov = mk_provenance(3)
+        val outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        expect(outcome.accepted).to_equal(true)
+        expect(outcome.reason_code).to_equal(SLSA_ACCEPTED)
+
+# ----------------------------------------------------------------------------
+# Full pipeline — each gap rejected with its distinct reason
+# ----------------------------------------------------------------------------
+
+describe "SLSA full verification — gaps rejected":
+    """Every provenance gap fails closed with a distinct reason code."""
+
+    it "rejects an untrusted builder":
+        """builder_id not on the trusted list yields SLSA_UNTRUSTED_BUILDER."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "unknown-builder", build_type: "t",
+            source_uri: "git+https://example/src", source_digest: "sha256:d",
+            materials: [], slsa_level: 3)
+        val outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(SLSA_UNTRUSTED_BUILDER)
+
+    it "rejects a subject digest mismatch (attestation-swap attack)":
+        """A trusted-builder attestation FOR A DIFFERENT artifact yields
+        SLSA_SUBJECT_MISMATCH — it must not be accepted for this artifact."""
+        val prov = mk_provenance(3)
+        val outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:swappeddigest999",
+            mk_trusted_builders(), 3)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(SLSA_SUBJECT_MISMATCH)
+
+    it "rejects an unpinned source":
+        """An empty source_uri yields SLSA_UNPINNED_SOURCE."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "simpleos-ci-builder-1", build_type: "t",
+            source_uri: "", source_digest: "sha256:d",
+            materials: [], slsa_level: 3)
+        val outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(SLSA_UNPINNED_SOURCE)
+
+    it "rejects a slsa_level below the required floor":
+        """slsa_level 1 with a required level of 3 yields SLSA_LEVEL_TOO_LOW."""
+        val prov = mk_provenance(1)
+        val outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(SLSA_LEVEL_TOO_LOW)
+
+# ----------------------------------------------------------------------------
+# Combined TUF + SLSA defense-in-depth gate
+# ----------------------------------------------------------------------------
+
+describe "Combined TUF + SLSA gate":
+    """The combined gate accepts only when BOTH the TUF metadata-trust
+    outcome and the SLSA provenance outcome accept."""
+
+    it "accepts when both TUF and SLSA accept":
+        """Defense-in-depth gate passes only on a double-accept."""
+        val prov = mk_provenance(3)
+        val slsa_outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        val combined = verify_tuf_and_slsa(mk_tuf_accepted(), slsa_outcome)
+        expect(combined.accepted).to_equal(true)
+
+    it "rejects when TUF accepts but SLSA rejects":
+        """A trusted, fresh, non-rollback update from an untrusted builder
+        is still denied — SLSA is not bypassed by a passing TUF check."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "unknown-builder", build_type: "t",
+            source_uri: "git+https://example/src", source_digest: "sha256:d",
+            materials: [], slsa_level: 3)
+        val slsa_outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        val combined = verify_tuf_and_slsa(mk_tuf_accepted(), slsa_outcome)
+        expect(combined.accepted).to_equal(false)
+        expect(combined.reason).to_contain("slsa:")
+
+    it "rejects when SLSA accepts but TUF rejects":
+        """A well-built, well-attested artifact riding on untrusted/rolled-
+        back metadata is still denied — TUF is not bypassed by a passing
+        SLSA check."""
+        val prov = mk_provenance(3)
+        val slsa_outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        val combined = verify_tuf_and_slsa(mk_tuf_rejected(), slsa_outcome)
+        expect(combined.accepted).to_equal(false)
+        expect(combined.reason).to_contain("tuf:")
+
+    it "rejects when both TUF and SLSA reject":
+        """Neither side masks the other; the combined reason mentions both."""
+        val prov = Provenance(
+            subject_name: "simple-cli-1.4.0", subject_digest: "sha256:artifactdigestabc123",
+            builder_id: "unknown-builder", build_type: "t",
+            source_uri: "git+https://example/src", source_digest: "sha256:d",
+            materials: [], slsa_level: 3)
+        val slsa_outcome = verify_provenance(
+            prov, "simple-cli-1.4.0", "sha256:artifactdigestabc123",
+            mk_trusted_builders(), 3)
+        val combined = verify_tuf_and_slsa(mk_tuf_rejected(), slsa_outcome)
+        expect(combined.accepted).to_equal(false)
+        expect(combined.reason).to_contain("tuf:")
+        expect(combined.reason).to_contain("slsa:")

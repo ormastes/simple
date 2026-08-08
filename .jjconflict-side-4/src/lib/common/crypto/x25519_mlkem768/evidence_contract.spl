@@ -1,0 +1,298 @@
+# Typed contract for the X25519MLKEM768 full-operation evidence runner.
+#
+# This module owns argument validation and canonical receipt rendering.  It
+# deliberately contains no backend dispatch and never accepts automatic
+# fallback: retained evidence must name the backend that actually ran.
+
+mod lib.common.crypto.x25519_mlkem768.evidence_contract
+
+val X25519_MLKEM768_EVIDENCE_MAX_BATCH: i64 = 1024
+
+enum X25519MlKem768EvidenceBackend:
+    ScalarCpu
+    Avx2
+    Neon
+    Rvv
+    Cuda
+    Vulkan
+    Metal
+
+enum X25519MlKem768EvidenceMode:
+    Native
+    QemuCorrectness
+
+enum X25519MlKem768EvidenceScope:
+    Correctness
+    FullOperation
+
+enum X25519MlKem768EvidenceStatus:
+    Pass
+    Fail
+    Blocked
+
+struct X25519MlKem768EvidenceCli:
+    fixture_manifest: text
+    fixture_source: text
+    runner_source: text
+    backend: X25519MlKem768EvidenceBackend
+    mode: X25519MlKem768EvidenceMode
+    scope: X25519MlKem768EvidenceScope
+    batch_size: i64
+
+struct X25519MlKem768RunReceipt:
+    schema: text
+    status: X25519MlKem768EvidenceStatus
+    reason: text
+    scope: X25519MlKem768EvidenceScope
+    requested_backend: X25519MlKem768EvidenceBackend
+    selected_backend: X25519MlKem768EvidenceBackend?
+    mode: X25519MlKem768EvidenceMode
+    emulated: bool
+    promotion_eligible: bool
+    implementation_version: text
+    profile_version: text
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    runner_source_sha256: text
+    batch_size: i64
+    client_share_bytes: i64
+    server_share_bytes: i64
+    shared_secret_bytes: i64
+    keygen_output_digest: text
+    encapsulate_output_digest: text
+    decapsulate_output_digest: text
+    scalar_roundtrip_match: bool
+    fallback_used: bool
+    absolute_oracle_match: bool
+    simd_chunk_hits: i64
+    observed_rvv_vlen_bits: i64
+    kernel_invocations: i64
+    compiled: bool
+    submitted: bool
+    fence_completed: bool
+    device_readback: bool
+    artifact_sha256: text
+    device_identity: text
+
+fn x25519_mlkem768_evidence_backend_name(
+        backend: X25519MlKem768EvidenceBackend) -> text:
+    if backend == X25519MlKem768EvidenceBackend.ScalarCpu: return "scalar-cpu"
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return "avx2"
+    if backend == X25519MlKem768EvidenceBackend.Neon: return "neon"
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return "rvv"
+    if backend == X25519MlKem768EvidenceBackend.Cuda: return "cuda"
+    if backend == X25519MlKem768EvidenceBackend.Vulkan: return "vulkan"
+    "metal"
+
+fn x25519_mlkem768_evidence_mode_name(
+        mode: X25519MlKem768EvidenceMode) -> text:
+    if mode == X25519MlKem768EvidenceMode.Native:
+        "native"
+    else:
+        "qemu-correctness"
+
+fn x25519_mlkem768_evidence_scope_name(
+        scope: X25519MlKem768EvidenceScope) -> text:
+    if scope == X25519MlKem768EvidenceScope.Correctness:
+        "correctness"
+    else:
+        "full-operation"
+
+fn x25519_mlkem768_evidence_status_name(
+        status: X25519MlKem768EvidenceStatus) -> text:
+    if status == X25519MlKem768EvidenceStatus.Pass: return "pass"
+    if status == X25519MlKem768EvidenceStatus.Blocked: return "blocked"
+    "fail"
+
+fn _evidence_backend_from_text(value: text) -> Result<X25519MlKem768EvidenceBackend, text>:
+    if value == "scalar-cpu": return Ok(X25519MlKem768EvidenceBackend.ScalarCpu)
+    if value == "avx2": return Ok(X25519MlKem768EvidenceBackend.Avx2)
+    if value == "neon": return Ok(X25519MlKem768EvidenceBackend.Neon)
+    if value == "rvv": return Ok(X25519MlKem768EvidenceBackend.Rvv)
+    if value == "cuda": return Ok(X25519MlKem768EvidenceBackend.Cuda)
+    if value == "vulkan": return Ok(X25519MlKem768EvidenceBackend.Vulkan)
+    if value == "metal": return Ok(X25519MlKem768EvidenceBackend.Metal)
+    Err("unsupported-backend")
+
+fn _evidence_mode_from_text(value: text) -> Result<X25519MlKem768EvidenceMode, text>:
+    if value == "native": return Ok(X25519MlKem768EvidenceMode.Native)
+    if value == "qemu-correctness": return Ok(X25519MlKem768EvidenceMode.QemuCorrectness)
+    Err("unsupported-execution-mode")
+
+fn _evidence_scope_from_text(value: text) -> Result<X25519MlKem768EvidenceScope, text>:
+    if value == "correctness": return Ok(X25519MlKem768EvidenceScope.Correctness)
+    if value == "full-operation": return Ok(X25519MlKem768EvidenceScope.FullOperation)
+    Err("unsupported-evidence-scope")
+
+fn x25519_mlkem768_parse_evidence_cli(args: [text]) -> Result<X25519MlKem768EvidenceCli, text>:
+    var fixture_manifest = ""
+    var fixture_source = ""
+    var runner_source = ""
+    var backend = X25519MlKem768EvidenceBackend.ScalarCpu
+    var mode = X25519MlKem768EvidenceMode.Native
+    var scope = X25519MlKem768EvidenceScope.Correctness
+    var batch_size: i64 = 0
+    var has_fixture_manifest = false
+    var has_fixture_source = false
+    var has_runner_source = false
+    var has_backend = false
+    var has_mode = false
+    var has_scope = false
+    var has_batch = false
+    var index: i64 = 0
+    while index < args.len():
+        val option = args[index]
+        if option == "--allow-fallback":
+            return Err("fallback-request-forbidden")
+        if (option != "--fixture-manifest" and
+                option != "--fixture-source" and
+                option != "--runner-source" and
+                option != "--backend" and
+                option != "--mode" and
+                option != "--scope" and
+                option != "--batch"):
+            return Err("unknown-argument-" + option)
+        if index + 1 >= args.len():
+            return Err("missing-value-for-" + option)
+        val value = args[index + 1]
+        if option == "--fixture-manifest":
+            if has_fixture_manifest: return Err("duplicate-fixture-manifest")
+            fixture_manifest = value
+            has_fixture_manifest = true
+        elif option == "--fixture-source":
+            if has_fixture_source: return Err("duplicate-fixture-source")
+            fixture_source = value
+            has_fixture_source = true
+        elif option == "--runner-source":
+            if has_runner_source: return Err("duplicate-runner-source")
+            runner_source = value
+            has_runner_source = true
+        elif option == "--backend":
+            if has_backend: return Err("duplicate-backend")
+            backend = match _evidence_backend_from_text(value):
+                case Ok(parsed): parsed
+                case Err(reason): return Err(reason)
+            has_backend = true
+        elif option == "--mode":
+            if has_mode: return Err("duplicate-execution-mode")
+            mode = match _evidence_mode_from_text(value):
+                case Ok(parsed): parsed
+                case Err(reason): return Err(reason)
+            has_mode = true
+        elif option == "--scope":
+            if has_scope: return Err("duplicate-evidence-scope")
+            scope = match _evidence_scope_from_text(value):
+                case Ok(parsed): parsed
+                case Err(reason): return Err(reason)
+            has_scope = true
+        elif option == "--batch":
+            if has_batch: return Err("duplicate-batch")
+            val parsed_batch = value.parse_i64() ?? -1
+            if (parsed_batch < 1 or
+                    parsed_batch > X25519_MLKEM768_EVIDENCE_MAX_BATCH or
+                    parsed_batch.to_text() != value):
+                return Err("invalid-batch")
+            batch_size = parsed_batch
+            has_batch = true
+        index = index + 2
+    if fixture_manifest == "": return Err("missing-fixture-manifest")
+    if fixture_source == "": return Err("missing-fixture-source")
+    if runner_source == "": return Err("missing-runner-source")
+    if not has_backend: return Err("missing-backend")
+    if not has_mode: return Err("missing-execution-mode")
+    if not has_scope: return Err("missing-evidence-scope")
+    if not has_batch: return Err("missing-batch")
+    if mode == X25519MlKem768EvidenceMode.QemuCorrectness and
+            (backend == X25519MlKem768EvidenceBackend.Cuda or
+             backend == X25519MlKem768EvidenceBackend.Vulkan or
+             backend == X25519MlKem768EvidenceBackend.Metal):
+        return Err("gpu-backend-cannot-use-qemu-correctness")
+    Ok(X25519MlKem768EvidenceCli(
+        fixture_manifest: fixture_manifest,
+        fixture_source: fixture_source,
+        runner_source: runner_source,
+        backend: backend,
+        mode: mode,
+        scope: scope,
+        batch_size: batch_size))
+
+fn x25519_mlkem768_constant_time_list_equal(left: list, right: list) -> bool:
+    if left.len() != right.len():
+        return false
+    var difference: i64 = 0
+    var index: i64 = 0
+    while index < left.len():
+        difference = difference | (left.get(index) ^ right.get(index))
+        index = index + 1
+    difference == 0
+
+fn x25519_mlkem768_evidence_fixture_list32(offset: i64) -> list:
+    var values: list = []
+    var index: i64 = 0
+    while index < 32:
+        values.push((offset + index) & 0xFF)
+        index = index + 1
+    values
+
+fn x25519_mlkem768_evidence_fixture_bytes32(offset: i64) -> [u8]:
+    var values: [u8] = []
+    var index: i64 = 0
+    while index < 32:
+        values.push(((offset + index) & 0xFF).to_u8())
+        index = index + 1
+    values
+
+fn x25519_mlkem768_render_evidence_receipt(
+        receipt: X25519MlKem768RunReceipt) -> text:
+    var lines: [text] = []
+    lines.push("schema=" + receipt.schema)
+    lines.push("status=" + x25519_mlkem768_evidence_status_name(receipt.status))
+    lines.push("reason=" + receipt.reason)
+    lines.push("scope=" + x25519_mlkem768_evidence_scope_name(receipt.scope))
+    lines.push("requested_backend=" + x25519_mlkem768_evidence_backend_name(receipt.requested_backend))
+    val selected_backend_name = match receipt.selected_backend:
+        case Some(selected): x25519_mlkem768_evidence_backend_name(selected)
+        case nil: "none"
+    lines.push("selected_backend=" + selected_backend_name)
+    lines.push("mode=" + x25519_mlkem768_evidence_mode_name(receipt.mode))
+    lines.push("emulated=" + receipt.emulated.to_text())
+    lines.push("promotion_eligible=" + receipt.promotion_eligible.to_text())
+    lines.push("implementation_version=" + receipt.implementation_version)
+    lines.push("profile_version=" + receipt.profile_version)
+    lines.push("fixture_id=" + receipt.fixture_id)
+    lines.push("fixture_manifest_sha256=" + receipt.fixture_manifest_sha256)
+    lines.push("fixture_source_sha256=" + receipt.fixture_source_sha256)
+    lines.push("runner_source_sha256=" + receipt.runner_source_sha256)
+    lines.push("batch_size=" + receipt.batch_size.to_text())
+    lines.push("client_share_bytes=" + receipt.client_share_bytes.to_text())
+    lines.push("server_share_bytes=" + receipt.server_share_bytes.to_text())
+    lines.push("shared_secret_bytes=" + receipt.shared_secret_bytes.to_text())
+    lines.push("keygen_output_digest=" + receipt.keygen_output_digest)
+    lines.push("encapsulate_output_digest=" + receipt.encapsulate_output_digest)
+    lines.push("decapsulate_output_digest=" + receipt.decapsulate_output_digest)
+    lines.push("scalar_roundtrip_match=" + receipt.scalar_roundtrip_match.to_text())
+    lines.push("fallback_used=" + receipt.fallback_used.to_text())
+    lines.push("absolute_oracle_match=" + receipt.absolute_oracle_match.to_text())
+    lines.push("simd_chunk_hits=" + receipt.simd_chunk_hits.to_text())
+    lines.push("observed_rvv_vlen_bits=" + receipt.observed_rvv_vlen_bits.to_text())
+    lines.push("kernel_invocations=" + receipt.kernel_invocations.to_text())
+    lines.push("compiled=" + receipt.compiled.to_text())
+    lines.push("submitted=" + receipt.submitted.to_text())
+    lines.push("fence_completed=" + receipt.fence_completed.to_text())
+    lines.push("device_readback=" + receipt.device_readback.to_text())
+    lines.push("artifact_sha256=" + receipt.artifact_sha256)
+    lines.push("device_identity=" + receipt.device_identity)
+    lines.join("\n") + "\n"
+
+export X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode
+export X25519_MLKEM768_EVIDENCE_MAX_BATCH
+export X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus
+export X25519MlKem768EvidenceCli, X25519MlKem768RunReceipt
+export x25519_mlkem768_parse_evidence_cli
+export x25519_mlkem768_evidence_backend_name, x25519_mlkem768_evidence_mode_name
+export x25519_mlkem768_evidence_scope_name, x25519_mlkem768_evidence_status_name
+export x25519_mlkem768_constant_time_list_equal
+export x25519_mlkem768_evidence_fixture_list32
+export x25519_mlkem768_evidence_fixture_bytes32
+export x25519_mlkem768_render_evidence_receipt

@@ -1,0 +1,121 @@
+#![allow(print_in_test_spec)]
+
+# @req REQ-002 REQ-003 REQ-007
+"""# SimpleOS browser-demo guest ELF staging contract
+
+Proves the fullscreen evidence lane builds a real freestanding browser client,
+stages its exact ELF bytes in `BROWSMF.SMF`, and correlates input with a
+ring-3 content mutation instead of accepting marker-only media.
+"""
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+describe "SimpleOS browser-demo guest ELF staging contract":
+
+    it "builds stages and validates the real x86_64 browser client":
+        step("Require the freestanding guest entry and versioned WM wire")
+        val build = file_read("scripts/os/build_browser_demo_client.shs")
+        val runtime = file_read("examples/09_embedded/simpleos_remote_gui/remote_window_runtime.c")
+        val browser = file_read("examples/09_embedded/simpleos_remote_gui/browser_demo_gui.c")
+        val shell = file_read("src/os/desktop/shell.spl")
+        expect(build).to_contain("browser_demo_gui.c")
+        expect(build).to_contain("simpleos_syscall.S")
+        expect(build).to_contain("-e _start")
+        expect(build).to_contain("7f454c46")
+        expect(build).to_contain("\"62\"")
+        expect(runtime).to_contain("IPC_WIRE_V1_FLAG")
+        expect(runtime).to_contain("IPC_WIRE_CAPACITY 4128")
+        expect(runtime).to_contain("WM_EVENT_MOUSE_DOWN 4")
+        expect(runtime).to_contain("SYS_IPC_CREATE_PORT")
+        expect(runtime).to_contain("(int64_t)(uintptr_t)APP_ID")
+        expect(runtime).to_contain("wire + 16")
+        expect(runtime).to_contain("wire + 24")
+        expect(runtime).to_contain("wire[32u + i]")
+        expect(browser).to_contain("[browser-demo-event] window=")
+        expect(browser).to_contain(" input_received=true content_mutated=true")
+        expect(runtime).to_contain("_write_event_marker(window_id)")
+        expect(runtime).to_contain("method == COMP_INPUT_EVENT && len >= 28")
+        expect(runtime).to_contain(
+            "_read_u32(msg + 8) == WM_EVENT_MOUSE_DOWN")
+        expect(shell).to_contain("remote_bootstrap_polls_left: i64 = 256")
+        expect(shell).to_contain("remote_event_polls_left: i64 = 0")
+        expect(shell).to_contain("remote_event_window_id: i64 = 0")
+        expect(shell).to_contain("remote_event_input_seq: i64 = 0")
+        expect(shell).to_contain(
+            "next_remote_action.window_id == remote_event_window_id")
+        expect(shell).to_contain(
+            "remote_event_window_id = input_compositor.pending_wm_pointer_window_id")
+        expect(shell).to_contain("remote_event_input_seq = pointer_sequence")
+        expect(shell).to_contain("remote_surface.owner_port > 0")
+        expect(shell).to_contain("[remote-browser-ready] window=")
+        expect(shell).to_contain("[remote-browser-content-presented] window=")
+        expect(shell).to_contain(
+            "input_seq=" + "{" + "remote_event_input_seq" + "}")
+        expect(shell).to_contain(
+            "generation=" + "{" + "presented_generation" + "}")
+        expect(shell.index_of("val presented_generation = self.render_baremetal_frame(executor)"))
+            .to_be_less_than(shell.index_of("serial_println(\"[remote-browser-content-presented]"))
+        expect(shell).to_contain(
+            "pointer_window_id = input_compositor.pending_wm_pointer_window_id")
+        expect(shell).to_contain(
+            "window=" + "{" + "pointer_window_id" + "} marker=" +
+            "{" + "self.last_wm_loop_marker" + "}")
+        expect(shell.contains(
+            "pointer_window_id = self.compositor.surfaces[self.compositor.focused_idx].id")).to_equal(false)
+        expect(shell).to_contain("self.render_baremetal_frame(executor)")
+        expect(shell).to_contain(
+            "val pointer_move_needs_render = pointer_sequence > 0 and pointer_kind_code == 3 and state_revision_changed")
+        expect(shell.contains(
+            "pointer_sequence > 0 and pointer_kind_code != 2")).to_equal(false)
+
+        step("Require explicit ELF staging and reject marker-only fullscreen admission")
+        val disk_wrapper = file_read("scripts/os/make_os_disk.shs")
+        val disk_builder = file_read("scripts/os/make_os_disk.c")
+        val evidence = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(disk_wrapper).to_contain("validate_elf_payload \"$SIMPLEOS_BROWSER_DEMO_BINARY\" 62 BrowserDemo")
+        expect(disk_wrapper).to_contain("export SIMPLEOS_BROWSER_DEMO_BINARY")
+        expect(disk_builder).to_contain("read_file(getenv(\"SIMPLEOS_BROWSER_DEMO_BINARY\"))")
+        expect(disk_builder).to_contain("browser_payload.len ? browser_payload : platform_elf(platform, gui_marker)")
+        expect(disk_builder).to_contain("\"BROWSMF SMF\"")
+        expect(evidence).to_contain("scripts/os/build_browser_demo_client.shs")
+        expect(evidence).to_contain("SIMPLEOS_BROWSER_DEMO_BINARY=\"$BROWSER_DEMO_BINARY\"")
+        expect(evidence).to_contain("browser_demo_disk_payload_status")
+        expect(evidence).to_contain("browser-elf-prefix-mismatch")
+        expect(evidence).to_contain("browser-demo-real-elf-not-staged")
+        expect(evidence).to_contain("wait_remote_browser_ready")
+        expect(evidence).to_contain("fullscreen-target-is-not-remote-browser")
+        expect(evidence).to_contain(
+            "def wait_browser_content_presented(window_id, input_seq, serial_offset):")
+        expect(evidence).to_contain(
+            "generation=([1-9]\\d*)")
+        expect(evidence).to_contain("browser_serial_offset = serial_size()")
+        expect(evidence).to_contain("serial_text_from(serial_offset)")
+        expect(evidence).to_contain(
+            "[browser-demo-event] window=%d input_received=true content_mutated=true")
+        expect(evidence).to_contain(
+            "presented_match.start() > event_pos")
+        expect(evidence).to_contain(
+            "remote_browser_window, pointer_seq, browser_serial_offset")
+        expect(evidence).to_contain(
+            "pointer_release_serial_offset = serial_size()")
+        expect(evidence.index_of("browser_event_frame = pmem(f, browser_event_ppm)"))
+            .to_be_less_than(evidence.index_of("pointer_release_serial_offset = serial_size()"))
+        expect(evidence).to_contain(
+            "wait_pointer_correlation(pointer_seq, 2, pointer_window, pointer_release_serial_offset)")
+        expect(evidence.contains(
+            "wait_pointer_correlation(pointer_seq, 2, pointer_window)")).to_equal(false)
+        expect(evidence).to_contain(
+            "simpleos_wm_browser_content_presented_generation=")
+        expect(evidence).to_contain(
+            "simpleos_wm_browser_content_delta generation=%d")
+        expect(evidence).to_contain(
+            "browser_content_delta_generation_status=pass")
+        expect(evidence).to_contain(
+            "content-presented scene_revision=$browser_content_presented_generation")
+        expect(evidence.contains(
+            "content-presented scene_revision=[1-9][0-9]* path=")).to_equal(false)
+        expect(evidence).to_contain("browser-content-buffer-did-not-mutate")
+        expect(evidence).to_contain("simpleos_wm_fullscreen_browser_content_changed_bytes=")
+        expect(evidence).to_contain("simpleos_wm_fullscreen_browser_event_ppm_magic_status=")
+        expect(evidence.index_of("browser_demo_remote_main")).to_equal(-1)

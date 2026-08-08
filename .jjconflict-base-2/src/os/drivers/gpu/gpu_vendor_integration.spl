@@ -1,0 +1,136 @@
+# GPU Vendor Integration — Platform Contract Bridge
+# MDSOC: feature dimension, drivers layer
+#
+# Bridges GpuVendorRegistry probe results into the driver platform contract
+# layer.  GpuPlatformEntry normalises vendor-specific data into a uniform
+# (vendor, backend, vram_mb) tuple.  GpuLaneStatus tracks Lane-1 GPU
+# readiness across all five delivery gates.
+
+use os.drivers.gpu.gpu_vendor_probe.{
+    CudaGpuProbe,
+    AmdGpuProbe,
+    IntelGpuProbe,
+    QualcommArmGpuProbe,
+    RiscvSoftGpuProbe,
+    GpuVendorRegistry
+}
+
+# ============================================================================
+# GpuPlatformEntry
+# ============================================================================
+
+class GpuPlatformEntry:
+    """Normalised bridge between a vendor probe and the driver platform."""
+    vendor: text
+    available: bool
+    backend: text
+    vram_mb: i64
+
+impl GpuPlatformEntry:
+    static fn from_cuda(probe: CudaGpuProbe) -> GpuPlatformEntry:
+        GpuPlatformEntry(
+            vendor: "cuda",
+            available: probe.is_available(),
+            backend: "cuda",
+            vram_mb: probe.vram_mb
+        )
+
+    static fn from_amd(probe: AmdGpuProbe) -> GpuPlatformEntry:
+        GpuPlatformEntry(
+            vendor: "amd",
+            available: probe.is_available(),
+            backend: "vulkan",
+            vram_mb: probe.vram_mb
+        )
+
+    static fn from_intel(probe: IntelGpuProbe) -> GpuPlatformEntry:
+        GpuPlatformEntry(
+            vendor: "intel",
+            available: probe.is_available(),
+            backend: "vulkan",
+            vram_mb: probe.vram_mb
+        )
+
+    static fn from_qualcomm(probe: QualcommArmGpuProbe) -> GpuPlatformEntry:
+        GpuPlatformEntry(
+            vendor: "qualcomm",
+            available: probe.is_available(),
+            backend: "vulkan",
+            vram_mb: probe.vram_mb
+        )
+
+    static fn from_riscv(probe: RiscvSoftGpuProbe) -> GpuPlatformEntry:
+        GpuPlatformEntry(
+            vendor: "riscv",
+            available: probe.is_available(),
+            backend: "software",
+            vram_mb: 0
+        )
+
+    me summary() -> text:
+        "GpuPlatformEntry vendor=" + self.vendor +
+            " available=" + self.available.to_text() +
+            " backend=" + self.backend +
+            " vram=" + self.vram_mb.to_text() + "MB"
+
+# ============================================================================
+# GpuLaneStatus
+# ============================================================================
+
+class GpuLaneStatus:
+    """Lane-1 GPU delivery gate readiness tracker."""
+    owner: text
+    has_contract: bool
+    has_tests: bool
+    has_docs: bool
+    has_reviewer: bool
+    vendor_count: i64
+    primary_vendor: text
+    primary_backend: text
+
+impl GpuLaneStatus:
+    static fn create() -> GpuLaneStatus:
+        """Create a blank (not-ready) lane status."""
+        val reg: GpuVendorRegistry = GpuVendorRegistry.create()
+        val count: i64 = reg.probe_all()
+        val best: text = reg.best_available()
+        val backend: text = GpuLaneStatus._backend_for(best)
+        GpuLaneStatus(
+            owner: "lane1-gpu",
+            has_contract: false,
+            has_tests: false,
+            has_docs: false,
+            has_reviewer: false,
+            vendor_count: count,
+            primary_vendor: best,
+            primary_backend: backend
+        )
+
+    static fn _backend_for(vendor: text) -> text:
+        if vendor == "cuda":
+            "cuda"
+        else if vendor == "riscv":
+            "software"
+        else if vendor == "none":
+            "none"
+        else:
+            "vulkan"
+
+    me is_ready() -> bool:
+        self.has_contract and
+            self.has_tests and
+            self.has_docs and
+            self.has_reviewer and
+            self.vendor_count > 0
+
+    me report() -> text:
+        "=== GPU Lane Status ===\n" +
+            "owner=" + self.owner + "\n" +
+            "has_contract=" + self.has_contract.to_text() + "\n" +
+            "has_tests=" + self.has_tests.to_text() + "\n" +
+            "has_docs=" + self.has_docs.to_text() + "\n" +
+            "has_reviewer=" + self.has_reviewer.to_text() + "\n" +
+            "vendor_count=" + self.vendor_count.to_text() + "\n" +
+            "primary_vendor=" + self.primary_vendor + "\n" +
+            "primary_backend=" + self.primary_backend + "\n" +
+            "ready=" + self.is_ready().to_text()

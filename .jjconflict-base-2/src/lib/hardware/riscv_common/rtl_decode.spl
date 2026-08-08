@@ -1,0 +1,121 @@
+# ============================================================================
+# Shared RTL decode template (XLEN-neutral) — Wave-3 W3-2 / W3-3 extraction
+# ============================================================================
+#
+# ONE implementation of the error-prone bit-assembly for the 5 immediate
+# formats, plus the shared ALU-op selection for the 10 common opcodes.
+#
+# Design (fail-closed, JIT-safe):
+#   * `rtl_*_imm_bits(insn)` return the RAW, UNEXTENDED immediate field as a
+#     small non-negative i64 — width-neutral, identical for RV32 and RV64.
+#   * Sign extension is applied by the per-width shim: the rv32 decoder keeps a
+#     u32-domain `sign_extend_u32`, the rv64 decoder keeps `sign_extend_to_64`.
+#     Width is therefore fixed at COMPILE TIME by which shim wraps the shared
+#     bits — never a runtime XlenConfig dispatch (W2-A). This also avoids a
+#     seed-JIT `(negative_i64 as u32)` mis-cast, so rv32 stays entirely in the
+#     u32 domain exactly as before.
+#
+# `rtl_sign_extend` is provided for i64 (rv64) callers that want the composed
+# sign-extended value.
+# ============================================================================
+
+use std.hardware.riscv_common.rtl_pkg.{OP_LUI, OP_IMMED, OP_REG}
+use std.hardware.riscv_common.rtl_pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
+use std.hardware.riscv_common.rtl_pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND, ALU_PASS_B}
+
+# ----------------------------------------------------------------------------
+# Sign-extension (to 64-bit) — for rv64 / behavioral callers
+# ----------------------------------------------------------------------------
+
+fn rtl_sign_extend(value: i64, width: i64) -> i64:
+    """Sign-extend a value of the given bit width to 64 bits."""
+    val sign_bit: i64 = 1 << (width - 1)
+    if (value & sign_bit) != 0:
+        val fill: i64 = -1 << width
+        value | fill
+    else:
+        value
+
+# ----------------------------------------------------------------------------
+# Raw immediate bit-assembly (unextended, width-neutral, non-negative)
+# ----------------------------------------------------------------------------
+
+fn rtl_i_imm_bits(insn: i64) -> i64:
+    """I-type immediate field: bits [31:20] (12 bits, unextended)."""
+    (insn >> 20) & 0xFFF
+
+fn rtl_s_imm_bits(insn: i64) -> i64:
+    """S-type immediate field: [31:25] | [11:7] (12 bits, unextended)."""
+    val hi = (insn >> 25) & 0x7F
+    val lo = (insn >> 7) & 0x1F
+    (hi << 5) | lo
+
+fn rtl_b_imm_bits(insn: i64) -> i64:
+    """B-type immediate field: 13 bits, bit[0]=0 (unextended)."""
+    val bit12 = (insn >> 31) & 0x1
+    val bit10_5 = (insn >> 25) & 0x3F
+    val bit4_1 = (insn >> 8) & 0xF
+    val bit11 = (insn >> 7) & 0x1
+    (bit12 << 12) | (bit11 << 11) | (bit10_5 << 5) | (bit4_1 << 1)
+
+fn rtl_u_imm_bits(insn: i64) -> i64:
+    """U-type immediate: bits [31:12] in place (bits [11:0] = 0)."""
+    insn & 0xFFFFF000
+
+fn rtl_j_imm_bits(insn: i64) -> i64:
+    """J-type immediate field: 21 bits, bit[0]=0 (unextended)."""
+    val bit20 = (insn >> 31) & 0x1
+    val bit10_1 = (insn >> 21) & 0x3FF
+    val bit11 = (insn >> 20) & 0x1
+    val bit19_12 = (insn >> 12) & 0xFF
+    (bit20 << 20) | (bit19_12 << 12) | (bit11 << 11) | (bit10_1 << 1)
+
+# ----------------------------------------------------------------------------
+# Shared ALU-op selection for the 10 common opcodes
+# ----------------------------------------------------------------------------
+# Handles OP_REG / OP_IMMED / OP_LUI. Callers classify the RV64-only opcodes
+# (OP_OP_32, OP_OP_IMM_32, M-ext funct7==0x01) FIRST, then delegate here.
+# ADD is the default (load/store address calc, AUIPC, JAL, JALR).
+
+fn rtl_select_alu_op_base(opcode: u32, funct3: u32, funct7: u32) -> i64:
+    """ALU-op for the opcodes shared by RV32I and RV64I."""
+
+    if opcode == OP_REG:
+        if funct3 == 0x0:
+            if (funct7 & 0x20) != 0:
+                return ALU_SUB
+            else:
+                return ALU_ADD
+        if funct3 == 0x1: return ALU_SLL
+        if funct3 == 0x2: return ALU_SLT
+        if funct3 == 0x3: return ALU_SLTU
+        if funct3 == 0x4: return ALU_XOR
+        if funct3 == 0x5:
+            if (funct7 & 0x20) != 0:
+                return ALU_SRA
+            else:
+                return ALU_SRL
+        if funct3 == 0x6: return ALU_OR
+        if funct3 == 0x7: return ALU_AND
+        return ALU_ADD
+
+    else if opcode == OP_IMMED:
+        if funct3 == 0x0: return ALU_ADD
+        if funct3 == 0x1: return ALU_SLL
+        if funct3 == 0x2: return ALU_SLT
+        if funct3 == 0x3: return ALU_SLTU
+        if funct3 == 0x4: return ALU_XOR
+        if funct3 == 0x5:
+            if (funct7 & 0x20) != 0:
+                return ALU_SRA
+            else:
+                return ALU_SRL
+        if funct3 == 0x6: return ALU_OR
+        if funct3 == 0x7: return ALU_AND
+        return ALU_ADD
+
+    else if opcode == OP_LUI:
+        return ALU_PASS_B
+
+    # Default: ADD (load/store address calc, AUIPC, JAL, JALR)
+    ALU_ADD

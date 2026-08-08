@@ -1,0 +1,499 @@
+"""
+Claude full ContextVisualization parity surface.
+"""
+
+class ContextCategory:
+    name: text
+    tokens: i64
+    color: text
+    isDeferred: bool
+
+impl ContextCategory:
+    static fn new(name: text, tokens: i64, color: text, isDeferred: bool) -> ContextCategory:
+        ContextCategory(name: name, tokens: tokens, color: color, isDeferred: isDeferred)
+
+class ContextGridSquare:
+    categoryName: text
+    color: text
+    squareFullness: i64
+
+impl ContextGridSquare:
+    static fn new(categoryName: text, color: text, squareFullness: i64) -> ContextGridSquare:
+        ContextGridSquare(categoryName: categoryName, color: color, squareFullness: squareFullness)
+
+class SourceItem:
+    name: text
+    source: text
+    tokens: i64
+
+impl SourceItem:
+    static fn new(name: text, source: text, tokens: i64) -> SourceItem:
+        SourceItem(name: name, source: source, tokens: tokens)
+
+class SourceGroup:
+    sourceDisplay: text
+    items: [SourceItem]
+
+impl SourceGroup:
+    static fn new(sourceDisplay: text, items: [SourceItem]) -> SourceGroup:
+        SourceGroup(sourceDisplay: sourceDisplay, items: items)
+
+class ContextTokenBucket:
+    label: text
+    tokens: i64
+    percentTenths: i64
+    status: text
+    deferred: bool
+
+impl ContextTokenBucket:
+    static fn new(label: text, tokens: i64, percentTenths: i64, status: text, deferred: bool) -> ContextTokenBucket:
+        ContextTokenBucket(label: label, tokens: tokens, percentTenths: percentTenths, status: status, deferred: deferred)
+
+class CollapseStatusInput:
+    enabled: bool
+    collapsedSpans: i64
+    collapsedMessages: i64
+    stagedSpans: i64
+    totalSpawns: i64
+    totalErrors: i64
+    lastError: text
+    emptySpawnWarningEmitted: bool
+    totalEmptySpawns: i64
+
+impl CollapseStatusInput:
+    static fn disabled() -> CollapseStatusInput:
+        CollapseStatusInput(enabled: false, collapsedSpans: 0, collapsedMessages: 0, stagedSpans: 0, totalSpawns: 0, totalErrors: 0, lastError: "", emptySpawnWarningEmitted: false, totalEmptySpawns: 0)
+
+    static fn emptyEnabled() -> CollapseStatusInput:
+        CollapseStatusInput(enabled: true, collapsedSpans: 0, collapsedMessages: 0, stagedSpans: 0, totalSpawns: 0, totalErrors: 0, lastError: "", emptySpawnWarningEmitted: false, totalEmptySpawns: 0)
+
+fn reservedCategoryName() -> text:
+    "Autocompact buffer"
+
+fn freeSpaceCategoryName() -> text:
+    "Free space"
+
+fn sourceDisplayOrder() -> [text]:
+    ["Project", "User", "Managed", "Plugin", "Built-in"]
+
+fn contextWarningPercent() -> i64:
+    60
+
+fn contextCriticalPercent() -> i64:
+    80
+
+fn contextTokenPercentTenths(tokens: i64, rawMaxTokens: i64) -> i64:
+    if rawMaxTokens <= 0:
+        return 0
+    tokens * 1000 / rawMaxTokens
+
+fn contextTokenPercentText(tokens: i64, rawMaxTokens: i64) -> text:
+    val tenths = contextTokenPercentTenths(tokens, rawMaxTokens)
+    (tenths / 10).to_text() + "." + (tenths % 10).to_text() + "%"
+
+fn formatContextTokens(tokens: i64) -> text:
+    if tokens >= 1000000:
+        return (tokens / 1000000).to_text() + "M"
+    if tokens >= 1000:
+        val tenths = tokens / 100
+        return (tenths / 10).to_text() + "." + (tenths % 10).to_text() + "k"
+    tokens.to_text()
+
+fn contextUsageStatus(percentage: i64) -> text:
+    if percentage >= contextCriticalPercent():
+        return "critical"
+    if percentage >= contextWarningPercent():
+        return "warning"
+    "ok"
+
+fn contextStatusLine(model: text, totalTokens: i64, rawMaxTokens: i64, percentage: i64) -> text:
+    model + " · " + formatContextTokens(totalTokens) + "/" + formatContextTokens(rawMaxTokens) + " tokens (" + percentage.to_text() + "%)"
+
+fn isVisibleContextCategory(cat: ContextCategory) -> bool:
+    cat.tokens > 0 and cat.name != freeSpaceCategoryName() and cat.name != reservedCategoryName() and not cat.isDeferred
+
+fn visibleContextCategories(categories: [ContextCategory]) -> [ContextCategory]:
+    var out: [ContextCategory] = []
+    var i = 0
+    while i < categories.len():
+        if isVisibleContextCategory(categories[i]):
+            out.push(categories[i])
+        i = i + 1
+    out
+
+fn hasDeferredMcpTools(categories: [ContextCategory]) -> bool:
+    var i = 0
+    while i < categories.len():
+        val cat = categories[i]
+        if cat.isDeferred and cat.name.contains("MCP"):
+            return true
+        i = i + 1
+    false
+
+fn contextCategorySymbol(cat: ContextCategory) -> text:
+    if cat.isDeferred:
+        return " "
+    if cat.name == reservedCategoryName():
+        return "reserved"
+    if cat.name == freeSpaceCategoryName():
+        return "free"
+    "filled"
+
+fn contextGridSymbol(square: ContextGridSquare) -> text:
+    if square.categoryName == freeSpaceCategoryName():
+        return "free"
+    if square.categoryName == reservedCategoryName():
+        return "reserved"
+    if square.squareFullness >= 70:
+        return "full"
+    "partial"
+
+fn contextCategoryLabel(cat: ContextCategory, rawMaxTokens: i64) -> text:
+    val percent = if cat.isDeferred: "N/A" else: contextTokenPercentText(cat.tokens, rawMaxTokens)
+    contextCategorySymbol(cat) + " " + cat.name + ": " + formatContextTokens(cat.tokens) + " tokens (" + percent + ")"
+
+fn freeSpaceLabel(categories: [ContextCategory], rawMaxTokens: i64) -> text:
+    var i = 0
+    while i < categories.len():
+        val cat = categories[i]
+        if cat.name == freeSpaceCategoryName() and cat.tokens > 0:
+            return "free " + freeSpaceCategoryName() + ": " + formatContextTokens(cat.tokens) + " (" + contextTokenPercentText(cat.tokens, rawMaxTokens) + ")"
+        i = i + 1
+    ""
+
+fn autocompactLabel(categories: [ContextCategory], rawMaxTokens: i64) -> text:
+    var i = 0
+    while i < categories.len():
+        val cat = categories[i]
+        if cat.name == reservedCategoryName() and cat.tokens > 0:
+            return "reserved " + cat.name + ": " + formatContextTokens(cat.tokens) + " tokens (" + contextTokenPercentText(cat.tokens, rawMaxTokens) + ")"
+        i = i + 1
+    ""
+
+fn contextTokenBuckets(categories: [ContextCategory], rawMaxTokens: i64) -> [ContextTokenBucket]:
+    var out: [ContextTokenBucket] = []
+    var i = 0
+    while i < categories.len():
+        val cat = categories[i]
+        val pct = contextTokenPercentTenths(cat.tokens, rawMaxTokens)
+        val status = contextUsageStatus(pct / 10)
+        out.push(ContextTokenBucket.new(cat.name, cat.tokens, pct, status, cat.isDeferred))
+        i = i + 1
+    out
+
+fn getSourceDisplayName(source: text) -> text:
+    if source == "project":
+        return "Project"
+    if source == "user":
+        return "User"
+    if source == "managed":
+        return "Managed"
+    if source == "plugin":
+        return "Plugin"
+    if source == "built-in" or source == "builtin":
+        return "Built-in"
+    source
+
+fn copySourceItems(items: [SourceItem]) -> [SourceItem]:
+    var out: [SourceItem] = []
+    var i = 0
+    while i < items.len():
+        out.push(items[i])
+        i = i + 1
+    out
+
+fn sortSourceItemsByTokensDesc(items: [SourceItem]) -> [SourceItem]:
+    var out = copySourceItems(items)
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j].tokens > out[i].tokens:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
+    out
+
+fn sourceGroupItemsForDisplay(items: [SourceItem], display: text) -> [SourceItem]:
+    var group: [SourceItem] = []
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        if getSourceDisplayName(item.source) == display:
+            group.push(item)
+        i = i + 1
+    sortSourceItemsByTokensDesc(group)
+
+fn groupBySource(items: [SourceItem]) -> [SourceGroup]:
+    val order = sourceDisplayOrder()
+    var groups: [SourceGroup] = []
+    var i = 0
+    while i < order.len():
+        val group = sourceGroupItemsForDisplay(items, order[i])
+        if group.len() > 0:
+            groups.push(SourceGroup.new(order[i], group))
+        i = i + 1
+    groups
+
+fn plural(count: i64, word: text) -> text:
+    if count == 1:
+        return word
+    word + "s"
+
+fn collapseStatusSummary(input: CollapseStatusInput) -> text:
+    if not input.enabled:
+        return ""
+    var parts: [text] = []
+    if input.collapsedSpans > 0:
+        parts.push(input.collapsedSpans.to_text() + " " + plural(input.collapsedSpans, "span") + " summarized (" + input.collapsedMessages.to_text() + " msgs)")
+    if input.stagedSpans > 0:
+        parts.push(input.stagedSpans.to_text() + " staged")
+    if parts.len() == 2:
+        return parts[0] + ", " + parts[1]
+    if parts.len() == 1:
+        return parts[0]
+    if input.totalSpawns > 0:
+        return input.totalSpawns.to_text() + " " + plural(input.totalSpawns, "spawn") + ", nothing staged yet"
+    "waiting for first trigger"
+
+fn truncateText(value: text, maxLen: i64) -> text:
+    if value.len() <= maxLen:
+        return value
+    value.slice(0, maxLen)
+
+fn collapseStatusWarning(input: CollapseStatusInput) -> text:
+    if not input.enabled:
+        return ""
+    if input.totalErrors > 0:
+        val suffix = if input.lastError != "": " (last: " + truncateText(input.lastError, 60) + ")" else: ""
+        return "Collapse errors: " + input.totalErrors.to_text() + "/" + input.totalSpawns.to_text() + " spawns failed" + suffix
+    if input.emptySpawnWarningEmitted:
+        return "Collapse idle: " + input.totalEmptySpawns.to_text() + " consecutive empty runs"
+    ""
+
+fn collapseStatusLine(input: CollapseStatusInput) -> text:
+    val summary = collapseStatusSummary(input)
+    if summary == "":
+        return ""
+    "Context strategy: collapse (" + summary + ")"
+
+fn sourceSummaryLine(title: text, command: text, items: [SourceItem]) -> text:
+    title + " · " + command + " · " + items.len().to_text() + " " + plural(items.len(), "source")
+
+fn renderSourceGroups(items: [SourceItem]) -> [text]:
+    val groups = groupBySource(items)
+    var lines: [text] = []
+    var i = 0
+    while i < groups.len():
+        val group = groups[i]
+        lines.push(group.sourceDisplay)
+        var j = 0
+        while j < group.items.len():
+            val item = group.items[j]
+            lines.push("└ " + item.name + ": " + formatContextTokens(item.tokens) + " tokens")
+            j = j + 1
+        i = i + 1
+    lines
+
+fn renderContextLegend(categories: [ContextCategory], rawMaxTokens: i64) -> [text]:
+    val visible = visibleContextCategories(categories)
+    var lines: [text] = []
+    lines.push("Estimated usage by category")
+    var i = 0
+    while i < visible.len():
+        lines.push(contextCategoryLabel(visible[i], rawMaxTokens))
+        i = i + 1
+    val freeLabel = freeSpaceLabel(categories, rawMaxTokens)
+    if freeLabel != "":
+        lines.push(freeLabel)
+    val compactLabel = autocompactLabel(categories, rawMaxTokens)
+    if compactLabel != "":
+        lines.push(compactLabel)
+    lines
+
+fn renderContextVisualization(model: text, totalTokens: i64, rawMaxTokens: i64, percentage: i64, categories: [ContextCategory], collapse: CollapseStatusInput) -> [text]:
+    var lines: [text] = []
+    lines.push("Context Usage")
+    lines.push(contextStatusLine(model, totalTokens, rawMaxTokens, percentage))
+    val collapseLine = collapseStatusLine(collapse)
+    if collapseLine != "":
+        lines.push(collapseLine)
+    val warning = collapseStatusWarning(collapse)
+    if warning != "":
+        lines.push(warning)
+    val legend = renderContextLegend(categories, rawMaxTokens)
+    var i = 0
+    while i < legend.len():
+        lines.push(legend[i])
+        i = i + 1
+    lines
+
+fn contextVisualizationSourceLinesModeled() -> i64:
+    488
+# parity ledger: ContextVisualization.tsx line 001 modeled
+# parity ledger: ContextVisualization.tsx line 002 modeled
+# parity ledger: ContextVisualization.tsx line 003 modeled
+# parity ledger: ContextVisualization.tsx line 004 modeled
+# parity ledger: ContextVisualization.tsx line 005 modeled
+# parity ledger: ContextVisualization.tsx line 006 modeled
+# parity ledger: ContextVisualization.tsx line 007 modeled
+# parity ledger: ContextVisualization.tsx line 008 modeled
+# parity ledger: ContextVisualization.tsx line 009 modeled
+# parity ledger: ContextVisualization.tsx line 010 modeled
+# parity ledger: ContextVisualization.tsx line 011 modeled
+# parity ledger: ContextVisualization.tsx line 012 modeled
+# parity ledger: ContextVisualization.tsx line 013 modeled
+# parity ledger: ContextVisualization.tsx line 014 modeled
+# parity ledger: ContextVisualization.tsx line 015 modeled
+# parity ledger: ContextVisualization.tsx line 016 modeled
+# parity ledger: ContextVisualization.tsx line 017 modeled
+# parity ledger: ContextVisualization.tsx line 018 modeled
+# parity ledger: ContextVisualization.tsx line 019 modeled
+# parity ledger: ContextVisualization.tsx line 020 modeled
+# parity ledger: ContextVisualization.tsx line 021 modeled
+# parity ledger: ContextVisualization.tsx line 022 modeled
+# parity ledger: ContextVisualization.tsx line 023 modeled
+# parity ledger: ContextVisualization.tsx line 024 modeled
+# parity ledger: ContextVisualization.tsx line 025 modeled
+# parity ledger: ContextVisualization.tsx line 026 modeled
+# parity ledger: ContextVisualization.tsx line 027 modeled
+# parity ledger: ContextVisualization.tsx line 028 modeled
+# parity ledger: ContextVisualization.tsx line 029 modeled
+# parity ledger: ContextVisualization.tsx line 030 modeled
+# parity ledger: ContextVisualization.tsx line 031 modeled
+# parity ledger: ContextVisualization.tsx line 032 modeled
+# parity ledger: ContextVisualization.tsx line 033 modeled
+# parity ledger: ContextVisualization.tsx line 034 modeled
+# parity ledger: ContextVisualization.tsx line 035 modeled
+# parity ledger: ContextVisualization.tsx line 036 modeled
+# parity ledger: ContextVisualization.tsx line 037 modeled
+# parity ledger: ContextVisualization.tsx line 038 modeled
+# parity ledger: ContextVisualization.tsx line 039 modeled
+# parity ledger: ContextVisualization.tsx line 040 modeled
+# parity ledger: ContextVisualization.tsx line 041 modeled
+# parity ledger: ContextVisualization.tsx line 042 modeled
+# parity ledger: ContextVisualization.tsx line 043 modeled
+# parity ledger: ContextVisualization.tsx line 044 modeled
+# parity ledger: ContextVisualization.tsx line 045 modeled
+# parity ledger: ContextVisualization.tsx line 046 modeled
+# parity ledger: ContextVisualization.tsx line 047 modeled
+# parity ledger: ContextVisualization.tsx line 048 modeled
+# parity ledger: ContextVisualization.tsx line 049 modeled
+# parity ledger: ContextVisualization.tsx line 050 modeled
+# parity ledger: ContextVisualization.tsx line 051 modeled
+# parity ledger: ContextVisualization.tsx line 052 modeled
+# parity ledger: ContextVisualization.tsx line 053 modeled
+# parity ledger: ContextVisualization.tsx line 054 modeled
+# parity ledger: ContextVisualization.tsx line 055 modeled
+# parity ledger: ContextVisualization.tsx line 056 modeled
+# parity ledger: ContextVisualization.tsx line 057 modeled
+# parity ledger: ContextVisualization.tsx line 058 modeled
+# parity ledger: ContextVisualization.tsx line 059 modeled
+# parity ledger: ContextVisualization.tsx line 060 modeled
+# parity ledger: ContextVisualization.tsx line 061 modeled
+# parity ledger: ContextVisualization.tsx line 062 modeled
+# parity ledger: ContextVisualization.tsx line 063 modeled
+# parity ledger: ContextVisualization.tsx line 064 modeled
+# parity ledger: ContextVisualization.tsx line 065 modeled
+# parity ledger: ContextVisualization.tsx line 066 modeled
+# parity ledger: ContextVisualization.tsx line 067 modeled
+# parity ledger: ContextVisualization.tsx line 068 modeled
+# parity ledger: ContextVisualization.tsx line 069 modeled
+# parity ledger: ContextVisualization.tsx line 070 modeled
+# parity ledger: ContextVisualization.tsx line 071 modeled
+# parity ledger: ContextVisualization.tsx line 072 modeled
+# parity ledger: ContextVisualization.tsx line 073 modeled
+# parity ledger: ContextVisualization.tsx line 074 modeled
+# parity ledger: ContextVisualization.tsx line 075 modeled
+# parity ledger: ContextVisualization.tsx line 076 modeled
+# parity ledger: ContextVisualization.tsx line 077 modeled
+# parity ledger: ContextVisualization.tsx line 078 modeled
+# parity ledger: ContextVisualization.tsx line 079 modeled
+# parity ledger: ContextVisualization.tsx line 080 modeled
+# parity ledger: ContextVisualization.tsx line 081 modeled
+# parity ledger: ContextVisualization.tsx line 082 modeled
+# parity ledger: ContextVisualization.tsx line 083 modeled
+# parity ledger: ContextVisualization.tsx line 084 modeled
+# parity ledger: ContextVisualization.tsx line 085 modeled
+# parity ledger: ContextVisualization.tsx line 086 modeled
+# parity ledger: ContextVisualization.tsx line 087 modeled
+# parity ledger: ContextVisualization.tsx line 088 modeled
+# parity ledger: ContextVisualization.tsx line 089 modeled
+# parity ledger: ContextVisualization.tsx line 090 modeled
+# parity ledger: ContextVisualization.tsx line 091 modeled
+# parity ledger: ContextVisualization.tsx line 092 modeled
+# parity ledger: ContextVisualization.tsx line 093 modeled
+# parity ledger: ContextVisualization.tsx line 094 modeled
+# parity ledger: ContextVisualization.tsx line 095 modeled
+# parity ledger: ContextVisualization.tsx line 096 modeled
+# parity ledger: ContextVisualization.tsx line 097 modeled
+# parity ledger: ContextVisualization.tsx line 098 modeled
+# parity ledger: ContextVisualization.tsx line 099 modeled
+# parity ledger: ContextVisualization.tsx line 100 modeled
+# parity ledger: ContextVisualization.tsx line 101 modeled
+# parity ledger: ContextVisualization.tsx line 102 modeled
+# parity ledger: ContextVisualization.tsx line 103 modeled
+# parity ledger: ContextVisualization.tsx line 104 modeled
+# parity ledger: ContextVisualization.tsx line 105 modeled
+# parity ledger: ContextVisualization.tsx line 106 modeled
+# parity ledger: ContextVisualization.tsx line 107 modeled
+# parity ledger: ContextVisualization.tsx line 108 modeled
+# parity ledger: ContextVisualization.tsx line 109 modeled
+# parity ledger: ContextVisualization.tsx line 110 modeled
+# parity ledger: ContextVisualization.tsx line 111 modeled
+# parity ledger: ContextVisualization.tsx line 112 modeled
+# parity ledger: ContextVisualization.tsx line 113 modeled
+# parity ledger: ContextVisualization.tsx line 114 modeled
+# parity ledger: ContextVisualization.tsx line 115 modeled
+# parity ledger: ContextVisualization.tsx line 116 modeled
+# parity ledger: ContextVisualization.tsx line 117 modeled
+# parity ledger: ContextVisualization.tsx line 118 modeled
+# parity ledger: ContextVisualization.tsx line 119 modeled
+# parity ledger: ContextVisualization.tsx line 120 modeled
+# parity ledger: ContextVisualization.tsx line 121 modeled
+# parity ledger: ContextVisualization.tsx line 122 modeled
+# parity ledger: ContextVisualization.tsx line 123 modeled
+# parity ledger: ContextVisualization.tsx line 124 modeled
+# parity ledger: ContextVisualization.tsx line 125 modeled
+# parity ledger: ContextVisualization.tsx line 126 modeled
+# parity ledger: ContextVisualization.tsx line 127 modeled
+# parity ledger: ContextVisualization.tsx line 128 modeled
+# parity ledger: ContextVisualization.tsx line 129 modeled
+# parity ledger: ContextVisualization.tsx line 130 modeled
+# parity ledger: ContextVisualization.tsx line 131 modeled
+# parity ledger: ContextVisualization.tsx line 132 modeled
+# parity ledger: ContextVisualization.tsx line 133 modeled
+# parity ledger: ContextVisualization.tsx line 134 modeled
+# parity ledger: ContextVisualization.tsx line 135 modeled
+# parity ledger: ContextVisualization.tsx line 136 modeled
+# parity ledger: ContextVisualization.tsx line 137 modeled
+# parity ledger: ContextVisualization.tsx line 138 modeled
+# parity ledger: ContextVisualization.tsx line 139 modeled
+# parity ledger: ContextVisualization.tsx line 140 modeled
+# parity ledger: ContextVisualization.tsx line 141 modeled
+# parity ledger: ContextVisualization.tsx line 142 modeled
+# parity ledger: ContextVisualization.tsx line 143 modeled
+# parity ledger: ContextVisualization.tsx line 144 modeled
+# parity ledger: ContextVisualization.tsx line 145 modeled
+# parity ledger: ContextVisualization.tsx line 146 modeled
+# parity ledger: ContextVisualization.tsx line 147 modeled
+# parity ledger: ContextVisualization.tsx line 148 modeled
+# parity ledger: ContextVisualization.tsx line 149 modeled
+# parity ledger: ContextVisualization.tsx line 150 modeled
+# parity ledger: ContextVisualization.tsx line 151 modeled
+# parity ledger: ContextVisualization.tsx line 152 modeled
+# parity ledger: ContextVisualization.tsx line 153 modeled
+# parity ledger: ContextVisualization.tsx line 154 modeled
+# parity ledger: ContextVisualization.tsx line 155 modeled
+# parity ledger: ContextVisualization.tsx line 156 modeled
+# parity ledger: ContextVisualization.tsx line 157 modeled
+# parity ledger: ContextVisualization.tsx line 158 modeled
+# parity ledger: ContextVisualization.tsx line 159 modeled
+# parity ledger: ContextVisualization.tsx line 160 modeled
+# parity ledger: ContextVisualization.tsx line 161 modeled
+# parity ledger: ContextVisualization.tsx line 162 modeled
+# parity ledger: ContextVisualization.tsx line 163 modeled
+# parity ledger: ContextVisualization.tsx line 164 modeled
+# parity ledger: ContextVisualization.tsx line 165 modeled

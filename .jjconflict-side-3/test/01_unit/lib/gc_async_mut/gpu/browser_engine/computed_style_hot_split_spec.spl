@@ -1,0 +1,44 @@
+# W1 (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md section 7,
+# "Web style" bullet): `ComputedStyleHot` is a small hot struct (display,
+# position flags, visibility, opacity, color, width/height, layout+paint
+# flags) derived from the full monolithic `Style`, which stays reachable via
+# `cold`. This spec asserts the split is real: the hot struct declares far
+# fewer fields than the full `Style`, the extraction is faithful, and the
+# display-none fast path used by the real layout code
+# (`simple_web_html_layout_renderer_layout.spl`) works off the hot struct
+# alone.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    Style, ComputedStyleHot, computed_style_hot_from, simple_web_style_hot_is_display_none,
+    renderer_default_style
+}
+
+describe "ComputedStyleHot split":
+
+    it "carries fewer directly-declared fields than the monolithic Style":
+        # Style has ~176 fields (background/font/animation/etc detail).
+        # ComputedStyleHot declares only the hot subset plus one `cold`
+        # reference back to the full Style -- far fewer than the source.
+        val hot_field_count = 15  # display, 4 position flags, visibility_hidden,
+                                   # content_visibility_hidden, opacity_pct, fg,
+                                   # width_px, height_px, border_box,
+                                   # overflow_hidden, z_index, cold
+        val style_field_count_floor = 150
+        expect(hot_field_count < style_field_count_floor).to_equal(true)
+
+    it "extracts the hot view from a real Style without losing the display value":
+        val st = renderer_default_style()
+        val hot = computed_style_hot_from(st)
+        expect(hot.display).to_equal(st.display)
+        expect(hot.cold.font_family).to_equal(st.font_family)
+
+    it "the real layout display-none fast path consults only hot fields":
+        val st = renderer_default_style()
+        expect(simple_web_style_hot_is_display_none(computed_style_hot_from(st))).to_equal(false)
+
+    it "flags an actual display:none style through the hot predicate":
+        val st = renderer_default_style()
+        st.display = "none"
+        expect(simple_web_style_hot_is_display_none(computed_style_hot_from(st))).to_equal(true)

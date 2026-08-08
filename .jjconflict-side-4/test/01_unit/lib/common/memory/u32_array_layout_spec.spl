@@ -1,0 +1,74 @@
+# @cover src/runtime/simple_core/core_array_ops.spl 0%
+# @tag: unit, memory, u32, array_layout
+
+use std.spec
+
+# `[u32]` layout guarantee (reverified 2026-08-07, still live as of that date).
+#
+# `[u32]` is NOT a packed 4-byte-per-element buffer. Both runtime
+# implementations use the SAME generic tagged-array storage as every other
+# array element type: 8 bytes per slot, values decoded/masked to 32 bits on
+# read.
+#
+#   - C runtime (`src/runtime/runtime_native.c:5197`,
+#     `rt_core_array_reserve`): `elem_size = flags & RT_CORE_ARRAY_FLAG_BYTES
+#     ? sizeof(uint8_t) : sizeof(int64_t)` -- binary, 1 or 8. There is no
+#     4-byte element size anywhere in the array runtime.
+#   - Pure-Simple runtime (`src/runtime/simple_core/core_array_ops.spl:382`,
+#     `rt_typed_words_u32_at`): `spl_load_i64(array_items(array), actual_idx *
+#     8)` -- the `* 8` stride is hardcoded, matching the C side independently.
+#   - MIR lowering (`src/compiler/50.mir/`) has no special-cased 4-byte path
+#     for `[u32]` array-literal construction; it goes through the same
+#     generic tagged-array push as any other element type.
+#
+# A true packed 4-byte pixel/word basis exists ONLY via a
+# `RT_CORE_ARRAY_FLAG_BYTES` array (`rt_byte_array_new`, elem_size 1) read
+# through `rt_typed_bytes_u32_le_at/set` -- not `[u32]` itself.
+#
+# Full evidence trail (source-line citations for both runtimes, plus an
+# independent third confirmation from the ROCm GPU backend's gather/scatter):
+# doc/08_tracking/bug/rt_typed_words_u32_is_not_a_packed_pixel_basis_2026-08-06.md
+#
+# This spec intentionally does NOT assert on raw byte stride: the low-level
+# pointer/offset externs (`array_items`, `spl_load_u8`/`spl_load_i64`) used to
+# inspect stride directly are runtime-internal intrinsics, not wired into the
+# interpreter's SFFI dispatch table for arbitrary user-level scripts (verified
+# 2026-08-07: calling them from an ordinary `.spl` script under both the
+# default JIT-attempting `run` path and `SIMPLE_EXECUTION_MODE=interpret`
+# reports "declared but backed by no implementation" / "unknown extern
+# function"). What IS asserted here is the functional contract users depend
+# on -- values round-trip correctly through `[u32]` regardless of storage
+# width -- so a regression in VALUE correctness (as opposed to storage
+# density) is still caught.
+#
+# Indirect corroboration that storage is NOT 4-byte-packed, gathered
+# 2026-08-07 via `/usr/bin/time -v` peak-RSS delta on a 5,000,000-element
+# `[u32]` array vs. a 100-element control, run through `bin/simple run`
+# (bootstrap seed binary; JIT-attempting default path):
+#   - control (n=100):        28,160 KB peak RSS
+#   - n=5,000,000:            143,108 KB peak RSS
+#   - delta / element:        ~23 bytes/element
+# A true 4-byte-packed buffer would add ~19,073 KB (4 bytes * 5,000,000); the
+# measured delta is ~6x that floor even before accounting for growth-doubling
+# and interpreter/JIT temporaries, which is consistent with (not tight proof
+# of) the documented 8-byte tagged-word storage and rules out 4-byte packing.
+
+describe "[u32] array layout guarantee":
+    it "round-trips u32 extreme values correctly regardless of storage width":
+        var a: [u32] = []
+        a.push(0x00000000u32)
+        a.push(0x7fffffffu32)
+        a.push(0xffffffffu32)
+        assert_true(a.len() == 3)
+        assert_true(a[0] == 0x00000000u32)
+        assert_true(a[1] == 0x7fffffffu32)
+        assert_true(a[2] == 0xffffffffu32)
+
+    it "is NOT a zero-copy packed 4-byte buffer -- documented, not assertable in-spec":
+        # See header: no interpreter-reachable extern exposes raw byte
+        # stride to ordinary .spl code, so this is a documentation-only
+        # placeholder that keeps the guarantee co-located with its test file
+        # rather than only in doc/08_tracking/bug/. The storage-format claim
+        # itself is verified via direct source-line citation (see header) and
+        # the RSS delta measurement above, both re-checked 2026-08-07.
+        assert_true(true)

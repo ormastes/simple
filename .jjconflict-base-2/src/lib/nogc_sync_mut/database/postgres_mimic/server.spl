@@ -1,0 +1,178 @@
+"""Pure-Simple PostgreSQL-compatible session server over PureDatabase.
+
+This module owns PostgreSQL-like session and query semantics. Network framing is
+kept behind a later transport adapter so the database engine remains testable.
+"""
+
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbRow, DbError}
+
+enum PgSessionState:
+    Starting
+    Ready
+    InTransaction
+    FailedTransaction
+    Closed
+
+enum PgResponseKind:
+    AuthenticationOk
+    ParameterStatus
+    ReadyForQuery
+    RowSet
+    CommandComplete
+    ErrorResponse
+
+struct PgResponse:
+    kind: PgResponseKind
+    tag: text
+    columns: [text]
+    rows: [DbRow]
+    sqlstate: text
+    message: text
+    transaction_status: text
+
+struct PgSession:
+    id: i64
+    user: text
+    database: text
+    application_name: text
+    state: PgSessionState
+
+fn pg_response(kind: PgResponseKind, tag: text, message: text) -> PgResponse:
+    PgResponse(kind: kind, tag: tag, columns: [], rows: [], sqlstate: "", message: message, transaction_status: "I")
+
+fn pg_error(sqlstate: text, message: text, status: text) -> PgResponse:
+    PgResponse(kind: PgResponseKind.ErrorResponse, tag: "ERROR", columns: [], rows: [], sqlstate: sqlstate,
+        message: message, transaction_status: status)
+
+fn first_keyword(sql: text) -> text:
+    val normalized = sql.trim().to_upper()
+    if normalized == "": return ""
+    normalized.split(" ")[0]
+
+fn command_tag(sql: text, changes: i64) -> text:
+    match first_keyword(sql):
+        "INSERT": "INSERT 0 {changes}"
+        "UPDATE": "UPDATE {changes}"
+        "DELETE": "DELETE {changes}"
+        "CREATE": "CREATE"
+        "DROP": "DROP"
+        "BEGIN": "BEGIN"
+        "COMMIT": "COMMIT"
+        "ROLLBACK": "ROLLBACK"
+        keyword: keyword
+
+class PostgresMimicServer:
+    db: PureDatabase
+    sessions: Dict<i64, PgSession>
+    next_session_id: i64
+
+    static fn memory() -> Result<PostgresMimicServer, DbError>:
+        Ok(PostgresMimicServer(db: PureDatabase.memory()?, sessions: {}, next_session_id: 1))
+
+    static fn open(path: text) -> Result<PostgresMimicServer, DbError>:
+        Ok(PostgresMimicServer(db: PureDatabase.open(path)?, sessions: {}, next_session_id: 1))
+
+    me startup(user: text, database: text, application_name: text) -> Result<i64, text>:
+        if user.trim() == "": return Err("user is required")
+        if database.trim() == "": return Err("database is required")
+        val id = self.next_session_id
+        self.next_session_id = id + 1
+        self.sessions[id] = PgSession(id: id, user: user, database: database,
+            application_name: application_name, state: PgSessionState.Ready)
+        Ok(id)
+
+    fn startup_responses(session_id: i64) -> [PgResponse]:
+        if not self.sessions.contains_key(session_id):
+            return [pg_error("08003", "connection does not exist", "I")]
+        [
+            pg_response(PgResponseKind.AuthenticationOk, "AUTH", ""),
+            PgResponse(kind: PgResponseKind.ParameterStatus, tag: "server_version", columns: [], rows: [],
+                sqlstate: "", message: "16.0-simple", transaction_status: "I"),
+            pg_response(PgResponseKind.ReadyForQuery, "READY", "")
+        ]
+
+    me simple_query(session_id: i64, sql: text) -> PgResponse:
+        if not self.sessions.contains_key(session_id): return pg_error("08003", "connection does not exist", "I")
+        var session = self.sessions[session_id]
+        if session.state == PgSessionState.Closed: return pg_error("08003", "connection is closed", "I")
+        val keyword = first_keyword(sql)
+        if keyword == "": return pg_error("42601", "empty query", self.status_byte(session.state))
+        if session.state == PgSessionState.FailedTransaction and keyword != "ROLLBACK":
+            return pg_error("25P02", "current transaction is aborted; issue ROLLBACK", "E")
+
+        if keyword == "SELECT" or keyword == "WITH" or keyword == "VALUES":
+            val queried = self.db.query(sql, [])
+            if queried.is_err():
+                if session.state == PgSessionState.InTransaction: session.state = PgSessionState.FailedTransaction
+                self.sessions[session_id] = session
+                return pg_error("42601", "query failed", self.status_byte(session.state))
+            val rows = queried.unwrap()
+            val columns = if rows.len() > 0: rows[0].columns else: []
+            return PgResponse(kind: PgResponseKind.RowSet, tag: "SELECT {rows.len()}", columns: columns,
+                rows: rows, sqlstate: "", message: "", transaction_status: self.status_byte(session.state))
+
+        val executed = self.db.exec_sql(sql)
+        if executed.is_err():
+            if session.state == PgSessionState.InTransaction: session.state = PgSessionState.FailedTransaction
+            self.sessions[session_id] = session
+            return pg_error("42601", "statement failed", self.status_byte(session.state))
+        if keyword == "BEGIN": session.state = PgSessionState.InTransaction
+        elif keyword == "COMMIT" or keyword == "ROLLBACK": session.state = PgSessionState.Ready
+        self.sessions[session_id] = session
+        PgResponse(kind: PgResponseKind.CommandComplete, tag: command_tag(sql, self.db.changes()), columns: [], rows: [],
+            sqlstate: "", message: "", transaction_status: self.status_byte(session.state))
+
+    me terminate(session_id: i64) -> bool:
+        if not self.sessions.contains_key(session_id): return false
+        var session = self.sessions[session_id]
+        session.state = PgSessionState.Closed
+        self.sessions[session_id] = session
+        true
+
+    fn status_byte(state: PgSessionState) -> text:
+        match state:
+            PgSessionState.InTransaction: "T"
+            PgSessionState.FailedTransaction: "E"
+            _: "I"
+
+    me checkpoint() -> Result<(), DbError>: self.db.checkpoint()
+    me close() -> Result<(), DbError>: self.db.close()
+
+# Free façades keep compiled entrypoints away from cross-module class-method
+# resolution, which the current self-hosted MIR can lower to null placeholders.
+fn postgres_mimic_open(path: text) -> Result<PostgresMimicServer, DbError>:
+    PostgresMimicServer.open(path)
+
+fn postgres_mimic_startup(server: PostgresMimicServer, user: text,
+        database: text, application_name: text) -> Result<i64, text>:
+    server.startup(user, database, application_name)
+
+fn postgres_mimic_simple_query(server: PostgresMimicServer,
+        session_id: i64, sql: text) -> PgResponse:
+    server.simple_query(session_id, sql)
+
+fn postgres_mimic_close(server: PostgresMimicServer) -> Result<(), DbError>:
+    server.close()
+
+fn postgres_mimic_join_text(values: [text], separator: text) -> text:
+    var result = ""
+    var i = 0
+    while i < values.len():
+        if i > 0: result = result + separator
+        result = result + values[i]
+        i = i + 1
+    result
+
+fn postgres_mimic_row_tsv(row: DbRow) -> text:
+    var result = ""
+    var i = 0
+    while i < row.values.len():
+        if i > 0: result = result + "\t"
+        result = result + row.values[i].to_text()
+        i = i + 1
+    result
+
+export PgSessionState, PgResponseKind, PgResponse, PgSession, PostgresMimicServer
+export postgres_mimic_open, postgres_mimic_startup, postgres_mimic_simple_query
+export postgres_mimic_close, postgres_mimic_join_text, postgres_mimic_row_tsv

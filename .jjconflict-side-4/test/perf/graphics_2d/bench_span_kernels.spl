@@ -1,0 +1,84 @@
+"""
+# WS-D span-kernel microbenchmark (D0 measurement rig)
+
+Drives the CPU software rasterizer span kernels DIRECTLY
+(`std.nogc_sync_mut.gpu.engine2d.simd_kernels`) so a number cannot be
+contaminated by the browser/scene layers that other sessions are editing.
+
+Fixed work per op: one 640-pixel span, `ITERS` times per kernel.
+Emits one `KERNEL_RESULT` line per kernel; the driver script does the
+p50/p99 across processes (one fresh process per sample, because
+`native_pixel_rows_enabled()` memoizes).
+"""
+
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{fill_span, copy_span, alpha_blend_span, simd_blit_row, native_pixel_rows_enabled, active_arch_text}
+extern fn rt_time_now_nanos() -> i64
+
+fn now_millis() -> i64:
+    rt_time_now_nanos() / 1000000
+
+val W: i64 = 640
+val ITERS: i64 = 400
+
+fn make_buf(n: i64, v: u32) -> [u32]:
+    var b: [u32] = [0; n.to_i32()]
+    var i: i64 = 0
+    while i < n:
+        b[i.to_i32()] = v
+        i = i + 1
+    b
+
+fn main():
+    println("SPAN_BENCH arch=" + active_arch_text() + " native_rows=" + native_pixel_rows_enabled().to_text() + " width=" + W.to_text() + " iters=" + ITERS.to_text())
+
+    var dst = make_buf(W, 0xFF203040 as u32)
+    val src = make_buf(W, 0x80A0B0C0 as u32)
+
+    var t0 = now_millis()
+    var i: i64 = 0
+    while i < ITERS:
+        fill_span(dst, 0, W, 0xFF112233 as u32)
+        i = i + 1
+    println("KERNEL_RESULT kernel=fill ms=" + (now_millis() - t0).to_text())
+
+    t0 = now_millis()
+    i = 0
+    while i < ITERS:
+        copy_span(dst, 0, src, 0, W)
+        i = i + 1
+    println("KERNEL_RESULT kernel=copy ms=" + (now_millis() - t0).to_text())
+
+    t0 = now_millis()
+    i = 0
+    while i < ITERS:
+        alpha_blend_span(dst, src, 0, W)
+        i = i + 1
+    println("KERNEL_RESULT kernel=blend ms=" + (now_millis() - t0).to_text())
+
+    t0 = now_millis()
+    i = 0
+    while i < ITERS:
+        simd_blit_row(dst, 0, src, 0, W)
+        i = i + 1
+    println("KERNEL_RESULT kernel=blit ms=" + (now_millis() - t0).to_text())
+
+    # Parity: blend a varied source over a varied destination exactly once and
+    # checksum the whole span. Must be identical across every SIMPLE_2D_SIMD
+    # value — that is the byte-identical-output gate.
+    var i2: i64 = 0
+    while i2 < W:
+        dst[i2.to_i32()] = ((0xFF000000 + i2 * 7919) % 4294967296) as u32
+        i2 = i2 + 1
+    var vsrc: [u32] = [0; W.to_i32()]
+    i2 = 0
+    while i2 < W:
+        vsrc[i2.to_i32()] = ((i2 * 16777259) % 4294967296) as u32
+        i2 = i2 + 1
+    alpha_blend_span(dst, vsrc, 0, W)
+
+    var sum: i64 = 0
+    i = 0
+    while i < W:
+        sum = (sum * 131 + dst[i.to_i32()]) % 1000000007
+        i = i + 1
+    println("SPAN_BENCH_DONE checksum=" + sum.to_text())

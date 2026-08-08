@@ -1,0 +1,299 @@
+#!/bin/sh
+# Fail-closed coverage audit for GUI widget HTML rendering fixtures/specs.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gui_widget_rendering_fixture_coverage}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/gui_widget_rendering_fixture_coverage_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+python3 - <<'PY' >"$OUT_ENV"
+from pathlib import Path
+import re
+
+ROOT = Path.cwd()
+
+WIDGET_KIND = ROOT / "src/lib/common/ui/widget_kind.spl"
+HTML_RENDERER = ROOT / "src/app/ui.render/html_widgets.spl"
+RENDERDOC_FIXTURE = ROOT / "test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html"
+SPEC_ROOTS = [
+    ROOT / "test/01_unit/app/ui/html_render_spec.spl",
+    ROOT / "test/01_unit/app/ui/gui_widgets_spec.spl",
+    ROOT / "test/03_system/gui/widget_rendering_spec.spl",
+    ROOT / "test/03_system/gui/ui/widget_coverage_spec.spl",
+]
+SPEC_ROOTS.extend(sorted((ROOT / "test/01_unit/app/ui").glob("widget*_spec.spl")))
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def emit(key: str, value) -> None:
+    value = "" if value is None else str(value)
+    value = value.replace("\n", " ")
+    print(f"{key}={value}")
+
+
+def expected_class(wire: str) -> str:
+    if wire == "treenode":
+        return "tree-node"
+    if wire == "label":
+        return "widget-text"
+    return "widget-" + wire.replace("_", "-")
+
+
+EXPECTED_FEATURES = {
+    "panel": "container-surface",
+    "text": "text-run",
+    "list": "list-rows",
+    "table": "tabular-grid",
+    "progress": "meter-fill",
+    "menubar": "menu-actions",
+    "statusbar": "status-line",
+    "input": "form-input",
+    "tabs": "tab-selection",
+    "button": "command-action",
+    "checkbox": "binary-choice",
+    "radio": "exclusive-choice",
+    "dropdown": "option-select",
+    "textfield": "single-line-edit",
+    "image": "media-image",
+    "divider": "separator-line",
+    "dialog": "modal-surface",
+    "tooltip": "hover-help",
+    "tree": "hierarchy-root",
+    "treenode": "hierarchy-node",
+    "scroll": "scroll-region",
+    "textarea": "multi-line-edit",
+    "heading": "section-title",
+    "label": "field-label",
+    "navigation_bar": "primary-navigation",
+    "tab_bar": "tab-navigation",
+    "card": "content-card",
+    "switch": "toggle-control",
+    "segmented_control": "segmented-choice",
+    "search_bar": "search-input",
+    "glass_title_bar": "window-titlebar",
+    "sidebar": "side-navigation",
+    "command_bar": "command-actions",
+    "workspace_tabs": "workspace-tab-strip",
+    "command_palette": "command-search",
+    "toast": "transient-message",
+    "sheet_modal": "sheet-modal",
+    "context_menu": "context-actions",
+    "inspector": "property-inspector",
+    "utility_rail": "utility-navigation",
+    "status_chip": "status-indicator",
+    "selection_pill": "selection-token",
+    "empty_state": "empty-feedback",
+}
+
+
+def expected_feature(wire: str) -> str:
+    return EXPECTED_FEATURES.get(wire, wire.replace("_", "-"))
+
+
+def attr_value(tag: str, name: str) -> str:
+    match = re.search(r"\b" + re.escape(name) + r"\s*=\s*[\"']([^\"']*)[\"']", tag)
+    return match.group(1) if match else ""
+
+
+def renderdoc_widget_feature(source: str, wire: str, css_class: str) -> str:
+    for tag in re.findall(r"<[^>]+>", source):
+        class_value = attr_value(tag, "class")
+        widget_value = attr_value(tag, "data-widget")
+        if not class_value or not widget_value:
+            continue
+        classes = set(class_value.split())
+        if widget_value == wire and css_class in classes:
+            return attr_value(tag, "data-render-feature")
+    return ""
+
+
+widget_source = WIDGET_KIND.read_text(encoding="utf-8", errors="ignore")
+renderer_source = HTML_RENDERER.read_text(encoding="utf-8", errors="ignore")
+renderdoc_fixture_source = RENDERDOC_FIXTURE.read_text(encoding="utf-8", errors="ignore") if RENDERDOC_FIXTURE.exists() else ""
+
+wire_pairs = re.findall(r"WidgetKind\.([A-Za-z0-9_]+)\s*=>\s*\"([^\"]+)\"", widget_source)
+widgets = []
+seen_wires = set()
+for enum_name, wire in wire_pairs:
+    if wire not in seen_wires:
+        widgets.append((enum_name, wire))
+        seen_wires.add(wire)
+
+match = re.search(r"fn render_html_widget\(.*?\n(.*?)\nfn render_html_tree_widget", renderer_source, re.S)
+dispatch_block = match.group(1) if match else ""
+dispatch_wires = set(re.findall(r"^\s*\"([^\"]+)\"\s*=>", dispatch_block, re.M))
+
+spec_text_by_path = {}
+for path in SPEC_ROOTS:
+    if path.exists():
+        spec_text_by_path[path] = path.read_text(encoding="utf-8", errors="ignore")
+
+missing_dispatch = []
+missing_renderer_class = []
+missing_spec = []
+missing_render_fixture = []
+missing_renderdoc_fixture = []
+missing_renderdoc_fixture_features = []
+covered_specs = {}
+covered_render_fixtures = {}
+covered_renderdoc_fixture = []
+covered_renderdoc_fixture_features = []
+covered_spec_widget_classes = []
+covered_render_fixture_widget_classes = []
+covered_renderdoc_fixture_widget_classes = []
+covered_renderer_classes = []
+covered_dispatch = []
+
+for enum_name, wire in widgets:
+    css_class = expected_class(wire)
+    if wire in dispatch_wires:
+        covered_dispatch.append(wire)
+    else:
+        missing_dispatch.append(wire)
+
+    if css_class in renderer_source:
+        covered_renderer_classes.append(wire)
+    else:
+        missing_renderer_class.append(f"{wire}:{css_class}")
+
+    matching_specs = []
+    for path, text in spec_text_by_path.items():
+        if css_class not in text:
+            continue
+        if wire == "label":
+            if not (
+                "WidgetKind.Label" in text
+                or '"label"' in text
+                or "label(" in text
+                or "label widget" in text
+            ):
+                continue
+        matching_specs.append(rel(path))
+    if matching_specs:
+        covered_specs[wire] = matching_specs
+        covered_spec_widget_classes.append(f"{wire}:{css_class}")
+    else:
+        missing_spec.append(f"{wire}:{css_class}")
+
+    wire_refs = [
+        f"\"{wire}\"",
+        f"WidgetKind.{enum_name}",
+        f"{wire} widget",
+        f"renders {wire}",
+    ]
+    if wire == "label":
+        wire_refs.extend(["WidgetKind.Label", "label widget", 'WidgetNode.new("l", "label")'])
+    render_fixture_specs = []
+    for path, text in spec_text_by_path.items():
+        has_wire = any(ref in text for ref in wire_refs)
+        has_render_call = "render_html_widget" in text or "render_html_tree" in text
+        has_class_assertion = css_class in text
+        has_expectation = "expect" in text
+        if has_wire and has_render_call and has_class_assertion and has_expectation:
+            render_fixture_specs.append(rel(path))
+    if render_fixture_specs:
+        covered_render_fixtures[wire] = render_fixture_specs
+        covered_render_fixture_widget_classes.append(f"{wire}:{css_class}")
+    else:
+        missing_render_fixture.append(f"{wire}:{css_class}")
+
+    renderdoc_feature = renderdoc_widget_feature(renderdoc_fixture_source, wire, css_class)
+    feature = expected_feature(wire)
+    if renderdoc_feature:
+        covered_renderdoc_fixture.append(wire)
+        covered_renderdoc_fixture_widget_classes.append(f"{wire}:{css_class}")
+        if renderdoc_feature == feature:
+            covered_renderdoc_fixture_features.append(f"{wire}:{feature}")
+        else:
+            missing_renderdoc_fixture_features.append(f"{wire}:{feature}:actual-{renderdoc_feature}")
+    else:
+        missing_renderdoc_fixture.append(f"{wire}:{css_class}")
+        missing_renderdoc_fixture_features.append(f"{wire}:{feature}:missing-widget")
+
+status = "pass"
+reason = "pass"
+if missing_dispatch:
+    status = "fail"
+    reason = "missing-render-html-widget-dispatch"
+elif missing_renderer_class:
+    status = "fail"
+    reason = "missing-renderer-class-marker"
+elif missing_spec:
+    status = "fail"
+    reason = "missing-widget-rendering-spec-marker"
+elif missing_render_fixture:
+    status = "fail"
+    reason = "missing-widget-render-fixture-witness"
+elif missing_renderdoc_fixture:
+    status = "fail"
+    reason = "missing-renderdoc-html-widget-fixture"
+elif missing_renderdoc_fixture_features:
+    status = "fail"
+    reason = "missing-renderdoc-html-widget-feature"
+
+emit("gui_widget_rendering_fixture_coverage_status", status)
+emit("gui_widget_rendering_fixture_coverage_reason", reason)
+emit("gui_widget_rendering_fixture_coverage_widget_kind_source", rel(WIDGET_KIND))
+emit("gui_widget_rendering_fixture_coverage_renderer_source", rel(HTML_RENDERER))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_source", rel(RENDERDOC_FIXTURE))
+emit("gui_widget_rendering_fixture_coverage_widget_kind_count", len(widgets))
+emit("gui_widget_rendering_fixture_coverage_dispatch_covered_count", len(covered_dispatch))
+emit("gui_widget_rendering_fixture_coverage_renderer_class_covered_count", len(covered_renderer_classes))
+emit("gui_widget_rendering_fixture_coverage_spec_covered_count", len(covered_specs))
+emit("gui_widget_rendering_fixture_coverage_render_fixture_covered_count", len(covered_render_fixtures))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count", len(covered_renderdoc_fixture))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count", len(covered_renderdoc_fixture_features))
+emit("gui_widget_rendering_fixture_coverage_missing_dispatch_widgets", ",".join(missing_dispatch))
+emit("gui_widget_rendering_fixture_coverage_missing_renderer_classes", ",".join(missing_renderer_class))
+emit("gui_widget_rendering_fixture_coverage_missing_spec_widgets", ",".join(missing_spec))
+emit("gui_widget_rendering_fixture_coverage_missing_render_fixture_widgets", ",".join(missing_render_fixture))
+emit("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_widgets", ",".join(missing_renderdoc_fixture))
+emit("gui_widget_rendering_fixture_coverage_missing_renderdoc_fixture_features", ",".join(missing_renderdoc_fixture_features))
+emit("gui_widget_rendering_fixture_coverage_expected_classes", ",".join(f"{wire}:{expected_class(wire)}" for _, wire in widgets))
+emit("gui_widget_rendering_fixture_coverage_expected_renderdoc_fixture_features", ",".join(f"{wire}:{expected_feature(wire)}" for _, wire in widgets))
+emit("gui_widget_rendering_fixture_coverage_spec_sources", ",".join(rel(path) for path in sorted(spec_text_by_path)))
+emit("gui_widget_rendering_fixture_coverage_covered_widgets", ",".join(wire for _, wire in widgets if wire in covered_specs))
+emit("gui_widget_rendering_fixture_coverage_spec_widget_classes", ",".join(covered_spec_widget_classes))
+emit("gui_widget_rendering_fixture_coverage_render_fixture_widgets", ",".join(wire for _, wire in widgets if wire in covered_render_fixtures))
+emit("gui_widget_rendering_fixture_coverage_render_fixture_widget_classes", ",".join(covered_render_fixture_widget_classes))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widgets", ",".join(wire for _, wire in widgets if wire in covered_renderdoc_fixture))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes", ",".join(covered_renderdoc_fixture_widget_classes))
+emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features", ",".join(covered_renderdoc_fixture_features))
+PY
+
+status="$(sed -n 's/^gui_widget_rendering_fixture_coverage_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^gui_widget_rendering_fixture_coverage_reason=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# GUI Widget Rendering Fixture Coverage"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- widget kinds: $(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- renderer dispatch covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_dispatch_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- renderer class markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderer_class_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- spec markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_spec_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- render fixture witnesses covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_render_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- RenderDoc HTML fixture widgets covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- RenderDoc HTML fixture features covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

@@ -1,0 +1,75 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl 80%
+# @tag: unit, engine2d, rocm, processing
+#
+# ROCm/HIP processing-lane probe spec.
+#
+# On this Linux host hipcc is absent and amdhip64 is not installed.
+# probe_rocm() must:
+#   - return a BackendProbeResult (not silently pass)
+#   - set feature_gate = "hip-toolchain-missing" when the HIP runtime
+#     library is unavailable
+# Specs assert concrete field values; no skip(), no hollow expects,
+# no boolean-wrapper asserts.
+
+use std.gpu.engine2d.backend_rocm.{RocmBackend, probe_rocm}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+
+describe "ROCm/HIP processing-lane probe":
+
+    it "probe_rocm returns a BackendProbeResult with required api fields":
+        val probe = probe_rocm()
+        expect(probe.requested_name).to_equal("rocm")
+        expect(probe.api_name).to_equal("rocm")
+        expect(probe.shader_format).to_equal("hsaco")
+
+    it "probe_rocm returns a known BackendStatus variant":
+        val probe = probe_rocm()
+        val ok = (probe.status == BackendStatus.Initialized or
+                  probe.status == BackendStatus.Unavailable or
+                  probe.status == BackendStatus.Failed)
+        expect(ok).to_equal(true)
+
+    it "probe_rocm reports hip-toolchain-missing on hosts without AMD HIP runtime":
+        val probe = probe_rocm()
+        if probe.status == BackendStatus.Unavailable:
+            # On this Linux host: hipcc absent, amdhip64 not installed
+            # The expected gate is "hip-toolchain-missing" or "rocm-device-unavailable"
+            val gate = probe.feature_gate
+            val ok = (gate == "hip-toolchain-missing" or
+                      gate == "rocm-device-unavailable")
+            expect(ok).to_equal(true)
+
+    it "probe is not silently green when HIP toolchain is absent":
+        val probe = probe_rocm()
+        if probe.status != BackendStatus.Initialized:
+            # Must carry a non-empty feature_gate so callers can identify the cause
+            val has_gate = probe.feature_gate != ""
+            expect(has_gate).to_equal(true)
+            val has_reason = probe.reason != ""
+            expect(has_reason).to_equal(true)
+
+    it "hip-toolchain-missing gate appears when rt_rocm_is_available is false":
+        val probe = probe_rocm()
+        # On a host where hipcc is not installed and the HIP runtime library
+        # (amdhip64) is absent, the very first probe step fails with
+        # "hip-toolchain-missing". Assert this exact evidence string rather
+        # than relying on absence of an assertion.
+        if probe.feature_gate == "hip-toolchain-missing":
+            expect(probe.status).to_equal(BackendStatus.Unavailable)
+            expect(probe.api_name).to_equal("rocm")
+            expect(probe.shader_format).to_equal("hsaco")
+            expect(probe.has_compute).to_equal(false)
+            expect(probe.has_graphics).to_equal(false)
+            expect(probe.has_present).to_equal(false)
+
+    it "RocmBackend.create does not initialize without AMD hardware":
+        var backend = RocmBackend.create()
+        expect(backend.initialized).to_equal(false)
+
+    it "when ROCm device present probe reports compute and graphics ready":
+        val probe = probe_rocm()
+        if probe.status == BackendStatus.Initialized:
+            expect(probe.has_compute).to_equal(true)
+            expect(probe.has_graphics).to_equal(true)
+            expect(probe.has_present).to_equal(true)
+            expect(probe.feature_gate).to_equal("rocm-device-ready")

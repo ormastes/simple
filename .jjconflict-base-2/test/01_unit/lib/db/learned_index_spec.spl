@@ -1,0 +1,54 @@
+use std.spec
+use std.db.learned_index.{
+    learned_segment_build,
+    learned_segment_enabled,
+    learned_segment_lookup_exact,
+    learned_segment_probe,
+    learned_segment_unsafe_fallbacks,
+    learned_segment_window_size
+}
+
+describe "DB learned segment index":
+    it "requires explicit opt-in and falls back to exact full scan when disabled":
+        val idx = learned_segment_build([10, 20, 30], [1, 2, 3], false)
+        val probe = learned_segment_probe(idx, 20)
+        val hits = learned_segment_lookup_exact(idx, 20)
+
+        expect(learned_segment_enabled(idx)).to_equal(false)
+        expect(probe.fallback).to_equal(true)
+        expect(learned_segment_window_size(probe)).to_equal(3)
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal(2)
+
+    it "uses a bounded learned window for sorted static segments":
+        val idx = learned_segment_build([0, 10, 20, 30, 40, 50, 60, 70], [100, 101, 102, 103, 104, 105, 106, 107], true)
+        val probe = learned_segment_probe(idx, 40)
+        val hits = learned_segment_lookup_exact(idx, 40)
+
+        expect(learned_segment_enabled(idx)).to_equal(true)
+        expect(probe.used_model).to_equal(true)
+        expect(probe.fallback).to_equal(false)
+        expect(learned_segment_window_size(probe)).to_be_less_than(8)
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal(104)
+
+    it "disables unsafe unsorted segments and preserves exact results":
+        val idx = learned_segment_build([10, 40, 30, 50], [1, 4, 3, 5], true)
+        val probe = learned_segment_probe(idx, 30)
+        val hits = learned_segment_lookup_exact(idx, 30)
+
+        expect(learned_segment_enabled(idx)).to_equal(false)
+        expect(learned_segment_unsafe_fallbacks(idx)).to_equal(1)
+        expect(probe.fallback).to_equal(true)
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal(3)
+
+    it "returns no rows for out-of-range probes without scanning":
+        val idx = learned_segment_build([100, 200, 300], [10, 20, 30], true)
+        val probe = learned_segment_probe(idx, 50)
+        val hits = learned_segment_lookup_exact(idx, 50)
+
+        expect(probe.used_model).to_equal(true)
+        expect(probe.fallback).to_equal(false)
+        expect(learned_segment_window_size(probe)).to_equal(0)
+        expect(hits.len()).to_equal(0)

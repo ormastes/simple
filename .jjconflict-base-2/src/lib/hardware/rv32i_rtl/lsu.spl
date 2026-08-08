@@ -1,0 +1,156 @@
+# ============================================================================
+# RV32I RTL Load/Store Unit
+# ============================================================================
+#
+# Handles data memory interface for load and store instructions.
+# Computes memory address, formats store data, and sign/zero-extends
+# loaded data according to funct3 (LB/LH/LW/LBU/LHU).
+#
+# No direct VHDL file — extracted from rv32i_core.vhd memory interface
+# logic and the LSU width/extension behaviour implied by funct3.
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{FUNCT3_LB, FUNCT3_LH, FUNCT3_LW, FUNCT3_LBU, FUNCT3_LHU}
+use std.hardware.rv32i_rtl.pkg.{MEM_WIDTH_BYTE, MEM_WIDTH_HALF, MEM_WIDTH_WORD}
+use std.hardware.rv32i_rtl.alu.u32_signed_lt
+
+# ============================================================================
+# A-extension funct5 codes (bits [31:27] of the AMO instruction)
+# ============================================================================
+# Same encodings as rv64gc_rtl/pkg.spl. Canonical copies now live in
+# rv32i_rtl/pkg.spl; this local mirror is kept for module-local use
+# (memory-unit-owned, like the rv64 atomics.spl helper).
+
+val AMO_LR: u32   = 0x02
+val AMO_SC: u32   = 0x03
+val AMO_SWAP: u32 = 0x01
+val AMO_ADD: u32  = 0x00
+val AMO_XOR: u32  = 0x04
+val AMO_AND: u32  = 0x0C
+val AMO_OR: u32   = 0x08
+val AMO_MIN: u32  = 0x10
+val AMO_MAX: u32  = 0x14
+val AMO_MINU: u32 = 0x18
+val AMO_MAXU: u32 = 0x1C
+
+# ============================================================================
+# Store result — signals driven to data memory for store operations
+# ============================================================================
+
+struct LsuStoreResult:
+    """Data memory interface signals for a store operation."""
+    dmem_addr: u32     # Effective address (base + offset)
+    dmem_wdata: u32    # Data to write
+    dmem_we: bool      # Write enable
+    dmem_width: u32    # Access width (byte/half/word)
+
+# ============================================================================
+# Store address/data computation
+# ============================================================================
+
+fn lsu_store(base: u32, offset: u32, rs2_data: u32, funct3: u32) -> LsuStoreResult:
+    """Compute store address and format write data.
+    funct3[1:0] selects byte/half/word width."""
+
+    val addr = base + offset
+    val width = funct3 & 0x3   # funct3[1:0] = width encoding
+
+    LsuStoreResult(
+        dmem_addr: addr,
+        dmem_wdata: rs2_data,
+        dmem_we: true,
+        dmem_width: width
+    )
+
+# ============================================================================
+# Load data sign/zero extension
+# ============================================================================
+
+fn lsu_load(rdata: u32, funct3: u32) -> u32:
+    """Sign- or zero-extend loaded data according to funct3.
+    Handles LB (sign), LH (sign), LW, LBU (zero), LHU (zero)."""
+
+    if funct3 == FUNCT3_LB:
+        # Load byte, sign-extend from bit 7
+        val byte_val = rdata & 0xFF
+        if (byte_val & 0x80) != 0:
+            byte_val | 0xFFFFFF00
+        else:
+            byte_val
+
+    else if funct3 == FUNCT3_LH:
+        # Load halfword, sign-extend from bit 15
+        val half_val = rdata & 0xFFFF
+        if (half_val & 0x8000) != 0:
+            half_val | 0xFFFF0000
+        else:
+            half_val
+
+    else if funct3 == FUNCT3_LW:
+        # Load word — no extension needed
+        rdata
+
+    else if funct3 == FUNCT3_LBU:
+        # Load byte unsigned — zero-extend
+        rdata & 0xFF
+
+    else if funct3 == FUNCT3_LHU:
+        # Load halfword unsigned — zero-extend
+        rdata & 0xFFFF
+
+    else:
+        # Default: pass through
+        rdata
+
+# ============================================================================
+# AMO compute — atomic read-modify-write value (RV32: .W only)
+# ============================================================================
+
+struct Amo32Result:
+    """Result of an AMO*.W computation."""
+    old_value: u32   # Value read from memory (goes to rd)
+    new_value: u32   # Value to write back to memory
+
+fn amo32_compute(funct5: u32, old_value: u32, rs2_value: u32) -> Amo32Result:
+    """Compute the AMO*.W result given the old memory value and rs2.
+    Mirrors rv64gc_rtl amo_compute for XLEN=32; signed MIN/MAX use
+    two's-complement comparison via u32_signed_lt."""
+    var new_val: u32 = old_value
+
+    if funct5 == AMO_SWAP:
+        new_val = rs2_value
+    else if funct5 == AMO_ADD:
+        new_val = old_value + rs2_value
+    else if funct5 == AMO_XOR:
+        new_val = old_value ^ rs2_value
+    else if funct5 == AMO_AND:
+        new_val = old_value & rs2_value
+    else if funct5 == AMO_OR:
+        new_val = old_value | rs2_value
+    else if funct5 == AMO_MIN:
+        if u32_signed_lt(old_value, rs2_value):
+            new_val = old_value
+        else:
+            new_val = rs2_value
+    else if funct5 == AMO_MAX:
+        if u32_signed_lt(old_value, rs2_value):
+            new_val = rs2_value
+        else:
+            new_val = old_value
+    else if funct5 == AMO_MINU:
+        if old_value < rs2_value:
+            new_val = old_value
+        else:
+            new_val = rs2_value
+    else if funct5 == AMO_MAXU:
+        if old_value > rs2_value:
+            new_val = old_value
+        else:
+            new_val = rs2_value
+
+    Amo32Result(old_value: old_value, new_value: new_val)
+
+export LsuStoreResult, lsu_store, lsu_load
+export AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR
+export AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU
+export Amo32Result, amo32_compute

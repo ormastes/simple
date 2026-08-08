@@ -1,0 +1,210 @@
+#!/usr/bin/env sh
+# Build the focused static Simple compiler/interpreter/loader for SimpleOS.
+#
+# Usage:
+#   sh scripts/os/simpleos-native-build.shs [--target <triple>]
+#
+# Defaults:
+#   --target x86_64-unknown-simpleos
+#   output:  bin/release/x86_64-unknown-simpleos/simple
+#
+# Target examples:
+#   x86_64-unknown-simpleos   (default)
+#   riscv64gc-unknown-none
+#   aarch64-unknown-none
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---- defaults ----
+TARGET="x86_64-unknown-simpleos"
+ARCH="x86_64"
+
+# ---- parse args ----
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      shift
+      TARGET="$1"
+      ;;
+    --target=*)
+      TARGET="${1#*=}"
+      ;;
+    --help|-h)
+      echo "Usage: sh scripts/os/simpleos-native-build.shs [--target <triple>]"
+      echo ""
+      echo "  --target <triple>  Target triple (default: x86_64-unknown-simpleos)"
+      echo "                     e.g. riscv64gc-unknown-none, aarch64-unknown-none"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+# ---- derive arch from target ----
+case "$TARGET" in
+  x86_64-*)    ARCH="x86_64"  ;;
+  riscv64*)    ARCH="riscv64" ;;
+  aarch64-*)   ARCH="aarch64" ;;
+  riscv32*)    ARCH="riscv32" ;;
+  arm-*|armv*) ARCH="arm32"   ;;
+  *)           ARCH=$(echo "$TARGET" | cut -d- -f1) ;;
+esac
+
+OUTPUT="bin/release/${TARGET}/simple"
+TARGET_RUNTIME="build/os/simple-core-simpleos/libsimple_runtime.a"
+BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
+ENTRY="src/app/simpleos_tool/main.spl"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "error: missing SHA-256 tool (sha256sum or shasum)" >&2
+    return 1
+  fi
+}
+
+# ---- find compiler ----
+# COMPILER_EXPLICIT distinguishes an operator-chosen compiler from one this
+# script discovered on its own. The seed guard below only applies to the
+# discovered case: its purpose is to stop the build ACCIDENTALLY falling back
+# to the Rust bootstrap seed, not to forbid a deliberate, documented
+# route-around. Defect D1
+# (doc/08_tracking/bug/deployed_selfhost_env_set_miscompile_segv_2026-07-14.md)
+# makes such a route-around mandatory today: the tracked
+# release/x86_64-unknown-linux-gnu/simple currently holds a Rust bootstrap SEED
+# copy, and it is the FIRST entry in the discovery glob below.
+#
+# Discovery is a POSITIVE capability search, not a rejection filter. Measured
+# 2026-08-06, the previous "take the first executable, then reject it" shape had
+# two defects that between them made an honest self-hosted build impossible:
+#
+#   1. It ABORTED on the first candidate when that candidate was the seed,
+#      instead of continuing to the next one. Since bin/release/*/simple is a
+#      seed copy today, auto-discovery could never reach any working compiler.
+#   2. Its remaining checks were fail-OPEN: they rejected only rc>=128 or output
+#      naming --target. bin/release/x86_64-unknown-simpleos/simple (the SimpleOS
+#      PAYLOAD, a cross-target ELF) is executable and matches the same glob; it
+#      fails to exec with rc=126 and no output, so it passed every filter and
+#      would have been selected as the BUILDER.
+#
+# So a candidate is now admitted only by demonstrating the capability we need:
+# `native-build --target <triple> --help` must exit 0 AND print the native-build
+# usage banner including --runtime-bundle. Crash (rc>=128), exec failure
+# (rc=126), and silent no-output all fail that test rather than passing it.
+# The capability-probing selection that used to be inlined here now lives in
+# scripts/lib/simple-compiler-select.shs, shared with every other script that
+# has to pick a compiler. It is not a copy: the inline version here was itself
+# still fail-open. Measured 2026-08-06, its env-write probe ran `check`, which
+# the staged bootstrap compilers DO NOT IMPLEMENT -- they answer "unknown
+# command" (or bare rc=127), which the "reject only signal deaths" rule read as
+# a PASS. So this script would select build/bootstrap/stage2/.../simple having
+# proved nothing about it, and that binary then SIGSEGVs on the real work.
+# The shared helper probes a LADDER of subcommands and fails CLOSED when no
+# rung was conclusive. See its header for the full rationale.
+. "$REPO_ROOT/scripts/lib/simple-compiler-select.shs"
+
+COMPILER="$(simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET")" || {
+  echo "error: no Simple compiler passed the native-build capability probe for $TARGET" >&2
+  exit 1
+}
+
+echo "Compiler:  ${COMPILER}"
+echo "Target:    ${TARGET}"
+echo "Output:    ${OUTPUT}"
+echo ""
+
+# ---- create output directory ----
+mkdir -p "$(dirname "$OUTPUT")"
+
+if [ "$TARGET" = "x86_64-unknown-simpleos" ]; then
+  echo "[0/2] Building target Simple-core runtime..."
+  SIMPLE_BINARY="$COMPILER" \
+  SIMPLE_CORE_BUILD_DIR="build/os/simple-core-simpleos" \
+  SIMPLE_CORE_BACKEND="$BACKEND" \
+  BUILD_DIR="build/os/simple-core-simpleos/work" \
+  ARCHIVE_ONLY=1 TARGET="$TARGET" \
+    sh scripts/check/check-simple-core-runtime-smoke.shs
+  [ -s "$TARGET_RUNTIME" ] || { echo "error: target Simple-core archive missing: $TARGET_RUNTIME" >&2; exit 1; }
+  mkdir -p build/os/sysroot/lib
+  cp "$TARGET_RUNTIME" build/os/sysroot/lib/libsimple_runtime.a
+
+  # The seed linker hardcodes exactly three SimpleOS inputs — crt0.o,
+  # lib/libsimple_runtime.a and lib/libsimpleos_c.a (see
+  # simpleos_user_runtime_paths() in
+  # src/compiler_rust/compiler/src/pipeline/native_project/linker.rs). There is
+  # no fourth slot, and the copy above overwrites libsimple_runtime.a wholesale.
+  # So the cross-compiled C runtime has to be merged INTO that archive here,
+  # after the copy, or it would silently never reach the link line.
+  #
+  # `ar r` adds each object as its own member, so linker granularity is
+  # preserved: the simple-core Simple objects and the C runtime objects stay
+  # independently selectable. libsimpleos_c.a is deliberately left untouched so
+  # a plain C/C++ link never drags the Simple runtime in.
+  RUNTIME_NATIVE="build/os/sysroot/lib/libsimple_runtime_native.a"
+  if [ -f "$RUNTIME_NATIVE" ]; then
+    RT_MEMBER_DIR="build/os/simple-core-simpleos/rt-members"
+    rm -rf "$RT_MEMBER_DIR"; mkdir -p "$RT_MEMBER_DIR"
+    ( cd "$RT_MEMBER_DIR" && "${AR:-llvm-ar}" x "../../../../$RUNTIME_NATIVE" )
+    "${AR:-llvm-ar}" r build/os/sysroot/lib/libsimple_runtime.a "$RT_MEMBER_DIR"/*.o
+    echo "merged C runtime members into libsimple_runtime.a: $(ls "$RT_MEMBER_DIR"/*.o | wc -l)"
+  else
+    echo "error: missing $RUNTIME_NATIVE — run src/os/port/llvm/sysroot.shs first" >&2
+    exit 1
+  fi
+fi
+
+# ---- run native-build ----
+echo "[1/2] Building SimpleOS ${ARCH} binary..."
+SIMPLE_SIMPLE_CORE_PATH="$TARGET_RUNTIME" \
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$COMPILER" native-build \
+  --source src/compiler --source src/lib --source src/app \
+  --backend "$BACKEND" \
+  --runtime-bundle simple-core \
+  --entry-closure \
+  --entry "$ENTRY" \
+  --target "$TARGET" \
+  -o "$OUTPUT"
+
+# ---- verify output ----
+echo ""
+echo "[2/2] Verifying output..."
+if [ ! -f "$OUTPUT" ]; then
+  echo "FAILED: output file not found: ${OUTPUT}" >&2
+  exit 1
+fi
+
+file "$OUTPUT"
+
+FILE_INFO=$(file "$OUTPUT")
+case "$FILE_INFO" in
+  *ELF*"statically linked"*) ;;
+  *)
+    echo "FAILED: expected a static target ELF, got: $FILE_INFO" >&2
+    exit 1
+    ;;
+esac
+
+ARTIFACT_SHA256="$(sha256_file "$OUTPUT")"
+cat > "${OUTPUT}.build_stamp" <<EOF
+target=${TARGET}
+entry=${ENTRY}
+entry_closure=true
+backend=${BACKEND}
+compiler=${COMPILER}
+artifact_sha256=${ARTIFACT_SHA256}
+EOF
+
+SIZE=$(wc -c < "$OUTPUT")
+SIZE_KB=$((SIZE / 1024))
+
+echo ""
+echo "SUCCESS: ${OUTPUT}  (${SIZE_KB} KiB)"

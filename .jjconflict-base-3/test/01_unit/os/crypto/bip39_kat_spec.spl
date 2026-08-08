@@ -1,0 +1,327 @@
+# BIP-39 Known-Answer Tests
+#
+# Test vectors from:
+#   https://github.com/trezor/python-mnemonic/blob/master/vectors.json
+#
+# Covers:
+#   - entropy_to_mnemonic: 6 vectors (128/256/192 bit entropy)
+#   - mnemonic_to_entropy: 6 round-trip vectors
+#   - mnemonic_to_seed: 6 vectors with passphrase "TREZOR"
+#   - error cases: InvalidChecksum, UnknownWord, InvalidWordCount
+#
+# KNOWN INCOMPLETE (2026-07-28): the "BIP-39 mnemonic_to_seed" block below does
+# NOT run to completion and its six vectors have never been verified.
+# mnemonic_to_seed is PBKDF2-HMAC-SHA-512 with c=2048, and that chain
+# (pbkdf2_sha512_bytes -> hmac_sha512_bytes -> sha512_bytes) is pure Simple with
+# no extern on the hot path, so a single call takes >56 s interpreted while the
+# run path SIGTERMs at ~60 s. The other four describe blocks pass (17/17).
+# There is a registered rt_pbkdf2_hmac_sha512 extern but NOTHING ROUTES TO IT --
+# an earlier version of this comment claimed it "handles interpreter-mode
+# performance", which measurement disproved. Do not treat this file as green.
+# Details: doc/08_tracking/bug/bip39_mnemonic_to_seed_kat_blocked_60s_watchdog_2026-07-28.md
+#
+# All helper fns are module-level (feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use os.crypto.bip39.{
+    bip39_entropy_to_mnemonic,
+    bip39_mnemonic_to_entropy,
+    bip39_mnemonic_to_seed,
+    Bip39Error
+}
+use os.crypto.bip39_wordlist.{bip39_word, bip39_word_index, bip39_wordlist_self_check}
+
+# ===========================================================================
+# Byte helpers
+# ===========================================================================
+
+fn _hex_nibble(n: i64) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val byte = b[i].to_i64()
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+fn _list_hex(b: list) -> text:
+    var s: text = ""
+    var i = 0
+    while i < b.len():
+        val byte = b.get(i)
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+fn _hex_byte(hi: i64, lo: i64) -> u8:
+    val h = if hi >= 97: hi - 87
+            else if hi >= 65: hi - 55
+            else: hi - 48
+    val l = if lo >= 97: lo - 87
+            else if lo >= 65: lo - 55
+            else: lo - 48
+    val combined = (h << 4) | l
+    combined.to_u8()
+
+fn _hex_to_u8(hex: text) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i + 1 < hex.len():
+        val hi = hex.char_code_at(i)
+        val lo = hex.char_code_at(i + 1)
+        result.push(_hex_byte(hi, lo))
+        i = i + 2
+    result
+
+fn _u8_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len(): return false
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        if a[i] != b[i]: return false
+        i = i + 1
+    true
+
+# ===========================================================================
+# Test vector data helpers (module-level for feedback_it_block_var_mutation)
+# ===========================================================================
+
+# TV1: entropy = 00000000000000000000000000000000 (16 bytes)
+fn _tv1_entropy() -> [u8]:
+    _hex_to_u8("00000000000000000000000000000000")
+
+fn _tv1_mnemonic() -> text:
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+fn _tv1_seed() -> text:
+    "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+
+# TV2: entropy = 7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f
+fn _tv2_entropy() -> [u8]:
+    _hex_to_u8("7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f")
+
+fn _tv2_mnemonic() -> text:
+    "legal winner thank year wave sausage worth useful legal winner thank yellow"
+
+# TV1 with an EMPTY passphrase: salt is "mnemonic" alone, no suffix.
+fn _tv1_seed_no_passphrase() -> text:
+    "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+
+fn _tv2_seed() -> text:
+    "2e8905819b8723fe2c1d161860e5ee1830318dbf49a83bd451cfb8440c28bd6fa457fe1296106559a3c80937a1c1069be3a3a5bd381ee6260e8d9739fce1f607"
+
+# TV3: entropy = 80808080808080808080808080808080
+fn _tv3_entropy() -> [u8]:
+    _hex_to_u8("80808080808080808080808080808080")
+
+fn _tv3_mnemonic() -> text:
+    "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
+
+fn _tv3_seed() -> text:
+    "d71de856f81a8acc65e6fc851a38d4d7ec216fd0796d0a6827a3ad6ed5511a30fa280f12eb2e47ed2ac03b5c462a0358d18d69fe4f985ec81778c1b370b652a8"
+
+# TV4: entropy = ffffffffffffffffffffffffffffffff
+fn _tv4_entropy() -> [u8]:
+    _hex_to_u8("ffffffffffffffffffffffffffffffff")
+
+fn _tv4_mnemonic() -> text:
+    "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
+
+fn _tv4_seed() -> text:
+    "ac27495480225222079d7be181583751e86f571027b0497b5b5d11218e0a8a13332572917f0f8e5a589620c6f15b11c61dee327651a14c34e18231052e48c069"
+
+# TV5: 192-bit entropy = 000000000000000000000000000000000000000000000000
+fn _tv5_entropy() -> [u8]:
+    _hex_to_u8("000000000000000000000000000000000000000000000000")
+
+fn _tv5_mnemonic() -> text:
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon agent"
+
+fn _tv5_seed() -> text:
+    "035895f2f481b1b0f01fcf8c289c794660b289981a78f8106447707fdd9666ca06da5a9a565181599b79f53b844d8a71dd9f439c52a3d7b3e8a79c906ac845fa"
+
+# TV6: 256-bit entropy = 0000000000000000000000000000000000000000000000000000000000000000
+fn _tv6_entropy() -> [u8]:
+    _hex_to_u8("0000000000000000000000000000000000000000000000000000000000000000")
+
+fn _tv6_mnemonic() -> text:
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+
+fn _tv6_seed() -> text:
+    "bda85446c68413707090a52022edd26a1c9462295029f2e60cd7c4f2bbd3097170af7a4d73245cafa9c3cca8d561a7c3de6f5d4a10be8ed2a5e608d68f92fcc8"
+
+# ===========================================================================
+# Entropy → Mnemonic specs
+# ===========================================================================
+
+describe "BIP-39 wordlist integrity":
+
+    # The wordlist is index-critical: a substituted or reordered entry silently
+    # produces mnemonics no other BIP-39 wallet can recover. Pin the endpoints,
+    # the index round-trip, and the structural invariants.
+    it "is the official 2048-word BIP-39 English list":
+        expect(bip39_word(0)).to_equal("abandon")
+        expect(bip39_word(2047)).to_equal("zoo")
+        expect(bip39_word_index("abandon")).to_equal(0)
+        expect(bip39_word_index("zoo")).to_equal(2047)
+        expect(bip39_word_index("notaword")).to_equal(-1)
+        # 2048 entries, strictly ascending (implies sorted + duplicate-free)
+        expect(bip39_wordlist_self_check()).to_equal(true)
+
+describe "BIP-39 entropy_to_mnemonic":
+
+    it "TV1 00..00 (128-bit) → abandon×11 + about":
+        val result = bip39_entropy_to_mnemonic(_tv1_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv1_mnemonic())
+
+    it "TV2 7f..7f → legal winner thank year wave sausage worth useful legal winner thank yellow":
+        val result = bip39_entropy_to_mnemonic(_tv2_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv2_mnemonic())
+
+    it "TV3 80..80 → letter advice cage absurd amount doctor acoustic avoid letter advice cage above":
+        val result = bip39_entropy_to_mnemonic(_tv3_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv3_mnemonic())
+
+    it "TV4 ff..ff → zoo×11 + wrong":
+        val result = bip39_entropy_to_mnemonic(_tv4_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv4_mnemonic())
+
+    it "TV5 000..00 (192-bit) → 18 words starting with abandon×17 + agent":
+        val result = bip39_entropy_to_mnemonic(_tv5_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv5_mnemonic())
+
+    it "TV6 000..00 (256-bit) → 24 words starting with abandon×23 + art":
+        val result = bip39_entropy_to_mnemonic(_tv6_entropy())
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(_tv6_mnemonic())
+
+    it "invalid entropy length (15 bytes) → Err(InvalidEntropyLength)":
+        var bad: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val result = bip39_entropy_to_mnemonic(bad)
+        expect(result.is_err()).to_equal(true)
+
+# ===========================================================================
+# Mnemonic → Entropy (round-trip) specs
+# ===========================================================================
+
+describe "BIP-39 mnemonic_to_entropy (round-trip)":
+
+    it "TV1 round-trip: mnemonic_to_entropy(entropy_to_mnemonic(e)) == e":
+        val enc = bip39_entropy_to_mnemonic(_tv1_entropy())
+        val dec = bip39_mnemonic_to_entropy(enc.unwrap())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("00000000000000000000000000000000")
+
+    it "TV2 round-trip":
+        val enc = bip39_entropy_to_mnemonic(_tv2_entropy())
+        val dec = bip39_mnemonic_to_entropy(enc.unwrap())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f")
+
+    it "TV3 round-trip":
+        val enc = bip39_entropy_to_mnemonic(_tv3_entropy())
+        val dec = bip39_mnemonic_to_entropy(enc.unwrap())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("80808080808080808080808080808080")
+
+    it "TV4 round-trip (zoo×11 + wrong)":
+        val dec = bip39_mnemonic_to_entropy(_tv4_mnemonic())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("ffffffffffffffffffffffffffffffff")
+
+    it "TV5 round-trip (192-bit)":
+        val enc = bip39_entropy_to_mnemonic(_tv5_entropy())
+        val dec = bip39_mnemonic_to_entropy(enc.unwrap())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("000000000000000000000000000000000000000000000000")
+
+    it "TV6 round-trip (256-bit)":
+        val enc = bip39_entropy_to_mnemonic(_tv6_entropy())
+        val dec = bip39_mnemonic_to_entropy(enc.unwrap())
+        expect(dec.is_ok()).to_equal(true)
+        expect(_bytes_hex(dec.unwrap())).to_equal("0000000000000000000000000000000000000000000000000000000000000000")
+
+# ===========================================================================
+# Error cases
+# ===========================================================================
+
+describe "BIP-39 error cases":
+
+    it "unknown word → Err(UnknownWord)":
+        val result = bip39_mnemonic_to_entropy("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon notaword")
+        expect(result.is_err()).to_equal(true)
+
+    it "invalid checksum → Err(InvalidChecksum)":
+        # Flip last word: 'about' (correct for 00..00) → 'ability' (wrong checksum)
+        val result = bip39_mnemonic_to_entropy("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon ability")
+        expect(result.is_err()).to_equal(true)
+
+    it "wrong word count (11 words) → Err(InvalidWordCount)":
+        val result = bip39_mnemonic_to_entropy("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon")
+        expect(result.is_err()).to_equal(true)
+
+# ===========================================================================
+# Mnemonic → Seed (PBKDF2-HMAC-SHA-512, c=2048, passphrase="TREZOR")
+# ===========================================================================
+
+describe "BIP-39 mnemonic_to_seed":
+
+    it "TV1 seed with passphrase TREZOR":
+        val seed = bip39_mnemonic_to_seed(_tv1_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv1_seed())
+
+    it "TV2 seed with passphrase TREZOR":
+        val seed = bip39_mnemonic_to_seed(_tv2_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv2_seed())
+
+    it "TV3 seed with passphrase TREZOR":
+        val seed = bip39_mnemonic_to_seed(_tv3_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv3_seed())
+
+    it "TV4 seed with passphrase TREZOR":
+        val seed = bip39_mnemonic_to_seed(_tv4_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv4_seed())
+
+    it "TV5 seed with passphrase TREZOR (192-bit entropy)":
+        val seed = bip39_mnemonic_to_seed(_tv5_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv5_seed())
+
+    it "empty passphrase gives the BIP-39 no-passphrase seed, not the TREZOR one":
+        val seed_empty = bip39_mnemonic_to_seed(_tv1_mnemonic(), "")
+        val seed_trezor = bip39_mnemonic_to_seed(_tv1_mnemonic(), "TREZOR")
+        expect(_bytes_hex(seed_empty)).to_equal(_tv1_seed_no_passphrase())
+        assert_not_equal(_bytes_hex(seed_empty), _bytes_hex(seed_trezor))
+
+    it "TV6 seed with passphrase TREZOR (256-bit entropy)":
+        val seed = bip39_mnemonic_to_seed(_tv6_mnemonic(), "TREZOR")
+        expect(seed.len()).to_equal(64)
+        expect(_bytes_hex(seed)).to_equal(_tv6_seed())

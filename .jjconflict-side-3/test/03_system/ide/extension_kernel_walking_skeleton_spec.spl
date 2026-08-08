@@ -1,0 +1,220 @@
+# @cover src/lib/editor/extensions/host.spl 60%
+# @cover src/lib/editor/extensions/manifest_sdn.spl 60%
+# @req REQ-IDE-EXT-KERNEL-S5
+"""
+# IDE Extension Kernel — Walking Skeleton
+
+**Feature IDs:** IDE-EXT-KERNEL S5
+**Category:** Infrastructure
+**Status:** In Progress
+**Requirements:** doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md (S5)
+
+## Overview
+
+End-to-end proof that the extension kernel's landed pieces (manifest SDN
+decoder, `ExtensionHost`, `CommandRegistry`) compose into the walking
+skeleton the parallel-lane plan requires: a real fixture extension
+(`test/fixtures/ide_extensions/hello/`) is discovered without being
+executed, stays inactive until its command is dispatched, lazily activates
+and runs its typed handler, a duplicate registration loses to the first
+registrant, and deactivation tears every registration back down.
+
+External-process entrypoint execution (spawning `extension.entry` inside a
+sandboxed host) is future L6 work — see `ExtensionHost._dispatch_runtime_invocation`.
+This walking skeleton simulates the fixture extension's own activation code by
+registering its handler programmatically once the manifest has loaded, exactly
+as a real extension host would after running the entry module.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `extension_manifest_load_with_diagnostics` | Loads + decodes `extension.sdn`, collecting every diagnostic instead of aborting on the first |
+| `ExtensionHost.register_manifest` | Indexes a manifest without activating it |
+| `ExtensionHost.register_command_handler` | Eager registration; the command only *runs* once its owner is active |
+| `ExtensionHost.dispatch_command` | Lazily activates the owning extension (`onCommand:<id>`), then runs the real handler |
+| `ExtensionHost.deactivate` | Disposes every registration the extension's lifetime owns |
+| `extension_host_with_builtins_indexed` | Indexes the builtin manifests + hooks and activates nothing — builtins on the same lazy contract as disk extensions |
+| `extension_host_with_builtins` | The shipped constructor: identical to `extension_host_with_builtins_indexed` -- indexed, nothing activated (see the builtin-laziness scenario below) |
+
+## Related Specifications
+
+- [manifest_sdn_spec.spl](../../01_unit/lib/editor/extensions/manifest_sdn_spec.spl) — decoder unit coverage
+- [lifecycle_spec.spl](../../01_unit/lib/editor/extensions/lifecycle_spec.spl) — host lifecycle unit coverage
+"""
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.manifest_sdn.*
+use std.editor.extensions.api.{Disposable}
+
+val FIXTURE_MANIFEST_PATH = "test/fixtures/ide_extensions/hello/extension.sdn"
+val FIXTURE_EXTENSION_ROOT = "test/fixtures/ide_extensions/hello"
+val FIXTURE_EXTENSION_NAME = "fixture.hello"
+val FIXTURE_COMMAND_ID = "hello.greet"
+
+# ============================================================================
+# Step Helpers — named so underscores read as manual sentences
+# ============================================================================
+
+# Mirrors test/fixtures/ide_extensions/hello/hello_ext.spl's `hello_greet`.
+# The real entry module cannot be `use`d from a fixture path (fixtures are
+# not on the module search path); this is the programmatic stand-in the
+# walking skeleton wires into the host, matching the S5 brief.
+fn fixture_greet_handler(payload: text) -> Result<text, text>:
+    Ok("hello:" + payload)
+
+fn fixture_conflict_handler(payload: text) -> Result<text, text>:
+    Ok("intruder:" + payload)
+
+# @step: Load the fixture manifest with diagnostics
+fn load_fixture_manifest() -> ExtensionManifestLoad:
+    extension_manifest_load_with_diagnostics(FIXTURE_MANIFEST_PATH)
+
+# @step: Register the fixture extension and its command handler on a fresh host
+fn build_fixture_host() -> ExtensionHost:
+    val host = ExtensionHost.new()
+    val load = load_fixture_manifest()
+    host.register_manifest(load.manifest, FIXTURE_EXTENSION_ROOT)
+    host.register_command_handler(FIXTURE_EXTENSION_NAME, FIXTURE_COMMAND_ID,
+        "Hello: Greet", fixture_greet_handler)
+    host
+
+# @step: Dispatch the greet command with a payload
+fn dispatch_greet(host: ExtensionHost, payload: text) -> Result<text, text>:
+    host.dispatch_command(FIXTURE_COMMAND_ID, payload)
+
+# @step: Register a second, conflicting handler for the same command id
+fn register_conflicting_handler(host: ExtensionHost) -> Disposable:
+    host.register_command_handler("intruder", FIXTURE_COMMAND_ID,
+        "Fake Greet", fixture_conflict_handler)
+
+# @step: Then the dispatch succeeded with the expected value
+fn Then_dispatch_ok(result: Result<text, text>, expected: text):
+    match result:
+        case Ok(value):
+            expect(value).to_equal(expected)
+        case Err(_):
+            expect("dispatch").to_equal("should have succeeded")
+
+# @step: Then the dispatch failed cleanly, not by crashing
+fn Then_dispatch_err_contains(result: Result<text, text>, needle: text):
+    match result:
+        case Ok(_):
+            expect("dispatch").to_equal("should have failed")
+        case Err(message):
+            expect(message.contains(needle)).to_equal(true)
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+
+describe "IDE extension kernel walking skeleton: fixture.hello":
+
+    it "fixture manifest loads clean, with commands/keybindings/themes decoded":
+        val load = load_fixture_manifest()
+        expect(load.ok).to_equal(true)
+        expect(load.issues.len()).to_equal(0)
+        val m = load.manifest
+        expect(m.name).to_equal(FIXTURE_EXTENSION_NAME)
+        expect(m.host).to_equal("in_process")
+        expect(m.contributes_commands.len()).to_equal(1)
+        expect(m.contributes_commands[0].id).to_equal(FIXTURE_COMMAND_ID)
+        expect(m.contributes_commands[0].title).to_equal("Hello: Greet")
+        expect(m.contributes_languages.len()).to_equal(0)
+        expect(m.contributes_keybindings.len()).to_equal(1)
+        expect(m.contributes_keybindings[0].command).to_equal(FIXTURE_COMMAND_ID)
+        expect(m.contributes_keybindings[0].key).to_equal("ctrl+shift+h")
+        expect(m.contributes_themes.len()).to_equal(1)
+        expect(m.contributes_themes[0].id).to_equal("hello-light")
+        expect(m.contributes_themes[0].ui_theme).to_equal("light")
+        expect(m.activation_events.len()).to_equal(1)
+        expect(m.activation_events[0]).to_equal("onCommand:hello.greet")
+
+    it "activates lazily on dispatch, runs the real handler, then tears down cleanly on deactivate":
+        val host = build_fixture_host()
+
+        # (b) handlers register eagerly; the owning extension is not active yet.
+        expect(host.command_handler_registered(FIXTURE_COMMAND_ID)).to_equal(true)
+        expect(host.is_active(FIXTURE_EXTENSION_NAME)).to_equal(false)
+
+        # (c) dispatch activates the extension lazily, then runs the handler.
+        val first = dispatch_greet(host, "world")
+        Then_dispatch_ok(first, "hello:world")
+        expect(host.is_active(FIXTURE_EXTENSION_NAME)).to_equal(true)
+        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(1)
+
+        # (e) deactivate disposes every registration; a second dispatch fails,
+        # not crashes.
+        expect(host.deactivate(FIXTURE_EXTENSION_NAME)).to_equal(true)
+        expect(host.lifetime_disposable_count(FIXTURE_EXTENSION_NAME)).to_equal(0)
+        expect(host.command_handler_registered(FIXTURE_COMMAND_ID)).to_equal(false)
+        val second = dispatch_greet(host, "again")
+        Then_dispatch_err_contains(second, "no handler registered")
+
+    it "a duplicate registration of hello.greet loses to the first registrant":
+        val host = build_fixture_host()
+        val conflict = register_conflicting_handler(host)
+        expect(conflict.kind).to_equal("command-conflict")
+        # The original registration is untouched: dispatch still activates
+        # the real owner and runs the ORIGINAL handler, not the intruder's.
+        val result = dispatch_greet(host, "still-owned")
+        Then_dispatch_ok(result, "hello:still-owned")
+
+    it "a builtin obeys the same index -> lazy activate -> tear down contract as the fixture":
+        # The disk fixture above proves the contract for discovered extensions.
+        # Builtins get the identical contract from the indexed constructor;
+        # extension_host_with_builtins() is now the same lazy contract (the
+        # eager activate-all loop was removed 2026-07-31 -- builtin
+        # capabilities are no longer already-active before any event fires).
+        # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+        val host = extension_host_with_builtins_indexed()
+        expect(host.extension_count()).to_be_greater_than(2)
+        expect(host.active_count()).to_equal(0)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+
+        expect(host.activate_command("markdown.toggle_bold")).to_equal(1)
+        expect(host.is_active("markdown-language")).to_equal(true)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")
+
+        expect(host.deactivate("markdown-language")).to_equal(true)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+
+        # extension_host_with_builtins() (the shipped constructor) shares the
+        # identical lazy contract with the indexed constructor above.
+        val shipped = extension_host_with_builtins()
+        expect(shipped.active_count()).to_equal(0)
+        expect(shipped.activate_command("markdown.toggle_bold")).to_equal(1)
+        expect(shipped.is_active("markdown-language")).to_equal(true)
+
+    it "a broken manifest missing extension.id reports a diagnostic with line info":
+        # No '{' in this fixture text, so plain double-quoted concatenation
+        # is safe (the raw '...' landmine only bites once braces appear —
+        # see the fixture's inline command/keybinding/theme maps above).
+        val broken =
+            "extension:\n" +
+            "  schema: simple.ide.extension/1\n" +
+            "  version: 1.0.0\n" +
+            "  version: 2.0.0\n"
+        val load = extension_manifest_decode(broken)
+        expect(load.ok).to_equal(false)
+        var found_line = -1
+        for issue in load.issues:
+            if issue.path == "extension.id" and issue.message.contains("missing required field"):
+                found_line = issue.line
+        expect(found_line >= 1).to_equal(true)
+
+        # The duplicate `version:` key is also surfaced (parser-detected
+        # duplicate_key diagnostic, merged in with real line info).
+        var dup_found = false
+        var dup_line = -1
+        for issue in load.issues:
+            if issue.path == "extension.version" and issue.message.contains("duplicate key"):
+                dup_found = true
+                dup_line = issue.line
+        expect(dup_found).to_equal(true)
+        expect(dup_line).to_equal(4)

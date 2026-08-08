@@ -1,0 +1,79 @@
+"""Slide Sections + Summary Zoom model.
+
+A minimal deck-organization layer: a deck is split into named, contiguous
+sections (each a run of slide indices), and a Summary Zoom slide is derived
+from those sections — one thumbnail line per section, linking to the
+section's first slide. Also supports dragging a section to a new position
+in the section pane (`move_section`), and PowerPoint-like
+`<p:sectionLst>` XML export.
+"""
+
+struct SectionEntry:
+    section_name: text
+    first_slide_index: i32
+    slide_count: i32
+
+fn section_entry_new(section_name: text, first_slide_index: i32, slide_count: i32) -> SectionEntry:
+    return SectionEntry(section_name: section_name, first_slide_index: first_slide_index, slide_count: slide_count)
+
+struct DeckSections:
+    sections: [SectionEntry]
+
+fn deck_sections_new() -> DeckSections:
+    return DeckSections(sections: [])
+
+fn deck_sections_add(ds: DeckSections, entry: SectionEntry) -> DeckSections:
+    var sections = ds.sections
+    sections.push(entry)
+    return DeckSections(sections: sections)
+
+fn section_of_slide(ds: DeckSections, slide_index: i32) -> text:
+    for entry in ds.sections:
+        val range_end = entry.first_slide_index + entry.slide_count
+        if slide_index >= entry.first_slide_index and slide_index < range_end:
+            return entry.section_name
+    return ""
+
+fn total_slides(ds: DeckSections) -> i32:
+    var total = 0
+    for entry in ds.sections:
+        total = total + entry.slide_count
+    return total
+
+fn summary_zoom_targets(ds: DeckSections) -> [text]:
+    var lines: [text] = []
+    for entry in ds.sections:
+        val line_text = "{entry.section_name} -> slide {entry.first_slide_index}"
+        lines.push(line_text)
+    return lines
+
+fn section_count(ds: DeckSections) -> i32:
+    return ds.sections.len()
+
+fn sections_to_xml(ds: DeckSections) -> text:
+    var parts: [text] = []
+    parts.push("<p:sectionLst>")
+    for entry in ds.sections:
+        val range_end = entry.first_slide_index + entry.slide_count
+        val xml = "<p:section name=\"{entry.section_name}\" firstSlide=\"{entry.first_slide_index}\" cnt=\"{entry.slide_count}\" lastSlide=\"{range_end}\"/>"
+        parts.push(xml)
+    parts.push("</p:sectionLst>")
+    val xml = parts.join("")
+    return xml
+
+fn move_section(ds: DeckSections, from_index: i32, to_index: i32) -> DeckSections:
+    var moved: SectionEntry = ds.sections[from_index]
+    var remaining: [SectionEntry] = []
+    for i in 0..ds.sections.len():
+        if i != from_index:
+            remaining.push(ds.sections[i])
+    var result: [SectionEntry] = []
+    var out_idx = 0
+    for entry in remaining:
+        if out_idx == to_index:
+            result.push(moved)
+        result.push(entry)
+        out_idx = out_idx + 1
+    if to_index >= remaining.len():
+        result.push(moved)
+    return DeckSections(sections: result)

@@ -1,0 +1,73 @@
+# @cover src/compiler/20.hir/hir_lowering/expressions.spl
+#
+# Regression: `float(x)` is a primitive cast to f64, exactly as in the Rust
+# seed, and must not reach the value namespace as an unresolved name.
+#
+# BACKGROUND (2026-08-01, lane no-import-resolution). The self-hosted
+# `primitive_cast_type_kind` listed only the fixed-width numeric names
+# (i8..u64, f32, f64) and explicitly excluded `float`. The Rust seed does not:
+# `hir/lower/expr/calls.rs` lower_utility_builtin maps `"f64" | "float"` to the
+# same `TypeId::F64` cast, behind the same one-positional-argument gate. So
+# `float(i_part)` (src/std/common/format.spl:103 and :113) fell through to
+# ordinary symbol lookup in the self-hosted front end, missed, and hard-errored
+# `unresolved name: float` -- a builtin TYPE name arriving in the VALUE
+# namespace. It is not a missing import: `float` has no declaration to import.
+#
+# HARNESS NOTE (per me_field_resolution_spec.spl): the
+# parse_full_frontend -> HirLowering -> lower_module pipeline is inlined in
+# every `it` block on purpose -- do not factor this into a shared helper.
+#
+# tag: unit
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+describe "float(x) lowers as an f64 primitive cast":
+    it "lowers the format.spl shape with zero errors":
+        val src = "fn frac_digits(f: f64, i_part: i64) -> f64:\n" +
+            "    var frac = f - float(i_part)\n" +
+            "    frac\n"
+        val parsed = parse_full_frontend(src, "testdata/float_cast_format.spl", "float_cast_format", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/float_cast_format.spl")
+        val hir = hl.lower_module(parsed)
+
+        var unresolved_float = false
+        for err in hl.errors:
+            if err.message.contains("unresolved name: float"):
+                unresolved_float = true
+        expect(unresolved_float).to_equal(false)
+        expect(hl.errors.len()).to_equal(0)
+
+    it "lowers float(x) the same way as the already-supported f64(x)":
+        val src = "fn via_float(n: i64) -> f64:\n" +
+            "    float(n)\n" +
+            "\n" +
+            "fn via_f64(n: i64) -> f64:\n" +
+            "    f64(n)\n"
+        val parsed = parse_full_frontend(src, "testdata/float_cast_alias.spl", "float_cast_alias", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/float_cast_alias.spl")
+        val hir = hl.lower_module(parsed)
+        # Neither spelling may produce an unresolved-name error: `f64(x)` was
+        # already a cast, `float(x)` must now be the same cast.
+        var unresolved_names = 0
+        for err in hl.errors:
+            if err.message.contains("unresolved name:"):
+                unresolved_names = unresolved_names + 1
+        expect(unresolved_names).to_equal(0)
+        expect(hl.errors.len()).to_equal(0)
+
+    it "control: an unrelated unknown callee still errors loudly":
+        val src = "fn f(n: i64) -> i64:\n" +
+            "    definitely_not_a_builtin(n)\n"
+        val parsed = parse_full_frontend(src, "testdata/float_cast_control.spl", "float_cast_control", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/float_cast_control.spl")
+        val hir = hl.lower_module(parsed)
+
+        var has_unresolved = false
+        for err in hl.errors:
+            if err.message.contains("unresolved name: definitely_not_a_builtin"):
+                has_unresolved = true
+        expect(has_unresolved).to_equal(true)

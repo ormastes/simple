@@ -1,0 +1,415 @@
+# container_storage — §6.4 image / volume storage model for the Podman-on-MDSOC+
+# container manager (lane CTR2).
+#
+# Master plan §6.4 (doc/01_research/domain/simpleos_production_host_master_plan.md):
+#   "immutable content-addressed layers, RO base, COW writable snapshot,
+#    per-container quota, explicit volumes, atomic snapshot/rollback,
+#    signed metadata, ref-tracked GC."
+# Design: doc/04_architecture/os/container/podman_mdsoc_container_arch.md
+#
+# This is a PURE MODEL: no IO, no VFS, no live layer unpack. It holds the
+# bookkeeping the manager capsule needs to decide what may be reclaimed; the
+# actual blocks live behind the image-store port and are not touched here.
+#
+# Self-hosted-defect discipline (lane T3-CTR notes):
+#  - mutations go through `me` methods on a DIRECTLY-held array field
+#    (single field hop); callers holding a LayerStore inside another object use
+#    extract-mutate-writeback (var s = self.store; s.foo(); self.store = s);
+#  - no cross-module Result — the free functions return plain outcome structs;
+#  - in `me` methods the trailing return expression KEEPS the `self.` prefix;
+#  - no `{`/`}` literals in strings.
+
+# ============================================================================
+# Storage components (data-only structs)
+# ============================================================================
+
+struct ImageLayer:
+    """An immutable content-addressed RO image layer. `parent` is the digest of
+    the layer directly below it in the chain ("" for a base layer). `ro` is
+    always true — a published layer is never written again; writes land in the
+    container's CowSnapshot instead."""
+    digest: text
+    parent: text
+    size: u64
+    ro: bool
+
+struct CowSnapshot:
+    """A container's copy-on-write writable snapshot over an RO base.
+    `parent_digest` is the RO base this snapshot was branched from,
+    `layer_id` names the writable layer, `quota` is the per-container storage
+    ceiling and `used` the bytes currently written into the writable layer.
+    `live` is false once the snapshot has been released (rm / gc)."""
+    layer_id: text
+    parent_digest: text
+    owner: u64
+    quota: u64
+    used: u64
+    live: bool
+
+struct Volume:
+    """An EXPLICIT volume: a named, mounted store that is independent of the
+    container's COW snapshot. A persistent volume SURVIVES container removal —
+    that is the Podman/§6.4 rule the GC must respect."""
+    name: text
+    dest: text
+    persistent: bool
+    owner: u64
+    live: bool
+
+# Sentinel returned when a lookup misses. `live: false` makes a miss
+# indistinguishable from a released snapshot for liveness questions, which is
+# the fail-closed answer.
+fn dead_snapshot() -> CowSnapshot:
+    CowSnapshot(layer_id: "", parent_digest: "", owner: 0u64, quota: 0u64, used: 0u64, live: false)
+
+fn dead_volume() -> Volume:
+    Volume(name: "", dest: "", persistent: false, owner: 0u64, live: false)
+
+# ============================================================================
+# LayerStore — the content-addressed layer store + snapshot/volume tables.
+# Arrays are held DIRECTLY (single field hop) per the lane defect discipline.
+# ============================================================================
+
+class LayerStore:
+    layers: [ImageLayer]
+    snapshots: [CowSnapshot]
+    volumes: [Volume]
+    # Audit trail of digests reclaimed by every gc pass so far.
+    reclaimed: [text]
+
+impl LayerStore:
+    static fn new() -> LayerStore:
+        LayerStore(layers: [], snapshots: [], volumes: [], reclaimed: [])
+
+    # --- layer table -------------------------------------------------------
+
+    fn layer_count(self) -> i64:
+        self.layers.len()
+
+    fn has_layer(self, digest: text) -> bool:
+        var i = 0
+        while i < self.layers.len():
+            if self.layers[i].digest == digest:
+                return true
+            i = i + 1
+        false
+
+    fn parent_of(self, digest: text) -> text:
+        var i = 0
+        while i < self.layers.len():
+            if self.layers[i].digest == digest:
+                return self.layers[i].parent
+            i = i + 1
+        ""
+
+    # Walk a parent chain from `start` upward, asking whether `target` is on it.
+    # Bounded at 64 hops so a corrupt (cyclic) chain can never wedge the GC.
+    fn chain_contains(self, start: text, target: text) -> bool:
+        if target == "":
+            return false
+        var cur = start
+        var steps = 0
+        while cur != "" and steps < 64:
+            if cur == target:
+                return true
+            cur = self.parent_of(cur)
+            steps = steps + 1
+        false
+
+    # Add an immutable RO layer. Re-adding an existing digest is a no-op
+    # (content-addressed: the same digest IS the same layer).
+    me add_layer(digest: text, parent: text, size: u64) -> bool:
+        if self.has_layer(digest):
+            return false
+        var a = self.layers
+        a = a.push(ImageLayer(digest: digest, parent: parent, size: size, ro: true))
+        self.layers = a
+        true
+
+    # --- snapshot table ----------------------------------------------------
+
+    me add_snapshot(layer_id: text, parent_digest: text, owner: u64, quota: u64) -> i64:
+        var a = self.snapshots
+        a = a.push(CowSnapshot(
+            layer_id: layer_id,
+            parent_digest: parent_digest,
+            owner: owner,
+            quota: quota,
+            used: 0u64,
+            live: true
+        ))
+        self.snapshots = a
+        self.snapshots.len() - 1
+
+    fn snapshot_of(self, owner: u64) -> CowSnapshot:
+        var i = 0
+        while i < self.snapshots.len():
+            if self.snapshots[i].owner == owner and self.snapshots[i].live:
+                return self.snapshots[i]
+            i = i + 1
+        dead_snapshot()
+
+    fn snapshot_live(self, owner: u64) -> bool:
+        self.snapshot_of(owner).live
+
+    fn live_snapshot_count(self) -> i64:
+        var n = 0
+        var i = 0
+        while i < self.snapshots.len():
+            if self.snapshots[i].live:
+                n = n + 1
+            i = i + 1
+        n
+
+    # Writes into the writable layer, bounded by the per-container quota.
+    # Returns false (and writes NOTHING) when the write would exceed quota.
+    me snapshot_write(owner: u64, bytes: u64) -> bool:
+        var i = 0
+        var hit = -1
+        while i < self.snapshots.len():
+            if self.snapshots[i].owner == owner and self.snapshots[i].live:
+                hit = i
+            i = i + 1
+        if hit < 0:
+            return false
+        val s = self.snapshots[hit]
+        if s.used + bytes > s.quota:
+            return false
+        var a = self.snapshots
+        a[hit] = CowSnapshot(
+            layer_id: s.layer_id,
+            parent_digest: s.parent_digest,
+            owner: s.owner,
+            quota: s.quota,
+            used: s.used + bytes,
+            live: true
+        )
+        self.snapshots = a
+        true
+
+    fn snapshot_used(self, owner: u64) -> u64:
+        self.snapshot_of(owner).used
+
+    fn snapshot_layer_id(self, owner: u64) -> text:
+        self.snapshot_of(owner).layer_id
+
+    # Release a container's COW snapshot (the `rm` half of the lifecycle). The
+    # snapshot row is KEPT as a dead audit record; it stops holding refcounts.
+    me release_snapshot(owner: u64) -> bool:
+        var i = 0
+        var hit = -1
+        while i < self.snapshots.len():
+            if self.snapshots[i].owner == owner and self.snapshots[i].live:
+                hit = i
+            i = i + 1
+        if hit < 0:
+            return false
+        val s = self.snapshots[hit]
+        var a = self.snapshots
+        a[hit] = CowSnapshot(
+            layer_id: s.layer_id,
+            parent_digest: s.parent_digest,
+            owner: s.owner,
+            quota: s.quota,
+            used: s.used,
+            live: false
+        )
+        self.snapshots = a
+        true
+
+    # ATOMIC snapshot rollback: return the container to its RO base.
+    # Either the container is FULLY rolled back (writable layer discarded and
+    # re-branched from the same base, used == 0) or NOTHING changes. Returns the
+    # base digest on success and "" when the store was left unchanged.
+    me rollback_owner(owner: u64) -> text:
+        # --- validate first; no mutation happens until every check passes ---
+        var i = 0
+        var hit = -1
+        while i < self.snapshots.len():
+            if self.snapshots[i].owner == owner and self.snapshots[i].live:
+                hit = i
+            i = i + 1
+        if hit < 0:
+            return ""
+        val s = self.snapshots[hit]
+        if s.parent_digest == "":
+            return ""
+        if not self.has_layer(s.parent_digest):
+            # The RO base is gone — rolling back would leave a dangling
+            # snapshot, so refuse and leave the store untouched.
+            return ""
+        # --- commit ---
+        var a = self.snapshots
+        a[hit] = CowSnapshot(
+            layer_id: s.layer_id + ":rb",
+            parent_digest: s.parent_digest,
+            owner: s.owner,
+            quota: s.quota,
+            used: 0u64,
+            live: true
+        )
+        self.snapshots = a
+        s.parent_digest
+
+    # --- volume table ------------------------------------------------------
+
+    me add_volume(name: text, dest: text, persistent: bool, owner: u64) -> i64:
+        var a = self.volumes
+        a = a.push(Volume(name: name, dest: dest, persistent: persistent, owner: owner, live: true))
+        self.volumes = a
+        self.volumes.len() - 1
+
+    fn volume_of(self, name: text) -> Volume:
+        var i = 0
+        while i < self.volumes.len():
+            if self.volumes[i].name == name:
+                return self.volumes[i]
+            i = i + 1
+        dead_volume()
+
+    fn volume_live(self, name: text) -> bool:
+        self.volume_of(name).live
+
+    fn volume_persistent(self, name: text) -> bool:
+        self.volume_of(name).persistent
+
+    fn live_volume_count(self) -> i64:
+        var n = 0
+        var i = 0
+        while i < self.volumes.len():
+            if self.volumes[i].live:
+                n = n + 1
+            i = i + 1
+        n
+
+    # Drop a removed container's volumes. PERSISTENT volumes SURVIVE — they are
+    # explicit, named, independent of the container that mounted them. Only the
+    # anonymous/non-persistent ones go away with the container. Returns how many
+    # were dropped.
+    me drop_container_volumes(owner: u64) -> i64:
+        var dropped = 0
+        var out: [Volume] = []
+        var i = 0
+        while i < self.volumes.len():
+            val v = self.volumes[i]
+            if v.owner == owner and v.live and not v.persistent:
+                out = out.push(Volume(name: v.name, dest: v.dest, persistent: false, owner: v.owner, live: false))
+                dropped = dropped + 1
+            else:
+                out = out.push(v)
+            i = i + 1
+        self.volumes = out
+        dropped
+
+    # --- ref-tracked GC ----------------------------------------------------
+
+    # How many live references exist to `digest`:
+    #   1. every LIVE CowSnapshot whose parent chain passes through it (i.e.
+    #      a live container is still using it), plus
+    #   2. every other layer in the store that names it as its parent (a layer
+    #      still needed to reconstruct a chain above it).
+    # Released snapshots and reclaimed layers contribute NOTHING.
+    fn refcount(self, digest: text) -> i64:
+        var n = 0
+        var i = 0
+        while i < self.snapshots.len():
+            val s = self.snapshots[i]
+            if s.live and self.chain_contains(s.parent_digest, digest):
+                n = n + 1
+            i = i + 1
+        var j = 0
+        while j < self.layers.len():
+            val l = self.layers[j]
+            if l.digest != digest and l.parent == digest:
+                n = n + 1
+            j = j + 1
+        n
+
+    # Reclaim every layer whose refcount is 0, to a fixpoint: reclaiming a leaf
+    # can drop its parent to 0, which is then reclaimable on the next round.
+    # A layer referenced by a LIVE container (directly or through the chain) is
+    # NEVER reclaimed. Returns the reclaimed digests in reclaim order.
+    #
+    # `ignore_refcounts` exists ONLY so the spec can prove it can FAIL (set it
+    # true and the GC reclaims a live container's base layer, breaking the
+    # survival oracle). Production callers use gc_collect / gc(), which pass
+    # false.
+    me gc_run(ignore_refcounts: bool) -> [text]:
+        var out: [text] = []
+        var changed = true
+        var rounds = 0
+        while changed and rounds < 64:
+            changed = false
+            rounds = rounds + 1
+            var keep: [ImageLayer] = []
+            var i = 0
+            while i < self.layers.len():
+                val l = self.layers[i]
+                val rc = self.refcount(l.digest)
+                if ignore_refcounts or rc == 0:
+                    out = out.push(l.digest)
+                    changed = true
+                else:
+                    keep = keep.push(l)
+                i = i + 1
+            self.layers = keep
+        var rec = self.reclaimed
+        var k = 0
+        while k < out.len():
+            rec = rec.push(out[k])
+            k = k + 1
+        self.reclaimed = rec
+        out
+
+    me gc() -> [text]:
+        self.gc_run(false)
+
+    fn reclaimed_count(self) -> i64:
+        self.reclaimed.len()
+
+    fn was_reclaimed(self, digest: text) -> bool:
+        var i = 0
+        while i < self.reclaimed.len():
+            if self.reclaimed[i] == digest:
+                return true
+            i = i + 1
+        false
+
+# ============================================================================
+# Free-function surface (the §6.4 API names). Mutating entry points return the
+# store alongside their result rather than relying on caller aliasing, and
+# never cross a module boundary with a Result.
+# ============================================================================
+
+struct GcOutcome:
+    """Result of a gc pass: the store after the pass + the reclaimed digests."""
+    store: LayerStore
+    reclaimed: [text]
+
+struct RollbackOutcome:
+    """Result of an atomic rollback. `ok == false` means the store is UNCHANGED
+    and `base_digest` is ""."""
+    store: LayerStore
+    base_digest: text
+    ok: bool
+
+fn layer_refcount(store: LayerStore, digest: text) -> i64:
+    """Live reference count of a content-addressed layer."""
+    store.refcount(digest)
+
+fn gc_collect(store: LayerStore) -> GcOutcome:
+    """Reclaim ONLY layers with refcount 0, to a fixpoint. Never reclaims a
+    layer still referenced by a live container or by another layer's parent
+    chain."""
+    var s = store
+    # calls gc_run DIRECTLY (not via the gc() convenience wrapper) so the
+    # mutation is never routed through an extra method hop.
+    val r = s.gc_run(false)
+    GcOutcome(store: s, reclaimed: r)
+
+fn snapshot_rollback(store: LayerStore, container: u64) -> RollbackOutcome:
+    """Atomically return `container` to its RO base: either fully rolled back
+    (writable layer discarded, used == 0, same base digest) or unchanged."""
+    var s = store
+    val base = s.rollback_owner(container)
+    RollbackOutcome(store: s, base_digest: base, ok: base != "")

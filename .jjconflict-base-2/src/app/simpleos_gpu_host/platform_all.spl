@@ -1,0 +1,138 @@
+"""Legacy all-host provider for the shared SimpleOS GPU daemon runner."""
+
+use app.simpleos_gpu_host.platform_contract.{
+    SimpleOsGpuHostPlatform,
+    SimpleOsGpuHostProcessingResult,
+    simpleos_gpu_host_processing_result,
+    simpleos_gpu_host_processing_failure
+}
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+}
+use std.common.processing.processing_ir.{
+    ProcessingIr,
+    processing_ir_fill_u32,
+    processing_ir_cpu_execute,
+    processing_ir_outputs_equal
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_selected_device_driver_identity_hash
+}
+use std.gc_async_mut.processing.vulkan_fill_u32.{
+    processing_ir_execute_vulkan
+}
+use std.gc_async_mut.processing.cuda_fill_u32.{
+    ProcessingCudaExecutor,
+    processing_ir_execute_cuda_with_executor
+}
+use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{
+    directx_hardware_adapter_identity
+}
+
+class SimpleOsGpuHostAllPlatform:
+    cuda_executor: ProcessingCudaExecutor
+
+    static fn create() -> SimpleOsGpuHostAllPlatform:
+        SimpleOsGpuHostAllPlatform(cuda_executor: ProcessingCudaExecutor.create())
+
+fn _processing_selector_mask(requested: i64, selector: text, auto_mask: i64) -> i64:
+    if selector == "cuda":
+        return requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+    if selector == "vulkan":
+        return requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+    if selector == "metal":
+        return 0
+    requested & auto_mask
+
+fn _processing_result(completed: bool, reason: text, values: [u32], backend_handle: i64, device_identity: i64) -> SimpleOsGpuHostProcessingResult:
+    simpleos_gpu_host_processing_result(
+        completed, reason, values, backend_handle, device_identity)
+
+fn _execute_processing(cuda_executor: ProcessingCudaExecutor, ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
+    if backend == "cuda":
+        val result = processing_ir_execute_cuda_with_executor(cuda_executor, ir)
+        return _processing_result(
+            result.completed, result.reason, result.values,
+            result.backend_handle, result.device_identity)
+    if backend == "vulkan":
+        val result = processing_ir_execute_vulkan(ir)
+        return _processing_result(
+            result.completed, result.reason, result.values,
+            result.backend_handle, result.device_identity)
+    simpleos_gpu_host_processing_failure("unsupported-processing-backend")
+
+fn _processing_backend_mask_supported(cuda_executor: ProcessingCudaExecutor, selected: i64) -> i64:
+    val probe_ir = processing_ir_fill_u32(1, 1u32)
+    val oracle = processing_ir_cpu_execute(probe_ir)
+    var available: i64 = 0
+    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
+        val probe = _execute_processing(cuda_executor, probe_ir, "vulkan")
+        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
+            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
+        val probe = _execute_processing(cuda_executor, probe_ir, "cuda")
+        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
+            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+    available
+
+@cfg(linux)
+fn _create_all_engine(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
+    if backend != "vulkan":
+        return Err("linux-host-daemon-requires-vulkan")
+    Engine2D.create_vulkan_backend(width, height)
+
+@cfg(not(linux))
+fn _create_all_engine(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
+    Engine2D.create_requested_backend(width, height, backend)
+
+fn _all_render_device_identity(backend: text) -> i64:
+    if backend == "vulkan":
+        return vulkan_sffi_selected_device_driver_identity_hash()
+    if backend == "directx":
+        return directx_hardware_adapter_identity()
+    0
+
+@cfg(linux)
+fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
+    val selected = _processing_selector_mask(
+        requested, selector,
+        SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA)
+    _processing_backend_mask_supported(cuda_executor, selected)
+
+@cfg(not(linux))
+fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
+    val selected = _processing_selector_mask(requested, selector, requested)
+    _processing_backend_mask_supported(cuda_executor, selected)
+
+impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
+    fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
+        match _create_all_engine(width, height, backend):
+            Err(reason): Err(reason)
+            Ok(engine): Ok(engine)
+
+    fn probe_render_backend(backend: text) -> Result<bool, text>:
+        match _create_all_engine(1, 1, backend):
+            Err(reason): Err(reason)
+            Ok(engine):
+                val available = (
+                    engine.backend_name() == backend and
+                    _all_render_device_identity(backend) > 0)
+                engine.shutdown()
+                Ok(available)
+
+    fn render_device_identity(backend: text) -> i64:
+        _all_render_device_identity(backend)
+
+    fn processing_backend_mask(requested: i64, selector: text) -> i64:
+        _all_processing_backend_mask(self.cuda_executor, requested, selector)
+
+    fn execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
+        _execute_processing(self.cuda_executor, ir, backend)
+
+    fn shutdown():
+        self.cuda_executor.shutdown()
+
+export SimpleOsGpuHostAllPlatform

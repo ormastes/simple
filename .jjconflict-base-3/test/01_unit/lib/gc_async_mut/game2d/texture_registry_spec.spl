@@ -1,0 +1,176 @@
+# game2d TextureRegistry + TileMap real texture sampling tests.
+#
+# Closes two DrawIR feature-gap audit items
+# (doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md):
+#
+# - gap #6 / lane GAP-5, "Tilemap texture sampling": tiles previously always
+#   painted as a flat solid color ("placeholder — real texture sampling
+#   would require a TextureRegistry"). This spec proves
+#   TileMap.create_textured + a registered strip texture now renders the
+#   tileset's real pixels, and that the no-registry path still falls back
+#   to the placeholder unchanged (backward compatible).
+# - gap #12, "Render-to-texture game-layer consumer": `create_offscreen` +
+#   `draw_engine` existed with no game-layer caller. `TileMap.render_minimap`
+#   is a real consumer — renders into its own offscreen Engine2D, then
+#   composites the result into a parent Engine2D.
+
+use std.spec
+use std.game2d.texture_registry.{TextureRegistry, RegisteredTexture}
+use std.game2d.tilemap.{TileMap, tilemap_sample_tile}
+use std.game2d.camera.{Camera2D}
+use std.gpu.engine2d.engine.{Engine2D}
+
+fn _build_two_tile_strip(texture_id: u64, tw: i32, th: i32, color_a: u32, color_b: u32) -> RegisteredTexture:
+    """Build a `2*tw` x `th` horizontal strip: left tile solid color_a, right tile solid color_b."""
+    val width = tw * 2
+    val height = th
+    val total = width * height
+    var pixels: [u32] = [0; total]
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            val idx = y * width + x
+            if x < tw:
+                pixels[idx] = color_a
+            else:
+                pixels[idx] = color_b
+            x = x + 1
+        y = y + 1
+    RegisteredTexture(texture_id: texture_id, width: width, height: height, pixels: pixels)
+
+fn _contains_color(pixels: [u32], color: u32) -> bool:
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            return true
+        i = i + 1
+    false
+
+describe "TextureRegistry":
+    describe "register/lookup":
+        it "returns nil for an unregistered id":
+            val reg = TextureRegistry.create()
+            val found = reg.lookup(1)
+            var is_present = false
+            if val Some(_t) = found:
+                is_present = true
+            assert_false(is_present)
+
+        it "returns the registered texture by id":
+            var reg = TextureRegistry.create()
+            reg.register(7, 4, 4, [0xFFFF0000; 16])
+            val found = reg.lookup(7)
+            var is_present = false
+            if val Some(_t) = found:
+                is_present = true
+            assert_true(is_present)
+            if val Some(tex) = found:
+                expect(tex.width).to_equal(4)
+                expect(tex.height).to_equal(4)
+                expect(tex.texture_id).to_equal(7)
+
+        it "distinguishes multiple registered ids":
+            var reg = TextureRegistry.create()
+            reg.register(1, 2, 2, [0xFFAA0000; 4])
+            reg.register(2, 2, 2, [0xFF00BB00; 4])
+            expect(reg.count()).to_equal(2)
+            if val Some(t1) = reg.lookup(1):
+                expect(t1.pixels[0]).to_equal(0xFFAA0000)
+            if val Some(t2) = reg.lookup(2):
+                expect(t2.pixels[0]).to_equal(0xFF00BB00)
+
+describe "tilemap_sample_tile":
+    it "samples the left tile's real pixels from a horizontal strip":
+        val tex = _build_two_tile_strip(1, 4, 4, 0xFFAA1122, 0xFF22BB44)
+        val pixels = tilemap_sample_tile(tex, 0, 4, 4)
+        expect(pixels.len()).to_equal(16)
+        var i = 0
+        while i < pixels.len():
+            expect(pixels[i]).to_equal(0xFFAA1122)
+            i = i + 1
+
+    it "samples the right tile's real pixels from a horizontal strip":
+        val tex = _build_two_tile_strip(1, 4, 4, 0xFFAA1122, 0xFF22BB44)
+        val pixels = tilemap_sample_tile(tex, 1, 4, 4)
+        expect(pixels.len()).to_equal(16)
+        var i = 0
+        while i < pixels.len():
+            expect(pixels[i]).to_equal(0xFF22BB44)
+            i = i + 1
+
+    it "falls back to the solid placeholder when the tile index is out of the strip's bounds":
+        val tex = _build_two_tile_strip(1, 4, 4, 0xFFAA1122, 0xFF22BB44)
+        # Only 2 tiles (index 0,1) fit in an 8-wide strip of 4-wide tiles.
+        val pixels = tilemap_sample_tile(tex, 5, 4, 4)
+        expect(pixels.len()).to_equal(16)
+        # Placeholder for idx=5 packs 5 into the blue channel: 0xFF000005.
+        expect(pixels[0]).to_equal(0xFF000005)
+
+describe "TileMap real texture rendering (end-to-end via Engine2D)":
+    it "create_textured renders the registered strip's real colors, not the placeholder":
+        var reg = TextureRegistry.create()
+        val strip = _build_two_tile_strip(9, 4, 4, 0xFFAA1122, 0xFF22BB44)
+        reg.register(9, strip.width, strip.height, strip.pixels)
+        val cells = [[0, 1]]
+        val tm = TileMap.create_textured(9, 4, 4, cells, reg)
+
+        var engine = Engine2D.create_with_backend(32, 32, "cpu")
+        engine.clear(0xFF001122)
+        val camera = Camera2D.create(0.0, 0.0, 32.0, 32.0)
+        tm.render_tilemap(engine, camera, 0.0, 0.0)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        assert_true(_contains_color(pixels, 0xFFAA1122))
+        assert_true(_contains_color(pixels, 0xFF22BB44))
+        # The old placeholder colors for tile indices 0 and 1 must NOT appear —
+        # proves this path samples real pixels, it didn't just get lucky.
+        assert_false(_contains_color(pixels, 0xFF000000))
+        assert_false(_contains_color(pixels, 0xFF000001))
+
+    it "create (no registry) still falls back to the placeholder unchanged":
+        val cells = [[0, 1]]
+        val tm = TileMap.create(9, 4, 4, cells)
+
+        var engine = Engine2D.create_with_backend(32, 32, "cpu")
+        engine.clear(0xFF001122)
+        val camera = Camera2D.create(0.0, 0.0, 32.0, 32.0)
+        tm.render_tilemap(engine, camera, 0.0, 0.0)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        # Placeholder colors: idx 0 -> 0xFF000000, idx 1 -> 0xFF000001.
+        assert_true(_contains_color(pixels, 0xFF000000))
+        assert_true(_contains_color(pixels, 0xFF000001))
+
+describe "TileMap render-to-texture minimap (real RTT consumer)":
+    it "composites a 1px-per-tile minimap of real tile colors onto the parent engine":
+        var reg = TextureRegistry.create()
+        val strip = _build_two_tile_strip(11, 4, 4, 0xFFAA1122, 0xFF22BB44)
+        reg.register(11, strip.width, strip.height, strip.pixels)
+        val cells = [[0, 1]]
+        val tm = TileMap.create_textured(11, 4, 4, cells, reg)
+
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        engine.clear(0xFF001122)
+        tm.render_minimap(engine, 0, 0)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        # 8-wide canvas: (0,0) -> index 0, (1,0) -> index 1.
+        expect(pixels[0]).to_equal(0xFFAA1122)
+        expect(pixels[1]).to_equal(0xFF22BB44)
+
+    it "falls back to placeholder colors in the minimap when no registry is set":
+        val cells = [[0, 1]]
+        val tm = TileMap.create(11, 4, 4, cells)
+
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        engine.clear(0xFF001122)
+        tm.render_minimap(engine, 0, 0)
+        engine.present()
+
+        val pixels = engine.read_pixels()
+        expect(pixels[0]).to_equal(0xFF000000)
+        expect(pixels[1]).to_equal(0xFF000001)

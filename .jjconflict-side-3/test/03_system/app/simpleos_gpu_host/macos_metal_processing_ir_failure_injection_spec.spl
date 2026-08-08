@@ -1,0 +1,117 @@
+"""Prepared macOS live checks for Metal ProcessingIR failure injection."""
+
+use std.spec.{describe, it, expect, pending}
+use std.io_runtime.{get_args, process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_macos}
+use std.common.processing.processing_ir.{
+    processing_ir_fill_u32, processing_ir_output_matches
+}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_injected}
+use std.gc_async_mut.processing.metal_fill_u32.{processing_ir_execute_metal}
+
+val METAL_FAULT_SPEC_PATH: text = "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl"
+val METAL_FAULT_CHILD_TIMEOUT_MS: i64 = 30000
+val METAL_FAULT_CHILD_OUTPUT_BYTES: i64 = 4194304
+
+fn _arg_value(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+fn _checksum(values: [u32]) -> u64:
+    var checksum: u64 = 0
+    for value in values:
+        checksum = checksum + value.to_u64()
+    checksum
+
+fn _probe(phase: text):
+    val ir = processing_ir_fill_u32(8, 0x01020304u32)
+    val result = processing_ir_execute_metal(ir)
+    val values_exact = processing_ir_output_matches(ir, result.values)
+    val checksum = _checksum(result.values)
+    print("GPU_METAL_FAULT_PROBE phase={phase} fault_active={_bool_text(processing_ir_fault_injected(\"metal\", phase))} completed={_bool_text(result.completed)} reason={result.reason} values={result.values.len()} values_exact={_bool_text(values_exact)} checksum={checksum} handle={result.backend_handle} identity={result.device_identity}\n")
+
+val GPU_METAL_PROBE_PHASE = _arg_value(get_args(), "--phase=")
+if GPU_METAL_PROBE_PHASE != "":
+    _probe(GPU_METAL_PROBE_PHASE)
+
+fn _probe_mode() -> bool:
+    GPU_METAL_PROBE_PHASE != ""
+
+fn _run_case(phase: text, test_gate: bool, selector: bool) -> text:
+    var args = [
+        "-u", "SIMPLE_GPU_TEST",
+        "-u", "SIMPLE_GPU_FAULT_INJECT",
+        "-u", "SIMPLE_RUNTIME_MODE",
+        "SIMPLE_LIB=src",
+        "SIMPLE_RUNTIME_MODE=interpreter"
+    ]
+    if test_gate:
+        args = args + ["SIMPLE_GPU_TEST=1"]
+    if selector:
+        args = args + ["SIMPLE_GPU_FAULT_INJECT=metal:" + phase]
+    args = args + [
+        "bin/simple", "run", METAL_FAULT_SPEC_PATH,
+        "--phase=" + phase
+    ]
+    val (out, err, code) = process_run_bounded(
+        "env", args, METAL_FAULT_CHILD_TIMEOUT_MS, METAL_FAULT_CHILD_OUTPUT_BYTES)
+    val timed_out = (
+        err.contains("[TIMEOUT: Process killed after") or
+        err.contains("Process timed out") or
+        err == "TIMEOUT")
+    if code == -1 and timed_out:
+        print("GPU_METAL_FAULT_CHILD_TIMEOUT phase={phase} timeout_ms={METAL_FAULT_CHILD_TIMEOUT_MS}\n")
+    expect(code).to_equal(0)
+    out
+
+fn _assert_default_gate_absent() -> text:
+    val out = _run_case("none", false, false)
+    expect(out).to_contain(
+        "GPU_METAL_FAULT_PROBE phase=none fault_active=false completed=true reason=ok values=8 values_exact=true checksum=135272480"
+    )
+    expect(out.contains("handle=0")).to_equal(false)
+    expect(out.contains("identity=0")).to_equal(false)
+    out
+
+fn _assert_injected(phase: text, reason: text) -> text:
+    val out = _run_case(phase, true, true)
+    expect(out).to_contain(
+        "GPU_METAL_FAULT_PROBE phase=" + phase +
+        " fault_active=true completed=false reason=" + reason +
+        " values=0 values_exact=false checksum=0 handle=0 identity=0"
+    )
+    out
+
+describe "prepared macOS Metal ProcessingIR failure injection" :
+    if not is_macos():
+        it "requires a macOS host for the live Metal executor" :
+            expect(is_macos()).to_equal(false)
+            pending("macOS Metal ProcessingIR live test is postponed to a macOS host")
+        return
+
+    it "proves the production default gate does not inject a failure" :
+        if _probe_mode(): return
+        expect(_assert_default_gate_absent()).to_contain(
+            "fault_active=false completed=true reason=ok")
+
+    it "requires both fault gate variables":
+        if _probe_mode(): return
+        expect(_run_case("init", true, false)).to_contain(
+            "phase=init fault_active=false")
+        expect(_run_case("init", false, true)).to_contain(
+            "phase=init fault_active=false")
+
+    it "returns typed init, submit, readback, and mismatch failures" :
+        if _probe_mode(): return
+        expect(_assert_injected("unavailable", "metal-unavailable")).to_contain(
+            "reason=metal-unavailable")
+        expect(_assert_injected("init", "metal-init-failed")).to_contain(
+            "reason=metal-init-failed")
+        _assert_injected("submit", "metal-submit-failed")
+        _assert_injected("readback", "metal-readback-failed")
+        _assert_injected("mismatch", "checksum-mismatch")

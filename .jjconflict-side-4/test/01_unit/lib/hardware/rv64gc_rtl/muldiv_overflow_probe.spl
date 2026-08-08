@@ -1,0 +1,44 @@
+# Regression probe: rv64 M-extension signed-division overflow (INT64_MIN / -1).
+# Before the fix, MULDIV_DIV/REM did raw `a / b` and native idiv SIGFPE-crashed
+# the model on INT64_MIN / -1. RISC-V mandates DIV -> dividend, REM -> 0, no trap.
+# Run-path probe: `bin/simple run`; expects "MULDIV OVERFLOW PROBE: ALL PASS".
+use std.hardware.rv64gc_rtl.mul_div.{MulDivState, mul_div_start, mul_div_tick}
+use std.hardware.rv64gc_rtl.pkg.{MULDIV_DIV, MULDIV_REM}
+
+fn run(op: i64, a: i64, b: i64) -> i64:
+    var s = mul_div_start(op, a, b)
+    var i = 0
+    while i < 10:
+        s = mul_div_tick(s)
+        i = i + 1
+    s.result
+
+fn check(name: text, got: i64, want: i64) -> i64:
+    if got == want:
+        return 0
+    print("FAIL {name}: got {got} want {want}")
+    1
+
+fn main() -> i64:
+    var f = 0
+    val imin = 1 << 63          # INT64_MIN = 0x8000000000000000
+
+    # overflow cases — previously SIGFPE-crashed the simulator
+    f = f + check("DIV imin/-1 == imin", run(MULDIV_DIV, imin, -1), imin)
+    f = f + check("REM imin/-1 == 0", run(MULDIV_REM, imin, -1), 0)
+
+    # normal signed div/rem still correct (truncate toward zero)
+    f = f + check("DIV 100/7 == 14", run(MULDIV_DIV, 100, 7), 14)
+    f = f + check("REM 100/7 == 2", run(MULDIV_REM, 100, 7), 2)
+    f = f + check("DIV -100/7 == -14", run(MULDIV_DIV, 0 - 100, 7), 0 - 14)
+    f = f + check("REM -100/7 == -2", run(MULDIV_REM, 0 - 100, 7), 0 - 2)
+
+    # divide-by-zero contract unchanged
+    f = f + check("DIV 42/0 == -1", run(MULDIV_DIV, 42, 0), 0 - 1)
+    f = f + check("REM 42/0 == 42", run(MULDIV_REM, 42, 0), 42)
+
+    if f == 0:
+        print("MULDIV OVERFLOW PROBE: ALL PASS")
+        return 0
+    print("MULDIV OVERFLOW PROBE: {f} FAIL")
+    1

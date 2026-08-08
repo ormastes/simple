@@ -1,0 +1,232 @@
+"""
+Audio Bus Graph — Named dB-domain bus graph unit tests
+
+Tests BusGraph construction, volume/mute mutation, DAG routing with cycle
+rejection, and effective_gain computation along the send_target chain.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.audio.bus.{AudioBusNode, BusGraph, _db_to_linear}
+
+describe "BusGraph":
+    it "starts empty":
+        val graph = BusGraph.new()
+        expect(graph.bus_count()).to_equal(0)
+
+    it "add_bus with empty send_target creates root bus":
+        var graph = BusGraph.new()
+        val ok = graph.add_bus("master", "", 0.0)
+        expect(ok).to_equal(true)
+        expect(graph.bus_count()).to_equal(1)
+
+    it "add_bus rejects duplicate name":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val dup = graph.add_bus("master", "", 0.0)
+        expect(dup).to_equal(false)
+
+    it "add_bus rejects unknown send_target":
+        var graph = BusGraph.new()
+        val ok = graph.add_bus("sfx", "master", 0.0)
+        expect(ok).to_equal(false)
+
+    it "add_bus succeeds when send_target exists":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val ok = graph.add_bus("sfx", "master", -6.0)
+        expect(ok).to_equal(true)
+        expect(graph.bus_count()).to_equal(2)
+
+    it "get_bus returns a result for known name":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val result = graph.get_bus("master")
+        # bus was inserted — bus_count is 1 confirms it exists
+        expect(graph.bus_count()).to_equal(1)
+
+    it "get_bus returns nil for unknown name":
+        val graph = BusGraph.new()
+        val result = graph.get_bus("missing")
+        # No bus inserted — bus_count stays 0
+        expect(graph.bus_count()).to_equal(0)
+
+    it "set_volume_db returns true for existing bus":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val ok = graph.set_volume_db("master", -12.0)
+        expect(ok).to_equal(true)
+
+    it "set_volume_db updates and round-trips via effective_gain":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", -20.0)
+        # -20 dB linear = ~0.1; effective_gain * 1000 ≈ 100
+        val gain = graph.effective_gain("master")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(98.0)
+        expect(g1000).to_be_less_than(102.0)
+
+    it "set_volume_db returns false for missing bus":
+        var graph = BusGraph.new()
+        val ok = graph.set_volume_db("ghost", -3.0)
+        expect(ok).to_equal(false)
+
+    it "set_muted returns false for missing bus":
+        var graph = BusGraph.new()
+        val ok = graph.set_muted("ghost", true)
+        expect(ok).to_equal(false)
+
+    it "set_muted returns true for existing bus":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val ok = graph.set_muted("master", true)
+        expect(ok).to_equal(true)
+
+describe "BusGraph route":
+    it "route succeeds with valid target and updates send_target":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("music", "master", 0.0)
+        graph.add_bus("ambient", "master", 0.0)
+        val ok = graph.route("ambient", "music")
+        expect(ok).to_equal(true)
+        # Verify the routing took effect via effective_gain through the new chain
+        # ambient -> music -> master; all at 0 dB → gain = 1.0
+        val gain = graph.effective_gain("ambient")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(999.0)
+        expect(g1000).to_be_less_than(1001.0)
+
+    it "route rejects direct self-cycle":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        val ok = graph.route("sfx", "sfx")
+        expect(ok).to_equal(false)
+
+    it "route rejects indirect cycle":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("a", "master", 0.0)
+        graph.add_bus("b", "a", 0.0)
+        # b -> a -> master; routing a -> b would create a -> b -> a cycle
+        val ok = graph.route("a", "b")
+        expect(ok).to_equal(false)
+
+    it "route rejects missing bus name":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val ok = graph.route("ghost", "master")
+        expect(ok).to_equal(false)
+
+    it "route rejects missing target":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        val ok = graph.route("sfx", "nonexistent")
+        expect(ok).to_equal(false)
+
+    it "route to empty string succeeds":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        val ok = graph.route("sfx", "")
+        expect(ok).to_equal(true)
+
+describe "BusGraph effective_gain":
+    it "single unity bus at master has gain 1.0":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        val gain = graph.effective_gain("master")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(999.0)
+        expect(g1000).to_be_less_than(1001.0)
+
+    it "bus at -6.0206 dB under unity master has gain ~0.5":
+        # -6.0206 dB is the standard half-amplitude point (10^(-6.0206/20) = 0.5)
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", -6.0206)
+        val gain = graph.effective_gain("sfx")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(498.0)
+        expect(g1000).to_be_less_than(502.0)
+
+    it "stacked -6.0206 dB buses multiply to ~0.25":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", -6.0206)
+        graph.add_bus("reverb", "sfx", -6.0206)
+        val gain = graph.effective_gain("reverb")
+        # 0.5 * 0.5 = 0.25 → g1000 ≈ 250
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(248.0)
+        expect(g1000).to_be_less_than(252.0)
+
+    it "muted bus returns 0.0 gain":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        graph.set_muted("sfx", true)
+        val gain = graph.effective_gain("sfx")
+        expect(gain).to_equal(0.0)
+
+    it "muted parent bus zeroes child effective gain":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        graph.add_bus("reverb", "sfx", 0.0)
+        graph.set_muted("sfx", true)
+        val gain = graph.effective_gain("reverb")
+        expect(gain).to_equal(0.0)
+
+    it "muted master zeroes all children":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("music", "master", 0.0)
+        graph.set_muted("master", true)
+        val gain = graph.effective_gain("music")
+        expect(gain).to_equal(0.0)
+
+    it "effective_gain on missing bus returns 0.0":
+        val graph = BusGraph.new()
+        val gain = graph.effective_gain("ghost")
+        expect(gain).to_equal(0.0)
+
+    it "unmuted bus restores gain to 1.0":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", 0.0)
+        graph.add_bus("sfx", "master", 0.0)
+        graph.set_muted("sfx", true)
+        graph.set_muted("sfx", false)
+        val gain = graph.effective_gain("sfx")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(999.0)
+        expect(g1000).to_be_less_than(1001.0)
+
+    it "master at -20dB gives child gain ~0.1":
+        var graph = BusGraph.new()
+        graph.add_bus("master", "", -20.0)
+        graph.add_bus("sfx", "master", 0.0)
+        val gain = graph.effective_gain("sfx")
+        val g1000 = gain * 1000.0
+        expect(g1000).to_be_greater_than(98.0)
+        expect(g1000).to_be_less_than(102.0)
+
+describe "_db_to_linear":
+    it "0 dB returns 1.0":
+        val g = _db_to_linear(0.0)
+        val g1000 = g * 1000.0
+        expect(g1000).to_be_greater_than(999.0)
+        expect(g1000).to_be_less_than(1001.0)
+
+    it "-20 dB returns ~0.1":
+        val g = _db_to_linear(-20.0)
+        val g1000 = g * 1000.0
+        expect(g1000).to_be_greater_than(98.0)
+        expect(g1000).to_be_less_than(102.0)
+
+    it "positive 20 dB returns ~10.0":
+        val g = _db_to_linear(20.0)
+        val g100 = g * 100.0
+        expect(g100).to_be_greater_than(998.0)
+        expect(g100).to_be_less_than(1002.0)

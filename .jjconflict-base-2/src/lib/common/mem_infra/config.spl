@@ -1,0 +1,356 @@
+# std.common.mem_infra config — `--mem-infra=` capability matrix + resolution.
+#
+# Source: doc/02_requirements/runtime/memory_analysis/feature_backend_memory_infra_toggle.md
+# (capability matrix + acceptance rows) and
+# doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md M3.
+#
+# Pure functions only: no env reads, no build wiring. Callers (CLI/build
+# plumbing, a later lane) turn `MemInfraPlan.enabled` into env vars via
+# `mem_infra_env_assignments` and act on the `BUILD:*` markers themselves.
+
+# One capability-matrix row: whether backend `name` is available under each
+# codegen backend, per the feature-doc table.
+struct MemInfraRow:
+    name: text
+    interpreter: bool
+    cranelift: bool
+    llvm: bool
+
+# Resolution outcome for a `--mem-infra=` request.
+#
+# `enabled` holds the resolved row names actually turned on (after
+# degradation), in request order, deduplicated. `notices` holds one line per
+# degraded row. `errors` holds one line per unknown row, or per unsupported
+# row when `strict` was requested.
+struct MemInfraPlan:
+    enabled: [text]
+    notices: [text]
+    errors: [text]
+
+# The eight capability-matrix rows, in feature-doc order.
+fn mem_infra_matrix() -> [MemInfraRow]:
+    [
+        MemInfraRow(name: "attr", interpreter: true, cranelift: true, llvm: true),
+        # guard is interpreter-ONLY as far as the DEPLOYED binary is
+        # concerned. The guard-page allocator lives in
+        # `src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs`
+        # (mmap + mprotect(PROT_NONE)); cranelift and llvm both resolve
+        # `rt_alloc` to the C runtime.
+        #
+        # UPDATE 2026-08-05: a native-C mirror now EXISTS in source --
+        # `src/runtime/runtime_memory_guard.h` (shared, `static`-linkage so
+        # it is safe to `#include` into both C files below without a new
+        # multiple-definition symbol), wired into `rt_alloc`/`rt_free` in
+        # both `src/runtime/runtime_memory.c` (the object the cranelift-JIT
+        # process `dlsym`s `rt_alloc` from) and `src/runtime/runtime_native.c`
+        # (the object `native-build --runtime-bundle core-c-bootstrap`
+        # actually ships for llvm/cranelift AOT artifacts -- confirmed the
+        # true provider by `nm`, same method the harden comment below uses).
+        # Sabotage-verified in isolated `cc`+`ar`+`nm` builds (no bootstrap):
+        # `src/runtime/test/rt_mem_guard_native_selfcheck.c`, linked directly
+        # against the real `core-c-bootstrap` archive, forks a child per
+        # check and asserts SIGSEGV (not just a boolean) on a 1-byte
+        # overflow AND on read/write-after-free; flipping the mprotect calls
+        # in the shared header to non-PROT_NONE turns exactly those checks
+        # red and nothing else, proving the check isn't vacuous.
+        #
+        # This row STAYS false here anyway: nothing has redeployed the seed
+        # (cranelift path) or the self-hosted `native-build` toolchain (llvm
+        # path) with this new C, so `--mem-infra=guard` today still exports
+        # `SIMPLE_MEM_GUARD_RATE` into a process whose linked `rt_alloc`
+        # predates this change. Flipping the matrix before that redeploy
+        # would reproduce this exact bug from the other direction -- see
+        # `doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md`.
+        # Re-measure with `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`
+        # against a REDEPLOYED binary before flipping cranelift/llvm to true.
+        MemInfraRow(name: "guard", interpreter: true, cranelift: false, llvm: false),
+        # harden is real on the interpreter and on cranelift, but NOT on llvm.
+        # Measured behaviourally on 2026-08-02, not read off the source tree —
+        # see `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl`, which
+        # frees blocks, tampers a known number of them, and asserts the reported
+        # tamper count tracks exactly that number.
+        #
+        # The three backends do NOT share one implementation:
+        #   * interpreter — `interpreter_extern/memory.rs`, reached as the
+        #     extern `rt_mem_harden_check`.
+        #   * cranelift   — the C quarantine in `src/runtime/runtime_memory.c`,
+        #     which the seed process links; reached as the extern
+        #     `rt_mem_harden_check_native`. (The interpreter's spelling
+        #     `rt_mem_harden_check` is NOT an exported C symbol, so under
+        #     cranelift it silently resolves to 0 — see
+        #     `doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md`.)
+        #   * llvm        — nothing. `native-build` links the `simple-core`
+        #     runtime lane, whose `rt_alloc` comes from `runtime_native.c`
+        #     (plain `malloc`, no quarantine, no poison, no getenv gate).
+        #     `runtime_memory.o` is not in that lane at all, so a probe that
+        #     calls the check fails to link with
+        #     `undefined symbol: rt_mem_harden_check_native`, and
+        #     `SIMPLE_MEM_HARDEN=1` is inert in a native artifact.
+        MemInfraRow(name: "harden", interpreter: true, cranelift: true, llvm: false),
+        MemInfraRow(name: "genarena", interpreter: true, cranelift: true, llvm: true),
+        MemInfraRow(name: "strict", interpreter: true, cranelift: false, llvm: false),
+        # asan: M4 lane (2026-08-05). `--sanitize` / `--mem-infra=asan` on the
+        # Rust-seed `native-build --backend=llvm` CLI now does real work, not
+        # just the `BUILD:asan` notice-only marker: the LLVM backend marks
+        # every defined function `sanitize_address` and runs the real LLVM
+        # `asan` module pass (`codegen/llvm/backend_core.rs::llvm_asan_enabled`,
+        # gated `SIMPLE_MEM_ASAN=1`), and the linker step adds
+        # `-fsanitize=address` to link the ASan runtime
+        # (`pipeline/native_project/linker.rs`). Verified with a standalone
+        # `cargo run --example m4_asan_probe --features llvm` fixture: a
+        # deliberate out-of-bounds stack write compiles clean with zero asan
+        # symbols when the env var is unset, and gets a real
+        # `__asan_report_store1` shadow-memory check inserted when it is set
+        # — see the M4 lane report for exact byte-for-byte before/after
+        # symbol counts and a real linked-and-run ASan trap.
+        #
+        # Scope limit, so this row does not overclaim: the instrumentation
+        # only covers raw memory access LLVM-compiled Simple code emits
+        # directly (locals, GEP/store/load). It does NOT cover accesses that
+        # happen inside the pre-built C runtime (`rt_alloc`/`rt_ptr_write_i64`
+        # and friends in `src/runtime/*.c`) — those are compiled separately,
+        # without `-fsanitize=address`, and are not recompiled by this lane.
+        # `rt_ptr_write_i64`-based OOB (the M2 fixture pattern) is therefore
+        # NOT caught by `asan` yet; that needs the runtime C sources built
+        # with asan too, tracked as a follow-up (see the M4 lane report's
+        # "Remains" list).
+        MemInfraRow(name: "asan", interpreter: false, cranelift: false, llvm: true),
+        # memprof: M4 lane, memprof half (2026-08-05). `--memprof` /
+        # `--mem-infra=memprof` on the Rust-seed `native-build --backend=llvm`
+        # CLI now does real work, not just the `BUILD:memprof` notice-only
+        # marker: the LLVM backend runs LLVM's real MemProfiler passes
+        # (`codegen/llvm/backend_core.rs::llvm_memprof_enabled`, gated
+        # `SIMPLE_MEM_MEMPROF=1`) — `function(memprof),module(memprof-module)`,
+        # NOT the bare `memprof` alias asan's precedent might suggest; that
+        # alias resolves to a FUNCTION-only pass on this LLVM (empirically
+        # confirmed via `opt -print-pipeline-passes -passes=memprof` ->
+        # `function(memprof),verify,print`, and via `opt -passes=memprof`
+        # alone never emitting `memprof.module_ctor`) — and the linker step
+        # adds `-fmemory-profile` to link the real MemProfiler runtime
+        # (`pipeline/native_project/linker.rs`). Verified with a standalone
+        # `cargo run --example m4_memprof_probe --features llvm` fixture: a
+        # heap malloc/store/load/free pattern compiles with zero memprof
+        # symbols when the env var is unset, and with it set gets real inline
+        # shadow-memory access-count instrumentation (confirmed by
+        # disassembly, not just a symbol-count grep) plus
+        # `__memprof_init`/`__memprof_shadow_memory_dynamic_address`
+        # references and a `memprof.module_ctor`. The instrumented object,
+        # linked against the real `libclang_rt.memprof` runtime and run,
+        # wrote a genuine `memprof.profraw` (correct raw-profile magic bytes,
+        # matching a `clang -fmemory-profile` reference compile byte-for-byte
+        # on the magic) — this is the actual claimed artifact, not just a
+        # clean compile.
+        #
+        # Scope limit, so this row does not overclaim, mirroring `asan`'s:
+        # instrumentation only covers heap accesses LLVM-compiled Simple code
+        # emits directly. It does NOT cover the pre-built C runtime
+        # (`rt_alloc`/`rt_ptr_write_i64` and friends in `src/runtime/*.c`),
+        # which is not recompiled by this lane. And the plan's actual exit
+        # criterion — "memprof profile produced for a **stage-2** compile" —
+        # remains blocked: stage-2/3 self-hosting still runs on Cranelift,
+        # not LLVM (`doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`),
+        # so this is proven at the standalone-fixture level only, same scoping
+        # discipline the asan half used. See
+        # `doc/03_plan/compiler/bootstrap/m_lane_status_2026-08-02.md` M4
+        # section for the full before/after evidence.
+        MemInfraRow(name: "memprof", interpreter: false, cranelift: false, llvm: true),
+        # gpu: device-alloc/free byte counters at the CUDA driver-API choke
+        # points (`rt_cuda_mem_alloc_fn`/`rt_cuda_mem_free_fn`,
+        # `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`), read
+        # via `rt_gpu_mem_live_bytes`/`rt_gpu_mem_peak_bytes`. Verified
+        # behaviourally, on real GPU hardware (2 CUDA devices), not read off
+        # the source tree — see
+        # `test/01_unit/lib/mem_infra/gpu_device_leak_spec.spl`, which drives
+        # a real device allocation, deliberately leaks it, and asserts the
+        # counter reports exactly the leaked size.
+        #
+        # This piggybacks on the SAME `SIMPLE_MEM_ATTR` gate `attr` uses (the
+        # choke points call `rt_mem_attr_enabled()` directly, see gpu.rs) --
+        # NOT a separate env var. Kept as its own named row rather than
+        # folded into `attr` because it is a distinct, GPU-specific
+        # capability claim a caller may want to request/reason about
+        # explicitly (per the plan's per-allocator-model matrix), matching
+        # how `genarena` is a separate row from `attr` despite both being
+        # instrumentation-trait implementations.
+        #
+        # interpreter-only, mirroring `guard`'s precedent: `gpu.rs` lives
+        # under `interpreter_extern`, which is the tree-walk interpreter's
+        # own SFFI implementation. Measured: zero hits for
+        # `rt_cuda_mem_alloc`/`rt_gpu_mem_live_bytes` anywhere under
+        # `src/runtime/*.c` (the C runtime linked by native/cranelift and
+        # llvm builds) -- there is no native-build mirror of this
+        # bookkeeping today. `codegen/runtime_sffi.rs` does declare a link
+        # signature for the raw `rt_cuda_mem_alloc` CUDA call itself (ABI
+        # shape only), which is NOT the same claim as "the counters move
+        # under native builds" -- unverified either way pending a real
+        # native-build run, so this row stays conservative (false) on
+        # cranelift/llvm rather than guessing.
+        MemInfraRow(name: "gpu", interpreter: true, cranelift: false, llvm: false)
+    ]
+
+# Row names the `auto` shorthand expands to, given the target backend.
+#
+# `auto` only ever expands to rows that are actually supported on `backend`,
+# so it can never advertise a protection the backend does not have. `guard` is
+# therefore interpreter-only here: including it on cranelift/llvm is what made
+# plain `--mem-infra=auto` silently claim use-after-free coverage on native
+# builds that had none.
+fn mem_infra_auto_rows(backend: text) -> [text]:
+    if backend == "llvm":
+        return ["attr", "genarena", "asan"]
+    if backend == "interpreter":
+        return ["attr", "guard", "genarena"]
+    ["attr", "genarena"]
+
+# True when `name` is one of the eight known capability-matrix rows.
+fn mem_infra_row_known(name: text) -> bool:
+    for row in mem_infra_matrix():
+        if row.name == name:
+            return true
+    false
+
+# Whether `name` is supported on `backend` per the matrix. False for an
+# unknown row name or an unrecognised backend.
+fn mem_infra_row_supported(name: text, backend: text) -> bool:
+    for row in mem_infra_matrix():
+        if row.name == name:
+            if backend == "interpreter": return row.interpreter
+            if backend == "cranelift": return row.cranelift
+            if backend == "llvm": return row.llvm
+            return false
+    false
+
+# Closest runtime-level equivalent for a row unsupported on `backend`, per the
+# feature doc's degradation notes. Empty text means "no equivalent", and the
+# caller turns that into a loud error rather than a silent downgrade.
+#
+# `guard` deliberately has NO fallback on cranelift/llvm. `harden` looks like
+# the obvious analog, but a guard page traps the faulting access at the
+# instruction that commits the use-after-free, whereas harden only notices
+# afterwards, when something calls the harden check. Substituting one for the
+# other silently would answer "yes, you have UAF detection" to someone who
+# asked for the trapping kind — the exact false-safety failure this row was
+# corrected to remove. Erroring sends them to a backend that really has it.
+#
+# A degrade target is itself a capability claim, so it must never name a row
+# that is false on the requesting backend. `strict` used to degrade to
+# `harden` on every non-interpreter backend; now that `harden` is known false
+# on llvm, that path would have quietly enabled an inert row and reported
+# success. `strict` therefore degrades to `harden` only on cranelift, where
+# harden was actually measured to work. `resolve_mem_infra` re-checks this
+# invariant for every target so no future row can reintroduce it.
+fn mem_infra_degrade_target(name: text, backend: text) -> text:
+    if name == "asan": return "harden"
+    if name == "memprof": return "attr"
+    if name == "strict":
+        if backend == "cranelift": return "harden"
+        return ""
+    ""
+
+# `mem_infra_degrade_target` filtered so it can only ever name a row that is
+# genuinely supported on `backend`. Returns "" when the declared fallback is
+# itself unsupported there, which callers already treat as "no fallback" and
+# turn into a loud error. This is the invariant that stops a corrected
+# capability row (harden on llvm, 2026-08-02) from leaving a degrade path that
+# still answers "yes, you have detection".
+fn _mem_infra_usable_degrade_target(name: text, backend: text) -> text:
+    val target = mem_infra_degrade_target(name, backend)
+    if target == "":
+        return ""
+    if not mem_infra_row_supported(target, backend):
+        return ""
+    target
+
+fn _mem_infra_contains(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+# Resolve a `--mem-infra=` request list against the capability matrix for
+# `backend`.
+#
+# - `auto` expands to attr,guard,genarena (+asan under llvm) before
+#   resolution, so each expanded row still goes through normal
+#   support/degradation handling.
+# - An unknown name always produces an error, regardless of `strict`.
+# - A known name unsupported on `backend`: `strict=false` degrades to the
+#   closest runtime equivalent with a one-line notice; `strict=true` produces
+#   an error instead.
+fn resolve_mem_infra(requested: [text], backend: text, strict: bool) -> MemInfraPlan:
+    var enabled: [text] = []
+    var notices: [text] = []
+    var errors: [text] = []
+
+    var expanded: [text] = []
+    for name in requested:
+        if name == "auto":
+            for auto_name in mem_infra_auto_rows(backend):
+                expanded = expanded.push(auto_name)
+        else:
+            expanded = expanded.push(name)
+
+    for name in expanded:
+        if not mem_infra_row_known(name):
+            errors = errors.push("unknown mem-infra '" + name + "'")
+        else:
+            if mem_infra_row_supported(name, backend):
+                if not _mem_infra_contains(enabled, name):
+                    enabled = enabled.push(name)
+            else:
+                if strict:
+                    errors = errors.push(
+                        "'" + name + "' is not supported on backend '" + backend + "' (strict mode)"
+                    )
+                else:
+                    # A degrade target is itself a capability claim. If it is
+                    # unsupported on `backend` it is worse than no fallback:
+                    # resolution would report success while enabling a row that
+                    # does nothing. `_mem_infra_usable_degrade_target` collapses
+                    # that case to "" so it takes the no-fallback error path.
+                    val target = _mem_infra_usable_degrade_target(name, backend)
+                    if target == "":
+                        errors = errors.push(
+                            "'" + name + "' is not supported on backend '" + backend + "' and has no fallback"
+                        )
+                    else:
+                        if not _mem_infra_contains(enabled, target):
+                            enabled = enabled.push(target)
+                        notices = notices.push(
+                            "'" + name + "' is not supported on backend '" + backend + "'; degraded to '" + target + "'"
+                        )
+
+    MemInfraPlan(enabled: enabled, notices: notices, errors: errors)
+
+# Map a resolved plan's enabled rows to the existing env-var gates ('NAME=VALUE'
+# strings) plus 'BUILD:*' markers for the two LLVM-only build-flag rows.
+fn mem_infra_env_assignments(plan: MemInfraPlan) -> [text]:
+    var out: [text] = []
+    for name in plan.enabled:
+        # `attr` and `gpu` share the exact same gate (gpu.rs's device
+        # counters call `rt_mem_attr_enabled()` directly, no separate env
+        # var) -- deduped so requesting `attr,gpu` together does not emit
+        # `SIMPLE_MEM_ATTR=1` twice.
+        if name == "attr" or name == "gpu":
+            if not _mem_infra_contains(out, "SIMPLE_MEM_ATTR=1"):
+                out = out.push("SIMPLE_MEM_ATTR=1")
+        else:
+            if name == "harden":
+                out = out.push("SIMPLE_MEM_HARDEN=1")
+            else:
+                if name == "guard":
+                    out = out.push("SIMPLE_MEM_GUARD_RATE=64")
+                else:
+                    if name == "genarena":
+                        out = out.push("SIMPLE_AST_GEN_CHECK=1")
+                        out = out.push("SIMPLE_GEN_ARENA_CHECK=1")
+                    else:
+                        if name == "strict":
+                            out = out.push("SIMPLE_STRICT_MEM=1")
+                        else:
+                            if name == "asan":
+                                out = out.push("BUILD:asan")
+                            else:
+                                if name == "memprof":
+                                    out = out.push("BUILD:memprof")
+    out

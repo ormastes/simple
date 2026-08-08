@@ -1,0 +1,47 @@
+"""Shared text-walking helpers for lint passes.
+
+Centralises the docstring-tracking loop that 8 lint files (mcp_perf_lint,
+remote_exec_lint, security_*) had copy-pasted. Behaviour matches the original
+per-file loop exactly: in_docstring is updated BEFORE the in_docstring check,
+so a line that ENDS a docstring is yielded as code, and a line that STARTS
+one is skipped."""
+
+
+class CodeLine:
+    line_num: i64
+    raw: text
+    trimmed: text
+
+
+fn count_triple_quotes(line: text) -> i64:
+    """Count `\"\"\"` sequences in a line. Odd count toggles in_docstring."""
+    var count = 0
+    var i = 0
+    while i + 2 < line.len():
+        val chunk = line.slice(i, i + 3)
+        if chunk == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+
+fn iter_code_lines(source: text) -> [CodeLine]:
+    """Return every non-docstring line as `CodeLine(line_num, raw, trimmed)`.
+
+    Tracks triple-quoted blocks via `count_triple_quotes`. A line that toggles
+    in_docstring from false→true is skipped (it opens the docstring); a line
+    that toggles from true→false is yielded as code (matches original loop)."""
+    var result: [CodeLine] = []
+    val lines = source.split("\n")
+    var in_docstring = false
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        if count_triple_quotes(line) % 2 == 1:
+            in_docstring = not in_docstring
+        if not in_docstring:
+            result.push(CodeLine(line_num: li + 1, raw: line, trimmed: line.trim()))
+        li = li + 1
+    result

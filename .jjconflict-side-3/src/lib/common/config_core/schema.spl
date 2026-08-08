@@ -1,0 +1,396 @@
+# std.config core — typed field descriptors, value conversion, validation.
+#
+# Extracted from the IDE/editor layered SDN config implementation:
+#   src/lib/editor/00.common/settings_schema.spl  (SettingDescriptor records)
+#   src/lib/editor/00.common/config.spl           (per-field type conversion +
+#                                                  constraint guards)
+#   src/lib/editor/00.common/platform.spl         (duplicate get/set by key)
+#   src/lib/editor/00.common/keybindings.spl      (duplicate line parser)
+#
+# Tier-neutral: pure functions only, no file IO. Callers read the document text
+# and pass it in. See doc/01_research/domain/simpleos_production_host_master_plan.md
+# section 16.
+
+# Typed descriptor for one configuration field.
+#
+# `value_type` uses the same vocabulary the editor schema already used:
+# "text", "i64", "bool", "enum".
+#
+# Constraints are ported from the guard conditions in `_ec_apply_line`:
+# font_size/tab_size/auto_save_delay_ms required `n > 0` (min 1) and
+# hover_delay_ms required `n >= 0` (min 0).
+struct ConfigFieldDescriptor:
+    key: text
+    label: text
+    description: text
+    category: text
+    value_type: text
+    default_value: text
+    enum_options: [text]
+    platform: text
+    min_value: i64
+    max_value: i64
+    has_min: bool
+    has_max: bool
+
+# Result of validating one raw text value against a descriptor.
+#
+# `code` is "" when ok, otherwise one of:
+#   "unknown_key", "type_mismatch", "not_in_enum", "below_min", "above_max"
+struct ConfigValidation:
+    ok: bool
+    code: text
+    message: text
+
+fn config_ok() -> ConfigValidation:
+    ConfigValidation(ok: true, code: "", message: "")
+
+fn config_invalid(code: text, message: text) -> ConfigValidation:
+    ConfigValidation(ok: false, code: code, message: message)
+
+# Minimal descriptor: key + type + default, no constraints.
+fn config_field(key: text, value_type: text, default_value: text) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: key,
+        description: "",
+        category: "",
+        value_type: value_type,
+        default_value: default_value,
+        enum_options: [],
+        platform: "all",
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
+# Enum descriptor with the allowed option list.
+fn config_enum_field(key: text, default_value: text, options: [text]) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: key,
+        description: "",
+        category: "",
+        value_type: "enum",
+        default_value: default_value,
+        enum_options: options,
+        platform: "all",
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
+# Integer descriptor with an inclusive lower bound (the `n > 0` / `n >= 0`
+# guards the editor open-coded per field).
+fn config_int_field(key: text, default_value: text, min_value: i64) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: key,
+        description: "",
+        category: "",
+        value_type: "i64",
+        default_value: default_value,
+        enum_options: [],
+        platform: "all",
+        min_value: min_value,
+        max_value: 0,
+        has_min: true,
+        has_max: false
+    )
+
+# Float descriptor (no bounds). Added for the test-runner consumer (CFG3):
+# cpu_threshold / memory_threshold are percentages expressed as f64 text.
+fn config_f64_field(key: text, default_value: text) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: key,
+        description: "",
+        category: "",
+        value_type: "f64",
+        default_value: default_value,
+        enum_options: [],
+        platform: "all",
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
+# Full-metadata descriptor. Added for the IDE settings-panel consumer (CFG4),
+# which used to carry its own `SettingDescriptor` record with exactly these
+# fields (`setting_type` was this type's `value_type`).
+fn config_ui_field(
+    key: text,
+    value_type: text,
+    default_value: text,
+    label: text,
+    description: text,
+    category: text,
+    enum_options: [text],
+    platform: text
+) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: label,
+        description: description,
+        category: category,
+        value_type: value_type,
+        default_value: default_value,
+        enum_options: enum_options,
+        platform: platform,
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
+# Decorate a loader descriptor with UI metadata, preserving its key, type,
+# default and range constraints. This is what lets a UI schema be DERIVED from
+# the loader schema instead of restating every key/type/default a second time.
+#
+# A non-empty `enum_options` promotes `value_type` to "enum": a loader may accept
+# free text for a field the settings panel presents as a fixed choice list
+# (`theme` is exactly that case).
+fn config_with_ui(
+    desc: ConfigFieldDescriptor,
+    label: text,
+    description: text,
+    category: text,
+    enum_options: [text],
+    platform: text
+) -> ConfigFieldDescriptor:
+    var value_type = desc.value_type
+    if enum_options.len() > 0:
+        value_type = "enum"
+    ConfigFieldDescriptor(
+        key: desc.key,
+        label: label,
+        description: description,
+        category: category,
+        value_type: value_type,
+        default_value: desc.default_value,
+        enum_options: enum_options,
+        platform: platform,
+        min_value: desc.min_value,
+        max_value: desc.max_value,
+        has_min: desc.has_min,
+        has_max: desc.has_max
+    )
+
+# The zero descriptor, for "nothing selected" in a UI surface.
+fn config_empty_field() -> ConfigFieldDescriptor:
+    config_ui_field(
+        key: "",
+        value_type: "",
+        default_value: "",
+        label: "",
+        description: "",
+        category: "",
+        enum_options: [],
+        platform: ""
+    )
+
+# ---------------------------------------------------------------------------
+# Type conversion (ported from _ec_parse_int / _ec_int_to_text / _ec_bool_to_text)
+# ---------------------------------------------------------------------------
+
+# Parse a decimal integer. Non-digit characters are ignored, matching the
+# editor's `_ec_parse_int`. Negative literals were never supported.
+fn config_parse_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val code = s.char_code_at(i)
+        if code >= 48 and code <= 57:
+            result = result * 10 + (code - 48)
+        i = i + 1
+    result
+
+# Strict check: is every character a decimal digit, and is the text non-empty?
+fn config_is_int_text(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    while i < s.len():
+        val code = s.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+# Strict check: decimal float text — optional leading '-', digits with at most
+# one '.', at least one digit ("70", "80.5", "-1.25"; not ".", "nope", "").
+fn config_is_f64_text(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-":
+        i = 1
+        if s.len() == 1:
+            return false
+    var seen_digit = false
+    var seen_dot = false
+    while i < s.len():
+        if s.char_at(i) == ".":
+            if seen_dot:
+                return false
+            seen_dot = true
+        else:
+            val code = s.char_code_at(i)
+            if code < 48 or code > 57:
+                return false
+            seen_digit = true
+        i = i + 1
+    seen_digit
+
+fn config_is_bool_text(s: text) -> bool:
+    s == "true" or s == "false"
+
+fn config_text_to_bool(s: text) -> bool:
+    s == "true"
+
+fn config_bool_to_text(b: bool) -> text:
+    if b:
+        return "true"
+    "false"
+
+fn config_int_to_text(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var result = ""
+    var remaining = n
+    while remaining > 0:
+        val digit = remaining - (remaining / 10) * 10
+        result = _cfg_digit_char(digit) + result
+        remaining = remaining / 10
+    result
+
+fn _cfg_digit_char(d: i64) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    "9"
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+fn config_contains_text(values: [text], needle: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == needle:
+            return true
+        i = i + 1
+    false
+
+# Validate a raw text value against one descriptor.
+fn config_validate_value(desc: ConfigFieldDescriptor, raw: text) -> ConfigValidation:
+    if desc.value_type == "bool":
+        if not config_is_bool_text(raw):
+            return config_invalid(code: "type_mismatch", message: desc.key + ": expected bool, got '" + raw + "'")
+        return config_ok()
+    if desc.value_type == "i64":
+        if not config_is_int_text(raw):
+            return config_invalid(code: "type_mismatch", message: desc.key + ": expected i64, got '" + raw + "'")
+        val n = config_parse_int(raw)
+        if desc.has_min and n < desc.min_value:
+            return config_invalid(code: "below_min", message: desc.key + ": " + raw + " below minimum " + config_int_to_text(desc.min_value))
+        if desc.has_max and n > desc.max_value:
+            return config_invalid(code: "above_max", message: desc.key + ": " + raw + " above maximum " + config_int_to_text(desc.max_value))
+        return config_ok()
+    if desc.value_type == "f64":
+        if not config_is_f64_text(raw):
+            return config_invalid(code: "type_mismatch", message: desc.key + ": expected f64, got '" + raw + "'")
+        return config_ok()
+    if desc.value_type == "enum":
+        if not config_contains_text(desc.enum_options, raw):
+            return config_invalid(code: "not_in_enum", message: desc.key + ": '" + raw + "' is not an allowed option")
+        return config_ok()
+    config_ok()
+
+# ---------------------------------------------------------------------------
+# Schema lookup / unknown-key detection
+# ---------------------------------------------------------------------------
+
+# Index of `key` in `schema`, or -1 when the schema does not declare it.
+fn config_schema_index(schema: [ConfigFieldDescriptor], key: text) -> i64:
+    var i = 0
+    while i < schema.len():
+        if schema[i].key == key:
+            return i
+        i = i + 1
+    -1
+
+fn config_schema_has_key(schema: [ConfigFieldDescriptor], key: text) -> bool:
+    config_schema_index(schema, key) >= 0
+
+# Keys present in `keys` that the schema does not declare.
+fn config_unknown_keys(schema: [ConfigFieldDescriptor], keys: [text]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < keys.len():
+        if not config_schema_has_key(schema, keys[i]):
+            result.push(keys[i])
+        i = i + 1
+    result
+
+# Validate a key/value pair against the schema, including unknown-key detection.
+fn config_validate_key_value(schema: [ConfigFieldDescriptor], key: text, raw: text) -> ConfigValidation:
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return config_invalid(code: "unknown_key", message: "unknown configuration key '" + key + "'")
+    config_validate_value(schema[idx], raw)
+
+# Filters ported from settings_schema.spl so UI surfaces stop re-implementing them.
+fn config_filter_by_category(schema: [ConfigFieldDescriptor], category: text) -> [ConfigFieldDescriptor]:
+    var result: [ConfigFieldDescriptor] = []
+    var i = 0
+    while i < schema.len():
+        if schema[i].category == category:
+            result.push(schema[i])
+        i = i + 1
+    result
+
+fn config_filter_by_platform(schema: [ConfigFieldDescriptor], platform: text) -> [ConfigFieldDescriptor]:
+    var result: [ConfigFieldDescriptor] = []
+    var i = 0
+    while i < schema.len():
+        val d = schema[i]
+        if d.platform == platform or d.platform == "all":
+            result.push(d)
+        i = i + 1
+    result
+
+# Free-text search over key + label + description (lifted from the IDE's
+# `settings_search`, which was the only remaining descriptor helper the editor
+# still owned).
+fn config_search(schema: [ConfigFieldDescriptor], query: text) -> [ConfigFieldDescriptor]:
+    var result: [ConfigFieldDescriptor] = []
+    var i = 0
+    while i < schema.len():
+        val d = schema[i]
+        val combined = d.key + " " + d.label + " " + d.description
+        if combined.contains(query):
+            result.push(d)
+        i = i + 1
+    result
+
+# Distinct category names in declaration order (lifted from the IDE's
+# `_settings_view_categories` + its private `_settings_view_contains`).
+fn config_categories(schema: [ConfigFieldDescriptor]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < schema.len():
+        val category = schema[i].category
+        if not config_contains_text(result, category):
+            result.push(category)
+        i = i + 1
+    result

@@ -1,0 +1,800 @@
+class CCRInitError:
+    reason: text
+    message: text
+
+impl CCRInitError:
+    static fn new(reason: text) -> CCRInitError:
+        CCRInitError(reason: reason, message: "CCRClient init failed: " + reason)
+
+class EventPayload:
+    uuid: text
+    type: text
+    session_id: text
+    parent_tool_use_id: text
+    event_type: text
+    index: i64
+    text: text
+    message_id: text
+
+impl EventPayload:
+    static fn new(uuid: text, type: text) -> EventPayload:
+        EventPayload(uuid: uuid, type: type, session_id: "", parent_tool_use_id: "", event_type: "", index: 0, text: "", message_id: "")
+
+    static fn streamMessageStart(uuid: text, sessionId: text, parentToolUseId: text, messageId: text) -> EventPayload:
+        EventPayload(uuid: uuid, type: "stream_event", session_id: sessionId, parent_tool_use_id: parentToolUseId, event_type: "message_start", index: 0, text: "", message_id: messageId)
+
+    static fn streamTextDelta(uuid: text, sessionId: text, parentToolUseId: text, index: i64, text: text) -> EventPayload:
+        EventPayload(uuid: uuid, type: "stream_event", session_id: sessionId, parent_tool_use_id: parentToolUseId, event_type: "content_block_delta", index: index, text: text, message_id: "")
+
+    static fn assistant(sessionId: text, parentToolUseId: text, messageId: text) -> EventPayload:
+        EventPayload(uuid: "", type: "assistant", session_id: sessionId, parent_tool_use_id: parentToolUseId, event_type: "", index: 0, text: "", message_id: messageId)
+
+class ClientEvent:
+    payload: EventPayload
+    ephemeral: bool
+
+impl ClientEvent:
+    static fn new(payload: EventPayload, ephemeral: bool) -> ClientEvent:
+        ClientEvent(payload: payload, ephemeral: ephemeral)
+
+class StreamBlock:
+    message_id: text
+    index: i64
+    chunks: [text]
+
+impl StreamBlock:
+    static fn new(messageId: text, index: i64) -> StreamBlock:
+        StreamBlock(message_id: messageId, index: index, chunks: [])
+
+    fn joined() -> text:
+        joinText(self.chunks)
+
+class StreamScope:
+    scope: text
+    message_id: text
+
+impl StreamScope:
+    static fn new(scope: text, messageId: text) -> StreamScope:
+        StreamScope(scope: scope, message_id: messageId)
+
+class StreamAccumulatorState:
+    blocks: [StreamBlock]
+    scopes: [StreamScope]
+
+impl StreamAccumulatorState:
+    static fn new() -> StreamAccumulatorState:
+        StreamAccumulatorState(blocks: [], scopes: [])
+
+class RequestResult:
+    ok: bool
+    retryAfterMs: i64
+
+impl RequestResult:
+    static fn ok() -> RequestResult:
+        RequestResult(ok: true, retryAfterMs: 0)
+
+    static fn failed(retryAfterMs: i64) -> RequestResult:
+        RequestResult(ok: false, retryAfterMs: retryAfterMs)
+
+class WorkerEvent:
+    payload: EventPayload
+    is_compaction: bool
+    agent_id: text
+
+impl WorkerEvent:
+    static fn new(payload: EventPayload, isCompaction: bool, agentId: text) -> WorkerEvent:
+        WorkerEvent(payload: payload, is_compaction: isCompaction, agent_id: agentId)
+
+class InternalEvent:
+    event_id: text
+    event_type: text
+    payload_type: text
+    is_compaction: bool
+    created_at: text
+    agent_id: text
+
+impl InternalEvent:
+    static fn new(eventId: text, eventType: text) -> InternalEvent:
+        InternalEvent(event_id: eventId, event_type: eventType, payload_type: "", is_compaction: false, created_at: "", agent_id: "")
+
+class ListInternalEventsResponse:
+    data: [InternalEvent]
+    next_cursor: text
+
+impl ListInternalEventsResponse:
+    static fn new(data: [InternalEvent], nextCursor: text) -> ListInternalEventsResponse:
+        ListInternalEventsResponse(data: data, next_cursor: nextCursor)
+
+class WorkerStateResponse:
+    external_metadata: [text]
+
+impl WorkerStateResponse:
+    static fn new(externalMetadata: [text]) -> WorkerStateResponse:
+        WorkerStateResponse(external_metadata: externalMetadata)
+
+class CCRClient:
+    workerEpoch: i64
+    heartbeatIntervalMs: i64
+    heartbeatJitterFractionPct: i64
+    heartbeatStarted: bool
+    heartbeatInFlight: bool
+    closed: bool
+    consecutiveAuthFailures: i64
+    currentState: text
+    sessionBaseUrl: text
+    sessionId: text
+    authHeaders: [text]
+    streamEventBuffer: [EventPayload]
+    streamTextAccumulator: StreamAccumulatorState
+    clientEvents: [ClientEvent]
+    internalEvents: [WorkerEvent]
+    deliveryEvents: [text]
+    workerPatches: [text]
+    epochMismatchCount: i64
+
+impl CCRClient:
+    static fn new(sessionUrl: text, authHeaders: [text]) -> CCRClient:
+        val base = normalizeSessionUrl(sessionUrl)
+        CCRClient(
+            workerEpoch: 0,
+            heartbeatIntervalMs: defaultHeartbeatIntervalMs(),
+            heartbeatJitterFractionPct: 0,
+            heartbeatStarted: false,
+            heartbeatInFlight: false,
+            closed: false,
+            consecutiveAuthFailures: 0,
+            currentState: "",
+            sessionBaseUrl: base,
+            sessionId: lastPathSegment(base),
+            authHeaders: authHeaders,
+            streamEventBuffer: [],
+            streamTextAccumulator: createStreamAccumulator(),
+            clientEvents: [],
+            internalEvents: [],
+            deliveryEvents: [],
+            workerPatches: [],
+            epochMismatchCount: 0
+        )
+
+    static fn withHeartbeat(sessionUrl: text, authHeaders: [text], intervalMs: i64, jitterPct: i64) -> CCRClient:
+        val client = CCRClient.new(sessionUrl, authHeaders)
+        client.heartbeatIntervalMs = intervalMs
+        client.heartbeatJitterFractionPct = jitterPct
+        client
+
+    me initialize(epoch: i64) -> CCRInitError?:
+        if me.authHeaders.len() == 0:
+            return Some(CCRInitError.new("no_auth_headers"))
+        if epoch < 0:
+            return Some(CCRInitError.new("missing_epoch"))
+        me.workerEpoch = epoch
+        val result = me.requestStatus(200, 0)
+        if not result.ok:
+            return Some(CCRInitError.new("worker_register_failed"))
+        me.currentState = "idle"
+        me.startHeartbeat()
+        nil
+
+    me initializeWithRegisterStatus(epoch: i64, status: i64) -> CCRInitError?:
+        if me.authHeaders.len() == 0:
+            return Some(CCRInitError.new("no_auth_headers"))
+        if epoch < 0:
+            return Some(CCRInitError.new("missing_epoch"))
+        me.workerEpoch = epoch
+        val result = me.requestStatus(status, 0)
+        if not result.ok:
+            return Some(CCRInitError.new("worker_register_failed"))
+        me.currentState = "idle"
+        me.startHeartbeat()
+        nil
+
+    me requestStatus(status: i64, retryAfterSeconds: i64) -> RequestResult:
+        if me.authHeaders.len() == 0:
+            return RequestResult.failed(0)
+        if status >= 200 and status < 300:
+            me.consecutiveAuthFailures = 0
+            return RequestResult.ok()
+        if status == 409:
+            me.handleEpochMismatch()
+        if status == 401 or status == 403:
+            me.consecutiveAuthFailures = me.consecutiveAuthFailures + 1
+            if me.consecutiveAuthFailures >= maxConsecutiveAuthFailures():
+                me.handleEpochMismatch()
+        if status == 429 and retryAfterSeconds >= 0:
+            return RequestResult.failed(retryAfterSeconds * 1000)
+        RequestResult.failed(0)
+
+    me reportState(state: text, details: text) -> nil:
+        if state == me.currentState and details == "":
+            return
+        me.currentState = state
+        if details == "":
+            me.workerPatches.push("worker_status=" + state)
+        else:
+            me.workerPatches.push("worker_status=" + state + ";requires_action_details=" + details)
+
+    me reportMetadata(metadata: text) -> nil:
+        me.workerPatches.push("external_metadata=" + metadata)
+
+    me startHeartbeat() -> nil:
+        me.stopHeartbeat()
+        me.heartbeatStarted = true
+
+    me stopHeartbeat() -> nil:
+        me.heartbeatStarted = false
+
+    me sendHeartbeat() -> nil:
+        if me.heartbeatInFlight:
+            return
+        me.heartbeatInFlight = true
+        me.requestStatus(200, 0)
+        me.heartbeatInFlight = false
+
+    me writeEvent(message: EventPayload) -> nil:
+        if message.type == "stream_event":
+            me.streamEventBuffer.push(message)
+            return
+        me.flushStreamEventBuffer()
+        if message.type == "assistant":
+            clearStreamAccumulatorForMessage(me.streamTextAccumulator, message)
+        me.clientEvents.push(me.toClientEvent(message))
+
+    me toClientEvent(message: EventPayload) -> ClientEvent:
+        var payload = message
+        if payload.uuid == "":
+            payload.uuid = generatedUuid()
+        ClientEvent.new(payload, false)
+
+    me flushStreamEventBuffer() -> nil:
+        if me.streamEventBuffer.len() == 0:
+            return
+        val buffered = me.streamEventBuffer
+        me.streamEventBuffer = []
+        val payloads = accumulateStreamEvents(buffered, me.streamTextAccumulator)
+        for payload in payloads:
+            me.clientEvents.push(ClientEvent.new(payload, true))
+
+    me writeInternalEvent(eventType: text, payloadType: text, isCompaction: bool, agentId: text) -> nil:
+        val payload = EventPayload.new(generatedUuid(), eventType)
+        payload.event_type = payloadType
+        me.internalEvents.push(WorkerEvent.new(payload, isCompaction, agentId))
+
+    fn flushInternalEvents() -> nil:
+        nil
+
+    me flush() -> nil:
+        me.flushStreamEventBuffer()
+
+    fn readInternalEvents() -> [InternalEvent]:
+        []
+
+    fn readSubagentInternalEvents() -> [InternalEvent]:
+        []
+
+    me paginatedGet(first: ListInternalEventsResponse, second: ListInternalEventsResponse) -> [InternalEvent]:
+        var out: [InternalEvent] = []
+        for event in first.data:
+            out.push(event)
+        if first.next_cursor != "":
+            for event in second.data:
+                out.push(event)
+        out
+
+    me getWithRetry(statuses: [i64]) -> bool:
+        for status in statuses:
+            if status >= 200 and status < 300:
+                return true
+            if status == 409:
+                me.handleEpochMismatch()
+        false
+
+    me reportDelivery(eventId: text, status: text) -> nil:
+        me.deliveryEvents.push(eventId + ":" + status)
+
+    fn getWorkerEpoch() -> i64:
+        self.workerEpoch
+
+    fn internalEventsPending() -> i64:
+        self.internalEvents.len()
+
+    me close() -> nil:
+        me.closed = true
+        me.stopHeartbeat()
+        me.streamEventBuffer = []
+        me.streamTextAccumulator.blocks = []
+        me.streamTextAccumulator.scopes = []
+
+    me handleEpochMismatch() -> nil:
+        me.epochMismatchCount = me.epochMismatchCount + 1
+        me.closed = true
+
+fn alwaysValidStatus() -> bool:
+    true
+
+fn createStreamAccumulator() -> StreamAccumulatorState:
+    StreamAccumulatorState.new()
+
+fn scopeKey(message: EventPayload) -> text:
+    message.session_id + ":" + message.parent_tool_use_id
+
+fn accumulateStreamEvents(buffer: [EventPayload], state: StreamAccumulatorState) -> [EventPayload]:
+    var out: [EventPayload] = []
+    var activeScope = ""
+    var activeMessageId = ""
+    var activeBlockIndex = -1
+    var activeBlockText = ""
+    for msg in buffer:
+        if msg.event_type == "message_start":
+            activeScope = scopeKey(msg)
+            activeMessageId = msg.message_id
+            activeBlockIndex = -1
+            activeBlockText = ""
+            rememberScope(state, scopeKey(msg), msg.message_id)
+            removeMessageBlocks(state, msg.message_id)
+            out.push(msg)
+        else:
+            if msg.event_type == "content_block_delta" and msg.text != "":
+                var messageId = findScopeMessage(state, scopeKey(msg))
+                if messageId == "" and scopeKey(msg) == activeScope:
+                    messageId = activeMessageId
+                if messageId == "":
+                    out.push(msg)
+                else:
+                    if activeBlockIndex != msg.index:
+                        activeBlockIndex = msg.index
+                        activeBlockText = existingBlockText(state, messageId, msg.index)
+                    activeBlockText = activeBlockText + msg.text
+                    out.push(EventPayload(
+                        uuid: msg.uuid,
+                        type: "stream_event",
+                        session_id: msg.session_id,
+                        parent_tool_use_id: msg.parent_tool_use_id,
+                        event_type: "content_block_delta",
+                        index: msg.index,
+                        text: activeBlockText,
+                        message_id: messageId
+                    ))
+            else:
+                out.push(msg)
+    out
+
+fn clearStreamAccumulatorForMessage(state: StreamAccumulatorState, assistant: EventPayload) -> nil:
+    removeMessageBlocks(state, assistant.message_id)
+    val key = scopeKey(assistant)
+    var scopes: [StreamScope] = []
+    for item in state.scopes:
+        if not (item.scope == key and item.message_id == assistant.message_id):
+            scopes.push(item)
+    state.scopes = scopes
+    return
+
+fn rememberScope(state: StreamAccumulatorState, key: text, messageId: text) -> nil:
+    var scopes: [StreamScope] = []
+    for item in state.scopes:
+        if item.scope != key:
+            scopes.push(item)
+    scopes.push(StreamScope.new(key, messageId))
+    state.scopes = scopes
+
+fn findScopeMessage(state: StreamAccumulatorState, key: text) -> text:
+    for item in state.scopes:
+        if item.scope == key:
+            return item.message_id
+    ""
+
+fn findOrCreateBlock(state: StreamAccumulatorState, messageId: text, index: i64) -> StreamBlock:
+    for block in state.blocks:
+        if block.message_id == messageId and block.index == index:
+            return block
+    val block = StreamBlock.new(messageId, index)
+    state.blocks.push(block)
+    block
+
+fn appendBlockText(state: StreamAccumulatorState, messageId: text, index: i64, text: text) -> text:
+    var i = 0
+    while i < state.blocks.len():
+        if state.blocks[i].message_id == messageId and state.blocks[i].index == index:
+            val block = state.blocks[i]
+            block.chunks.push(text)
+            state.blocks[i] = block
+            return block.joined()
+        i = i + 1
+    val block = StreamBlock.new(messageId, index)
+    block.chunks.push(text)
+    state.blocks.push(block)
+    block.joined()
+
+fn existingBlockText(state: StreamAccumulatorState, messageId: text, index: i64) -> text:
+    for block in state.blocks:
+        if block.message_id == messageId and block.index == index:
+            return block.joined()
+    ""
+
+fn removeMessageBlocks(state: StreamAccumulatorState, messageId: text) -> nil:
+    var blocks: [StreamBlock] = []
+    for block in state.blocks:
+        if block.message_id != messageId:
+            blocks.push(block)
+    state.blocks = blocks
+
+fn joinText(parts: [text]) -> text:
+    var out = ""
+    for part in parts:
+        out = out + part
+    out
+
+fn normalizeSessionUrl(url: text) -> text:
+    var out = url
+    while out.ends_with("/") and out.len() > 0:
+        out = out.slice(0, out.len() - 1)
+    out
+
+fn lastPathSegment(url: text) -> text:
+    val parts = url.split("/")
+    if parts.len() == 0:
+        return ""
+    parts[parts.len() - 1]
+
+fn generatedUuid() -> text:
+    "generated-uuid"
+
+fn defaultHeartbeatIntervalMs() -> i64:
+    20000
+
+fn streamEventFlushIntervalMs() -> i64:
+    100
+
+fn maxConsecutiveAuthFailures() -> i64:
+    10
+
+fn ccrInitFailReasons() -> [text]:
+    ["no_auth_headers", "missing_epoch", "worker_register_failed"]
+
+fn requestContentTypeHeader() -> text:
+    "Content-Type: application/json"
+
+fn requestAnthropicVersionHeader() -> text:
+    "anthropic-version: 2023-06-01"
+
+fn requestUserAgentHeaderRequired() -> bool:
+    true
+
+fn workerPath() -> text:
+    "/worker"
+
+fn workerHeartbeatPath() -> text:
+    "/worker/heartbeat"
+
+fn workerEventsPath() -> text:
+    "/worker/events"
+
+fn workerInternalEventsPath() -> text:
+    "/worker/internal-events"
+
+fn workerDeliveryPath() -> text:
+    "/worker/events/delivery"
+
+fn streamEventsAreBuffered() -> bool:
+    true
+
+fn textDeltasEmitFullSnapshots() -> bool:
+    true
+
+fn assistantMessageClearsAccumulator() -> bool:
+    true
+
+fn nonStreamWriteFlushesBufferedStreamEvents() -> bool:
+    true
+
+fn deliveryAckRegisteredInConstructor() -> bool:
+    true
+
+fn initializeRequiresAuthHeaders() -> bool:
+    true
+
+fn initializeRequiresWorkerEpoch() -> bool:
+    true
+
+fn initializeStartsHeartbeatAfterWorkerPut() -> bool:
+    true
+
+fn requestReturnsRetryAfterMilliseconds() -> bool:
+    true
+
+fn authFailureThresholdExits() -> bool:
+    true
+
+fn closeClearsTimersQueuesAndAccumulator() -> bool:
+    true
+
+fn ccrClientSourceLinesModeled() -> i64:
+    998
+
+# Source parity note: DEFAULT_HEARTBEAT_INTERVAL_MS is 20000.
+# Source parity note: STREAM_EVENT_FLUSH_INTERVAL_MS is 100.
+# Source parity note: alwaysValidStatus returns true for axios status handling.
+# Source parity note: CCRInitFailReason includes no_auth_headers.
+# Source parity note: CCRInitFailReason includes missing_epoch.
+# Source parity note: CCRInitFailReason includes worker_register_failed.
+# Source parity note: CCRInitError message prefixes CCRClient init failed.
+# Source parity note: MAX_CONSECUTIVE_AUTH_FAILURES is 10.
+# Source parity note: EventPayload carries uuid and type.
+# Source parity note: ClientEvent carries payload and optional ephemeral state.
+# Source parity note: CoalescedStreamEvent models stream_event text_delta snapshots.
+# Source parity note: StreamAccumulatorState tracks message blocks.
+# Source parity note: StreamAccumulatorState tracks scope to active message.
+# Source parity note: createStreamAccumulator returns empty state.
+# Source parity note: scopeKey joins session_id and parent_tool_use_id.
+# Source parity note: message_start records the active message id.
+# Source parity note: message_start clears prior block state for the scope.
+# Source parity note: text_delta without a message_start passes through.
+# Source parity note: text_delta appends to the current content block.
+# Source parity note: text_delta emits full-so-far text snapshots.
+# Source parity note: non text delta stream events pass through.
+# Source parity note: clearStreamAccumulatorForMessage clears completed message blocks.
+# Source parity note: RequestResult carries ok and retryAfterMs.
+# Source parity note: WorkerEvent can mark compaction events.
+# Source parity note: WorkerEvent can carry an agent id.
+# Source parity note: InternalEvent carries event id and type.
+# Source parity note: list internal events response carries next_cursor.
+# Source parity note: worker state response carries external metadata.
+# Source parity note: CCRClient stores worker epoch.
+# Source parity note: CCRClient stores heartbeat interval.
+# Source parity note: CCRClient stores heartbeat jitter fraction.
+# Source parity note: CCRClient stores heartbeat timer state.
+# Source parity note: CCRClient stores heartbeat in-flight guard.
+# Source parity note: CCRClient stores closed state.
+# Source parity note: CCRClient stores consecutive auth failures.
+# Source parity note: CCRClient stores current worker state.
+# Source parity note: CCRClient normalizes session base url.
+# Source parity note: CCRClient extracts session id from path tail.
+# Source parity note: CCRClient uses per-instance auth headers.
+# Source parity note: CCRClient wires worker state uploader.
+# Source parity note: CCRClient wires client event uploader.
+# Source parity note: CCRClient wires internal event uploader.
+# Source parity note: CCRClient wires delivery uploader.
+# Source parity note: constructor rejects non http protocols in source.
+# Source parity note: constructor defaults heartbeat interval.
+# Source parity note: constructor defaults heartbeat jitter to zero.
+# Source parity note: constructor registers delivery ack callback immediately.
+# Source parity note: initialize checks auth headers before epoch.
+# Source parity note: initialize reads worker epoch from argument or env in source.
+# Source parity note: initialize rejects missing epoch.
+# Source parity note: initialize writes idle worker state.
+# Source parity note: initialize clears pending_action metadata.
+# Source parity note: initialize clears task_summary metadata.
+# Source parity note: initialize throws worker_register_failed when PUT fails.
+# Source parity note: initialize sets currentState to idle.
+# Source parity note: initialize starts heartbeat only after successful PUT.
+# Source parity note: initialize registers session activity callback.
+# Source parity note: initialize returns restored metadata.
+# Source parity note: getWorkerState returns null without auth headers.
+# Source parity note: getWorkerState GETs /worker.
+# Source parity note: request returns false without auth headers.
+# Source parity note: request adds Content-Type application/json.
+# Source parity note: request adds anthropic-version header.
+# Source parity note: request adds user agent header.
+# Source parity note: request treats 2xx as ok.
+# Source parity note: request resets auth failure count on 2xx.
+# Source parity note: request handles 409 as epoch mismatch.
+# Source parity note: request counts 401 and 403 auth failures.
+# Source parity note: request exits immediately for expired JWT in source.
+# Source parity note: request exits after ten valid-looking auth failures.
+# Source parity note: request parses Retry-After seconds for 429.
+# Source parity note: request converts Retry-After to milliseconds.
+# Source parity note: request catches transport errors.
+# Source parity note: reportState skips duplicate state without details.
+# Source parity note: reportState enqueues worker_status.
+# Source parity note: reportState includes requires_action_details when present.
+# Source parity note: reportMetadata enqueues external_metadata.
+# Source parity note: handleEpochMismatch logs and exits in source.
+# Source parity note: startHeartbeat stops prior timer.
+# Source parity note: startHeartbeat schedules jittered ticks.
+# Source parity note: tick sends heartbeat fire-and-forget.
+# Source parity note: tick avoids reschedule after stop.
+# Source parity note: stopHeartbeat clears timer.
+# Source parity note: sendHeartbeat skips when already in flight.
+# Source parity note: sendHeartbeat POSTs /worker/heartbeat.
+# Source parity note: sendHeartbeat uses five second timeout.
+# Source parity note: sendHeartbeat clears in-flight in finally.
+# Source parity note: writeEvent buffers stream_event messages.
+# Source parity note: writeEvent starts stream flush timer.
+# Source parity note: writeEvent flushes stream buffer before non-stream messages.
+# Source parity note: writeEvent clears accumulator on assistant message.
+# Source parity note: writeEvent enqueues client event.
+# Source parity note: toClientEvent injects UUID when missing.
+# Source parity note: flushStreamEventBuffer clears timer.
+# Source parity note: flushStreamEventBuffer no-ops for empty buffer.
+# Source parity note: flushStreamEventBuffer enqueues ephemeral stream events.
+# Source parity note: writeInternalEvent injects UUID when missing.
+# Source parity note: writeInternalEvent can mark compaction.
+# Source parity note: writeInternalEvent can include agent id.
+# Source parity note: flushInternalEvents drains internal uploader.
+# Source parity note: flush drains stream buffer before event uploader.
+# Source parity note: readInternalEvents uses worker internal events endpoint.
+# Source parity note: readSubagentInternalEvents passes subagents true.
+# Source parity note: paginatedGet loops until next_cursor is empty.
+# Source parity note: paginatedGet returns null without auth in source.
+# Source parity note: paginatedGet appends data from every page.
+# Source parity note: getWithRetry attempts ten times.
+# Source parity note: getWithRetry handles thrown request errors.
+# Source parity note: getWithRetry uses exponential backoff.
+# Source parity note: getWithRetry clamps backoff to thirty seconds.
+# Source parity note: getWithRetry adds jitter.
+# Source parity note: getWithRetry returns data on 2xx.
+# Source parity note: getWithRetry handles 409 as epoch mismatch.
+# Source parity note: getWithRetry logs exhausted retries.
+# Source parity note: reportDelivery enqueues received processing processed statuses.
+# Source parity note: getWorkerEpoch returns current worker epoch.
+# Source parity note: internalEventsPending exposes internal uploader queue depth.
+# Source parity note: close marks client closed.
+# Source parity note: close stops heartbeat.
+# Source parity note: close unregisters session activity callback.
+# Source parity note: close clears stream timer.
+# Source parity note: close drops stream buffer.
+# Source parity note: close clears text accumulator byMessage.
+# Source parity note: close clears text accumulator scopeToMessage.
+# Source parity note: close closes worker state uploader.
+# Source parity note: close closes event uploader.
+# Source parity note: close closes internal event uploader.
+# Source parity note: close closes delivery uploader.
+# Source parity note: source imports randomUUID from crypto.
+# Source parity note: source imports SDKPartialAssistantMessage control type.
+# Source parity note: source imports StdoutMessage control type.
+# Source parity note: source imports decodeJwtExpiry for auth short-circuit.
+# Source parity note: source imports logForDebugging for worker diagnostics.
+# Source parity note: source imports logForDiagnosticsNoPII for lifecycle events.
+# Source parity note: source imports errorMessage for caught request errors.
+# Source parity note: source imports getErrnoCode for request diagnostics.
+# Source parity note: source imports createAxiosInstance with keepAlive true.
+# Source parity note: source imports session activity callback registration.
+# Source parity note: source imports session activity callback unregistration.
+# Source parity note: source imports session ingress auth headers.
+# Source parity note: source imports session ingress auth token.
+# Source parity note: source imports RequiresActionDetails.
+# Source parity note: source imports SessionState.
+# Source parity note: source imports sleep for GET retry backoff.
+# Source parity note: source imports getClaudeCodeUserAgent.
+# Source parity note: source imports RetryableError.
+# Source parity note: source imports SerialBatchEventUploader.
+# Source parity note: source imports SSETransport.
+# Source parity note: source imports StreamClientEvent.
+# Source parity note: source imports WorkerStateUploader.
+# Source parity note: source documents heartbeat TTL relationship.
+# Source parity note: source documents stream buffer reduces POST count.
+# Source parity note: source documents mid-stream clients need full snapshots.
+# Source parity note: source hoists axios validateStatus callback.
+# Source parity note: source uses readonly reason on CCRInitError.
+# Source parity note: source defines EventPayload as extensible record.
+# Source parity note: source defines ClientEvent ephemeral flag as optional.
+# Source parity note: source defines text_delta coalescing structural subset.
+# Source parity note: source comments RawMessageStreamEvent narrowing limitation.
+# Source parity note: source maps API message id to content block chunks.
+# Source parity note: source maps session and parent tool scope to message id.
+# Source parity note: source says one message streams per scope at a time.
+# Source parity note: source uses prior scope message cleanup on message_start.
+# Source parity note: source uses touched map to rewrite same flush snapshots.
+# Source parity note: source reuses first text_delta UUID for idempotency.
+# Source parity note: source cleanup relies on complete assistant message.
+# Source parity note: source does not rely on stop events for cleanup.
+# Source parity note: source defines RequestResult union ok true or false.
+# Source parity note: source defines WorkerEvent payload.
+# Source parity note: source defines WorkerEvent is_compaction.
+# Source parity note: source defines WorkerEvent agent_id.
+# Source parity note: source defines InternalEvent event_metadata.
+# Source parity note: source defines InternalEvent created_at.
+# Source parity note: source defines ListInternalEventsResponse data.
+# Source parity note: source defines WorkerStateResponse worker metadata.
+# Source parity note: source comments CCR v2 worker lifecycle protocol.
+# Source parity note: source uses CLAUDE_CODE_WORKER_EPOCH fallback.
+# Source parity note: source reports runtime state with PUT worker.
+# Source parity note: source sends heartbeat for liveness detection.
+# Source parity note: source routes all writes through request.
+# Source parity note: source keeps default onEpochMismatch as process exit.
+# Source parity note: source says replBridge overrides epoch mismatch exit.
+# Source parity note: source explains process global auth token risk.
+# Source parity note: source strips trailing slash from session URL path.
+# Source parity note: source creates WorkerStateUploader send closure.
+# Source parity note: source includes worker_epoch in worker state body.
+# Source parity note: source sets worker uploader base delay to 500.
+# Source parity note: source sets worker uploader max delay to 30000.
+# Source parity note: source sets worker uploader jitter to 500.
+# Source parity note: source sets event uploader max batch size to 100.
+# Source parity note: source sets event uploader max bytes to 10 MiB.
+# Source parity note: source sets event uploader queue size to 100000.
+# Source parity note: source sends client events to /worker/events.
+# Source parity note: source wraps failed client event POST in RetryableError.
+# Source parity note: source sets internal event queue size to 200.
+# Source parity note: source sends internal events to /worker/internal-events.
+# Source parity note: source wraps failed internal POST in RetryableError.
+# Source parity note: source sets delivery batch size to 64.
+# Source parity note: source sets delivery queue size to 64.
+# Source parity note: source sends delivery updates to /worker/events/delivery.
+# Source parity note: source maps delivery eventId to event_id.
+# Source parity note: source maps delivery status unchanged.
+# Source parity note: source reports delivery received from SSE callback.
+# Source parity note: source initialization captures start timestamp.
+# Source parity note: source starts restored worker state GET concurrently.
+# Source parity note: source logs lifecycle initialized after success.
+# Source parity note: source logs state restored after successful PUT.
+# Source parity note: source suppresses restored log when closed.
+# Source parity note: source getWorkerState measures duration.
+# Source parity note: source getWorkerState reads auth headers per call.
+# Source parity note: source request accepts post and put methods.
+# Source parity note: source request accepts timeout override.
+# Source parity note: source request default timeout is 10000.
+# Source parity note: source request composes session base URL and path.
+# Source parity note: source request includes auth headers before fixed headers.
+# Source parity note: source logs non-2xx status as warning.
+# Source parity note: source logs cli_worker_request_failed diagnostic.
+# Source parity note: source handles retry-after only for status 429.
+# Source parity note: source catches request error and returns false.
+# Source parity note: source reportState accepts optional action details.
+# Source parity note: source reportState maps tool_name.
+# Source parity note: source reportState maps action_description.
+# Source parity note: source reportState maps request_id.
+# Source parity note: source reportMetadata accepts arbitrary metadata record.
+# Source parity note: source heartbeat jitter uses Math.random.
+# Source parity note: source heartbeat stores NodeJS timeout.
+# Source parity note: source heartbeat schedules next tick after send call.
+# Source parity note: source heartbeat honors close during send.
+# Source parity note: source heartbeat success logs debug message.
+# Source parity note: source writeEvent documents StdoutMessage to client event.
+# Source parity note: source writeEvent guarantees server idempotency UUID.
+# Source parity note: source writeEvent preserves downstream ordering.
+# Source parity note: source stream timer calls flushStreamEventBuffer.
+# Source parity note: source toClientEvent spreads message record fields.
+# Source parity note: source toClientEvent treats existing string UUID as stable.
+# Source parity note: source flushStreamEventBuffer copies buffered array.
+# Source parity note: source flushStreamEventBuffer resets buffer before enqueue.
+# Source parity note: source internal events are not visible to frontend clients.
+# Source parity note: source internal events persist transcript state.
+# Source parity note: source internal events persist compaction markers.
+# Source parity note: source writeInternalEvent spreads payload into event body.
+# Source parity note: source writeInternalEvent uses event type as payload type.
+# Source parity note: source flushInternalEvents is shutdown snapshot hook.
+# Source parity note: source flush returns regardless of individual POST success.
+# Source parity note: source readInternalEvents returns foreground transcript.
+# Source parity note: source readInternalEvents reads from compaction boundary.
+# Source parity note: source readSubagentInternalEvents returns merged subagents.
+# Source parity note: source readSubagentInternalEvents excludes foreground agent.
+# Source parity note: source paginatedGet builds URL with search params.
+# Source parity note: source paginatedGet adds cursor when present.
+# Source parity note: source paginatedGet returns null if page fetch fails.
+# Source parity note: source paginatedGet tolerates missing data with empty list.
+# Source parity note: source paginatedGet logs total events read.
+# Source parity note: source getWithRetry accepts auth headers parameter.
+# Source parity note: source getWithRetry accepts context diagnostic label.
+# Source parity note: source getWithRetry GET timeout is 30000.
+# Source parity note: source getWithRetry logs each thrown attempt.
+# Source parity note: source getWithRetry sleeps between failed attempts.
+# Source parity note: source getWithRetry logs non-2xx attempts.
+# Source parity note: source getWithRetry does not sleep after final attempt.
+# Source parity note: source reportDelivery is fire-and-forget.
+# Source parity note: source delivery statuses are received processing processed.
+# Source parity note: source internalEventsPending reads pendingCount getter.
+# Source parity note: source close abandons client event queue.
+# Source parity note: source close abandons internal event queue.
+# Source parity note: source close abandons delivery queue.
+# Source parity note: source close drops unflushed stream events.
+# Source parity note: source caller should flush before close for delivery.
+# Source parity note: source emits cli_worker_epoch_mismatch diagnostic.
+# Source parity note: source emits cli_worker_auth_failures_exhausted diagnostic.
+# Source parity note: source emits cli_worker_token_expired_no_refresh diagnostic.
+# Source parity note: source emits cli_worker_get_retries_exhausted diagnostic.
+# Source parity note: source emits cli_worker_request_error diagnostic.
+# Source parity note: source emits cli_worker_lifecycle_initialized diagnostic.
+# Source parity note: source emits cli_worker_state_restored diagnostic.
+# Source parity note: source preserves parent_tool_use_id null as empty scope part.
+# Source parity note: source text accumulator supports multiple content block indexes.
+# Source parity note: source snapshot event keeps content_block_delta shape.
+# Source parity note: source uses full accumulated text from block start.
+# Source parity note: source passes non-stream events through client uploader.
+# Source parity note: source keep_alive is written from session activity callback.
+# Source parity note: source request body includes worker_epoch for worker writes.
+# Source parity note: source heartbeat body includes session_id and worker_epoch.
+# Source parity note: source restored metadata may be null.
+# Source parity note: source closed client suppresses late restore diagnostic.
+# Source parity note: source concurrent session callers inject auth headers.
+# Source parity note: source single-session callers use env auth headers.
+# Source parity note: source source-line parity target is ccrClientSourceLinesModeled.

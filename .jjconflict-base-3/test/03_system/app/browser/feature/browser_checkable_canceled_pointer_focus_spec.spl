@@ -1,0 +1,135 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+"""# Checkable Canceled-Pointer Focus Preservation
+
+A canceled primary pointerdown still permits the same-target click and the
+checkbox input/change defaults, but it must not move focus from an existing
+text input. Hosted and isolated renderer paths must expose the same exact
+event order and focused target.
+"""
+
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{BrowserRendererMessage}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_has_attr, be_dom_path_for_route
+}
+use std.gc_async_mut.web.browser_session_runtime.*
+use test.system.browser_dom_identity_helpers.{
+    system_browser_dom_identity_index, system_dom_focused_route,
+    system_dom_route
+}
+
+val CHECKABLE_CANCELED_POINTER_FOCUS_HTML = (
+    "<style>html,body{margin:0;width:80px;height:48px}" +
+    "#keep{position:absolute;left:0;top:0;margin:0;padding:0;border:0;" +
+    "width:60px;height:18px}" +
+    "#choice{position:absolute;left:0;top:24px;margin:0;padding:0;" +
+    "width:16px;height:16px}</style>" +
+    "<input id='keep' type='text' value='kept'>" +
+    "<input id='choice' type='checkbox'><script>" +
+    "var keep=document.getElementById('keep');" +
+    "var choice=document.getElementById('choice');document.title='';" +
+    "keep.addEventListener('focus',function(event){" +
+    "document.title=document.title+'focus,';});" +
+    "keep.addEventListener('blur',function(event){" +
+    "document.title=document.title+'blur,';});" +
+    "keep.addEventListener('focusout',function(event){" +
+    "document.title=document.title+'focusout,';});" +
+    "choice.addEventListener('pointerdown',function(event){" +
+    "document.title=document.title+'pointerdown,';event.preventDefault();});" +
+    "choice.addEventListener('click',function(event){" +
+    "document.title=document.title+'click,';});" +
+    "choice.addEventListener('input',function(event){" +
+    "document.title=document.title+'input,';});" +
+    "choice.addEventListener('change',function(event){" +
+    "document.title=document.title+'change,';});</script>"
+)
+
+describe "Checkable canceled-pointer focus preservation":
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "should preserve text focus while activating the checkbox":
+        step("Open the same text input and checkbox in hosted and isolated renderers")
+        var hosted = HostedWebContentSession.create(
+            902, CHECKABLE_CANCELED_POINTER_FOCUS_HTML, 80, 48
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 13, request_id: 2,
+            payload: CHECKABLE_CANCELED_POINTER_FOCUS_HTML
+        )).ok).to_be(true)
+        expect(hosted.browser.current_title).to_equal("")
+        expect(worker.browser.current_title).to_equal("")
+
+        step("Focus both text inputs through the primary pointer")
+        val hosted_focus_down = hosted.dispatch_pointer_at(1, 4, 4, true)
+        val hosted_focus_up = hosted.dispatch_pointer_at(2, 4, 4, false)
+        val worker_focus_down = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 13, request_id: 3,
+            payload: "P1\t1\t4\t4\t1"
+        ))
+        val worker_focus_up = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 13, request_id: 4,
+            payload: "P1\t2\t4\t4\t0"
+        ))
+        expect(hosted_focus_down.semantic_target_id).to_equal("keep")
+        expect(hosted_focus_up.semantic_target_id).to_equal("keep")
+        expect(worker_focus_down.ok).to_be(true)
+        expect(worker_focus_up.ok).to_be(true)
+        expect(hosted.browser.current_title).to_equal("focus,")
+        expect(worker.browser.current_title).to_equal("focus,")
+
+        step("Activate both checkboxes after canceling their pointerdown events")
+        val hosted_choice_down = hosted.dispatch_pointer_at(3, 4, 28, true)
+        val hosted_choice_up = hosted.dispatch_pointer_at(4, 4, 28, false)
+        val worker_choice_down = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 13, request_id: 5,
+            payload: "P1\t3\t4\t28\t1"
+        ))
+        val worker_choice_up = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 13, request_id: 6,
+            payload: "P1\t4\t4\t28\t0"
+        ))
+        expect(hosted_choice_down.semantic_target_id).to_equal("choice")
+        expect(hosted_choice_down.callback_count).to_equal(1)
+        expect(hosted_choice_up.semantic_target_id).to_equal("choice")
+        expect(hosted_choice_up.callback_count).to_equal(3)
+        expect(worker_choice_down.ok).to_be(true)
+        expect(worker_choice_up.ok).to_be(true)
+
+        step("Observe checkable order and preserved text focus")
+        val expected_events = "focus,pointerdown,click,input,change,"
+        expect(hosted.browser.current_title).to_equal(expected_events)
+        expect(worker.browser.current_title).to_equal(expected_events)
+        val hosted_root = hosted.browser.dom_root()
+        val worker_root = worker.browser.dom_root()
+        val hosted_index = system_browser_dom_identity_index(hosted.browser)
+        val worker_index = system_browser_dom_identity_index(worker.browser)
+        expect(system_dom_focused_route(
+            hosted_root, hosted_index
+        ).node_id).to_equal(system_dom_route(hosted_index, "keep").node_id)
+        expect(system_dom_focused_route(
+            worker_root, worker_index
+        ).node_id).to_equal(system_dom_route(worker_index, "keep").node_id)
+        val hosted_choice = be_dom_path_for_route(
+            hosted_root, hosted_index, system_dom_route(hosted_index, "choice")
+        )
+        val worker_choice = be_dom_path_for_route(
+            worker_root, worker_index, system_dom_route(worker_index, "choice")
+        )
+        expect(hosted_choice.len()).to_be_greater_than(0)
+        expect(worker_choice.len()).to_be_greater_than(0)
+        expect(be_dom_has_attr(
+            hosted_choice[hosted_choice.len() - 1], "checked"
+        )).to_be(true)
+        expect(be_dom_has_attr(
+            worker_choice[worker_choice.len() - 1], "checked"
+        )).to_be(true)
+        expect(hosted.browser.dom_callback_count).to_equal(5)
+        expect(worker.browser.dom_callback_count).to_equal(5)
+        hosted.close()

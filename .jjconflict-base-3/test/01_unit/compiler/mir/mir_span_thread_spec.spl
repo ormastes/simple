@@ -1,0 +1,210 @@
+"""
+# MIR Per-Instruction Span Threading Specification
+
+**Feature IDs:** #TBD
+**Category:** Compiler / MIR
+**Lane:** DS5 mir-span-thread
+
+## Overview
+
+Before this change, every `emit_*` helper on `MirBuilder`
+(`src/compiler/50.mir/mir_data.spl`) hardcoded `span: nil` on the `MirInst`
+it built, so no MIR instruction ever carried a real source location -- the
+missing input for debugger line maps, replay locations, coverage, and
+per-instruction DWARF `!dbg` emission.
+
+`MirBuilder` now carries a `current_span: Span?` field, seeded per-function
+from `begin_function`'s span, and pushed/popped by save-set-restore
+wrappers around `lower_stmt` (`mir_lowering_stmts.spl`) and `lower_expr`
+(`_MirLoweringExpr/expr_dispatch.spl`) using each HIR node's own `.span`.
+
+## Why this builds HIR by hand instead of parsing source text
+
+An earlier version of this spec drove the real `parse_full_frontend` ->
+`HirLowering` -> `MirLowering` pipeline on a small in-memory source string
+and asserted on the resulting spans. That test is RED even after this
+change: `HirFunction.span` (and every statement/expression span reachable
+from it) comes back as the exact zero value `Span(start:0,end:0,line:0,
+col:0)` for that pipeline entry point -- i.e. the AST/HIR front-end does
+not populate real per-node spans on this path at all. That is a pre-existing
+gap in the parser/AST layer, upstream of anything `mir_data.spl` or its
+lowering callers touch, and is out of DS5's owned scope
+(`src/compiler/50.mir/**`). It has been left as a follow-up rather than
+silently worked around here (see the tracking note at the bottom of this
+file).
+
+To prove DS5's own mechanism -- that a real (non-nil) span attached to a
+HIR node survives into the corresponding MIR instruction, and that a
+compound node gets ITS OWN span back (not its last-lowered child's span)
+-- this spec builds a small HIR module directly, using hand-chosen,
+mutually distinct span line numbers on: two integer-literal leaves, the
+inner `Binary` node combining them, a third literal, and the outer
+`Binary` node combining the inner result with the third literal. This
+isolates the lowering-side threading from the (separately broken) span
+computation upstream.
+"""
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirExpr, HirExprKind, HirBinOp}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+
+fn mk_span(line: i64) -> Span:
+    """A span whose only load-bearing field for this spec is `line` --
+    distinct, hand-chosen values stand in for "distinct source locations"
+    since no real parser is involved."""
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn add(left: HirExpr, right: HirExpr, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Binary(HirBinOp.Add, left, right), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn make_main_fn() -> HirFunction:
+    # (1 @ line 10) + (2 @ line 20)   -- inner Binary emitted @ line 30
+    # inner_result + (3 @ line 40)    -- outer Binary emitted @ line 50
+    val lit1 = int_lit(1, 10)
+    val lit2 = int_lit(2, 20)
+    val inner = add(lit1, lit2, 30)
+    val lit3 = int_lit(3, 40)
+    val outer = add(inner, lit3, 50)
+    val body = HirBlock(stmts: [], has: true, value: outer, span: mk_span(5))
+    HirFunction(
+        symbol: SymbolId(id: 1),
+        name: "main",
+        type_params: [],
+        params: [],
+        return_type: i64_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn make_hir_module() -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    val main_fn = make_main_fn()
+    functions[main_fn.symbol] = main_fn
+    HirModule(
+        name: "mir_span_thread_test",
+        path: "synthetic/mir_span_thread_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+describe "MIR instructions carry real per-instruction source spans (DS5)":
+    it "gives each hand-spanned HIR leaf its OWN span in the lowered MIR, and gives each compound Binary node ITS OWN span back rather than its last-lowered operand's":
+        val hir_module = make_hir_module()
+        var mir_lowering = MirLowering.new(hir_module.symbols)
+        val mir_module = mir_lowering.lower_module(hir_module)
+
+        val fns = mir_module.functions.values()
+        expect(fns.len() > 0).to_equal(true)
+        val mir_fn = fns[0]
+
+        var const1_line: i64 = -1
+        var const1_has_span = false
+        var const2_line: i64 = -1
+        var const2_has_span = false
+        var const3_line: i64 = -1
+        var const3_has_span = false
+        var binop_lines: [i64] = []
+
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Const(_, value, _):
+                        match value:
+                            case MirConstValue.Int(n):
+                                if n == 1:
+                                    if val sp = inst.span:
+                                        const1_has_span = true
+                                        const1_line = sp.line
+                                if n == 2:
+                                    if val sp = inst.span:
+                                        const2_has_span = true
+                                        const2_line = sp.line
+                                if n == 3:
+                                    if val sp = inst.span:
+                                        const3_has_span = true
+                                        const3_line = sp.line
+                            case _:
+                                nil
+                    case MirInstKind.BinOp(_, _, _, _):
+                        if val sp = inst.span:
+                            binop_lines = binop_lines.push(sp.line)
+                    case _:
+                        nil
+
+        # Leaves: each integer-literal Const must carry its OWN hand-chosen
+        # span line, not nil and not another leaf's line.
+        expect(const1_has_span).to_equal(true)
+        expect(const1_line).to_equal(10)
+        expect(const2_has_span).to_equal(true)
+        expect(const2_line).to_equal(20)
+        expect(const3_has_span).to_equal(true)
+        expect(const3_line).to_equal(40)
+
+        # Compound nodes: exactly 2 BinOp instructions (inner then outer, in
+        # lowering/emission order -- operands are lowered before the node's
+        # own instruction is emitted). The inner Binary must read back its
+        # OWN span (30), not operand 2's span (20) it just finished
+        # recursing through. The outer Binary must read back ITS OWN span
+        # (50), not the inner result's span (30) or literal 3's span (40).
+        # This is exactly the case the lower_expr save/restore wrapper
+        # exists for: a broken (non-stacking) implementation would leak the
+        # last-processed child's span into the parent's own instruction.
+        expect(binop_lines.len()).to_equal(2)
+        expect(binop_lines[0]).to_equal(30)
+        expect(binop_lines[1]).to_equal(50)
+
+# TODO (out of DS5 scope, filed for follow-up): `HirFunction.span` (and
+# transitively every stmt/expr span under it) comes back as the exact zero
+# value Span(0,0,0,0) when built via the real
+# parse_full_frontend -> HirLowering -> MirLowering pipeline on an
+# in-memory source string, even though the tokenizer itself tracks real
+# line numbers (see test/01_unit/lib/std/compiler/lexer_spec.spl). DS5's
+# per-instruction threading mechanism (this file) is verified correct in
+# isolation; the parser/AST-to-HIR span computation gap that would make the
+# end-to-end (source-text) version of this spec pass is a separate,
+# upstream bug outside src/compiler/50.mir/**.

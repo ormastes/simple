@@ -1,0 +1,146 @@
+# codex-system-test
+use std.spec.*
+use common.ui.access_cli_grammar.*
+use common.ui.access_types.{UiAccessNode, UiAccessSurface, UiAccessSnapshot}
+use common.ui.access_query.{ui_access_find_nodes_filtered, ui_access_snapshot_to_json}
+
+fn _read_descriptor(min_args: i64) -> AccessCommandDescriptor:
+    AccessCommandDescriptor.create(
+        "windows", "", "ui.windows", ACCESS_OPERATION_LIST,
+        "windows", "windows --json", min_args, "List windows", ["wm-list"],
+        AccessSafety.read(2000)
+    )
+
+fn _act_descriptor(confirm: bool) -> AccessCommandDescriptor:
+    AccessCommandDescriptor.create(
+        "act", "", "ui.act", ACCESS_OPERATION_ACT,
+        "act <id> <action>", "act main#ok click", 2, "Act on a target", [],
+        AccessSafety.action(2000, false, confirm, false)
+    )
+
+fn _snapshot() -> UiAccessSnapshot:
+    val a_root = UiAccessNode(canonical_id: "a#root", surface_id: "a", widget_id: "root", kind: "tui", visible: true, focused: true, enabled: true, selected: false, text_value: "Alpha", props: [], child_ids: [], action_names: ["click"])
+    val z_root = UiAccessNode(canonical_id: "z#root", surface_id: "z", widget_id: "root", kind: "gui", visible: true, focused: false, enabled: true, selected: false, text_value: "Zulu", props: [], child_ids: [], action_names: [])
+    UiAccessSnapshot(
+        protocol_version: 1,
+        snapshot_revision: 7,
+        mode: "NORMAL",
+        active_surface: "a",
+        surfaces: [
+            UiAccessSurface(surface_id: "z", title: "Zulu", active: false, window_id: "2", app_id: "app.z", root_canonical_id: "z#root"),
+            UiAccessSurface(surface_id: "a", title: "Alpha", active: true, window_id: "1", app_id: "app.a", root_canonical_id: "a#root")
+        ],
+        nodes: [z_root, a_root],
+        recent_events: []
+    )
+
+describe "Shared UI CLI access grammar":
+    it "should recognize only the six shared operations":
+        expect(access_operation_is_valid(ACCESS_OPERATION_LIST)).to_be(true)
+        expect(access_operation_is_valid(ACCESS_OPERATION_SNAPSHOT)).to_be(true)
+        expect(access_operation_is_valid(ACCESS_OPERATION_SURFACE)).to_be(true)
+        expect(access_operation_is_valid(ACCESS_OPERATION_FIND)).to_be(true)
+        expect(access_operation_is_valid(ACCESS_OPERATION_ACT)).to_be(true)
+        expect(access_operation_is_valid(ACCESS_OPERATION_HISTORY)).to_be(true)
+        expect(access_operation_is_valid("cmm")).to_be(false)
+
+    it "should recognize human and JSON output modes":
+        expect(access_output_mode_is_valid(ACCESS_OUTPUT_HUMAN)).to_be(true)
+        expect(access_output_mode_is_valid(ACCESS_OUTPUT_JSON)).to_be(true)
+        expect(access_output_mode_is_valid("xml")).to_be(false)
+
+    it "should resolve canonical names and compatibility aliases":
+        val descriptors = [_read_descriptor(0)]
+        match access_find_descriptor("windows", "", descriptors):
+            Some(found): expect(found.handler_key).to_equal("ui.windows")
+            nil: fail("canonical descriptor was not found")
+        match access_find_descriptor("wm-list", "", descriptors):
+            Some(found): expect(found.operation).to_equal(ACCESS_OPERATION_LIST)
+            nil: fail("alias descriptor was not found")
+        expect(access_find_descriptor("missing", "", descriptors)).to_be_nil()
+
+    it "should reject missing positional arguments":
+        val request = AccessRequest.create(_read_descriptor(1), ACCESS_OUTPUT_HUMAN, "simple_ui", "ui-1", "r1", [], 2000, false)
+        match access_validate_request(request):
+            Err(e): expect(e.code).to_equal("invalid_argument")
+            Ok(_): fail("missing arguments were accepted")
+
+    it "should reject invalid output and timeout values":
+        val bad_output = AccessRequest.create(_read_descriptor(0), "xml", "simple_ui", "", "r2", [], 2000, false)
+        match access_validate_request(bad_output):
+            Err(e): expect(e.message).to_contain("output mode")
+            Ok(_): fail("invalid output mode was accepted")
+        val bad_timeout = AccessRequest.create(_read_descriptor(0), ACCESS_OUTPUT_JSON, "simple_ui", "", "r3", [], 0, false)
+        match access_validate_request(bad_timeout):
+            Err(e): expect(e.message).to_contain("timeout")
+            Ok(_): fail("invalid timeout was accepted")
+
+    it "should require explicit confirmation only when policy requires it":
+        val blocked = AccessRequest.create(_act_descriptor(true), ACCESS_OUTPUT_JSON, "simple_ui", "", "r4", ["main#ok", "click"], 2000, false)
+        match access_validate_request(blocked):
+            Err(e): expect(e.code).to_equal("interaction_required")
+            Ok(_): fail("unconfirmed action was accepted")
+        val confirmed = AccessRequest.create(_act_descriptor(true), ACCESS_OUTPUT_JSON, "simple_ui", "", "r5", ["main#ok", "click"], 2000, true)
+        match access_validate_request(confirmed):
+            Ok(_): expect(confirmed.confirmed).to_be(true)
+            Err(e): fail("confirmed action was rejected: " + e.message)
+
+    it "should validate actions against current advertised target state":
+        val snapshot = _snapshot()
+        match access_validate_snapshot_action(snapshot, "a#root", "click"):
+            Ok(node): expect(node.canonical_id).to_equal("a#root")
+            Err(e): fail("advertised action was rejected: " + e.message)
+        match access_validate_snapshot_action(snapshot, "a#root", "type_text"):
+            Err(e): expect(e.code).to_equal("unsupported_action")
+            Ok(_): fail("unadvertised action was accepted")
+        match access_validate_snapshot_action(snapshot, "missing#root", "click"):
+            Err(e): expect(e.code).to_equal("target_not_found")
+            Ok(_): fail("missing target was accepted")
+
+    it "should normalize and sort window rows through one common projector":
+        val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "ui-1", _snapshot(), 10)
+        expect(result.rows.len()).to_equal(3)
+        expect(result.rows[0]).to_equal(["ID", "TITLE", "OWNER", "KIND", "STATE", "GEOMETRY", "FOCUS", "VISIBLE", "PARENT", "CAPS", "REVISION", "CAPTURED_AT", "GENERATION", "STALE"])
+        expect(result.rows[1][0]).to_equal("a")
+        expect(result.rows[1][10]).to_equal("7")
+        expect(result.rows[2][0]).to_equal("z")
+        expect(result.returned_count).to_equal(2)
+        expect(result.truncated).to_be(false)
+
+    it "should apply focused filtering before the bounded result limit":
+        val matches = ui_access_find_nodes_filtered(_snapshot(), "", "", "", true, 1)
+        expect(matches.len()).to_equal(1)
+        expect(matches[0].canonical_id).to_equal("a#root")
+        expect(matches[0].focused).to_be(true)
+
+    it "should expose truncation and the same semantic result in both modes":
+        val result = access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "ui-1", _snapshot(), 1)
+        expect(result.truncated).to_be(true)
+        expect(access_render_human(result)).to_contain("Alpha")
+        val json = access_render_json(result)
+        expect(json).to_contain("\"schema\":\"simple.access/v1\"")
+        expect(json).to_contain("\"operation\":\"list\"")
+        expect(json).to_contain("\"truncated\":true")
+        expect(json).to_contain("\"id\":\"a\"")
+
+    it "should reject malformed geometry and serialize duplicate props once":
+        val root = UiAccessNode(canonical_id: "g#root", surface_id: "g", widget_id: "root", kind: "gui", visible: true, focused: false, enabled: true, selected: false, text_value: "Geometry", props: [UiAccessProp(key: "x", value: "bad"), UiAccessProp(key: "x", value: "9"), UiAccessProp(key: "y", value: "2"), UiAccessProp(key: "width", value: "3"), UiAccessProp(key: "height", value: "4")], child_ids: [], action_names: [])
+        val surface = UiAccessSurface(surface_id: "g", title: "Geometry", active: true, window_id: "", app_id: "fixture", root_canonical_id: "g#root")
+        val snapshot = UiAccessSnapshot(protocol_version: 1, snapshot_revision: 1, mode: "gui", active_surface: "g", surfaces: [surface], nodes: [root], recent_events: [])
+        val list_json = access_render_json(access_result_from_snapshot(ACCESS_OPERATION_LIST, "simple_ui", "", snapshot, 1))
+        expect(list_json).to_contain("\"geometry\":null")
+        val snapshot_json = ui_access_snapshot_to_json(snapshot)
+        expect(snapshot_json.split("\"x\":").len()).to_equal(2)
+
+    it "should preserve T32-compatible scalar table list and raw rendering":
+        expect(access_render_human(AccessResult.scalar_titled("State", "ready"))).to_equal("State: ready")
+        expect(access_render_human(AccessResult.table("Rows", [["A", "B"], ["1", "2"]]))).to_contain("1  2")
+        expect(access_render_human(AccessResult.list("Items", ["one"]))).to_contain("- one")
+        expect(access_render_human(AccessResult.raw("captured text"))).to_equal("captured text")
+
+    it "should render typed errors without contaminating the message":
+        val error = AccessError.detailed("stale_target", "target is stale", "T4030", "list again", true, false)
+        val json = access_error_to_json(ACCESS_OPERATION_ACT, "r6", error)
+        expect(json).to_contain("\"code\":\"stale_target\"")
+        expect(json).to_contain("\"source_code\":\"T4030\"")
+        expect(json).to_contain("\"retryable\":true")

@@ -1,0 +1,574 @@
+# ============================================================================
+# Frozen CLANG-AST export contract v1 — contract-freeze gate.
+#
+# Architecture §12 (Clang bridge), §12.2 (entity identity), §12.3 (AOP rewrite
+# policy), §12.6 (version policy), §26 (contract freeze), §27 (the CLANG-AST
+# and LLVM lanes own structural/clang).
+# Plan: doc/03_plan/platform/structural_compute/clang_bridge_plan.md phase 1.
+#
+# This spec is the gate for the CLANG-AST lane's wave-1 deliverable. Like the
+# ID-TAG and MAP gates it proves three separate things, because round-tripping
+# alone is not enough for a frozen contract:
+#
+#   1. EXACT BYTES — encoder output equals a hand-derived golden vector. This
+#      is what actually freezes the format; a round-trip test alone passes
+#      happily even if encoder and decoder drift together.
+#   2. ROUND TRIP — decode(encode(x)) reconstructs x for every record shape,
+#      including the empty export.
+#   3. REJECTION — malformed, truncated, cross-typed, wrong-version and
+#      structurally-invalid buffers are refused rather than silently coerced.
+#      For a Clang bridge this is the important half: §12.6 exists precisely
+#      because an adapter that silently assumes ABI compatibility with an
+#      unknown Clang major produces plausible wrong answers, not a crash.
+# ============================================================================
+
+use std.spec
+use std.common.structural.wire.{wire_to_hex}
+use std.common.structural.identity.entity_id.{
+    ArtifactId,
+    SourceAnchor,
+    artifact_id,
+    hash128,
+    source_anchor
+}
+use std.common.structural.clang.clang_types.{
+    CLANG_ABSENT_ID,
+    CLANG_AST_EXPORT_SCHEMA,
+    CLANG_FEATURE_AST_EXPORT,
+    CLANG_FEATURE_LLVM_PASS,
+    CLANG_FEATURE_MATCHER_QUERY,
+    CLANG_FEATURE_NONE,
+    CLANG_FEATURE_PROFILE_REMARKS,
+    CLANG_FEATURE_SET_ALL,
+    CLANG_FEATURE_SOURCE_TRANSFORM,
+    CLANG_NODE_FLAGS_ALL,
+    CLANG_NODE_FLAGS_REWRITE_GUARDED,
+    CLANG_NODE_FLAG_GENERATED_FILE,
+    CLANG_NODE_FLAG_IMPLICIT,
+    CLANG_NODE_FLAG_MACRO_EXPANSION,
+    CLANG_NODE_FLAG_NONE,
+    CLANG_NODE_FLAG_SYNTHETIC_ORIGIN,
+    CLANG_NODE_FLAG_SYSTEM_HEADER,
+    CLANG_NODE_FLAG_TEMPLATE_INSTANTIATION,
+    CLANG_REJECT_REASON_COUNT,
+    CLANG_REJECT_REASON_MAX,
+    CLANG_SUPPORTED_MAJOR_MAX,
+    CLANG_SUPPORTED_MAJOR_MIN,
+    CLANG_SUPPORTED_MAJOR_PRIMARY,
+    ClangAstExport,
+    ClangEntityIdentity,
+    ClangRejectReason,
+    clang_adapter_capability,
+    clang_adapter_capability_equal,
+    clang_ast_export,
+    clang_capability_decide,
+    clang_empty_export,
+    clang_entity_identity,
+    clang_entity_identity_equal,
+    clang_entity_identity_has_usr,
+    clang_export_equal,
+    clang_export_index_of,
+    clang_export_is_root,
+    clang_export_node_count,
+    clang_export_valid,
+    clang_feature_set_add,
+    clang_feature_set_contains,
+    clang_feature_set_valid,
+    clang_identity_of,
+    clang_major_supported,
+    clang_node_flags_valid,
+    clang_reject_reason_from_u8,
+    clang_reject_reason_to_u8,
+    clang_reject_reason_valid,
+    clang_rewrite_policy_required,
+    clang_this_build_capability,
+    clang_zero_artifact,
+    clang_zero_identity,
+    clang_zero_source_anchor
+}
+use std.common.structural.clang.clang_codec.{
+    decode_clang_adapter_capability,
+    decode_clang_ast_export,
+    decode_clang_entity_identity,
+    encode_clang_adapter_capability,
+    encode_clang_ast_export,
+    encode_clang_entity_identity
+}
+use test.fixtures.structural.clang_golden_v1.{
+    GOLDEN_CAP_FULL,
+    GOLDEN_CAP_MAX,
+    GOLDEN_CAP_THIS_BUILD,
+    GOLDEN_CAP_ZERO,
+    GOLDEN_EXPORT_EMPTY,
+    GOLDEN_EXPORT_TWO,
+    GOLDEN_IDENTITY_DECL,
+    GOLDEN_IDENTITY_MAX,
+    GOLDEN_IDENTITY_ZERO
+}
+
+# ----------------------------------------------------------------------------
+# Shared fixtures — the same values the golden vectors were hand-derived from.
+# ----------------------------------------------------------------------------
+
+fn tu_artifact() -> ArtifactId:
+    artifact_id(hash128(0x0102030405060708, 0x1112131415161718), 7)
+
+fn src_artifact() -> ArtifactId:
+    artifact_id(hash128(0x2122232425262728, 0x3132333435363738), 3)
+
+fn anchor_zero() -> SourceAnchor:
+    source_anchor(src_artifact(), 0x100, 0x140, 5, CLANG_ABSENT_ID)
+
+fn anchor_one() -> SourceAnchor:
+    source_anchor(src_artifact(), 0x110, 0x120, 5, 9)
+
+fn identity_decl() -> ClangEntityIdentity:
+    clang_entity_identity(tu_artifact(), 0x2a, anchor_zero(), 0x00abcdef, 9)
+
+# The identity of node 0 of `export_two()`. It differs from `identity_decl()`
+# in exactly one field: the standalone identity vector uses local_ordinal 9
+# (chosen asymmetric, to catch a field-order error in the 68-byte record),
+# whereas node 0 of the arena is the first sibling and so has ordinal 0.
+fn identity_node0() -> ClangEntityIdentity:
+    clang_entity_identity(tu_artifact(), 0x2a, anchor_zero(), 0x00abcdef, 0)
+
+fn identity_max() -> ClangEntityIdentity:
+    val ones = artifact_id(hash128(0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF),
+                           0xffffffff)
+    val a = source_anchor(ones, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff)
+    clang_entity_identity(ones, 0xffffffff, a, 0xffffffff, 0xffffffff)
+
+fn export_two() -> ClangAstExport:
+    var kind: [u32] = []
+    kind.push(0x2a)
+    kind.push(0x2b)
+    var parent: [u32] = []
+    parent.push(CLANG_ABSENT_ID)
+    parent.push(0)
+    var ordinal: [u32] = []
+    ordinal.push(0)
+    ordinal.push(1)
+    var flags: [u32] = []
+    flags.push(CLANG_NODE_FLAG_NONE)
+    flags.push(5)
+    var usr: [u32] = []
+    usr.push(0x00abcdef)
+    usr.push(CLANG_ABSENT_ID)
+    var anchor: [SourceAnchor] = []
+    anchor.push(anchor_zero())
+    anchor.push(anchor_one())
+    clang_ast_export(tu_artifact(), CLANG_SUPPORTED_MAJOR_PRIMARY, kind, parent,
+                     ordinal, flags, usr, anchor)
+
+fn empty_bytes() -> [u8]:
+    val b: [u8] = []
+    b
+
+fn corrupt_byte(data: [u8], index: i64, value: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        if i == index:
+            b.push(value)
+        else:
+            b.push(data[i])
+        i = i + 1
+    b
+
+fn truncated(data: [u8], keep: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < keep and i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b
+
+fn with_trailing_byte(data: [u8]) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b.push(0)
+    b
+
+# Byte offsets inside an encoded ClangAstExport with 2 nodes. Stated once here
+# so a layout change breaks one place, not eight assertions.
+#   0   envelope(8)
+#   8   producer_clang_major u32
+#   12  tu_artifact(20)
+#   32  node_count u32
+#   36  kind[0..1]      44 parent[0..1]   52 ordinal[0..1]
+#   60  flags[0..1]     68 usr[0..1]      76 anchor[0]  112 anchor[1]
+val OFF_MAJOR: i64 = 8
+val OFF_NODE_COUNT: i64 = 32
+val OFF_PARENT_1: i64 = 48
+val OFF_FLAGS_0_HIGH: i64 = 63
+
+describe "Supported Clang majors (architecture 12.6)":
+    it "accepts only the majors this repo builds and tests an adapter for":
+        assert_true(clang_major_supported(CLANG_SUPPORTED_MAJOR_MIN))
+        assert_true(clang_major_supported(CLANG_SUPPORTED_MAJOR_PRIMARY))
+        assert_true(clang_major_supported(CLANG_SUPPORTED_MAJOR_MAX))
+
+    it "rejects an unknown major rather than assuming ABI compatibility":
+        assert_false(clang_major_supported(CLANG_SUPPORTED_MAJOR_MIN - 1))
+        assert_false(clang_major_supported(CLANG_SUPPORTED_MAJOR_MAX + 1))
+        assert_false(clang_major_supported(0))
+        assert_false(clang_major_supported(99))
+
+describe "ClangFeatureSet — the CapabilitySet wire slot":
+    it "accepts the frozen five-bit vocabulary":
+        assert_true(clang_feature_set_valid(CLANG_FEATURE_NONE))
+        assert_true(clang_feature_set_valid(CLANG_FEATURE_SET_ALL))
+        assert_true(clang_feature_set_valid(CLANG_FEATURE_AST_EXPORT))
+
+    it "rejects a reserved bit instead of ignoring it":
+        assert_false(clang_feature_set_valid(CLANG_FEATURE_SET_ALL + 1))
+        assert_false(clang_feature_set_valid(-1))
+
+    it "reports membership only when every requested bit is present":
+        val s = clang_feature_set_add(CLANG_FEATURE_AST_EXPORT,
+                                      CLANG_FEATURE_LLVM_PASS)
+        assert_true(clang_feature_set_contains(s, CLANG_FEATURE_AST_EXPORT))
+        assert_true(clang_feature_set_contains(s, CLANG_FEATURE_LLVM_PASS))
+        assert_false(clang_feature_set_contains(s, CLANG_FEATURE_MATCHER_QUERY))
+        assert_false(clang_feature_set_contains(s, CLANG_FEATURE_PROFILE_REMARKS))
+
+    it "treats the empty request as unsatisfiable rather than trivially true":
+        assert_false(clang_feature_set_contains(CLANG_FEATURE_SET_ALL,
+                                                CLANG_FEATURE_NONE))
+
+describe "ClangNodeFlags and the rewrite-policy gate (architecture 12.3)":
+    it "rejects a flags word with a reserved bit set":
+        assert_true(clang_node_flags_valid(CLANG_NODE_FLAGS_ALL))
+        assert_false(clang_node_flags_valid(CLANG_NODE_FLAGS_ALL + 1))
+        assert_false(clang_node_flags_valid(-1))
+
+    it "requires explicit policy for macro, system-header, generated and template nodes":
+        assert_true(clang_rewrite_policy_required(CLANG_NODE_FLAG_MACRO_EXPANSION))
+        assert_true(clang_rewrite_policy_required(CLANG_NODE_FLAG_SYSTEM_HEADER))
+        assert_true(clang_rewrite_policy_required(CLANG_NODE_FLAG_GENERATED_FILE))
+        assert_true(clang_rewrite_policy_required(
+            CLANG_NODE_FLAG_TEMPLATE_INSTANTIATION))
+        assert_equal(CLANG_NODE_FLAGS_REWRITE_GUARDED, 29)
+
+    it "does not gate a plain node, nor one that is merely implicit or synthetic":
+        assert_false(clang_rewrite_policy_required(CLANG_NODE_FLAG_NONE))
+        assert_false(clang_rewrite_policy_required(CLANG_NODE_FLAG_IMPLICIT))
+        assert_false(clang_rewrite_policy_required(CLANG_NODE_FLAG_SYNTHETIC_ORIGIN))
+
+describe "ClangRejectReason wire discriminants":
+    it "assigns the eight reasons to 0..7 in declaration order":
+        assert_equal(clang_reject_reason_to_u8(ClangRejectReason.Accepted), 0)
+        assert_equal(clang_reject_reason_to_u8(ClangRejectReason.UnsupportedMajor), 1)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.AstExportSchemaMismatch), 2)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.MatcherAdapterMissing), 3)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.TransformerAdapterMissing), 4)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.LlvmIrSchemaMismatch), 5)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.MissingRequiredFeature), 6)
+        assert_equal(clang_reject_reason_to_u8(
+            ClangRejectReason.UnknownFeatureBits), 7)
+        assert_equal(CLANG_REJECT_REASON_COUNT, 8)
+
+    it "round-trips every discriminant through from_u8":
+        var i = 0
+        var mismatches = 0
+        while i <= CLANG_REJECT_REASON_MAX:
+            if clang_reject_reason_to_u8(clang_reject_reason_from_u8(i)) != i:
+                mismatches = mismatches + 1
+            i = i + 1
+        assert_equal(mismatches, 0)
+
+    it "rejects a discriminant past the end of the frozen enum":
+        assert_true(clang_reject_reason_valid(CLANG_REJECT_REASON_MAX))
+        assert_false(clang_reject_reason_valid(CLANG_REJECT_REASON_MAX + 1))
+        assert_false(clang_reject_reason_valid(-1))
+
+describe "ClangEntityIdentity — exact bytes":
+    it "encodes the zero identity to the frozen 68-byte body":
+        expect(wire_to_hex(encode_clang_entity_identity(clang_zero_identity())))
+            .to_equal(GOLDEN_IDENTITY_ZERO)
+
+    it "encodes the saturated identity without sign-extension filler":
+        expect(wire_to_hex(encode_clang_entity_identity(identity_max())))
+            .to_equal(GOLDEN_IDENTITY_MAX)
+
+    it "encodes every field asymmetrically so field order is pinned":
+        expect(wire_to_hex(encode_clang_entity_identity(identity_decl())))
+            .to_equal(GOLDEN_IDENTITY_DECL)
+
+describe "ClangEntityIdentity — round trip":
+    it "reconstructs the asymmetric declaration identity":
+        val r = decode_clang_entity_identity(
+            encode_clang_entity_identity(identity_decl()))
+        assert_true(r.ok)
+        assert_true(clang_entity_identity_equal(r.value, identity_decl()))
+
+    it "reconstructs the zero identity":
+        val r = decode_clang_entity_identity(
+            encode_clang_entity_identity(clang_zero_identity()))
+        assert_true(r.ok)
+        assert_true(clang_entity_identity_equal(r.value, clang_zero_identity()))
+
+    it "distinguishes an absent USR from StringId zero":
+        assert_true(clang_entity_identity_has_usr(identity_decl()))
+        assert_true(clang_entity_identity_has_usr(clang_zero_identity()))
+        assert_false(clang_entity_identity_has_usr(identity_max()))
+
+describe "ClangEntityIdentity — rejection":
+    it "rejects an empty buffer":
+        assert_false(decode_clang_entity_identity(empty_bytes()).ok)
+
+    it "rejects a truncated record":
+        val enc = encode_clang_entity_identity(identity_decl())
+        assert_false(decode_clang_entity_identity(truncated(enc, 40)).ok)
+        assert_false(decode_clang_entity_identity(
+            truncated(enc, enc.len() - 1)).ok)
+
+    it "rejects trailing bytes after a complete record":
+        assert_false(decode_clang_entity_identity(
+            with_trailing_byte(encode_clang_entity_identity(identity_decl()))).ok)
+
+    it "rejects a cross-typed buffer carrying another record's magic":
+        assert_false(decode_clang_entity_identity(
+            encode_clang_adapter_capability(clang_this_build_capability())).ok)
+
+    it "rejects a wrong schema version rather than negotiating":
+        val bad = corrupt_byte(encode_clang_entity_identity(identity_decl()), 4, 2)
+        assert_false(decode_clang_entity_identity(bad).ok)
+
+    it "rejects a non-zero envelope reserved field":
+        val bad = corrupt_byte(encode_clang_entity_identity(identity_decl()), 6, 1)
+        assert_false(decode_clang_entity_identity(bad).ok)
+
+describe "ClangAdapterCapability — exact bytes":
+    it "encodes the zero capability to the frozen 14-byte body":
+        expect(wire_to_hex(encode_clang_adapter_capability(
+            clang_adapter_capability(0, 0, 0, 0, 0, 0)))).to_equal(GOLDEN_CAP_ZERO)
+
+    it "encodes what this wave-1 build actually advertises":
+        expect(wire_to_hex(encode_clang_adapter_capability(
+            clang_this_build_capability()))).to_equal(GOLDEN_CAP_THIS_BUILD)
+
+    it "encodes the five adapter versions in declaration order":
+        expect(wire_to_hex(encode_clang_adapter_capability(
+            clang_adapter_capability(18, 1, 2, 3, 4, CLANG_FEATURE_SET_ALL))))
+            .to_equal(GOLDEN_CAP_FULL)
+
+    it "encodes the maximum legal capability":
+        expect(wire_to_hex(encode_clang_adapter_capability(
+            clang_adapter_capability(0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+                                     CLANG_FEATURE_SET_ALL))))
+            .to_equal(GOLDEN_CAP_MAX)
+
+describe "ClangAdapterCapability — round trip and rejection":
+    it "reconstructs a fully-featured advertisement":
+        val cap = clang_adapter_capability(18, 1, 2, 3, 4, CLANG_FEATURE_SET_ALL)
+        val r = decode_clang_adapter_capability(
+            encode_clang_adapter_capability(cap))
+        assert_true(r.ok)
+        assert_true(clang_adapter_capability_equal(r.value, cap))
+
+    it "still decodes an advertisement from an unsupported major, so it can be refused with a reason":
+        val cap = clang_adapter_capability(99, 1, 1, 1, 1, CLANG_FEATURE_SET_ALL)
+        val r = decode_clang_adapter_capability(
+            encode_clang_adapter_capability(cap))
+        assert_true(r.ok)
+        assert_equal(r.value.clang_major, 99)
+
+    it "rejects an empty buffer":
+        assert_false(decode_clang_adapter_capability(empty_bytes()).ok)
+
+    it "rejects a truncated, over-long or cross-typed buffer":
+        val enc = encode_clang_adapter_capability(clang_this_build_capability())
+        assert_false(decode_clang_adapter_capability(
+            truncated(enc, enc.len() - 1)).ok)
+        assert_false(decode_clang_adapter_capability(with_trailing_byte(enc)).ok)
+        assert_false(decode_clang_adapter_capability(
+            encode_clang_entity_identity(identity_decl())).ok)
+
+describe "Adapter acceptance carries a reason receipt (shared rule 4)":
+    it "accepts this build when only AST export is required":
+        val d = clang_capability_decide(clang_this_build_capability(),
+                                        CLANG_FEATURE_AST_EXPORT)
+        assert_true(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 0)
+
+    it "refuses an unsupported major and says so":
+        val cap = clang_adapter_capability(99, CLANG_AST_EXPORT_SCHEMA, 1, 1, 1,
+                                           CLANG_FEATURE_SET_ALL)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_AST_EXPORT)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 1)
+
+    it "refuses unknown feature bits before blaming a missing feature":
+        val cap = clang_adapter_capability(18, CLANG_AST_EXPORT_SCHEMA, 1, 1, 1,
+                                           CLANG_FEATURE_SET_ALL + 1)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_AST_EXPORT)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 7)
+
+    it "refuses an export schema mismatch":
+        val cap = clang_adapter_capability(18, CLANG_AST_EXPORT_SCHEMA + 1, 1, 1,
+                                           1, CLANG_FEATURE_SET_ALL)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_AST_EXPORT)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 2)
+
+    it "refuses a capability that does not advertise the required feature":
+        val d = clang_capability_decide(clang_this_build_capability(),
+                                        CLANG_FEATURE_MATCHER_QUERY)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 6)
+
+    it "refuses a matcher requirement when the adapter version is unset":
+        val cap = clang_adapter_capability(18, CLANG_AST_EXPORT_SCHEMA, 0, 1, 1,
+                                           CLANG_FEATURE_SET_ALL)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_MATCHER_QUERY)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 3)
+
+    it "refuses a transform requirement when the transformer version is unset":
+        val cap = clang_adapter_capability(18, CLANG_AST_EXPORT_SCHEMA, 1, 0, 1,
+                                           CLANG_FEATURE_SET_ALL)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_SOURCE_TRANSFORM)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 4)
+
+    it "refuses an LLVM pass requirement when the IR schema is unset":
+        val cap = clang_adapter_capability(18, CLANG_AST_EXPORT_SCHEMA, 1, 1, 0,
+                                           CLANG_FEATURE_SET_ALL)
+        val d = clang_capability_decide(cap, CLANG_FEATURE_LLVM_PASS)
+        assert_false(d.accepted)
+        assert_equal(clang_reject_reason_to_u8(d.reason), 5)
+
+describe "ClangAstExport — exact bytes":
+    it "encodes an export with no nodes at all":
+        expect(wire_to_hex(encode_clang_ast_export(
+            clang_empty_export(clang_zero_artifact(),
+                               CLANG_SUPPORTED_MAJOR_PRIMARY))))
+            .to_equal(GOLDEN_EXPORT_EMPTY)
+
+    it "encodes a two-node arena column-major with the columns in frozen order":
+        expect(wire_to_hex(encode_clang_ast_export(export_two())))
+            .to_equal(GOLDEN_EXPORT_TWO)
+
+describe "ClangAstExport — empty input":
+    it "treats a zero-node export as valid rather than as an error":
+        val e = clang_empty_export(tu_artifact(), CLANG_SUPPORTED_MAJOR_PRIMARY)
+        assert_true(clang_export_valid(e))
+        assert_equal(clang_export_node_count(e), 0)
+
+    it "round-trips a zero-node export":
+        val e = clang_empty_export(tu_artifact(), CLANG_SUPPORTED_MAJOR_PRIMARY)
+        val r = decode_clang_ast_export(encode_clang_ast_export(e))
+        assert_true(r.ok)
+        assert_equal(clang_export_node_count(r.value), 0)
+        assert_true(clang_export_equal(r.value, e))
+
+    it "finds no node for any identity in an empty export":
+        val e = clang_empty_export(tu_artifact(), CLANG_SUPPORTED_MAJOR_PRIMARY)
+        assert_equal(clang_export_index_of(e, identity_decl()), -1)
+
+    it "rejects a completely empty buffer":
+        assert_false(decode_clang_ast_export(empty_bytes()).ok)
+
+describe "ClangAstExport — round trip":
+    it "reconstructs a two-node arena including its absent ids":
+        val r = decode_clang_ast_export(encode_clang_ast_export(export_two()))
+        assert_true(r.ok)
+        assert_true(clang_export_equal(r.value, export_two()))
+        assert_equal(clang_export_node_count(r.value), 2)
+
+    it "preserves which node is a root":
+        val r = decode_clang_ast_export(encode_clang_ast_export(export_two()))
+        assert_true(clang_export_is_root(r.value, 0))
+        assert_false(clang_export_is_root(r.value, 1))
+
+describe "ClangAstExport — durable identity resolution":
+    it "reconstructs a node's identity from the arena":
+        assert_true(clang_entity_identity_equal(
+            clang_identity_of(export_two(), 0), identity_node0()))
+
+    it "resolves an identity back to its node index":
+        assert_equal(clang_export_index_of(export_two(), identity_node0()), 0)
+
+    it "resolves the second node, distinguishing it by ordinal and anchor":
+        assert_equal(clang_export_index_of(export_two(),
+                                           clang_identity_of(export_two(), 1)), 1)
+
+    it "refuses an identity that differs only in local ordinal":
+        assert_equal(clang_export_index_of(export_two(), identity_decl()), -1)
+
+    it "refuses an identity belonging to a different translation unit":
+        val foreign = clang_entity_identity(src_artifact(), 0x2a, anchor_zero(),
+                                            0x00abcdef, 9)
+        assert_equal(clang_export_index_of(export_two(), foreign), -1)
+
+    it "refuses an identity whose ordinal does not match any node":
+        val wrong = clang_entity_identity(tu_artifact(), 0x2a, anchor_zero(),
+                                          0x00abcdef, 77)
+        assert_equal(clang_export_index_of(export_two(), wrong), -1)
+
+describe "ClangAstExport — rejection":
+    it "rejects a producer Clang major outside the supported set":
+        val bad = corrupt_byte(encode_clang_ast_export(export_two()),
+                               OFF_MAJOR, 99)
+        assert_false(decode_clang_ast_export(bad).ok)
+
+    it "rejects a node count that does not consume the buffer exactly":
+        val bad = corrupt_byte(encode_clang_ast_export(export_two()),
+                               OFF_NODE_COUNT, 3)
+        assert_false(decode_clang_ast_export(bad).ok)
+
+    it "rejects trailing bytes after a complete record":
+        assert_false(decode_clang_ast_export(
+            with_trailing_byte(encode_clang_ast_export(export_two()))).ok)
+
+    it "rejects a truncated record":
+        val enc = encode_clang_ast_export(export_two())
+        assert_false(decode_clang_ast_export(truncated(enc, 20)).ok)
+        assert_false(decode_clang_ast_export(truncated(enc, enc.len() - 1)).ok)
+
+    it "rejects a reserved node-flag bit instead of ignoring it":
+        val bad = corrupt_byte(encode_clang_ast_export(export_two()),
+                               OFF_FLAGS_0_HIGH, 0x80)
+        assert_false(decode_clang_ast_export(bad).ok)
+
+    it "rejects a parent that is not emitted before its child":
+        val bad = corrupt_byte(encode_clang_ast_export(export_two()),
+                               OFF_PARENT_1, 1)
+        assert_false(decode_clang_ast_export(bad).ok)
+
+    it "rejects a wrong schema version and a non-zero reserved field":
+        val enc = encode_clang_ast_export(export_two())
+        assert_false(decode_clang_ast_export(corrupt_byte(enc, 4, 2)).ok)
+        assert_false(decode_clang_ast_export(corrupt_byte(enc, 6, 1)).ok)
+
+    it "rejects a cross-typed buffer carrying another record's magic":
+        assert_false(decode_clang_ast_export(
+            encode_clang_entity_identity(identity_decl())).ok)
+
+    it "refuses to encode an arena whose columns disagree in length":
+        var kind: [u32] = []
+        kind.push(1)
+        kind.push(2)
+        var short: [u32] = []
+        short.push(0)
+        var anchor: [SourceAnchor] = []
+        anchor.push(clang_zero_source_anchor())
+        val e = clang_ast_export(tu_artifact(), CLANG_SUPPORTED_MAJOR_PRIMARY,
+                                 kind, short, short, short, short, anchor)
+        assert_false(clang_export_valid(e))
+        assert_equal(encode_clang_ast_export(e).len(), 0)
+
+    it "refuses to encode an arena produced by an unsupported Clang major":
+        val e = clang_empty_export(tu_artifact(), 99)
+        assert_false(clang_export_valid(e))
+        assert_equal(encode_clang_ast_export(e).len(), 0)

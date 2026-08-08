@@ -1,0 +1,84 @@
+# WebSocket per-opcode dispatch regression spec.
+#
+# Regression guard for: every frame dispatched as TEXT regardless of opcode.
+# Root cause: `match header.opcode:` with `case WS_OPCODE_TEXT:` arms. The
+# WS_OPCODE_* names are `val` i64 constants, not enum variants, and a bare
+# identifier in `case` position is an IRREFUTABLE BINDING PATTERN — so the
+# first arm bound every opcode and the other five arms were dead.
+# See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+# and lint MEXH006.
+#
+# These assertions discriminate on nil / non-nil only. ws_parse_frame_header
+# performs NO opcode or control-frame validation, so each rejection below can
+# only be produced by the opcode dispatch reaching the CORRECT arm:
+#   - reserved opcodes 0x3/0x4/0xb/0xf -> unknown-opcode path  -> nil
+#   - Close with a 1-byte payload      -> _build_close_frame   -> nil
+#   - Close/Ping/Pong with FIN=0       -> control-frag guard   -> nil
+# Under the bug all of these wrongly parse as a Text frame and return non-nil.
+
+use std.spec.{describe, it, assert_equal}
+use std.http.ws.ws_parser.{ws_parse_frame}
+
+fn _frame3(b0: i64, b1: i64, b2: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(b0)
+    bytes.push(b1)
+    bytes.push(b2)
+    bytes
+
+fn _frame2(b0: i64, b1: i64) -> [u8]:
+    var bytes: [u8] = []
+    bytes.push(b0)
+    bytes.push(b1)
+    bytes
+
+fn _parses3(b0: i64, b1: i64, b2: i64) -> bool:
+    ws_parse_frame(_frame3(b0, b1, b2), 0) != nil
+
+fn _parses2(b0: i64, b1: i64) -> bool:
+    ws_parse_frame(_frame2(b0, b1), 0) != nil
+
+describe "WebSocket parser per-opcode dispatch":
+    # --- positive controls: each defined opcode still parses ---------------
+    it "parses a Text frame (opcode 0x1)":
+        assert_equal(_parses3(0x81, 0x01, 0x41), true)
+
+    it "parses a Binary frame (opcode 0x2)":
+        assert_equal(_parses3(0x82, 0x01, 0x41), true)
+
+    it "parses a Continuation frame (opcode 0x0)":
+        assert_equal(_parses3(0x80, 0x01, 0x41), true)
+
+    it "parses a Ping frame (opcode 0x9)":
+        assert_equal(_parses3(0x89, 0x01, 0x41), true)
+
+    it "parses a Pong frame (opcode 0xa)":
+        assert_equal(_parses3(0x8a, 0x01, 0x41), true)
+
+    it "parses an empty Close frame (opcode 0x8)":
+        assert_equal(_parses2(0x88, 0x00), true)
+
+    # --- dispatch discriminators: reachable only past the TEXT arm ---------
+    it "rejects reserved non-control opcode 0x3":
+        assert_equal(_parses3(0x83, 0x01, 0x41), false)
+
+    it "rejects reserved non-control opcode 0x4":
+        assert_equal(_parses3(0x84, 0x01, 0x41), false)
+
+    it "rejects reserved control opcode 0xb":
+        assert_equal(_parses3(0x8b, 0x01, 0x41), false)
+
+    it "rejects reserved control opcode 0xf":
+        assert_equal(_parses3(0x8f, 0x01, 0x41), false)
+
+    it "rejects a Close frame with a 1-byte status payload":
+        assert_equal(_parses3(0x88, 0x01, 0x41), false)
+
+    it "rejects a fragmented Close frame (FIN=0)":
+        assert_equal(_parses2(0x08, 0x00), false)
+
+    it "rejects a fragmented Ping frame (FIN=0)":
+        assert_equal(_parses3(0x09, 0x01, 0x41), false)
+
+    it "rejects a fragmented Pong frame (FIN=0)":
+        assert_equal(_parses3(0x0a, 0x01, 0x41), false)

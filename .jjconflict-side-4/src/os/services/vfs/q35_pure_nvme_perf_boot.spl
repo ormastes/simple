@@ -1,0 +1,633 @@
+# q35 pure NVMe performance boot path.
+#
+# Storage-only boot helper for the q35 performance lane. It deliberately avoids
+# importing the full VFS boot module, whose fallback and exec paths pull POSIX,
+# net, and hosted-service dependencies that are unrelated to this proof.
+
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
+use os.drivers.nvme.nvme_namespace_assignment.{nvme_user_assigned_filesystem_lease_from_grant_checked}
+use os.drivers.nvme.nvme_storage_model.{
+    NvmeFilesystemConsumer,
+    NvmeFilesystemLease,
+    NvmeNamespaceIdentity,
+    NvmeNamespaceMode,
+    NvmeQueueAssignment,
+    NvmeQueueRole,
+    nvme_filesystem_consumer_name,
+    nvme_filesystem_lease,
+    nvme_shared_filesystem_interface,
+    nvme_shared_filesystem_interface_consumers,
+    nvme_transfer_readiness_reason
+}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class_i64, pcimgr_grant_device}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID}
+use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_is_isolated, device_grant_resource_set_label}
+use os.kernel.boot.mmio.{mmio_read8}
+use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc, dma_free}
+use std.fs_driver.direct_io.{direct_io_read_batch_request, direct_io_write_batch_request}
+use std.fs_driver.error.{FsError}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn simpleos_nvme_init() -> i64
+extern fn simpleos_nvme_read_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
+extern fn simpleos_nvme_write_sector(device_idx: u64, lba: u64, buf_addr: u64) -> i64
+
+fn _q35_fs_error_name(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "unsupported"
+        case FsError.Transient(_): "transient"
+        case FsError.Corrupt: "corrupt"
+        case FsError.NoSpace: "no-space"
+        case FsError.Permission: "permission"
+        case FsError.NotFound: "not-found"
+        case FsError.AlreadyExists: "already-exists"
+        case FsError.Busy: "busy"
+        case FsError.IoError(code): "io-error:" + code.to_u64().to_text()
+        case FsError.Interrupted: "interrupted"
+        case FsError.TooLarge: "too-large"
+        case FsError.ReadOnly: "read-only"
+        case FsError.InvalidArg: "invalid-arg"
+        case FsError.StaleHandle: "stale-handle"
+        case FsError.PathTraversal: "path-traversal"
+
+class Q35NvmePerfCounters:
+    read_iops: u64
+    write_iops: u64
+    read_p99_us: u64
+    write_p99_us: u64
+
+fn _elapsed_us(start_us: i64, end_us: i64) -> u64:
+    if end_us <= start_us:
+        return 1u64
+    (end_us - start_us).to_u64()
+
+fn _iops(ops: u64, elapsed_us: u64) -> u64:
+    if elapsed_us == 0u64:
+        return 1u64
+    val value = (ops * 1000000u64) / elapsed_us
+    if value == 0u64:
+        return 1u64
+    value
+
+fn _relative_4k_lba(sector_size: u32, sector_count: u64, run: u32, op: u32) -> u64:
+    val sectors_per_4k = 4096u64 / sector_size.to_u64()
+    var slot_count = sector_count / sectors_per_4k
+    if slot_count <= 2u64:
+        return 0u64
+    if slot_count > 128u64:
+        slot_count = 128u64
+    val slot = 1u64 + (((run.to_u64() * 13u64) + (op.to_u64() * 17u64)) % (slot_count - 1u64))
+    slot * sectors_per_4k
+
+fn _le16(addr: u64, off: u64) -> u32:
+    mmio_read8(addr + off).to_u32() | (mmio_read8(addr + off + 1u64).to_u32() << 8)
+
+fn _le32(addr: u64, off: u64) -> u32:
+    mmio_read8(addr + off).to_u32() |
+        (mmio_read8(addr + off + 1u64).to_u32() << 8) |
+        (mmio_read8(addr + off + 2u64).to_u32() << 16) |
+        (mmio_read8(addr + off + 3u64).to_u32() << 24)
+
+fn _fat32_read_sector(nvme: NvmeDriver, lba: u64, buf: SharedDmaBuffer) -> Result<bool, text>:
+    nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, lba, 1, buf)
+
+fn _fat32_cluster_to_lba(cluster: u32, sectors_per_cluster: u32, data_start_lba: u64) -> u64:
+    data_start_lba + ((cluster - 2u32).to_u64() * sectors_per_cluster.to_u64())
+
+fn _fat32_next_cluster(nvme: NvmeDriver, cluster: u32, bytes_per_sector: u32, reserved_sectors: u32, buf: SharedDmaBuffer) -> Result<u32, text>:
+    val cpu_addr = buf.cpu_virt_addr
+    val fat_offset = cluster * 4u32
+    val fat_lba = reserved_sectors.to_u64() + (fat_offset / bytes_per_sector).to_u64()
+    val entry_offset = (fat_offset % bytes_per_sector).to_u64()
+    val read = _fat32_read_sector(nvme, fat_lba, buf)
+    if read.is_err():
+        return Err(read.unwrap_err())
+    Ok(_le32(cpu_addr, entry_offset) & 0x0FFFFFFFu32)
+
+fn _fat32_fixture_direct_offsets(nvme: NvmeDriver, sector_size: u32, buf: SharedDmaBuffer) -> Result<[i64], text>:
+    val cpu_addr = buf.cpu_virt_addr
+    val boot = _fat32_read_sector(nvme, 0u64, buf)
+    if boot.is_err():
+        return Err("fat32-boot-sector:" + boot.unwrap_err())
+    val bytes_per_sector = _le16(cpu_addr, 11u64)
+    val sectors_per_cluster = mmio_read8(cpu_addr + 13u64).to_u32()
+    val reserved_sectors = _le16(cpu_addr, 14u64)
+    val num_fats = mmio_read8(cpu_addr + 16u64).to_u32()
+    val fat_size = _le32(cpu_addr, 36u64)
+    val root_cluster = _le32(cpu_addr, 44u64)
+    if bytes_per_sector != sector_size or sectors_per_cluster == 0u32 or root_cluster < 2u32:
+        return Err("fat32-invalid-geometry")
+    val data_start = reserved_sectors.to_u64() + (num_fats.to_u64() * fat_size.to_u64())
+    # scripts/os/make_os_disk.shs emits /SYS/PERF/FAT4K.BIN after the optional
+    # CFAT4K baseline; the fixture readiness check forces media regeneration
+    # when that file is missing.
+    val first_cluster = 42u32
+    val second_cluster = _fat32_next_cluster(nvme, first_cluster, bytes_per_sector, reserved_sectors, buf)
+    if second_cluster.is_err():
+        return Err(second_cluster.unwrap_err())
+    if second_cluster.unwrap() < 2u32 or second_cluster.unwrap() >= 0x0FFFFFF8u32:
+        return Err("fat32-fixture-chain-invalid")
+    Ok([
+        (_fat32_cluster_to_lba(first_cluster, sectors_per_cluster, data_start) * sector_size.to_u64()) as i64,
+        (_fat32_cluster_to_lba(second_cluster.unwrap(), sectors_per_cluster, data_start) * sector_size.to_u64()) as i64
+    ])
+
+fn _dbfs_arena_direct_offsets(sector_size: u32, sector_count: u64, arena_base_lba: u64) -> Result<[i64], text>:
+    if sector_size == 0u32:
+        return Err("dbfs-arena-invalid-sector-size")
+    val sectors_per_4k = 4096u64 / sector_size.to_u64()
+    if sectors_per_4k == 0u64 or (4096u64 % sector_size.to_u64()) != 0u64:
+        return Err("dbfs-arena-sector-size-not-4k-divisible")
+    val first_lba = arena_base_lba + 1u64
+    val second_lba = arena_base_lba + 1u64 + sectors_per_4k
+    if second_lba + sectors_per_4k >= sector_count:
+        return Err("dbfs-arena-out-of-range")
+    Ok([
+        (first_lba * sector_size.to_u64()) as i64,
+        (second_lba * sector_size.to_u64()) as i64
+    ])
+
+fn _access_marker(storage_grant: text, network_grant: text) -> text:
+    "[real-device] storage_provider=simple-driver network_provider=simple-driver " +
+        "storage_placement=user-space-driver system_storage_placement=system-driver network_placement=user-space-driver " +
+        "storage_namespace=non-secure-resource-namespace network_namespace=non-secure-resource-namespace " +
+        "storage_grant=" + storage_grant + " network_grant=" + network_grant + " common_driver_logic=shared"
+
+fn _consumer_for_measurement(run: u32, op: u32) -> NvmeFilesystemConsumer:
+    val selector = (run + op) % 3u32
+    if selector == 0u32:
+        return NvmeFilesystemConsumer.Fat32
+    if selector == 1u32:
+        return NvmeFilesystemConsumer.Nvfs
+    NvmeFilesystemConsumer.Dbfs
+
+fn _q35_user_namespace_assignment_marker(
+    nvme: NvmeDriver,
+    grant: DeviceGrant,
+    shared: SharedDmaBuffer,
+    active_leases: [NvmeFilesystemLease]
+) -> Result<text, text>:
+    val queue_id = SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID
+    val system_nsid = 1u32
+    val owner_task = 0u64
+    val max_depth = 64u16
+    val previous_nsid = nvme.get_namespace_id()
+    val user_namespace = nvme.identify_first_assignable_user_namespace(system_nsid)
+    var user_nsid: u32 = 0u32
+    var user_sector_size: u32 = 0u32
+    var user_sector_count: u64 = 0u64
+    if user_namespace.is_err():
+        val fallback_identify = nvme.identify_namespace_id(2u32)
+        if fallback_identify.is_err():
+            return Err("user-namespace-identify:" + user_namespace.unwrap_err() + " fallback_nsid=2 detail=" + fallback_identify.unwrap_err())
+        user_nsid = 2u32
+        user_sector_size = nvme.get_sector_size()
+        user_sector_count = nvme.get_sector_count()
+    else:
+        val user_facts = user_namespace.unwrap()
+        user_nsid = user_facts.nsid
+        user_sector_size = user_facts.formatted_lba_size
+        user_sector_count = user_facts.lba_count
+    if previous_nsid != user_nsid:
+        val restore_before_probe = nvme.identify_namespace_id(previous_nsid)
+        if restore_before_probe.is_err():
+            return Err("user-namespace-restore:" + restore_before_probe.unwrap_err())
+    if user_sector_count < 8u64:
+        if previous_nsid != user_nsid:
+            val restore_after_capacity = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_capacity.is_err():
+                return Err("user-namespace-restore:" + restore_after_capacity.unwrap_err())
+        return Err("user-namespace-too-small")
+    if user_sector_size < 512u32:
+        return Err("user-namespace-lba-size-invalid nsid=" + user_nsid.to_text() + " lba_size=" + user_sector_size.to_text() + " lba_count=" + user_sector_count.to_text())
+    val proof_offset = 0 as i64
+    val grant_label = device_grant_resource_set_label(grant)
+    val evidence_result = nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "user-space-driver",
+        grant_label,
+        "non-secure-resource-namespace",
+        device_grant_is_isolated(grant),
+        device_grant_is_isolated(grant)
+    )
+    if evidence_result.is_err():
+        return Err("user-transfer-probe:" + evidence_result.unwrap_err())
+    val evidence = evidence_result.unwrap()
+    val transfer_reason = nvme_transfer_readiness_reason(evidence)
+    if transfer_reason != "ready":
+        return Err("user-transfer-not-ready:" + transfer_reason)
+    val queue_ready = nvme.ensure_user_data_queue_for_assignment(queue_id, max_depth, 0u32, user_nsid, owner_task)
+    if queue_ready.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_queue = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_queue.is_err():
+                return Err("user-namespace-restore:" + restore_after_queue.unwrap_err())
+        return Err("user-data-queue:" + queue_ready.unwrap_err())
+    val lease_result = nvme_user_assigned_filesystem_lease_from_grant_checked(
+        evidence,
+        grant,
+        0u32,
+        user_nsid,
+        user_sector_size,
+        user_sector_count,
+        0u64,
+        user_sector_count,
+        queue_id,
+        owner_task,
+        max_depth,
+        NvmeFilesystemConsumer.Fat32,
+        active_leases
+    )
+    if lease_result.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_lease = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_lease.is_err():
+                return Err("user-namespace-restore:" + restore_after_lease.unwrap_err())
+        return Err("user-lease:" + lease_result.unwrap_err())
+    val lease = lease_result.unwrap()
+    val shared_interface = nvme_shared_filesystem_interface(lease)
+    if shared_interface.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_shared = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_shared.is_err():
+                return Err("user-namespace-restore:" + restore_after_shared.unwrap_err())
+        return Err("user-shared-interface:" + shared_interface.unwrap_err())
+    val user_shared = SharedDmaBuffer(
+        cpu_virt_addr: shared.cpu_virt_addr,
+        host_phys_addr: shared.host_phys_addr,
+        device_addr: shared.device_addr,
+        byte_len: 4096u64,
+        cache_policy: shared.cache_policy,
+        owner: shared.owner,
+        allocation_id: shared.allocation_id
+    )
+    val direct_read_probe = nvme.read_4k_shared_dma_batch_in_namespace_on_queue(
+        user_nsid,
+        queue_id,
+        [0u64],
+        user_sector_size,
+        user_sector_count,
+        user_shared
+    )
+    if val Err(e) = direct_read_probe:
+        if previous_nsid != user_nsid:
+            val restore_after_read = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_read.is_err():
+                return Err("user-namespace-restore:" + restore_after_read.unwrap_err())
+        return Err("user-direct-read:" + e)
+    val write_probe = nvme.write_4k_shared_dma_batch_in_namespace_on_queue(
+        user_nsid,
+        queue_id,
+        [0u64],
+        user_sector_size,
+        user_sector_count,
+        user_shared
+    )
+    if write_probe.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_write = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_write.is_err():
+                return Err("user-namespace-restore:" + restore_after_write.unwrap_err())
+        return Err("user-direct-write:" + write_probe.unwrap_err())
+    if previous_nsid != user_nsid:
+        val identify_before_flush = nvme.identify_namespace_id(user_nsid)
+        if identify_before_flush.is_err():
+            return Err("user-namespace-identify-before-flush:" + identify_before_flush.unwrap_err())
+    val flush_probe = nvme.flush_in_namespace_on_queue(user_nsid, queue_id)
+    if flush_probe.is_err():
+        if previous_nsid != user_nsid:
+            val restore_after_flush = nvme.identify_namespace_id(previous_nsid)
+            if restore_after_flush.is_err():
+                return Err("user-namespace-restore:" + restore_after_flush.unwrap_err())
+        return Err("user-direct-flush:" + flush_probe.unwrap_err())
+    if previous_nsid != user_nsid:
+        val restore_after_probe = nvme.identify_namespace_id(previous_nsid)
+        if restore_after_probe.is_err():
+            return Err("user-namespace-restore:" + restore_after_probe.unwrap_err())
+    Ok(
+        "user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned " +
+        "user_namespace_nsid=" + lease.namespace_identity.nsid.to_u64().to_text() + " " +
+        "user_namespace_queue_id=" + lease.queue.queue_id.to_u64().to_text() +
+        " user_namespace_active_lease_count=" + active_leases.len().to_u64().to_text() +
+            " user_namespace_direct_io=read-write-through user_namespace_shared_interface=" + nvme_shared_filesystem_interface_consumers() +
+            " user_namespace_conflict_policy=active-lease-checked"
+    )
+
+fn _q35_system_namespace_lease(sector_size: u32, sector_count: u64) -> NvmeFilesystemLease:
+    val namespace_identity = NvmeNamespaceIdentity(
+        controller_id: 0u32,
+        nsid: 1u32,
+        lba_size: sector_size,
+        lba_count: sector_count,
+        eui64: 0u64,
+        nguid_lo: 0u64,
+        nguid_hi: 0u64,
+        uuid_lo: 0u64,
+        uuid_hi: 0u64
+    )
+    val queue = NvmeQueueAssignment(
+        queue_id: SIMPLEOS_NVME_SYSTEM_QUEUE_ID,
+        role: NvmeQueueRole.System,
+        controller_id: 0u32,
+        nsid: 1u32,
+        owner_task: 0u64,
+        max_depth: 64u16,
+        rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_QUEUE_SUBMIT
+    )
+    nvme_filesystem_lease(
+        namespace_identity,
+        0u64,
+        sector_count,
+        NvmeNamespaceMode.System,
+        queue,
+        "simple-driver",
+        "kernel-owned-resource",
+        true,
+        true
+    )
+
+fn _perf_reason(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    read_p99_us: u64,
+    write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64
+) -> text:
+    if c_read_iops == 0u64 or c_write_iops == 0u64 or c_read_p99_us == 0u64 or c_write_p99_us == 0u64:
+        return "c-baseline-missing-iops"
+    if simple_read_iops <= c_read_iops:
+        return "simple-read-iops-not-faster-than-c"
+    if simple_write_iops <= c_write_iops:
+        return "simple-write-iops-not-faster-than-c"
+    if read_p99_us >= c_read_p99_us:
+        return "simple-read-p99-not-faster-than-c"
+    if write_p99_us >= c_write_p99_us:
+        return "simple-write-p99-not-faster-than-c"
+    "ready"
+
+fn _perf_marker(
+    simple_read_iops: u64,
+    simple_write_iops: u64,
+    read_p99_us: u64,
+    write_p99_us: u64,
+    c_read_iops: u64,
+    c_write_iops: u64,
+    c_read_p99_us: u64,
+    c_write_p99_us: u64,
+    fs_consumers: text,
+    queue_depth: u16
+) -> text:
+    "nvme_perf reason=" + _perf_reason(simple_read_iops, simple_write_iops, read_p99_us, write_p99_us, c_read_iops, c_write_iops, c_read_p99_us, c_write_p99_us) +
+        " simple_provider=simple-driver workload=4k-random-read-write io_size_bytes=4096" +
+        " direct_io_path=nvme-lease-shared-dma-4k fs_consumers=" + fs_consumers +
+        " fat32_direct_io=read-write-through" +
+        " nvfs_direct_io=read-write-through" +
+        " dbfs_direct_io=read-write-through" +
+        " fat32_extent_source=freestanding-fat32-extents" +
+        " nvfs_extent_source=freestanding-dbfs-arena" +
+        " dbfs_extent_source=freestanding-dbfs-arena" +
+        " c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct" +
+        " common_logic_shared=true allocation_per_io=false" +
+        " simple_read_iops=" + simple_read_iops.to_text() +
+        " simple_write_iops=" + simple_write_iops.to_text() +
+        " simple_read_p99_us=" + read_p99_us.to_text() +
+        " simple_write_p99_us=" + write_p99_us.to_text() +
+        " c_read_iops=" + c_read_iops.to_text() +
+        " c_write_iops=" + c_write_iops.to_text() +
+        " c_read_p99_us=" + c_read_p99_us.to_text() +
+        " c_write_p99_us=" + c_write_p99_us.to_text() +
+        " queue_depth=" + queue_depth.to_u64().to_text() + " warm_runs=3 max_rss_kib=1"
+
+fn _measure_c_bridge_4k_baseline(lbas: [u64], sector_size: u32, buf_addr: u64) -> Result<Q35NvmePerfCounters, text>:
+    val init = simpleos_nvme_init()
+    if init != 0:
+        return Err("c-nvme-init-failed")
+    if buf_addr == 0u64:
+        return Err("c-nvme-buffer-missing")
+    if sector_size == 0u32 or (4096u32 % sector_size) != 0u32:
+        return Err("c-nvme-sector-size-invalid")
+    val sectors_per_4k = 4096u32 / sector_size
+    var read_ops: u64 = 0u64
+    var write_ops: u64 = 0u64
+    var read_total_us: u64 = 0u64
+    var write_total_us: u64 = 0u64
+    var read_p99_us: u64 = 1u64
+    var write_p99_us: u64 = 1u64
+    for lba in lbas:
+        val read_start = rt_time_now_unix_micros()
+        var sector: u32 = 0u32
+        while sector < sectors_per_4k:
+            val rc = simpleos_nvme_read_sector(0u64, lba + sector.to_u64(), buf_addr + (sector.to_u64() * sector_size.to_u64()))
+            if rc != 0:
+                return Err("c-nvme-read-failed")
+            sector = sector + 1u32
+        val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
+        if read_elapsed > read_p99_us:
+            read_p99_us = read_elapsed
+        read_total_us = read_total_us + read_elapsed
+        read_ops = read_ops + 1u64
+
+        val write_start = rt_time_now_unix_micros()
+        sector = 0u32
+        while sector < sectors_per_4k:
+            val rc = simpleos_nvme_write_sector(0u64, lba + sector.to_u64(), buf_addr + (sector.to_u64() * sector_size.to_u64()))
+            if rc != 0:
+                return Err("c-nvme-write-failed")
+            sector = sector + 1u32
+        val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
+        if write_elapsed > write_p99_us:
+            write_p99_us = write_elapsed
+        write_total_us = write_total_us + write_elapsed
+        write_ops = write_ops + 1u64
+    Ok(Q35NvmePerfCounters(
+        read_iops: _iops(read_ops, read_total_us),
+        write_iops: _iops(write_ops, write_total_us),
+        read_p99_us: read_p99_us,
+        write_p99_us: write_p99_us
+    ))
+
+fn q35_pure_nvme_perf_serial_lines() -> [text]:
+    pcimgr_init()
+    val nvme_idx = pcimgr_find_by_class_i64(1, 8)
+    if nvme_idx < 0:
+        return ["[q35-pure-nvme-perf] skipped reason=no-nvme-device"]
+    val grant_result = pcimgr_grant_device(nvme_idx.to_u64(), 0)
+    if grant_result.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-grant-failed"]
+
+    var nvme = NvmeDriver.new()
+    val grant = grant_result.unwrap()
+    val nvme_init = nvme.init_from_grant(grant)
+    if nvme_init.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-init-failed detail=" + nvme_init.unwrap_err()]
+    val evidence_result = nvme.transfer_evidence_from_reversible_probe(
+        0u64,
+        "system-driver",
+        "kernel-owned-resource",
+        "system-kernel-namespace",
+        true,
+        true
+    )
+    if evidence_result.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-transfer-probe-failed detail=" + evidence_result.unwrap_err()]
+    val evidence = evidence_result.unwrap()
+    val sector_size = nvme.get_sector_size()
+    val sector_count = nvme.get_sector_count()
+    if sector_size < 512u32:
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-size-invalid detail=" + sector_size.to_u64().to_text()]
+    if sector_count == 0u64:
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-sector-count-missing"]
+    val transfer_reason = nvme_transfer_readiness_reason(evidence)
+    if transfer_reason != "ready":
+        return ["[q35-pure-nvme-perf] skipped reason=nvme-transfer-not-ready detail=" + transfer_reason]
+    val batch_4k_ops: u32 = 2u32
+    val batch_bytes = batch_4k_ops.to_u64() * 4096u64
+    val dma_result = dma_alloc((batch_bytes + 4096u64) as i64, DmaDir.Bidirectional)
+    if dma_result.is_err():
+        return ["[q35-pure-nvme-perf] skipped reason=dma-alloc-failed"]
+    val dma = dma_result.unwrap()
+    val owner = DmaOwner(task_id: 0u64, bdf_bus: 0u8, bdf_device: 0u8, bdf_function: 0u8)
+    val dma_phys = dma.phys as u64
+    val dma_virt = dma.virt as u64
+    val misalignment = dma_phys % 4096u64
+    val align_delta = if misalignment == 0u64 { 0u64 } else { 4096u64 - misalignment }
+    val shared = SharedDmaBuffer(
+        cpu_virt_addr: dma_virt + align_delta,
+        host_phys_addr: dma_phys + align_delta,
+        device_addr: dma_phys + align_delta,
+        byte_len: batch_bytes,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: owner,
+        allocation_id: 1u64
+    )
+    val fat32_offsets_result = _fat32_fixture_direct_offsets(nvme, sector_size, shared)
+    if fat32_offsets_result.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=fat32-driver-direct-extent-failed detail=" + fat32_offsets_result.unwrap_err()]
+    val fat32_offsets = fat32_offsets_result.unwrap()
+    val nvfs_offsets_result = _dbfs_arena_direct_offsets(sector_size, sector_count, 639u64)
+    if nvfs_offsets_result.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=nvfs-arena-direct-extent-failed detail=" + nvfs_offsets_result.unwrap_err()]
+    val nvfs_offsets = nvfs_offsets_result.unwrap()
+    val dbfs_offsets_result = _dbfs_arena_direct_offsets(sector_size, sector_count, 767u64)
+    if dbfs_offsets_result.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=dbfs-arena-direct-extent-failed detail=" + dbfs_offsets_result.unwrap_err()]
+    val dbfs_offsets = dbfs_offsets_result.unwrap()
+    val active_system_lease = _q35_system_namespace_lease(sector_size, sector_count)
+    val user_namespace_marker = _q35_user_namespace_assignment_marker(nvme, grant, shared, [active_system_lease])
+    if user_namespace_marker.is_err():
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=user-namespace-assignment-failed detail=" + user_namespace_marker.unwrap_err()]
+
+    var read_ops: u64 = 0u64
+    var write_ops: u64 = 0u64
+    var read_total_us: u64 = 0u64
+    var write_total_us: u64 = 0u64
+    var read_p99_us: u64 = 1u64
+    var write_p99_us: u64 = 1u64
+    var all_lbas: [u64] = []
+    var saw_fat32: bool = false
+    var saw_nvfs: bool = false
+    var saw_dbfs: bool = false
+    var run: u32 = 0u32
+    while run < 3u32:
+        var op: u32 = 0u32
+        while op < 32u32:
+            var lbas: [u64] = []
+            var offsets: [i64] = []
+            var batch_op: u32 = 0u32
+            while batch_op < batch_4k_ops and op + batch_op < 32u32:
+                val lba = _relative_4k_lba(sector_size, sector_count, run, op + batch_op)
+                lbas.push(lba)
+                offsets.push((lba * sector_size.to_u64()) as i64)
+                batch_op = batch_op + 1u32
+
+            val consumer = _consumer_for_measurement(run, op)
+            val consumer_name = nvme_filesystem_consumer_name(consumer)
+            if consumer_name == "fat32":
+                saw_fat32 = true
+                var fat_idx: i32 = 0
+                while fat_idx < offsets.len() and fat_idx < fat32_offsets.len():
+                    offsets[fat_idx] = fat32_offsets[fat_idx]
+                    lbas[fat_idx] = (fat32_offsets[fat_idx] as u64) / sector_size.to_u64()
+                    fat_idx = fat_idx + 1
+            if consumer_name == "nvfs":
+                saw_nvfs = true
+                var nvfs_idx: i32 = 0
+                while nvfs_idx < offsets.len() and nvfs_idx < nvfs_offsets.len():
+                    offsets[nvfs_idx] = nvfs_offsets[nvfs_idx]
+                    lbas[nvfs_idx] = (nvfs_offsets[nvfs_idx] as u64) / sector_size.to_u64()
+                    nvfs_idx = nvfs_idx + 1
+            if consumer_name == "dbfs":
+                saw_dbfs = true
+                var dbfs_idx: i32 = 0
+                while dbfs_idx < offsets.len() and dbfs_idx < dbfs_offsets.len():
+                    offsets[dbfs_idx] = dbfs_offsets[dbfs_idx]
+                    lbas[dbfs_idx] = (dbfs_offsets[dbfs_idx] as u64) / sector_size.to_u64()
+                    dbfs_idx = dbfs_idx + 1
+            for lba in lbas:
+                all_lbas.push(lba)
+            val read_req = direct_io_read_batch_request(1u64, offsets, shared, 200000u32)
+            val read_start = rt_time_now_unix_micros()
+            val read_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, read_req)
+            val read_elapsed = _elapsed_us(read_start, rt_time_now_unix_micros())
+            if read_result.is_err():
+                dma_free(dma)
+                return ["[q35-pure-nvme-perf] skipped reason=direct-read-failed"]
+            val read_sample_us = read_elapsed / lbas.len().to_u64()
+            if read_sample_us > read_p99_us:
+                read_p99_us = read_sample_us
+            read_total_us = read_total_us + read_elapsed
+            read_ops = read_ops + lbas.len().to_u64()
+
+            val write_req = direct_io_write_batch_request(1u64, offsets, shared, 200000u32)
+            val write_start = rt_time_now_unix_micros()
+            val write_result = NvmeBlockAdapter.submit_direct_4k_shared_dma_batch_for_lease_window(nvme, 1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, consumer, 0u64, sector_count, sector_size, write_req)
+            val write_elapsed = _elapsed_us(write_start, rt_time_now_unix_micros())
+            if write_result.is_err():
+                dma_free(dma)
+                return ["[q35-pure-nvme-perf] skipped reason=direct-write-failed"]
+            val write_sample_us = write_elapsed / lbas.len().to_u64()
+            if write_sample_us > write_p99_us:
+                write_p99_us = write_sample_us
+            write_total_us = write_total_us + write_elapsed
+            write_ops = write_ops + lbas.len().to_u64()
+            op = op + lbas.len().to_u32()
+        run = run + 1u32
+
+    if not saw_fat32 or not saw_nvfs or not saw_dbfs:
+        dma_free(dma)
+        return ["[q35-pure-nvme-perf] skipped reason=fs-consumer-direct-io-incomplete"]
+    val fs_consumers = "fat32,nvfs,dbfs"
+    val c_baseline = _measure_c_bridge_4k_baseline(all_lbas, sector_size, shared.cpu_virt_addr)
+    dma_free(dma)
+    var c_read_iops: u64 = 0u64
+    var c_write_iops: u64 = 0u64
+    var c_read_p99_us: u64 = 0u64
+    var c_write_p99_us: u64 = 0u64
+    if c_baseline.is_ok():
+        val c = c_baseline.unwrap()
+        c_read_iops = c.read_iops
+        c_write_iops = c.write_iops
+        c_read_p99_us = c.read_p99_us
+        c_write_p99_us = c.write_p99_us
+    val access = _access_marker("resource-grant-set:tok=nvme0", "resource-grant-set:tok=net0")
+    val perf = _perf_marker(
+        _iops(read_ops, read_total_us),
+        _iops(write_ops, write_total_us),
+        read_p99_us,
+        write_p99_us,
+        c_read_iops,
+        c_write_iops,
+        c_read_p99_us,
+        c_write_p99_us,
+        fs_consumers,
+        128u16
+    )
+    [access, user_namespace_marker.unwrap(), perf]

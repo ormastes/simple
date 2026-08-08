@@ -1,0 +1,195 @@
+"""
+# Ignore Working Copy Specification
+#
+# Subject: src/app/sj/jj_exec.spl (`is_read_bypass`, `inject_flags`,
+# `build_command`).
+#
+# Tests that read-only jj verbs get --ignore-working-copy injected,
+# and that all commands get --no-pager --color never.
+#
+# History: this file used to carry a 45-line local copy of the whole flag
+# injector — `_verb_key`, `is_read_bypass`, `inject_flags`, `build_command` —
+# and imported nothing but `std.io_runtime`. All 19 examples passed against the
+# copy and could never observe shipped code. The copy was functionally faithful
+# but structurally refactored: it hoisted the verb-key computation into a
+# separate `_verb_key` helper, whereas the shipped `is_read_bypass` inlines it
+# as an if/else chain. That is the shape worth naming — a shim can be correct
+# today and still be totally vacuous, because nothing makes it stay correct.
+# See doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+#
+# `_has_flag` below is kept: it is a genuine test helper (a membership check
+# over the returned argv), not a reimplementation of the subject.
+#
+# Note: `src/app/sj_daemon/jj_exec.spl:20` also defines
+# `is_read_bypass([text]) -> bool` with an identical signature. It is NOT
+# co-compiled here, because `src/app/sj/jj_exec.spl` does not import it — a
+# sabotage of the sj/jj_exec.spl body does move these examples, so this spec is
+# reaching its stated subject rather than a same-signature sibling.
+"""
+
+use std.spec.*
+use app.sj.jj_exec.{is_read_bypass, inject_flags, build_command}
+
+fn _has_flag(result: [text], flag: text) -> bool:
+    var i = 0i64
+    while i < result.len():
+        if result[i] == flag:
+            return true
+        i = i + 1i64
+    false
+
+describe "Ignore Working Copy - Read Verbs":
+    it "injects --ignore-working-copy for jj log":
+        val result = inject_flags(["jj", "log"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj status":
+        val result = inject_flags(["jj", "status"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj diff":
+        val result = inject_flags(["jj", "diff"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj show":
+        val result = inject_flags(["jj", "show"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj op log":
+        val result = inject_flags(["jj", "op", "log"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj evolog":
+        val result = inject_flags(["jj", "evolog"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj file annotate":
+        val result = inject_flags(["jj", "file", "annotate", "src/main.spl"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj file list":
+        val result = inject_flags(["jj", "file", "list"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj file show":
+        val result = inject_flags(["jj", "file", "show", "path"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj bookmark list":
+        val result = inject_flags(["jj", "bookmark", "list"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj config list":
+        val result = inject_flags(["jj", "config", "list"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+    it "injects --ignore-working-copy for jj op show":
+        val result = inject_flags(["jj", "op", "show"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(true)
+
+describe "Ignore Working Copy - No-Pager and Color":
+    it "all commands get --no-pager":
+        val result = inject_flags(["jj", "describe", "-m", "test"])
+        expect(_has_flag(result, "--no-pager")).to_equal(true)
+
+    it "all commands get --color never":
+        val result = inject_flags(["jj", "describe", "-m", "test"])
+        expect(_has_flag(result, "--color")).to_equal(true)
+        expect(_has_flag(result, "never")).to_equal(true)
+
+describe "Ignore Working Copy - Negative Cases":
+    it "does NOT inject --ignore-working-copy for jj describe":
+        val result = inject_flags(["jj", "describe", "-m", "test"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(false)
+
+    it "does NOT inject --ignore-working-copy for jj new":
+        val result = inject_flags(["jj", "new"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(false)
+
+    it "does NOT inject --ignore-working-copy for jj rebase":
+        val result = inject_flags(["jj", "rebase", "-d", "main"])
+        expect(_has_flag(result, "--ignore-working-copy")).to_equal(false)
+
+    it "does not modify non-jj commands":
+        val result = inject_flags(["git", "status"])
+        expect(result.len()).to_equal(2i64)
+        expect(result[0i64]).to_equal("git")
+
+    it "build_command combines inject and join":
+        val cmd = build_command(["jj", "log"])
+        expect(cmd).to_contain("--ignore-working-copy")
+        expect(cmd).to_contain("--no-pager")
+
+# ---------------------------------------------------------------------------
+# Coverage the shim never had. `is_read_bypass` was reimplemented locally but
+# never called directly by a single example — every example went through
+# `inject_flags`, so the predicate's own contract was untested. Argument order
+# and the exact emitted argv were untested too.
+# ---------------------------------------------------------------------------
+
+describe "Ignore Working Copy - is_read_bypass contract":
+    it "recognises the bare read verbs":
+        expect(is_read_bypass(["jj", "log"])).to_equal(true)
+        expect(is_read_bypass(["jj", "status"])).to_equal(true)
+        expect(is_read_bypass(["jj", "diff"])).to_equal(true)
+        expect(is_read_bypass(["jj", "show"])).to_equal(true)
+        expect(is_read_bypass(["jj", "evolog"])).to_equal(true)
+
+    it "recognises the two-word read verbs":
+        expect(is_read_bypass(["jj", "op", "log"])).to_equal(true)
+        expect(is_read_bypass(["jj", "op", "show"])).to_equal(true)
+        expect(is_read_bypass(["jj", "file", "annotate"])).to_equal(true)
+        expect(is_read_bypass(["jj", "file", "list"])).to_equal(true)
+        expect(is_read_bypass(["jj", "file", "show"])).to_equal(true)
+        expect(is_read_bypass(["jj", "bookmark", "list"])).to_equal(true)
+        expect(is_read_bypass(["jj", "config", "list"])).to_equal(true)
+
+    it "rejects mutating subcommands of the two-word families":
+        expect(is_read_bypass(["jj", "op", "restore", "abc"])).to_equal(false)
+        expect(is_read_bypass(["jj", "bookmark", "set", "main"])).to_equal(false)
+        expect(is_read_bypass(["jj", "config", "set", "k", "v"])).to_equal(false)
+        expect(is_read_bypass(["jj", "file", "track", "x"])).to_equal(false)
+
+    it "rejects an empty or verbless argv":
+        expect(is_read_bypass([])).to_equal(false)
+        expect(is_read_bypass(["jj"])).to_equal(false)
+
+    it "a bare two-word family head is not a read verb":
+        # `jj op` with no subcommand takes the argv.len() > 1 branch, giving
+        # key == "op", which is in none of the read-verb cases.
+        expect(is_read_bypass(["jj", "op"])).to_equal(false)
+        expect(is_read_bypass(["jj", "bookmark"])).to_equal(false)
+
+describe "Ignore Working Copy - emitted argv shape":
+    it "emits jj, the bypass flag, then the pager and colour flags, then the verb":
+        val result = inject_flags(["jj", "log", "-r", "@"])
+        expect(result[0i64]).to_equal("jj")
+        expect(result[1i64]).to_equal("--ignore-working-copy")
+        expect(result[2i64]).to_equal("--no-pager")
+        expect(result[3i64]).to_equal("--color")
+        expect(result[4i64]).to_equal("never")
+        expect(result[5i64]).to_equal("log")
+        expect(result[6i64]).to_equal("-r")
+        expect(result[7i64]).to_equal("@")
+        expect(result.len()).to_equal(8i64)
+
+    it "omits only the bypass flag for a write verb":
+        val result = inject_flags(["jj", "new"])
+        expect(result[0i64]).to_equal("jj")
+        expect(result[1i64]).to_equal("--no-pager")
+        expect(result[2i64]).to_equal("--color")
+        expect(result[3i64]).to_equal("never")
+        expect(result[4i64]).to_equal("new")
+        expect(result.len()).to_equal(5i64)
+
+    it "returns a non-jj argv completely untouched":
+        val result = inject_flags(["git", "push", "--force"])
+        expect(result.len()).to_equal(3i64)
+        expect(result[2i64]).to_equal("--force")
+
+    it "returns an empty argv untouched":
+        expect(inject_flags([]).len()).to_equal(0i64)
+
+    it "build_command renders the whole line space-separated":
+        expect(build_command(["jj", "log"])).to_equal("jj --ignore-working-copy --no-pager --color never log")
+        expect(build_command(["jj", "new"])).to_equal("jj --no-pager --color never new")

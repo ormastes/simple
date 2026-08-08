@@ -1,0 +1,71 @@
+name: RISC-V Hardware Gates
+
+# Runs the RISC-V hardware gates so regressions cannot land silently:
+# all JTAG debug testbenches under GHDL (JTAG STAGE1..5 PASS) plus the
+# soc/core `simple run` probes (each must print ALL PASS), via the single
+# entrypoint scripts/check/check-riscv-hardware-gates.shs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/lib/hardware/**'
+      - 'examples/09_embedded/**'
+      - 'test/01_unit/lib/hardware/**'
+      - 'scripts/fpga/**'
+      - 'scripts/check/check-riscv-hardware-gates.shs'
+      - '.github/workflows/riscv-hardware-gates.yml'
+  pull_request:
+    paths:
+      - 'src/lib/hardware/**'
+      - 'examples/09_embedded/**'
+      - 'test/01_unit/lib/hardware/**'
+      - 'scripts/fpga/**'
+      - 'scripts/check/check-riscv-hardware-gates.shs'
+      - '.github/workflows/riscv-hardware-gates.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: riscv-hw-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  riscv-hw-gates:
+    name: JTAG testbenches + soc/core probes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: riscv-hw-gates-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            riscv-hw-gates-rust-bootstrap-
+
+      - name: Install GHDL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ghdl
+          ghdl --version | head -n 2
+
+      - name: Build Simple bootstrap binary
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+          ./target/bootstrap/simple --version || true
+
+      - name: Run RISC-V hardware gates
+        env:
+          SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+        run: sh scripts/check/check-riscv-hardware-gates.shs

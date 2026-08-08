@@ -1,0 +1,106 @@
+# @Feature G9: Cooperative cancellation tokens
+# @Description: Exercises the REAL std.async.cancellation.CancellationToken
+# (not a local text-matching stub or an in-spec re-implementation). Prior to
+# this spec the type had never been constructed by any test: async_spec.spl
+# tested a hand-rolled local `class CancellationToken` stub with an
+# unrelated field layout, and async_host_spec.spl only grepped the source
+# text of handle.spl/joinset.spl for method signatures. Both masked that
+# `CancellationToken.new()` did not exist and that `cancel()` silently
+# failed to propagate under `bin/simple test` (see
+# doc/08_tracking/bug/interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md).
+
+use std.async.cancellation.{CancellationToken, token_new}
+
+describe "CancellationToken (real module, both constructors)":
+    it "starts not cancelled":
+        val t = CancellationToken.new()
+        expect(t.is_cancelled()).to_equal(false)
+
+    it "cancel() flips is_cancelled() on the same token":
+        var t = CancellationToken.new()
+        expect(t.is_cancelled()).to_equal(false)
+        t.cancel()
+        expect(t.is_cancelled()).to_equal(true)
+
+    it "token_new() free-function constructor behaves the same as .new()":
+        var t = token_new()
+        expect(t.is_cancelled()).to_equal(false)
+        t.cancel()
+        expect(t.is_cancelled()).to_equal(true)
+
+    it "cancelling a parent is observed by an existing child":
+        var parent = token_new()
+        var child = parent.child()
+        expect(child.is_cancelled()).to_equal(false)
+        parent.cancel()
+        expect(child.is_cancelled()).to_equal(true)
+
+    it "cancelling a child does not cancel its parent":
+        var parent = token_new()
+        var child = parent.child()
+        child.cancel()
+        expect(child.is_cancelled()).to_equal(true)
+        expect(parent.is_cancelled()).to_equal(false)
+
+    it "cancelling one child does not affect an unrelated sibling":
+        var parent = token_new()
+        var sib_a = parent.child()
+        var sib_b = parent.child()
+        sib_a.cancel()
+        expect(sib_a.is_cancelled()).to_equal(true)
+        expect(sib_b.is_cancelled()).to_equal(false)
+        expect(parent.is_cancelled()).to_equal(false)
+
+    # NOTE: depth-2 (grandparent -> grandchild) propagation with an
+    # intervening `token_new()`/`.new()` allocation between the middle
+    # token's construction and the later `is_cancelled()` check is
+    # STILL BROKEN, and is a *deeper* variant of the same interpreter
+    # defect than originally filed. Attempted here and root-caused
+    # further (2026-07-29 update in both bug docs): the true trigger is
+    # not recursion depth or array-vs-scalar, but calling the
+    # receiver-less constructor (`token_new()` / `CancellationToken.new()`)
+    # *more than once* — the second call reads a stale cross-call
+    # snapshot of `_next_token_id` and mints a COLLIDING id with a token
+    # from an unrelated earlier call, corrupting that slot's parent
+    # link. A workaround (routing every root allocation through
+    # `.child()` on a hidden, never-cancelled dummy instance, so the
+    # receiver-less path only ever pushes once, lazily) was verified
+    # correct in isolated single-script probes at depth-2, depth-3, and
+    # with 200+ allocations — but the SAME workaround, run through this
+    # spec's actual `describe`/`it` structure, corrupted state
+    # differently across `it` blocks and made the test daemon hang
+    # (see the dated section in
+    # doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md
+    # for the full probe transcript). Per this lane's own escalation
+    # rule ("if the interpreter bug makes even the iterative form fail,
+    # stop and document"), the workaround was NOT shipped: it traded a
+    # deterministic wrong-answer for a hang, which is worse. What IS
+    # shipped: `is_cancelled()` is now a bounded, non-recursive
+    # iterative loop (see src/lib/nogc_async_mut/async/cancellation.spl)
+    # that keeps every single-`token_new()`-call scenario below correct
+    # (including the direct parent/child case) and can never hang even
+    # if a future allocation pattern corrupts the parent chain into a
+    # cycle. Depth-2+ propagation across more than one `token_new()`
+    # call remains unverified and is NOT asserted here — see the bug
+    # doc for the open item.
+
+    it "allocates well past the old fixed 64-slot registry cap":
+        # The registry used to be a hardcoded 64-element array with no
+        # growth; the 65th token allocated in the process crashed on an
+        # out-of-bounds index. Confirms the growable-array fix.
+        var i = 0
+        var last = token_new()
+        while i < 200:
+            last = token_new()
+            i = i + 1
+        expect(last.is_cancelled()).to_equal(false)
+        last.cancel()
+        expect(last.is_cancelled()).to_equal(true)
+
+    it "guard_future() reflects cancellation state":
+        var t = token_new()
+        val before = t.guard_future()
+        expect(before.is_ready()).to_equal(false)
+        t.cancel()
+        val after = t.guard_future()
+        expect(after.is_ready()).to_equal(true)

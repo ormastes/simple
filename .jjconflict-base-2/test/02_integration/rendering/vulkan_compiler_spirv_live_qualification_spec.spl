@@ -1,0 +1,135 @@
+"""Strict Vulkan launch/readback qualification for compiler-produced SPIR-V.
+
+The Simple Vulkan backend emits SPIR-V assembly. This test assembles that exact
+source->HIR->MIR producer output, then passes the resulting binary to the
+runtime's Vulkan SPIR-V module API for a real storage-buffer dispatch.
+
+@tag: integration, rendering, vulkan, hardware, strict
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+use compiler.backend.backend.vulkan_backend.{vulkan_compile_module_direct}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_dispatch_framebuffer_compute_checked}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_compile_spirv, vulkan_sffi_destroy_shader,
+    vulkan_sffi_create_compute_pipeline, vulkan_sffi_destroy_pipeline,
+    vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_read_buffer_bytes,
+    vulkan_sffi_shutdown_reaped
+}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn vulkan_u32_le(value: i64) -> [u8]:
+    [
+        (value & 0xff).to_u8(),
+        ((value >> 8) & 0xff).to_u8(),
+        ((value >> 16) & 0xff).to_u8(),
+        ((value >> 24) & 0xff).to_u8()
+    ]
+
+fn vulkan_read_u32_le(bytes: [u8], offset: i64) -> i64:
+    bytes[offset].to_i64() |
+        (bytes[offset + 1].to_i64() << 8) |
+        (bytes[offset + 2].to_i64() << 16) |
+        (bytes[offset + 3].to_i64() << 24)
+
+describe "compiler-produced Vulkan SPIR-V live qualification":
+    it "writes exact U32 values through binding zero and a U32 push constant":
+        val source = "@gpu(\"vulkan\")\n" +
+            "fn fill(mut output: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        output[i] = 42u32\n"
+        val parsed = parse_full_frontend(source, "vulkan_compiler_spirv_live.spl", "vulkan_compiler_spirv_live", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("vulkan_compiler_spirv_live.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+
+        val compiled = vulkan_compile_module_direct(mir)
+        expect(compiled.is_ok()).to_equal(true)
+        val assembly = compiled.unwrap().text_output
+        expect(assembly).to_contain("; Generator: Simple Compiler")
+        expect(assembly).to_contain("Binding 0")
+        expect(assembly).to_contain("PushConstant")
+
+        val assembly_path = "/tmp/simple_vulkan_compiler_spirv_live.spvasm"
+        val binary_path = "/tmp/simple_vulkan_compiler_spirv_live.spv"
+        val assembly_written = rt_file_write_text(assembly_path, assembly)
+        print("vulkan_compiler_live_assembly_written=" + assembly_written.to_text())
+        expect(assembly_written).to_equal(true)
+        val (_which_out, _which_err, tools_status) = rt_process_run(
+            "/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
+        expect(tools_status).to_equal(0)
+        val (_as_out, as_err, as_status) = rt_process_run(
+            "spirv-as", ["--target-env", "vulkan1.3", assembly_path, "-o", binary_path])
+        expect(as_status).to_equal(0)
+        expect(as_err).to_equal("")
+        val (_val_out, val_err, val_status) = rt_process_run(
+            "spirv-val", ["--target-env", "vulkan1.3", binary_path])
+        expect(val_status).to_equal(0)
+        expect(val_err).to_equal("")
+        val spirv = rt_file_read_bytes(binary_path)
+        expect(spirv.len()).to_be_greater_than(20)
+
+        var session = VulkanSession.create()
+        expect(session.init()).to_equal(0)
+        print("vulkan_compiler_live_device_name=" + session.device_name)
+        print("vulkan_compiler_live_device_type=" + session.device_type)
+        print("vulkan_compiler_live_driver_identity=" + session.driver_identity)
+        expect(session.device_name.len()).to_be_greater_than(0)
+        expect(session.driver_identity.len()).to_be_greater_than(0)
+        expect(session.device_type == "discrete" or session.device_type == "integrated").to_equal(true)
+        val shader = vulkan_sffi_compile_spirv(spirv)
+        expect(shader).to_be_greater_than(0)
+        val pipeline = vulkan_sffi_create_compute_pipeline(shader, "fill", 4)
+        expect(pipeline).to_be_greater_than(0)
+        val count: i64 = 8
+        val output = vulkan_sffi_alloc_buffer(count * 4, 0x80)
+        expect(output).to_be_greater_than(0)
+        if shader > 0 and pipeline > 0 and output > 0:
+            val zeroes: [u8] = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+                0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+            val uploaded = vulkan_sffi_copy_to_buffer(output, zeroes, 0)
+            print("vulkan_compiler_live_uploaded=" + uploaded.to_text())
+            expect(uploaded).to_equal(true)
+            expect(vulkan_dispatch_framebuffer_compute_checked(
+                output, pipeline, vulkan_u32_le(count), 1, 1, 1)).to_equal(1)
+            val expected: [u8] = [42u8, 0u8, 0u8, 0u8, 42u8, 0u8, 0u8, 0u8,
+                42u8, 0u8, 0u8, 0u8, 42u8, 0u8, 0u8, 0u8,
+                42u8, 0u8, 0u8, 0u8, 42u8, 0u8, 0u8, 0u8,
+                42u8, 0u8, 0u8, 0u8, 42u8, 0u8, 0u8, 0u8]
+            val readback = vulkan_sffi_read_buffer_bytes(output, count * 4, 0)
+            expect(readback).to_equal(expected)
+            var index: i64 = 0
+            while index < count:
+                expect(vulkan_read_u32_le(readback, index * 4)).to_equal(42)
+                index = index + 1
+        if output > 0:
+            val freed = vulkan_sffi_free_buffer(output)
+            print("vulkan_compiler_live_buffer_freed=" + freed.to_text())
+            expect(freed).to_equal(true)
+        if pipeline > 0:
+            val pipeline_destroyed = vulkan_sffi_destroy_pipeline(pipeline)
+            print("vulkan_compiler_live_pipeline_destroyed=" + pipeline_destroyed.to_text())
+            expect(pipeline_destroyed).to_equal(true)
+        if shader > 0:
+            val shader_destroyed = vulkan_sffi_destroy_shader(shader)
+            print("vulkan_compiler_live_shader_destroyed=" + shader_destroyed.to_text())
+            expect(shader_destroyed).to_equal(true)
+        session.release()
+        val shutdown_reaped = vulkan_sffi_shutdown_reaped()
+        print("vulkan_compiler_live_shutdown_reaped=" + shutdown_reaped.to_text())
+        expect(shutdown_reaped).to_equal(true)

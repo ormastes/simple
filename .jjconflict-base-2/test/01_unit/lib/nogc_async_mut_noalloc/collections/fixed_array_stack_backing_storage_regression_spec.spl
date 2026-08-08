@@ -1,0 +1,77 @@
+# Regression spec for
+# doc/08_tracking/bug/noalloc_collections_backed_by_growable_heap_array_2026-08-07.md
+#
+# FixedArray and FixedStack claimed "no heap allocation" / "no heap growth"
+# but were backed by a real growable `[i64]` array populated via `.push()`
+# on every insert, and deallocated (`self.items = []`) on `clear()`.
+#
+# BEFORE the fix: `arr.items.len()` (the backing array's real length) was 0
+# right after `new(8)`, grew to 3 after 3 pushes, and dropped back to 0 after
+# `clear()` — proving the backing array grew per-operation and was
+# deallocated on clear, not reserved once.
+#
+# AFTER the fix: `new()` reserves the full capacity up front and `push()`
+# writes by index, so the backing array's length is 8 at every stage —
+# construction, mid-use, and after clear().
+#
+# This is NOT the same axis as "over-capacity insert is rejected" — that
+# guard (`len >= capacity` before push) was already correct before this fix
+# and is unaffected; asserting only on it would pass identically before and
+# after and prove nothing (a fail-open absence assertion). The discriminating
+# axis is the backing array's actual reserved length.
+#
+# Full fix (genuinely inline/statically-reserved storage instead of a heap
+# `[i64]` array) needs a language feature that does not exist today: `[T; N]`
+# sized-array syntax is parsed but its size expression is discarded
+# (src/compiler/10.frontend/core/parser.spl:789-798, "stage4 arrays are
+# dynamic"). The bug stays open for that reason; this spec proves only the
+# steady-state (post-construction) growth was eliminated.
+
+use std.nogc_async_mut_noalloc.collections.fixed_array.{FixedArray}
+use std.nogc_async_mut_noalloc.collections.fixed_stack.{FixedStack}
+
+describe "FixedArray / FixedStack backing storage":
+    """Proves new()/push()/clear() no longer grow or shrink the backing
+    [i64] array after construction — the WP-12 collections finding."""
+
+    it "reserves the backing array once at construction and never grows or shrinks it again":
+        val arr = FixedArray.new(8)
+        expect(arr.items.len()).to_equal(8)
+
+        arr.push(1)
+        arr.push(2)
+        arr.push(3)
+        expect(arr.items.len()).to_equal(8)
+
+        arr.clear()
+        expect(arr.items.len()).to_equal(8)
+
+        arr.push(9)
+        expect(arr.items.len()).to_equal(8)
+
+    it "still rejects push past capacity (unaffected by this fix, checked for completeness)":
+        val arr = FixedArray.new(2)
+        assert_true(arr.push(1))
+        assert_true(arr.push(2))
+        expect(arr.push(3)).to_equal(false)
+        expect(arr.size()).to_equal(2)
+
+    it "reserves FixedStack backing storage once at construction and never grows or shrinks it again":
+        val st = FixedStack.new(8)
+        expect(st.items.len()).to_equal(8)
+
+        st.push(1)
+        expect(st.items.len()).to_equal(8)
+
+        st.clear()
+        expect(st.items.len()).to_equal(8)
+
+        st.push(2)
+        expect(st.items.len()).to_equal(8)
+
+    it "still rejects push past capacity on FixedStack (unaffected by this fix, checked for completeness)":
+        val st = FixedStack.new(2)
+        assert_true(st.push(1))
+        assert_true(st.push(2))
+        expect(st.push(3)).to_equal(false)
+        expect(st.depth()).to_equal(2)

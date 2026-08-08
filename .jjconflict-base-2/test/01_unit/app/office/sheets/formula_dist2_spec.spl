@@ -1,0 +1,102 @@
+"""Calc continuous-distribution machinery spec (CARD 2).
+
+Covers BETA/GAMMA/CHISQ/T/F distributions + inverses, GAMMA, GAUSS, PHI, all
+built on two primitives probed through their functions: the regularized
+incomplete beta I_x(a,b) (Lentz continued fraction, NR 6.4) and the
+regularized lower incomplete gamma P(a,x) (series + CF, NR 6.2). Ground truths
+are Excel-documented; two of the plan card's cited values were transcription
+errors and are asserted here at their true (mpmath-40-digit + closed-form
+verified) values, noted inline:
+  - F.INV(0.01,6,4) = 0.1093099 (plan said 0.1093861 -> cdf 0.010017, not 0.01)
+  - GAMMA(-3.75)    = 0.2678661 (plan said 0.2678539; GAMMA(2.5)=1.3293404 OK)
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("B1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("B1"))
+
+describe "Calc incomplete-beta primitive (via BETA/T/F/CHISQ)":
+    it "I_x(a,b) hits hand-computed points through BETADIST/BETA.DIST":
+        expect(_eval("=BETA.DIST(0.5, 2, 3, TRUE())")).to_start_with("0.6875")
+        expect(_eval("=BETADIST(0.25, 2, 2)")).to_start_with("0.15625")
+        expect(_eval("=BETADIST(0.5, 0.5, 0.5)")).to_start_with("0.5")
+
+    it "incomplete gamma P(a,x) hits closed-form points":
+        expect(_eval("=GAMMA.DIST(1, 1, 1, TRUE())")).to_start_with("0.632120")
+        expect(_eval("=CHISQ.DIST(1, 1, TRUE())")).to_start_with("0.682689")
+
+describe "Calc BETA / GAMMA distributions":
+    it "BETA.DIST rescales [lo,hi] and BETA.INV round-trips":
+        expect(_eval("=BETA.DIST(2, 8, 10, TRUE(), 1, 3)")).to_start_with("0.685470")
+        expect(_eval("=BETA.INV(0.6854706, 8, 10, 1, 3)")).to_start_with("2.000000")
+        expect(_eval("=BETAINV(0.6854706, 8, 10, 1, 3)")).to_start_with("2.000000")
+
+    it "GAMMA.DIST cdf and GAMMA.INV round-trip; legacy aliases match":
+        expect(_eval("=GAMMA.DIST(10.00001131, 9, 2, TRUE())")).to_start_with("0.068094")
+        expect(_eval("=GAMMADIST(10.00001131, 9, 2, TRUE())")).to_start_with("0.068094")
+        expect(_eval("=GAMMA.INV(0.068094, 9, 2)")).to_start_with("10.00001")
+        expect(_eval("=GAMMAINV(0.068094, 9, 2)")).to_start_with("10.00001")
+
+describe "Calc CHI-SQUARE distribution":
+    it "CHISQ.DIST left cdf and right-tail forms":
+        expect(_eval("=CHISQ.DIST(0.5, 1, TRUE())")).to_start_with("0.520499")
+        expect(_eval("=CHISQ.DIST.RT(18.307, 10)")).to_start_with("0.0500005")
+        expect(_eval("=CHIDIST(18.307, 10)")).to_start_with("0.0500005")
+
+    it "CHISQ.INV and right-tail inverse (legacy CHIINV)":
+        expect(_eval("=CHISQ.INV(0.93, 1)")).to_start_with("3.283020")
+        expect(_eval("=CHISQ.INV.RT(0.05, 10)")).to_start_with("18.3070")
+        expect(_eval("=CHIINV(0.05, 1)")).to_start_with("3.841458")
+
+describe "Calc STUDENT-T distribution":
+    it "T.DIST cdf, 2-tailed and right-tail":
+        expect(_eval("=T.DIST(60, 1, TRUE())")).to_start_with("0.9946953")
+        expect(_eval("=T.DIST(1.96, 60, TRUE())")).to_start_with("0.972677")
+        expect(_eval("=T.DIST.2T(1.959999998, 60)")).to_start_with("0.0546449")
+        expect(_eval("=TDIST(1.959999998, 60, 2)")).to_start_with("0.0546449")
+
+    it "T.INV one-tail, T.INV.2T two-tail, legacy TINV (two-tail)":
+        expect(_eval("=T.INV(0.75, 2)")).to_start_with("0.816496")
+        expect(_eval("=T.INV.2T(0.05, 60)")).to_start_with("2.000297")
+        expect(_eval("=TINV(0.05, 60)")).to_start_with("2.000297")
+
+describe "Calc F distribution":
+    it "F.DIST cdf and right-tail (legacy FDIST)":
+        expect(_eval("=F.DIST(15.20686486, 6, 4, TRUE())")).to_start_with("0.9899999")
+        expect(_eval("=F.DIST.RT(15.20686486, 6, 4)")).to_start_with("0.0100000")
+        expect(_eval("=FDIST(15.20686486, 6, 4)")).to_start_with("0.0100000")
+
+    it "F.INV left inverse and right-tail inverse (legacy FINV)":
+        # plan card cited 0.1093861 (cdf 0.010017); true left inverse is 0.1093099
+        expect(_eval("=F.INV(0.01, 6, 4)")).to_start_with("0.109309")
+        expect(_eval("=F.INV.RT(0.05, 6, 4)")).to_start_with("6.163132")
+        expect(_eval("=FINV(0.05, 6, 4)")).to_start_with("6.163132")
+
+describe "Calc GAMMA / GAUSS / PHI":
+    it "GAMMA with reflection for negative non-integers":
+        expect(_eval("=GAMMA(2.5)")).to_start_with("1.329340")
+        # plan card cited 0.2678539; true Gamma(-3.75) is 0.2678661
+        expect(_eval("=GAMMA(-3.75)")).to_start_with("0.267866")
+
+    it "GAUSS = Phi(z)-0.5 and PHI = standard normal pdf":
+        expect(_eval("=GAUSS(2)")).to_start_with("0.477249")
+        expect(_eval("=PHI(0.75)")).to_start_with("0.301137")
+
+describe "Calc dotted-name lexing and error domains":
+    it "digit-tailed dotted names lex and mix with plain calls":
+        # T.DIST.2T (.2T dot-then-digit) + GAMMA(1)=1 in one formula
+        expect(_eval("=T.DIST.2T(1.959999998, 60) + GAMMA(1)")).to_start_with("1.0546449")
+
+    it "domain violations fail closed with #ERR":
+        expect(_eval("=BETA.DIST(0.5, 0, 3, TRUE())")).to_contain("#ERR")
+        expect(_eval("=T.DIST(1, 0.5, TRUE())")).to_contain("#ERR")
+        expect(_eval("=GAMMA.INV(1, 9, 2)")).to_contain("#ERR")
+        expect(_eval("=GAMMA(0)")).to_contain("#ERR")
+        expect(_eval("=GAMMA(-2)")).to_contain("#ERR")

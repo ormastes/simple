@@ -1,0 +1,107 @@
+"""SimpleOS WM host seam — the routing edge that lets a real backend through.
+
+SCOPE, AND WHAT THIS FILE CANNOT PROVE
+  The SimpleOS contract itself — that `wm_host_2d_frame` runs over real
+  hardware and that pixels reach a real framebuffer — is NOT provable from a
+  Linux host process, and this file does not pretend otherwise. It is proved by
+  booting SimpleOS on real firmware:
+
+      sh scripts/check/check-simpleos-wm-host-seam-evidence.shs
+
+  which boots OVMF pflash -> GRUB EFI -> multiboot (no QEMU `-kernel`, no
+  `isa-debug-exit`), runs the portable frame step over
+  `WmHost2dSimpleOs`, reads the pixels back out of the hardware framebuffer
+  in-guest, captures the QEMU display over QMP and checks it is the same exact
+  colour, and injects real keystrokes that arrive through `event_poll` as PS/2
+  scancodes. That harness is the receipt; this file is not a substitute for it.
+
+WHAT THIS FILE DOES PROVE
+  The one part of the SimpleOS route that is pure logic: `wm_host_2d_for_backed`
+  must not let an unbacked object through just because a caller handed it in.
+  That is the honesty rule at the routing edge, and it is exactly the rule an
+  earlier draft of the seam lost when it shipped `WmHost2dSimpleOs` as in-memory
+  bookkeeping. If this check ever goes green on a `"none"` backing, the seam has
+  regressed to that shape.
+
+  Every assertion below fixes an exact value. None of them can pass on a
+  degenerate one: a zero count, an empty string and a refusal are all distinct
+  from what is asserted.
+"""
+
+use std.spec.{describe, it, expect, expect_not, to_equal, to_contain}
+use nogc_async_mut.wm.host.{
+    wm_host_2d_frame,
+    wm_host_2d_reference,
+    wm_host_2d_for,
+    wm_host_2d_for_backed
+}
+use std.common.window_protocol.window_protocol.{WmInputEvent}
+use std.common.window_protocol.geometry.{WindowId, Point, KeyCode, Modifiers, Size}
+
+fn _screen() -> Size:
+    Size.wh(1024, 768)
+
+fn _request() -> Size:
+    Size.wh(800, 600)
+
+fn _events() -> [WmInputEvent]:
+    [
+        WmInputEvent.key_down(WindowId(value: 7u64), KeyCode(code: 65u32, name: "a"), Modifiers.none()),
+        WmInputEvent.mouse_move(WindowId(value: 7u64), Point.xy(12, 34))
+    ]
+
+describe "SimpleOS WM host seam — routing edge":
+    """Being handed an object is not evidence; declared backing is."""
+
+    it "refuses a backend that reports no real backing, even for simpleos":
+        val r = wm_host_2d_frame(
+            wm_host_2d_for_backed("simpleos", wm_host_2d_reference(_screen(), _events()), "none"),
+            _request()
+        )
+        expect_not(r.surface_ok)
+        expect_not(r.present_ok)
+        expect_not(r.released_ok)
+        expect(r.events_drained).to_equal(0)
+        expect(r.surface_state).to_contain("unavailable:simpleos")
+        expect(r.surface_state).to_contain("reports no real backing")
+
+    it "refuses platforms other than simpleos even when handed a live backend":
+        for platform in ["macos", "windows", "linux", "freebsd"]:
+            val r = wm_host_2d_frame(
+                wm_host_2d_for_backed(platform, wm_host_2d_reference(_screen(), _events()), "mmio-scanout"),
+                _request()
+            )
+            expect_not(r.surface_ok)
+            expect_not(r.present_ok)
+            expect(r.events_drained).to_equal(0)
+            expect(r.surface_state).to_contain("unavailable:" + platform)
+
+    it "passes a declared-backed simpleos backend through unchanged":
+        # The backend handed in here is the in-memory REFERENCE, not a platform
+        # backend — the point being checked is only that routing forwards it
+        # verbatim rather than substituting or wrapping it. Real SimpleOS
+        # backing is proved by the QEMU harness named in this file's docstring.
+        val routed = wm_host_2d_frame(
+            wm_host_2d_for_backed("simpleos", wm_host_2d_reference(_screen(), _events()), "mmio-scanout"),
+            _request()
+        )
+        val direct = wm_host_2d_frame(wm_host_2d_reference(_screen(), _events()), _request())
+        expect(routed.steps).to_equal(direct.steps)
+        expect(routed.steps).to_equal("acquire(acquired) present(presented) events(2) release(released)")
+        expect(routed.events_drained).to_equal(2)
+        expect(routed.surface_width).to_equal(800u32)
+        expect(routed.surface_height).to_equal(600u32)
+        expect(routed.present_ok).to_equal(true)
+        expect(routed.released_ok).to_equal(true)
+
+    it "keeps the resource-free routing refusing, and says why":
+        # `wm_host_2d_for` has no framebuffer in it, so it cannot hand out a
+        # surface. It must keep refusing simpleos and must name the call that
+        # can succeed, or the seam has started claiming a capability it has
+        # not been given.
+        val r = wm_host_2d_frame(wm_host_2d_for("simpleos"), _request())
+        expect_not(r.surface_ok)
+        expect_not(r.present_ok)
+        expect(r.events_drained).to_equal(0)
+        expect(r.surface_state).to_contain("unavailable:simpleos")
+        expect(r.surface_state).to_contain("wm_host_2d_for_backed")

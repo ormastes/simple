@@ -1,0 +1,259 @@
+"""
+QEMU System Test — SimpleOS in-guest toolchain smoke matrix (lane C5).
+
+**Feature IDs:** #SIMPLEOS-SELFHOST-C5
+**Category:** OS system test
+
+As a SimpleOS developer, I want to compile, link and RUN real C and C++
+programs entirely inside a SimpleOS guest booted from real firmware, so that
+"hello world on the SimpleOS terminal" is a reproducible transcript rather
+than a claim.
+
+Every row of the matrix below drives the same real-firmware board proxy the
+proven `clang -cc1` ladder uses: OVMF pflash boot (never QEMU `-kernel` pass
+semantics — `.claude/rules/board-runnable.md`), sshd in ring 3, and a direct
+absolute-path FS-exec of the tool. The link step invokes `lld` DIRECTLY, never
+through the clang driver, because the ring-3 FS-exec path has no `fork`.
+
+Guest filesystem constraint, load-bearing for every row: SimpleOS FAT32
+`fat32_write_file` is ROOT-DIRECTORY-ONLY with 8.3 names (no mkdir, no LFN
+create). Reads traverse subdirectories, writes do not. So every staged input
+and every produced artifact is an uppercase 8.3 name in the ROOT: `/LLD.ELF`,
+`/CLANG.ELF`, `/HELLO.C`, `/HELLO.O`, `/HELLO.ELF`, `/CRT0.O`, `/LIBC.A`,
+`/SIMPLEOS.LD`, `/LIBCXX.A`.
+
+Fail-closed contract, mirroring `sys_qemu_x86_64_fs_exec_spec.spl`: a row is
+classified as `pass`, `missing-media:<path>`, or `boot-fail:<marker>`, and
+anything other than `pass` is a RED failure. `skip()` is NEVER used — while
+the cross LLVM toolchain is still building, these rows stay VISIBLE and RED
+with a printed `blocked` diagnosis naming the exact missing artifact, so the
+matrix can never be mistaken for green.
+
+Driver: `scripts/os/ssh_lld_link_uefi.shs` (rungs 3-6) and the C5 extensions
+noted per row. Plan: `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
+lanes C4/C5; ladder: `doc/03_plan/os/in_guest_lld_link_ladder.md`.
+"""
+use std.spec.*
+use os.qemu_systest_contract.{
+    classify_serial,
+    SYSTEST_PASS,
+    SYSTEST_PREFIX_MISSING_MEDIA
+}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+# --- Descriptors (qemu_systest_contract.spl accessor style) ----------------
+
+fn lld_static_path() -> text:
+    "build/os/clang_static/bin/lld_static"
+
+fn clang_static_path() -> text:
+    "build/os/clang_static/bin/clang_static"
+
+fn crt0_path() -> text:
+    "build/os/sysroot/lib/crt0.o"
+
+fn libc_path() -> text:
+    "build/os/sysroot/lib/libsimpleos_c.a"
+
+fn libcxx_path() -> text:
+    "build/os/sysroot/lib/libc++.a"
+
+fn linker_script_path() -> text:
+    "build/os/sysroot/share/simpleos/simpleos.ld"
+
+fn link_gate_script() -> text:
+    "scripts/os/ssh_lld_link_uefi.shs"
+
+fn image_stager() -> text:
+    "scripts/os/fsexec_mkimg_lld.spl"
+
+fn serial_log_path() -> text:
+    "build/os/ssh_lld_link_uefi.serial.log"
+
+fn host_ref_o0() -> text:
+    "build/os/elfexec_lld/host/TU1-O0.O"
+
+fn host_ref_o2() -> text:
+    "build/os/elfexec_lld/host/TU1-O2.O"
+
+fn guest_out_o0() -> text:
+    "build/os/elfexec_lld/guest/TU1-O0.O"
+
+fn guest_out_o2() -> text:
+    "build/os/elfexec_lld/guest/TU1-O2.O"
+
+# --- Classifier -------------------------------------------------------------
+
+val SYSTEST_BLOCKED_PREFIX: text = "blocked:"
+
+fn _first_missing(paths: [text]) -> text:
+    var i: i64 = 0
+    while i < paths.len():
+        if not rt_file_exists(paths[i]):
+            return paths[i]
+        i = i + 1
+    ""
+
+fn classify_row(row: text, media: [text], markers: [text]) -> text:
+    """pass | missing-media:<path> | boot-fail:<marker>.
+
+    Media presence is checked BEFORE anything is read, so a row whose toolchain
+    has not been built yet reports the precise artifact it waits on instead of a
+    misleading boot failure. Once the media exist the verdict comes from the
+    RETAINED SERIAL TRANSCRIPT of the gate script, marker by marker, via the
+    shared `classify_serial` — presence of a log file is never itself a pass,
+    or a stale transcript from an unrelated run would turn the whole matrix
+    green without verifying anything.
+    """
+    val missing = _first_missing(media)
+    if missing.length > 0u64:
+        return SYSTEST_PREFIX_MISSING_MEDIA + missing
+    if not rt_file_exists(serial_log_path()):
+        return "boot-fail:" + row + ":no-serial-transcript"
+    val serial = rt_file_read_text(serial_log_path()) ?? ""
+    # `[wf-diag]` is the FAT32 write path's own failure diagnostic. Without
+    # this check a link whose output could not be persisted (no free cluster,
+    # root-dir slot full, NVMe write error) is indistinguishable from one that
+    # never ran at all.
+    if serial.contains("[wf-diag]"):
+        return "boot-fail:" + row + ":fat32-write-failed"
+    classify_serial(serial, markers)
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _diagnose(row: text, classification: text):
+    if classification != SYSTEST_PASS:
+        print "[sys_qemu_lld_smoke] " + SYSTEST_BLOCKED_PREFIX + row
+        print "[sys_qemu_lld_smoke] CLASSIFIED: " + classification
+
+# ---------------------------------------------------------------------------
+# @manual_section: In-guest toolchain smoke matrix
+# ---------------------------------------------------------------------------
+
+describe "SimpleOS in-guest toolchain smoke matrix (C5)":
+    """Four rows that each compile, link and run real code inside a SimpleOS
+    guest booted from real firmware. Rows stay visible and RED, classified as
+    `missing-media:<artifact>`, until the cross LLVM toolchain is built."""
+
+    # @req REQ-SIMPLEOS-SELFHOST-C5-000
+    it "the in-guest link ladder has a stager and a gate script committed":
+        step("Locate the multi-payload FAT32 stager for the guest image")
+        assert_true(rt_file_exists(image_stager()))
+        step("Locate the rungs 3-6 in-guest link gate script")
+        assert_true(rt_file_exists(link_gate_script()))
+        step("Confirm the SimpleOS sysroot supplies crt0, libc and the linker script")
+        assert_true(rt_file_exists(crt0_path()))
+        assert_true(rt_file_exists(libc_path()))
+        assert_true(rt_file_exists(linker_script_path()))
+
+    # Row (a) — the G2 exit criterion.
+    # @req REQ-SIMPLEOS-SELFHOST-C5-001
+    it "compiles, links and runs hello.c entirely inside the guest":
+        step("Stage /HELLO.C, /CRT0.O, /LIBC.A, /SIMPLEOS.LD, /CLANG.ELF and /LLD.ELF as root 8.3 names")
+        step("Boot SimpleOS under OVMF pflash and reach the ring-3 sshd accept loop")
+        step("Run /CLANG.ELF -cc1 -emit-obj /HELLO.C -o /HELLO.O over SSH as a direct FS-exec")
+        step("Run /LLD.ELF -flavor gnu -T /SIMPLEOS.LD -o /HELLO.ELF /CRT0.O /HELLO.O /LIBC.A -- lld directly, never via the clang driver, because ring-3 FS-exec has no fork")
+        step("Run /HELLO.ELF from the guest filesystem and read its stdout and exit status")
+        val classification = classify_row(
+            "hello-c-compile-link-run",
+            [clang_static_path(), lld_static_path(), crt0_path(), libc_path(), linker_script_path()],
+            [
+                "accept loop start",
+                "persist HELLO.O -> OK",
+                "LLD ",
+                "-o /HELLO.ELF",
+                "persist HELLO.ELF -> OK",
+                "heap:stream-open-ok path=/HELLO.ELF",
+                "returned rc="
+            ]
+        )
+        _diagnose("hello-c-compile-link-run", classification)
+        expect(classification).to_equal(SYSTEST_PASS)
+
+    # Row (b) — proves lld resolves cross-TU relocations in-guest.
+    # @req REQ-SIMPLEOS-SELFHOST-C5-002
+    it "links a two-translation-unit C program in-guest":
+        step("Stage /HELLO.C and /HELLO2.C, where HELLO.C calls a function defined in HELLO2.C")
+        step("Compile each translation unit separately in-guest to /HELLO.O and /HELLO2.O")
+        step("Link both objects in one /LLD.ELF -flavor gnu invocation against /CRT0.O and /LIBC.A")
+        step("Run the linked /HELLO.ELF and confirm the cross-TU call produced the expected output")
+        val classification = classify_row(
+            "two-tu-c-link",
+            [clang_static_path(), lld_static_path(), crt0_path(), libc_path(), linker_script_path()],
+            [
+                "accept loop start",
+                "persist HELLO.O -> OK",
+                "persist HELLO2.O -> OK",
+                "/HELLO.O /HELLO2.O",
+                "persist HELLO.ELF -> OK",
+                "heap:stream-open-ok path=/HELLO.ELF",
+                "returned rc="
+            ]
+        )
+        _diagnose("two-tu-c-link", classification)
+        expect(classification).to_equal(SYSTEST_PASS)
+
+    # Row (c) — libc++.a; note LIBC++.A is NOT a legal 8.3 name ('+'), so the
+    # archive is staged as /LIBCXX.A.
+    # @req REQ-SIMPLEOS-SELFHOST-C5-003
+    it "links a C++ hello against libc++.a in-guest":
+        step("Stage the C++ standard library archive as /LIBCXX.A -- '+' is not a legal 8.3 character, so libc++.a cannot keep its host name")
+        step("Compile the C++ source in-guest with /CLANG.ELF -cc1 -x c++ to /HELLO.O")
+        step("Link /HELLO.O against /LIBCXX.A and /LIBC.A with /LLD.ELF -flavor gnu")
+        step("Run the linked /HELLO.ELF and confirm the C++ runtime initialised and printed")
+        val classification = classify_row(
+            "cxx-hello-libcxx",
+            [clang_static_path(), lld_static_path(), libcxx_path(), crt0_path(), linker_script_path()],
+            [
+                "accept loop start",
+                "-x c++",
+                "/LIBCXX.A",
+                "persist HELLO.ELF -> OK",
+                "heap:stream-open-ok path=/HELLO.ELF",
+                "returned rc="
+            ]
+        )
+        _diagnose("cxx-hello-libcxx", classification)
+        expect(classification).to_equal(SYSTEST_PASS)
+
+    # Row (d) — the oracle is a BYTE-COMPARE against the host cross build of
+    # the same preprocessed .i, not merely "both binaries run".
+    # @req REQ-SIMPLEOS-SELFHOST-C5-004
+    it "produces host-identical objects at -O0 and -O2 from the same preprocessed TU":
+        step("Preprocess the source on the host with the cross clang into a single self-contained /TU1.I")
+        step("Compile /TU1.I in-guest at -O0 and retrieve the object with the proven getfile path")
+        step("Compile /TU1.I in-guest at -O2 and retrieve that object as well")
+        step("Byte-compare each retrieved object against the host cross build of the SAME .i at the SAME optimisation level")
+        step("Confirm -O0 and -O2 differ from each other, so the flag was actually honoured in-guest")
+        # This row's oracle is a REAL host-side byte-compare of the retrieved
+        # objects, not a serial marker: a marker could only prove the command
+        # ran, never that the bytes agree.
+        val classification = classify_row(
+            "o0-vs-o2-byte-compare",
+            [
+                clang_static_path(),
+                host_ref_o0(), host_ref_o2(),
+                guest_out_o0(), guest_out_o2()
+            ],
+            ["accept loop start", "persist TU1.O -> OK"]
+        )
+        _diagnose("o0-vs-o2-byte-compare", classification)
+        expect(classification).to_equal(SYSTEST_PASS)
+        val g0 = rt_file_read_bytes(guest_out_o0()) ?? []
+        val g2 = rt_file_read_bytes(guest_out_o2()) ?? []
+        val h0 = rt_file_read_bytes(host_ref_o0()) ?? []
+        val h2 = rt_file_read_bytes(host_ref_o2()) ?? []
+        assert_true(_bytes_equal(g0, h0))
+        assert_true(_bytes_equal(g2, h2))
+        assert_false(_bytes_equal(g0, g2))

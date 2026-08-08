@@ -1,0 +1,94 @@
+# Test-level detection: numbered tree AND legacy bare mirror
+#
+# Regression guard for
+# doc/08_tracking/bug/test_level_filters_never_match_numbered_trees_2026-07-27.md
+# — `detect_test_level` / `matches_level` used to test `path.contains("/unit/")`,
+# which never matched the MAINTAINED numbered tree (`test/01_unit/`), so every
+# `--unit` / `--integration` / `--system` run silently selected only the stale
+# legacy mirror.
+
+use std.test_runner.test_level_detect.{
+    strip_order_prefix, path_has_level_segment,
+    test_level_of_path, test_level_matches,
+    TEST_LEVEL_NONE, TEST_LEVEL_UNIT, TEST_LEVEL_INTEGRATION, TEST_LEVEL_SYSTEM
+}
+
+describe "strip_order_prefix":
+    it "strips a two-digit ordering prefix":
+        expect(strip_order_prefix("01_unit")).to_equal("unit")
+        expect(strip_order_prefix("02_integration")).to_equal("integration")
+        expect(strip_order_prefix("03_system")).to_equal("system")
+
+    it "leaves segments without an NN_ prefix untouched":
+        expect(strip_order_prefix("unit")).to_equal("unit")
+        expect(strip_order_prefix("1_unit")).to_equal("1_unit")
+        expect(strip_order_prefix("_unit")).to_equal("_unit")
+        expect(strip_order_prefix("ab_unit")).to_equal("ab_unit")
+
+describe "test_level_of_path — maintained numbered tree":
+    it "classifies 01_unit as unit":
+        expect(test_level_of_path("test/01_unit/test_runner/mode_filter_spec.spl")).to_equal(TEST_LEVEL_UNIT)
+
+    it "classifies 02_integration as integration":
+        expect(test_level_of_path("test/02_integration/compiler/pipeline_spec.spl")).to_equal(TEST_LEVEL_INTEGRATION)
+
+    it "classifies 03_system as system":
+        expect(test_level_of_path("test/03_system/os/boot_spec.spl")).to_equal(TEST_LEVEL_SYSTEM)
+
+describe "test_level_of_path — legacy bare mirror":
+    it "classifies unit as unit":
+        expect(test_level_of_path("test/unit/test_runner/mode_filter_spec.spl")).to_equal(TEST_LEVEL_UNIT)
+
+    it "classifies integration as integration":
+        expect(test_level_of_path("test/integration/compiler/pipeline_spec.spl")).to_equal(TEST_LEVEL_INTEGRATION)
+
+    it "classifies system and feature as system":
+        expect(test_level_of_path("test/system/os/boot_spec.spl")).to_equal(TEST_LEVEL_SYSTEM)
+        expect(test_level_of_path("test/feature/wm/glass_spec.spl")).to_equal(TEST_LEVEL_SYSTEM)
+
+    it "classifies shared as unit":
+        expect(test_level_of_path("test/shared/helpers_spec.spl")).to_equal(TEST_LEVEL_UNIT)
+
+describe "test_level_of_path — negative cases":
+    it "does not treat a substring inside a longer word as a level segment":
+        # "opportunity" and "community" both CONTAIN "unit" — they must not classify.
+        expect(test_level_of_path("test/09_baselines/opportunity/report_spec.spl")).to_equal(TEST_LEVEL_NONE)
+        expect(test_level_of_path("test/app/community/feed_spec.spl")).to_equal(TEST_LEVEL_NONE)
+        # "ecosystem" contains "system"; "disintegration" contains "integration".
+        expect(test_level_of_path("test/app/ecosystem/graph_spec.spl")).to_equal(TEST_LEVEL_NONE)
+        expect(test_level_of_path("test/app/disintegration/decay_spec.spl")).to_equal(TEST_LEVEL_NONE)
+
+    it "leaves unnumbered non-level trees unclassified in both forms":
+        expect(test_level_of_path("test/04_smoke/cli_spec.spl")).to_equal(TEST_LEVEL_NONE)
+        expect(test_level_of_path("test/smoke/cli_spec.spl")).to_equal(TEST_LEVEL_NONE)
+        expect(test_level_of_path("test/05_perf/test_runner_benchmark_spec.spl")).to_equal(TEST_LEVEL_NONE)
+
+    it "does not classify a file whose basename merely mentions a level":
+        expect(test_level_of_path("test/fixtures/unit_helper_spec.spl")).to_equal(TEST_LEVEL_NONE)
+
+describe "test_level_of_path — windows separators":
+    it "normalizes backslashes before segmenting":
+        expect(test_level_of_path("test\\01_unit\\app\\cli_spec.spl")).to_equal(TEST_LEVEL_UNIT)
+
+describe "path_has_level_segment":
+    it "matches whole segments in both hierarchies":
+        expect(path_has_level_segment("test/01_unit/a_spec.spl", "unit")).to_equal(true)
+        expect(path_has_level_segment("test/unit/a_spec.spl", "unit")).to_equal(true)
+
+    it "rejects a substring inside a longer segment":
+        expect(path_has_level_segment("test/opportunity/a_spec.spl", "unit")).to_equal(false)
+
+describe "test_level_matches — the filter the CLI applies":
+    it "selects numbered-tree specs for --unit (the regression)":
+        expect(test_level_matches("test/01_unit/app/cli_spec.spl", TEST_LEVEL_UNIT)).to_equal(true)
+        expect(test_level_matches("test/01_unit/app/cli_spec.spl", TEST_LEVEL_SYSTEM)).to_equal(false)
+
+    it "still selects mirror specs for --unit":
+        expect(test_level_matches("test/unit/app/cli_spec.spl", TEST_LEVEL_UNIT)).to_equal(true)
+
+    it "selects numbered-tree specs for --integration and --system":
+        expect(test_level_matches("test/02_integration/db/tx_spec.spl", TEST_LEVEL_INTEGRATION)).to_equal(true)
+        expect(test_level_matches("test/03_system/os/boot_spec.spl", TEST_LEVEL_SYSTEM)).to_equal(true)
+
+    it "treats level code 0 as all-levels":
+        expect(test_level_matches("test/04_smoke/cli_spec.spl", TEST_LEVEL_NONE)).to_equal(true)

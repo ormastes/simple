@@ -1,0 +1,927 @@
+# SQLite-over-SimpleOS VFS — the IMPLEMENTATION.
+#
+# `sqlite_vfs_contract.spl` in this directory is the typed target: 17 declarative
+# `VfsMethodReport`s and no live IO. This module is the other half — a real
+# `sqlite3_vfs` / `sqlite3_io_methods` implementation in pure Simple that moves
+# real bytes through the OS file layer, takes a real advisory lock, and reaches
+# real durable media.
+#
+# The SQLite amalgamation build is still blocked on the C toolchain. That blocks
+# *binding* this VFS to sqlite3.c; it does not block the VFS, which is the part
+# that decides whether SQLite is CORRECT on SimpleOS. This module is that part.
+#
+# ---------------------------------------------------------------------------
+# DURABILITY — why this file exists
+# ---------------------------------------------------------------------------
+# The house durability pattern is `atomic_write` in
+# `src/lib/nogc_sync_mut/database/atomic.spl`, contracted by
+# `src/lib/nogc_sync_mut/database/server/durability.spl`:
+#
+#     FileLock  ->  write <path>.tmp  ->  rt_file_sync(tmp)  ->  rename(tmp,path)
+#
+# with the rename as the commit point.
+#
+# `xTruncate` here uses exactly that sequence, so a crash mid-truncate leaves the
+# OLD length, never a torn one.
+#
+# `xWrite` deliberately does NOT. This is a decision, not drift. SQLite's
+# atomicity mechanism *is* the rollback journal: the pre-image of every page it
+# is about to modify is written to `<db>-journal` and made durable FIRST, and
+# only then is the database page overwritten IN PLACE. If `xWrite` swapped the
+# whole database file via rename, the journal's pre-images would no longer
+# correspond to the file they are supposed to recover, and the recovery protocol
+# would be destroyed. So `xWrite` is an in-place read-modify-write and durability
+# arrives via `xSync` (`rt_file_sync`) at the points SQLite chooses.
+#
+# Because that ordering is the whole ballgame, this VFS ENFORCES it rather than
+# trusting the caller. `x_write` to a MAIN_DB handle is REFUSED with
+# SQLITE_IOERR while the associated `<db>-journal` has bytes written since its
+# last `x_sync`. A correct caller (write journal -> sync journal -> write page)
+# never notices. An incorrect one fails closed instead of silently building an
+# unrecoverable database. See `enforce_journal_sync_before_page_write`.
+#
+# ---------------------------------------------------------------------------
+# LOCKING — the existing primitive, not a second engine
+# ---------------------------------------------------------------------------
+# `FileLock` (O_EXCL lockfile + pid liveness + staleness) is the OS's advisory
+# lock and it is EXCLUSIVE-ONLY: there is no LOCK_SH equivalent anywhere in the
+# tree. Rather than write a second locking engine, SHARED is OVER-APPROXIMATED
+# onto the same exclusive lock. That is safe (strictly more restrictive — it can
+# never admit a conflicting pair) and degraded (two readers serialize; the loser
+# gets SQLITE_BUSY, which SQLite is required to handle). The methods report
+# "partial" for exactly this reason and are not laundered into "supported".
+#
+# ---------------------------------------------------------------------------
+# WAL — still gated, on purpose
+# ---------------------------------------------------------------------------
+# xShmMap / xShmLock / xShmBarrier / xShmUnmap still fail closed with the real
+# SQLITE_IOERR_SHM* codes. Writable shared mmap does not exist (separate lane).
+# Reporting these supported would let WAL corrupt a database. Not done.
+#
+# ---------------------------------------------------------------------------
+# IMPLEMENTATION SHAPE
+# ---------------------------------------------------------------------------
+# The handle table is PARALLEL ARRAYS indexed by handle id, and `SqliteVfs` is
+# the only mutable object in the module. That is deliberate: mutating through
+# two or more field hops loses the write on the interpreter, so there is no
+# nested-struct mutation anywhere in this file.
+
+use std.database.atomic.{ FileLock }
+
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_file_write_bytes(path: text, bytes: [u8]) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_sync(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_random_i64() -> i64
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_micros() -> i64
+
+# ---------------------------------------------------------------------------
+# Result codes — the real sqlite3.h values, primary and extended, so they stay
+# checkable against the amalgamation when the C toolchain unblocks.
+# ---------------------------------------------------------------------------
+pub fn sqlite_ok() -> i64: 0
+pub fn sqlite_error() -> i64: 1
+pub fn sqlite_busy() -> i64: 5
+pub fn sqlite_ioerr() -> i64: 10
+pub fn sqlite_notfound() -> i64: 12
+pub fn sqlite_cantopen() -> i64: 14
+
+# SQLITE_IOERR | (n<<8)
+pub fn sqlite_ioerr_read() -> i64: 266             # (1<<8)|10
+pub fn sqlite_ioerr_short_read() -> i64: 522       # (2<<8)|10
+pub fn sqlite_ioerr_write() -> i64: 778            # (3<<8)|10
+pub fn sqlite_ioerr_fsync() -> i64: 1034           # (4<<8)|10
+pub fn sqlite_ioerr_dir_fsync() -> i64: 1290       # (5<<8)|10
+pub fn sqlite_ioerr_truncate() -> i64: 1546        # (6<<8)|10
+pub fn sqlite_ioerr_fstat() -> i64: 1802           # (7<<8)|10
+pub fn sqlite_ioerr_unlock() -> i64: 2058          # (8<<8)|10
+pub fn sqlite_ioerr_delete() -> i64: 2570          # (10<<8)|10
+pub fn sqlite_ioerr_checkreservedlock() -> i64: 3594  # (14<<8)|10
+pub fn sqlite_ioerr_lock() -> i64: 3850            # (15<<8)|10
+pub fn sqlite_ioerr_close() -> i64: 4106           # (16<<8)|10
+pub fn sqlite_ioerr_shmopen() -> i64: 4618         # (18<<8)|10
+pub fn sqlite_ioerr_shmsize() -> i64: 4874         # (19<<8)|10
+pub fn sqlite_ioerr_shmlock() -> i64: 5130         # (20<<8)|10
+pub fn sqlite_ioerr_shmmap() -> i64: 5386          # (21<<8)|10
+
+# ---------------------------------------------------------------------------
+# Open flags (sqlite3.h SQLITE_OPEN_*).
+# ---------------------------------------------------------------------------
+pub fn open_readonly() -> i64: 1
+pub fn open_readwrite() -> i64: 2
+pub fn open_create() -> i64: 4
+pub fn open_deleteonclose() -> i64: 8
+pub fn open_exclusive() -> i64: 16
+pub fn open_main_db() -> i64: 256
+pub fn open_temp_db() -> i64: 512
+pub fn open_main_journal() -> i64: 2048
+pub fn open_temp_journal() -> i64: 4096
+pub fn open_subjournal() -> i64: 8192
+pub fn open_wal() -> i64: 524288
+
+# Sync flags.
+pub fn sync_normal() -> i64: 2
+pub fn sync_full() -> i64: 3
+pub fn sync_dataonly() -> i64: 16
+
+# Access flags (xAccess).
+pub fn access_exists() -> i64: 0
+pub fn access_readwrite() -> i64: 1
+pub fn access_read() -> i64: 2
+
+# File-control opcodes actually handled.
+pub fn fcntl_size_hint() -> i64: 5
+pub fn fcntl_has_moved() -> i64: 20
+
+pub fn has_flag(flags: i64, bit: i64) -> bool:
+    (flags & bit) != 0
+
+# ---------------------------------------------------------------------------
+# Lock ladder, as i64 so the handle table stays a flat parallel array.
+# Matches sqlite3.h SQLITE_LOCK_*.
+# ---------------------------------------------------------------------------
+pub fn lock_none() -> i64: 0
+pub fn lock_shared() -> i64: 1
+pub fn lock_reserved() -> i64: 2
+pub fn lock_pending() -> i64: 3
+pub fn lock_exclusive() -> i64: 4
+
+pub fn lock_level_name_of(level: i64) -> text:
+    if level == 0:
+        return "NONE"
+    if level == 1:
+        return "SHARED"
+    if level == 2:
+        return "RESERVED"
+    if level == 3:
+        return "PENDING"
+    if level == 4:
+        return "EXCLUSIVE"
+    "UNKNOWN"
+
+# ---------------------------------------------------------------------------
+# Ordered event log. This is what makes the durability ordering OBSERVABLE
+# instead of merely asserted: every method that touches media appends here.
+# ---------------------------------------------------------------------------
+pub struct VfsEvent:
+    seq: i64
+    op: text
+    path: text
+    offset: i64
+    length: i64
+    code: i64
+
+# ---------------------------------------------------------------------------
+# Named result structs, NOT anonymous tuples.
+#
+# This is a target-correctness requirement, not a style choice: lint FSK002 /
+# entry-closure defect C4 says an anonymous tuple return has its positional
+# members read SWAPPED under freestanding codegen — and freestanding SimpleOS
+# is exactly where this VFS is meant to run. A `(code, data)` return would come
+# back as `(data, code)` on the real target, which for a VFS means a result code
+# read out of a byte buffer. Named structs are immune.
+# See doc/08_tracking/bug/simpleos_native_build_entry_closure_codegen_defects_2026-07-17.md
+# ---------------------------------------------------------------------------
+pub struct VfsReadResult:
+    code: i64
+    data: [u8]
+
+pub struct VfsSizeResult:
+    code: i64
+    size: i64
+
+pub struct VfsBoolResult:
+    code: i64
+    value: bool
+
+pub struct VfsPathResult:
+    code: i64
+    path: text
+
+pub fn journal_suffix() -> text: "-journal"
+
+pub fn journal_path_for(db_path: text) -> text:
+    db_path + journal_suffix()
+
+pub fn path_is_journal(p: text) -> bool:
+    p.ends_with(journal_suffix())
+
+pub fn parent_dir_of(p: text) -> text:
+    var cut = -1
+    var i = 0
+    while i < p.len():
+        if p[i:i + 1] == "/":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return "."
+    if cut == 0:
+        return "/"
+    p[0:cut]
+
+# xFullPathname normalization: absolutise against cwd, then collapse "//",
+# "." and ".." segments and strip any trailing slash.
+pub fn normalize_full_path(cwd: text, p: text) -> text:
+    val full = if p.starts_with("/"):
+        p
+    else:
+        cwd + "/" + p
+    var stack: [text] = []
+    for seg in full.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if stack.len() > 0:
+                stack.pop()
+            continue
+        stack.push(seg)
+    if stack.len() == 0:
+        return "/"
+    "/" + stack.join("/")
+
+# ---------------------------------------------------------------------------
+# The VFS.
+# ---------------------------------------------------------------------------
+pub class SqliteVfs:
+    vfs_name: text
+    cwd: text
+    # Ordering enforcement (see module header). Default ON. Turning it off is
+    # the deliberate-red calibration lever used by the spec.
+    enforce_journal_sync_before_page_write: bool
+    # xLock is non-blocking by contract: a conflict fails closed. 0 ms means
+    # "one attempt, then give up", which is the EWOULDBLOCK behaviour.
+    lock_timeout_ms: i64
+
+    events: [VfsEvent]
+    seq_next: i64
+    violations: [text]
+
+    # Handle table (parallel arrays, index == handle id).
+    h_path: [text]
+    h_open: [bool]
+    h_flags: [i64]
+    h_lock: [i64]
+    h_delete_on_close: [bool]
+
+    # Journal dirty tracking: bytes written since last sync, per journal path.
+    j_path: [text]
+    j_dirty: [bool]
+
+    # Advisory-lock ownership: which handle currently holds the FileLock.
+    l_path: [text]
+    l_owner: [i64]
+
+    static fn create(name: text, cwd: text) -> SqliteVfs:
+        SqliteVfs(
+            vfs_name: name,
+            cwd: cwd,
+            enforce_journal_sync_before_page_write: true,
+            lock_timeout_ms: 0,
+            events: [],
+            seq_next: 0,
+            violations: [],
+            h_path: [],
+            h_open: [],
+            h_flags: [],
+            h_lock: [],
+            h_delete_on_close: [],
+            j_path: [],
+            j_dirty: [],
+            l_path: [],
+            l_owner: []
+        )
+
+    # -- event log ----------------------------------------------------------
+    me record(op: text, path: text, offset: i64, length: i64, code: i64):
+        val s = self.seq_next
+        var evs = self.events
+        evs.push(VfsEvent(seq: s, op: op, path: path, offset: offset, length: length, code: code))
+        self.events = evs
+        self.seq_next = s + 1
+
+    me note_violation(msg: text):
+        var v = self.violations
+        v.push(msg)
+        self.violations = v
+
+    fn event_count() -> i64:
+        self.events.len()
+
+    fn violation_count() -> i64:
+        self.violations.len()
+
+    # Index of the first event matching op+path at or after `from`, else -1.
+    fn find_event(op: text, path: text, from: i64) -> i64:
+        var i = from
+        while i < self.events.len():
+            val e = self.events[i]
+            if e.op == op and e.path == path:
+                return i
+            i = i + 1
+        -1
+
+    # -- journal dirty bookkeeping -----------------------------------------
+    fn journal_slot(p: text) -> i64:
+        var i = 0
+        while i < self.j_path.len():
+            if self.j_path[i] == p:
+                return i
+            i = i + 1
+        -1
+
+    fn journal_is_dirty(p: text) -> bool:
+        val s = self.journal_slot(p)
+        if s < 0:
+            return false
+        self.j_dirty[s]
+
+    me set_journal_dirty(p: text, dirty: bool):
+        val s = self.journal_slot(p)
+        if s < 0:
+            var jp = self.j_path
+            var jd = self.j_dirty
+            jp.push(p)
+            jd.push(dirty)
+            self.j_path = jp
+            self.j_dirty = jd
+            return
+        var jd2 = self.j_dirty
+        jd2[s] = dirty
+        self.j_dirty = jd2
+
+    # -- advisory lock ownership -------------------------------------------
+    fn lock_slot(p: text) -> i64:
+        var i = 0
+        while i < self.l_path.len():
+            if self.l_path[i] == p:
+                return i
+            i = i + 1
+        -1
+
+    fn lock_owner_of(p: text) -> i64:
+        val s = self.lock_slot(p)
+        if s < 0:
+            return -1
+        self.l_owner[s]
+
+    me set_lock_owner(p: text, owner: i64):
+        val s = self.lock_slot(p)
+        if s < 0:
+            var lp = self.l_path
+            var lo = self.l_owner
+            lp.push(p)
+            lo.push(owner)
+            self.l_path = lp
+            self.l_owner = lo
+            return
+        var lo2 = self.l_owner
+        lo2[s] = owner
+        self.l_owner = lo2
+
+    # -- handle helpers ------------------------------------------------------
+    fn handle_valid(h: i64) -> bool:
+        if h < 0 or h >= self.h_path.len():
+            return false
+        self.h_open[h]
+
+    fn handle_path(h: i64) -> text:
+        if h < 0 or h >= self.h_path.len():
+            return ""
+        self.h_path[h]
+
+    fn handle_lock_level(h: i64) -> i64:
+        if h < 0 or h >= self.h_lock.len():
+            return lock_none()
+        self.h_lock[h]
+
+    fn handle_flags(h: i64) -> i64:
+        if h < 0 or h >= self.h_flags.len():
+            return 0
+        self.h_flags[h]
+
+    me set_handle_lock(h: i64, level: i64):
+        var hl = self.h_lock
+        hl[h] = level
+        self.h_lock = hl
+
+    # =======================================================================
+    # sqlite3_vfs methods
+    # =======================================================================
+
+    # xOpen -> handle id, or -1 on failure. Real: creates the file when
+    # SQLITE_OPEN_CREATE is set, honours O_EXCL, refuses a missing file
+    # otherwise with SQLITE_CANTOPEN semantics (-1).
+    me x_open(path: text, flags: i64) -> i64:
+        val full = normalize_full_path(self.cwd, path)
+        val exists = rt_file_exists(full)
+        if exists and has_flag(flags, open_create()) and has_flag(flags, open_exclusive()):
+            self.record("open", full, 0, 0, sqlite_cantopen())
+            return -1
+        if not exists:
+            if not has_flag(flags, open_create()):
+                self.record("open", full, 0, 0, sqlite_cantopen())
+                return -1
+            val empty: [u8] = []
+            if not rt_file_write_bytes(full, empty):
+                self.record("open", full, 0, 0, sqlite_cantopen())
+                return -1
+        val h = self.h_path.len()
+        var hp = self.h_path
+        var ho = self.h_open
+        var hf = self.h_flags
+        var hl = self.h_lock
+        var hd = self.h_delete_on_close
+        hp.push(full)
+        ho.push(true)
+        hf.push(flags)
+        hl.push(lock_none())
+        hd.push(has_flag(flags, open_deleteonclose()))
+        self.h_path = hp
+        self.h_open = ho
+        self.h_flags = hf
+        self.h_lock = hl
+        self.h_delete_on_close = hd
+        self.record("open", full, 0, 0, sqlite_ok())
+        h
+
+    # xClose. Releases any advisory lock and honours DELETEONCLOSE.
+    me x_close(h: i64) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_ioerr_close()
+        val p = self.handle_path(h)
+        if self.handle_lock_level(h) != lock_none():
+            self.x_unlock(h, lock_none())
+        var ho = self.h_open
+        ho[h] = false
+        self.h_open = ho
+        if self.h_delete_on_close[h]:
+            rt_file_delete(p)
+        self.record("close", p, 0, 0, sqlite_ok())
+        sqlite_ok()
+
+    # xRead. SQLite requires that a short read zero-fill the tail and report
+    # SQLITE_IOERR_SHORT_READ — not a plain error, not a silent truncation.
+    me x_read(h: i64, offset: i64, amount: i64) -> VfsReadResult:
+        var outv: [u8] = []
+        if not self.handle_valid(h):
+            return VfsReadResult(code: sqlite_ioerr_read(), data: outv)
+        val p = self.handle_path(h)
+        val data = read_all_bytes(p)
+        var got = 0
+        var i = 0
+        while i < amount:
+            val src = offset + i
+            if src >= 0 and src < data.len():
+                outv.push(data[src])
+                got = got + 1
+            else:
+                outv.push(0 as u8)
+            i = i + 1
+        if got < amount:
+            self.record("read", p, offset, amount, sqlite_ioerr_short_read())
+            return VfsReadResult(code: sqlite_ioerr_short_read(), data: outv)
+        self.record("read", p, offset, amount, sqlite_ok())
+        VfsReadResult(code: sqlite_ok(), data: outv)
+
+    # xWrite. In-place read-modify-write (see module header for why this is NOT
+    # tmp+rename). Holes are zero-filled, matching pwrite past EOF.
+    #
+    # ORDERING GUARD: a database page write is refused while the rollback
+    # journal protecting it still has unsynced bytes.
+    me x_write(h: i64, offset: i64, data: [u8]) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_ioerr_write()
+        val p = self.handle_path(h)
+        val is_journal = path_is_journal(p)
+        if not is_journal:
+            val jp = journal_path_for(p)
+            if self.enforce_journal_sync_before_page_write and self.journal_is_dirty(jp):
+                self.note_violation("page write to " + p + " at offset " + "{offset}" + " while " + jp + " has unsynced bytes")
+                self.record("write", p, offset, data.len(), sqlite_ioerr())
+                return sqlite_ioerr()
+        var buf = read_all_bytes(p)
+        while buf.len() < offset:
+            buf.push(0 as u8)
+        var i = 0
+        while i < data.len():
+            val pos = offset + i
+            if pos < buf.len():
+                buf[pos] = data[i]
+            else:
+                buf.push(data[i])
+            i = i + 1
+        if not rt_file_write_bytes(p, buf):
+            self.record("write", p, offset, data.len(), sqlite_ioerr_write())
+            return sqlite_ioerr_write()
+        if is_journal:
+            self.set_journal_dirty(p, true)
+        self.record("write", p, offset, data.len(), sqlite_ok())
+        sqlite_ok()
+
+    # xTruncate. Uses the HOUSE pattern (tmp -> fsync -> rename) so a crash
+    # mid-truncate leaves the old length rather than a torn one.
+    me x_truncate(h: i64, size: i64) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_ioerr_truncate()
+        if size < 0:
+            return sqlite_ioerr_truncate()
+        val p = self.handle_path(h)
+        val buf = read_all_bytes(p)
+        var outv: [u8] = []
+        var i = 0
+        while i < size:
+            if i < buf.len():
+                outv.push(buf[i])
+            else:
+                outv.push(0 as u8)
+            i = i + 1
+        val tmp = p + ".sqlvfs.tmp"
+        if not rt_file_write_bytes(tmp, outv):
+            self.record("truncate", p, 0, size, sqlite_ioerr_truncate())
+            return sqlite_ioerr_truncate()
+        rt_file_sync(tmp)
+        if not rt_file_rename(tmp, p):
+            rt_file_delete(tmp)
+            self.record("truncate", p, 0, size, sqlite_ioerr_truncate())
+            return sqlite_ioerr_truncate()
+        self.record("truncate", p, 0, size, sqlite_ok())
+        sqlite_ok()
+
+    # xSync. This is the method that has to actually reach durable media.
+    # SQLITE_SYNC_FULL additionally fsyncs the containing directory, which is
+    # what makes a freshly created journal's DIRECTORY ENTRY durable too — a
+    # journal whose entry is not durable is a journal that does not exist after
+    # a power cut.
+    me x_sync(h: i64, flags: i64) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_ioerr_fsync()
+        val p = self.handle_path(h)
+        if not rt_file_sync(p):
+            self.record("sync", p, 0, 0, sqlite_ioerr_fsync())
+            return sqlite_ioerr_fsync()
+        if flags == sync_full():
+            if not rt_file_sync(parent_dir_of(p)):
+                self.record("sync", p, 0, 0, sqlite_ioerr_dir_fsync())
+                return sqlite_ioerr_dir_fsync()
+        if path_is_journal(p):
+            self.set_journal_dirty(p, false)
+        self.record("sync", p, 0, 0, sqlite_ok())
+        sqlite_ok()
+
+    # xFileSize.
+    me x_file_size(h: i64) -> VfsSizeResult:
+        if not self.handle_valid(h):
+            return VfsSizeResult(code: sqlite_ioerr_fstat(), size: 0)
+        val p = self.handle_path(h)
+        if not rt_file_exists(p):
+            self.record("filesize", p, 0, 0, sqlite_ok())
+            return VfsSizeResult(code: sqlite_ok(), size: 0)
+        val n = rt_file_size(p)
+        self.record("filesize", p, 0, n, sqlite_ok())
+        VfsSizeResult(code: sqlite_ok(), size: n)
+
+    # xDelete. `sync_dir` fsyncs the parent so the UNLINK is durable — this is
+    # the commit point of DELETE journal mode, so it is not optional.
+    me x_delete(path: text, sync_dir: bool) -> i64:
+        val full = normalize_full_path(self.cwd, path)
+        if not rt_file_exists(full):
+            # SQLite tolerates deleting a file that is already gone.
+            self.record("delete", full, 0, 0, sqlite_ok())
+            return sqlite_ok()
+        if not rt_file_delete(full):
+            self.record("delete", full, 0, 0, sqlite_ioerr_delete())
+            return sqlite_ioerr_delete()
+        if path_is_journal(full):
+            self.set_journal_dirty(full, false)
+        if sync_dir:
+            if not rt_file_sync(parent_dir_of(full)):
+                self.record("delete", full, 0, 0, sqlite_ioerr_dir_fsync())
+                return sqlite_ioerr_dir_fsync()
+        self.record("delete", full, 0, 0, sqlite_ok())
+        sqlite_ok()
+
+    # xAccess.
+    me x_access(path: text, flags: i64) -> VfsBoolResult:
+        val full = normalize_full_path(self.cwd, path)
+        val e = rt_file_exists(full)
+        self.record("access", full, flags, 0, sqlite_ok())
+        if not e:
+            return VfsBoolResult(code: sqlite_ok(), value: false)
+        if flags == access_exists() or flags == access_read() or flags == access_readwrite():
+            return VfsBoolResult(code: sqlite_ok(), value: true)
+        VfsBoolResult(code: sqlite_ok(), value: false)
+
+    # xFullPathname.
+    me x_full_pathname(path: text) -> VfsPathResult:
+        val full = normalize_full_path(self.cwd, path)
+        self.record("fullpath", full, 0, 0, sqlite_ok())
+        VfsPathResult(code: sqlite_ok(), path: full)
+
+    # xRandomness. Real entropy from the runtime PRNG (rt_random_bytes does not
+    # exist in this runtime; rt_random_i64 does).
+    me x_randomness(n: i64) -> [u8]:
+        var outv: [u8] = []
+        var i = 0
+        while i < n:
+            val r = rt_random_i64()
+            outv.push((r & 255) as u8)
+            i = i + 1
+        self.record("randomness", "", 0, n, sqlite_ok())
+        outv
+
+    # xSleep(microseconds) -> microseconds actually requested of the OS.
+    me x_sleep(micros: i64) -> i64:
+        if micros <= 0:
+            return 0
+        val ms = (micros + 999) / 1000
+        rt_sleep_ms(ms)
+        self.record("sleep", "", 0, micros, sqlite_ok())
+        ms * 1000
+
+    # xCurrentTime -> Julian Day number, the unit sqlite3_vfs actually wants.
+    me x_current_time() -> f64:
+        val micros = rt_time_now_micros()
+        val secs = (micros as f64) / 1000000.0
+        (secs / 86400.0) + 2440587.5
+
+    # xCurrentTimeInt64 -> milliseconds since the Julian epoch.
+    me x_current_time_int64() -> i64:
+        val micros = rt_time_now_micros()
+        (micros / 1000) + 210866760000000
+
+    # =======================================================================
+    # Locking family — over the ONE existing primitive (FileLock).
+    # =======================================================================
+
+    # xLock. Escalation on a handle that already holds the lock is a no-op:
+    # whole-file exclusive already dominates every level above SHARED.
+    me x_lock(h: i64, level: i64) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_ioerr_lock()
+        if level == lock_none():
+            return self.x_unlock(h, lock_none())
+        val p = self.handle_path(h)
+        val cur = self.handle_lock_level(h)
+        if cur != lock_none():
+            # Already holding the underlying exclusive lock — record the ladder
+            # position and return. RESERVED/PENDING/EXCLUSIVE are all the same
+            # lock underneath; the distinction is in-process only.
+            self.set_handle_lock(h, level)
+            self.record("lock", p, level, 0, sqlite_ok())
+            return sqlite_ok()
+        val owner = self.lock_owner_of(p)
+        if owner >= 0 and owner != h:
+            self.record("lock", p, level, 0, sqlite_busy())
+            return sqlite_busy()
+        var fl = FileLock.for_file(p)
+        if not fl.try_acquire(self.lock_timeout_ms):
+            self.record("lock", p, level, 0, sqlite_busy())
+            return sqlite_busy()
+        self.set_lock_owner(p, h)
+        self.set_handle_lock(h, level)
+        self.record("lock", p, level, 0, sqlite_ok())
+        sqlite_ok()
+
+    # xUnlock. Down to NONE releases; down to SHARED keeps the underlying
+    # exclusive lock (an over-approximation, but never an under-approximation).
+    me x_unlock(h: i64, level: i64) -> i64:
+        if h < 0 or h >= self.h_path.len():
+            return sqlite_ioerr_unlock()
+        val p = self.handle_path(h)
+        val cur = self.handle_lock_level(h)
+        if cur == lock_none():
+            self.record("unlock", p, level, 0, sqlite_ok())
+            return sqlite_ok()
+        if level != lock_none():
+            self.set_handle_lock(h, level)
+            self.record("unlock", p, level, 0, sqlite_ok())
+            return sqlite_ok()
+        if self.lock_owner_of(p) == h:
+            var fl = FileLock(path: p, lock_path: p + ".lock", acquired: true)
+            fl.release()
+            self.set_lock_owner(p, -1)
+        self.set_handle_lock(h, lock_none())
+        self.record("unlock", p, level, 0, sqlite_ok())
+        sqlite_ok()
+
+    # xCheckReservedLock: does SOMEONE ELSE hold RESERVED or greater?
+    # Whole-file exclusive cannot distinguish RESERVED from EXCLUSIVE, so this
+    # answers "another holder exists", which is the safe over-approximation.
+    me x_check_reserved_lock(h: i64) -> VfsBoolResult:
+        if not self.handle_valid(h):
+            return VfsBoolResult(code: sqlite_ioerr_checkreservedlock(), value: false)
+        val p = self.handle_path(h)
+        val owner = self.lock_owner_of(p)
+        if owner >= 0 and owner != h:
+            self.record("checkreserved", p, 0, 0, sqlite_ok())
+            return VfsBoolResult(code: sqlite_ok(), value: true)
+        if owner < 0 and rt_file_exists(p + ".lock"):
+            # Held by another process.
+            self.record("checkreserved", p, 0, 0, sqlite_ok())
+            return VfsBoolResult(code: sqlite_ok(), value: true)
+        self.record("checkreserved", p, 0, 0, sqlite_ok())
+        VfsBoolResult(code: sqlite_ok(), value: false)
+
+    # =======================================================================
+    # Remaining io_methods.
+    # =======================================================================
+
+    me x_sector_size(h: i64) -> i64:
+        512
+
+    # Conservative and CORRECT for durability: no IOCAP bit is proven by the
+    # block layer, so none is claimed. Claiming POWERSAFE_OVERWRITE we cannot
+    # prove would let SQLite skip journal work it actually needs.
+    me x_device_characteristics(h: i64) -> i64:
+        0
+
+    me x_file_control(h: i64, op: i64) -> i64:
+        if not self.handle_valid(h):
+            return sqlite_notfound()
+        if op == fcntl_size_hint():
+            # Advisory only; preallocation is not available and pretending it
+            # happened would be a lie, but SIZE_HINT is legitimately a no-op.
+            return sqlite_ok()
+        if op == fcntl_has_moved():
+            return sqlite_ok()
+        sqlite_notfound()
+
+    # =======================================================================
+    # Shared-memory family — FAIL CLOSED. WAL stays gated. Do not "fix" these
+    # by returning SQLITE_OK; that corrupts databases.
+    # =======================================================================
+
+    me x_shm_map(h: i64, region: i64, size: i64, extend: bool) -> i64:
+        self.record("shmmap", self.handle_path(h), region, size, sqlite_ioerr_shmmap())
+        sqlite_ioerr_shmmap()
+
+    me x_shm_lock(h: i64, offset: i64, n: i64, flags: i64) -> i64:
+        self.record("shmlock", self.handle_path(h), offset, n, sqlite_ioerr_shmlock())
+        sqlite_ioerr_shmlock()
+
+    me x_shm_barrier(h: i64) -> i64:
+        self.record("shmbarrier", self.handle_path(h), 0, 0, sqlite_ioerr_shmmap())
+        sqlite_ioerr_shmmap()
+
+    me x_shm_unmap(h: i64, delete_flag: bool) -> i64:
+        self.record("shmunmap", self.handle_path(h), 0, 0, sqlite_ioerr_shmmap())
+        sqlite_ioerr_shmmap()
+
+    me x_shm_open(h: i64) -> i64:
+        self.record("shmopen", self.handle_path(h), 0, 0, sqlite_ioerr_shmopen())
+        sqlite_ioerr_shmopen()
+
+    # =======================================================================
+    # Ordering verdict over the recorded log — the crash-point oracle.
+    # =======================================================================
+
+    # True iff, for the given database path, every recorded page write is
+    # preceded in the log by a successful sync of the journal that came after
+    # the last journal write. This is checked against the LOG, independently of
+    # the guard in x_write, so the two can disagree and be caught.
+    fn journal_before_page_ordering_holds(db_path: text) -> bool:
+        val jp = journal_path_for(db_path)
+        var journal_dirty = false
+        var i = 0
+        while i < self.events.len():
+            val e = self.events[i]
+            if e.op == "write" and e.path == jp and e.code == sqlite_ok():
+                journal_dirty = true
+            if e.op == "sync" and e.path == jp and e.code == sqlite_ok():
+                journal_dirty = false
+            if e.op == "delete" and e.path == jp and e.code == sqlite_ok():
+                journal_dirty = false
+            if e.op == "write" and e.path == db_path and e.code == sqlite_ok():
+                if journal_dirty:
+                    return false
+            i = i + 1
+        true
+
+# ---------------------------------------------------------------------------
+# Free helpers.
+# ---------------------------------------------------------------------------
+pub fn read_all_bytes(path: text) -> [u8]:
+    if not rt_file_exists(path):
+        val e: [u8] = []
+        return e
+    if val b = rt_file_read_bytes(path):
+        return b
+    val e2: [u8] = []
+    e2
+
+pub fn bytes_from_text(s: text) -> [u8]:
+    var outv: [u8] = []
+    for b in s.bytes():
+        outv.push(b as u8)
+    outv
+
+pub fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn filled_bytes(n: i64, v: i64) -> [u8]:
+    var outv: [u8] = []
+    var i = 0
+    while i < n:
+        outv.push((v & 255) as u8)
+        i = i + 1
+    outv
+
+# ---------------------------------------------------------------------------
+# Implementation status, reported the same honest way the contract does, but
+# now describing what the code ACTUALLY does rather than what the FsDriver
+# surface could support in principle.
+# ---------------------------------------------------------------------------
+pub struct VfsImplStatus:
+    method: text
+    status: text          # "supported" | "partial" | "unsupported"
+    backed_by: text
+
+pub fn impl_statuses() -> [VfsImplStatus]:
+    [
+        VfsImplStatus(method: "xOpen", status: "supported",
+            backed_by: "handle table + rt_file_exists/rt_file_write_bytes; CREATE and EXCLUSIVE honoured"),
+        VfsImplStatus(method: "xClose", status: "supported",
+            backed_by: "handle release + DELETEONCLOSE + advisory-lock release"),
+        VfsImplStatus(method: "xRead", status: "supported",
+            backed_by: "rt_file_read_bytes + offset slice; short read zero-fills and returns SQLITE_IOERR_SHORT_READ"),
+        VfsImplStatus(method: "xWrite", status: "supported",
+            backed_by: "in-place read-modify-write via rt_file_write_bytes, hole zero-fill, journal-ordering guard"),
+        VfsImplStatus(method: "xTruncate", status: "supported",
+            backed_by: "tmp + rt_file_sync + rename (house atomic_write pattern) — contract listed this unsupported"),
+        VfsImplStatus(method: "xSync", status: "supported",
+            backed_by: "rt_file_sync on the file; SQLITE_SYNC_FULL also fsyncs the parent directory"),
+        VfsImplStatus(method: "xFileSize", status: "supported",
+            backed_by: "rt_file_size"),
+        VfsImplStatus(method: "xDelete", status: "supported",
+            backed_by: "rt_file_delete + parent rt_file_sync when syncDir is set"),
+        VfsImplStatus(method: "xAccess", status: "supported",
+            backed_by: "rt_file_exists for EXISTS/READ/READWRITE"),
+        VfsImplStatus(method: "xFullPathname", status: "supported",
+            backed_by: "normalizer: absolutise, collapse //, . and .., strip trailing /"),
+        VfsImplStatus(method: "xRandomness", status: "supported",
+            backed_by: "rt_random_i64"),
+        VfsImplStatus(method: "xSleep", status: "supported",
+            backed_by: "rt_sleep_ms"),
+        VfsImplStatus(method: "xCurrentTime", status: "supported",
+            backed_by: "rt_time_now_micros converted to Julian Day"),
+        VfsImplStatus(method: "xSectorSize", status: "supported",
+            backed_by: "published 512"),
+        VfsImplStatus(method: "xLock", status: "partial",
+            backed_by: "FileLock (exclusive-only): SHARED is over-approximated to exclusive, so readers serialize"),
+        VfsImplStatus(method: "xUnlock", status: "partial",
+            backed_by: "FileLock.release; EXCLUSIVE->SHARED downgrade retains the exclusive lock rather than being atomic"),
+        VfsImplStatus(method: "xCheckReservedLock", status: "partial",
+            backed_by: "lockfile/owner query; RESERVED is not distinguishable from EXCLUSIVE"),
+        VfsImplStatus(method: "xFileControl", status: "partial",
+            backed_by: "SIZE_HINT and HAS_MOVED handled; every other opcode returns SQLITE_NOTFOUND"),
+        VfsImplStatus(method: "xDeviceCharacteristics", status: "partial",
+            backed_by: "returns 0 — no IOCAP bit is proven by the block layer, so none is claimed"),
+        VfsImplStatus(method: "xShmMap", status: "unsupported",
+            backed_by: "fails closed SQLITE_IOERR_SHMMAP — writable shared mmap absent; this is what gates WAL"),
+        VfsImplStatus(method: "xShmLock", status: "unsupported",
+            backed_by: "fails closed SQLITE_IOERR_SHMLOCK"),
+        VfsImplStatus(method: "xShmBarrier", status: "unsupported",
+            backed_by: "fails closed — no shared region to barrier over"),
+        VfsImplStatus(method: "xShmUnmap", status: "unsupported",
+            backed_by: "fails closed — no shared region to unmap")
+    ]
+
+pub fn impl_status_of(name: text) -> VfsImplStatus:
+    for s in impl_statuses():
+        if s.method == name:
+            return s
+    VfsImplStatus(method: name, status: "unsupported", backed_by: "not implemented")
+
+pub fn impl_count_with_status(s: text) -> i64:
+    var n = 0
+    for r in impl_statuses():
+        if r.status == s:
+            n = n + 1
+    n
+
+# Rollback-journal (DELETE) mode is the mode this VFS supports. WAL is not.
+pub fn impl_rollback_journal_supported() -> bool:
+    for name in ["xOpen", "xClose", "xRead", "xWrite", "xSync", "xFileSize", "xDelete", "xAccess", "xLock", "xUnlock", "xCheckReservedLock", "xSectorSize"]:
+        if impl_status_of(name).status == "unsupported":
+            return false
+    true
+
+pub fn impl_wal_supported() -> bool:
+    impl_status_of("xShmMap").status == "supported"
+
+pub fn impl_wal_blocked_prerequisite() -> text:
+    "writable shared mmap (MAP_SHARED / shm_open) for the -wal-index; absent by design, so xShmMap fails closed with SQLITE_IOERR_SHMMAP."
+
+pub fn amalgamation_build_status() -> text:
+    "blocked: the SQLite C amalgamation build needs a C toolchain that is not available here. This VFS is the pure-Simple layer the amalgamation binds to; it does not unblock the build."

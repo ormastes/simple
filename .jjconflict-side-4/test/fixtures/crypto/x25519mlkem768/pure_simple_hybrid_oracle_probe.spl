@@ -1,0 +1,131 @@
+# Source-matched pure-Simple full X25519MLKEM768 oracle probe.
+#
+# Set A: deterministic ML-KEM-768 keygen/encapsulation/decapsulation.
+# Set B: RFC 7748 X25519 client/server public keys and shared secret.
+# Set C: draft-05 client share, server share, and ML-KEM || X25519 secret.
+#
+# This is ordinary Simple control flow so native evidence does not depend on
+# the SPipe rewriter. Expected digests are independently derived from the
+# pinned mlkem-native fd58 and RFC 7748 fixtures.
+
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    X25519MlKem768VerificationPolicy, X25519MlKem768Config,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate,
+    x25519_mlkem768_decapsulate}
+use os.crypto.sha256.{sha256}
+
+fn _hex_bytes(hex: text) -> list:
+    var out: list = []
+    var index: i64 = 0
+    while index < hex.len():
+        val high_code = hex.char_code_at(index)
+        val low_code = hex.char_code_at(index + 1)
+        val high = if high_code <= 57: high_code - 48 else: high_code - 87
+        val low = if low_code <= 57: low_code - 48 else: low_code - 87
+        out.push(high * 16 + low)
+        index = index + 2
+    out
+
+fn _typed_bytes(values: list) -> [u8]:
+    var out: [u8] = []
+    var index: i64 = 0
+    while index < values.len():
+        out.push(values.get(index).to_u8())
+        index = index + 1
+    out
+
+fn _hex_digit(value: i64) -> text:
+    if value < 10: value.to_text()
+    elif value == 10: "a"
+    elif value == 11: "b"
+    elif value == 12: "c"
+    elif value == 13: "d"
+    elif value == 14: "e"
+    else: "f"
+
+fn _digest(values: list) -> text:
+    val digest = sha256(_typed_bytes(values))
+    var out = ""
+    var index: i64 = 0
+    while index < digest.len().to_i64():
+        val value = digest[index].to_i64()
+        out = out + _hex_digit((value >> 4) & 15) + _hex_digit(value & 15)
+        index = index + 1
+    out
+
+fn _same(left: list, right: list) -> bool:
+    if left.len() != right.len(): return false
+    var difference: i64 = 0
+    var index: i64 = 0
+    while index < left.len():
+        difference = difference | (left.get(index) ^ right.get(index))
+        index = index + 1
+    difference == 0
+
+fn _scalar_config() -> X25519MlKem768Config:
+    X25519MlKem768Config(
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION,
+        requested_backend: X25519MlKem768Backend.ScalarCpu,
+        selection_mode: X25519MlKem768SelectionMode.Require,
+        verification_policy: X25519MlKem768VerificationPolicy.AbsoluteAndScalar,
+        minimum_batch: 1,
+        batch_size: 1)
+
+fn main() -> i64:
+    val d = _hex_bytes(
+        "934d60b35624d740b30a7f227af2ae7c678e4e04e13c5f509eade2b79aea77e2")
+    val z = _hex_bytes(
+        "3e2a2ea6c9c476fc4937b013c993a793d6c0ab9960695ba838f649da539ca3d0")
+    val client_private = _typed_bytes(_hex_bytes(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"))
+    val server_private = _typed_bytes(_hex_bytes(
+        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"))
+    val config = _scalar_config()
+
+    val key_pair = match x25519_mlkem768_keygen(
+            config, client_private, d, z):
+        case Ok(value): value
+        case Err(reason):
+            print "x25519mlkem768_hybrid_probe=fail set=A phase=keygen reason={reason}"
+            return 20
+    if _digest(key_pair.client_key_share) !=
+            "5678dcb3115aa095f8b367cc1668328dfa2c96852b58f9527deb086486ecad0d":
+        print "x25519mlkem768_hybrid_probe=fail set=C phase=client-share"
+        return 21
+
+    val encapsulation = match x25519_mlkem768_encapsulate(
+            config, key_pair.client_key_share, server_private, d):
+        case Ok(value): value
+        case Err(reason):
+            print "x25519mlkem768_hybrid_probe=fail set=A-B-C phase=encapsulation reason={reason}"
+            return 22
+    if _digest(encapsulation.server_key_share) !=
+            "26835d91412c9e7987e5e42308e8f5b9321cd3813f5eb0d54b44eebc4be00ae2":
+        print "x25519mlkem768_hybrid_probe=fail set=C phase=server-share"
+        return 23
+    if _digest(encapsulation.shared_secret) !=
+            "0fc6a0c999313693b1a2fa990e49a585f639d3460254907bb42ea4a95b18a8fc":
+        print "x25519mlkem768_hybrid_probe=fail set=C phase=combined-secret"
+        return 24
+
+    val decapsulation = match x25519_mlkem768_decapsulate(
+            config, encapsulation.server_key_share, client_private,
+            key_pair.decapsulation_key):
+        case Ok(value): value
+        case Err(reason):
+            print "x25519mlkem768_hybrid_probe=fail set=A-B-C phase=decapsulation reason={reason}"
+            return 25
+    if not _same(encapsulation.shared_secret, decapsulation.shared_secret):
+        print "x25519mlkem768_hybrid_probe=fail set=C phase=roundtrip-secret"
+        return 26
+    if _digest(decapsulation.shared_secret) !=
+            "0fc6a0c999313693b1a2fa990e49a585f639d3460254907bb42ea4a95b18a8fc":
+        print "x25519mlkem768_hybrid_probe=fail set=C phase=recovered-secret"
+        return 27
+    print "x25519mlkem768_hybrid_probe=pass oracle=mlkem-native-fd58+rfc7748 sets=A,B,C outputs=2400"
+    0

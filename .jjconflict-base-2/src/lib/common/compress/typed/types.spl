@@ -1,0 +1,287 @@
+# ============================================================================
+# common/compress/typed/types.spl — behavior-carrying compression types
+#
+# Typed barrier for compression codec teams (LZ4, DEFLATE/gzip, Zstd, LZMA2).
+# Built on the common/bytes foundation (ByteSpan, ByteBuffer, BitWriter,
+# BitReader). Replaces ad-hoc i64/[u8] primitives with intent-carrying types.
+#
+# Types exported:
+#   LzToken      — enum: Literal(b) | Match(distance, length) for LZ77 back-refs
+#   SymbolFreqs  — frequency counter over a fixed symbol alphabet
+#   HuffTable    — canonical Huffman table (DEFLATE RFC 1951 rules)
+# ============================================================================
+
+use lib.common.bytes.bits.{BitWriter, BitReader}
+
+# ----------------------------------------------------------------------------
+# LzToken — LZ77 token: either a literal byte or a back-reference
+# ----------------------------------------------------------------------------
+enum LzToken:
+    """An LZ77 token: either a literal byte to emit or a back-reference
+    (distance, length) pair pointing into the sliding history window."""
+    Literal(b: i64)
+    Match(distance: i64, length: i64)
+
+# ----------------------------------------------------------------------------
+# SymbolFreqs — frequency table over a fixed symbol alphabet
+# ----------------------------------------------------------------------------
+struct SymbolFreqs:
+    """Frequency counter for symbols in [0, max_sym). Backed by a fixed [i64]
+    array of size `max_sym`. Used to build Huffman trees from observed data."""
+    counts: [i64]
+    max_sym: i64
+    total: i64
+
+impl SymbolFreqs:
+    static fn new(max_sym: i64) -> SymbolFreqs:
+        """Create a zeroed frequency table for symbols 0..max_sym-1."""
+        var c: [i64] = []
+        var i = 0
+        while i < max_sym:
+            c.push(0)
+            i = i + 1
+        SymbolFreqs(counts: c, max_sym: max_sym, total: 0)
+
+    me add(sym: i64):
+        """Increment the frequency count for `sym`. Out-of-range symbols are ignored."""
+        if sym >= 0 and sym < self.max_sym:
+            self.counts[sym] = self.counts[sym] + 1
+            self.total = self.total + 1
+
+    fn count(sym: i64) -> i64:
+        """Return the frequency of `sym`, or 0 if out of range."""
+        if sym < 0 or sym >= self.max_sym:
+            return 0
+        self.counts[sym]
+
+    fn total_count() -> i64:
+        """Return the sum of all symbol frequencies."""
+        self.total
+
+# ----------------------------------------------------------------------------
+# HuffTable — canonical Huffman code table (RFC 1951 style)
+# ----------------------------------------------------------------------------
+struct HuffTable:
+    """Canonical Huffman table for encoding/decoding symbols.
+    Codes are assigned per RFC 1951: shorter huff_codes first, ties broken by
+    ascending symbol number. Enhuff_codes up to `n_sym` symbols."""
+    n_sym: i64
+    code_lengths: [i64]
+    huff_codes: [i64]
+
+impl HuffTable:
+    static fn from_code_lengths(lengths: [i64]) -> HuffTable:
+        """Build a canonical Huffman table from an array of code lengths
+        (one per symbol, 0 = not used). Follows RFC 1951 §3.2.2:
+          1. Count the number of huff_codes for each length (bl_count).
+          2. Find the smallest code for each length (next_code).
+          3. Assign huff_codes in symbol order."""
+        val n_sym = lengths.len()
+
+        # Step 1: find max length and count per length
+        var max_len = 0
+        var i = 0
+        while i < n_sym:
+            if lengths[i] < 0:
+                return HuffTable(n_sym: 0, code_lengths: [], huff_codes: [])
+            if lengths[i] > max_len:
+                max_len = lengths[i]
+            i = i + 1
+
+        if max_len > 32:
+            return HuffTable(n_sym: 0, code_lengths: [], huff_codes: [])
+
+        # bl_count[len] = number of huff_codes with that bit length (index 0..max_len)
+        var bl_count: [i64] = []
+        var k = 0
+        while k <= max_len:
+            bl_count.push(0)
+            k = k + 1
+        i = 0
+        while i < n_sym:
+            val l = lengths[i]
+            if l > 0:
+                bl_count[l] = bl_count[l] + 1
+            i = i + 1
+
+        # Step 2: next_code[len] = smallest code value of that length
+        # next_code[1] = 0; next_code[len] = (next_code[len-1] + bl_count[len-1]) << 1
+        var next_code: [i64] = []
+        var nc = 0
+        while nc <= max_len:
+            next_code.push(0)
+            nc = nc + 1
+        var code = 0
+        # length 0 has no huff_codes, start accumulation from length 1
+        next_code[0] = 0
+        var len = 1
+        while len <= max_len:
+            code = (code + bl_count[len - 1]) << 1
+            if code + bl_count[len] > (1 << len):
+                return HuffTable(n_sym: 0, code_lengths: [], huff_codes: [])
+            next_code[len] = code
+            len = len + 1
+
+        # Step 3: assign canonical huff_codes in symbol order
+        var huff_codes: [i64] = []
+        var j = 0
+        while j < n_sym:
+            huff_codes.push(0)
+            j = j + 1
+        i = 0
+        while i < n_sym:
+            val l = lengths[i]
+            if l > 0:
+                huff_codes[i] = next_code[l]
+                next_code[l] = next_code[l] + 1
+            i = i + 1
+
+        HuffTable(n_sym: n_sym, code_lengths: lengths, huff_codes: huff_codes)
+
+    static fn from_freqs(freqs: SymbolFreqs, max_len: i64) -> HuffTable:
+        """Build a length-limited Huffman table from a SymbolFreqs by simple
+        frequency-rank assignment. Symbols with zero frequency get length 0
+        (unused). Non-zero symbols get lengths 1..max_len assigned by rank
+        (most frequent = shortest). Ties broken by ascending symbol index.
+        NOTE: This is a heuristic that is correct only for small alphabets
+        where the resulting code lengths don't violate the Kraft inequality.
+        For production use, implement a proper package-merge or heap-based
+        algorithm in the codec layer."""
+        val n_sym = freqs.max_sym
+
+        # Collect (freq, sym) pairs for non-zero symbols and sort by freq desc
+        # (simple insertion sort — adequate for small alphabets at build time)
+        var sym_list: [i64] = []
+        var freq_list: [i64] = []
+        var i = 0
+        while i < n_sym:
+            val f = freqs.count(i)
+            if f > 0:
+                sym_list.push(i)
+                freq_list.push(f)
+            i = i + 1
+
+        # Insertion sort descending by frequency (secondary: ascending sym index)
+        val m = sym_list.len()
+        var s = 1
+        while s < m:
+            val key_sym = sym_list[s]
+            val key_freq = freq_list[s]
+            var t = s - 1
+            while (t >= 0 and (freq_list[t] < key_freq or
+                               (freq_list[t] == key_freq and sym_list[t] > key_sym))):
+                sym_list[t + 1] = sym_list[t]
+                freq_list[t + 1] = freq_list[t]
+                t = t - 1
+            sym_list[t + 1] = key_sym
+            freq_list[t + 1] = key_freq
+            s = s + 1
+
+        # Assign lengths: rank 0 (most frequent) → 1, rank k → min(k+1, max_len)
+        var lengths: [i64] = []
+        var z = 0
+        while z < n_sym:
+            lengths.push(0)
+            z = z + 1
+        var r = 0
+        while r < m:
+            var ll = r + 1
+            if ll > max_len:
+                ll = max_len
+            lengths[sym_list[r]] = ll
+            r = r + 1
+
+        HuffTable.from_code_lengths(lengths)
+
+    fn encode_value(sym: i64) -> i64:
+        """Return the canonical code integer for `sym` (0 if unused/OOB)."""
+        if sym < 0 or sym >= self.n_sym:
+            return 0
+        self.huff_codes[sym]
+
+    fn encode_len(sym: i64) -> i64:
+        """Return the bit-length for `sym` (0 if unused/OOB)."""
+        if sym < 0 or sym >= self.n_sym:
+            return 0
+        self.code_lengths[sym]
+
+    me encode(sym: i64, w: BitWriter):
+        """Write the canonical code for `sym` into `w` using MSB-first order
+        (standard for DEFLATE static/dynamic Huffman trees)."""
+        val cl = self.encode_len(sym)
+        if cl > 0:
+            val cv = self.encode_value(sym)
+            w.put_bits(cv, cl)
+
+    me decode(r: BitReader) -> i64:
+        """Decode one symbol from `r` by reading bits one at a time and
+        walking the implicit canonical-code table. Returns -1 on EOF or error.
+
+        Algorithm: accumulate bits MSB-first; after each bit, check if the
+        accumulated value matches any canonical code of the current length.
+        Because canonical huff_codes are contiguous per length, this is a range check:
+        code[len] is in [first_code[len], first_code[len] + bl_count[len] - 1].
+        """
+        # Pre-compute first_code[len] and bl_count[len] for fast range checks.
+        # This is O(n_sym) at decode-start; for performance, cache in a wrapper.
+        var max_len = 0
+        var i = 0
+        while i < self.n_sym:
+            if self.code_lengths[i] > max_len:
+                max_len = self.code_lengths[i]
+            i = i + 1
+
+        if max_len == 0:
+            return -1
+
+        # bl_count[len] and first_code[len]
+        var bl_count: [i64] = []
+        var fc: [i64] = []
+        var k = 0
+        while k <= max_len:
+            bl_count.push(0)
+            fc.push(0)
+            k = k + 1
+
+        i = 0
+        while i < self.n_sym:
+            val l = self.code_lengths[i]
+            if l > 0:
+                bl_count[l] = bl_count[l] + 1
+            i = i + 1
+
+        # Recompute first huff_codes exactly as from_code_lengths does
+        var code = 0
+        var len = 1
+        while len <= max_len:
+            code = (code + bl_count[len - 1]) << 1
+            fc[len] = code
+            len = len + 1
+
+        # Read bits one at a time, matching canonical ranges
+        var acc = 0
+        var cur_len = 0
+        while (not r.eof()) and cur_len < max_len:
+            val bit = r.read_bits(1)
+            acc = (acc << 1) | bit
+            cur_len = cur_len + 1
+
+            # Check if acc is in the canonical range for cur_len
+            val first = fc[cur_len]
+            val cnt = bl_count[cur_len]
+            if cnt > 0 and acc >= first and acc < first + cnt:
+                # Find which symbol this maps to
+                val offset = acc - first
+                # Walk symbols to find the offset-th symbol of this length
+                var found = 0
+                var sym_idx = 0
+                i = 0
+                while i < self.n_sym:
+                    if self.code_lengths[i] == cur_len:
+                        if sym_idx == offset:
+                            found = i
+                        sym_idx = sym_idx + 1
+                    i = i + 1
+                return found
+
+        return -1

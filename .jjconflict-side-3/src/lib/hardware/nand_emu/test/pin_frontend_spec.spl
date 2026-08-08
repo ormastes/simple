@@ -1,0 +1,155 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Pin frontend spec (rtl/pin_frontend.spl)
+# ============================================================================
+#
+# Host-side spec for the VHDL-2008 subset feasibility spike (doc §5.1):
+# latch classification (combinational, all 4 truth-table rows) and the
+# serial-access column counter (clocked: increment on RE rising edge, reset
+# on address latch, survives CE deassert). Absolute oracles only — every
+# expectation is a known value at a known input, never a self-comparison.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §5.1
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.rtl.pin_frontend.{NeColCounter, ne_latch_classify, ne_col_counter_step}
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # Latch classification — full 4-row truth table (doc §5.1)
+    # ------------------------------------------------------------------
+    describe("ne_latch_classify"):
+        it("classifies CLE high / ALE low as Command"):
+            """doc §5.1: CLE selects Command when ALE is deasserted."""
+            val kind = ne_latch_classify(true, false)
+            expect(kind.to_text()).to_equal("command")
+
+        it("classifies CLE low / ALE high as Address"):
+            """doc §5.1: ALE selects Address when CLE is deasserted."""
+            val kind = ne_latch_classify(false, true)
+            expect(kind.to_text()).to_equal("address")
+
+        it("classifies CLE low / ALE low as DataIn"):
+            """doc §5.1: neither strobe asserted is a DataIn cycle."""
+            val kind = ne_latch_classify(false, false)
+            expect(kind.to_text()).to_equal("data_in")
+
+        it("classifies CLE high / ALE high as Illegal"):
+            """doc §5.1: CLE and ALE both asserted is an illegal latch cycle."""
+            val kind = ne_latch_classify(true, true)
+            expect(kind.to_text()).to_equal("illegal")
+
+    # ------------------------------------------------------------------
+    # Column counter — increment on RE rising edge (doc §5.1 req. 3)
+    # ------------------------------------------------------------------
+    describe("ne_col_counter_step increment"):
+        it("holds column 0 when armed and no strobe fires"):
+            """No addr_latch, no re_rising: the register holds (idle clock
+            edge). A freshly armed counter (col=0) stays at col=0."""
+            val armed = NeColCounter(col: 0, valid: true)
+            val next = ne_col_counter_step(armed, false, false, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(true)
+
+        it("increments column by one on each RE rising edge"):
+            """doc §5.1 req. 3: on every RE rising edge the counter pre-fetches
+            the next byte and increments. Starting at col=0 with a 528-byte
+            page (S1 profile), one RE rising edge advances to col=1."""
+            val armed = NeColCounter(col: 0, valid: true)
+            val next = ne_col_counter_step(armed, true, false, 528)
+            expect(next.col).to_equal(1)
+            expect(next.valid).to_equal(true)
+
+        it("does not advance on RE rising edge when not armed"):
+            """valid=false means no page is loaded; the counter must not
+            advance even on an RE rising edge."""
+            val unarmed = NeColCounter(col: 0, valid: false)
+            val next = ne_col_counter_step(unarmed, true, false, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(false)
+
+        it("chains three RE rising edges to column 3"):
+            """Three sequential clocked steps from col=0 land on col=3 (no
+            wrap yet, well inside the 528-byte S1 page)."""
+            var state = NeColCounter(col: 0, valid: true)
+            state = ne_col_counter_step(state, true, false, 528)
+            state = ne_col_counter_step(state, true, false, 528)
+            state = ne_col_counter_step(state, true, false, 528)
+            expect(state.col).to_equal(3)
+
+    # ------------------------------------------------------------------
+    # Column counter — wraps at page_bytes (doc §5.1 req. 3)
+    # ------------------------------------------------------------------
+    describe("ne_col_counter_step wrap"):
+        it("wraps from the last column of a 528-byte page back to 0"):
+            """doc §5.1 req. 3: the counter wraps at page_bytes. col=527 is
+            the last valid index of a 528-byte S1 page; the next RE rising
+            edge wraps to col=0."""
+            val at_last = NeColCounter(col: 527, valid: true)
+            val next = ne_col_counter_step(at_last, true, false, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(true)
+
+        it("holds at column 0 for a degenerate zero-byte page"):
+            """page_bytes == 0 is a degenerate geometry; the implementation
+            holds at col=0 (explicit safe result) rather than dividing by
+            zero or wrapping negative."""
+            val armed = NeColCounter(col: 0, valid: true)
+            val next = ne_col_counter_step(armed, true, false, 0)
+            expect(next.col).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Column counter — reset on address latch (doc §5.1, per task spec)
+    # ------------------------------------------------------------------
+    describe("ne_col_counter_step address-latch reset"):
+        it("resets to column 0 and arms on an address-latch cycle"):
+            """A freshly latched address restarts serial access from the
+            first byte, regardless of the prior column."""
+            val mid_page = NeColCounter(col: 300, valid: true)
+            val next = ne_col_counter_step(mid_page, false, true, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(true)
+
+        it("arms an unarmed counter on address latch"):
+            """Even a never-armed counter (valid=false, e.g. right after
+            chip reset) becomes armed at col=0 once an address is latched."""
+            val fresh = NeColCounter(col: 0, valid: false)
+            val next = ne_col_counter_step(fresh, false, true, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(true)
+
+        it("address latch wins over a simultaneous RE rising edge"):
+            """addr_latch takes priority: a re-addressed cycle always resets
+            to col=0 even if re_rising is asserted in the same step."""
+            val mid_page = NeColCounter(col: 42, valid: true)
+            val next = ne_col_counter_step(mid_page, true, true, 528)
+            expect(next.col).to_equal(0)
+            expect(next.valid).to_equal(true)
+
+    # ------------------------------------------------------------------
+    # Column counter — survives CE deassert (doc §5.1 req. 6)
+    # ------------------------------------------------------------------
+    describe("ne_col_counter_step CE-deassert survival"):
+        it("holds column and armed state across a step with neither strobe"):
+            """doc §5.1 req. 6: the datasheet permits CE going inactive mid
+            serial-access; the column counter must survive it. This register
+            has no ce_n input at all — a step with re_rising=false and
+            addr_latch=false (modeling a clock edge while CE is inactive)
+            holds col and valid unchanged by construction."""
+            val mid_page = NeColCounter(col: 200, valid: true)
+            val held = ne_col_counter_step(mid_page, false, false, 528)
+            expect(held.col).to_equal(200)
+            expect(held.valid).to_equal(true)
+
+        it("resumes incrementing from the held column after CE returns"):
+            """Simulates CE deassert (held step) then CE reassert with the
+            next RE rising edge: the counter resumes exactly where it left
+            off, at col=201, not from col=0."""
+            val mid_page = NeColCounter(col: 200, valid: true)
+            val held = ne_col_counter_step(mid_page, false, false, 528)
+            val resumed = ne_col_counter_step(held, true, false, 528)
+            expect(resumed.col).to_equal(201)
+            expect(resumed.valid).to_equal(true)

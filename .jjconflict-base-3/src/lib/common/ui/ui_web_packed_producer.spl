@@ -1,0 +1,337 @@
+# ui_web_packed_producer.spl -- L7: UiPackedProducer adoption for the Web
+# HTML/CSS layout rendering path.
+#
+# Design authority: doc/05_design/ui/unified_packed_ui_scene.md section 2.2.
+# Lane: L7, doc/03_plan/ui/unified_packed_ui_scene_agent_lanes.md.
+#
+# Adapts INTO the existing production HTML/CSS layout renderer
+# (`simple_web_layout_render_html_draw_ir`,
+# simple_web_html_layout_renderer.spl) and the existing v2->v3 typed adapter
+# (draw_ir_v2_to_v3.spl, lane L3) rather than re-deriving cascade/layout/
+# paint -- this lane does not edit either file.
+#
+# Unlike the GUI widget path (lane L6), the Web v2 oracle ALREADY marks
+# ordinary boxes hit-testable (verified by probe: a plain two-`<div>` page
+# with no interactive tags produces 5 HIT_SHAPES rows from 6 commands --
+# every box is a potential DOM pointer-event target, not just an
+# explicitly-interactive one). So this lane does not need its own
+# interactivity detector: it gives exactly one OWNER_RECORDS row to every
+# HIT_SHAPES row the oracle already produced -- satisfying design section
+# 2.4's "every hit-shape row emitted has an owner record" for whatever the
+# oracle marks hit-testable, without re-deriving what "interactive" means.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_NO_ID,
+    DrawIrV3Scene,
+    DrawIrV3Command,
+    DrawIrV3Geometry,
+    DrawIrV3Paint,
+    DrawIrV3TextRun,
+    DrawIrV3Glyph,
+    DrawIrV3Resource,
+    DrawIrV3PathSpan,
+    DrawIrV3PathPoint,
+    DrawIrV3Clip,
+    DrawIrV3Transform,
+    DrawIrV3HitShape,
+    DrawIrV3Provenance
+}
+use common.ui.ui_scene_counts.{
+    UiSceneCounts,
+    UiSceneRanges,
+    UiSceneOverflowReceipt,
+    UI_PRODUCER_WEB,
+    UI_SCENE_OVERFLOW_DEFICIT,
+    UI_SCENE_OVERFLOW_SURPLUS
+}
+use common.ui.ui_scene_owner_table.{UiOwnerRecord, UI_SCENE_EVENT_POLICY_HIT_OPAQUE}
+use common.ui.ui_scene_slice.{
+    UiSceneSlice,
+    UiSceneWriteVerdict,
+    UiSceneEmitResult,
+    DrawIrV3Writer,
+    UiOwnerWriter,
+    UiActionWriter,
+    UiPackedProducer
+}
+
+# Matches `draw_ir_v2_to_v3`'s adapter, which sets `component_generation:
+# 0u32` unconditionally at both of its command-construction sites. L9's
+# "recycled slot" check in ui_scene_event_route.spl compares this owner
+# field against the hit command's own component_generation for EQUALITY,
+# not non-zero-ness — every Web hit_shape is copied from an adapter
+# command, so this must be 0 to ever pass that check.
+val WEB_HIT_OWNER_GENERATION: u32 = 0u32
+
+# See ui_gui_packed_producer.spl's `_gui_rebase_id` doc comment: table-row-
+# index fields must be rebased to this producer's assigned
+# `ranges.<table>.start` before being written; component_id/parent_id are
+# identities, never rebased.
+fn _web_rebase_id(id: u32, start: u32) -> u32:
+    if id == DRAW_IR_V3_NO_ID:
+        DRAW_IR_V3_NO_ID
+    else:
+        id + start
+
+# `host_parent_id` is DRAW_IR_V3_NO_ID for a standalone (non-nested) render.
+# When a host is hosting this producer as a WebView child (design section
+# 2.2 nesting rule), it passes its own WebView component id here so the
+# child's root command(s) get re-parented onto it.
+fn _web_build_scene(html: text, width: i32, height: i32, host_parent_id: u32) -> DrawIrV3Scene:
+    val composition = simple_web_layout_render_html_draw_ir(html, width, height)
+    val v3_raw = draw_ir_v2_to_v3(composition)
+    DrawIrV3Scene(
+        schema: v3_raw.schema, schema_id: v3_raw.schema_id, scene_id: v3_raw.scene_id, generation: v3_raw.generation,
+        commands: _web_reparent_roots(v3_raw.commands, host_parent_id),
+        geometry: v3_raw.geometry, paint: v3_raw.paint, text_runs: v3_raw.text_runs,
+        resources: v3_raw.resources, path_points: v3_raw.path_points, clips: v3_raw.clips,
+        transforms: v3_raw.transforms, hit_shapes: v3_raw.hit_shapes, provenance: v3_raw.provenance
+    )
+
+fn _web_reparent_roots(commands: [DrawIrV3Command], host_parent_id: u32) -> [DrawIrV3Command]:
+    if host_parent_id == DRAW_IR_V3_NO_ID:
+        return commands
+    var out: [DrawIrV3Command] = []
+    for cmd in commands:
+        if cmd.parent_id == DRAW_IR_V3_NO_ID:
+            var patched = cmd
+            patched.parent_id = host_parent_id
+            out.push(patched)
+        else:
+            out.push(cmd)
+    out
+
+fn _web_counts_of(v3: DrawIrV3Scene) -> UiSceneCounts:
+    val n_hit_shapes = v3.hit_shapes.xs.len().to_u32()
+    UiSceneCounts(
+        commands: v3.commands.len().to_u32(),
+        geometry: v3.geometry.xs.len().to_u32(),
+        paint: v3.paint.fill_colors.len().to_u32(),
+        text_runs: v3.text_runs.run_glyph_starts.len().to_u32(),
+        glyphs: v3.text_runs.glyph_ids.len().to_u32(),
+        resources: v3.resources.kinds.len().to_u32(),
+        path_spans: v3.path_points.span_point_starts.len().to_u32(),
+        path_points: v3.path_points.point_xs.len().to_u32(),
+        clips: v3.clips.xs.len().to_u32(),
+        transforms: v3.transforms.m11s.len().to_u32(),
+        hit_shapes: n_hit_shapes,
+        provenance_edges: v3.provenance.command_indices.len().to_u32(),
+        owner_records: n_hit_shapes,
+        action_bindings: 0u32,
+        prepared_batches: 0u32,
+        dirty_ranges: 0u32
+    )
+
+fn _web_verdict_is_exact(v: UiSceneWriteVerdict) -> bool:
+    match v:
+        UiSceneWriteVerdict.Exact:
+            true
+        UiSceneWriteVerdict.Deficit(table_id, n):
+            false
+        UiSceneWriteVerdict.Surplus(table_id, n):
+            false
+
+fn _web_overflow_receipt(v: UiSceneWriteVerdict, producer_kind: u16, producer_id: u32, snapshot_id: u64) -> UiSceneOverflowReceipt:
+    match v:
+        UiSceneWriteVerdict.Deficit(table_id, n):
+            UiSceneOverflowReceipt(
+                table_id: table_id, kind: UI_SCENE_OVERFLOW_DEFICIT, required: n, capacity: 0u32,
+                producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
+            )
+        UiSceneWriteVerdict.Surplus(table_id, n):
+            UiSceneOverflowReceipt(
+                table_id: table_id, kind: UI_SCENE_OVERFLOW_SURPLUS, required: n, capacity: 0u32,
+                producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
+            )
+        UiSceneWriteVerdict.Exact:
+            UiSceneOverflowReceipt(
+                table_id: 0u16, kind: UI_SCENE_OVERFLOW_DEFICIT, required: 0u32, capacity: 0u32,
+                producer_kind: producer_kind, producer_id: producer_id, snapshot_id: snapshot_id
+            )
+
+fn _web_write_scene(v3: DrawIrV3Scene, host_owner_id: u32, ranges: UiSceneRanges, draw: DrawIrV3Writer, owners: UiOwnerWriter):
+    var i = 0
+    while i < v3.commands.len():
+        val c = v3.commands[i]
+        draw.put_command(DrawIrV3Command(
+            kind: c.kind, flags: c.flags,
+            component_id: c.component_id, component_generation: c.component_generation, parent_id: c.parent_id,
+            geometry_id: _web_rebase_id(c.geometry_id, ranges.geometry.start),
+            paint_id: _web_rebase_id(c.paint_id, ranges.paint.start),
+            text_run_id: _web_rebase_id(c.text_run_id, ranges.text_runs.start),
+            image_resource_id: _web_rebase_id(c.image_resource_id, ranges.resources.start),
+            path_span_id: _web_rebase_id(c.path_span_id, ranges.path_spans.start),
+            clip_id: _web_rebase_id(c.clip_id, ranges.clips.start),
+            transform_id: _web_rebase_id(c.transform_id, ranges.transforms.start),
+            hit_shape_id: _web_rebase_id(c.hit_shape_id, ranges.hit_shapes.start)
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.geometry.xs.len():
+        draw.put_geometry(DrawIrV3Geometry(
+            present: true, x: v3.geometry.xs[i], y: v3.geometry.ys[i],
+            width: v3.geometry.widths[i], height: v3.geometry.heights[i],
+            corner_radius: v3.geometry.corner_radii[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.paint.fill_colors.len():
+        draw.put_paint(DrawIrV3Paint(
+            present: true, fill_color: v3.paint.fill_colors[i],
+            stroke_color: v3.paint.stroke_colors[i],
+            stroke_width_milli: v3.paint.stroke_widths_milli[i],
+            opacity_milli: v3.paint.opacities_milli[i],
+            blend_mode: v3.paint.blend_modes[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.text_runs.run_glyph_starts.len():
+        draw.put_text_run(DrawIrV3TextRun(
+            present: true, glyph_start: _web_rebase_id(v3.text_runs.run_glyph_starts[i], ranges.glyphs.start),
+            glyph_count: v3.text_runs.run_glyph_counts[i],
+            font_resource_id: v3.text_runs.run_font_resource_ids[i],
+            font_size_milli: v3.text_runs.run_font_sizes_milli[i],
+            baseline_x: v3.text_runs.run_baseline_xs[i],
+            baseline_y: v3.text_runs.run_baseline_ys[i],
+            color: v3.text_runs.run_colors[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.text_runs.glyph_ids.len():
+        draw.put_glyph(DrawIrV3Glyph(
+            present: true, glyph_id: v3.text_runs.glyph_ids[i],
+            x: v3.text_runs.glyph_xs[i], y: v3.text_runs.glyph_ys[i],
+            cluster: v3.text_runs.glyph_clusters[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.resources.kinds.len():
+        draw.put_resource(DrawIrV3Resource(
+            present: true, kind: v3.resources.kinds[i], format: v3.resources.formats[i],
+            width: v3.resources.widths[i], height: v3.resources.heights[i],
+            content_hash: v3.resources.content_hashes[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.path_points.span_point_starts.len():
+        draw.put_path_span(DrawIrV3PathSpan(
+            present: true, point_start: _web_rebase_id(v3.path_points.span_point_starts[i], ranges.path_points.start),
+            point_count: v3.path_points.span_point_counts[i],
+            fill_rule: v3.path_points.span_fill_rules[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.path_points.point_xs.len():
+        draw.put_path_point(DrawIrV3PathPoint(
+            present: true, x: v3.path_points.point_xs[i], y: v3.path_points.point_ys[i],
+            verb: v3.path_points.point_verbs[i]
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.clips.xs.len():
+        draw.put_clip(DrawIrV3Clip(
+            present: true, x: v3.clips.xs[i], y: v3.clips.ys[i],
+            width: v3.clips.widths[i], height: v3.clips.heights[i],
+            corner_radius: v3.clips.corner_radii[i], parent_id: _web_rebase_id(v3.clips.parent_ids[i], ranges.clips.start)
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.transforms.m11s.len():
+        draw.put_transform(DrawIrV3Transform(
+            present: true, m11: v3.transforms.m11s[i], m12: v3.transforms.m12s[i],
+            m21: v3.transforms.m21s[i], m22: v3.transforms.m22s[i],
+            dx: v3.transforms.dxs[i], dy: v3.transforms.dys[i]
+        ))
+        i = i + 1
+
+    # Every hit-shape row gets exactly one owner record (design section 2.4;
+    # module doc: the oracle, not this lane, decides what is hit-testable).
+    i = 0
+    while i < v3.hit_shapes.xs.len():
+        val comp_id = v3.hit_shapes.component_ids[i]
+        draw.put_hit_shape(DrawIrV3HitShape(
+            present: true, x: v3.hit_shapes.xs[i], y: v3.hit_shapes.ys[i],
+            width: v3.hit_shapes.widths[i], height: v3.hit_shapes.heights[i],
+            shape_kind: v3.hit_shapes.shape_kinds[i], hit_flags: v3.hit_shapes.hit_flags[i],
+            component_id: comp_id
+        ))
+        owners.put_owner_record(UiOwnerRecord(
+            producer_kind: UI_PRODUCER_WEB, event_policy: UI_SCENE_EVENT_POLICY_HIT_OPAQUE,
+            semantic_id: comp_id, semantic_generation: WEB_HIT_OWNER_GENERATION,
+            parent_owner_id: host_owner_id, action_binding_id: DRAW_IR_V3_NO_ID
+        ))
+        i = i + 1
+
+    i = 0
+    while i < v3.provenance.command_indices.len():
+        draw.put_provenance(DrawIrV3Provenance(
+            present: true, command_index: _web_rebase_id(v3.provenance.command_indices[i], ranges.commands.start),
+            edge_kind: v3.provenance.edge_kinds[i],
+            source_node_id: v3.provenance.source_node_ids[i],
+            source_rule_id: v3.provenance.source_rule_ids[i],
+            source_span_start: v3.provenance.source_span_starts[i],
+            source_span_len: v3.provenance.source_span_lens[i]
+        ))
+        i = i + 1
+
+struct WebPackedProducer:
+    id_val: u32
+    html: text
+    width: i32
+    height: i32
+    host_parent_id: u32
+    # DRAW_IR_V3_NO_ID for a standalone (non-nested) render. When a host
+    # (e.g. a GUI producer's WebView-host widget owner, see
+    # ui_gui_packed_producer.spl's own `host_owner_id`) is hosting this
+    # producer, it passes its own OWNER_RECORDS absolute index here so
+    # every owner record this producer emits -- one per hit-shape row, all
+    # flat/root within its own scope -- gets re-parented onto it (see
+    # ui_scene_event_route.spl's cross-producer wiring follow-on note).
+    host_owner_id: u32
+
+impl UiPackedProducer for WebPackedProducer:
+    me producer_kind() -> u16:
+        UI_PRODUCER_WEB
+
+    me producer_id() -> u32:
+        self.id_val
+
+    me count(snapshot_id: u64, counts: UiSceneCounts) -> UiSceneCounts:
+        _web_counts_of(_web_build_scene(self.html, self.width, self.height, self.host_parent_id))
+
+    me emit(
+        snapshot_id: u64, ranges: UiSceneRanges,
+        draw: DrawIrV3Writer, owners: UiOwnerWriter, actions: UiActionWriter
+    ) -> UiSceneEmitResult:
+        val v3 = _web_build_scene(self.html, self.width, self.height, self.host_parent_id)
+        _web_write_scene(v3, self.host_owner_id, ranges, draw, owners)
+
+        val draw_verdict = draw.finish()
+        if not _web_verdict_is_exact(draw_verdict):
+            return UiSceneEmitResult.Refused(_web_overflow_receipt(draw_verdict, self.producer_kind(), self.id_val, snapshot_id))
+
+        val owner_verdict = owners.finish()
+        if not _web_verdict_is_exact(owner_verdict):
+            return UiSceneEmitResult.Refused(_web_overflow_receipt(owner_verdict, self.producer_kind(), self.id_val, snapshot_id))
+
+        val action_verdict = actions.finish()
+        if not _web_verdict_is_exact(action_verdict):
+            return UiSceneEmitResult.Refused(_web_overflow_receipt(action_verdict, self.producer_kind(), self.id_val, snapshot_id))
+
+        UiSceneEmitResult.Emitted(UiSceneSlice(
+            scene_slot: self.id_val, scene_generation: 1u32,
+            root_component_id: DRAW_IR_V3_NO_ID, ranges: ranges
+        ))
+
+export WebPackedProducer

@@ -1,0 +1,126 @@
+# @cover src/os/kernel/net/http_route.spl 95%
+"""
+# in-guest HTTP route hardening — malformed / hostile requests (Lane HARDEN-ROBUST)
+
+Feeds the boot HTTP route classifier (src/os/kernel/net/http_route.spl)
+malformed, oversized, injection, mixed-line-ending, percent-encoded and
+method-confusion request lines and asserts every one FAILS CLOSED
+(BadRequest / NotFound) — never a crash and never a partial File accept of a
+hostile filename. Complements the happy-path coverage in
+http_route_spec.spl.
+
+Regression note: a `/files/` segment carrying a raw CR/LF or other control
+byte now fails closed to NotFound, matching path_is_safe()'s NUL policy, so a
+bare-LF-injected filename can no longer ride through as a "safe" segment.
+"""
+
+use std.spec
+use os.kernel.net.http_route.{http_classify_request, HttpRoute, HttpRouteKind}
+
+fn _kind(request: text) -> HttpRouteKind:
+    http_classify_request(request).kind
+
+fn _is_badrequest(request: text) -> bool:
+    match _kind(request):
+        HttpRouteKind.BadRequest: true
+        _: false
+
+fn _is_notfound(request: text) -> bool:
+    match _kind(request):
+        HttpRouteKind.NotFound: true
+        _: false
+
+fn _is_file(request: text) -> bool:
+    match _kind(request):
+        HttpRouteKind.File: true
+        _: false
+
+fn _repeat(s: text, n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + s
+        i = i + 1
+    out
+
+describe "http route hardening: method confusion":
+    it "lowercase method is NotFound (case-sensitive GET)":
+        assert_true(_is_notfound("get / HTTP/1.1\r\n\r\n"))
+
+    it "mixed-case method is NotFound":
+        assert_true(_is_notfound("GeT / HTTP/1.1\r\n\r\n"))
+
+    it "a leading space shifts the method and fails closed (BadRequest)":
+        # split(' ') yields ["", "GET", "/"...]; method="" path="GET" version="/"
+        assert_true(_is_badrequest(" GET / HTTP/1.1\r\n\r\n"))
+
+    it "TRACE/CONNECT-style methods are NotFound":
+        assert_true(_is_notfound("TRACE / HTTP/1.1\r\n\r\n"))
+        assert_true(_is_notfound("CONNECT / HTTP/1.1\r\n\r\n"))
+
+describe "http route hardening: version confusion":
+    it "HTTP/2.0 is rejected (BadRequest)":
+        assert_true(_is_badrequest("GET / HTTP/2.0\r\n\r\n"))
+
+    it "HTTP/0.9 is rejected (BadRequest)":
+        assert_true(_is_badrequest("GET / HTTP/0.9\r\n\r\n"))
+
+    it "a missing version token is BadRequest":
+        assert_true(_is_badrequest("GET /\r\n\r\n"))
+
+    it "a bogus protocol token is BadRequest":
+        assert_true(_is_badrequest("GET / SPDY/3\r\n\r\n"))
+
+describe "http route hardening: empty / truncated request lines":
+    it "an empty request is BadRequest":
+        assert_true(_is_badrequest(""))
+
+    it "method-only (no path/version) is BadRequest":
+        assert_true(_is_badrequest("GET\r\n\r\n"))
+
+    it "a double-space empty path is BadRequest":
+        assert_true(_is_badrequest("GET  HTTP/1.1\r\n\r\n"))
+
+    it "a non-absolute path is BadRequest":
+        assert_true(_is_badrequest("GET files/x HTTP/1.1\r\n\r\n"))
+
+describe "http route hardening: CRLF handling / header injection":
+    it "an embedded CRLF that truncates before the version is BadRequest":
+        # first \r\n cuts the line to "GET /files/a" -> no version token
+        assert_true(_is_badrequest("GET /files/a\r\nInjected: 1 HTTP/1.1\r\n\r\n"))
+
+    it "a raw-LF-injected /files segment fails closed (NotFound, not File)":
+        # bare LF survives into the filename; must not be served as a safe segment
+        assert_false(_is_file("GET /files/a\nb HTTP/1.1\r\n\r\n"))
+        assert_true(_is_notfound("GET /files/a\nb HTTP/1.1\r\n\r\n"))
+
+    it "a raw-CR-injected /files segment fails closed (NotFound)":
+        assert_true(_is_notfound("GET /files/a\rb HTTP/1.1\r\n\r\n"))
+
+    it "a NUL-injected /files segment fails closed (NotFound)":
+        assert_true(_is_notfound("GET /files/a\0b HTTP/1.1\r\n\r\n"))
+
+describe "http route hardening: percent-encoding + traversal":
+    it "a NUL byte in the path (%00) is NotFound":
+        assert_true(_is_notfound("GET /files/a%00b HTTP/1.1\r\n\r\n"))
+
+    it "encoded slash + encoded dot-dot is NotFound":
+        assert_true(_is_notfound("GET /files/a%2f%2e%2e HTTP/1.1\r\n\r\n"))
+
+    it "encoded backslash traversal is NotFound":
+        assert_true(_is_notfound("GET /files/..%5cwin HTTP/1.1\r\n\r\n"))
+
+    it "a nested (multi-segment) /files path is NotFound":
+        assert_true(_is_notfound("GET /files/sub/secret HTTP/1.1\r\n\r\n"))
+
+describe "http route hardening: oversized inputs":
+    it "an oversized /files segment (>200) is NotFound":
+        val req = "GET /files/" + _repeat("a", 250) + " HTTP/1.1\r\n\r\n"
+        assert_true(_is_notfound(req))
+
+    it "an absurdly long unknown path does not crash and is NotFound":
+        val req = "GET /" + _repeat("x", 9000) + " HTTP/1.1\r\n\r\n"
+        assert_true(_is_notfound(req))
+
+    it "a legitimate flat filename still classifies as File (control positive)":
+        assert_true(_is_file("GET /files/VERSION.TXT HTTP/1.1\r\n\r\n"))

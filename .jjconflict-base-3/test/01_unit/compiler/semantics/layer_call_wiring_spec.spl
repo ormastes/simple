@@ -1,0 +1,163 @@
+# Spec for layer_call_wiring.spl (M1b whole-program wiring, doc/03_plan/
+# compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
+#
+# BINARY PROVENANCE: run under bin/simple, which on this tree resolves to
+# the self-hosted binary at bin/release/x86_64-unknown-linux-gnu/simple
+# (verified via `readlink -f bin/simple` before writing this spec) — not the
+# Rust seed.
+#
+# Real-text-scan proof, same pattern as layer_call_scan_spec.spl: the
+# CALLEE fixture is a real file written to src/lib/ so layer_call_scan's
+# `use std.X` -> `src/lib/X` resolution (file_exists-gated) actually
+# resolves it. The CALLER side is passed as in-memory content straight to
+# check_project_layer_calls (via scan_source_calls under the hood) — no
+# caller fixture file needs to exist on disk, proving the whole-program
+# entry point genuinely consumes in-memory batches, not a directory walk.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.common.string_core.{char_from_code}
+use compiler.semantics.layer_call_wiring.{
+    merge_layer_dag, build_module_layers, check_project_layer_calls
+}
+
+val OB = char_from_code(123)
+val CB = char_from_code(125)
+
+val FIXTURE_DIR = "src/lib/_layer_call_wiring_spec_fixture"
+val CALLEE_PATH = FIXTURE_DIR + "/callee.spl"
+val CONSUMER_PATH = FIXTURE_DIR + "/consumer.spl"
+val CALLEE_SOURCE = "fn helper_fn() -> i64:\n    1\n\nexport helper_fn\n"
+val CALLER_SOURCE = "use std._layer_call_wiring_spec_fixture.callee." + OB + "helper_fn" + CB
+    + "\n\nfn probe() -> i64:\n    helper_fn()\n"
+# A second REAL fixture file that resolves the same way CALLER_SOURCE does
+# (identical import), used only by the sabotage test below so both the
+# caller and callee sides are distinct on-disk files -- avoids the
+# self-loop that reusing CALLEE_PATH as both roles would create.
+val CONSUMER_SOURCE = CALLER_SOURCE
+
+fn _setup():
+    dir_create_all(FIXTURE_DIR)
+    file_write(CALLEE_PATH, CALLEE_SOURCE)
+    file_write(CONSUMER_PATH, CONSUMER_SOURCE)
+
+fn _teardown():
+    file_delete(CALLEE_PATH)
+    file_delete(CONSUMER_PATH)
+    dir_remove_all(FIXTURE_DIR)
+
+describe "layer_call_wiring: merge_layer_dag":
+
+    it "replays declare/uses facts from serialized module texts into one registry":
+        val reg = merge_layer_dag(["D:draw", "D:gui\nE:gui>draw"])
+        expect(reg.has_layer("draw")).to_equal(true)
+        expect(reg.has_layer("gui")).to_equal(true)
+        expect(reg.edges_from("gui").len()).to_equal(1)
+        expect(reg.edges_from("gui")[0]).to_equal("draw")
+
+    it "skips empty per-module text (untagged/no-layer modules) without error":
+        val reg = merge_layer_dag(["", "D:draw", ""])
+        expect(reg.has_layer("draw")).to_equal(true)
+        expect(reg.names.len()).to_equal(1)
+
+    it "is idempotent for a layer declared in more than one module":
+        val reg = merge_layer_dag(["D:draw", "D:draw\nE:draw>draw2", "D:draw2"])
+        expect(reg.names.len()).to_equal(2)
+
+describe "layer_call_wiring: build_module_layers":
+
+    it "pairs module_paths[i] with tagged_layers[i], skipping untagged entries":
+        val layers = build_module_layers(["a.spl", "b.spl", "c.spl"], ["gui", "", "draw"])
+        expect(layers.len()).to_equal(2)
+        expect(layers[0].has("a.spl")).to_equal(true)
+        expect(layers[0]["a.spl"]).to_equal("gui")
+        expect(layers[1].has("c.spl")).to_equal(true)
+
+describe "layer_call_wiring: check_project_layer_calls":
+
+    it "returns [] immediately when no module in the batch carries a layer tag":
+        # Deliberately mismatched/garbage paths+contents: if this scanned at
+        # all it would either crash or find something. The all-untagged
+        # early-out must make it a true no-op.
+        val result = check_project_layer_calls(
+            ["nonexistent_a.spl", "nonexistent_b.spl"],
+            ["not real content {", "also not real }"],
+            ["", ""],
+            ["D:draw", "D:gui"]
+        )
+        expect(result.len()).to_equal(0)
+
+    it "flags a real cross-layer call with no downward 'uses' path as a violation":
+        _setup()
+        val caller_path = "caller_probe.spl"
+        val result = check_project_layer_calls(
+            [caller_path, CALLEE_PATH],
+            [CALLER_SOURCE, CALLEE_SOURCE],
+            ["gui", "draw"],
+            ["D:gui", "D:draw"]
+        )
+        _teardown()
+
+        expect(result.len()).to_equal(1)
+        expect(result[0].contains("error[layer_call]")).to_equal(true)
+        expect(result[0].contains("gui")).to_equal(true)
+        expect(result[0].contains("draw")).to_equal(true)
+
+    it "does not flag the same call once a downward 'uses' edge legalizes it":
+        _setup()
+        val caller_path = "caller_probe.spl"
+        val result = check_project_layer_calls(
+            [caller_path, CALLEE_PATH],
+            [CALLER_SOURCE, CALLEE_SOURCE],
+            ["gui", "draw"],
+            ["D:gui\nE:gui>draw", "D:draw"]
+        )
+        _teardown()
+
+        expect(result.len()).to_equal(0)
+
+    it "sabotage: an upward call (draw calling into gui) is still rejected even though gui->draw exists":
+        _setup()
+        # CONSUMER_PATH (a real, distinct on-disk file) now plays the CALLER
+        # tagged 'draw', calling into CALLEE_PATH tagged 'gui'. Only the
+        # gui->draw edge exists in the dag, not draw->gui, so this must
+        # still violate -- proves the check is direction-sensitive, not just
+        # "are these two layers connected at all".
+        val result = check_project_layer_calls(
+            [CONSUMER_PATH, CALLEE_PATH],
+            [CONSUMER_SOURCE, CALLEE_SOURCE],
+            ["draw", "gui"],
+            ["D:draw", "D:gui\nE:gui>draw"]
+        )
+        _teardown()
+
+        expect(result.len()).to_equal(1)
+
+    it "M1b promotion: a local fn sharing an imported symbol's name is NOT misattributed as a cross-layer call":
+        # T13 (doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md):
+        # the documented false-positive gap. This caller file both imports
+        # `helper_fn` from CALLEE_PATH (tagged 'draw', downward-illegal from
+        # 'gui' with no uses edge) AND declares its OWN local `fn helper_fn`.
+        # The bare `helper_fn()` call site is ambiguous text -- under the OLD
+        # text-scan (no local-declaration awareness, verified by temporarily
+        # reverting the fix under test) this misattributes the call to the
+        # imported module and reports a spurious violation. Under the fix
+        # (layer_call_scan._local_fn_names shadow check) it must NOT, because
+        # a local `fn helper_fn(...)` declaration lexically shadows the
+        # import in this file -- the call resolves locally, not to
+        # CALLEE_PATH. This is the discriminating case: it would have FAILED
+        # (found 1 violation) under the pre-fix text edges and must PASS
+        # (find 0) now, or the promotion proved nothing.
+        _setup()
+        val caller_path = "caller_probe_shadow.spl"
+        val shadowing_caller_source = CALLER_SOURCE + "\nfn helper_fn() -> i64:\n    2\n"
+        val result = check_project_layer_calls(
+            [caller_path, CALLEE_PATH],
+            [shadowing_caller_source, CALLEE_SOURCE],
+            ["gui", "draw"],
+            ["D:gui", "D:draw"]
+        )
+        _teardown()
+
+        expect(result.len()).to_equal(0)

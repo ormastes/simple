@@ -1,0 +1,707 @@
+# Web-render parity matrix across ALL FOUR execution lanes.
+#
+# The campaign's parity comparison (`web_engine2d_gpu_offload_parity_spec.spl`)
+# exercises ONE resolved offload lane. This spec runs the same comparison on
+# each of the four declared lanes and attributes every result to the lane that
+# actually produced it:
+#
+#   1. cpu       -- scalar CPU reference       (CpuBackend.create())
+#   2. cpu_simd  -- SIMD CPU pixel rows        (CpuBackend.create_simd(), gated
+#                                               on native_pixel_rows_enabled())
+#   3. vulkan    -- portable GPU API           (Vulkan here; Metal on Apple)
+#   4. cuda      -- direct CUDA                (create_requested_backend("cuda"))
+#
+# WHY THE LANE NAMES MATTER (a naming trap this spec exists to avoid)
+# ------------------------------------------------------------------
+# `backend_display_name("software")` is the string "Optimized Software (SIMD)",
+# but "software" constructs a `SoftwareBackend`, NOT the SIMD pixel-row lane.
+# The genuine SIMD lane is the canonical key `cpu_simd`, which builds
+# `CpuBackend.create_simd()` and FAILS CLOSED with
+# "backend unavailable: cpu_simd native SIMD pixel rows unavailable" when
+# `native_pixel_rows_enabled()` is false (engine.spl:666-671). A matrix that
+# used "software" for its SIMD lane would report a SIMD pass on a host with no
+# SIMD at all. This spec uses `cpu_simd` and asserts the gate.
+#
+# A second trap in the same family: `CpuBackend.name()` returns "cpu" for BOTH
+# `create()` and `create_simd()` (backend_cpu.spl:20-21), so the backend's own
+# name cannot distinguish the scalar lane from the SIMD lane. Only the
+# Engine2D's `selected_backend_name` can, which is why the availability
+# examples below assert on the REQUESTED key surviving to the create rather
+# than on `backend.name()`.
+#
+# PROVENANCE (non-negotiable)
+# ---------------------------
+# A frame is labelled GPU-rendered only when the readback proves a device
+# produced it: source == "device_readback" AND handle > 0 AND identity > 0 AND
+# pixel_count == frame_pixels. The readback vocabulary is FOURTEEN labels in
+# four classes (device 4, cpu 2, unattributed 1, no-frame 7); every no-frame
+# label carries an EMPTY pixel array, and `cache` is genuinely UNATTRIBUTED --
+# neither device evidence nor assumed CPU.
+#
+# WHY THE READBACK IS TAKEN BEFORE present() (derived, not chosen for taste)
+# -------------------------------------------------------------------------
+# `VulkanBackend.read_pixels_with_source()` has two arms
+# (backend_vulkan.spl:809-838), selected by `self.dirty`:
+#   - dirty  -> reads the device framebuffer via vulkan_sffi_read_buffer_bytes
+#               and returns "device_readback" WITH device identity (:812-825)
+#   - clean  -> returns the host cache copy as
+#               "host_cache_after_device_present"                    (:826-838)
+# `present()` refreshes host_buf and sets `dirty = false`. So a
+# draw -> present() -> read sequence can NEVER reach the device arm, and the
+# vulkan lane could never satisfy the strict provenance invariant no matter how
+# healthy the device was. Measured on this host, one create, both arms:
+#   present=false -> source=device_readback              handle=1 identity>0
+#   present=true  -> source=host_cache_after_device_present handle=1 identity>0
+# The dirty read is therefore the arm this matrix asserts on -- it is both the
+# freshest device content and the only route to strict device proof. The
+# presented read is ALSO taken (from the same create, because the per-process
+# vulkan create leak makes creates the scarce resource) and disclosed, so the
+# host-cache arm is reported rather than hidden.
+#
+# TOLERANCE (derived, never fitted)
+# ---------------------------------
+# The only tolerance in this matrix is ZERO: every lane must match the CPU
+# oracle BIT-EXACTLY. That bound is derived from the primitive, not from
+# observed numbers. The comparison replays the oracle's own pixel values
+# through `draw_rect_filled` as runs of a SINGLE SOLID COLOR. A solid-fill rect
+# has exactly one correct value per covered pixel; the path contains no
+# interpolation, no filtering, no blending and no floating-point. So any
+# non-zero diff is a defect, and there is no number to tune. A bound fitted to
+# today's diff would be worthless.
+#
+# DISCLOSURE
+# ----------
+# Per-example receipts, because cross-example tallies do not survive the runner
+# (a module `var` and a class field both read back 0 immediately after a bump).
+#   - `[lane-matrix] <lane>: GPU-PROVEN`  /  `GPU BRANCH SKIPPED ... proves NOTHING`
+#   - `[lane-matrix] COMPARED <label>`    /  `SKIP <label> ... NOT COMPARED`
+# Count with an ANCHORED grep -- the closing verdict lines necessarily mention
+# the tokens, so an unanchored `grep -c` counts the verdict's own prose as
+# evidence and inflates the total:
+#   grep -c '^.lane-matrix. COMPARED '
+# The closing verdict states the denominator so a pass cannot be read as
+# complete when comparisons were skipped.
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SPEC_W: i32 = 80
+val SPEC_H: i32 = 60
+val SPEC_BG: u32 = 0xFFFFFFFFu32
+
+# One lane-vs-oracle parity comparison per declared lane.
+val PARITY_COMPARISONS_DECLARED: i32 = 4
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+class LaneResult:
+    created: bool
+    fail_reason: text
+    source: text
+    handle: i64
+    identity: i64
+    px: [u32]
+    pixel_count: i64
+    presented_source: text
+
+# ============================================================================
+# The reference frame (oracle)
+# ============================================================================
+#
+# WHY THIS IS NOT `simple_web_layout_render_html_pixels`
+# -----------------------------------------------------
+# The campaign's CPU oracle is unusable at this base. The style-producer loop in
+# `simple_web_html_layout_renderer_core.spl` calls `_web_budget_expired()` at
+# FOUR sites (:2568, :2644, :2694, :2730), and that zero-argument function is
+# DEFINED NOWHERE in the tree -- only `_web_budget_expired_at(site: text)`
+# exists (simple_web_html_layout_renderer_foundation.spl:282). Calling the web
+# oracle therefore aborts with
+#   error[E1002]: function `_web_budget_expired` not found
+# and the process stalls rather than returning a frame, so the failure cannot
+# even be caught in-language and turned into a disclosed skip.
+#
+# Coupling a FOUR-LANE matrix to a renderer defect on a different axis would
+# make every lane unmeasurable for a reason that has nothing to do with any
+# backend. So the reference frame is built here, deterministically, and the
+# renderer defect is reported as its own finding rather than silently absorbed.
+#
+# The scene is chosen to be a genuine rasterizer test, not a flat fill: a page
+# background, a header band, two bordered cards with ONE-PIXEL borders, an
+# accent tag at an odd offset, and a vertical rule at an odd column. Thin
+# edges and odd offsets are where rasterizer families actually diverge; a
+# scene of large aligned blocks would agree on every backend and prove nothing.
+
+fn _put(mut px: [u32], x0: i32, y0: i32, w: i32, h: i32, color: u32):
+    var y = y0
+    while y < y0 + h:
+        var x = x0
+        while x < x0 + w:
+            if x >= 0 and x < SPEC_W and y >= 0 and y < SPEC_H:
+                px[y * SPEC_W + x] = color
+            x = x + 1
+        y = y + 1
+
+# A 1px-outline box: four thin edges, the classic rasterizer-family probe.
+fn _put_border(mut px: [u32], x0: i32, y0: i32, w: i32, h: i32, color: u32):
+    _put(px, x0, y0, w, 1, color)
+    _put(px, x0, y0 + h - 1, w, 1, color)
+    _put(px, x0, y0, 1, h, color)
+    _put(px, x0 + w - 1, y0, 1, h, color)
+
+fn _reference_frame() -> [u32]:
+    var px: [u32] = [0xFF1A1A2Eu32; SPEC_W * SPEC_H]
+    # header band
+    _put(px, 0, 0, SPEC_W, 11, 0xFF16213Eu32)
+    _put(px, 3, 3, 29, 5, 0xFFA0C4FFu32)
+    # card 1 (odd offset, 1px border)
+    _put(px, 5, 15, 47, 17, 0xFF0F3460u32)
+    _put_border(px, 5, 15, 47, 17, 0xFF533483u32)
+    _put(px, 9, 19, 23, 3, 0xFFE0E0FFu32)
+    # accent tag at an odd offset
+    _put(px, 37, 25, 11, 5, 0xFF533483u32)
+    # card 2
+    _put(px, 5, 36, 47, 15, 0xFF0F3460u32)
+    _put_border(px, 5, 36, 47, 15, 0xFF533483u32)
+    _put(px, 9, 40, 31, 3, 0xFFE0E0FFu32)
+    # vertical rule at an odd column
+    _put(px, 63, 13, 1, 40, 0xFF533483u32)
+    px
+
+# ============================================================================
+# Pixel helpers
+# ============================================================================
+
+fn _diffcount(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _count_color(px: [u32], color: u32) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] == color:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _nonzero(px: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] != 0u32:
+            n = n + 1
+        i = i + 1
+    n
+
+# Adjacent-row-pair identity: how many rows are identical to the row below.
+# Two rasterizers from different families disagree on this signature even when
+# their total diff count matches, so it is reported alongside every comparison.
+fn _row_pair_identity(px: [u32]) -> i32:
+    if px.len() != SPEC_W * SPEC_H:
+        return -1
+    var same = 0
+    var y = 0
+    while y < SPEC_H - 1:
+        var eq = true
+        var x = 0
+        while x < SPEC_W:
+            if px[y * SPEC_W + x] != px[(y + 1) * SPEC_W + x]:
+                eq = false
+                x = SPEC_W
+            x = x + 1
+        if eq:
+            same = same + 1
+        y = y + 1
+    same
+
+# Decompose a disagreement the way the campaign's standard requires: into
+# oracle-only, lane-only and differing pixels, plus the row band it occupies.
+# Printing the decomposition is what turns "N pixels differ" into a finding.
+fn _decompose(label: text, oracle: [u32], lane: [u32]):
+    if oracle.len() != lane.len():
+        print "[lane-matrix] DIVERGENCE {label}: LENGTH MISMATCH oracle={oracle.len()} lane={lane.len()} -- not decomposable"
+        return
+    var oracle_only = 0
+    var lane_only = 0
+    var differing = 0
+    var first_row = -1
+    var last_row = -1
+    var i = 0
+    while i < oracle.len():
+        if oracle[i] != lane[i]:
+            val row = i / SPEC_W
+            if first_row < 0:
+                first_row = row
+            last_row = row
+            if lane[i] == SPEC_BG and oracle[i] != SPEC_BG:
+                oracle_only = oracle_only + 1
+            else if oracle[i] == SPEC_BG and lane[i] != SPEC_BG:
+                lane_only = lane_only + 1
+            else:
+                differing = differing + 1
+        i = i + 1
+    print "[lane-matrix] DIVERGENCE {label}: oracle_only={oracle_only} lane_only={lane_only} differing={differing} rows={first_row}..{last_row} oracle_rowpair={_row_pair_identity(oracle)} lane_rowpair={_row_pair_identity(lane)}"
+
+# ============================================================================
+# Readback provenance vocabulary -- FOURTEEN labels in four classes
+# ============================================================================
+
+fn _expected_px() -> i64:
+    (SPEC_W * SPEC_H).to_i64()
+
+fn _device_proven(source: text, handle: i64, identity: i64, pixel_count: i64) -> bool:
+    """True only when a real device demonstrably produced this frame."""
+    source == "device_readback" and handle > 0 and identity > 0 and
+        pixel_count == _expected_px()
+
+fn _source_is_device(source: text) -> bool:
+    """The four readback sources that claim device provenance."""
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present" or source == "framebuffer_surface"
+
+fn _source_is_cpu(source: text) -> bool:
+    """The two readback sources served by the CPU/software lane."""
+    source == "cpu_mirror" or source == "cpu_fallback"
+
+fn _source_is_unattributed(source: text) -> bool:
+    """A replayed frame whose provenance is genuinely unknown.
+
+    NOT device evidence and NOT assumed CPU -- its own fourth class, so it can
+    never be laundered into either.
+    """
+    source == "cache"
+
+fn _source_is_no_frame(source: text) -> bool:
+    """The seven readback sources that produced no frame at all.
+
+    Every one carries an EMPTY pixel array, so no frame-content assertion may
+    run against them.
+    """
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested" or source == "device_identity_unknown" or
+        source == "preflight_rejected" or source == "unavailable" or
+        source == "none"
+
+fn _source_is_known(source: text) -> bool:
+    """True when the readback source is inside the honest vocabulary."""
+    _source_is_device(source) or _source_is_cpu(source) or
+        _source_is_unattributed(source) or _source_is_no_frame(source)
+
+fn _assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64):
+    """Fail closed on any readback claiming more provenance than it earned."""
+    if not _source_is_known(source):
+        print "[lane-matrix] {label}: UNKNOWN READBACK SOURCE '{source}' -- outside the fourteen-label vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    if source == "device_readback":
+        expect(handle).to_be_greater_than(0)
+        expect(identity).to_be_greater_than(0)
+        expect(pixel_count).to_equal(_expected_px())
+    if _source_is_cpu(source):
+        expect(_source_is_device(source)).to_equal(false)
+        expect(_device_proven(source, handle, identity, pixel_count)).to_equal(false)
+    if _source_is_unattributed(source):
+        expect(_device_proven(source, handle, identity, pixel_count)).to_equal(false)
+    if _source_is_no_frame(source):
+        # Every no-frame label carries an EMPTY array. Asserting it here is what
+        # stops a no-frame outcome from being compared as if it were a frame.
+        expect(pixel_count).to_equal(0)
+
+fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64) -> bool:
+    """Disclose whether this lane proved a device, and return that fact."""
+    if _device_proven(source, handle, identity, pixel_count):
+        print "[lane-matrix] {label}: GPU-PROVEN -- a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[lane-matrix] {label}: GPU BRANCH SKIPPED -- device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about strict device provenance"
+    else if source == "cpu_fallback":
+        print "[lane-matrix] {label}: GPU BRANCH SKIPPED -- the device was unavailable at use time (source=cpu_fallback); this example proves NOTHING about the GPU path"
+    else if source == "cpu_mirror":
+        print "[lane-matrix] {label}: GPU BRANCH SKIPPED -- CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU path"
+    else if _source_is_unattributed(source):
+        print "[lane-matrix] {label}: GPU BRANCH SKIPPED -- replayed frame of unknown provenance (source={source}); this example proves NOTHING about the GPU path"
+    else:
+        print "[lane-matrix] {label}: GPU BRANCH SKIPPED -- no frame produced (source={source}); this example proves NOTHING about the GPU path"
+    false
+
+# ============================================================================
+# The parity comparison, run identically on every lane
+# ============================================================================
+
+# Replay the CPU oracle's pixels through the lane's own GPU-dispatched
+# primitive (`draw_rect_filled` runs of a single solid color) and read back
+# with provenance. Single pixel source, so the correct diff is exactly 0.
+#
+# ONE create per lane: the per-process vulkan create leak (~20 creates then
+# exit 1, and probe-then-create doubles the count) makes creates the scarce
+# resource, so this never probes before creating -- it creates once and asserts
+# on what the CREATE returned.
+fn _render_lane(lane: text, oracle: [u32]) -> LaneResult:
+    match Engine2D.create_requested_backend(SPEC_W, SPEC_H, lane):
+        Err(msg):
+            LaneResult(created: false, fail_reason: msg, source: "unavailable",
+                handle: 0, identity: 0, px: [], pixel_count: 0, presented_source: "")
+        Ok(engine):
+            engine.clear(SPEC_BG)
+            var y = 0
+            while y < SPEC_H:
+                var x = 0
+                while x < SPEC_W:
+                    val color = oracle[y * SPEC_W + x]
+                    var run_w = 1
+                    while x + run_w < SPEC_W and oracle[y * SPEC_W + x + run_w] == color:
+                        run_w = run_w + 1
+                    engine.draw_rect_filled(x, y, run_w, 1, color)
+                    x = x + run_w
+                y = y + 1
+            # DIRTY read first -- the only arm that can yield strict device
+            # provenance on the vulkan lane (see the header note).
+            val rb = engine.read_pixels_with_source()
+            # Then present and read again, purely to DISCLOSE the host-cache
+            # arm. Same create, so this costs no extra device.
+            engine.present()
+            val rb2 = engine.read_pixels_with_source()
+            engine.shutdown()
+            LaneResult(created: true, fail_reason: "", source: rb.source,
+                handle: rb.backend_handle, identity: rb.device_identity,
+                px: rb.pixels, pixel_count: rb.pixel_count,
+                presented_source: rb2.source)
+
+# Uniform per-comparison receipt. A no-frame readback carries an EMPTY array,
+# so there is nothing to compare and the comparison is DECLARED SKIPPED rather
+# than silently passed.
+fn _compare_lane(label: text, oracle: [u32], res: LaneResult):
+    if not res.created:
+        print "[lane-matrix] SKIP {label}: lane unavailable at use time (reason='{res.fail_reason}') -- parity NOT COMPARED; this example proves NOTHING about {label} parity"
+        return
+    if _source_is_no_frame(res.source):
+        print "[lane-matrix] SKIP {label}: no frame produced (source={res.source}) -- parity NOT COMPARED; this example proves NOTHING about {label} parity"
+        return
+    expect(res.px.len()).to_equal(SPEC_W * SPEC_H)
+    val diff = _diffcount(oracle, res.px)
+    # The receipt is emitted from the MEASURED diff, and the COMPARED wording is
+    # reachable ONLY on diff == 0.
+    #
+    # This ordering is load-bearing and was found by sabotage. A failing
+    # `expect` does NOT abort the example body, so an earlier version of this
+    # function ran `expect(diff).to_equal(0)` and then unconditionally printed
+    # "COMPARED ... (diff=0 ...)" with that zero HARD-CODED into the string.
+    # Under a sabotaged SIMD fill the example duly failed, and still printed a
+    # receipt asserting it had compared bit-exactly -- a receipt that contradicted
+    # its own example's verdict. A receipt that cannot say "I failed" is worse
+    # than no receipt, because it is counted as evidence by the closing grep.
+    if diff != 0:
+        _decompose(label, oracle, res.px)
+        print "[lane-matrix] FAILED {label}: NOT bit-exact with the cpu oracle (diff={diff} of {SPEC_W * SPEC_H} rowpair={_row_pair_identity(res.px)} source={res.source} presented_source={res.presented_source})"
+    else:
+        print "[lane-matrix] COMPARED {label}: bit-exact with the cpu oracle (diff={diff} rowpair={_row_pair_identity(res.px)} source={res.source} presented_source={res.presented_source})"
+    # Derived bound: solid-fill replay of a single pixel source has exactly one
+    # correct value per pixel. Zero is the only admissible diff.
+    expect(diff).to_equal(0)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Web-render parity matrix across all four execution lanes":
+
+    context "the reference frame itself (anti-vacuity)":
+
+        it "the oracle is a real multi-colour scene, not a flat fill":
+            # THIS EXAMPLE IS THE MATRIX'S ANTI-VACUITY GUARD.
+            # Arrays are VALUE types in this language. If `_put`'s `mut`
+            # parameter failed to write back, `_reference_frame()` would return
+            # a uniform page-background fill -- and every lane would then agree
+            # on it bit-exactly, so all four parity comparisons would PASS while
+            # proving nothing at all. That is precisely the vacuous green this
+            # matrix exists to prevent, so the scene's structure is asserted
+            # before any lane is allowed to compare against it.
+            val oracle = _reference_frame()
+            expect(oracle.len()).to_equal(SPEC_W * SPEC_H)
+            # Every declared colour must actually be present.
+            expect(_count_color(oracle, 0xFF1A1A2Eu32)).to_be_greater_than(0)
+            expect(_count_color(oracle, 0xFF16213Eu32)).to_be_greater_than(0)
+            expect(_count_color(oracle, 0xFFA0C4FFu32)).to_be_greater_than(0)
+            expect(_count_color(oracle, 0xFF0F3460u32)).to_be_greater_than(0)
+            expect(_count_color(oracle, 0xFF533483u32)).to_be_greater_than(0)
+            expect(_count_color(oracle, 0xFFE0E0FFu32)).to_be_greater_than(0)
+            # A flat fill would have every pixel the same colour; require that
+            # the background is a MINORITY of the frame's distinct structure.
+            expect(_count_color(oracle, 0xFF1A1A2Eu32)).to_not_equal(SPEC_W * SPEC_H)
+            # The 1px border must be exactly where it was drawn -- this is what
+            # catches a write-back that silently lost the thin edges.
+            expect(oracle[15 * SPEC_W + 5]).to_equal(0xFF533483u32)
+            expect(oracle[15 * SPEC_W + 51]).to_equal(0xFF533483u32)
+            expect(oracle[31 * SPEC_W + 5]).to_equal(0xFF533483u32)
+            # ...and the card interior just inside that border must NOT be the
+            # border colour, so a fill that overran the edges also fails here.
+            expect(oracle[16 * SPEC_W + 6]).to_equal(0xFF0F3460u32)
+            # The odd-column vertical rule.
+            expect(oracle[30 * SPEC_W + 63]).to_equal(0xFF533483u32)
+            print "[lane-matrix] ORACLE VERIFIED: nonzero={_nonzero(oracle)} rowpair={_row_pair_identity(oracle)} bg={_count_color(oracle, 0xFF1A1A2Eu32)} of {SPEC_W * SPEC_H} -- multi-colour scene with intact 1px borders"
+
+    context "lane availability (skipped-and-why, never silently passed)":
+
+        it "reports the SIMD gate honestly rather than inferring it":
+            # `cpu_simd` is the ONLY genuine SIMD lane. Its create is gated on
+            # native_pixel_rows_enabled(); when that is false the create must
+            # FAIL rather than quietly serve scalar pixels under the SIMD name.
+            val simd_ok = native_pixel_rows_enabled()
+            print "[lane-matrix] AVAILABILITY cpu_simd: native_pixel_rows_enabled={simd_ok}"
+            match Engine2D.create_requested_backend(SPEC_W, SPEC_H, "cpu_simd"):
+                Ok(e):
+                    e.shutdown()
+                    # A create that succeeded proves the gate was open.
+                    if not simd_ok:
+                        print "[lane-matrix] AVAILABILITY cpu_simd: CREATE SUCCEEDED WITH THE GATE CLOSED -- scalar pixels would be served under the SIMD name; failing closed"
+                    expect(simd_ok).to_equal(true)
+                Err(msg):
+                    print "[lane-matrix] AVAILABILITY cpu_simd: UNAVAILABLE reason='{msg}'"
+                    # Fail-closed is only correct if the gate really is closed.
+                    if simd_ok:
+                        print "[lane-matrix] AVAILABILITY cpu_simd: GATE OPEN BUT CREATE FAILED -- the SIMD lane is being reported unavailable on a SIMD-capable host"
+                    expect(simd_ok).to_equal(false)
+
+        it "reports metal as unavailable on this host rather than faking it":
+            # Metal is an Apple API. On Linux the create must fail; a matrix
+            # that reported a metal pass here would be fabricating a lane.
+            match Engine2D.create_requested_backend(SPEC_W, SPEC_H, "metal"):
+                Ok(e):
+                    e.shutdown()
+                    print "[lane-matrix] AVAILABILITY metal: create SUCCEEDED -- this is an Apple host"
+                Err(msg):
+                    print "[lane-matrix] AVAILABILITY metal: UNAVAILABLE reason='{msg}' -- Metal is an Apple API and this is not an Apple host; the Vulkan/Metal matrix slot is served by vulkan"
+                    expect(msg).to_not_equal("")
+
+        it "reports opencl as unavailable rather than substituting another backend":
+            match Engine2D.create_requested_backend(SPEC_W, SPEC_H, "opencl"):
+                Ok(e):
+                    e.shutdown()
+                    print "[lane-matrix] AVAILABILITY opencl: create SUCCEEDED"
+                Err(msg):
+                    print "[lane-matrix] AVAILABILITY opencl: UNAVAILABLE reason='{msg}'"
+                    expect(msg).to_not_equal("")
+
+        it "records that webgpu presents in software by construction":
+            # backend_webgpu.spl:561 returns cpu_mirror unconditionally with
+            # emu_draw_* primitives. It is software BY CONSTRUCTION, so a
+            # device-provenance expectation there is a guaranteed false red.
+            # It is recorded as a software lane, not asserted as a GPU lane.
+            val oracle = _reference_frame()
+            val res = _render_lane("webgpu", oracle)
+            if not res.created:
+                print "[lane-matrix] AVAILABILITY webgpu: UNAVAILABLE reason='{res.fail_reason}'"
+            else:
+                print "[lane-matrix] AVAILABILITY webgpu: constructs, source={res.source} -- software by construction (backend_webgpu.spl:561 returns cpu_mirror unconditionally); NOT counted as a GPU lane"
+                _assert_provenance_invariants("webgpu", res.source, res.handle, res.identity, res.pixel_count)
+                # The load-bearing assertion: a software-by-construction lane
+                # must never carry device credentials.
+                expect(_device_proven(res.source, res.handle, res.identity, res.pixel_count)).to_equal(false)
+
+    context "lane 1 of 4 -- cpu (scalar reference)":
+
+        it "cpu lane replays the oracle bit-exactly with honest cpu provenance":
+            val oracle = _reference_frame()
+            expect(_nonzero(oracle)).to_be_greater_than(0)
+            val res = _render_lane("cpu", oracle)
+            if res.created:
+                _assert_provenance_invariants("cpu", res.source, res.handle, res.identity, res.pixel_count)
+                _report_outcome("cpu", res.source, res.handle, res.identity, res.pixel_count)
+                # The scalar CPU lane must say it is CPU. A cpu create that came
+                # back device-sourced would be a provenance defect.
+                expect(_source_is_device(res.source)).to_equal(false)
+            _compare_lane("cpu", oracle, res)
+
+    context "lane 2 of 4 -- cpu_simd (SIMD pixel rows)":
+
+        it "simd lane replays the oracle bit-exactly with honest cpu provenance":
+            val oracle = _reference_frame()
+            val res = _render_lane("cpu_simd", oracle)
+            if res.created:
+                _assert_provenance_invariants("cpu_simd", res.source, res.handle, res.identity, res.pixel_count)
+                _report_outcome("cpu_simd", res.source, res.handle, res.identity, res.pixel_count)
+                expect(_source_is_device(res.source)).to_equal(false)
+            _compare_lane("cpu_simd", oracle, res)
+
+    context "lane 3 of 4 -- vulkan (portable GPU API; Metal slot on Apple)":
+
+        it "vulkan lane replays the oracle bit-exactly and proves a device":
+            val oracle = _reference_frame()
+            val res = _render_lane("vulkan", oracle)
+            if not res.created:
+                # A create failure here is a device-availability event (the
+                # per-process vulkan leak surfaces exactly this way), not a
+                # defect in the code under test. Say so and assert nothing
+                # about a device that is not present.
+                print "[lane-matrix] vulkan: GPU BRANCH SKIPPED -- create failed at use time (reason='{res.fail_reason}'); this example proves NOTHING about the vulkan lane"
+            else:
+                _assert_provenance_invariants("vulkan", res.source, res.handle, res.identity, res.pixel_count)
+                val proven = _report_outcome("vulkan", res.source, res.handle, res.identity, res.pixel_count)
+                print "[lane-matrix] vulkan: presented-arm source={res.presented_source} (present() clears `dirty`, so the presented read takes the host-cache arm by construction)"
+                if not proven:
+                    # Not strictly proven. It must then be either honestly
+                    # device-attributed with real credentials, or an honest
+                    # cpu_fallback. A vulkan create that SUCCEEDED and returned
+                    # "cpu_mirror" means the GPU lane was silently reclassified
+                    # as CPU with no fallback recorded -- a bookkeeping defect,
+                    # not a device event, and it fails here.
+                    if res.source == "cpu_mirror":
+                        print "[lane-matrix] vulkan: SILENT CPU RECLASSIFICATION -- a live vulkan backend must report 'cpu_fallback' with a reason, never 'cpu_mirror'; failing closed"
+                    expect(res.source).to_not_equal("cpu_mirror")
+                    if _source_is_device(res.source):
+                        expect(res.handle).to_be_greater_than(0)
+                        expect(res.identity).to_be_greater_than(0)
+            _compare_lane("vulkan", oracle, res)
+
+    context "lane 4 of 4 -- cuda (direct CUDA)":
+
+        it "cuda lane replays the oracle bit-exactly and proves a device":
+            # NOTE ON THE PROBE: probe_cuda() reports "CUDA runtime unavailable"
+            # from a cold process on this host while
+            # create_with_backend_strict("cuda") succeeds with real device
+            # readback. That divergence is permanent, not load-dependent
+            # (verified byte-identical with the kill-guard off), so the probe is
+            # NOT authoritative for cuda and this lane never consults it -- it
+            # creates and asserts on what the create returned.
+            val oracle = _reference_frame()
+            val res = _render_lane("cuda", oracle)
+            if not res.created:
+                print "[lane-matrix] cuda: GPU BRANCH SKIPPED -- create failed at use time (reason='{res.fail_reason}'); this example proves NOTHING about the cuda lane"
+            else:
+                _assert_provenance_invariants("cuda", res.source, res.handle, res.identity, res.pixel_count)
+                val proven = _report_outcome("cuda", res.source, res.handle, res.identity, res.pixel_count)
+                if not proven:
+                    if res.source == "cpu_mirror":
+                        print "[lane-matrix] cuda: SILENT CPU RECLASSIFICATION -- a live cuda backend must report 'cpu_fallback' with a reason, never 'cpu_mirror'; failing closed"
+                    expect(res.source).to_not_equal("cpu_mirror")
+            _compare_lane("cuda", oracle, res)
+
+    context "cross-lane divergence":
+
+        it "characterises any disagreement between the four lanes":
+            # All four lanes replay the SAME single pixel source, so any
+            # pairwise disagreement is a rasterizer difference and is reported
+            # as a FINDING -- decomposed into oracle-only / lane-only /
+            # differing with the adjacent-row-pair signature -- never resolved
+            # by picking a winner or loosening the bound.
+            val oracle = _reference_frame()
+            print "[lane-matrix] ORACLE: nonzero={_nonzero(oracle)} rowpair={_row_pair_identity(oracle)}"
+            val cpu = _render_lane("cpu", oracle)
+            val simd = _render_lane("cpu_simd", oracle)
+            val vk = _render_lane("vulkan", oracle)
+            val cu = _render_lane("cuda", oracle)
+            var compared = 0
+            if cpu.created and simd.created:
+                val d = _diffcount(cpu.px, simd.px)
+                print "[lane-matrix] COMPARED divergence/cpu-vs-simd: diff={d} cpu_rowpair={_row_pair_identity(cpu.px)} simd_rowpair={_row_pair_identity(simd.px)}"
+                if d != 0:
+                    _decompose("cpu-vs-simd", cpu.px, simd.px)
+                compared = compared + 1
+            else:
+                print "[lane-matrix] SKIP divergence/cpu-vs-simd: a lane was unavailable -- NOT COMPARED"
+            if cpu.created and vk.created:
+                val d = _diffcount(cpu.px, vk.px)
+                print "[lane-matrix] COMPARED divergence/cpu-vs-vulkan: diff={d} cpu_rowpair={_row_pair_identity(cpu.px)} vulkan_rowpair={_row_pair_identity(vk.px)}"
+                if d != 0:
+                    _decompose("cpu-vs-vulkan", cpu.px, vk.px)
+                compared = compared + 1
+            else:
+                print "[lane-matrix] SKIP divergence/cpu-vs-vulkan: a lane was unavailable -- NOT COMPARED"
+            if cpu.created and cu.created:
+                val d = _diffcount(cpu.px, cu.px)
+                print "[lane-matrix] COMPARED divergence/cpu-vs-cuda: diff={d} cpu_rowpair={_row_pair_identity(cpu.px)} cuda_rowpair={_row_pair_identity(cu.px)}"
+                if d != 0:
+                    _decompose("cpu-vs-cuda", cpu.px, cu.px)
+                compared = compared + 1
+            else:
+                print "[lane-matrix] SKIP divergence/cpu-vs-cuda: a lane was unavailable -- NOT COMPARED"
+            if vk.created and cu.created:
+                val d = _diffcount(vk.px, cu.px)
+                print "[lane-matrix] COMPARED divergence/vulkan-vs-cuda: diff={d} vulkan_rowpair={_row_pair_identity(vk.px)} cuda_rowpair={_row_pair_identity(cu.px)}"
+                if d != 0:
+                    _decompose("vulkan-vs-cuda", vk.px, cu.px)
+                compared = compared + 1
+            else:
+                print "[lane-matrix] SKIP divergence/vulkan-vs-cuda: a lane was unavailable -- NOT COMPARED"
+            print "[lane-matrix] DIVERGENCE VERDICT: {compared} of 4 pairwise lane comparisons ran in this example."
+
+    context "the real web-render oracle across the lanes":
+
+        it "replays an actual web render through every available lane":
+            # The four comparisons above deliberately use the DETERMINISTIC
+            # reference frame, because the web layout renderer's output is
+            # wall-clock-budget degradable and a degradable oracle is a
+            # confound on a matrix whose whole purpose is to isolate the
+            # BACKEND axis: two lanes could be compared against two different
+            # oracles and the disagreement would be blamed on a backend.
+            #
+            # This example closes the remaining gap -- it drives the SAME
+            # replay with a genuine web render, so the matrix is demonstrably
+            # wired to the web renderer and not only to a synthetic scene.
+            val html = "<html><head><style>" +
+                "body { background-color: #1a1a2e; }" +
+                ".card { background-color: #0f3460; border: 2px solid #533483; }" +
+                "</style></head><body>" +
+                "<div class='card'><p>lane matrix</p></div>" +
+                "</body></html>"
+            val oracle = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val degraded = simple_web_layout_last_render_degraded()
+            if degraded:
+                val reason = simple_web_layout_last_render_degrade_reason()
+                # Every budget exhaustion must NAME its exit site. An anonymous
+                # degrade is a provenance-bookkeeping defect, not a host event
+                # -- and the four style-cascade guards were unreachable at this
+                # base precisely because they called a function that did not
+                # exist, so this assertion is load-bearing here.
+                print "[lane-matrix] WEB ORACLE: degraded at site '{reason}'"
+                expect(reason).to_not_equal("")
+            expect(oracle.len()).to_equal(SPEC_W * SPEC_H)
+            print "[lane-matrix] WEB ORACLE: nonzero={_nonzero(oracle)} rowpair={_row_pair_identity(oracle)} degraded={degraded}"
+            if _nonzero(oracle) == 0:
+                print "[lane-matrix] SKIP web-oracle: the web render produced an empty frame -- NOT COMPARED; this example proves NOTHING about web-render lane parity"
+            else:
+                val vk = _render_lane("vulkan", oracle)
+                val cu = _render_lane("cuda", oracle)
+                if vk.created:
+                    _assert_provenance_invariants("web-oracle/vulkan", vk.source, vk.handle, vk.identity, vk.pixel_count)
+                    _report_outcome("web-oracle/vulkan", vk.source, vk.handle, vk.identity, vk.pixel_count)
+                _compare_lane("web-oracle/vulkan", oracle, vk)
+                if cu.created:
+                    _assert_provenance_invariants("web-oracle/cuda", cu.source, cu.handle, cu.identity, cu.pixel_count)
+                    _report_outcome("web-oracle/cuda", cu.source, cu.handle, cu.identity, cu.pixel_count)
+                _compare_lane("web-oracle/cuda", oracle, cu)
+
+    context "run verdict":
+
+        it "states the denominator so a pass cannot be misread as complete":
+            print "[lane-matrix] RUN VERDICT: this run DECLARES {PARITY_COMPARISONS_DECLARED} lane-vs-oracle parity comparisons (cpu, cpu_simd, vulkan, cuda)."
+            print "[lane-matrix] RUN VERDICT: the number that ACTUALLY RAN is `grep -c '^.lane-matrix. COMPARED '`; the number skipped is `grep -c '^.lane-matrix. SKIP '`. Anchor at line start -- these verdict lines mention the tokens too, and an unanchored count reads the verdict's own prose as evidence."
+            print "[lane-matrix] RUN VERDICT: this run's GPU evidence is exactly the set of '[lane-matrix] <lane>: GPU-PROVEN' lines. Every 'GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU path."
+            # The GPU-PROVEN receipts carry a VARIABLE label between the tag and
+            # the token, so no fixed prefix anchors them the way `^... COMPARED `
+            # anchors the parity receipts. A bare `grep -c GPU-PROVEN` therefore
+            # counts THIS verdict line too and over-reports by one -- measured:
+            # 5 against 4 real receipts. State the subtraction explicitly rather
+            # than leave a counting rule that silently inflates.
+            print "[lane-matrix] RUN VERDICT: count GPU-PROVEN with `grep -a 'GPU-PROVEN' | grep -av 'RUN VERDICT' | wc -l`. A bare `grep -c 'GPU-PROVEN'` counts this verdict line as evidence and over-reports by exactly one."
+            print "[lane-matrix] RUN VERDICT: a PASS with fewer than {PARITY_COMPARISONS_DECLARED} lane-vs-oracle COMPARED receipts is INCONCLUSIVE, not a parity pass -- a lane was unavailable and its comparison was never made."
+            print "[lane-matrix] RUN VERDICT: cpu and cpu_simd are CPU lanes by design; a run whose only COMPARED receipts are cpu/cpu_simd proves NOTHING about GPU offload, regardless of the example count."
+            expect(PARITY_COMPARISONS_DECLARED).to_equal(4)

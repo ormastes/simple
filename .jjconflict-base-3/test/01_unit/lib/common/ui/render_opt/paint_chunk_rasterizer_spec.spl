@@ -1,0 +1,273 @@
+# @cover src/lib/common/ui/render_opt/paint_chunk_rasterizer.spl 80%
+# @tag: unit, ui, render_perf, render_opt, o3
+#
+# LANE O3 FINDING, load-bearing for this spec's design: `paint_chunks_raster`'s
+# cache key (`key_grouping_rev`/`key_property_rev`/...) is GLOBAL, not
+# per-chunk-content. Probed directly: calling `revs.mark(node, REV_PAINT)` on
+# ONE node and re-running `paint_chunks_raster` with the same generation
+# arguments invalidates ALL FOUR chunks (rastered=4, skipped=0), not just the
+# mutated one — because `revisions_chunk_grouping_rev` sums monotonic
+# per-KIND counters across the whole scene, and every chunk's key is compared
+# against that same scene-wide sum. The only genuine per-chunk selectivity
+# this data structure supports is a chunk that hasn't been synced against the
+# CURRENT generation values yet (e.g. one newly added since the last sync) vs.
+# chunks already brought up to date — confirmed by probe: 3 chunks synced,
+# a 4th added, re-run with unchanged generation args => rastered=1,
+# skipped=3. This spec tests THAT real selectivity, not a per-node-content
+# distinction the API does not actually provide.
+
+use std.spec
+use common.ui.render_opt.revisions.RenderRevisions
+use common.ui.render_opt.property_trees.{
+    PropertyTrees, PaintChunks, PT_TRANSFORM, PT_CLIP, PT_EFFECT
+}
+use common.ui.render_opt.paint_chunk_rasterizer.{
+    PaintChunkRects, ChunkRasterBuffer, paint_chunk_rasterizer_run, paint_rect
+}
+
+# 4 non-overlapping 10x10 rects laid out left-to-right in a 40x10 buffer, so
+# each chunk's region occupies an exclusive, easily-scanned column band.
+fn make_rects() -> PaintChunkRects:
+    val r = PaintChunkRects.create()
+    r.add_rect(0, 0, 10, 10, 0xFFFF0000)   # red   (chunk 1)
+    r.add_rect(10, 0, 10, 10, 0xFF00FF00)  # green (chunk 2)
+    r.add_rect(20, 0, 10, 10, 0xFF0000FF)  # blue  (chunk 3)
+    r.add_rect(30, 0, 10, 10, 0xFFFFFF00)  # yellow (chunk 4, added frame 2)
+    r
+
+fn make_scene() -> PropertyTrees:
+    val t = PropertyTrees.create()
+    t.add_node(PT_TRANSFORM, -1, 0, 0, 40, 10)
+    t.add_node(PT_CLIP, -1, 0, 0, 40, 10)
+    t.add_node(PT_EFFECT, -1, 255, 0, 0, 0)
+    t
+
+# Copy a buffer's pixels into a plain list snapshot for later comparison.
+fn snapshot(buf: ChunkRasterBuffer) -> [u32]:
+    var out: [u32] = []
+    var i: i64 = 0
+    val total = buf.stride * buf.height
+    while i < total:
+        out.push(buf.pixels[i.to_i32()])
+        i = i + 1
+    out
+
+# Count how many of the 4 column bands differ between two full-buffer
+# snapshots taken from the same 40x10 layout `make_rects` describes.
+fn count_changed_bands(before: [u32], after: [u32]) -> i64:
+    var changed: i64 = 0
+    var band: i64 = 0
+    while band < 4:
+        var band_diff = false
+        var row: i64 = 0
+        while row < 10:
+            var col: i64 = 0
+            while col < 10:
+                val x = band * 10 + col
+                val idx = (row * 40 + x).to_i32()
+                if before[idx] != after[idx]:
+                    band_diff = true
+                col = col + 1
+            row = row + 1
+        if band_diff:
+            changed = changed + 1
+        band = band + 1
+    changed
+
+describe "F4 paint_rect edge cases: zero-area, negative-origin, empty chunk list":
+    it "zero-area rects (w=0 or h=0) paint nothing":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, 2, 0, 3, 0xFFFF0000)
+        paint_rect(buf, 2, 2, 3, 0, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "fully out-of-bounds negative-y rect paints nothing (row clip works)":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, -5, 3, 2, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "negative-origin x clips to the buffer instead of bleeding into the preceding row (FIXED: see doc/08_tracking/bug/paint_rect_negative_x_row_bleed_2026-08-07.md)":
+        # `paint_rect` now clips the fill span per row to [0, buf.stride) in x,
+        # the same way it already clipped `py` to [0, buf.height) in y. Before
+        # the fix, x=-3 made `row_offset` land in the PRECEDING row's tail and
+        # the fill bled forward across the row boundary; now it is clamped to
+        # the intersection of [x, x+w) with [0, stride), i.e. [0, 2).
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, -3, 2, 5, 1, 0xFFFF0000)
+        # Row 1 (the row ABOVE the target row 2) must stay completely
+        # untouched -- no bleed at all.
+        assert_true(buf.get(7, 1) == 0)
+        assert_true(buf.get(8, 1) == 0)
+        assert_true(buf.get(9, 1) == 0)
+        # Row 2 (the intended target row) is clipped to columns [0, 2):
+        # requested span [-3, 2) intersected with [0, 10) is [0, 2).
+        assert_true(buf.get(0, 2) == 0xFFFF0000)
+        assert_true(buf.get(1, 2) == 0xFFFF0000)
+        assert_true(buf.get(2, 2) == 0)
+
+    it "negative-x rect fully left of the buffer paints nothing and touches no neighbouring row":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, -8, 3, 5, 1, 0xFFFF0000)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 100:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+    it "x + w overflowing the right edge clips instead of writing into the next row":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 7, 4, 5, 1, 0xFFFF0000)
+        # Requested span [7, 12) intersected with [0, 10) is [7, 10).
+        assert_true(buf.get(7, 4) == 0xFFFF0000)
+        assert_true(buf.get(8, 4) == 0xFFFF0000)
+        assert_true(buf.get(9, 4) == 0xFFFF0000)
+        # Row 5 (the row BELOW the target row 4) must stay untouched -- no
+        # bleed from the overflowing tail wrapping into the next row.
+        assert_true(buf.get(0, 5) == 0)
+        assert_true(buf.get(1, 5) == 0)
+        assert_true(buf.get(2, 5) == 0)
+
+    it "negative-y rect with partial row overlap paints only in-bounds rows, no wrap-around bleed":
+        val buf = ChunkRasterBuffer.create(10, 10)
+        paint_rect(buf, 2, -1, 3, 3, 0xFFFF0000)
+        # Requested rows y=-1,0,1; only rows 0 and 1 are in bounds.
+        assert_true(buf.get(2, 0) == 0xFFFF0000)
+        assert_true(buf.get(3, 0) == 0xFFFF0000)
+        assert_true(buf.get(4, 0) == 0xFFFF0000)
+        assert_true(buf.get(2, 1) == 0xFFFF0000)
+        # The last row of the buffer must not have been touched by the
+        # negative-y clip (no wrap-around from the skipped row=-1).
+        assert_true(buf.get(2, 9) == 0)
+
+    it "paint_chunk_rasterizer_run with an empty chunk list rasters nothing and reports zero counts":
+        val trees = make_scene()
+        val chunks = PaintChunks.create()
+        val rects = make_rects()
+        val revs = RenderRevisions.create(4)
+        val buf = ChunkRasterBuffer.create(40, 10)
+        val stats = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                                1, 1, 1, 1, 1)
+        assert_true(stats.rastered_count == 0)
+        assert_true(stats.skipped_count == 0)
+        var i: i64 = 0
+        var any_nonzero = false
+        while i < 400:
+            if buf.pixels[i.to_i32()] != 0:
+                any_nonzero = true
+            i = i + 1
+        assert_false(any_nonzero)
+
+describe "O3 paint-chunk rasterizer: dirty chunks paint, skipped chunks stay untouched":
+    it "frame 1 paints the 3 existing chunks; frame 2's newly-added 4th chunk is the ONLY one that paints":
+        val trees = make_scene()
+        val chunks = PaintChunks.create()
+        chunks.add_chunk_sized(1, 0, 1, 2, 0, 7, 0, 100)
+        chunks.add_chunk_sized(2, 0, 1, 2, 0, 7, 1, 100)
+        chunks.add_chunk_sized(3, 0, 1, 2, 0, 7, 2, 100)
+        val rects = make_rects()
+        val revs = RenderRevisions.create(4)
+        val buf = ChunkRasterBuffer.create(40, 10)
+
+        # Frame 1: 3 chunks exist and are all dirty (fresh keys default to 0).
+        val stats1 = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                                 1, 1, 1, 1, 1)
+        assert_true(stats1.rastered_count == 3)
+        assert_true(stats1.skipped_count == 0)
+        val frame1 = snapshot(buf)
+        assert_true(frame1[0] == 0xFFFF0000)
+        assert_true(frame1[15] == 0xFF00FF00)
+        assert_true(frame1[25] == 0xFF0000FF)
+        # band 3 (yellow, index 30..39) is still buffer-zero: chunk 4 does
+        # not exist yet.
+        assert_true(frame1[35] == 0)
+
+        # Frame 2: a 4th chunk is added, everything else about the frame is
+        # unchanged (same generation args) — this is the ONLY thing that
+        # should make anything dirty this call.
+        chunks.add_chunk_sized(4, 0, 1, 2, 0, 7, 3, 100)
+        val stats2 = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                                 1, 1, 1, 1, 1)
+        assert_true(stats2.rastered_count == 1)
+        assert_true(stats2.skipped_count == 3)
+
+        val frame2 = snapshot(buf)
+        # REAL PIXEL COMPARISON: exactly one band (the new chunk's) differs,
+        # every other band's pixels are byte-identical to frame 1.
+        assert_true(count_changed_bands(frame1, frame2) == 1)
+        assert_true(frame2[35] == 0xFFFFFF00)
+        assert_true(frame2[0] == 0xFFFF0000)
+        assert_true(frame2[15] == 0xFF00FF00)
+        assert_true(frame2[25] == 0xFF0000FF)
+
+    it "SABOTAGE: forcing every chunk to rasterize every frame breaks the exactly-one-band invariant":
+        val trees = make_scene()
+        val chunks = PaintChunks.create()
+        chunks.add_chunk_sized(1, 0, 1, 2, 0, 7, 0, 100)
+        chunks.add_chunk_sized(2, 0, 1, 2, 0, 7, 1, 100)
+        chunks.add_chunk_sized(3, 0, 1, 2, 0, 7, 2, 100)
+        val rects = make_rects()
+        val revs = RenderRevisions.create(4)
+        val buf = ChunkRasterBuffer.create(40, 10)
+
+        val _stats1 = paint_chunk_rasterizer_run(chunks, rects, trees, revs, buf,
+                                                  1, 1, 1, 1, 1)
+        val frame1 = snapshot(buf)
+
+        chunks.add_chunk_sized(4, 0, 1, 2, 0, 7, 3, 100)
+
+        # Sabotage: bypass the dirty-skip decision entirely and unconditionally
+        # repaint EVERY rect with a distinguishable "wrong" colour, exactly
+        # what a broken/no-skip rasterizer would do every frame regardless of
+        # which chunks actually went stale. A same-colour repaint of an
+        # already-fresh band would be invisible to a pixel diff and would
+        # prove nothing, so the sabotage colour must differ from frame 1's.
+        var i: i64 = 0
+        while i < rects.rect_count:
+            paint_rect(buf, rects.rect_x[i], rects.rect_y[i],
+                      rects.rect_w[i], rects.rect_h[i], 0xFF000000)
+            i = i + 1
+
+        val frame2_sabotaged = snapshot(buf)
+        val changed_sabotaged = count_changed_bands(frame1, frame2_sabotaged)
+        # All 4 bands now differ, not just the newly-added chunk 4's: the
+        # "only the newly-dirty chunk changed" invariant the real path
+        # guarantees goes red under the sabotage, exactly because the skip
+        # logic was bypassed. Assert the failure condition explicitly.
+        assert_true(changed_sabotaged == 4)
+        assert_true(changed_sabotaged != 1)
+
+        # Restore the real (non-sabotaged) path on a fresh buffer and prove it
+        # is back to reporting exactly 1 rastered / 3 skipped and exactly 1
+        # changed band — the sabotage above was a bypass of this module, not
+        # a change to its real skip logic.
+        val real_trees = make_scene()
+        val real_chunks = PaintChunks.create()
+        real_chunks.add_chunk_sized(1, 0, 1, 2, 0, 7, 0, 100)
+        real_chunks.add_chunk_sized(2, 0, 1, 2, 0, 7, 1, 100)
+        real_chunks.add_chunk_sized(3, 0, 1, 2, 0, 7, 2, 100)
+        val real_revs = RenderRevisions.create(4)
+        val real_buf = ChunkRasterBuffer.create(40, 10)
+        val _real1 = paint_chunk_rasterizer_run(real_chunks, rects, real_trees,
+                                                 real_revs, real_buf, 1, 1, 1, 1, 1)
+        val real_frame1 = snapshot(real_buf)
+        real_chunks.add_chunk_sized(4, 0, 1, 2, 0, 7, 3, 100)
+        val stats_real = paint_chunk_rasterizer_run(real_chunks, rects, real_trees,
+                                                      real_revs, real_buf, 1, 1, 1, 1, 1)
+        assert_true(stats_real.rastered_count == 1)
+        assert_true(stats_real.skipped_count == 3)
+        val real_frame2 = snapshot(real_buf)
+        assert_true(count_changed_bands(real_frame1, real_frame2) == 1)

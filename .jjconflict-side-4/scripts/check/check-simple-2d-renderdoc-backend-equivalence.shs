@@ -1,0 +1,322 @@
+#!/bin/sh
+# Canonical fail-closed aggregate for Simple 2D RenderDoc backend equivalence.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+PROFILE=focused
+case "${1:-}" in
+    "") ;;
+    --profile=focused|--profile=intensive|--profile=qemu|--profile=qualification)
+        PROFILE="${1#--profile=}"
+        ;;
+    --self-test)
+        work="$(mktemp -d "${TMPDIR:-/tmp}/simple-renderdoc-aggregate.XXXXXX")"
+        trap 'rm -rf "$work"' EXIT HUP INT TERM
+        set +e
+        SIMPLE_BIN="$work/missing-simple" \
+        BUILD_DIR="$work/out" REPORT_PATH="$work/report.md" \
+            sh "$0" --profile=focused >"$work/stdout" 2>"$work/stderr"
+        code=$?
+        set -e
+        [ "$code" -ne 0 ]
+        grep -Fq 'simple_renderdoc_aggregate_status=blocked' "$work/out/evidence.env"
+        grep -Fq 'simple_renderdoc_aggregate_runtime_admission_status=blocked' "$work/out/evidence.env"
+        grep -Eq '^simple_renderdoc_aggregate_profile_blocker_count=[1-9][0-9]*$' "$work/out/evidence.env"
+        grep -Eq '^simple_renderdoc_aggregate_row_count=[1-9][0-9]*$' "$work/out/evidence.env"
+        echo "simple_renderdoc_aggregate_self_test_status=pass"
+        exit 0
+        ;;
+    *)
+        echo "simple_renderdoc_aggregate_status=fail"
+        echo "simple_renderdoc_aggregate_reason=invalid-profile"
+        exit 2
+        ;;
+esac
+
+BUILD_DIR="${BUILD_DIR:-build/simple-2d-renderdoc-backend-equivalence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/simple_2d_renderdoc_backend_equivalence_$(date -u +%F).md}"
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+TIMEOUT_SECS="${SIMPLE_RENDERDOC_TIMEOUT_SECS:-900}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+ROWS="$BUILD_DIR/rows.tsv"
+ADMISSION_LOG="$BUILD_DIR/stage4-admission.log"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+: >"$OUT_ENV"
+: >"$ROWS"
+
+ROW_COUNT=0
+PASS_COUNT=0
+PROFILE_BLOCKERS=0
+COMPLETION_BLOCKERS=0
+BLOCKER_KEYS=""
+
+emit() {
+    printf '%s=%s\n' "$1" "$2" >>"$OUT_ENV"
+}
+
+append_blocker() {
+    key="$1"
+    if [ -z "$BLOCKER_KEYS" ]; then
+        BLOCKER_KEYS="$key"
+    else
+        BLOCKER_KEYS="$BLOCKER_KEYS,$key"
+    fi
+}
+
+record_row() {
+    key="$1"
+    selected="$2"
+    status="$3"
+    reason="$4"
+    reqs="$5"
+    source="$6"
+    elapsed_ms="$7"
+    max_rss_kb="$8"
+    artifact_path="$9"
+    shift 9
+    log_path="$1"
+
+    ROW_COUNT=$((ROW_COUNT + 1))
+    [ "$status" = pass ] && PASS_COUNT=$((PASS_COUNT + 1))
+    if [ "$status" != pass ]; then
+        COMPLETION_BLOCKERS=$((COMPLETION_BLOCKERS + 1))
+        append_blocker "$key"
+        [ "$selected" = true ] && PROFILE_BLOCKERS=$((PROFILE_BLOCKERS + 1))
+    fi
+
+    prefix="simple_renderdoc_aggregate_${key}"
+    emit "${prefix}_selected" "$selected"
+    emit "${prefix}_status" "$status"
+    emit "${prefix}_reason" "$reason"
+    emit "${prefix}_requested_backend" "n/a"
+    emit "${prefix}_actual_backend" "n/a"
+    emit "${prefix}_native_api" "n/a"
+    emit "${prefix}_execution" "pure-simple"
+    emit "${prefix}_translation" "none"
+    emit "${prefix}_adapter" "n/a"
+    emit "${prefix}_driver" "n/a"
+    emit "${prefix}_handle" "n/a"
+    emit "${prefix}_completion" "$status"
+    emit "${prefix}_readback" "n/a"
+    emit "${prefix}_record_path" "$source"
+    emit "${prefix}_artifact_path" "$artifact_path"
+    emit "${prefix}_log_path" "$log_path"
+    emit "${prefix}_exact_diff_count" "n/a"
+    emit "${prefix}_semantic_diff_count" "n/a"
+    emit "${prefix}_oracle_mismatch_count" "n/a"
+    emit "${prefix}_pair_mismatch_count" "n/a"
+    emit "${prefix}_tolerance_used" "false"
+    emit "${prefix}_elapsed_ms" "$elapsed_ms"
+    emit "${prefix}_max_rss_kb" "$max_rss_kb"
+    emit "${prefix}_requirements" "$reqs"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$key" "$selected" "$status" "$reason" "$elapsed_ms" "$max_rss_kb" "$reqs" >>"$ROWS"
+}
+
+selected_for() {
+    groups="$1"
+    case " $groups " in
+        *" $PROFILE "*) echo true ;;
+        *) echo false ;;
+    esac
+}
+
+placeholder_count() {
+    file="$1"
+    if [ ! -f "$file" ]; then
+        echo 0
+        return
+    fi
+    grep -Ec 'pending_[A-Za-z0-9_]*\(\)|fail\("[^"]*(required|pending)' "$file" 2>/dev/null || true
+}
+
+RUNTIME_ADMISSION_STATUS=blocked
+RUNTIME_ADMISSION_REASON=missing-simple-binary
+if [ -x "$SIMPLE_BIN" ]; then
+    set +e
+    SIMPLE_BINARY="$SIMPLE_BIN" sh scripts/check/check-bootstrap-essential-tools-smoke.shs \
+        >"$ADMISSION_LOG" 2>&1
+    admission_code=$?
+    set -e
+    if [ "$admission_code" -eq 0 ] \
+        && grep -Fq 'bootstrap_essential_tools_smoke=true' "$ADMISSION_LOG"; then
+        RUNTIME_ADMISSION_STATUS=pass
+        RUNTIME_ADMISSION_REASON=stage4-essential-tools-pass
+    elif grep -Fq 'error=rust_seed_binary' "$ADMISSION_LOG"; then
+        RUNTIME_ADMISSION_REASON=rust-seed-forbidden
+    else
+        RUNTIME_ADMISSION_REASON=stage4-essential-tools-failed
+    fi
+fi
+
+run_spec_row() {
+    key="$1"
+    groups="$2"
+    reqs="$3"
+    spec="$4"
+    selected="$(selected_for "$groups")"
+    if [ "$selected" != true ]; then
+        record_row "$key" false blocked profile-not-selected "$reqs" "$spec" 0 0 "" ""
+        return
+    fi
+    pending="$(placeholder_count "$spec")"
+    if [ ! -f "$spec" ]; then
+        record_row "$key" true blocked missing-spec "$reqs" "$spec" 0 0 "" ""
+        return
+    elif [ "$pending" -gt 0 ]; then
+        record_row "$key" true blocked "explicit-fail-placeholder:$pending" "$reqs" "$spec" 0 0 "" ""
+        return
+    elif [ "$RUNTIME_ADMISSION_STATUS" != pass ]; then
+        record_row "$key" true blocked "$RUNTIME_ADMISSION_REASON" "$reqs" "$spec" 0 0 "" "$ADMISSION_LOG"
+        return
+    fi
+
+    log="$BUILD_DIR/$key.log"
+    time_log="$BUILD_DIR/$key.time"
+    start_ns="$(date +%s%N)"
+    set +e
+    SIMPLE_LIB=src /usr/bin/time -f 'max_rss_kb=%M' -o "$time_log" \
+        timeout -k 5 "$TIMEOUT_SECS" "$SIMPLE_BIN" test --no-session-daemon \
+        "$spec" --mode=interpreter --clean >"$log" 2>&1
+    code=$?
+    set -e
+    end_ns="$(date +%s%N)"
+    elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+    max_rss_kb="$(sed -n 's/^max_rss_kb=//p' "$time_log" | tail -n 1)"
+    max_rss_kb="${max_rss_kb:-0}"
+    if [ "$code" -eq 0 ] && grep -Eq '[0-9]+ total, [1-9][0-9]* passed, 0 failed|All tests passed' "$log"; then
+        record_row "$key" true pass pass "$reqs" "$spec" "$elapsed_ms" "$max_rss_kb" "" "$log"
+    else
+        record_row "$key" true fail "sspec-exit-$code" "$reqs" "$spec" "$elapsed_ms" "$max_rss_kb" "" "$log"
+    fi
+}
+
+run_renderdoc_row() {
+    selected="$(selected_for 'focused intensive qualification')"
+    if [ "$selected" != true ]; then
+        record_row renderdoc_capture false blocked profile-not-selected REQ-009 \
+            scripts/check/check-renderdoc-simple-gate.shs 0 0 "" ""
+        return
+    fi
+    gate_dir="$BUILD_DIR/renderdoc-simple-gate"
+    log="$BUILD_DIR/renderdoc_capture.log"
+    time_log="$BUILD_DIR/renderdoc_capture.time"
+    start_ns="$(date +%s%N)"
+    set +e
+    BUILD_DIR="$gate_dir" REPORT_PATH="$gate_dir/report.md" \
+    RDOC_SIMPLE_EVIDENCE_ENV="${RDOC_SIMPLE_EVIDENCE_ENV:-build/renderdoc/canonical-probe/simple/evidence.env}" \
+        /usr/bin/time -f 'max_rss_kb=%M' -o "$time_log" \
+        sh scripts/check/check-renderdoc-simple-gate.shs >"$log" 2>&1
+    code=$?
+    set -e
+    end_ns="$(date +%s%N)"
+    elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+    max_rss_kb="$(sed -n 's/^max_rss_kb=//p' "$time_log" | tail -n 1)"
+    max_rss_kb="${max_rss_kb:-0}"
+    gate_env="$gate_dir/evidence.env"
+    gate_status="$(sed -n 's/^rdoc_simple_gate_status=//p' "$gate_env" 2>/dev/null | tail -n 1)"
+    gate_reason="$(sed -n 's/^rdoc_simple_gate_reason=//p' "$gate_env" 2>/dev/null | tail -n 1)"
+    artifact="$(sed -n 's/^rdoc_simple_gate_capture_file=//p' "$gate_env" 2>/dev/null | tail -n 1)"
+    if [ "$code" -eq 0 ] && [ "$gate_status" = pass ]; then
+        record_row renderdoc_capture true pass pass REQ-009 "$gate_env" \
+            "$elapsed_ms" "$max_rss_kb" "$artifact" "$log"
+    else
+        record_row renderdoc_capture true blocked "${gate_reason:-renderdoc-gate-failed}" \
+            REQ-009 "$gate_env" "$elapsed_ms" "$max_rss_kb" "$artifact" "$log"
+    fi
+}
+
+run_external_row() {
+    key="$1"
+    reqs="$2"
+    selected="$(selected_for qualification)"
+    if [ "$selected" = true ]; then
+        record_row "$key" true blocked external-host-evidence-required "$reqs" "" 0 0 "" ""
+    else
+        record_row "$key" false blocked profile-not-selected "$reqs" "" 0 0 "" ""
+    fi
+}
+
+run_spec_row record_core "focused intensive qemu qualification" REQ-001..003 \
+    test/01_unit/lib/common/renderdoc/backend_render_record_spec.spl
+run_spec_row simpleos_schema "focused intensive qemu qualification" REQ-016,018..021 \
+    test/01_unit/lib/common/renderdoc/simpleos_render_evidence_spec.spl
+run_spec_row equivalence_core "focused intensive qemu qualification" REQ-004,006 \
+    test/02_integration/rendering/backend_render_equivalence_spec.spl
+run_spec_row provenance_matrix "focused intensive qualification" REQ-005,007,008 \
+    test/02_integration/rendering/engine2d_backend_provenance_matrix_spec.spl
+run_spec_row surface_matrix "focused intensive qualification" REQ-011 \
+    test/02_integration/rendering/engine2d_render_surface_matrix_spec.spl
+run_spec_row x86_simd "focused intensive qemu qualification" REQ-020,021 \
+    test/02_integration/rendering/engine2d_x86_simd_execution_spec.spl
+run_spec_row replay_inspector "focused intensive qualification" REQ-009 \
+    test/01_unit/app/renderdoc_replay_inspect_spec.spl
+run_spec_row replay_system "focused intensive qualification" REQ-009 \
+    test/03_system/check/renderdoc_capture_replay_inspection_spec.spl
+run_spec_row web_equivalence "focused intensive qualification" REQ-012 \
+    test/03_system/gui/wm_compare/simple_web_backend_equivalence_spec.spl
+run_spec_row manual_contract "focused intensive qemu qualification" REQ-010,014,015 \
+    test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl
+run_external_row simpleos_guest REQ-016,018
+run_spec_row simpleos_qmp "qemu qualification" REQ-017,018 \
+    test/03_system/os/qemu/simpleos_render_evidence_protocol_spec.spl
+run_spec_row physical_board_contract "qemu qualification" REQ-018,019 \
+    test/03_system/os/simpleos_physical_board_render_evidence_spec.spl
+run_external_row simpleos_simd REQ-020,021
+run_renderdoc_row
+run_external_row windows_d3d11_d3d12 REQ-008
+run_external_row macos_metal REQ-008
+run_external_row physical_boards REQ-019
+
+STATUS=pass
+REASON=profile-pass
+if [ "$PROFILE_BLOCKERS" -gt 0 ]; then
+    STATUS=blocked
+    REASON=profile-blockers-present
+fi
+COMPLETION_STATUS=pass
+[ "$COMPLETION_BLOCKERS" -gt 0 ] && COMPLETION_STATUS=incomplete
+
+{
+    echo "simple_renderdoc_aggregate_schema=simple-renderdoc-aggregate-v1"
+    echo "simple_renderdoc_aggregate_profile=$PROFILE"
+    echo "simple_renderdoc_aggregate_status=$STATUS"
+    echo "simple_renderdoc_aggregate_reason=$REASON"
+    echo "simple_renderdoc_aggregate_completion_status=$COMPLETION_STATUS"
+    echo "simple_renderdoc_aggregate_runtime_admission_status=$RUNTIME_ADMISSION_STATUS"
+    echo "simple_renderdoc_aggregate_runtime_admission_reason=$RUNTIME_ADMISSION_REASON"
+    echo "simple_renderdoc_aggregate_simple_bin=$SIMPLE_BIN"
+    echo "simple_renderdoc_aggregate_stage4_admission_log=$ADMISSION_LOG"
+    echo "simple_renderdoc_aggregate_row_count=$ROW_COUNT"
+    echo "simple_renderdoc_aggregate_pass_count=$PASS_COUNT"
+    echo "simple_renderdoc_aggregate_profile_blocker_count=$PROFILE_BLOCKERS"
+    echo "simple_renderdoc_aggregate_completion_blocker_count=$COMPLETION_BLOCKERS"
+    echo "simple_renderdoc_aggregate_blocker_keys=${BLOCKER_KEYS:-none}"
+    echo "simple_renderdoc_aggregate_requirements=REQ-001..REQ-021"
+} >>"$OUT_ENV"
+
+{
+    echo "# Simple 2D RenderDoc Backend Equivalence"
+    echo
+    echo "- profile: $PROFILE"
+    echo "- status: $STATUS ($REASON)"
+    echo "- completion: $COMPLETION_STATUS"
+    echo "- Stage 4 runtime: $RUNTIME_ADMISSION_STATUS ($RUNTIME_ADMISSION_REASON)"
+    echo "- rows: $PASS_COUNT/$ROW_COUNT pass"
+    echo "- profile blockers: $PROFILE_BLOCKERS"
+    echo "- completion blockers: $COMPLETION_BLOCKERS"
+    echo
+    echo "| Row | Selected | Status | Reason | Elapsed ms | Max RSS KB | Requirements |"
+    echo "|---|---:|---|---|---:|---:|---|"
+    awk -F '\t' '{ printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5, $6, $7 }' "$ROWS"
+    echo
+    echo "## Machine-readable evidence"
+    echo
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+[ "$STATUS" = pass ]

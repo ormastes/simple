@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+source_dir="$root/src/os/kernel/arch/arm32/cosmos"
+test_source="$root/test/02_integration/os/cosmos/cosmos_ftl_contract_test.c"
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-ecc-refresh-build.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+common='-std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2'
+arm='--target=armv7-none-eabi -mcpu=cortex-a9 -marm -ffreestanding -nostdlib -fno-builtin -DCOSMOS_SILICON=1'
+profile="$source_dir/cosmos_profile_openssd2_8ch8way_v300.h"
+
+cc $common -Wno-int-to-pointer-cast -Wno-unused-function -DCOSMOS_MMIO_TEST=1 \
+    -I"$source_dir" -c "$test_source" -o "$build_dir/ftl_test.o"
+
+for unit in cosmos_ftl cosmos_ftl_nfc_backend cosmos_nvme_ftl_media; do
+    clang $arm $common -include "$profile" -I"$source_dir" \
+        -c "$source_dir/$unit.c" -o "$build_dir/$unit.arm.o"
+done
+ld.lld -r "$build_dir/cosmos_ftl.arm.o" \
+    "$build_dir/cosmos_ftl_nfc_backend.arm.o" \
+    "$build_dir/cosmos_nvme_ftl_media.arm.o" \
+    -o "$build_dir/ecc_refresh.arm.o"
+nm "$build_dir/ecc_refresh.arm.o" |
+    grep -Eq '[[:space:]]T[[:space:]]+cosmos_ftl_refresh_page$'
+
+echo "cosmos ECC refresh API and ARM relocatable link: PASS"

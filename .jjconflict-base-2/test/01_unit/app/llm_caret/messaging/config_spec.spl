@@ -1,0 +1,59 @@
+# @req REQ-LLM-MSG-006 REQ-LLM-MSG-013 REQ-LLM-MSG-016 REQ-LLM-MSG-017
+"""Messaging configuration uses typed SDN and secret references."""
+
+use std.spec.*
+use app.llm_caret.messaging.config.{decode_messaging_config}
+
+describe "LLM Caret messaging SDN configuration":
+    it "decodes server, agent, room, and transport maps":
+        val config = decode_messaging_config("""
+messaging:
+  server:
+    listen: "unix://.simple/run/messaging.sock"
+    database: .simple/state/messaging.db
+    external_http: false
+  defaults:
+    room_mode: mention
+    update_policy: milestones
+    previous_messages: 2
+    mirror_policy: full
+  agents:
+    reviewer:
+      provider: codex
+      handler: subagent
+      role: review
+      session_policy: persistent_per_thread
+  rooms:
+    development:
+      mode: room
+      update_policy: milestones
+  transports:
+    primitive:
+      enabled: true
+      mirror_policy: full
+    slack:
+      enabled: true
+      credential_ref: "secret://slack/development"
+      mirror_policy: metadata_only
+""")
+        expect(config.issues.join(" | ")).to_equal("")
+        expect(config.server.database).to_equal(".simple/state/messaging.db")
+        expect(config.agents.len()).to_equal(1)
+        expect(config.agents[0].provider).to_equal("codex")
+        expect(config.rooms[0].mode).to_equal("room")
+        expect(config.transports.len()).to_equal(2)
+
+    it "rejects raw transport tokens and unsafe listeners":
+        val config = decode_messaging_config("""
+messaging:
+  server:
+    listen: http://0.0.0.0:8080
+    database: state.db
+  transports:
+    slack:
+      enabled: true
+      credential_ref: xoxb-raw-secret
+""")
+        expect(config.valid()).to_equal(false)
+        expect(config.issues.join(" | ")).to_contain("listen must be a Unix socket or loopback HTTP")
+        expect(config.issues.join(" | ")).to_contain("secret:// reference")

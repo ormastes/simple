@@ -1,0 +1,82 @@
+use std.spec.{describe, it, expect}
+use std.common.net.byte_cursor.{ByteReader, ByteWriter}
+
+describe "ByteReader/ByteWriter big-endian wire codec":
+    it "round-trips 0xDEADBEEF through write_u32/read_u32 with exact bytes":
+        var w = ByteWriter.new()
+        w.write_u32(0xDEADBEEFu32)
+        val bytes = w.to_bytes()
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0xDEu8)
+        expect(bytes[1]).to_equal(0xADu8)
+        expect(bytes[2]).to_equal(0xBEu8)
+        expect(bytes[3]).to_equal(0xEFu8)
+        var r = ByteReader.new(bytes)
+        match r.read_u32():
+            case Ok(v): expect(v).to_equal(0xDEADBEEFu32)
+            case Err(_): assert_true(false)
+
+    it "read_u8 past end yields a clean Err, never a panic":
+        var r = ByteReader.new([])
+        match r.read_u8():
+            case Ok(_): assert_true(false)
+            case Err(msg): expect(msg).to_contain("past end")
+
+    it "read_bytes past end yields a clean Err":
+        val data: [u8] = [1u8, 2u8]
+        var r = ByteReader.new(data)
+        match r.read_bytes(5):
+            case Ok(_): assert_true(false)
+            case Err(msg): expect(msg).to_contain("past end")
+
+    it "boundary read at exact remaining length succeeds and drains the cursor":
+        val data: [u8] = [0xAAu8, 0xBBu8]
+        var r = ByteReader.new(data)
+        match r.read_u16():
+            case Ok(v): expect(v).to_equal(0xAABBu16)
+            case Err(_): assert_true(false)
+        expect(r.remaining()).to_equal(0u64)
+
+    it "interleaves u8/u16/u24/u32/u48/u64 writes and reads in order":
+        var w = ByteWriter.new()
+        w.write_u8(1u8)
+        w.write_u16(2u16)
+        w.write_u24(3u32)
+        w.write_u32(4u32)
+        w.write_u48(5u64)
+        w.write_u64(6u64)
+        val bytes = w.to_bytes()
+        expect(bytes.len()).to_equal(24)
+        var r = ByteReader.new(bytes)
+        match r.read_u8():
+            case Ok(v): expect(v).to_equal(1u8)
+            case Err(_): assert_true(false)
+        match r.read_u16():
+            case Ok(v): expect(v).to_equal(2u16)
+            case Err(_): assert_true(false)
+        match r.read_u24():
+            case Ok(v): expect(v).to_equal(3u32)
+            case Err(_): assert_true(false)
+        match r.read_u32():
+            case Ok(v): expect(v).to_equal(4u32)
+            case Err(_): assert_true(false)
+        match r.read_u48():
+            case Ok(v): expect(v).to_equal(5u64)
+            case Err(_): assert_true(false)
+        match r.read_u64():
+            case Ok(v): expect(v).to_equal(6u64)
+            case Err(_): assert_true(false)
+        expect(r.remaining()).to_equal(0u64)
+
+    it "write_bytes/read_bytes round-trips an arbitrary payload":
+        val payload: [u8] = [0x10u8, 0x20u8, 0x30u8]
+        var w = ByteWriter.new()
+        w.write_bytes(payload)
+        val bytes = w.to_bytes()
+        var r = ByteReader.new(bytes)
+        match r.read_bytes(3):
+            case Ok(v):
+                expect(v[0]).to_equal(0x10u8)
+                expect(v[1]).to_equal(0x20u8)
+                expect(v[2]).to_equal(0x30u8)
+            case Err(_): assert_true(false)

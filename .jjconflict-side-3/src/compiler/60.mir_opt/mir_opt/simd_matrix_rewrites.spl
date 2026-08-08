@@ -1,0 +1,336 @@
+# SIMD Matrix Operation Rewrites
+#
+# Profitability analysis and rewrite strategies for:
+#   - Dot product vectorization
+#   - Outer product vectorization
+#   - Matrix-vector multiply vectorization
+
+# ============================================================================
+# MatrixOpProfile — profitability profile for a matrix operation
+# ============================================================================
+
+class MatrixOpProfile:
+    """Profitability profile for a SIMD matrix operation rewrite."""
+    op_name: text
+    element_type: text
+    dimension: i64
+    vector_width: i64
+    elements_per_lane: i64
+
+impl MatrixOpProfile:
+    static fn create(name: text, elem: text, dim: i64, vw: i64) -> MatrixOpProfile:
+        val bits = element_bits(elem)
+        val epl = vw / bits
+        MatrixOpProfile(
+            op_name: name,
+            element_type: elem,
+            dimension: dim,
+            vector_width: vw,
+            elements_per_lane: epl
+        )
+
+    fn scalar_ops() -> i64:
+        if self.op_name == "dot_product":
+            self.dimension * 2
+        else:
+            if self.op_name == "outer_product":
+                self.dimension * self.dimension * 2
+            else:
+                self.dimension * self.dimension * 2
+
+    fn vector_ops() -> i64:
+        val epl = self.elements_per_lane
+        if epl <= 0:
+            self.scalar_ops()
+        else:
+            if self.op_name == "dot_product":
+                (self.dimension / epl) * 2 + log2_i64(epl)
+            else:
+                if self.op_name == "outer_product":
+                    (self.dimension / epl) * self.dimension * 2
+                else:
+                    (self.dimension / epl) * self.dimension * 2
+
+    fn speedup() -> i64:
+        val vops = self.vector_ops()
+        if vops <= 0:
+            1
+        else:
+            self.scalar_ops() / vops
+
+    fn is_profitable() -> bool:
+        val sp = self.speedup()
+        val dim_ok = self.dimension >= self.elements_per_lane
+        (sp >= 2) and dim_ok
+
+    fn break_even_dim() -> i64:
+        self.elements_per_lane
+
+    fn summary() -> text:
+        self.op_name + "[" + self.element_type + "] dim=" + self.dimension.to_text() +
+        " epl=" + self.elements_per_lane.to_text() +
+        " speedup=" + self.speedup().to_text() +
+        " profitable=" + self.is_profitable().to_text()
+
+# ============================================================================
+# DotProductRewrite — dot product vectorization
+# ============================================================================
+
+class DotProductRewrite:
+    """Vectorization rewrite for dot product operations."""
+    profile: MatrixOpProfile
+    use_fma: bool
+    use_horizontal_add: bool
+
+impl DotProductRewrite:
+    static fn f32(dim: i64, width: i64, fma: bool) -> DotProductRewrite:
+        DotProductRewrite(
+            profile: MatrixOpProfile.create("dot_product", "f32", dim, width),
+            use_fma: fma,
+            use_horizontal_add: true
+        )
+
+    static fn f64(dim: i64, width: i64, fma: bool) -> DotProductRewrite:
+        DotProductRewrite(
+            profile: MatrixOpProfile.create("dot_product", "f64", dim, width),
+            use_fma: fma,
+            use_horizontal_add: true
+        )
+
+    static fn i32(dim: i64, width: i64) -> DotProductRewrite:
+        DotProductRewrite(
+            profile: MatrixOpProfile.create("dot_product", "i32", dim, width),
+            use_fma: false,
+            use_horizontal_add: false
+        )
+
+    fn reduction_tree_depth() -> i64:
+        log2_i64(self.profile.elements_per_lane)
+
+    fn instruction_sequence() -> text:
+        if self.use_fma:
+            "LOAD,FMADD,REDUCE"
+        else:
+            if self.use_horizontal_add:
+                "LOAD,MUL,HADD"
+            else:
+                "LOAD,MUL,REDUCE"
+
+    fn is_applicable() -> bool:
+        self.profile.is_profitable()
+
+    fn summary() -> text:
+        "DotProduct[" + self.profile.element_type + "]" +
+        " seq=" + self.instruction_sequence() +
+        " depth=" + self.reduction_tree_depth().to_text() +
+        " applicable=" + self.is_applicable().to_text()
+
+# ============================================================================
+# OuterProductRewrite — outer product (vector x vector^T = matrix)
+# ============================================================================
+
+class OuterProductRewrite:
+    """Vectorization rewrite for outer product operations."""
+    profile: MatrixOpProfile
+    row_dim: i64
+    col_dim: i64
+    broadcast_strategy: text
+
+impl OuterProductRewrite:
+    static fn create(elem: text, rows: i64, cols: i64, width: i64) -> OuterProductRewrite:
+        val dim = rows
+        OuterProductRewrite(
+            profile: MatrixOpProfile.create("outer_product", elem, dim, width),
+            row_dim: rows,
+            col_dim: cols,
+            broadcast_strategy: choose_broadcast_strategy(cols, width, elem)
+        )
+
+    fn total_elements() -> i64:
+        self.row_dim * self.col_dim
+
+    fn vector_stores() -> i64:
+        val epl = self.profile.elements_per_lane
+        if epl <= 0:
+            self.total_elements()
+        else:
+            self.total_elements() / epl
+
+    fn is_applicable() -> bool:
+        self.col_dim >= self.profile.elements_per_lane
+
+    fn summary() -> text:
+        "OuterProduct[" + self.profile.element_type + "]" +
+        " rows=" + self.row_dim.to_text() +
+        " cols=" + self.col_dim.to_text() +
+        " strategy=" + self.broadcast_strategy +
+        " stores=" + self.vector_stores().to_text() +
+        " applicable=" + self.is_applicable().to_text()
+
+# ============================================================================
+# MatvecRewrite — matrix-vector multiply
+# ============================================================================
+
+class MatvecRewrite:
+    """Vectorization rewrite for matrix-vector multiply."""
+    profile: MatrixOpProfile
+    rows: i64
+    cols: i64
+    accumulator_strategy: text
+
+impl MatvecRewrite:
+    static fn create(elem: text, rows: i64, cols: i64, width: i64) -> MatvecRewrite:
+        MatvecRewrite(
+            profile: MatrixOpProfile.create("matvec", elem, cols, width),
+            rows: rows,
+            cols: cols,
+            accumulator_strategy: choose_accumulator_strategy(cols, width, elem)
+        )
+
+    fn dot_products_needed() -> i64:
+        self.rows
+
+    fn is_applicable() -> bool:
+        self.cols >= self.profile.elements_per_lane
+
+    fn total_vector_ops() -> i64:
+        val epl = self.profile.elements_per_lane
+        if epl <= 0:
+            self.rows * self.cols
+        else:
+            self.rows * (self.cols / epl)
+
+    fn summary() -> text:
+        "Matvec[" + self.profile.element_type + "]" +
+        " rows=" + self.rows.to_text() +
+        " cols=" + self.cols.to_text() +
+        " strategy=" + self.accumulator_strategy +
+        " vec_ops=" + self.total_vector_ops().to_text() +
+        " applicable=" + self.is_applicable().to_text()
+
+# ============================================================================
+# MatrixRewriteEngine — applies rewrites
+# ============================================================================
+
+class MatrixRewriteEngine:
+    """Applies SIMD matrix operation rewrites based on profitability."""
+    target_width: i64
+    has_fma: bool
+    applied_dot: i64
+    applied_outer: i64
+    applied_matvec: i64
+    skipped_count: i64
+
+impl MatrixRewriteEngine:
+    static fn create(width: i64, fma: bool) -> MatrixRewriteEngine:
+        MatrixRewriteEngine(
+            target_width: width,
+            has_fma: fma,
+            applied_dot: 0,
+            applied_outer: 0,
+            applied_matvec: 0,
+            skipped_count: 0
+        )
+
+    fn try_dot(elem: text, dim: i64) -> text:
+        val r = DotProductRewrite.f32(dim, self.target_width, self.has_fma)
+        val actual = make_dot_rewrite(elem, dim, self.target_width, self.has_fma)
+        if actual.is_applicable():
+            self.applied_dot = self.applied_dot + 1
+            "applied"
+        else:
+            self.skipped_count = self.skipped_count + 1
+            "skipped:not_profitable(dim=" + dim.to_text() + ",epl=" + actual.profile.elements_per_lane.to_text() + ")"
+
+    fn try_outer(elem: text, rows: i64, cols: i64) -> text:
+        val r = OuterProductRewrite.create(elem, rows, cols, self.target_width)
+        if r.is_applicable():
+            self.applied_outer = self.applied_outer + 1
+            "applied"
+        else:
+            self.skipped_count = self.skipped_count + 1
+            "skipped:cols_too_small(cols=" + cols.to_text() + ",epl=" + r.profile.elements_per_lane.to_text() + ")"
+
+    fn try_matvec(elem: text, rows: i64, cols: i64) -> text:
+        val r = MatvecRewrite.create(elem, rows, cols, self.target_width)
+        if r.is_applicable():
+            self.applied_matvec = self.applied_matvec + 1
+            "applied"
+        else:
+            self.skipped_count = self.skipped_count + 1
+            "skipped:cols_too_small(cols=" + cols.to_text() + ",epl=" + r.profile.elements_per_lane.to_text() + ")"
+
+    fn total_applied() -> i64:
+        self.applied_dot + self.applied_outer + self.applied_matvec
+
+    fn stats() -> text:
+        "MatrixRewriteEngine stats: applied=" + self.total_applied().to_text() +
+        " (dot=" + self.applied_dot.to_text() +
+        " outer=" + self.applied_outer.to_text() +
+        " matvec=" + self.applied_matvec.to_text() +
+        ") skipped=" + self.skipped_count.to_text()
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn element_bits(elem: text) -> i64:
+    if elem == "f64":
+        64
+    else:
+        if elem == "f32":
+            32
+        else:
+            if elem == "i32":
+                32
+            else:
+                32
+
+fn log2_i64(n: i64) -> i64:
+    if n <= 1:
+        0
+    else:
+        if n <= 2:
+            1
+        else:
+            if n <= 4:
+                2
+            else:
+                if n <= 8:
+                    3
+                else:
+                    if n <= 16:
+                        4
+                    else:
+                        5
+
+fn choose_broadcast_strategy(cols: i64, width: i64, elem: text) -> text:
+    val bits = element_bits(elem)
+    val epl = width / bits
+    if cols >= epl * 4:
+        "lane_broadcast"
+    else:
+        if cols >= epl:
+            "shuffle"
+        else:
+            "gather"
+
+fn choose_accumulator_strategy(cols: i64, width: i64, elem: text) -> text:
+    val bits = element_bits(elem)
+    val epl = width / bits
+    if cols >= epl * 8:
+        "cascade"
+    else:
+        if cols >= epl * 2:
+            "tree"
+        else:
+            "horizontal"
+
+fn make_dot_rewrite(elem: text, dim: i64, width: i64, fma: bool) -> DotProductRewrite:
+    if elem == "f64":
+        DotProductRewrite.f64(dim, width, fma)
+    else:
+        if elem == "i32":
+            DotProductRewrite.i32(dim, width)
+        else:
+            DotProductRewrite.f32(dim, width, fma)

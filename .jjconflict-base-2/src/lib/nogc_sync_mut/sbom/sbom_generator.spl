@@ -1,0 +1,238 @@
+# SBOM (Software Bill of Materials) generator — SPDX-2.3-minimal JSON.
+#
+# Given a root directory and a list of (relative) file paths, produces a
+# deterministic SPDX-2.3-style JSON document: package identity per file
+# (name + sha256 checksum), plus a root package that DESCRIBES the document
+# and DEPENDS_ON any vendored third-party components passed in separately
+# (see CLAUDE.md "Owned-Code Scope": src/compiler_rust/vendor/**,
+# src/runtime/vendor/**, miniaudio.h, stb_image.h, stb_truetype.h).
+#
+# DETERMINISM (certification requirement — do not weaken):
+#   - `created` is ALWAYS caller-supplied. This module never samples wall
+#     clock time; pass "" if you have no timestamp to record.
+#   - Package/relationship ordering follows the ORDER of the `files` and
+#     `vendored_files` lists exactly as given — no Dict, no hash-set, no
+#     directory-listing order is consulted. Callers that need a canonical
+#     order must sort their input list before calling.
+#   - `document_namespace` is derived from `package_name`/`package_version`
+#     text only (no UUID, no random, no time).
+#   - CLI wiring into `bin/simple build` is OUT OF SCOPE for this module —
+#     follow-up: doc/08_tracking/feature (build-integration lane).
+#
+# JSON is built via the existing `common.json` JsonBuilder/JsonArrayBuilder
+# (not hand-rolled string interpolation) so field-name escaping and value
+# escaping reuse the one escape_json implementation in the tree.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.builder.{JsonBuilder, JsonArrayBuilder}
+use std.io_runtime.{read_file}
+use std.nogc_sync_mut.sbom.sbom_model.{
+    SbomChecksum, SbomPackage, SbomRelationship, SbomCreationInfo, SbomDocument
+}
+
+# ============================================================================
+# Path + checksum helpers
+# ============================================================================
+
+fn join_root_path(root_dir: text, rel_path: text) -> text:
+    """Join root dir + relative path with exactly one separating '/'.
+    Assumes rel_path has no leading '/' and root_dir has no trailing '/' —
+    both true for every call site in this module and its spec."""
+    if root_dir == "":
+        rel_path
+    else:
+        root_dir + "/" + rel_path
+
+fn sha256_hex_of_file(root_dir: text, rel_path: text) -> text:
+    """sha256 hex digest of the file's content. A missing file reads as ""
+    (io_runtime.read_file's documented miss behavior) and hashes to the
+    sha256("") constant — this module does not treat a missing file as an
+    error; callers who need that must check existence beforehand."""
+    val full_path = join_root_path(root_dir, rel_path)
+    val content = read_file(full_path)
+    sha256_text(content)
+
+fn make_sha256_checksum(hex_digest: text) -> SbomChecksum:
+    SbomChecksum(algorithm: "SHA256", checksum_value: hex_digest)
+
+# ============================================================================
+# Document assembly
+# ============================================================================
+
+fn root_package_id() -> text:
+    "SPDXRef-Package-Root"
+
+fn document_id() -> text:
+    "SPDXRef-DOCUMENT"
+
+fn file_package_id(index: i64) -> text:
+    # NOTE: kept as a two-statement body on purpose — a single-expression
+    # `"SPDXRef-Package-File-{index}"` body trips lint STUB001 ("unused
+    # param") because the interpolation-param checker does not look inside
+    # string-literal template text for `{index}` references. See
+    # doc/08_tracking/bug/lint_stub001_false_positive_on_string_interpolation_param_2026-07-29.md.
+    val id = "SPDXRef-Package-File-{index}"
+    id
+
+fn vendor_package_id(index: i64) -> text:
+    val id = "SPDXRef-Package-Vendor-{index}"
+    id
+
+fn build_document_namespace(package_name: text, package_version: text) -> text:
+    """Deterministic namespace URI — text-derived only, no UUID/time."""
+    "https://spdx.org/spdxdocs/{package_name}-{package_version}"
+
+fn build_file_packages(root_dir: text, files: [text], id_fn_is_vendor: bool) -> [SbomPackage]:
+    """Shared builder for both the tracked-source list and the vendored
+    third-party list — the only difference between them is the id prefix,
+    selected by id_fn_is_vendor."""
+    var out: [SbomPackage] = []
+    var i = 0
+    for path in files:
+        val digest = sha256_hex_of_file(root_dir, path)
+        val id = if id_fn_is_vendor: vendor_package_id(i) else: file_package_id(i)
+        val pkg = SbomPackage(
+            spdx_id: id,
+            name: path,
+            version_info: "NOASSERTION",
+            download_location: "NOASSERTION",
+            files_analyzed: true,
+            checksums: [make_sha256_checksum(digest)]
+        )
+        out = out.push(pkg)
+        i = i + 1
+    out
+
+fn build_relationships(file_packages: [SbomPackage], vendor_packages: [SbomPackage]) -> [SbomRelationship]:
+    var out: [SbomRelationship] = []
+    out = out.push(SbomRelationship(
+        spdx_element_id: document_id(),
+        related_spdx_element_id: root_package_id(),
+        relationship_type: "DESCRIBES"
+    ))
+    for fp in file_packages:
+        out = out.push(SbomRelationship(
+            spdx_element_id: root_package_id(),
+            related_spdx_element_id: fp.spdx_id,
+            relationship_type: "CONTAINS"
+        ))
+    for vp in vendor_packages:
+        out = out.push(SbomRelationship(
+            spdx_element_id: root_package_id(),
+            related_spdx_element_id: vp.spdx_id,
+            relationship_type: "DEPENDS_ON"
+        ))
+    out
+
+fn generate_sbom_document(
+    root_dir: text,
+    package_name: text,
+    package_version: text,
+    files: [text],
+    vendored_files: [text],
+    creators: [text],
+    created: text
+) -> SbomDocument:
+    """Build the in-memory SbomDocument for root_dir + files + vendored_files.
+    `created` is caller-supplied — pass "" if no timestamp is available."""
+    val file_packages = build_file_packages(root_dir, files, false)
+    val vendor_packages = build_file_packages(root_dir, vendored_files, true)
+    val root_pkg = SbomPackage(
+        spdx_id: root_package_id(),
+        name: package_name,
+        version_info: package_version,
+        download_location: "NOASSERTION",
+        files_analyzed: files.len() > 0,
+        checksums: []
+    )
+    var packages: [SbomPackage] = [root_pkg]
+    for fp in file_packages:
+        packages = packages.push(fp)
+    for vp in vendor_packages:
+        packages = packages.push(vp)
+    val relationships = build_relationships(file_packages, vendor_packages)
+    SbomDocument(
+        spdx_version: "SPDX-2.3",
+        data_license: "CC0-1.0",
+        spdx_id: document_id(),
+        name: package_name,
+        document_namespace: build_document_namespace(package_name, package_version),
+        creation_info: SbomCreationInfo(creators: creators, created: created),
+        packages: packages,
+        relationships: relationships
+    )
+
+# ============================================================================
+# JSON serialization (via common.json JsonBuilder — no manual brace strings)
+# ============================================================================
+
+fn serialize_checksum(c: SbomChecksum) -> JsonBuilder:
+    JsonBuilder.object()
+        .field("algorithm", c.algorithm)
+        .field("checksumValue", c.checksum_value)
+
+fn serialize_package(p: SbomPackage) -> JsonBuilder:
+    val b = JsonBuilder.object()
+    b.field("SPDXID", p.spdx_id)
+    b.field("name", p.name)
+    b.field("versionInfo", p.version_info)
+    b.field("downloadLocation", p.download_location)
+    b.field_bool("filesAnalyzed", p.files_analyzed)
+    val checksums_arr = JsonArrayBuilder.new()
+    for c in p.checksums:
+        checksums_arr.item_object(serialize_checksum(c))
+    b.field_array_raw("checksums", checksums_arr)
+    b
+
+fn serialize_relationship(r: SbomRelationship) -> JsonBuilder:
+    JsonBuilder.object()
+        .field("spdxElementId", r.spdx_element_id)
+        .field("relationshipType", r.relationship_type)
+        .field("relatedSpdxElement", r.related_spdx_element_id)
+
+fn serialize_creation_info(ci: SbomCreationInfo) -> JsonBuilder:
+    val creators_arr = JsonArrayBuilder.new()
+    for c in ci.creators:
+        creators_arr.item(c)
+    JsonBuilder.object()
+        .field_array_raw("creators", creators_arr)
+        .field("created", ci.created)
+
+fn serialize_sbom(doc: SbomDocument) -> text:
+    """Serialize an SbomDocument to SPDX-2.3-style JSON text. Deterministic:
+    field order, array order, and content follow doc's own fields exactly —
+    no map/set iteration, no clock read."""
+    val packages_arr = JsonArrayBuilder.new()
+    for p in doc.packages:
+        packages_arr.item_object(serialize_package(p))
+    val rels_arr = JsonArrayBuilder.new()
+    for r in doc.relationships:
+        rels_arr.item_object(serialize_relationship(r))
+    JsonBuilder.object()
+        .field("spdxVersion", doc.spdx_version)
+        .field("dataLicense", doc.data_license)
+        .field("SPDXID", doc.spdx_id)
+        .field("name", doc.name)
+        .field("documentNamespace", doc.document_namespace)
+        .field_object("creationInfo", serialize_creation_info(doc.creation_info))
+        .field_array_raw("packages", packages_arr)
+        .field_array_raw("relationships", rels_arr)
+        .build()
+
+fn generate_sbom_json(
+    root_dir: text,
+    package_name: text,
+    package_version: text,
+    files: [text],
+    vendored_files: [text],
+    creators: [text],
+    created: text
+) -> text:
+    """Convenience one-shot: build the document model, then serialize it."""
+    val doc = generate_sbom_document(
+        root_dir, package_name, package_version, files, vendored_files, creators, created
+    )
+    serialize_sbom(doc)
+
+export generate_sbom_document, generate_sbom_json, serialize_sbom
+export sha256_hex_of_file, join_root_path

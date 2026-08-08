@@ -1,0 +1,146 @@
+use std.crypto.sha256.{sha256_text}
+use app.sspec_maintain.analyzer.{normalize_sspec_path}
+
+struct SspecAnalysisIdentityParts:
+    path: text
+    source: text
+    mirror_identity: text
+    rules_identity: text
+    config_identity: text
+    tool_identity: text
+
+struct SspecCacheRecord:
+    schema_version: text
+    identity: text
+    effective_score: i64
+    maximum_severity_rank: i64
+    human_report: text
+    json_report: text
+    sarif_report: text
+
+struct SspecPairCacheKey:
+    normalized_path: text
+    source_hash: text
+    mirror_path: text
+    mirror_hash: text
+    rule_version: text
+    configuration_hash: text
+    tool_version: text
+    identity: text
+
+fn sspec_analysis_identity(parts: SspecAnalysisIdentityParts) -> text:
+    sspec_cache_identity(parts.path, parts.source, parts.mirror_identity,
+        parts.rules_identity, parts.config_identity, parts.tool_identity)
+
+fn sspec_cache_identity(path: text, source: text, mirror_identity: text,
+        rules_identity: text, config_identity: text, tool_identity: text) -> text:
+    sha256_text(path + "\n" + sha256_text(source) + "\n" + mirror_identity +
+        "\n" + rules_identity + "\n" + config_identity + "\n" + tool_identity)
+
+fn sspec_cache_configuration_identity(baseline_content: text,
+        suppressions_content: text, rule_filters: [text]) -> text:
+    var ordered: [text] = []
+    for rule_id in rule_filters:
+        val normalized = rule_id.trim()
+        if normalized != "" and not ordered.contains(normalized):
+            ordered.push(normalized)
+    ordered.sort()
+    sha256_text(sha256_text(baseline_content) + "\n" +
+        sha256_text(suppressions_content) + "\n" + ordered.join(","))
+
+fn build_sspec_pair_cache_key(path: text, source: Option<text>, mirror_path: text,
+        mirror: Option<text>, rule_version: text, configuration_hash: text,
+        tool_version: text) -> SspecPairCacheKey:
+    val normalized_path = normalize_sspec_path(path)
+    val normalized_mirror_path = normalize_sspec_path(mirror_path)
+    val source_hash = match source:
+        case Some(content): sha256_text(content)
+        case None: "absent"
+    val mirror_hash = match mirror:
+        case Some(content): sha256_text(content)
+        case None: "missing"
+    val identity = sha256_text(normalized_path + "\n" + source_hash + "\n" +
+        normalized_mirror_path + "\n" + mirror_hash + "\n" + rule_version +
+        "\n" + configuration_hash + "\n" + tool_version)
+    SspecPairCacheKey(normalized_path: normalized_path, source_hash: source_hash,
+        mirror_path: normalized_mirror_path, mirror_hash: mirror_hash,
+        rule_version: rule_version, configuration_hash: configuration_hash,
+        tool_version: tool_version, identity: identity)
+
+fn sspec_pair_cache_path(cache_directory: text, key: SspecPairCacheKey) -> text:
+    cache_directory + "/" + key.identity + ".cache"
+
+fn sspec_pair_cache_reusable(record: SspecCacheRecord,
+        key: SspecPairCacheKey) -> bool:
+    record.schema_version == "sspec-maintain-cache/v1" and
+        record.identity == key.identity
+
+fn sspec_finding_baseline_state(fingerprint: text, previous: [text]) -> text:
+    if previous.contains(fingerprint): "unchanged" else: "new"
+
+fn sspec_resolved_fingerprints(active: [text], previous: [text]) -> [text]:
+    var resolved: [text] = []
+    for fingerprint in previous:
+        if not active.contains(fingerprint):
+            resolved.push(fingerprint)
+    resolved
+
+fn encode_sspec_cache_record(record: SspecCacheRecord) -> text:
+    "schema={record.schema_version}\nidentity={record.identity}\n" +
+        "score={record.effective_score}\nseverity={record.maximum_severity_rank}\n" +
+        "human_len={record.human_report.len()}\njson_len={record.json_report.len()}\n" +
+        "sarif_len={record.sarif_report.len()}\n--payload--\n" +
+        record.human_report + record.json_report + record.sarif_report
+
+fn _cache_header_value(lines: [text], key: text) -> text:
+    val prefix = key + "="
+    for line in lines:
+        if line.starts_with(prefix):
+            return line[prefix.len():]
+    ""
+
+fn decode_sspec_cache_record(content: text) -> Result<SspecCacheRecord, text>:
+    val marker = "\n--payload--\n"
+    val marker_offset = content.find(marker)
+    if marker_offset < 0:
+        return Err("truncated SSpec cache record")
+    val lines = content[:marker_offset].split("\n")
+    val schema = _cache_header_value(lines, "schema")
+    if schema != "sspec-maintain-cache/v1":
+        return Err("unsupported SSpec cache schema")
+    val identity = _cache_header_value(lines, "identity")
+    val score = _cache_header_value(lines, "score").to_i64() ?? -1
+    val severity = _cache_header_value(lines, "severity").to_i64() ?? -1
+    val human_len = _cache_header_value(lines, "human_len").to_i64() ?? -1
+    val json_len = _cache_header_value(lines, "json_len").to_i64() ?? -1
+    val sarif_len = _cache_header_value(lines, "sarif_len").to_i64() ?? -1
+    if identity == "" or score < 0 or severity < 0 or human_len < 0 or
+            json_len < 0 or sarif_len < 0:
+        return Err("invalid SSpec cache header")
+    val payload = content[marker_offset + marker.len():]
+    if payload.len() != human_len + json_len + sarif_len:
+        return Err("truncated SSpec cache payload")
+    val json_start = human_len
+    val sarif_start = human_len + json_len
+    Ok(SspecCacheRecord(schema_version: schema, identity: identity,
+        effective_score: score, maximum_severity_rank: severity,
+        human_report: payload[:json_start],
+        json_report: payload[json_start:sarif_start],
+        sarif_report: payload[sarif_start:]))
+
+fn render_sspec_baseline(fingerprints: [text]) -> text:
+    var ordered: [text] = []
+    for fingerprint in fingerprints:
+        if fingerprint != "" and not ordered.contains(fingerprint):
+            ordered.push(fingerprint)
+    ordered.sort()
+    ordered.join("\n") + (if ordered.len() > 0: "\n" else: "")
+
+fn parse_sspec_baseline(content: text) -> [text]:
+    var fingerprints: [text] = []
+    for line in content.split("\n"):
+        val fingerprint = line.trim()
+        if fingerprint != "" and not fingerprints.contains(fingerprint):
+            fingerprints.push(fingerprint)
+    fingerprints.sort()
+    fingerprints

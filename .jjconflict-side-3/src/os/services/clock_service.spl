@@ -1,0 +1,261 @@
+# SimpleOS Monotonic Clock Service (G13)
+#
+# Provides monotonic tick-based timekeeping, one-shot alarms, periodic
+# timers, and timerfd-style primitives for SimpleOS user-space.
+#
+# ECS internals: entities are alarms; components live in per-type
+# ComponentStore<T> columns owned by ClockWorld.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+# ============================================================================
+# Alarm kind constants
+# ============================================================================
+
+val ALARM_ONESHOT: u32 = 0
+val ALARM_PERIODIC: u32 = 1
+val ALARM_TIMERFD: u32 = 2
+
+# ============================================================================
+# Components (per MDSOC+ ECS spec)
+# ============================================================================
+
+struct Deadline:
+    """Monotonic tick at which the alarm fires."""
+    ticks: u64
+
+struct Period:
+    """0 for one-shot, >0 for periodic."""
+    ticks: u64
+
+struct Subscriber:
+    """Endpoint to notify when the alarm fires."""
+    endpoint_id: u64
+
+struct AlarmKind:
+    """ALARM_ONESHOT | ALARM_PERIODIC | ALARM_TIMERFD"""
+    kind: u32
+
+# ============================================================================
+# ClockWorld — ECS world for clock/alarm state
+# ============================================================================
+
+struct ClockWorld:
+    """ECS world that owns all alarm entities and their component data."""
+    base: WorldBase
+    deadlines:   ComponentStore<Deadline>
+    periods:     ComponentStore<Period>
+    subscribers: ComponentStore<Subscriber>
+    kinds:       ComponentStore<AlarmKind>
+
+# ============================================================================
+# Notification stub — kernel will wire real IPC at link time.
+# A module-level counter lets tests observe calls without an extern.
+#
+# This was `extern fn clock_notify(endpoint_id: u64)` with no implementation
+# anywhere in the tree, so firing any alarm aborted with
+# "unknown extern function: clock_notify". The failure was masked until
+# 2026-07-27 because two-hop mutation loss meant no alarm was ever armed.
+# Same stub shape as ds_notify in ds_service.spl.
+# ============================================================================
+
+var clock_notify_count: u64 = 0
+
+fn clock_notify(endpoint_id: u64):
+    """Notify the subscriber endpoint that its alarm fired.
+
+    Production build: replace body with real IPC send.
+    """
+    clock_notify_count = clock_notify_count + 1
+
+fn clock_notify_count_value() -> u64:
+    """Accessor for clock_notify_count.
+
+    Importers must call this instead of reading the module-level `var`
+    directly: cross-module reads of a mutable module global observe the
+    initial value on the self-hosted binary.
+    """
+    clock_notify_count
+
+# ============================================================================
+# System: sys_fire_due_alarms
+#
+# Two-pass: first collect entities to fire, then mutate stores.
+# Periodic/timerfd alarms have their deadline advanced; one-shots are removed.
+# ============================================================================
+
+fn sys_fire_due_alarms(world_in: ClockWorld, tick: u64) -> ClockWorld:
+    """ECS system: fire all alarms whose deadline <= tick.
+
+    One-shots are removed after firing (despawned from all stores).
+    Periodic/timerfd alarms have their deadline advanced by Period.ticks.
+    Uses two-pass iteration to avoid swap-with-last aliasing during removal.
+
+    Returns the mutated world: `ClockWorld` is a struct (value type), so the
+    caller must write the result back — mutating the parameter in place is
+    invisible to the caller.
+    """
+    var world = world_in
+    val count = world.deadlines.len()
+
+    # Pass 1: collect entity ids and their deadline data
+    var to_fire: [i32] = []
+    var i = 0
+    while i < count:
+        val eid_raw = world.deadlines.entity_at(i)
+        val e = Entity(id: eid_raw, generation: 1)
+        val slot = world.deadlines.get_slot(e)
+        if slot >= 0:
+            val dl = world.deadlines.dense[slot]
+            if tick >= dl.ticks:
+                to_fire = to_fire.push(eid_raw)
+        i = i + 1
+
+    # Pass 2: notify and update/remove
+    for eid_raw in to_fire:
+        val e = Entity(id: eid_raw, generation: 1)
+        val sub_slot = world.subscribers.get_slot(e)
+        if sub_slot >= 0:
+            clock_notify(world.subscribers.dense[sub_slot].endpoint_id)
+        val period_slot = world.periods.get_slot(e)
+        val is_periodic = period_slot >= 0 and world.periods.dense[period_slot].ticks > 0
+        if is_periodic:
+            # Advance deadline; keep entity alive
+            val dl_slot = world.deadlines.get_slot(e)
+            if dl_slot >= 0:
+                val old_ticks = world.deadlines.dense[dl_slot].ticks
+                val period_ticks = world.periods.dense[period_slot].ticks
+                val ecs_tick = world.base.now()
+                # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+                var deadlines_s = world.deadlines
+                deadlines_s.insert(e, Deadline(ticks: old_ticks + period_ticks), ecs_tick)
+                world.deadlines = deadlines_s
+        else:
+            # One-shot: remove from all stores and despawn
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            var deadlines_s = world.deadlines
+            deadlines_s.remove(e)
+            world.deadlines = deadlines_s
+            var periods_s = world.periods
+            periods_s.remove(e)
+            world.periods = periods_s
+            var subscribers_s = world.subscribers
+            subscribers_s.remove(e)
+            world.subscribers = subscribers_s
+            var kinds_s = world.kinds
+            kinds_s.remove(e)
+            world.kinds = kinds_s
+            var base_s = world.base
+            base_s.despawn(e)
+            world.base = base_s
+    world
+
+# ============================================================================
+# ClockService — public API
+# ============================================================================
+
+class ClockService:
+    """Monotonic clock service with alarm and timerfd support.
+
+    Owns a ClockWorld (ECS world) internally. The public API is a thin
+    shell over ECS system calls.
+    """
+    world: ClockWorld
+    now: u64
+    started: bool
+
+impl ClockService:
+    static fn new() -> ClockService:
+        """Create a fresh ClockService with now=0."""
+        ClockService(
+            world: ClockWorld(
+                base:        WorldBase.new(),
+                deadlines:   ComponentStore.new(),
+                periods:     ComponentStore.new(),
+                subscribers: ComponentStore.new(),
+                kinds:       ComponentStore.new()
+            ),
+            now: 0,
+            started: false
+        )
+
+    me clock_service_tick() -> u64:
+        """Advance now by 1, run sys_fire_due_alarms, return new now."""
+        self.now = self.now + 1
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var w = self.world
+        var base_s = w.base
+        base_s.advance()
+        w.base = base_s
+        self.world = sys_fire_due_alarms(w, self.now)
+        self.started = true
+        self.now
+
+    fn clock_service_now() -> u64:
+        """Return current monotonic tick."""
+        self.now
+
+    me arm_alarm(deadline: u64, period: u64, subscriber: u64, kind: u32) -> Entity:
+        """Spawn one alarm entity and install its four components.
+
+        two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        (extract-mutate-writeback for every cross-module store).
+        """
+        var base_s = self.world.base
+        val e = base_s.spawn()
+        self.world.base = base_s
+        val ecs_tick = self.world.base.now()
+        var deadlines_s = self.world.deadlines
+        deadlines_s.insert(e, Deadline(ticks: deadline), ecs_tick)
+        self.world.deadlines = deadlines_s
+        var periods_s = self.world.periods
+        periods_s.insert(e, Period(ticks: period), ecs_tick)
+        self.world.periods = periods_s
+        var subscribers_s = self.world.subscribers
+        subscribers_s.insert(e, Subscriber(endpoint_id: subscriber), ecs_tick)
+        self.world.subscribers = subscribers_s
+        var kinds_s = self.world.kinds
+        kinds_s.insert(e, AlarmKind(kind: kind), ecs_tick)
+        self.world.kinds = kinds_s
+        e
+
+    me clock_arm_oneshot(deadline: u64, subscriber: u64) -> Entity:
+        """Arm a one-shot alarm that fires once at the given deadline tick."""
+        self.arm_alarm(deadline, 0, subscriber, ALARM_ONESHOT)
+
+    me clock_arm_periodic(period: u64, first_deadline: u64, subscriber: u64) -> Entity:
+        """Arm a periodic alarm that fires every `period` ticks starting at first_deadline."""
+        self.arm_alarm(first_deadline, period, subscriber, ALARM_PERIODIC)
+
+    me clock_arm_timerfd(period: u64, first_deadline: u64, subscriber: u64) -> Entity:
+        """Arm a timerfd-style alarm (periodic, distinguishable by AlarmKind.TIMERFD)."""
+        self.arm_alarm(first_deadline, period, subscriber, ALARM_TIMERFD)
+
+    me clock_cancel(alarm: Entity) -> bool:
+        """Remove an alarm from all component stores and despawn its entity.
+        Returns true if the entity was live (found in deadlines store)."""
+        if not self.world.deadlines.contains(alarm):
+            return false
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var deadlines_s = self.world.deadlines
+        deadlines_s.remove(alarm)
+        self.world.deadlines = deadlines_s
+        var periods_s = self.world.periods
+        periods_s.remove(alarm)
+        self.world.periods = periods_s
+        var subscribers_s = self.world.subscribers
+        subscribers_s.remove(alarm)
+        self.world.subscribers = subscribers_s
+        var kinds_s = self.world.kinds
+        kinds_s.remove(alarm)
+        self.world.kinds = kinds_s
+        var base_s = self.world.base
+        base_s.despawn(alarm)
+        self.world.base = base_s
+        true
+
+    fn clock_pending_count() -> i32:
+        """Return the count of active (not yet cancelled) alarms."""
+        self.world.deadlines.len()

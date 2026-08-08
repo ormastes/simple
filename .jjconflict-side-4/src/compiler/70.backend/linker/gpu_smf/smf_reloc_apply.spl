@@ -1,0 +1,127 @@
+# ============================================================================
+# compiler/70.backend/linker/gpu_smf/smf_reloc_apply.spl — L8 relocation
+# applier over the formula oracle (link_manager wave 8, Lane APPLY)
+#
+# Byte-patching layer above smf_reloc_formulas.spl: values ALWAYS come from
+# smf_reloc_compute (imported, never reimplemented here). All-or-nothing:
+# any reject (out-of-range symbol_index, patch window past the section end,
+# formula ok: false) returns ok: false with EMPTY bytes and rejected_index =
+# the failing reloc's position; no partial patch ever escapes. Success
+# returns a patched COPY of the section with the little-endian bytes of the
+# computed value written at each reloc offset (width 8 for Abs64, 4 for the
+# 32-bit variants). Byte arrays are rebuilt by push (COLL019 — no indexed
+# assignment).
+# ============================================================================
+
+use compiler.backend.linker.smf_writer.{SmfRelocation, RelocationType}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    SmfRelocValue,
+    smf_reloc_compute
+}
+
+# ----------------------------------------------------------------------------
+# Result record
+# ----------------------------------------------------------------------------
+
+struct SmfApplyResult:
+    ok: bool
+    bytes: [u8]
+    rejected_index: i64
+
+# ----------------------------------------------------------------------------
+# Patch width per variant (bytes written at reloc.offset)
+# ----------------------------------------------------------------------------
+
+fn smf_reloc_width(reloc_type: RelocationType) -> i64:
+    """Field width in bytes for one RelocationType variant: 8 for Abs64,
+    4 for every 32-bit variant (Rel32/PltRel32/GotRel32/Abs32)."""
+    match reloc_type:
+        case Abs64: 8
+        case Rel32: 4
+        case PltRel32: 4
+        case GotRel32: 4
+        case Abs32: 4
+
+# ----------------------------------------------------------------------------
+# Little-endian byte encoding (two's complement, no negative shifts)
+# ----------------------------------------------------------------------------
+
+fn _smf_le_bytes(value: i64, width: i64) -> [u8]:
+    """Little-endian bytes of value at the given width (4 or 8).
+
+    Negative values encode as two's complement. The value is first split
+    into non-negative 32-bit halves (`& 0xFFFFFFFF` clears the sign bits;
+    the high half comes from an EXACT division by 2^32, so truncation
+    direction never matters) — no right-shift of a negative i64 is ever
+    performed."""
+    val low = value & 0xFFFFFFFF
+    val high = ((value - low) / 4294967296) & 0xFFFFFFFF
+    var out: [u8] = []
+    out.push((low & 0xFF) as u8)
+    out.push(((low >> 8) & 0xFF) as u8)
+    out.push(((low >> 16) & 0xFF) as u8)
+    out.push(((low >> 24) & 0xFF) as u8)
+    if width == 8:
+        out.push((high & 0xFF) as u8)
+        out.push(((high >> 8) & 0xFF) as u8)
+        out.push(((high >> 16) & 0xFF) as u8)
+        out.push(((high >> 24) & 0xFF) as u8)
+    out
+
+# ----------------------------------------------------------------------------
+# Single-window patch by push-rebuild (COLL019 — no b[i] = v)
+# ----------------------------------------------------------------------------
+
+fn _smf_patch_window(bytes: [u8], offset: i64, patch: [u8]) -> [u8]:
+    """Rebuild bytes with patch written at [offset, offset + patch.len()).
+    Caller guarantees the window lies inside the array."""
+    val n = bytes.len()
+    val w = patch.len()
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        if (i >= offset) and (i < offset + w):
+            out.push(patch[i - offset])
+        else:
+            out.push(bytes[i])
+        i = i + 1
+    out
+
+fn _smf_apply_reject(idx: i64) -> SmfApplyResult:
+    val empty: [u8] = []
+    SmfApplyResult(ok: false, bytes: empty, rejected_index: idx)
+
+# ----------------------------------------------------------------------------
+# Applier entry point
+# ----------------------------------------------------------------------------
+
+fn smf_apply_relocations(section_bytes: [u8], section_addr: i64, relocs: [SmfRelocation], symbol_addrs: [i64]) -> SmfApplyResult:
+    """Apply relocs to a copy of section_bytes, in reloc order.
+
+    Per reloc: p = section_addr + offset, s = symbol_addrs[symbol_index],
+    value = smf_reloc_compute(reloc_type, s, addend, p), then the value's
+    little-endian bytes (smf_reloc_width wide) replace the window at
+    offset. Rejects — out-of-range symbol_index, negative offset, window
+    past the section end, or formula ok: false — abort the WHOLE apply:
+    ok: false, empty bytes, rejected_index = the failing reloc's position.
+    Success: ok: true, patched copy, rejected_index = -1."""
+    val section_len = section_bytes.len()
+    val sym_count = symbol_addrs.len()
+    val reloc_count = relocs.len()
+    var patched = section_bytes
+    var i = 0
+    while i < reloc_count:
+        val reloc = relocs[i]
+        if (reloc.symbol_index < 0) or (reloc.symbol_index >= sym_count):
+            return _smf_apply_reject(i)
+        val width = smf_reloc_width(reloc.reloc_type)
+        if (reloc.offset < 0) or (reloc.offset + width > section_len):
+            return _smf_apply_reject(i)
+        val p = section_addr + reloc.offset
+        val s = symbol_addrs[reloc.symbol_index]
+        val v = smf_reloc_compute(reloc.reloc_type, s, reloc.addend, p)
+        if not v.ok:
+            return _smf_apply_reject(i)
+        patched = _smf_patch_window(patched, reloc.offset, _smf_le_bytes(v.value, width))
+        i = i + 1
+    SmfApplyResult(ok: true, bytes: patched, rejected_index: -1)

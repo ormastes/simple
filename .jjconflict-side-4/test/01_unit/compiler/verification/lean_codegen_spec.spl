@@ -1,0 +1,65 @@
+use verification.lean.codegen as codegen
+
+describe "Lean Code Generation":
+    context "LeanCodegenOptions":
+        it "creates with defaults":
+            val opts = codegen.LeanCodegenOptions.new()
+            expect(opts.module_name).to_equal("Main")
+            expect(opts.generate_stubs).to_equal(true)
+            expect(opts.output_dir).to_equal("build/lean")
+
+        it "updates module and output configuration":
+            var opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("TestModule")
+            opts = opts.with_output_dir("build/test-lean")
+            opts = opts.with_stubs(false)
+            expect(opts.module_name).to_equal("TestModule")
+            expect(opts.output_dir).to_equal("build/test-lean")
+            expect(opts.generate_stubs).to_equal(false)
+
+    context "LeanStructure / LeanInductive / LeanFunction / LeanTheorem":
+        it "builds structured artifacts":
+            var structure = codegen.LeanStructure.new("Point")
+            structure = structure.add_field("x", "Int")
+            structure = structure.add_field("y", "Int")
+            structure = structure.derive("Repr")
+
+            var inductive = codegen.LeanInductive.new("Mode")
+            inductive = inductive.add_constructor("Online", [])
+            inductive = inductive.add_constructor("Offline", [])
+
+            var func = codegen.LeanFunction.new("identity")
+            func = func.add_param("x", "Nat")
+            func = func.with_return_type("Nat")
+            func = func.with_body("x")
+
+            var theorem = codegen.LeanTheorem.new("identity_refl", "identity x = x")
+            theorem = theorem.add_param("x", "Nat")
+            theorem = theorem.with_proof("rfl")
+
+            expect(structure.name).to_equal("Point")
+            expect(structure.fields.len()).to_equal(2)
+            expect(inductive.constructors.len()).to_equal(2)
+            expect(func.params.len()).to_equal(1)
+            expect(theorem.proof).to_equal(Some("rfl"))
+
+    context "LeanCodegen output":
+        it "emits proof-clean Lean for explicit proofs":
+            var opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("Demo")
+            opts = opts.with_output_dir("build/lean-test")
+            opts = opts.with_stubs(false)
+
+            var gen = codegen.LeanCodegen.new(opts)
+            gen = gen.add_structure(codegen.build_class("point", [("x", "Int"), ("y", "Int")]))
+            gen = gen.add_inductive(codegen.build_enum_with_deriving("mode", [("online", []), ("offline", [])], ["Repr"]))
+            gen = gen.add_function(codegen.build_function("identity", [("x", "Nat")], "Nat", "x"))
+            gen = gen.add_theorem(codegen.build_theorem("identity_refl", [("x", "Nat")], "identity x = x", "rfl"))
+
+            val output = gen.emit()
+            expect(output).to_contain("namespace Demo")
+            expect(output).to_contain("structure Point where")
+            expect(output).to_contain("inductive Mode where")
+            expect(output).to_contain("def identity")
+            expect(output).to_contain("theorem identity_refl")
+            expect(output.contains("sorry")).to_equal(false)

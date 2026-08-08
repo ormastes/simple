@@ -1,0 +1,100 @@
+#!/bin/sh
+# Build the pinned, userspace-only guest rootfs; kernel and OpenSBI stay external.
+set -eu
+
+case "${1-}" in
+  rv32|rv64) arch="$1" ;;
+  *) echo "usage: $0 rv32|rv64 [--finalize-only]" >&2; exit 2 ;;
+esac
+case "${2-}" in
+  '') finalize_only=0 ;;
+  --finalize-only) finalize_only=1 ;;
+  *) echo "usage: $0 rv32|rv64 [--finalize-only]" >&2; exit 2 ;;
+esac
+
+pin=e4a5ab3b319753f41e2b5cf22e90b6b0304ca225
+busybox_version=1.36.1
+busybox_sha256=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+repo=https://github.com/buildroot/buildroot.git
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+external="$root/scripts/os/buildroot"
+base="$root/build/os/buildroot"
+source="$base/source"
+output="$base/$arch"
+defconfig="simple_${arch}_defconfig"
+jobs="${BUILDROOT_JOBS:-$(nproc)}"
+case "$jobs" in
+  ''|*[!0-9]*|0) echo "BUILDROOT_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+
+if [ ! -d "$source/.git" ]; then
+  mkdir -p "$base"
+  mkdir -p "$source"
+  git -C "$source" init
+  git -C "$source" remote add origin "$repo"
+fi
+git -C "$source" cat-file -e "$pin^{commit}" 2>/dev/null ||
+  git -C "$source" fetch --depth=1 origin "$pin"
+git -C "$source" checkout --detach "$pin"
+[ "$(git -C "$source" rev-parse HEAD)" = "$pin" ] || {
+  echo "Buildroot pin mismatch" >&2
+  exit 1
+}
+git -C "$source" diff --quiet && git -C "$source" diff --cached --quiet || {
+  echo "Buildroot source has tracked modifications" >&2
+  exit 1
+}
+[ -z "$(git -C "$source" status --porcelain --untracked-files=all)" ] || {
+  echo "Buildroot source has untracked files" >&2
+  exit 1
+}
+[ -z "${BR2_PACKAGE_OVERRIDE_FILE:-}" ] &&
+  ! env | grep -Eq '^[A-Z0-9_]+_OVERRIDE_SRCDIR=' || {
+    echo "Buildroot package source overrides are forbidden" >&2
+    exit 1
+  }
+unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEOVERRIDES LD_LIBRARY_PATH
+
+export BR2_DL_DIR="$base/dl"
+if [ "$finalize_only" -eq 0 ]; then
+  make -j"$jobs" -C "$source" O="$output" BR2_EXTERNAL="$external" "$defconfig"
+  make -j"$jobs" -C "$output" olddefconfig
+fi
+[ -s "$output/.config" ] || {
+  echo "missing Buildroot configuration" >&2
+  exit 1
+}
+[ "$(grep '^BR2_PACKAGE_OVERRIDE_FILE=' "$output/.config")" = \
+  'BR2_PACKAGE_OVERRIDE_FILE="$(CONFIG_DIR)/local.mk"' ] &&
+  [ ! -e "$output/local.mk" ] || {
+    echo "Buildroot local/package override file is forbidden" >&2
+    exit 1
+  }
+if [ "$finalize_only" -eq 0 ]; then
+  make -j"$jobs" -C "$output"
+fi
+
+[ -s "$output/images/rootfs.cpio.gz" ] || {
+  echo "missing rootfs.cpio.gz" >&2
+  exit 1
+}
+cross_gcc=$(find "$output/host/bin" \( -type f -o -type l \) -name "riscv*linux*-gcc" -print -quit)
+[ -n "$cross_gcc" ] || {
+  echo "missing Buildroot RISC-V cross compiler" >&2
+  exit 1
+}
+external_tree_sha256=$(
+  cd "$external"
+  find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+)
+cat >"$output/buildroot-manifest.txt" <<EOF
+buildroot_commit=$pin
+arch=$arch
+busybox_version=$busybox_version
+busybox_source_sha256=$busybox_sha256
+config_sha256=$(sha256sum "$output/.config" | awk '{print $1}')
+external_tree_sha256=$external_tree_sha256
+rootfs_sha256=$(sha256sum "$output/images/rootfs.cpio.gz" | awk '{print $1}')
+cross_gcc=$cross_gcc
+EOF
+echo "Buildroot $arch rootfs: $output/images/rootfs.cpio.gz"

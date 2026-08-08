@@ -1,0 +1,260 @@
+#!/bin/sh
+# check-pure-simple-pipe-lambda-parse.shs
+#
+# PARSE GATE: the pure-Simple frontend must accept the pipe-lambda form
+# `|x| body`, and adding it must not have stolen any pre-existing meaning of
+# the `|` token.
+#
+# WHY THIS EXISTS
+# ---------------
+# Until 2026-08-08 the pure-Simple parser
+# (src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl) had no
+# production for `|params| body` AT ALL -- not merely the `: Type` annotation
+# that the seed-only fix 150a24e0fdb added, but the whole form. The gap was
+# invisible because `bin/simple run` and `bin/simple test` parse with the RUST
+# SEED, which accepts it; only `bin/simple lint` runs the pure-Simple frontend.
+# Meanwhile 29 pipe-lambda call sites already existed under src/compiler
+# (e.g. 35.semantics/error_formatter.spl:442,465,475), so the self-hosted
+# compiler could not parse its own source. See
+# doc/08_tracking/bug/pure_simple_parser_missing_pipe_lambda_form_2026-08-08.md
+#
+# WHY `bin/simple lint` IS THE ORACLE
+# -----------------------------------
+# lint loads and runs the pure-Simple frontend from SOURCE. Verified by
+# positive control on 2026-08-08: reverting primary_expr.spl to its pre-fix
+# blob made exactly the four pipe-lambda fixtures below return PARSE001, and
+# restoring it made them parse again -- with the deployed binary untouched in
+# both directions. So this gate observes the source under audit, not a stale
+# binary (contrast scripts/check/check-lint-binary-staleness.shs).
+#
+# lint FAILS OPEN on unparseable input: a PARSE001 means every AST-based lint
+# was SKIPPED, so "no lint findings" proves nothing. This script therefore
+# asserts on the PARSE001 / "NOT LINTED" markers directly, never on lint's
+# exit code.
+#
+# EVERY PRE-EXISTING MEANING OF `|` IS PINNED BELOW
+# ------------------------------------------------
+# The new production is reachable ONLY in prefix (primary-expression) position,
+# so it cannot steal an infix or separator use. The `r*` fixtures prove that
+# empirically -- they must keep parsing, and they are what goes RED if the
+# production ever over-triggers:
+#   r1  bitwise-or, infix          `a | b`, `(a | b) | 1`, `e = e | b`
+#   r2  logical-or                 `a || b`      (TOK_OR/56, a separate token)
+#   r3  union type                 `x: i64 | text`
+#   r4  match-arm alternation      `case Color.Red | Color.Green:`
+#   r5  backslash lambda           `\x, y: x + y`, `\: 7`, `\x: x * 2`
+#       (r5 is the form the seed's own first revision broke; keep it here)
+#   r6  leading-`|` continuation   `val c = a` NEWLINE INDENT `| b`
+#       THE discriminator. lexer_struct's leading-operator continuation has an
+#       "operator cannot begin a statement" guard; before this change that was
+#       trivially true of `|`, and it is no longer. If the guard ever consults
+#       a "can this token start an expression" table that the new production
+#       changed, this fixture is what catches it.
+#   r7  pipe operator              `n |> twice` (TOK 175, a separate token)
+#   r8  enum variant separator     `Escape | F1 | F2` on one line
+#       (enum_module_body.spl:376 -- its own loop advances past the `|`)
+#   r9  asm target spec / clobber  in-tree fixture, see ASM_FIXTURE below
+#       (parser_asm.spl:33 and asm_match_suffix.spl:67 -- also their own loops)
+#
+# Usage: sh scripts/check/check-pure-simple-pipe-lambda-parse.shs
+# Exit:  0 = PASS, 1 = FAIL, 2 = ERROR (nothing was checked)
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="$ROOT/bin/simple"
+WORK="$ROOT/build/pipe_lambda_parse_gate"
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "ERROR — nothing was checked: $SIMPLE not executable"
+    exit 2
+fi
+if [ ! -f "$ROOT/src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl" ]; then
+    echo "ERROR — nothing was checked: parser source not found (run from a real clone)"
+    exit 2
+fi
+
+rm -rf "$WORK"
+mkdir -p "$WORK" || { echo "ERROR — nothing was checked: cannot create $WORK"; exit 2; }
+
+# ---- fixtures that MUST parse: the new pipe-lambda production ----
+cat > "$WORK/p1_single.spl" <<'EOF'
+fn main() -> i64:
+    val xs = [1, 2, 3]
+    val ys = xs.map(|e| e + 1)
+    return ys.len()
+EOF
+
+cat > "$WORK/p2_typed.spl" <<'EOF'
+fn main() -> i64:
+    val xs = [1, 2, 3]
+    val ys = xs.map(|e: i64| e + 1)
+    return ys.len()
+EOF
+
+cat > "$WORK/p3_multi.spl" <<'EOF'
+fn main() -> i64:
+    val f = |x, y| x + y
+    val g = |_| 9
+    return f(1, 2) + g(0)
+EOF
+
+# Zero params is written `| |`: `||` lexes as TOK_OR/56 in lexer_struct, so the
+# two pipes must be separated. That is the seed's behaviour too, not a dialect.
+cat > "$WORK/p4_zero.spl" <<'EOF'
+fn main() -> i64:
+    val f = | | 7
+    return f()
+EOF
+
+# ---- fixtures that MUST KEEP parsing: every pre-existing `|` meaning ----
+cat > "$WORK/r1_bitor.spl" <<'EOF'
+fn main() -> i64:
+    val a = 6
+    val b = 3
+    val c = a | b
+    val d = (a | b) | 1
+    var e = a
+    e = e | b
+    return c + d + e
+EOF
+
+cat > "$WORK/r2_logor.spl" <<'EOF'
+fn main() -> i64:
+    val a = true
+    val b = false
+    if a || b:
+        return 1
+    return 0
+EOF
+
+cat > "$WORK/r3_union_type.spl" <<'EOF'
+fn describe(x: i64 | text) -> i64:
+    val n = 1
+    return n
+
+fn main() -> i64:
+    return describe(1)
+EOF
+
+cat > "$WORK/r4_enum_alt.spl" <<'EOF'
+enum Color:
+    Red
+    Green
+    Blue
+
+fn main() -> i64:
+    val c = Color.Red
+    match c:
+        case Color.Red | Color.Green:
+            return 1
+        case _:
+            return 0
+EOF
+
+cat > "$WORK/r5_bslambda.spl" <<'EOF'
+fn main() -> i64:
+    val f = \x, y: x + y
+    val g = \: 7
+    val h = \x: x * 2
+    return f(1, 2) + g() + h(3)
+EOF
+
+cat > "$WORK/r6_leading_pipe_cont.spl" <<'EOF'
+fn main() -> i64:
+    val a = 6
+    val b = 3
+    val c = a
+        | b
+    return c
+EOF
+
+cat > "$WORK/r7_pipe_op.spl" <<'EOF'
+fn twice(n: i64) -> i64:
+    return n + n
+
+fn main() -> i64:
+    val n = 4
+    val m = n |> twice
+    return m
+EOF
+
+cat > "$WORK/r8_enum_sep.spl" <<'EOF'
+enum Key:
+    Escape | F1 | F2
+    Enter
+
+fn main() -> i64:
+    val k = Key.F1
+    match k:
+        case Key.F1:
+            return 1
+        case _:
+            return 0
+EOF
+
+FIXTURES="p1_single p2_typed p3_multi p4_zero r1_bitor r2_logor r3_union_type r4_enum_alt r5_bslambda r6_leading_pipe_cont r7_pipe_op r8_enum_sep"
+
+# r9: the asm target-spec / clobber `|` (`case [x86_64 | x86]:`) is exercised
+# against a real in-tree file rather than a synthetic fixture, because the asm
+# grammar is too involved to restate faithfully here and a wrong restatement
+# would be a false gate.
+ASM_FIXTURE="$ROOT/test/01_unit/compiler/native/asm_match_spec.spl"
+
+PATHS=""
+N=0
+for f in $FIXTURES; do
+    PATHS="$PATHS $WORK/$f.spl"
+    N=$((N + 1))
+done
+
+if [ -f "$ASM_FIXTURE" ]; then
+    PATHS="$PATHS $ASM_FIXTURE"
+    FIXTURES="$FIXTURES asm_match_spec"
+    N=$((N + 1))
+else
+    echo "note: asm target-spec fixture absent ($ASM_FIXTURE) — that \`|\` meaning is NOT covered by this run"
+fi
+
+if [ "$N" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no fixtures generated"
+    exit 2
+fi
+
+# One batched invocation: lint costs ~4.4s / 339MB per process (383 modules,
+# no cache), so never loop it per file.
+OUT="$WORK/lint.out"
+# shellcheck disable=SC2086
+"$SIMPLE" lint $PATHS > "$OUT" 2>&1
+LINT_RC=$?
+
+if [ ! -s "$OUT" ]; then
+    echo "ERROR — nothing was checked: lint produced no output (rc=$LINT_RC)"
+    exit 2
+fi
+
+# Self-check the oracle: lint must have actually produced per-file verdicts. If
+# it never did, we cannot distinguish "parsed" from "never opened".
+if ! grep -q "Found .* error" "$OUT"; then
+    echo "ERROR — nothing was checked: lint output has no per-file verdict (rc=$LINT_RC)"
+    exit 2
+fi
+
+FAILED=""
+for f in $FIXTURES; do
+    if grep -q "$f\.spl.*PARSE001" "$OUT" || grep -q "NOT LINTED: .*$f\.spl" "$OUT"; then
+        FAILED="$FAILED $f"
+    fi
+done
+
+if [ -n "$FAILED" ]; then
+    echo "--- offending lint output ---"
+    grep -E "PARSE001|NOT LINTED" "$OUT"
+    echo "FAIL — pure-Simple parse failure in:$FAILED (of $N fixtures)"
+    echo "  p* = the pipe-lambda production is missing or broken"
+    echo "  r*/asm = the pipe-lambda production has STOLEN a pre-existing \`|\` meaning"
+    exit 1
+fi
+
+echo "PASS — $N fixture(s) checked: 4 pipe-lambda forms parse, $((N - 4)) pre-existing \`|\` meanings intact"
+exit 0

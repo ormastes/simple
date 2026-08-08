@@ -1,0 +1,49 @@
+# CLINT-compatible MMIO timer for RISC-V 64 FPGA platform.
+#
+# All reads/writes go through mmio_read64 / mmio_write64 from
+# os.kernel.boot.mmio.  No SBI calls — pure M-mode MMIO access.
+# timer_polling_delay_* are the only primitives required for the
+# riscv64-fpga-min profile (polling_timer feature flag, no interrupt).
+
+use os.kernel.boot.mmio.{mmio_read64, mmio_write64, mmio_write32}
+
+# CLINT register offsets (standard)
+val CLINT_MSIP_BASE:     u64 = 0x0000
+val CLINT_MTIMECMP_BASE: u64 = 0x4000
+val CLINT_MTIME:         u64 = 0xBFF8
+
+# Used to disarm a hart's timer interrupt
+val TIMER_DISABLED: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn timer_mmio_init(clint_base: u64):
+    """Disable software interrupts for hart 0; leave mtime running."""
+    mmio_write32(clint_base + CLINT_MSIP_BASE, 0)
+
+fn timer_read_mtime(clint_base: u64) -> u64:
+    """Read current 64-bit mtime counter value."""
+    mmio_read64(clint_base + CLINT_MTIME)
+
+fn timer_set_mtimecmp(clint_base: u64, hart: u64, deadline: u64):
+    """Set mtimecmp[hart] to deadline, arming the timer interrupt."""
+    mmio_write64(clint_base + CLINT_MTIMECMP_BASE + hart * 8, deadline)
+
+fn timer_clear_mtimecmp(clint_base: u64, hart: u64):
+    """Set mtimecmp[hart] to u64::MAX, disabling timer interrupt for that hart."""
+    mmio_write64(clint_base + CLINT_MTIMECMP_BASE + hart * 8, TIMER_DISABLED)
+
+fn polling_delay(clint_base: u64, ticks: u64):
+    """Busy-wait for the given number of mtime ticks."""
+    val start = timer_read_mtime(clint_base)
+    val deadline = start + ticks
+    while timer_read_mtime(clint_base) < deadline:
+        pass_do_nothing
+
+fn timer_polling_delay_us(clint_base: u64, timebase_hz: u64, us: u64):
+    """Busy-wait for approximately us microseconds using mtime."""
+    val ticks = timebase_hz / 1000000 * us
+    polling_delay(clint_base, ticks)
+
+fn timer_polling_delay_ms(clint_base: u64, timebase_hz: u64, ms: u64):
+    """Busy-wait for approximately ms milliseconds using mtime."""
+    val ticks = timebase_hz / 1000 * ms
+    polling_delay(clint_base, ticks)

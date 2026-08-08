@@ -1,0 +1,116 @@
+#!/bin/sh
+# Sabotage-residue guard — detect unrestored verification markers.
+#
+# This guard detects markers left behind by sabotage-verification cycles:
+# live sabotage strings, marker text, and debug probes in source that were
+# meant to be temporary and should have been restored.
+#
+# Only flags markers in the working copy that are ABSENT from origin/main
+# for the same file. Markers already committed to origin are legitimate.
+#
+# Exit codes:
+#   0  — PASS: no residue found
+#   1  — FAIL: residue found in one or more files
+#   2  — ERROR: could not scan (origin/main unreachable, repo broken, etc.)
+#
+# Usage:
+#   sh scripts/check/check-no-sabotage-residue.shs
+#
+# Markers detected:
+#   - SABOTAGE (literal)
+#   - MARKER- or MARKER_ (prefix match)
+#   - TEMP-PROBE (literal)
+#   - XXX-DEBUG (literal)
+#   - DEBUGME (literal)
+#
+# Strategy: for each marker, find files in WC that contain it, then compare
+# against origin/main. If origin's version of that file lacks the marker,
+# the residue is unrestored.
+
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+# Verify we're in a git repo
+if [ ! -d .git ]; then
+    printf 'ERROR — nothing was checked\n'
+    exit 2
+fi
+
+# Verify origin/main exists
+if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+    printf 'ERROR — nothing was checked\n'
+    exit 2
+fi
+
+SCRATCH_DIR=$(mktemp -d)
+trap 'rm -rf "$SCRATCH_DIR"' EXIT INT TERM
+
+RESIDUE_FILE="$SCRATCH_DIR/residue_list.txt"
+CHECKED_FILE="$SCRATCH_DIR/checked_files.txt"
+touch "$RESIDUE_FILE" "$CHECKED_FILE"
+
+# Markers to search for (each gets its own pass)
+# Use explicit literal strings, not regexes, for precision
+MARKERS="SABOTAGE MARKER- MARKER_ TEMP-PROBE XXX-DEBUG DEBUGME"
+
+# Scan tracked files in src/** and test/fixtures/**
+# Use /usr/bin/grep explicitly, NOT bare grep (which is wrapped ugrep honoring .gitignore)
+for pattern in $MARKERS; do
+    # Find all tracked files containing this marker
+    # We must scan WC files, not origin, to detect residue
+    marker_files=$(/usr/bin/grep -r --include='*.spl' --include='*.shs' "$pattern" src test/fixtures 2>/dev/null | cut -d: -f1 | sort -u || true)
+
+    for filepath in $marker_files; do
+        # Record that we checked this file
+        echo "$filepath" >>"$CHECKED_FILE"
+
+        # Skip if file doesn't exist (deleted in WC or not tracked)
+        [ -f "$filepath" ] || continue
+
+        # Check if file exists in origin/main
+        if ! git show origin/main:"$filepath" >/dev/null 2>&1; then
+            # File is new (not in origin) — the marker is not "residue",
+            # it's part of new work. Don't flag it.
+            continue
+        fi
+
+        # File exists in both WC and origin. Check if the marker exists in origin's version.
+        # Use git show + /usr/bin/grep to search the origin version.
+        if git show origin/main:"$filepath" 2>/dev/null | /usr/bin/grep -F "$pattern" >/dev/null 2>&1; then
+            # Marker exists in origin too — this is committed, legitimate content.
+            # Do not flag.
+            continue
+        fi
+
+        # Marker is in WC but NOT in origin — this is unrestored residue.
+        # Extract and report line numbers
+        line_numbers=$(/usr/bin/grep -n -F "$pattern" "$filepath" | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
+        snippet=$(/usr/bin/grep -F "$pattern" "$filepath" | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        printf '%s:%s: %s\n' "$filepath" "$line_numbers" "$snippet" >>"$RESIDUE_FILE"
+    done
+done
+
+# Count unique files checked
+num_checked=$(sort -u "$CHECKED_FILE" | wc -l)
+
+# Check for residue
+if [ -s "$RESIDUE_FILE" ]; then
+    # Residue found
+    num_residue_files=$(cut -d: -f1 "$RESIDUE_FILE" | sort -u | wc -l)
+    cat "$RESIDUE_FILE"
+    printf 'FAIL — residue found in %d file(s)\n' "$num_residue_files"
+    exit 1
+fi
+
+# No residue found
+if [ "$num_checked" -le 0 ]; then
+    # No files matched any scan
+    printf 'ERROR — nothing was checked\n'
+    exit 2
+fi
+
+printf 'PASS — %d file(s) checked, no residue\n' "$num_checked"
+exit 0

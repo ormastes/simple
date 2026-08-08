@@ -1,0 +1,293 @@
+# Document Registry
+#
+# URI -> DocumentHandle registry: open/get/close/apply/undo/mark_saved, plus
+# S3-depth: multi-view invalidation callbacks, autosave polling, and
+# hot-exit serialize/restore. Collaboration (multi-writer OT) is still out
+# of scope. Part of the S3+ document-service depth; see
+# doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md
+# section S3.
+#
+# `get()` returns a sentinel handle (version 0) instead of an Option --
+# native codegen has known corruption on `Dict.get()`/Option<struct> paths
+# (see .claude/rules/code-style.md "Native-Codegen Dict Pitfalls" and
+# .claude/memory/ref_*), and the rest of this lib (multi_buffer.spl,
+# debug_session_registry.spl) already prefers sentinel-default returns over
+# Option<struct> for the same reason. Use `is_open(uri)` to check presence.
+
+use std.editor.document.model.*
+use std.editor.document.transaction.*
+use std.editor.extensions.api.{Disposable}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.parser.{parse_safe}
+
+# One view's registration against a document: an fn-value callback invoked
+# with the post-transaction version number every time apply()/undo() lands.
+# Mirrors the fn-value idiom in
+# src/lib/editor/extensions/registry.spl (EventListenerRegistration).
+struct DocumentViewRegistration:
+    view_id: text
+    disposable_id: text
+    on_invalidate: fn(i64)
+
+struct DocumentHandle:
+    uri: text
+    version: i64
+    dirty: bool
+    model: TextDocumentModel
+    undo_stack: [DocumentTransaction]
+    views: [DocumentViewRegistration]
+    # Version at which mark_autosaved() last snapshotted this doc (0 = never
+    # autosaved). autosave_pending() compares `version - autosave_version`
+    # against a caller threshold.
+    autosave_version: i64
+    autosave_snapshot: text
+    # Set only by restore_state(): how many undo steps this doc had before
+    # the last hot exit. The steps themselves are NOT restored (see
+    # restore_state doc comment) -- this is informational only.
+    restored_undo_depth: i64
+
+fn document_registry_default_handle(uri: text) -> DocumentHandle:
+    DocumentHandle(
+        uri: uri,
+        version: 0,
+        dirty: false,
+        model: text_document_model_new(""),
+        undo_stack: [],
+        views: [],
+        autosave_version: 0,
+        autosave_snapshot: "",
+        restored_undo_depth: 0
+    )
+
+fn document_handle_content(handle: DocumentHandle) -> text:
+    text_document_model_snapshot(handle.model)
+
+fn _document_notify_views(handle: DocumentHandle):
+    for view in handle.views:
+        val callback = view.on_invalidate
+        callback(handle.version)
+
+class DocumentRegistry:
+    handles: Dict<text, DocumentHandle>
+    next_view_id: i64
+
+impl DocumentRegistry:
+
+    static fn new() -> DocumentRegistry:
+        DocumentRegistry(handles: {}, next_view_id: 0)
+
+    me open(uri: text, content: text) -> DocumentHandle:
+        val handle = DocumentHandle(
+            uri: uri,
+            version: 1,
+            dirty: false,
+            model: text_document_model_new(content),
+            undo_stack: [],
+            views: [],
+            autosave_version: 0,
+            autosave_snapshot: "",
+            restored_undo_depth: 0
+        )
+        self.handles[uri] = handle
+        handle
+
+    fn get(uri: text) -> DocumentHandle:
+        # Bracket + contains_key, not `.get()`: dict `.get()` is unreliable
+        # for struct values under native codegen -- see file header.
+        if self.handles.contains_key(uri):
+            return self.handles[uri]
+        document_registry_default_handle(uri)
+
+    fn is_open(uri: text) -> bool:
+        self.handles.contains_key(uri)
+
+    me close(uri: text):
+        if self.handles.contains_key(uri):
+            self.handles.remove(uri)
+
+    me apply(uri: text, tx: DocumentTransaction) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        handle.model = document_transaction_apply(tx, handle.model)
+        handle.undo_stack.push(document_transaction_inverse(tx))
+        handle.version = handle.version + 1
+        handle.dirty = true
+        self.handles[uri] = handle
+        _document_notify_views(handle)
+        true
+
+    me undo(uri: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        if handle.undo_stack.len() == 0:
+            return false
+        # Index-read + slice-reassign, not `.pop()`: in-place pop on an array
+        # reached through a struct field returns the right element but does
+        # NOT shrink the array on the Rust debug engine the test runner
+        # spawns (see doc/08_tracking/bug/struct_field_array_pop_no_shrink_2026-07-30.md).
+        val last_index = handle.undo_stack.len() - 1
+        val inverse_tx = handle.undo_stack[last_index]
+        handle.undo_stack = handle.undo_stack.slice(0, last_index)
+        handle.model = document_transaction_apply(inverse_tx, handle.model)
+        handle.version = handle.version + 1
+        handle.dirty = true
+        self.handles[uri] = handle
+        _document_notify_views(handle)
+        true
+
+    me mark_saved(uri: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        handle.dirty = false
+        self.handles[uri] = handle
+        true
+
+    # ---- multi-view sync ----------------------------------------------
+
+    # Registers a view against an open document. `on_invalidate` is called
+    # with the post-transaction version number every time apply()/undo()
+    # lands on this uri. Returns a Disposable-style token; pass its id to
+    # dispose_view() to unregister. No-op registration (kind
+    # "view-noop") if the uri isn't open.
+    me register_view(uri: text, view_id: text, on_invalidate: fn(i64)) -> Disposable:
+        if not self.handles.contains_key(uri):
+            return Disposable(id: "", kind: "view-noop", owner: view_id)
+        var handle = self.handles[uri]
+        val disposable_id = "view-" + self.next_view_id.to_text()
+        self.next_view_id = self.next_view_id + 1
+        handle.views.push(DocumentViewRegistration(
+            view_id: view_id,
+            disposable_id: disposable_id,
+            on_invalidate: on_invalidate
+        ))
+        self.handles[uri] = handle
+        Disposable(id: disposable_id, kind: "view", owner: view_id)
+
+    me dispose_view(uri: text, disposable_id: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        var removed = false
+        var kept: [DocumentViewRegistration] = []
+        for view in handle.views:
+            if view.disposable_id == disposable_id:
+                removed = true
+            else:
+                kept.push(view)
+        handle.views = kept
+        self.handles[uri] = handle
+        removed
+
+    # ---- autosave --------------------------------------------------------
+    #
+    # No timer/async loop lives here: the document-service layer stays
+    # synchronous, so the host shell polls autosave_pending() on whatever
+    # cadence it wants (idle callback, N-second interval, etc.) and calls
+    # mark_autosaved() for whatever it actually persisted. Keeping timing
+    # external avoids a clock/async-runtime dependency in this library.
+
+    # Dirty documents whose version has advanced at least `threshold`
+    # versions past their last autosave (or since open, if never
+    # autosaved).
+    me autosave_pending(threshold: i64) -> [text]:
+        var out: [text] = []
+        for uri in self.handles.keys():
+            val handle = self.handles[uri]
+            if handle.dirty:
+                val age = handle.version - handle.autosave_version
+                if age >= threshold:
+                    out.push(uri)
+        out
+
+    # Snapshots content for autosave WITHOUT clearing dirty: autosave is a
+    # safety-net copy, not a user save. Only mark_saved() (an explicit user
+    # save action) clears dirty.
+    me mark_autosaved(uri: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        handle.autosave_snapshot = document_handle_content(handle)
+        handle.autosave_version = handle.version
+        self.handles[uri] = handle
+        true
+
+    # ---- hot exit ----------------------------------------------------
+    #
+    # serialize_state()/restore_state() round-trip uri/content/version/dirty
+    # for every open document through SDN. The undo stack is NOT replayed
+    # on restore: a hot-exit snapshot only ever recorded how many undo
+    # steps existed (undo_depth), never the edits themselves, so
+    # fabricating that many placeholder transactions would silently corrupt
+    # undo instead of just losing it. Restored handles start with an empty
+    # undo_stack; `restored_undo_depth` keeps the lost count around so the
+    # shell can tell the user "N undo steps were lost" if it wants to.
+
+    me serialize_state() -> text:
+        var docs: [SdnValue] = []
+        for uri in self.handles.keys():
+            val handle = self.handles[uri]
+            var d: Dict<text, SdnValue> = {}
+            d["uri"] = SdnValue.String(handle.uri)
+            d["content"] = SdnValue.String(document_handle_content(handle))
+            d["version"] = SdnValue.Int(handle.version)
+            d["dirty"] = SdnValue.Bool(handle.dirty)
+            d["undo_depth"] = SdnValue.Int(handle.undo_stack.len())
+            docs.push(SdnValue.Dict(d))
+        var root: Dict<text, SdnValue> = {}
+        root["documents"] = SdnValue.Array(docs)
+        sdn_encode_canonical(SdnValue.Dict(root))
+
+    me _restore_one(item: SdnValue):
+        var uri = ""
+        var content = ""
+        var version = 0
+        var dirty = false
+        var undo_depth = 0
+        if val Some(uri_val) = item.get("uri"):
+            if val Some(s) = uri_val.as_str():
+                uri = s
+        if val Some(content_val) = item.get("content"):
+            if val Some(s) = content_val.as_str():
+                content = s
+        if val Some(version_val) = item.get("version"):
+            if val Some(i) = version_val.as_i64():
+                version = i
+        if val Some(dirty_val) = item.get("dirty"):
+            if val Some(b) = dirty_val.as_bool():
+                dirty = b
+        if val Some(undo_val) = item.get("undo_depth"):
+            if val Some(i) = undo_val.as_i64():
+                undo_depth = i
+        if uri == "":
+            return
+        val handle = DocumentHandle(
+            uri: uri,
+            version: version,
+            dirty: dirty,
+            model: text_document_model_new(content),
+            undo_stack: [],
+            views: [],
+            autosave_version: version,
+            autosave_snapshot: content,
+            restored_undo_depth: undo_depth
+        )
+        self.handles[uri] = handle
+
+    static fn restore_state(source: text) -> Result<DocumentRegistry, text>:
+        match parse_safe(source):
+            case Err(e):
+                Err("hot-exit restore failed: " + e)
+            case Ok(root):
+                var registry = DocumentRegistry.new()
+                if val Some(docs_val) = root.get("documents"):
+                    match docs_val:
+                        case SdnValue.Array(items):
+                            for item in items:
+                                registry._restore_one(item)
+                        case _:
+                            pass
+                Ok(registry)

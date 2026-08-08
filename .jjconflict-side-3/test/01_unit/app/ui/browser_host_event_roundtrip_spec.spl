@@ -1,0 +1,95 @@
+# @cover src/app/ui.browser/backend.spl 60%
+# @tag: unit, app, ui, browser, host_gpu_queue
+
+use std.spec.*
+use common.ui.builder.{button, panel, text_widget, build_tree_with_title}
+use common.ui.widget.{UIEvent, UITree}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU}
+use common.ui.state.{init_state}
+use nogc_sync_mut.ui.session.{UISession}
+use app.ui.browser.backend.{BrowserBackend}
+use app.ui.browser.app.{BrowserApp}
+
+extern fn rt_host_gpu_queue_reset()
+
+describe "BrowserBackend host event roundtrip":
+
+    it "should preserve one immutable frame identity across an input batch and reject foreign stale or replayed events":
+        step("Submit one session-owned Draw IR frame")
+        val root = panel("identity-root", "Identity", [button("identity-action", "Run", "run")])
+        var session = UISession.new(UITree.new(root))
+        val submitted = session.submit_widget_draw_ir(64, 48, DRAW_IR_BACKEND_GPU)
+        val move_event = session.current_draw_ir_event(
+            "move-1", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "", kind: "move")
+        )
+        val down_event = session.current_draw_ir_event(
+            "down-1", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down")
+        )
+        val up_event = session.current_draw_ir_event(
+            "up-1", UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "up")
+        )
+        val stale_event = session.current_draw_ir_event("stale-1", UIEvent.KeyPress(key: "X"))
+
+        step("Consume each input key without clearing the submitted frame")
+        expect(move_event.session_nonce).to_equal(session.draw_ir_session_nonce)
+        expect(move_event.submission_revision).to_equal(1)
+        expect(move_event.composition_id).to_equal(submitted.composition_id)
+        expect(session.dispatch_draw_ir_event(move_event)).to_be(true)
+        expect(session.dispatch_draw_ir_event(down_event)).to_be(true)
+        expect(session.dispatch_draw_ir_event(down_event)).to_be(false)
+        expect(session.dispatch_draw_ir_event(up_event)).to_be(true)
+
+        step("Reject foreign session and stale revision identities")
+        var foreign = UISession.new(UITree.new(root))
+        val foreign_submitted = foreign.submit_widget_draw_ir(64, 48, DRAW_IR_BACKEND_GPU)
+        val foreign_event = foreign.current_draw_ir_event("foreign-1", UIEvent.KeyPress(key: "X"))
+        expect(foreign_event.composition_id).to_equal(foreign_submitted.composition_id)
+        expect(session.dispatch_draw_ir_event(foreign_event)).to_be(false)
+        session.submit_widget_draw_ir(64, 48, DRAW_IR_BACKEND_GPU)
+        expect(session.dispatch_draw_ir_event(stale_event)).to_be(false)
+
+    it "correlates a queued input event with a GPU frame dispatch receipt":
+        rt_host_gpu_queue_reset()
+        val root = panel("browser_queue_root", "Browser Queue", [
+            text_widget("browser_queue_copy", "Queued frame"),
+            button("browser_queue_action", "Run", "run")
+        ])
+        val tree = build_tree_with_title(root, "Browser Queue", "dark")
+        val state = init_state(tree)
+        val backend = BrowserBackend.create(64, 48, "vulkan").unwrap()
+
+        backend.push_event(UIEvent.Action("run"))
+        val queued_events = backend.poll_events()
+        expect(queued_events.len()).to_be_greater_than(0)
+        backend.record_event_dispatch(queued_events[0])
+        backend.render_frame(state.tree, state)
+
+        expect(backend.input_event_enqueued_count).to_equal(1)
+        expect(backend.input_event_polled_count).to_equal(1)
+        expect(backend.input_event_dispatched_count).to_equal(1)
+        expect(backend.last_input_event_roundtrip_status).to_equal("rendered")
+        expect(backend.last_input_event_host_gpu_forwarded).to_be(true)
+        expect(backend.last_input_event_host_gpu_backward_completed).to_be(true)
+        expect(backend.last_artifact_queue_dispatch_status).to_equal("dispatched")
+        expect(backend.last_artifact_queue_backend_handle).to_be_greater_than(0)
+
+    it "routes BrowserApp host input through the queued receipt before session dispatch":
+        val app_result = BrowserApp.new("test/03_system/gui/ui_browser/fixtures/hello.ui.sdn", 0, "software")
+        match app_result:
+            Err(e):
+                fail(e)
+            Ok(app):
+                step("Submit one production BrowserApp Draw IR frame")
+                val submitted = app.session.submit_widget_draw_ir(672, 448, DRAW_IR_BACKEND_GPU)
+                expect(submitted.composition_id).to_start_with("ui-session-")
+                step("Deliver one pointer batch through the production queue boundary")
+                app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "", kind: "move"))
+                app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "down"))
+                app.handle_ui_event(UIEvent.MouseEvent(x: 10.0, y: 20.0, button: "left", kind: "up"))
+                step("Keep the submitted frame identity while consuming each input key once")
+                expect(app.session.draw_ir_submission_revision).to_equal(1)
+                expect(app.session.submitted_draw_ir_composition_id).to_equal(submitted.composition_id)
+                expect(app.backend.input_event_enqueued_count).to_equal(3)
+                expect(app.backend.input_event_polled_count).to_equal(3)
+                expect(app.backend.input_event_dispatched_count).to_equal(3)
+                expect(app.backend.last_input_event_roundtrip_status).to_equal("dispatched")

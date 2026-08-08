@@ -1,0 +1,546 @@
+# Lane CI — build the SimpleOS-target Simple toolchain binary per 64-bit arch.
+#
+# Goal: `bin/release/<triple>-unknown-simpleos/simple` as a CI artifact for
+# x86_64 / aarch64 / riscv64, built with the Rust seed native-build of
+# src/app/simpleos_tool/main.spl (the proven Lane BX route — see
+# doc/03_plan/os/simpleos/in_guest_simple_toolchain_multiarch_plan.md §Lane CI).
+#
+# Per target the pipeline is:
+#   probe   — resolve + validate the per-arch SimpleOS sysroot (crt0.o,
+#             libsimple_runtime.a, libsimpleos_c.a, simpleos.ld,
+#             target-triple.txt) and the target Simple-core runtime archive.
+#             A missing/incomplete sysroot for a not-yet-required arch is
+#             reported as "arch not yet buildable: <reason>" (Lanes BA/BR64
+#             land those in parallel); for a required arch it is a hard fail.
+#   build   — seed native-build --target <triple> into a staging dir
+#             (build/ci/simpleos_toolchain/<triple>/), full log kept there.
+#   verify  — fail-closed artifact checks: ELF64 + EXEC, correct EM machine,
+#             static (no PT_INTERP / PT_DYNAMIC), every PT_LOAD clears the
+#             arch kernel band, first PT_LOAD vaddr == sysroot link base.
+#   stamp   — write <artifact>.build_stamp with target/entry/provenance.
+#   install — copy into bin/release/<triple>/simple (previous kept as .prev).
+#
+# Wrapper: scripts/ci/build-simpleos-toolchain.shs
+# Flags (tolerated anywhere in argv):
+#   --only <arch|triple>   restrict to one target (repeatable)
+#   --require-all          every selected target must go green
+#   --probe-only           report per-arch buildability, skip build
+#   --seed <path>          compiler override (default: env SIMPLE_CI_SEED,
+#                          then src/compiler_rust/target/release/simple)
+# Env knobs:
+#   SIMPLEOS_SYSROOT_<arch>       per-arch sysroot dir override
+#   SIMPLE_CORE_ARCHIVE_<arch>    per-arch Simple-core runtime archive override
+#   SIMPLEOS_KERNEL_BAND_<arch>   "0xLO:0xHI" kernel band override
+#   SIMPLEOS_CI_REQUIRE           comma list of triples that must go green
+#                                 (default: x86_64-unknown-simpleos)
+#   SIMPLEOS_CI_BACKEND           codegen backend (default: cranelift — the
+#                                 seed is built without --features llvm)
+#   SIMPLEOS_CI_CPU               cpu policy (default: x86-64-v1 on x86_64
+#                                 for board-safe SSE-only code, else compiler
+#                                 default)
+
+use std.io_runtime.{process_run, file_exists, read_file, write_file, env_get, get_args}
+
+# ---------------------------------------------------------------- shell utils
+
+fn sh(cmd: text) -> (text, text, i64):
+    process_run("sh", ["-c", cmd])
+
+fn sh_line(cmd: text) -> text:
+    var out = ""
+    var err = ""
+    var rc: i64 = 0
+    (out, err, rc) = sh(cmd)
+    if rc != 0:
+        return ""
+    out.trim()
+
+fn split_ws(line: text) -> [text]:
+    var toks: [text] = []
+    for t in line.replace("\t", " ").split(" "):
+        if t != "":
+            toks = toks.push(t)
+    toks
+
+fn hex_to_dec(h: text) -> i64:
+    """Parse a 0x-prefixed hex literal to i64 (-1 on failure)."""
+    if h == "" or not h.starts_with("0x"):
+        return -1
+    val out = sh_line("printf '%d' " + h + " 2>/dev/null")
+    if out == "":
+        return -1
+    int(out)
+
+fn env_val(key: text) -> text:
+    env_get(key) ?? ""
+
+# ------------------------------------------------------------ per-arch config
+
+fn ci_triples() -> [text]:
+    ["x86_64-unknown-simpleos", "aarch64-unknown-simpleos", "riscv64-unknown-simpleos"]
+
+fn arch_of(triple: text) -> text:
+    triple.split("-")[0]
+
+fn em_of(arch: text) -> text:
+    """readelf -h 'Machine:' substring expected per arch."""
+    if arch == "x86_64":
+        "Advanced Micro Devices X86-64"
+    elif arch == "aarch64":
+        "AArch64"
+    elif arch == "riscv64":
+        "RISC-V"
+    else:
+        ""
+
+fn kernel_band_of(arch: text) -> (text, text):
+    """Kernel band [lo, hi) that no user PT_LOAD may overlap, as hex text.
+
+    Defaults (env SIMPLEOS_KERNEL_BAND_<arch> = "0xLO:0xHI" overrides):
+      x86_64  — OVMF 128MB-base merged kernel image + .bss band
+                (examples/09_embedded/simple_os/arch/x86_64/linker_128mb.ld:
+                 kernel at 0x08000000, .bss reaches ~0x16400000).
+      aarch64 — QEMU virt kernel RAM window (src/os/kernel/arch/arm64/
+                linker.ld: ORIGIN 0x40000000, LENGTH 128M).
+      riscv64 — OpenSBI (0x80000000, 2MB) + S-mode kernel at 0x80200000
+                (src/os/kernel/arch/riscv64/linker.ld) + 128M headroom.
+    """
+    val ov = env_val("SIMPLEOS_KERNEL_BAND_" + arch)
+    if ov != "" and ov.contains(":"):
+        val parts = ov.split(":")
+        if parts.len() == 2:
+            return (parts[0], parts[1])
+    if arch == "x86_64":
+        ("0x08000000", "0x16400000")
+    elif arch == "aarch64":
+        ("0x40000000", "0x48000000")
+    elif arch == "riscv64":
+        ("0x80000000", "0x88200000")
+    else:
+        ("0x0", "0x0")
+
+# ------------------------------------------------------------- sysroot probe
+
+fn sysroot_candidates(triple: text) -> [text]:
+    var cands: [text] = []
+    val ov = env_val("SIMPLEOS_SYSROOT_" + arch_of(triple))
+    if ov != "":
+        cands = cands.push(ov)
+    # Lanes BA/BR64 build the per-arch sysroot at build/os/sysroot-<arch>
+    # (scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs), so probe that first.
+    cands = cands.push("build/os/sysroot-" + arch_of(triple))
+    cands = cands.push("build/os/sysroot-" + triple)
+    cands = cands.push("build/os/sysroot/" + triple)
+    cands = cands.push("build/os/sysroot")
+    cands
+
+fn sysroot_reject_reason(dir: text, triple: text) -> text:
+    """Empty text when `dir` is a complete SimpleOS sysroot for `triple`."""
+    val needed = ["lib/crt0.o", "lib/libsimpleos_c.a",
+                  "share/simpleos/simpleos.ld", "share/simpleos/target-triple.txt"]
+    for rel in needed:
+        if not file_exists(dir + "/" + rel):
+            return "missing " + dir + "/" + rel
+    # The sysroot runtime archive name differs per arch: x86_64/aarch64 stage
+    # lib/libsimple_runtime.a; riscv64 stages the merged lib/libsimpleos_all.a
+    # (libc + core runtime + crt0). Either presence satisfies the sysroot — the
+    # archive actually fed to native-build is resolved by runtime_archive_of
+    # from build/os/simple-core-simpleos-<arch>/, not from the sysroot.
+    if (not file_exists(dir + "/lib/libsimple_runtime.a") and
+        not file_exists(dir + "/lib/libsimpleos_all.a")):
+        return "missing " + dir + "/lib/{libsimple_runtime.a,libsimpleos_all.a}"
+    val spec = read_file(dir + "/share/simpleos/target-triple.txt").trim()
+    if spec != triple:
+        return dir + " targets '" + spec + "', not " + triple
+    # crt0.o must actually be for this arch (catches a shared/stale sysroot).
+    var out = ""
+    var err = ""
+    var rc: i64 = 0
+    (out, err, rc) = sh("readelf -h '" + dir + "/lib/crt0.o' 2>&1")
+    if rc != 0:
+        return "readelf failed on " + dir + "/lib/crt0.o"
+    if not out.contains(em_of(arch_of(triple))):
+        return dir + "/lib/crt0.o is not " + em_of(arch_of(triple))
+    ""
+
+fn resolve_sysroot(triple: text) -> (text, text):
+    """Return (sysroot_dir, "") or ("", reason)."""
+    var first_reason = ""
+    for cand in sysroot_candidates(triple):
+        val reason = sysroot_reject_reason(cand, triple)
+        if reason == "":
+            return (cand, "")
+        if first_reason == "":
+            first_reason = reason
+    ("", "no valid sysroot for " + triple + " (first candidate: " + first_reason + ")")
+
+fn runtime_archive_of(triple: text, sysroot: text) -> text:
+    """Target Simple-core runtime archive (SIMPLE_SIMPLE_CORE_PATH)."""
+    val arch = arch_of(triple)
+    var cands: [text] = []
+    val ov = env_val("SIMPLE_CORE_ARCHIVE_" + arch)
+    if ov != "":
+        cands = cands.push(ov)
+    cands = cands.push("build/os/simple-core-simpleos-" + arch + "/libsimple_runtime.a")
+    if arch == "x86_64":
+        cands = cands.push("build/os/simple-core-simpleos/libsimple_runtime.a")
+    cands = cands.push(sysroot + "/lib/libsimple_runtime.a")
+    for cand in cands:
+        if file_exists(cand):
+            return cand
+    ""
+
+# ------------------------------------------------------------------- verify
+
+fn verify_artifact(path: text, triple: text, want_base: text) -> (text, text):
+    """Fail-closed artifact verification. Returns (reason ""=ok, first_load)."""
+    val arch = arch_of(triple)
+    val em = em_of(arch)
+    if not file_exists(path):
+        return ("artifact missing: " + path, "")
+    var hout = ""
+    var herr = ""
+    var hrc: i64 = 0
+    (hout, herr, hrc) = sh("readelf -h '" + path + "' 2>&1")
+    if hrc != 0:
+        return ("readelf -h failed on " + path, "")
+    if not hout.contains("ELF64"):
+        return ("not an ELF64 artifact", "")
+    if not hout.contains(em):
+        return ("wrong machine (want '" + em + "')", "")
+    if not hout.contains("EXEC (Executable file)"):
+        return ("not ET_EXEC (static -no-pie expected)", "")
+    # Parse the ACTUAL `readelf -h` entry point (never the build command's
+    # intent). It is validated below against the first PT_LOAD segment, not the
+    # bare link base: _start need not sit exactly at the base (riscv64 places
+    # .text.entry ahead of _start, so its entry is legitimately offset within
+    # the segment). The default-base 0x200000 regression is still caught — its
+    # entry falls outside the correctly-based first PT_LOAD, and its first
+    # PT_LOAD != base (both checked below).
+    var entry_h = ""
+    for hline in hout.split("\n"):
+        if hline.contains("Entry point address:"):
+            val etoks = split_ws(hline)
+            if etoks.len() >= 1:
+                entry_h = etoks[etoks.len() - 1]
+    var lout = ""
+    var lerr = ""
+    var lrc: i64 = 0
+    (lout, lerr, lrc) = sh("readelf -lW '" + path + "' 2>&1")
+    if lrc != 0:
+        return ("readelf -lW failed on " + path, "")
+    if lout.contains("INTERP"):
+        return ("has PT_INTERP — not a static executable", "")
+    if lout.contains("DYNAMIC"):
+        return ("has PT_DYNAMIC — not a static executable", "")
+    var band_lo_h = ""
+    var band_hi_h = ""
+    (band_lo_h, band_hi_h) = kernel_band_of(arch)
+    val band_lo = hex_to_dec(band_lo_h)
+    val band_hi = hex_to_dec(band_hi_h)
+    var first_load = ""
+    var first_load_vaddr: i64 = -1
+    var first_load_memsz: i64 = -1
+    var first_load_memsz_h = ""
+    var seen_load = false
+    for line in lout.split("\n"):
+        val toks = split_ws(line)
+        if toks.len() >= 6 and toks[0] == "LOAD":
+            seen_load = true
+            val vaddr_h = toks[2]
+            val memsz_h = toks[5]
+            val vaddr = hex_to_dec(vaddr_h)
+            val memsz = hex_to_dec(memsz_h)
+            if first_load == "":
+                first_load = vaddr_h
+                first_load_vaddr = vaddr
+                first_load_memsz = memsz
+                first_load_memsz_h = memsz_h
+            if vaddr < 0 or memsz < 0:
+                return ("unparseable PT_LOAD line: " + line.trim(), first_load)
+            if (band_hi > band_lo and
+                vaddr < band_hi and vaddr + memsz > band_lo):
+                return ("PT_LOAD " + vaddr_h + "+" + memsz_h +
+                        " overlaps kernel band [" + band_lo_h + "," + band_hi_h + ")", first_load)
+    if not seen_load:
+        return ("no PT_LOAD segments found", "")
+    # Entry point must be a mapped executable address inside the first PT_LOAD
+    # segment (which begins at the link base). This allows a legitimately
+    # offset _start (riscv64) while still rejecting an entry that points outside
+    # the loaded image.
+    val egot = hex_to_dec(entry_h)
+    if (egot >= 0 and first_load_vaddr >= 0 and first_load_memsz >= 0 and
+        (egot < first_load_vaddr or egot >= first_load_vaddr + first_load_memsz)):
+        return ("entry point " + entry_h + " outside first PT_LOAD segment [" +
+                first_load + ", +" + first_load_memsz_h + ") (readelf)", first_load)
+    if want_base != "":
+        val want = hex_to_dec(want_base)
+        val got = hex_to_dec(first_load)
+        if want >= 0 and got != want:
+            return ("first PT_LOAD " + first_load + " != sysroot link base " + want_base, first_load)
+    ("", first_load)
+
+# -------------------------------------------------------------------- build
+
+fn link_base_of(sysroot: text) -> text:
+    """First `. = 0x...;` in the sysroot linker script (empty if none)."""
+    val sedprog = r"s/^[ \t]*\. = \(0x[0-9a-fA-F]*\);.*/\1/p"
+    sh_line("sed -n '" + sedprog + "' '" + sysroot + "/share/simpleos/simpleos.ld' | head -1")
+
+fn write_stamp(stamp_path: text, triple: text, seed: text, sysroot: text,
+               runtime_archive: text, provenance: text, artifact: text,
+               first_load: text) -> bool:
+    var band_lo = ""
+    var band_hi = ""
+    (band_lo, band_hi) = kernel_band_of(arch_of(triple))
+    val built = sh_line("date -u +%Y-%m-%dT%H:%M:%SZ")
+    val size = sh_line("wc -c < '" + artifact + "'")
+    val seed_info = sh_line("stat -c '%s bytes, mtime %y' '" + seed + "'")
+    val entry_pt = sh_line("readelf -h '" + artifact +
+        "' 2>/dev/null | sed -n 's/.*Entry point address: *//p' | head -1")
+    val stamp = "target=" + triple + "\n" +
+        "entry=src/app/simpleos_tool/main.spl\n" +
+        "entry_closure=true\n" +
+        "provenance=" + provenance + "\n" +
+        "runtime_bundle=simple-core\n" +
+        "runtime_archive=" + runtime_archive + "\n" +
+        "sysroot=" + sysroot + "\n" +
+        "linker_script=" + sysroot + "/share/simpleos/simpleos.ld\n" +
+        "entry_point=" + entry_pt + "\n" +
+        "first_pt_load=" + first_load + "\n" +
+        "kernel_band=[" + band_lo + "," + band_hi + ")\n" +
+        "compiler=" + seed + " (Rust seed, " + seed_info + ")\n" +
+        "built=" + built + "\n" +
+        "size=" + size + "\n" +
+        "verified=static-elf64,machine,entry-in-first-pt-load,pt_load==base,pt_load-clears-kernel-band\n" +
+        "ci=src/app/ci/build_simpleos_toolchain.spl\n"
+    write_file(stamp_path, stamp)
+
+fn looks_like_missing_target_support(log_tail: text) -> bool:
+    val hints = ["unknown target", "Unknown target", "unsupported target",
+                 "Unsupported target", "unrecognized target", "no toolchain",
+                 "not supported for target", "no simpleos user runtime"]
+    for h in hints:
+        if log_tail.contains(h):
+            return true
+    false
+
+fn ci_build_target(triple: text, seed: text, required: bool, probe_only: bool) -> text:
+    """Run the full pipeline for one triple. Returns 'OK ...', 'SKIP ...' or 'FAIL ...'."""
+    val arch = arch_of(triple)
+    print "[ci-simpleos] === " + triple + " ==="
+
+    # -- probe: sysroot + runtime archive ---------------------------------
+    var sysroot = ""
+    var why = ""
+    (sysroot, why) = resolve_sysroot(triple)
+    if sysroot == "":
+        if required:
+            print "[ci-simpleos] " + triple + ": HARD FAIL — required arch has no sysroot"
+            print "[ci-simpleos]   " + why
+            return "FAIL " + why
+        print "[ci-simpleos] " + triple + ": arch not yet buildable: " + why
+        print "[ci-simpleos]   (Lanes BA/BR64 land the per-arch target spec + sysroot;"
+        print "[ci-simpleos]    this target goes green here once they exist)"
+        return "SKIP arch not yet buildable: " + why
+    val runtime_archive = runtime_archive_of(triple, sysroot)
+    if runtime_archive == "":
+        val reason = "target Simple-core runtime archive missing for " + arch
+        if required:
+            return "FAIL " + reason
+        return "SKIP arch not yet buildable: " + reason
+    val want_base = link_base_of(sysroot)
+    print "[ci-simpleos] sysroot=" + sysroot + " runtime_archive=" + runtime_archive
+    print "[ci-simpleos] link_base=" + want_base
+    if probe_only:
+        return "OK probe-only: sysroot + runtime archive present (build skipped)"
+
+    # -- stage the artifact (from-source build OR verify a prebuilt) -------
+    val stage_dir = "build/ci/simpleos_toolchain/" + triple
+    val staging = stage_dir + "/simple"
+    val log = stage_dir + "/build.log"
+    sh("mkdir -p '" + stage_dir + "'")
+    sh("rm -f '" + staging + "'")
+    var provenance = ""
+    val prebuilt = env_val("SIMPLEOS_CI_PREBUILT_" + arch)
+    if prebuilt != "":
+        # Verify+publish stage for a seed-built artifact handed in from a
+        # prior/parallel build stage. Used when the from-source compile is
+        # externally gated (e.g. the central compiler is mid-refactor with
+        # transient duplicate package exports). This does NOT fabricate a
+        # pass: the artifact still runs the full fail-closed verify below, so
+        # a wrong-arch / wrong-base / non-static binary is rejected exactly as
+        # a fresh build would be.
+        if not file_exists(prebuilt):
+            return "FAIL prebuilt artifact not found: " + prebuilt
+        provenance = "prebuilt seed artifact " + prebuilt
+        print "[ci-simpleos] verify+publish prebuilt seed artifact: " + prebuilt
+        sh("cp -f '" + prebuilt + "' '" + staging + "'")
+    else:
+        # cranelift default: the seed is routinely built without --features
+        # llvm (native backend 'llvm' unavailable); cranelift is the proven
+        # kernel/payload route (see scripts/os/ssh_simple_hello_uefi.shs).
+        val backend = if env_val("SIMPLEOS_CI_BACKEND") != "": env_val("SIMPLEOS_CI_BACKEND") else: "cranelift"
+        # x86-64-v1 keeps the payload SSE-only (board-safe: SimpleOS ring-3
+        # does not enable AVX xsave state; QEMU qemu64 has no AVX either).
+        var cpu = env_val("SIMPLEOS_CI_CPU")
+        if cpu == "" and arch == "x86_64":
+            cpu = "x86-64-v1"
+        val cpu_flag = if cpu != "": "--cpu " + cpu + " " else: ""
+        provenance = "seed native-build (backend " + backend + ")"
+        # SimpleOS link base (0x40000000 on x86_64) comes from the seed's
+        # built-in auto-inject of <sysroot>/share/simpleos/simpleos.ld for
+        # SimpleOS x86_64/aarch64 targets (resolve_freestanding_linker_script
+        # in the seed's native_project/linker.rs). That auto-inject resolves
+        # the sysroot RELATIVE TO CWD, so the CI must run from the repo root.
+        # We deliberately do NOT pass an explicit --linker-script: that flag
+        # routes native-build through a strict whole-package re-discovery that
+        # hard-fails on any transient duplicate export in a mid-sync central-
+        # compiler working copy. The verify step below is the fail-closed
+        # guard — a wrong base (e.g. the default 0x200000 when the sysroot did
+        # not resolve) is rejected there.
+        val cmd = "SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src " +
+            "SIMPLEOS_SYSROOT='" + sysroot + "' " +
+            "SIMPLE_SIMPLE_CORE_PATH='" + runtime_archive + "' " +
+            "'" + seed + "' native-build " +
+            "--source src/compiler --source src/lib --source src/app " +
+            "--backend " + backend + " " + cpu_flag + "--runtime-bundle simple-core " +
+            "--entry-closure --entry src/app/simpleos_tool/main.spl " +
+            "--target " + triple + " -o '" + staging + "'"
+        print "[ci-simpleos] building (backend=" + backend + ", log=" + log + ") ..."
+        var bout = ""
+        var berr = ""
+        var brc: i64 = 0
+        (bout, berr, brc) = sh(cmd + " > '" + log + "' 2>&1")
+        val tail = sh_line("tail -5 '" + log + "'")
+        if brc != 0 or not file_exists(staging):
+            if not required and looks_like_missing_target_support(tail):
+                print "[ci-simpleos] " + triple + ": arch not yet buildable (seed lacks target support)"
+                print tail
+                return "SKIP arch not yet buildable: seed lacks target support (see " + log + ")"
+            print "[ci-simpleos] BUILD FAILED (rc={brc}), log tail:"
+            print tail
+            return "FAIL native-build failed (rc={brc}, see " + log + ")"
+
+    # -- verify (fail closed) ---------------------------------------------
+    var vreason = ""
+    var first_load = ""
+    (vreason, first_load) = verify_artifact(staging, triple, want_base)
+    if vreason != "":
+        print "[ci-simpleos] VERIFY FAILED: " + vreason
+        return "FAIL verify: " + vreason
+    val entry_shown = sh_line("readelf -h '" + staging +
+        "' 2>/dev/null | sed -n 's/.*Entry point address: *//p' | head -1")
+    print "[ci-simpleos] verified: static ELF64 " + em_of(arch) +
+        ", entry " + entry_shown + " in first PT_LOAD " + first_load + " == base " + want_base
+
+    # -- stamp + install ----------------------------------------------------
+    if not write_stamp(staging + ".build_stamp", triple, seed, sysroot,
+                       runtime_archive, provenance, staging, first_load):
+        return "FAIL could not write build stamp"
+    # Install root defaults to bin/release; SIMPLEOS_CI_INSTALL_DIR lets a
+    # build run from a clean out-of-tree checkout still publish into the
+    # real repo's bin/release (the main WC is often mid-churn from parallel
+    # lanes, so CI builds the clean HEAD export but installs the deliverable
+    # back into the repo).
+    val install_root = if env_val("SIMPLEOS_CI_INSTALL_DIR") != "": env_val("SIMPLEOS_CI_INSTALL_DIR") else: "bin/release"
+    val dest_dir = install_root + "/" + triple
+    val dest = dest_dir + "/simple"
+    sh("mkdir -p '" + dest_dir + "'")
+    if file_exists(dest):
+        sh("cp -f '" + dest + "' '" + dest + ".prev'")
+    var iout = ""
+    var ierr = ""
+    var irc: i64 = 0
+    (iout, ierr, irc) = sh("cp -f '" + staging + "' '" + dest + ".new' && mv -f '" +
+                           dest + ".new' '" + dest + "' && cp -f '" +
+                           staging + ".build_stamp' '" + dest + ".build_stamp'")
+    if irc != 0:
+        return "FAIL install to " + dest + " failed: " + ierr.trim()
+    val size = sh_line("wc -c < '" + dest + "'")
+    print "[ci-simpleos] installed " + dest + " (" + size + " bytes) + .build_stamp"
+    "OK " + dest + " (" + size + " bytes, first PT_LOAD " + first_load + ")"
+
+# ---------------------------------------------------------------------- main
+
+fn required_triples() -> [text]:
+    val ov = env_val("SIMPLEOS_CI_REQUIRE")
+    if ov == "":
+        return ["x86_64-unknown-simpleos"]
+    var out: [text] = []
+    for t in ov.split(","):
+        if t.trim() != "":
+            out = out.push(t.trim())
+    out
+
+fn normalize_triple(sel: text) -> text:
+    if sel.contains("-"):
+        sel
+    else:
+        sel + "-unknown-simpleos"
+
+fn contains_text(xs: [text], x: text) -> bool:
+    for e in xs:
+        if e == x:
+            return true
+    false
+
+fn main() -> i64:
+    val args = get_args()
+    var only: [text] = []
+    var require_all = false
+    var probe_only = false
+    var seed = env_val("SIMPLE_CI_SEED")
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--only" and i + 1 < args.len():
+            only = only.push(normalize_triple(args[i + 1]))
+            i = i + 2
+        elif a == "--require-all":
+            require_all = true
+            i = i + 1
+        elif a == "--probe-only" or a == "--list":
+            probe_only = true
+            i = i + 1
+        elif a == "--seed" and i + 1 < args.len():
+            seed = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    if seed == "":
+        seed = "src/compiler_rust/target/release/simple"
+    if not file_exists(seed):
+        print "[ci-simpleos] FAIL: seed compiler not found: " + seed
+        print "[ci-simpleos] build it first: cargo build --release (src/compiler_rust)"
+        return 1
+
+    val req = required_triples()
+    var statuses: [text] = []
+    var failed = false
+    var ok_count = 0
+    for triple in ci_triples():
+        if only.len() > 0 and not contains_text(only, triple):
+            continue
+        val required = require_all or contains_text(req, triple)
+        val status = ci_build_target(triple, seed, required, probe_only)
+        statuses = statuses.push(triple + ": " + status)
+        if status.starts_with("FAIL"):
+            failed = true
+        elif status.starts_with("OK"):
+            ok_count = ok_count + 1
+        elif status.starts_with("SKIP") and required:
+            failed = true
+
+    print ""
+    print "==== SimpleOS toolchain CI summary ===="
+    for s in statuses:
+        print "  " + s
+    if failed:
+        print "RESULT: FAIL"
+        return 1
+    if ok_count == 0:
+        print "RESULT: FAIL (no target was buildable)"
+        return 1
+    print "RESULT: PASS ({ok_count} built, pending arches reported above)"
+    0

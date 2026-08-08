@@ -1,0 +1,203 @@
+extern fn rt_file_read_text(path: text) -> text
+
+# Pure-Simple interpreter: _EvalOps export completeness + text `.at` dispatch.
+#
+# Three gaps, all in the live dispatch tree
+# `src/compiler/10.frontend/core/interpreter/_EvalOps/`:
+#
+#   1. `eval_int_method` was named by NEITHER `__init__.spl` NOR `eval_ops.spl`,
+#      so any out-of-tree importer of `compiler.frontend.core.interpreter.*`
+#      failed to LINK -- `error[E1002]: function 'eval_int_method' not found` --
+#      on the first int method it evaluated.
+#   2. Text `.at` had no arm at all, in the live table or in the
+#      `eval_methods.spl` copy deleted on 2026-08-01. It fell through to
+#      `eval_set_error` + -1, which reads back as the RECEIVER UNCHANGED for
+#      text: `"abcdef".at(2)` answered 'abcdef'. Arrays DO have `.at`, so text
+#      and arrays diverged.
+#   3. `__init__.spl` uses EXPLICIT export lists, so 1 was not an accident --
+#      it is the default outcome for anything added to `_EvalOps`.
+#
+# See doc/08_tracking/bug/2026-08-01_interpreter_evalops_export_gaps.md
+#
+# ENGINE NOTE -- read before trusting any number here.
+# The behavioural evidence for 1 and 2 was NOT produced by this spec. It was
+# produced by driving `core_interpret_expr` from a standalone driver with the
+# Rust seed as HOST over working-copy interpreter source, so the values came
+# from the pure-Simple interpreter under test. That measurement is transcribed
+# in the bug doc. It CANNOT be re-expressed as `it` blocks here: a spec that
+# imports the interpreter and calls `core_interpret_expr` does not compile under
+# `test/` at all (`error: semantic: variable 'cache_initialized' not found` --
+# value.spl's module-level globals), and the identical file placed outside
+# `test/` compiles but then reads the value pool as EMPTY mid-run
+# ("array index out of bounds: index is 263 but length is 0"). Both are the
+# known cross-module module-level-global defect, not a defect in the arms below.
+# Filed as the follow-up in the bug doc.
+#
+# So the blocks below are structural REGRESSION PINS on the file that actually
+# runs, in the shape this campaign settled on for
+# text_byte_at_dispatch_spec.spl and option_result_method_dispatch_spec.spl.
+# The export-completeness block is mechanical rather than a hand-listed name
+# check, so it also catches gaps nobody has hit yet.
+
+val INIT_PATH = "src/compiler/10.frontend/core/interpreter/__init__.spl"
+val EVAL_OPS_PATH = "src/compiler/10.frontend/core/interpreter/eval_ops.spl"
+val CALL_METHOD_PATH = "src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl"
+val ACCESS_PATH = "src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl"
+
+fn read_src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn arm_body(source: text, start_marker: text, end_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    if start < 0: return ""
+    val rest = source.substring(start, source.len())
+    val stop = rest.index_of(end_marker)
+    if stop < 0: return rest
+    rest.substring(0, stop)
+
+# Names defined as `fn NAME(` at the start of a line in `src` that are NOT named
+# on any line of `init_src`. Token-anchored on both sides, so an export of
+# `eval_dict_literal` does not satisfy a definition of `eval_dict_lit`.
+fn unexported_fns(src: text, init_src: text) -> text:
+    var missing = ""
+    var rest = "\n" + src
+    while true:
+        val p = rest.index_of("\nfn ")
+        if p < 0:
+            break
+        rest = rest.substring(p + 4, rest.len())
+        val paren = rest.index_of("(")
+        if paren < 0:
+            break
+        val name = rest.substring(0, paren)
+        if name.contains(" ") == false and name.contains("\n") == false:
+            val by_comma = init_src.contains(" " + name + ",")
+            val by_eol = init_src.contains(" " + name + "\n")
+            if by_comma == false and by_eol == false:
+                missing = missing + name + " "
+    missing
+
+describe "interpreter _EvalOps exports and text.at":
+
+    it "exports every _EvalOps function from the package __init__":
+        # THE ITEM-3 PIN, and the reason items 1 and 2 stayed hidden for so long.
+        #
+        # eval_ops.spl re-exports the package with
+        # `export use ..._EvalOps.*`, so a new helper is automatically visible
+        # to importers of eval_ops. But __init__.spl -- what
+        # `use compiler.frontend.core.interpreter.*` resolves -- uses EXPLICIT
+        # export lists and does NOT inherit that wildcard. A function added to
+        # _EvalOps is therefore invisible to every out-of-tree importer until
+        # somebody remembers to list it, and the failure surfaces as a link
+        # error in an unrelated file, far from the edit that caused it.
+        #
+        # Mechanical rather than a hand-written name list: adding a `fn` to
+        # _EvalOps without exporting it turns this red and NAMES the function.
+        val init_src = read_src(INIT_PATH)
+        expect(init_src.len()).to_be_greater_than(0)
+        val call_src = read_src(CALL_METHOD_PATH)
+        expect(call_src.len()).to_be_greater_than(0)
+        val access_src = read_src(ACCESS_PATH)
+        expect(access_src.len()).to_be_greater_than(0)
+
+        # Self-check first: the scanner must actually find functions. Without
+        # this, a scanner that silently matched nothing would report "no gaps"
+        # and be vacuously green -- the false-green shape this campaign keeps
+        # hitting.
+        expect(unexported_fns(call_src, "")).to_contain("eval_int_method")
+        expect(unexported_fns(access_src, "")).to_contain("eval_text_method")
+
+        expect(unexported_fns(call_src, init_src)).to_equal("")
+        expect(unexported_fns(access_src, init_src)).to_equal("")
+
+    it "keeps eval_int_method reachable from the package export list":
+        # THE ITEM-1 PIN, stated as the specific symbol rather than relying on
+        # the generic scan above, because this one has a live call site:
+        # _EvalOps/call_method_eval.spl dispatches VAL_INT receivers to it. An
+        # importer that reached core_interpret_expr therefore died on
+        # `(42).to_text()` before evaluating anything.
+        val call_src = read_src(CALL_METHOD_PATH)
+        expect(call_src).to_contain("return eval_int_method(receiver, method_name, arg_eids)")
+        expect(call_src).to_contain("fn eval_int_method(")
+
+        val init_src = read_src(INIT_PATH)
+        expect(init_src).to_contain("export eval_int_method")
+
+    it "routes each receiver kind to a dispatcher the package exports":
+        # Generalises the block above: every `eval_*_method` the per-kind
+        # dispatch calls must be exported, not just the one that bit us.
+        val init_src = read_src(INIT_PATH)
+        expect(init_src).to_contain(" eval_array_method")
+        expect(init_src).to_contain(" eval_text_method")
+        expect(init_src).to_contain(" eval_int_method")
+
+    it "gives text an at arm in the LIVE dispatch table":
+        # THE ITEM-2 PIN. `at` was absent from the live text table AND from the
+        # eval_methods.spl copy deleted on 2026-08-01, so it is a genuine gap
+        # rather than a regression from that deletion. Arrays already had `at`.
+        #
+        # This asserts against the file that ACTUALLY RUNS. The sole call site
+        # of eval_text_method is _EvalOps/call_method_eval.spl, in this same
+        # _EvalOps package, so the package-local definition is the one that
+        # resolves -- proven by two-directional sabotage through
+        # core_interpret_expr in
+        # doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md
+        val access_src = read_src(ACCESS_PATH)
+        expect(access_src).to_contain("if method_name == \"at\":")
+
+        val body = arm_body(access_src, "if method_name == \"at\":", "if method_name == \"parse_int\":")
+        expect(body.len()).to_be_greater_than(0)
+        # In range: a one-byte slice, the same shape char_at uses.
+        expect(body).to_contain("s.substring(at_idx, at_idx + 1)")
+        # Bounds-checked on both ends, negative index included.
+        expect(body).to_contain("at_idx >= 0 and at_idx < s.len()")
+
+    it "returns flat None from text .at out of range, matching array .at":
+        # `.at` is this codebase's bounds-checked Option accessor. Array `.at`
+        # returns flat-None (nil) past the end -- the element itself is its own
+        # `Some`, per the FLAT Option encoding; there is no VAL_ENUM in this
+        # interpreter. 250+ call sites `match x.at(i)` as Some/None, so a text
+        # `.at` returning "" would make every one of them take the Some branch
+        # on an out-of-range read.
+        #
+        # The two receivers are asserted side by side so they cannot drift apart
+        # silently the way `at` itself did.
+        val access_src = read_src(ACCESS_PATH)
+        val text_at = arm_body(access_src, "if method_name == \"at\":", "if method_name == \"parse_int\":")
+        expect(text_at).to_contain("return val_make_nil()")
+        # ...and NOT the seed's empty-string convention.
+        expect(text_at).to_not_contain("val_make_text(\"\")")
+
+        val call_src = read_src(CALL_METHOD_PATH)
+        val array_at = arm_body(call_src, "if method_name == \"at\":", "if method_name == \"map\":")
+        expect(array_at).to_contain("return val_make_nil()")
+
+    it "fails LOUDLY when text .at is called with no index":
+        # A missing argument is a caller bug, not an empty string. char_at's
+        # older no-arg behaviour (return "") is exactly the silent-default shape
+        # this campaign keeps having to undo, so `at` must not copy it.
+        val access_src = read_src(ACCESS_PATH)
+        val body = arm_body(access_src, "if method_name == \"at\":", "if method_name == \"parse_int\":")
+        expect(body).to_contain("eval_set_error(\"at() requires an index argument\")")
+        expect(body).to_contain("return -1")
+
+    it "documents text .at as a deliberate divergence from the seed":
+        # DO NOT "fix" this toward the seed. The seed
+        # (src/compiler_rust/compiler/src/interpreter_method/string.rs, where
+        # `"char_at" | "at"` share one arm) is CHARACTER-indexed and returns ""
+        # out of range. The C runtime's rt_string_char_at -- what `s[i]` lowers
+        # to on native/JIT via rt_index_get -- is a raw one-byte slice returning
+        # nil out of range. This interpreter matches the RUNTIME on both axes,
+        # because interpreter/native agreement is the property that matters for
+        # a compiler lane, and because len/index_of/slice/char_at here all hand
+        # out byte offsets so a character-indexed `at` would not compose with
+        # them. Same reasoning already recorded on char_at.
+        #
+        # Pinning the comment, not just the code, because the next person to
+        # diff the interpreter against the seed will otherwise "fix" the
+        # divergence and silently break the composition property.
+        val access_src = read_src(ACCESS_PATH)
+        val body = arm_body(access_src, "# Text `at`:", "if method_name == \"parse_int\":")
+        expect(body).to_contain("rt_string_char_at")
+        expect(body).to_contain("interpreter_method/string.rs")
+        expect(body).to_contain("bounds-checked Option accessor")

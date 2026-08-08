@@ -1,0 +1,56 @@
+"""macOS Dynamic Loading System Test.
+
+Exercises the dylib_registry ELF cross-load pipeline on macOS. Since
+no Mach-O loader exists, this verifies that the ELF registry works
+cross-platform. Gated by is_macos() -- prints SKIP on other platforms.
+
+# TODO(dynload-system-tests): switch to gcc -shared + file_read_bytes
+# once interpreter FFI [u8] wrapping bug is fixed (see D-1 in state.md).
+# TODO(dynload-system-tests): add Mach-O loader tests when a Mach-O
+# parser is implemented (see D-4).
+
+**Feature IDs:** #DYNLOAD-SYS-011 to #DYNLOAD-SYS-012
+**Category:** Infrastructure / System Test
+"""
+
+# @cover src/os/kernel/loader/dylib_registry.spl 80%
+
+use std.spec
+use std.env.platform.{is_macos}
+use os.kernel.loader.dylib_registry.{
+    dylib_registry_reset_for_test,
+    dylib_registry_register,
+    dylib_registry_close,
+    dylib_registry_symbol
+}
+use test.system.dynload.dynload_fixture_helpers.{
+    make_elf64_exec
+}
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Dynload macOS System":
+    describe "ELF cross-load via registry":
+        it "registers and resolves ELF64 on macOS":
+            if is_macos():
+                dylib_registry_reset_for_test()
+                val handle = dylib_registry_register("/lib/cross.so", make_elf64_exec())
+                expect(handle).to_be_greater_than(0)
+                expect(dylib_registry_symbol(handle, "_start")).to_equal(0x400000)
+                expect(dylib_registry_close(handle)).to_equal(0)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: macOS ELF cross-load (not on macOS)")
+
+        it "resolves main entry symbol on macOS":
+            if is_macos():
+                dylib_registry_reset_for_test()
+                val handle = dylib_registry_register("/lib/mac.so", make_elf64_exec())
+                expect(handle).to_be_greater_than(0)
+                expect(dylib_registry_symbol(handle, "main")).to_equal(0x400000)
+                expect(dylib_registry_close(handle)).to_equal(0)
+                dylib_registry_reset_for_test()
+            else:
+                print("SKIP: macOS symbol resolve (not on macOS)")

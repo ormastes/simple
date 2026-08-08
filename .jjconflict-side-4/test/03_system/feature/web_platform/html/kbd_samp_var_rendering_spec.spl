@@ -1,0 +1,248 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""Selected `<kbd>`, `<samp>`, and `<var>` UA typography through WebIR,
+DrawIrComposition, and Engine2D.
+
+Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
+
+val WIDTH: i32 = 128
+val HEIGHT: i32 = 32
+val SAMPLE: text = "iiiiWWWW"
+
+fn _typography_fixture(tag: text, declarations: text) -> text:
+    val style = if declarations == "":
+        ""
+    else:
+        " style='" + declarations + "'"
+    (
+        "<style>html,body{margin:0;background:#fff;font-size:16px}</style>" +
+        "<body id='body'><" + tag + " id='target'" + style + ">" +
+        SAMPLE + "</" + tag + "></body>"
+    )
+
+fn _typography_node_index(nodes: [HNode], component_id: text) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing grouped typography Web semantic node: {component_id}")
+    -1
+
+fn _typography_command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing grouped typography Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+fn _typography_text_command(
+    composition: DrawIrComposition
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text" and command.text_value == SAMPLE:
+                return command
+    fail("missing grouped typography Draw IR text command")
+    composition.batches[0].commands[0]
+
+fn _typography_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing grouped typography Draw IR style: {key}")
+    ""
+
+fn _typography_geometry(result: SimpleWebLayoutDrawIrResult) -> [i32]:
+    val index = _typography_node_index(result.hit_index.nodes, "target")
+    [
+        result.hit_index.boxes.bx[index], result.hit_index.boxes.by[index],
+        result.hit_index.boxes.bw[index], result.hit_index.boxes.bh[index]
+    ]
+
+fn _typography_pixels(result: SimpleWebLayoutDrawIrResult) -> [u32]:
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val frame = raster.render_draw_ir_composition(result.composition, [])
+    raster.shutdown()
+    expect(frame.skipped_command_count).to_equal(0)
+    expect(frame.pixels.len()).to_equal(WIDTH * HEIGHT)
+    frame.pixels
+
+fn _typography_pixel_difference_count(
+    left: [u32], right: [u32]
+) -> i32:
+    if left.len() != right.len():
+        fail("grouped typography frames must have equal dimensions")
+    var count = 0
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            count = count + 1
+        index = index + 1
+    count
+
+describe "Production kbd samp and var rendering":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+    it "should lower grouped UA typography through Draw IR to pixels":
+        step("Parse kbd samp and var as inline body children")
+        val semantic_html = (
+            "<body id='body'><kbd id='kbd'>K</kbd>" +
+            "<samp id='samp'>S</samp><var id='var'>V</var></body>"
+        )
+        val root = html_tree_builder_build(semantic_html)
+        val identity_index = system_dom_identity_index(root)
+        val body_path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, "body"))
+        for component_id in ["kbd", "samp", "var"]:
+            val path = be_dom_path_for_route(root, identity_index, system_dom_route(identity_index, component_id))
+            expect(path.len()).to_be_greater_than(1)
+            expect(be_dom_get_tag(path[path.len() - 1])).to_equal(component_id)
+            expect(path[path.len() - 2].node_id).to_equal(
+                body_path[body_path.len() - 1].node_id
+            )
+
+        step("Resolve grouped user-agent typography and author overrides")
+        val kbd = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("kbd", ""), WIDTH, HEIGHT
+        )
+        val samp = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("samp", ""), WIDTH, HEIGHT
+        )
+        val mono = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("span", "font-family:monospace"), WIDTH, HEIGHT
+        )
+        val kbd_override = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("kbd", "font-family:sans-serif"), WIDTH, HEIGHT
+        )
+        val variable = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("var", ""), WIDTH, HEIGHT
+        )
+        val italic = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("span", "font-style:italic"), WIDTH, HEIGHT
+        )
+        val var_override = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("var", "font-style:normal"), WIDTH, HEIGHT
+        )
+        val normal = simple_web_layout_render_html_draw_ir_result(
+            _typography_fixture("span", "font-style:normal"), WIDTH, HEIGHT
+        )
+        val kbd_style = kbd.hit_index.styles[
+            _typography_node_index(kbd.hit_index.nodes, "target")
+        ]
+        val samp_style = samp.hit_index.styles[
+            _typography_node_index(samp.hit_index.nodes, "target")
+        ]
+        val var_style = variable.hit_index.styles[
+            _typography_node_index(variable.hit_index.nodes, "target")
+        ]
+        val kbd_override_style = kbd_override.hit_index.styles[
+            _typography_node_index(kbd_override.hit_index.nodes, "target")
+        ]
+        val var_override_style = var_override.hit_index.styles[
+            _typography_node_index(var_override.hit_index.nodes, "target")
+        ]
+        expect(kbd_style.display).to_equal("inline")
+        expect(samp_style.display).to_equal("inline")
+        expect(var_style.display).to_equal("inline")
+        expect(kbd_style.font_family).to_equal("monospace")
+        expect(samp_style.font_family).to_equal("monospace")
+        expect(var_style.font_style_italic).to_be(true)
+        expect(kbd_override_style.font_family).to_equal("sans-serif")
+        expect(var_override_style.font_style_italic).to_be(false)
+        expect(_typography_geometry(kbd)).to_equal(_typography_geometry(mono))
+        expect(_typography_geometry(samp)).to_equal(_typography_geometry(mono))
+        expect(_typography_geometry(variable)).to_equal(
+            _typography_geometry(italic)
+        )
+
+        step("Emit canonical grouped typography Draw IR")
+        val kbd_box = _typography_command(kbd.composition, "target")
+        val samp_box = _typography_command(samp.composition, "target")
+        val var_box = _typography_command(variable.composition, "target")
+        val kbd_text = _typography_text_command(kbd.composition)
+        val samp_text = _typography_text_command(samp.composition)
+        val var_text = _typography_text_command(variable.composition)
+        val mono_text = _typography_text_command(mono.composition)
+        expect(_typography_style(kbd_box, "tag")).to_equal("kbd")
+        expect(_typography_style(samp_box, "tag")).to_equal("samp")
+        expect(_typography_style(var_box, "tag")).to_equal("var")
+        expect(_typography_style(kbd_box, "display")).to_equal("inline")
+        expect(_typography_style(kbd_box, "font-family")).to_equal("monospace")
+        expect(_typography_style(samp_box, "display")).to_equal("inline")
+        expect(_typography_style(samp_box, "font-family")).to_equal("monospace")
+        expect(_typography_style(var_box, "display")).to_equal("inline")
+        expect(_typography_style(var_box, "font-style")).to_equal("italic")
+        expect(_typography_style(kbd_text, "font-family")).to_equal(
+            _typography_style(mono_text, "font-family")
+        )
+        expect(_typography_style(
+            kbd_text, "font-identity"
+        ) == "").to_be(false)
+        expect(_typography_style(kbd_text, "font-identity")).to_equal(
+            _typography_style(mono_text, "font-identity")
+        )
+        expect(_typography_style(samp_text, "font-identity")).to_equal(
+            _typography_style(mono_text, "font-identity")
+        )
+        expect(_typography_style(var_text, "font-style")).to_equal("italic")
+        expect(kbd_text.parent_id).to_equal("target")
+        expect(samp_text.parent_id).to_equal("target")
+        expect(var_text.parent_id).to_equal("target")
+        expect([kbd_text.x, kbd_text.y]).to_equal([0, 0])
+        expect([samp_text.x, samp_text.y]).to_equal([0, 0])
+        expect([var_text.x, var_text.y]).to_equal([0, 0])
+
+        step("Render grouped typography through Engine2D")
+        val kbd_pixels = _typography_pixels(kbd)
+        val samp_pixels = _typography_pixels(samp)
+        val mono_pixels = _typography_pixels(mono)
+        val kbd_override_pixels = _typography_pixels(kbd_override)
+        val var_pixels = _typography_pixels(variable)
+        val italic_pixels = _typography_pixels(italic)
+        val var_override_pixels = _typography_pixels(var_override)
+        val normal_pixels = _typography_pixels(normal)
+        expect(_typography_pixel_difference_count(
+            kbd_pixels, mono_pixels
+        )).to_equal(0)
+        expect(_typography_pixel_difference_count(
+            samp_pixels, mono_pixels
+        )).to_equal(0)
+        expect(_typography_pixel_difference_count(
+            kbd_pixels, kbd_override_pixels
+        )).to_be_greater_than(0)
+        expect(_typography_pixel_difference_count(
+            kbd_override_pixels, normal_pixels
+        )).to_equal(0)
+        expect(_typography_pixel_difference_count(
+            var_pixels, italic_pixels
+        )).to_equal(0)
+        expect(_typography_pixel_difference_count(
+            var_pixels, var_override_pixels
+        )).to_be_greater_than(0)
+        expect(_typography_pixel_difference_count(
+            var_override_pixels, normal_pixels
+        )).to_equal(0)

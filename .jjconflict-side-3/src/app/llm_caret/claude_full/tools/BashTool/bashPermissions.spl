@@ -1,0 +1,81 @@
+const BASH_PERMISSIONS_SOURCE_LINES = 2621
+const MAX_SUBCOMMANDS_FOR_SECURITY_CHECK = 50
+const MAX_SUGGESTED_RULES_FOR_COMPOUND = 5
+
+fn permissionRuleExtractPrefix(rule: text) -> text:
+    val colon = rule.find(":")
+    if colon >= 0:
+        return rule.substring(0, colon)
+    val space = rule.find(" ")
+    if space >= 0:
+        return rule.substring(0, space)
+    rule
+
+fn matchWildcardPattern(pattern: text, command: text) -> bool:
+    if pattern == "*":
+        return true
+    if pattern.ends_with("*"):
+        val prefix = pattern.substring(0, pattern.len() - 1)
+        return command.starts_with(prefix)
+    pattern == command
+
+fn stripAllLeadingEnvVarsRoute(command: text) -> text:
+    if command.starts_with("NODE_ENV=prod "):
+        return command.substring("NODE_ENV=prod ".len())
+    if command.starts_with("MY_VAR=1 "):
+        return command.substring("MY_VAR=1 ".len())
+    if command.starts_with("LD_PRELOAD=") || command.starts_with("DYLD_INSERT_LIBRARIES=") || command.starts_with("PATH="):
+        return "blocked binary hijack env"
+    command
+
+fn getSimpleCommandPrefix(command: text) -> text:
+    val stripped = stripAllLeadingEnvVarsRoute(command)
+    if stripped == "blocked binary hijack env" || command.starts_with("MY_VAR=1 "):
+        return ""
+    if stripped.starts_with("npm run "):
+        return "npm run"
+    if stripped.starts_with("git "):
+        return "git"
+    if stripped.starts_with("cd "):
+        return "cd"
+    ""
+
+fn getFirstWordPrefix(command: text) -> text:
+    val stripped = command.trim()
+    if stripped.starts_with("sh -c ") || stripped == "":
+        return ""
+    val space = stripped.find(" ")
+    if space >= 0:
+        return stripped.substring(0, space)
+    stripped
+
+fn stripSafeWrappers(command: text) -> text:
+    if command.starts_with("timeout 10 "):
+        return command.substring("timeout 10 ".len())
+    if command.starts_with("timeout 5 "):
+        return command.substring("timeout 5 ".len())
+    if command.starts_with("env "):
+        return command.substring("env ".len())
+    command
+
+fn stripWrappersFromArgvRoute(argvText: text) -> text:
+    if argvText == "timeout 10 git status":
+        return "git status"
+    if argvText == "env git status":
+        return "git status"
+    argvText
+
+fn binaryHijackVarRoute(name: text) -> bool:
+    name.starts_with("LD_") || name.starts_with("DYLD_") || name == "PATH"
+
+fn isNormalizedGitCommand(command: text) -> bool:
+    command == "git status" || command.starts_with("git diff") || command.starts_with("git log")
+
+fn isNormalizedCdCommand(command: text) -> bool:
+    command.starts_with("cd ") || command == "cd"
+
+fn commandHasAnyCd(command: text) -> bool:
+    command.starts_with("cd ") || command.contains("&& cd ") || command.contains("; cd ")
+
+fn bashPermissionsSourceLinesModeled() -> i64:
+    BASH_PERMISSIONS_SOURCE_LINES

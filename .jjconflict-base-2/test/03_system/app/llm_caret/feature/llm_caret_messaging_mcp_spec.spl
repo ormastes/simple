@@ -1,0 +1,65 @@
+"""# LLM Caret Messaging MCP
+
+## Overview
+
+This executable manual verifies the dedicated stdio MCP protocol registration
+and an end-to-end private-room send/read flow through canonical PureDatabase
+messaging semantics.
+
+**Requirements:** REQ-LLM-MSG-003, REQ-LLM-MSG-013, REQ-LLM-MSG-015,
+REQ-LLM-MSG-016
+"""
+
+use std.spec
+use std.mcp_sdk.server.app.{mcp_server_handle}
+use app.llm_caret.messaging.mcp.protocol.{register_messaging_tools, configure_messaging_mcp_memory}
+
+fn response(message: text) -> text:
+    val result = mcp_server_handle(message)
+    match result:
+        Some(value): return value
+        nil: return ""
+
+fn tool_call(id: i64, name: text, arguments: text) -> text:
+    response("{\"jsonrpc\":\"2.0\",\"id\":" + id.to_text() +
+        ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name +
+        "\",\"arguments\":" + arguments + "}}")
+
+fn configure_test_mcp():
+    configure_messaging_mcp_memory("human-mcp", "mcp-ws",
+        ["room:read", "room:write", "profile:read", "dm:write", "agent:control"])
+
+describe "LLM Caret dedicated messaging MCP":
+    it "advertises the complete canonical chat tool set with JSON schemas":
+        step("Discover the dedicated messaging MCP")
+        configure_test_mcp()
+        register_messaging_tools()
+        val listed = response("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}")
+        expect(listed).to_contain("chat_join")
+        expect(listed).to_contain("chat_open_private")
+        expect(listed).to_contain("chat_publish_artifact")
+        expect(listed).to_contain("chat_get_context")
+        expect(listed).to_contain("\"inputSchema\":{\"type\":\"object\"")
+        expect(listed.contains("CREATE TABLE")).to_equal(false)
+
+    it "opens a private room then sends and reads one canonical message":
+        step("Create and bind a room")
+        configure_test_mcp()
+        register_messaging_tools()
+        val opened = tool_call(2, "chat_open_private", "{\"workspace_id\":\"mcp-ws\",\"identity_id\":\"human-mcp\",\"target_identity_id\":\"agent-mcp\",\"room_id\":\"mcp-dm\",\"idempotency_key\":\"open-mcp-0001\",\"occurred_at\":10}")
+        expect(opened).to_contain("primitive_direct_room")
+        step("Route a message to an agent")
+        val sent = tool_call(3, "chat_send", "{\"workspace_id\":\"mcp-ws\",\"identity_id\":\"human-mcp\",\"room_id\":\"mcp-dm\",\"message_id\":\"mcp-msg-1\",\"body\":\"hello agent\",\"idempotency_key\":\"send-mcp-0001\",\"occurred_at\":11}")
+        expect(sent).to_contain("accepted")
+        step("Inject the bounded context bundle")
+        val read = tool_call(4, "chat_read", "{\"workspace_id\":\"mcp-ws\",\"identity_id\":\"human-mcp\",\"room_id\":\"mcp-dm\",\"after_seq\":0,\"limit\":10,\"occurred_at\":12}")
+        expect(read).to_contain("canonical_history")
+        expect(read).to_contain("mcp-msg-1")
+        expect(read).to_contain("hello agent")
+
+    it "rejects caller-supplied workspace escalation beyond the local capability":
+        step("Observe task and receipt transitions")
+        configure_test_mcp()
+        register_messaging_tools()
+        val denied = tool_call(5, "chat_read", "{\"workspace_id\":\"other-workspace\",\"identity_id\":\"attacker\",\"room_id\":\"mcp-dm\",\"occurred_at\":12}")
+        expect(denied).to_contain("workspace_access_denied")

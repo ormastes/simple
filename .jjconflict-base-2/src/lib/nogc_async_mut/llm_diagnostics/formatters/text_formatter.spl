@@ -1,0 +1,131 @@
+# LLM Diagnostics — Text Formatter
+#
+# Terminal-friendly table output for diagnostics.
+
+use std.nogc_async_mut.llm_diagnostics.types.{
+    SessionDiag, McpServerStats, AgentNode, DiagEvent,
+    TokenUsage, CacheAnalysis,
+    token_usage_total_input, token_usage_total,
+    mcp_stats_avg_latency, agent_node_duration_ms
+}
+use std.nogc_async_mut.llm_diagnostics.mcp_tracker.{mcp_server_summary_line}
+use std.nogc_async_mut.llm_diagnostics.agent_graph.{agent_summary_line}
+
+# --- Helpers ---
+
+fn pad_right(s: text, width: i64) -> text:
+    var result = s
+    while result.len() < width:
+        result = result + " "
+    result
+
+fn pad_left(s: text, width: i64) -> text:
+    var result = s
+    while result.len() < width:
+        result = " " + result
+    result
+
+fn sep_line(width: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < width:
+        result = result + "-"
+        i = i + 1
+    result
+
+fn format_tokens_k(n: i64) -> text:
+    """Format token count with K suffix for readability."""
+    if n >= 1000:
+        val k = n / 1000
+        val remainder = (n % 1000) / 100
+        k.to_text() + "." + remainder.to_text() + "K"
+    else:
+        n.to_text()
+
+# --- Token Usage ---
+
+fn format_token_usage_text(u: TokenUsage) -> text:
+    var lines: [text] = []
+    lines.push("  Input tokens:          " + pad_left(format_tokens_k(u.input_tokens), 10))
+    lines.push("  Output tokens:         " + pad_left(format_tokens_k(u.output_tokens), 10))
+    lines.push("  Cache read tokens:     " + pad_left(format_tokens_k(u.cache_read_input_tokens), 10))
+    lines.push("  Cache creation tokens: " + pad_left(format_tokens_k(u.cache_creation_input_tokens), 10))
+    lines.push("  Total input:           " + pad_left(format_tokens_k(token_usage_total_input(u)), 10))
+    lines.push("  Total (in+out):        " + pad_left(format_tokens_k(token_usage_total(u)), 10))
+    lines.join("\n")
+
+# --- MCP Stats ---
+
+fn format_mcp_stats_text(stats: [McpServerStats]) -> text:
+    if stats.len() == 0:
+        return "  (no MCP calls recorded)"
+    var lines: [text] = []
+    lines.push(pad_right("Server", 25) + pad_left("Calls", 8) + pad_left("Avg ms", 10) + pad_left("~Tokens", 12))
+    lines.push(sep_line(55))
+    for s in stats:
+        val tokens = s.estimated_request_tokens + s.estimated_response_tokens
+        lines.push(
+            pad_right(s.server_name, 25) +
+            pad_left(s.call_count.to_text(), 8) +
+            pad_left(mcp_stats_avg_latency(s).to_text(), 10) +
+            pad_left(format_tokens_k(tokens), 12)
+        )
+    lines.join("\n")
+
+# --- Agent Tree ---
+
+fn format_agent_tree_text(agents: [AgentNode]) -> text:
+    if agents.len() == 0:
+        return "  (no subagents recorded)"
+    var lines: [text] = []
+    for agent in agents:
+        lines.push("  " + agent_summary_line(agent))
+    lines.join("\n")
+
+# --- Timeline ---
+
+fn format_timeline_text(events: [DiagEvent]) -> text:
+    if events.len() == 0:
+        return "  (no events)"
+    var lines: [text] = []
+    lines.push(pad_right("Time (ms)", 14) + pad_right("Type", 22) + "Agent")
+    lines.push(sep_line(50))
+    for e in events:
+        lines.push(
+            pad_right(e.timestamp.to_text(), 14) +
+            pad_right(e.event_type, 22) +
+            e.agent_id
+        )
+    lines.join("\n")
+
+# --- Cache ---
+
+fn format_cache_text(ca: CacheAnalysis) -> text:
+    var lines: [text] = []
+    lines.push("  Total cache reads:     " + pad_left(format_tokens_k(ca.total_cache_reads), 10))
+    lines.push("  Total cache writes:    " + pad_left(format_tokens_k(ca.total_cache_writes), 10))
+    lines.push("  Total uncached:        " + pad_left(format_tokens_k(ca.total_uncached), 10))
+    val pct = (ca.cache_efficiency * 100.0) as i64
+    lines.push("  Cache efficiency:      " + pad_left(pct.to_text() + "%", 10))
+    lines.join("\n")
+
+# --- Full Session ---
+
+fn format_session_text(session: SessionDiag) -> text:
+    var lines: [text] = []
+    lines.push("=== LLM Diagnostics ===")
+    lines.push("")
+    lines.push("Session: " + session.session_id)
+    lines.push("Type:    " + session.session_type)
+    lines.push("Turns:   " + session.turn_count.to_text())
+    lines.push("Events:  " + session.events.len().to_text())
+    lines.push("")
+    lines.push("--- Token Usage ---")
+    lines.push(format_token_usage_text(session.total_usage))
+    lines.push("")
+    lines.push("--- MCP Servers ---")
+    lines.push(format_mcp_stats_text(session.mcp_stats))
+    lines.push("")
+    lines.push("--- Subagents ---")
+    lines.push(format_agent_tree_text(session.agent_tree))
+    lines.join("\n")

@@ -1,0 +1,149 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Fault injection predicate spec
+# ============================================================================
+#
+# Exercises the pure predicates in fault.spl: ne_fault_aborts_pulse (SPO),
+# ne_fault_forces_program_fail, ne_fault_forces_erase_fail, and the shared
+# ne_fault_matches helper. All oracles are absolute values traced to
+# doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §8
+# (scenario 5 SPO during program, scenario 7 program failure, scenario 8
+# erase failure) — never self-comparison.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.NeOpKind
+use hardware.nand_emu.fault.{
+    ne_fault_none, ne_fault_spo, ne_fault_prog_fail, ne_fault_erase_fail,
+    ne_fault_aborts_pulse, ne_fault_forces_program_fail,
+    ne_fault_forces_erase_fail, ne_fault_matches
+}
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # ne_fault_aborts_pulse — SPO during program (doc §8 scenario 5)
+    # ------------------------------------------------------------------
+    describe("ne_fault_aborts_pulse"):
+        it("does not abort the pulse before the armed pulse"):
+            """doc §8 scenario 5: `FAULT_SPO` armed at pulse 8 of a 20-pulse
+            ISPP loop must NOT abort while the loop is still at pulse 7 — the
+            page is programmed cleanly up to (but not including) pulse 8."""
+            val f = ne_fault_spo(NeOpKind.Program, 8, 100)
+            expect(ne_fault_aborts_pulse(f, NeOpKind.Program, 7)).to_equal(false)
+
+        it("aborts exactly at the armed pulse"):
+            """The SPO signature fires the instant the current pulse reaches
+            the armed pulse: `pulse >= at_pulse`, so pulse 8 aborts at 8, not
+            waiting for 9."""
+            val f = ne_fault_spo(NeOpKind.Program, 8, 100)
+            expect(ne_fault_aborts_pulse(f, NeOpKind.Program, 8)).to_equal(true)
+
+        it("keeps aborting on every pulse after the armed pulse"):
+            """Once armed, SPO is a standing condition for the remainder of
+            the ISPP loop — pulse 9 (past the armed pulse) still aborts."""
+            val f = ne_fault_spo(NeOpKind.Program, 8, 100)
+            expect(ne_fault_aborts_pulse(f, NeOpKind.Program, 9)).to_equal(true)
+
+        it("does not abort a different operation than the one armed"):
+            """An SPO armed for Program must not abort an Erase ISPP loop —
+            the fault is scoped to the operation it was injected against."""
+            val f = ne_fault_spo(NeOpKind.Program, 8, 100)
+            expect(ne_fault_aborts_pulse(f, NeOpKind.Erase, 8)).to_equal(false)
+
+        it("never aborts for the none-fault"):
+            """doc §7.1: the no-op fault must never trigger any predicate —
+            an idle chip with no injected fault runs every ISPP pulse clean."""
+            val none = ne_fault_none()
+            expect(ne_fault_aborts_pulse(none, NeOpKind.Program, 0)).to_equal(false)
+            expect(ne_fault_aborts_pulse(none, NeOpKind.Program, 20)).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # ne_fault_forces_program_fail (doc §8 scenario 7)
+    # ------------------------------------------------------------------
+    describe("ne_fault_forces_program_fail"):
+        it("fires on its own target page"):
+            """doc §8 scenario 7: `FAULT_PROG_FAIL` on page n of block A must
+            force status I/O0=1 when firmware programs page n."""
+            val f = ne_fault_prog_fail(42)
+            expect(ne_fault_forces_program_fail(f, 42)).to_equal(true)
+
+        it("does not fire on a different page"):
+            """The forced failure is page-scoped: neighboring pages 1..n-1
+            (the ones the datasheet's block-replacement flow copies out
+            first) must program normally."""
+            val f = ne_fault_prog_fail(42)
+            expect(ne_fault_forces_program_fail(f, 41)).to_equal(false)
+            expect(ne_fault_forces_program_fail(f, 43)).to_equal(false)
+
+        it("does not fire for a fault of a different kind"):
+            """An armed EraseFail must never masquerade as a program
+            failure, even when its (irrelevant) row fields overlap."""
+            val f = ne_fault_erase_fail(5)
+            expect(ne_fault_forces_program_fail(f, 5)).to_equal(false)
+
+        it("never fires for the none-fault"):
+            val none = ne_fault_none()
+            expect(ne_fault_forces_program_fail(none, 42)).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # ne_fault_forces_erase_fail (doc §8 scenario 8)
+    # ------------------------------------------------------------------
+    describe("ne_fault_forces_erase_fail"):
+        it("fires on its own target block"):
+            """doc §8 scenario 8: `FAULT_ERASE_FAIL` retires the targeted
+            block and the bad-block table must be updated."""
+            val f = ne_fault_erase_fail(5)
+            expect(ne_fault_forces_erase_fail(f, 5)).to_equal(true)
+
+        it("does not fire on a different block"):
+            """The forced failure is block-scoped: other blocks in the same
+            plane must erase normally."""
+            val f = ne_fault_erase_fail(5)
+            expect(ne_fault_forces_erase_fail(f, 4)).to_equal(false)
+            expect(ne_fault_forces_erase_fail(f, 6)).to_equal(false)
+
+        it("does not fire for a fault of a different kind"):
+            """An armed ProgramFail must never masquerade as an erase
+            failure, even when its (irrelevant) block fields overlap."""
+            val f = ne_fault_prog_fail(5)
+            expect(ne_fault_forces_erase_fail(f, 5)).to_equal(false)
+
+        it("never fires for the none-fault"):
+            val none = ne_fault_none()
+            expect(ne_fault_forces_erase_fail(none, 5)).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # ne_fault_matches — shared op/location helper
+    # ------------------------------------------------------------------
+    describe("ne_fault_matches"):
+        it("matches a row-scoped fault regardless of the block argument"):
+            """A ProgramFail descriptor only ever sets target_row (its
+            target_block stays -1 / not-applicable), so the block dimension
+            must never block a match — any block value passes."""
+            val f = ne_fault_prog_fail(42)
+            expect(ne_fault_matches(f, NeOpKind.Program, 0, 42)).to_equal(true)
+            expect(ne_fault_matches(f, NeOpKind.Program, 99, 42)).to_equal(true)
+
+        it("matches a block-scoped fault regardless of the page argument"):
+            """An EraseFail descriptor only ever sets target_block (its
+            target_row stays -1 / not-applicable), so the page dimension
+            must never block a match — any page value passes."""
+            val f = ne_fault_erase_fail(5)
+            expect(ne_fault_matches(f, NeOpKind.Erase, 5, 0)).to_equal(true)
+            expect(ne_fault_matches(f, NeOpKind.Erase, 5, 99)).to_equal(true)
+
+        it("fails to match on a wrong operation"):
+            """The op dimension is always checked: a Program-scoped fault
+            never matches an Erase query, independent of location."""
+            val f = ne_fault_prog_fail(42)
+            expect(ne_fault_matches(f, NeOpKind.Erase, 0, 42)).to_equal(false)
+
+        it("fails to match on a wrong page when the row is applicable"):
+            val f = ne_fault_prog_fail(42)
+            expect(ne_fault_matches(f, NeOpKind.Program, 0, 43)).to_equal(false)
+
+        it("fails to match on a wrong block when the block is applicable"):
+            val f = ne_fault_erase_fail(5)
+            expect(ne_fault_matches(f, NeOpKind.Erase, 6, 0)).to_equal(false)

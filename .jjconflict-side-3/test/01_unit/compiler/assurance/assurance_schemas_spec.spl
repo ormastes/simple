@@ -1,0 +1,216 @@
+# @cover src/compiler/00.common/assurance/policy_schema.spl 80%
+# @cover src/compiler/00.common/assurance/symbol_summary.spl 80%
+# @cover src/compiler/00.common/assurance/stamp.spl 80%
+#
+# WP-0 — the three remaining frozen schemas. The load-bearing assertions are
+# the policy-hash SENSITIVITY cases (one per field) and the "unknown rejects"
+# cases: determinism alone passes trivially, and a permissive Unknown default
+# is exactly the failure mode this schema exists to prevent.
+
+use compiler.common.assurance.policy_schema.{
+    AssuranceStrictness, AssuranceGrade, AssuranceConvention,
+    ResolvedAssurancePolicyV1
+}
+use compiler.common.assurance.symbol_summary.{
+    AllocationClass, BlockingBehavior, PanicBehavior, BoundStatus,
+    EvidenceStatus, LoweringStatus, CriticalSymbolSummaryV1
+}
+use compiler.common.assurance.stamp.{ExternProviderSummaryV1, AssuranceStampV1}
+
+fn flight_policy() -> ResolvedAssurancePolicyV1:
+    ResolvedAssurancePolicyV1(
+        strictness: AssuranceStrictness.Critical,
+        runtime_family: "nogc_async_mut_noalloc",
+        assurance_grade: AssuranceGrade.AeroA,
+        convention: AssuranceConvention.FlightCoreV1
+    )
+
+fn clean_stamp() -> AssuranceStampV1:
+    AssuranceStampV1(
+        preset: "flight-core-v1",
+        policy_hash: flight_policy().policy_hash(),
+        rule_set_hash: "FLTV1-1",
+        compiler_hash: "cc-aaaa",
+        source_hash: "src-bbbb",
+        error_count: 0,
+        warning_count: 0,
+        externs: ExternProviderSummaryV1(declared: 2, resolved: 2, unbacked: 0,
+            ambiguous: 0, weak_fabricated: 0, providers: ["rt", "libc"])
+    )
+
+describe "ResolvedAssurancePolicyV1":
+    describe "strictness parsing":
+        it "accepts the canonical ladder names":
+            expect(AssuranceStrictness.from_name("moderate").name()).to_equal("moderate")
+            expect(AssuranceStrictness.from_name("strict").name()).to_equal("strict")
+            expect(AssuranceStrictness.from_name("robust").name()).to_equal("robust")
+            expect(AssuranceStrictness.from_name("critical").name()).to_equal("critical")
+
+        it "maps the frozen deprecated aliases onto canonical names":
+            expect(AssuranceStrictness.from_name("mission-critical").name()).to_equal("critical")
+            expect(AssuranceStrictness.from_name("mission_critical").name()).to_equal("critical")
+            expect(AssuranceStrictness.from_name("reliable").name()).to_equal("robust")
+            expect(AssuranceStrictness.from_name("lib").name()).to_equal("strict")
+
+        it "fails soft to moderate on an unknown or empty name":
+            expect(AssuranceStrictness.from_name("").name()).to_equal("moderate")
+            expect(AssuranceStrictness.from_name("banana").name()).to_equal("moderate")
+
+        it "orders the ladder":
+            expect(AssuranceStrictness.Critical.at_least(AssuranceStrictness.Robust)).to_equal(true)
+            expect(AssuranceStrictness.Robust.at_least(AssuranceStrictness.Critical)).to_equal(false)
+            expect(AssuranceStrictness.Moderate.at_least(AssuranceStrictness.Moderate)).to_equal(true)
+
+    describe "grade and convention":
+        it "round-trips grades with both spellings":
+            expect(AssuranceGrade.from_name("aero-a").name()).to_equal("aero-a")
+            expect(AssuranceGrade.from_name("aero_a").name()).to_equal("aero-a")
+            expect(AssuranceGrade.from_name("space-a").name()).to_equal("space-a")
+            expect(AssuranceGrade.from_name("nope").name()).to_equal("none")
+
+        it "round-trips conventions":
+            expect(AssuranceConvention.from_name("flight-core-v1").name()).to_equal("flight-core-v1")
+            expect(AssuranceConvention.from_name("flight_core_v1").name()).to_equal("flight-core-v1")
+            expect(AssuranceConvention.from_name("").name()).to_equal("none")
+
+        it "reports whether the FLT- registry is in force":
+            expect(flight_policy().flight_rules_active()).to_equal(true)
+            expect(ResolvedAssurancePolicyV1.default().flight_rules_active()).to_equal(false)
+
+    describe "policy_hash":
+        it "is deterministic for two independently built identical policies":
+            expect(flight_policy().policy_hash()).to_equal(flight_policy().policy_hash())
+
+        it "changes when strictness changes":
+            var p = flight_policy()
+            p.strictness = AssuranceStrictness.Robust
+            expect(p.policy_hash() == flight_policy().policy_hash()).to_equal(false)
+
+        it "changes when runtime_family changes":
+            var p = flight_policy()
+            p.runtime_family = "nogc_async_mut"
+            expect(p.policy_hash() == flight_policy().policy_hash()).to_equal(false)
+
+        it "changes when assurance_grade changes":
+            var p = flight_policy()
+            p.assurance_grade = AssuranceGrade.SpaceA
+            expect(p.policy_hash() == flight_policy().policy_hash()).to_equal(false)
+
+        it "changes when convention changes":
+            var p = flight_policy()
+            p.convention = AssuranceConvention.NoConvention
+            expect(p.policy_hash() == flight_policy().policy_hash()).to_equal(false)
+
+        it "carries the APOLV1 tag so a schema break is visible":
+            expect(flight_policy().policy_hash().starts_with("APOLV1-")).to_equal(true)
+
+    describe "strictness comparison":
+        it "never lets a weaker policy claim to dominate a stronger one":
+            val strong = flight_policy()
+            val weak = ResolvedAssurancePolicyV1.default()
+            expect(strong.is_at_least_as_strict_as(weak)).to_equal(true)
+            expect(weak.is_at_least_as_strict_as(strong)).to_equal(false)
+
+describe "CriticalSymbolSummaryV1":
+    it "starts every lattice at its rejecting bottom for an unanalysed symbol":
+        val s = CriticalSymbolSummaryV1.unknown_for("sym::foo")
+        expect(s.symbol_id).to_equal("sym::foo")
+        expect(s.allocation_class.name()).to_equal("unknown")
+        expect(s.blocking.name()).to_equal("unknown")
+        expect(s.panic_behavior.name()).to_equal("unknown")
+        expect(s.loop_bound.name()).to_equal("unknown")
+        expect(s.recursion_bound.name()).to_equal("unknown")
+        expect(s.proof_status.name()).to_equal("unknown")
+        expect(s.test_status.name()).to_equal("unknown")
+        expect(s.backend_lowering.name()).to_equal("unknown")
+        expect(s.stack_known()).to_equal(false)
+
+    it "rejects an unanalysed symbol rather than passing it":
+        val s = CriticalSymbolSummaryV1.unknown_for("sym::foo")
+        expect(s.is_flight_clear()).to_equal(false)
+        expect(s.failing_rule_ids().len() > 0).to_equal(true)
+
+    it "clears a fully classified symbol":
+        var s = CriticalSymbolSummaryV1.unknown_for("sym::ok")
+        s.allocation_class = AllocationClass.NoAlloc
+        s.blocking = BlockingBehavior.NonBlocking
+        s.panic_behavior = PanicBehavior.NoPanic
+        s.loop_bound = BoundStatus.Inferred
+        s.recursion_bound = BoundStatus.NotApplicable
+        s.stack_bytes = 128
+        s.proof_status = EvidenceStatus.Proved
+        s.test_status = EvidenceStatus.Checked
+        s.backend_lowering = LoweringStatus.Lowered
+        expect(s.failing_rule_ids().len()).to_equal(0)
+        expect(s.is_flight_clear()).to_equal(true)
+
+    it "names FLT-MEM-001 for an unbounded allocator":
+        var s = CriticalSymbolSummaryV1.unknown_for("sym::alloc")
+        s.allocation_class = AllocationClass.Unbounded
+        expect(s.failing_rule_ids().contains("FLT-MEM-001")).to_equal(true)
+
+    it "names FLT-ABS-002 when indirect targets are enumerated but not closed":
+        var s = CriticalSymbolSummaryV1.unknown_for("sym::dyn")
+        s.dyn_targets = ["a", "b"]
+        s.dyn_targets_closed = false
+        expect(s.failing_rule_ids().contains("FLT-ABS-002")).to_equal(true)
+        s.dyn_targets_closed = true
+        expect(s.failing_rule_ids().contains("FLT-ABS-002")).to_equal(false)
+
+    it "treats a partial backend lowering as not lowered":
+        expect(LoweringStatus.Partial.is_flight_acceptable()).to_equal(false)
+        expect(LoweringStatus.Lowered.is_flight_acceptable()).to_equal(true)
+
+    it "round-trips the allocation lattice":
+        expect(AllocationClass.from_name("none").name()).to_equal("none")
+        expect(AllocationClass.from_name("init_only").name()).to_equal("init_only")
+        expect(AllocationClass.from_name("bounded_pool").name()).to_equal("bounded_pool")
+        expect(AllocationClass.from_name("unbounded").name()).to_equal("unbounded")
+        expect(AllocationClass.from_name("").name()).to_equal("unknown")
+
+describe "AssuranceStampV1":
+    it "is deterministic and tagged":
+        expect(clean_stamp().stamp_hash()).to_equal(clean_stamp().stamp_hash())
+        expect(clean_stamp().stamp_hash().starts_with("ASTMPV1-")).to_equal(true)
+
+    it "changes hash when the source hash changes":
+        var s = clean_stamp()
+        s.source_hash = "src-cccc"
+        expect(s.stamp_hash() == clean_stamp().stamp_hash()).to_equal(false)
+
+    it "admits a clean object for release":
+        expect(clean_stamp().release_clean()).to_equal(true)
+
+    it "fails release on warnings, not just errors":
+        var s = clean_stamp()
+        s.warning_count = 1
+        expect(s.release_clean()).to_equal(false)
+
+    it "fails release on a fabricated weak provider":
+        var s = clean_stamp()
+        s.externs.weak_fabricated = 4023
+        expect(s.externs.is_closed()).to_equal(false)
+        expect(s.release_clean()).to_equal(false)
+
+    it "fails release on an unbacked extern":
+        var s = clean_stamp()
+        s.externs.unbacked = 1
+        expect(s.release_clean()).to_equal(false)
+
+    it "links objects only when policy and rule set agree":
+        val a = clean_stamp()
+        var b = clean_stamp()
+        b.compiler_hash = "cc-dddd"
+        b.source_hash = "src-eeee"
+        expect(a.link_compatible_with(b)).to_equal(true)
+        b.rule_set_hash = "FLTV1-2"
+        expect(a.link_compatible_with(b)).to_equal(false)
+
+    it "refuses to link across differing policies":
+        val a = clean_stamp()
+        var b = clean_stamp()
+        b.policy_hash = ResolvedAssurancePolicyV1.default().policy_hash()
+        expect(a.link_compatible_with(b)).to_equal(false)
+
+    it "treats an empty extern summary as closed":
+        expect(ExternProviderSummaryV1.empty().is_closed()).to_equal(true)

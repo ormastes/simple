@@ -1,0 +1,127 @@
+"""
+# Array `.at(i)` is a bounds-checked Option accessor, not an alias for `[i]`
+
+**Category:** Stdlib / collection accessors
+**Bug:** doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md
+
+## Overview
+
+`.at(i)` returns `Some(element)` for an in-range index and `None` otherwise. It
+is *not* the same operation as `[i]`: `[i]` yields the element directly and has
+no way to report absence, while `.at(i)` is the safe accessor that ~161 call
+sites across the tree consume with `match`/`unwrap`.
+
+Before the fix the Rust seed had no array `at` at all — only the *text* one
+(`"char_at" | "at" => rt_string_char_at`). Every `arr.at(i)` therefore fell
+through the unhandled-method path to `Value::Nil`, which reads as `None`. That
+is the same value a genuinely out-of-range read produces, so every in-range hit
+silently took the `None` branch with no error and no crash.
+
+That failure shape is why the in-range assertions below matter more than the
+out-of-range ones. `at(99) == None` passed even when `.at()` was completely
+unimplemented; only `at(0) == Some(10)` can tell the two apart. Each in-range
+assertion here is RED against the unpatched seed.
+
+## Coverage
+
+- in-range hit (first, interior, and the `len - 1` boundary)
+- out-of-range: `len` exactly, and far past the end
+- negative index — must be `None`, never a wrap-around to a huge positive index
+- empty container
+- index 3 specifically, and the *element value* 3, because the nil sentinel is 3
+- `.at()` against `[i]` on the same array, so the two cannot silently diverge
+
+## Syntax
+
+```simple
+match xs.at(0):
+    Some(v): v
+    None: -1
+```
+"""
+
+use std.spec
+
+# --- helpers -----------------------------------------------------------------
+
+# `.at()` folded to a plain i64 so the assertions can compare numbers.
+# SENTINEL_ABSENT is deliberately not 0 and not 3: 0 is a plausible element and
+# 3 is the nil sentinel, so either would let a broken `.at()` look correct.
+val SENTINEL_ABSENT: i64 = -777
+
+fn at_or_absent(xs: [i64], i: i64) -> i64:
+    match xs.at(i):
+        Some(v): return v
+        None: return SENTINEL_ABSENT
+
+fn is_present(xs: [i64], i: i64) -> bool:
+    match xs.at(i):
+        Some(v): return true
+        None: return false
+
+# --- specs -------------------------------------------------------------------
+
+describe("array .at() Option accessor"):
+
+    it("returns Some(element) for an in-range index"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, 0), 10)
+        assert_equal(at_or_absent(xs, 1), 20)
+        assert_equal(at_or_absent(xs, 2), 30)
+
+    it("returns Some at the last valid index"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, 4), 50)
+        assert_true(is_present(xs, 4))
+
+    it("returns None at exactly len, the first invalid index"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, 5), SENTINEL_ABSENT)
+        assert_false(is_present(xs, 5))
+
+    it("returns None far past the end"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, 99), SENTINEL_ABSENT)
+
+    it("returns None for a negative index rather than wrapping around"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, -1), SENTINEL_ABSENT)
+        assert_equal(at_or_absent(xs, -100), SENTINEL_ABSENT)
+
+    it("returns None on an empty array"):
+        val e: [i64] = []
+        assert_equal(at_or_absent(e, 0), SENTINEL_ABSENT)
+        assert_false(is_present(e, 0))
+
+    # The nil sentinel is 3. Both the *index* 3 and the *element value* 3 are
+    # covered: a representation that confuses "the element happens to be 3" with
+    # "absent" produces a wrong answer, not an error.
+    it("handles index 3, the nil sentinel value, as an ordinary index"):
+        val xs: [i64] = [10, 20, 30, 40, 50]
+        assert_equal(at_or_absent(xs, 3), 40)
+        assert_true(is_present(xs, 3))
+
+    it("reports an element whose value is 3 as present, not absent"):
+        val xs: [i64] = [3, 3, 3]
+        assert_equal(at_or_absent(xs, 0), 3)
+        assert_equal(at_or_absent(xs, 2), 3)
+        assert_true(is_present(xs, 1))
+        assert_equal(at_or_absent(xs, 3), SENTINEL_ABSENT)
+
+    it("reports an element whose value is 0 as present, not absent"):
+        val xs: [i64] = [0, 0]
+        assert_equal(at_or_absent(xs, 0), 0)
+        assert_true(is_present(xs, 0))
+
+    it("agrees with [i] on every in-range index"):
+        val xs: [i64] = [7, 0, 3, 42, -5]
+        var i = 0
+        while i < xs.len():
+            assert_equal(at_or_absent(xs, i), xs[i])
+            i = i + 1
+
+    it("stays None for every index of a single-element array except 0"):
+        val xs: [i64] = [99]
+        assert_equal(at_or_absent(xs, 0), 99)
+        assert_equal(at_or_absent(xs, 1), SENTINEL_ABSENT)
+        assert_equal(at_or_absent(xs, -1), SENTINEL_ABSENT)

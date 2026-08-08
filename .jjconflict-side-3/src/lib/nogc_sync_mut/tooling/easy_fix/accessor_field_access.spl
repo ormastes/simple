@@ -1,0 +1,64 @@
+use std.tooling.easy_fix.accessor_core.{parse_accessor_classes, acc_suffix_has_real, AccMethod}
+use std.tooling.easy_fix.accessor_rewrite.{rewrite_get_in_line, rewrite_set_in_line}
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence}
+use std.tooling.easy_fix.rules_helpers.{_text_index_len}
+
+# Field-access short grammar: inside a class that defines a dummy get_*/set_*/is_*
+# forwarder, rewrite the class's own `self.`/`me.` accessor calls to direct field
+# access — `self.get_x()` -> `self.x`, `self.set_x(v)` -> `self.x = v`. The
+# receiver type is statically known (it is the defining class) so this is Safe.
+# Reuses the accessor-fix rewrite engine, which already guards expression-context
+# and multi-argument setter calls.
+fn check_field_access_refactor(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    if not (source.contains(".get_") or source.contains(".set_") or source.contains(".is_")):
+        return fixes
+    val classes = parse_accessor_classes(source)
+    val lines = source.split("\n")
+    var starts: [i64] = []
+    var off = 0
+    for line in lines:
+        starts.push(off)
+        off = off + _text_index_len(line) + 1
+    for c in classes:
+        var dummies: [AccMethod] = []
+        for m in c.methods:
+            if m.is_dummy and m.kind != "" and not acc_suffix_has_real(c, m.field):
+                dummies.push(m)
+        if dummies.len() == 0:
+            continue
+        var idx = c.start_line
+        while idx < c.end_line and idx < lines.len():
+            var line = lines[idx]
+            var changed = false
+            for m in dummies:
+                if line.contains(m.name):
+                    if m.kind == "set":
+                        var (sl, sn) = rewrite_set_in_line(line, m.name, m.field, true)
+                        if sn > 0:
+                            line = sl
+                            changed = true
+                    else:
+                        var (gl, gn) = rewrite_get_in_line(line, m.name, m.field, true)
+                        if gn > 0:
+                            line = gl
+                            changed = true
+            if changed:
+                val s = starts[idx]
+                val e = s + _text_index_len(lines[idx])
+                var fix = EasyFix.create(
+                    id: "L:short_grammar_field_access:{idx + 1}:1",
+                    description: "use field access for dummy get/set accessor",
+                    confidence: FixConfidence.Safe
+                )
+                fix.add_replacement(Replacement.create(
+                    file: file,
+                    start: s,
+                    end: e,
+                    line: idx + 1,
+                    column: 1,
+                    new_text: line
+                ))
+                fixes.push(fix)
+            idx = idx + 1
+    fixes

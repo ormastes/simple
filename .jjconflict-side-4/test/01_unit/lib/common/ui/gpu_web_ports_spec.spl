@@ -1,0 +1,175 @@
+use std.spec.*
+use common.ui.gpu_web_ports.{
+    GPU_WEB_PORTS_SCHEMA_VERSION,
+    GPU_WEB_PORTS_SCHEMA_ID,
+    GPU_EVENT_KIND_NONE,
+    GPU_EVENT_KIND_POINTER_MOVE,
+    GPU_EVENT_KIND_POINTER_DOWN,
+    GPU_EVENT_KIND_POINTER_UP,
+    GPU_EVENT_KIND_WHEEL,
+    GPU_EVENT_KIND_KEY_DOWN,
+    GPU_EVENT_KIND_KEY_UP,
+    GPU_EVENT_KIND_TEXT_INPUT,
+    GPU_EVENT_KIND_TIMER,
+    GPU_EVENT_KIND_HOST_EFFECT_COMPLETION,
+    HOST_EFFECT_NONE,
+    HOST_EFFECT_FETCH,
+    HOST_EFFECT_FILE,
+    HOST_EFFECT_CLIPBOARD,
+    HOST_EFFECT_IME,
+    HOST_EFFECT_ACCESSIBILITY_SNAPSHOT,
+    GpuInputEvent,
+    GpuMutation,
+    GpuHostEffectRequest,
+    GpuHostEffectCompletion,
+    GpuResourcePacket
+}
+use common.ui.gpu_web_receipt_contract.{
+    GPU_WEB_RECEIPT_SCHEMA_VERSION,
+    GPU_WEB_RECEIPT_SCHEMA_ID,
+    GPU_FALLBACK_L0_GPU_NATIVE,
+    GPU_FALLBACK_L1_HOST_EFFECT,
+    GPU_FALLBACK_L2_STAGE_SERVICE,
+    GPU_FALLBACK_L3_SUBTREE_COMPAT,
+    GPU_FALLBACK_L4_DOCUMENT_COMPAT,
+    GPU_FALLBACK_L5_DEVICE_RECOVERY,
+    GPU_ROUTE_GPU,
+    GPU_ROUTE_CPU_SELECTED,
+    GPU_ROUTE_GPU_FALLBACK,
+    gpu_fallback_is_strict_pass,
+    gpu_fallback_is_compat_pass,
+    GpuOverflowReceipt
+}
+
+
+describe "GPU web ports frozen contract (Kernel C0)":
+
+    it "pins the ports schema id and version to their frozen values":
+        step("Read the schema constants any consumer must agree on")
+        expect(GPU_WEB_PORTS_SCHEMA_VERSION).to_equal("simple-gpu-web-ports-v1")
+        expect(GPU_WEB_PORTS_SCHEMA_ID).to_equal(1u32)
+
+    it "pins the receipt contract schema id and version to their frozen values":
+        step("Read the receipt-side schema constants")
+        expect(GPU_WEB_RECEIPT_SCHEMA_VERSION).to_equal("simple-gpu-web-receipt-v1")
+        expect(GPU_WEB_RECEIPT_SCHEMA_ID).to_equal(1u32)
+
+    it "constructs a GpuInputEvent with every field set and reads them back":
+        step("Build a fully populated pointer-move event")
+        val event = GpuInputEvent(
+            sequence: 42u64,
+            scene_generation: 7u64,
+            timestamp_ns: 123456789u64,
+            kind: GPU_EVENT_KIND_POINTER_MOVE,
+            device_id: 3u16,
+            flags: 1u32,
+            x_fixed: 100,
+            y_fixed: 200,
+            delta_x_fixed: 5,
+            delta_y_fixed: -5,
+            key_code: 0u32,
+            text_offset: 0u32,
+            text_length: 0u32
+        )
+        expect(event.sequence).to_equal(42u64)
+        expect(event.scene_generation).to_equal(7u64)
+        expect(event.timestamp_ns).to_equal(123456789u64)
+        expect(event.kind).to_equal(GPU_EVENT_KIND_POINTER_MOVE)
+        expect(event.device_id).to_equal(3u16)
+        expect(event.flags).to_equal(1u32)
+        expect(event.x_fixed).to_equal(100)
+        expect(event.y_fixed).to_equal(200)
+        expect(event.delta_x_fixed).to_equal(5)
+        expect(event.delta_y_fixed).to_equal(-5)
+        expect(event.key_code).to_equal(0u32)
+        expect(event.text_offset).to_equal(0u32)
+        expect(event.text_length).to_equal(0u32)
+
+    it "constructs a GpuMutation and reads back its fields":
+        step("Build a single node-field mutation")
+        val mutation = GpuMutation(
+            node_id: 10u32,
+            node_generation: 1u32,
+            field_id: 2u16,
+            operation: 1u16,
+            value_lo: 500u32,
+            value_hi: 0u32,
+            sequence: 9u32
+        )
+        expect(mutation.node_id).to_equal(10u32)
+        expect(mutation.node_generation).to_equal(1u32)
+        expect(mutation.field_id).to_equal(2u16)
+        expect(mutation.operation).to_equal(1u16)
+        expect(mutation.value_lo).to_equal(500u32)
+        expect(mutation.value_hi).to_equal(0u32)
+        expect(mutation.sequence).to_equal(9u32)
+
+    it "constructs a GpuHostEffectRequest and reads back its fields":
+        step("Build a clipboard-read host-effect request")
+        val request = GpuHostEffectRequest(
+            event_sequence: 42u64,
+            effect_kind: HOST_EFFECT_CLIPBOARD,
+            continuation_id: 6u16,
+            payload_offset: 128u32,
+            payload_length: 64u32
+        )
+        expect(request.event_sequence).to_equal(42u64)
+        expect(request.effect_kind).to_equal(HOST_EFFECT_CLIPBOARD)
+        expect(request.continuation_id).to_equal(6u16)
+        expect(request.payload_offset).to_equal(128u32)
+        expect(request.payload_length).to_equal(64u32)
+
+    it "keeps every event-kind constant distinct":
+        step("Spot-check pairwise inequalities across the event-kind set")
+        expect(GPU_EVENT_KIND_NONE == GPU_EVENT_KIND_POINTER_MOVE).to_equal(false)
+        expect(GPU_EVENT_KIND_POINTER_DOWN == GPU_EVENT_KIND_POINTER_UP).to_equal(false)
+        expect(GPU_EVENT_KIND_WHEEL == GPU_EVENT_KIND_KEY_DOWN).to_equal(false)
+        expect(GPU_EVENT_KIND_KEY_UP == GPU_EVENT_KIND_TEXT_INPUT).to_equal(false)
+        expect(GPU_EVENT_KIND_TIMER == GPU_EVENT_KIND_HOST_EFFECT_COMPLETION).to_equal(false)
+
+    it "keeps every host-effect constant distinct":
+        step("Spot-check pairwise inequalities across the host-effect set")
+        expect(HOST_EFFECT_NONE == HOST_EFFECT_FETCH).to_equal(false)
+        expect(HOST_EFFECT_FILE == HOST_EFFECT_CLIPBOARD).to_equal(false)
+        expect(HOST_EFFECT_IME == HOST_EFFECT_ACCESSIBILITY_SNAPSHOT).to_equal(false)
+        expect(HOST_EFFECT_FETCH == HOST_EFFECT_FILE).to_equal(false)
+
+    it "accepts only L0/L1 under the strict GPU-verification profile":
+        step("Check the strict pass predicate across all fallback levels")
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L0_GPU_NATIVE)).to_equal(true)
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L1_HOST_EFFECT)).to_equal(true)
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L2_STAGE_SERVICE)).to_equal(false)
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L3_SUBTREE_COMPAT)).to_equal(false)
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L4_DOCUMENT_COMPAT)).to_equal(false)
+        expect(gpu_fallback_is_strict_pass(GPU_FALLBACK_L5_DEVICE_RECOVERY)).to_equal(false)
+
+    it "accepts L0 through L3 under the standards-compatibility profile":
+        step("Check the compat pass predicate across all fallback levels")
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L0_GPU_NATIVE)).to_equal(true)
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L1_HOST_EFFECT)).to_equal(true)
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L2_STAGE_SERVICE)).to_equal(true)
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L3_SUBTREE_COMPAT)).to_equal(true)
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L4_DOCUMENT_COMPAT)).to_equal(false)
+        expect(gpu_fallback_is_compat_pass(GPU_FALLBACK_L5_DEVICE_RECOVERY)).to_equal(false)
+
+    it "keeps a cost-policy CPU route distinct from a GPU fallback route":
+        step("A CPU-selected route must never collapse into the fallback route")
+        expect(GPU_ROUTE_CPU_SELECTED == GPU_ROUTE_GPU_FALLBACK).to_equal(false)
+        expect(GPU_ROUTE_GPU == GPU_ROUTE_CPU_SELECTED).to_equal(false)
+        expect(GPU_ROUTE_GPU == GPU_ROUTE_GPU_FALLBACK).to_equal(false)
+
+    it "constructs a GpuOverflowReceipt and reads back its fields":
+        step("Build a capacity-overflow receipt naming the breached bound")
+        val receipt = GpuOverflowReceipt(
+            kind: 3u16,
+            scene_generation: 7u64,
+            bound_id: 11u16,
+            requested: 5000u64,
+            limit: 4096u64
+        )
+        expect(receipt.kind).to_equal(3u16)
+        expect(receipt.scene_generation).to_equal(7u64)
+        expect(receipt.bound_id).to_equal(11u16)
+        expect(receipt.requested).to_equal(5000u64)
+        expect(receipt.limit).to_equal(4096u64)
+

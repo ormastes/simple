@@ -1,0 +1,90 @@
+# x86_64 Per-CPU Base Register (GS_BASE/FS_BASE) Helpers
+#
+# x86_64 uses the GS segment base register as the per-CPU base pointer in
+# kernel mode:
+#   GS_BASE = &per_cpu_data[cpu_id]
+#
+# At early boot each CPU core writes its per-CPU base into GS_BASE via the
+# MSR_GS_BASE MSR before entering the kernel proper.  The helpers here provide:
+#   - Thin wrappers over read_msr/write_msr for GS_BASE and FS_BASE
+#   - Simulated GS/FS write for interpreter-mode tests (no real MSR access)
+#
+# The real read_msr() / write_msr() and the MSR constants live in cpu.spl and
+# are imported here.  Per-CPU code should use this module as the single import.
+#
+# Public API:
+#   read_gs_base() -> u64
+#   write_gs_base(value: u64)
+#   read_fs_base() -> u64
+#   write_fs_base(value: u64)
+#   simulate_gs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+#   read_gs_base_test() -> u64
+#   simulate_gs_write_hosted()
+#   simulate_fs_write_baremetal(cpu_id, per_cpu_base, per_cpu_shift)
+#   read_fs_base_test() -> u64
+#   simulate_fs_write_hosted()
+
+use os.kernel.arch.x86_64.cpu.{read_msr, write_msr, MSR_GS_BASE, MSR_FS_BASE}
+
+# ============================================================================
+# Simulated GS/FS state (no real MSR access in interpreter/hosted mode)
+# ============================================================================
+
+var SIM_GS_BASE: u64 = 0u64
+var SIM_FS_BASE: u64 = 0u64
+
+# ============================================================================
+# GS_BASE — real MSR wrappers
+# ============================================================================
+
+fn read_gs_base() -> u64:
+    """Read GS segment base via MSR_GS_BASE (0xC0000101)."""
+    read_msr(MSR_GS_BASE)
+
+fn write_gs_base(value: u64):
+    """Write GS segment base via MSR_GS_BASE (0xC0000101)."""
+    write_msr(MSR_GS_BASE, value)
+
+# ============================================================================
+# FS_BASE — real MSR wrappers
+# ============================================================================
+
+fn read_fs_base() -> u64:
+    """Read FS segment base via MSR_FS_BASE (0xC0000100)."""
+    read_msr(MSR_FS_BASE)
+
+fn write_fs_base(value: u64):
+    """Write FS segment base via MSR_FS_BASE (0xC0000100)."""
+    write_msr(MSR_FS_BASE, value)
+
+# ============================================================================
+# Simulated GS write — interpreter/hosted mode
+# ============================================================================
+
+fn simulate_gs_write_baremetal(cpu_id: u32, per_cpu_base: u64, per_cpu_shift: u32):
+    """Simulate the early-boot GS_BASE write: GS_BASE = per_cpu_base + (cpu_id << per_cpu_shift)."""
+    SIM_GS_BASE = per_cpu_base + (cpu_id as u64 << per_cpu_shift as u64)
+
+fn read_gs_base_test() -> u64:
+    """Return the simulated GS_BASE value set by simulate_gs_write_baremetal."""
+    SIM_GS_BASE
+
+fn simulate_gs_write_hosted():
+    """On hosted (non-baremetal) builds, GS_BASE MUST NOT be written — this is a no-op."""
+    pass_do_nothing
+
+# ============================================================================
+# Simulated FS write — interpreter/hosted mode
+# ============================================================================
+
+fn simulate_fs_write_baremetal(cpu_id: u32, per_cpu_base: u64, per_cpu_shift: u32):
+    """Simulate the early-boot FS_BASE write: FS_BASE = per_cpu_base + (cpu_id << per_cpu_shift)."""
+    SIM_FS_BASE = per_cpu_base + (cpu_id as u64 << per_cpu_shift as u64)
+
+fn read_fs_base_test() -> u64:
+    """Return the simulated FS_BASE value set by simulate_fs_write_baremetal."""
+    SIM_FS_BASE
+
+fn simulate_fs_write_hosted():
+    """On hosted (non-baremetal) builds, FS_BASE MUST NOT be written — this is a no-op."""
+    pass_do_nothing

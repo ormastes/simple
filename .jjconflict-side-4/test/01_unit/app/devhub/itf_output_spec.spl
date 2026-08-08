@@ -1,0 +1,188 @@
+# @cover src/app/devhub/output.spl 60%
+#
+# output.spl helpers that don't need a tty/network: size formatting and the
+# dynamic-width table column-sizing used by `itf github` listings.
+#
+# should_page() is pure by design specifically so it can be unit-tested here
+# without ever spawning a real pager subprocess (see _emit_lines()'s
+# docstring in output.spl for the hang risk that would come with testing
+# the side-effecting path directly).
+
+use app.devhub.output.{format_size, _table_col_widths, _visible_len, _pad_visible, relative_time_at, format_transfer_summary, should_page, resolve_pager_cmd, _split_pager_cmd}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+
+
+describe "format_size":
+
+    it "shows byte counts under 1 KiB as-is":
+        expect(format_size(0)).to_equal("0 B")
+        expect(format_size(512)).to_equal("512 B")
+        expect(format_size(1023)).to_equal("1023 B")
+
+    it "formats KiB with one decimal":
+        expect(format_size(1024)).to_equal("1.0 KiB")
+        expect(format_size(1536)).to_equal("1.5 KiB")
+
+    it "formats MiB with one decimal":
+        expect(format_size(1048576)).to_equal("1.0 MiB")
+        expect(format_size(134217728)).to_equal("128.0 MiB")
+
+    it "formats GiB with one decimal":
+        expect(format_size(1073741824)).to_equal("1.0 GiB")
+
+    it "formats TiB with one decimal":
+        expect(format_size(1099511627776)).to_equal("1.0 TiB")
+
+    it "passes through a negative (unknown) size unchanged":
+        expect(format_size(-1)).to_equal("-1")
+
+
+describe "_table_col_widths (dynamic-width table sizing)":
+
+    it "seeds each column width from the header when rows are shorter":
+        val widths = _table_col_widths(["NUMBER", "TITLE"], [["#1", "x"]])
+        expect(widths[0]).to_equal(6)
+        expect(widths[1]).to_equal(5)
+
+    it "grows a column width to fit the longest cell":
+        val widths = _table_col_widths(["NUMBER", "TITLE"], [["#1", "a very long title indeed"]])
+        expect(widths[0]).to_equal(6)
+        expect(widths[1]).to_equal(24)
+
+    it "takes the max across multiple rows":
+        val widths = _table_col_widths(["K"], [["short"], ["a much longer value"]])
+        expect(widths[0]).to_equal(19)
+
+
+describe "_visible_len / _pad_visible (ANSI-aware table alignment)":
+    # Regression coverage for a real bug found in review: colorize_state()
+    # wraps a word in `\x1b[32m...\x1b[0m`, and feeding that straight into
+    # _table_col_widths/pad_right (both byte-length-based) inflated the
+    # measured width by the escape-code bytes — misaligning STATE/AUTHOR/
+    # UPDATED columns in `itf github issue list` whenever color was on.
+
+    it "counts an ANSI-colored word by its visible characters, not its byte length":
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        expect(_visible_len(colored)).to_equal(4)
+
+    it "matches plain-text length when there is no escape code":
+        expect(_visible_len("CLOSED")).to_equal(6)
+
+    it "_table_col_widths measures colored cells by visible width, not byte length":
+        val colored_open = "\u{001b}[32mOPEN\u{001b}[0m"
+        val colored_closed = "\u{001b}[2mCLOSED\u{001b}[0m"
+        val widths = _table_col_widths(["STATE"], [[colored_open], [colored_closed]])
+        # Visible widths are 4 ("OPEN") and 6 ("CLOSED"); header "STATE" is 5.
+        # Max visible width must be 6 — not the byte-inflated 13/14 that
+        # `.len()` would have measured before this fix.
+        expect(widths[0]).to_equal(6)
+
+    it "_pad_visible pads a colored cell to the same visible width as a plain one":
+        val colored = "\u{001b}[32mOPEN\u{001b}[0m"
+        val padded_colored = _pad_visible(colored, 6)
+        val padded_plain = _pad_visible("AB", 6)
+        # Both should have 4 trailing spaces after their visible content —
+        # i.e. same total visible width once the escape codes are stripped.
+        expect(_visible_len(padded_colored)).to_equal(6)
+        expect(_visible_len(padded_plain)).to_equal(6)
+
+
+describe "relative_time_at (J4 relative dates, deterministic — 'now' is a param)":
+
+    it "buckets under a minute as 'just now'":
+        expect(relative_time_at("1970-01-01T00:00:00Z", 0)).to_equal("just now")
+        expect(relative_time_at("1970-01-01T00:00:00Z", 30)).to_equal("just now")
+
+    it "buckets minutes":
+        expect(relative_time_at("1970-01-01T00:00:00Z", 120)).to_equal("2m ago")
+
+    it "buckets hours":
+        expect(relative_time_at("1970-01-01T00:00:00Z", 7200)).to_equal("2h ago")
+
+    it "buckets days":
+        expect(relative_time_at("1970-01-01T00:00:00Z", 172800)).to_equal("2d ago")
+
+    it "handles the Feb-29 leap-year boundary correctly (1972 is a leap year)":
+        # Days from 1970-01-01 to 1972-03-01 = 365 + 365 + 31 (Jan '72) +
+        # 29 (Feb '72, leap) = 790 days = 68,256,000s. If _days_in_month's
+        # leap branch were wrong (treating Feb as always 28 days), this
+        # would compute one day short and show "1d ago" instead.
+        expect(relative_time_at("1972-03-01T00:00:00Z", 68256000)).to_equal("just now")
+
+    it "returns the input unchanged when it doesn't parse as a timestamp":
+        expect(relative_time_at("not-a-date", 100)).to_equal("not-a-date")
+
+
+describe "format_transfer_summary (J4 minio get/put elapsed+throughput)":
+
+    it "builds a full summary with clean-dividing numbers":
+        expect(format_transfer_summary("uploaded", 10240, 1000)).to_equal("uploaded 10.0 KiB in 1.0s, 10.0 KiB/s")
+
+    it "omits the throughput clause when elapsed_ms is zero":
+        expect(format_transfer_summary("downloaded", 500, 0)).to_equal("downloaded 500 B in 0.0s")
+
+
+describe "should_page (J4 pager decision — pure, no subprocess/env access)":
+
+    it "pages when the terminal looks interactive and content overflows it":
+        expect(should_page(30, 24, false, true)).to_equal(true)
+
+    it "does not page when content fits within the terminal":
+        expect(should_page(10, 24, false, true)).to_equal(false)
+
+    it "never pages when --no-pager is set, even if content overflows":
+        expect(should_page(30, 24, true, true)).to_equal(false)
+
+    it "never pages when the terminal doesn't look interactive":
+        expect(should_page(30, 24, false, false)).to_equal(false)
+
+
+describe "_split_pager_cmd":
+
+    it "splits a pager command with flags":
+        val (bin, args) = _split_pager_cmd("less -R")
+        expect(bin).to_equal("less")
+        expect(args.len()).to_equal(1)
+        expect(args[0]).to_equal("-R")
+
+    it "handles a bare command with no flags":
+        val (bin, args) = _split_pager_cmd("cat")
+        expect(bin).to_equal("cat")
+        expect(args.len()).to_equal(0)
+
+    it "falls back to less -R for an empty command":
+        val (bin, args) = _split_pager_cmd("")
+        expect(bin).to_equal("less")
+        expect(args[0]).to_equal("-R")
+
+
+describe "resolve_pager_cmd (${ITF_PAGER:-${PAGER:-less -R}})":
+
+    it "prefers ITF_PAGER over PAGER and the less -R default":
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "most")
+        val _s2 = rt_env_set("PAGER", "cat")
+        expect(resolve_pager_cmd()).to_equal("most")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)
+
+    it "falls back to PAGER when ITF_PAGER is unset":
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "")
+        val _s2 = rt_env_set("PAGER", "cat")
+        expect(resolve_pager_cmd()).to_equal("cat")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)
+
+    it "falls back to less -R when neither is set":
+        val orig_itf = rt_env_get("ITF_PAGER") ?? ""
+        val orig_pager = rt_env_get("PAGER") ?? ""
+        val _s1 = rt_env_set("ITF_PAGER", "")
+        val _s2 = rt_env_set("PAGER", "")
+        expect(resolve_pager_cmd()).to_equal("less -R")
+        val _r1 = rt_env_set("ITF_PAGER", orig_itf)
+        val _r2 = rt_env_set("PAGER", orig_pager)

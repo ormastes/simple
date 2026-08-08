@@ -1,0 +1,246 @@
+#![allow(primitive_api, unnamed_duplicate_typed_args)]
+@allow(primitive_api, unnamed_duplicate_typed_args)
+# W0: PropertyId + Declaration + apply_declarations — O(k) declaration
+# application, per doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md
+# section 7 "Web style" bullet.
+#
+# PropertyId is deliberately a bare i64 constant table (matching
+# kernel_registry.spl's KERNEL_OP_* style, see below), and
+# `important: bool` is CSS's own `!important` flag, not a request for an
+# enum wrapper — hence the primitive_api / unnamed_duplicate_typed_args
+# allow above.
+#
+# The plan text says "PropertyId: u16 enum (append-only, generated)". This
+# repo has open engine-divergence defects on `match`/enum dispatch (a `match`
+# on an enum from `!` fires no arm under the JIT; a `match` on an `E?` fires
+# no arm under the interpreter — see
+# doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md
+# and kernel_registry.spl's own header comment for the same ruling) and the
+# project's standing no-enum-on-hot-path rule, so PropertyId here is an
+# append-only table of i64 constants, matching kernel_registry.spl's
+# KERNEL_OP_*/KERNEL_BUCKET_* style, not a `u16 enum`.
+#
+# Scope: this file lands the CORE MECHANISM (PropertyId table, Declaration
+# shape, apply_declarations) plus a proportionality proof (see
+# w0_property_id_declarations_spec.spl). It intentionally does NOT rewire
+# style_block.spl's apply_rules_to_node[_indexed] (still CssDecl{property:
+# text, value: text} matched by string comparison per rule) — that is a
+# larger sweep across the whole cascade-application call path and is left
+# out of scope per the W0 landing note. The property set below is exactly
+# the set of properties ComputedStyleHot
+# (simple_web_html_layout_renderer_style.spl) has a dedicated hot field for
+# (excluding `cold: Style`, which is the fallback/overflow side table for
+# every other CSS property and is not owned by any single PropertyId here).
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{ComputedStyleHot}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
+
+# NOTE: this file intentionally does NOT `use style_block.{sb_parse_int,
+# sb_find}` even though those helpers exist there — T1
+# (doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md) wires
+# style_block.spl's live cascade to import FROM this module
+# (apply_declarations et al), and style_block already importing FROM
+# style_property_id would make a style_block -> style_property_id ->
+# style_block cycle. Local, private duplicates below break that cycle.
+
+fn spid_parse_int(s: text) -> i32:
+    """Private duplicate of style_block.sb_parse_int -- see note above for
+    why this isn't a shared import."""
+    val t = s.trim()
+    if t.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if t.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif t.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = t.len()
+    while idx < slen:
+        val ch = t.char_at(idx)
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            break
+        result = result * 10 + digit
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result
+
+fn spid_find(s: text, target: text, start: i64) -> i64:
+    """Private duplicate of style_block.sb_find -- see note above."""
+    var i = start
+    val tlen = target.len()
+    val slen = s.len()
+    while i + tlen <= slen:
+        if s.slice(i, i + tlen) == target:
+            return i
+        i = i + 1
+    999999999
+
+# --- PropertyId table (append-only i64 constants) --------------------------
+
+val PROPERTY_ID_DISPLAY: i64 = 0
+val PROPERTY_ID_POSITION: i64 = 1
+val PROPERTY_ID_VISIBILITY: i64 = 2
+val PROPERTY_ID_CONTENT_VISIBILITY: i64 = 3
+val PROPERTY_ID_OPACITY: i64 = 4
+val PROPERTY_ID_COLOR: i64 = 5
+val PROPERTY_ID_WIDTH: i64 = 6
+val PROPERTY_ID_HEIGHT: i64 = 7
+val PROPERTY_ID_BOX_SIZING: i64 = 8
+val PROPERTY_ID_OVERFLOW: i64 = 9
+val PROPERTY_ID_Z_INDEX: i64 = 10
+val PROPERTY_ID_UNKNOWN: i64 = 11
+val PROPERTY_ID_COUNT: i64 = 12
+
+pub fn property_id_from_name(name: text) -> i64:
+    """Parse a CSS property name into a PropertyId ONCE (at Declaration
+    construction time), matching the plan's "names→PropertyId once" bullet."""
+    val n = name.trim()
+    if n == "display":
+        return PROPERTY_ID_DISPLAY
+    elif n == "position":
+        return PROPERTY_ID_POSITION
+    elif n == "visibility":
+        return PROPERTY_ID_VISIBILITY
+    elif n == "content-visibility":
+        return PROPERTY_ID_CONTENT_VISIBILITY
+    elif n == "opacity":
+        return PROPERTY_ID_OPACITY
+    elif n == "color":
+        return PROPERTY_ID_COLOR
+    elif n == "width":
+        return PROPERTY_ID_WIDTH
+    elif n == "height":
+        return PROPERTY_ID_HEIGHT
+    elif n == "box-sizing":
+        return PROPERTY_ID_BOX_SIZING
+    elif n == "overflow":
+        return PROPERTY_ID_OVERFLOW
+    elif n == "z-index":
+        return PROPERTY_ID_Z_INDEX
+    PROPERTY_ID_UNKNOWN
+
+# --- Declaration flags -------------------------------------------------------
+
+val DECL_FLAG_NONE: i64 = 0
+val DECL_FLAG_IMPORTANT: i64 = 1
+
+pub class Declaration:
+    property: i64
+    value_text: text
+    value_id: i64
+    flags: i64
+
+fn style_property_id_parse_opacity_pct(value: text) -> i64:
+    """Typed-parse a CSS opacity value ("1", "0.5", "50%") to a 0..100
+    percent i64, ONCE, at Declaration construction — not on every apply."""
+    val v = value.trim()
+    if v.len() == 0:
+        return 100
+    if v.ends_with("%"):
+        return spid_parse_int(v.slice(0, v.len() - 1)) as i64
+    val dot = spid_find(v, ".", 0)
+    if dot < 999999999:
+        val int_part = spid_parse_int(v.slice(0, dot)) as i64
+        val frac_str = v.slice(dot + 1, v.len())
+        var frac_digit: i64 = 0
+        if frac_str.len() > 0:
+            frac_digit = spid_parse_int(frac_str.slice(0, 1)) as i64
+        return int_part * 100 + frac_digit * 10
+    (spid_parse_int(v) as i64) * 100
+
+pub fn declaration_from_name_value(name: text, value: text, important: bool) -> Declaration:
+    """Build a Declaration: property name→PropertyId and value→typed form are
+    both parsed exactly once here, never re-parsed by apply_declarations."""
+    val pid = property_id_from_name(name)
+    var flags = DECL_FLAG_NONE
+    if important:
+        flags = DECL_FLAG_IMPORTANT
+    var value_id: i64 = -1
+    if pid == PROPERTY_ID_OPACITY:
+        value_id = style_property_id_parse_opacity_pct(value)
+    elif pid == PROPERTY_ID_COLOR:
+        value_id = parse_color_value(value) as i64
+    elif pid == PROPERTY_ID_WIDTH or pid == PROPERTY_ID_HEIGHT or pid == PROPERTY_ID_Z_INDEX:
+        value_id = spid_parse_int(value) as i64
+    Declaration(property: pid, value_text: value.trim(), value_id: value_id, flags: flags)
+
+# --- apply_declarations: O(k) in decls.len() --------------------------------
+#
+# `stats` is a caller-owned Dict<text,i64> counter, not a class field, per the
+# established rule in this tree that a class stored into another class's
+# field is VALUE-COPIED under the interpreter (see class_field_reference_
+# semantics_diverge_2026-08-06.md) while a Dict passed as a fn parameter
+# aliases correctly on both engines (same idiom style_invalidation.spl uses
+# for its own Dict-typed bookkeeping fields). stats["touched"] counts exactly
+# one increment per declaration whose PropertyId is known and applied — never
+# per ComputedStyleHot field examined, never per PROPERTY_ID_COUNT slot — so
+# it is the direct proportionality witness: touched <= decls.len(), and
+# touched is independent of PROPERTY_ID_COUNT or tree size.
+
+pub fn apply_declarations(hot: ComputedStyleHot, decls: [Declaration], mut stats: Dict<text, i64>) -> ComputedStyleHot:
+    """Iterates only `decls` (size k) — never the full known-property table —
+    and writes at most one ComputedStyleHot field group per declaration."""
+    if not stats.contains_key("touched"):
+        stats["touched"] = 0
+    var i = 0
+    while i < decls.len():
+        val d = decls[i]
+        i = i + 1
+        if d.property == PROPERTY_ID_DISPLAY:
+            hot.display = d.value_text
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_POSITION:
+            val v = d.value_text
+            hot.position_relative = v == "relative"
+            hot.position_absolute = v == "absolute"
+            hot.position_sticky = v == "sticky"
+            hot.position_fixed = v == "fixed"
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_VISIBILITY:
+            hot.visibility_hidden = d.value_text == "hidden"
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_CONTENT_VISIBILITY:
+            hot.content_visibility_hidden = d.value_text == "hidden"
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_OPACITY:
+            hot.opacity_pct = d.value_id as i32
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_COLOR:
+            hot.fg = d.value_id as u32
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_WIDTH:
+            hot.width_px = d.value_id as i32
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_HEIGHT:
+            hot.height_px = d.value_id as i32
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_BOX_SIZING:
+            hot.border_box = d.value_text == "border-box"
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_OVERFLOW:
+            hot.overflow_hidden = d.value_text == "hidden"
+            stats["touched"] = stats["touched"] + 1
+        elif d.property == PROPERTY_ID_Z_INDEX:
+            hot.z_index = d.value_id as i32
+            stats["touched"] = stats["touched"] + 1
+        # PROPERTY_ID_UNKNOWN (or any future property not yet given a hot
+        # slot): skip. No field write, no touch — the cold `Style` side
+        # table (already `cold: Style` on ComputedStyleHot) is the intended
+        # home for it, wired at a higher layer, out of scope here.
+    hot

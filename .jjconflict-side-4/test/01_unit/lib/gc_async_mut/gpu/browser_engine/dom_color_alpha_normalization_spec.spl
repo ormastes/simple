@@ -1,0 +1,140 @@
+# codex-system-test
+"""CSS alpha grammar, validity, animation, Draw IR, and pixel propagation."""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{
+    parse_alpha_component_checked, parse_color_component,
+    parse_color_value, parse_color_value_checked
+}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{CSSValue}
+use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_reconcile_animation_instances,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations
+}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 24
+
+fn _alpha_html(animated: bool) -> text:
+    val keyframes = if animated:
+        (
+            "@keyframes alphaOne{" +
+            "from{background-color:rgba(34,197,94,1e0)}" +
+            "to{background-color:rgba(34,197,94,1e0)}}"
+        )
+    else:
+        ""
+    val color = if animated:
+        "animation:alphaOne 1000ms linear forwards;"
+    else:
+        "background-color:#22c55e;"
+    (
+        "<style>html,body{margin:0;background:#ffffff}" + keyframes +
+        "#box{width:16px;height:12px;" + color + "}</style>" +
+        "<div id='box'></div>"
+    )
+
+fn _command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+describe "CSS alpha number and percentage normalization":
+    # @manual: show
+    it "should parse complete bounded CSS numbers without integer overflow":
+        step("Accept signed fractions, percentages, and exponent forms")
+        expect(parse_color_value("rgba(1,2,3,+.5e0)")).to_equal(0x01020380u32)
+        expect(parse_color_value("rgb(1 2 3 / 5e-1)")).to_equal(0x01020380u32)
+        expect(parse_color_value("hsla(120,100%,50%,5E-1)")).to_equal(0x00FF0080u32)
+        expect(parse_color_value("hsl(120 100% 50% / 5E+1%)")).to_equal(0x00FF0080u32)
+
+        step("Clamp extreme exponents before byte conversion")
+        expect(parse_alpha_component_checked("1e999999") ?? 0u32).to_equal(255u32)
+        expect(parse_alpha_component_checked("1e-999999") ?? 255u32).to_equal(0u32)
+        expect(parse_alpha_component_checked("-1e999999") ?? 255u32).to_equal(0u32)
+        expect(parse_alpha_component_checked("100.0001%") ?? 0u32).to_equal(255u32)
+        expect(parse_alpha_component_checked("-0.1%") ?? 255u32).to_equal(0u32)
+
+        step("Round beyond the former nine-digit truncation boundary")
+        expect(parse_alpha_component_checked("0.0019607844") ?? 0u32).to_equal(1u32)
+        expect(parse_alpha_component_checked("0.0019607843") ?? 1u32).to_equal(0u32)
+        expect(parse_alpha_component_checked("50.0%") ?? 0u32).to_equal(128u32)
+
+        step("Leave the independent RGB channel parser unchanged")
+        expect(parse_color_component("50%")).to_equal(127u32)
+        expect(parse_color_value("rgba(1e2,2,3,.5)")).to_equal(0x01020380u32)
+
+    # @manual: show
+    it "should reject malformed alpha without replacing a valid keyframe winner":
+        step("Distinguish transparent alpha from malformed alpha")
+        expect(parse_color_value_checked("rgba(1,2,3,0)") ?? 0u32).to_equal(0x01020300u32)
+        expect(parse_color_value_checked("rgba(1,2,3,1.)")).to_be_nil()
+        expect(parse_color_value_checked("rgb(1 2 3 / 1e)")).to_be_nil()
+        expect(parse_color_value_checked("hsla(120,100%,50%,50 %)")).to_be_nil()
+        expect(parse_color_value_checked("hsl(120 100% 50% / --.5)")).to_be_nil()
+        expect(parse_color_value("var(--theme-color)")).to_equal(0x00000000u32)
+        expect(parse_color_value_checked("var(--theme-color)")).to_be_nil()
+
+        step("Cascade a later malformed duplicate behind the valid declaration")
+        val registry = extract_keyframes("""
+            @keyframes retained {
+                50% { background-color: rgba(34,197,94,5e-1); }
+                50% { background-color: rgba(255,0,0,1e); }
+            }
+        """)
+        expect(registry.entries.len()).to_equal(1)
+        expect(registry.entries[0].frames.len()).to_equal(1)
+        expect(registry.entries[0].frames[0].properties.len()).to_equal(1)
+        match registry.entries[0].frames[0].properties[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(34)
+                expect(color.g).to_equal(197)
+                expect(color.b).to_equal(94)
+                expect(color.a).to_equal(128)
+            _:
+                fail("expected the earlier valid color declaration")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(gui)
+    it "should preserve exponent alpha through keyframes, Draw IR, and pixels":
+        step("Create one animation instance from exponent-alpha keyframes")
+        val html = _alpha_html(true)
+        val instances = simple_web_layout_reconcile_animation_instances(
+            html, WIDTH, 0, 0, false, []
+        )
+        expect(instances.len()).to_equal(1)
+
+        step("Lower the animated opaque color to canonical Draw IR")
+        val result = (
+            simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+                html, WIDTH, HEIGHT, 0, instances
+            )
+        )
+        val command = _command(result.composition, "box")
+        expect(command.color).to_equal(0xFF22C55Eu32)
+        expect([
+            command.x, command.y, command.width, command.height
+        ]).to_equal([0, 0, 16, 12])
+
+        step("Rasterize identically to an opaque literal control")
+        val animated_pixels = BrowserRenderer.create(
+            WIDTH, HEIGHT
+        ).render_html_to_pixels_at_time_with_animations(
+            html, 0, instances
+        ).pixel_data
+        val literal_pixels = BrowserRenderer.create(
+            WIDTH, HEIGHT
+        ).render_html_to_pixels(_alpha_html(false)).pixel_data
+        expect(animated_pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(literal_pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(animated_pixels[6 * WIDTH + 8]).to_equal(0xFF22C55Eu32)
+        expect(animated_pixels).to_equal(literal_pixels)

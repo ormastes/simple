@@ -1,0 +1,542 @@
+# Core Interpreter — Lazy Parsing Module Loader (W2-A2, AC-4)
+#
+# Outline-first module loading bridge:
+# 1. Scans a module source for its top-level declaration surface only
+#    (function names + body line spans, struct/enum/class/val names, exports)
+#    WITHOUT running the full parser.
+# 2. Registers the module through the existing deferred-module mechanism
+#    (module_loader_core.register_deferred_module), so the first use of any
+#    of its symbols (eval_ident -> try_force_any_deferred_for) materializes
+#    the module via the battle-tested whole-file load_module path.
+# 3. Additionally records per-function body spans and offers a span-based
+#    single-function materializer (lazy_force_function) that parses just one
+#    function's source slice and registers it.
+#
+# Correctness-first: ANY outline scan failure (unrecognized top-level
+# construct, unreadable file, zero functions) falls back to the regular
+# whole-file load_module path.
+#
+# Mode gating: the wiring in module_loader_core.load_module only routes here
+# when SIMPLE_LAZY_PARSE=1 (see lazy_parse_enabled). Default behavior is
+# completely unchanged. The Rust-seed parser is not modified.
+#
+# State note: the lazy registry is dict-backed (not parallel arrays) because
+# in interpreter mode module-level array mutations made inside a callee are
+# not always visible to later cross-module calls, while dict key writes are.
+
+use compiler.core.frontend.{core_frontend_parse_append}
+use compiler.core.ast.{decl_get_name, decl_get_ret_type, decl_get_tag, module_get_decls}
+use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register}
+use compiler.core.interpreter.module_loader_core.{
+    is_deferred_module,
+    load_module,
+    module_is_loaded,
+    register_deferred_module
+}
+use compiler.core.interpreter.module_loader_resolve.{resolve_module_path}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+
+# AST declaration tags (mirror of ast.spl / module_loader_core.spl)
+val LAZY_DECL_FN = 1
+val LAZY_DECL_EXTERN_FN = 2
+
+# ===== Mode Gate =====
+
+# -1 = not read yet, 0 = disabled, 1 = enabled
+var _lazy_enabled_cache: i64 = -1
+
+fn lazy_parse_enabled() -> i64:
+    # Read SIMPLE_LAZY_PARSE once and cache the answer.
+    if _lazy_enabled_cache >= 0:
+        return _lazy_enabled_cache
+    val v = rt_env_get("SIMPLE_LAZY_PARSE")
+    var enabled = 0
+    if v == "1":
+        enabled = 1
+    _lazy_enabled_cache = enabled
+    enabled
+
+# Re-entrancy flag: while set, load_module must take its normal whole-file
+# path even when SIMPLE_LAZY_PARSE=1 (prevents the wired load_module from
+# bouncing back into load_module_lazy during materialization/fallback).
+# Dict-backed for cross-module visibility (see state note above).
+var _lazy_flags: {text: i64} = {}
+
+fn lazy_in_fallback() -> i64:
+    val depth = _lazy_flags["fallback_depth"] ?? 0
+    if depth > 0:
+        return 1
+    0
+
+# ===== Lazy Module Registry (dict-backed) =====
+
+# module -> registered marker
+var _lazy_mod_set: {text: bool} = {}
+# module -> resolved file path
+var _lazy_mod_file_map: {text: text} = {}
+# module -> importer file (current_file at defer time)
+var _lazy_mod_current_map: {text: text} = {}
+# module -> raw source text (sliced on demand)
+var _lazy_mod_source_map: {text: text} = {}
+# module -> "\n"-joined top-level function names
+var _lazy_mod_fns_map: {text: text} = {}
+# module -> "\n"-joined top-level declaration names (fns + structs + vals...)
+var _lazy_mod_decls_map: {text: text} = {}
+# "module|fn" -> 0-based body span start line / exclusive end line
+var _lazy_span_start_map: {text: i64} = {}
+var _lazy_span_end_map: {text: i64} = {}
+# bookkeeping counters ("count")
+var _lazy_meta: {text: i64} = {}
+
+fn lazy_loader_reset():
+    _lazy_mod_set = {}
+    _lazy_mod_file_map = {}
+    _lazy_mod_current_map = {}
+    _lazy_mod_source_map = {}
+    _lazy_mod_fns_map = {}
+    _lazy_mod_decls_map = {}
+    _lazy_span_start_map = {}
+    _lazy_span_end_map = {}
+    _lazy_meta = {}
+    _lazy_flags = {}
+    _lazy_meta["count"] = 0
+    _lazy_flags["fallback_depth"] = 0
+    _lazy_enabled_cache = -1
+
+fn lazy_module_count() -> i64:
+    val n = _lazy_meta["count"] ?? 0
+    return n
+
+fn lazy_module_known(module_name: text) -> i64:
+    if _lazy_mod_set.has(module_name):
+        return 1
+    0
+
+fn _lazy_split_names(joined: text) -> [text]:
+    if joined == "":
+        val empty: [text] = []
+        return empty
+    val parts = joined.split("\n")
+    parts
+
+fn lazy_module_fn_names(module_name: text) -> [text]:
+    val joined = _lazy_mod_fns_map[module_name] ?? ""
+    _lazy_split_names(joined)
+
+fn lazy_module_decl_names(module_name: text) -> [text]:
+    val joined = _lazy_mod_decls_map[module_name] ?? ""
+    _lazy_split_names(joined)
+
+fn lazy_module_fn_count(module_name: text) -> i64:
+    val names = lazy_module_fn_names(module_name)
+    val n = names.len()
+    return n
+
+fn lazy_fn_span_start(module_name: text, fn_name: text) -> i64:
+    # 0-based start line of the recorded function declaration, or -1.
+    val key = module_name + "|" + fn_name
+    val s = _lazy_span_start_map[key] ?? -1
+    return s
+
+fn lazy_fn_span_end(module_name: text, fn_name: text) -> i64:
+    # 0-based exclusive end line of the recorded function body span, or -1.
+    val key = module_name + "|" + fn_name
+    val e = _lazy_span_end_map[key] ?? -1
+    return e
+
+# ===== Outline Scanner (thin span-based variant) =====
+#
+# Line-oriented top-level declaration scanner. Deliberately conservative:
+# the moment it sees a zero-indent line it cannot classify, it reports
+# failure and the caller falls back to the whole-file parse.
+#
+# Scanner outputs live in module arrays; they are produced and consumed
+# within a single load_module_lazy call chain (safe in all modes).
+
+var _scan_fn_names_out: [text] = []
+var _scan_fn_starts_out: [i64] = []
+var _scan_fn_ends_out: [i64] = []
+var _scan_decl_names: [text] = []
+var _scan_ok: i64 = 0
+# 0-based line index of the construct that aborted the scan (-1 = none)
+var _scan_fail_line: i64 = -1
+
+fn lazy_scan_probe(path: text) -> text:
+    # Diagnostic helper: scan a file and report the outcome as text.
+    val source = _lazy_try_read(path)
+    if source == "":
+        return "unreadable: " + path
+    _scan_source(source)
+    if _scan_ok == 0:
+        return "bail at line " + _scan_fail_line.to_text()
+    var joined = "ok:"
+    for name in _scan_fn_names_out:
+        joined = joined + " " + name
+    joined
+
+fn _count_triple_quotes(line: text) -> i64:
+    val stripped = line.replace("\"\"\"", "")
+    val removed = line.len() - stripped.len()
+    removed / 3
+
+fn _trim_ws(s: text) -> text:
+    var a: i64 = 0
+    var b: i64 = s.len()
+    while a < b:
+        val c = s.substring(a, a + 1)
+        if c == " " or c == "\t":
+            a = a + 1
+        else:
+            break
+    while b > a:
+        val c2 = s.substring(b - 1, b)
+        if c2 == " " or c2 == "\t" or c2 == "\r":
+            b = b - 1
+        else:
+            break
+    s.substring(a, b)
+
+fn _ident_from(line: text, start: i64) -> text:
+    # Extract an identifier starting at `start`, stopping at a delimiter.
+    val n = line.len()
+    var end_pos = start
+    while end_pos < n:
+        val c = line.substring(end_pos, end_pos + 1)
+        val is_delim = (c == "(" or c == "<" or c == ":" or c == " " or c == "=" or c == "\t" or c == "," or c == ")" or c == "\r")
+        if is_delim:
+            break
+        end_pos = end_pos + 1
+    if end_pos <= start:
+        return ""
+    line.substring(start, end_pos)
+
+fn _scan_push_decl_name(line: text, off: i64):
+    val name = _ident_from(line, off)
+    if name != "":
+        _scan_decl_names.push(name)
+
+fn _push_export_names(rest: text):
+    val parts = rest.split(",")
+    for p in parts:
+        val name = _trim_ws(p)
+        if name != "":
+            _scan_decl_names.push(name)
+
+fn _scan_source(source: text):
+    # Populates _scan_* module vars. _scan_ok = 1 only when every top-level
+    # line was recognized.
+    _scan_fn_names_out = []
+    _scan_fn_starts_out = []
+    _scan_fn_ends_out = []
+    _scan_decl_names = []
+    _scan_ok = 1
+    _scan_fail_line = -1
+
+    val lines = source.split("\n")
+    val total = lines.len()
+    var in_triple = false
+    var pending_attr: i64 = -1
+    var open_fn: i64 = -1
+    var li: i64 = -1
+
+    for line in lines:
+        li = li + 1
+        val triples = _count_triple_quotes(line)
+        if in_triple:
+            if triples % 2 == 1:
+                in_triple = false
+            continue
+        if line.len() == 0:
+            continue
+        val c0 = line.substring(0, 1)
+        if c0 == " " or c0 == "\t" or c0 == "\r":
+            # Indented body/continuation line; may open a docstring.
+            if triples % 2 == 1:
+                in_triple = true
+            continue
+        if c0 == "#":
+            continue
+        if c0 == "\"":
+            # Module-level docstring / string line.
+            if open_fn >= 0:
+                _scan_fn_ends_out[open_fn] = li
+                open_fn = -1
+            if triples % 2 == 1:
+                in_triple = true
+            continue
+        if c0 == "@":
+            # Attribute/decorator: belongs to the next declaration.
+            if open_fn >= 0:
+                _scan_fn_ends_out[open_fn] = li
+                open_fn = -1
+            if pending_attr < 0:
+                pending_attr = li
+            continue
+
+        # A new zero-indent declaration closes any open function span.
+        if open_fn >= 0:
+            _scan_fn_ends_out[open_fn] = li
+            open_fn = -1
+
+        var fn_name_off: i64 = -1
+        if line.starts_with("fn "):
+            fn_name_off = 3
+        if line.starts_with("async fn "):
+            fn_name_off = 9
+        if line.starts_with("pub fn "):
+            fn_name_off = 7
+        if line.starts_with("me "):
+            fn_name_off = 3
+        if fn_name_off >= 0:
+            val name = _ident_from(line, fn_name_off)
+            if name == "":
+                _scan_ok = 0
+                _scan_fail_line = li
+                return
+            var start_line = li
+            if pending_attr >= 0:
+                start_line = pending_attr
+            pending_attr = -1
+            _scan_fn_names_out.push(name)
+            _scan_fn_starts_out.push(start_line)
+            _scan_fn_ends_out.push(total)
+            _scan_decl_names.push(name)
+            open_fn = _scan_fn_names_out.len() - 1
+            continue
+
+        pending_attr = -1
+        if line.starts_with("extern fn "):
+            _scan_push_decl_name(line, 10)
+            continue
+        if line.starts_with("use "):
+            continue
+        if line.starts_with("export "):
+            _push_export_names(line.substring(7, line.len()))
+            continue
+        if line.starts_with("struct "):
+            _scan_push_decl_name(line, 7)
+            continue
+        if line.starts_with("enum "):
+            _scan_push_decl_name(line, 5)
+            continue
+        if line.starts_with("class "):
+            _scan_push_decl_name(line, 6)
+            continue
+        if line.starts_with("trait "):
+            _scan_push_decl_name(line, 6)
+            continue
+        if line.starts_with("actor "):
+            _scan_push_decl_name(line, 6)
+            continue
+        if line.starts_with("type "):
+            _scan_push_decl_name(line, 5)
+            continue
+        if line.starts_with("val "):
+            _scan_push_decl_name(line, 4)
+            continue
+        if line.starts_with("var "):
+            _scan_push_decl_name(line, 4)
+            continue
+        if line.starts_with("impl "):
+            continue
+
+        # Unknown top-level construct: the outline cannot model this file.
+        _scan_ok = 0
+        _scan_fail_line = li
+        return
+
+# ===== Source Reading =====
+
+fn _lazy_try_read(path: text) -> text:
+    if path == "":
+        return ""
+    val src = rt_file_read_text(path)
+    if src == nil:
+        return ""
+    src
+
+fn _lazy_std_candidates(module_name: text) -> [text]:
+    # Direct stdlib path candidates for std./lib. modules. Used when the
+    # resolver's answer is unreadable (its rt_file_exists() == 1 checks fail
+    # under host interpretation, where the extern returns bool). Mirrors the
+    # resolver's family-directory search order.
+    var cands: [text] = []
+    val is_std = module_name.starts_with("std.")
+    val is_lib = module_name.starts_with("lib.")
+    if not (is_std or is_lib):
+        return cands
+    val rest = module_name.substring(4, module_name.len())
+    val sub = rest.replace(".", "/") + ".spl"
+    var root = rt_env_get("SIMPLE_LIB")
+    if root == nil:
+        root = "src"
+    if root == "":
+        root = "src"
+    cands.push(root + "/lib/" + sub)
+    cands.push(root + "/lib/nogc_async_mut/" + sub)
+    cands.push(root + "/lib/nogc_async_immut/" + sub)
+    cands.push(root + "/lib/nogc_sync_immut/" + sub)
+    cands.push(root + "/lib/nogc_sync_mut/" + sub)
+    cands.push(root + "/lib/common/" + sub)
+    cands.push(root + "/lib/gc_async_mut/" + sub)
+    cands.push(root + "/lib/gc_async_immut/" + sub)
+    cands.push(root + "/lib/gc_sync_mut/" + sub)
+    cands.push(root + "/lib/gc_sync_immut/" + sub)
+    cands.push(root + "/lib/nogc_async_mut_noalloc/" + sub)
+    cands
+
+# ===== Whole-File Fallback =====
+
+fn _lazy_load_whole(module_name: text, current_file: text) -> i64:
+    # Run the regular whole-file load path. The fallback depth flag makes the
+    # (optionally wired) load_module skip lazy routing while we are inside.
+    val depth = _lazy_flags["fallback_depth"] ?? 0
+    _lazy_flags["fallback_depth"] = depth + 1
+    val ok = load_module(module_name, current_file)
+    _lazy_flags["fallback_depth"] = depth
+    ok
+
+# ===== Public Entry Point =====
+
+fn load_module_lazy(module_name: text, current_file: text) -> i64:
+    # Outline-first lazy load. Returns 1 on success (module either deferred
+    # for on-demand materialization or fully loaded via fallback), 0 on
+    # failure (matching load_module semantics).
+    if module_is_loaded(module_name) == 1:
+        return 1
+    if lazy_in_fallback() == 1:
+        return _lazy_load_whole(module_name, current_file)
+    if is_deferred_module(module_name) == 1:
+        # We deferred this module earlier and the deferred-force machinery is
+        # now materializing it (force_deferred_module -> load_module -> here
+        # when wired). Materialize with the real whole-file parse.
+        return _lazy_load_whole(module_name, current_file)
+
+    var resolved = resolve_module_path(module_name, current_file)
+    var source = _lazy_try_read(resolved)
+    if source == "":
+        # Resolver answer unreadable — retry direct stdlib candidates.
+        val cands = _lazy_std_candidates(module_name)
+        for cand in cands:
+            if source == "":
+                val attempt = _lazy_try_read(cand)
+                if attempt != "":
+                    source = attempt
+                    resolved = cand
+    if source == "":
+        return _lazy_load_whole(module_name, current_file)
+
+    _scan_source(source)
+    if _scan_ok == 0:
+        return _lazy_load_whole(module_name, current_file)
+    if _scan_fn_names_out.len() == 0:
+        # Nothing to defer (no functions) — eager load is both correct and cheap.
+        return _lazy_load_whole(module_name, current_file)
+
+    # Record the outline so bodies/slices can be materialized later.
+    var fn_joined = ""
+    var fi: i64 = 0
+    for fname in _scan_fn_names_out:
+        if fi > 0:
+            fn_joined = fn_joined + "\n"
+        fn_joined = fn_joined + fname
+        val key = module_name + "|" + fname
+        _lazy_span_start_map[key] = _scan_fn_starts_out[fi]
+        _lazy_span_end_map[key] = _scan_fn_ends_out[fi]
+        fi = fi + 1
+    var decl_joined = ""
+    var di: i64 = 0
+    for dname in _scan_decl_names:
+        if di > 0:
+            decl_joined = decl_joined + "\n"
+        decl_joined = decl_joined + dname
+        di = di + 1
+
+    _lazy_mod_set[module_name] = true
+    _lazy_mod_file_map[module_name] = resolved
+    _lazy_mod_current_map[module_name] = current_file
+    _lazy_mod_source_map[module_name] = source
+    _lazy_mod_fns_map[module_name] = fn_joined
+    _lazy_mod_decls_map[module_name] = decl_joined
+    val prev_count = _lazy_meta["count"] ?? 0
+    _lazy_meta["count"] = prev_count + 1
+
+    # Bridge into the existing deferred mechanism: first use of any scanned
+    # symbol triggers eval_ident -> try_force_any_deferred_for -> full load.
+    register_deferred_module(module_name, current_file, _scan_decl_names)
+    1
+
+# ===== Span-Based Single-Function Materializer =====
+
+fn lazy_fn_slice(module_name: text, fn_name: text) -> text:
+    # Reconstruct the exact source text of one function from its recorded
+    # body span (declaration line through last body line). Returns "" when
+    # the module/function is not in the lazy registry.
+    val key = module_name + "|" + fn_name
+    val start_line = _lazy_span_start_map[key] ?? -1
+    val end_line = _lazy_span_end_map[key] ?? -1
+    if start_line < 0:
+        return ""
+    if end_line <= start_line:
+        return ""
+    val source = _lazy_mod_source_map[module_name] ?? ""
+    if source == "":
+        return ""
+    val lines = source.split("\n")
+    val total = lines.len()
+    var slice = ""
+    var li = start_line
+    while li < end_line:
+        if li < total:
+            slice = slice + lines[li] + "\n"
+        li = li + 1
+    slice
+
+fn lazy_force_function(module_name: text, fn_name: text) -> i64:
+    # Parse and register a single function from its recorded body span.
+    # Returns 1 on success, 0 on failure. Falls back to whole-file load if
+    # the slice fails to parse.
+    if lazy_module_known(module_name) == 0:
+        return 0
+    if func_table_lookup(fn_name) >= 0:
+        return 1
+    val slice = lazy_fn_slice(module_name, fn_name)
+    if slice == "":
+        return 0
+
+    val decls_before = module_get_decls()
+    val before = decls_before.len()
+    val file_path = _lazy_mod_file_map[module_name] ?? ""
+    if not core_frontend_parse_append(slice, file_path):
+        val current_file = _lazy_mod_current_map[module_name] ?? ""
+        return _lazy_load_whole(module_name, current_file)
+
+    val decls = module_get_decls()
+    val total = decls.len()
+    var di = before
+    var registered = 0
+    while di < total:
+        val did = decls[di]
+        val tag = decl_get_tag(did)
+        if tag == LAZY_DECL_FN:
+            val name = decl_get_name(did)
+            val ret_type = decl_get_ret_type(did)
+            func_table_register(name, did)
+            func_register_return_type(name, ret_type)
+            registered = registered + 1
+        if tag == LAZY_DECL_EXTERN_FN:
+            val ename = decl_get_name(did)
+            val eret = decl_get_ret_type(did)
+            func_register_return_type(ename, eret)
+            registered = registered + 1
+        di = di + 1
+    if registered == 0:
+        return 0
+    1
+
+export load_module_lazy, lazy_parse_enabled, lazy_in_fallback, lazy_loader_reset
+export lazy_force_function, lazy_fn_slice, lazy_module_count, lazy_module_known, lazy_scan_probe
+export lazy_module_fn_count, lazy_module_fn_names, lazy_module_decl_names
+export lazy_fn_span_start, lazy_fn_span_end

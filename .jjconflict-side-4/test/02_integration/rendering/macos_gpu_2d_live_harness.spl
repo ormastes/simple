@@ -1,0 +1,582 @@
+# Shared macOS Vulkan/Metal Engine2D live evidence harness.
+#
+# This is intentionally test-only. It consumes the raw winit event ABI because
+# the public WinitInput convenience snapshot retains key presses but discards
+# key releases; live evidence must prove the ordered down/up delivery instead
+# of inferring it from aggregate counters.
+
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    engine2d_draw_ir_adv_composition
+}
+use std.common.processing.processing_ir.{processing_ir_fill_u32}
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity, selected_font_asset_physical_path}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+use std.io_runtime.{env_get, file_write, file_write_bytes}
+use macos_gpu_2d_draw_ir_event_fixture.{
+    MACOS_GPU_2D_NATIVE_FOCUS_KIND,
+    MacosGpu2dDrawIrEventFixture,
+    macos_gpu_2d_draw_ir_event_fixture
+}
+
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_key_pressed(ev: i64) -> i64
+extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+
+val LIVE_DPI: i32 = 300
+val LIVE_FONT_POINTS: i32 = 24
+val LIVE_BACKGROUND: u32 = 0xFF101522u32
+val PREVIEW_WIDTH: i32 = 960
+val PREVIEW_HEIGHT: i32 = 540
+val EVENT_SEQUENCE: text = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+val EVT_CLOSE: i64 = 3
+val EVT_WINDOW_FOCUSED: i64 = 5
+val EVT_KEYBOARD_INPUT: i64 = 10
+val EVT_MOUSE_BUTTON: i64 = 20
+val EVT_MOUSE_MOVED: i64 = 21
+
+fn event_preview(interaction_complete: bool) -> [i64]:
+    # The event window is deliberately smaller than the evidence framebuffer.
+    # It exists only to receive ordered native input promptly; the durable
+    # capture and all pixel assertions remain the 3840x2160 backend readback.
+    var pixels: [i64] = [0x101522i64; PREVIEW_WIDTH * PREVIEW_HEIGHT]
+    var y = 80
+    while y < PREVIEW_HEIGHT - 80:
+        var x = 100
+        while x < PREVIEW_WIDTH - 100:
+            pixels[y * PREVIEW_WIDTH + x] = if interaction_complete:
+                0x166534i64
+            else:
+                0x312E81i64
+            x = x + 1
+        y = y + 1
+    pixels
+
+fn measured_non_background_bounds(pixels: [u32], width: i32, height: i32) -> text:
+    var min_x = width
+    var min_y = height
+    var max_x = -1
+    var max_y = -1
+    var index = 0
+    while index < pixels.len():
+        if pixels[index] != LIVE_BACKGROUND:
+            val x = index % width
+            val y = index / width
+            if x < min_x:
+                min_x = x
+            if y < min_y:
+                min_y = y
+            if x > max_x:
+                max_x = x
+            if y > max_y:
+                max_y = y
+        index = index + 1
+    if max_x < min_x or max_y < min_y:
+        return ""
+    val bounds_width = max_x - min_x + 1
+    val bounds_height = max_y - min_y + 1
+    "{min_x},{min_y},{bounds_width},{bounds_height}"
+
+fn append_event(sequence: text, name: text) -> text:
+    if sequence == "":
+        return name
+    sequence + "," + name
+
+fn dpi_points_to_pixels(points: i32, dpi: i32) -> i32:
+    # Deterministic integer round(points * dpi / 72) for the vector font only.
+    # This does not claim that the scene's other geometry is DPI-scaled.
+    (points * dpi + 36) / 72
+
+fn lower_hex_sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+fn vulkan_font_device_evidence_valid(result: Engine2dDrawIrAdvResult) -> bool:
+    (result.font_execution_target == "vulkan" and
+     result.font_batch_identity != "" and
+     result.font_readback_source == "device_readback" and
+     result.font_device_checksum > 0 and
+     result.font_device_checksum == result.font_oracle_checksum and
+     result.font_readback_nonblank_pixels > 0 and
+     result.font_parity and result.font_device_executed and
+     result.font_promotion_ready and
+     result.font_atlas_upload_count > 0 and
+     result.font_atlas_upload_bytes > 0 and
+     lower_hex_sha256_valid(result.font_atlas_payload_sha256))
+
+fn vulkan_processing_ir_receipt() -> (bool, text):
+    val expected_value = 0x01020304u32
+    val expected_checksum = 1082179840u64
+    val result = processing_ir_execute_vulkan(
+        processing_ir_fill_u32(64, expected_value))
+    var actual_checksum: u64 = 0
+    var mismatch_count: i64 = 0
+    for actual in result.values:
+        actual_checksum = actual_checksum + actual.to_u64()
+        if actual != expected_value:
+            mismatch_count = mismatch_count + 1
+    val values_exact = result.values.len() == 64 and
+        actual_checksum == expected_checksum and mismatch_count == 0
+    val valid = result.completed and result.reason == "ok" and values_exact and
+        result.backend_handle > 0 and result.device_identity > 0
+    val status = if valid: "pass" else: "fail"
+    (valid,
+        "gpu_2d_live_processing_ir_status={status}\n" +
+        "gpu_2d_live_processing_ir_reason={result.reason}\n" +
+        "gpu_2d_live_processing_ir_completed={result.completed}\n" +
+        "gpu_2d_live_processing_ir_backend=vulkan\n" +
+        "gpu_2d_live_processing_ir_count={result.values.len()}\n" +
+        "gpu_2d_live_processing_ir_expected_checksum={expected_checksum}\n" +
+        "gpu_2d_live_processing_ir_actual_checksum={actual_checksum}\n" +
+        "gpu_2d_live_processing_ir_values_exact={values_exact}\n" +
+        "gpu_2d_live_processing_ir_readback_source=device_readback\n" +
+        "gpu_2d_live_processing_ir_handle={result.backend_handle}\n" +
+        "gpu_2d_live_processing_ir_identity={result.device_identity}\n" +
+        "gpu_2d_live_processing_ir_mismatch_count={mismatch_count}\n" +
+        "gpu_2d_live_processing_ir_cpu_fallback=false\n")
+
+fn write_runtime_receipt(path: text, backend: text, capture_path: text,
+                         repo_revision: text, shared_scene_fingerprint: text,
+                         source_revision: text, backend_handle: i64,
+                         device_identity: i64, initial_checksum: i64,
+                         interaction_checksum: i64,
+                         interaction_device_identity: i64,
+                         bounds: text, live_width: i32, live_height: i32,
+                         font_loaded: bool, expected_font_identity: text,
+                         font_identity: text, cold_rasterizations: i64,
+                         warm_rasterizations: i64, warm_hits: i64,
+                         font_pixel_size: i32,
+                         font_target: text, font_attempts: text,
+                         event_sequence: text, event_count: i64,
+                         fixture: MacosGpu2dDrawIrEventFixture,
+                         draw_ir_result: Engine2dDrawIrAdvResult,
+                         warm_draw_ir_result: Engine2dDrawIrAdvResult,
+                         processing_ir_receipt: text) -> bool:
+    val mutation = fixture.mutation
+    file_write(path,
+        "gpu_2d_live_status=pass\n" +
+        "gpu_2d_live_backend={backend}\n" +
+        "gpu_2d_live_target=macos-host\n" +
+        "gpu_2d_live_width={live_width}\n" +
+        "gpu_2d_live_height={live_height}\n" +
+        "gpu_2d_live_dpi={LIVE_DPI}\n" +
+        "gpu_2d_live_capture_path={capture_path}\n" +
+        "gpu_2d_live_repo_revision={repo_revision}\n" +
+        "gpu_2d_live_shared_scene_fingerprint={shared_scene_fingerprint}\n" +
+        "repo_revision={repo_revision}\n" +
+        "shared_scene_fingerprint={shared_scene_fingerprint}\n" +
+        "gpu_2d_live_source_revision={source_revision}\n" +
+        "gpu_2d_live_backend_handle={backend_handle}\n" +
+        "gpu_2d_live_device_identity={device_identity}\n" +
+        "gpu_2d_live_draw_ir_device_identity={draw_ir_result.device_identity}\n" +
+        "gpu_2d_live_interaction_device_identity={interaction_device_identity}\n" +
+        "gpu_2d_live_source=device_readback\n" +
+        "gpu_2d_live_initial_checksum={initial_checksum}\n" +
+        "gpu_2d_live_interaction_checksum={interaction_checksum}\n" +
+        "gpu_2d_live_non_background_bounds={bounds}\n" +
+        "gpu_2d_live_font_loaded={font_loaded}\n" +
+        "gpu_2d_live_font_expected_identity={expected_font_identity}\n" +
+        "gpu_2d_live_font_identity={font_identity}\n" +
+        "gpu_2d_live_font_cold_rasterizations={cold_rasterizations}\n" +
+        "gpu_2d_live_font_warm_rasterizations={warm_rasterizations}\n" +
+        "gpu_2d_live_font_warm_hits={warm_hits}\n" +
+        "gpu_2d_live_font_point_size={LIVE_FONT_POINTS}\n" +
+        "gpu_2d_live_font_dpi={LIVE_DPI}\n" +
+        "gpu_2d_live_font_pixel_size={font_pixel_size}\n" +
+        "gpu_2d_live_font_execution_target={font_target}\n" +
+        "gpu_2d_live_font_execution_attempts={font_attempts}\n" +
+        "gpu_2d_live_font_batch_identity={draw_ir_result.font_batch_identity}\n" +
+        "gpu_2d_live_font_readback_source={draw_ir_result.font_readback_source}\n" +
+        "gpu_2d_live_font_device_checksum={draw_ir_result.font_device_checksum}\n" +
+        "gpu_2d_live_font_oracle_checksum={draw_ir_result.font_oracle_checksum}\n" +
+        "gpu_2d_live_font_readback_nonblank_pixels={draw_ir_result.font_readback_nonblank_pixels}\n" +
+        "gpu_2d_live_font_parity={draw_ir_result.font_parity}\n" +
+        "gpu_2d_live_font_device_executed={draw_ir_result.font_device_executed}\n" +
+        "gpu_2d_live_font_promotion_ready={draw_ir_result.font_promotion_ready}\n" +
+        "gpu_2d_live_font_atlas_upload_count={draw_ir_result.font_atlas_upload_count}\n" +
+        "gpu_2d_live_font_atlas_upload_bytes={draw_ir_result.font_atlas_upload_bytes}\n" +
+        "gpu_2d_live_font_atlas_payload_sha256={draw_ir_result.font_atlas_payload_sha256}\n" +
+        "gpu_2d_live_font_warm_batch_identity={warm_draw_ir_result.font_batch_identity}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_count={warm_draw_ir_result.font_atlas_upload_count}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_bytes={warm_draw_ir_result.font_atlas_upload_bytes}\n" +
+        "gpu_2d_live_font_warm_atlas_payload_sha256={warm_draw_ir_result.font_atlas_payload_sha256}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_delta={warm_draw_ir_result.font_atlas_upload_count - draw_ir_result.font_atlas_upload_count}\n" +
+        "gpu_2d_live_event_sequence={event_sequence}\n" +
+        "gpu_2d_live_event_count={event_count}\n" +
+        "gpu_2d_live_event_backend={backend}\n" +
+        "gpu_2d_live_draw_ir_composition_id={fixture.composition.composition_id}\n" +
+        "gpu_2d_live_draw_ir_scene_key={fixture.composition.scene_key}\n" +
+        "gpu_2d_live_draw_ir_rendered_commands={draw_ir_result.rendered_command_count}\n" +
+        "gpu_2d_live_draw_ir_skipped_commands={draw_ir_result.skipped_command_count}\n" +
+        "gpu_2d_live_draw_ir_fallback_required={draw_ir_result.fallback_required}\n" +
+        "gpu_2d_live_draw_ir_fallback_reason={draw_ir_result.fallback_reason}\n" +
+        "gpu_2d_live_draw_ir_readback_source={draw_ir_result.readback_source}\n" +
+        "gpu_2d_live_draw_ir_readback_checksum={draw_ir_result.readback_checksum}\n" +
+        processing_ir_receipt +
+        "gpu_2d_live_semantic_event={mutation.event_name}\n" +
+        "gpu_2d_live_semantic_before_focus={mutation.before_focus}\n" +
+        "gpu_2d_live_semantic_after_focus={mutation.after_focus}\n" +
+        "gpu_2d_live_semantic_before_accent={mutation.before_accent}\n" +
+        "gpu_2d_live_semantic_after_accent={mutation.after_accent}\n" +
+        "gpu_2d_live_semantic_changed={mutation.changed}\n" +
+        "gpu_2d_live_semantic_native_focus_kind={mutation.native_focus_kind}\n" +
+        "gpu_2d_live_semantic_native_focus_reduced={mutation.native_focus_reduced}\n" +
+        "gpu_2d_live_semantic_raw_winit_reduced={mutation.native_focus_reduced}\n" +
+        "gpu_2d_live_semantic_pointer_key_delivery=observed\n" +
+        "gpu_2d_live_semantic_correlation=native-focus-reduced;pointer-key-delivery-observed\n")
+
+fn write_failure_receipt_with_diagnostics(
+        path: text, backend: text, reason: text, stage: i64, exit_code: i64,
+        diagnostics: text) -> i64:
+    file_write(path,
+        "gpu_2d_live_status=fail\n" +
+        "gpu_2d_live_reason={reason}\n" +
+        "gpu_2d_live_backend={backend}\n" +
+        "gpu_2d_live_stage={stage}\n" +
+        "gpu_2d_live_exit_code={exit_code}\n" +
+        diagnostics)
+    exit_code
+
+fn write_failure_receipt(path: text, backend: text, reason: text,
+                         stage: i64, exit_code: i64) -> i64:
+    write_failure_receipt_with_diagnostics(
+        path, backend, reason, stage, exit_code, "")
+
+fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
+    # Keep native framebuffer dimensions function-local and literal-backed.
+    # Cross-module module-global aliases currently lower into zero-initialized
+    # BSS in native builds, while this offscreen buffer must remain 3840x2160
+    # independently of the later 960x540 event-preview window.
+    val live_width: i32 = 3840
+    val live_height: i32 = 2160
+    val capture_path = env_get("GPU_2D_LIVE_CAPTURE_PATH") ?? ""
+    val receipt_path = env_get("GPU_2D_LIVE_RECEIPT_PATH") ?? ""
+    val ready_path = env_get("GPU_2D_LIVE_READY_PATH") ?? ""
+    val repo_revision = env_get("GPU_2D_LIVE_REPO_REVISION") ?? ""
+    val shared_scene_fingerprint = env_get("GPU_2D_LIVE_SHARED_SCENE_FINGERPRINT") ?? ""
+    val source_revision = env_get("GPU_2D_LIVE_SOURCE_REVISION") ?? ""
+    if (capture_path == "" or receipt_path == "" or ready_path == "" or
+        repo_revision == "" or shared_scene_fingerprint == "" or source_revision == ""):
+        return 2
+    if backend != "vulkan" and backend != "metal":
+        return 3
+    var processing_ir_receipt = ""
+    if backend == "vulkan":
+        val (processing_ir_valid, receipt_lines) = vulkan_processing_ir_receipt()
+        if not processing_ir_valid:
+            return write_failure_receipt_with_diagnostics(
+                receipt_path, backend, "processing-ir-receipt-failed", 4, 4,
+                receipt_lines)
+        processing_ir_receipt = receipt_lines
+    var engine = Engine2D.create_with_backend_fast(live_width, live_height, backend)
+    if engine.backend_name() != backend:
+        val selected_backend = engine.backend_name()
+        engine.shutdown()
+        var probe_reason = "backend-specific-probe-unavailable"
+        if backend == "vulkan":
+            var vulkan_probe = VulkanBackend.create()
+            if vulkan_probe.init(live_width, live_height):
+                probe_reason = "vulkan-direct-probe-unexpectedly-initialized"
+                vulkan_probe.shutdown()
+            else:
+                probe_reason = vulkan_probe.last_error
+        elif backend == "metal":
+            var metal_probe = MetalBackend.create()
+            if metal_probe.init(live_width, live_height):
+                probe_reason = "metal-direct-probe-unexpectedly-initialized"
+                metal_probe.shutdown()
+            else:
+                probe_reason = metal_probe.last_error
+        file_write(
+            receipt_path,
+            "gpu_2d_live_status=fail\n" +
+            "gpu_2d_live_reason=backend-create-failed\n" +
+            "gpu_2d_live_backend=" + backend + "\n" +
+            "gpu_2d_live_stage=4\n" +
+            "gpu_2d_live_exit_code=4\n" +
+            "gpu_2d_live_requested_backend=" + backend + "\n" +
+            "gpu_2d_live_selected_backend=" + selected_backend + "\n" +
+            "gpu_2d_live_probe=" + probe_reason + "\n")
+        return 4
+    engine.clear(LIVE_BACKGROUND)
+    engine.draw_gradient_rect(160, 140, 3520, 1880, 0xFF172554u32, 0xFF312E81u32)
+    engine.draw_rect_filled(260, 260, 1120, 520, 0xCC1F2937u32)
+    engine.draw_circle_filled(3100, 620, 330, 0xFF22D3EEu32)
+    engine.draw_triangle_filled(2460, 1560, 3100, 980, 3580, 1740, 0xFFF59E0Bu32)
+
+    # Use the pinned static Bungee face for live evidence. The first catalog
+    # entry is a 17.7 MB CJK variable font whose interpreted parse alone can
+    # consume the bounded GUI launch window; Bungee still exercises the same
+    # canonical FontRenderer -> FontRenderBatch -> backend atlas compositor path.
+    val font_candidate = selected_font_asset_candidates()[9]
+    val expected_font_identity = selected_font_asset_identity(font_candidate)
+    val physical_font_path = selected_font_asset_physical_path(font_candidate.local_path)
+    val font_loaded = engine.load_font(physical_font_path)
+    val font_pixel_size = dpi_points_to_pixels(LIVE_FONT_POINTS, LIVE_DPI)
+    val loaded_fonts = engine.fonts()
+    val font_identity = loaded_fonts.current_font_identity()
+    engine.install_font_renderer(loaded_fonts)
+    if (not font_loaded or font_identity != expected_font_identity or
+        font_pixel_size <= 0):
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "font-validation-failed", 5, 5)
+
+    val initial_readback = engine.read_pixels_with_source()
+    if (initial_readback.source != "device_readback" or
+        initial_readback.backend_handle <= 0 or initial_readback.checksum <= 0 or
+        initial_readback.device_identity <= 0 or
+        initial_readback.pixel_count != (live_width * live_height).to_i64()):
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "initial-device-readback-failed", 6, 6)
+    val backend_handle = initial_readback.backend_handle
+    val initial_checksum = initial_readback.checksum
+    engine.present()
+
+    val lp = winit_loop_new()
+    if not lp.is_valid:
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "event-loop-create-failed", 7, 7)
+    val win = winit_window_new(
+        lp, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(),
+        "Simple {backend} 4K/300 DPI Evidence")
+    if not win.is_valid:
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "window-create-failed", 8, 8)
+    if not winit_present_rgba(
+        win, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(), event_preview(false)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "initial-window-present-failed", 9, 9)
+    if not file_write(ready_path, "gpu_2d_live_ready=true\n"):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "ready-receipt-write-failed", 10, 10)
+
+    var event_stage = 0
+    var event_sequence = ""
+    var event_count: i64 = 0
+    var native_focus_observed = false
+    var native_focus_kind: i64 = 0
+    var wait_ticks = 0
+    while event_stage < 6 and wait_ticks < 18000:
+        var event = rt_winit_event_loop_poll_events(lp.handle, 1)
+        while event != 0:
+            val kind = rt_winit_event_get_type(event)
+            if kind == EVT_WINDOW_FOCUSED and event_stage == 0:
+                native_focus_observed = true
+                native_focus_kind = kind
+                event_sequence = append_event(event_sequence, "focus")
+                event_stage = 1
+                event_count = event_count + 1
+            elif kind == EVT_MOUSE_MOVED and event_stage == 1:
+                event_sequence = append_event(event_sequence, "pointer_move")
+                event_stage = 2
+                event_count = event_count + 1
+            elif kind == EVT_MOUSE_BUTTON:
+                val pressed = rt_winit_event_mouse_pressed(event) != 0
+                if event_stage == 2 and pressed:
+                    event_sequence = append_event(event_sequence, "pointer_down")
+                    event_stage = 3
+                    event_count = event_count + 1
+                elif event_stage == 3 and not pressed:
+                    event_sequence = append_event(event_sequence, "pointer_up")
+                    event_stage = 4
+                    event_count = event_count + 1
+            elif kind == EVT_KEYBOARD_INPUT:
+                val pressed = rt_winit_event_key_pressed(event) != 0
+                if event_stage == 4 and pressed:
+                    event_sequence = append_event(event_sequence, "key_down")
+                    event_stage = 5
+                    event_count = event_count + 1
+                elif event_stage == 5 and not pressed:
+                    event_sequence = append_event(event_sequence, "key_up")
+                    event_stage = 6
+                    event_count = event_count + 1
+            rt_winit_event_free(event)
+            event = rt_winit_event_loop_poll_events(lp.handle, 1)
+        wait_ticks = wait_ticks + 1
+        thread_sleep(10)
+
+    if event_sequence != EVENT_SEQUENCE or event_count != 6:
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "event-sequence-incomplete", 11, 11)
+
+    # Reduce the focus boolean/kind captured from the real raw winit record.
+    # Pointer and key receipts prove ordered delivery only; they are not mapped
+    # to UI state by this fixture.
+    val fixture = macos_gpu_2d_draw_ir_event_fixture(
+        native_focus_observed, native_focus_kind)
+    val mutation = fixture.mutation
+    if (not mutation.native_focus_observed or
+        not mutation.native_focus_reduced or
+        mutation.native_focus_kind != MACOS_GPU_2D_NATIVE_FOCUS_KIND or
+        not mutation.changed or mutation.event_name != "focus" or
+        mutation.before_focus != "macos-gpu-2d-root" or
+        mutation.after_focus != "macos-gpu-2d-action" or
+        mutation.before_accent == mutation.after_accent):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "native-focus-reduction-failed", 12, 12)
+
+    # Execute the exact same frozen DrawIrComposition on Vulkan and Metal via
+    # the canonical Engine2D lowering. Unsupported commands are encoded as a
+    # skipped count plus non-empty fallback reason by draw_ir_adv.
+    val font_before = engine.font_cache_stats()
+    val draw_ir_result = engine2d_draw_ir_adv_composition(
+        engine, fixture.composition, true)
+    val font_cold = engine.font_cache_stats()
+    val warm_draw_ir_result = engine2d_draw_ir_adv_composition(
+        engine, fixture.composition, true)
+    val font_warm = engine.font_cache_stats()
+    val font_target = engine.font_execution_target()
+    val font_attempts = engine.font_execution_attempts().join(",")
+    val cold_rasterizations = font_cold.rasterizations - font_before.rasterizations
+    val warm_rasterizations = font_warm.rasterizations - font_cold.rasterizations
+    val warm_hits = font_warm.hits - font_cold.hits
+    val expected_draw_ir_commands = fixture.composition.batches[0].commands.len()
+    if (draw_ir_result.readback_source != "device_readback" or
+        draw_ir_result.backend_handle != backend_handle or
+        draw_ir_result.device_identity != initial_readback.device_identity or
+        draw_ir_result.readback_checksum <= 0 or
+        draw_ir_result.pixels.len() != (live_width * live_height).to_i64() or
+        draw_ir_result.rendered_command_count != expected_draw_ir_commands or
+        draw_ir_result.skipped_command_count != 0 or
+        draw_ir_result.fallback_required or draw_ir_result.fallback_reason != ""):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "shared-draw-ir-device-render-failed", 13, 13)
+    if (warm_draw_ir_result.readback_source != "device_readback" or
+        warm_draw_ir_result.backend_handle != backend_handle or
+        warm_draw_ir_result.readback_checksum <= 0 or
+        warm_draw_ir_result.pixels.len() != (live_width * live_height).to_i64() or
+        warm_draw_ir_result.rendered_command_count != expected_draw_ir_commands or
+        warm_draw_ir_result.skipped_command_count != 0 or
+        warm_draw_ir_result.fallback_required or
+        warm_draw_ir_result.fallback_reason != "" or
+        cold_rasterizations <= 0 or warm_rasterizations != 0 or warm_hits <= 0 or
+        font_target != backend or not font_attempts.contains(backend)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "shared-draw-ir-warm-font-render-failed", 13, 13)
+    if (backend == "vulkan" and
+        (not vulkan_font_device_evidence_valid(draw_ir_result) or
+         not vulkan_font_device_evidence_valid(warm_draw_ir_result) or
+         warm_draw_ir_result.font_batch_identity != draw_ir_result.font_batch_identity or
+         warm_draw_ir_result.font_atlas_upload_count != draw_ir_result.font_atlas_upload_count or
+         warm_draw_ir_result.font_atlas_upload_bytes != draw_ir_result.font_atlas_upload_bytes or
+         warm_draw_ir_result.font_atlas_payload_sha256 != draw_ir_result.font_atlas_payload_sha256)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "vulkan-font-device-evidence-failed", 13, 13)
+
+    if not winit_present_rgba(
+        win, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(), event_preview(true)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "interaction-window-present-failed", 14, 14)
+
+    engine.draw_rect_filled(3300, 1860, 300, 180, 0xFF22C55Eu32)
+    val interaction_readback = engine.read_pixels_with_source()
+    if (interaction_readback.source != "device_readback" or
+        interaction_readback.backend_handle != backend_handle or
+        interaction_readback.device_identity != initial_readback.device_identity or
+        interaction_readback.checksum <= 0 or
+        interaction_readback.checksum == initial_checksum or
+        interaction_readback.pixel_count != (live_width * live_height).to_i64()):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "interaction-device-readback-failed", 15, 15)
+    engine.present()
+    val captured_pixels = interaction_readback.pixels
+    if captured_pixels.len() != live_width * live_height:
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "interaction-pixel-count-mismatch", 16, 16)
+    val bounds = measured_non_background_bounds(captured_pixels, live_width, live_height)
+    if bounds == "":
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "non-background-bounds-empty", 17, 17)
+    val ppm = encode_ppm_p6(live_width.to_u32(), live_height.to_u32(), captured_pixels)
+    if ppm.len() <= live_width * live_height * 3 or not file_write_bytes(capture_path, ppm):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "framebuffer-write-failed", 18, 18)
+    if not write_runtime_receipt(
+        receipt_path, backend, capture_path, repo_revision,
+        shared_scene_fingerprint, source_revision, backend_handle,
+        initial_readback.device_identity, initial_checksum,
+        interaction_readback.checksum, interaction_readback.device_identity,
+        bounds, live_width, live_height,
+        font_loaded, expected_font_identity, font_identity, cold_rasterizations,
+        warm_rasterizations, warm_hits, font_pixel_size, font_target, font_attempts,
+        event_sequence, event_count, fixture, draw_ir_result, warm_draw_ir_result,
+        processing_ir_receipt):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "success-receipt-write-failed", 19, 19)
+
+    if (env_get("GPU_2D_LIVE_HOLD") ?? "") == "1":
+        var holding = true
+        while holding:
+            var held_event = rt_winit_event_loop_poll_events(lp.handle, 1)
+            while held_event != 0:
+                if rt_winit_event_get_type(held_event) == EVT_CLOSE:
+                    holding = false
+                rt_winit_event_free(held_event)
+                held_event = rt_winit_event_loop_poll_events(lp.handle, 1)
+            thread_sleep(10)
+
+    winit_window_free(win)
+    winit_loop_free(lp)
+    engine.shutdown()
+    0
+
+export run_macos_gpu_2d_live_harness

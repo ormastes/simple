@@ -1,0 +1,68 @@
+"""
+Resource wrapper for FileLock — WP-J acceptance
+
+Tests the new FileLock wrapper class with resource ownership pattern:
+- Sentinel-based validity checks
+- Consuming close() method
+- Double-close guard (one-shot safety)
+- Backward compatibility with deprecated file_lock/file_unlock
+"""
+
+use std.spec
+use std.nogc_sync_mut.sffi.io.{FileLock, file_lock_acquire}
+use std.io.{file_lock, file_unlock}
+
+describe "FileLock resource wrapper":
+    it "FileLock.is_valid checks sentinel":
+        val lock = FileLock(handle: 5)
+        assert_true(lock.is_valid())
+
+    it "FileLock.is_valid detects invalid sentinel (-1)":
+        val lock = FileLock(handle: -1)
+        assert_false(lock.is_valid())
+
+    it "FileLock sentinel is -1":
+        val lock = FileLock(handle: -1)
+        assert_false(lock.is_valid())
+
+        # FileLock with 0 should be valid (sentinel is -1, not 0)
+        val lock_zero = FileLock(handle: 0)
+        assert_true(lock_zero.is_valid())
+
+describe "FileLock consuming close with double-close guard":
+    # `close()` calls the REAL `rt_file_unlock(fd: i64)` extern.
+    # `FileLock(handle: 5)` is a FABRICATED fd number, not one this process
+    # actually holds a lock on -- fd 5 may be a real, in-use descriptor
+    # belonging to the test runner itself (an open socket, log file, etc.),
+    # so calling the real unlock on it is not a guard-logic test, it is a
+    # live interference risk with the runner's own file descriptors. The
+    # sibling `Image` wrapper spec hit the equivalent bug with a fabricated
+    # pointer handle and crashed the runner
+    # (doc/08_tracking/bug/image_wrapper_close_needs_live_handle_fixture_2026-08-07.md).
+    # The guard's actual behavior -- `if self.handle != -1: unlock();
+    # handle = -1` -- is proven safely below using the invalid sentinel
+    # (-1), which the guard skips before ever reaching the extern call.
+    # Testing double-close on a genuinely-acquired lock needs a real
+    # `file_lock_acquire()` round trip against a real file and is left as a
+    # follow-up, same bug doc as above (filed to cover both wrappers).
+    it "close on invalid sentinel is safe":
+        val lock = FileLock(handle: -1)
+        lock.close()
+        assert_equal(lock.handle, -1)
+        # No exception should occur
+        lock.close()
+        assert_equal(lock.handle, -1)
+
+describe "Deprecated file_lock/file_unlock compatibility":
+    it "file_lock (deprecated) still exists and is callable":
+        # Note: file_lock tries to lock a real file, which may fail.
+        # This verifies the function is still reachable.
+        val result = file_lock("/tmp/nonexistent_file_for_test", 1)
+        # Result could be -1 or a valid fd; just verify it returned something
+        assert_true(result >= -1)
+
+    it "file_unlock (deprecated) still exists and is callable":
+        # Note: file_unlock with invalid fd -1 should return false.
+        # This verifies the function is still reachable.
+        val result = file_unlock(-1)
+        assert_false(result)

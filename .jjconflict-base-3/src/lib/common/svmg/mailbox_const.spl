@@ -1,0 +1,84 @@
+# GMB-1 mailbox constants — local copy for the SVM-G host reference VM
+# (Task D2), matching design doc §3.1 exactly
+# (doc/05_design/runtime/gpu_remote_interpreter_architecture.md).
+#
+# NOTE (unification deferred, not blocking): Task A2
+# (`src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl`) is specified to own
+# the canonical GMB-1 constants + MailboxArena helpers shared by the CUDA/
+# Vulkan lane executors. As of this task (D1/D2), A2 had not landed yet, so
+# this file defines the same values locally to keep `src/lib/common/svmg`
+# GPU-free and dependency-free (no `nogc_sync_mut` import from `common`,
+# which would invert the tier layering documented in
+# `.claude/rules/structure.md`). When A2 lands, the two constant sets should
+# be diffed and, if identical (they are specified to be), this file's values
+# can stay as the intentionally-independent `common`-tier copy, or the lane
+# executors can re-export from here — whichever avoids a `common` ->
+# `nogc_sync_mut` dependency. File a small follow-up bug rather than
+# reaching for the mutable-arena tier from this pure-function module.
+
+# ============================================================================
+# Arena layout (byte offsets)
+# ============================================================================
+
+pub val ARENA_DATA_SIZE: i64 = 0x10000          # 64 KiB DATA region
+pub val ARENA_TOTAL_SIZE: i64 = 0x20000         # 128 KiB total (DATA + REG/LOG/RECORD)
+
+pub val RAM_SENTINEL_OFFSET: i64 = 0x08000      # within DATA region
+
+pub val REG_BASE_OFFSET: i64 = 0x10000
+pub val REG_CMD_OFFSET: i64 = REG_BASE_OFFSET + 0x00
+pub val REG_ARG0_OFFSET: i64 = REG_BASE_OFFSET + 0x04
+pub val REG_ARG1_OFFSET: i64 = REG_BASE_OFFSET + 0x08
+pub val REG_STATUS_OFFSET: i64 = REG_BASE_OFFSET + 0x0C
+pub val REG_RESULT_OFFSET: i64 = REG_BASE_OFFSET + 0x10
+pub val REG_SEQ_ID_OFFSET: i64 = REG_BASE_OFFSET + 0x14
+pub val REG_TRIGGER_OFFSET: i64 = REG_BASE_OFFSET + 0x18
+pub val REG_BLOCK_SIZE: i64 = 0x20              # 8 u32 fields
+
+pub val LOG_RING_BASE_OFFSET: i64 = REG_BASE_OFFSET + REG_BLOCK_SIZE   # 0x10020
+pub val LOG_HEAD_OFFSET: i64 = LOG_RING_BASE_OFFSET + 0x00
+pub val LOG_CAP_OFFSET: i64 = LOG_RING_BASE_OFFSET + 0x04
+pub val LOG_DATA_OFFSET: i64 = LOG_RING_BASE_OFFSET + 0x08
+
+# Default LOG ring capacity (bytes) used by the reference VM's default
+# arena builder; callers may size differently as long as RECORD ring base
+# is derived the same way (LOG_DATA_OFFSET + log_cap).
+pub val DEFAULT_LOG_CAP: i64 = 1024
+
+# RECORD ring: 12-byte records (seq: u32, pass: u32, value: u32).
+pub val RECORD_SIZE: i64 = 12
+
+fn record_ring_base_offset(log_cap: i64) -> i64:
+    LOG_DATA_OFFSET + log_cap
+
+# ============================================================================
+# Commands / sentinels / trigger (design §3.1)
+# ============================================================================
+
+pub val CMD_PUTC: i64 = 0x01
+pub val CMD_EXIT: i64 = 0x02
+pub val CMD_RESULT: i64 = 0x03
+
+pub val TRIGGER_MAGIC: i64 = 0x0000DEAD
+
+pub val SENTINEL_EXIT_MASK: i64 = 0xCAFE0000
+pub val SENTINEL_TIMEOUT: i64 = 0xDEAD0000
+
+# Trap-result value written into CMD_RESULT.value when SVM-G traps on an
+# out-of-bounds LOAD32/STORE32/LOAD8/STORE8 (design §4.1: "Out-of-bounds =>
+# trap => CMD_RESULT(pass=0, value=TRAP_OOB) + CMD_EXIT(0x7F)"). The design
+# doc specifies the *behavior* but does not pin a numeric TRAP_OOB value; 1
+# is chosen locally and documented here so B3/C3 can match it exactly when
+# they consume the D3 conformance vectors.
+pub val TRAP_OOB: i64 = 1
+
+# Trap-result value for integer DIV/REM by zero. Not named in the design
+# doc (only the OOB trap is specified there); chosen locally, alongside
+# TRAP_OOB, using the same CMD_RESULT(pass=0, value=TRAP_*) +
+# CMD_EXIT(0x7F) shape so the reference VM never has to invent a second
+# trap wire format.
+pub val TRAP_DIV0: i64 = 2
+
+# CMD_EXIT code used for all VM-trap paths (design §4.1 names it for OOB;
+# reused for TRAP_DIV0 above for consistency).
+pub val TRAP_OOB_EXIT_CODE: i64 = 0x7F

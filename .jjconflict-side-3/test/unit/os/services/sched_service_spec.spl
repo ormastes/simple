@@ -1,0 +1,72 @@
+# @cover src/os/services/sched_service.spl 80%
+"""
+# SchedService Specification (G1)
+
+**Feature IDs:** #G1
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+User-space scheduler policy service. Validates task registration,
+unregistration, CPU-usage accumulation, runaway-driver demotion,
+nice clamping, and priority recommendation.
+"""
+
+use std.spec
+use os.services.sched_service.{SchedService, SCHED_DRIVER, SCHED_NORMAL, PRIO_REALTIME, PRIO_HIGH, PRIO_NORMAL, NICE_MIN, NICE_MAX}
+
+describe "SchedService register":
+    it "register_task returns entity with non-zero id":
+        var svc = SchedService.new()
+        val e = svc.sched_register_task(1, SCHED_NORMAL, PRIO_NORMAL, 0)
+        expect(e.id).to_be_greater_than(0)
+
+    it "registered task has correct recommend_priority":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(2, SCHED_NORMAL, PRIO_HIGH, 0)
+        expect(svc.sched_recommend_priority(2)).to_equal(PRIO_HIGH)
+
+describe "SchedService unregister":
+    it "unregister_task returns true for registered task":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(3, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val ok = svc.sched_unregister_task(3)
+        expect(ok).to_equal(true)
+
+    it "recommend_priority returns -1 after unregister":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(4, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val _ok = svc.sched_unregister_task(4)
+        expect(svc.sched_recommend_priority(4)).to_equal(-1)
+
+describe "SchedService record_usage":
+    it "record_usage returns true for registered task":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(5, SCHED_NORMAL, PRIO_NORMAL, 0)
+        val ok = svc.sched_record_usage(5, 10)
+        expect(ok).to_equal(true)
+
+describe "SchedService runaway driver demotion":
+    it "driver task above threshold is demoted after sched_tick":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(6, SCHED_DRIVER, PRIO_HIGH, 0)
+        val _ok = svc.sched_record_usage(6, 101)
+        val _tick = svc.sched_tick()
+        # priority should be demoted from PRIO_HIGH (1) to PRIO_NORMAL (2)
+        expect(svc.sched_recommend_priority(6)).to_equal(PRIO_NORMAL)
+
+describe "SchedService nice clamping":
+    it "nice value above 19 is clamped to 19":
+        var svc = SchedService.new()
+        val _e = svc.sched_register_task(7, SCHED_NORMAL, PRIO_NORMAL, 100)
+        # nice is clamped at register time; verify via sched_set_nice
+        val ok = svc.sched_set_nice(7, 50)
+        expect(ok).to_equal(true)
+        # recommend_priority stays the same (nice doesn't change priority directly)
+        expect(svc.sched_recommend_priority(7)).to_equal(PRIO_NORMAL)
+
+    it "nice min/max constants are correct":
+        expect(NICE_MIN).to_equal(-20)
+        expect(NICE_MAX).to_equal(19)

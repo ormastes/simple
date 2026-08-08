@@ -1,0 +1,244 @@
+# codex-impl
+# Audio-specific nonblocking QEMU ivshmem wire owned by the SimpleOS guest.
+
+use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64, mmio_memory_barrier}
+
+extern fn simpleos_audio_q15_word_raw(values: [u32], index: i64) -> i64
+
+val SIMPLE_AUDIO_IVSHMEM_MAGIC: i64 = 6000287076110435377
+val SIMPLE_AUDIO_IVSHMEM_VERSION: i64 = 1
+val SIMPLE_AUDIO_IVSHMEM_SLOT_BYTES: i64 = 256
+val SIMPLE_AUDIO_IVSHMEM_HEADER_BYTES: i64 = 64
+val SIMPLE_AUDIO_IVSHMEM_MAX_SLOTS: i64 = 8
+val SIMPLE_AUDIO_IVSHMEM_PAYLOAD_BASE: i64 = 4096
+val SIMPLE_AUDIO_IVSHMEM_PAYLOAD_STRIDE: i64 = 524288
+val SIMPLE_AUDIO_IVSHMEM_MAX_INPUT_SAMPLES: i64 = 32768
+val SIMPLE_AUDIO_IVSHMEM_MAX_KERNEL_SAMPLES: i64 = 4096
+val SIMPLE_AUDIO_IVSHMEM_INPUT_OFFSET: i64 = 0
+val SIMPLE_AUDIO_IVSHMEM_KERNEL_OFFSET: i64 = 131072
+val SIMPLE_AUDIO_IVSHMEM_OUTPUT_OFFSET: i64 = 147456
+
+val SIMPLE_AUDIO_WIRE_STATE_FREE: i64 = 0
+val SIMPLE_AUDIO_WIRE_STATE_PUBLISHED: i64 = 1
+val SIMPLE_AUDIO_WIRE_STATE_PROCESSING: i64 = 2
+val SIMPLE_AUDIO_WIRE_STATE_COMPLETED: i64 = 3
+
+val SIMPLE_AUDIO_WIRE_PROVIDER_REMOTE_HOST_CUDA: i64 = 1
+val SIMPLE_AUDIO_WIRE_READBACK_DEVICE: i64 = 1
+
+val _WIRE_MAGIC: i64 = 0
+val _WIRE_VERSION: i64 = 8
+val _WIRE_CAPACITY: i64 = 16
+val _WIRE_SLOT_BYTES: i64 = 24
+
+val _SLOT_STATE: i64 = 0
+val _SLOT_GENERATION: i64 = 8
+val _SLOT_SEQUENCE: i64 = 16
+val _SLOT_CORRELATION: i64 = 24
+val _SLOT_PERIOD: i64 = 32
+val _SLOT_DEADLINE_NS: i64 = 40
+val _SLOT_FRAMES: i64 = 48
+val _SLOT_CHANNELS: i64 = 56
+val _SLOT_KERNEL_FRAMES: i64 = 64
+val _SLOT_OPERATION: i64 = 72
+val _SLOT_CPU_CHECKSUM: i64 = 80
+val _SLOT_PROVIDER: i64 = 88
+val _SLOT_NATIVE_HANDLE: i64 = 96
+val _SLOT_DEVICE_IDENTITY: i64 = 104
+val _SLOT_READBACK_CHECKSUM: i64 = 112
+val _SLOT_COMPLETED_NS: i64 = 120
+val _SLOT_ERROR_MILLIONTHS: i64 = 128
+val _SLOT_READBACK_SOURCE: i64 = 136
+val _SLOT_INPUT_SAMPLES: i64 = 144
+val _SLOT_INPUT_CHECKSUM: i64 = 152
+val _SLOT_KERNEL_CHECKSUM: i64 = 160
+val _SLOT_OUTPUT_SAMPLES: i64 = 168
+
+struct SimpleAudioIvshmemHeader:
+    magic: i64
+    version: i64
+    capacity: i64
+    slot_bytes: i64
+
+struct SimpleAudioIvshmemCompletion:
+    state: i64
+    generation: u64
+    correlation_id: u64
+    provider: i64
+    native_handle: i64
+    device_identity: i64
+    readback_checksum: i64
+    completed_ns: u64
+    normalized_error_millionths: i64
+    readback_source: i64
+
+fn simple_audio_ivshmem_header_status(header: SimpleAudioIvshmemHeader) -> text:
+    if header.magic != SIMPLE_AUDIO_IVSHMEM_MAGIC:
+        return "bad-magic"
+    if header.version != SIMPLE_AUDIO_IVSHMEM_VERSION:
+        return "bad-version"
+    if header.capacity < 2 or header.capacity > SIMPLE_AUDIO_IVSHMEM_MAX_SLOTS:
+        return "bad-capacity"
+    if header.slot_bytes != SIMPLE_AUDIO_IVSHMEM_SLOT_BYTES:
+        return "bad-slot-size"
+    "ready"
+
+fn simple_audio_ivshmem_payload_status(input_samples: i64, kernel_samples: i64, output_samples: i64) -> text:
+    if input_samples <= 0 or kernel_samples <= 0:
+        return "invalid-work"
+    if input_samples > SIMPLE_AUDIO_IVSHMEM_MAX_INPUT_SAMPLES or kernel_samples > SIMPLE_AUDIO_IVSHMEM_MAX_KERNEL_SAMPLES:
+        return "payload-too-large"
+    if output_samples != input_samples + kernel_samples - 1:
+        return "bad-output-size"
+    "ready"
+
+fn simple_audio_ivshmem_completion_status(completion: SimpleAudioIvshmemCompletion, expected_generation: u64, expected_correlation: u64, observed_guest_ns: u64, deadline_ns: u64) -> text:
+    if completion.state != SIMPLE_AUDIO_WIRE_STATE_COMPLETED:
+        return "pending"
+    if completion.generation != expected_generation:
+        return "stale-generation"
+    if completion.correlation_id != expected_correlation:
+        return "correlation-mismatch"
+    # Host and guest monotonic clocks have unrelated epochs. Admission uses
+    # the guest observation time; completed_ns carries host service elapsed ns.
+    if observed_guest_ns > deadline_ns:
+        return "late"
+    if completion.provider != SIMPLE_AUDIO_WIRE_PROVIDER_REMOTE_HOST_CUDA:
+        return "bad-provider"
+    if completion.native_handle <= 0 or completion.device_identity <= 0:
+        return "missing-device-provenance"
+    if completion.readback_source != SIMPLE_AUDIO_WIRE_READBACK_DEVICE or completion.readback_checksum == 0:
+        return "missing-device-readback"
+    if completion.normalized_error_millionths < 0 or completion.normalized_error_millionths > 10:
+        return "parity-failed"
+    "accepted-device-result"
+
+fn _slot_base(base: u64, slot: i64) -> u64:
+    base + (SIMPLE_AUDIO_IVSHMEM_HEADER_BYTES as u64) + ((slot * SIMPLE_AUDIO_IVSHMEM_SLOT_BYTES) as u64)
+
+fn _payload_base(base: u64, slot: i64) -> u64:
+    base + (SIMPLE_AUDIO_IVSHMEM_PAYLOAD_BASE as u64) + ((slot * SIMPLE_AUDIO_IVSHMEM_PAYLOAD_STRIDE) as u64)
+
+fn _q15_checksum(values: [u32]) -> i64:
+    var checksum = 1469598103
+    var i = 0
+    while i < values.len():
+        val word = simpleos_audio_q15_word_raw(values, i) & 4294967295
+        checksum = ((checksum * 16777619) + word) % 2147483647
+        i = i + 1
+    if checksum == 0: 1 else: checksum
+
+fn _write_q15_words(address: u64, values: [u32]):
+    var i = 0
+    while i < values.len():
+        val low = (simpleos_audio_q15_word_raw(values, i) & 4294967295) as u64
+        var high = 0u64
+        if i + 1 < values.len():
+            high = (simpleos_audio_q15_word_raw(values, i + 1) & 4294967295) as u64
+        mmio_write64(address + ((i * 4) as u64), low | (high << 32u32))
+        i = i + 2
+
+fn _write(base: u64, offset: i64, value: i64):
+    mmio_write64(base + (offset as u64), value as u64)
+
+fn _read(base: u64, offset: i64) -> i64:
+    mmio_read64(base + (offset as u64)) as i64
+
+fn simple_audio_ivshmem_read_header(base: u64) -> SimpleAudioIvshmemHeader:
+    SimpleAudioIvshmemHeader(magic: _read(base, _WIRE_MAGIC), version: _read(base, _WIRE_VERSION), capacity: _read(base, _WIRE_CAPACITY), slot_bytes: _read(base, _WIRE_SLOT_BYTES))
+
+fn simple_audio_ivshmem_initialize(base: u64, capacity: i64) -> text:
+    if base == 0u64 or capacity < 2 or capacity > SIMPLE_AUDIO_IVSHMEM_MAX_SLOTS:
+        return "invalid-region"
+    _write(base, _WIRE_MAGIC, SIMPLE_AUDIO_IVSHMEM_MAGIC)
+    _write(base, _WIRE_VERSION, SIMPLE_AUDIO_IVSHMEM_VERSION)
+    _write(base, _WIRE_CAPACITY, capacity)
+    _write(base, _WIRE_SLOT_BYTES, SIMPLE_AUDIO_IVSHMEM_SLOT_BYTES)
+    var slot = 0
+    while slot < capacity:
+        val address = _slot_base(base, slot)
+        _write(address, _SLOT_GENERATION, 1)
+        _write(address, _SLOT_CORRELATION, 0)
+        _write(address, _SLOT_PROVIDER, 0)
+        _write(address, _SLOT_READBACK_CHECKSUM, 0)
+        _write(address, _SLOT_READBACK_SOURCE, 0)
+        _write(address, _SLOT_STATE, SIMPLE_AUDIO_WIRE_STATE_FREE)
+        slot = slot + 1
+    mmio_memory_barrier()
+    "ready"
+
+fn simple_audio_ivshmem_publish(base: u64, slot: i64, capacity: i64, generation: u64, sequence: u64, correlation_id: u64, period_index: u64, deadline_ns: u64, frames: i64, channels: i64, kernel_frames: i64, operation_code: i64, cpu_checksum: i64) -> text:
+    if base == 0u64 or slot < 0 or slot >= capacity or capacity < 2 or capacity > SIMPLE_AUDIO_IVSHMEM_MAX_SLOTS:
+        return "invalid-slot"
+    if generation == 0u64 or sequence == 0u64 or correlation_id == 0u64 or deadline_ns == 0u64:
+        return "invalid-work"
+    if frames <= 0 or channels <= 0 or kernel_frames <= 0 or operation_code < 1 or operation_code > 2:
+        return "invalid-work"
+    val address = _slot_base(base, slot)
+    if _read(address, _SLOT_STATE) != SIMPLE_AUDIO_WIRE_STATE_FREE:
+        return "queue-full"
+    _write(address, _SLOT_GENERATION, generation as i64)
+    _write(address, _SLOT_SEQUENCE, sequence as i64)
+    _write(address, _SLOT_CORRELATION, correlation_id as i64)
+    _write(address, _SLOT_PERIOD, period_index as i64)
+    _write(address, _SLOT_DEADLINE_NS, deadline_ns as i64)
+    _write(address, _SLOT_FRAMES, frames)
+    _write(address, _SLOT_CHANNELS, channels)
+    _write(address, _SLOT_KERNEL_FRAMES, kernel_frames)
+    _write(address, _SLOT_OPERATION, operation_code)
+    _write(address, _SLOT_CPU_CHECKSUM, cpu_checksum)
+    mmio_memory_barrier()
+    _write(address, _SLOT_STATE, SIMPLE_AUDIO_WIRE_STATE_PUBLISHED)
+    "published"
+
+fn simple_audio_ivshmem_publish_q15(base: u64, slot: i64, capacity: i64, generation: u64, sequence: u64, correlation_id: u64, period_index: u64, deadline_ns: u64, frames: i64, channels: i64, operation_code: i64, input: [u32], kernel: [u32], cpu_checksum: i64) -> text:
+    val output_samples = input.len().to_i64() + kernel.len().to_i64() - 1
+    val payload_status = simple_audio_ivshmem_payload_status(input.len().to_i64(), kernel.len().to_i64(), output_samples)
+    if payload_status != "ready":
+        return payload_status
+    if base == 0u64 or slot < 0 or slot >= capacity or capacity < 2 or capacity > SIMPLE_AUDIO_IVSHMEM_MAX_SLOTS:
+        return "invalid-slot"
+    if generation == 0u64 or sequence == 0u64 or correlation_id == 0u64 or deadline_ns == 0u64 or frames <= 0 or channels <= 0 or operation_code < 1 or operation_code > 2:
+        return "invalid-work"
+    val address = _slot_base(base, slot)
+    if _read(address, _SLOT_STATE) != SIMPLE_AUDIO_WIRE_STATE_FREE:
+        return "queue-full"
+    val payload = _payload_base(base, slot)
+    _write_q15_words(payload + (SIMPLE_AUDIO_IVSHMEM_INPUT_OFFSET as u64), input)
+    _write_q15_words(payload + (SIMPLE_AUDIO_IVSHMEM_KERNEL_OFFSET as u64), kernel)
+    _write(address, _SLOT_INPUT_SAMPLES, input.len().to_i64())
+    _write(address, _SLOT_INPUT_CHECKSUM, _q15_checksum(input))
+    _write(address, _SLOT_KERNEL_CHECKSUM, _q15_checksum(kernel))
+    _write(address, _SLOT_OUTPUT_SAMPLES, output_samples)
+    # Metadata publication remains last; the host cannot claim partial payload.
+    val status = simple_audio_ivshmem_publish(base, slot, capacity, generation, sequence, correlation_id, period_index, deadline_ns, frames, channels, kernel.len().to_i64(), operation_code, cpu_checksum)
+    status
+
+fn simple_audio_ivshmem_poll(base: u64, slot: i64, capacity: i64) -> SimpleAudioIvshmemCompletion:
+    if base == 0u64 or slot < 0 or slot >= capacity:
+        return SimpleAudioIvshmemCompletion(state: -1, generation: 0u64, correlation_id: 0u64, provider: 0, native_handle: 0, device_identity: 0, readback_checksum: 0, completed_ns: 0u64, normalized_error_millionths: 0, readback_source: 0)
+    val address = _slot_base(base, slot)
+    val state = _read(address, _SLOT_STATE)
+    if state == SIMPLE_AUDIO_WIRE_STATE_COMPLETED:
+        mmio_memory_barrier()
+    SimpleAudioIvshmemCompletion(state: state, generation: _read(address, _SLOT_GENERATION) as u64, correlation_id: _read(address, _SLOT_CORRELATION) as u64, provider: _read(address, _SLOT_PROVIDER), native_handle: _read(address, _SLOT_NATIVE_HANDLE), device_identity: _read(address, _SLOT_DEVICE_IDENTITY), readback_checksum: _read(address, _SLOT_READBACK_CHECKSUM), completed_ns: _read(address, _SLOT_COMPLETED_NS) as u64, normalized_error_millionths: _read(address, _SLOT_ERROR_MILLIONTHS), readback_source: _read(address, _SLOT_READBACK_SOURCE))
+
+fn simple_audio_ivshmem_state(base: u64, slot: i64, capacity: i64) -> i64:
+    """Read only the publication state for allocation-free event-loop polling."""
+    if base == 0u64 or slot < 0 or slot >= capacity:
+        return -1
+    _read(_slot_base(base, slot), _SLOT_STATE)
+
+fn simple_audio_ivshmem_release(base: u64, slot: i64, capacity: i64, generation: u64) -> text:
+    if base == 0u64 or slot < 0 or slot >= capacity:
+        return "invalid-slot"
+    val address = _slot_base(base, slot)
+    if (_read(address, _SLOT_GENERATION) as u64) != generation:
+        return "stale-generation"
+    val state = _read(address, _SLOT_STATE)
+    if state == SIMPLE_AUDIO_WIRE_STATE_FREE:
+        return "invalid-state"
+    _write(address, _SLOT_GENERATION, (generation + 1u64) as i64)
+    mmio_memory_barrier()
+    _write(address, _SLOT_STATE, SIMPLE_AUDIO_WIRE_STATE_FREE)
+    "released"

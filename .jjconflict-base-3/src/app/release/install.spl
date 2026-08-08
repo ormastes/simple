@@ -1,0 +1,181 @@
+#[runtime_intrinsics]
+#!simple
+# Simple Language Installer
+#
+# Installs Simple language to system or user directory.
+#
+# Usage:
+#   ./install.shs [--prefix=/usr/local]
+#   simple install.shs [--prefix=/usr/local]
+
+
+use app.io.mod.{process_run}
+use std.io_runtime.{cwd}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.encoding.font_registry.{selected_font_bundle_asset_pins}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_cli_get_args() -> [text]
+
+fn parse_prefix_arg() -> text:
+    val args = rt_cli_get_args()
+    for arg in args:
+        if arg.starts_with("--prefix="):
+            return arg[9:]
+        if arg == "--prefix" or arg == "-p":
+            # Next arg should be the path - find it
+            var found_flag = false
+            for a in args:
+                if found_flag:
+                    return a
+                if a == arg:
+                    found_flag = true
+    "/usr/local"
+
+fn main() -> i64:
+    val prefix = parse_prefix_arg()
+    val script_dir = cwd()
+
+    print "Simple Language Installer"
+    print "========================="
+    print ""
+    print "Installing to: " + prefix
+    print ""
+
+    # Create directories
+    print "Creating directories..."
+    rt_dir_create(prefix + "/bin", true)
+    rt_dir_create(prefix + "/lib", true)
+    rt_dir_create(prefix + "/include", true)
+    rt_dir_create(prefix + "/share/simple/src", true)
+    rt_dir_create(prefix + "/share/simple/assets/fonts", true)
+
+    print "Installing bundled fonts and notices..."
+    if not copy_font_tree(src: script_dir + "/assets/fonts", dst: prefix + "/share/simple/assets/fonts"):
+        print "  ERROR: bundled font installation incomplete"
+        return 1
+    val license_ok = copy_file_unchanged(script_dir + "/LICENSE", prefix + "/share/simple/LICENSE")
+    val notices_ok = copy_file_unchanged(script_dir + "/THIRD_PARTY_NOTICES.md", prefix + "/share/simple/THIRD_PARTY_NOTICES.md")
+    if not license_ok or not notices_ok:
+        print "  ERROR: license or third-party notice installation failed"
+        return 1
+
+    # Install runtime binary
+    print "Installing binaries..."
+    val runtime_src = script_dir + "/bin/simple_runtime"
+    val runtime_dst = prefix + "/bin/simple_runtime"
+    if rt_file_exists(runtime_src):
+        if not rt_file_copy(runtime_src, runtime_dst):
+            print "  ERROR: simple_runtime copy failed"
+            return 1
+        val runtime_chmod = process_run("chmod", ["+x", runtime_dst])
+        if runtime_chmod.2 != 0:
+            print "  ERROR: simple_runtime chmod failed"
+            return 1
+        print "  Installed simple_runtime"
+    else:
+        print "  ERROR: simple_runtime not found"
+        return 1
+
+    # Create CLI wrapper
+    val wrapper = "#!/bin/sh\nSHARE_DIR=\"" + prefix + "/share/simple\"\nRUNTIME=\"" + prefix + "/bin/simple_runtime\"\nexport SIMPLE_ASSET_ROOT=\"$SHARE_DIR\"\nexport LD_LIBRARY_PATH=\"" + prefix + "/lib:$LD_LIBRARY_PATH\"\nexec \"$RUNTIME\" \"$SHARE_DIR/src/app/cli/main.spl\" \"$@\"\n"
+    val wrapper_path = prefix + "/bin/simple"
+    if not rt_file_write_text(wrapper_path, wrapper):
+        print "  ERROR: simple CLI wrapper write failed"
+        return 1
+    val wrapper_chmod = process_run("chmod", ["+x", wrapper_path])
+    if wrapper_chmod.2 != 0:
+        print "  ERROR: simple CLI wrapper chmod failed"
+        return 1
+    print "  Installed simple CLI wrapper"
+
+    # Install libraries
+    print "Installing libraries..."
+    val lib_src = script_dir + "/lib/libsimple_sffi_wrapper.so"
+    if rt_file_exists(lib_src):
+        rt_file_copy(lib_src, prefix + "/lib/libsimple_sffi_wrapper.so")
+        print "  Installed libsimple_sffi_wrapper.so"
+
+    # Install headers
+    print "Installing headers..."
+    val header_src = script_dir + "/include/simple_sffi.h"
+    if rt_file_exists(header_src):
+        rt_file_copy(src: header_src, dst: prefix + "/include/simple_sffi.h")
+        print "  Installed simple_sffi.h"
+
+    # Install source files
+    print "Installing source files..."
+    copy_source_tree(src: script_dir + "/src", dst: prefix + "/share/simple/src")
+
+    print ""
+    print "Installation complete!"
+    print ""
+    print "Add to PATH if needed:"
+    print "  export PATH=\"" + prefix + "/bin:$PATH\""
+    print ""
+    print "Test installation:"
+    print "  simple --version"
+    0
+
+fn copy_source_tree(src: text, dst: text):
+    val files = rt_dir_walk(src)
+    var count = 0
+    for f in files:
+        if f.ends_with(".spl") or f.ends_with(".shs"):
+            val rel = f.slice(src.len() + 1)
+            val dst_file = dst + "/" + rel
+            val parent = get_parent(dst_file)
+            rt_dir_create(parent, true)
+            rt_file_copy(f, dst_file)
+            count = count + 1
+    print "  Copied " + count.to_text() + " source files"
+
+fn copy_font_tree(src: text, dst: text) -> bool:
+    val pins = selected_font_bundle_asset_pins()
+    val files = rt_dir_walk(src)
+    if pins.len() != 57 or files.len() != pins.len(): return false
+
+    for f in files:
+        val rel = f.slice(src.len() + 1)
+        var pinned = false
+        for pin in pins:
+            if pin.path == "assets/fonts/" + rel:
+                pinned = true
+        if not pinned: return false
+
+    for pin in pins:
+        val prefix = "assets/fonts/"
+        if not pin.path.starts_with(prefix): return false
+        val rel = pin.path.slice(prefix.len(), pin.path.len())
+        val source_path = src + "/" + rel
+        if not rt_file_exists(source_path): return false
+        if sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256: return false
+
+    for pin in pins:
+        val prefix = "assets/fonts/"
+        val rel = pin.path.slice(prefix.len(), pin.path.len())
+        val source_path = src + "/" + rel
+        val dst_file = dst + "/" + rel
+        rt_dir_create(get_parent(dst_file), true)
+        if not rt_file_copy(source_path, dst_file): return false
+        if sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256: return false
+    print "  Copied " + pins.len().to_text() + " resource files"
+    true
+
+fn copy_file_unchanged(src: text, dst: text) -> bool:
+    if not rt_file_copy(src, dst): return false
+    sha256_u8_hex(rt_file_read_bytes(src)) == sha256_u8_hex(rt_file_read_bytes(dst))
+
+fn get_parent(p: text) -> text:
+    var i = p.len() - 1
+    while i >= 0:
+        if p.char_at(i) == "/":
+            return p.slice(0, i)
+        i = i - 1
+    "."

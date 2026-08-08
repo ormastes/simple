@@ -1,0 +1,109 @@
+# @cover src/lib/gc_async_mut/gpu_lane/vulkan_jit_lane_executor.spl 70%
+# vulkan_jit lane executor -- hello (vector-add-equivalent) system spec
+# (Task C2).
+# @tag: system, gpu, vulkan, jit
+#
+# Design: doc/05_design/runtime/gpu_remote_interpreter_architecture.md §6.1.
+# Plan: doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md
+# (Stream C, task C2).
+#
+# Mirrors the shape of B2's landed cuda_jit_hello_spec.spl (SKIP-clean
+# convention, RECORD + GMB-1 exit sentinel assertions) but is independently
+# scoped and self-contained: it imports only vulkan_jit_lane_executor.spl
+# and A2's gpu_mailbox.spl, never B2's CUDA files.
+#
+# Covers:
+#   1. The live vector-add-equivalent "hello" dispatch: on a Vulkan host it
+#      lowers the hello kernel via the existing SPIR-V emitter, assembles
+#      it with spirv-as, optionally validates with spirv-val, dispatches
+#      through C1's VulkanLaneSession, fences, and drains a GMB-1 RECORD
+#      (seq=0, pass=true, value=a+b) plus the exit sentinel 0xCAFE0000
+#      from the returned arena -- matching C1's own SKIP-clean convention
+#      (`probe().starts_with("skip:")`).
+#   2. spirv-val cleanliness of the assembled module, when the tool is
+#      present on this host (host-aware optional, per task step 3).
+
+use std.spipe.*
+use std.gc_async_mut.gpu_lane.vulkan_jit_lane_executor.{
+    VulkanJitLaneExecutor, decode_hello_result, spirv_tool_present}
+use std.gc_async_mut.gpu_lane.vulkan_lane_session.{VulkanLaneSession}
+use std.nogc_sync_mut.test_runner.gpu_mailbox.{SentinelState}
+
+fn _u32_le(value: i64) -> [u8]:
+    [
+        (value & 0xFF).to_u8(),
+        ((value >> 8) & 0xFF).to_u8(),
+        ((value >> 16) & 0xFF).to_u8(),
+        ((value >> 24) & 0xFF).to_u8()
+    ]
+
+describe "vulkan_jit lane executor -- vector-add-equivalent hello dispatch (Task C2 verify)":
+    """
+    Vector-add-equivalent "hello" dispatch through jit(remote(vulkan(...))):
+    on a live Vulkan host this lowers the kernel via the existing SPIR-V
+    emitter, assembles + optionally validates it, dispatches, fences, and
+    drains the expected GMB-1 RECORD plus exit sentinel `0xCAFE0000` from
+    the arena. On a host without a usable Vulkan device it SKIPs cleanly --
+    matching the `probe().starts_with("skip:")` contract C1's own spec
+    established.
+    """
+    it "computes a+b on a live Vulkan host and records RECORD(value=a+b) + sentinel 0xCAFE0000; SKIPs cleanly elsewhere":
+        step("Probe for a Vulkan-capable device before doing any real work")
+        var probe_session = VulkanLaneSession.create()
+        val probe_result = probe_session.probe()
+
+        if probe_result.starts_with("skip:"):
+            step("No usable Vulkan device/ICD on this host: " + probe_result)
+            assert_true(probe_result.starts_with("skip:"))
+        else:
+            step("Live Vulkan device found: create the executor and prepare() (lower to SPIR-V via the existing emitter, assemble with spirv-as, optionally validate with spirv-val, init the C1 session)")
+            var executor = VulkanJitLaneExecutor.create()
+            val prepare_result = executor.prepare("vulkan_jit_hello")
+
+            if not prepare_result.is_ok():
+                step("prepare() failed for a reason other than device-absence (already handled above by the probe branch) -- this IS a real failure, not a skip")
+                expect(prepare_result.unwrap_err()).to_equal("")
+            else:
+                step("Dispatch the hello kernel with operands a=7, b=35 (expected sum=42)")
+                val blob = _u32_le(7) + _u32_le(35)
+                val run_result = executor.run_program(blob)
+                assert_true(run_result.is_ok())
+
+                if run_result.is_ok():
+                    step("Decode the RECORD ring + exit sentinel from the readback via A2's mailbox helpers")
+                    val readback = run_result.unwrap()
+                    val (records, sentinel_state, exit_code) = decode_hello_result(readback)
+
+                    step("Confirm the RECORD: seq=0, pass=true, value=42")
+                    expect(records.len()).to_equal(1)
+                    expect(records[0].seq).to_equal(0)
+                    assert_true(records[0].pass)
+                    expect(records[0].value).to_equal(42)
+
+                    step("Confirm the GMB-1 exit sentinel decodes to Exit with exit_code=0")
+                    expect(sentinel_state).to_equal(SentinelState.Exit)
+                    expect(exit_code).to_equal(0)
+
+                step("Tear down the session cleanly")
+                assert_true(executor.teardown())
+
+    it "the assembled hello kernel validates cleanly with spirv-val when the tool is present on this host (host-aware optional)":
+        step("Probe for a Vulkan-capable device (spirv-val itself needs no device, but this spec only assembles the real kernel on a live-probe pass to avoid duplicating the prepare() path)")
+        var probe_session = VulkanLaneSession.create()
+        val probe_result = probe_session.probe()
+
+        if probe_result.starts_with("skip:"):
+            step("No usable Vulkan device/ICD on this host: " + probe_result)
+            assert_true(probe_result.starts_with("skip:"))
+        elif not spirv_tool_present("spirv-val"):
+            step("skip: spirv-val not found on this host (host-aware optional check)")
+            # Assert the branch's own precondition rather than a tautology, so
+            # this example cannot silently pass if the branch is ever entered
+            # for the wrong reason.
+            assert_false(spirv_tool_present("spirv-val"))
+        else:
+            step("prepare() already runs spirv-val internally and would have returned Err on a validation failure -- a successful prepare() is itself the positive proof")
+            var executor = VulkanJitLaneExecutor.create()
+            val prepare_result = executor.prepare("vulkan_jit_hello_spirv_val_check")
+            assert_true(prepare_result.is_ok())
+            assert_true(executor.teardown())

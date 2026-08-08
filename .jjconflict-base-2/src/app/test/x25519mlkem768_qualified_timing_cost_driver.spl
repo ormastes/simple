@@ -1,0 +1,168 @@
+"""Cost attribution driver for the qualified-timing spec.
+
+The spec's 9 examples take ~137 s through `bin/simple test`. This driver runs
+the SAME receipt construction and admission calls from a `fn main` program so
+the crypto/receipt cost can be separated from the BDD/test-runner overhead.
+Prints one `PROBE PHASE <name> ms=<n>` line per phase and a verdict line.
+
+Run it under a NAMED engine, e.g.
+    SIMPLE_EXECUTION_MODE=interpret bin/simple run \\
+        src/app/test/x25519mlkem768_qualified_timing_cost_driver.spl
+"""
+
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend}
+use lib.common.crypto.x25519_mlkem768.measurement_qualification.{
+    X25519MlKem768MeasurementQualification}
+use lib.common.crypto.x25519_mlkem768.qualified_timing.{
+    X25519_MLKEM768_WARM_SETUP_SCHEMA,
+    X25519_MLKEM768_TIMED_OPERATION_SCHEMA,
+    X25519MlKem768TimingRole,
+    X25519MlKem768WarmSetupReceipt,
+    X25519MlKem768TimedOperationReceipt,
+    x25519_mlkem768_warm_setup_receipt_sha256,
+    x25519_mlkem768_sample_set_sha256,
+    x25519_mlkem768_timed_operation_receipt_sha256,
+    x25519_mlkem768_admit_warm_setup,
+    x25519_mlkem768_admit_timed_operations}
+use test.helpers.x25519mlkem768_performance_fixture.{
+    x25519_mlkem768_synthetic_measurement_qualification}
+
+extern fn rt_time_monotonic_ns() -> i64
+
+fn _samples(count: i64, base_ns: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(base_ns + i * 1000)
+        i = i + 1
+    out
+
+fn _warm(
+        qualification: X25519MlKem768MeasurementQualification,
+        role: X25519MlKem768TimingRole) -> X25519MlKem768WarmSetupReceipt:
+    val scalar = role == X25519MlKem768TimingRole.ScalarReference
+    var receipt = X25519MlKem768WarmSetupReceipt(
+        schema: X25519_MLKEM768_WARM_SETUP_SCHEMA,
+        receipt_sha256: "", role: role,
+        backend: if scalar: X25519MlKem768EvidenceBackend.ScalarCpu
+            else: qualification.target.backend,
+        qualification_sha256: qualification.qualification_sha256,
+        matrix_row_set_sha256: qualification.target.matrix_row_set_sha256,
+        scalar_source_receipt_sha256:
+            qualification.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256:
+            qualification.candidate_source_receipt_sha256,
+        host_os: qualification.target.host_os,
+        host_arch: qualification.target.host_arch,
+        session_id: qualification.target.session_id,
+        monotonic_clock_id: qualification.target.monotonic_clock_id,
+        workload_configuration_sha256:
+            qualification.target.workload_configuration_sha256,
+        backend_configuration_sha256:
+            if scalar: qualification.target.scalar_configuration_sha256
+            else: qualification.target.candidate_configuration_sha256,
+        runner_artifact_sha256: qualification.target.runner_artifact_sha256,
+        backend_artifact_sha256:
+            if scalar: qualification.target.scalar_backend_artifact_sha256
+            else: qualification.target.backend_artifact_sha256,
+        backend_identity:
+            if scalar: qualification.target.scalar_backend_identity
+            else: qualification.target.executor_identity,
+        completed_full_exchanges: if scalar: 2 else: 3,
+        scalar_qualification_count: if scalar: 2 else: 1,
+        candidate_warmup_count: if scalar: 0 else: 2,
+        setup_operations_timed: 0,
+        oracle_match: true, fallback_used: false)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_warm_setup_receipt_sha256(receipt)
+    receipt
+
+fn _timed(
+        qualification: X25519MlKem768MeasurementQualification,
+        warm: X25519MlKem768WarmSetupReceipt,
+        samples_ns: [i64]) -> X25519MlKem768TimedOperationReceipt:
+    val scalar = warm.role == X25519MlKem768TimingRole.ScalarReference
+    val exchange_count = samples_ns.len()
+    val operation_count = exchange_count * 3
+    var receipt = X25519MlKem768TimedOperationReceipt(
+        schema: X25519_MLKEM768_TIMED_OPERATION_SCHEMA,
+        receipt_sha256: "",
+        warm_setup_receipt_sha256: warm.receipt_sha256,
+        role: warm.role, backend: warm.backend,
+        qualification_sha256: warm.qualification_sha256,
+        matrix_row_set_sha256: warm.matrix_row_set_sha256,
+        scalar_source_receipt_sha256: warm.scalar_source_receipt_sha256,
+        candidate_source_receipt_sha256: warm.candidate_source_receipt_sha256,
+        host_os: warm.host_os, host_arch: warm.host_arch,
+        session_id: warm.session_id,
+        monotonic_clock_id: warm.monotonic_clock_id,
+        workload_configuration_sha256: warm.workload_configuration_sha256,
+        backend_configuration_sha256: warm.backend_configuration_sha256,
+        runner_artifact_sha256: warm.runner_artifact_sha256,
+        backend_artifact_sha256: warm.backend_artifact_sha256,
+        backend_identity: warm.backend_identity,
+        samples_ns: samples_ns,
+        sample_set_sha256: x25519_mlkem768_sample_set_sha256(samples_ns),
+        full_exchange_count: exchange_count,
+        hybrid_operation_count: operation_count,
+        setup_operations_during_timing: 0,
+        kernel_only_operations: 0, fallback_operations: 0,
+        public_mismatch_operations: 0, secret_mismatch_operations: 0,
+        accelerated_operation_count: if scalar: 0 else: operation_count,
+        simd_chunk_hits: if scalar: 0 else: operation_count,
+        observed_rvv_vlen_bits: 0,
+        gpu_transfer_count: 0, gpu_launch_count: 0,
+        gpu_synchronization_count: 0, gpu_readback_count: 0,
+        gpu_kernel_count: 0,
+        max_rss_kb: qualification.platform_observation.peak_memory_kib)
+    receipt.receipt_sha256 =
+        x25519_mlkem768_timed_operation_receipt_sha256(receipt)
+    receipt
+
+fn main():
+    val t_start = rt_time_monotonic_ns()
+    val qualification =
+        x25519_mlkem768_synthetic_measurement_qualification(
+            X25519MlKem768EvidenceBackend.Avx2)
+    val t_qual = rt_time_monotonic_ns()
+    print("PROBE PHASE qualification ms=" +
+        ((t_qual - t_start) / 1000000).to_text())
+
+    val q2 = x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Neon)
+    val t_qual2 = rt_time_monotonic_ns()
+    print("PROBE PHASE qualification_2nd_call ms=" +
+        ((t_qual2 - t_qual) / 1000000).to_text())
+    val q3 = x25519_mlkem768_synthetic_measurement_qualification(
+        X25519MlKem768EvidenceBackend.Avx2)
+    val t_qual3 = rt_time_monotonic_ns()
+    print("PROBE PHASE qualification_3rd_call ms=" +
+        ((t_qual3 - t_qual2) / 1000000).to_text() +
+        " same_as_first=" +
+        (q3.qualification_sha256 == qualification.qualification_sha256).to_text())
+
+    val warm = _warm(qualification, X25519MlKem768TimingRole.Candidate)
+    val t_warm = rt_time_monotonic_ns()
+    print("PROBE PHASE warm_receipt ms=" +
+        ((t_warm - t_qual3) / 1000000).to_text())
+
+    val timed30 = _timed(qualification, warm, _samples(30, 100000))
+    val t30 = rt_time_monotonic_ns()
+    print("PROBE PHASE timed_n30 ms=" + ((t30 - t_warm) / 1000000).to_text() +
+        " sample_set=" + timed30.sample_set_sha256)
+
+    val admitted = x25519_mlkem768_admit_timed_operations(
+        qualification, warm, timed30)
+    val t_admit = rt_time_monotonic_ns()
+    print("PROBE PHASE admit_n30 ms=" + ((t_admit - t30) / 1000000).to_text() +
+        " ok=" + admitted.is_ok().to_text())
+
+    val timed1025 = _timed(qualification, warm, _samples(1025, 100000))
+    val t1025 = rt_time_monotonic_ns()
+    print("PROBE PHASE timed_n1025 ms=" +
+        ((t1025 - t_admit) / 1000000).to_text() +
+        " sample_set=" + timed1025.sample_set_sha256)
+
+    print("PROBE PHASE total ms=" + ((t1025 - t_start) / 1000000).to_text())
+    print("PROBE VERDICT: PASS")

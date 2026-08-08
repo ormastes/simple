@@ -1,0 +1,200 @@
+# Multicore Green - Pure Simple facade for bounded CPU-parallel tasks.
+#
+# This is the public Simple-level candidate for Go-like M:N CPU work. It uses
+# the runtime-owned worker pool when rt_pool_* is linked, while keeping the
+# existing cooperative green-thread queue separate.
+
+use std.concurrent.channel.{channel_new, channel_from_id}
+
+extern fn rt_pool_submit(closure: Any, env_ptr: i64) -> i64
+extern fn rt_pool_join(handle: i64) -> i64
+extern fn rt_pool_is_done(handle: i64) -> i64
+extern fn rt_pool_set_parallelism(workers: i64) -> i64
+extern fn rt_pool_get_parallelism() -> i64
+extern fn rt_pool_uses_global_fifo_queue() -> i64
+extern fn rt_pool_uses_work_stealing() -> i64
+extern fn rt_pool_safepoint() -> i64
+extern fn rt_pool_submitted_count() -> i64
+extern fn rt_pool_completed_count() -> i64
+extern fn rt_pool_pending_count() -> i64
+extern fn rt_pool_busy_count() -> i64
+extern fn rt_pool_blocked_count() -> i64
+
+class MulticoreGreenHandle:
+    """Join handle for a multicore-green value task."""
+    native_handle: i64
+    inline_done: bool
+    inline_result: i64
+
+    fn used_runtime_pool() -> bool:
+        """Return true when this task was accepted by the runtime worker pool."""
+        self.native_handle > 0
+
+    fn ran_inline_fallback() -> bool:
+        """Return true when this task ran inline because no runtime pool was available."""
+        self.native_handle == 0
+
+    fn is_done() -> bool:
+        if self.native_handle > 0:
+            return rt_pool_is_done(self.native_handle) == 1
+        self.inline_done
+
+    fn join() -> i64:
+        if self.native_handle > 0:
+            return rt_pool_join(self.native_handle)
+        self.inline_result
+
+class MulticoreGreenSliceResult:
+    """One explicit resumable CPU slice result."""
+    done: bool
+    state: i64
+    value: i64
+
+    static fn continue_with(state: i64) -> MulticoreGreenSliceResult:
+        MulticoreGreenSliceResult(done: false, state: state, value: 0)
+
+    static fn completed(value: i64) -> MulticoreGreenSliceResult:
+        MulticoreGreenSliceResult(done: true, state: 0, value: value)
+
+class MulticoreGreenSlicedHandle:
+    """Join handle for an explicitly sliced multicore-green task."""
+    result_channel_id: i64
+    first_slice_used_pool: bool
+    first_slice_ran_inline: bool
+    inline_done: bool
+    inline_result: i64
+
+    fn used_runtime_pool() -> bool:
+        """Return true when the first slice was accepted by the runtime worker pool."""
+        self.first_slice_used_pool
+
+    fn ran_inline_fallback() -> bool:
+        """Return true when the first slice ran inline because no runtime pool was available."""
+        self.first_slice_ran_inline
+
+    fn join() -> i64:
+        if self.inline_done:
+            return self.inline_result
+        val results = channel_from_id(self.result_channel_id)
+        results.recv() as i64
+
+fn multicore_green_slice_worker(work_id: i64, result_id: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> i64:
+    val work = channel_from_id(work_id)
+    val results = channel_from_id(result_id)
+    val state = work.recv() as i64
+    val next = step_fn(state)
+    if next.done:
+        results.send(next.value)
+    else:
+        work.send(next.state)
+        multicore_green_spawn(\: multicore_green_slice_worker(work_id, result_id, step_fn))
+    0
+
+fn multicore_green_run_slices_inline(initial_state: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> i64:
+    var state = initial_state
+    while true:
+        val next = step_fn(state)
+        if next.done:
+            return next.value
+        state = next.state
+
+fn multicore_green_spawn(task: fn() -> i64) -> MulticoreGreenHandle:
+    """Spawn a value task on the bounded runtime worker pool when available."""
+    val native_handle = rt_pool_submit(task, 0)
+    if native_handle > 0:
+        return MulticoreGreenHandle(
+            native_handle: native_handle,
+            inline_done: false,
+            inline_result: 0
+        )
+    MulticoreGreenHandle(
+        native_handle: 0,
+        inline_done: true,
+        inline_result: task()
+    )
+
+fn multicore_green_spawn_sliced(initial_state: i64, step_fn: fn(i64) -> MulticoreGreenSliceResult) -> MulticoreGreenSlicedHandle:
+    """Spawn explicit resumable CPU slices on the runtime worker pool.
+
+    This is a cooperative fairness API for CPU-heavy work that can expose a
+    scalar progress state. Each step returns quickly, then unfinished work is
+    requeued as a later pool task. Plain `multicore_green_spawn` closures still
+    run to completion and are not preempted automatically.
+    """
+    val work = channel_new()
+    val results = channel_new()
+    work.send(initial_state)
+    val native_handle = rt_pool_submit(\: multicore_green_slice_worker(work.id(), results.id(), step_fn), 0)
+    if native_handle <= 0:
+        return MulticoreGreenSlicedHandle(
+            result_channel_id: results.id(),
+            first_slice_used_pool: false,
+            first_slice_ran_inline: true,
+            inline_done: true,
+            inline_result: multicore_green_run_slices_inline(initial_state, step_fn)
+        )
+    MulticoreGreenSlicedHandle(
+        result_channel_id: results.id(),
+        first_slice_used_pool: true,
+        first_slice_ran_inline: false,
+        inline_done: false,
+        inline_result: 0
+    )
+
+fn multicore_green_set_parallelism(workers: i64) -> i64:
+    """Set hosted runtime-pool parallelism.
+
+    This is the Simple-level control with the same role as Go's GOMAXPROCS for
+    the current hosted M:N candidate. Call it before the first
+    multicore_green_spawn to choose the initial worker count. If the pool is
+    already running, the runtime can grow the pool but does not claim live
+    shrink/preemption behavior. Non-positive requests are clamped to `1` at
+    the Pure Simple boundary to match hosted runtime support.
+    """
+    if workers <= 0:
+        return rt_pool_set_parallelism(1)
+    rt_pool_set_parallelism(workers)
+
+fn multicore_green_parallelism() -> i64:
+    """Return the hosted runtime-pool parallelism currently configured."""
+    rt_pool_get_parallelism()
+
+fn multicore_green_uses_global_fifo_queue() -> bool:
+    """Return true when the hosted runtime pool still uses one global FIFO."""
+    rt_pool_uses_global_fifo_queue() == 1
+
+fn multicore_green_uses_work_stealing() -> bool:
+    """Return true when the hosted runtime pool uses per-worker queues with stealing."""
+    rt_pool_uses_work_stealing() == 1
+
+fn multicore_green_safepoint() -> i64:
+    """Poll a runtime-pool safepoint from the current pool worker.
+
+    This is an explicit runtime safepoint hook for future compiler-inserted
+    loop polls. It is not automatic preemption: ordinary closures only become
+    fair when user code or generated code calls this function inside a long
+    running body. The hook may start compensation capacity and yield the
+    current OS worker; callers must not rely on the returned progress count for
+    correctness.
+    """
+    rt_pool_safepoint()
+
+fn multicore_green_submitted_count() -> i64:
+    """Return hosted runtime-pool tasks accepted by the multicore-green pool."""
+    rt_pool_submitted_count()
+
+fn multicore_green_completed_count() -> i64:
+    """Return hosted runtime-pool tasks completed by the multicore-green pool."""
+    rt_pool_completed_count()
+
+fn multicore_green_pending_count() -> i64:
+    """Return hosted runtime-pool tasks queued but not yet running."""
+    rt_pool_pending_count()
+
+fn multicore_green_busy_count() -> i64:
+    """Return hosted runtime-pool workers currently executing tasks."""
+    rt_pool_busy_count()
+
+fn multicore_green_blocked_count() -> i64:
+    """Return hosted runtime-pool workers marked blocked by runtime compensation hooks."""
+    rt_pool_blocked_count()

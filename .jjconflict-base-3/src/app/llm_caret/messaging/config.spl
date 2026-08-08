@@ -1,0 +1,146 @@
+"""Typed SDN configuration decoder for the LLM Caret messaging composition root."""
+
+use std.common.sdn.parser.{parse as sdn_parse}
+use std.common.sdn.schema.{SdnDecodeIssues, sdn_require_text, sdn_require_bool,
+    sdn_require_dict, sdn_get_text, sdn_get_bool, sdn_get_int, sdn_get_dict}
+
+pub class MessagingServerConfig:
+    listen: text
+    database: text
+    external_http: bool
+
+pub class MessagingDefaultsConfig:
+    room_mode: text
+    update_policy: text
+    previous_messages: i64
+    mirror_policy: text
+
+pub class MessagingAgentConfig:
+    name: text
+    provider: text
+    handler: text
+    role: text
+    session_policy: text
+
+pub class MessagingRoomConfig:
+    name: text
+    mode: text
+    update_policy: text
+
+pub class MessagingTransportConfig:
+    name: text
+    enabled: bool
+    credential_ref: text
+    mirror_policy: text
+
+pub class MessagingConfig:
+    server: MessagingServerConfig
+    defaults: MessagingDefaultsConfig
+    agents: [MessagingAgentConfig]
+    rooms: [MessagingRoomConfig]
+    transports: [MessagingTransportConfig]
+    issues: [text]
+
+    fn valid(self) -> bool: self.issues.len() == 0
+
+fn _empty_config(issue: text) -> MessagingConfig:
+    MessagingConfig(server: MessagingServerConfig(listen: "", database: "", external_http: false),
+        defaults: MessagingDefaultsConfig(room_mode: "mention", update_policy: "milestones",
+            previous_messages: 2, mirror_policy: "full"), agents: [], rooms: [], transports: [],
+        issues: [issue])
+
+fn _issue_text(issues: SdnDecodeIssues) -> [text]:
+    var out: [text] = []
+    for issue in issues.items: out.push(issue.path + ": " + issue.message)
+    out
+
+fn _one_of(value: text, allowed: [text]) -> bool:
+    for item in allowed:
+        if value == item: return true
+    false
+
+fn _validate_server(listen: text, database: text, external_http: bool, issues: SdnDecodeIssues):
+    val local = listen.starts_with("unix://") or listen.starts_with("http://127.0.0.1:") or
+        listen.starts_with("http://localhost:")
+    if not local: issues.add("messaging.server.listen", "listen must be a Unix socket or loopback HTTP")
+    if database.trim() == "": issues.add("messaging.server.database", "database path is required")
+    if external_http and not listen.starts_with("http://127.0.0.1:") and not listen.starts_with("http://localhost:"):
+        issues.add("messaging.server.external_http", "external_http requires an explicit loopback HTTP listener")
+
+fn _decode_agents(root, issues: SdnDecodeIssues) -> [MessagingAgentConfig]:
+    var out: [MessagingAgentConfig] = []
+    val values = sdn_get_dict(root, "messaging.agents", issues) ?? {}
+    for name in values.keys():
+        val p = "messaging.agents." + name + "."
+        val provider = sdn_require_text(root, p + "provider", issues) ?? ""
+        val handler = sdn_require_text(root, p + "handler", issues) ?? ""
+        val role = sdn_require_text(root, p + "role", issues) ?? ""
+        val session_policy = sdn_require_text(root, p + "session_policy", issues) ?? ""
+        if not _one_of(provider, ["claude", "codex", "gemini"]): issues.add(p + "provider", "unsupported agent provider")
+        if not _one_of(handler, ["main", "subagent", "advisor", "router"]): issues.add(p + "handler", "unsupported handler")
+        if not _one_of(session_policy, ["persistent_per_room", "persistent_per_thread", "new_per_task", "existing_main_session"]):
+            issues.add(p + "session_policy", "unsupported session policy")
+        out.push(MessagingAgentConfig(name: name, provider: provider, handler: handler,
+            role: role, session_policy: session_policy))
+    out
+
+fn _decode_rooms(root, issues: SdnDecodeIssues) -> [MessagingRoomConfig]:
+    var out: [MessagingRoomConfig] = []
+    val values = sdn_get_dict(root, "messaging.rooms", issues) ?? {}
+    for name in values.keys():
+        val p = "messaging.rooms." + name + "."
+        val mode = sdn_require_text(root, p + "mode", issues) ?? ""
+        val update_policy = sdn_require_text(root, p + "update_policy", issues) ?? ""
+        if not _one_of(mode, ["room", "mention", "keyword", "manual"]): issues.add(p + "mode", "unsupported room mode")
+        if not _one_of(update_policy, ["milestones", "verbose", "final_only", "silent"]):
+            issues.add(p + "update_policy", "unsupported update policy")
+        out.push(MessagingRoomConfig(name: name, mode: mode, update_policy: update_policy))
+    out
+
+fn _decode_transports(root, issues: SdnDecodeIssues) -> [MessagingTransportConfig]:
+    var out: [MessagingTransportConfig] = []
+    val values = sdn_require_dict(root, "messaging.transports", issues) ?? {}
+    for name in values.keys():
+        val p = "messaging.transports." + name + "."
+        val enabled = sdn_require_bool(root, p + "enabled", issues) ?? false
+        val credential_ref = sdn_get_text(root, p + "credential_ref", issues) ?? ""
+        val mirror_policy = sdn_get_text(root, p + "mirror_policy", issues) ?? "full"
+        if not _one_of(mirror_policy, ["full", "metadata_only", "off"]):
+            issues.add(p + "mirror_policy", "unsupported mirror policy")
+        if credential_ref != "" and not credential_ref.starts_with("secret://"):
+            issues.add(p + "credential_ref", "credential must be a secret:// reference, never a raw token")
+        if enabled and name != "primitive" and credential_ref == "":
+            issues.add(p + "credential_ref", "enabled external transport requires a secret:// reference")
+        out.push(MessagingTransportConfig(name: name, enabled: enabled,
+            credential_ref: credential_ref, mirror_policy: mirror_policy))
+    out
+
+pub fn decode_messaging_config(content: text) -> MessagingConfig:
+    match sdn_parse(content):
+        case Err(_): _empty_config("messaging: invalid SDN")
+        case Ok(root):
+            val issues = SdnDecodeIssues.new()
+            val listen = sdn_require_text(root, "messaging.server.listen", issues) ?? ""
+            val database = sdn_require_text(root, "messaging.server.database", issues) ?? ""
+            val external_http = sdn_get_bool(root, "messaging.server.external_http", issues) ?? false
+            val room_mode = sdn_get_text(root, "messaging.defaults.room_mode", issues) ?? "mention"
+            val update_policy = sdn_get_text(root, "messaging.defaults.update_policy", issues) ?? "milestones"
+            val previous_messages = sdn_get_int(root, "messaging.defaults.previous_messages", issues) ?? 2
+            val mirror_policy = sdn_get_text(root, "messaging.defaults.mirror_policy", issues) ?? "full"
+            _validate_server(listen, database, external_http, issues)
+            if not _one_of(room_mode, ["room", "mention", "keyword", "manual"]):
+                issues.add("messaging.defaults.room_mode", "unsupported room mode")
+            if not _one_of(update_policy, ["milestones", "verbose", "final_only", "silent"]):
+                issues.add("messaging.defaults.update_policy", "unsupported update policy")
+            if previous_messages < 0 or previous_messages > 20:
+                issues.add("messaging.defaults.previous_messages", "must be between 0 and 20")
+            if not _one_of(mirror_policy, ["full", "metadata_only", "off"]):
+                issues.add("messaging.defaults.mirror_policy", "unsupported mirror policy")
+            val agents = _decode_agents(root, issues)
+            val rooms = _decode_rooms(root, issues)
+            val transports = _decode_transports(root, issues)
+            MessagingConfig(server: MessagingServerConfig(listen: listen, database: database,
+                    external_http: external_http),
+                defaults: MessagingDefaultsConfig(room_mode: room_mode, update_policy: update_policy,
+                    previous_messages: previous_messages, mirror_policy: mirror_policy),
+                agents: agents, rooms: rooms, transports: transports, issues: _issue_text(issues))

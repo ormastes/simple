@@ -1,0 +1,106 @@
+"""
+# A naked `case StructName(...)` arm must not be an unconditional match
+
+**Category:** Pattern matching / match-arm selection
+**Bug:** doc/08_tracking/bug/naked_struct_pattern_vs_option_always_wildcard_2026-07-29.md
+
+## Overview
+
+A `match` arm whose pattern is a bare struct constructor — `case PId(raw):`,
+with no `Some(...)` wrapper — is lowered by the Rust seed to the *literal*
+`true` (`hir/lower/stmt_lowering.rs:1679`, `is_class_pattern` →
+`HirExprKind::Bool(true)`). There is no discriminant compare, no type test and
+no nil guard, so such an arm matches **every** scrutinee: a value of an
+unrelated struct type, and `nil`. Every later arm, including `case _:`,
+becomes dead code.
+
+The originally filed polarity ("the naked arm always falls to the wildcard")
+is the inverse and does not reproduce. It looked that way because a naked arm
+carrying a *binding* selects on `nil` and then traps reading a field off nil
+(`runtime error: field access on nil receiver`, SIGILL) — an arm that selects
+and then dies is externally indistinguishable from an arm that never selected.
+
+This is the `fb1a0033d51` family: a `case` arm existing is not evidence it
+ever runs, and here it is the **wildcard** arm that never runs.
+
+## Coverage
+
+The bind-free patterns are load-bearing: they observe arm *selection* only, so
+a failure cannot be confused with a destructuring fault.
+
+- `nil` must reach the wildcard, not the struct arm.
+- A `Beta` pattern must not swallow an `Alpha` value.
+- The `Some(...)` form is the control — it is correct on the buggy lane too,
+  so a red control means the harness, not the defect.
+"""
+
+use std.spec
+
+struct Alpha:
+    a: i64
+
+struct Beta:
+    b: i64
+
+# Bind-free: observes arm SELECTION only, never a destructure.
+fn select_naked(x: Alpha?) -> text:
+    match x:
+        case Alpha(_):
+            return "ALPHA"
+        case _:
+            return "WILDCARD"
+
+# A pattern naming a DIFFERENT struct must not match an Alpha scrutinee.
+fn select_wrong_type_first(x: Alpha?) -> text:
+    match x:
+        case Beta(_):
+            return "BETA"
+        case Alpha(_):
+            return "ALPHA"
+        case _:
+            return "WILDCARD"
+
+# Control: the idiomatic `Some(...)` form.
+fn select_some(x: Alpha?) -> text:
+    match x:
+        case Some(Alpha(_)):
+            return "ALPHA"
+        case _:
+            return "WILDCARD"
+
+# Binding form, PRESENT VALUES ONLY -- deliberately never called with nil.
+# On the buggy lane `select_naked_binding(nil)` selects the arm and then traps
+# reading `a` off nil: "runtime error: field access on nil receiver", SIGILL,
+# exit 132. That is a genuine symptom, but a SIGILL is not a clean assertion
+# failure, and whether the runner isolates a crashing `it` block could not be
+# verified here (`simple test` exceeded a 900 s cap twice on this box without
+# reaching a single assertion). Asserting it would risk taking down the suite
+# to prove something the bind-free cases below already prove cleanly.
+fn select_naked_binding(x: Alpha?) -> text:
+    match x:
+        case Alpha(a):
+            return "ALPHA:" + a.to_text()
+        case _:
+            return "WILDCARD"
+
+describe("naked struct-constructor match arms"):
+    it("selects the struct arm for a present value"):
+        assert_equal(select_naked(Alpha(a: 7)), "ALPHA")
+
+    it("falls through to the wildcard for nil"):
+        assert_equal(select_naked(nil), "WILDCARD")
+
+    it("does not let a Beta pattern swallow an Alpha value"):
+        assert_equal(select_wrong_type_first(Alpha(a: 7)), "ALPHA")
+
+    it("does not let a Beta pattern swallow nil"):
+        assert_equal(select_wrong_type_first(nil), "WILDCARD")
+
+    it("binds the payload for a present value"):
+        assert_equal(select_naked_binding(Alpha(a: 7)), "ALPHA:7")
+
+    it("keeps the Some(...) control form correct for a present value"):
+        assert_equal(select_some(Alpha(a: 7)), "ALPHA")
+
+    it("keeps the Some(...) control form correct for nil"):
+        assert_equal(select_some(nil), "WILDCARD")

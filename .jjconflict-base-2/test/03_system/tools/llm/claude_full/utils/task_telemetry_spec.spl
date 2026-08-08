@@ -1,0 +1,46 @@
+"""
+# Claude Full Task Output and Telemetry
+
+Checks modern SSpec parity for task output and BigQuery metrics export.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.task.TaskOutput.*
+use app.llm_caret.claude_full.utils.telemetry.bigqueryExporter.*
+
+describe "Claude full task output and telemetry":
+    it "should model pipe task output buffering":
+        var output = TaskOutput.new("task-a", "/tmp/tasks", false, 20)
+        output = output.writeStdout("hello\nworld").writeStderr("warn")
+        expect(output.path).to_equal("/tmp/tasks/task-a.output")
+        expect(output.totalLinesValue).to_equal(2)
+        expect(output.getStdout(5)).to_equal("world")
+        expect(output.getStderr()).to_equal("warn")
+        output = output.writeStdout(" this line is too long")
+        expect(output.diskEnabled).to_equal(true)
+
+    it "should model file polling progress":
+        var output = TaskOutput.new("task-b", "/tmp/tasks", true, DEFAULT_MAX_MEMORY)
+        output = output.startPolling().tickTail("a\nb\nc\nd\ne\nf", 12)
+        expect(output.polling).to_equal(true)
+        expect(output.progressEvents.len()).to_equal(1)
+        expect(output.progressEvents[0].lastLines).to_contain("b")
+        expect(output.getStderr()).to_equal("")
+        expect(output.stopPolling().polling).to_equal(false)
+
+    it "should model BigQuery metrics export decisions":
+        var exporter = BigQueryMetricsExporter.new(0, "ant", "https://metrics.example")
+        expect(exporter.endpoint).to_equal("https://metrics.example/api/claude_code/metrics")
+        val skipped = exporter.export(true, false, "", true, "requests", 7)
+        expect(skipped.code).to_equal(EXPORT_SUCCESS)
+        expect(skipped.note).to_equal("trust not established")
+        val failed = exporter.export(true, true, "missing auth", true, "requests", 7)
+        expect(failed.code).to_equal(EXPORT_FAILED)
+        val sent = exporter.export(true, true, "", true, "requests", 7)
+        expect(sent.payload.metrics[0].name).to_equal("requests")
+        expect(sent.payload.resourceAttributes[3].value).to_equal("claude_ai")
+        expect(exporter.shutdownExporter().export(true, true, "", true, "requests", 1).error).to_equal("Exporter has been shutdown")
+
+    it "should expose source sizes":
+        expect(taskOutputSourceLinesModeled()).to_equal(390)
+        expect(bigQueryExporterSourceLinesModeled()).to_equal(252)

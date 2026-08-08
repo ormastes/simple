@@ -1,0 +1,175 @@
+# TLS 1.3 Key Schedule — No-Alloc Baremetal Port
+#
+# Ported from src/os/tls13/key_schedule.spl.
+# Implements RFC 8446 §7.1 key schedule:
+#   Early Secret → Handshake Secret → Master Secret
+# Plus traffic key derivation (key + IV from traffic secret).
+#
+# All secrets stored in Tls13Secrets struct with fixed [u8] arrays
+# pre-allocated to 32 bytes each.
+
+use src.lib.nogc_async_mut_noalloc.tls.hkdf.{hkdf_extract, hkdf_expand_label}
+use src.lib.nogc_async_mut_noalloc.tls.transcript.{Transcript, transcript_hash, transcript_empty_hash}
+use src.lib.nogc_async_mut_noalloc.tls.types.{KEY_SIZE_AES128, KEY_SIZE_IV, HASH_SIZE_SHA256}
+use src.os.crypto.sha256.{sha256_hmac_with_len}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _ks_u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _zeros(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(0x00u8)
+        i = i + 1
+    out
+
+fn _copy32(src: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(_ks_u8_at(src, i))
+        i = i + 1
+    out
+
+# ============================================================================
+# Traffic Keys
+# ============================================================================
+
+class TrafficKeys:
+    """Derived AES-128 key (16 bytes) and IV (12 bytes) for a single direction."""
+    key: [u8]   # 16 bytes
+    iv: [u8]    # 12 bytes
+
+# ============================================================================
+# Full Key Schedule State
+# ============================================================================
+
+class Tls13Secrets:
+    """All TLS 1.3 secrets derived during the key schedule.
+
+    All secret fields are 32-byte arrays (empty [] = not yet derived).
+    """
+    early_secret:         [u8]   # 32 bytes
+    handshake_secret:     [u8]   # 32 bytes
+    master_secret:        [u8]   # 32 bytes
+    client_hs_traffic:    [u8]   # 32 bytes
+    server_hs_traffic:    [u8]   # 32 bytes
+    client_app_traffic:   [u8]   # 32 bytes
+    server_app_traffic:   [u8]   # 32 bytes
+
+# ============================================================================
+# derive_secret — HKDF-Expand-Label with transcript hash as context
+# ============================================================================
+
+fn derive_secret(secret: [u8], label: text, t: Transcript) -> [u8]:
+    """Derive a secret using the transcript hash as context (RFC 8446 §7.1)."""
+    val ctx = transcript_hash(t)
+    hkdf_expand_label(secret, label, ctx, 32)
+
+# ============================================================================
+# Key Schedule Steps
+# ============================================================================
+
+fn tls13_early_secret() -> [u8]:
+    """Compute the Early Secret from a zero IKM with zero salt (no PSK).
+
+    early_secret = HKDF-Extract(salt=0^32, IKM=0^32)
+    """
+    hkdf_extract(_zeros(32), _zeros(32))
+
+fn tls13_handshake_secret(early_secret: [u8], dhe_shared: [u8]) -> [u8]:
+    """Compute the Handshake Secret (RFC 8446 §7.1).
+
+    derived = HKDF-Expand-Label(early_secret, "derived", SHA256(""), 32)
+    handshake_secret = HKDF-Extract(salt=derived, IKM=dhe_shared)
+    """
+    val derived = hkdf_expand_label(early_secret, "derived", transcript_empty_hash(), 32)
+    hkdf_extract(derived, dhe_shared)
+
+fn tls13_master_secret(handshake_secret: [u8]) -> [u8]:
+    """Compute the Master Secret (RFC 8446 §7.1).
+
+    derived = HKDF-Expand-Label(handshake_secret, "derived", SHA256(""), 32)
+    master_secret = HKDF-Extract(salt=derived, IKM=0^32)
+    """
+    val derived = hkdf_expand_label(handshake_secret, "derived", transcript_empty_hash(), 32)
+    hkdf_extract(derived, _zeros(32))
+
+# ============================================================================
+# Traffic Key Derivation
+# ============================================================================
+
+fn tls13_traffic_keys(traffic_secret: [u8]) -> TrafficKeys:
+    """Derive AES-128 key and IV from a traffic secret (RFC 8446 §7.3).
+
+    key = HKDF-Expand-Label(traffic_secret, "key", "", 16)
+    iv  = HKDF-Expand-Label(traffic_secret, "iv",  "", 12)
+    """
+    val empty: [u8] = []
+    val key = hkdf_expand_label(traffic_secret, "key", empty, 16)
+    val iv  = hkdf_expand_label(traffic_secret, "iv",  empty, 12)
+    TrafficKeys(key: key, iv: iv)
+
+# ============================================================================
+# Finished MAC
+# ============================================================================
+
+fn tls13_finished_key(traffic_secret: [u8]) -> [u8]:
+    """Derive the Finished MAC key (RFC 8446 §4.4.4).
+
+    finished_key = HKDF-Expand-Label(traffic_secret, "finished", "", 32)
+    """
+    val empty: [u8] = []
+    hkdf_expand_label(traffic_secret, "finished", empty, 32)
+
+fn tls13_verify_data(finished_key: [u8], transcript_hash_bytes: [u8]) -> [u8]:
+    """Compute Finished verify_data = HMAC-SHA256(finished_key, transcript_hash)."""
+    val out = sha256_hmac_with_len(finished_key, 32, transcript_hash_bytes, 32)
+    _copy32(out)
+
+# ============================================================================
+# Composite: derive handshake + application secrets
+# ============================================================================
+
+fn tls13_compute_handshake_secrets(dhe_shared: [u8], transcript_sh: Transcript) -> Tls13Secrets:
+    """Derive all handshake-phase secrets.
+
+    Returns Tls13Secrets with early/handshake/client_hs/server_hs filled.
+    master_secret and app traffic secrets are empty ([]) until
+    tls13_compute_app_secrets is called.
+    """
+    val early   = tls13_early_secret()
+    val hs      = tls13_handshake_secret(early, dhe_shared)
+    val c_hs    = derive_secret(hs, "c hs traffic", transcript_sh)
+    val s_hs    = derive_secret(hs, "s hs traffic", transcript_sh)
+    val empty: [u8] = []
+    Tls13Secrets(
+        early_secret:       early,
+        handshake_secret:   hs,
+        master_secret:      empty,
+        client_hs_traffic:  c_hs,
+        server_hs_traffic:  s_hs,
+        client_app_traffic: empty,
+        server_app_traffic: empty,
+    )
+
+fn tls13_compute_app_secrets(hs_secrets: Tls13Secrets, transcript_sf: Transcript) -> Tls13Secrets:
+    """Derive application traffic secrets after server Finished.
+
+    Extends hs_secrets with master_secret, client_app_traffic, server_app_traffic.
+    """
+    val master    = tls13_master_secret(hs_secrets.handshake_secret)
+    val c_app     = derive_secret(master, "c ap traffic", transcript_sf)
+    val s_app     = derive_secret(master, "s ap traffic", transcript_sf)
+    Tls13Secrets(
+        early_secret:       hs_secrets.early_secret,
+        handshake_secret:   hs_secrets.handshake_secret,
+        master_secret:      master,
+        client_hs_traffic:  hs_secrets.client_hs_traffic,
+        server_hs_traffic:  hs_secrets.server_hs_traffic,
+        client_app_traffic: c_app,
+        server_app_traffic: s_app,
+    )

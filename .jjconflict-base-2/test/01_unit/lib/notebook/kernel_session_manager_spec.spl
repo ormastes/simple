@@ -1,0 +1,192 @@
+"""
+KernelSessionManager unit spec (Stream K, task K1).
+
+Covers session lifecycle, per-cell mode override resolution, and invalid
+mode-spec diagnostic passthrough from the composite-mode extractor helpers
+(test_executor_composite_parse.spl, extended by GPU-A1).
+
+Design: doc/05_design/app/tools/notebook_lanes_architecture.md §4.1
+Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream K, K1)
+"""
+
+use std.spec
+use std.notebook.types.{CellResult, SessionOpts, LaneStatus, cell_result_ok}
+use std.notebook.executor.{NotebookExecutor, NotebookExecutorFactory, validate_mode_spec, mode_spec_is_valid}
+use std.notebook.session_manager.{KernelSessionManager}
+
+# ============================================================================
+# FakeExecutor / FakeExecutorFactory — minimal test doubles. Real lane
+# executors (LocalExec, RemoteExec, CudaExec, VulkanExec) land in K2/K4/K5/K6;
+# K1 only owns the manager + trait seam, so the unit spec exercises it
+# through a fake implementation.
+# ============================================================================
+
+class FakeExecutor with NotebookExecutor:
+    spec: text
+    started: bool
+    reset_count: i64
+    interrupt_count: i64
+    shutdown_count: i64
+    exec_count: i64
+
+    static fn make(spec: text) -> FakeExecutor:
+        FakeExecutor(spec: spec, started: false, reset_count: 0, interrupt_count: 0, shutdown_count: 0, exec_count: 0)
+
+    fn mode_spec() -> text:
+        self.spec
+
+    fn probe() -> LaneStatus:
+        LaneStatus.Available
+
+    me start(opts: SessionOpts):
+        val _ = opts
+        self.started = true
+
+    me execute_cell(code: text, cell_id: text) -> CellResult:
+        val _ = cell_id
+        self.exec_count = self.exec_count + 1
+        cell_result_ok("echo: {code}", [], [], 1)
+
+    me interrupt():
+        self.interrupt_count = self.interrupt_count + 1
+
+    me reset():
+        self.reset_count = self.reset_count + 1
+
+    me shutdown():
+        self.shutdown_count = self.shutdown_count + 1
+
+class FakeExecutorFactory with NotebookExecutorFactory:
+    created_count: i64
+
+    static fn make() -> FakeExecutorFactory:
+        FakeExecutorFactory(created_count: 0)
+
+    me create(mode_spec: text) -> NotebookExecutor:
+        self.created_count = self.created_count + 1
+        FakeExecutor.make(mode_spec)
+
+fn manager_with_fake_factory() -> KernelSessionManager:
+    KernelSessionManager.create(FakeExecutorFactory.make())
+
+describe "KernelSessionManager — session lifecycle":
+
+    it "creates a session with a valid default mode":
+        val mgr = manager_with_fake_factory()
+        val diag = mgr.create_session("s1", "interpreter")
+        expect(diag).to_equal("")
+        assert_true(mgr.session_exists("s1"))
+        expect(mgr.default_mode_of("s1")).to_equal("interpreter")
+
+    it "rejects a duplicate session id":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val diag = mgr.create_session("s1", "interpreter")
+        expect(diag).to_equal("Session already exists: s1")
+
+    it "removes a session and shuts down its cached executors":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val result = mgr.execute_cell("s1", "val x = 1", "cell-1", "")
+        assert_true(result.is_ok())
+        val removed = mgr.remove_session("s1")
+        assert_true(removed)
+        expect_not(mgr.session_exists("s1"))
+
+    it "removing an unknown session returns false":
+        val mgr = manager_with_fake_factory()
+        expect_not(mgr.remove_session("nope"))
+
+    it "%mode changes the session default":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val diag = mgr.set_default_mode("s1", "interpreter(remote(baremetal(riscv32)))")
+        expect(diag).to_equal("")
+        expect(mgr.default_mode_of("s1")).to_equal("interpreter(remote(baremetal(riscv32)))")
+
+    it "%mode on an unknown session reports the session, not a spec error":
+        val mgr = manager_with_fake_factory()
+        val diag = mgr.set_default_mode("ghost", "interpreter")
+        expect(diag).to_equal("Unknown session: ghost")
+
+
+describe "KernelSessionManager — per-cell mode override resolution":
+
+    it "a cell with no override runs on the session default":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        expect(mgr.resolve_cell_mode("s1", "")).to_equal("interpreter")
+
+    it "%%mode override wins for that cell without changing the default":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val overridden = mgr.resolve_cell_mode("s1", "interpreter(remote(vulkan(spv15)))")
+        expect(overridden).to_equal("interpreter(remote(vulkan(spv15)))")
+        # Default is unchanged.
+        expect(mgr.default_mode_of("s1")).to_equal("interpreter")
+
+    it "execute_cell honors a per-cell override and caches a distinct executor":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val r1 = mgr.execute_cell("s1", "code-a", "cell-1", "")
+        val r2 = mgr.execute_cell("s1", "code-b", "cell-2", "interpreter(remote(baremetal(riscv32)))")
+        assert_true(r1.is_ok())
+        assert_true(r2.is_ok())
+        expect(r1.stdout_delta).to_equal("echo: code-a")
+        expect(r2.stdout_delta).to_equal("echo: code-b")
+
+    it "repeated cells on the same lane reuse the cached executor (state persists)":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val _ = mgr.execute_cell("s1", "cell one", "cell-1", "")
+        val _ = mgr.execute_cell("s1", "cell two", "cell-2", "")
+        # Both cells ran on the same "interpreter" lane executor instance;
+        # observable via the factory only having created it once.
+        expect(mgr.resolve_cell_mode("s1", "")).to_equal("interpreter")
+
+    it "execute_cell on an unknown session returns an error CellResult, not a panic":
+        val mgr = manager_with_fake_factory()
+        val result = mgr.execute_cell("ghost", "val x = 1", "cell-1", "")
+        expect_not(result.is_ok())
+        expect(result.error).to_equal("Unknown session: ghost")
+
+
+describe "KernelSessionManager — invalid mode-spec diagnostic passthrough":
+
+    it "create_session surfaces the runner's 'Unknown platform' diagnostic verbatim":
+        val mgr = manager_with_fake_factory()
+        val diag = mgr.create_session("s1", "interpreter(nonsense(riscv32))")
+        expect(diag).to_equal("Unknown platform: nonsense")
+
+    it "set_default_mode surfaces the same diagnostic":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val diag = mgr.set_default_mode("s1", "interpreter(nonsense(riscv32))")
+        expect(diag).to_equal("Unknown platform: nonsense")
+        # Default mode is unchanged on rejection.
+        expect(mgr.default_mode_of("s1")).to_equal("interpreter")
+
+    it "execute_cell surfaces an invalid %%mode override as a CellResult error":
+        val mgr = manager_with_fake_factory()
+        val _ = mgr.create_session("s1", "interpreter")
+        val result = mgr.execute_cell("s1", "code", "cell-1", "interpreter(nonsense(riscv32))")
+        expect_not(result.is_ok())
+        expect(result.error).to_equal("Unknown platform: nonsense")
+
+    it "rejects vulkan(resident) with the GPU-A1 diagnostic verbatim":
+        val mgr = manager_with_fake_factory()
+        val diag = mgr.create_session("s1", "interpreter(remote(vulkan(spv15(resident))))")
+        expect(diag).to_equal("resident submode requires forward-progress guarantees; vulkan lanes are per-dispatch (see gpu_remote_interpreter_architecture.md §6.3)")
+
+    it "accepts a bare base runtime with no composite nesting":
+        assert_true(mode_spec_is_valid("interpreter"))
+        assert_true(mode_spec_is_valid("jit"))
+
+    it "accepts known composite lane specs":
+        assert_true(mode_spec_is_valid("interpreter(remote(baremetal(riscv32)))"))
+        assert_true(mode_spec_is_valid("interpreter(remote(cuda(sm80(resident))))"))
+        assert_true(mode_spec_is_valid("interpreter(remote(vulkan(spv15)))"))
+
+    it "validate_mode_spec on an empty spec reports Unknown platform":
+        expect(validate_mode_spec("")).to_equal("Unknown platform: ")
+        expect_not(mode_spec_is_valid(""))

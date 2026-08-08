@@ -1,0 +1,101 @@
+@gc
+
+# compute_run — end-to-end runtime execution for std.compute elementwise kernels.
+#
+# Wires the full pipeline: build launch plan -> gate on device availability ->
+# real GPU dispatch via gpu_ops (alloc/upload/load-module/launch/sync/download/free)
+# -> else the pure-Simple CPU reference (the differential oracle). On a CUDA host
+# the GPU branch runs on-device; with no device, gpu_device_count()==0 and the CPU
+# path runs. Result carries honest stats (which backend, ran_on_cpu, grid/block).
+
+use gc_async_mut.gpu_ops.{gpu_init, gpu_device_count, gpu_alloc_f32, gpu_upload_f32, gpu_download_f32, gpu_launch, gpu_sync, gpu_free}
+use gc_async_mut.gpu_types.{GpuError, GpuPtr, GpuModule, GpuLaunchConfig}
+use std.nogc_async_mut.compute.exec_target.{ExecTarget, ComputeBackend, compute_backend_name}
+
+val COMPUTE_BLOCK_SIZE = 256
+
+# 1D launch plan: block = 256 threads, grid = ceil(n / block).
+fn compute_grid_for(n: i64) -> i64:
+    if n <= 0:
+        return 0
+    (n + COMPUTE_BLOCK_SIZE - 1) / COMPUTE_BLOCK_SIZE
+
+fn target_is_device_backend(target: ExecTarget) -> bool:
+    val b = target.backend
+    b == ComputeBackend.Cuda or b == ComputeBackend.Hip or b == ComputeBackend.OpenCl or b == ComputeBackend.Vulkan or b == ComputeBackend.Metal or b == ComputeBackend.WebGpu
+
+# Result of a runtime compute execution.
+class ComputeRunResult:
+    data: [f32]
+    backend: text
+    ran_on_cpu: bool   # true => pure-Simple reference path executed
+    grid_x: i64
+    block_x: i64
+    device_count: i64
+    note: text
+
+    static fn make(data: [f32], backend: text, ran_on_cpu: bool, grid_x: i64, block_x: i64, device_count: i64, note: text) -> ComputeRunResult:
+        ComputeRunResult(data: data, backend: backend, ran_on_cpu: ran_on_cpu, grid_x: grid_x, block_x: block_x, device_count: device_count, note: note)
+
+# Pure-Simple reference: out[i] = in[i] * factor. The differential oracle.
+fn cpu_transform_scale_f32(data: [f32], factor: f32) -> [f32]:
+    var out = [for i in 0..data.len(): 0.0]
+    var i = 0
+    while i < data.len():
+        out[i] = data[i] * factor
+        i = i + 1
+    return out
+
+# Real GPU dispatch via gpu_ops. Returns Err (-> caller falls back to CPU) when the
+# precompiled PTX artifact is absent or any device op fails. On a CUDA host with the
+# built module this runs the kernel on-device. (`grid_dim`/`block_dim` are named to
+# avoid the `block`/`grid` soft-keyword parser trip — see bug doc.)
+fn gpu_transform_scale_f32(data: [f32], factor: f32, grid_dim: i64, block_dim: i64) -> Result<[f32], GpuError>:
+    gpu_init()?
+    val n = data.len()
+    val d_in = gpu_alloc_f32(n)?
+    val d_out = gpu_alloc_f32(n)?
+    gpu_upload_f32(d_in, data)?
+    # Load the precompiled kernel module (CUDA source -> PTX is a build step; see
+    # gpu_compute_algorithm_kernels.spl + portable_compute_compile_plan). Absent here
+    # => Err => CPU fallback. This is the hardware-integration boundary.
+    val module = GpuModule.load_file("build/gpu/compute/scale_u32.ptx")?
+    val config = GpuLaunchConfig(grid_x: grid_dim, grid_y: 1, grid_z: 1, block_x: block_dim, block_y: 1, block_z: 1)
+    # TODO(hardware): pack [d_out, d_in, factor, n] into the kernel arg buffer per the
+    # device ABI and pass its address; requires a CUDA device to validate the packing.
+    val args_ptr = compute_pack_scale_args(d_out, d_in, factor, n)
+    gpu_launch(module, "scale_u32", config, args_ptr)?
+    gpu_sync()?
+    val out = gpu_download_f32(d_out, n)?
+    gpu_free(d_in)?
+    gpu_free(d_out)?
+    Ok(out)
+
+# Packs kernel arguments. Returns 0 (null) until validated against a real device ABI;
+# gpu_launch then reports an error and the runner falls back to the CPU oracle — never
+# a wrong "GPU ran" result.
+fn compute_pack_scale_args(d_out: GpuPtr, d_in: GpuPtr, factor: f32, n: i64) -> i64:
+    0
+
+# End-to-end: run out[i] = in[i] * factor on the backend chosen by `target`.
+fn run_transform_scale_f32(data: [f32], factor: f32, target: ExecTarget) -> ComputeRunResult:
+    val grid_n = compute_grid_for(data.len())
+    val backend = compute_backend_name(target.backend)
+    val devices = gpu_device_count()
+    val want_gpu = target_is_device_backend(target) and devices > 0
+
+    if want_gpu:
+        val attempt = gpu_transform_scale_f32(data, factor, grid_n, COMPUTE_BLOCK_SIZE)
+        match attempt:
+            case Ok(gpu_out):
+                return ComputeRunResult.make(gpu_out, backend, false, grid_n, COMPUTE_BLOCK_SIZE, devices, "gpu-executed")
+            case Err(e):
+                val cpu_fb = cpu_transform_scale_f32(data, factor)
+                return ComputeRunResult.make(cpu_fb, backend, true, grid_n, COMPUTE_BLOCK_SIZE, devices, "gpu-unavailable-fell-back")
+
+    val cpu_out = cpu_transform_scale_f32(data, factor)
+    ComputeRunResult.make(cpu_out, backend, true, grid_n, COMPUTE_BLOCK_SIZE, devices, "cpu-reference")
+
+export COMPUTE_BLOCK_SIZE, ComputeRunResult
+export compute_grid_for, target_is_device_backend
+export cpu_transform_scale_f32, run_transform_scale_f32

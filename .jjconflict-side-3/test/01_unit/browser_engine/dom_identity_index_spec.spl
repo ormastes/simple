@@ -1,0 +1,447 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-004
+"""# Generation-qualified DOM identity index
+
+The document identity owner builds stable typed routes, resolves DOM
+associations without recursive lookup, and rejects routes captured from a
+replaced document generation.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomNodeRoute, DomIdentityIndex,
+    dom_identity_index_build, dom_node_route_text, dom_node_route_parse
+}
+use std.gc_async_mut.gpu.browser_engine.dom_limits.{
+    HTML_MAX_TREE_DEPTH, HTML_MAX_NODES
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+
+class DomIdentityGenerationFixture:
+    index: DomIdentityIndex
+    external_route: DomNodeRoute
+    later_form_route: DomNodeRoute
+    explicit_label_route: DomNodeRoute
+    nested_label_route: DomNodeRoute
+    nested_control_route: DomNodeRoute
+    free_radio_route: DomNodeRoute
+    deep_route: DomNodeRoute
+    first_duplicate_route: DomNodeRoute
+
+class DomIdentityReplacementReceipt:
+    index: DomIdentityIndex
+    replacement_route: DomNodeRoute
+
+fn fail(message: text):
+    fail_assertion(message)
+
+fn _generation(value: i64) -> DomDocumentGeneration:
+    match DomDocumentGeneration.create(value):
+        Ok(generation): generation
+        Err(reason): fail("Expected valid document generation: {reason}")
+
+fn _route(index: DomIdentityIndex, author_id: text) -> DomNodeRoute:
+    match index.route_for_author_id(author_id):
+        Some(route): route
+        nil: fail("Expected route for #{author_id}")
+
+fn _index(html: text, generation: i64) -> DomIdentityIndex:
+    val root = html_tree_builder_build(html)
+    match dom_identity_index_build(root, _generation(generation)):
+        Ok(index): index
+        Err(reason): fail("Expected DOM identity index: {reason}")
+
+fn _dom_identity_fixture_html() -> text:
+    "<html><head><title>identity</title></head><body>text" +
+        "<style>.hidden{{display:none}}</style>" +
+        "<input id='external' form='later' type='radio' name='team'>" +
+        "<label id='explicit-label' for='external'>External</label>" +
+        "<label id='nested-label'>Nested<input id='nested'></label>" +
+        "<script>document.title='ignored'</script><meta name='x'>" +
+        "<link rel='stylesheet'>" +
+        "<form id='later'><input id='owned' type='radio' name='team'></form>" +
+        "<input id='free-radio' type='radio' name='team'>" +
+        "<div id='duplicate'></div><span id='duplicate'></span>" +
+        "<section id='section'><script>0</script>" +
+        "<button id='deep'>Deep</button></section></body></html>"
+
+fn setup_dom_identity_generation_fixture() -> DomIdentityGenerationFixture:
+    val index = _index(_dom_identity_fixture_html(), 1)
+    DomIdentityGenerationFixture(
+        index: index,
+        external_route: _route(index, "external"),
+        later_form_route: _route(index, "later"),
+        explicit_label_route: _route(index, "explicit-label"),
+        nested_label_route: _route(index, "nested-label"),
+        nested_control_route: _route(index, "nested"),
+        free_radio_route: _route(index, "free-radio"),
+        deep_route: _route(index, "deep"),
+        first_duplicate_route: _route(index, "duplicate")
+    )
+
+fn _over_depth_layout_key() -> text:
+    var key = "path:0"
+    var depth = 0
+    while depth < HTML_MAX_TREE_DEPTH:
+        key = key + "/0"
+        depth = depth + 1
+    key
+
+fn _depth_overflow_dom() -> BeDomNode:
+    # Build bottom-up: `.push` copies, so children attached after a node is
+    # pushed into its parent would be lost.
+    var chain = BeDomNode.element_with_id(HTML_MAX_TREE_DEPTH.to_i64() + 1, "div")
+    var remaining = HTML_MAX_TREE_DEPTH - 1
+    while remaining > 0:
+        var parent = BeDomNode.element_with_id(remaining.to_i64() + 1, "div")
+        parent.children.push(chain)
+        chain = parent
+        remaining = remaining - 1
+    var root = BeDomNode.element_with_id(1, "html")
+    root.children.push(chain)
+    root
+
+fn _node_overflow_dom() -> BeDomNode:
+    # Batched subtrees keep every child array small: interpreter `.push`
+    # clones the whole array, so one flat 65k-child list is quadratic and
+    # times out. 257 branches x 256 leaves = 66,306 nodes > HTML_MAX_NODES.
+    var root = BeDomNode.element_with_id(1, "html")
+    var next_id: i64 = 2
+    var branch_count = 0
+    while branch_count < 257:
+        var branch = BeDomNode.element_with_id(next_id, "section")
+        next_id = next_id + 1
+        var leaf_count = 0
+        while leaf_count < 256:
+            branch.children.push(BeDomNode.element_with_id(next_id, "div"))
+            next_id = next_id + 1
+            leaf_count = leaf_count + 1
+        root.children.push(branch)
+        branch_count = branch_count + 1
+    root
+
+fn _check_deep_layout_inverse():
+    # Build bottom-up: `.push` copies, so children attached after a node is
+    # pushed into its parent would be lost.
+    val node_id: i64 = HTML_MAX_TREE_DEPTH.to_i64() + 1
+    var chain = BeDomNode.element_with_id(node_id - 1, "div")
+    var chain_id = node_id - 2
+    while chain_id >= 3:
+        var parent = BeDomNode.element_with_id(chain_id, "div")
+        parent.children.push(chain)
+        chain = parent
+        chain_id = chain_id - 1
+    var body = BeDomNode.element_with_id(2, "body")
+    body.children.push(chain)
+    var root = BeDomNode.element_with_id(1, "html")
+    root.children.push(body)
+    val index = match dom_identity_index_build(root, _generation(1)):
+        Ok(value): value
+        Err(reason): fail("Expected bounded deep layout index: {reason}")
+    val deepest = DomNodeRoute(
+        generation: _generation(1), node_id: node_id - 1
+    )
+    val target_key = match index.layout_target_key_for_route(deepest):
+        Some(value): value
+        nil: fail("Expected deep inverse layout path")
+    expect(target_key.slice(5, target_key.len()).split("/").len()).to_equal(
+        HTML_MAX_TREE_DEPTH - 2
+    )
+    expect(index.route_for_layout_target_key(target_key)).to_equal(Ok(deepest))
+
+fn _check_layout_and_admission_bounds():
+    var two_body_root = BeDomNode.element_with_id(1, "html")
+    var first_body = BeDomNode.element_with_id(2, "body")
+    first_body.children.push(BeDomNode.element_with_id(3, "div"))
+    var later_body = BeDomNode.element_with_id(4, "body")
+    later_body.children.push(BeDomNode.element_with_id(5, "div"))
+    two_body_root.children.push(first_body)
+    two_body_root.children.push(later_body)
+    val two_body_index = match dom_identity_index_build(
+        two_body_root, _generation(1)
+    ):
+        Ok(index): index
+        Err(reason): fail("Expected first-body layout index: {reason}")
+    val first_child_route = DomNodeRoute(
+        generation: _generation(1), node_id: 3
+    )
+    val later_child_route = DomNodeRoute(
+        generation: _generation(1), node_id: 5
+    )
+    expect(two_body_index.route_for_layout_target_key("path:0")).to_equal(
+        Ok(first_child_route)
+    )
+    expect(two_body_index.layout_target_key_for_route(
+        later_child_route
+    )).to_be_nil()
+    expect(dom_identity_index_build(
+        _depth_overflow_dom(), _generation(1)
+    )).to_equal(Err("tree_depth_exceeded"))
+    expect(dom_identity_index_build(
+        _node_overflow_dom(), _generation(1)
+    )).to_equal(Err("node_limit_exceeded"))
+
+fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
+    val index = fixture.index
+    expect(index.generation.value).to_equal(1)
+    expect(index.counters.pass_count).to_equal(2)
+    expect(index.counters.build_visit_count).to_equal(
+        index.counters.node_count * 2
+    )
+    expect(index.counters.duplicate_author_id_count).to_equal(1)
+    expect(index.counters.layout_relation_count).to_equal(11)
+    expect(index.form_owner_for_route(fixture.external_route)).to_equal(
+        Some(fixture.later_form_route)
+    )
+    expect(index.control_for_label_route(
+        fixture.explicit_label_route
+    )).to_equal(Some(fixture.external_route))
+    expect(index.control_for_label_route(
+        fixture.nested_label_route
+    )).to_equal(Some(fixture.nested_control_route))
+
+    val owned_group = match index.radio_group_for_route(fixture.external_route):
+        Some(group): group
+        nil: fail("Expected form-owned radio group")
+    val free_group = match index.radio_group_for_route(fixture.free_radio_route):
+        Some(group): group
+        nil: fail("Expected ownerless radio group")
+    expect(owned_group.form_owner).to_equal(Some(fixture.later_form_route))
+    expect(index.radio_members(owned_group).len()).to_equal(2)
+    expect(free_group.form_owner).to_be_nil()
+    expect(index.radio_members(free_group).len()).to_equal(1)
+
+    expect(index.route_for_layout_target_key("id:duplicate")).to_equal(
+        Ok(fixture.first_duplicate_route)
+    )
+    expect(index.author_id_for_route(fixture.deep_route)).to_equal(
+        Some("deep")
+    )
+    val body_route = match index.route_for_layout_target_key("path:"):
+        Ok(route): route
+        Err(reason): fail("Expected body layout route: {reason}")
+    expect(index.author_id_for_route(body_route)).to_be_nil()
+    expect(index.route_for_layout_target_key("path:7/0")).to_equal(
+        Ok(fixture.deep_route)
+    )
+    expect(index.layout_target_key_for_route(fixture.deep_route)).to_equal(
+        Some("path:7/0")
+    )
+    expect(index.route_for_layout_target_key("path:08/0")).to_equal(
+        Err("invalid_target")
+    )
+    expect(index.route_for_layout_target_key("path:0//1")).to_equal(
+        Err("invalid_target")
+    )
+    expect(index.route_for_layout_target_key(
+        _over_depth_layout_key()
+    )).to_equal(Err("invalid_target"))
+    val oversized_path = (
+        "path:" + "0".repeat(HTML_MAX_TREE_DEPTH.to_i64() * 11)
+    )
+    expect(index.route_for_layout_target_key(oversized_path)).to_equal(
+        Err("invalid_target")
+    )
+    val oversized_route = (
+        "dom-route-v1:" + "1".repeat(19) + ":" + "1".repeat(20)
+    )
+    expect(dom_node_route_parse(oversized_route)).to_equal(
+        Err("invalid_route")
+    )
+    _check_deep_layout_inverse()
+    _check_layout_and_admission_bounds()
+
+fn check_stable_route_dispatch(fixture: DomIdentityGenerationFixture):
+    val route_text = dom_node_route_text(fixture.deep_route)
+    expect(dom_node_route_parse(route_text)).to_equal(Ok(fixture.deep_route))
+    expect(fixture.index.contains_route(fixture.deep_route)).to_be(true)
+    val path = match fixture.index.path_for_route(fixture.deep_route):
+        Some(value): value
+        nil: fail("Expected structural path for captured route")
+    expect(path.len()).to_equal(4)
+    val event_path = fixture.index.event_path_for_route(fixture.deep_route)
+    expect(event_path.len()).to_equal(5)
+    expect(event_path[event_path.len() - 1]).to_equal(fixture.deep_route)
+
+fn check_document_replacement_during_handler(
+    captured_route: DomNodeRoute
+) -> DomIdentityReplacementReceipt:
+    val replacement = _index(_dom_identity_fixture_html(), 2)
+    val replacement_route = _route(replacement, "deep")
+    expect(replacement_route.generation.value).to_equal(2)
+    expect(replacement_route.node_id).to_equal(captured_route.node_id)
+    DomIdentityReplacementReceipt(
+        index: replacement,
+        replacement_route: replacement_route
+    )
+
+fn check_stale_routes_and_index_release(
+    captured_index: DomIdentityIndex,
+    captured_route: DomNodeRoute,
+    replacement: DomIdentityReplacementReceipt
+):
+    expect(captured_index.contains_route(captured_route)).to_be(true)
+    expect(replacement.index.contains_route(captured_route)).to_be(false)
+    expect(replacement.index.path_for_route(captured_route)).to_be_nil()
+    expect(replacement.index.layout_target_key_for_route(
+        captured_route
+    )).to_be_nil()
+    expect(replacement.replacement_route.generation.value).to_equal(2)
+    var pinned: DomIdentityIndex? = Some(captured_index)
+    match pinned:
+        Some(index): expect(index.generation.value).to_equal(1)
+        nil: fail("Expected captured index to remain pinned during unwind")
+    pinned = nil
+    expect(pinned).to_be_nil()
+
+describe "Generation-qualified DOM identity index":
+
+    # @req REQ-WEB-BROWSER-004
+    it "keeps routes stable only for the committed document generation":
+        step("Build the document identity index")
+        val fixture = setup_dom_identity_generation_fixture()
+        check_dom_identity_index_built(fixture)
+
+        step("Dispatch through stable routes")
+        check_stable_route_dispatch(fixture)
+
+        step("Replace the document during a handler")
+        val replacement = check_document_replacement_during_handler(
+            fixture.deep_route
+        )
+
+        step("Reject stale routes and release the index")
+        check_stale_routes_and_index_release(
+            fixture.index, fixture.deep_route, replacement
+        )
+
+    # @req REQ-WEB-BROWSER-004
+    it "admits only canonical positive generation values":
+        expect(DomDocumentGeneration.create(0)).to_equal(
+            Err("invalid_generation")
+        )
+        expect(DomDocumentGeneration.create(-1)).to_equal(
+            Err("invalid_generation")
+        )
+        expect(_generation(5).value).to_equal(5)
+        val advanced = match _generation(5).next():
+            Ok(value): value
+            Err(reason): fail("Expected successor generation: {reason}")
+        expect(advanced.value).to_equal(6)
+        expect(DomDocumentGeneration(
+            value: 9223372036854775807
+        ).next()).to_equal(Err("generation_exhausted"))
+
+        # `create` is not the only way in: a generation built directly around a
+        # non-positive value must still be refused by the builder itself,
+        # before any node is visited.
+        val root = html_tree_builder_build("<p id='a'>x</p>")
+        expect(dom_identity_index_build(
+            root, DomDocumentGeneration(value: 0)
+        )).to_equal(Err("invalid_generation"))
+        expect(dom_identity_index_build(
+            root, DomDocumentGeneration(value: -3)
+        )).to_equal(Err("invalid_generation"))
+
+    # @req REQ-WEB-BROWSER-004
+    it "round-trips route text and rejects every non-canonical form":
+        val route = DomNodeRoute(generation: _generation(1), node_id: 7)
+        expect(dom_node_route_text(route)).to_equal("dom-route-v1:1:7")
+        expect(dom_node_route_parse("dom-route-v1:1:7")).to_equal(Ok(route))
+        expect(dom_node_route_parse("nope")).to_equal(Err("invalid_route"))
+        expect(dom_node_route_parse("dom-route-v2:1:7")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:7:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:0:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:01:1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:-1")).to_equal(
+            Err("invalid_route")
+        )
+        expect(dom_node_route_parse("dom-route-v1:1:")).to_equal(
+            Err("invalid_route")
+        )
+
+    # @req REQ-WEB-BROWSER-004
+    it "separates malformed layout targets from targets that are absent":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        expect(index.route_for_layout_target_key("id:")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("q:1")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("path:-1")).to_equal(
+            Err("invalid_target")
+        )
+        expect(index.route_for_layout_target_key("id:zzz")).to_equal(
+            Err("target_not_found")
+        )
+        expect(index.route_for_layout_target_key("path:99")).to_equal(
+            Err("target_not_found")
+        )
+        val first_div = _route(index, "a")
+        expect(index.route_for_layout_target_key("path:0")).to_equal(
+            Ok(first_div)
+        )
+        expect(index.layout_target_key_for_route(first_div)).to_equal(
+            Some("path:0")
+        )
+        expect(index.author_id_for_route(first_div)).to_equal(Some("a"))
+        expect(index.route_for_author_id("")).to_be_nil()
+        expect(index.route_for_author_id("zzz")).to_be_nil()
+
+    # @req REQ-WEB-BROWSER-004
+    it "refuses every association lookup made with a foreign generation":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        val live = _route(index, "r")
+        expect(index.contains_route(live)).to_be(true)
+        expect(index.form_owner_for_route(live)).to_equal(
+            Some(_route(index, "f"))
+        )
+        val foreign = DomNodeRoute(
+            generation: _generation(2), node_id: live.node_id
+        )
+        expect(index.contains_route(foreign)).to_be(false)
+        expect(index.form_owner_for_route(foreign)).to_be_nil()
+        expect(index.control_for_label_route(foreign)).to_be_nil()
+        expect(index.radio_group_for_route(foreign)).to_be_nil()
+        expect(index.author_id_for_route(foreign)).to_be_nil()
+        expect(index.path_for_route(foreign)).to_be_nil()
+        expect(index.event_path_for_route(foreign).len()).to_equal(0)
+
+    # @req REQ-WEB-BROWSER-004
+    it "counts exactly one visit per node in each of the two build passes":
+        val index = _index(
+            "<body><div id='a'><input id='i' type='hidden'></div>" +
+            "<form id='f'><input id='r' type='radio' name='n'></form>" +
+            "</body>",
+            1
+        )
+        expect(index.counters.pass_count).to_equal(2)
+        expect(index.counters.node_count).to_equal(8)
+        expect(index.counters.build_visit_count).to_equal(16)
+        expect(index.counters.duplicate_author_id_count).to_equal(0)
+        expect(index.counters.resolved_association_count).to_equal(1)
+        expect(index.counters.unresolved_association_count).to_equal(0)
+        expect(index.counters.layout_relation_count).to_equal(4)

@@ -1,0 +1,48 @@
+# Regression guard for the statement-coverage collector's cross-file line
+# conflation (defect D). The collector pooled every file's executed line
+# numbers into ONE global set, so a line executed in file A marked the SAME
+# line number in file B as covered whenever B's enclosing function had also
+# been called.
+#
+# covkey_exec_a.spl executes recordable lines 3..11.
+# covkey_dead_b.spl has recordable lines 4..11 that are NEVER executed
+# (the guard is always false), plus lines 3 and 12 that always run, and its
+# enclosing function IS called. Honest coverage for B is therefore 2/10 = 20%.
+# With the defect, B reported 100% (10/10).
+#
+# Expected report with a correct instrument:
+#   covkey_exec_a.spl  100% (9/9)   -- genuinely fully executed
+#   covkey_dead_b.spl   20% (2/10)  -- was 100% before the (file, line) key
+#   covkey_calls_c.spl  50% (3/6)   -- negative control for the called gate
+#   covkey_toplevel_d.spl 66% (2/3) -- known residual: a flattened module-level
+#                                      statement is still filed under <entry>,
+#                                      so it under-reports by one line. That is
+#                                      the conservative direction; see the
+#                                      RESIDUAL note in test_runner_single.spl.
+#
+# @cover test/fixtures/coverage/covkey_exec_a.spl
+# @cover test/fixtures/coverage/covkey_dead_b.spl
+# @cover test/fixtures/coverage/covkey_calls_c.spl
+# @cover test/fixtures/coverage/covkey_toplevel_d.spl
+use std.spec.{describe, it}
+use test.fixtures.coverage.covkey_exec_a.covfix_a_run
+use test.fixtures.coverage.covkey_dead_b.covfix_b_run
+use test.fixtures.coverage.covkey_calls_c.covfix_c_called
+use test.fixtures.coverage.covkey_toplevel_d.covfix_d_run
+
+describe "coverage line-key attribution":
+    it "runs file A's lines fully and file B's guard only":
+        """File A executes every recordable line; file B enters its function
+        but never takes the branch holding the same line numbers."""
+        assert_equal(covfix_a_run(), 28)
+        assert_equal(covfix_b_run(false), 0)
+
+    it "leaves the uncalled function in the negative control unexecuted":
+        """Only one of file C's two functions is ever called, so file C must
+        never report 100%."""
+        assert_equal(covfix_c_called(), 2)
+
+    it "credits a module-level statement that really executed":
+        """File D's module-level val and its function body all execute, so it
+        must report 100% -- proof the (file, line) key does not under-report."""
+        assert_equal(covfix_d_run(), 7)

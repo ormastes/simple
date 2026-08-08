@@ -1,0 +1,781 @@
+# ============================================================================
+# Frozen PlacementRequest / PlacementPlan / lease-rules contract v1 —
+# contract-freeze gate.
+#
+# Architecture §20 (GPU Object VM, placement, leases), §26 (contract freeze),
+# §27 (PLACE lane).
+#
+# Like the ID-TAG, MAP, RECEIPT and QUERY gates this proves three separate
+# things, because round-tripping alone is not enough for a frozen contract:
+#
+#   1. EXACT BYTES — encoder output equals a hand-derived golden vector. This
+#      is what actually freezes the format; a round-trip test alone passes
+#      happily even if encoder and decoder drift together.
+#   2. ROUND TRIP — decode(encode(x)) reconstructs x for every record shape.
+#   3. REJECTION — malformed, truncated, cross-typed, wrong-version and
+#      structurally-invalid buffers are refused rather than silently coerced.
+#
+# For this group there is a fourth, and it is the reason the group exists:
+#
+#   4. LEASE VALIDITY IS DECIDABLE. §4.1 says an EntityRef is "valid only while
+#      the referenced snapshot/object lease is valid" and §20.5 says "a raw
+#      address may be used only inside the lease epoch". Neither sentence can
+#      be checked against a `PlacementLease` as declared. The assertions below
+#      exercise the predicates that make them checkable, and — more
+#      importantly — assert that a dead lease carrying a live address cannot be
+#      ENCODED at all.
+# ============================================================================
+
+use std.spec
+use std.common.structural.wire.{wire_to_hex}
+use std.common.compute.placement_contracts.planner.{CostEstimate}
+use std.common.compute.placement_contracts.schema.{
+    PLACEMENT_NO_EPOCH,
+    PLACEMENT_NO_SLOT,
+    PLACEMENT_SCHEMA_ID
+}
+use std.common.structural.placement.placement_contracts.{
+    ACCESS_PATTERN_COUNT,
+    ACCESS_PATTERN_MAX,
+    LEASE_ACCESS_KNOWN,
+    LEASE_ACCESS_NONE,
+    LEASE_ACCESS_READ,
+    LEASE_ACCESS_WRITE,
+    LEASE_STATE_COUNT,
+    LEASE_STATE_MAX,
+    PERSISTENCE_POLICY_COUNT,
+    PERSISTENCE_POLICY_MAX,
+    PLACE_SCHEMA_VERSION,
+    RESIDENCY_TIER_COUNT,
+    TIER_SET_DEVICE,
+    TIER_SET_DEVICE_LOCAL,
+    TIER_SET_DEVICE_SHARED,
+    TIER_SET_HOST_COLD,
+    TIER_SET_HOST_HOT,
+    TIER_SET_HOST_PINNED,
+    TIER_SET_KNOWN,
+    TIER_SET_RECOMPUTABLE,
+    TIER_SET_SSD_CAS,
+    access_pattern_from_u8,
+    access_pattern_required_rights,
+    access_pattern_to_u8,
+    access_pattern_valid,
+    lease_access_satisfies,
+    lease_access_valid,
+    lease_state_from_u8,
+    lease_state_is_dead,
+    lease_state_is_live,
+    lease_state_prevents_eviction,
+    lease_state_to_u8,
+    lease_state_valid,
+    persistence_policy_from_u8,
+    persistence_policy_to_u8,
+    persistence_policy_valid,
+    place_u64_add_fits,
+    place_u64_le,
+    place_u64_lt,
+    tier_set_has_device,
+    tier_set_valid
+}
+use std.common.structural.execution.profile_types.{
+    DEVICE_BIT_GPU,
+    DEVICE_MASK_KNOWN,
+    device_mask_valid
+}
+use std.common.structural.placement.placement_types.{
+    LEASE_GRANT_LEN,
+    PLACEMENT_COST_LEN,
+    PLACEMENT_PLAN_LEN,
+    PLACEMENT_REQUEST_LEN,
+    PLACE_CONFIDENCE_MAX,
+    PLACE_NO_TIER,
+    PLACE_ZERO_SEED,
+    LeaseGrant,
+    entity_ref_valid_under,
+    lease_grant,
+    lease_grant_covers,
+    lease_grant_dead,
+    lease_grant_satisfies_request,
+    lease_grant_valid_at,
+    lease_grant_well_formed,
+    lease_set_lookup,
+    lease_set_well_formed,
+    lease_set_wire,
+    place_hex64_valid,
+    placement_cost_equal,
+    placement_cost_from_estimate,
+    placement_cost_well_formed,
+    placement_cost_wire,
+    placement_cost_zero,
+    placement_plan_equal,
+    placement_plan_wire,
+    placement_request_equal,
+    placement_request_well_formed,
+    placement_request_wire,
+    resident_view_valid_under,
+    resident_view_wire
+}
+use std.common.structural.placement.placement_codec.{
+    decode_lease_grant,
+    decode_lease_set,
+    decode_placement_plan,
+    decode_placement_request,
+    encode_lease_grant,
+    encode_lease_set,
+    encode_placement_plan,
+    encode_placement_request,
+    lease_set_acquirable_from
+}
+use test.fixtures.structural.placement_golden_v1.{
+    GOLDEN_LEASE_ACTIVE,
+    GOLDEN_LEASE_PINNED_MAX,
+    GOLDEN_LEASE_REVOKED,
+    GOLDEN_LEASE_SET_EMPTY,
+    GOLDEN_LEASE_SET_PAIR,
+    GOLDEN_PLAN_FULL,
+    GOLDEN_PLAN_MINIMAL,
+    GOLDEN_REQUEST_FULL,
+    GOLDEN_REQUEST_MINIMAL,
+    GOLDEN_REQUEST_UNSIGNED_EPOCH
+}
+
+# ----------------------------------------------------------------------------
+# Bit patterns Simple cannot spell as positive i64 literals.
+# ----------------------------------------------------------------------------
+
+val U64_MAX_BITS: i64 = 0 - 1
+val U64_MSB_BITS: i64 = 1 << 63
+# 0xffffffffffff0000 — the highest address that still leaves 0xffff of room.
+val ADDR_TOP: i64 = (0 - 1) - 65535
+
+# ----------------------------------------------------------------------------
+# Buffer surgery helpers
+# ----------------------------------------------------------------------------
+
+fn corrupt_byte(data: [u8], off: i64, v: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        if i == off:
+            b.push(v)
+        else:
+            b.push(data[i])
+        i = i + 1
+    b
+
+fn truncated(data: [u8], n: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < n:
+        b.push(data[i])
+        i = i + 1
+    b
+
+fn appended(data: [u8], v: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < data.len():
+        b.push(data[i])
+        i = i + 1
+    b.push(v)
+    b
+
+# ----------------------------------------------------------------------------
+# The records the golden vectors describe
+# ----------------------------------------------------------------------------
+
+fn minimal_request():
+    val none: [i64] = []
+    placement_request_wire(1, 1, 0, 8, none, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)
+
+fn full_request():
+    val pref: [i64] = [0, 2, 1]
+    placement_request_wire(0x11223344, 7, 3, 7, pref, 2, 1,
+                           0x1122334455667788, 0x101, 5, 0x10, 0x20,
+                           0x40, 0x80, 0x99)
+
+fn unsigned_epoch_request():
+    val none: [i64] = []
+    placement_request_wire(2, 0, 4, 32, none, 1, 0, 0, 0xffffffff, 8,
+                           1, U64_MSB_BITS, U64_MAX_BITS, 0, 0)
+
+fn lease_active() -> LeaseGrant:
+    lease_grant(5, 9, 257, 0, 3, 0, 0x00007f0000001000, 4096)
+
+fn lease_pinned_max() -> LeaseGrant:
+    lease_grant(0xfffffffe, 0xffffffff, 0xfffffffe, 1, 1, 2, ADDR_TOP, 0xffff)
+
+fn lease_revoked() -> LeaseGrant:
+    lease_grant_dead(5, 9, 4, 0)
+
+fn lease_set_pair():
+    val gs: [LeaseGrant] = [lease_active(), lease_pinned_max()]
+    lease_set_wire(gs)
+
+fn minimal_plan():
+    placement_plan_wire(PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                        PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                        3, 1, placement_cost_zero(), PLACE_ZERO_SEED)
+
+fn full_plan():
+    val cost = placement_cost_wire(1, 2, 3, 4, 5, 6, 7, 8, 9, 1000)
+    placement_plan_wire(0x10, 1, 0x11, 2, PLACEMENT_NO_SLOT, 0,
+                        0x13, 4, 0x14, 5, cost,
+                        "0123456789abcdef0123456789abcdef"
+                            + "0123456789abcdef0123456789abcdef")
+
+# ============================================================================
+# 0. The contract constants
+# ============================================================================
+
+describe "Placement contract version and record lengths":
+    it "ties the wire version to the already-frozen schema id":
+        assert_equal(PLACE_SCHEMA_VERSION, 1)
+        assert_equal(PLACE_SCHEMA_VERSION, PLACEMENT_SCHEMA_ID)
+
+    it "freezes every record length":
+        assert_equal(PLACEMENT_REQUEST_LEN, 82)
+        assert_equal(LEASE_GRANT_LEN, 32)
+        assert_equal(PLACEMENT_COST_LEN, 70)
+        assert_equal(PLACEMENT_PLAN_LEN, 142)
+
+    it "keeps a lease grant inside the 32-48 byte hot-descriptor budget":
+        assert_true(LEASE_GRANT_LEN >= 32 and LEASE_GRANT_LEN <= 48)
+
+# ============================================================================
+# 1. Wire discriminants
+# ============================================================================
+
+describe "AccessPattern wire discriminants":
+    it "assigns declaration order as wire order":
+        assert_equal(ACCESS_PATTERN_MAX, 4)
+        assert_equal(ACCESS_PATTERN_COUNT, 5)
+
+    it "round-trips every valid discriminant":
+        var v = 0
+        while v <= ACCESS_PATTERN_MAX:
+            assert_equal(access_pattern_to_u8(access_pattern_from_u8(v)), v)
+            assert_true(access_pattern_valid(v))
+            v = v + 1
+
+    it "rejects a discriminant past the maximum":
+        assert_false(access_pattern_valid(ACCESS_PATTERN_MAX + 1))
+        assert_false(access_pattern_valid(0 - 1))
+
+describe "PersistencePolicy wire discriminants":
+    it "round-trips every valid discriminant":
+        assert_equal(PERSISTENCE_POLICY_MAX, 3)
+        assert_equal(PERSISTENCE_POLICY_COUNT, 4)
+        var v = 0
+        while v <= PERSISTENCE_POLICY_MAX:
+            assert_equal(persistence_policy_to_u8(persistence_policy_from_u8(v)), v)
+            v = v + 1
+        assert_false(persistence_policy_valid(PERSISTENCE_POLICY_MAX + 1))
+
+describe "LeaseState wire discriminants":
+    it "freezes the five derived states in order":
+        assert_equal(LEASE_STATE_MAX, 4)
+        assert_equal(LEASE_STATE_COUNT, 5)
+        var v = 0
+        while v <= LEASE_STATE_MAX:
+            assert_equal(lease_state_to_u8(lease_state_from_u8(v)), v)
+            v = v + 1
+        assert_false(lease_state_valid(LEASE_STATE_MAX + 1))
+
+    it "splits live from dead exhaustively":
+        var v = 0
+        while v <= LEASE_STATE_MAX:
+            assert_true(lease_state_is_live(v) != lease_state_is_dead(v))
+            v = v + 1
+
+    it "marks exactly Pinned and InFlight as eviction-preventing":
+        assert_false(lease_state_prevents_eviction(0))
+        assert_true(lease_state_prevents_eviction(1))
+        assert_true(lease_state_prevents_eviction(2))
+        assert_false(lease_state_prevents_eviction(3))
+        assert_false(lease_state_prevents_eviction(4))
+
+describe "ResidencyTierSet wire slot":
+    it "assigns bit i to tier discriminant i":
+        assert_equal(TIER_SET_DEVICE_LOCAL, 1)
+        assert_equal(TIER_SET_DEVICE_SHARED, 2)
+        assert_equal(TIER_SET_HOST_PINNED, 4)
+        assert_equal(TIER_SET_HOST_HOT, 8)
+        assert_equal(TIER_SET_HOST_COLD, 16)
+        assert_equal(TIER_SET_SSD_CAS, 32)
+        assert_equal(TIER_SET_RECOMPUTABLE, 64)
+        assert_equal(TIER_SET_KNOWN, 127)
+        assert_equal(RESIDENCY_TIER_COUNT, 7)
+
+    it "hard-rejects a reserved bit instead of masking it away":
+        assert_true(tier_set_valid(TIER_SET_KNOWN))
+        assert_false(tier_set_valid(128))
+        assert_false(tier_set_valid(TIER_SET_KNOWN + 1))
+
+    it "derives the device tiers from the frozen schema helper":
+        assert_equal(TIER_SET_DEVICE, 3)
+        assert_true(tier_set_has_device(TIER_SET_DEVICE_LOCAL))
+        assert_true(tier_set_has_device(TIER_SET_DEVICE_SHARED))
+        assert_false(tier_set_has_device(TIER_SET_HOST_HOT))
+        assert_false(tier_set_has_device(TIER_SET_SSD_CAS))
+
+describe "LeaseAccess rights":
+    it "freezes read and write with the rest reserved":
+        assert_equal(LEASE_ACCESS_NONE, 0)
+        assert_equal(LEASE_ACCESS_READ, 1)
+        assert_equal(LEASE_ACCESS_WRITE, 2)
+        assert_equal(LEASE_ACCESS_KNOWN, 3)
+        assert_false(lease_access_valid(4))
+
+    it "maps each AccessPattern to the rights it implies":
+        assert_equal(access_pattern_required_rights(0), LEASE_ACCESS_READ)
+        assert_equal(access_pattern_required_rights(1), LEASE_ACCESS_READ)
+        assert_equal(access_pattern_required_rights(2), LEASE_ACCESS_KNOWN)
+        assert_equal(access_pattern_required_rights(3), LEASE_ACCESS_KNOWN)
+        assert_equal(access_pattern_required_rights(4), LEASE_ACCESS_WRITE)
+
+    it "refuses an under-privileged grant":
+        assert_true(lease_access_satisfies(LEASE_ACCESS_KNOWN, LEASE_ACCESS_WRITE))
+        assert_false(lease_access_satisfies(LEASE_ACCESS_READ, LEASE_ACCESS_WRITE))
+        assert_false(lease_access_satisfies(LEASE_ACCESS_NONE, LEASE_ACCESS_READ))
+
+# ============================================================================
+# 2. Unsigned 64-bit primitives — the width trap
+# ============================================================================
+
+describe "Unsigned 64-bit comparison":
+    it "orders a high u64 above a low one even though it decodes negative":
+        assert_true(U64_MSB_BITS < 0)
+        assert_true(place_u64_lt(1, U64_MSB_BITS))
+        assert_false(place_u64_lt(U64_MSB_BITS, 1))
+        assert_true(place_u64_lt(U64_MSB_BITS, U64_MAX_BITS))
+        assert_true(place_u64_le(U64_MAX_BITS, U64_MAX_BITS))
+
+    it "computes remaining room instead of a sum that would wrap":
+        assert_true(place_u64_add_fits(0, U64_MAX_BITS))
+        assert_true(place_u64_add_fits(ADDR_TOP, 0xffff))
+        assert_false(place_u64_add_fits(ADDR_TOP, 0x10000))
+        assert_false(place_u64_add_fits(U64_MAX_BITS, 1))
+
+# ============================================================================
+# 3. EXACT BYTES — the actual freeze
+# ============================================================================
+
+describe "PlacementRequest exact bytes":
+    it "encodes the minimal request to the golden vector":
+        assert_equal(wire_to_hex(encode_placement_request(minimal_request())),
+                     GOLDEN_REQUEST_MINIMAL)
+
+    it "encodes the fully populated request to the golden vector":
+        assert_equal(wire_to_hex(encode_placement_request(full_request())),
+                     GOLDEN_REQUEST_FULL)
+
+    it "encodes an interval only an unsigned comparison accepts":
+        assert_equal(
+            wire_to_hex(encode_placement_request(unsigned_epoch_request())),
+            GOLDEN_REQUEST_UNSIGNED_EPOCH)
+
+    it "fills unused preference slots with 0xff, never 0":
+        assert_equal(PLACE_NO_TIER, 255)
+        val bytes = encode_placement_request(minimal_request())
+        assert_equal(bytes[8 + 11] & 0xFF, 255)
+        assert_equal(bytes[8 + 17] & 0xFF, 255)
+
+    it "emits exactly the frozen record length":
+        assert_equal(encode_placement_request(minimal_request()).len(),
+                     8 + PLACEMENT_REQUEST_LEN)
+
+describe "LeaseGrant exact bytes":
+    it "encodes an active lease to the golden vector":
+        assert_equal(wire_to_hex(encode_lease_grant(lease_active())),
+                     GOLDEN_LEASE_ACTIVE)
+
+    it "encodes the maximum non-wrapping window to the golden vector":
+        assert_equal(wire_to_hex(encode_lease_grant(lease_pinned_max())),
+                     GOLDEN_LEASE_PINNED_MAX)
+
+    it "encodes a revoked lease to its single legal shape":
+        assert_equal(wire_to_hex(encode_lease_grant(lease_revoked())),
+                     GOLDEN_LEASE_REVOKED)
+
+    it "emits exactly the frozen record length":
+        assert_equal(encode_lease_grant(lease_active()).len(),
+                     8 + LEASE_GRANT_LEN)
+
+describe "LeaseSet exact bytes":
+    it "encodes an empty acquire result to the golden vector":
+        assert_equal(wire_to_hex(encode_lease_set(lease_set_wire([]))),
+                     GOLDEN_LEASE_SET_EMPTY)
+
+    it "encodes an ordered pair to the golden vector":
+        assert_equal(wire_to_hex(encode_lease_set(lease_set_pair())),
+                     GOLDEN_LEASE_SET_PAIR)
+
+describe "PlacementPlan exact bytes":
+    it "encodes the minimal acquirable plan to the golden vector":
+        assert_equal(wire_to_hex(encode_placement_plan(minimal_plan())),
+                     GOLDEN_PLAN_MINIMAL)
+
+    it "encodes a fully populated plan to the golden vector":
+        assert_equal(wire_to_hex(encode_placement_plan(full_plan())),
+                     GOLDEN_PLAN_FULL)
+
+    it "emits exactly the frozen record length":
+        assert_equal(encode_placement_plan(minimal_plan()).len(),
+                     8 + PLACEMENT_PLAN_LEN)
+
+# ============================================================================
+# 4. Round trip
+# ============================================================================
+
+describe "Placement round trip":
+    it "reconstructs every request shape":
+        val a = decode_placement_request(encode_placement_request(minimal_request()))
+        assert_true(a.ok)
+        assert_true(placement_request_equal(a.value, minimal_request()))
+        val b = decode_placement_request(encode_placement_request(full_request()))
+        assert_true(b.ok)
+        assert_true(placement_request_equal(b.value, full_request()))
+        val c = decode_placement_request(
+            encode_placement_request(unsigned_epoch_request()))
+        assert_true(c.ok)
+        assert_true(placement_request_equal(c.value, unsigned_epoch_request()))
+
+    it "preserves the preference ORDER, not just the membership":
+        val r = decode_placement_request(encode_placement_request(full_request()))
+        assert_true(r.ok)
+        assert_equal(r.value.preferred.len(), 3)
+        assert_equal(r.value.preferred[0], 0)
+        assert_equal(r.value.preferred[1], 2)
+        assert_equal(r.value.preferred[2], 1)
+
+    it "reconstructs every lease grant shape":
+        val a = decode_lease_grant(encode_lease_grant(lease_active()))
+        assert_true(a.ok)
+        assert_equal(a.value.device_address, 0x00007f0000001000)
+        assert_equal(a.value.lease_epoch, 257)
+        val b = decode_lease_grant(encode_lease_grant(lease_pinned_max()))
+        assert_true(b.ok)
+        assert_equal(b.value.device_address, ADDR_TOP)
+        assert_equal(b.value.length, 0xffff)
+        val c = decode_lease_grant(encode_lease_grant(lease_revoked()))
+        assert_true(c.ok)
+        assert_equal(c.value.lease_epoch, PLACEMENT_NO_EPOCH)
+        assert_equal(c.value.device_address, 0)
+
+    it "reconstructs a lease set":
+        val s = decode_lease_set(encode_lease_set(lease_set_pair()))
+        assert_true(s.ok)
+        assert_equal(s.value.grants.len(), 2)
+        assert_equal(s.value.grants[0].object_slot, 5)
+        assert_equal(s.value.grants[1].object_slot, 0xfffffffe)
+
+    it "reconstructs every plan shape":
+        val a = decode_placement_plan(encode_placement_plan(minimal_plan()))
+        assert_true(a.ok)
+        assert_true(placement_plan_equal(a.value, minimal_plan()))
+        val b = decode_placement_plan(encode_placement_plan(full_plan()))
+        assert_true(b.ok)
+        assert_true(placement_plan_equal(b.value, full_plan()))
+        assert_equal(b.value.cost.confidence_milli, PLACE_CONFIDENCE_MAX)
+
+# ============================================================================
+# 5. Lease validity is DECIDABLE — the point of the group
+# ============================================================================
+
+describe "Lease validity rules":
+    it "authorises a dereference only inside the granted epoch":
+        val g = lease_active()
+        assert_true(lease_grant_valid_at(g, 257))
+        assert_false(lease_grant_valid_at(g, 258))
+        assert_false(lease_grant_valid_at(g, 256))
+        assert_false(lease_grant_valid_at(g, PLACEMENT_NO_EPOCH))
+
+    it "never authorises a dereference under a dead lease":
+        assert_false(lease_grant_valid_at(lease_revoked(), PLACEMENT_NO_EPOCH))
+        assert_false(lease_grant_valid_at(lease_grant_dead(5, 9, 3, 0), 0))
+
+    it "bounds a resident view to the lease window":
+        val g = lease_active()
+        assert_true(lease_grant_covers(g, 0x00007f0000001000, 4096))
+        assert_true(lease_grant_covers(g, 0x00007f0000001010, 16))
+        assert_false(lease_grant_covers(g, 0x00007f0000000fff, 1))
+        assert_false(lease_grant_covers(g, 0x00007f0000001000, 4097))
+        assert_false(lease_grant_covers(g, 0x00007f0000002000, 1))
+
+    it "refuses a candidate range whose own length would wrap":
+        val g = lease_pinned_max()
+        assert_true(lease_grant_covers(g, ADDR_TOP, 0xffff))
+        assert_false(lease_grant_covers(g, ADDR_TOP, 0x10000))
+
+    it "validates a ResidentView against its grant, epoch and window":
+        val g = lease_active()
+        assert_true(resident_view_valid_under(
+            resident_view_wire(0x00007f0000001000, 4096, 5, 257), g))
+        assert_false(resident_view_valid_under(
+            resident_view_wire(0x00007f0000001000, 4096, 5, 258), g))
+        assert_false(resident_view_valid_under(
+            resident_view_wire(0x00007f0000001000, 4096, 6, 257), g))
+        assert_false(resident_view_valid_under(
+            resident_view_wire(0x00007f0000009000, 4096, 5, 257), g))
+        assert_false(resident_view_valid_under(
+            resident_view_wire(0, 0, 5, PLACEMENT_NO_EPOCH), lease_revoked()))
+
+    it "makes an EntityRef's validity a decidable question":
+        val g = lease_active()
+        assert_true(entity_ref_valid_under(5, 257, g))
+        assert_false(entity_ref_valid_under(5, 258, g))
+        assert_false(entity_ref_valid_under(6, 257, g))
+        assert_false(entity_ref_valid_under(5, PLACEMENT_NO_EPOCH, lease_revoked()))
+
+    it "checks a grant against the request it answers":
+        val r = full_request()
+        assert_true(lease_grant_satisfies_request(
+            lease_grant(0x11223344, 7, 1, 0, 3, 0, 0x1000, 0x1000), r))
+        # tier HostHot(3) is not in the request's required set {0,1,2}
+        assert_false(lease_grant_satisfies_request(
+            lease_grant(0x11223344, 7, 1, 0, 3, 3, 0x1000, 0x1000), r))
+        # read-only grant for a ReadWrite request
+        assert_false(lease_grant_satisfies_request(
+            lease_grant(0x11223344, 7, 1, 0, 1, 0, 0x1000, 0x1000), r))
+        # right object slot, wrong generation
+        assert_false(lease_grant_satisfies_request(
+            lease_grant(0x11223344, 8, 1, 0, 3, 0, 0x1000, 0x1000), r))
+
+    it "relates a plan to the lease set acquired from it":
+        assert_true(lease_set_acquirable_from(minimal_plan(), lease_set_pair()))
+        # an acquire that returns an already-revoked grant is not a success
+        val dead: [LeaseGrant] = [lease_revoked()]
+        assert_false(lease_set_acquirable_from(minimal_plan(),
+                                               lease_set_wire(dead)))
+        assert_false(lease_set_acquirable_from(minimal_plan(),
+                                               lease_set_wire([])))
+
+    it "finds a grant by slot and returns an unusable miss":
+        val s = lease_set_pair()
+        assert_equal(lease_set_lookup(s, 5).lease_epoch, 257)
+        assert_false(lease_grant_well_formed(lease_set_lookup(s, 77)))
+
+# ============================================================================
+# 6. ENCODE-SIDE REJECTION — ill-formed records are unrepresentable
+# ============================================================================
+
+describe "Encoder refuses to emit an ill-formed record":
+    it "cannot write a dead lease carrying a live address":
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, PLACEMENT_NO_EPOCH, 4, 0, 0, 0x1000, 0x1000)).len(), 0)
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, 7, 4, 0, 0, 0, 0)).len(), 0)
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, PLACEMENT_NO_EPOCH, 3, 1, 0, 0, 0)).len(), 0)
+
+    it "cannot write a live lease with no epoch, no rights or no window":
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, PLACEMENT_NO_EPOCH, 0, 3, 0, 0x1000, 0x1000)).len(), 0)
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, 7, 0, 0, 0, 0x1000, 0x1000)).len(), 0)
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, 7, 0, 3, 0, 0, 0x1000)).len(), 0)
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, 7, 0, 3, 0, 0x1000, 0)).len(), 0)
+
+    it "cannot write a lease window that wraps past 2^64":
+        assert_equal(encode_lease_grant(
+            lease_grant(5, 9, 7, 0, 3, 0, ADDR_TOP, 0x10000)).len(), 0)
+
+    it "cannot write an out-of-order or duplicated lease set":
+        val swapped: [LeaseGrant] = [lease_pinned_max(), lease_active()]
+        assert_equal(encode_lease_set(lease_set_wire(swapped)).len(), 0)
+        val dup: [LeaseGrant] = [lease_active(), lease_active()]
+        assert_equal(encode_lease_set(lease_set_wire(dup)).len(), 0)
+
+    it "cannot write a request with an empty or reserved tier set":
+        val none: [i64] = []
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 0, none, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 128, none, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+
+    it "cannot write a preference outside the required set or duplicated":
+        val outside: [i64] = [4]
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, outside, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+        val dup: [i64] = [3, 3]
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, dup, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+
+    it "cannot write a device tier requirement without the GPU bit":
+        # DeviceLocal required, but the mask permits only CPU-scalar. Uses the
+        # EXEC lane's frozen DeviceMask vocabulary, not a second one.
+        val none: [i64] = []
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 1, none, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+        assert_true(encode_placement_request(
+            placement_request_wire(1, 1, 0, 1, none, 0, 0, 0, 0, DEVICE_BIT_GPU,
+                                   0, 0, 0, 0, 0)).len() > 0)
+
+    it "cannot write a device_mask of zero or one with a reserved bit":
+        val none: [i64] = []
+        assert_false(device_mask_valid(0))
+        assert_false(device_mask_valid(16))
+        assert_true(device_mask_valid(DEVICE_MASK_KNOWN))
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, none, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)).len(), 0)
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, none, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0)).len(), 0)
+
+    it "cannot write an inverted liveness interval":
+        val none: [i64] = []
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, none, 0, 0, 0, 0, 1, 9, 8, 0, 0, 0)).len(), 0)
+
+    it "cannot write an absent deadline that still carries a timestamp":
+        val none: [i64] = []
+        assert_equal(encode_placement_request(
+            placement_request_wire(1, 1, 0, 8, none, 0, 0, 5, 0, 1, 0, 0, 0, 0, 0)).len(), 0)
+
+    it "cannot write a plan without a lease arena":
+        assert_equal(encode_placement_plan(
+            placement_plan_wire(PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                                PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                                PLACEMENT_NO_SLOT, 0, placement_cost_zero(),
+                                PLACE_ZERO_SEED)).len(), 0)
+
+    it "cannot write an absent arena sentinel carrying a generation":
+        assert_equal(encode_placement_plan(
+            placement_plan_wire(PLACEMENT_NO_SLOT, 4, PLACEMENT_NO_SLOT, 0,
+                                PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                                3, 1, placement_cost_zero(),
+                                PLACE_ZERO_SEED)).len(), 0)
+
+    it "cannot write a confidence above 1000 per-mille or a bad seed":
+        val over = placement_cost_wire(0, 0, 0, 0, 0, 0, 0, 0, 0, 1001)
+        assert_false(placement_cost_well_formed(over))
+        assert_equal(encode_placement_plan(
+            placement_plan_wire(PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                                PLACEMENT_NO_SLOT, 0, PLACEMENT_NO_SLOT, 0,
+                                3, 1, over, PLACE_ZERO_SEED)).len(), 0)
+        assert_false(place_hex64_valid("ABCD"))
+        assert_false(place_hex64_valid(
+            "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"))
+        assert_true(place_hex64_valid(PLACE_ZERO_SEED))
+
+# ============================================================================
+# 7. DECODE-SIDE REJECTION
+# ============================================================================
+
+describe "Decoder rejects malformed placement buffers":
+    it "rejects an empty buffer, which is what a refused encode returns":
+        val empty: [u8] = []
+        assert_false(decode_lease_grant(empty).ok)
+        assert_false(decode_placement_request(empty).ok)
+        assert_false(decode_placement_plan(empty).ok)
+        assert_false(decode_lease_set(empty).ok)
+
+    it "rejects a wrong schema version rather than negotiating it":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 4, 2)).ok)
+        assert_false(decode_placement_plan(
+            corrupt_byte(encode_placement_plan(minimal_plan()), 4, 2)).ok)
+
+    it "rejects a non-zero envelope reserved field":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 6, 1)).ok)
+
+    it "rejects a cross-typed buffer":
+        assert_false(decode_lease_grant(encode_placement_plan(minimal_plan())).ok)
+        assert_false(decode_placement_plan(encode_lease_grant(lease_active())).ok)
+        assert_false(decode_placement_request(encode_lease_grant(lease_active())).ok)
+        assert_false(decode_lease_set(encode_lease_grant(lease_active())).ok)
+
+    it "rejects a truncated or over-long buffer":
+        val g = encode_lease_grant(lease_active())
+        assert_false(decode_lease_grant(truncated(g, g.len() - 1)).ok)
+        assert_false(decode_lease_grant(appended(g, 0)).ok)
+        val p = encode_placement_plan(full_plan())
+        assert_false(decode_placement_plan(truncated(p, p.len() - 1)).ok)
+        assert_false(decode_placement_plan(appended(p, 0)).ok)
+
+    it "rejects an unknown LeaseState discriminant, never defaults it":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 8 + 12, 5)).ok)
+
+    it "rejects a reserved LeaseAccess bit":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 8 + 13, 4)).ok)
+
+    it "rejects an unknown ResidencyTier discriminant":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 8 + 14, 7)).ok)
+
+    it "rejects a non-zero LeaseGrant reserved byte":
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 8 + 15, 1)).ok)
+
+    it "rejects a decoded grant flipped to a dead state with a live address":
+        # Byte 8+12 is `state`. Flipping Active(0) to Revoked(4) leaves the
+        # epoch and address in place, which is exactly the stale-lease shape.
+        assert_false(decode_lease_grant(
+            corrupt_byte(encode_lease_grant(lease_active()), 8 + 12, 4)).ok)
+
+    it "rejects an unknown AccessPattern or PersistencePolicy in a request":
+        val r = encode_placement_request(minimal_request())
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 8, 5)).ok)
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 18, 4)).ok)
+
+    it "rejects a reserved tier bit and a non-zero request reserved u16":
+        val r = encode_placement_request(minimal_request())
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 9, 128)).ok)
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 20, 1)).ok)
+
+    it "rejects a reserved DeviceMask bit in a decoded request":
+        # Byte 8+26 is the low byte of device_mask. 16 is the first reserved bit.
+        val r = encode_placement_request(minimal_request())
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 26, 16)).ok)
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 26, 0)).ok)
+
+    it "rejects preference filler that is not the 0xff sentinel":
+        val r = encode_placement_request(minimal_request())
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 11, 0)).ok)
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 17, 3)).ok)
+
+    it "rejects a preference length past the seven-tier bound":
+        val r = encode_placement_request(minimal_request())
+        assert_false(decode_placement_request(corrupt_byte(r, 8 + 10, 8)).ok)
+
+    it "rejects a declared lease count larger than the buffer":
+        val s = encode_lease_set(lease_set_pair())
+        assert_false(decode_lease_set(corrupt_byte(s, 8, 9)).ok)
+        assert_false(decode_lease_set(corrupt_byte(s, 8, 1)).ok)
+
+    it "rejects a plan whose lease arena slot is the absent sentinel":
+        # All FOUR bytes of the u32 must be 0xff to spell PLACEMENT_NO_SLOT;
+        # one 0xff byte is the ordinary slot 255 and must still decode.
+        val p = encode_placement_plan(minimal_plan())
+        assert_true(decode_placement_plan(corrupt_byte(p, 8 + 32, 255)).ok)
+        var q = corrupt_byte(p, 8 + 32, 255)
+        q = corrupt_byte(q, 8 + 33, 255)
+        q = corrupt_byte(q, 8 + 34, 255)
+        q = corrupt_byte(q, 8 + 35, 255)
+        assert_false(decode_placement_plan(q).ok)
+
+    it "rejects a plan confidence above 1000 per-mille":
+        # Byte 8+40+68 is the low byte of confidence_milli; 0xe9 makes it 1001.
+        val p = encode_placement_plan(full_plan())
+        assert_false(decode_placement_plan(corrupt_byte(p, 8 + 40 + 68, 233)).ok)
+
+# ============================================================================
+# 8. The already-frozen semantic carrier is the host-side truth
+# ============================================================================
+
+describe "Bridge to the existing CostEstimate carrier":
+    it "flattens the semantic CostEstimate without redeclaring it":
+        val c = CostEstimate(cpu_work: 1, simd_work: 2, gpu_work: 3,
+                             host_to_device_bytes: 4, device_to_host_bytes: 5,
+                             ssd_read_bytes: 6, ssd_write_bytes: 7,
+                             synchronization_points: 8,
+                             predicted_latency_us: 9, confidence_milli: 1000)
+        val w = placement_cost_from_estimate(c)
+        assert_true(placement_cost_equal(
+            w, placement_cost_wire(1, 2, 3, 4, 5, 6, 7, 8, 9, 1000)))
+        assert_true(placement_cost_well_formed(w))

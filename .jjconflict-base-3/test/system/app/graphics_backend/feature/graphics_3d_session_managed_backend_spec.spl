@@ -1,0 +1,66 @@
+use std.spec.SPipe
+
+describe "Graphics 3D Session Managed Backend":
+    describe "REQ-GFX-001: common backend capability model":
+        it "should report backend kind and target architecture":
+            val caps = GraphicsBackendSpec.fake_caps("Vulkan", "riscv64")
+            expect(caps.backend_kind).to_equal("Vulkan")
+            expect(caps.target_arch).to_equal("riscv64")
+
+        it "should reject an unknown backend kind":
+            val result = GraphicsBackendSpec.validate_backend("UnknownGpu")
+            expect(result.error?).to_equal(true)
+
+    describe "REQ-GFX-002: legacy no-session preservation":
+        it "should map old constructors to LegacyNoSession":
+            val session = GraphicsBackendSpec.create_legacy_3d_session()
+            expect(session.mode).to_equal("LegacyNoSession")
+
+        it "should not enable managed caches for legacy constructors":
+            val session = GraphicsBackendSpec.create_legacy_2d_session()
+            expect(session.managed_cache_enabled).to_equal(false)
+
+    describe "REQ-GFX-003: managed and perf isolation":
+        it "should reject mutable resource sharing across modes":
+            val result = GraphicsBackendSpec.share_mutable_queue("ManagedShared", "PerfExclusive")
+            expect(result.error?).to_equal(true)
+
+        it "should allow immutable capability table sharing":
+            val result = GraphicsBackendSpec.share_capability_table("ManagedShared", "PerfExclusive")
+            expect(result.error?).to_equal(false)
+
+    describe "REQ-GFX-004: common policy across surfaces":
+        it "should pass one policy to 2D, 2D game, 3D, web, GUI, and WM":
+            val surfaces = GraphicsBackendSpec.bind_policy_to_all_surfaces("ManagedShared")
+            expect(surfaces).to_contain("engine2d")
+            expect(surfaces).to_contain("game2d")
+            expect(surfaces).to_contain("engine3d")
+            expect(surfaces).to_contain("web_renderer")
+            expect(surfaces).to_contain("gui")
+            expect(surfaces).to_contain("wm")
+
+    describe "REQ-GFX-005: persistent optimization provider state":
+        it "should key provider facts by backend and policy hash":
+            val key = GraphicsBackendSpec.provider_key("simple.opt.graphics.pipeline_cache", "Metal", "abc123")
+            expect(key).to_equal("simple.opt.graphics.pipeline_cache:Metal:abc123")
+
+        it "should isolate perf provider state from managed provider state":
+            val result = GraphicsBackendSpec.provider_state_aliases("ManagedShared", "PerfExclusive")
+            expect(result).to_equal(false)
+
+    describe "REQ-GFX-006: Pure Simple API and C ABI native boundary":
+        it "should expose a Pure Simple public API marker":
+            val api = GraphicsBackendSpec.public_api_contract()
+            expect(api.language).to_equal("Simple")
+
+        it "should reject Rust as the required runtime backend boundary":
+            val result = GraphicsBackendSpec.validate_native_boundary("rust-runtime-lib")
+            expect(result.error?).to_equal(true)
+
+    describe "REQ-GFX-007: multi-arch capability records":
+        it "should include ARM and RISC-V 32/64 targets":
+            val targets = GraphicsBackendSpec.supported_arch_records()
+            expect(targets).to_contain("arm32")
+            expect(targets).to_contain("arm64")
+            expect(targets).to_contain("riscv32")
+            expect(targets).to_contain("riscv64")

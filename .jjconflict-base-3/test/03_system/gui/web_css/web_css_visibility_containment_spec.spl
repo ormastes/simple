@@ -1,0 +1,273 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/containment.spl
+# @req REQ-WEB-CSS-006
+# @gui: headless
+"""
+# Web CSS Visibility/Containment System Test
+
+**Plan:** doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md (unit U3.6)
+
+## Purpose and Audience
+
+A reader wants to know whether the headless web/HTML-CSS renderer correctly
+distinguishes the family of properties that make a box invisible without
+removing it (`visibility: hidden`, `opacity: 0`) from the property that
+removes it from the flow entirely (`display: none`), correctly skips
+rendering a subtree behind `content-visibility: hidden`, and correctly
+applies the perf-oriented `contain` fast paths (`contain: layout`,
+`contain: paint`) landed 2026-08-06 without changing observable geometry
+semantics. `contain` had zero test coverage before this unit.
+
+## Scope and Preconditions
+
+Assertions read computed geometry straight off `DrawIrCommand` from
+`simple_web_layout_render_html_draw_ir(html, width, height)` (DrawIR-tree
+oracle, plan §3.6), a pointer-target lookup from
+`simple_web_layout_hit_test_target_at_time(html, width, height, x, y,
+animation_time_ms)` for the opacity hit-area case, and a CPU presenter pixel
+readback via `simple_web_layout_render_html_pixels(html, width, height,
+"cpu")` for the two paint-suppression cases where "was a pixel painted"
+is the more direct oracle than command presence.
+
+## Primary Workflow
+
+Render small fixed HTML/CSS fixtures at a fixed viewport, look up the
+command for a named element by `component_id`, and assert exact computed
+geometry, clip rects, and command presence/absence.
+
+## Evidence and Provenance
+
+DrawIR-tree oracle + hit-test oracle + CPU presenter pixel oracle per plan
+§3.6; source: `src/lib/gc_async_mut/gpu/browser_engine/
+simple_web_html_layout_renderer_paint_layout.spl`,
+`src/lib/gc_async_mut/gpu/browser_engine/containment.spl`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_hit_test_target_at_time}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_pixels}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+fn _has_command_id(commands: [DrawIrCommand], component_id: text) -> bool:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return true
+        idx = idx + 1
+    false
+
+fn _style_prop(command: DrawIrCommand, key: text) -> text:
+    var idx = 0
+    while idx < command.computed_style.len():
+        if command.computed_style[idx].key == key:
+            return command.computed_style[idx].value
+        idx = idx + 1
+    "__missing__"
+
+describe "Web CSS visibility and containment":
+    """
+    Readers of this manual section can trust that the headless HTML/CSS
+    renderer's Draw IR draws a hard line between "invisible but still
+    occupying flow" (`visibility: hidden`, `opacity: 0`) and "fully removed
+    from flow" (`display: none`), correctly withholds a `content-visibility:
+    hidden` subtree's own commands, and that the `contain: layout` /
+    `contain: paint` fast paths landed 2026-08-06 preserve correct geometry
+    (`contain: paint` actually clips descendant Draw IR to the container's
+    box).
+    """
+
+    # @manual_section "Visibility and containment"
+
+    it "visibility: hidden suppresses paint but keeps layout space":
+        step("Render three stacked 10px-tall siblings; the middle one is visibility:hidden")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:20px;height:10px;background:#111111}" +
+            "#b{display:block;width:20px;height:10px;visibility:hidden;background:#222222}" +
+            "#c{display:block;width:20px;height:10px;background:#333333}" +
+            "</style></head><body><div id='a'></div><div id='b'></div><div id='c'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val a = _draw_ir_command_by_id(commands, "a")
+        val c = _draw_ir_command_by_id(commands, "c")
+
+        step("Assert the hidden middle box does not emit its own paint command")
+        assert_false(_has_command_id(commands, "b"))
+
+        step("Assert the third sibling is still offset by the hidden box's own height, proving its layout space was reserved")
+        expect(c.y).to_equal(a.y + a.height + 10)
+
+        step("Assert the pixel inside the hidden box's own region stayed the unpainted white background, confirming paint was suppressed")
+        val pixels = simple_web_layout_render_html_pixels(html, 64, 64, "cpu")
+        expect(pixels[15 * 64 + 5]).to_equal(0xFFFFFFFFu32)
+
+    it "display: none removes both paint and layout space":
+        step("Render the same three-sibling stack, but the middle one is display:none instead of visibility:hidden")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:20px;height:10px;background:#111111}" +
+            "#b{display:none;width:20px;height:10px;background:#222222}" +
+            "#c{display:block;width:20px;height:10px;background:#333333}" +
+            "</style></head><body><div id='a'></div><div id='b'></div><div id='c'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val a = _draw_ir_command_by_id(commands, "a")
+        val c = _draw_ir_command_by_id(commands, "c")
+
+        step("Assert the display:none box does not emit its own paint command")
+        assert_false(_has_command_id(commands, "b"))
+
+        step("Assert the third sibling sits immediately after the first with no gap, proving the display:none box reserved zero layout space")
+        expect(c.y).to_equal(a.y + a.height)
+
+    it "opacity: 0 still lays out and hit-area remains":
+        step("Render an opacity:0 box followed by a sibling, to prove layout space is kept via the sibling's offset")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:20px;height:10px;opacity:0;background:#111111}" +
+            "#c{display:block;width:20px;height:10px;background:#333333}" +
+            "</style></head><body><div id='a'></div><div id='c'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val c = _draw_ir_command_by_id(commands, "c")
+
+        step("Assert the following sibling is offset by the opacity:0 box's own height, proving it still occupies layout space")
+        expect(c.y).to_equal(10)
+
+        step("Assert the opacity:0 box's own region stayed the unpainted white background, confirming opacity:0 suppresses paint")
+        val pixels = simple_web_layout_render_html_pixels(html, 64, 64, "cpu")
+        expect(pixels[5 * 64 + 5]).to_equal(0xFFFFFFFFu32)
+
+        step("Assert a pointer hit-test inside the box's region still resolves to a real target (not the empty/body fallback), proving the hit-area remains despite invisible paint")
+        val hit = simple_web_layout_hit_test_target_at_time(html, 64, 64, 5, 5, -1)
+        assert_true(hit != "")
+        assert_true(hit != "path:")
+
+    it "contain: layout isolates a subtree's layout from outside changes":
+        step("Render a contain:layout subtree after an outer sibling, then re-render with only the outer sibling's own height changed")
+        val html_run1 = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#outer{display:block;width:10px;height:10px;background:#111111}" +
+            "#c{display:block;contain:layout;width:30px}" +
+            "#c #inner{display:block;width:10px;height:10px;background:#123456}" +
+            "</style></head><body><div id='outer'></div><div id='c'><div id='inner'></div></div></body></html>"
+        )
+        val html_run2 = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#outer{display:block;width:10px;height:40px;background:#111111}" +
+            "#c{display:block;contain:layout;width:30px}" +
+            "#c #inner{display:block;width:10px;height:10px;background:#123456}" +
+            "</style></head><body><div id='outer'></div><div id='c'><div id='inner'></div></div></body></html>"
+        )
+        val run1 = simple_web_layout_render_html_draw_ir(html_run1, 64, 64)
+        val run2 = simple_web_layout_render_html_draw_ir(html_run2, 64, 64)
+        val c1 = _draw_ir_command_by_id(run1.batches[0].commands, "c")
+        val c2 = _draw_ir_command_by_id(run2.batches[0].commands, "c")
+        val inner1 = _draw_ir_command_by_id(run1.batches[0].commands, "inner")
+        val inner2 = _draw_ir_command_by_id(run2.batches[0].commands, "inner")
+
+        step("Assert the contained box itself moved down in flow, proving the outer sibling's height change WAS observed by the document")
+        assert_true(c2.y > c1.y)
+
+        step("Assert the contained subtree's own internal geometry, measured relative to its own contained box, is identical across both renders even though the outer sibling changed, proving the subtree's internal layout is isolated from that outside change")
+        expect(inner1.x - c1.x).to_equal(inner2.x - c2.x)
+        expect(inner1.y - c1.y).to_equal(inner2.y - c2.y)
+        expect(inner1.width).to_equal(inner2.width)
+        expect(inner1.height).to_equal(inner2.height)
+
+    it "contain: paint clips descendants to the container":
+        step("Render a contain:paint box (no overflow:hidden) smaller than its overflowing child")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#c{display:block;width:20px;height:20px;contain:paint}" +
+            "#c #inner{display:block;width:40px;height:40px;background:#123456}" +
+            "</style></head><body><div id='c'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val c = _draw_ir_command_by_id(commands, "c")
+        val inner = _draw_ir_command_by_id(commands, "inner")
+
+        step("Assert the child's own box kept its full authored size (contain:paint clips paint, not layout)")
+        expect(inner.width).to_equal(40)
+        expect(inner.height).to_equal(40)
+
+        step("Assert the child's Draw IR clip rect was narrowed to the contain:paint container's own box, proving the contain:paint fast path actually clipped descendant paint even without overflow:hidden set")
+        expect(inner.clip_rect.width).to_equal(c.width)
+        expect(inner.clip_rect.height).to_equal(c.height)
+
+    it "content-visibility: hidden skips subtree rendering":
+        step("Render a content-visibility:hidden box with an explicit size and a child")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:30px;height:14px;content-visibility:hidden;background:#123456}" +
+            "#a #inner{display:block;width:10px;height:10px;background:#654321}" +
+            "</style></head><body><div id='a'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val a = _draw_ir_command_by_id(commands, "a")
+
+        step("Assert the content-visibility:hidden box itself still emits a command at its own authored size")
+        assert_true(_has_command_id(commands, "a"))
+        expect(a.width).to_equal(30)
+        expect(a.height).to_equal(14)
+        expect(_style_prop(a, "content-visibility")).to_equal("hidden")
+
+        step("Assert the child inside the content-visibility:hidden subtree emits no command at all, proving the whole subtree was skipped rather than merely painted transparent")
+        assert_false(_has_command_id(commands, "inner"))
+
+    it "contain: size sizes the box independent of content":
+        """
+        RED BY DESIGN. `contain: size` is explicitly out of scope per the
+        header comment in
+        src/lib/gc_async_mut/gpu/browser_engine/containment.spl (lines 1-11):
+        it requires intrinsic-sizing machinery (a box's size must not depend
+        on its contents, which needs a separate "measure without laying out"
+        pass) that this codebase's array/index-based `layout()` does not
+        have. Real CSS semantics: with `contain: size` and
+        `contain-intrinsic-size: 20px 5px` set, the box's own height must be
+        5px regardless of a 40px-tall child; this renderer instead sizes the
+        box to the child's content height (40px), because `contain: size`
+        parses but is never consulted by the sizing pass. Left RED per
+        project policy: a correct spec that documents real missing
+        behaviour must not be weakened. See bug doc
+        doc/08_tracking/bug/browser_engine_css_contain_size_unimplemented_2026-08-08.md.
+        """
+        step("Render a contain:size box with contain-intrinsic-size:20px 5px and a 40px-tall child")
+        val html = (
+            "<html><head><style>" +
+            "html{margin:0;padding:0}body{margin:0;padding:0;background:#ffffff}" +
+            "#s{display:block;width:20px;contain:size;contain-intrinsic-size:20px 5px}" +
+            "#s #inner{display:block;width:10px;height:40px;background:#123456}" +
+            "</style></head><body><div id='s'><div id='inner'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val s = _draw_ir_command_by_id(composition.batches[0].commands, "s")
+
+        step("Assert the box's height came from contain-intrinsic-size, independent of the 40px child (per CSS contain:size semantics)")
+        expect(s.height).to_equal(5)

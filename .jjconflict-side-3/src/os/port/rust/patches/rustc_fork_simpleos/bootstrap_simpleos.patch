@@ -1,0 +1,82 @@
+# UNIFIED DIFF — apply with: cd $RUST_FORK && patch -p1 < bootstrap_simpleos.patch
+#
+# Teaches bootstrap (x.py) about the `simpleos` OS so that
+# `--target=*-unknown-simpleos` (and optionally `--host=x86_64-unknown-simpleos`)
+# resolve without "unknown platform" errors.
+#
+# Touches three files:
+#   - src/bootstrap/src/lib.rs              : supported_hosts / supported_targets table
+#   - src/bootstrap/src/core/build_steps/dist.rs : skip host-only artifacts for simpleos
+#   - src/bootstrap/src/core/builder/mod.rs : target_os guard for crt/linker args
+#
+# Minimum effect: x.py accepts the triple and builds libcore/liballoc/libstd.
+# Full std port is Workstream B6 (libstd_pal_simpleos).
+
+--- a/src/bootstrap/src/lib.rs
++++ b/src/bootstrap/src/lib.rs
+@@ -- pub const HOSTS: &[&str] = &[
+ pub const HOSTS: &[&str] = &[
+     "x86_64-unknown-linux-gnu",
++    "x86_64-unknown-simpleos",
+     "aarch64-unknown-linux-gnu",
++    "aarch64-unknown-simpleos",
+     // ...
+ ];
+
+@@ -- pub const TARGETS: &[&str] = &[
+ pub const TARGETS: &[&str] = &[
+     // ... existing targets ...
++    "x86_64-unknown-simpleos",
++    "aarch64-unknown-simpleos",
++    "riscv64gc-unknown-simpleos",
++    "riscv32imac-unknown-simpleos",
+ ];
+
+@@ -- fn is_simpleos_triple(triple: &str) -> bool {
++/// Returns true for any `*-unknown-simpleos` target.
++pub fn is_simpleos_triple(triple: &str) -> bool {
++    triple.ends_with("-unknown-simpleos")
++}
+
+--- a/src/bootstrap/src/core/build_steps/dist.rs
++++ b/src/bootstrap/src/core/build_steps/dist.rs
+@@ -- fn skip_host_only(target: &TargetSelection) -> bool {
+ fn skip_host_only(target: &TargetSelection) -> bool {
+     // Don't build rustc/cargo/rustdoc for bare-metal-style OSes.
+     target.contains("-none")
++        || target.ends_with("-unknown-simpleos")
+         || target.contains("-uefi")
+ }
+
+@@ -- impl Step for Rustc {
+     fn should_run(run: ShouldRun<'_>) -> ShouldRunDescription<'_> {
+-        run.alias("rustc")
++        run.alias("rustc").filter(|t| !crate::is_simpleos_triple(t.triple))
+     }
+
+--- a/src/bootstrap/src/core/builder/mod.rs
++++ b/src/bootstrap/src/core/builder/mod.rs
+@@ -- fn target_env_for(target: &TargetSelection) -> &'static str {
+ fn target_env_for(target: &TargetSelection) -> &'static str {
+     match target.triple.as_str() {
+         t if t.ends_with("-unknown-linux-gnu")   => "gnu",
+         t if t.ends_with("-unknown-linux-musl")  => "musl",
++        t if t.ends_with("-unknown-simpleos")    => "simpleos",
+         _ => "",
+     }
+ }
+
+@@ -- fn needs_crt_static(target: &TargetSelection) -> bool {
+ fn needs_crt_static(target: &TargetSelection) -> bool {
+     target.contains("musl")
++        || target.ends_with("-unknown-simpleos")
+         || target.contains("-none")
+ }
+
+@@ -- fn linker_for(target: &TargetSelection) -> Option<PathBuf> {
++    if target.triple.ends_with("-unknown-simpleos") {
++        if let Ok(sdkroot) = env::var("SDKROOT") {
++            return Some(PathBuf::from(sdkroot).join("bin/rust-lld"));
++        }
++    }
+     // fallthrough to existing logic

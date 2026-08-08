@@ -1,0 +1,46 @@
+use std.spec.*
+use std.hardware.soc_rtl.soc_top.{soc_protected32_create, soc_protected32_tick}
+use std.hardware.soc_rtl.soc_top.{soc_protected32_uart_push_rx, soc_protected32_read, soc_protected32_read_update}
+use std.hardware.soc_rtl.soc_top.soc_protected32_set_supervisor_interrupts
+use std.hardware.soc_rtl.uart16550.{uart_mmio_write, IER_RDI}
+use std.hardware.soc_rtl.plic.{plic_mmio_write, PLIC_BASE, PLIC_ENABLE_OFF, PLIC_ENABLE_S_OFF, PLIC_CLAIM_OFF}
+use std.hardware.soc_rtl.wb_interconnect.UART_BASE
+
+val UART_SOURCE_32: u32 = 10
+val MIP_MEIP_32: u32 = 0x00000800
+val MIP_STIP_32: u32 = 0x00000020
+val MIP_SEIP_32: u32 = 0x00000200
+
+describe "RV32 protected SoC Linux interrupt and input path":
+    it "latches and consumes one UART receive event exactly once":
+        val initial = soc_protected32_create(16)
+        val received = soc_protected32_uart_push_rx(initial, 65)
+        expect(received.uart.rx_count).to_equal(1)
+        expect(soc_protected32_read(received, UART_BASE)).to_equal(65)
+
+        val consumed = soc_protected32_read_update(received, UART_BASE)
+        expect(consumed.uart.rx_count).to_equal(0)
+        expect(soc_protected32_read(consumed, UART_BASE)).to_equal(0)
+
+    it "maps UART receive through PLIC context zero to MEIP":
+        var soc = soc_protected32_create(16)
+        soc.uart = uart_mmio_write(soc.uart, 1, IER_RDI)
+        soc.plic = plic_mmio_write(soc.plic, UART_SOURCE_32 * 4, 1)
+        soc.plic = plic_mmio_write(soc.plic, PLIC_ENABLE_OFF, 1 << UART_SOURCE_32)
+        soc.plic = plic_mmio_write(soc.plic, PLIC_ENABLE_S_OFF, 1 << UART_SOURCE_32)
+        soc = soc_protected32_uart_push_rx(soc, 66)
+
+        val delivered = soc_protected32_tick(soc).state
+        expect(delivered.core.csr_m.mip & MIP_MEIP_32).to_equal(MIP_MEIP_32)
+        expect(delivered.core.csr_m.mip & MIP_SEIP_32).to_equal(MIP_SEIP_32)
+        expect(soc_protected32_read(delivered, PLIC_BASE + PLIC_CLAIM_OFF)).to_equal(UART_SOURCE_32)
+
+        val claimed = soc_protected32_read_update(delivered, PLIC_BASE + PLIC_CLAIM_OFF)
+        expect(claimed.plic.pending & (1 << UART_SOURCE_32)).to_equal(0)
+
+    it "routes platform supervisor timer and external levels through the core owner":
+        val initial = soc_protected32_create(16)
+        val pending = soc_protected32_set_supervisor_interrupts(initial, true, true)
+        val delivered = soc_protected32_tick(pending).state
+        expect(delivered.core.csr_m.mip & MIP_STIP_32).to_equal(MIP_STIP_32)
+        expect(delivered.core.csr_m.mip & MIP_SEIP_32).to_equal(MIP_SEIP_32)

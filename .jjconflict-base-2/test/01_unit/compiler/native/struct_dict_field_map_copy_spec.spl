@@ -1,0 +1,76 @@
+"""
+Struct-Field Map Copy — Nested Dicts Must Survive (Native Regression)
+
+Bug doc: doc/08_tracking/bug/native_struct_field_map_copy_nilfills_nested_dicts_2026-07-27.md
+
+Lineage: a struct field of type `Dict<text, StructValue>` where `StructValue`
+itself holds a `Dict` (and an array) field. Populating a standalone map with
+one entry, then assigning that map into the struct field (`Holder(by_name:
+populated_map)`), and reading the entry back out of the struct-field copy
+should reproduce the same struct value the standalone map held. Under native
+codegen the struct-field copy is suspected to nil-fill (or otherwise corrupt)
+the nested `Dict`/array fields of the copied struct value, even though reading
+directly from the original (uncopied) map is fine — the classic "seed
+NIL-FILLS omitted struct-init fields" defect family, but here triggered by a
+map-value copy through a struct field rather than an omitted constructor arg.
+
+This spec pins the DESIRED contract: reading `Inner.items`/`Inner.order` back
+out of `Holder.by_name.get(key)` after assigning a populated map into the
+struct field must observe the same len()/contains_key()/order as the entry
+held directly in the original map.
+
+EXPECTED: PASS under interpreter mode (verified via `bin/simple test
+test/01_unit/compiler/native/struct_dict_field_map_copy_spec.spl
+--mode=interpreter`) — this is a native-codegen-only defect, so the
+interpreter lane does not reproduce it. If the native lane reproduces the
+struct-field map-copy nil-fill, the "struct-field map copy" scenario below is
+deliberately RED there; per repo convention for filed defects (precedent:
+nil_dict_receiver_phantom_option_spec.spl), it must stay visibly red — do NOT
+skip() it.
+"""
+
+use std.spec
+
+# Mirrors the defect shape: a struct holding a Dict of struct-values which
+# themselves contain a Dict field (and an array field).
+struct Inner:
+    items: Dict<text, i64>
+    order: [text]
+
+struct Holder:
+    by_name: Dict<text, Inner>
+
+fn make_inner() -> Inner:
+    var items: Dict<text, i64> = {}
+    items["alpha"] = 1
+    items["beta"] = 2
+    Inner(items: items, order: ["alpha", "beta"])
+
+fn make_populated_map() -> Dict<text, Inner>:
+    var m: Dict<text, Inner> = {}
+    m["first"] = make_inner()
+    m
+
+describe "struct-field map copy preserves nested dicts (native regression)":
+    it "preserves nested dicts through a struct-field map copy":
+        val populated_map = make_populated_map()
+        val holder = Holder(by_name: populated_map)
+
+        if val inner = holder.by_name.get("first"):
+            expect(inner.items.len()).to_equal(2)
+            expect(inner.items.contains_key("alpha")).to_equal(true)
+            expect(inner.items.contains_key("beta")).to_equal(true)
+            expect(inner.order.len()).to_equal(2)
+        else:
+            expect(true).to_equal(false)
+
+    it "preserves nested dicts when reading directly from the original map (control)":
+        val populated_map = make_populated_map()
+
+        if val inner = populated_map.get("first"):
+            expect(inner.items.len()).to_equal(2)
+            expect(inner.items.contains_key("alpha")).to_equal(true)
+            expect(inner.items.contains_key("beta")).to_equal(true)
+            expect(inner.order.len()).to_equal(2)
+        else:
+            expect(true).to_equal(false)

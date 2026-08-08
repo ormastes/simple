@@ -1,0 +1,80 @@
+"""
+# MCP Completions Intensive
+
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+This spec replaces the skip-only completions placeholder with executable
+coverage for MCP completion protocol handling and the `simple_completions`
+tool surface.
+
+The covered contract is:
+
+- app and lower MCP protocol handlers return completion envelopes,
+- completion suggestions cover common prompt/resource argument names,
+- `simple_completions` validates `file` and `line`,
+- completion schemas expose `file`, `line`, `column`, and `prefix`,
+- completion tools are advertised as read-only query tools.
+
+## Syntax
+
+The spec reads MCP completion sources through the standard file facade and
+checks stable protocol/tool markers without invoking shell-backed completions.
+
+## Examples
+
+```spl
+val source = file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+expect(source).to_contain("fn handle_simple_completions(id: text, body: text) -> text:")
+```
+"""
+
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+describe "Mcp Completions Intensive":
+    it "app protocol completion handler returns completion envelope":
+        val source = file_read_text("src/app/mcp/main_lazy_protocol.spl") ?? ""
+        expect(source).to_contain("fn handle_completion_req(id: text, body: text) -> text:")
+        expect(source).to_contain("completion = completion + jp(\"values\", values)")
+        expect(source).to_contain("completion = completion + \",\" + jp(\"total\", str(total))")
+        expect(source).to_contain("completion = completion + \",\" + jp(\"hasMore\", \"false\")")
+        expect(source).to_contain("val result = jo1(jp(\"completion\", completion))")
+
+    it "lower protocol completion handler offers standard argument suggestions":
+        val source = file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_resources.spl") ?? ""
+        expect(source).to_contain("fn handle_completion_req(id: text, body: text) -> text:")
+        expect(source).to_contain("if arg_name == \"path\":")
+        expect(source).to_contain("js(\"src/\")")
+        expect(source).to_contain("elif arg_name == \"target_type\":")
+        expect(source).to_contain("js(\"interpreter\")")
+
+    it "simple_completions validates required coordinates":
+        val source = file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+        expect(source).to_contain("fn handle_simple_completions(id: text, body: text) -> text:")
+        expect(source).to_contain("val file = extract_field(body, \"file\")")
+        expect(source).to_contain("val line = extract_field(body, \"line\")")
+        expect(source).to_contain("Missing required parameter: file")
+        expect(source).to_contain("Missing required parameter: line")
+
+    it "simple_completions builds query command with optional column and prefix":
+        val source = file_read_text("src/lib/nogc_async_mut/mcp/main_lazy_query_tools.spl") ?? ""
+        expect(source).to_contain("query completions \" + file + \" \" + line")
+        expect(source).to_contain("if column != \"\":")
+        expect(source).to_contain("cmd = cmd + \" \" + column")
+        expect(source).to_contain("if prefix != \"\":")
+        expect(source).to_contain("cmd = cmd + \" --prefix \" + prefix")
+
+    it "completion schemas advertise arguments and read-only metadata":
+        val schema = file_read_text("src/lib/nogc_async_mut/mcp/lazy_protocol_schemas.spl") ?? ""
+        val dispatch = file_read_text("src/lib/nogc_async_mut/mcp/main_lazy.spl") ?? ""
+        expect(schema).to_contain("make_tool_schema(name: \"simple_completions\"")
+        expect(schema).to_contain("elif name == \"simple_completions\":")
+        expect(schema).to_contain("jp(\"prefix\", jo2(jp(\"type\", js(\"string\"))")
+        expect(schema).to_contain("req = \"[\" + js(\"file\") + \",\" + js(\"line\") + \"]\"")
+        expect(schema).to_contain("name == \"simple_definition\" or name == \"simple_references\" or name == \"simple_hover\" or name == \"simple_completions\"")
+        expect(dispatch).to_contain("elif tool_name == \"simple_completions\":")
+        expect(dispatch).to_contain("return handle_simple_completions(id, body)")

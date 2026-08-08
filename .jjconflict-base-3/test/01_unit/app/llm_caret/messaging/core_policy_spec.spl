@@ -1,0 +1,101 @@
+# @req REQ-LLM-MSG-003 REQ-LLM-MSG-004 REQ-LLM-MSG-005 REQ-LLM-MSG-006 REQ-LLM-MSG-007 REQ-LLM-MSG-008 REQ-LLM-MSG-014 REQ-LLM-MSG-017
+"""Core messaging policy stays transport-neutral, deterministic, and truthful."""
+
+use std.spec.*
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.domain.capability.*
+use app.llm_caret.messaging.domain.receipt.*
+use app.llm_caret.messaging.application.naming.*
+use app.llm_caret.messaging.application.command.*
+use app.llm_caret.messaging.application.policy.*
+
+fn message(id: text, seq: i64, body: text, origin: MessageOrigin, thread: text, sender_agent: text, hops: i64) -> RoomMessage:
+    RoomMessage(
+        message_id: messaging_id("message", id), workspace_id: messaging_id("workspace", "w1"),
+        room_id: messaging_id("room", "r1"), room_seq: seq, thread_root_id: thread,
+        reply_to_id: "", sender_identity_id: messaging_id("identity", "i1"),
+        sender_agent_id: sender_agent, origin: origin, body: body, mentions: [], command: "",
+        audience: [], external_ref: "", correlation_id: "c1", causation_id: "",
+        hop_count: hops, created_at: seq, edited_at: 0)
+
+describe "LLM Caret messaging core policy":
+    it "validates tagged IDs and allocates stable collision-free agent names":
+        step("Validate canonical typed IDs and reserve control names")
+        expect(messaging_id_valid(messaging_id("agent", "agent-01"))).to_equal(true)
+        expect(messaging_id_valid(messaging_id("agent", ""))).to_equal(false)
+        expect(agent_name_reserved("SYSTEM")).to_equal(true)
+
+        step("Prefer an available explicit name, then persisted name, then the lowest ordinal")
+        expect(allocate_agent_name("Reviewer", "", "reviewer", "codex", [])).to_equal("reviewer")
+        expect(allocate_agent_name("system", "Saved-Agent", "reviewer", "codex", [])).to_equal("saved-agent")
+        expect(allocate_agent_name("", "", "reviewer", "codex", ["Reviewer-Codex-01"])).to_equal("reviewer-codex-02")
+
+    it "parses commands and ignores escaped or fenced mentions":
+        step("Parse explicit agent and previous-message targeting")
+        val command = parse_room_command("/ask @reviewer ^ review this")
+        expect(command.name).to_equal("ask")
+        expect(command.target).to_equal("reviewer")
+        expect(command.reference).to_equal("^")
+        expect(command.body).to_equal("review this")
+
+        step("Normalize visible mentions without treating examples as triggers")
+        expect(mentions_agent("please ask @Reviewer", "reviewer", [])).to_equal(true)
+        expect(mentions_agent("escaped \\@reviewer", "reviewer", [])).to_equal(false)
+        expect(mentions_agent("```\n@reviewer\n```", "reviewer", [])).to_equal(false)
+        expect(keyword_matches("Please INSPECT this", ["inspect"])).to_equal(true)
+
+    it "plans native, emulated, sidecar, and unsupported behavior from capability data":
+        step("Select behavior without branching on a platform name")
+        expect(plan_capability_fallback(CapabilityLevel.Native, "private_message").action).to_equal("native:private_message")
+        expect(plan_capability_fallback(CapabilityLevel.Emulated, "reply").action).to_equal("emulated:reply")
+        expect(plan_capability_fallback(CapabilityLevel.PrimitiveSidecar, "room_create").action).to_equal("primitive_sidecar:room_create")
+        expect(plan_capability_fallback(CapabilityLevel.Unsupported, "mark_read").error).to_equal("capability_not_supported:mark_read")
+
+    it "routes deterministically before falling back to the main agent":
+        step("An explicit mention wins over owner and main fallback")
+        val mentioned = RouteCandidate(agent_id: "reviewer", handler: AgentHandler.Subagent,
+            mentioned: true, replied_to: false, assigned: false, capability_match: false, room_owner: false)
+        val main = RouteCandidate(agent_id: "builder", handler: AgentHandler.Main,
+            mentioned: false, replied_to: false, assigned: false, capability_match: false, room_owner: true)
+        val decision = route_message([mentioned, main])
+        expect(decision.agent_id).to_equal("reviewer")
+        expect(decision.reason).to_equal("mentioned")
+
+        step("Ambiguous capability matches do not invoke a selector implicitly")
+        val c1 = RouteCandidate(agent_id: "one", handler: AgentHandler.Advisor,
+            mentioned: false, replied_to: false, assigned: false, capability_match: true, room_owner: false)
+        val c2 = RouteCandidate(agent_id: "two", handler: AgentHandler.Main,
+            mentioned: false, replied_to: false, assigned: false, capability_match: true, room_owner: false)
+        expect(route_message([c1, c2]).agent_id).to_equal("two")
+        expect(route_message([]).reason).to_equal("agent_unavailable")
+
+    it "selects two prior relevant messages and excludes unrelated progress":
+        step("Select prior non-status room messages in chronological order")
+        val first = message("m1", 1, "first", MessageOrigin.Human, "", "", 0)
+        val update = message("m2", 2, "working", MessageOrigin.AgentUpdate, "", "builder", 0)
+        val second = message("m3", 3, "second", MessageOrigin.AgentAnswer, "", "builder", 0)
+        val trigger = message("m4", 4, "trigger", MessageOrigin.Human, "", "", 0)
+        val selected = select_previous_context([first, update, second], trigger, 2)
+        expect(selected.len()).to_equal(3)
+        expect(selected[0].message_id.value).to_equal("m1")
+        expect(selected[1].message_id.value).to_equal("m3")
+        expect(selected[2].message_id.value).to_equal("m4")
+
+    it "reports truthful receipt evidence and prevents agent feedback loops":
+        step("Keep native human read evidence distinct from local cursors")
+        val native_read = MessageReceipt(message_id: "m1", identity_id: "i1", state: ReceiptState.Read,
+            evidence: ReceiptEvidence.Native, occurred_at: 1, detail: "")
+        val local_read = MessageReceipt(message_id: "m1", identity_id: "i1", state: ReceiptState.Read,
+            evidence: ReceiptEvidence.LocalCursor, occurred_at: 1, detail: "")
+        expect(receipt_tag(native_read)).to_equal("[read:native]")
+        expect(receipt_tag(local_read)).to_equal("[read:local]")
+
+        step("Reject duplicate, self, exhausted, and implicit progress triggers")
+        val human = message("m1", 1, "hello", MessageOrigin.Human, "", "", 0)
+        val self_message = message("m2", 2, "echo", MessageOrigin.AgentAnswer, "", "reviewer", 0)
+        val progress = message("m3", 3, "working", MessageOrigin.AgentUpdate, "", "builder", 0)
+        expect(loop_guard(human, "reviewer", true, 4, false).reason).to_equal("duplicate_event")
+        expect(loop_guard(self_message, "reviewer", false, 4, false).reason).to_equal("self_mirror")
+        expect(loop_guard(message("m4", 4, "handoff", MessageOrigin.Human, "", "", 4), "reviewer", false, 4, false).reason).to_equal("handoff_limit")
+        expect(loop_guard(progress, "reviewer", false, 4, false).reason).to_equal("progress_non_triggering")
+        expect(loop_guard(progress, "reviewer", false, 4, true).allowed).to_equal(true)

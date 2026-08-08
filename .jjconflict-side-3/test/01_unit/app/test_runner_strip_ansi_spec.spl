@@ -1,0 +1,62 @@
+use std.test_runner.test_runner_files.{strip_ansi}
+
+# Regression coverage for `strip_ansi`
+# (src/lib/nogc_sync_mut/test_runner/test_runner_files.spl).
+#
+# Filed alongside the investigation in
+# doc/08_tracking/bug/stage4_test_runner_strip_ansi_superlinear_hang_2026-07-20.md:
+# a prior lane suspected strip_ansi's per-character slicing was O(n^2) on the
+# 5-14MB / 150K-424K line captured-output volumes that trigger it. A
+# follow-up microbenchmark (results in that bug doc) measured the real
+# function -- on real captured output, and on synthetic corpora up to 800K
+# calls -- and found it empirically LINEAR under this binary's confirmed
+# production backend (cranelift; this build has no LLVM JIT feature). No
+# algorithmic change was made to strip_ansi as a result. This spec exists
+# purely as correctness coverage (the "hot, load-bearing path" bar from that
+# investigation), independent of the performance finding.
+describe "strip_ansi":
+    it "leaves plain text with no escape sequences unchanged":
+        expect(strip_ansi("plain test output, nothing fancy")).to_equal("plain test output, nothing fancy")
+
+    it "strips a simple SGR color sequence":
+        expect(strip_ansi("\x1b[32mPASS\x1b[0m")).to_equal("PASS")
+
+    it "strips multiple sequences within one line":
+        expect(strip_ansi("\x1b[32mPASS\x1b[0m test/sample_spec.spl \x1b[2m(2 passed)\x1b[0m")).to_equal("PASS test/sample_spec.spl (2 passed)")
+
+    it "strips a cursor/attribute sequence using the '?' parameter byte":
+        expect(strip_ansi("before\x1b[?25lafter")).to_equal("beforeafter")
+
+    it "strips a sequence with multiple numeric parameters":
+        expect(strip_ansi("\x1b[1;32;40mBOLD GREEN ON BLACK\x1b[0m")).to_equal("BOLD GREEN ON BLACK")
+
+    it "passes through an OSC-style sequence unchanged (only CSI 'ESC[' is recognized)":
+        # strip_ansi only recognizes CSI sequences (ESC '[' ... letter). An
+        # OSC sequence (ESC ']' ...) does not match `next == "["`, so the
+        # ESC byte and the sequence body fall through as ordinary
+        # characters. Documenting this as current, intentional-scope
+        # behavior -- not a bug fixed here.
+        val osc = "before\x1b]0;title\x07after"
+        expect(strip_ansi(osc)).to_equal(osc)
+
+    it "does not hang or drop trailing content on a truncated escape at end of string":
+        # "\x1b[3" has no terminator letter before the string ends -- the
+        # lookahead scan exhausts s.len() without setting looks_like_ansi,
+        # so the ESC and everything after it must fall through unchanged
+        # rather than being dropped or causing an infinite loop.
+        expect(strip_ansi("abc\x1b[3")).to_equal("abc\x1b[3")
+
+    it "does not hang or drop trailing content on a bare trailing ESC byte":
+        expect(strip_ansi("abc\x1b")).to_equal("abc\x1b")
+
+    it "returns an empty string for an empty string":
+        expect(strip_ansi("")).to_equal("")
+
+    it "returns an empty string when the input is only escape sequences":
+        expect(strip_ansi("\x1b[32m\x1b[1m\x1b[0m")).to_equal("")
+
+    it "passes non-ASCII (multi-byte UTF-8) text through intact":
+        expect(strip_ansi("\x1b[32m✓ café 日本語\x1b[0m")).to_equal("✓ café 日本語")
+
+    it "handles an escape sequence immediately followed by more plain text with no separator":
+        expect(strip_ansi("\x1b[31mFAIL\x1b[0m: assertion mismatch")).to_equal("FAIL: assertion mismatch")

@@ -1,0 +1,237 @@
+# XDC Constraint File Generator
+#
+# Generates Xilinx Design Constraints (.xdc) files for FPGA board
+# support packages. Pin assignments, clock definitions, I/O standards,
+# and timing constraints are expressed as pure Simple data structures
+# and serialized to XDC text.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+# ============================================================================
+# Pin Assignment
+# ============================================================================
+
+pub struct PinAssignment:
+    """A single FPGA pin assignment: signal name to physical pin."""
+    signal: text
+    pin: text
+    io_standard: text
+    comment: text
+
+impl PinAssignment:
+    static fn create(signal: text, pin: text, io_standard: text) -> PinAssignment:
+        PinAssignment(signal: signal, pin: pin, io_standard: io_standard, comment: "")
+
+    static fn with_comment(signal: text, pin: text, io_standard: text, comment: text) -> PinAssignment:
+        PinAssignment(signal: signal, pin: pin, io_standard: io_standard, comment: comment)
+
+    fn to_xdc() -> text:
+        """Serialize this pin assignment to XDC format."""
+        val cmt = self.comment
+        val p = self.pin
+        val sig = self.signal
+        val ios = self.io_standard
+        var lines: [text] = []
+        if cmt != "":
+            lines = lines.push("# {cmt}")
+        lines = lines.push("set_property PACKAGE_PIN {p} [get_ports {sig}]")
+        lines = lines.push("set_property IOSTANDARD {ios} [get_ports {sig}]")
+        return lines.join("\n")
+
+# ============================================================================
+# Clock Constraint
+# ============================================================================
+
+pub struct ClockConstraint:
+    """Clock period and waveform constraint for a specific pin."""
+    name: text
+    period_ns: i64
+    pin: text
+
+impl ClockConstraint:
+    static fn from_hz(name: text, hz: i64, pin: text) -> ClockConstraint:
+        """Create a clock constraint from frequency in Hz."""
+        # period_ns = 1e9 / hz, stored as integer nanoseconds
+        var period = 0
+        if hz > 0:
+            period = 1000000000 / hz
+        ClockConstraint(name: name, period_ns: period, pin: pin)
+
+    fn to_xdc() -> text:
+        """Serialize this clock constraint to XDC format."""
+        val half = self.period_ns / 2
+        val pns = self.period_ns
+        val nm = self.name
+        val pn = self.pin
+        "create_clock -period {pns}.000 -name {nm} -waveform {{0.000 {half}.000}} [get_ports {pn}]"
+
+# ============================================================================
+# Timing Constraint
+# ============================================================================
+
+pub enum TimingConstraintKind:
+    """Types of timing constraints."""
+    MaxDelay
+    MinDelay
+    FalsePath
+    MulticyclePath
+
+pub struct TimingConstraint:
+    """A timing constraint between two endpoints."""
+    kind: TimingConstraintKind
+    from_pin: text
+    to_pin: text
+    value_ns: i64
+    comment: text
+
+impl TimingConstraint:
+    fn to_xdc() -> text:
+        val fp = self.from_pin
+        val tp = self.to_pin
+        val vns = self.value_ns
+        val cmt = self.comment
+        var line = ""
+        match self.kind:
+            case MaxDelay:
+                line = "set_max_delay -from [get_pins {fp}] -to [get_pins {tp}] {vns}.000"
+            case MinDelay:
+                line = "set_min_delay -from [get_pins {fp}] -to [get_pins {tp}] {vns}.000"
+            case FalsePath:
+                line = "set_false_path -from [get_pins {fp}] -to [get_pins {tp}]"
+            case MulticyclePath:
+                line = "set_multicycle_path {vns} -from [get_pins {fp}] -to [get_pins {tp}]"
+        if cmt != "":
+            return "# {cmt}\n{line}"
+        return line
+
+# ============================================================================
+# XDC Document
+# ============================================================================
+
+pub struct XdcDocument:
+    """
+    Complete XDC constraint document for an FPGA board.
+    Collects pin assignments, clock constraints, and timing constraints
+    and serializes them to a single .xdc file.
+    """
+    board_name: text
+    pins: [PinAssignment]
+    clocks: [ClockConstraint]
+    timing: [TimingConstraint]
+
+impl XdcDocument:
+    static fn create(board_name: text) -> XdcDocument:
+        XdcDocument(board_name: board_name, pins: [], clocks: [], timing: [])
+
+    me add_pin(pin: PinAssignment):
+        self.pins = self.pins.push(pin)
+
+    me add_clock(clock: ClockConstraint):
+        self.clocks = self.clocks.push(clock)
+
+    me add_timing(constraint: TimingConstraint):
+        self.timing = self.timing.push(constraint)
+
+    fn to_xdc() -> text:
+        """Serialize the complete constraint document to XDC text."""
+        val bn = self.board_name
+        var lines: [text] = []
+        lines = lines.push("## ============================================================================")
+        lines = lines.push("## XDC Constraints for {bn}")
+        lines = lines.push("## Auto-generated by Simple compiler — do not edit manually")
+        lines = lines.push("## ============================================================================")
+        lines = lines.push("")
+
+        if self.clocks.len() > 0:
+            lines = lines.push("## Clock Constraints")
+            for clock in self.clocks:
+                lines = lines.push(clock.to_xdc())
+            lines = lines.push("")
+
+        if self.pins.len() > 0:
+            lines = lines.push("## Pin Assignments")
+            for pin in self.pins:
+                lines = lines.push(pin.to_xdc())
+                lines = lines.push("")
+
+        if self.timing.len() > 0:
+            lines = lines.push("## Timing Constraints")
+            for tc in self.timing:
+                lines = lines.push(tc.to_xdc())
+            lines = lines.push("")
+
+        return lines.join("\n")
+
+    fn write_to(path: text) -> bool:
+        """Write the XDC document to a file."""
+        rt_file_write_text(path, self.to_xdc())
+
+# ============================================================================
+# Board-Specific XDC Generators
+# ============================================================================
+
+pub fn generate_mlk_s02_100t_xdc() -> XdcDocument:
+    """
+    Generates the XDC constraint file for the MLK-S02-100T board
+    (Artix-7 XC7A100T). Includes system clock, UART, LEDs, reset.
+    """
+    var doc = XdcDocument.create("MLK-S02-100T")
+
+    # System clock — 25 MHz on-board oscillator
+    doc.add_clock(ClockConstraint.from_hz("sys_clk", 25000000, "R4"))
+    doc.add_pin(PinAssignment.with_comment("sys_clk", "R4", "LVCMOS33", "25 MHz system clock"))
+
+    # Active-low reset button
+    doc.add_pin(PinAssignment.with_comment("sys_rst_n", "U7", "LVCMOS33", "Reset button (active low)"))
+
+    # UART (directly connected to USB-UART bridge)
+    doc.add_pin(PinAssignment.with_comment("uart_txd", "T4", "LVCMOS33", "UART TX to host"))
+    doc.add_pin(PinAssignment.with_comment("uart_rxd", "N5", "LVCMOS33", "UART RX from host"))
+
+    # LEDs
+    doc.add_pin(PinAssignment.with_comment("led[0]", "N16", "LVCMOS33", "LED 0"))
+    doc.add_pin(PinAssignment.with_comment("led[1]", "N14", "LVCMOS33", "LED 1"))
+    doc.add_pin(PinAssignment.with_comment("led[2]", "V17", "LVCMOS33", "LED 2"))
+    doc.add_pin(PinAssignment.with_comment("led[3]", "U17", "LVCMOS33", "LED 3"))
+
+    return doc
+
+pub fn generate_xdc_for_board(board_id: text) -> Result<XdcDocument, text>:
+    """Look up and generate XDC constraints for a known board."""
+    if board_id == "mlk_s02_100t":
+        return Ok(generate_mlk_s02_100t_xdc())
+    Err("unknown board for XDC generation: {board_id}")
+
+# ============================================================================
+# Generic XDC Constraints Generator
+# ============================================================================
+
+pub fn generate_xdc_constraints() -> text:
+    """Generates a minimal generic XDC constraint snippet with clock, reset,
+    UART, and LED pin assignments using LVCMOS33 I/O standard."""
+    var lines: [text] = []
+    lines = lines.push("## Generic XDC Constraints — auto-generated")
+    lines = lines.push("")
+    lines = lines.push("## System Clock")
+    lines = lines.push("create_clock -period 10.000 -name sys_clk [get_ports clk]")
+    lines = lines.push("set_property PACKAGE_PIN R4 [get_ports clk]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports clk]")
+    lines = lines.push("")
+    lines = lines.push("## Reset")
+    lines = lines.push("set_property PACKAGE_PIN U7 [get_ports rst]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports rst]")
+    lines = lines.push("")
+    lines = lines.push("## UART")
+    lines = lines.push("set_property PACKAGE_PIN T4 [get_ports uart_tx]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports uart_tx]")
+    lines = lines.push("set_property PACKAGE_PIN N5 [get_ports uart_rx]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports uart_rx]")
+    lines = lines.push("")
+    lines = lines.push("## LEDs")
+    lines = lines.push("set_property PACKAGE_PIN N16 [get_ports {{led[0]}}]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports {{led[0]}}]")
+    lines = lines.push("set_property PACKAGE_PIN N14 [get_ports {{led[1]}}]")
+    lines = lines.push("set_property IOSTANDARD LVCMOS33 [get_ports {{led[1]}}]")
+    lines = lines.push("")
+    lines.join("\n")

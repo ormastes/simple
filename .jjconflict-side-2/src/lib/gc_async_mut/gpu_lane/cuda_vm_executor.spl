@@ -57,6 +57,14 @@ pub struct SvmgRunOutcome:
     exit_code: i64
     log_text: text
     records: [SvmgResultRecord]
+    # Full ARENA_TOTAL_SIZE output arena from this call's readback (empty on
+    # any error path before a successful `arena_read`), plus the logical
+    # DATA-region start offset it was built at (`SGP_HEADER_SIZE +
+    # code.len()`). Feed both back into `run_source_persisting_data` as
+    # `prior_arena`/`prior_data_off` to preserve this call's DATA/LOG/RECORD
+    # state into the next call -- see `run_source_persisting_data` docstring.
+    out_arena: [u8]
+    data_off: i64
 
 fn _u32_le_at(bytes: [u8], idx: i64) -> i64:
     (bytes[idx] as i64) | ((bytes[idx + 1] as i64) << 8) | ((bytes[idx + 2] as i64) << 16) | ((bytes[idx + 3] as i64) << 24)
@@ -112,6 +120,40 @@ fn build_svmg_arena(code: [u8], step_budget: i64, entry_pc: i64) -> [u8]:
     arena[LOG_CAP_OFFSET + 1] = ((DEFAULT_LOG_CAP >> 8) & 0xFF) as u8
     arena[LOG_CAP_OFFSET + 2] = ((DEFAULT_LOG_CAP >> 16) & 0xFF) as u8
     arena[LOG_CAP_OFFSET + 3] = ((DEFAULT_LOG_CAP >> 24) & 0xFF) as u8
+    arena
+
+# Root-cause fix for
+# doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md:
+# same host-side splice `cuda_exec.spl`'s `run_program_with_persistence`
+# workaround implemented at the call site, now owned here so callers don't
+# have to re-derive it. `prior_arena` must be a previous call's full
+# ARENA_TOTAL_SIZE output arena (anything else, including the default `[]`,
+# is treated as "no prior state" and this degrades to plain
+# `build_svmg_arena` -- i.e. the fresh-every-call behavior `run_source`
+# still needs for its OWN stateless per-vector contract, see module
+# docstring). `prior_data_off` is the logical DATA-region start offset that
+# `prior_arena` was laid out at (its own `code_off + code_len`) -- copying by
+# this LOGICAL offset, not a raw byte offset, means a shorter/longer cell
+# body doesn't corrupt or lose prior globals as code length shifts release
+# to release.
+fn build_svmg_arena_persisting_data(code: [u8], step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> [u8]:
+    var arena = build_svmg_arena(code, step_budget, entry_pc)
+    if prior_arena.len() != ARENA_TOTAL_SIZE:
+        return arena
+    val data_off = SGP_HEADER_SIZE + code.len()
+    val copy_len = ARENA_DATA_SIZE - (if data_off > prior_data_off: data_off else: prior_data_off)
+    var k = 0
+    while k < copy_len:
+        arena[data_off + k] = prior_arena[prior_data_off + k]
+        k = k + 1
+    # LOG/RECORD ring region lives at FIXED absolute offsets (>=
+    # ARENA_DATA_SIZE, see mailbox_const) -- carried forward verbatim so a
+    # program's SYS_PUTC/SYS_RESULT output accumulates across calls instead
+    # of being wiped by the next rebuild.
+    var j = ARENA_DATA_SIZE
+    while j < ARENA_TOTAL_SIZE:
+        arena[j] = prior_arena[j]
+        j = j + 1
     arena
 
 fn read_sentinel(arena: [u8]) -> i64:
@@ -202,16 +244,38 @@ class CudaVmExecutor:
     # should come from `step_budget_from_env()` unless a caller overrides
     # it (e.g. the D3 conformance harness pins per-vector budgets).
     me run_source(source: text, step_budget: i64, entry_pc: i64) -> SvmgRunOutcome:
+        self.run_source_persisting_data(source, step_budget, entry_pc, [], 0)
+
+    # Same upload/launch/sync/drain sequence as `run_source`, but the arena
+    # is built with `build_svmg_arena_persisting_data` instead of
+    # `build_svmg_arena` -- i.e. it carries `prior_arena`'s DATA/LOG/RECORD
+    # state forward into this call's arena before launch, and returns this
+    # call's own output arena (`SvmgRunOutcome.out_arena`) plus the
+    # logical DATA-region offset it was built at
+    # (`SvmgRunOutcome.data_off`) so a caller can chain calls: pass this
+    # outcome's `out_arena`/`data_off` back in as the NEXT call's
+    # `prior_arena`/`prior_data_off`. `run_source` itself calls this with
+    # `prior_arena: []`, which `build_svmg_arena_persisting_data` treats as
+    # "no prior state" and degrades to a plain fresh build -- so
+    # `run_source`'s existing stateless-per-call contract (relied on by
+    # `cuda_vm_executor_conformance_spec.spl`'s independent per-vector runs)
+    # is unchanged. Fixes
+    # doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md
+    # at the root -- callers that need cross-call persistence (e.g.
+    # `CudaExec.run_program_with_persistence`) no longer have to reimplement
+    # the launch sequence themselves.
+    me run_source_persisting_data(source: text, step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> SvmgRunOutcome:
         if not self.entry_loaded:
             return SvmgRunOutcome(ok: false, error: "cuda-vm-entry-not-loaded",
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
         val code = svmg_asm(source)
-        val arena = build_svmg_arena(code, step_budget, entry_pc)
+        val data_off = SGP_HEADER_SIZE + code.len()
+        val arena = build_svmg_arena_persisting_data(code, step_budget, entry_pc, prior_arena, prior_data_off)
         if not self.session.arena_write(arena):
             return SvmgRunOutcome(ok: false, error: self.session.last_error,
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
 
         val value_ptr = lane_scratch_alloc(8)
         val args_ptr = lane_scratch_alloc(8)
@@ -224,13 +288,13 @@ class CudaVmExecutor:
             return SvmgRunOutcome(ok: false, error: launch_err,
                 sentinel: self.session.last_dispatch_sentinel,
                 trapped: false, timed_out: launch_err == "cuda-lane-device-timeout-sentinel",
-                exit_code: 0, log_text: "", records: [])
+                exit_code: 0, log_text: "", records: [], out_arena: [], data_off: 0)
 
         val out_arena = self.session.arena_read(ARENA_TOTAL_SIZE)
         if out_arena.len() == 0:
             return SvmgRunOutcome(ok: false, error: self.session.last_error,
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
 
         val sentinel = read_sentinel(out_arena)
         val (trapped, timed_out, exit_code) = _decode_sentinel(sentinel)
@@ -239,6 +303,7 @@ class CudaVmExecutor:
             trapped: trapped, timed_out: timed_out, exit_code: exit_code,
             log_text: read_log(out_arena),
             records: read_records(out_arena, 64),
+            out_arena: out_arena, data_off: data_off,
         )
 
     me shutdown() -> text:
@@ -246,5 +311,5 @@ class CudaVmExecutor:
 
 export CudaVmExecutor, SvmgRunOutcome, SvmgResultRecord
 export SVMG_ENTRY, DEFAULT_STEP_BUDGET
-export step_budget_from_env, build_svmg_arena
+export step_budget_from_env, build_svmg_arena, build_svmg_arena_persisting_data
 export read_sentinel, read_log, read_records

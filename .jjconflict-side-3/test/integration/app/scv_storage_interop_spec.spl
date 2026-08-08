@@ -1,0 +1,26 @@
+use app.io.mod (process_run)
+
+fn _run_storage_interop_script(script: text) -> text:
+    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    "{out}{err}\nexit={code}\n"
+
+describe "scv storage Git interchange":
+    it "exports a Git fast-import stream that Git can import":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-fast-import-src.XXXXXX)\nGITDST=$(mktemp -d /tmp/scv-fast-import-git.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\nmkdir -p \"$SRC/nested\"\nprintf 'nested\\n' > \"$SRC/nested/b.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-git-fast-import export.fi main\ncd \"$GITDST\"\ngit init -q\ngit fast-import < \"$SRC/export.fi\" >/dev/null\ngit checkout -q main\ncmp \"$SRC/a.txt\" a.txt\ncmp \"$SRC/nested/b.txt\" nested/b.txt\nprintf 'git_a=%s\\n' \"$(cat a.txt | tr '\\n' '|')\"\nprintf 'git_b=%s\\n' \"$(cat nested/b.txt | tr '\\n' '|')\"\n"
+        val out = _run_storage_interop_script(script)
+        expect(out).to_contain("export-git-fast-import export.fi")
+        expect(out).to_contain("branch=main")
+        expect(out).to_contain("blobs=2")
+        expect(out).to_contain("git_a=payload|")
+        expect(out).to_contain("git_b=nested|")
+        expect(out).to_contain("exit=0")
+
+    it "imports an SCV fast-import stream into a fresh repository":
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-fast-import-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-fast-import-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\nmkdir -p \"$SRC/nested\"\nprintf 'nested\\n' > \"$SRC/nested/b.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-git-fast-import \"$SRC/export.fi\" main >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-git-fast-import \"$SRC/export.fi\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\ncmp \"$SRC/a.txt\" out/a.txt\ncmp \"$SRC/nested/b.txt\" out/nested/b.txt\nprintf 'scv_a=%s\\n' \"$(cat out/a.txt | tr '\\n' '|')\"\nprintf 'scv_b=%s\\n' \"$(cat out/nested/b.txt | tr '\\n' '|')\"\n"
+        val out = _run_storage_interop_script(script)
+        expect(out).to_contain("import-git-fast-import files=2")
+        expect(out).to_contain("commit=commit_")
+        expect(out).to_contain("OK checked=2")
+        expect(out).to_contain("scv_a=payload|")
+        expect(out).to_contain("scv_b=nested|")
+        expect(out).to_contain("exit=0")

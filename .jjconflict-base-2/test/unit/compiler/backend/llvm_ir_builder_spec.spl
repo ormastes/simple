@@ -1,0 +1,152 @@
+use compiler.backend.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_ir_builder_build}
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple}
+use compiler.backend.backend_types.{CodegenTarget}
+
+fn new_builder() -> LlvmIRBuilder:
+    LlvmIRBuilder.create("demo.module", LlvmTargetTriple.from_target(CodegenTarget.X86_64))
+
+# The accumulator field was `instructions: [text]` until it became the
+# `sb: i64` rt_string_builder handle (llvm_ir_builder.spl:62-68 — the array
+# re-copied itself per emitted line, O(M^2) over a module's IR lines). `build()`
+# yields exactly the emitted lines joined by "\n", so splitting it back gives
+# the same per-line view the assertions below were written against.
+fn emitted_lines(builder: LlvmIRBuilder) -> [text]:
+    builder.build().split("\n")
+
+describe "LLVM IR Builder":
+    it "emits the module header from the selected target":
+        val builder = new_builder()
+
+        builder.emit_module_header()
+
+        val lines = emitted_lines(builder)
+        expect(lines.len()).to_equal(5)
+        expect(lines[0]).to_equal("; ModuleID = 'demo.module'")
+        expect(lines[1]).to_equal("source_filename = \"demo.module.spl\"")
+        expect(lines[2]).to_contain("target datalayout = \"")
+        expect(lines[3]).to_contain("target triple = \"")
+        expect(lines[4]).to_equal("")
+
+    it "creates fresh locals and wraps a function body":
+        val builder = new_builder()
+        val local0 = builder.fresh_local()
+        val local1 = builder.fresh_local()
+
+        # NAMED temporaries (`%tN`), not anonymous `%N`: llc rejects an
+        # anonymous `%0` interspersed with named `%lN` locals ("instruction
+        # expected to be numbered '%3' or greater"). See fresh_local's
+        # docstring in llvm_ir_builder.spl:258-270.
+        expect(local0).to_equal("%t0")
+        expect(local1).to_equal("%t1")
+
+        builder.start_function("add_numbers", ["i64 %lhs", "i64 %rhs"], "i64")
+        builder.emit_ret("i64", "%lhs")
+        builder.end_function()
+
+        val lines = emitted_lines(builder)
+        expect(lines[0]).to_equal("define i64 @add_numbers(i64 %lhs, i64 %rhs) nounwind {")
+        expect(lines[1]).to_equal("  ret i64 %lhs")
+        expect(lines[2]).to_equal("}")
+        expect(lines[3]).to_equal("")
+
+    it "emits direct arithmetic, memory, and comparison instructions":
+        val builder = new_builder()
+
+        builder.emit_add("%2", "i64", "%0", "%1")
+        builder.emit_load("%3", "i64", "%ptr")
+        builder.emit_store("i64", "%3", "%ptr")
+        builder.emit_icmp_eq("%4", "i64", "%3", "%2")
+
+        val lines = emitted_lines(builder)
+        expect(lines[0]).to_equal("  %2 = add i64 %0, %1")
+        expect(lines[1]).to_equal("  %3 = load i64, ptr %ptr, align 8")
+        expect(lines[2]).to_equal("  store i64 %3, ptr %ptr, align 8")
+        expect(lines[3]).to_equal("  %4 = icmp eq i64 %3, %2")
+
+# --- Regression: builder storage must remain per-instance in bootstrap mode ---
+# doc/08_tracking/bug/llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md
+extern fn rt_env_set(key: text, value_str: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+describe "LLVM IR Builder bootstrap per-instance parity":
+    it "emits every function header before recording function state":
+        val source = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_ir_builder.spl"
+        ) ?? ""
+        val plain_start = source.find("    me start_function(name:")
+        val opt_start = source.find("    me start_function_opt(")
+        val attrs_start = source.find("    me start_function_with_attrs(")
+        val attrs_end = source.find("    me end_function():")
+        val plain_body = source.substring(plain_start, opt_start)
+        val opt_body = source.substring(opt_start, attrs_start)
+        val attrs_body = source.substring(attrs_start, attrs_end)
+
+        expect(plain_body.find("self.emit(\"define ")).to_be_less_than(
+            plain_body.find("self.current_function = Some(name)")
+        )
+        expect(opt_body.find("self.emit(\"define ")).to_be_less_than(
+            opt_body.find("self.current_function = Some(name)")
+        )
+        expect(attrs_body.find("self.emit(\"{prefix} ")).to_be_less_than(
+            attrs_body.find("self.current_function = Some(name)")
+        )
+
+    it "does not prepend a previous module's IR to the next module":
+        # SIMPLE_BOOTSTRAP must use the same per-instance runtime string
+        # builder as every other mode. Module B therefore cannot inherit any
+        # text from module A.
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        val triple = LlvmTargetTriple.from_target(CodegenTarget.X86_64)
+
+        val a = LlvmIRBuilder.create("mod_a", triple)
+        a.emit_module_header()
+        a.start_function("mod_a", [], "i64")
+        a.emit_ret("i64", "42")
+        a.end_function()
+        val ir_a = llvm_ir_builder_build(a)
+
+        val b = LlvmIRBuilder.create("mod_b", triple)
+        b.emit_module_header()
+        b.start_function("mod_b", [], "i64")
+        b.emit_ret("i64", "7")
+        b.end_function()
+        val ir_b = llvm_ir_builder_build(b)
+
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+        # Module A is well-formed on its own.
+        expect(ir_a.contains("ModuleID = 'mod_a'")).to_equal(true)
+
+        # Module B must be a STANDALONE module: no trace of module A.
+        expect(ir_b.contains("mod_a")).to_equal(false)
+        expect(ir_b.contains("ModuleID = 'mod_b'")).to_equal(true)
+
+        # Exactly one module header in B (split on N occurrences -> N+1 parts).
+        expect(ir_b.split("target triple").len()).to_equal(2)
+        expect(ir_b.split("source_filename").len()).to_equal(2)
+
+    it "does not let an incidental builder erase an active module":
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        val triple = LlvmTargetTriple.from_target(CodegenTarget.X86_64)
+        val top = LlvmIRBuilder.create("top", triple)
+        top.emit_module_header()
+        top.start_function("body", [], "i64")
+        top.emit_ret("i64", "42")
+        top.end_function()
+
+        # A second builder owns a distinct runtime string-builder handle, so
+        # merely constructing it cannot affect the active top-level builder.
+        val incidental = LlvmIRBuilder.create("incidental", triple)
+        val _ = incidental.local_counter
+
+        top.emit("; retained tail")
+        val ir = llvm_ir_builder_build(top)
+
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+        expect(ir.split("ModuleID = 'top'").len()).to_equal(2)
+        expect(ir.split("define i64 @body()").len()).to_equal(2)
+        expect(ir.split("; retained tail").len()).to_equal(2)
+        expect(ir.contains("incidental")).to_equal(false)

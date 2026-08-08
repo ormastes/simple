@@ -1,0 +1,144 @@
+# Canonical assurance-policy RESOLVER (WP-3, 2026-08-07).
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+#
+# policy_schema.spl froze the SHAPE (WP-0). This file is the only place that
+# turns configuration inputs — project pin, CLI flag, environment variable —
+# into a `ResolvedAssurancePolicyV1`. policy_names.spl owns the name/alias
+# table; this file owns PRECEDENCE and the typed value.
+#
+# ---------------------------------------------------------------------------
+# PRECEDENCE IS FAIL-CLOSED: RAISE-ONLY
+# ---------------------------------------------------------------------------
+# The rule is "CLI may raise strictness, never lower a project pinned to
+# robust/critical". Implemented as the MAXIMUM over every source rather than
+# as last-writer-wins, which makes it unconditional: no input can ever lower
+# any other, in either direction, so a future fourth source cannot reintroduce
+# a downgrade path by being added in the wrong order. Grade and convention use
+# the same max rule for the same reason.
+#
+# The permissive default is `moderate` / no grade / no convention — an
+# unconfigured build resolves exactly to `ResolvedAssurancePolicyV1.default()`
+# and nothing silently escalates.
+#
+# ---------------------------------------------------------------------------
+# `SIMPLE_SAFETY_PROFILE` IS DEMOTED TO SUBPROCESS SERIALIZATION
+# ---------------------------------------------------------------------------
+# Premise 5b: the env var was never typed state. The driver re-read it per call
+# and the interpreter latched it once at `eval_init`, so the two could disagree
+# with nothing detecting it. After WP-3 the env var has exactly one legitimate
+# job: carrying an already-resolved policy ACROSS a process boundary (`run` and
+# the test runner spawn children). `policy_env_value` is the writer and
+# `resolve_assurance_policy`'s `env_profile` argument is the reader. In-process
+# components take the typed policy as a parameter.
+#
+# THE CANONICAL PROJECT FORM IS FLAT TWO-LEVEL SDN — the form WP-4 shipped and
+# all three readers already agree on:
+#
+#     lints:
+#       profile: critical
+#
+# A nested third level (`lints:` -> `overrides:` -> `stub_impl:`) is NOT
+# canonical: WP-4's hand-rolled scanners read any indented key as a direct
+# `lints.*` child, so a sub-dict would be read as `lints.stub_impl` by them and
+# as `lints.overrides.stub_impl` by the typed loader. Per-lint overrides
+# therefore stay flat siblings of `profile:` until a WP deliberately versions
+# the schema.
+
+use compiler.common.assurance.policy_names.{
+    normalize_profile_name, is_known_profile_name
+}
+use compiler.common.assurance.policy_schema.{
+    AssuranceStrictness, AssuranceGrade, AssuranceConvention,
+    ResolvedAssurancePolicyV1
+}
+
+# Strictness for one configuration input. Unknown and empty are BOTH the
+# permissive baseline, matching every pre-WP-3 call site's fail-soft default.
+pub fn strictness_for_profile_name(raw: text) -> AssuranceStrictness:
+    AssuranceStrictness.from_name(normalize_profile_name(raw))
+
+# The stricter of two rungs. `at_least` is policy_schema's frozen comparison.
+fn _max_strictness(a: AssuranceStrictness, b: AssuranceStrictness) -> AssuranceStrictness:
+    if a.at_least(b):
+        return a
+    b
+
+fn _max_grade(a: AssuranceGrade, b: AssuranceGrade) -> AssuranceGrade:
+    if a.rank() >= b.rank():
+        return a
+    b
+
+fn _max_convention(a: AssuranceConvention, b: AssuranceConvention) -> AssuranceConvention:
+    if a.rank() >= b.rank():
+        return a
+    b
+
+# A policy carrying nothing but a strictness rung. The single-input form used
+# by every command that today knows only a profile name.
+pub fn policy_for_profile_name(raw: text) -> ResolvedAssurancePolicyV1:
+    val base = ResolvedAssurancePolicyV1.default()
+    ResolvedAssurancePolicyV1(
+        strictness: strictness_for_profile_name(raw),
+        runtime_family: base.runtime_family,
+        assurance_grade: base.assurance_grade,
+        convention: base.convention
+    )
+
+# THE resolver. Every argument is a raw configuration string; unknown values
+# fall back to the permissive baseline and are never an error, because an
+# unparsed name must not silently weaken a pin coming from another source.
+#
+# `project_profile` is the repo-root `simple.sdn` pin (WP-4), `cli_profile` the
+# `--profile` flag, `env_profile` the deserialized SIMPLE_SAFETY_PROFILE from a
+# parent process. Raise-only, so their order of appearance is immaterial.
+pub fn resolve_assurance_policy(
+    project_profile: text,
+    cli_profile: text,
+    env_profile: text,
+    runtime_family: text,
+    grade: text,
+    convention: text
+) -> ResolvedAssurancePolicyV1:
+    val base = ResolvedAssurancePolicyV1.default()
+    var strictness = strictness_for_profile_name(project_profile)
+    strictness = _max_strictness(a: strictness, b: strictness_for_profile_name(cli_profile))
+    strictness = _max_strictness(a: strictness, b: strictness_for_profile_name(env_profile))
+    var family = runtime_family
+    if family == "":
+        family = base.runtime_family
+    ResolvedAssurancePolicyV1(
+        strictness: strictness,
+        runtime_family: family,
+        assurance_grade: _max_grade(a: base.assurance_grade, b: AssuranceGrade.from_name(grade)),
+        convention: _max_convention(a: base.convention, b: AssuranceConvention.from_name(convention))
+    )
+
+# True when `candidate` would WEAKEN `pinned` on any axis — the fail-closed
+# check a CLI front-end runs before accepting an explicit downgrade request.
+# Written as a positive predicate returning bool (never an Option) so an
+# absence assertion against it cannot be fail-open.
+fn policy_would_weaken(
+    pinned: ResolvedAssurancePolicyV1,
+    candidate: ResolvedAssurancePolicyV1
+) -> bool:
+    not candidate.is_at_least_as_strict_as(pinned)
+
+# Serialize a resolved policy for a CHILD PROCESS. This is the only sanctioned
+# writer of SIMPLE_SAFETY_PROFILE's value. It intentionally emits the canonical
+# name, never a deprecated alias, so a child never has to re-run the alias
+# table and a deprecation warning is never emitted twice.
+pub fn policy_env_value(policy: ResolvedAssurancePolicyV1) -> text:
+    policy.strictness.name()
+
+# Read back what `policy_env_value` wrote. Round-trips by construction; the
+# spec asserts it over every accepted spelling, not just the canonical four.
+pub fn policy_from_env_value(raw: text) -> ResolvedAssurancePolicyV1:
+    policy_for_profile_name(raw)
+
+# Convenience for call sites that only need "is this rung at least robust /
+# critical" and have no reason to hold the whole struct.
+fn profile_name_is_at_least(raw: text, floor: text) -> bool:
+    if not is_known_profile_name(floor):
+        return false
+    strictness_for_profile_name(raw).at_least(strictness_for_profile_name(floor))

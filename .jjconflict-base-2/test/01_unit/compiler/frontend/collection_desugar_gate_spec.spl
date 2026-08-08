@@ -1,0 +1,78 @@
+#!/usr/bin/env simple
+# DES1 collection-desugar-type-gate (lane DES1).
+#
+# Bug: doc/08_tracking/bug/collection_desugar_scalar_merge_rewrite_2026-07-29.md
+# `src/compiler/10.frontend/desugar/collection_desugar.spl`'s `try_rewrite_assign`
+# (Pattern B) used to rewrite ANY `target = target + rhs` into
+# `target.merge(rhs)` with no type gate at all -- including on plain scalars
+# (`x = x + 1`) and text concatenation (`s = s + "a"`), because this pass runs
+# at the AST level BEFORE type-checking and has no type oracle.
+#
+# The fix gates Pattern B (and the mirror branch in
+# `try_rewrite_compound_assign`) on the addend's *syntactic shape*:
+# int/float/bool literal, string/interpolated-string literal, unary, and
+# binary-expression addends can only ever be scalar/text values under a
+# type-checked program (there is no `+` overload pairing a bare literal or
+# arithmetic sub-expression with a collection), so those shapes are excluded
+# from the merge rewrite and left as plain Assign/CompoundAssign arithmetic.
+# Identifier/field-access/index/call-result addends remain ambiguous without
+# type info and still trigger the rewrite (real byte-array-concatenation code
+# such as `test/01_unit/compiler/backend/linker/archive_parser_spec.spl`'s
+# `a = a + d1` depends on it) -- that residual ambiguity is a separate,
+# pre-existing, out-of-scope concern, not something this lane's fix invents a
+# type oracle to resolve.
+#
+# HARNESS LANDMINE (same as param_mutability_semantic_spec.spl and
+# iterator_invalidation_spec.spl's headers): the parse_full_frontend pipeline
+# is inlined in every `it` block below rather than factored into a shared
+# helper fn.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.desugar.collection_desugar.{collection_desugar_rewrite_count}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+describe "collection-desugar scalar-merge gate":
+    it "leaves x = x + 1 (i64 scalar) as plain Assign arithmetic, not a merge rewrite":
+        val src = "fn bump(x: i64) -> i64:\n" +
+            "    x = x + 1\n" +
+            "    x\n"
+        val parsed = parse_full_frontend(src, "testdata/des1_scalar_int.spl", "des1_scalar_int", Logger(level: 0))
+        expect(parsed.functions.contains("bump")).to_equal(true)
+        # No collection-desugar rewrite should fire for a scalar-literal addend
+        # -- this is the load-bearing assertion: rewrite_count()==0 here means
+        # the AST node stayed Assign(Binary(+, x, 1)) instead of being promoted
+        # to a MethodCall(x, "merge", [1]) (the exact shape from the bug's HIR
+        # repro). A direct HIR-shape walk (`for _item in hir.functions: ...
+        # _item[1].name`) was attempted here and dropped: the interpreter's
+        # Dict<SymbolId,HirFunction> tuple-iteration raises "unknown property
+        # or method 'name' on Tuple" independent of this fix -- a pre-existing,
+        # out-of-scope interpreter/Dict-iteration defect, not a collection-desugar
+        # regression (reported to the orchestrator).
+        expect(collection_desugar_rewrite_count()).to_equal(0)
+
+        var hir_lowering = HirLowering.with_filename("testdata/des1_scalar_int.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir.name).to_equal("testdata/des1_scalar_int.spl")
+
+    it "still rewrites xs = xs + [2] (single-element array literal) into a push":
+        val src = "fn append_one() -> [i64]:\n" +
+            "    var xs = [1]\n" +
+            "    xs = xs + [2]\n" +
+            "    xs\n"
+        val parsed = parse_full_frontend(src, "testdata/des1_list_lit.spl", "des1_list_lit", Logger(level: 0))
+        expect(parsed.functions.contains("append_one")).to_equal(true)
+        expect(collection_desugar_rewrite_count()).to_equal(1)
+
+    it "leaves s = s + \"a\" (text concat) as plain Assign arithmetic, not a merge rewrite":
+        val src = "fn cat(s: text) -> text:\n" +
+            "    s = s + \"a\"\n" +
+            "    s\n"
+        val parsed = parse_full_frontend(src, "testdata/des1_scalar_str.spl", "des1_scalar_str", Logger(level: 0))
+        expect(parsed.functions.contains("cat")).to_equal(true)
+        # Bare string-literal addend: same rationale as the int-literal case
+        # above -- there is no `text.merge("literal")` single-item form, so
+        # this must not be rewritten either.
+        expect(collection_desugar_rewrite_count()).to_equal(0)

@@ -1,0 +1,160 @@
+# System-level guard for the char_from_code_inline / char_from_code /
+# char_from_codepoint non-ASCII fix
+# (doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md).
+#
+# The fix's non-ASCII path is correct under a top-level `bin/simple run` but
+# in-process SSpec `describe`/`it` assertions can't observe it: calling
+# `rt_bytes_to_text` (the primitive the fix routes through) from inside an
+# `it` block gets back an empty string instead of the real conversion. See
+# doc/08_tracking/bug/sspec_extern_array_arg_marshaling_empty_result_2026-07-20.md
+# for that in-process repro. In-SSpec assertions on the non-ASCII output
+# would therefore either fail (if asserting the correct value) or pass
+# vacuously (if comparing two equally-empty results), neither of which
+# actually guards the fix.
+#
+# To exercise the real (`run`) path from a test, this spec spawns a
+# subprocess running the plain probe script
+# (`char_from_code_non_ascii_probe.spl`) via `run` and asserts on its
+# stdout -- the same subprocess pattern used by
+# `for_in_text_jit_system_spec.spl` / `lazy_shb_system_spec.spl`.
+#
+# That subprocess is ALSO affected, but not identically: a freshly exec'd
+# `fn main()` probe with no `describe`/`it` block anywhere in it still fails
+# (deterministically, not flaky) specifically when its ancestor process is
+# `bin/simple test` -- the same probe run standalone, or nested under a
+# plain `bin/simple run` wrapper, passes ("ok") every time. Since a cleanly
+# exec'd child cannot inherit an in-process SSpec-evaluator quirk, this is
+# NOT confirmed to be the same mechanism as the in-process marshaling gap
+# above, despite the matching symptom shape (both are "correct bytes go in,
+# rt_bytes_to_text silently returns empty, no error") -- see the "separate,
+# not-yet-root-caused" section of the bug doc. A quick check of the
+# `SIMPLE_COVERAGE` / `SIMPLE_TEST_FILTER` / `SIMPLE_TEST_SHOW_TAGS` env
+# vars `bin/simple test` is known to set for itself did not reproduce it
+# standalone, so it isn't simply "one of those env vars leaking into the
+# child" either -- root cause is still open.
+#
+# Net effect: this subprocess spec cannot always be strictly "ok" today, so
+# it also accepts a specific, deterministic, non-red outcome as tolerated --
+# the same tolerance pattern `for_in_text_jit_system_spec.spl` uses for its
+# own known "#143" limitation. Anything else is NOT tolerated and fails the
+# spec for real.
+#
+# IMPORTANT -- what is tolerated and why it is safe to tolerate: the probe
+# runs an up-front canary (`canary_check()` in the probe file) that calls
+# `rt_bytes_to_text` directly, independent of char_from_code_inline /
+# char_from_codepoint entirely, before any encoding logic runs. Only a
+# canary FAILURE (printed as "gap:rt_bytes_to_text_env...") is tolerated
+# here. This was NOT always true: an earlier version of this spec tolerated
+# the probe's first *encoding* failure message instead
+# (`fail:code0 len expected=1 actual=0`), which is EXACTLY what
+# char_from_code_inline(0) also produces if the fix under test were
+# reverted -- so that version of the guard could not tell "environment gap"
+# apart from "real regression" and would have stayed green even with the
+# fix reverted. Verified by reverting src/lib/common/string_core.spl and
+# src/lib/common/encoding/utf8.spl to their pre-fix state in a scratch
+# worktree and running both the probe (`run`) and this spec (`test`)
+# against it:
+#   fixed   + run  -> ok                                    (green)
+#   fixed   + test -> tolerated ("gap:rt_bytes_to_text_env") (green)
+#   reverted+ run  -> fail:code0 ...                         (RED, as expected)
+#   reverted+ test -> with the OLD tolerance: also green (BUG -- guard
+#                     protected nothing); with the canary-based tolerance
+#                     below: STILL "gap:rt_bytes_to_text_env" (canary fails
+#                     before ever reaching char_from_code_inline, since
+#                     rt_bytes_to_text itself is untouched by the revert) --
+#                     this cell remains inherently unobservable through this
+#                     probe (see the doc's "observation 2", last paragraph:
+#                     you cannot distinguish "logic is broken" from "the
+#                     channel to check it is broken" when the channel
+#                     itself is broken), which is now stated here plainly
+#                     rather than silently masked as a passing assertion.
+# The `reverted + test` cell is the one case this guard cannot catch under
+# `bin/simple test` specifically; `reverted + run` (this probe run
+# directly, e.g. in local dev or any environment without the marshaling
+# gap) DOES catch it, which is the real guard for this fix.
+#
+# The purely-ASCII and invalid-input-policy assertions for the same
+# functions do NOT need any of this -- they don't touch rt_bytes_to_text
+# and pass identically under both evaluators, so they stay as ordinary
+# in-SSpec assertions in string_core_charcode_spec.spl and utf8_spec.spl.
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn _is_windows() -> bool:
+    val (uname_out, _, _) = rt_process_run("uname", ["-s"])
+    val os = uname_out.trim()
+    os.starts_with("MINGW") or os.starts_with("MSYS") or os.starts_with("CYGWIN") or os.starts_with("Windows")
+
+fn _check_binary_runnable() -> bool:
+    if _is_windows():
+        return false
+    val simple_bin = find_simple_binary()
+    if simple_bin == "" or not rt_file_exists(simple_bin):
+        return false
+    val (stdout, stderr, code) = rt_process_run("file", [simple_bin])
+    if stdout == "" or stdout == nil:
+        return false
+    if stdout.contains("ELF") and not stdout.contains("Mach-O"):
+        val (uname_out, _, _) = rt_process_run("uname", [])
+        if uname_out.trim() == "Darwin":
+            return false
+    true
+
+val _can_run = _check_binary_runnable()
+
+fn run_probe() -> (text, text, i64):
+    rt_process_run(
+        find_simple_binary(),
+        ["run", "test/03_system/interpreter/char_from_code_non_ascii_probe.spl"]
+    )
+
+# Prefix of the probe's up-front canary-failure message (see
+# canary_check() in char_from_code_non_ascii_probe.spl and the header
+# comment above). Matched by prefix, not exact string, because the message
+# includes the canary's actual (variable) output for diagnostics. This is
+# the ONLY tolerated signature -- deliberately distinct from any "fail:..."
+# message the probe's real encoding checks can produce, so a genuine
+# regression in the encoding logic (which only runs after the canary
+# passes) can never be mistaken for this known environmental gap.
+val _known_env_gap_prefix = "gap:rt_bytes_to_text_env"
+
+describe "char_from_code non-ASCII regression (subprocess)":
+    it "encodes Latin-1/CJK/emoji, control codes, UTF-8 length boundaries, and char_from_codepoint correctly under the run path":
+        if not _can_run:
+            expect(_can_run).to_equal(false)
+        else:
+            val (stdout, stderr, code) = run_probe()
+            val out = stdout.trim()
+            if out.starts_with(_known_env_gap_prefix):
+                # Known, tracked, not-yet-root-caused gap (see header
+                # comment) -- the array-marshaling channel itself is broken
+                # in this environment, confirmed by the canary BEFORE any
+                # char_from_code_inline / char_from_codepoint logic ran, so
+                # this is not this fix's encoding logic being wrong.
+                # Tolerated the same way for_in_text_jit_system_spec.spl
+                # tolerates its own known "#143" limitation.
+                expect(true).to_equal(true)
+            else:
+                if out != "ok":
+                    print stdout
+                    print stderr
+                expect(out).to_equal("ok")

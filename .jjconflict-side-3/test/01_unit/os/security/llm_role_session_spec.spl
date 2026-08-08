@@ -1,0 +1,209 @@
+"""
+# LlmSession Role Gating Specification (OCap Privilege — P1, Lane S-llm)
+
+**Feature IDs:** #OS-OCAP-P1-LLM
+**Category:** Runtime / Security
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1)
+**Design:** doc/01_research/os/security/llm_role_cspace_container_design.md (§3.3, §3.4)
+
+## Overview — the user's headline scenario
+
+The SAME immutable binary (identical `image_hash`) is run as two LLM roles that
+differ ONLY in the capability pouch injected at spawn:
+
+  - a **ticketing** session — granted ONLY an `IpcConnect` cap to the ticket
+    channel (`svc.tickets`). It can see the ticket tool. It CANNOT see the
+    filesystem-write tool, and CANNOT see the calendar tool.
+  - a **scheduling** session — granted ONLY a calendar `SharedDataset` rw cap. It
+    can see the calendar tool. It CANNOT see the ticket tool.
+
+Tool visibility is decided by `resolve_tool(session, name)`: the tool is returned
+ONLY if the session holds the capability that tool requires. An un-granted tool is
+`nil` — invisible, not merely denied (research §3.3: "no capability is
+indistinguishable from nonexistence"), so a prompt-injected role cannot probe for
+authority it was never given.
+
+Also proven: a session cannot hold a capability the parent lacks (monotonic), and
+a sealed session denies ambient authority (never the allow-all of `full()`).
+"""
+
+use std.spec.{describe, it, expect, assert_true, assert_false, assert_equal}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE}
+use os.kernel.ipc.cspace_spawn.{CapGrant, atten_identity}
+use os.kernel.ipc.llm_session.{LlmSession, spawn_llm_role}
+use os.services.llm.mcp_tool_gate.{LlmTool, resolve_tool, available_tool_names, os_mcp_tool_cap_map, SVC_TICKETS, CALENDAR_OBJ, CALENDAR_GEN}
+
+# ============================================================================
+# Fixtures — one binary, two role pouches
+# ============================================================================
+
+val IMAGE_HASH: text = "blake3:9f3a-llm_worker"
+
+fn _tickets_cap() -> CapabilityKind:
+    CapabilityKind.IpcConnect(port_name: SVC_TICKETS)
+
+fn _calendar_rw() -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CALENDAR_OBJ, generation: CALENDAR_GEN, rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE)
+
+fn _fwrite_var() -> CapabilityKind:
+    CapabilityKind.FileWrite(path_prefix: "/var")
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64, depth: i64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 1u64, token_id: tid, parent_token_id: 0u64, depth: depth)
+
+fn make_orchestrator() -> CapabilitySet:
+    """Broad orchestrator pouch: tickets(rw), calendar(rw), filewrite(/var) — all
+    concrete, delegable tokens (depth 2). This is the authority the roles are
+    minted FROM; neither role receives all of it."""
+    val tickets = _tok(_tickets_cap(), 1u64, 100u64, 2)
+    val calendar = _tok(_calendar_rw(), 2u64, 101u64, 2)
+    val fwrite = _tok(_fwrite_var(), 3u64, 102u64, 2)
+    CapabilitySet(caps: [tickets, calendar, fwrite], is_pledged: true)
+
+fn ticketing_grants() -> [CapGrant]:
+    [CapGrant(label: "ipc.tickets", requested: _tickets_cap(), atten: atten_identity())]
+
+fn scheduling_grants() -> [CapGrant]:
+    [CapGrant(label: "mem.calendar", requested: _calendar_rw(), atten: atten_identity())]
+
+fn make_ticketing() -> LlmSession:
+    spawn_llm_role(make_orchestrator(), "ticketing", IMAGE_HASH, ticketing_grants(), 700u64, 20u64, 1000u64, 300u64)
+
+fn make_scheduling() -> LlmSession:
+    spawn_llm_role(make_orchestrator(), "scheduling", IMAGE_HASH, scheduling_grants(), 701u64, 21u64, 2000u64, 400u64)
+
+# small helpers so `it` blocks assert on bools/text, not raw optionals
+fn _resolves(session: LlmSession, name: text) -> bool:
+    val r = resolve_tool(session, name)
+    r != nil
+
+fn _resolved_name(session: LlmSession, name: text) -> text:
+    val r = resolve_tool(session, name)
+    if r == nil:
+        return ""
+    val t = r
+    t.name
+
+fn _names_contains(names: [text], want: text) -> bool:
+    for n in names:
+        if n == want:
+            return true
+    false
+
+# ============================================================================
+# Group 1 — THE GATE: same image_hash, opposite tool menus
+# ============================================================================
+
+describe "LlmSession: same binary, role-scoped MCP tool menu":
+    """Two sessions of ONE binary; the injected pouch alone decides tool visibility."""
+
+    it "both roles run the SAME immutable image_hash":
+        expect(make_ticketing().image_hash).to_equal(make_scheduling().image_hash)
+
+    it "ticketing SEES the ticket tool":
+        assert_true(_resolves(make_ticketing(), "ticket_submit"))
+
+    it "ticketing resolves the ticket tool to the right handler name":
+        expect(_resolved_name(make_ticketing(), "ticket_submit")).to_equal("ticket_submit")
+
+    it "ticketing CANNOT see filesystem-write (no FS authority in its pouch)":
+        assert_false(_resolves(make_ticketing(), "file_write"))
+
+    it "ticketing CANNOT see the calendar tool":
+        assert_false(_resolves(make_ticketing(), "calendar_read"))
+        assert_false(_resolves(make_ticketing(), "calendar_write"))
+
+    it "scheduling SEES the calendar tool":
+        assert_true(_resolves(make_scheduling(), "calendar_read"))
+
+    it "scheduling resolves calendar_write (it holds rw)":
+        assert_true(_resolves(make_scheduling(), "calendar_write"))
+
+    it "scheduling CANNOT see the ticket tool":
+        assert_false(_resolves(make_scheduling(), "ticket_submit"))
+        assert_false(_resolves(make_scheduling(), "ticket_read"))
+
+    it "scheduling CANNOT see filesystem-write either":
+        assert_false(_resolves(make_scheduling(), "file_write"))
+
+    it "an unknown tool name is nil (no probing surface) for either role":
+        assert_false(_resolves(make_ticketing(), "no_such_tool"))
+        assert_false(_resolves(make_scheduling(), "process_spawn"))
+
+# ============================================================================
+# Group 2 — the visible toolset is the role's authorized subset, not the server
+# ============================================================================
+
+describe "LlmSession: tools/list is the role subset, not the whole server":
+    """available_tool_names returns ONLY the tools the role's caps authorize."""
+
+    it "ticketing's menu contains the ticket tool":
+        val names = available_tool_names(make_ticketing(), os_mcp_tool_cap_map())
+        assert_true(_names_contains(names, "ticket_submit"))
+
+    it "ticketing's menu excludes file_write and calendar":
+        val names = available_tool_names(make_ticketing(), os_mcp_tool_cap_map())
+        assert_false(_names_contains(names, "file_write"))
+        assert_false(_names_contains(names, "calendar_read"))
+
+    it "scheduling's menu contains calendar but not tickets":
+        val names = available_tool_names(make_scheduling(), os_mcp_tool_cap_map())
+        assert_true(_names_contains(names, "calendar_read"))
+        assert_false(_names_contains(names, "ticket_submit"))
+
+# ============================================================================
+# Group 3 — sealed: no ambient authority
+# ============================================================================
+
+describe "LlmSession: sealed, no ambient authority":
+    """A minted session is pledged and sealed; it never inherits the parent's
+    broad authority, and never the allow-all of full()."""
+
+    it "a ticketing session is sealed":
+        assert_true(make_ticketing().sealed)
+
+    it "the session C-Space is pledged (never ambient full)":
+        assert_true(make_ticketing().caps.is_pledged)
+
+    it "the session does NOT inherit the parent's FileWrite (ambient denied)":
+        # The orchestrator holds FileWrite(/var); the ticketing session must not.
+        assert_false(make_ticketing().can(_fwrite_var()))
+
+    it "can() fails closed on a construction-bug (sealed=false) session":
+        # A session that is somehow not sealed denies EVERYTHING, even a cap it lists.
+        val broken = LlmSession(
+            role: "broken",
+            session_id: 999u64,
+            image_hash: IMAGE_HASH,
+            caps: make_orchestrator(),
+            sealed: false,
+            rejected: 0,
+            grant_labels: []
+        )
+        assert_false(broken.can(_fwrite_var()))
+
+    it "has_label exposes only granted labels (caps.get DI property)":
+        assert_true(make_ticketing().has_label("ipc.tickets"))
+        assert_false(make_ticketing().has_label("mem.calendar"))
+
+# ============================================================================
+# Group 4 — monotonic: a session cannot hold a cap the parent lacks
+# ============================================================================
+
+describe "LlmSession: monotonic minting":
+    """A role recipe asking for authority the parent does not hold is rejected,
+    never widened."""
+
+    it "ticketing minted from a ticket-less parent gets ZERO caps and no ticket tool":
+        val calendar = _tok(_calendar_rw(), 2u64, 101u64, 2)
+        val no_ticket_parent = CapabilitySet(caps: [calendar], is_pledged: true)
+        val sess = spawn_llm_role(no_ticket_parent, "ticketing", IMAGE_HASH, ticketing_grants(), 710u64, 30u64, 5000u64, 600u64)
+        expect(sess.rejected).to_equal(1)
+        expect(sess.grant_count()).to_equal(0)
+        assert_false(_resolves(sess, "ticket_submit"))
+
+    it "each role receives EXACTLY one cap from its single-grant recipe":
+        expect(make_ticketing().grant_count()).to_equal(1)
+        expect(make_scheduling().grant_count()).to_equal(1)

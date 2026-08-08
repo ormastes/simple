@@ -1,0 +1,208 @@
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/parser_decls_types.spl
+# @cover src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+# Lanes EPC1 `enum-payload-capture` + EPA1 `enum-payload-multi-arity`
+# (mission-critical robustness campaign, 2026-07-29). See doc/08_tracking/bug/
+# enum_variant_payload_types_discarded_at_parse_2026-07-29.md.
+#
+# Enum variant payload TYPES used to be parsed purely to advance the token
+# stream and never stored anywhere: `decl_enum_def` had no type slot, and
+# `_FlatAstBridge/module_assembly.spl` hardcoded `kind: VariantKind.Tuple([])`
+# for every variant regardless of its real declared payload.
+#
+# EPC1 added single-payload capture (only the first field's type per
+# variant). EPA1 extends that to FULL arity: `decl_enum_def` now takes a flat
+# `variant_payload_types_flat: [i64]` (every payload field's type tag, in
+# order, concatenated across all variants) plus a parallel
+# `variant_payload_counts: [i64]` (one entry per variant, how many payload
+# fields it declared). The flat list reuses the decl arena's existing
+# per-decl `decl_field_types` slot (structs already use it); the counts
+# reuse `decl_field_bits` (unused by enum decls otherwise -- structs use it
+# for bitfield widths). The bridge slices the flat list back apart per
+# variant using a running offset and threads each slice through
+# `convert_flat_type`. See `decl_enum_def`'s docstring in
+# `_Ast/decl_nodes.spl` for the full encoding.
+#
+# HARNESS NOTE (matches type_alias_capture_spec.spl /
+# convert_nodes_loud_fallback_spec.spl / iso_parse_pipeline_spec.spl in this
+# same area): the parse call is inlined in each `it` block on purpose --
+# routing it through a shared module-level helper fn has previously been shown
+# to lose recorded parser/lowering state when read back afterward.
+#
+# Dict landmine (see .claude/rules/code-style.md): `enums` values are Enum
+# STRUCTS, so presence/lookup always goes through `contains_key(...)` + index
+# read (`dict[key]`), never `.get()`.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+use compiler.frontend.parser_types.{Variant, VariantKind}
+
+fn find_variant_index(variants: [Variant], name: text) -> i64:
+    var i = 0
+    while i < variants.len():
+        if variants[i].name == name:
+            return i
+        i = i + 1
+    -1
+
+fn variant_tuple_type_names(v: Variant) -> [text]:
+    match v.kind:
+        case VariantKind.Tuple(types):
+            var names: [text] = []
+            for t in types:
+                names.push(parser_type_kind_named_name(t.kind))
+            names
+        case _:
+            []
+
+describe "enum variant payload types are captured, not discarded, at parse time":
+    it "captures a single-field payload variant (Some(payload: i64)) with the right type":
+        val src = "enum E:\n" +
+            "    Some(payload: i64)\n" +
+            "    None\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epc1_some.spl", "fixture_epc1_some", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("E"))
+        val e = parsed.enums["E"]
+        val some_idx = find_variant_index(e.variants, "Some")
+        assert_true(some_idx >= 0)
+        val some_types = variant_tuple_type_names(e.variants[some_idx])
+        assert_equal(some_types.len(), 1)
+        assert_equal(some_types[0], "i64")
+
+    it "leaves payload-less variants with an empty Tuple([]) kind":
+        val src = "enum E:\n" +
+            "    Some(payload: i64)\n" +
+            "    None\n" +
+            "\n" +
+            "fn identity(n: i64) -> i64:\n" +
+            "    n\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epc1_none.spl", "fixture_epc1_none", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("E"))
+        val e = parsed.enums["E"]
+        val none_idx = find_variant_index(e.variants, "None")
+        assert_true(none_idx >= 0)
+        val none_types = variant_tuple_type_names(e.variants[none_idx])
+        assert_equal(none_types.len(), 0)
+
+    it "captures a mixed enum (payload variants and plain variants) correctly per-variant":
+        val src = "enum Status:\n" +
+            "    Ok(value: i64)\n" +
+            "    Err(msg: text)\n" +
+            "    Pending\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epc1_mixed.spl", "fixture_epc1_mixed", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("Status"))
+        val e = parsed.enums["Status"]
+        val ok_idx = find_variant_index(e.variants, "Ok")
+        val err_idx = find_variant_index(e.variants, "Err")
+        val pending_idx = find_variant_index(e.variants, "Pending")
+        assert_true(ok_idx >= 0)
+        assert_true(err_idx >= 0)
+        assert_true(pending_idx >= 0)
+        val ok_types = variant_tuple_type_names(e.variants[ok_idx])
+        val err_types = variant_tuple_type_names(e.variants[err_idx])
+        val pending_types = variant_tuple_type_names(e.variants[pending_idx])
+        assert_equal(ok_types.len(), 1)
+        assert_equal(ok_types[0], "i64")
+        assert_equal(err_types.len(), 1)
+        assert_equal(err_types[0], "text")
+        assert_equal(pending_types.len(), 0)
+
+    it "EPA1: captures BOTH fields of a two-field payload variant (Pair(a: i64, b: text)), in order":
+        val src = "enum Pair:\n" +
+            "    Both(a: i64, b: text)\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epa1_pair.spl", "fixture_epa1_pair", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("Pair"))
+        val e = parsed.enums["Pair"]
+        val both_idx = find_variant_index(e.variants, "Both")
+        assert_true(both_idx >= 0)
+        val both_types = variant_tuple_type_names(e.variants[both_idx])
+        assert_equal(both_types.len(), 2)
+        assert_equal(both_types[0], "i64")
+        assert_equal(both_types[1], "text")
+
+    it "EPA1: captures all three fields of a three-field payload variant, in order":
+        val src = "enum Triple:\n" +
+            "    All(a: i64, b: text, c: bool)\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epa1_triple.spl", "fixture_epa1_triple", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("Triple"))
+        val e = parsed.enums["Triple"]
+        val all_idx = find_variant_index(e.variants, "All")
+        assert_true(all_idx >= 0)
+        val all_types = variant_tuple_type_names(e.variants[all_idx])
+        assert_equal(all_types.len(), 3)
+        assert_equal(all_types[0], "i64")
+        assert_equal(all_types[1], "text")
+        assert_equal(all_types[2], "bool")
+
+    it "EPA1: a mixed enum with varying arities keeps each variant's own field count and types straight":
+        val src = "enum Mixed:\n" +
+            "    Zero\n" +
+            "    One(x: i64)\n" +
+            "    Two(x: i64, y: text)\n" +
+            "    Three(x: i64, y: text, z: bool)\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epa1_mixed_arity.spl", "fixture_epa1_mixed_arity", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("Mixed"))
+        val e = parsed.enums["Mixed"]
+        val zero_idx = find_variant_index(e.variants, "Zero")
+        val one_idx = find_variant_index(e.variants, "One")
+        val two_idx = find_variant_index(e.variants, "Two")
+        val three_idx = find_variant_index(e.variants, "Three")
+        assert_true(zero_idx >= 0)
+        assert_true(one_idx >= 0)
+        assert_true(two_idx >= 0)
+        assert_true(three_idx >= 0)
+        val zero_types = variant_tuple_type_names(e.variants[zero_idx])
+        val one_types = variant_tuple_type_names(e.variants[one_idx])
+        val two_types = variant_tuple_type_names(e.variants[two_idx])
+        val three_types = variant_tuple_type_names(e.variants[three_idx])
+        assert_equal(zero_types.len(), 0)
+        assert_equal(one_types.len(), 1)
+        assert_equal(one_types[0], "i64")
+        assert_equal(two_types.len(), 2)
+        assert_equal(two_types[0], "i64")
+        assert_equal(two_types[1], "text")
+        assert_equal(three_types.len(), 3)
+        assert_equal(three_types[0], "i64")
+        assert_equal(three_types[1], "text")
+        assert_equal(three_types[2], "bool")
+
+    it "leaves a fully payload-less enum with every variant at Tuple([])":
+        val src = "enum Color:\n" +
+            "    Red\n" +
+            "    Green\n" +
+            "    Blue\n" +
+            "\n" +
+            "fn make() -> i64:\n" +
+            "    1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_epc1_clean.spl", "fixture_epc1_clean", Logger(level: 0))
+        assert_false(parser_has_errors())
+        assert_true(parsed.enums.contains_key("Color"))
+        val e = parsed.enums["Color"]
+        assert_equal(e.variants.len(), 3)
+        for v in e.variants:
+            assert_equal(variant_tuple_type_names(v).len(), 0)

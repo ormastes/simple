@@ -1,0 +1,74 @@
+# Word extension kernel routing spec (IDE extension kernel campaign, lane L2)
+#
+# Exercises the writer.* CommandRegistry dispatch added to WordApp and the
+# writer_ext.spl builtin manifest declaring simple.rich_document.
+
+use std.spec.{describe, it, expect}
+use app.office.word.word_app.{WordApp}
+use common.ui.widget.{UIEvent}
+use std.editor.extensions.builtin.writer_ext.{writer_ext_manifest}
+
+describe "writer extension manifest":
+
+    it "declares the simple.rich_document custom editor and namespaced writer.* commands":
+        val m = writer_ext_manifest()
+        expect(m.contributes_custom_editors.len()).to_equal(1)
+        expect(m.contributes_custom_editors[0].document_kind).to_equal("simple.rich_document")
+        expect(m.contributes_commands.len()).to_equal(12)
+        expect(m.contributes_commands[0].id).to_equal("writer.format_bold")
+        expect(m.contributes_commands[11].id).to_equal("writer.save")
+
+describe "WordApp writer.* command dispatch":
+
+    it "dispatches writer.format_bold through the registry and mutates a real RichDocument":
+        val app = WordApp.open("draft.txt", "Hello world")
+        expect(app.modified).to_equal(false)
+        app.handle_event(UIEvent.Action(name: "format_bold"))
+        expect(app.modified).to_equal(true)
+        val bi = app.editor.cursor.block_index
+        val block = app.editor.doc.blocks[bi]
+        var saw_bold = false
+        for s in block.spans:
+            match s.style:
+                case Bold:
+                    saw_bold = true
+                case _:
+                    pass_do_nothing("non-bold span")
+        expect(saw_bold).to_equal(true)
+
+    it "dispatches writer.format_h1 and changes the block kind":
+        val app = WordApp.open("draft.txt", "Hello world")
+        app.handle_event(UIEvent.Action(name: "format_h1"))
+        val bi = app.editor.cursor.block_index
+        val block = app.editor.doc.blocks[bi]
+        var is_heading1 = false
+        match block.kind:
+            case Heading1:
+                is_heading1 = true
+            case _:
+                pass_do_nothing("not a heading")
+        expect(is_heading1).to_equal(true)
+
+    it "writer.save serializes the document through the codec and clears modified":
+        val app = WordApp.open("draft.txt", "Hello world")
+        app.handle_event(UIEvent.Action(name: "format_bold"))
+        expect(app.modified).to_equal(true)
+        app.handle_event(UIEvent.Action(name: "save"))
+        expect(app.modified).to_equal(false)
+        val saved = app.save()
+        expect(saved.contains("title:")).to_equal(true)
+        expect(saved.contains("Hello world")).to_equal(true)
+
+    it "an unrecognized action does not register as a writer.* command":
+        val app = WordApp.new()
+        app.handle_event(UIEvent.Action(name: "not_a_real_action"))
+        expect(app.modified).to_equal(false)
+
+    it "an unknown writer command id returns Err, not a crash":
+        val app = WordApp.new()
+        val result = app.commands.run("writer.does_not_exist", "0")
+        match result:
+            case Ok(_):
+                expect("unknown command").to_equal("should have failed")
+            case Err(msg):
+                expect(msg.contains("no handler")).to_equal(true)

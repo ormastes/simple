@@ -1,0 +1,112 @@
+# @platform: all
+# # Parenthesized Field Callee Specification
+#
+# **Category:** Syntax
+# **Status:** Implemented
+#
+# A call whose callee is a *grouped* field access — `(self.cb)(x)` or
+# `(obj.cb)(x)` where `cb` is a function-typed field — must resolve exactly like
+# the unparenthesized `self.cb(x)`. `(expr)(args)` is legal syntax and grouping
+# an expression must never change which symbol it denotes.
+#
+# Regression guard. The two forms did NOT agree: the unparenthesized call parses
+# as a MethodCall and resolved correctly, while the grouped form parses as a Call
+# whose callee is a FieldAccess and reached the dispatch branch written for
+# module-qualified calls (`module.function()`). That branch assumed the receiver
+# named a module or class, walked its module/class/impl/mangled-name chain, and
+# then failed with `unknown symbol self.cb` — never considering that the receiver
+# is an ordinary in-scope value holding a callable field.
+#
+# The defect was NOT specific to `self`: `(obj.cb)(x)` on a plain local failed
+# identically, so these examples pin both receivers. Binding the field to a local
+# first (`val f = self.cb` then `f(x)`) always worked, which is what identified
+# this as a dispatch ROUTING gap rather than missing callable-value machinery.
+
+
+class Doubler:
+    cb: fn(i64) -> i64
+
+    me fn via_paren(x: i64) -> i64:
+        (self.cb)(x)
+
+    me fn via_plain(x: i64) -> i64:
+        self.cb(x)
+
+    me fn via_bound_local(x: i64) -> i64:
+        val f = self.cb
+        f(x)
+
+
+class TwoFields:
+    add_fn: fn(i64, i64) -> i64
+    neg_fn: fn(i64) -> i64
+
+    me fn combine(a: i64, b: i64) -> i64:
+        (self.neg_fn)((self.add_fn)(a, b))
+
+
+fn double(v: i64) -> i64:
+    v * 2
+
+fn add2(a: i64, b: i64) -> i64:
+    a + b
+
+fn negate(v: i64) -> i64:
+    0 - v
+
+
+describe "parenthesized field callee":
+    # A grouped field access used as a callee must denote the same symbol as the
+    # ungrouped one. Each example pairs the grouped form against the form already
+    # known to work, so a regression shows up as a DISAGREEMENT, not just a fail.
+
+    describe "self receiver":
+        # `(self.field)(args)` from inside a `me` method — the shape that failed.
+
+        it "resolves a function-typed field called through parentheses":
+            val d = Doubler(cb: double)
+            expect d.via_paren(5) == 10
+
+        it "agrees with the unparenthesized call":
+            val d = Doubler(cb: double)
+            expect d.via_paren(7) == d.via_plain(7)
+
+        it "agrees with binding the field to a local first":
+            val d = Doubler(cb: double)
+            expect d.via_paren(9) == d.via_bound_local(9)
+
+    describe "local-variable receiver":
+        # The defect was never self-specific: an ordinary local failed the same
+        # way, so the fix must not special-case `self`.
+
+        it "resolves a field call through parentheses on a plain local":
+            val d = Doubler(cb: double)
+            expect (d.cb)(5) == 10
+
+        it "agrees with the unparenthesized call on a plain local":
+            val d = Doubler(cb: double)
+            expect (d.cb)(6) == d.cb(6)
+
+    describe "lambda-valued fields":
+        # The field may hold a lambda rather than a named function; both are
+        # callable values and both must dispatch.
+
+        it "resolves a lambda-valued field called through parentheses":
+            val d = Doubler(cb: |v: i64| v * 2)
+            expect d.via_paren(21) == 42
+
+        it "agrees with the unparenthesized call for a lambda-valued field":
+            val d = Doubler(cb: |v: i64| v * 2)
+            expect d.via_paren(8) == d.via_plain(8)
+
+    describe "arity and nesting":
+        # Arguments must be forwarded intact, including for a multi-argument
+        # field and for a grouped call nested inside another grouped call.
+
+        it "forwards multiple arguments to a grouped field callee":
+            val t = TwoFields(add_fn: add2, neg_fn: negate)
+            expect (t.add_fn)(3, 4) == 7
+
+        it "resolves a grouped field callee nested inside another":
+            val t = TwoFields(add_fn: add2, neg_fn: negate)
+            expect t.combine(3, 4) == 0 - 7

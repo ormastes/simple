@@ -1,0 +1,105 @@
+use compiler.common.dependency.graph.{ImportGraph}
+
+struct CouplingMetrics:
+    module_name: text
+    cbo: i64
+    fan_in: i64
+    fan_out: i64
+    instability: f64
+    abstractness: f64
+    distance: f64
+
+struct InstabilityInversion:
+    from_module: text
+    to_module: text
+    from_instability: f64
+    to_instability: f64
+
+fn compute_fan_out(graph: ImportGraph) -> Dict<text, i64>:
+    var result: Dict<text, i64> = {}
+    for key in graph.edges.keys():
+        result[key] = graph.edges[key].len()
+    result
+
+fn compute_fan_in(graph: ImportGraph) -> Dict<text, i64>:
+    var result: Dict<text, i64> = {}
+    for key in graph.edges.keys():
+        result[key] = 0
+    for key in graph.edges.keys():
+        for dep in graph.edges[key]:
+            if not result.has(dep):
+                result[dep] = 0
+            result[dep] = result[dep] + 1
+    result
+
+fn compute_all_metrics(graph: ImportGraph) -> [CouplingMetrics]:
+    val fan_in = compute_fan_in(graph)
+    val fan_out = compute_fan_out(graph)
+    var result: [CouplingMetrics] = []
+    for name in graph.edges.keys():
+        val fi = if fan_in.has(name): fan_in[name] else: 0
+        val fo = if fan_out.has(name): fan_out[name] else: 0
+        val total = fi + fo
+        val instability = if total == 0: 0.0 else: (fo as f64) / (total as f64)
+        val abstractness = 0.0
+        val distance = if total == 0: 1.0 else: (abstractness + instability - 1.0).abs()
+        result.push(CouplingMetrics(module_name: name, cbo: fo, fan_in: fi, fan_out: fo, instability: instability, abstractness: abstractness, distance: distance))
+    result
+
+fn _contains_text(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _cycle_seen(cycles: [[text]], cycle: [text]) -> bool:
+    for existing in cycles:
+        if existing.len() == cycle.len():
+            var same = true
+            for i in range(0, cycle.len()):
+                if existing[i] != cycle[i]:
+                    same = false
+            if same:
+                return true
+    false
+
+fn _dfs_cycles(graph: ImportGraph, node: text, path: [text], cycles: [[text]]) -> [[text]]:
+    var found = cycles
+    if _contains_text(path, node):
+        var cycle: [text] = []
+        var active = false
+        for item in path:
+            if item == node:
+                active = true
+            if active:
+                cycle.push(item)
+        if cycle.len() > 1 and not _cycle_seen(found, cycle):
+            found.push(cycle)
+        return found
+    val next_path = path.push(node)
+    val deps = if graph.edges.has(node): graph.edges[node] else: []
+    for dep in deps:
+        found = _dfs_cycles(graph, dep, next_path, found)
+    found
+
+fn find_cycles(graph: ImportGraph) -> [[text]]:
+    var cycles: [[text]] = []
+    for node in graph.edges.keys():
+        cycles = _dfs_cycles(graph, node, [], cycles)
+    cycles
+
+fn _metric_by_name(metrics: [CouplingMetrics], name: text) -> CouplingMetrics:
+    for metric in metrics:
+        if metric.module_name == name:
+            return metric
+    CouplingMetrics(module_name: name, cbo: 0, fan_in: 0, fan_out: 0, instability: 0.0, abstractness: 0.0, distance: 1.0)
+
+fn find_instability_inversions(metrics: [CouplingMetrics], graph: ImportGraph) -> [InstabilityInversion]:
+    var result: [InstabilityInversion] = []
+    for from in graph.edges.keys():
+        val from_metric = _metric_by_name(metrics, from)
+        for to in graph.edges[from]:
+            val to_metric = _metric_by_name(metrics, to)
+            if from_metric.instability < to_metric.instability:
+                result.push(InstabilityInversion(from_module: from, to_module: to, from_instability: from_metric.instability, to_instability: to_metric.instability))
+    result

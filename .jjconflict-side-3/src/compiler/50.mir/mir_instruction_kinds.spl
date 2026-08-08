@@ -1,0 +1,284 @@
+# MIR instruction opcode kinds.  Operand and metadata types live in the
+# support owner; this module deliberately has no graph dependency.
+
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.*
+
+"""MIR instruction kind."""
+enum MirInstKind:
+    # Constants
+    Const(dest: LocalId, value: MirConstValue, type_: MirType)
+
+    # Moves and copies
+    Copy(dest: LocalId, src: LocalId)
+    Move(dest: LocalId, src: LocalId)
+
+    # WP-E (resource ownership, doc/03_plan/language/resource/
+    # resource_parallel_agent_plan_2026-08-06.md): a drop edge for an
+    # affine `resource`-typed local -- emitted at normal scope exit, an
+    # early `return`, a `?` error-propagation exit, or a consuming
+    # `.close()` call. Deliberately a bare marker (no release-function
+    # operand): WP-E's job is the drop EDGE itself (exactly-once placement
+    # in the MIR control-flow graph); wiring it to the resource's real
+    # `@sffi(release: ...)` extern is sffi_gen/WP-H's job.
+    Drop(local: LocalId)
+
+    # Arithmetic
+    BinOp(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand)
+    UnaryOp(dest: LocalId, op: MirUnaryOp, operand: MirOperand)
+    CheckedBinOp(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand)
+
+    # Memory
+    Alloc(dest: LocalId, type_: MirType)
+    Load(dest: LocalId, ptr: MirOperand)
+    Store(ptr: MirOperand, value: MirOperand)
+    GetElementPtr(dest: LocalId, base: MirOperand, indices: [MirOperand])
+
+    # Module-level global storage (mutglobal lane -- module-scope `var`
+    # mutation, see scratchpad/mutglobal_plan.md). Distinct from Load/Store
+    # (which operate on a stack/heap MirOperand pointer, e.g. from Alloc):
+    # these reference a MirModule.statics entry directly by SymbolId, so the
+    # backend can resolve it to the real `@name` LLVM global without a
+    # separate "address of global" operand kind. Nothing in the HIR/MIR
+    # frontend lowering emits these yet (see the gap-analysis doc) --
+    # they exist so a backend (this lane's core_codegen.spl) has a real
+    # target to translate once another lane wires identifier
+    # read/assignment resolution through to a MirModule.statics symbol.
+    LoadGlobal(dest: LocalId, symbol: SymbolId)
+    StoreGlobal(symbol: SymbolId, value: MirOperand)
+
+    # Aggregates
+    Aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand])
+    GetField(dest: LocalId, base: MirOperand, field: i64)
+    SetField(base: MirOperand, field: i64, value: MirOperand)
+
+    # Casts
+    Cast(dest: LocalId, operand: MirOperand, target: MirType)
+    Bitcast(dest: LocalId, operand: MirOperand, target: MirType)
+
+    # Function calls
+    Call(dest: LocalId?, func: MirOperand, args: [MirOperand])
+    CallIndirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature)
+
+    # Intrinsics
+    Intrinsic(dest: LocalId?, name: text, args: [MirOperand])
+
+    # SIMD Operations (128-bit and 256-bit vector instructions)
+    # f32x4 (128-bit SSE/NEON)
+    SimdAddF32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdSubF32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdMulF32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdDivF32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdFmaF32x4(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand)
+    # f32x8 (256-bit AVX2)
+    SimdAddF32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdSubF32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdMulF32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdDivF32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdFmaF32x8(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand)
+    # f64x4 (256-bit AVX2)
+    SimdAddF64x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdSubF64x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdMulF64x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdDivF64x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdFmaF64x4(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand)
+    # i32x4 (128-bit SSE/NEON)
+    SimdAddI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdSubI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdMulI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdXorI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdAndI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdOrI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdShlI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdShrI32x4(dest: LocalId, a: MirOperand, b: MirOperand)
+    # i32x8 (256-bit AVX2)
+    SimdAddI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdSubI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdMulI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdXorI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdAndI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdOrI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdShlI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    SimdShrI32x8(dest: LocalId, a: MirOperand, b: MirOperand)
+    # Horizontal operations
+    SimdHaddF32x4(dest: LocalId, a: MirOperand)
+    SimdHmaxF32x4(dest: LocalId, a: MirOperand)
+    SimdHminF32x4(dest: LocalId, a: MirOperand)
+
+    # Inline assembly (must be in unsafe block)
+    InlineAsm(
+        asm_template: text,              # Assembly template with {operand} placeholders
+        is_volatile: bool,               # Prevent optimization
+        inputs: [MirAsmOperand],         # Input operands
+        outputs: [MirAsmOperand],        # Output operands
+        clobbers: [text]                 # Clobbered registers
+    )
+
+    # Pipeline operators (require runtime function dispatch)
+    PipeForward(dest: LocalId, value: MirOperand, func: MirOperand)
+    Compose(dest: LocalId, f: MirOperand, g: MirOperand, forward: bool)
+    Parallel(dest: LocalId, funcs: [MirOperand])
+    LayerConnect(dest: LocalId, layer1: MirOperand, layer2: MirOperand)
+
+    # Debug
+    DebugValue(local: LocalId, name: text)
+    Nop
+
+    # Async/Await Operations
+    # Creates a Promise<T> from an async expression body
+    CreatePromise(dest: LocalId, body: LocalId, result_type: MirType)
+    # Awaits a Promise, suspending until resolved
+    Await(dest: LocalId, promise: MirOperand)
+    # Yields a value from a generator, suspending execution
+    Yield(value: MirOperand?)
+    # Spawns an async task/actor
+    Spawn(dest: LocalId, handler: MirOperand, args: [MirOperand])
+    # Sends a message to an actor
+    Send(target: MirOperand, message: MirOperand)
+    # Receives a message from mailbox (blocking with optional timeout)
+    Receive(dest: LocalId, timeout: MirOperand?)
+
+    # Borrow checking instructions
+    Ref(dest: LocalId, borrow_kind: MirBorrowKind, place: MirPlace)
+
+    # GPU Instructions
+    # Kernel definition - wraps a function body as a GPU kernel
+    # WORKAROUND: Parser bug with multiple params of same custom type
+    # GpuKernelDef(name: text, params: [MirLocal], body_block: BlockId)
+    # GpuLaunch(kernel: MirOperand, grid_dim: MirOperand, block_dim: MirOperand, args: [MirOperand])
+    GpuKernelDef(name: text)
+    GpuLaunch(args: [text])
+    # Thread ID accessors (dim: 0=x, 1=y, 2=z)
+    GpuGlobalId(dest: LocalId, dim: i64)    # Global thread ID
+    GpuLocalId(dest: LocalId, dim: i64)     # Local thread ID within block
+    GpuBlockId(dest: LocalId, dim: i64)     # Block/workgroup ID
+    GpuBlockDim(dest: LocalId, dim: i64)    # Block dimensions
+    GpuGridDim(dest: LocalId, dim: i64)     # Grid dimensions
+    # Synchronization
+    GpuBarrier(scope: GpuBarrierScope)      # Thread synchronization barrier
+    GpuMemFence(scope: GpuMemoryScope)      # Memory fence
+    # Shared memory
+    GpuSharedAlloc(dest: LocalId, type_: MirType, size: i64)  # Allocate shared memory
+    # Atomic operations
+    GpuAtomicOp(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand)
+    # Compare-and-swap (3-operand atomic: ptr, expected, desired)
+    GpuAtomicCas(dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand)
+
+    # Host/GPU lane queue-boundary markers — bracket a region of instructions
+    # that cross from host-side execution into a named GPU lane (and back).
+    # Consumed by codegen (accounting only, no unsupported-instruction error)
+    # and by host_gpu_lane_queue.spl (turns the bracketed region into queue
+    # submission evidence packets).
+    HostGpuLaneBegin(lane: text, max_packet_bytes: MirOperand?)
+    HostGpuLaneEnd(lane: text)
+
+    # VHDL Instructions
+    # Process definition with sensitivity/clocking semantics
+    VhdlProcess(kind: VhdlProcessKind, body_block: BlockId)
+    # Signal assignment (with optional delay in nanoseconds)
+    VhdlSignalAssign(target: MirOperand, value: MirOperand, delay_ns: i64?)
+    # Variable assignment (inside process, immediate)
+    VhdlVarAssign(target: MirOperand, value: MirOperand)
+    # Port map instantiation
+    VhdlPortMap(entity: text, instance: text, connections: [(text, MirOperand)])
+    # Resize signal width (zero/sign extend or truncate)
+    VhdlResize(dest: LocalId, operand: MirOperand, new_width: i64, signed: bool)
+    # Slice a signal (hi downto lo)
+    VhdlSlice(dest: LocalId, signal: MirOperand, hi: i64, lo: i64)
+    # Concatenate signals
+    VhdlConcat(dest: LocalId, parts: [MirOperand])
+
+    # Scalable vector fence — lowering deferred until riscv_v ISel exists
+    ScalableVecFence(ordering: text)
+
+    # =========================================================================
+    # Generalized SIMD MIR opcodes — C2 §8
+    # These opcodes use LocalId / MirOperand / MirType consistent with the
+    # existing MirInstKind convention (not MirReg from the doc pseudo-code).
+    # Pattern matches on MirInstKind should NOT touch these until M1 lowering.
+    # =========================================================================
+
+    # Splat scalar to all lanes
+    MirSimdSplat(dest: LocalId, value: MirOperand, vec_type: MirType)
+
+    # Aligned/unaligned vector load and store
+    MirSimdLoad(dest: LocalId, ptr: MirOperand, aligned: bool, vec_type: MirType)
+    MirSimdStore(value: MirOperand, ptr: MirOperand, aligned: bool)
+
+    # Gather (indexed load) and scatter (indexed store)
+    MirSimdGather(dest: LocalId, base: MirOperand, indices: MirOperand, vec_type: MirType)
+    MirSimdScatter(value: MirOperand, base: MirOperand, indices: MirOperand)
+
+    # Binary SIMD ops — op enum from simd_types.spl SimdBinop
+    MirSimdBinop(dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text)
+
+    # Ternary SIMD ops (fma, fnmadd) — separate from binop per C2 §8
+    MirSimdTernop(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand, op: text)
+
+    # Unary SIMD ops — op enum from simd_types.spl SimdUnop
+    MirSimdUnop(dest: LocalId, src: MirOperand, op: text)
+
+    # Horizontal reduction
+    MirSimdReduce(dest: LocalId, src: MirOperand, op: text)
+
+    # Shuffle and permute — kind from simd_types.spl SimdShuffleKind
+    MirSimdShuffle(dest: LocalId, lhs: MirOperand, rhs: MirOperand, kind: text)
+    MirSimdPermute(dest: LocalId, src: MirOperand, ctrl: MirOperand)
+
+    # Comparison — produces a mask; op from simd_types.spl SimdCmpKind
+    MirSimdCmp(dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text)
+
+    # Predicated select: dest[i] = mask[i] ? t[i] : f[i]
+    MirSimdSelect(dest: LocalId, mask: MirOperand, t: MirOperand, f: MirOperand)
+
+    # Mask-to-mask operation — op from simd_types.spl SimdMaskOpKind
+    MirSimdMaskOp(dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text)
+
+    # Scalable vector length query — lowers to svcntw() (SVE2) or vsetvli (RVV)
+    # C2 §8.5: emitted BEFORE the first use of ScalableVec in each function
+    MirSimdScalableVsetvl(dest_vl: LocalId, requested: MirOperand, elem_type: MirType)
+
+    # =========================================================================
+    # Masked / Predicated SIMD opcodes — predicate_promote fusion targets
+    # MaskFromCmp produces a mask from a scalar comparison; Masked* apply an
+    # existing mask; Predicated* are the fused form after predicate_promote.
+    # =========================================================================
+
+    # Compare two operands producing a mask register
+    MaskFromCmp(dest: LocalId, cmp_kind: text, a: MirOperand, b: MirOperand)
+
+    # Masked binary ops — inactive lanes controlled by mask
+    MaskedAdd(dest: LocalId, mask: MirOperand, a: MirOperand, b: MirOperand)
+    MaskedMul(dest: LocalId, mask: MirOperand, a: MirOperand, b: MirOperand)
+
+    # Masked ternary (fused multiply-add) — 3 source operands + mask
+    MaskedFma(dest: LocalId, mask: MirOperand, a: MirOperand, b: MirOperand, c: MirOperand)
+
+    # Predicated ops — fused form of MaskFromCmp + Masked*; k-register predicated
+    # Signature subject to revision in Wave I2 fusion pass implementation
+    PredicatedAdd(dest: LocalId, cmp_kind: text, cmp_a: MirOperand, cmp_b: MirOperand, a: MirOperand, b: MirOperand)
+    PredicatedMul(dest: LocalId, cmp_kind: text, cmp_a: MirOperand, cmp_b: MirOperand, a: MirOperand, b: MirOperand)
+    PredicatedFma(dest: LocalId, cmp_kind: text, cmp_a: MirOperand, cmp_b: MirOperand, a: MirOperand, b: MirOperand, c: MirOperand)
+
+    # =========================================================================
+    # Warp-specific opcodes — C2 §6
+    # Separate from MirSimd* to enforce the WarpVec trait separation.
+    # =========================================================================
+
+    # Warp shuffle: up/down/xor/idx lane exchange
+    MirWarpShfl(dest: LocalId, src: MirOperand, delta: MirOperand, mask: MirOperand, op: text)
+
+    # Warp reduction: sum/min/max/any/all across active lanes
+    MirWarpReduce(dest: LocalId, src: MirOperand, mask: MirOperand, op: text)
+
+    # Warp ballot: returns bitmask of lanes where pred is true
+    MirWarpBallot(dest: LocalId, pred: MirOperand, mask: MirOperand)
+
+    # Active thread mask query (PTX: __activemask())
+    MirWarpActivesMask(dest: LocalId)
+
+    # Warp-level barrier / sync with mask
+    MirWarpSync(mask: MirOperand)
+
+export MirInstKind

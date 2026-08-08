@@ -1,0 +1,36 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "Vulkan direct compute ownership contract":
+    it "passes owned buffer arcs into direct execution and quarantine":
+        val pipeline = file_read("src/compiler_rust/runtime/src/vulkan/pipeline.rs").replace("\r\n", "\n")
+        val kernel = file_read("src/compiler_rust/runtime/src/value/gpu_vulkan/vulkan_sffi/kernel.rs").replace("\r\n", "\n")
+
+        expect(pipeline).to_contain("self: &Arc<Self>")
+        expect(pipeline).to_contain("buffers.to_vec()")
+        expect(pipeline).to_contain("Arc::clone(self)")
+        expect(pipeline.contains("std::mem::forget(fence)")).to_equal(false)
+        expect(kernel).to_contain("pipeline.execute(&buffers")
+
+    it "blocks unknown compute work and reaps only after device idle":
+        val device = file_read("src/compiler_rust/runtime/src/vulkan/device.rs").replace("\r\n", "\n")
+        val buffer = file_read("src/compiler_rust/runtime/src/vulkan/buffer.rs").replace("\r\n", "\n")
+        val image = file_read("src/compiler_rust/runtime/src/vulkan/image.rs").replace("\r\n", "\n")
+
+        expect(device).to_contain("struct DirectComputeSubmission")
+        expect(device).to_contain("pipeline: Arc<ComputePipeline>")
+        expect(device).to_contain("fence: Fence")
+        expect(device).to_contain("command_buffer: vk::CommandBuffer")
+        expect(device).to_contain("buffers: Vec<Arc<VulkanBuffer>>")
+        expect(device).to_contain("self.reap_direct_compute_submissions()")
+        expect(device).to_contain("let _direct_compute = self.direct_compute_gate.lock()")
+        expect(device).to_contain("if !submission.pipeline.recover_after_device_idle()")
+        expect(device).to_contain("*self.direct_compute_quarantine.lock() = pending")
+        expect(device).to_contain("direct compute descriptor recovery failed")
+        expect(device).to_contain("self.ensure_direct_compute_available()")
+        expect(device).to_contain("submit_definitely_not_accepted")
+        expect(device).to_contain("NotSubmitted(VulkanError::CommandBufferError")
+        expect(buffer.count("self.device.ensure_buffer_io_available()?")).to_equal(2)
+        expect(buffer.count("self.device.direct_compute_gate().lock()")).to_equal(2)
+        expect(image.count("self.device.ensure_buffer_io_available()?")).to_equal(2)
+        expect(image.count("self.device.direct_compute_gate().lock()")).to_equal(2)

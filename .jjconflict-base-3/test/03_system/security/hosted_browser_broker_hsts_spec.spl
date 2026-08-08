@@ -1,0 +1,269 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
+"""Broker-owned HSTS admission and request ordering.
+
+This focused hostile scenario does not use a mock transport as TLS evidence.
+It enters only through the parent broker's post-authentication HSTS commit
+boundary, then proves the URL is upgraded before permit, CSP, cookie, and
+transport preparation. The renderer worker never owns policy state.
+"""
+
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererNetworkDecodeResult,
+    browser_renderer_decoder_feed,
+    browser_renderer_decoder_new,
+    browser_renderer_fetch_request_decode,
+    browser_renderer_fetch_request_encode,
+    browser_renderer_navigation_decode,
+    browser_renderer_network_response_decode
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess
+}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.hosted_browser_renderer_policy.{
+    hosted_browser_empty_navigation_permit
+}
+use std.gc_async_mut.web.browser_session.{
+    BrowserHstsSnapshot,
+    BrowserHstsSnapshotEntry
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+class BrokerHstsFixture:
+    registry: HostedBrowserRendererRegistry
+    broker: HostedBrowserRendererProcess
+    wall_clock_ms: i64
+
+fn setup_broker_hsts_fixture() -> BrokerHstsFixture:
+    val wall_clock_ms = rt_time_now_unix_micros() / 1000
+    var broker = HostedBrowserRendererProcess.create(71, 640, 480)
+    broker.state = "active"
+    broker.document_url = "https://source.test/page"
+    broker.document_origin = "https://source.test"
+    broker.document_csp_policy = "img-src https://cdn.secure.test"
+    broker.document_csp_ready = true
+    BrokerHstsFixture(
+        registry: HostedBrowserRendererRegistry.create("", "about:blank"),
+        broker: broker,
+        wall_clock_ms: wall_clock_ms
+    )
+
+fn check_hsts_policy_committed(fixture: BrokerHstsFixture):
+    expect(fixture.broker._commit_validated_https_hsts(
+        "https://secure.test/start",
+        "Strict-Transport-Security: max-age=60; includeSubDomains"
+    )).to_equal(true)
+    expect(fixture.broker.hsts_dirty).to_equal(true)
+    val snapshot = fixture.broker.hsts_snapshot(fixture.wall_clock_ms)
+    expect(snapshot.entries.len()).to_equal(1)
+    expect(snapshot.entries[0].host).to_equal("secure.test")
+    expect(snapshot.entries[0].include_subdomains).to_equal(true)
+    expect(fixture.registry.accept_renderer_hsts_snapshot(
+        snapshot, fixture.wall_clock_ms
+    )).to_equal(1)
+    expect(fixture.registry.hsts_upgrade_url(
+        "http://cdn.secure.test/image.png"
+    )).to_equal("https://cdn.secure.test/image.png")
+
+fn check_navigation_upgraded_before_permit(fixture: BrokerHstsFixture):
+    expect(fixture.broker.begin_navigate(
+        "http://cdn.secure.test/page", "GET", "", "", "", 2000
+    ).is_ok()).to_equal(true)
+    expect(fixture.broker.navigation_permit.url).to_equal(
+        "https://cdn.secure.test/page"
+    )
+    val decoded = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(71), fixture.broker.pending_wire
+    )
+    val worker_command = browser_renderer_navigation_decode(decoded.message)
+    expect(worker_command.ok).to_equal(true)
+    expect(worker_command.url).to_equal("https://cdn.secure.test/page")
+    fixture.broker.pending_wire = ""
+    fixture.broker.pending_wire_offset = 0
+    fixture.broker.pending_wire_reply_to_request_id = 0
+    fixture.broker.pending_wire_is_command = false
+    fixture.broker.command_deadline_ms = 0
+    fixture.broker.pending_operation = ""
+    fixture.broker.navigation_permit = (
+        hosted_browser_empty_navigation_permit()
+    )
+
+fn _decode_worker_image_request(
+    wire_request_id: i64, script_cookie_writes: [text]
+) -> BrowserRendererNetworkDecodeResult:
+    val encoded = browser_renderer_fetch_request_encode(
+        71,
+        wire_request_id,
+        1,
+        "hsts-image",
+        "image",
+        "http://cdn.secure.test/image.png",
+        "GET",
+        "",
+        "",
+        "",
+        "include",
+        script_cookie_writes,
+        "https://source.test"
+    )
+    if not encoded.ok:
+        fail(encoded.reason)
+    val decoded = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(71), encoded.wire
+    )
+    val fetch = browser_renderer_fetch_request_decode(decoded.message)
+    if not fetch.ok:
+        fail(fetch.reason)
+    fetch
+
+fn check_subresource_upgraded_before_credentials(
+    fixture: BrokerHstsFixture
+):
+    expect(fixture.broker.network.store_script_cookies(
+        ["sid=secure; Secure; SameSite=None; Path=/"],
+        "https://cdn.secure.test/page"
+    )).to_equal(true)
+    fixture.broker.expected_reply_to_request_id = 1
+
+    fixture.broker.document_csp_policy = "img-src 'none'"
+    expect(fixture.broker._dispatch_renderer_fetch(
+        _decode_worker_image_request(
+            2, ["forged=blocked; Secure; SameSite=None; Path=/"]
+        )
+    )).to_be_nil()
+    expect(fixture.broker.network_job_handle).to_equal(0)
+    val denied = browser_renderer_network_response_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(71),
+            fixture.broker.pending_wire
+        ).message
+    )
+    expect(denied.ok).to_equal(true)
+    expect(denied.url).to_equal(
+        "http://cdn.secure.test/image.png"
+    )
+    expect(denied.status).to_equal(0)
+    expect(denied.error).to_equal("csp-img-src-blocked")
+    val cdn = Origin(
+        scheme: "https", host: "cdn.secure.test", port: 443
+    )
+    expect(fixture.broker.network.cookie_store.get_header_for_origin(
+        cdn, "/", Some(cdn), "GET", false,
+        rt_time_now_unix_micros() / 1000000
+    )).to_equal("sid=secure")
+    fixture.broker.pending_wire = ""
+    fixture.broker.pending_wire_offset = 0
+    fixture.broker.pending_wire_reply_to_request_id = 0
+    fixture.broker.pending_wire_is_command = false
+
+    fixture.broker.document_csp_policy = (
+        "img-src https://cdn.secure.test"
+    )
+    expect(fixture.broker._dispatch_renderer_fetch(
+        _decode_worker_image_request(3, [])
+    )).to_be_nil()
+    expect(fixture.broker.network_job_handle).to_equal(0)
+    val upgraded = browser_renderer_network_response_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(71),
+            fixture.broker.pending_wire
+        ).message
+    )
+    expect(upgraded.ok).to_equal(true)
+    expect(upgraded.url).to_equal(
+        "http://cdn.secure.test/image.png"
+    )
+    expect(upgraded.status).to_equal(307)
+    expect(upgraded.headers).to_contain(
+        "Location: https://cdn.secure.test/image.png"
+    )
+    expect(upgraded.headers).to_contain(
+        "X-Simple-Broker-Transport-Upgrade: 1"
+    )
+    expect(upgraded.headers.contains("Cookie:")).to_equal(false)
+
+fn check_expired_policy_rejected(fixture: BrokerHstsFixture):
+    var hostile = HostedBrowserRendererProcess.create(72, 640, 480)
+    expect(hostile._commit_validated_https_hsts(
+        "https://secure.test/",
+        "Strict-Transport-Security: max-age=60; max-age=120"
+    )).to_equal(false)
+    expect(hostile._commit_validated_https_hsts(
+        "https://secure.test/",
+        "Strict-Transport-Security: max-age=999999999999999999999999"
+    )).to_equal(false)
+    expect(hostile._commit_validated_https_hsts(
+        "http://secure.test/",
+        "Strict-Transport-Security: max-age=60"
+    )).to_equal(false)
+
+    val rejected = BrowserHstsSnapshot.create([
+        BrowserHstsSnapshotEntry(
+            host: "expired.test",
+            received_at_unix_ms: fixture.wall_clock_ms - 2000,
+            expires_at_unix_ms: fixture.wall_clock_ms - 1,
+            include_subdomains: true
+        ),
+        BrowserHstsSnapshotEntry(
+            host: "com",
+            received_at_unix_ms: fixture.wall_clock_ms,
+            expires_at_unix_ms: 9223372036854775807,
+            include_subdomains: true
+        ),
+        BrowserHstsSnapshotEntry(
+            host: "forged.test",
+            received_at_unix_ms: -1,
+            expires_at_unix_ms: 9223372036854775807,
+            include_subdomains: true
+        ),
+        BrowserHstsSnapshotEntry(
+            host: "future.test",
+            received_at_unix_ms: fixture.wall_clock_ms + 1,
+            expires_at_unix_ms: fixture.wall_clock_ms + 60000,
+            include_subdomains: true
+        ),
+        BrowserHstsSnapshotEntry(
+            host: "incoherent.test",
+            received_at_unix_ms: fixture.wall_clock_ms,
+            expires_at_unix_ms: fixture.wall_clock_ms,
+            include_subdomains: true
+        )
+    ])
+    expect(hostile.load_hsts_snapshot(
+        rejected, fixture.wall_clock_ms
+    )).to_equal(0)
+    expect(hostile._hsts_upgrade_url(
+        "http://expired.test/"
+    )).to_equal("http://expired.test/")
+    expect(hostile.close()).to_equal(true)
+    expect(hostile.hsts.hsts_policies.len()).to_equal(0)
+
+    expect(fixture.broker.close()).to_equal(true)
+    expect(fixture.broker.hsts.hsts_policies.len()).to_equal(0)
+    expect(fixture.registry.close()).to_equal(true)
+    expect(fixture.registry.hsts_snapshot(
+        fixture.wall_clock_ms
+    ).entries.len()).to_equal(0)
+
+describe "Hosted browser broker HSTS":
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
+    it "should keep validated HSTS and upgraded requests in the parent broker":
+        val fixture = setup_broker_hsts_fixture()
+
+        step("Commit a validated HTTPS transport policy")
+        check_hsts_policy_committed(fixture)
+
+        step("Upgrade a matching HTTP navigation")
+        check_navigation_upgraded_before_permit(fixture)
+
+        step("Upgrade a matching subresource before credentials")
+        check_subresource_upgraded_before_credentials(fixture)
+
+        step("Reject forged or expired policy state")
+        check_expired_policy_rejected(fixture)

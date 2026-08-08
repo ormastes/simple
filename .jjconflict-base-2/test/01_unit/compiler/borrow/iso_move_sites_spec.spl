@@ -1,0 +1,166 @@
+"""
+# `iso` (Isolated) capability -- Move emission at a call-argument transfer site
+
+**Lane:** WP-M (2026-08-06)
+
+`iso_move_pipeline_spec.spl` proved a real MIR `Move` at the variable-to-
+variable let-binding transfer site
+(`src/compiler/50.mir/mir_lowering_stmts.spl`). That was the ONLY call site
+of `MirBuilder.emit_move` (`mir_data.spl:353`) in the whole compiler --
+`borrow_graph.spl:455-458` says so explicitly. Every OTHER way an iso value
+transfers ownership (call argument, return, reassignment, struct-field
+store) still emitted a plain Copy, so the NLL borrow checker was starved of
+Move facts for those shapes and use-after-move went undetected there.
+
+This lane closes ONE of those gaps: passing an iso-typed value as a
+function-call ARGUMENT
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, the
+direct-call argument-lowering loop in `lower_call`). Before this change, a
+call argument was lowered straight to a `mir_operand_copy(arg_local)`
+MirOperand REFERENCE with no backing MIR instruction at all -- confirmed by
+a pre-existing TODO comment at that call site (switch_operators_calls.spl,
+just above the arg loop) stating a synthetic
+`emit_move(fresh_local, arg_local)` had not yet been wired. This spec hand-
+builds HIR (same technique as iso_move_pipeline_spec.spl, for the same
+reason: the parser cannot yet parse `iso T` in parameter position --
+`doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md`)
+to prove the real (non-hand-built) `check_mir_module` now reports a
+use-after-move for `fn caller(a: iso i64) -> i64: callee(a); val c = a; c`
+where `callee` also declares an `iso i64` parameter, and that the identical
+non-iso shape is unaffected.
+"""
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.borrow.borrow_check.*
+use compiler.common.attributes.{FunctionAttr}
+
+fn mk_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn iso_i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Isolated(i64_type()), span: mk_span(0))
+
+fn var_read(sym: SymbolId, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(sym), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn named_callee(name: text, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), name), has_type_: false, type_: i64_type(), span: mk_span(line))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span(0))
+
+fn call_arg(value: HirExpr, line: i64) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: mk_span(line))
+
+fn call_expr(callee_name: text, arg_sym: SymbolId, line: i64) -> HirExpr:
+    val callee = named_callee(callee_name, line)
+    val args = [call_arg(var_read(arg_sym, line), line)]
+    HirExpr(kind: HirExprKind.Call(callee, args, []), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn mk_param(sym_id: i64, iso_: bool) -> HirParam:
+    val ty = if iso_: iso_i64_type() else: i64_type()
+    HirParam(symbol: SymbolId(id: sym_id), name: "a", type_: ty, has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+
+fn mk_fn(sym_id: i64, name: text, param: HirParam, body_stmts: [HirStmt], tail: HirExpr) -> HirFunction:
+    val body = HirBlock(stmts: body_stmts, has: true, value: tail, span: mk_span(1))
+    HirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        type_params: [],
+        params: [param],
+        return_type: i64_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn make_hir_module(callee_fn: HirFunction, caller_fn: HirFunction) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[callee_fn.symbol] = callee_fn
+    functions[caller_fn.symbol] = caller_fn
+    HirModule(
+        name: "iso_move_sites_test",
+        path: "synthetic/iso_move_sites_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn lower_and_check(callee_fn: HirFunction, caller_fn: HirFunction) -> [NLLError]:
+    val hir_module = make_hir_module(callee_fn, caller_fn)
+    var mir_lowering = MirLowering.new(hir_module.symbols)
+    # `callee`'s declared iso param type only reaches `caller`'s call-site
+    # argument lowering via the name-keyed bootstrap_fn_param_hir_types
+    # registry (mir_data.spl), which prescan_module_struct_names populates
+    # (module_lowering.spl:677). Real multi-function driver runs always call
+    # this first (driver_pipeline_lowering.spl); a hand-built single-call
+    # lower_module() does not do it implicitly.
+    mir_lowering.prescan_module_struct_names(hir_module)
+    val mir_module = mir_lowering.lower_module(hir_module)
+    check_mir_module(mir_module)
+
+describe "iso call-argument transfer emits a real Move (WP-M)":
+    it "reports a borrow diagnostic for `fn caller(a: iso i64) -> i64: callee(a); val c = a; c` when `callee` also declares an iso i64 param":
+        val callee_fn = mk_fn(3, "callee", mk_param(1, true), [], var_read(SymbolId(id: 1), 5))
+        # callee(a)  -- the call-argument move
+        val call_stmt = HirStmt(kind: HirStmtKind.Expr(call_expr("callee", SymbolId(id: 11), 10)), span: mk_span(10))
+        # val c = a  -- the use-after-move: a second place-read of the
+        # already-moved iso source.
+        val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 12), nil, var_read(SymbolId(id: 11), 20)), span: mk_span(20))
+        val caller_fn = mk_fn(4, "caller", mk_param(11, true), [call_stmt, let_c], var_read(SymbolId(id: 12), 25))
+        val errors = lower_and_check(callee_fn, caller_fn)
+        assert_true(errors.len() > 0)
+
+describe "identical non-iso call-argument shape is unaffected":
+    it "reports no borrow diagnostic for the same shape without `iso`":
+        val callee_fn = mk_fn(3, "callee", mk_param(1, false), [], var_read(SymbolId(id: 1), 5))
+        val call_stmt = HirStmt(kind: HirStmtKind.Expr(call_expr("callee", SymbolId(id: 11), 10)), span: mk_span(10))
+        val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 12), nil, var_read(SymbolId(id: 11), 20)), span: mk_span(20))
+        val caller_fn = mk_fn(4, "caller", mk_param(11, false), [call_stmt, let_c], var_read(SymbolId(id: 12), 25))
+        val errors = lower_and_check(callee_fn, caller_fn)
+        assert_true(errors.len() == 0)

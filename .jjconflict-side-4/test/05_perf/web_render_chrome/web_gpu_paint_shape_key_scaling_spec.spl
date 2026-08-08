@@ -1,0 +1,109 @@
+# codex-system-test
+# @req NFR-WEB-BROWSER-015 NFR-WEB-BROWSER-016
+# @tag: web, rendering, engine2d, performance
+# @evidence-display: links
+"""# Web GPU paint shape-key scaling
+
+Isolates the exact geometry-key builder from GPU/device work. The executable
+gate preserves byte-for-byte cache identity and compares deterministic N/2N
+construction medians. Performance remains unclaimed until an admitted
+pure-Simple runtime executes this scenario.
+"""
+
+use std.spec.*
+use common.render_scene.scene.{SceneCommand, scene_fill_rect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    WebGpuPaintFrame
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    _web_gpu_fill_shape_key
+}
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+
+val WEB_GPU_SHAPE_KEY_N: i32 = 4096
+val WEB_GPU_SHAPE_KEY_2N: i32 = 8192
+val WEB_GPU_SHAPE_KEY_SAMPLES: i32 = 9
+
+fn make_web_gpu_shape_key_frame(
+    operation_count: i32, first_x_delta: i32 = 0
+) -> WebGpuPaintFrame:
+    var fill_ops: [SceneCommand] = []
+    var index: i32 = 0
+    while index < operation_count:
+        val x = index + if index == 0: first_x_delta else: 0
+        fill_ops.push(scene_fill_rect(
+            x, index % 97, index % 11 + 1, index % 13 + 1,
+            0xFF1D4ED8u32 as i32
+        ))
+        index = index + 1
+    WebGpuPaintFrame(
+        fb: [],
+        fill_ops: fill_ops,
+        width: 16384,
+        height: 128,
+        base: 0xFFFFFFFFu32,
+        cpu_paint_pixels: 0
+    )
+
+fn web_gpu_shape_key_sample_nanos(
+    frame: WebGpuPaintFrame
+) -> [i64]:
+    val warm_key = _web_gpu_fill_shape_key(frame)
+    expect(warm_key.len()).to_be_greater_than(0)
+    var samples: [i64] = []
+    var sample: i32 = 0
+    while sample < WEB_GPU_SHAPE_KEY_SAMPLES:
+        val started = time_now_nanos()
+        val key = _web_gpu_fill_shape_key(frame)
+        val elapsed = time_now_nanos() - started
+        expect(key).to_equal(warm_key)
+        samples.push(elapsed)
+        sample = sample + 1
+    samples
+
+fn expect_web_gpu_shape_key_identity(frame: WebGpuPaintFrame):
+    val exact = _web_gpu_fill_shape_key(
+        make_web_gpu_shape_key_frame(2)
+    )
+    expect(exact).to_equal("0,0,1,1;1,1,2,2;")
+    val repeated = _web_gpu_fill_shape_key(frame)
+    expect(_web_gpu_fill_shape_key(frame)).to_equal(repeated)
+    val changed = _web_gpu_fill_shape_key(
+        make_web_gpu_shape_key_frame(WEB_GPU_SHAPE_KEY_N, 1)
+    )
+    expect(changed == repeated).to_be(false)
+
+fn expect_web_gpu_shape_key_linear_scaling(
+    n_samples: [i64], two_n_samples: [i64]
+):
+    expect(n_samples.len()).to_equal(WEB_GPU_SHAPE_KEY_SAMPLES)
+    expect(two_n_samples.len()).to_equal(WEB_GPU_SHAPE_KEY_SAMPLES)
+    var sorted_n = n_samples
+    var sorted_two_n = two_n_samples
+    sorted_n.sort()
+    sorted_two_n.sort()
+    val n_median = sorted_n[WEB_GPU_SHAPE_KEY_SAMPLES / 2]
+    val two_n_median = sorted_two_n[WEB_GPU_SHAPE_KEY_SAMPLES / 2]
+    expect(n_median).to_be_greater_than(0)
+    expect(two_n_median).to_be_greater_than(0)
+    expect(two_n_median).to_be_less_than(n_median * 3 + 1)
+
+describe "Web GPU paint shape-key scaling":
+    # @manual: show
+    # @capture(text)
+    it "should preserve exact identity with linear N to 2N construction":
+        step("Build deterministic N and 2N fill frames")
+        val n_frame = make_web_gpu_shape_key_frame(WEB_GPU_SHAPE_KEY_N)
+        val two_n_frame = make_web_gpu_shape_key_frame(WEB_GPU_SHAPE_KEY_2N)
+        expect(n_frame.fill_ops.len()).to_equal(WEB_GPU_SHAPE_KEY_N)
+        expect(two_n_frame.fill_ops.len()).to_equal(WEB_GPU_SHAPE_KEY_2N)
+
+        step("Preserve exact geometry cache identity")
+        expect_web_gpu_shape_key_identity(n_frame)
+
+        step("Measure isolated shape-key construction")
+        val n_samples = web_gpu_shape_key_sample_nanos(n_frame)
+        val two_n_samples = web_gpu_shape_key_sample_nanos(two_n_frame)
+
+        step("Require linear N to 2N scaling")
+        expect_web_gpu_shape_key_linear_scaling(n_samples, two_n_samples)

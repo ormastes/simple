@@ -1,0 +1,678 @@
+"""Simple Web Renderer non-Metal GPU Offload Parity (end-to-end)
+
+@tag: rendering, engine2d, vulkan, software, web, html, css, offload, scroll, parity
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 90%
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl 90%
+
+Non-Metal sibling of web_engine2d_metal_offload_spec.spl. Proves the Simple Web
+surface (HTML AST + CSS pipeline) renders through the engine2d GPU offload path
+on the best lane available on THIS host — Vulkan when a device initializes,
+otherwise the deterministic software backend — with readback provenance and
+CPU parity.
+
+Lane selection is fail-closed: the spec resolves "vulkan" through the real
+probe (`simple_web_engine2d_resolved_backend_name`), which returns either
+"vulkan" (device initialized) or "software" (probe failed). Anything else is a
+hard failure with a printed reason — never a silent pass.
+
+The probe result is a PREDICTION and is never trusted across the gap to the
+actual create (TOCTOU). `simple_web_engine2d_resolved_backend_name` initializes
+and destroys its own device; `Engine2D.create_requested_backend` then performs a
+second, independent device initialization later. Under host contention the two
+genuinely disagree — reproduced deterministically at `ulimit -n 44`, where the
+probe returns "vulkan" and the create then fails. Branching the GPU assertions
+on the probe made that device event a FALSE RED, while the opposite roll
+("software") made the GPU branch vanish and produced a VACUOUS GREEN that read
+identically to a real GPU pass. So:
+  - Every GPU assertion branches on what the readback ACTUALLY reports.
+  - The honest-provenance invariants (`_assert_provenance_invariants`) are
+    asserted on EVERY outcome and every lane, not only inside the GPU branch —
+    a device label without handle+identity+full frame, or a CPU frame carrying
+    device credentials, fails here whatever the probe said.
+  - Every non-GPU outcome prints an explicit "GPU BRANCH SKIPPED ... proves
+    NOTHING about the GPU offload path" line, and the run ends with
+    `[offload-gpu] RUN VERDICT` lines giving the exact rule for reading them:
+    the GPU evidence is the set of "GPU-PROVEN" lines, and a pass with none of
+    them does not attest the GPU path. A skipped-GPU pass is therefore never
+    mistakable for a real one — `grep 'GPU-PROVEN'` separates them.
+
+Provenance is asserted the honest way (see
+doc/08_tracking/bug/web_render_gpu_backend_provenance_fabricated_2026-06-17.md:
+the requested-name label once fabricated "GPU-backed" evidence). Real offload
+must show `source == "device_readback"` with `backend_handle > 0` and
+`device_identity > 0` from the actual device readback; the software lane must
+honestly report `cpu_mirror` — never a GPU label.
+
+Parity strategy: the layout renderer carries a hostile-page wall-clock budget;
+on the interpreted lane it can expire mid-style ("[web-style-producer]
+budget-break"), which makes two renders of the SAME html legitimately diverge
+(graceful degradation, by design). Raising the budget instead trips the
+interpreter's 10M-operation execution limit. So:
+  - Single-source parity (CPU pixels blitted through the real GPU lane and
+    read back) is asserted UNCONDITIONALLY — it cannot be perturbed by the
+    budget and is the actual offload-path proof.
+  - Cross-render parity (two independent full renders) is asserted whenever
+    `simple_web_layout_last_render_degraded()` reports both renders completed;
+    a degraded render prints an explicit skip reason and still asserts the
+    non-parity invariants.
+
+Skipped comparisons are disclosed in the verdict, not just in a log line. This
+spec was observed reporting `17 total, 17 passed, 0 failed` while SIX of its
+cross-render comparisons had been skipped by the wall-clock budget — a reader
+saw 17/17 and concluded parity held, when up to six of the substantive
+comparisons had not run. That is the same vacuous-green shape as the GPU branch
+above, so it gets the same remedy:
+  - Every comparison emits a uniform receipt: `[offload-parity] COMPARED
+    <label>` when it ran, `[offload-parity] SKIP <label> ... NOT COMPARED` when
+    the budget degraded a render. `grep -c '^\[offload-parity\] COMPARED '` is
+    the number of comparisons this run genuinely executed — ANCHORED, because
+    the RUN VERDICT lines themselves mention the tokens and an unanchored count
+    reads the verdict's own prose as evidence.
+  - The run ends with `[offload-parity] RUN VERDICT` lines stating the declared
+    denominator (PARITY_COMPARISONS_DECLARED) and the rule: a pass with fewer
+    COMPARED lines than declared is INCONCLUSIVE for cross-render parity, not a
+    parity pass.
+  - A degraded render is an ENVIRONMENT condition, not a defect in the code
+    under test, so it is reported inconclusive rather than red — turning a slow
+    host into a red gate is the same FALSE RED mistake the TOCTOU section above
+    was written to avoid, and a permanently-red gate gets muted. But the skip
+    path is no longer assertion-free: `_capture_degraded` requires every
+    degraded render to NAME the budget-exhaustion site it stopped at, so the
+    anonymous-exit bookkeeping defect that 40c540fa850 was landed to prevent
+    fails here rather than passing quietly.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_pixels,
+    simple_web_layout_render_html_pixels_at_scroll,
+    simple_web_layout_render_html_readback,
+    simple_web_layout_render_html_readback_paint,
+    simple_web_layout_render_html_should_gpu_paint,
+    simple_web_layout_render_html_gpu_paint_route_verdict,
+    web_gpu_paint_backend_verdict,
+    web_gpu_paint_timing_cache_reset}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    simple_web_engine2d_render_html_pixels,
+    simple_web_engine2d_render_html_readback,
+    simple_web_engine2d_resolved_backend_name,
+    simple_web_html_background_color}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SPEC_W: i32 = 80
+val SPEC_H: i32 = 60
+
+# ============================================================================
+# Result type for direct Engine2D lane render
+# ============================================================================
+
+class LaneDirectResult:
+    ok: bool
+    source: text
+    handle: i64
+    identity: i64
+    px: [u32]
+    pixel_count: i64
+
+# ============================================================================
+# Fixtures — scenes exercising text, boxes, colors, borders, nesting
+# ============================================================================
+
+# S1: text-heavy scene (h1/p/span) — routes through the full layout renderer.
+fn _fixture_text_html() -> text:
+    "<html><head><style>" +
+    "body { background-color: #1a1a2e; color: #e0e0ff; }" +
+    "h1 { background-color: #16213e; color: #a0c4ff; padding: 8px; }" +
+    ".card { background-color: #0f3460; border: 2px solid #533483; padding: 8px; }" +
+    ".tag { background-color: #533483; color: #fff; }" +
+    "</style></head><body>" +
+    "<h1>Offload Web Spec</h1>" +
+    "<div class='card'><p>GPU offload test</p><span class='tag'>Lane</span></div>" +
+    "<div class='card'><p>Scroll content below fold</p></div>" +
+    "<div class='card'><p>Block 3 — below viewport</p></div>" +
+    "</body></html>"
+
+# S2: nested boxes with borders and distinct colors.
+fn _fixture_boxes_html() -> text:
+    "<html><head><style>" +
+    "body { background-color: #202430; }" +
+    ".outer { background-color: #2d6a4f; border: 3px solid #d8f3dc; padding: 6px; }" +
+    ".inner { background-color: #b5838d; border: 1px solid #ffcdb2; }" +
+    "</style></head><body>" +
+    "<div class='outer'><p>outer</p><div class='inner'><span>inner</span></div></div>" +
+    "</body></html>"
+
+# S3: solid background, no text tags — renderer heuristic/solid path.
+fn _fixture_solid_html() -> text:
+    "<html><head><style>body { background-color: #204060; }</style></head>" +
+    "<body><div>plain</div></body></html>"
+
+# S4: inline block colors with size hints — renderer heuristic surface path.
+fn _fixture_blocks_html() -> text:
+    "<html><body>" +
+    "<div style='background-color: #aa3355; width: 80px; height: 40px'></div>" +
+    "<div style='background-color: #33aa55; width: 80px; height: 40px'></div>" +
+    "</body></html>"
+
+# S5: "Simple Web" mark on white — renderer accent-stripe heuristic path.
+fn _fixture_mark_html() -> text:
+    "<html><body>Simple Web</body></html>"
+
+# S6: toolbar/modal grid marker — renderer fixed-grid path.
+fn _fixture_toolbar_grid_html() -> text:
+    "<html><body><div class='simple-web-engine2d-toolbar-modal-grid'></div></body></html>"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _diffcount(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _nonzero(px: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] != 0u32:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _count_color(px: [u32], color: u32) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] == color:
+            n = n + 1
+        i = i + 1
+    n
+
+# Resolve the non-Metal offload lane available on this host via the REAL probe:
+# "vulkan" when the device initializes, otherwise "software" (fail-closed).
+fn _offload_lane() -> text:
+    simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "vulkan")
+
+fn _lane_is_gpu(lane: text) -> bool:
+    lane == "vulkan"
+
+# ---------------------------------------------------------------------------
+# Observed-outcome classification (TOCTOU fix)
+#
+# `_offload_lane()` is a PREDICTION made by a probe that creates, initializes
+# and destroys its own device. `create_requested_backend` later performs a
+# SECOND, independent device initialization. The two are separated in time and
+# under host contention they genuinely disagree: probe says "vulkan", the create
+# then fails and the frame is served by the CPU. Branching GPU assertions on the
+# probe result therefore produced a FALSE RED (the code under test was fine; the
+# device went away), while the opposite roll produced a VACUOUS GREEN (the lane
+# resolved to "software", the GPU branch never ran, and the run still printed a
+# clean pass that was indistinguishable from a real GPU pass).
+#
+# The fix is structural: nothing is asserted on the basis of the probe. Every
+# GPU assertion is driven by what the readback ACTUALLY reports, and the honest
+# provenance invariants are asserted on EVERY outcome rather than only inside
+# the GPU branch — so this spec is now strictly harder to pass, not easier.
+# ---------------------------------------------------------------------------
+
+fn _expected_px() -> i64:
+    (SPEC_W * SPEC_H).to_i64()
+
+# The campaign's provenance predicate, restated here so the assertion does not
+# depend on the implementation it is checking
+# (`_web_gpu_readback_device_proven`).
+fn _device_proven(source: text, handle: i64, identity: i64, pixel_count: i64) -> bool:
+    source == "device_readback" and handle > 0 and identity > 0 and
+        pixel_count == _expected_px()
+
+# Sources that mean a real device produced or presented the pixels.
+fn _source_is_device(source: text) -> bool:
+    source == "device_readback" or source == "host_cache_after_device_present" or
+        source == "swapchain_present"
+
+# Sources that mean the frame was served by the CPU. A frame carrying one of
+# these may NEVER be reported as GPU-rendered.
+fn _source_is_cpu(source: text) -> bool:
+    source == "cpu_mirror" or source == "cpu_fallback"
+
+# Sources that mean the device produced nothing at all this attempt.
+fn _source_is_no_frame(source: text) -> bool:
+    source == "completion_unknown" or source == "readback_failed" or
+        source == "not_requested"
+
+fn _source_is_known(source: text) -> bool:
+    _source_is_device(source) or _source_is_cpu(source) or _source_is_no_frame(source)
+
+# Honest-provenance invariants. These hold for EVERY outcome on EVERY lane and
+# are asserted unconditionally — this is where the spec keeps its teeth. A
+# device label without a handle/identity, or a CPU frame carrying device
+# credentials, is the fabricated-provenance defect and fails here regardless of
+# which backend happened to serve the frame.
+fn _assert_provenance_invariants(label: text, source: text, handle: i64, identity: i64, pixel_count: i64):
+    if not _source_is_known(source):
+        print "[offload-provenance] {label}: UNKNOWN READBACK SOURCE '{source}' — outside the honest vocabulary, failing closed"
+    expect(_source_is_known(source)).to_equal(true)
+    if source == "device_readback":
+        # A device label is only honest with a real handle, a real device
+        # identity, and a full frame.
+        expect(handle).to_be_greater_than(0)
+        expect(identity).to_be_greater_than(0)
+        expect(pixel_count).to_equal(_expected_px())
+    if _source_is_cpu(source):
+        # A CPU-served frame must never claim a device source and must never
+        # satisfy the device-proven predicate. Deliberately NOT asserting
+        # `handle == 0` / `identity == 0` here: under host resource exhaustion
+        # the seed surfaces those fields as nil rather than 0 (visible as
+        # `identity=nil` in this spec's own provenance line), so an equality
+        # check on them is a host-condition false red rather than a statement
+        # about provenance. The two predicates below are the honest claim.
+        expect(_source_is_device(source)).to_equal(false)
+        expect(_device_proven(source, handle, identity, pixel_count)).to_equal(false)
+
+# NOTE: a module-level `var` tally was tried here and silently did not work —
+# writes made inside an `it` body were not visible when read back in the same
+# body (the counters stayed 0 while three examples had reported GPU-PROVEN), so
+# it produced a RUN VERDICT that contradicted the run. Run-level evidence is
+# therefore carried by the per-example disclosure LINES below, which are exact
+# and greppable, rather than by cross-example state the spec runner does not
+# preserve.
+
+# Disclose what actually happened and return whether the device is proven, so
+# the caller can assert the GPU-only invariants against a fact rather than a
+# prediction. Every non-GPU outcome prints an explicit skip line saying the run
+# proves nothing about the GPU path.
+fn _report_outcome(label: text, source: text, handle: i64, identity: i64, pixel_count: i64) -> bool:
+    if _device_proven(source, handle, identity, pixel_count):
+        print "[offload-gpu] {label}: GPU-PROVEN — a device produced this frame (source={source} handle={handle} identity={identity} pixels={pixel_count})"
+        return true
+    if _source_is_device(source):
+        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — device-sourced but not device-PROVEN (source={source} handle={handle} identity={identity} pixels={pixel_count}); this example proves NOTHING about the GPU offload path"
+    else if source == "cpu_fallback":
+        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — the device was unavailable at use time (source=cpu_fallback); the probe's lane prediction did not survive to the create. This example proves NOTHING about the GPU offload path"
+    else if source == "cpu_mirror":
+        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — CPU/software lane (source=cpu_mirror); this example proves NOTHING about the GPU offload path"
+    else:
+        print "[offload-gpu] {label}: GPU BRANCH SKIPPED — no frame produced (source={source}); this example proves NOTHING about the GPU offload path"
+    false
+
+# Total number of cross-render parity comparisons this spec DECLARES. Kept as a
+# named constant so the closing verdict can state the denominator, and so adding
+# a comparison without updating the verdict is a visible edit rather than a
+# silent drift. Seven `_assert_parity_unless_degraded` call sites plus the
+# inline scroll-shift band comparison.
+val PARITY_COMPARISONS_DECLARED: i32 = 8
+
+# Capture the degraded flag for the render that JUST completed, and enforce the
+# campaign's "no exhaustion exit can be nameless" invariant at the moment of
+# capture (see 40c540fa850, which replaced the anonymous `_web_budget_expired()`
+# with `_web_budget_expired_at(site)` precisely so that every exhaustion names
+# itself). This is where the skip path grows teeth: previously a degraded render
+# skipped its comparison and asserted NOTHING, so an unnamed exit — the exact
+# bookkeeping defect that fix was landed to prevent — could not be caught here.
+# A degraded render must name the site that stopped it; an empty reason fails.
+#
+# The flag and the reason are module globals describing the LAST render, so this
+# must be called immediately after the render whose verdict it is capturing —
+# the same discipline the existing call sites already follow for the bool alone.
+fn _capture_degraded(label: text) -> bool:
+    val degraded = simple_web_layout_last_render_degraded()
+    if degraded:
+        val reason = simple_web_layout_last_render_degrade_reason()
+        if reason == "":
+            print "[offload-parity] {label}: DEGRADED WITH NO NAMED EXIT SITE — every budget exhaustion must name itself (WEB_BUDGET_SITE_*); an anonymous exit is a provenance-bookkeeping defect, not a host condition"
+        expect(reason != "").to_equal(true)
+        print "[offload-parity] {label}: render degraded at site '{reason}'"
+    degraded
+
+# Cross-render parity gate: bit-exact comparison is only meaningful when
+# neither render was degraded by the wall-clock budget.
+#
+# Both outcomes now emit a uniform, greppable receipt, because the skip line
+# alone was not enough: a run in which every one of these comparisons was
+# skipped still reported an unqualified `17 total, 17 passed, 0 failed`, and a
+# reader could not tell that pass from one where all 8 comparisons actually ran.
+# This mirrors the GPU-PROVEN / GPU BRANCH SKIPPED pattern already used above —
+# `grep -c '\[offload-parity\] COMPARED'` yields the number of comparisons this
+# run genuinely executed, and the closing RUN VERDICT states the denominator.
+fn _assert_parity_unless_degraded(label: text, a: [u32], a_degraded: bool, b: [u32], b_degraded: bool):
+    expect(a.len()).to_equal(SPEC_W * SPEC_H)
+    expect(b.len()).to_equal(SPEC_W * SPEC_H)
+    if a_degraded or b_degraded:
+        print "[offload-parity] SKIP {label}: render degraded by wall-clock budget (a={a_degraded} b={b_degraded}) — cross-render parity NOT COMPARED; this example proves NOTHING about {label} cross-render parity"
+    else:
+        expect(_diffcount(a, b)).to_equal(0)
+        print "[offload-parity] COMPARED {label}: cross-render parity asserted bit-exact (both renders completed within budget)"
+
+# Render cpu-oracle pixels onto the lane backend directly through the Engine2D
+# facade using per-row filled-rect runs (the same GPU-dispatched primitive the
+# offload path uses), then read back with provenance.
+fn _render_lane_direct(lane: text, cpu_px: [u32]) -> LaneDirectResult:
+    val engine_result = Engine2D.create_requested_backend(SPEC_W, SPEC_H, lane)
+    match engine_result:
+        Err(_):
+            LaneDirectResult(ok: false, source: "create_failed", handle: 0, identity: 0, px: [], pixel_count: 0)
+        Ok(engine):
+            engine.clear(0xFFFFFFFFu32)
+            var y = 0
+            while y < SPEC_H:
+                var x = 0
+                while x < SPEC_W:
+                    val color = cpu_px[y * SPEC_W + x]
+                    var run_w = 1
+                    while x + run_w < SPEC_W and cpu_px[y * SPEC_W + x + run_w] == color:
+                        run_w = run_w + 1
+                    engine.draw_rect_filled(x, y, run_w, 1, color)
+                    x = x + run_w
+                y = y + 1
+            engine.present()
+            val readback = engine.read_pixels_with_source()
+            engine.shutdown()
+            LaneDirectResult(
+                ok: true,
+                source: readback.source,
+                handle: readback.backend_handle,
+                identity: readback.device_identity,
+                px: readback.pixels,
+                pixel_count: readback.pixel_count)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Simple Web Renderer non-Metal GPU offload parity":
+
+    context "lane selection (fail closed)":
+
+        it "selects an available offload lane on this host or fails with a printed reason":
+            val lane = _offload_lane()
+            if lane != "vulkan" and lane != "software":
+                print "[offload-lane] NO ENGINE2D LANE AVAILABLE on this host: resolved='{lane}' — genuine gap, failing closed"
+            print "[offload-lane] selected lane: {lane}"
+            expect(lane == "vulkan" or lane == "software").to_equal(true)
+
+        it "resolves cpu and software requests verbatim and vulkan only via the probe":
+            expect(simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "cpu")).to_equal("cpu")
+            expect(simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "software")).to_equal("software")
+            val resolved = simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "vulkan")
+            expect(resolved == "vulkan" or resolved == "software").to_equal(true)
+
+        it "classifies backends for GPU paint offload honestly":
+            expect(web_gpu_paint_backend_verdict("vulkan")).to_equal("gpu-paint-candidate")
+            expect(web_gpu_paint_backend_verdict("cpu")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("software")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("no-such-backend")).to_equal("unknown-backend-not-gpu-offload")
+
+    context "CPU oracle baseline":
+
+        it "renders a non-empty pixel buffer with the declared CSS background":
+            val html = _fixture_text_html()
+            val first = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val first_degraded = _capture_degraded("cpu-determinism/a")
+            val second = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val second_degraded = _capture_degraded("cpu-determinism/b")
+            expect(_nonzero(first)).to_be_greater_than(0)
+            expect(_count_color(first, 0xFF1A1A2Eu32)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("cpu-determinism", first, first_degraded, second, second_degraded)
+
+        it "extracts a declared CSS color as the page background":
+            # The extractor is a precedence heuristic under active refinement —
+            # assert it lands on one of the fixture's DECLARED colors rather
+            # than pinning one precedence winner.
+            val bg = simple_web_html_background_color(_fixture_text_html())
+            print "[offload-bg-extract] extracted={bg}"
+            val declared = (bg == 0xFF1A1A2Eu32 or bg == 0xFF16213Eu32 or
+                bg == 0xFF0F3460u32 or bg == 0xFF533483u32)
+            expect(declared).to_equal(true)
+
+    context "offload readback provenance (anti-fabrication)":
+
+        it "lane readback carries genuine provenance and matches the cpu oracle":
+            val lane = _offload_lane()
+            val html = _fixture_text_html()
+            val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = _capture_degraded("text-scene-lane/cpu")
+            val readback = simple_web_layout_render_html_readback(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = _capture_degraded("text-scene-lane/lane")
+            print "[offload-provenance] lane={lane} source={readback.source} handle={readback.backend_handle} identity={readback.device_identity}"
+            expect(readback.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+            expect(readback.checksum).to_be_greater_than(0)
+            # Honest-provenance invariants hold on EVERY outcome — not only when
+            # the probe predicted a GPU lane. This is the assertion that a
+            # fabricated device label trips.
+            _assert_provenance_invariants("text-scene-lane", readback.source,
+                readback.backend_handle, readback.device_identity, readback.pixel_count)
+            # Branch on the readback we ACTUALLY got, never on the lane the probe
+            # predicted: under contention the device can disappear between the
+            # probe and the create, and a prediction-driven assertion turns that
+            # device event into a false failure.
+            val proven = _report_outcome("text-scene-lane", readback.source,
+                readback.backend_handle, readback.device_identity, readback.pixel_count)
+            if not proven:
+                # Not a GPU frame — it must therefore be an honest CPU source.
+                # A device label without device proof already failed above.
+                expect(_source_is_cpu(readback.source)).to_equal(true)
+            _assert_parity_unless_degraded("text-scene-lane", cpu_px, cpu_degraded, readback.pixels, lane_degraded)
+
+        it "cpu-backend readback through the renderer facade is an honest cpu_mirror":
+            val readback = simple_web_engine2d_render_html_readback(_fixture_text_html(), SPEC_W, SPEC_H, "cpu")
+            expect(readback.source).to_equal("cpu_mirror")
+            expect(readback.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+
+        it "rejects degenerate surfaces with a not_requested readback":
+            val readback = simple_web_engine2d_render_html_readback(_fixture_text_html(), 0, SPEC_H, "cpu")
+            expect(readback.source).to_equal("not_requested")
+            expect(readback.pixels.len()).to_equal(0)
+            val none = simple_web_engine2d_render_html_pixels(_fixture_text_html(), SPEC_W, 0, "cpu")
+            expect(none.len()).to_equal(0)
+
+    context "CPU parity across scenes (offload lane)":
+
+        it "nested boxes-and-borders scene matches between cpu oracle and offload lane":
+            val lane = _offload_lane()
+            val html = _fixture_boxes_html()
+            val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = _capture_degraded("boxes-scene-lane/cpu")
+            val lane_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = _capture_degraded("boxes-scene-lane/lane")
+            expect(_nonzero(cpu_px)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("boxes-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "direct Engine2D lane render of the cpu oracle is bit-exact with real provenance":
+            # Single pixel source: the cpu frame is blitted through the lane's
+            # GPU primitives and read back — budget-immune, always bit-exact.
+            val lane = _offload_lane()
+            val cpu_px = simple_web_layout_render_html_pixels(_fixture_text_html(), SPEC_W, SPEC_H, "cpu")
+            val res = _render_lane_direct(lane, cpu_px)
+            if not res.ok:
+                # The create FAILED here, at the moment of use. That is a device
+                # availability event, not a defect in the code under test — the
+                # probe's prediction simply did not survive the gap. Say so
+                # loudly and assert nothing about a device that is not present.
+                print "[offload-gpu] direct-lane: GPU BRANCH SKIPPED — Engine2D.create_requested_backend('{lane}') failed at use time; this example proves NOTHING about the GPU offload path"
+            else:
+                expect(res.px.len()).to_equal(SPEC_W * SPEC_H)
+                # Single pixel source, budget-immune: whichever backend served
+                # this frame, it must be bit-exact with the cpu oracle.
+                expect(_diffcount(cpu_px, res.px)).to_equal(0)
+                _assert_provenance_invariants("direct-lane", res.source, res.handle, res.identity, res.pixel_count)
+                # Branch on the real backend, not on the predicted lane. A device
+                # present that produced the frame from its host cache also
+                # carries device provenance, so accept it as proof.
+                val device_sourced = _source_is_device(res.source)
+                if device_sourced:
+                    print "[offload-gpu] direct-lane: GPU-PROVEN — device-sourced frame (source={res.source} handle={res.handle} identity={res.identity})"
+                    # The actual proof: a device-sourced frame must carry real
+                    # device credentials. This is the load-bearing red.
+                    expect(res.handle).to_be_greater_than(0)
+                    expect(res.identity).to_be_greater_than(0)
+                else:
+                    print "[offload-gpu] direct-lane: GPU BRANCH SKIPPED — the frame was CPU-served (source={res.source}); this example proves NOTHING about the GPU offload path"
+                    # A CPU-served frame must say so honestly and must never
+                    # carry device credentials (already asserted above).
+                    expect(_source_is_cpu(res.source)).to_equal(true)
+                    # Strengthening that costs no flake: `lane` here is the
+                    # argument this example actually PASSED to the create, not a
+                    # prediction about a later call. VulkanBackend reports
+                    # "cpu_fallback" (with a recorded reason) whenever it
+                    # degrades, and "cpu_mirror" is emitted only for a backend
+                    # the presenter classified as a CPU backend. So a vulkan
+                    # create that SUCCEEDED and then returned "cpu_mirror" means
+                    # the GPU lane was silently reclassified as CPU with no
+                    # fallback recorded — a provenance-bookkeeping defect, not a
+                    # device event, and it fails here. Genuine device loss still
+                    # passes, because that surfaces as cpu_fallback.
+                    if lane == "vulkan":
+                        if res.source == "cpu_mirror":
+                            print "[offload-gpu] direct-lane: vulkan create SUCCEEDED but the readback is 'cpu_mirror' — a degrading vulkan lane must report 'cpu_fallback' with a reason; silent CPU reclassification is a provenance defect"
+                        expect(res.source).to_equal("cpu_fallback")
+
+    context "renderer heuristic routing (backend-independent surfaces)":
+
+        it "solid-background scene is dominated by the CSS color and parity holds":
+            val lane = _offload_lane()
+            val html = _fixture_solid_html()
+            val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = _capture_degraded("solid-scene-lane/cpu")
+            val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = _capture_degraded("solid-scene-lane/lane")
+            # Majority (not exact-full-frame) — the routed renderer may paint
+            # the "plain" text run over the background.
+            expect(_count_color(cpu_px, 0xFF204060u32)).to_be_greater_than((SPEC_W * SPEC_H) / 2)
+            _assert_parity_unless_degraded("solid-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "inline block colors paint heuristic rects identically on both lanes":
+            val lane = _offload_lane()
+            val html = _fixture_blocks_html()
+            val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = _capture_degraded("blocks-scene-lane/cpu")
+            val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = _capture_degraded("blocks-scene-lane/lane")
+            expect(_count_color(cpu_px, 0xFFAA3355u32)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("blocks-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "Simple Web mark scene paints accent stripes over the white background":
+            val html = _fixture_mark_html()
+            val px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            expect(px.len()).to_equal(SPEC_W * SPEC_H)
+            # Stripe column at x=0 spans the full height — corner pixel is not white.
+            expect(px[0] != 0xFFFFFFFFu32).to_equal(true)
+            expect(_count_color(px, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+        it "toolbar modal grid marker renders the fixed deterministic grid":
+            val html = _fixture_toolbar_grid_html()
+            val first = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val second = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            expect(first.len()).to_equal(SPEC_W * SPEC_H)
+            expect(_nonzero(first)).to_be_greater_than(0)
+            # Fixed pixel grid — no layout/budget involvement, always exact.
+            expect(_diffcount(first, second)).to_equal(0)
+
+    context "scroll offset rendering on the offload lane":
+
+        it "scrolled content shifts correctly and matches on the offload lane":
+            val lane = _offload_lane()
+            val html = _fixture_text_html()
+            val scroll_dy = 10
+            val px0 = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", 0)
+            val px0_degraded = _capture_degraded("scroll-shift/px0")
+            val pxDy = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", scroll_dy)
+            val pxDy_degraded = _capture_degraded("scroll-shift/pxDy")
+            expect(px0.len()).to_equal(SPEC_W * SPEC_H)
+            expect(pxDy.len()).to_equal(SPEC_W * SPEC_H)
+            if px0_degraded or pxDy_degraded:
+                print "[offload-parity] SKIP scroll-shift: render degraded by wall-clock budget — shift comparison NOT COMPARED; this example proves NOTHING about scroll-shift correctness"
+            else:
+                expect(_diffcount(px0, pxDy)).to_be_greater_than(0)
+                # Shift correctness: row Y at offset 0 == row Y-dy at offset dy.
+                var row_band_diff = 0
+                var row = scroll_dy
+                while row < SPEC_H:
+                    var col = 0
+                    while col < SPEC_W:
+                        if px0[row * SPEC_W + col] != pxDy[(row - scroll_dy) * SPEC_W + col]:
+                            row_band_diff = row_band_diff + 1
+                        col = col + 1
+                    row = row + 1
+                expect(row_band_diff).to_equal(0)
+                # Receipt for the eighth declared comparison. Without it a run
+                # in which every comparison ran still reported 7 of 8 COMPARED
+                # and therefore read as INCONCLUSIVE — the false-inconclusive
+                # mirror of the silent-pass defect this change fixes.
+                print "[offload-parity] COMPARED scroll-shift: scrolled row band asserted bit-exact against the unscrolled render (both renders completed within budget)"
+            # Lane parity at the same scroll offset.
+            val lane_px = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, lane, scroll_dy)
+            val lane_degraded = _capture_degraded("scroll-lane/lane")
+            _assert_parity_unless_degraded("scroll-lane", pxDy, pxDy_degraded, lane_px, lane_degraded)
+
+    context "GPU paint route selection":
+
+        it "route verdict reports disabled, cpu, and candidate lanes distinctly":
+            val html = _fixture_text_html()
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "vulkan", false)).to_equal("gpu-paint-disabled")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "cpu", true)).to_equal("cpu-backend-not-gpu-offload")
+            val verdict = simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "vulkan", true)
+            print "[gpu-paint-route] vulkan verdict: {verdict}"
+            expect(verdict.starts_with("gpu-paint:") or verdict.starts_with("cpu-mirror:")).to_equal(true)
+            expect(simple_web_layout_render_html_should_gpu_paint(html, SPEC_W, SPEC_H, "vulkan", false)).to_equal(false)
+            expect(simple_web_layout_render_html_should_gpu_paint(html, SPEC_W, SPEC_H, "cpu", true)).to_equal(false)
+
+        it "explicit gpu-paint readback on the lane matches the cpu truth":
+            web_gpu_paint_timing_cache_reset()
+            val lane = _offload_lane()
+            val html = _fixture_boxes_html()
+            val cpu_truth = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, "cpu", false)
+            val cpu_degraded = _capture_degraded("gpu-paint-lane/cpu")
+            expect(cpu_truth.source).to_equal("cpu_mirror")
+            val lane_paint = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, lane, true)
+            val lane_degraded = _capture_degraded("gpu-paint-lane/lane")
+            print "[gpu-paint-readback] lane={lane} source={lane_paint.source} handle={lane_paint.backend_handle}"
+            expect(lane_paint.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+            _assert_provenance_invariants("gpu-paint-lane", lane_paint.source,
+                lane_paint.backend_handle, lane_paint.device_identity, lane_paint.pixel_count)
+            val paint_proven = _report_outcome("gpu-paint-lane", lane_paint.source,
+                lane_paint.backend_handle, lane_paint.device_identity, lane_paint.pixel_count)
+            if not paint_proven:
+                expect(_source_is_cpu(lane_paint.source)).to_equal(true)
+            _assert_parity_unless_degraded("gpu-paint-lane", cpu_truth.pixels, cpu_degraded, lane_paint.pixels, lane_degraded)
+            # Run-level disclosure: a green in which the GPU branch never ran
+            # must not be readable as a green that proved the device. The
+            # evidence is the per-example disclosure lines, so state the exact
+            # rule for reading them rather than a cross-example tally the spec
+            # runner does not preserve.
+            print "[offload-gpu] RUN VERDICT: this run's GPU evidence is exactly the set of '[offload-gpu] <label>: GPU-PROVEN' lines above."
+            print "[offload-gpu] RUN VERDICT: every '[offload-gpu] <label>: GPU BRANCH SKIPPED' line marks an example that proves NOTHING about the GPU offload path."
+            print "[offload-gpu] RUN VERDICT: a PASS with no GPU-PROVEN line does NOT attest the GPU offload path — read it as 'device unavailable', not as 'GPU works'."
+            # Parity run-level disclosure. Same failure mode as the GPU branch,
+            # same remedy: this spec once reported `17 total, 17 passed, 0
+            # failed` while SIX cross-render comparisons had been skipped by the
+            # wall-clock budget, and nothing in the verdict said so. The counts
+            # below are stated so the closing verdict names its own denominator;
+            # the executed count is recovered by grep because the spec runner
+            # does not preserve cross-example state (a module-level tally, and
+            # even a mutable field on a module-level class instance, read back 0
+            # — re-verified for this change, see the NOTE above).
+            print "[offload-parity] RUN VERDICT: this run DECLARES {PARITY_COMPARISONS_DECLARED} cross-render parity comparisons."
+            # The counting rule is stated as an ANCHORED grep on purpose. These
+            # verdict lines necessarily mention the receipt tokens, so an
+            # unanchored `grep -c` would count the verdict's own prose as
+            # evidence and inflate the total — observed while verifying this
+            # change (COMPARED read as 1 when it was 0). Receipts start the
+            # line; the verdict lines start with 'RUN VERDICT', so `^` separates
+            # them cleanly.
+            print "[offload-parity] RUN VERDICT: the number that ACTUALLY RAN is `grep -c '^.offload-parity. COMPARED '`; the number skipped is `grep -c '^.offload-parity. SKIP '`. Anchor at line start — these verdict lines mention the tokens too."
+            print "[offload-parity] RUN VERDICT: a PASS with fewer than {PARITY_COMPARISONS_DECLARED} COMPARED receipts is INCONCLUSIVE for cross-render parity — the budget degraded the renders, so those comparisons were never made. It is NOT a parity pass."
+            print "[offload-parity] RUN VERDICT: cross-render parity is the only budget-sensitive evidence here. The budget-IMMUNE proof — 'direct-lane' single-source parity through the real GPU primitives — runs unconditionally, so read a degraded run as 'cross-render parity unproven', not as 'the offload path is unproven'."

@@ -1,0 +1,429 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+# @evidence-display: links
+"""# Browser live default-action validation
+
+Click listeners may change the activation target before default behavior runs.
+The original checkbox/radio pre-activation is rolled back when its action no
+longer matches, and only the action derived from the live routed node executes.
+New browsing-context targets remain distinct from current-document navigation
+and fail closed when popup authority or a popup host is unavailable.
+"""
+use std.spec.*
+use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
+use std.gc_async_mut.web.browser_session.{BrowserResponse, BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_default_action_to_route, be_dom_get_attr, be_dom_path_for_route
+}
+use test.system.browser_dom_identity_helpers.{
+    system_browser_dom_identity_index, system_dom_route
+}
+
+fn _open_live_default_fixture(session: BrowserSession, html: text):
+    match session.open_html("https://example.test/live-default", html):
+        Ok(_):
+            ()
+        Err(reason):
+            fail("live default-action fixture failed: {reason}")
+
+fn setup_post_dispatch_activation_fixture() -> BrowserSession:
+    var session = BrowserSession.new()
+    _open_live_default_fixture(
+        session,
+        "<html><body>" +
+        "<form id='checkbox-submit-form' action='/checkbox-submit' " +
+        "onsubmit='set-attr:data-submit=yes'>" +
+        "<input id='checkbox-submit' type='checkbox' value='checkbox-submit' " +
+        "oninput='set-attr:data-input=yes' " +
+        "onchange='set-attr:data-change=yes' " +
+        "onfocus='set-attr:data-focus=yes'></form>" +
+        "<input id='checkbox-text' type='checkbox' value='checkbox-text' " +
+        "oninput='set-attr:data-input=yes' " +
+        "onchange='set-attr:data-change=yes' " +
+        "onfocus='set-attr:data-focus=yes'>" +
+        "<input id='stable-radio' type='radio' name='choice' " +
+        "value='stable-radio' checked>" +
+        "<input id='checkbox-radio' type='checkbox' name='choice' " +
+        "value='checkbox-radio' oninput='set-attr:data-input=yes' " +
+        "onchange='set-attr:data-change=yes' " +
+        "onfocus='set-attr:data-focus=yes'>" +
+        "<input id='submit-checkbox' type='submit' value='submit-checkbox' " +
+        "oninput='set-attr:data-input=yes' " +
+        "onchange='set-attr:data-change=yes' " +
+        "onfocus='set-attr:data-focus=yes'>" +
+        "<a id='changed-link' href='/stale-destination'>Changed link</a>" +
+        "<a id='removed-link' href='/removed-destination'>Removed link</a>" +
+        "<script>" +
+        "var cs=document.getElementById('checkbox-submit');" +
+        "cs.addEventListener('click',function(){" +
+        "cs.setAttribute('type','submit');});" +
+        "var ct=document.getElementById('checkbox-text');" +
+        "ct.addEventListener('click',function(){" +
+        "ct.setAttribute('type','text');});" +
+        "var cr=document.getElementById('checkbox-radio');" +
+        "cr.addEventListener('click',function(){" +
+        "cr.setAttribute('type','radio');});" +
+        "var sc=document.getElementById('submit-checkbox');" +
+        "sc.addEventListener('click',function(){" +
+        "sc.setAttribute('type','checkbox');});" +
+        "var changed=document.getElementById('changed-link');" +
+        "changed.addEventListener('click',function(){" +
+        "changed.setAttribute('href','/live-destination');});" +
+        "var removed=document.getElementById('removed-link');" +
+        "removed.addEventListener('click',function(){" +
+        "document.body.removeChild(removed);});" +
+        "</script></body></html>"
+    )
+    session
+
+fn _act_live_control(
+    session: BrowserSession, kind: text, label: text,
+    action: text, key: text
+):
+    val nodes = ui_access_find_nodes(
+        session.ui_access_snapshot(), "browser:session", kind, label, 1
+    )
+    expect(nodes.len()).to_equal(1)
+    val result = session.ui_access_act(WinTextActionRequest(
+        target_id: nodes[0].canonical_id,
+        action: action, text_value: key, x: 0, y: 0
+    ))
+    expect(result.ok).to_equal(true)
+
+fn setup_target_context_fixture(
+    target: text, label: text, allow_popups: bool
+) -> BrowserSession:
+    var session = BrowserSession.new()
+    expect(session.begin_network_navigation(
+        "https://example.test/target-context", "GET", "", "", ""
+    ).is_ok()).to_equal(true)
+    match session.take_pending_request():
+        Some(request):
+            val popup_token = if allow_popups: " allow-popups" else: ""
+            expect(session.commit_network_response(BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: 200,
+                headers: (
+                    "Content-Security-Policy: sandbox allow-top-navigation" +
+                    popup_token
+                ),
+                body: (
+                    "<html><head><title>Committed target fixture</title></head>" +
+                    "<body><a id='target-link' target='{target}' " +
+                    "href='/next'>{label}</a></body></html>"
+                ),
+                error: ""
+            )).is_ok()).to_equal(true)
+        nil:
+            fail("target-context fixture request was not queued")
+    session
+
+fn expect_target_context_unchanged(
+    session: BrowserSession, warning: text
+):
+    expect(session.pending_request_count()).to_equal(0)
+    expect(session.current_url).to_equal(
+        "https://example.test/target-context"
+    )
+    expect(session.current_title).to_equal("Committed target fixture")
+    expect(session.current_body_html).to_contain("target-link")
+    expect(session.history.len()).to_equal(1)
+    expect(session.current_index).to_equal(0)
+    expect(session.warnings).to_contain(warning)
+
+fn expect_current_target_navigation(session: BrowserSession):
+    expect(session.pending_request_count()).to_equal(1)
+    match session.take_pending_request():
+        Some(request):
+            expect(request.kind).to_equal("document")
+            expect(request.url).to_equal("https://example.test/next")
+        nil:
+            fail("current-target navigation was not queued")
+
+fn trigger_pointer_and_keyboard_mutation(
+    session: BrowserSession
+):
+    _act_live_control(
+        session, "checkbox", "checkbox-submit", "click", ""
+    )
+    _act_live_control(
+        session, "checkbox", "checkbox-text", "key", " "
+    )
+    _act_live_control(
+        session, "checkbox", "checkbox-radio", "click", ""
+    )
+    _act_live_control(
+        session, "button", "submit-checkbox", "key", "Enter"
+    )
+    _act_live_control(
+        session, "link", "Changed link", "click", ""
+    )
+    _act_live_control(
+        session, "link", "Removed link", "key", "Enter"
+    )
+
+fn _live_attr(
+    session: BrowserSession, target_id: text, name: text
+) -> text:
+    val root = session.dom_root()
+    val identity_index = system_browser_dom_identity_index(session)
+    val path = be_dom_path_for_route(
+        root, identity_index, system_dom_route(identity_index, target_id)
+    )
+    be_dom_get_attr(path[path.len() - 1], name)
+
+fn _live_default_action(
+    session: BrowserSession, target_id: text, event_type: text
+) -> text:
+    val root = session.dom_root()
+    val identity_index = system_browser_dom_identity_index(session)
+    be_dom_default_action_to_route(
+        root, identity_index, system_dom_route(identity_index, target_id),
+        event_type
+    )
+
+fn check_invalidated_default_actions(session: BrowserSession):
+    expect(_live_attr(
+        session, "checkbox-submit", "checked"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-submit", "data-input"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-submit", "data-change"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-submit", "data-focus"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "checkbox-submit-form", "data-submit"
+    )).to_equal("yes")
+
+    expect(_live_attr(
+        session, "checkbox-text", "checked"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-text", "data-input"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-text", "data-change"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-text", "data-focus"
+    )).to_equal("yes")
+
+    expect(_live_attr(
+        session, "checkbox-radio", "checked"
+    )).to_equal("checked")
+    expect(_live_attr(
+        session, "stable-radio", "checked"
+    )).to_equal("")
+    expect(_live_attr(
+        session, "checkbox-radio", "data-input"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "checkbox-radio", "data-change"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "checkbox-radio", "data-focus"
+    )).to_equal("yes")
+
+    expect(_live_attr(
+        session, "submit-checkbox", "checked"
+    )).to_equal("checked")
+    expect(_live_attr(
+        session, "submit-checkbox", "data-input"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "submit-checkbox", "data-change"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "submit-checkbox", "data-focus"
+    )).to_equal("yes")
+
+    val identity_index = system_browser_dom_identity_index(session)
+    expect(identity_index.route_for_author_id("removed-link")).to_be_nil()
+    expect(session.pending_request_count()).to_equal(2)
+    match session.take_pending_request():
+        Some(request):
+            expect(request.url).to_equal(
+                "https://example.test/checkbox-submit"
+            )
+        nil:
+            fail("live checkbox-to-submit action did not submit")
+    match session.take_pending_request():
+        Some(request):
+            expect(request.url).to_equal(
+                "https://example.test/live-destination"
+            )
+        nil:
+            fail("changed live href did not navigate")
+    expect(session.pending_request_count()).to_equal(0)
+
+fn check_live_default_action_control_case():
+    var session = BrowserSession.new()
+    _open_live_default_fixture(
+        session,
+        "<html><body><input id='control-check' type='checkbox' " +
+        "value='control-check' oninput='set-attr:data-input=yes' " +
+        "onchange='set-attr:data-change=yes' " +
+        "onfocus='set-attr:data-focus=yes'>" +
+        "<a href='/control-link'>Control link</a></body></html>"
+    )
+    _act_live_control(
+        session, "checkbox", "control-check", "click", ""
+    )
+    _act_live_control(
+        session, "link", "Control link", "key", "Enter"
+    )
+    expect(_live_attr(
+        session, "control-check", "checked"
+    )).to_equal("checked")
+    expect(_live_attr(
+        session, "control-check", "data-input"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "control-check", "data-change"
+    )).to_equal("yes")
+    expect(_live_attr(
+        session, "control-check", "data-focus"
+    )).to_equal("yes")
+    expect(session.pending_request_count()).to_equal(1)
+    match session.take_pending_request():
+        Some(request):
+            expect(request.url).to_equal(
+                "https://example.test/control-link"
+            )
+        nil:
+            fail("unchanged keyboard link did not navigate")
+
+describe "BrowserSession live default actions":
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+    it "should route only the action derived from the live target":
+        step("Install guarded link and submit controls")
+        val fixture = setup_post_dispatch_activation_fixture()
+
+        step("Mutate activation state inside click listeners")
+        trigger_pointer_and_keyboard_mutation(fixture)
+
+        step("Suppress stale navigation and form submission")
+        check_invalidated_default_actions(fixture)
+
+        step("Preserve unchanged control activation")
+        check_live_default_action_control_case()
+
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "should never coerce a new target into the current document":
+        step("Install whitespace, mixed-case, named, and keyword targets")
+        val spaced_self = setup_target_context_fixture(
+            " _self ", "Spaced self", false
+        )
+        val mixed_blank = setup_target_context_fixture(
+            "_BLANK", "Mixed blank", false
+        )
+        val exact_blank = setup_target_context_fixture(
+            "_blank", "Exact blank", false
+        )
+        val named = setup_target_context_fixture(
+            "report: frame", "Named target", true
+        )
+        val mixed_self = setup_target_context_fixture(
+            "_SELF", "Mixed self", false
+        )
+        val exact_self = setup_target_context_fixture(
+            "_self", "Exact self", false
+        )
+        val parent_target = setup_target_context_fixture(
+            "_parent", "Parent target", false
+        )
+        val top_target = setup_target_context_fixture(
+            "_top", "Top target", false
+        )
+        val empty_target = setup_target_context_fixture(
+            "", "Empty target", false
+        )
+
+        step("Preserve raw new-context names and classify exact keywords")
+        expect(_live_default_action(
+            spaced_self, "target-link", "click"
+        )).to_equal("navigate-popup:7: _self /next")
+        expect(_live_default_action(
+            mixed_blank, "target-link", "click"
+        )).to_equal("navigate-popup:6:_BLANK/next")
+        expect(_live_default_action(
+            exact_blank, "target-link", "click"
+        )).to_equal("navigate-popup:6:_blank/next")
+        expect(_live_default_action(
+            named, "target-link", "click"
+        )).to_equal("navigate-popup:13:report: frame/next")
+        expect(_live_default_action(
+            mixed_self, "target-link", "click"
+        )).to_equal("navigate:/next")
+        expect(_live_default_action(
+            exact_self, "target-link", "click"
+        )).to_equal("navigate:/next")
+        expect(_live_default_action(
+            parent_target, "target-link", "click"
+        )).to_equal("navigate:/next")
+        expect(_live_default_action(
+            top_target, "target-link", "click"
+        )).to_equal("navigate:/next")
+        expect(_live_default_action(
+            empty_target, "target-link", "click"
+        )).to_equal("navigate:/next")
+
+        step("Activate whitespace and keyword targets by pointer and Enter")
+        _act_live_control(
+            spaced_self, "link", "Spaced self", "click", ""
+        )
+        _act_live_control(
+            mixed_blank, "link", "Mixed blank", "key", "Enter"
+        )
+        _act_live_control(
+            exact_blank, "link", "Exact blank", "click", ""
+        )
+        _act_live_control(
+            named, "link", "Named target", "click", ""
+        )
+        _act_live_control(
+            mixed_self, "link", "Mixed self", "key", "Enter"
+        )
+        _act_live_control(
+            exact_self, "link", "Exact self", "click", ""
+        )
+        _act_live_control(
+            parent_target, "link", "Parent target", "click", ""
+        )
+        _act_live_control(
+            top_target, "link", "Top target", "key", "Enter"
+        )
+        _act_live_control(
+            empty_target, "link", "Empty target", "click", ""
+        )
+
+        step("Fail popup attempts closed and preserve current-target behavior")
+        expect_target_context_unchanged(
+            spaced_self, "CSP sandbox blocked popup"
+        )
+        expect_target_context_unchanged(
+            mixed_blank, "CSP sandbox blocked popup"
+        )
+        expect_target_context_unchanged(
+            exact_blank, "CSP sandbox blocked popup"
+        )
+        expect_target_context_unchanged(
+            named, "popup-context-unavailable"
+        )
+        expect_current_target_navigation(mixed_self)
+        expect_current_target_navigation(exact_self)
+        expect_current_target_navigation(parent_target)
+        expect_current_target_navigation(top_target)
+        expect_current_target_navigation(empty_target)

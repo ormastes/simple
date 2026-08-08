@@ -1,0 +1,113 @@
+"""
+# `resource` ownership sigils (`R` / `*R` / `@R` / `-R`) — WP-B acceptance
+
+**Plan:** doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md (WP-B)
+**Design:** doc/05_design/language/resource/resource_sffi_binding_design_2026-08-06.md §3, §7
+
+WP-B parses the four ownership sigils into distinguishable `TypeKind`
+representations and records the observed use-site ownership kind alongside
+the resource in WP-C's `resource_registry` (no parallel registry). It does
+NOT lower ownership to RC runtime calls -- that is a later WP.
+
+## What already parsed before this WP
+
+`*T` in type-annotation position already parsed (probed directly per plan
+`#0.5`), but as `TypeKind.Pointer(inner, false)` via the pre-existing raw
+pointer branch in `parser_parse_type_impl` -- there was no dedicated "shared"
+representation and no registry linkage. `TypeKind.Atomic` already existed as
+an enum variant, but nothing in `core/parser.spl` produced it: `@` was only
+consumed as `TOK_AT` in attribute/annotation position
+(`parser_expr.spl`), never in type position. `-T` (weak) did not parse at
+all -- `TOK_MINUS` was unhandled in `parser_parse_type_impl`.
+
+## Why this spec feeds source STRINGS instead of writing sigils directly
+
+Same oracle-unreachability finding as WP-A/WP-C (plan `#0.5`): `bin/simple
+test` re-execs a child Rust seed whose parser reads a spec file's own
+module-level syntax, so a spec file cannot itself contain `*File` / `@File`
+/ `-File` type annotations as *the spec's own source* and have that prove
+anything about the pure-Simple frontend. This spec drives the same
+source-string harness `resource_hir_metadata_spec.spl` (WP-C) uses: past
+`parse_module_body()` into `parse_and_build_module()`, which runs the actual
+flat-bridge conversion under test (`_FlatAstBridge/convert_nodes.spl
+convert_flat_type`).
+
+## Why ownership recording lives in the bridge, not the parser
+
+`resource_registry_declare` (WP-C) is only called from
+`_FlatAstBridge/module_assembly.spl`'s `__resource_decl` handling, which runs
+during the flat-bridge walk -- AFTER the whole file has already been parsed
+into a flat AST. At raw-parse time (`core/parser.spl`'s `parser_parse_type_impl`),
+no resource has been registered yet even if its `@sffi resource` decl appears
+textually earlier in the same source, so a `resource_is_declared` check made
+from the parser would always read false. The ownership-kind recording and the
+`@R` `thread_safe:` legality gate are therefore implemented in
+`convert_flat_type`, which walks decls in the same source order the bridge
+already established `__resource_decl` metadata in.
+"""
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.resource_registry.*
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use std.spec
+
+fn build(source: text) -> i64:
+    val _module = parse_and_build_module(source, "resource_ownership_sigil_spec.spl")
+    0
+
+fn build_errors(source: text) -> [text]:
+    build(source)
+    parser_get_errors()
+
+describe "resource ownership sigils: parse + registry recording":
+    it "records 'unique' as the default ownership kind (no sigil observed)":
+        build("@sffi(prefix: \"rt_io_file\", thread_safe: true)\nresource File\n")
+        expect(resource_ownership_kind("File")).to_equal("unique")
+
+    it "records 'shared' for the *R use-site sigil":
+        build(
+            "@sffi(prefix: \"rt_io_file\")\nresource File\n" +
+            "fn take(f: *File):\n    pass_do_nothing\n"
+        )
+        expect(resource_ownership_kind("File")).to_equal("shared")
+        assert_false(parser_has_errors())
+
+    it "records 'weak' for the -R use-site sigil":
+        build(
+            "@sffi(prefix: \"rt_io_file\")\nresource File\n" +
+            "fn take(f: -File):\n    pass_do_nothing\n"
+        )
+        expect(resource_ownership_kind("File")).to_equal("weak")
+        assert_false(parser_has_errors())
+
+    it "records 'atomic' for the @R use-site sigil when thread_safe: true":
+        build(
+            "@sffi(prefix: \"rt_io_file\", thread_safe: true)\nresource File\n" +
+            "fn take(f: @File):\n    pass_do_nothing\n"
+        )
+        expect(resource_ownership_kind("File")).to_equal("atomic")
+        assert_false(parser_has_errors())
+
+    it "rejects @R on a resource that is not declared thread_safe: true (clean diagnostic, not silent accept)":
+        val errors = build_errors(
+            "@sffi(prefix: \"rt_io_file\", thread_safe: false)\nresource File\n" +
+            "fn take(f: @File):\n    pass_do_nothing\n"
+        )
+        assert_true(parser_has_errors())
+        var found_thread_safe_error = false
+        var i = 0
+        while i < errors.len():
+            if errors[i].contains("thread_safe"):
+                found_thread_safe_error = true
+            i = i + 1
+        assert_true(found_thread_safe_error)
+        # The illegal sigil must NOT be silently recorded as legal.
+        expect(resource_ownership_kind("File")).to_equal("unique")
+
+    it "rejects @R on a resource with no thread_safe: metadata at all (absent defaults to unsafe)":
+        val errors = build_errors(
+            "@sffi(prefix: \"rt_io_file\")\nresource File\n" +
+            "fn take(f: @File):\n    pass_do_nothing\n"
+        )
+        assert_true(parser_has_errors())
+        assert_true(errors.len() > 0)

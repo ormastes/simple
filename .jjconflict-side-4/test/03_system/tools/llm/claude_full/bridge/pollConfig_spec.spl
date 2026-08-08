@@ -1,0 +1,65 @@
+"""
+# Claude Full Bridge Poll Config
+
+Mirrors GrowthBook poll config validation and fallback behavior.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.pollConfig.{PollIntervalConfigCandidate, getPollIntervalConfig, parsePollIntervalConfig, validatePollIntervalConfig, zeroOrAtLeast100, pollConfigFlagName, pollConfigRefreshMs, pollConfigMinSeekWorkIntervalMs, pollConfigZeroOrAtLeast100Message, atCapacityLivenessMessage}
+
+describe "Claude full bridge poll config":
+    it "accepts a complete valid GrowthBook poll config":
+        step("Parse required and optional poll intervals")
+        val cfg = getPollIntervalConfig(PollIntervalConfigCandidate.fromRequired(150, 250).withHeartbeat(300).withMultisession(400, 500, 600).withReclaim(700).withSessionKeepalive(800))
+        expect(cfg.poll_interval_ms_not_at_capacity).to_equal(150)
+        expect(cfg.poll_interval_ms_at_capacity).to_equal(250)
+        expect(cfg.non_exclusive_heartbeat_interval_ms).to_equal(300)
+        expect(cfg.multisession_poll_interval_ms_not_at_capacity).to_equal(400)
+        expect(cfg.multisession_poll_interval_ms_partial_capacity).to_equal(500)
+        expect(cfg.multisession_poll_interval_ms_at_capacity).to_equal(600)
+        expect(cfg.reclaim_older_than_ms).to_equal(700)
+        expect(cfg.session_keepalive_interval_v2_ms).to_equal(800)
+
+    it "defaults optional fields while preserving required served values":
+        step("Omit zod-defaulted fields")
+        val cfg = getPollIntervalConfig(PollIntervalConfigCandidate.fromRequired(1000, 2000))
+        expect(cfg.poll_interval_ms_not_at_capacity).to_equal(1000)
+        expect(cfg.poll_interval_ms_at_capacity).to_equal(2000)
+        expect(cfg.non_exclusive_heartbeat_interval_ms).to_equal(0)
+        expect(cfg.multisession_poll_interval_ms_not_at_capacity).to_equal(2000)
+        expect(cfg.multisession_poll_interval_ms_partial_capacity).to_equal(2000)
+        expect(cfg.multisession_poll_interval_ms_at_capacity).to_equal(600000)
+        expect(cfg.reclaim_older_than_ms).to_equal(5000)
+        expect(cfg.session_keepalive_interval_v2_ms).to_equal(120000)
+
+    it "falls back to defaults when a seek-work interval is below the floor":
+        step("Reject fat-fingered values below 100ms")
+        val parsed = parsePollIntervalConfig(PollIntervalConfigCandidate.fromRequired(99, 200))
+        expect(parsed.success).to_equal(false)
+        expect(parsed.error).to_contain("not_at_capacity")
+        val cfg = getPollIntervalConfig(PollIntervalConfigCandidate.fromRequired(99, 200))
+        expect(cfg.poll_interval_ms_not_at_capacity).to_equal(2000)
+        expect(zeroOrAtLeast100(0)).to_equal(true)
+        expect(zeroOrAtLeast100(99)).to_equal(false)
+        expect(zeroOrAtLeast100(100)).to_equal(true)
+
+    it "rejects invalid at-capacity liveness combinations":
+        step("Require heartbeat or at-capacity polling")
+        val single = PollIntervalConfigCandidate.fromRequired(100, 0).withMultisession(100, 100, 600)
+        val parsedSingle = parsePollIntervalConfig(single)
+        expect(parsedSingle.success).to_equal(false)
+        expect(parsedSingle.error).to_contain("single-session")
+        val multi = PollIntervalConfigCandidate.fromRequired(100, 600).withMultisession(100, 100, 0)
+        val parsedMulti = parsePollIntervalConfig(multi)
+        expect(parsedMulti.success).to_equal(false)
+        expect(parsedMulti.error).to_contain("multisession")
+        val valid = PollIntervalConfigCandidate.fromRequired(100, 0).withHeartbeat(250).withMultisession(100, 100, 0)
+        expect(validatePollIntervalConfig(getPollIntervalConfig(valid))).to_equal("")
+
+    it "exposes flag metadata and validation messages":
+        step("Read constants used by the fetch wrapper")
+        expect(pollConfigFlagName()).to_equal("tengu_bridge_poll_interval_config")
+        expect(pollConfigRefreshMs()).to_equal(300000)
+        expect(pollConfigMinSeekWorkIntervalMs()).to_equal(100)
+        expect(pollConfigZeroOrAtLeast100Message()).to_contain("100ms")
+        expect(atCapacityLivenessMessage()).to_contain("at-capacity")
