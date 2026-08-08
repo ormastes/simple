@@ -911,6 +911,8 @@ fn main() -> i64:
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
     val (verdict_executed, verdict_passed, verdict_failed, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
+    if env_get("SIMPLE_TEST_RUNNER_DEBUG") == "1":
+        print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} trunc={was_truncated}"
     var failed = 0
     var passed = 0
     if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
@@ -977,8 +979,36 @@ fn main() -> i64:
         passed = 0
         print "error: test-runner: no examples executed"
     else:
-        passed = if has_summary == 1: summary_passed else: (if code == 0: 1 else: 0)
-        failed = if has_summary == 1: summary_failed else: (if code == 0: 0 else: 1)
+        # BUG FIX (spec_runner_describe_tail_expression_exit_code): when a
+        # `describe(...)` block is the TAIL EXPRESSION of `fn main()`, its
+        # return value — a constant 1, NOT an example count (proven: a
+        # 3-example spec still exits 1) — becomes the child's process exit
+        # status. So a wholly passing spec of that shape hands us code=1, and
+        # the `code != 0` clamp below then manufactured a phantom failure:
+        # "Results: 1 total, 0 passed, 1 failed" + exit 1 for a spec whose
+        # example demonstrably ran and passed. Adding ANY statement after the
+        # block (a `print`, a literal `0`) cures it, which is why holding the
+        # `fn main()` entry shape constant did not reproduce it. The exit
+        # status is pinned red for passing AND failing specs alike, so it also
+        # SUPPRESSES real reds for this shape.
+        #
+        # This is NOT a weakening of the greenwash guards. The child's
+        # SPEC FILE VERDICT line is emitted by the driver epilogue, which only
+        # runs if the spec process reached the end normally: a spec that
+        # passes its examples and THEN dies abnormally emits no verdict line
+        # at all (proven: `exit(7)` after the block yields has_verdict=0 and
+        # stays RED). So requiring a clean verdict, corroborated by the
+        # independent ✗-glyph tally and by any summary line present, is
+        # POSITIVE evidence that the process completed and nothing failed —
+        # exactly the shape of the truncation fix above. Every genuinely
+        # nonzero exit that is not backed by that evidence still fails closed.
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_failed == 0
+        val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
+        if exit_code_spurious:
+            print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"
+        val exit_ok = code == 0 or exit_code_spurious
+        passed = if has_summary == 1: summary_passed else: (if exit_ok: 1 else: 0)
+        failed = if has_summary == 1: summary_failed else: (if exit_ok: 0 else: 1)
         # Fail-closed: never let either counting method's LOWER failure count
         # silently win. This is what catches an orphan top-level `it` (bug:
         # test_runner_orphan_it_silently_ignored) — its real ✗ marker prints,
@@ -1001,7 +1031,7 @@ fn main() -> i64:
             passed = real_passed
             if real_failed > failed:
                 failed = real_failed
-        if code != 0 and failed == 0:
+        if not exit_ok and failed == 0:
             failed = 1
         if failed > 0:
             print "error: test-runner: spec failed"

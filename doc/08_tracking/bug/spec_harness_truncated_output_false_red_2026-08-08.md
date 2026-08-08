@@ -47,6 +47,27 @@ having characterized it. What the axis controls below do establish is that
 directory, entry shape, imports, example count and `--assert-ran` do not *by
 themselves* trigger the contradiction on a quiet run.
 
+> **UPDATE 2026-08-08 — the second mechanism is now CLOSED.** It was found and
+> fixed: see
+> `doc/08_tracking/bug/spec_runner_describe_tail_expression_exit_code_2026-08-08.md`.
+>
+> The reasoning above is sound and its conclusion held: the finder's case is
+> genuinely a different mechanism, mechanically independent of truncation (95 KB
+> log, `trunc=false`). The trigger is **`describe(...)` being the tail
+> expression of `fn main()`** — Simple returns a function's tail expression, and
+> for `main` that becomes the exit status; `describe(...)` evaluates to a
+> constant `1`, so the child exits 1 and the `code != 0` clamp manufactures a
+> phantom failure.
+>
+> This is also why the "entry shape" axis control here came back green: holding
+> the `fn main()` *shape* constant is not enough — a `fn main()` spec with **any
+> statement after the block** is unaffected. The discriminating axis is the
+> block's *position within* `main`, not the wrapper's presence.
+>
+> The branch that fired was **none of the four nominated below**: it was the
+> plain final `else` (`spec failed`, ~:1007), reached with `code=1` and
+> `has_summary=0`.
+
 ## Trigger condition (precise) — for the mechanism fixed here
 
 Not directory shape, not entry shape, not imports, not example count — each was
@@ -147,9 +168,19 @@ of their own bounded capture.
 
 ## Follow-up (not done here)
 
-**OPEN: the finder's one-line `src/lib/**/test/` case is still unexplained** (see
-the section at the top). A second mechanism with the same signature exists and
-was not isolated. Anyone reproducing it should grep their log for the four
+**CLOSED 2026-08-08: the finder's one-line `src/lib/**/test/` case is now
+explained and fixed** —
+`doc/08_tracking/bug/spec_runner_describe_tail_expression_exit_code_2026-08-08.md`.
+Root cause: `describe(...)` as the tail expression of `fn main()` returns a
+constant 1 that becomes the child's exit status. The branch that fired was the
+plain final `else`, not any of the four listed below. The
+branch-identifying-string technique itself worked exactly as intended and is
+what named it — but note the list below is **not exhaustive**; the final `else`
+shares the `error: test-runner: spec failed` string with the `--assert-ran`
+branch, so disambiguate with `SIMPLE_TEST_RUNNER_DEBUG=1`, which prints
+`code=`, `assert_ran=`, `has_sum=`, `has_v=` and `trunc=` for the run.
+
+Original (now-resolved) note, kept for the record — the four
 branch-identifying strings, which name the branch uniquely:
 `error: test-runner: file timed out` (line ~849, child killed),
 `error: test-runner: spec failed` (~858, non-zero exit under `--assert-ran`),
@@ -167,3 +198,43 @@ parsing copy in
 `src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl`. The
 directory/multi-file aggregation lanes should get the same verdict-line
 preference; only the single-file lane is fixed here.
+
+### Disposition of the other consumers (triaged 2026-08-08) — still OPEN, deliberately not fixed
+
+Triaged while fixing the tail-expression bug. Left as filed work rather than
+swept, because each needs its own discrimination proof and they sit in modules
+other lanes are editing.
+
+- **Same-family, real exposure — should get the verdict-line preference:**
+  `src/app/test_runner_new/test_runner_main.spl:101`,
+  `test_runner_client.spl:245`,
+  `src/app/test_daemon/light_daemon.spl:104`,
+  `src/lib/nogc_sync_mut/test_runner/sdoctest/runner.spl:324`,
+  `src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl`.
+  All scrape pass/fail counts from bounded-captured text and none call
+  `output_was_truncated`. The single-file lane's `output_was_truncated()`
+  helper (`test_runner_single.spl:338`, matching `[output truncated:`) is the
+  ready-made predicate — it is currently used in exactly one place.
+
+- **Non-test `process_run_bounded` callers — lower risk, no count-scraping:**
+  `src/app/devhub/wiki_git.spl` (10 call sites),
+  `src/app/portal/git_repo.spl`, `src/app/mcp/main_lazy_json.spl:497`,
+  `src/app/simple_lsp_mcp/tools.spl`. These consume git plumbing output well
+  under the cap and mostly branch on the exit code, not on scraped counts. Real
+  but low exposure; the marker check is still the correct hardening.
+
+- **`OUTPUT_LIMIT = 12000` does NOT share a helper with
+  `spawn_bounded_output_reader`.** Checked for the lane that owns it. The
+  occurrences (`src/app/cli/check_entry.spl:11,99-109`,
+  `src/app/cli/electron_entry.spl:6,34-46`) are plain **head-only display
+  slicing** — `output[0:OUTPUT_LIMIT]` on already-captured text, for printing
+  only. Different layer, different truncation shape (head-only, not head+tail),
+  no shared code with the runtime reader, and it drops no middle. The two
+  problems are independent; no coordination needed beyond this note. **Their
+  files were not edited by this lane.**
+
+- **Adjacent defect found and filed separately:**
+  `parse_child_example_summary` returns `has_summary=0` on every run — see
+  `doc/08_tracking/bug/spec_runner_child_summary_scraper_returns_zero_2026-08-08.md`.
+  Same "scraper silently returns zero, read downstream as *absent* rather than
+  *broken*" family as this bug.

@@ -1,5 +1,37 @@
 # Spec runner contradicts itself on `fn main()`-wrapped specs: verdict green, summary red, exit code constant 1 (2026-08-08)
 
+> **STATUS 2026-08-08: FIXED — and the trigger stated below is TOO BROAD.**
+> Root cause and fix:
+> `doc/08_tracking/bug/spec_runner_describe_tail_expression_exit_code_2026-08-08.md`.
+>
+> **What this doc got right:** the observation, the four probes, and the ruling
+> that `SPEC FILE VERDICT` is the truthful surface while `Results:` and the exit
+> code are wrong. Probe C's both-directions test was the decisive piece of
+> reasoning and it holds.
+>
+> **What this doc got wrong — two corrections:**
+>
+> 1. **The trigger is not the `fn main()` wrapper.** It is `describe(...)` being
+>    the **tail expression** of `fn main()`. Simple returns a function's tail
+>    expression and for `main` that becomes the process exit status;
+>    `describe(...)` evaluates to a constant `1`. A `fn main()` spec with **any
+>    statement after the block** (a `print`, a literal `0`) is completely
+>    unaffected. Probes A/C/D all happen to end with the block, which is why the
+>    wrapper looked causal. This over-broad predicate is why a second lane
+>    independently held "entry shape" constant and could not reproduce the bug —
+>    the two lanes' disagreement was an artifact of this doc's predicate, not of
+>    the environment.
+>
+> 2. **The blast radius of 133 is wrong.** 133 is every `^fn main()` spec file;
+>    only those whose `main` *ends* with the block are affected. Re-measured at
+>    `origin/main` b8cac166a1c: **39** affected, out of 133 `fn main()` files,
+>    out of **19,504** tracked `*_spec.spl` (the 22,228 figure is also stale).
+>
+> The "Unresolved" question at the foot of this doc — *why* the shape breaks the
+> accounting — is answered in the new doc. The exit status is a constant `1`,
+> **not** an example count (a 3-example spec still exits 1), so there is no
+> mod-256 accidental-green case: the polarity is uniformly a false RED.
+
 ## Summary
 
 For a spec whose examples are nested inside `fn main():`, the test runner emits
