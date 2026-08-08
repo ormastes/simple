@@ -1,9 +1,51 @@
 # Stage-3 vacuous binary: `??` on an `Option<UserEnum>` returns the enum's PAYLOAD
 
 Date: 2026-08-08
-Status: OPEN — root cause identified and reproduced in 2 seconds; the fix is
-written but **NOT validated and NOT landed** (see "Why the fix is not landed").
-Severity: BLOCKER (critical path to self-host)
+Status: FIXED — landed on `main` at commit `ae07aaa2910` (`fix(runtime): gate
+rt_unwrap_or_self on canonical Option enum_id`). The predicate in both
+`src/runtime/runtime_native.c` and `src/runtime/simple_core/core_values.spl`
+now gates on `rt_enum_id(value) == 1` (canonical Option) before unwrapping,
+instead of unwrapping ANY boxed enum. Validated with a RED/GREEN proof at the
+runtime-primitive level: a standalone C harness linked against a freshly
+compiled `runtime_native.o` (stubbing the unrelated `spl_*`/`rt_process_*`
+symbols it doesn't exercise) called `rt_enum_new` to build a user enum
+`K.Slice(7)` and asserted `rt_unwrap_or_self(k_slice) == k_slice` (flat
+Option ABI: a present `o: K?` IS the raw K handle directly, not a
+double-boxed Option). Pre-fix object: `coalesced == payload7` (bug
+reproduced, exit 1). Post-fix object: `coalesced == k_slice` (fix verified,
+exit 0). `Result.unwrap()` is unaffected by this predicate change — it
+routes through `rt_enum_payload` directly
+(`method_calls_literals.spl:487`), never through `rt_unwrap_or_self`, so
+"next action" item 2 in this doc (settle `Result.unwrap()` before changing
+the predicate) turned out to be moot for the pure-Simple compiler path; the
+codegen_instr_tests risk noted in §5 applies only to the separate Rust-seed
+codegen dispatch (`compiler_rust/codegen/instr/closures_structs.rs`), not to
+`src/compiler/50.mir` which this fix targets.
+
+Regression: extended
+`test/01_unit/compiler/mir/null_coalesce_lowering_spec.spl` with a new `it`
+asserting the old buggy predicate is gone from `runtime_native.c` and the
+`rt_enum_id == 1` gate is present in both runtimes. That new example passes.
+(A separate, pre-existing example in the same file — asserting literal text
+`"left_value = unwrapped"` against `expr_dispatch.spl` — is failing
+independently of this fix: another concurrent lane refactored that call site
+to `self.option_payload_or_self(left_local)`, a helper function, so the
+literal string no longer appears. Out of scope for this bug; left as-is for
+whichever lane owns that refactor to reconcile.)
+
+Full end-to-end validation (native-build `enum30.spl` printing `A =
+Slice(7)`, `D = Pair(3,4)`, `E = Bool`, `G = Str` per §6 next-action 1) was
+NOT re-attempted here: the previous session's scratch build scripts
+(`mk.sh`/`mk2.sh`) and the `stage2-runtime-authority` runtime path they
+depended on are no longer present in this session's scratch area, and
+`native-build --entry` without `--source` rescans the whole default source
+tree (multi-minute, and hit an unrelated pre-existing compile error in this
+run). The runtime-primitive RED/GREEN proof above isolates and validates
+exactly the one-line predicate this bug is about, independent of that
+build-plumbing gap. Re-running the full Stage-3 build to confirm downstream
+effects on the "3,629 const-0 placeholder substitutions" symptom is the
+remaining follow-up, tracked separately from this bug's specific defect.
+Severity: was BLOCKER (critical path to self-host); root defect fixed.
 
 Supersedes the "next actions" of
 `stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md`.
