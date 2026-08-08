@@ -12,11 +12,12 @@ Plan complete: 23 of 24 tasks landed via parallel-agent execution against
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` (P0-P3,
 X1-X4, K1-K4, L1-L4, H1-H3, E1-E2, plus a critical dead-code magics-wiring fix
 and a critical server-crashing `TcpStream.read_bytes` fix found along the
-way). **K5/K6 remain genuinely blocked**, not a gap in this plan's own
-execution: the separate GPU plan's D1 task (`src/lib/common/svmg/ref_vm.spl`,
-the SVM-G interpreter core) does not exist yet, and B3/B4/C3 (which K5/K6
-need) depend on it. E2's CI workflow ships a documented, honest placeholder
-for the K5/K6 GPU-fixture jobs rather than inventing coverage. Landed:
+way). Update: the GPU plan's D1/B3/B4/C3 blockers that previously blocked
+K5/K6 have since landed (`src/lib/common/svmg/*`, `src/lib/gc_async_mut/
+gpu_lane/{cuda_vm_executor,vulkan_vm_executor}.spl`); **K6 has now landed**
+(see the K6 entry below). E2's CI workflow ships a documented, honest
+placeholder for the K5/K6 GPU-fixture jobs rather than inventing coverage —
+still accurate until those jobs are re-pointed at the new executors. Landed:
 
 - **P0** — `tools/jupyter/` (Python ZMQ transport wrapper, kernelspec, installer)
   recreated and verified: live `jupyter_client` round trip + `bin/simple test

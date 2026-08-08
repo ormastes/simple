@@ -310,6 +310,119 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
     result.setup_ms = setup_ms
     result
 
+# =========================================================================
+# GPU lane dispatch — wires remote(cuda(...))/remote(vulkan(...)) to the
+# real landed B2/B3/C2/C3 GpuLaneExecutor implementations instead of a
+# static "not yet implemented" FAIL (closes
+# doc/08_tracking/bug/gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07.md).
+#
+# Lives here (not in gpu_lane_common.spl) because the concrete executor
+# classes (gc_async_mut tier) already import gpu_lane_common (nogc_sync_mut
+# tier) for the `GpuLaneExecutor` trait — importing them back from
+# gpu_lane_common would be circular. This module already imports across
+# that boundary elsewhere in the codebase (e.g. notebook/vulkan_exec.spl),
+# so the direction is precedented.
+# =========================================================================
+
+fn _gpu_lane_result(file_path: text, setup_ms: i64, passed: i64, failed: i64, skipped: i64, error: text) -> TestFileResult:
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: 0,
+        duration_ms: 0, setup_ms: setup_ms, error: error, timed_out: false, cached: false)
+
+fn _run_cuda_jit_lane(file_path: text, setup_ms: i64, session_id: text) -> TestFileResult:
+    var executor = CudaJitLaneExecutor.create()
+    val prepared = executor.prepare(session_id)
+    if not prepared.is_ok():
+        val err = prepared.unwrap_err()
+        if err.starts_with("skip:"):
+            return _gpu_lane_result(file_path, setup_ms, 0, 0, 1, err)
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_jit lane failed: {err}")
+    val ran = executor.run_program([])
+    if not ran.is_ok():
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_jit lane failed: {ran.unwrap_err()}")
+    if not executor.teardown():
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_jit lane failed: teardown-failed")
+    _gpu_lane_result(file_path, setup_ms, 1, 0, 0, "")
+
+fn _run_vulkan_jit_lane(file_path: text, setup_ms: i64, session_id: text) -> TestFileResult:
+    var executor = VulkanJitLaneExecutor.create()
+    val prepared = executor.prepare(session_id)
+    if not prepared.is_ok():
+        val err = prepared.unwrap_err()
+        if err.starts_with("skip:"):
+            return _gpu_lane_result(file_path, setup_ms, 0, 0, 1, err)
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_jit lane failed: {err}")
+    val ran = executor.run_program([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+    if not ran.is_ok():
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_jit lane failed: {ran.unwrap_err()}")
+    if not executor.teardown():
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_jit lane failed: teardown-failed")
+    _gpu_lane_result(file_path, setup_ms, 1, 0, 0, "")
+
+fn _run_cuda_vm_lane(file_path: text, setup_ms: i64) -> TestFileResult:
+    val kernel_bytes = file_read_bytes("src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx")
+    if kernel_bytes.len() == 0:
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_vm lane failed: svmg_cuda_kernel.ptx artifact missing/empty")
+    var executor = CudaVmExecutor.create()
+    val init_err = executor.init(kernel_bytes)
+    if init_err != "":
+        if init_err.starts_with("skip:"):
+            return _gpu_lane_result(file_path, setup_ms, 0, 0, 1, init_err)
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_vm lane failed: {init_err}")
+    val outcome = executor.run_source("HALT 7", 1000, 0)
+    executor.shutdown()
+    if not outcome.ok or outcome.sentinel != (SENTINEL_EXIT_MASK | 7):
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "cuda_vm lane failed: {outcome.error}")
+    _gpu_lane_result(file_path, setup_ms, 1, 0, 0, "")
+
+fn _run_vulkan_vm_lane(file_path: text, setup_ms: i64) -> TestFileResult:
+    val kernel_bytes = file_read_bytes("src/lib/gc_async_mut/gpu_lane/svmg_vulkan_kernel.spv")
+    if kernel_bytes.len() == 0:
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_vm lane failed: svmg_vulkan_kernel.spv artifact missing/empty")
+    var executor = VulkanVmExecutor.create()
+    val init_err = executor.init(kernel_bytes)
+    if init_err != "":
+        if init_err.starts_with("skip:"):
+            return _gpu_lane_result(file_path, setup_ms, 0, 0, 1, init_err)
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_vm lane failed: {init_err}")
+    val outcome = executor.run_source("HALT 7", 1000, 0)
+    executor.shutdown()
+    if not outcome.ok or outcome.sentinel != (SENTINEL_EXIT_MASK | 7):
+        return _gpu_lane_result(file_path, setup_ms, 0, 1, 0, "vulkan_vm lane failed: {outcome.error}")
+    _gpu_lane_result(file_path, setup_ms, 1, 0, 0, "")
+
+fn run_test_file_gpu_lane_dispatch(file_path: text, options: TestOptions, remote_backend: text, base_runtime: text) -> TestFileResult:
+    """Top-level routing hook for `remote_backend in {cuda, vulkan}`. Runs
+    the same host-aware probes as before (symbols first, so an interpreter
+    gap is never masked by a driver-absent skip) and, once driver+symbols
+    are ready, dispatches through the matching concrete executor
+    (cuda_jit/cuda_vm/vulkan_jit/vulkan_vm) instead of a static
+    not-yet-implemented FAIL. Falls back to `route_gpu_lane`'s honest
+    not-yet-implemented FAIL for lane ids with no concrete executor yet
+    (cuda_vm_resident, cudagdb)."""
+    val setup_start = time_now_unix_micros()
+    val missing_symbol = probe_gpu_symbols(remote_backend)
+    val driver_present = if missing_symbol != "": false else: probe_gpu_driver_present(remote_backend)
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    if missing_symbol != "" or not driver_present:
+        return route_gpu_lane(file_path: file_path, setup_ms: setup_ms, remote_backend: remote_backend,
+            driver_present: driver_present, missing_symbol: missing_symbol)
+
+    val lane_id = gpu_lane_id_for(base_runtime, remote_backend)
+    val session_id = "gpu_lane_dispatch_{file_path}"
+    if lane_id == "cuda_jit":
+        return _run_cuda_jit_lane(file_path, setup_ms, session_id)
+    if lane_id == "vulkan_jit":
+        return _run_vulkan_jit_lane(file_path, setup_ms, session_id)
+    if lane_id == "cuda_vm":
+        return _run_cuda_vm_lane(file_path, setup_ms)
+    if lane_id == "vulkan_vm":
+        return _run_vulkan_vm_lane(file_path, setup_ms)
+
+    route_gpu_lane(file_path: file_path, setup_ms: setup_ms, remote_backend: remote_backend,
+        driver_present: driver_present, missing_symbol: missing_symbol)
+
 fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text, target: text, remote_backend: text) -> TestFileResult:
     """Execute test on remote target via QEMU.
 

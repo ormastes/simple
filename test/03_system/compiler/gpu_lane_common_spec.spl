@@ -10,7 +10,8 @@
 
 use std.test_runner.gpu_lane_common.{
     route_gpu_lane, gpu_lane_timeout_ms, gpu_live_required_env, gpu_live_required,
-    gpu_required_symbols, gpu_driver_probe_cmd, GPU_LANE_TIMEOUT_MS_DEFAULT
+    gpu_required_symbols, gpu_driver_probe_cmd, GPU_LANE_TIMEOUT_MS_DEFAULT,
+    gpu_lane_id_for
 }
 use std.io_runtime.{env_set}
 
@@ -89,3 +90,35 @@ describe "GPU lane env contract (design §7)":
         val result = route_gpu_lane(file_path: "x.spl", setup_ms: 0, remote_backend: "vulkan",
             driver_present: true, missing_symbol: "rt_vulkan_alloc_buffer")
         expect(result.error).to_equal("blocked: rt_vulkan_alloc_buffer")
+
+describe "gpu_lane_id_for — routing lane-spec strings to the real B2/B3/C2/C3 executors (closes gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07)":
+    """The generic composite-runner dispatch (test_executor_composite.spl's
+    run_test_file_gpu_lane_dispatch) uses this pure mapping to pick which
+    concrete GpuLaneExecutor (CudaJitLaneExecutor/CudaVmExecutor/
+    VulkanJitLaneExecutor/VulkanVmExecutor) drives a `remote(cuda(...))` /
+    `remote(vulkan(...))` spec, instead of the old static "not yet
+    implemented" FAIL. This spec only asserts the pure routing decision —
+    the real construct-and-drive step needs the gc_async_mut-tier executor
+    classes, which this module cannot import (circular import — see
+    gpu_lane_id_for's docstring), so it lives in test_executor_composite.spl
+    and is exercised end-to-end via that module's own dispatch, not here."""
+
+    it "routes jit(remote(cuda(...))) to cuda_jit":
+        expect(gpu_lane_id_for("jit", "cuda")).to_equal("cuda_jit")
+
+    it "routes interpreter(remote(cuda(...))) to cuda_vm":
+        expect(gpu_lane_id_for("interpreter", "cuda")).to_equal("cuda_vm")
+
+    it "routes jit(remote(vulkan(...))) to vulkan_jit":
+        expect(gpu_lane_id_for("jit", "vulkan")).to_equal("vulkan_jit")
+
+    it "routes interpreter(remote(vulkan(...))) to vulkan_vm":
+        expect(gpu_lane_id_for("interpreter", "vulkan")).to_equal("vulkan_vm")
+
+    it "returns '' for a base_runtime with no concrete executor yet (e.g. cuda_vm_resident's 'resident' submode is carried outside base_runtime, so an unrecognized base still falls through honestly)":
+        expect(gpu_lane_id_for("unknown_base", "cuda")).to_equal("")
+        expect(gpu_lane_id_for("unknown_base", "vulkan")).to_equal("")
+
+    it "returns '' for a backend with no landed executor (e.g. cudagdb)":
+        expect(gpu_lane_id_for("jit", "cudagdb")).to_equal("")
+        expect(gpu_lane_id_for("interpreter", "cudagdb")).to_equal("")
