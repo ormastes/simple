@@ -310,3 +310,57 @@ recommended mitigation remains unchanged: retype `: list` parameters to
 concrete element types (`[i64]`, `[u8]`, etc.) at call sites, as already
 done for kafka `serialization.spl`, and/or land the lint/error on `: list`
 parameters proposed in "Recommended next steps" item 4.
+
+## 2026-08-08 re-verification — STILL LIVE, exact `<<3` signature, fence added
+
+**Binary**: deployed `bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`,
+mtime 2026-08-08 00:53, seed banner confirmed) — the Rust seed. Fixture:
+`test/fixtures/untyped_list_element_shift/main.spl` (kept in-tree so a fence
+can drive it; prior probes were scratch-only).
+
+| call | JIT (default) | `SIMPLE_EXECUTION_MODE=interpret` | expected |
+|---|---|---|---|
+| `get_via_typed_param(buf, 0/1)` (`[i64]` control) | `5, 7` | `5, 7` | `5, 7` |
+| `get_via_list_param(buf, 0/1)` (`: list` param) | `40, 56` | `5, 7` | `5, 7` |
+
+Exact `<<3` signature reproduced (`5→40`, `7→56` = `value*8`), matching every
+prior measurement in this doc (2026-07-30, 2026-08-01, 2026-08-07). Confirmed
+real JIT engagement (not silent interpreter fallback) via
+`RUST_LOG=cranelift_jit=debug`: two `cranelift_jit::backend: defining
+function` lines for the two callee functions in this exact probe (funcid57
+i64,i64->i64 and funcid58 i64,i64->i64).
+
+**Shared-root-cause check with the array-OOB sentinel-leak defect** (both
+live in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`,
+same `lower_index_expr` function): inspected — **not the same root cause**,
+though they are adjacent branches of the same lowering function. The OOB
+defect (`jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md`) is a
+missing bounds-check-and-nil-guard around the `rt_array_get` CALL emission
+(lines ~495-523: the call is emitted unconditionally, with no check on the
+result). This bug is a *type-driven decision to skip* the `UnboxInt`
+instruction that runs *after* the call succeeds (`needs_int_unbox`,
+line ~581, computed from the statically-known `element_expr_ty`) — for a
+`: list`/`ANY`-typed element there is deliberately no static evidence the
+value is an integer, so no unbox is emitted and the tagged/boxed word is
+used raw. A fix for one would not fix the other: adding a bounds-check+guard
+around the call site (this bug's fix shape) does not change the
+type-driven unbox decision downstream, and vice versa. They are siblings in
+the same lowering pass, not a shared mechanism — worth cross-referencing
+(as this note does), not conflating.
+
+**Fence**: `scripts/check/check-untyped-list-element-shift.shs`, modelled on
+`check-native-tuple-to-text.shs` / `check-native-object-cache-granularity.shs`
+(driving `bin/simple run` + `SIMPLE_EXECUTION_MODE=interpret`, not
+`native-build`, since this is a JIT/interpreter divergence). Hard-asserts the
+interpreter's correct behaviour (`typed=[5,7]`, `list-param=[5,7]`) as a
+prerequisite gate, then classifies the JIT lane's `: list`-param reads into
+three outcomes: correct (→ `FAIL (promote-me)`, prompting a rewrite to a hard
+assertion), the documented exact `40,56` `<<3` signature (→ `KNOWN-OPEN`,
+exit 0, expected-correct values `5,7` stated inline), or anything else (→
+`FAIL`, flagged as a new, undocumented divergence rather than silently
+accepted). The typed `[i64]` control is asserted correct on the JIT lane
+unconditionally, distinguishing "this bug" from "something else broke".
+Sabotage-verified: corrupting the fixture's seed data (`buf = [5, 7, 9]` →
+`[6, 7, 9]`) makes the script print `FAIL — interpreter reference lane
+regressed` and exit 1; restoring the fixture (verified byte-identical via
+`diff`) makes it pass again (`KNOWN-OPEN`, exit 0).

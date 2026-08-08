@@ -242,3 +242,52 @@ working binary to verify it against.
    Option-typed locals, reusing the `dict_get_preserve_flat_nil` compare/select
    pattern (`expr_dispatch.spl:895-946`) — verify only once Stage-3
    native-build stops segfaulting on trivial programs.
+
+## 2026-08-08 re-verification — STILL LIVE, fence added
+
+**Binary**: deployed `bin/simple` (`bin/release/x86_64-unknown-linux-gnu/simple`,
+mtime 2026-08-08 00:53, seed banner confirmed via `--version`) — the Rust
+seed, same binary this bug's root cause lives in. Fixture:
+`test/fixtures/jit_array_oob_nil_sentinel/main.spl` (kept in-tree, unlike the
+prior session's scratch-only probes, so a fence can drive it).
+
+| expr | JIT (default) | `SIMPLE_EXECUTION_MODE=interpret` |
+|---|---|---|
+| `xs.get(9)` (miss, OOB) | `3` — WRONG | `nil` — correct |
+| `ys.get(2)` / `ys[2]` (legit value `3`, in bounds — discriminator) | `3` — correct | `3` — correct |
+| bare `xs[9]` (OOB) | `3`, rc=0, no panic — WRONG | panics `array index out of bounds: index is 9 but length is 3`, rc=1 — correct |
+
+Confirmed real JIT engagement (not silent interpreter fallback) via
+`RUST_LOG=cranelift_jit=debug`: `cranelift_jit::backend: defining function
+funcid58: function u0:58() -> i32 system_v` printed for this exact probe.
+
+**Divergence from the 2026-08-07 record, noted but not chased**: that
+session's `ys.get(2) ?? -1` discriminator row claimed `-1` — correct
+(NOT replaced)`. Re-run today on the same expression (`val v = ys.get(2) ??
+-1` and inline, both forms, 3x repeat, deterministic) instead prints `-1` on
+JIT (`interpret` still correctly prints `3`) — i.e. the `??` operator itself
+now appears to coalesce the genuine in-bounds value `3` away, treating it as
+if it were the nil sentinel. This is either a regression introduced by
+whatever produced today's binary (rebuilt 2026-08-08 00:53, after
+yesterday's finding) or a mismeasurement in the prior session — not
+re-investigated here, out of scope for this pass. The fence below therefore
+does NOT rely on `??` as a discriminator; it uses cross-engine comparison of
+a genuine in-bounds `3` (`ys[2]`/`ys.get(2)`, bare interpolation, no `??`)
+instead, which reproduced identically to the 2026-08-07 record and is stable
+across repeats.
+
+**Fence**: `scripts/check/check-jit-array-oob-nil-sentinel.shs`, modelled on
+`check-native-tuple-to-text.shs` / `check-native-object-cache-granularity.shs`
+(adapted for `bin/simple run` + `SIMPLE_EXECUTION_MODE=interpret` instead of
+`native-build`, since this is a JIT/interpreter divergence, not an AOT one).
+Hard-asserts the interpreter's correct behaviour (miss=nil, in-bounds
+control=3/3, bare OOB panics with the exact message and nonzero rc) as a
+prerequisite gate, then records the JIT's current wrong behaviour as
+`KNOWN-OPEN` (exit 0) with the expected-correct values stated inline; flips
+to `FAIL (promote-me)` if the JIT lane ever starts matching the interpreter,
+and to a plain `FAIL` if the JIT in-bounds control itself regresses
+(distinguishing "this bug fixed" from "something else broke").
+Sabotage-verified: corrupting the fixture's in-bounds control value
+(`ys=[1,2,3]` → `[1,2,4]`) makes the script print `FAIL — interpreter lane
+control regressed` and exit 1; restoring the fixture (verified byte-identical
+via `diff`) makes it pass again (`KNOWN-OPEN`, exit 0).
