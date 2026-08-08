@@ -194,3 +194,19 @@ one global disclaimer, and WP-3.5 owns the redeploy that makes 🟡 observable.
 F´, capDL, CompCert, TACLeBench, ARCHIE) are recorded "as-cited, unverified"** —
 network fetch is blocked in this environment. Re-verify against controlled
 documents before any of them becomes certification evidence.
+
+**WP-12a's own follow-up gap, closed 2026-08-08:** `run_noalloc_manifest_scan`
+(`90.tools/verify/noalloc_manifest_scan.spl:205`) registered every scanned
+function with `allocates: false` hardcoded, even though the scan already
+computes each function's own direct-alloc `expr_tags`
+("new"/"interpolation") and simply discarded them at registration. That left
+`NoallocViolationKind.TransitiveCall` (`noalloc_checker.spl:449`)
+unreachable through the driver — only `FamilyImport` (family-prefix) could
+fire. Fixed by deriving `allocates = entry.expr_tags.len() > 0` per entry.
+Real-tree check first (19 `@noalloc` fns, 0 violations, unchanged before/after
+— no false positives introduced), then sabotage-proven with a fixture. If a
+future WP touches this driver again: `allocates` on a manifest entry now means
+two different things depending on how it got set — `true` from a family-prefix
+row (`RUNTIME_FAMILY_MANIFEST`) OR from this per-function direct-alloc
+derivation — both correct, but conflating "which path fired" in a future
+diagnostic message would be a regression in clarity, not correctness.
