@@ -10755,6 +10755,120 @@ RuntimeValue rt_push_byte(RuntimeValue arr, int64_t byte_val)
     return rt_array_push_handle(arr, ENCODE_INT(byte_val & 0xFF));
 }
 
+/* rt_push / rt_pop / rt_clear / rt_sort: receiver-dispatched spellings of
+ * push/pop/clear/sort (compiler/src/codegen/instr/calls.rs routes the
+ * type-blind `.push()`/`.pop()`/`.clear()`/`.sort()` method names here rather
+ * than to the array-only `rt_array_*` helpers, because those fail CLOSED on a
+ * text receiver -- see the comment on the hosted `rt_push`/`rt_pop`/
+ * `rt_clear` in src/compiler_rust/runtime/src/value/collections.rs and
+ * src/runtime/runtime_native.c, which this freestanding kernel build cannot
+ * link against, per doc/09_report/os/simpleos_2d_render_qemu_evidence_2026-08-07.md
+ * ("Fix + re-run" section, 2026-08-08): the freestanding link is `-nostdlib`
+ * and never sees runtime_native.c, so these four had no freestanding body and
+ * the fabricated-stub guard correctly refused to synthesize return-0 stubs
+ * for them (a stub `pop`/`sort` would silently corrupt every array-mutating
+ * caller). Ported here from runtime_native.c's array semantics, adapted to
+ * this file's tagged RuntimeValue/HEAP_ARRAY/HEAP_STRING representation.
+ *
+ * Text handling mirrors this file's own `rt_string_char_at` (byte-indexed,
+ * not full UTF-8 decoding) rather than the hosted UTF-8-aware version, to
+ * match the simplification level already used throughout this translation
+ * unit -- callers needing UTF-8-correct text mutation should not be reaching
+ * this freestanding provider in the first place (text is a value type; only
+ * `push`/`pop` on text allocate a new string here).
+ */
+RuntimeValue rt_push(RuntimeValue receiver, RuntimeValue value)
+{
+    RuntimeArray *a = runtime_array_from_abi(receiver);
+    if (a) {
+        rt_array_push_handle(receiver, value);
+        return receiver;
+    }
+    if (IS_HEAP(receiver)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        if (s && s->hdr.type == HEAP_STRING) {
+            return rt_string_concat(receiver, value);
+        }
+    }
+    return receiver;
+}
+
+RuntimeValue rt_pop(RuntimeValue receiver)
+{
+    RuntimeArray *a = runtime_array_from_abi(receiver);
+    if (a) {
+        if (a->hdr.gc_flags & BYTE_PACKED) {
+            if (a->len == 0) return NIL_VALUE;
+            a->len--;
+            return ENCODE_INT(_rt_bytes_get(a, (uint32_t)a->len));
+        }
+        if (a->len == 0) return NIL_VALUE;
+        a->len--;
+        RuntimeValue *items = runtime_array_items(a);
+        RuntimeValue value = items[a->len];
+        items[a->len] = NIL_VALUE;
+        return value;
+    }
+    if (IS_HEAP(receiver)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        if (s && s->hdr.type == HEAP_STRING) {
+            if (s->len == 0) return rt_string_new(0, 0);
+            return rt_string_new((RuntimeValue)(uintptr_t)(s->data + s->len - 1), 1);
+        }
+    }
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_clear(RuntimeValue receiver)
+{
+    RuntimeArray *a = runtime_array_from_abi(receiver);
+    if (a) {
+        if (a->hdr.gc_flags & BYTE_PACKED) {
+            a->len = 0;
+            return receiver;
+        }
+        RuntimeValue *items = runtime_array_items(a);
+        for (uint32_t i = 0; i < a->len; i++) items[i] = NIL_VALUE;
+        a->len = 0;
+        return receiver;
+    }
+    if (IS_HEAP(receiver)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(receiver);
+        if (s && s->hdr.type == HEAP_STRING) {
+            return rt_string_new(0, 0);
+        }
+    }
+    return receiver;
+}
+
+/* Stable insertion sort over tagged-int elements, matching runtime_native.c's
+ * rt_sort (stable, in place, returns the receiver). Only the plain
+ * (non-byte-packed) element representation is sorted: byte-packed [u8]
+ * arrays are not observed at any current freestanding kernel call site and
+ * are left untouched rather than mis-sorted under the wrong element stride. */
+RuntimeValue rt_sort(RuntimeValue receiver)
+{
+    RuntimeArray *a = runtime_array_from_abi(receiver);
+    if (!a || (a->hdr.gc_flags & BYTE_PACKED)) return receiver;
+    uint32_t n = (uint32_t)a->len;
+    if (n < 2) return receiver;
+    RuntimeValue *items = runtime_array_items(a);
+    for (uint32_t i = 1; i < n; i++) {
+        RuntimeValue key = items[i];
+        int64_t key_ord = IS_INT(key) ? DECODE_INT(key) : (int64_t)key;
+        int32_t j = (int32_t)i - 1;
+        while (j >= 0) {
+            RuntimeValue cur = items[j];
+            int64_t cur_ord = IS_INT(cur) ? DECODE_INT(cur) : (int64_t)cur;
+            if (cur_ord <= key_ord) break;
+            items[j + 1] = items[j];
+            j--;
+        }
+        items[j + 1] = key;
+    }
+    return receiver;
+}
+
 RuntimeValue rt_bytes_concat(RuntimeValue a_rv, RuntimeValue b_rv)
 {
     if (!IS_HEAP(a_rv) || !IS_HEAP(b_rv)) return NIL_VALUE;
@@ -19345,6 +19459,62 @@ RuntimeValue rt_engine2d_simd_blend_row_u32(RuntimeValue dst_row, RuntimeValue s
         oi[i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
     }
     return out;
+}
+
+/* rt_engine2d_simd_blend_span_u32 / rt_engine2d_simd_blend_const_span_u32:
+ * in-place source-over span blends, mirroring rt_engine2d_simd_fill_span_u32
+ * / rt_engine2d_simd_copy_span_u32 above (no malloc, unlike blend_row).
+ * Hosted reference: src/runtime/runtime_simd_dispatch.c:1628 and :1649.
+ * Called from src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl,
+ * which is reached from the baremetal-framebuffer CPU software rasterizer
+ * (backend_software.spl) -- a genuinely used primitive, not dead code that
+ * a stub could get away with faking. Both return the SAME dst handle on
+ * every path, matching fill_span/copy_span's in-place convention. */
+RuntimeValue rt_engine2d_simd_blend_span_u32(RuntimeValue dst, int64_t dst_offset,
+                                             RuntimeValue src, int64_t src_offset,
+                                             int64_t count)
+{
+    RuntimeArray *d = _bm_pixel_array_from_abi(dst);
+    RuntimeArray *s = _bm_pixel_array_from_abi(src);
+    if (!d || !s) return dst;
+
+    int64_t d_off = 0, n = 0;
+    if (!_bm_span_bounds(d, dst_offset, count, &d_off, &n)) return dst;
+    int64_t s_off = 0, s_n = 0;
+    if (!_bm_span_bounds(s, src_offset, n, &s_off, &s_n)) return dst;
+    if (s_n < n) n = s_n;
+
+    RuntimeValue *di = runtime_array_items(d);
+    RuntimeValue *si = runtime_array_items(s);
+    if (!di || !si) return dst;
+
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t sp = _bm_unbox_pixel(si[s_off + i]);
+        uint32_t dp = _bm_unbox_pixel(di[d_off + i]);
+        di[d_off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
+    }
+    return dst;
+}
+
+RuntimeValue rt_engine2d_simd_blend_const_span_u32(RuntimeValue dst, int64_t offset,
+                                                   int64_t count, int64_t const_color)
+{
+    RuntimeArray *a = _bm_pixel_array_from_abi(dst);
+    if (!a) return dst;
+
+    int64_t off = 0, n = 0;
+    if (!_bm_span_bounds(a, offset, count, &off, &n)) return dst;
+    RuntimeValue *items = runtime_array_items(a);
+    if (!items) return dst;
+
+    uint32_t sp = (uint32_t)(uint64_t)const_color;
+    uint32_t sa = (sp >> 24) & 0xFFu;
+    if (sa == 0u) return dst;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t dp = _bm_unbox_pixel(items[off + i]);
+        items[off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
+    }
+    return dst;
 }
 
 /* rt_font_glyph_index is NOT implemented here -- see the report. The

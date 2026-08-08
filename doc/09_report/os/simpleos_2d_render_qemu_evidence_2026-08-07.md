@@ -267,3 +267,100 @@ in this pass — recommend one be filed against `src/runtime/**` /
 `SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1` (a baseline bump would silently
 accept "return 0" bodies for real GPU/audio/array primitives, which the gate
 itself warns "silently corrupts every caller").
+
+## 7 of 13 fabricated-stub symbols implemented, gate narrows to 6 — 2026-08-08
+
+### Per-symbol root cause (traced via `nm -u` on the actual failed-run objects)
+
+`build/simpleos_wm_fullscreen_evidence/native-objects-*/*.o` from the prior
+failing run were still on disk. `nm`-ing all 772 objects and matching each of
+the 13 symbols against real `U` (undefined) entries — not just `declare`
+text in the LLVM backend prelude — confirmed all 13 are genuinely CALLED
+somewhere in the compiled closure, not dead references a `declare`-only scan
+would over-count:
+
+| Symbol(s) | Referencing object | Root cause |
+|---|---|---|
+| `rt_push`, `rt_pop`, `rt_sort`, `rt_clear` | many (`mod_148`=`dom_color.spl`, `mod_346`=`stmt_cache.spl`, others) | Type-blind `.push()`/`.pop()`/`.sort()`/`.clear()` method dispatch (`compiler/src/codegen/instr/calls.rs`) routes to these receiver-polymorphic helpers everywhere an array (or text) method is called. They exist for hosted builds (`src/runtime/runtime_native.c:4297/6857/6893`, `rt_push` only in the Rust runtime `value/collections.rs:2885`) but the freestanding link is `-nostdlib` and never sees `runtime_native.c` (`linker.rs:1009`) — no freestanding body existed anywhere. Genuinely needed: pervasive array-method dispatch, not eliminable. |
+| `rt_engine2d_simd_blend_span_u32`, `rt_engine2d_simd_blend_const_span_u32` | `mod_378` = `lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl`, called from `simd_isa_provider.spl` | Real CPU-software-rasterizer SIMD span blend, reached from `backend_software.spl` (the CPU path `backend_baremetal.spl` uses). Sibling functions (`fill_span`, `copy_span`, `blend_row`) already had freestanding C bodies in `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`; only these two straight-alpha span blends were missing. Genuinely needed, not dead code. |
+| `hda_dma_write_pcm_i16` | `mod_714` = `os/services/audio/audio_service.spl` | `gui_entry_desktop.spl` imports `os.services.audio.audio_service` directly and unconditionally logs audio-offload status on every boot (`gui_entry_desktop.spl:368-370`) — a real, always-executed entry-point code path, not something eliminable by conditional compilation. Deeper finding: `hda_dma_write_pcm_i16` was declared/imported by `audio_service.spl` (`use os.drivers.audio.hda_dma_resources.{...}`) but **never implemented or even exported anywhere in the tree** — a pre-existing missing-implementation bug in the HDA driver, not freestanding-specific. |
+| `rt_cuda_memset_d32`, `rt_metal_device_identity`, `rt_metal_device_supports_metal3`, `rt_metal_load_library_bytes`, `rt_metal_load_library_bytes_raw`, `rt_metal_load_library_file` | `mod_342` = `lib/nogc_sync_mut/cuda/mod.spl`, `mod_386` = `lib/nogc_sync_mut/io/metal_sffi.spl` | `src/lib/gc_async_mut/gpu/engine2d/mod.spl` (the engine2d package barrel) unconditionally `use`s **every** backend implementation — `backend_cuda`, `backend_metal`, `backend_vulkan`, `backend_opengl`, `backend_directx`, etc. — regardless of which backend is actually selected at runtime (`backend_baremetal` for this target). These host-only GPU-driver FFI bridges (macOS Metal, NVIDIA CUDA) are unreachable at runtime on this baremetal-framebuffer x86_64 kernel but are still compiled into the closure at build time. **This is pre-existing, already-accepted architectural debt**: `config/freestanding_fabricated_stub_baseline.sdn` already carries sibling symbols from the exact same families for the exact same entry (`rt_cuda_ctx_set_current`, `rt_cuda_launch_kernel_name`, `rt_cuda_module_load_data_bytes`, `rt_cuda_shutdown`, `rt_metal_destroy_command_buffer`, `rt_metal_run_compute_frame`, lines 87-90/117-118) — these 6 are simply the same class of symbol, newly surfaced by today's declare/backend additions (`796d8484`). |
+
+### Fixes landed (source-only, real implementations, not stubs)
+
+- `src/os/drivers/audio/hda_dma_resources.spl`: implemented
+  `hda_dma_write_pcm_i16` (writes interleaved i16 PCM samples into the
+  `HDA_DMA_PCM` ring at a given frame offset via `rt_ptr_write_i16`, bounded
+  to the buffer size, returns frames actually written) — filled in a
+  genuinely-missing driver primitive, not freestanding-specific.
+- `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`:
+  added freestanding C bodies for `rt_push`, `rt_pop`, `rt_clear`, `rt_sort`
+  (ported from `runtime_native.c`'s array/text receiver-dispatch semantics,
+  adapted to this file's tagged `RuntimeValue`/`HEAP_ARRAY`/`HEAP_STRING`
+  representation) and `rt_engine2d_simd_blend_span_u32`,
+  `rt_engine2d_simd_blend_const_span_u32` (ported from
+  `runtime_simd_dispatch.c:1628/1649`, reusing this file's existing
+  `_bm_pixel_array_from_abi`/`_bm_span_bounds`/`_bm_blend_pixel` helpers that
+  the sibling `fill_span`/`copy_span`/`blend_row` functions already used).
+  `gcc -fsyntax-only -ffreestanding -nostdlib` on the edited file is clean.
+
+### Verification: re-ran the exact evidence-gate command
+
+```
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple \
+REPORT_PATH=<scratch>/simpleos_wm_fullscreen_evidence_run2.md \
+BUILD_DIR=build/simpleos_wm_fullscreen_evidence2 \
+SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS=900 \
+SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS=870 \
+timeout 840 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+`native-build.out`:
+
+```
+Freestanding unresolved symbol check: 123 unexpected symbol(s)
+Fabricated freestanding stubs: 123 symbol(s) for entry
+'simpleos_wm_production_desktop.elf.candidate' -- weak bodies that RETURN 0
+(baseline config/freestanding_fabricated_stub_baseline.sdn: 117 known, 6 new)
+...
+Build failed: freestanding link would FABRICATE 6 symbol(s) not in the
+baseline for entry 'simpleos_wm_production_desktop.elf.candidate':
+rt_cuda_memset_d32, rt_metal_device_identity, rt_metal_device_supports_metal3,
+rt_metal_load_library_bytes, rt_metal_load_library_bytes_raw,
+rt_metal_load_library_file.
+```
+
+`evidence.env`: `simpleos_wm_fullscreen_status=fail`,
+`simpleos_wm_fullscreen_reason=wm-simple-web-build-failed`,
+`simpleos_wm_fullscreen_serial_log_bytes=0` — the gate still does not reach
+QEMU this run. **All 7 targeted symbols dropped out of the unresolved set**
+(13 -> 6); the 7 rejected before are gone from the "new" count, confirming
+the freestanding link now resolves them for real, not via a baseline bump
+(none of the 7 were added to `config/freestanding_fabricated_stub_baseline.sdn`).
+
+### Next blocker (precise, not fixed this pass)
+
+The remaining 6 (`rt_cuda_memset_d32` + 5 `rt_metal_*`) require a real
+conditional-compilation fix at `src/lib/gc_async_mut/gpu/engine2d/mod.spl`
+(lines 108-121): the backend barrel currently `use`s every GPU backend
+unconditionally. Making that target-conditional is a cross-cutting change —
+`engine2d.mod` is consumed by every engine2d-using build (macOS Metal apps,
+CUDA apps, the SimpleOS baremetal kernel), so gating imports by target
+risks breaking non-kernel consumers and needs its own scoped session, not a
+fold-in here. Per this task's explicit instruction, these 6 were **not**
+re-baselined as an accepted-stub cover-up, even though
+`config/freestanding_fabricated_stub_baseline.sdn` already carries sibling
+CUDA/Metal symbols for this exact entry (lines 87-90, 117-118) — that
+precedent explains why the compiler correctly refuses to fabricate them
+silently, not a license to extend it further from this session.
+
+Recommend filing `doc/08_tracking/bug/engine2d_mod_barrel_imports_all_gpu_backends_unconditionally_2026-08-08.md`
+against `src/lib/gc_async_mut/gpu/engine2d/mod.spl`, scoped to: introduce a
+target-conditional backend-selection surface (or split `mod.spl`'s barrel
+import into a per-target subset) so a baremetal-framebuffer kernel build
+does not compile in macOS Metal / NVIDIA CUDA host-driver FFI bridges it can
+never reach at runtime.
+
+Board-runnable caveat unchanged from the section above: this remains a QEMU
+real-firmware-proxy (OVMF pflash) evidence path; no physical-board attempt
+was made or claimed in this pass either.
