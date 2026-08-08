@@ -229,6 +229,37 @@ VERDICT … passed=1 failed=0` while also printing `Results: 0 passed, 1 failed`
 and exiting 1. Another lane is root-causing this; findings here avoid that path.
 Not attributable to this sweep.
 
+## Strengthened so far
+
+### `test/{01_,}unit/std/deep/dict_deep_4_spec.spl` — DONE, discrimination proven
+
+A file titled "STDLIB Deep-Dive Test", Category "Standard Library Deep Coverage",
+Status "Implemented", named `dict_deep_4`, whose first 16 examples asserted pure
+arithmetic constants — `check(1 == 1)`, `check("a" == "a")`, `check(5 - 3 == 2)`,
+`check(true and true)` — and whose `dict 2` example bound `val d = {}` and then
+asserted `check(true)`, ignoring the dict entirely. It covered no dict behavior.
+
+Rewritten: 11 real dict examples (read-back, key distinctness, presence/absence,
+`keys().len()`, empty dict, duplicate-key overwrite, **stored zero vs absent key**,
+case sensitivity, empty-string key, text values, keys()/contains_key agreement),
+plus `dict 2` and `nested 1` given real oracles. Assertions honor
+`doc/07_guide/language/dict_native_pitfalls.md`: no `Dict.len()`, no `.get()` —
+`keys().len()` and index reads / `contains_key` only.
+
+**Discrimination control (sabotage-and-restore on the oracle):**
+
+| Control | Result |
+|---------|--------|
+| A — as written | `executed=38 passed=38 failed=0 dropped=0`, exit 0 |
+| B — 4 independent oracles mutated to wrong values | `executed=38 passed=34 failed=4 dropped=0`, exit 1 |
+
+Exactly 4 mutations produced exactly 4 failures, one-to-one. The original
+constant assertions could not have produced a single one. Mutation was performed
+on a scratch copy, leaving the shared working copy untouched.
+
+**Detector before/after on the same file:** original pinned version → 17 flagged;
+strengthened version → 0 flagged.
+
 ## Remediation
 
 1. The `hir_*` family (#1–#4) and `treesitter_*_real` (#5–#6) must either import
