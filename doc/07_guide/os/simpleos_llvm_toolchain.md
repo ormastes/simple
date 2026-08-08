@@ -58,6 +58,18 @@ The port builds from a **fork**, not upstream LLVM:
 When built, the cross `clang-20` is a **host executable** (Linux ELF) that emits
 `x86_64-unknown-simpleos` code — a cross-compiler, not a guest-native binary.
 
+## POSIX capability and 23.1 migration boundary
+
+SimpleOS has enough static-sysroot and filesystem/ELF infrastructure to port a
+host cross toolchain, but it is not a complete POSIX host. Treat the following
+as separate evidence gates: host C/C++ cross compilation; in-guest `clang -cc1`
+object emission; in-guest C/C++ linking; and mounted-filesystem launch of the
+resulting ELF. In particular, the guest driver requires filesystem-exec
+`fork`/`exec`; partial mmap/dynamic-loader/signal support does not satisfy that
+requirement. The current Clang-20 cross driver also fails ordinary C codegen,
+so a 23.1 port must prove the driver path rather than rely on historical `cc1`
+evidence.
+
 ## Simple-native toolchain (distinct from clang)
 
 This guide covers the **clang/LLVM** cross-toolchain. There is a separate

@@ -823,11 +823,20 @@ and `doc/08_tracking/feature/` before reporting the handoff state.
 
 ## Reference: SimpleOS LLVM/Clang toolchain
 
+For the Stage-4 bootstrap migration, require Clang/LLVM 23.1 together with a
+matching Rust LLVM binding/vendor update. A legacy LLVM 18/20 bootstrap is
+diagnostic-only: do not report it as a 23.1 candidate or use it for deployment.
+Record unavailable-host/toolchain state with the exact resume command and keep
+the corresponding platform acceptance row active.
+
 Building a C/C++ "hello world" for SimpleOS with clang? The LLVM→SimpleOS port
-is already built (easy to lose): cross clang/lld at
-`build/os/llvm/cross-x86_64-unknown-simpleos/bin/`, source at
-`/home/ormastes/llvm-project`, sysroot at `build/os/sysroot/`. Compile+link
-works; in-guest exec is blocked. Full guide + verified commands:
+has a host cross toolchain and static sysroot, but it is not a general POSIX
+port and must not be described as easy guest-native Clang support. The current
+Clang-20 cross driver has a register-allocator failure for ordinary C code;
+historical in-guest proof is limited to `clang -cc1 -emit-obj`. Guest driver
+mode additionally needs filesystem exec plus fork/exec. Keep host cross,
+guest `-cc1`, guest link, and guest run as distinct gates. Full guide + exact
+commands:
 `doc/07_guide/os/simpleos_llvm_toolchain.md`.
 
 ## Session update 2026-07-18

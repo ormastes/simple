@@ -3,6 +3,20 @@
 
 Status: planned after the current x86 Stage 4 bootstrap is admitted
 
+## Toolchain prerequisite
+
+The first capsule authority must bind a Clang/LLVM 23.1 toolchain identity.
+Its manifest records the exact `llvm-config`, `clang`, `llvm-as`, `opt`, and
+`llc` versions and hashes. LLVM 18/20 artifacts are incompatible historical
+diagnostics, not a valid capsule seed. The Rust seed's Inkwell/llvm-sys
+binding must migrate before this prerequisite can be met.
+
+Current staging evidence is deliberately weaker: a local LLVM 23.1.0-rc2
+provider can expose all five tools and headers, and `aya-llvm-sys 231` links
+against it under strict versioning. It is disposable host evidence only until
+the provider is pinned into the capsule and Inkwell exposes a reviewed
+`llvm23-1` feature.
+
 ## Goal
 
 Adopt a Clang-style two-generation bootstrap boundary: build a new compiler

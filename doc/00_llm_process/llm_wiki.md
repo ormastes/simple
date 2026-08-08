@@ -78,6 +78,20 @@ verify that the caller actually crosses the worker/library boundary.
   identity separately from the seed/driver.
 - Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
 
+## Clang/LLVM 23.1 bootstrap migration
+
+- **Canonical requirement:** a Stage-4 LLVM bootstrap uses Clang/LLVM 23.1;
+  LLVM 18/20 is diagnostic evidence only.
+- **Selection contract:** platform detection must resolve one 23.1 prefix and
+  export its `llvm-config`, `clang`, `llvm-as`, `opt`, `llc`, runtime library,
+  and matching Rust `llvm-sys` binding.
+- **Do not substitute:** setting `LLVM_VERSIONS=23` while the Rust seed remains
+  on Inkwell `llvm18-0` / `llvm-sys 180`; that is an ABI-incompatible partial
+  migration.
+- **Host-unavailable status:** record `llvm23-toolchain-unavailable` with the
+  exact install/binding resume work. Do not run or claim a legacy LLVM 18
+  bootstrap as a 23.1 result.
+
 ## Spec run verdict / "did the tests pass?"
 
 - **Canonical verdict for one spec FILE:** the `SPEC FILE VERDICT: <path>
@@ -259,6 +273,17 @@ separate claim levels.
   and emit a Linux-dynamic ELF.
 - **LLVM fork:** `github.com/ormastes/llvm-project` branch `simpleos` (Clang 20),
   pinned by `LLVM_REVISION` in `src/os/port/llvm/build.spl`.
+
+### POSIX porting boundary
+
+SimpleOS provides a usable static sysroot, libc/C++ archives, ELF loader,
+filesystem syscalls, and partial POSIX/Linux-personality surfaces. That makes a
+**host cross** Clang port tractable, not an automatic guest-native Clang port.
+The in-guest driver needs `fork`/`exec` on the filesystem-exec route; dynamic
+loader, mmap, signal, and other POSIX families remain partial or unavailable.
+For 23.1, require separate positive evidence for: host cross C/C++ compile,
+guest `clang -cc1` object output, guest C/C++ link, and filesystem-launched
+ELF execution. Never infer a later tier from sysroot presence alone.
 
 ### Status rule — do not overstate
 

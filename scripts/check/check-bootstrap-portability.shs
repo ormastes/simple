@@ -53,6 +53,10 @@ grep -Fq 'brew install coreutils freetype' .github/workflows/rust-bootstrap-mult
 grep -Fq 'brew install coreutils freetype zstd' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS zstd linker dependency missing"
 grep -Fq 'LIBRARY_PATH=$(brew --prefix freetype)/lib:$(brew --prefix zstd)/lib:' .github/workflows/rust-bootstrap-multiplatform.yml || fail "macOS Homebrew library path missing"
 grep -Fq 'clang-18 lld-18 llvm-18-dev libfreetype6-dev libunwind-dev' .github/workflows/rust-bootstrap-multiplatform.yml || fail "Linux bootstrap linker dependency missing"
+grep -Fq ': "${LLVM_REQUIRED_VERSION:=23.1}"' scripts/setup/platform-detect.shs || fail "LLVM 23.1 resolver gate missing"
+grep -Fq 'LLVM_REQUIRED_VERSION:-23.1' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not report the LLVM 23.1 gate"
+grep -Fq 'missing llvm23-1 feature' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not fail closed on unmigrated LLVM bindings"
+grep -Fq 'LLVM_SYS_${rust_llvm_abi_version}_PREFIX' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not propagate the LLVM 23.1 ABI prefix"
 grep -q '^backend="llvm"$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap default backend is not LLVM"
 grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
 grep -Fq 'runtime-tls = ["dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pemfile"]' src/compiler_rust/runtime/Cargo.toml || fail "browser TLS does not use platform trust"
@@ -1249,6 +1253,27 @@ mingw=$(PATH="${tmp}:${PATH}" MSYSTEM=MINGW64 sh -c '. scripts/setup/platform-de
 
 msvc=$(PATH="${tmp}:${PATH}" MSYSTEM= SIMPLE_WINDOWS_ABI=msvc sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$PLATFORM_TRIPLE"')
 [ "${msvc}" = "x86_64-pc-windows-msvc" ] || fail "MSVC triple: ${msvc}"
+
+# The bootstrap capsule is LLVM 23.1 only.  Exercise the shared resolver with
+# a hermetic llvm-config fixture and prove that a nearby minor release is
+# rejected instead of being silently accepted as a compatible major.
+llvm_fixture_prefix="${tmp}/llvm-23.1"
+llvm_fixture_bin="${tmp}/llvm-bin"
+mkdir -p "${llvm_fixture_prefix}/lib" "${llvm_fixture_bin}"
+: >"${llvm_fixture_prefix}/lib/libLLVM-23.so"
+cat >"${llvm_fixture_bin}/llvm-config-23" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+  --version) printf '%s\\n' "\${LLVM_FIXTURE_VERSION:-23.1.0}" ;;
+  --prefix) printf '%s\\n' "${llvm_fixture_prefix}" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "${llvm_fixture_bin}/llvm-config-23"
+llvm23_detect=$(PATH="${llvm_fixture_bin}:${tmp}:${PATH}" SIMPLE_TARGET_OS=linux LLVM_VERSIONS=23 sh -c '. scripts/setup/platform-detect.shs; eval "abi_prefix=\${LLVM_SYS_${LLVM_REQUIRED_ABI_VERSION}_PREFIX:-}"; printf "%s|%s|%s|%s" "$LLVM_FOUND" "$LLVM_VERSION" "$LLVM_REQUIRED_VERSION" "$abi_prefix"')
+[ "${llvm23_detect}" = "1|23|23.1|${llvm_fixture_prefix}" ] || fail "LLVM 23.1 resolver: ${llvm23_detect}"
+llvm232_detect=$(PATH="${llvm_fixture_bin}:${tmp}:${PATH}" SIMPLE_TARGET_OS=linux LLVM_VERSIONS=23 LLVM_FIXTURE_VERSION=23.2.0 sh -c '. scripts/setup/platform-detect.shs; printf "%s" "$LLVM_FOUND"')
+[ "${llvm232_detect}" = "0" ] || fail "LLVM 23.2 was accepted by the 23.1 gate"
 
 set +e
 freebsd_out=$(sh scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 2>&1)

@@ -932,14 +932,24 @@ rust_rebuilt=0
 compiler_backfill_rebuilt=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect LLVM 18 availability for LLVM backends.
+# Detect the pinned LLVM 23.1 capsule for LLVM backends.  The shared resolver
+# fails closed on older majors/minors; do not reintroduce a legacy fallback
+# here while the Rust LLVM 23.1 bindings are being migrated.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
   # (scripts/setup/platform-detect.shs, sourced above), which also exports the
-  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
+  # LLVM_SYS_<major><minor>_PREFIX used by the Rust build and the runtime's
+  # LLVM path (LLVM 23.1 therefore uses LLVM_SYS_231_PREFIX).
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
+    # Do not let a newly installed LLVM 23.1 host accidentally build against
+    # the still-legacy Rust binding.  The binding port must land separately;
+    # until its llvm23-1 feature is present this is an intentional hard stop.
+    if ! grep -Eq 'llvm23-1' "${repo_root}/src/compiler_rust/compiler/Cargo.toml"; then
+      echo "error: LLVM ${LLVM_REQUIRED_VERSION:-23.1} was found, but the Rust LLVM binding is not migrated (missing llvm23-1 feature)" >&2
+      exit 1
+    fi
     llvm_features="--features llvm"
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
@@ -951,7 +961,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: LLVM not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-18})" >&2
+    echo "error: LLVM ${LLVM_REQUIRED_VERSION:-23.1} not found (shared platform detection: scripts/setup/platform-detect.shs; candidates: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -1036,6 +1046,10 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-major=//p'
   )
+  # llvm-sys names its prefix variable after the complete LLVM ABI version.
+  # The shared resolver is authoritative (23.1 -> 231); retain the old
+  # major-zero form only for a non-LLVM legacy caller that did not source it.
+  rust_llvm_abi_version="${LLVM_REQUIRED_ABI_VERSION:-${rust_llvm_major}0}"
   rust_llvm_prefix=$(
     printf '%s\n' "${rust_llvm_authority}" |
       sed -n 's/^llvm-prefix=//p'
@@ -1119,7 +1133,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_${rust_llvm_abi_version}_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
@@ -1137,7 +1151,7 @@ run_rust_authority_cargo() {
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
         TEMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_${rust_llvm_abi_version}_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \

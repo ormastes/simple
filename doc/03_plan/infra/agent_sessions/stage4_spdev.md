@@ -3,6 +3,21 @@
 Goal: complete the pure-Simple x86_64 Stage 4 bootstrap, verify the exact fresh
 CLI, and deploy it only after the bounded essential-tools smoke passes.
 
+## Toolchain migration gate (2026-08-08)
+
+Stage-4 admission now requires Clang/LLVM **23.1** end to end. LLVM 18/20
+output is diagnostic-only and must not be described as a migrated bootstrap.
+The current host has a disposable staged LLVM 23.1.0-rc2 provider under
+`/tmp/simple-llvm23-full-install` (headers plus clang/llvm-config/llvm-as/opt/
+llc; `aya-llvm-sys 231` strict link probe PASS), but it is not a durable
+bootstrap capsule or an Inkwell migration. Additionally the Rust seed is
+pinned to Inkwell's `llvm18-0`/`llvm-sys 180` binding. Before the next
+authoritative bootstrap, upgrade the binding/vendor surface, make platform
+detection prefer only 23.1 for this lane, extend interpreter tool discovery,
+and prove the selected `llvm-config`, `clang`, `llvm-as`, `opt`, and `llc`
+report 23.1. Retain the Stage-2 Mailbox replay as the first post-migration
+compiler gate.
+
 ## Current state (2026-08-02)
 
 - Stage 3 incremental refresh passes and normally reuses 724/727 cached units.
