@@ -191,6 +191,7 @@ impl Lowerer {
                         let id = self.module.types.register_named(name.to_string(), struct_ty);
                         return Ok(id);
                     }
+                }
                 // Bare type names from inference / cross-module signatures.
                 match name {
                     "unit" => return Ok(TypeId::VOID),
