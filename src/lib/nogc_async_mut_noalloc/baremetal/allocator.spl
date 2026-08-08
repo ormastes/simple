@@ -14,11 +14,21 @@ impl BlockHeader:
     # reported 8 — so the payload pointer alloc() hands out (block + 8)
     # aliased the top byte of `next`, and the first byte the caller wrote
     # into its own allocation corrupted the free-list link. `next` is now
-    # 4-byte aligned at +8 and the header is 12 bytes, so payload and header
-    # never overlap.
+    # 4-byte aligned at +8, so payload and header never overlap.
+    #
+    # The header is 16, not 12. alloc() hands the caller `block +
+    # header_size()` and steps to the next block by `header_size() +
+    # align_up(size, 8)`, so header_size() is what carries the payload's
+    # alignment: it must itself be a multiple of 8 or EVERY payload comes back
+    # misaligned. At 12 the payloads were 4-aligned, which contradicts both
+    # `align_up(size, 8)` here and BumpAllocator's "align to 8 bytes", and an
+    # 8-byte load (u64/f64) at a 4-aligned address traps on the ARM/RISC-V
+    # targets this module exists for. 16 keeps `next` at +8 (8 + 4 <= 16) and
+    # restores 8-aligned payloads for an 8-aligned `base`. Bytes 12..15 are
+    # tail padding.
     static fn header_size() -> u32:
-        """Size of block header (12 bytes: size@0, is_free@4, next@8)."""
-        12
+        """Size of block header (16 bytes: size@0, is_free@4, next@8, pad@12)."""
+        16
 
     static fn next_offset() -> u32:
         """Byte offset of the `next` field within the header (8).

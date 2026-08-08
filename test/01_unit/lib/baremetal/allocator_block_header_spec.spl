@@ -37,7 +37,28 @@ describe "BlockHeader static API":
             # address as the first byte of the payload alloc() hands out
             # (block + header_size) — the caller's first write corrupted the
             # free-list link.
-            expect(BlockHeader.header_size().to_i64()).to_equal(12)
+            #
+            # The pin is 16, not 12: 12 clears the no-overlap floor but leaves
+            # every payload 4-aligned (see the next example). Pinned exactly
+            # rather than as a `>= 12` band, so this example stays RED for the
+            # 12-byte layout specifically.
+            expect(BlockHeader.header_size().to_i64()).to_equal(16)
+
+        it "keeps every payload 8-byte aligned":
+            # alloc() returns `block + header_size()` and advances to the next
+            # block by `header_size() + align_up(size, 8)`, so header_size()
+            # is the sole term deciding payload alignment: unless it is itself
+            # a multiple of 8, EVERY payload is misaligned no matter how well
+            # aligned the heap `base` is.
+            #
+            # This is not hypothetical bookkeeping. The first repair of the
+            # +5/size-8 overlap set header_size() to 12, which is >= 12 and
+            # satisfies the no-overlap check above, yet silently dropped
+            # payload alignment from 8 (the pre-bug value) to 4 — so a u64 or
+            # f64 store into a freshly allocated block traps on the ARM and
+            # RISC-V targets this module exists to serve. 12 fails here; 16
+            # (and 8, and 24) pass.
+            assert_equal(BlockHeader.header_size().to_i64() % 8, 0)
 
         it "keeps the next-pointer field fully inside the header (no payload overlap)":
             # Non-tautological version of the check above: derives from
@@ -47,8 +68,10 @@ describe "BlockHeader static API":
             # and header_size()==8, so `5 + 4 <= 8` is false and this example
             # would fail against the reverted code even though
             # header_size()==12 alone would not catch it.
+            # `to_be_true()` is rejected by the runner on bool receivers
+            # (.claude/rules/testing.md), so this uses assert_true.
             val next_end = BlockHeader.next_offset().to_i64() + 4
-            expect(next_end <= BlockHeader.header_size().to_i64()).to_be_true()
+            assert_true(next_end <= BlockHeader.header_size().to_i64())
             expect(BlockHeader.next_offset().to_i64()).to_equal(8)
 
         it "resolves from_addr() as a static method":
