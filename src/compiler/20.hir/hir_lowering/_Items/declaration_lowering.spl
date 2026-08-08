@@ -138,8 +138,8 @@ impl HirLowering:
         # impls each declaring `static fn code()` otherwise collide on the bare
         # symbol name — one shared symbol id AND a duplicate bare `code` symbol
         # in the emitted LLVM IR ("invalid redefinition of function").
-        if (fn_.is_method or fn_.is_static) and self.current_method_self_type.?:
-            match self.current_method_self_type.unwrap().kind:
+        if (fn_.is_method or fn_.is_static) and self.has_current_method_self_type:
+            match self.current_method_self_type.kind:
                 case Named(owner_symbol, _):
                     fn_symbol_name = self.symbols.method_symbol_name(owner_symbol, fn_.name)
                 case _: ()
@@ -164,7 +164,7 @@ impl HirLowering:
         # signature so call-result typing works exactly like the predeclared
         # instance-method path. Statics have no receiver param, so no owner
         # context is needed.
-        val fn_fallback_type: HirType? = if fn_.is_static and self.current_method_self_type.?:
+        val fn_fallback_type: HirType? = if fn_.is_static and self.has_current_method_self_type:
             self.declared_callable_type(fn_, nil)
         else:
             nil
@@ -285,13 +285,13 @@ impl HirLowering:
         # into nothing (Bug native_me_receiver_no_mutate). Exclude "me" here so
         # it stays the sole receiver, exactly like an explicit `self`.
         var needs_implicit_self = false
-        if fn_.is_method and not fn_.is_static and self.current_method_self_type.?:
+        if fn_.is_method and not fn_.is_static and self.has_current_method_self_type:
             if fn_params.len() == 0:
                 needs_implicit_self = true
             elif fn_params[0].name != "self" and fn_params[0].name != "me":
                 needs_implicit_self = true
         if needs_implicit_self:
-            val self_type = self.current_method_self_type.unwrap()
+            val self_type = self.current_method_self_type
             val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
             params = params.push(HirParam(
                 symbol: self_symbol,
@@ -524,8 +524,10 @@ impl HirLowering:
             fields = fields.push(self.lower_field(cf))
 
         var methods: Dict<text, SymbolId> = {}
+        val previous_has_self_type = self.has_current_method_self_type
         val previous_self_type = self.current_method_self_type
-        self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: class_span))
+        self.has_current_method_self_type = true
+        self.current_method_self_type = HirType(kind: HirTypeKind.Named(symbol, []), span: class_span)
         for name in class_methods.keys():
             val fn_: ParserFunction = class_methods[name]
             val hir_fn = self.lower_function(fn_)
@@ -539,6 +541,7 @@ impl HirLowering:
             # with `class X:` + `me foo(): ...` (safety_checker.spl lane G2,
             # 2026-07-29).
             self.lowered_impl_functions[hir_fn.symbol] = hir_fn
+        self.has_current_method_self_type = previous_has_self_type
         self.current_method_self_type = previous_self_type
 
         self.symbols.pop_scope()
