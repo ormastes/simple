@@ -1516,7 +1516,12 @@ else
   rm -f "${stage2_capability_bin}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     set +e
+    # This is a Stage-2 capability probe, not the canonical Stage-4 CLI
+    # producer.  A caller may set SIMPLE_BOOTSTRAP_STAGE4=1 for the outer
+    # bootstrap; clear that inherited guard so the intentionally small probe
+    # entry keeps exercising the ordinary native-build path.
     env SIMPLE_BOOTSTRAP=1 \
+      SIMPLE_BOOTSTRAP_STAGE4=0 \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       "${stage2_bin}" native-build \
       --target "${PLATFORM}" \
@@ -1542,7 +1547,7 @@ else
     fi
   fi
   if [ "${stage2_capability_ok}" -ne 1 ]; then
-    echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
+    echo "  warning: Stage 2 native-build capability failed; Stage 4 remains bound to verified Stage 3" >&2
     echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
 fi
