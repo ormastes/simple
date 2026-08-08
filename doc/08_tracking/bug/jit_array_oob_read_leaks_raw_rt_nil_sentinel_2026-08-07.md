@@ -174,37 +174,65 @@ side — the MIR lowering for array `get`/index never wraps the value as a
 proper flat-Option in the first place (unlike the dict-get path, which does),
 so nothing downstream of it has any signal that a nil case occurred.
 
-### Self-hosted `.spl` lane: gap looks structurally similar but could not be dynamically verified
+### Self-hosted `.spl` lane: 2026-08-08 — dynamically verified, defect does NOT reproduce
 
-Static inspection of the pure-Simple self-hosted lowering
-(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` and
-`method_calls_literals.spl`) shows a parallel, but not identical, gap:
-- `expr_dispatch.spl:1609` **does** call `emit_bounds_check_for_index` for
-  bare `xs[i]`, and that check (when it fires) genuinely panics via
-  `__simple_intrinsic_bounds_check` (`runtime.c:1840-1847`, also mirrored in
-  `compiler_rust/runtime/src/value/collections.rs:5407-5412`) — so the
-  self-hosted lane's bare-index behavior is plausibly *not* affected, except
-  for the silent bailout at `expr_dispatch.spl:1304-1317` when no
-  `len_symbol` can be resolved for the base type (a narrower, different
-  trigger condition than the seed's "never checked at all").
-- There is **no dedicated array/list `.get()` lowering arm** anywhere in
-  `method_calls_literals.spl` (only dict `.get`, `1216`/`1340`, and
-  `.first()`/`.last()`, `3519-3661`, are special-cased with real Option
-  wrapping). `xs.get(9)` therefore likely falls through to the same raw
-  `rt_array_get` call with no guard, and the interpolation formatter
-  (`coerce_concat_operand`, `expr_dispatch.spl:527-610`) dispatches purely on
-  declared MIR type with no nil-sentinel branch — so `.get()` misses plausibly
-  leak `3` on the self-hosted lane too.
+Dynamically confirmed via `bin/simple native-build` (the pure-Simple
+`src/compiler/**` lowering — see `.claude/rules/bootstrap.md`; this is a
+different, working entry point than the `bootstrap/stage3/simple
+native-build` self-host path referenced below, which is a separate, still-open
+blocker unrelated to this bug). Fixtures run from a scratch dir, three
+separate `native-build` compiles:
 
-This could **not** be dynamically confirmed: `bootstrap/stage3/simple
-native-build` currently segfaults even on a trivial `print("hello\n")`
-program (rc=139, core dump, no useful diagnostic beyond
-`[mir-lower-expr]`/`[mir-method-call]` trace spam) — this matches the
-already-tracked, unrelated Stage-3 self-host blocker in
-`.claude/rules/bootstrap.md` / `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
-family (see also memory note "Stage-3 hello-world SEGV = BORROW CHECKER
-field-index collision"). No `.spl`-lane fix was attempted blind without a
-working binary to verify it against.
+1. `xs.get(9)` (array `.get()` miss) + bare `xs[9]` (OOB index) in one
+   program: build **fails to link at all**, rc=1, with
+   `[ERROR] MIR error: MIR lowering error: unresolved method call: get`. Log
+   shows the exact path taken: `[mir-method-call] unresolved-array method=get`
+   (the array-specific "Unresolved" arm, `method_calls_literals.spl:2626`)
+   is entered, but `get` matches none of its `map`/`filter`/`fold`/`first`/
+   `last`/`push` cases (2628-2720), so it falls to the generic loud bailout
+   at `method_calls_literals.spl:2721`/`2753` (`self.error(...)` +
+   `rt_panic("unresolved method call: get")`), which fails the build closed
+   rather than emitting any code. **Corrects the prior guess in this doc**
+   (below): there is no dedicated array `.get()` lowering arm, but the
+   fallthrough is NOT "falls through to raw `rt_array_get` with no guard" —
+   there is no fallthrough at all; the build never produces a binary, so
+   there is no sentinel to leak. This is a distinct, separately-filable gap
+   (missing array `.get()` lowering), not the OOB-nil-sentinel-leak defect.
+2. Bare `xs[9]` alone (no `.get()` call): build succeeds, rc=0. Running the
+   binary prints `PANIC: bounds_check intrinsic index=9 len=3` and exits
+   rc=1 — i.e. `expr_dispatch.spl:1609`'s call to
+   `emit_bounds_check_for_index` (1293-1332) genuinely fires and panics,
+   matching the tree-walk interpreter's correct behavior, not the seed
+   JIT's silent `3`/rc=0. The array fallback at 1305-1306 (`len_symbol =
+   "rt_array_len"` when `len_runtime_symbol_for_hir_type` yields nothing)
+   is exactly what makes this fire for a plain array-literal receiver.
+3. In-bounds discriminator (`xs[1]` and the bug doc's own control value
+   `ys[2]` where `ys=[1,2,3]`): build succeeds, rc=0, runs to completion
+   printing `in=20` / `ctl=3` — proving the bounds check does not
+   over-fire on legitimate accesses, and that a genuine in-bounds `3`
+   (the same value as the sentinel) passes through undisturbed.
+
+**Conclusion: the OOB-nil-sentinel-leak defect cannot manifest on the
+pure-Simple `native-build` lane, for two different reasons** — bare `xs[i]`
+is bounds-checked and panics (case 2/3 above), and `xs.get(i)` has no array
+lowering arm at all, so it fails the build closed instead of ever reaching a
+codegen path that could leak a sentinel (case 1). No `.spl`-lane code change
+was made — nothing to fix for *this* defect. The missing array `.get()`
+lowering is a real, separate gap worth its own bug entry if picked up.
+
+Scope note: this was verified on the `native-build` AOT lane only (the lane
+that actually executes `src/compiler/**`); the JIT/interpreter dual-engine
+comparison in the "2026-08-08 re-verification" section below is against the
+Rust seed binary (`bin/simple`), a different implementation entirely — see
+`.claude/rules/bootstrap.md`.
+
+(Historical note, superseded by the above: this section previously reported
+that `bootstrap/stage3/simple native-build` segfaults on trivial programs
+and that the self-hosted lane's `.get()` gap "could not be dynamically
+verified." That claim was about a different, still-open Stage-3 self-host
+blocker — see `doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`
+— not about whether `bin/simple native-build` itself can exercise
+`src/compiler/**`; it can, and did, above.)
 
 ### Disposition: confirmed live, NOT fixed
 

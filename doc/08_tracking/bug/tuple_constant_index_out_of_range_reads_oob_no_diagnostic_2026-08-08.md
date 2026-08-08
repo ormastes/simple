@@ -37,6 +37,42 @@ not a runtime array — and `return`s without emitting the `bounds_check`
 intrinsic. Every MIR consumer therefore inherits the hole by construction; it is
 not a Cranelift- or LLVM-specific defect.
 
+## The bailout is already counted — cheap detection path
+
+Established 2026-08-08 while verifying the sibling array-OOB defect: the bailout
+branch is not silent internally. It increments `mir_bounds_check_bailout_count`
+(exposed via `mir_bounds_check_bailouts()`) and, under
+`SIMPLE_MIR_BOUNDS_DEBUG=1`, prints per-site detail:
+
+```
+[mir] bounds-check bailout #N: no len symbol for indexed base local <id> (access is UNCHECKED)
+```
+
+So `t.5` is observable today without any compiler change — set that env var on a
+build and the unchecked access announces itself. Two consequences:
+
+1. Anyone picking this up gets a zero-cost repro/verification signal, and a
+   post-fix regression check can assert the counter does NOT increment for a
+   tuple index.
+2. The counter is a ready-made audit: a whole-program build's bailout count is
+   an upper bound on unchecked indexed accesses of every kind, not just tuples.
+
+## Contrast: runtime ARRAYS are correctly checked (verified, not assumed)
+
+The same function handles arrays properly, so this is a tuple-specific hole and
+not a general absence of bounds checking. When `len_runtime_symbol_for_hir_type`
+yields nothing, `local_is_runtime_array(base_local)` still routes arrays to
+`rt_array_len` and emits the intrinsic. Confirmed dynamically on 2026-08-08:
+`native-build` of `xs[9]` where `xs=[10,20,30]` builds rc=0 and the binary panics
+at runtime with `PANIC: bounds_check intrinsic index=9 len=3`, rc=1. An
+in-bounds control (`xs[1]`→20, and `ys[2]`→3 where `ys=[1,2,3]`) runs clean,
+proving the check neither over-fires nor mistakes a genuine value 3 for a
+sentinel.
+
+A tuple local is never a runtime array (`expr_dispatch.spl` — `Tuple` falls to
+`case _: return false`), so it takes the bailout `return` and the access proceeds
+UNCHECKED. That single predicate is the whole difference between the two rows.
+
 ## Not introduced by the 2026-08-07 tuple work — but a validation WAS lost
 
 Commit `459dd21c5f6` routes tuple bases away from `rt_array_get` to a plain

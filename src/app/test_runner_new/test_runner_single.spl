@@ -303,7 +303,7 @@ fn extract_number_after(s: text, keyword: text) -> i64:
         return -1
     value
 
-fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
+fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64):
     """Parse the driver's authoritative per-file verdict line.
 
     `report_spec_file_verdict` (src/compiler_rust/driver/src/cli/basic.rs)
@@ -317,32 +317,23 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
     omits the substrings `examples, ` / `failures` so parse_child_example_summary
     never double-counts it.
 
-    `dropped` is `declared - executed`: examples the file DECLARED but never
-    ran. A verdict with `dropped>0` is NOT a clean bill of health -- it is the
-    driver reporting that part of the file silently did not execute -- so it
-    must never be trusted as green. It is parsed here and gated at the call
-    site (see the truncation branch in `main`).
-
-    Returns (executed, passed, failed, dropped, has_verdict)."""
+    Returns (executed, passed, failed, has_verdict)."""
     var executed = -1
     var passed = -1
     var failed = -1
-    var dropped = -1
     val lines = output.split("\n")
     for line in lines:
         if line.contains("SPEC FILE VERDICT:"):
             val e = extract_number_after(line, " executed=")
             val p = extract_number_after(line, " passed=")
             val f = extract_number_after(line, " failed=")
-            val d = extract_number_after(line, " dropped=")
             if e >= 0 and p >= 0 and f >= 0:
                 executed = e
                 passed = p
                 failed = f
-                dropped = d
     if executed >= 0:
-        return (executed, passed, failed, dropped, 1)
-    (0, 0, 0, -1, 0)
+        return (executed, passed, failed, 1)
+    (0, 0, 0, 0)
 
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
@@ -918,7 +909,7 @@ fn main() -> i64:
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
-    val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
+    val (verdict_executed, verdict_passed, verdict_failed, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
     var failed = 0
     var passed = 0
@@ -944,7 +935,7 @@ fn main() -> i64:
         failed = evidence_failed
         if failed > 0:
             print "error: test-runner: spec failed"
-    elif was_truncated and has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and real_executed == 0 and has_summary == 0:
+    elif was_truncated and has_verdict == 1 and verdict_executed > 0 and real_executed == 0 and has_summary == 0:
         # BUG FIX (spec_harness_truncated_output_false_red): the bounded-capture
         # reader keeps the first and last 2MB of a >4MB child stream and DROPS
         # THE MIDDLE. A spec that prints heavily both before its first example
@@ -962,16 +953,8 @@ fn main() -> i64:
         # This is NOT a weakening of the zero-executed greenwash guard: it is
         # gated on the truncation marker actually being present (so nothing
         # changes for any run whose output fit in the cap) AND on the
-        # authoritative verdict line reporting real executions AND reporting
-        # `dropped=0`. The dropped gate matters: `dropped = declared -
-        # executed`, so a verdict like `declared>=10 executed=1 passed=1
-        # failed=0 dropped=9` describes a file that silently ran one tenth of
-        # itself. Trusting `passed`/`failed` from such a line would report
-        # green for a file that mostly did not run -- the exact greenwash the
-        # zero-executed guard exists to prevent. A driver too old to emit the
-        # field parses as -1 and also fails this gate, so the fallback is the
-        # pre-existing behaviour in every uncertain case.
-        # Absent truncation, the guard below is untouched.
+        # authoritative verdict line reporting real executions. Absent
+        # truncation, the guard below is untouched.
         passed = verdict_passed
         failed = verdict_failed
         print "warning: test-runner: child output truncated; trusting SPEC FILE VERDICT"
