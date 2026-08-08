@@ -193,3 +193,68 @@ to zero (or with an explicit grandfather list).
 - test/unit/lib/text/text_search_spec.spl -> std.lib.common.text.adapters,std.lib.common.text.text
 - test/unit/std/module_import_spec.spl -> std.test.helpers
 - test/unit/std/parser/treesitter_node_spec.spl -> std.parser.treesitter_node.
+
+## Triage update (2026-08-08, second pass)
+
+**Fixed (landed `ba2fab534dfca31d4cd3b62cf7fc84f8c4b9f21e`):** all 28 `std.lib.*`
+prefix-typo imports (10 unique spec basenames x2 for the `test/unit` +
+`test/01_unit` duplication) corrected to `std.*`. Only
+`test/{01_unit,unit}/lib/cc/property_tree_spec.spl` became fully clean by this
+fix alone (its sole import was the typo, and `src/lib/cc/entity/property_tree.spl`
+genuinely exists). The other 9 basenames (hit_test, paint_chunk,
+paint_tree_walker, style_cascade, layer_base, tile, text_index_slice,
+text_length, text_search) had the typo fixed but remain broken — they also
+import genuinely-unlanded `blink.*`/`common.text.*` submodules. **Correction to
+this doc's original subclass-2 framing:** "28 imports where `std.<X>` does
+exist" was true for only 3 of 8 unique module strings after stripping `lib.`
+(`skia.entity.geometry`, `skia.entity.color`, `cc.entity.property_tree`); the
+other 5 (`cc.entity.{layer_base,tile}`, `common.text.{text,adapters,text_view}`)
+don't exist under either prefix.
+
+**The original 122/68 figure was an undercount, not a ceiling.** Re-deriving
+independently (enumerate every `use std.*` in every `*_spec.spl` on
+`origin/main` directly via `git archive`, not by re-checking this doc's own
+list) with a resolver that models: direct `src/lib/<path>`, the 9 real
+execution-model tiers (`{nogc,gc}_{sync,async}_{mut,immut}` +
+`nogc_async_mut_noalloc` — the original calibration's tier list omitted the
+four `*_immut` tiers and `gc_sync_mut`), an interior `src/` segment, `.spl` /
+`mod.spl` / `__init__.spl` forms, bare-package-directory imports (a directory
+with no index file, e.g. `src/lib/common/yaml/`), and single-symbol dotted
+imports (`use std.mod.path.Symbol` with no `{}` — must retry with the last
+segment dropped, but **only** against file forms, never a bare directory, or
+this reintroduces the exact "truncation matches a bare tier dir" failure mode
+this doc's first draft had) finds:
+
+    352 flagged spec paths, 202 unique basenames (vs. this doc's 122 / 68)
+
+Calibration (both directions, 10 known-good / 8 known-bad, including the two
+edge cases that produced false results during iteration —
+`atom` under the immut tiers, and `blink.zzz_fake` which a naive
+symbol-drop+bare-dir combination wrongly resolved True): all 18 correct.
+Resolver + inputs: cross-check via `git ls-tree -r --name-only origin/main --
+src/lib` and `git archive origin/main` (no shared-WC dependency).
+
+**Subclass-1 triage, partial (budget-limited — not all 202 basenames triaged
+individually):**
+- `blink.*`, `cc.{layer_base,tile}`, `common/text/*`: the shared WC (`git
+  status --porcelain -- src/lib`, ~7,595 pending paths) carries partial
+  in-flight work for these families (`src/lib/blink/{css_parser,dom}/*`,
+  `src/lib/cc/entity/property_tree.spl` already landed). Per this task's
+  instruction not to land another session's WC-only files, these are left as
+  genuinely in-flight and NOT deleted. `text_length_spec.spl` self-documents
+  as an intentional Phase-5 red-phase contract.
+- `parser.treesitter*`: `git log origin/main --diff-filter=D --name-only --
+  '*treesitter*'` returns empty — never existed, never deleted on mainline
+  history. Consistent with planned/red-phase work, not orphaned. Left as-is.
+- `bare.hal.*` and the remaining ~190 unique basenames: **not individually
+  triaged this pass** — flagging as follow-up work, one pass per top-level
+  cluster (blink/cc/parser/crypto/math/game_engine/etc.), each needing the
+  same WC-presence + deletion-history check applied above before any delete
+  decision.
+
+**Guard viability:** still not viable as a zero-threshold gate — 350 of 352
+flagged imports remain (only the property_tree fix is clean). A grandfathered
+guard (fail only on *new* `std.*` imports not already in a pinned baseline
+list of the current 352) is viable now; the baseline should be regenerated
+from the corrected resolver above, not the original 122.
+
