@@ -144,6 +144,69 @@ dropper may be partly stale, since that worker currently propagates (it is the
 lane that produced rc=1 above). The dropping lane confirmed by measurement is
 the bootstrap one.
 
+## 2026-08-08: the native-build lane DOES reach codegen, at scale (3,629 / 538)
+
+The step recorded above as missing — "a consumer where the placeholder survives
+to a result" — is now partly closed. It was never reached before because Stage 3
+died in HIR; with the BGS1 fix landed (`91bb4437a83`) Stage 3 advances through
+`monomorphize` into real LLVM codegen, and that run is the first observation of
+this defect past the point both earlier attempts stopped at.
+
+Lane: `build/cyc/run_stage3.sh` in the pinned worktree
+`/home/ormastes/dev/simple-s3bisect` (pin `22dd136685d`, clean, an ancestor of
+`origin/main`), i.e. the **native-build bootstrap lane** under
+`SIMPLE_BOOTSTRAP=1` — a stage2-simple compiling `src/app/cli/bootstrap_main.spl`.
+
+Measured on that run's `stage3.log` (16.3 MB):
+
+| quantity | value |
+|---|---|
+| `const-0 placeholder` substitutions | **3,629** |
+| distinct unresolved names | **538** |
+| of those, constructor/enum-variant-shaped (leading capital) | 177 |
+| of those, method-shaped (leading lowercase) | 361 |
+| hard `^error:` lines | **0** |
+| `progress.events` terminal state | `failed=0`, `tasks_done=4/6`, reached `phase=monomorphize` then LLVM codegen |
+
+The count is **stable across five independent runs** — FIX1RUN 3,575,
+S3RUN_FIX1 3,613, S3RUN12 3,629, S3RUN_LONG 3,629 — each with **0** hard errors.
+So this is a longstanding property of the lane, not a regression introduced by
+the BGS1 fix, and the invariance across runs is itself the attribution evidence.
+
+The affected names are not exotic edge cases. The top of the census is
+`substring` 261, `merge` 248, `slice` 242, `unwrap` 217, `new` 95, `clear` 89,
+`check` 85, `concat` 82 — core text, collection and Option/Result operations —
+alongside 177 constructor-shaped names including `Named`, `Const`, `Call`,
+`Int`, `CodegenError`, `RuntimeError` and `Success`. Every one of these is an
+`i64` const-0 substituted for a real value in the compiler's own code.
+
+This upgrades two of the statuses below:
+
+- The in-tree comment naming "the native-build worker's `lower_to_mir`" as a
+  dropping lane is **corroborated by measurement**, not stale. The caveat
+  carried forward at the end of "Related stale-doc correction" — that the
+  worker "currently propagates" — is wrong for this configuration: here it
+  drops 3,629 collected errors and still emits objects.
+- "Neither attempt reached codegen" no longer holds. This run emitted LLVM IR,
+  ran `llc`, and wrote a 1.16 MB object
+  (`stage3-simple.app.cli.bootstrap_main.o`, 209 KB `.text`).
+
+### Still NOT proven, and why
+
+An **executed** wrong value remains undemonstrated. The run's final link
+produced a vacuous 22,896-byte `stage3-simple` — 14 KB `.text`, 42 defined
+functions, 22 dynamic symbols all libc, no compiler symbols — which prints
+nothing on `--version` and exits 0. The real 209 KB-`.text` object was not
+linked into it. So the placeholder survives to codegen and to an object file,
+but the artifact that would exhibit the wrong value at runtime was never
+assembled. That vacuous-link failure is a *separate* defect from this one and
+must not be folded into it.
+
+Consequence for anyone gating on this lane: `0 error: lines` and `failed=0`
+from a Stage 3 native-build run are **fail-open readings**, not evidence of a
+clean compile. The honest gate is the placeholder census
+(`grep -c 'const-0 placeholder'`), which no current automated check reads.
+
 ## Evidence status
 
 Method rules applied, each of which has caught a separate error in this
@@ -168,3 +231,7 @@ Status:
 - **NOT PROVED (open):** an end-to-end exit-0-with-a-wrong-value run. Neither
   attempt reached codegen. Until someone demonstrates it, the fail-open path is
   a strongly-evidenced mechanism, not an observed wrong answer.
+  **Superseded in part on 2026-08-08** — see the section above: codegen IS now
+  reached (3,629 substitutions, 538 names, 0 hard errors, object emitted), so
+  only the final "executed wrong value" step is still open, and it is blocked
+  by a separate vacuous-link defect rather than by this one.
