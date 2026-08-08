@@ -151,18 +151,68 @@ impl MirToC:
                 var field_idx = 0
                 for op in operands:
                     val field_val = self.translate_operand(op)
-                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + field_idx + r"] = (int64_t)" + field_val + r";")
+                    val field_ty = self.get_operand_type(op)
+                    val slot_expr = r"((int64_t*)(void*)" + slot_name + r")[" + field_idx + r"]"
+                    if field_ty == "double" or field_ty == "float":
+                        # Storage is one int64 word per field; a float field's
+                        # word must hold the FLOAT'S BITS (mirror of the LLVM
+                        # lane's store_field_bits `bitcast`, never `fptosi` --
+                        # see aggregate_intrinsics.spl translate_get_field/
+                        # store_field_bits). A plain `(int64_t)field_val` cast
+                        # here applies NUMERIC conversion and corrupts the
+                        # value on readback (tuple/struct float field, C
+                        # backend counterpart of
+                        # native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02
+                        # gap (c)).
+                        val fv_name = r"_agg_fv" + dest.id + r"_" + field_idx
+                        val bits_name = r"_agg_bits" + dest.id + r"_" + field_idx
+                        self.builder.emit(field_ty + r" " + fv_name + r" = " + field_val + r";")
+                        self.builder.emit(r"int64_t " + bits_name + r" = 0;")
+                        self.builder.emit(r"memcpy(&" + bits_name + r", &" + fv_name + r", sizeof(" + fv_name + r"));")
+                        self.builder.emit(slot_expr + r" = " + bits_name + r";")
+                    else:
+                        self.builder.emit(slot_expr + r" = (int64_t)" + field_val + r";")
                     field_idx = field_idx + 1
 
             case GetField(dest, base, field):
                 val dest_name = self.get_local(dest.id)
                 val base_val = self.translate_operand(base)
-                self.builder.emit_assign(dest_name, r"((int64_t*)" + base_val + r")[" + field + r"]")
+                val dest_ty = self.get_local_type(dest.id)
+                val word_expr = r"((int64_t*)" + base_val + r")[" + field + r"]"
+                if dest_ty == "double" or dest_ty == "float":
+                    # Reconcile the raw storage word to the field's real
+                    # float type by reinterpreting bits (mirror of the LLVM
+                    # lane's translate_get_field `bitcast`/load_field_bits
+                    # branch) -- a numeric `(double)` cast would convert the
+                    # VALUE of the raw int64 word instead of reading back the
+                    # float bits written by the Aggregate case above.
+                    val bits_name = r"_gf_bits" + dest.id
+                    self.builder.emit(r"int64_t " + bits_name + r" = " + word_expr + r";")
+                    self.builder.emit(r"memcpy(&" + dest_name + r", &" + bits_name + r", sizeof(" + dest_name + r"));")
+                elif dest_ty.ends_with("*"):
+                    # Reconcile to the field's real pointer type (mirror of
+                    # the LLVM lane's `inttoptr` branch) -- assigning a bare
+                    # int64_t into a typed C++ pointer variable without a
+                    # cast does not compile (no implicit int->pointer
+                    # conversion in C++), the exact "raw pointer/raw word"
+                    # failure mode this lane must not reproduce.
+                    self.builder.emit_assign(dest_name, r"(" + dest_ty + r")(" + word_expr + r")")
+                else:
+                    self.builder.emit_assign(dest_name, word_expr)
 
             case SetField(base, field, value):
                 val base_val = self.translate_operand(base)
                 val value_val = self.translate_operand(value)
-                self.builder.emit(r"((int64_t*)" + base_val + r")[" + field + r"] = " + value_val + r";")
+                val value_ty = self.get_operand_type(value)
+                val slot_expr = r"((int64_t*)" + base_val + r")[" + field + r"]"
+                if value_ty == "double" or value_ty == "float":
+                    # Same bit-preserving store as the Aggregate case above.
+                    val bits_name = self.builder.fresh_local()
+                    self.builder.emit(r"int64_t " + bits_name + r" = 0;")
+                    self.builder.emit(r"memcpy(&" + bits_name + r", &(" + value_val + r"), sizeof(" + bits_name + r"));")
+                    self.builder.emit(slot_expr + r" = " + bits_name + r";")
+                else:
+                    self.builder.emit(slot_expr + r" = (int64_t)" + value_val + r";")
 
             # === Intrinsics ===
             case Intrinsic(dest, name, args):
