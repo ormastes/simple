@@ -1,7 +1,7 @@
 # Session Regression Sweep — 2026-08-08
 
 ## Top line
-**11 suites clean, 0 new regressions, 0 infra-timeouts (1 borderline internal 120s runner-timeout treated as pre-existing/flaky), 3 pre-existing-known failures.**
+**10 suites clean (PASS), 0 new regressions, 0 infra-timeouts (1 borderline internal 120s runner-timeout treated as pre-existing/flaky), 4 pre-existing-known failures of 14 total suites.** (`mir_lowering_new_spec.spl`'s pre-existing classification is now substantiated by an A/B test against the pre-`a399483d` file content — see `doc/08_tracking/bug/mir_lowering_new_spec_preexisting_failures_2026-08-08.md` — not just "spec untouched" reasoning.)
 
 ## Critical finding: "deployed bin/simple" is the Rust seed, not the self-hosted binary
 
