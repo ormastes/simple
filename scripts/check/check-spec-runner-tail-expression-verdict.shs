@@ -31,6 +31,7 @@ SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
 RUNNER=src/app/test_runner_new/test_runner_single.spl
 ROOT="build/spec-runner-tail-expression.$$"
 FAILURES=0
+ERRORS=0
 
 cleanup() { rm -rf "$ROOT"; }
 trap cleanup EXIT HUP INT TERM
@@ -82,11 +83,17 @@ run_case() {
     else
         actual=$?
     fi
-    # 124/137 = the timeout(1) budget, 139 = SIGSEGV: neither is a verdict.
+    # 124/137 = the timeout(1) budget, 139 = SIGSEGV, 143 = external kill
+    # (earlyoom). NONE of these is a verdict, and a fence policing false REDs
+    # must not manufacture one: a loaded machine would otherwise turn a spec
+    # that never got to report into a RED. Route them to ERROR/exit 2 --
+    # "could not determine", per the PASS/FAIL/ERROR -> 0/1/2 contract in
+    # .claude/rules/vcs.md -- never to FAIL.
     case "$actual" in
         124|137|139|143)
-            echo "FAIL: $label did not produce a verdict (exit $actual)" >&2
-            FAILURES=$((FAILURES + 1))
+            echo "ERROR — nothing was checked: $label produced no verdict (exit $actual)" >&2
+            tail -n 10 "$ROOT/$label.log" >&2
+            ERRORS=$((ERRORS + 1))
             return
             ;;
     esac
@@ -154,5 +161,12 @@ fi
 if [ "$FAILURES" -ne 0 ]; then
     echo "FAIL — $FAILURES check(s) failed"
     exit 1
+fi
+if [ "$ERRORS" -ne 0 ]; then
+    # A real FAIL outranks an ERROR (checked above); an ERROR alone means the
+    # run could not be judged. Exit 2, never 0 -- an inconclusive run must not
+    # read as a pass.
+    echo "ERROR — nothing was checked: $ERRORS runtime case(s) produced no verdict"
+    exit 2
 fi
 echo "PASS — 3 runtime case(s) and 4 source invariant(s) checked"
