@@ -102,6 +102,70 @@ fn vulkan_session_destroy_cmd_pool(pool: i64) -> bool:
     rt_vk_destroy_cmd_pool(pool)
 
 # ============================================================================
+# VulkanShaderCache — flat storage for up to 4 named SPIR-V module handles
+#
+# Mirrors CudaModuleCache / MetalPipelineCache exactly (same 4 slots, same
+# "cache full" sentinel return, same fail-closed find). Before this cache
+# existed, `VulkanSession.load_shader()` re-invoked `rt_vk_load_spirv` on
+# every call for an already-loaded name, leaking one native VkShaderModule
+# per call -- the same leak class the CUDA/Metal caches close.
+# ============================================================================
+
+class VulkanShaderCache:
+    s0_name: text
+    s0_handle: i64
+    s1_name: text
+    s1_handle: i64
+    s2_name: text
+    s2_handle: i64
+    s3_name: text
+    s3_handle: i64
+    count: i64
+
+    static fn create() -> VulkanShaderCache:
+        VulkanShaderCache(
+            s0_name: "", s0_handle: 0,
+            s1_name: "", s1_handle: 0,
+            s2_name: "", s2_handle: 0,
+            s3_name: "", s3_handle: 0,
+            count: 0
+        )
+
+    me cache_shader(name: text, handle: i64) -> text:
+        if self.count == 0:
+            self.s0_name = name
+            self.s0_handle = handle
+            self.count = 1
+            return "ok"
+        if self.count == 1:
+            self.s1_name = name
+            self.s1_handle = handle
+            self.count = 2
+            return "ok"
+        if self.count == 2:
+            self.s2_name = name
+            self.s2_handle = handle
+            self.count = 3
+            return "ok"
+        if self.count == 3:
+            self.s3_name = name
+            self.s3_handle = handle
+            self.count = 4
+            return "ok"
+        "cache_full"
+
+    me find_shader(name: text) -> i64:
+        if self.s0_name == name:
+            return self.s0_handle
+        if self.s1_name == name:
+            return self.s1_handle
+        if self.s2_name == name:
+            return self.s2_handle
+        if self.s3_name == name:
+            return self.s3_handle
+        0
+
+# ============================================================================
 # VulkanSession
 # ============================================================================
 
@@ -123,6 +187,9 @@ class VulkanSession:
     transient_cmd_pools: [i64]
     transient_cmd_pool_created_count: i64
     transient_cmd_pool_destroyed_count: i64
+    shader_cache: VulkanShaderCache
+    cache_reject_count: i64
+    last_cache_rejection: text
 
     static fn create(mode: text, thread_policy: text) -> VulkanSession:
         VulkanSession(
@@ -142,7 +209,10 @@ class VulkanSession:
             device_name: "",
             transient_cmd_pools: [],
             transient_cmd_pool_created_count: 0,
-            transient_cmd_pool_destroyed_count: 0
+            transient_cmd_pool_destroyed_count: 0,
+            shader_cache: VulkanShaderCache.create(),
+            cache_reject_count: 0,
+            last_cache_rejection: ""
         )
 
     me init_device() -> text:
@@ -198,9 +268,25 @@ class VulkanSession:
     me load_shader(name: text) -> i64:
         if self.initialized == false:
             return 0
+        val cached = self.shader_cache.find_shader(name)
+        if cached != 0:
+            return cached
         val handle = vulkan_session_load_spirv(self.device_handle, name)
         if handle > 0:
             self.shader_count = self.shader_count + 1
+            return self.record_shader(name, handle)
+        handle
+
+    # Extracted so the cache-and-count bookkeeping is directly testable
+    # without a real native VkShaderModule from `rt_vk_load_spirv` (that
+    # extern is registered only for the JIT/native codegen path, not the
+    # tree-walk interpreter `bin/simple test` runs on). Always returns
+    # `handle` unchanged -- bookkeeping, not a gate.
+    me record_shader(name: text, handle: i64) -> i64:
+        val cache_result = self.shader_cache.cache_shader(name, handle)
+        if cache_result == "cache_full":
+            self.cache_reject_count = self.cache_reject_count + 1
+            self.last_cache_rejection = "shader:{name}"
         handle
 
     me begin_frame(width: i64, height: i64) -> i64:
@@ -284,6 +370,12 @@ class VulkanSession:
     fn transient_cmd_pool_destroyed_count_get() -> i64:
         self.transient_cmd_pool_destroyed_count
 
+    fn cache_reject_count_get() -> i64:
+        self.cache_reject_count
+
+    fn last_cache_rejection_get() -> text:
+        self.last_cache_rejection
+
     fn stats() -> text:
         "device=" + self.device_name
             + " mode=" + self.mode
@@ -293,3 +385,4 @@ class VulkanSession:
             + " init=" + self.initialized.to_text()
             + " transient_pools_created=" + self.transient_cmd_pool_created_count.to_text()
             + " transient_pools_destroyed=" + self.transient_cmd_pool_destroyed_count.to_text()
+            + " cache_rejects=" + self.cache_reject_count.to_text()
