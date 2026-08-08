@@ -17,6 +17,60 @@ use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
 use crate::value::{OptionVariant, ResultVariant};
 
+/// Snapshot the current value of every name a pattern binds, so a scoped
+/// construct can restore them afterwards. Pair with [`restore_pattern_scope`].
+///
+/// Used to scope `for` loop variables to their loop. The interpreter's `Env`
+/// (`CowEnv`) has no scope stack, so save/restore around the loop is how a
+/// scoped binding is expressed — the same shape the match-arm binding leak fix
+/// already uses for arm bindings.
+///
+/// Covers the shapes `bind_pattern`/`bind_pattern_value` actually bind: the
+/// three identifier forms and the two sequence forms, recursively. Anything else
+/// binds no names and so contributes nothing.
+///
+/// See doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
+pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &Env) -> Vec<(String, Option<Value>)> {
+    let mut names = Vec::new();
+    collect_pattern_binding_names(pattern, &mut names);
+    names
+        .into_iter()
+        .map(|name| {
+            let prior = env.get(&name).cloned();
+            (name, prior)
+        })
+        .collect()
+}
+
+/// Restore the bindings captured by [`save_pattern_scope`]: names that existed
+/// go back to their previous value, names that did not are removed.
+pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
+    for (name, prior) in saved {
+        match prior {
+            Some(value) => {
+                env.insert(name, value);
+            }
+            None => {
+                env.remove(&name);
+            }
+        }
+    }
+}
+
+fn collect_pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            out.push(name.clone())
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
+            for p in patterns {
+                collect_pattern_binding_names(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {
         Pattern::Wildcard => true,

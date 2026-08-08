@@ -3253,7 +3253,96 @@ pub(crate) fn call_method_if_exists(
     Ok(None)
 }
 
+/// Collect every name a `for` pattern binds, so the loop's bindings can be
+/// scoped to the loop.
+///
+/// Mirrors the shapes `bind_pattern` handles (interpreter_helpers/patterns.rs):
+/// the three identifier forms and the two sequence forms, recursively. Any other
+/// pattern binds nothing there, so it contributes nothing here.
+fn collect_pattern_names(pattern: &Pattern, out: &mut Vec<String>) {
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            out.push(name.clone())
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
+            for p in patterns {
+                collect_pattern_names(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Execute a `for` loop, with the loop variable SCOPED TO THE LOOP.
+///
+/// The loop binding used to be written straight into the caller's `Env` with no
+/// scope push and no restore, so after the loop the binding survived, and if the
+/// enclosing scope already had a binding of the same name it was DESTROYED —
+/// even an immutable `val`:
+///
+/// ```text
+/// val x = 100
+/// for x in [1, 2, 3]: pass
+/// print x        # -> 3, not 100
+/// ```
+///
+/// `Env` (`CowEnv`) has no scope stack to push, and `exec_for` also dispatches
+/// through eight specialised fast paths before the generic body, each binding
+/// into `env` the same way — so a per-path fix would have to be made eight times
+/// and would rot on the ninth. Instead this saves the prior value of every name
+/// the pattern binds, runs the loop unchanged, and restores afterwards: names
+/// that existed are put back to their old value, names that did not are removed.
+/// That covers every fast path at once because they all funnel through here.
+///
+/// The free-variable analyser in interpreter/expr/control.rs already modelled
+/// the loop correctly (mark, bind, walk, truncate); this makes the executor
+/// mirror that discipline.
+///
+/// Audited before landing: a sweep of 26,738 deduplicated `for` loops across all
+/// owned `.spl` found 16 post-loop reads of a loop variable, of which 8 are in a
+/// single interpreter perf spec that deliberately PINS the leak, 1 is a spec that
+/// already asserts this fix, and the rest are false positives inside docstrings.
+/// Zero reliance in `src/` production code, `examples/`, or `scripts/`.
+/// See doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
 pub(super) fn exec_for(
+    for_stmt: &simple_parser::ast::ForStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Control, CompileError> {
+    let mut bound_names = Vec::new();
+    collect_pattern_names(&for_stmt.pattern, &mut bound_names);
+    let saved: Vec<(String, Option<Value>)> = bound_names
+        .into_iter()
+        .map(|name| {
+            let prior = env.get(&name).cloned();
+            (name, prior)
+        })
+        .collect();
+
+    let result = exec_for_inner(for_stmt, env, functions, classes, enums, impl_methods);
+
+    // Restore unconditionally — including on the error path and on every early
+    // `return` a fast path takes. `break`/`continue`/`return` inside the body all
+    // come back through here as a `Control` value, so there is no escape route
+    // that skips this.
+    for (name, prior) in saved {
+        match prior {
+            Some(value) => {
+                env.insert(name, value);
+            }
+            None => {
+                env.remove(&name);
+            }
+        }
+    }
+
+    result
+}
+
+fn exec_for_inner(
     for_stmt: &simple_parser::ast::ForStmt,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,

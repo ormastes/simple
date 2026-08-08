@@ -676,7 +676,13 @@ impl Lowerer {
                     // Tuple destructuring in for loop: for (x, y) in items:
                     // Lower to: for __tuple_temp in items: { val x = __tuple_temp[0]; val y = __tuple_temp[1]; ... }
                     let temp_name = "__for_tuple_temp".to_string();
+                    let temp_shadowed = ctx.lookup(&temp_name);
                     let temp_idx = ctx.add_local(temp_name.clone(), element_ty, Mutability::Immutable);
+                    // Every name this pattern destructures is scoped to the loop,
+                    // same as the scalar case below. Collected here and restored
+                    // after the body is lowered. Nested loops reusing a name are
+                    // why the temp itself is saved too.
+                    let mut destructured_shadowed: Vec<(String, Option<usize>)> = Vec::new();
 
                     // Get tuple element types if available
                     let element_types = if let Some(HirType::Tuple(types)) = self.module.types.get(element_ty) {
@@ -710,6 +716,7 @@ impl Lowerer {
 
                         // Extract variable name from pattern
                         if let Some(name) = Self::extract_pattern_name(pattern) {
+                            destructured_shadowed.push((name.clone(), ctx.lookup(&name)));
                             let local_idx = ctx.add_local(name, elem_ty, Mutability::Immutable);
                             destructure_stmts.push(HirStmt::Let {
                                 local_index: local_idx,
@@ -728,6 +735,14 @@ impl Lowerer {
                     new_body.append(&mut body);
 
                     let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
+
+                    // Restore every name this loop bound, now that the body and
+                    // invariants (which may reference them) are lowered.
+                    for (name, shadowed) in destructured_shadowed {
+                        ctx.restore_name_binding(&name, shadowed);
+                    }
+                    ctx.restore_name_binding(&temp_name, temp_shadowed);
+
                     Ok(vec![HirStmt::For {
                         pattern: temp_name,
                         pattern_local: Some(temp_idx),
@@ -740,11 +755,26 @@ impl Lowerer {
                     // Simple pattern (single identifier)
                     let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
 
+                    // The loop variable is SCOPED TO THE LOOP: snapshot any outer
+                    // binding of this name, and restore it once the body is
+                    // lowered. `add_local` overwrites `local_map` unconditionally
+                    // (there is no scope stack), so without this a `for x in ...`
+                    // permanently rebound an enclosing `x` — every later mention
+                    // resolved to the loop's slot, which is why
+                    // `val x = 100; for x in [1,2,3]: pass; print x` printed 3 on
+                    // the compiled lane.
+                    // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
+                    let shadowed = ctx.lookup(&pattern);
+
                     // Add the loop variable to the context BEFORE lowering the body
                     let pattern_idx = ctx.add_local(pattern.clone(), element_ty, Mutability::Immutable);
 
                     let body = self.lower_block(&for_stmt.body, ctx)?;
                     let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
+
+                    // Restored AFTER the body and the invariants — both may
+                    // legitimately reference the loop variable.
+                    ctx.restore_name_binding(&pattern, shadowed);
                     Ok(vec![HirStmt::For {
                         pattern,
                         pattern_local: Some(pattern_idx),

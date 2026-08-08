@@ -31,7 +31,10 @@ pub(crate) use collections::{
     message_to_value, OptionResultEvalContext,
 };
 
-pub(crate) use patterns::{bind_pattern, bind_pattern_value, handle_functional_update, handle_method_call_with_self_update};
+pub(crate) use patterns::{
+    bind_pattern, bind_pattern_value, handle_functional_update, handle_method_call_with_self_update,
+    restore_pattern_scope, save_pattern_scope,
+};
 
 pub(crate) use utilities::{
     comprehension_iterate, control_to_value, normalize_index, slice_collection, spawn_future_with_callable,

@@ -1,7 +1,9 @@
 // Block closure execution helpers for interpreter_call module
 
 use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
-use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
+use super::super::interpreter_helpers::{
+    bind_pattern_value, handle_method_call_with_self_update, restore_pattern_scope, save_pattern_scope,
+};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
@@ -612,6 +614,14 @@ pub(super) fn exec_block_closure_into(
                 )?;
                 let iter_values = get_iterator_values(&iterable)?;
                 let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                // Loop variable is SCOPED TO THE LOOP — see the sibling site
+                // below and `exec_for` in interpreter_control.rs. This is the
+                // closure/block executor, which is the path an `it` block body
+                // takes; fixing only `exec_for` left the leak alive here, which
+                // is why control_flow_spec's "creates new scope for loop
+                // variable" stayed red while a top-level repro passed.
+                // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
+                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, &local_env);
                 'for_loop_own: for (index, val) in iter_values.into_iter().enumerate() {
                     let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
                         Value::Tuple(vec![Value::Int(index as i64), val])
@@ -633,9 +643,17 @@ pub(super) fn exec_block_closure_into(
                             break 'for_loop_own;
                         }
                         Err(CompileError::LoopContinue) => continue 'for_loop_own,
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            // Restore before propagating too, so a caught error
+                            // does not leave the loop variable bound. Cloned
+                            // because this branch sits inside the loop and the
+                            // normal exit below still needs the snapshot.
+                            restore_pattern_scope(for_saved_scope.clone(), &mut local_env);
+                            return Err(e);
+                        }
                     }
                 }
+                restore_pattern_scope(for_saved_scope, &mut local_env);
             }
             Node::Match(match_stmt) => {
                 let subject = evaluate_expr(
@@ -1371,6 +1389,10 @@ fn exec_block_closure_mut_inner(
                 let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
                 let iter_values = get_iterator_values(&iterable)?;
                 let is_dict_iteration = matches!(&iterable, Value::Dict(_));
+                // Loop variable is SCOPED TO THE LOOP — sibling of the
+                // `'for_loop_own` site above; both are closure/block executors.
+                // doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
+                let for_saved_scope = save_pattern_scope(&for_stmt.pattern, local_env);
                 'for_loop: for (index, val) in iter_values.into_iter().enumerate() {
                     let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
                         Value::Tuple(vec![Value::Int(index as i64), val])
@@ -1392,9 +1414,13 @@ fn exec_block_closure_mut_inner(
                             break 'for_loop;
                         }
                         Err(CompileError::LoopContinue) => continue 'for_loop,
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            restore_pattern_scope(for_saved_scope.clone(), local_env);
+                            return Err(e);
+                        }
                     }
                 }
+                restore_pattern_scope(for_saved_scope, local_env);
             }
             Node::Match(match_stmt) => {
                 let subject = evaluate_expr(&match_stmt.subject, local_env, functions, classes, enums, impl_methods)?;

@@ -101,6 +101,31 @@ impl FunctionContext {
         self.local_map.get(name).copied()
     }
 
+    /// Restore a NAME->slot mapping to what it was before a scoped binding.
+    ///
+    /// `add_local_full` does `local_map.insert(name, index)`, which OVERWRITES
+    /// any outer binding of that name permanently — there is no scope stack
+    /// here. For a construct whose binding is supposed to be scoped (a `for`
+    /// loop variable), the lowerer snapshots `lookup(name)` first and calls this
+    /// afterwards to put the mapping back.
+    ///
+    /// Only the NAME MAPPING is restored. The `locals` slot itself is
+    /// deliberately left in place: slot indices are already embedded in the
+    /// lowered body, so removing or reusing the slot would invalidate them.
+    /// Leaving a dead slot allocated is correct and costs one entry per loop.
+    ///
+    /// See doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
+    pub fn restore_name_binding(&mut self, name: &str, previous: Option<usize>) {
+        match previous {
+            Some(index) => {
+                self.local_map.insert(name.to_string(), index);
+            }
+            None => {
+                self.local_map.remove(name);
+            }
+        }
+    }
+
     /// Get a local variable by index
     pub fn get_local(&self, index: usize) -> Option<&LocalVar> {
         self.locals.get(index)
