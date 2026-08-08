@@ -172,13 +172,18 @@ SIMPLE_COVERAGE=1 bin/simple test <path> --no-cache --no-cover-check --timeout 1
   a subset of statement-shaped lines are individually instrumented. Treat a
   per-file percentage as a floor, not the true statement count, until these
   are addressed.
-- **`spl-coverage rollup` prints a raw union dump, not a tautological
-  100%-of-observed summary** — the regenerated `summary:` block
-  (`coverage_sdn.spl`, see U1.3 note below) is computed fresh from the merged
-  `lines`/`decisions` sections, so a rollup that merges two partial runs
-  correctly shows less-than-100% where neither run alone touched a line —
-  verify this before trusting a rollup's summary as "coverage achieved"
-  rather than "coverage observed across the inputs given".
+- **`spl-coverage rollup`'s `summary:` block is recomputed, not copied** —
+  `coverage_sdn.spl:227-257` iterates the merged rows fresh on every rollup.
+  But "recomputed" does not mean "meaningful" for both axes: it is
+  **tautological in practice for LINE coverage**, because coverage artifacts
+  only ever contain rows for lines that were actually executed, so
+  `covered_lines == total_lines` always holds at this stage regardless of
+  how partial the underlying runs were; it is **genuinely discriminating for
+  DECISION coverage**, since a decision row only counts as covered when both
+  `true_count>0` and `false_count>0`, which a partial run can and does leave
+  unmet. Verify this before trusting a rollup's line-coverage summary as
+  "coverage achieved" rather than "coverage observed across the inputs
+  given" — the decision-coverage summary does not have this caveat.
 
 ## 2026-08-08: impl-block methods stopped landing on `<entry>` (`b6a43042`)
 

@@ -1632,7 +1632,7 @@ own banner), closure-solo 486 distinct lines (banner said 484, the same
 ~1-2-line discrepancy class this report has documented before, not
 reconciled), **union 813 distinct lines**.
 
-**Union coverage: 813/1465 = 55.5%.** U4.5 target is >=85% (1245/1465
+**Union coverage: 813/1465 = 55.5%.** U4.5 target is >=85% (1246/1465
 needed at this denominator). **NOT MET** — short by 432 lines.
 
 Compared to the prior round's reported 51% (738/1433): the raw percentage

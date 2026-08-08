@@ -401,7 +401,7 @@ file did map to their stated source lines on inspection):
   `pacer.warm_startup_ms()` on a fresh `FramePacer.for_60hz()` and asserting
   `0`.
 
-### Genuinely unreachable arms — documented, not forced (5 rows, all in `engine2d_baremetal_core.spl` + 1 in `compositor_engine2d.spl`)
+### Genuinely unreachable arms — documented, not forced (5 rows total: 4 in `engine2d_baremetal_core.spl` + 1 in `compositor_engine2d.spl`)
 
 - **`engine2d_baremetal_core.spl:72`** (`_pixel_at`'s `x<0 or y<0 or
   width<=0` guard) — its only call site, `draw_image`'s run-length scan,
@@ -633,7 +633,11 @@ delegation through the same guard, and `rect_core_present`'s no-op body.
 Measured with `SIMPLE_COVERAGE=1` + distinct `SIMPLE_COVERAGE_OUTPUT`,
 foreground, `test_runner_single.spl --no-session-daemon --sequential`:
 
-- **Line coverage: 0% → 100% (17/17 executable lines)**
+- **Line coverage: 0% → 100% (17/17 executable lines)** — the collector's
+  line denominator excludes never-executed lines, so this is 17-of-17
+  *executed* lines all hit, not 17-of-total-source-lines; the unreached
+  `rt_gui_fill4` extern-call path (documented above) never enters this
+  denominator, which is exactly why decision coverage below is <100%.
 - **Decision coverage: 11/12 branches (91.7%)** — 5 of 6 decision points
   (the `w<=0 or h<=0` guard and all four clamp `if`s) have both true and
   false outcomes hit. The 6th decision, `x1<=x0 or y1<=y0`, has only its
@@ -641,7 +645,9 @@ foreground, `test_runner_single.spl --no-session-daemon --sequential`:
   exactly the `rt_gui_fill4` extern-call path documented above as
   host-unreachable. This is an honest, correctly-labeled gap, not a hidden
   one; no hardware/QEMU-only defect was found in the clamp arithmetic itself
-  (all 13 hand-derived assertions passed against the real clamping logic).
+  (13 examples executed the derived branches without fault — a crash-only
+  oracle; `rt_gui_fill4` has no host implementation, so reaching it would
+  fault).
 
 No defect surfaced in either file. `_pack` (the file-private packing helper)
 has no visibility modifier (default = same-file-only, per the Visibility
