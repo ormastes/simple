@@ -458,3 +458,82 @@ Next lane must clear the `case Str:`/`case Bool:`/`case Struct:`
 irrefutable-binding Stage 2 failures (or confirm they're a working-tree
 artifact and not present on a clean `origin/main` checkout) before this
 bug's own verification can proceed.
+
+## 2026-08-08 update (later still) — Stage-2 `case Str:`/`case Bool:`/`case Struct:`
+family confirmed fixed at `origin/main` a6f0814f38dd90fa90a4f1f22dacc874cb9c43ac
+(and the ByteOrder blocker at 9ad6aea9d349438e65a46edc9d6dc70e621f2f66), both
+verified ancestors of `origin/main` via `git merge-base --is-ancestor` before
+this run, plus their qualified forms (`HirTypeKind.Str`, `MirTypeKind.Bool`,
+`SymbolKind.Struct | SymbolKind.Enum`) grepped directly out of
+`git show origin/main:<path>` for all 4 previously-failing files. `df -h /`
+showed 111G free / 98% used; no gc/prune run.
+
+**Run 1** (`SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+--output=.../stage3-nilrecv-verify-20260808 --progress`, ~31 min, real cargo
+rebuild since Rust seed sources had changed) still failed Stage 2, but with a
+**new single-file** diagnosis, one sibling instance of the exact same
+irrefutable-binding class the prior lane fixed in this same file:
+
+```
+src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl : hir:
+Unsupported feature: `case Variable:` is not a variant of the matched enum...
+```
+
+Two bare `case Variable:` sites at lines 381 and 644 of
+`src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl` (matching over
+`symbol.kind` / `hir_symbol.kind`, both `SymbolKind`) — same shape as the
+already-qualified `case SymbolKind.Struct | SymbolKind.Enum:` arms a few
+lines above each site in the same two functions
+(`vhdl_catalog_static_identity`, and the loop in
+`vhdl_build_design_catalog_with_metadata`). This is a trivial, obvious,
+same-family qualified-enum-variant fix, in the spirit of the task's
+in-scope-fix allowance, so it was landed directly: both sites now read
+`case SymbolKind.Variable:`.
+
+**Run 2** (identical command, new `--output`, Rust seed unchanged so no
+cargo rebuild, ~31 min) got **past** the `case Variable:` diagnosis — Stage 2
+HIR/type-check now clears all 4+1 previously-known irrefutable-binding sites
+— and progressed further than either prior lane today, into **codegen/link**,
+where it hit a **new, different, unrelated blocker**:
+
+```
+Link failed. Objects kept at: .../stage3-nilrecv-verify-20260808-r2/stage3/
+  x86_64-unknown-linux-gnu/native-objects-BWeUtY
+Build failed: link failed: /usr/bin/ld:
+  .../native-objects-BWeUtY/mod_518.o: in function
+  `compiler__driver__driver__CompilerDriver.process_sdn':
+  compiler__driver__driver:(.text.simple.1+0xd3): undefined reference to `run_fn'
+clang++: error: linker command failed with exit code 1
+```
+
+This is a **linker-level missing-symbol defect** (`run_fn` referenced by
+`CompilerDriver.process_sdn` in `compiler__driver__driver` but not emitted/
+linked into the native-object set for Stage 2), not a `case`-arm exhaustiveness
+diagnostic and not the MIR-lowering nil-receiver SIGILL this bug tracks. It is
+**earlier in the pipeline than Stage 3** (it is Stage 2's own native-build
+that fails to link), so the nil-receiver SIGILL region was again **not
+reached** — `SIMPLE_MIR_STMT_CALLER_DEBUG=1`/`SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1`
+produced no matching probe output because MIR lowering of the stage-3 source
+tree never started. Per this task's scope, this is documented here as a
+clearly-separate, out-of-scope blocker and NOT fixed — `run_fn` is a
+driver/codegen linkage question, not a one-line qualified-variant typo, and
+deserves its own investigation/bug entry rather than a guess fix under this
+one.
+
+**What changed in this session, concretely:**
+- `src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl`: two bare
+  `case Variable:` arms qualified to `case SymbolKind.Variable:` (lines 381,
+  644). Landed, verified by re-running the full bootstrap and observing the
+  diagnosis disappear.
+- This bug file, with this update.
+
+**Status: STILL NOT RESOLVED.** The nil-receiver SIGILL claim remains
+**unexercised** — three full-bootstrap attempts today (this session's two
+plus the earlier one) have each been stopped by a different blocker strictly
+before Stage 3's MIR-lowering region: ByteOrder (fixed), the
+`case Str:`/`case Bool:`/`case Struct:` family (fixed) plus its
+`case Variable:` sibling (fixed this pass), and now a Stage-2 link-time
+undefined-reference to `run_fn`. Next lane must resolve (or file separately
+and hand off) the `run_fn` link failure before this bug's actual claim can be
+tested at all.
