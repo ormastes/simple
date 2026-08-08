@@ -193,9 +193,31 @@ class SqlitePool:
     # Close all connections. Call when pool is no longer needed.
     # ------------------------------------------------------------------
     me close() -> Result<(), DbError>:
-        self.writer.close()?
+        # Cleanup must be TOTAL: propagating the first failure with `?` used to
+        # abandon every connection after it. A writer-close failure skipped the
+        # reader loop entirely and leaked all N readers; a failure on reader k
+        # leaked readers k+1..N. Close everything unconditionally, then report
+        # the first failure so it is surfaced rather than swallowed.
+        var first_error: Result<(), DbError> = Ok(())
+        var failures = 0
+
+        val writer_result = self.writer.close()
+        match writer_result:
+            Ok(_): nil
+            Err(werr):
+                failures = failures + 1
+                if failures == 1:
+                    first_error = Err(werr)
+
         var i = 0
         while i < self.readers.len():
-            self.readers[i].close()?
+            val reader_result = self.readers[i].close()
+            match reader_result:
+                Ok(_): nil
+                Err(rerr):
+                    failures = failures + 1
+                    if failures == 1:
+                        first_error = Err(rerr)
             i = i + 1
-        Ok(())
+
+        first_error
