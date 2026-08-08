@@ -237,41 +237,39 @@ this codebase (see also the now-dead `css_bytes_*` helpers,
 `compute_styles`'s own residual superlinearity is unrelated and still open (selector-match chain,
 not parse-side).
 
-## 2026-08-07: `text-overflow: ellipsis` truncation wired into Draw IR emission (`34095840`)
+## 2026-08-08: negative vertical margins were silently zeroed, and collapsing used plain max()
 
-`_html_draw_ir_command` now calls `ellipsize_text_for_width` before emitting
-or measuring a Draw IR text run when `st.text_overflow_ellipsis` is set,
-matching the fixed-advance width model already used by the CPU-framebuffer
-raster loops — the two paths had drifted (raster truncated, Draw IR did not).
-Flips "text-overflow: ellipsis truncates a single-line overflowing box" from
-RED-by-design to green in `web_css_text_layout_spec.spl` (6 total, 5 passed,
-1 failed — the remaining failure is the unrelated, larger-scope
-overflow-wrap example, left RED-by-design). Same session triaged four other
-RED-by-design examples (CSS Grid `fr` tracks, `grid-template-areas`,
-`grid-auto-flow:column`, text `overflow-wrap`) as large-scope (new subsystem/
-parsing work), recorded in their own bug docs, left untouched per RED
-protocol — do not fold those into this feature's scope without a separate
-plan.
+Two compounding defects in adjacent-sibling vertical margin handling
+(`simple_web_html_layout_renderer_layout.spl` /
+`simple_web_html_layout_renderer_foundation.spl`):
 
-## 2026-08-08: all four deferred RED-by-design examples landed
+1. `margin_token_vh_px()` fed the raw CSS token straight into `parse_int()`,
+   which only accumulates decimal digits and silently drops a leading `-`
+   (`"-10px"` parsed as `10`). `resolve_vertical_margin_px()` then additionally
+   clamped any surviving negative value in the `-999..-1` range to `0` — that
+   range only looked like dead space because `parse_int()` could never itself
+   produce a negative number, so nothing there distinguished "unset" from "a
+   genuine negative px margin". Net effect: `margin-top: -10px` / `margin-bottom:
+   -10px` behaved as `0` end-to-end.
+2. Even with the sign preserved, the block-flow collapse at three call sites
+   inlined a plain `max()` (`if a > b: a else: b`) instead of CSS 2.2 §8.3.1's
+   `max(positive margins) + min(negative margins)`. A correct, already-written
+   but until-now-unused pure helper existed for this exact formula:
+   `collapse_margins_signed()` in `layout_m14_types.spl` — now wired in at all
+   three sites (`display:contents` children, the main block-flow loop, and the
+   `body`-top-margin special case).
 
-The four items triaged above on 2026-08-07 were implemented in the same
-follow-up session, not deferred further:
+Regression spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_margin_collapse_negative_spec.spl`.
 
-- `3e56ef9c` — `normalized_grid_track_list` accepts `<n>fr` tokens alongside
-  `<n>px` instead of rejecting the whole track list; `grid_track_sizes`
-  distributes remaining free space across `fr` tracks.
-- `eee74d33` — `grid-template-areas` + `grid-auto-flow:column` implemented.
-  `web_css_grid_spec.spl` now 6/6 (was 4/6 after the `fr`-tracks fix, 3/6
-  before this session).
-- `6fa4098d` — `overflow-wrap` threaded into Draw IR text emission.
-  `_html_draw_ir_command` previously always emitted one text command per
-  `#text` node regardless of container width, ignoring layout's
-  already-computed `wrap_starts`/`wrap_ends` ranges — this is a wiring fix
-  into an existing subsystem, **not** a new wrap-computation engine (layout
-  already did the wrap math; Draw IR just didn't consume it, same shape of
-  gap as the `text-overflow: ellipsis` fix above).
-
-Net: `web_css_text_layout_spec.spl` and `web_css_grid_spec.spl` should now be
-fully green when re-run; re-verify rather than trusting this note as durable
-PASS evidence.
+**Verification gotcha:** `simple_web_layout_debug_layout_by_id` must be
+imported via `use std.gc_async_mut.gpu.browser_engine....` — the `use
+lib.gc_async_mut...` alias path (used by the pre-existing
+`simple_web_flex_grow_weighted_spec.spl`) currently fails under both `bin/simple
+test` and `bin/simple run` with `semantic: variable '_web_budget_clock' not
+found` (a module-level `var` initializer not resolving through that import
+alias in the deployed seed binary). Reproduced standalone with zero browser
+code via a one-line probe; not something this change caused or could fix
+(interpreter/module-loading issue, out of CSS/layout scope). File a bug if this
+blocks other browser_engine spec work: the `lib.` alias path is otherwise
+documented as preferred for app code, but for this module tree `std.` is the
+only alias that currently loads cleanly.
