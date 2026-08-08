@@ -274,11 +274,14 @@ inventing startup-only or subsystem-local mmap APIs:
   either `ready-before-main` or `blocked-before-main`.
 
 The `startup_before_main(...)` ordering contract is implemented and unit
-tested. Automatic invocation from every generated native entry stub and both
-SimpleOS crt0 variants is a separate linker/crt0 integration gate and must not
-be claimed from the existence of this callable owner. Likewise, the provider
-contract is suitable for LLVM/Clang porting, but an in-guest compiled Clang
-hello-world remains a bootstrap/QEMU evidence requirement.
+tested. Generated POSIX native entries and the x86-64/AArch64 SimpleOS CRTs
+now expose the same weak `__simple_startup_before_main(argc, argv)` slot after
+argv publication and before constructors/runtime initialization. This is a
+structural ABI admission: a manifest-aware generated module may bind the slot
+and reject before main; legacy/C-only links leave it unresolved and retain
+their prior behavior. It is not live QEMU evidence that a generated artifact
+has decoded a manifest or that an in-guest Clang executable completed its
+preload. Those remain bootstrap/QEMU evidence requirements.
 
 ## Implementation Alignment Matrix
 
@@ -287,7 +290,7 @@ hello-world remains a bootstrap/QEMU evidence requirement.
 | File arg parser in startup logic | `startup_normalize_program_args(...)` and `cli_run_file(...)` preserve one script `argv[0]` | `test/03_system/app/simple/feature/simple_app_startup_spec.spl`, `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
 | Mmap support for fast file loading | Host mmap smoke via `file_mmap_read_text`; SMF mmap/cache in loader; SimpleOS VFS prewarm strategy in startup plan | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`, `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
 | Dedicated host mapping contract | Common POSIX-shaped flags/validation with hosted POSIX and native SimpleOS providers; SimpleOS rejects unsupported file/shared maps | `test/01_unit/app/startup/dedicated_host_startup_spec.spl`, `test/01_unit/app/startup/dedicated_host_provider_contract_spec.spl` |
-| Manifest startup execution | Declared argv schema and read-only preloads are admitted before main through `startup_before_main(...)` | focused unit/provider specs; generated-entry/crt0 hook remains open |
+| Manifest startup execution | Declared argv schema and read-only preloads are admitted before main through `startup_before_main(...)`; generated entry/CRT weak hook is structurally ordered before constructors | focused unit/provider specs; `scripts/check/check-dedicated-host-startup-wiring.shs`; live manifest-aware native/QEMU execution remains open |
 | Dynlib/SMF load on startup | Metadata carries `required_native_dynlibs` and `required_smf_dynlibs`; startup plan includes loader only when dependency lists are non-empty | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
 | SimpleOS hover preload | Launcher hover asks VFS for executable bytes on cache miss, caches warmed bytes, and keeps process count unchanged | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` |
 | Optimization guard | `launch_metadata.spl` stays pure; mechanism inclusion is capability-gated by `StartupLaunchPlan` | this document plus system specs |
@@ -335,7 +338,7 @@ Open evidence gaps:
   inside SimpleOS are claimed
 - final build/link gate proving unused parser/cache/dynlib code is excluded
 - embedded ELF/Mach-O/PE launch metadata sections for native binaries
-- generated native-entry and SimpleOS crt0 invocation of
-  `startup_before_main(...)`
+- generated manifest-aware native artifact binding of the admitted
+  `__simple_startup_before_main(...)` slot
 - live native POSIX anonymous map/protect/unmap and SimpleOS QEMU syscall/VFS
   provider evidence

@@ -33,11 +33,10 @@
 # :3032) — this module's enforcement point is designed to sit alongside those
 # calls, over the SAME `real_objects`/`user_objects` closure passed to that
 # function, i.e. the "steady-state closure" is the final set of `.o`/archive
-# inputs to one of those four links. This module does not itself edit
-# `llvm_native_link.spl` (see doc comment on `enforce_no_forbidden_allocator_symbols`
-# for why), so as of this WP the enforcement function below is exposed and
-# spec-covered but not yet call-site-wired; wiring it in is a one-line addition
-# at each of those four call sites once this module lands.
+# inputs to one of those four links. WIRED (WP-15 gap closure): each of those
+# four call sites now also calls `simpleos_check_no_forbidden_allocators`
+# (`llvm_native_link.spl`), which gates on the same `flight_closure` predicate
+# and delegates to `flight_allocator_scan_for_profile` below.
 #
 # FORBIDDEN SYMBOL LIST: reuses the same allocator-name vocabulary the
 # source-level scanner already uses at `noalloc_reachable.spl:106-107`
@@ -60,6 +59,8 @@
 # substring — exact match does not.
 
 use std.nogc_sync_mut.io_runtime.{process_run}
+use compiler.common.assurance.policy.{strictness_for_profile_name}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 
 pub val FORBIDDEN_ALLOCATOR_SYMBOLS = [
     "malloc", "calloc", "realloc", "free",
@@ -170,6 +171,25 @@ pub fn enforce_no_forbidden_allocator_symbols_from_names(symbol_names: [text]) -
         return Ok(true)
     Err("Forbidden allocator symbol(s) in sealed-build closure: {hits.join(\", \")} -- a sealed/flight-closure link must not reference a host heap allocator (see allocator_symbol_scan.spl doc comment for the full forbidden list and rationale)")
 
+pub fn flight_allocator_scan_for_profile(profile_name: text, no_stub_fallback: bool, symbol_names: [text]) -> Result<bool, text>:
+    """WP-15 link-path enforcement seam: under a flight closure --
+    `no_stub_fallback` true (SIMPLE_NO_STUB_FALLBACK=1) or `profile_name`
+    resolving (WP-3 canonical resolver, `compiler.common.assurance.policy`)
+    to at least `AssuranceStrictness.Critical` -- a forbidden allocator
+    symbol among the closure's undefined-symbol references is a hard link
+    failure. Non-flight profiles: no behavior change, always `Ok`. Same gate
+    predicate, verbatim, as WP-10's `flight_closure` in
+    `llvm_native_link.spl`'s `simpleos_check_no_fabricated_rt_stubs`.
+    Parameterized on the profile inputs so a unit spec can drive both gate
+    branches directly -- importing `llvm_native_link` into a spec exceeds the
+    interpreter's 800-module load cap, so the seam lives here and
+    `llvm_native_link.spl`'s `simpleos_check_no_forbidden_allocators` is only
+    the thin env-reading + `nm -u` wrapper over it."""
+    val flight_closure = no_stub_fallback or strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical)
+    if not flight_closure:
+        return Ok(true)
+    enforce_no_forbidden_allocator_symbols_from_names(symbol_names)
+
 pub fn enforce_no_forbidden_allocator_symbols(objects: [text]) -> Result<bool, text>:
     """Linker-level enforcement point: a forbidden allocator symbol anywhere
     in the steady-state closure's undefined-symbol references is a hard link
@@ -179,15 +199,12 @@ pub fn enforce_no_forbidden_allocator_symbols(objects: [text]) -> Result<bool, t
     sites, guarded by the same `flight_closure` predicate WP-10 defined there
     (`SIMPLE_NO_STUB_FALLBACK=1` or `SIMPLE_SAFETY_PROFILE` >= `Critical`).
 
-    Deliberately NOT wired into `llvm_native_link.spl` by this WP: WP-10 is
-    concurrently landing an uncommitted, unpushed edit to the neighbouring
-    lines of that same function (`:2496-2594`, the `flight_closure` predicate
-    itself and the fabricated-stub baseline gates) in this shared working
-    copy. This WP's call sites (`:2674`, `:2786`, `:2960`, `:3032`) are
-    textually disjoint from WP-10's edited range, but landing a same-file
-    edit on top of another agent's in-flight, not-yet-pushed change in a
-    shared working copy risks a lost or corrupted edit on push (see
-    `.claude/rules/vcs.md` "Sync must never clobber"). This function is
-    exposed, documented, and spec-covered as the enforcement seam; wiring it
-    into each call site is a one-line addition once WP-10 lands."""
+    WIRED: `llvm_native_link.spl` now calls this seam (via
+    `simpleos_check_no_forbidden_allocators`, delegating to
+    `flight_allocator_scan_for_profile` above) at each of the four
+    freestanding-link call sites, immediately after
+    `simpleos_check_no_fabricated_rt_stubs`, gated by the same
+    `flight_closure` predicate. The wiring was deferred from the original
+    WP-15 landing only because WP-10 had an in-flight edit to that file at
+    the time; that lane has landed."""
     enforce_no_forbidden_allocator_symbols_from_names(object_undefined_symbol_names(objects))

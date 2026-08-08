@@ -1544,7 +1544,33 @@ impl MirLowering:
         # as corrupt tagged handles. Fixing that generically requires tagging
         # every array element at construction time -- broader change, out of
         # scope here (documented in join_lowering_fix_report.md).
-        if method == "join" and args.len() == 1 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        # Gate (2026-08-08): this arm used to require SIMPLE_BOOTSTRAP=1. That
+        # env check was only ever a proxy for "no method-resolution info", and
+        # it excluded the IDENTICAL gap on the normal native-build path --
+        # exactly the same mistake already corrected for `len` above (see the
+        # "Previously this was gated behind SIMPLE_BOOTSTRAP=1" note there). A
+        # typed `var parts: [text] = ["a","b"]; parts.join(",")` resolves to
+        # MethodResolution.Unresolved too (the builtin Array type carries no
+        # symbol-bearing HIR type, so try_instance_method/try_trait_method/
+        # try_ufcs in resolve_strategies.spl all decline), so under plain
+        # native-build every `.join()` fell through to the loud "unresolved
+        # method call: join" at the end of `case Unresolved:` and aborted the
+        # build -- see bug doc
+        # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md, and the
+        # SQL identifier-quoting path
+        # (src/lib/nogc_sync_mut/database/sql/escape.spl:20,33,122) it blocks.
+        #
+        # Keying off `resolution` instead of the env var also makes this arm
+        # STRICTLY narrower than before on the bootstrap lane (where resolution
+        # is always Unresolved, so no behavior changes) while refusing to
+        # hijack a genuinely resolved user-defined `join` method on a struct.
+        var join_is_unresolved = false
+        match resolution:
+            case Unresolved: join_is_unresolved = true
+            case _: ()
+        if method == "join" and args.len() == 1 and join_is_unresolved:
+            if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                eprint("[conv-lower] join arm hit\n")
             match receiver.kind:
                 case ArrayLit(jn_elements, _):
                     if jn_elements.len() == 0:
@@ -2795,6 +2821,58 @@ impl MirLowering:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                # Enumerated siblings (2026-08-08). A single probe carrying
+                # eight typed-receiver method calls through plain native-build
+                # showed exactly four names still reaching this loud failure:
+                # `join` (fixed above), `slice`, `index_of` and `contains`.
+                # `substring`, `split`, `replace` and `unwrap` all lower fine on
+                # a typed receiver -- which is the evidence that the Stage-3
+                # const-0 substitution family (top names substring/merge/slice/
+                # unwrap) is NOT this defect: those names have working lowerings
+                # here, so Stage-3 loses its RECEIVER TYPES upstream and drops
+                # everything into this Unresolved arm. Same error string,
+                # different root cause; do not "fix" Stage-3 by adding arms.
+                #
+                # `contains` and `index_of` route to the receiver-polymorphic
+                # runtime accessors (rt_contains / rt_index_of in
+                # runtime_native.c), the same unified-accessor shape `len`
+                # already uses via rt_len: rt_contains dispatches array/dict/
+                # string off the tagged handle, and rt_index_of tries
+                # rt_array_index_of first then falls back to rt_string_find.
+                # Guarded on the receiver actually being a runtime handle
+                # (array/dict/tagged string) -- a plain untagged i64 receiver
+                # would be misread as a pointer, so it keeps falling through to
+                # the loud failure below rather than being silently mis-lowered.
+                # `slice` is deliberately NOT handled here: rt_slice returns a
+                # fresh collection HANDLE that would also need registering in
+                # the lowering's runtime-value bookkeeping for a downstream
+                # `.len()`/index read to work, which is a larger change than
+                # these two one-call methods. It stays loud-failing, filed.
+                val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local) or self.local_is_runtime_dict(unresolved_receiver_local) or self.local_is_str(unresolved_receiver_local)
+                if poly_recv_is_handle and args.len() == 1 and (method == "contains" or method == "index_of"):
+                    if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
+                        eprint("[conv-lower] polymorphic accessor arm hit method={method}\n")
+                    val poly_symbol = if method == "contains": "rt_contains" else: "rt_index_of"
+                    val poly_arg_local = self.lower_expr(args[0].value)
+                    val poly_arg_boxed = self.box_runtime_value(poly_arg_local)
+                    val poly_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str(poly_symbol),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_poly = self.builder
+                    val poly_call = b_poly.emit_call(poly_op, [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(poly_arg_boxed)], MirType.i64())
+                    val poly_raw = poly_call ?? b_poly.new_temp(MirType.i64())
+                    if method == "index_of":
+                        self.builder = b_poly
+                        return poly_raw
+                    # `contains` is a predicate: rt_contains returns int8_t 0/1,
+                    # normalized to a real Bool exactly like the rt_dict_contains
+                    # arm above does, so `if xs.contains(x):` tests a bool and
+                    # not a raw word.
+                    val poly_zero = b_poly.emit_const_int(0)
+                    val poly_bool = b_poly.emit_binop(MirBinOp.Ne, mir_operand_copy(poly_raw), mir_operand_copy(poly_zero), MirType.bool())
+                    self.builder = b_poly
+                    return poly_bool
                 self.error("unresolved method call: {method}", nil)
                 # Task #145: self.error only COLLECTS -- both the bootstrap
                 # lane (driver_bootstrap.spl reads ctx.errors, never

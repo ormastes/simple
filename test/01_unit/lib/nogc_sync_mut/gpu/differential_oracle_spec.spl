@@ -9,6 +9,7 @@ use std.test.differential_conformance.{
     compare_normalized_traces,
     trace_comparison_policy_semantic,
     trace_satisfies_environment_profile,
+    simpleos_qemu_gpu_environment_profiles,
     reference_oracle_adapter_valid,
 }
 
@@ -21,13 +22,22 @@ fn event(sequence: i64, layer: text, operation: text, object: text, parent: text
     )
 
 fn trace(events: [TraceEvent]) -> NormalizedTrace:
-    NormalizedTrace(schema_version: 1, run_id: "fixture-a", environment_profile_id: "qemu-venus", events: events)
+    NormalizedTrace(
+        schema_version: 1, run_id: "fixture-a", environment_profile_id: "qemu-venus",
+        ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio", arch: "x86_64", transport: "virtio-gpu",
+        enabled_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        venus_version: "1", device_identity: "virtio-gpu-0", oracle_identity: "mesa-vulkan-1",
+        device_origin_readback: true, fallback_used: false, dropped_events: 0, complete: true, events: events,
+    )
 
 fn required_profile() -> GpuEnvironmentProfile:
     GpuEnvironmentProfile(
-        id: "qemu-venus",
+        id: "qemu-venus", ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio",
+        expected_arch: "x86_64", expected_transport: "virtio-gpu",
+        required_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        expected_venus_version: "1", expected_device_identity: "virtio-gpu-0", expected_oracle_identity: "mesa-vulkan-1",
         required_operations: ["virtio_transport:discover", "venus_protocol:handshake", "vulkan_api:submit"],
-        requires_device_execution: true, requires_device_readback: true, requires_fence: true,
+        requires_device_execution: true, requires_device_origin_readback: true, requires_fence: true, requires_no_fallback: true,
         max_trace_events: 16, max_elapsed_ns: 1000,
     )
 
@@ -41,6 +51,21 @@ fn complete_trace() -> NormalizedTrace:
     ])
 
 describe "normalized GPU/web differential oracle":
+    it "exports unique concrete SimpleOS QEMU GPU expectation profiles":
+        val profiles = simpleos_qemu_gpu_environment_profiles()
+        expect(profiles.len()).to_equal(3)
+        expect(profiles[0].id).to_equal("simpleos-qemu-x86_64-vulkan-virtio")
+        expect(profiles[1].id).to_equal("simpleos-qemu-aarch64-vulkan-virtio")
+        expect(profiles[2].id).to_equal("simpleos-qemu-riscv64-vulkan-virtio")
+        expect(profiles[0].expected_transport).to_equal("virtio-gpu-pci")
+        expect(profiles[1].expected_transport).to_equal("virtio-gpu-mmio")
+        expect(profiles[2].expected_transport).to_equal("virtio-gpu-mmio")
+        expect(profiles[0].required_features.len()).to_equal(5)
+        expect(profiles[0].requires_device_execution).to_equal(true)
+        expect(profiles[1].requires_fence).to_equal(true)
+        expect(profiles[2].requires_device_origin_readback).to_equal(true)
+        expect(profiles[0].requires_no_fallback).to_equal(true)
+
     it "compares transformed object identifiers semantically, not as raw handles":
         val candidate = complete_trace()
         val reference = trace([
@@ -57,6 +82,22 @@ describe "normalized GPU/web differential oracle":
         )
         expect(result.matched).to_equal(true)
         expect(result.reason).to_equal("match")
+
+    it "does not demand equal provider timestamps when each trace preserves event order":
+        val candidate = complete_trace()
+        val reference = trace([
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 0, monotonic_ns: 100,
+                layer_id: "virtio_transport", operation: "discover", object_id: "guest-device", parent_id: "", result_class: "ok", error_class: "", payload_digest: "caps=5", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 1, monotonic_ns: 400,
+                layer_id: "venus_protocol", operation: "handshake", object_id: "guest-session", parent_id: "guest-device", result_class: "ok", error_class: "", payload_digest: "capset=venus", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 2, monotonic_ns: 700,
+                layer_id: "vulkan_api", operation: "submit", object_id: "guest-command", parent_id: "guest-session", result_class: "ok", error_class: "", payload_digest: "draw=1", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 3, monotonic_ns: 900,
+                layer_id: "vulkan_api", operation: "fence", object_id: "guest-fence", parent_id: "guest-command", result_class: "ok", error_class: "", payload_digest: "signaled", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+            TraceEvent(schema_version: 1, run_id: "fixture-a", sequence: 4, monotonic_ns: 1200,
+                layer_id: "vulkan_api", operation: "device_readback", object_id: "guest-image", parent_id: "guest-command", result_class: "ok", error_class: "", payload_digest: "pixels=4", scalar_fields: "count=1", environment_profile_id: "qemu-venus"),
+        ])
+        expect(compare_normalized_traces(candidate, reference, trace_comparison_policy_semantic(), [], []).matched).to_equal(true)
 
     it "rejects a payload mutation even when input/output object mapping is valid":
         val candidate = complete_trace()
@@ -94,6 +135,14 @@ describe "normalized GPU/web differential oracle":
         val result = compare_normalized_traces(invalid, complete_trace(), trace_comparison_policy_semantic(), [], [])
         expect(result.reason).to_equal("invalid-trace")
 
+    it "rejects incomplete or dropped trace evidence":
+        var incomplete = complete_trace()
+        incomplete.complete = false
+        expect(normalized_trace_valid(incomplete)).to_equal(false)
+        var dropped = complete_trace()
+        dropped.dropped_events = 1
+        expect(normalized_trace_valid(dropped)).to_equal(false)
+
     it "requires device submit fence and device-origin readback for GPU profiles":
         val result = trace_satisfies_environment_profile(complete_trace(), required_profile())
         expect(result.matched).to_equal(true)
@@ -115,10 +164,21 @@ describe "normalized GPU/web differential oracle":
         val slow = trace_satisfies_environment_profile(too_slow, required_profile())
         expect(slow.reason).to_equal("trace-time-budget-exceeded")
         val compact = GpuEnvironmentProfile(
-            id: "qemu-venus", required_operations: [], requires_device_execution: false,
-            requires_device_readback: false, requires_fence: false, max_trace_events: 2, max_elapsed_ns: 0,
+            id: "qemu-venus", ui_environment_profile_id: "simpleos-qemu-x86_64-vulkan-virtio", expected_arch: "x86_64", expected_transport: "virtio-gpu", required_features: [], expected_venus_version: "1", expected_device_identity: "virtio-gpu-0", expected_oracle_identity: "mesa-vulkan-1", required_operations: [], requires_device_execution: false,
+            requires_device_origin_readback: false, requires_fence: false, requires_no_fallback: false, max_trace_events: 2, max_elapsed_ns: 0,
         )
         expect(trace_satisfies_environment_profile(complete_trace(), compact).reason).to_equal("trace-event-budget-exceeded")
+
+    it "rejects wrong transport feature oracle identity and fallback":
+        var bad_transport = complete_trace()
+        bad_transport.transport = "pci"
+        expect(trace_satisfies_environment_profile(bad_transport, required_profile()).reason).to_equal("environment-fact-mismatch")
+        var missing_feature = complete_trace()
+        missing_feature.enabled_features = ["3d"]
+        expect(trace_satisfies_environment_profile(missing_feature, required_profile()).reason).to_equal("required-feature-missing")
+        var fallback = complete_trace()
+        fallback.fallback_used = true
+        expect(trace_satisfies_environment_profile(fallback, required_profile()).reason).to_equal("fallback-forbidden")
 
     it "admits only versioned test-only reference adapters with explicit symbols":
         val valid = ReferenceOracleAdapter(

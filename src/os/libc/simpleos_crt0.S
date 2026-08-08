@@ -68,6 +68,20 @@ _start:
     call    rax
 .Largs_published:
 
+    /*
+     * Generated native artifacts may provide this hook to run the manifest
+     * startup admission before constructors and user code.  It is weak so
+     * existing C-only and legacy SimpleOS executables keep their exact entry
+     * behavior until they carry a manifest-aware generated entry.
+     */
+    lea     rax, [rip + __simple_startup_before_main]
+    test    rax, rax
+    jz      .Lstartup_before_main_done
+    mov     rdi, r12
+    mov     rsi, r13
+    call    rax
+.Lstartup_before_main_done:
+
     /* Initialize C++ constructors and libc (.init_array) */
     call    __libc_init_array
 
@@ -114,6 +128,7 @@ _start:
 .weak __bss_end
 .weak __simple_call_module_inits
 .weak rt_set_args
+.weak __simple_startup_before_main
 
 /*
  * environ: fallback .bss storage for the POSIX environment pointer that crt0

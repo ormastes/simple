@@ -1029,13 +1029,13 @@ impl ExecCore {
         let hir_module = match hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint.as_deref())
         {
             Ok(m) => m,
-            Err(e) => return Err(jit_strict_fallback_error("HIR lowering error", &e)),
+            Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
 
         // Lower to MIR
         let mut mir_module = match lower_to_mir(&hir_module) {
             Ok(m) => m,
-            Err(e) => return Err(jit_strict_fallback_error("MIR lowering error", &e)),
+            Err(e) => return Err(jit_strict_fallback_error_for("MIR lowering error", &e, Some(path))),
         };
         if trace {
             eprintln!(
@@ -1258,15 +1258,81 @@ impl ExecCore {
 /// What this can NEVER catch: a silent miscompile that links and *runs* to
 /// completion produces no `Err` at all, so there is nothing here to tag.
 /// See doc/08_tracking/bug/jit_strict_coverage_gap_2026-07-30.md.
-fn jit_strict_fallback_error(kind: &str, err: &impl std::fmt::Display) -> String {
+/// Builtin containers whose paren-less accessors are the de-JIT defect class.
+///
+/// See `PARENLESS_ACCESSOR_FIELDS`. Kept as the exact `struct '<name>'` text
+/// that `hir/lower/expr/access.rs:400` (the SOLE producer of the
+/// "cannot infer field type while lowering" message -- verified by a
+/// whole-tree grep) interpolates, so an `ANY` receiver never matches: the
+/// `struct 'ANY'` drops are a DIFFERENT, wider cause that CAN occur in code
+/// that compiles, and must stay leniently lenient.
+const PARENLESS_ACCESSOR_STRUCTS: [&str; 3] = ["struct 'Array'", "struct 'String'", "struct 'Dict'"];
+
+/// Accessor names that are methods on a builtin container and are NEVER a
+/// legitimate field on one. `xs.length` parses as a field access, has no HIR
+/// lowering, and de-JITs the whole enclosing module (~100-1000x) while still
+/// printing the right answer -- `.length` in particular is the only member the
+/// interpreter also evaluates correctly, which is why it accumulated the most
+/// sites. Genuine user structs with a `length` field are unaffected: they
+/// resolve, so they never reach the error this matches on.
+const PARENLESS_ACCESSOR_FIELDS: [&str; 8] =
+    ["length", "len", "size", "empty", "chars", "first", "last", "capacity"];
+
+/// True when a HIR lowering error is the paren-less-container-accessor class.
+///
+/// This class is escalated to a hard error UNCONDITIONALLY (not merely under
+/// `SIMPLE_JIT_STRICT=1`), because it is never present in a working build:
+/// every file containing one already fails `bin/simple compile` with this same
+/// diagnostic. Making `run` agree with `compile` therefore cannot regress a
+/// build that works today -- it only removes the silent ~100-1000x degradation
+/// that made the class invisible. See
+/// doc/08_tracking/bug/paren_less_accessor_whole_module_de_jit_2026-08-08.md.
+fn is_parenless_container_accessor(msg: &str) -> bool {
+    if !msg.contains("cannot infer field type while lowering") {
+        return false;
+    }
+    if !PARENLESS_ACCESSOR_STRUCTS.iter().any(|s| msg.contains(s)) {
+        return false;
+    }
+    PARENLESS_ACCESSOR_FIELDS
+        .iter()
+        .any(|f| msg.contains(&format!("field '{f}'")))
+}
+
+/// `jit_strict_fallback_error` with the offending source path, when known.
+///
+/// The de-JIT message historically named the struct and field but NOT the
+/// file, so a drop in a deep import could not be attributed without compiling
+/// one file at a time (Finding 2 of the bug doc above). `path` is appended
+/// whenever the caller knows it.
+fn jit_strict_fallback_error_for(kind: &str, err: &impl std::fmt::Display, path: Option<&Path>) -> String {
+    let where_ = match path {
+        Some(p) => format!(" [in {}]", p.display()),
+        None => String::new(),
+    };
+    let msg = format!("{err}");
+
+    if is_parenless_container_accessor(&msg) {
+        eprintln!(
+            "[jit-fallback] {kind}: {msg}{where_}: paren-less accessor on a builtin container. \
+             Use the method form (e.g. `.len()`) instead. This is a hard error in every lane: \
+             it already fails `simple compile`, and silently de-JITing the whole module here \
+             (~100-1000x slowdown, correct output, no diagnostic) is what made it invisible."
+        );
+        return format!(
+            "SIMPLE_JIT_STRICT: {kind}: {msg}{where_}: paren-less accessor on a builtin \
+             container -- use the method form (e.g. `.len()`); refusing to fall back to the interpreter"
+        );
+    }
+
     eprintln!(
-        "[jit-fallback] {kind}: {err}: whole module dropped to the interpreter \
+        "[jit-fallback] {kind}: {msg}{where_}: whole module dropped to the interpreter \
          (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
     );
     if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
-        format!("SIMPLE_JIT_STRICT: {kind}: {err}; refusing to fall back to the interpreter")
+        format!("SIMPLE_JIT_STRICT: {kind}: {msg}{where_}; refusing to fall back to the interpreter")
     } else {
-        format!("{kind}: {err}")
+        format!("{kind}: {msg}{where_}")
     }
 }
 

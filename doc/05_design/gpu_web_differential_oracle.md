@@ -11,17 +11,26 @@
   handles, pixel/layer mutation, malformed sequence, environment/fence/readback,
   budget, and test-only adapter contract.
 
+`simpleos_qemu_gpu_environment_profiles()` exports the three canonical IDs.
+The x86_64 QEMU contract uses `virtio-gpu-pci`; the AArch64 and RISC-V QEMU
+contracts explicitly use `virtio-gpu-mmio`. All three require 3D,
+capset-query-fix, resource-blob, host-visible, and context-init; device
+execution/fence/device-origin-readback; and no fallback.
+
 ## Adapter algorithm
 
 1. The fixture receives a deterministic run ID and environment profile.
 2. Candidate and independent reference adapter each emit `TraceEvent`s at their
    own layer boundary.
 3. Adapter replaces transient handles with deterministic IDs and records only
-   operation-specific semantic digest/scalar facts.
+   operation-specific semantic digest/scalar facts. It records its canonical UI
+   profile, arch/transport, required feature facts, Venus/device/oracle identity,
+   device-origin readback, fallback, dropped-event count, and completion state.
 4. Test supplies a paired candidate/reference ID mapping. The comparator checks
    ordered events and mapped parent lineage; it never maps an unknown ID.
-5. The environment profile gates required operations and live evidence before a
-   trace comparison can be promoted.
+5. The environment profile gates required operations, UI profile, architecture,
+   transport, feature conjunction, Venus/device/oracle identity, no-fallback,
+   and live evidence before a trace comparison can be promoted.
 6. Mutation suite changes exactly one property at a time and asserts rejection.
 
 ## Next implementation lanes

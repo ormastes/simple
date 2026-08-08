@@ -1,0 +1,70 @@
+# CudaVmExecutor.run_source / ResidentSession.run_program discard arena DATA-region state every call
+
+Date: 2026-08-08
+Found by: Task K5 (`CudaExec` notebook lane)
+
+## Summary
+
+`src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl`'s `CudaVmExecutor.run_source`
+calls `build_svmg_arena(code, step_budget, entry_pc)` on every invocation.
+`build_svmg_arena` starts from `zero_bytes(ARENA_TOTAL_SIZE)` and writes only
+the SGP header + the new program's code bytes + the constant `LOG_CAP_OFFSET`
+word — every other byte of the arena, including the whole DATA region beyond
+the code and the entire LOG/RECORD ring region (`>= ARENA_DATA_SIZE`), is
+zeroed and then uploaded to the device via `session.arena_write(arena)`,
+which fully overwrites whatever the device held from the previous launch.
+
+`src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl`'s
+`ResidentSession.run_program` calls `self.executor.run_source(...)`
+internally for each program, so it inherits the same behavior.
+
+## Impact
+
+`doc/05_design/app/tools/notebook_lanes_architecture.md` §4.4 states, for
+both CUDA submodes:
+- Resident: "VM globals in the DATA region carry state between cells."
+- Per-launch: "the arena is retained across launches ... state persists via
+  the arena."
+
+Neither promise holds with a naive per-cell call to `run_source`/
+`run_program`: any `STORE32`/`STORE8` a cell's program wrote into the DATA
+region, and any `SYS_PUTC`/`SYS_RESULT` output accumulated in the LOG/RECORD
+rings, is unconditionally zeroed by the next cell's `build_svmg_arena` call
+before that cell even runs. Two sequential `ResidentSession.run_program`
+calls, or two sequential `CudaVmExecutor.run_source` calls with no
+intervening merge step, therefore behave as if each cell ran against a
+brand-new, unrelated device — the opposite of what §4.4 promises for the
+notebook lane's whole reason for using a resident/persistent-arena mode.
+
+## Workaround (not a fix — lives in the caller, not here)
+
+`src/lib/nogc_sync_mut/notebook/cuda_exec.spl`'s `CudaExec.run_program_with_persistence`
+does NOT call `run_source`/`run_program`. It reimplements the same
+build→write→launch→read sequence at the call site and inserts one extra
+step between `build_svmg_arena` and `session.arena_write`: it copies the
+previous cell's full output arena into the freshly-built one, at the
+*logical* DATA-region offset (`SGP_HEADER_SIZE + code.len()`, which the
+splice tracks per-cell since it shifts as code length changes) for the DATA
+region, and verbatim for the fixed-offset LOG/RECORD ring region beyond
+`ARENA_DATA_SIZE`. This is only correct because `CudaExec` owns the entire
+inter-cell sequencing itself; it does not fix `run_source`/`run_program` for
+any OTHER caller (e.g. a future non-notebook consumer, or a caller wanting
+resident's "true" ring-polling behavior once the `cuMemHostAlloc`/
+watchdog-attribute SFFI gap `cuda_resident_session.spl` already documents is
+closed).
+
+## Suggested fix
+
+Give `CudaVmExecutor` (or `ResidentSession`) an explicit persistence seam —
+e.g. `run_source_preserving_data(source, step_budget, entry_pc,
+prior_arena: [u8]) -> SvmgRunOutcome`, or simply expose the raw output arena
+on `SvmgRunOutcome` so callers can implement the splice without duplicating
+the launch sequence (as this file's `CudaExec` currently must). Either way
+the DATA/LOG/RECORD persistence contract design §4.4 promises should live in
+the shared executor, not be re-derived by every caller.
+
+## Files
+
+- `src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl` (`run_source`, `build_svmg_arena`)
+- `src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl` (`ResidentSession.run_program`)
+- `src/lib/nogc_sync_mut/notebook/cuda_exec.spl` (workaround: `run_program_with_persistence`)

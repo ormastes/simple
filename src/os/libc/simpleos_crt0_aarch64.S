@@ -66,6 +66,19 @@ _start:
     blr     x9
 .Largs_published:
 
+    /*
+     * Generated native artifacts may provide this hook to run the manifest
+     * startup admission before constructors and user code.  It is weak so
+     * existing C-only and legacy SimpleOS executables keep their exact entry
+     * behavior until they carry a manifest-aware generated entry.
+     */
+    ldr     x9, =__simple_startup_before_main
+    cbz     x9, .Lstartup_before_main_done
+    mov     x0, x19
+    mov     x1, x20
+    blr     x9
+.Lstartup_before_main_done:
+
     /* Initialize C++ constructors and libc (.init_array) */
     bl      __libc_init_array
 
@@ -108,6 +121,7 @@ _start:
 .weak __bss_end
 .weak rt_set_args
 .weak __simple_call_module_inits
+.weak __simple_startup_before_main
 
 /*
  * environ: real .bss storage for the POSIX environment pointer (see the

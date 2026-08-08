@@ -36,7 +36,10 @@ keeps the value contract reusable while making test-oracle dependency one-way.
 
 `TraceEvent` contains only `schema_version`, run/run-relative sequence and
 monotonic time, `layer_id`, operation, opaque *normalized* object/parent IDs,
-result/error classes, digest/scalar facts, and an environment profile ID. It
+result/error classes, digest/scalar facts, and an environment profile ID.
+`NormalizedTrace` additionally records canonical UI profile ID, architecture,
+transport, enabled features, Venus/device/oracle identities, device-origin
+readback/fallback facts, `dropped_events`, and `complete`. It
 must never contain raw address, native handle, wall-clock timestamp, or mutable
 payload. Schema v1 layer IDs are:
 
@@ -54,7 +57,8 @@ types: `VirtioGpuDiscoveryProvider`, `VenusProtocolProbe`, `VenusSession`,
 The comparator checks ordered state transitions, result/error class,
 operation-specific digest/scalar facts, and mapped object lineage. An adapter
 provides parallel candidate/reference ID maps for legitimate handle or protocol
-translation. It does *not* accept raw byte equality as proof: Vulkan/Venus
+translation. Per-trace monotonic timestamps prove local event order but are not
+compared for equality across providers. It does *not* accept raw byte equality as proof: Vulkan/Venus
 serialization, driver allocation, and Chromium display-list/layerization may
 transform bytes while preserving the required semantics. Pixel readback is a
 separate exact digest/scalar observation in the relevant trace event.
@@ -95,13 +99,19 @@ GPU command stream. Sources: [Khronos loader architecture](https://github.com/Kh
 
 ## Environment and performance profiles
 
-`GpuEnvironmentProfile` is an admission policy, not proof. It requires a named
-profile plus operations such as discovery/handshake/submit/fence/readback and
-can bound trace event count and run-relative elapsed time. Initial profiles:
+`GpuEnvironmentProfile` is an admission policy, not proof. It binds a named
+profile to canonical UI profile ID, expected architecture/transport, required
+feature conjunction, Venus/device/oracle identities, no-fallback and
+device-origin-readback expectations. It also requires operations such as
+discovery/handshake/submit/fence/readback and can bound trace event count and
+run-relative elapsed time. `complete=false` or `dropped_events>0` is rejected
+before any comparison. Initial profiles:
 
 | Profile | Required facts | Admission proof |
 |---|---|---|
-| `qemu-venus` | virtio 3D/capset/resource-blob/host-visible/context-init; Venus capset; queue/fence/readback | device identity plus exact device-origin pixels; no CPU fallback |
+| `simpleos-qemu-x86_64-vulkan-virtio` | `virtio-gpu-pci`; 3D/capset/resource-blob/host-visible/context-init; Venus capset; queue/fence/readback | normalized `virtio-gpu` + `mesa-vulkan-oracle` identity; exact device-origin pixels; no CPU fallback |
+| `simpleos-qemu-aarch64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
+| `simpleos-qemu-riscv64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
 | `host-vulkan-oracle` | loader ABI/symbols, selected ICD, queue/extension facts | independent reference readback and normalized trace |
 | `chrome-web-oracle` | browser build/viewport/fixture and renderer-stage capture | semantic layout/paint trace plus reviewed exact bitmap artifact |
 

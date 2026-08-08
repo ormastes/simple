@@ -5,7 +5,8 @@
 
 `VirtioGpuPciCapability` records cfg type, BAR, capability ID, 64-bit offset,
 64-bit length, and source capability offset. `VirtioGpuDeviceConfig` records
-events, scanouts, raw/admitted capset counts, and config generation.
+the validated mapped DEVICE_CFG address, events, scanouts, raw/admitted capset
+counts, and config generation.
 `VirtioGpuSharedMemoryRegion` records shmid, BAR, physical base, byte length,
 and whether containment was proven. `VirtioGpuDiscoveryReceipt` records status,
 reason, feature mask, all bounded capset tuples, the optional host-visible
@@ -98,8 +99,8 @@ Frozen ownership after differential-sidecar review:
 | Owner | File |
 |---|---|
 | generic immutable trace schema/injected sink | `src/lib/common/spec/differential_trace.spl` |
-| generic comparator/profiles | `test/helpers/differential_conformance.spl` |
+| generic comparator/profiles | `src/lib/nogc_sync_mut/test/differential_conformance.spl` (test-only import surface) |
 | canonical dynload extern owner | `src/lib/nogc_sync_mut/gpu/reference_oracle_sffi.spl` |
-| safe GPU oracle adapter | `test/helpers/gpu_reference_oracle.spl` |
+| safe GPU oracle adapter | `src/lib/nogc_sync_mut/test/gpu_reference_oracle.spl` |
 | GPU differential specs | `test/03_system/os/qemu/simpleos_venus_differential_spec.spl` |
 | Web/Chrome projection consumer | existing `test/05_perf/web_render_chrome/`, importing only generic test support |

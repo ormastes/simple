@@ -10,6 +10,8 @@
 | display-list/layerization transformation | web | semantic projection matches without byte equality |
 | missing library/symbol/ABI error | dynamic oracle | bounded error and unavailable status, never a synthetic pass |
 | malformed/reordered/oversized trace | shared | schema/profile rejects it |
+| incomplete/dropped trace | shared | comparison is ineligible before oracle evaluation |
+| wrong UI/arch/transport/features/Venus/device/oracle/fallback | GPU profile | exact profile fact rejection |
 
 Performance tests record adapter load time once, per-fixture normalization time,
 trace event count, p50/p95 readback time, and maximum RSS. No live test passes

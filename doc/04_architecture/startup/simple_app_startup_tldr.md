@@ -39,9 +39,9 @@ loading.
 - verification: run
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` for `simple run`
   startup changes.
-- evidence boundary: the callable pre-main owner is implemented, but generated
-  entry-stub/crt0 wiring and live SimpleOS QEMU provider execution remain open
-  gates.
+- evidence boundary: generated native entries and supported SimpleOS CRTs have
+  a structurally checked weak pre-main slot before constructors; a live
+  manifest-aware binding and SimpleOS QEMU provider execution remain open.
 
 ## Open Next
 

@@ -94,15 +94,16 @@ describe "CudaVmExecutor -- SVM-G D3 conformance vectors on a live device":
             step("Initialize the executor")
             var executor = CudaVmExecutor.create()
             val init_err = executor.init(kernel_bytes)
-            # BLOCKED: CudaLaneSession.probe() does not detect device unavailability
-            # (filed as doc/08_tracking/bug/cuda_lane_probe_misses_device_unavailable_2026-08-08.md)
-            # Workaround: check for device unavailable errors and skip gracefully
-            if init_err.contains("device-identity-unavailable"):
-                step("BLOCKED: CUDA device identity unavailable (probe did not detect)")
-                assert_true(true)
-            elif init_err != "":
-                step("Unexpected init error: " + init_err)
-                assert_true(false)
+            # A non-empty init_err on a host that got PAST the skip: probe is a
+            # real defect, not a reason to pass. This host has two healthy
+            # NVIDIA GPUs (RTX A6000 + TITAN RTX) on driver 580.126.16 with
+            # libcuda.so.1 -> libcuda.so.580.126.16 (no userspace/kernel skew),
+            # yet init fails with `cuda-lane-device-identity-unavailable`, so
+            # this spec stays legitimately RED until that is fixed. See
+            # doc/08_tracking/bug/cuda_lane_probe_misses_device_unavailable_2026-08-08.md
+            if init_err != "":
+                step("CUDA executor init failed on a live-GPU host: " + init_err)
+                assert_equal(init_err, "")
             else:
                 step("Run every D3 conformance vector and tally pass/fail")
                 val vectors = all_vectors()
@@ -156,16 +157,14 @@ describe "CudaVmExecutor -- SVM-G D3 conformance vectors on a live device":
             val kernel_bytes = file_read_bytes(_KERNEL_PTX)
             var executor = CudaVmExecutor.create()
             val init_err = executor.init(kernel_bytes)
-            # Same workaround for device unavailability
-            if init_err.contains("device-identity-unavailable"):
-                step("BLOCKED: CUDA device identity unavailable (probe did not detect)")
-                assert_true(true)
-            elif init_err != "":
-                step("Unexpected init error: " + init_err)
-                assert_true(false)
+            # As above: past the skip: probe, a non-empty init_err is a real
+            # defect on a live-GPU host, not a reason to pass. Stays RED until
+            # doc/08_tracking/bug/cuda_lane_probe_misses_device_unavailable_2026-08-08.md
+            # is fixed.
+            if init_err != "":
+                step("CUDA executor init failed on a live-GPU host: " + init_err)
+                assert_equal(init_err, "")
             else:
-                expect(init_err).to_equal("")
-
                 # 33 back-to-back CALLs into the very next instruction (each
                 # CALL is 3 bytes: opcode+u16 target), pushing a return address
                 # every time without ever RET-ing -- the 33rd CALL observes

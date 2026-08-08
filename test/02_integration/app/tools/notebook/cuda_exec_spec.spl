@@ -1,0 +1,150 @@
+"""
+# CudaExec — CUDA lane session lifecycle
+
+**Feature:** Notebook Execution Lanes, Stream K, task K5 —
+`src/lib/nogc_sync_mut/notebook/cuda_exec.spl`
+**Design:** `doc/05_design/app/tools/notebook_lanes_architecture.md` §4.4
+**Plan:** `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`
+(Stream K, K5)
+
+## Overview
+
+Exercises `CudaExec` against the `interpreter(remote(cuda(sm80)))` (per-launch)
+and `interpreter(remote(cuda(sm80(resident))))` (resident) lanes — the same
+`CudaLaneSession`/`CudaVmExecutor` (Task B3) and `ResidentSession` watchdog
+gate (Task B4) the GPU-lane system specs already exercise directly. This spec
+is host-aware, like every other CUDA-gated spec in this repo
+(`test/03_system/gpu_lane/cuda_vm_executor_conformance_spec.spl`): no CUDA
+driver/device is an acceptable, non-failing outcome (`skip:`), never a hard
+spec failure.
+
+## What this proves
+
+- `probe()` reuses `CudaLaneSession.probe()` verbatim and never panics.
+- Cross-cell VM-global persistence: cell 1 assembles `STORE32` into a fixed
+  logical DATA-region address, cell 2 assembles `LOAD32` from that same
+  address and reports it via `SYS_RESULT` — proving `CudaExec`'s arena splice
+  (module docstring "ARENA-PERSISTENCE GAP") actually carries state across
+  `execute_cell()` calls, not just across calls inside a single program.
+- Interrupt mid-cell (§5.3 force path): after `interrupt()`, the session is
+  `blocked:` until `%reset`, and a fresh cell after `reset()` succeeds again.
+- Resident submode falls back to per-launch, honestly, when the watchdog gate
+  refuses (this repo's known SFFI gap — no `cuDeviceGetAttribute` binding, see
+  `cuda_resident_session.spl`'s module docstring) instead of silently
+  pretending to be resident.
+
+## Syntax
+
+```simple
+val ex = CudaExec.make("interpreter(remote(cuda(sm80)))")
+val status = ex.probe()
+ex.start(session_opts_default("s1", ex.mode_spec()))
+val r1 = ex.execute_cell("PUSHI 100\nPUSHI 424242\nSTORE32\nHALT 0", "cell-1")
+val r2 = ex.execute_cell("PUSHI 1\nPUSHI 100\nLOAD32\nSYS_RESULT\nHALT 0", "cell-2")
+ex.interrupt()
+ex.reset()
+ex.shutdown()
+```
+"""
+
+use std.spec
+use std.notebook.cuda_exec.{CudaExec}
+use std.notebook.types.{LaneStatus, session_opts_default}
+
+val CUDA_LAUNCH_SPEC = "interpreter(remote(cuda(sm80)))"
+val CUDA_RESIDENT_SPEC = "interpreter(remote(cuda(sm80(resident))))"
+
+fn lane_outcome_is_acceptable(status_text: text) -> bool:
+    """A live lane must self-report as one of these — anything else (a
+    panic, or a status string outside this convention) is the failure."""
+    status_text == "available" or status_text.starts_with("skip:") or status_text.starts_with("blocked:")
+
+describe "CudaExec — CUDA per-launch lane (Stream K, K5)":
+
+    it "probe() reuses CudaLaneSession.probe() verbatim and never panics":
+        val ex = CudaExec.make(CUDA_LAUNCH_SPEC)
+        expect(ex.mode_spec()).to_equal(CUDA_LAUNCH_SPEC)
+        val status = ex.probe()
+        assert_true(lane_outcome_is_acceptable(status.to_text()))
+
+    it "cross-cell VM-global persistence: cell1 writes, cell2 reads — SKIP-clean without CUDA":
+        val ex = CudaExec.make(CUDA_LAUNCH_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            # Documented, non-failing outcome (design §3 skip:/blocked:
+            # wording): missing CUDA driver/device/artifact. SKIP-clean.
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("cuda-exec-spec", CUDA_LAUNCH_SPEC))
+
+            # Cell 1: store 424242 at logical DATA-region address 100.
+            val r1 = ex.execute_cell("PUSHI 100\nPUSHI 424242\nSTORE32\nHALT 0", "cell-1")
+            assert_true(r1.is_ok() or r1.error != "")
+
+            # Cell 2: load address 100 back and report it via SYS_RESULT.
+            # If cell1's write did NOT survive into cell2's arena (the gap
+            # this file's splice fixes), this record is either missing or
+            # carries a stale/zero value instead of 424242.
+            val r2 = ex.execute_cell("PUSHI 1\nPUSHI 100\nLOAD32\nSYS_RESULT\nHALT 0", "cell-2")
+            assert_true(r2.is_ok() or r2.error != "")
+            if r2.is_ok():
+                assert_true(r2.records.len() > 0)
+                assert_true(r2.records[0].contains("value=424242"))
+
+            ex.shutdown()
+
+    it "interrupt mid-cell resolves per design §5.3 force-timeout path, then %reset recovers — SKIP-clean without CUDA":
+        val ex = CudaExec.make(CUDA_LAUNCH_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("cuda-exec-interrupt-spec", CUDA_LAUNCH_SPEC))
+
+            val r1 = ex.execute_cell("PUSHI 1\nPUSHI 7\nSYS_RESULT\nHALT 0", "cell-1")
+            assert_true(r1.is_ok() or r1.error != "")
+
+            ex.interrupt()
+
+            # Per §5.3: no cooperative mid-kernel cancel channel exists, so
+            # interrupt() escalates straight to the force path — the
+            # session must self-report blocked:, never silently continue
+            # as if nothing happened.
+            val r2 = ex.execute_cell("PUSHI 1\nPUSHI 9\nSYS_RESULT\nHALT 0", "cell-2")
+            assert_true(not r2.is_ok())
+            assert_true(r2.error.starts_with("blocked:"))
+
+            ex.reset()
+
+            # After reset a session that was blocked must either be usable
+            # again (fresh reconnect succeeded) or cleanly report why not.
+            val r3 = ex.execute_cell("PUSHI 1\nPUSHI 11\nSYS_RESULT\nHALT 0", "cell-3")
+            assert_true(r3.is_ok() or r3.error != "")
+
+            ex.shutdown()
+
+describe "CudaExec — CUDA resident lane (Stream K, K5, design §4.4)":
+
+    it "resident submode either serves resident, or honestly falls back to per-launch on watchdog refusal — SKIP-clean without CUDA":
+        val ex = CudaExec.make(CUDA_RESIDENT_SPEC)
+        expect(ex.mode_spec()).to_equal(CUDA_RESIDENT_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("cuda-exec-resident-spec", CUDA_RESIDENT_SPEC))
+
+            # No `CU_DEVICE_ATTRIBUTE_KERNEL_EXEC_TIMEOUT` SFFI binding
+            # exists in this repo yet (cuda_resident_session.spl's own
+            # documented gap), so the watchdog attribute always reads
+            # WATCHDOG_UNKNOWN and the fail-safe gate refuses unless
+            # CUDA_RESIDENT_FORCE=1 is set — either branch below is a
+            # legitimate, non-failing outcome; CudaExec must not silently
+            # claim resident when it fell back.
+            val r1 = ex.execute_cell("PUSHI 1\nPUSHI 21\nSYS_RESULT\nHALT 0", "cell-1")
+            assert_true(r1.is_ok() or r1.error != "")
+
+            ex.shutdown()

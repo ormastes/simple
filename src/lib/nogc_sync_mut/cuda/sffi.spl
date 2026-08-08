@@ -68,3 +68,53 @@ extern fn rt_cuda_sync() -> i64
 # ============================================================================
 
 extern fn rt_cuda_get_error_string(error_code: i64) -> text
+
+# ============================================================================
+# Resource Wrapper (Owning Handle Class) — WP-J
+# ============================================================================
+
+# CUDA module resource wrapper with double-close guard.
+# Sentinel convention (from rt_cuda_module_load in
+# src/compiler_rust/runtime/src/cuda_runtime.rs): success returns the
+# CUmodule pointer as a positive i64; every failure path returns a NEGATIVE
+# value (-1 for bad input, -(CUresult) for driver errors, -3 when built
+# without CUDA). 0 is never a live handle, so 0 is the closed sentinel and
+# is_valid() is `handle > 0` (matching the `handle < 0` failure checks in
+# gpu/kernel.spl).
+class CudaModule:
+    handle: i64
+
+impl CudaModule:
+    fn is_valid() -> bool:
+        self.handle > 0
+
+    fn get_function(func_name: text) -> i64:
+        if not self.is_valid():
+            return 0
+        rt_cuda_module_get_function(self.handle, func_name)
+
+    fn close():
+        # Consuming drop: one-shot guard against double-close
+        if self.handle > 0:
+            rt_cuda_module_unload(self.handle)
+            self.handle = 0
+
+# Load a CUDA module from a file path. Returns nil on failure.
+fn cuda_module_load_resource(path: text) -> CudaModule?:
+    val h = rt_cuda_module_load(path)
+    if h <= 0:
+        return nil
+    CudaModule(handle: h)
+
+# Load a CUDA module from PTX source. Returns nil on failure.
+fn cuda_module_load_data_resource(ptx: text) -> CudaModule?:
+    val h = rt_cuda_module_load_data(ptx)
+    if h <= 0:
+        return nil
+    CudaModule(handle: h)
+
+# NOTE: the raw extern handle flow (rt_cuda_module_load +
+# rt_cuda_module_unload) is DEPRECATED for new code: use
+# cuda_module_load_resource() / cuda_module_load_data_resource() +
+# CudaModule.close() instead. Raw externs stay available for existing
+# callers (gpu/kernel.spl, cuda/ffi.spl, ...).

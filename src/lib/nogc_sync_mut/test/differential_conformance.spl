@@ -9,10 +9,18 @@ use common.spec.differential_trace.{TraceEvent, NormalizedTrace, normalized_trac
 
 pub struct GpuEnvironmentProfile:
     id: text
+    ui_environment_profile_id: text
+    expected_arch: text
+    expected_transport: text
+    required_features: [text]
+    expected_venus_version: text
+    expected_device_identity: text
+    expected_oracle_identity: text
     required_operations: [text]
     requires_device_execution: bool
-    requires_device_readback: bool
+    requires_device_origin_readback: bool
     requires_fence: bool
+    requires_no_fallback: bool
     max_trace_events: i64
     max_elapsed_ns: i64
 
@@ -42,6 +50,32 @@ pub fn trace_comparison_policy_semantic() -> TraceComparisonPolicy:
         compare_monotonic_order: true,
         compare_run_id: false,
     )
+
+fn _simpleos_qemu_gpu_environment_profile(id: text, arch: text, transport: text) -> GpuEnvironmentProfile:
+    GpuEnvironmentProfile(
+        id: id,
+        ui_environment_profile_id: id,
+        expected_arch: arch,
+        expected_transport: transport,
+        required_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        expected_venus_version: "1",
+        expected_device_identity: "virtio-gpu",
+        expected_oracle_identity: "mesa-vulkan-oracle",
+        required_operations: ["virtio_transport:discover", "venus_protocol:handshake", "vulkan_api:submit", "vulkan_api:fence", "vulkan_api:device_readback"],
+        requires_device_execution: true,
+        requires_device_origin_readback: true,
+        requires_fence: true,
+        requires_no_fallback: true,
+        max_trace_events: 4096,
+        max_elapsed_ns: 0,
+    )
+
+pub fn simpleos_qemu_gpu_environment_profiles() -> [GpuEnvironmentProfile]:
+    [
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-x86_64-vulkan-virtio", "x86_64", "virtio-gpu-pci"),
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-aarch64-vulkan-virtio", "aarch64", "virtio-gpu-mmio"),
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-riscv64-vulkan-virtio", "riscv64", "virtio-gpu-mmio"),
+    ]
 
 pub fn reference_oracle_adapter_valid(adapter: ReferenceOracleAdapter) -> bool:
     if not adapter.test_only or adapter.name == "" or adapter.library_name == "":
@@ -74,8 +108,8 @@ fn _event_semantically_equal(candidate: TraceEvent, reference: TraceEvent, polic
         return false
     if policy.require_environment_match and candidate.environment_profile_id != reference.environment_profile_id:
         return false
-    if policy.compare_monotonic_order and candidate.monotonic_ns != reference.monotonic_ns:
-        return false
+    # Each trace is independently validated as monotonically ordered. Timestamps
+    # are not a cross-provider equality oracle: devices legitimately differ.
     true
 
 pub fn compare_normalized_traces(candidate: NormalizedTrace, reference: NormalizedTrace, policy: TraceComparisonPolicy, candidate_ids: [text], reference_ids: [text]) -> TraceComparison:
@@ -87,6 +121,8 @@ pub fn compare_normalized_traces(candidate: NormalizedTrace, reference: Normaliz
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "schema-mismatch")
     if policy.require_environment_match and candidate.environment_profile_id != reference.environment_profile_id:
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-profile-mismatch")
+    if policy.require_environment_match and (candidate.ui_environment_profile_id != reference.ui_environment_profile_id or candidate.arch != reference.arch or candidate.transport != reference.transport or candidate.venus_version != reference.venus_version or candidate.device_identity != reference.device_identity or candidate.oracle_identity != reference.oracle_identity or candidate.device_origin_readback != reference.device_origin_readback or candidate.fallback_used != reference.fallback_used):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-fact-mismatch")
     if policy.compare_run_id and candidate.run_id != reference.run_id:
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "run-id-mismatch")
     if candidate.events.len() != reference.events.len():
@@ -114,9 +150,24 @@ fn _trace_has_operation(trace: NormalizedTrace, required: text) -> bool:
         index = index + 1
     false
 
+fn _trace_has_feature(trace: NormalizedTrace, required: text) -> bool:
+    var index = 0
+    while index < trace.enabled_features.len():
+        if trace.enabled_features[index] == required:
+            return true
+        index = index + 1
+    false
+
 pub fn trace_satisfies_environment_profile(trace: NormalizedTrace, profile: GpuEnvironmentProfile) -> TraceComparison:
-    if not normalized_trace_valid(trace) or trace.environment_profile_id != profile.id:
+    if not normalized_trace_valid(trace) or trace.environment_profile_id != profile.id or trace.ui_environment_profile_id != profile.ui_environment_profile_id:
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-profile-mismatch")
+    if trace.arch != profile.expected_arch or trace.transport != profile.expected_transport or trace.venus_version != profile.expected_venus_version or trace.device_identity != profile.expected_device_identity or trace.oracle_identity != profile.expected_oracle_identity:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-fact-mismatch")
+    var feature_index = 0
+    while feature_index < profile.required_features.len():
+        if not _trace_has_feature(trace, profile.required_features[feature_index]):
+            return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "required-feature-missing")
+        feature_index = feature_index + 1
     if profile.max_trace_events > 0 and trace.events.len() > profile.max_trace_events:
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "trace-event-budget-exceeded")
     if trace.events.len() > 0 and profile.max_elapsed_ns > 0:
@@ -132,6 +183,8 @@ pub fn trace_satisfies_environment_profile(trace: NormalizedTrace, profile: GpuE
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "device-execution-missing")
     if profile.requires_fence and not _trace_has_operation(trace, "vulkan_api:fence"):
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fence-missing")
-    if profile.requires_device_readback and not _trace_has_operation(trace, "vulkan_api:device_readback"):
+    if profile.requires_device_origin_readback and (not trace.device_origin_readback or not _trace_has_operation(trace, "vulkan_api:device_readback")):
         return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "device-readback-missing")
+    if profile.requires_no_fallback and trace.fallback_used:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fallback-forbidden")
     TraceComparison(matched: true, mismatch_count: 0, first_sequence: -1, reason: "match")

@@ -541,5 +541,64 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ============================================================================
+# Resource Wrapper (Owning Handle Class) — WP-J
+# ============================================================================
+
+# Raw TCP socket resource wrapper with double-close guard.
+# Sentinel is -1: rt_io_tcp_socket_create returns the socket fd on success
+# and -1 on failure (see tcp_backend_socket_create docstring and the
+# `if fd < 0` checks in tcp_backend_bind_with_reuseport above).
+class TcpSocket:
+    fd: i64
+
+impl TcpSocket:
+    fn is_valid() -> bool:
+        self.fd >= 0
+
+    fn bind(addr: text) -> bool:
+        if not self.is_valid():
+            return false
+        rt_io_tcp_bind_fd(self.fd, addr)
+
+    fn listen(backlog: i64) -> bool:
+        if not self.is_valid():
+            return false
+        rt_io_tcp_listen(self.fd, backlog)
+
+    fn set_reuseaddr(enabled: bool) -> bool:
+        if not self.is_valid():
+            return false
+        rt_io_tcp_set_reuseaddr(self.fd, enabled)
+
+    fn set_reuseport(enabled: bool) -> bool:
+        if not self.is_valid():
+            return false
+        rt_io_tcp_set_reuseport(self.fd, enabled)
+
+    fn local_addr() -> text?:
+        if not self.is_valid():
+            return nil
+        rt_io_tcp_local_addr(self.fd)
+
+    fn close():
+        # Consuming drop: one-shot guard against double-close
+        if self.fd >= 0:
+            rt_io_tcp_close(self.fd)
+            self.fd = -1
+
+# Create a raw TCP socket (not yet bound). family: 0 = IPv4, 1 = IPv6.
+# Returns nil on failure.
+fn tcp_socket_create_resource(family: i64) -> TcpSocket?:
+    val fd = rt_io_tcp_socket_create(family)
+    if fd < 0:
+        return nil
+    TcpSocket(fd: fd)
+
+# NOTE: the raw fd-based helpers above (tcp_backend_socket_create,
+# tcp_backend_close, ...) are DEPRECATED for new code: use
+# tcp_socket_create_resource() + TcpSocket.close() instead. They are kept
+# working for existing callers.
+
+# ============================================================================
 # Exports
 # ============================================================================

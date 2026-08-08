@@ -8,7 +8,8 @@
 - Future `std.gpu.reference_oracle_sffi` dynamically loads Mesa/Vulkan only as
   a verified test oracle; production never imports it.
 - Compare ordered semantic transitions, errors, mapped lineage, and digest/
-  scalar facts—not raw protocol bytes. Device pixels remain exact observations.
+  scalar facts—not raw protocol bytes or cross-provider timestamps. Incomplete
+  or dropped traces fail; device pixels remain exact observations.
 - VUDA has no current repository use; do not migrate or add it.
 
 See [full architecture](gpu_web_differential_oracle.md) and

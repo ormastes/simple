@@ -258,3 +258,98 @@ guard (fail only on *new* `std.*` imports not already in a pinned baseline
 list of the current 352) is viable now; the baseline should be regenerated
 from the corrected resolver above, not the original 122.
 
+## Triage update (2026-08-08, third pass — the ~190 remaining basenames)
+
+**The 352/202 figure was itself wrong, in the other direction this time.**
+Rebuilding the resolver from scratch against a pristine `git archive
+origin/main` extraction (never the shared WC) and re-injection-testing it
+found two more resolver defects the second pass's own 18/18 calibration did
+not catch:
+
+1. **Variable-reuse bug**: the second draft's tier-fallback loop re-bound a
+   loop variable (`cand`) across nested loops in a way that leaked a stale
+   value from a prior iteration into the bare-directory check, producing
+   nondeterministic false positives. Rewritten as a pure candidate-list
+   builder (`candidates_direct` + explicit tier prepending), no shared mutable
+   state across iterations.
+2. **Missing `common` implicit root**: `src/lib/common/` is *itself* an
+   implicit search root exactly parallel to the nine execution-model tiers —
+   `std.json`, `std.error`, `std.unicode_math`, `std.cert.x509_typed`,
+   `std.contracts.contracts`, `std.math.bignum.bignat`, `std.encoding.bson`,
+   `std.sdn.value.SdnValue` etc. all resolve via `src/lib/common/<path>`, not
+   a top-level `src/lib/<path>`. Neither prior pass modeled this, which alone
+   explains ~15 of the "missing" clusters in the second pass's un-itemized
+   352 (`math`, `encoding`, `js`, `json`, `convert`, `unicode_math`, `sdn`,
+   `error`, `window_protocol`, `text_advanced`, `string_builder`, `result`,
+   `result_ce`, `option`, `option_ce`, `format`, `computation`, `cert`,
+   `algorithm_utils`, `contracts` — all false positives from the second pass).
+3. **Numeric-prefix directories are a real, load-bearing convention**: several
+   `src/lib` subtrees order their children with a `NN.` prefix (e.g.
+   `src/lib/editor/00.common/`, `src/lib/editor/70.backend/` — the same
+   convention `.claude/rules/structure.md` documents for `src/compiler/`'s
+   00-99 numbered layers). `use std.editor.backend.gui_backend` legitimately
+   resolves to `editor/70.backend/gui_backend.spl`. This single fix cleared
+   the entire "editor" cluster (46 flagged paths in the second pass) to zero.
+
+**Corrected, injection-tested count: 162 flagged spec paths, 85 unique
+basenames** (vs. the second pass's 352/202 — the drop is ~all resolver
+false-positives, not new fixes; only the already-landed `property_tree` fix
+changed real content). Calibration: 22/22 both directions (11 known-good
+including `std.editor.backend.gui_backend`, `std.math.bignum.bignat`,
+`std.atom` under the immut tiers, and 11 known-bad including
+`std.blink.zzz_fake`, `std.bare.hal.gpio`, `std.parser.treesitter`). Resolver:
+`/tmp/spectriage/resolve.py` (scratch, not committed — reproducible from
+`git archive origin/main` + the tier/common/numeric-prefix rules above).
+
+Cluster breakdown of the corrected 162/85:
+
+    gc_async_mut 66 | blink 66 | common 21 | cc 20 | parser 14 | nogc_async_mut 12
+    bare 10 | tooling 6 | debug 6 | sys 5 | test 4 | system 4 | spec 2 | signature 2
+    probability_utils 2 | plugin 2 | nogc_sync_mut 2 | game_engine 2 | file 2
+    ds_utils 2 | diagnostics 2 | collection_helpers 2 | prelude 1 | doctest 1 | app 1
+
+**Deletion-history check, all 85 basenames' top-level namespaces:** `git log
+origin/main --diff-filter=D --name-only -- <path>` returns **empty for every
+single one** checked (`bare/hal`, `sys`, `signature`, `probability_utils`,
+`plugin`, `game_engine`, `file`, `ds_utils`, `diagnostics`, `collection_helpers`,
+`prelude`, `doctest`, `app`, `test/helpers`, `tooling/compiler`, `debug/remote`,
+plus the previously-checked `blink`, `cc`, `parser.treesitter`, and the new
+`gc_async_mut.{database,compression,dap,fs*}` clusters). **None of the 352
+flagged imports point at code that was ever landed and later removed.** Every
+one is consistent with planned/red-phase work that was never landed, the same
+pattern already established for `parser.treesitter*`.
+
+**Decision: leave, do not delete, do not land.** Given (a) zero deletion
+history anywhere in the set, (b) the explicit instruction not to land
+another session's WC-only work to justify a spec, and (c) a WC-presence
+check (tightened to require an exact `src/lib/<matched-prefix>/...` path,
+not a loose same-tier-directory match — the loose version wrongly "matched"
+unrelated siblings like `common.engine.signal.event_bus` against
+`common/engine/audio/...`) found only 5 of 141 unique bad module strings with
+any tight WC match (`common.engine.signal.event_bus`, `common.math.field.*`,
+`common.svmg.ref_vm`, `nogc_sync_mut.src.tooling.regex_utils`) — not enough
+to justify landing anything, and not enough to prove the rest are orphaned
+either. **None of the remaining 85 basenames were individually triaged to a
+delete/land verdict this pass** — the evidence available (no deletion
+history + thin WC signal) points to "leave as planned/red-phase," same
+verdict for effectively the whole set, so no specs were deleted and no
+modules were landed in this pass.
+
+**Harness spot-check:** attempted to confirm via `bin/simple test` on
+`test/01_unit/lib/crypto/crypto_reference_spec.spl` (content-identical to
+`origin/main`, verified by blob hash) but the run did not complete within the
+available time budget (shared machine, concurrent sessions running other
+long specs). Not used as evidence either way; the file-existence resolver
+(injection-tested 22/22) is the primary oracle here, consistent with how the
+first pass validated the `hash` facade.
+
+**Guard viability, restated:** still not a zero-threshold gate (162 of ~254
+imports checked still flag). A grandfathered guard is viable at the
+corrected 162/85 baseline. **Not landed this pass** — regenerating and
+pinning a baseline now would freeze the count I could not fully individually
+triage; leaving that to a follow-up pass that either lands it as a proper
+baseline file or explicitly re-derives at triage-complete time.
+
+**Not landed:** no code changes this pass beyond this doc update. No specs
+deleted, no modules landed, no guard script added.
+

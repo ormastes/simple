@@ -36,6 +36,9 @@ use os.drivers.virtio.virtio_gpu_types.{
 }
 use os.kernel.log.klog_api.{log_info}
 
+val GPU_CAPSET_COUNT_LIMIT: u32 = 64
+val GPU_CAPSET_PAYLOAD_LIMIT: u64 = 4072
+
 # ============================================================================
 # Capset descriptor
 # ============================================================================
@@ -88,6 +91,12 @@ fn gpu_features_venus_capable(acked: u32) -> bool:
     three and still expose no Venus capset. Capset discovery is what decides.
     """
     gpu_features_have_3d(acked) and gpu_features_have_blob(acked) and gpu_features_have_ctx_init(acked)
+
+fn gpu_capset_count_valid(num_capsets: u32) -> bool:
+    num_capsets <= GPU_CAPSET_COUNT_LIMIT
+
+fn gpu_capset_payload_size_valid(max_size: u64) -> bool:
+    max_size > 0 and max_size <= GPU_CAPSET_PAYLOAD_LIMIT
 
 # ============================================================================
 # Little-endian byte helpers — PURE
@@ -207,13 +216,16 @@ fn gpu_query_capsets(drv: VirtioGpuDriver, num_capsets: u32) -> List<GpuCapset>:
     `num_capsets` is passed IN rather than read from device config space: the
     driver currently maps only the common/notify/isr virtio-pci capabilities,
     NOT the device-specific config window where virtio_gpu_config.num_capsets
-    lives (offset 8). Reading offset 8 off the common-cfg window would return
+    lives (offset 12). Reading offset 12 off the common-cfg window would return
     a device_feature field and yield a plausible-looking wrong count. Wiring a
     DEVICE_CFG accessor is tracked as E2 work.
     """
     var out: List<GpuCapset> = []
     if not drv.has_3d:
         log_info("[virtio] " + "[virtio-gpu] capset walk skipped: no VIRGL feature")
+        return out
+    if not gpu_capset_count_valid(num_capsets):
+        log_info("[virtio] " + "[virtio-gpu] capset walk rejected: count={num_capsets} limit={GPU_CAPSET_COUNT_LIMIT}")
         return out
     var i: u32 = 0
     while i < num_capsets:
@@ -234,6 +246,8 @@ fn gpu_get_capset(drv: VirtioGpuDriver, capset_id: u32, capset_version: u32, max
     """
     if not drv.has_3d:
         return Err("GET_CAPSET requires VIRTIO_GPU_F_VIRGL (not acked)")
+    if not gpu_capset_payload_size_valid(max_size):
+        return Err("GET_CAPSET payload out of bounds ({max_size} > {GPU_CAPSET_PAYLOAD_LIMIT})")
 
     drv._write_ctrl_hdr(VIRTIO_GPU_CMD_GET_CAPSET as u64)
     ram_write32_raw(drv.cmd_buf_virt + GET_CAPSET_OFF_ID, capset_id as u64)
