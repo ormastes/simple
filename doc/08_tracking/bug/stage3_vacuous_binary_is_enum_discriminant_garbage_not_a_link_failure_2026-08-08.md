@@ -51,6 +51,29 @@ largest: 3200 .text.compiler.10.frontend.core.tokens.tok_kind_name
 compares never-written stack slots (`-0x49(%rsp)`, ...) and returns. Because it
 references nothing, `--gc-sections` legitimately discarded every other section.
 
+**`--gc-sections` is confirmed present on this exact link path** (this is the
+load-bearing check for the whole "the link is fine" claim — without it, a normal
+`ld` would have kept all 208,747 bytes and something else dropped them):
+
+- `src/compiler/70.backend/backend/llvm_native_link.spl:283` and `:437`
+  — `closure_args.push("-Wl,--gc-sections")`, on the `link_llvm_native` path
+  that `driver_bootstrap.spl:478/543` invokes.
+- `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:283`
+  — `args.push("--gc-sections")` in `link_native_unix` (direct `ld`), and
+  `:701`/`:735` `-Wl,--gc-sections` in the `cc` fallback.
+- `src/compiler/70.backend/backend/llvm_backend_tools.spl:404`
+  — `ld_args + " --gc-sections"`.
+
+So the 208,747 → 10,613 byte `.text` reduction is section GC operating correctly
+on code that references nothing, not code loss in the linker.
+
+All source line references in this document were verified identical between the
+working copy and `origin/main` at the time of writing (`git hash-object` vs
+`git rev-parse origin/main:<path>`) for `function_lowering.spl`,
+`bootstrap_globals.spl`, `mir_lowering_types.spl`, `driver_bootstrap.spl`,
+`driver_aot_pipeline.spl`, `driver_aot_native_output.spl`, and
+`driver_pipeline_lowering.spl`.
+
 ### 3. The LLVM IR is the smoking gun
 
 Instruction census over all 5,767 `define`s in `simple_llvm_567760.ll`:
