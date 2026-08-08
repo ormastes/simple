@@ -596,6 +596,63 @@ at :1012-1056.
 manual call-chain trace over `.spl` source), not a runtime execution proof —
 consistent with the unit's read-only/deliverable-is-a-doc scope in the plan.
 
+### T8 re-run after T10 (2026-08-08) — closes open item (3) above
+
+T10 (`f4ed794fac91`, landed 2026-08-07/08) extended `ensure_kernel_table()`
+to probe and register `KERNEL_OP_SRC_OVER_CONST` / `KERNEL_OP_SRC_OVER_IMAGE`
+/ `KERNEL_OP_MASK_SRC_OVER` alongside `KERNEL_OP_FILL_CONST`
+(`backend_software.spl:1012-1056`). This re-run answers the item this section
+deferred: does registering those three ops give them a real Layer-1
+(batch-dispatcher) production call site, the same way `fill_const` has one?
+
+```
+$ grep -n "span_batch_push" src/lib/gc_async_mut/gpu/engine2d/backend_software.spl \
+    src/lib/common/gpu/engine2d/kernel_registry.spl
+src/lib/common/gpu/engine2d/kernel_registry.spl:212:fn span_batch_push(...)
+src/lib/common/gpu/engine2d/kernel_registry.spl:287:export span_batch_new, span_batch_push, ...
+src/lib/gc_async_mut/gpu/engine2d/backend_software.spl:1071:
+    span_batch_push(batch, KERNEL_OP_FILL_CONST, offset as i64, 0, count as i64, color as i64, 0)
+```
+
+A repo-wide grep for `span_batch_push` (excluding `_spec.spl`) finds exactly
+one production call site, and it pushes `KERNEL_OP_FILL_CONST` only. No
+production code anywhere pushes `KERNEL_OP_SRC_OVER_CONST`,
+`KERNEL_OP_SRC_OVER_IMAGE`, or `KERNEL_OP_MASK_SRC_OVER` into a `SpanOpBatch`.
+
+Corroborating from the callee side — `simd_isa_src_over_const` /
+`simd_isa_src_over_image` / `simd_isa_mask_src_over`
+(`src/lib/nogc_sync_mut/gpu/engine2d/simd_isa_provider.spl:83,110,136`) are
+called from exactly two places each: (a) `simd_span_batch_execute`'s own
+op-dispatch switch inside that same file (`:244`, `:250`, `:256` — the
+generic executor that only fires for ops actually present in a pushed
+batch), and (b) T10's three new probe functions in `backend_software.spl`
+(measurement-only, per T10's own note that probes never register — the
+table owner does). No other `.spl` file in `src/` references these three
+symbols.
+
+**Verdict: STILL REFUTED for `fill_const` (per the original Layer 1/Layer 2
+findings above, unchanged), and STILL ZERO for the three T10-added ops at
+Layer 1.** T10 gives `src_over_const`/`src_over_image`/`mask_src_over` a real,
+honest, bit-exact-gated *registration* path into the kernel table — but
+registration is necessary, not sufficient, for a production call site:
+`simd_span_batch_execute` can only route a batch entry to a registered slot
+if some caller first constructs a `SpanOpBatch` containing that op via
+`span_batch_push`, and no production caller does that for these three ops
+today. This is the same "wired but not reached from production" shape T10
+itself found for the *fill* bucket's promotion (registered ≠ exercised), one
+layer up: here it's registered ≠ *reachable at all* from a real draw call
+(`fill_const` is at least reachable, per Layer 1 above). The three ops'
+blend/composite work in production still goes through Layer 2's separate
+direct-native-kernel path (`engine2d_simd_blend_row_u32` etc., unchanged by
+T10), not through `simd_isa_src_over_const/image/mask_src_over` at all.
+
+This closes T8's deferred item (3): re-reading Layer 1 for T10's three new
+ops does not change the "REFUTED" verdict's scope — it adds a distinct,
+narrower negative finding (zero batch-dispatcher call sites for the three new
+ops) alongside the pre-existing positive finding for `fill_const`/Layer 2.
+Method: same as above — anchored `grep -rn` over `src/`, not a runtime probe;
+consistent with T8's read-only scope in the plan.
+
 ## Run 5 — T19 regression-gate re-run (2026-08-07)
 
 T19 (`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`)
