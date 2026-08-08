@@ -1,0 +1,300 @@
+#!/bin/sh
+# Private immutable LLVM provider snapshot used by the ARM producer/consumer.
+
+llvm_23_1_snapshot_sha256_file() {
+    llvm_23_1_snapshot_sha256_line=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        llvm_23_1_snapshot_sha256_line="$(sha256sum "$1")" || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        llvm_23_1_snapshot_sha256_line="$(shasum -a 256 "$1")" || return 1
+    else
+        return 1
+    fi
+    printf '%s\n' "${llvm_23_1_snapshot_sha256_line%% *}"
+}
+
+llvm_23_1_snapshot_sha256() {
+    llvm_23_1_snapshot_sha256_file "$1"
+}
+
+llvm_23_1_snapshot_stat_uid() {
+    stat -c %u "$1" 2>/dev/null || stat -f %u "$1"
+}
+
+llvm_23_1_snapshot_stat_mode() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+llvm_23_1_snapshot_manifest_value() {
+    llvm_23_1_snapshot_manifest_key="$2"
+    awk -F= -v key="$llvm_23_1_snapshot_manifest_key" '
+        $1 == key { if (++seen != 1) exit 1; print substr($0, length(key) + 2) }
+        END { if (seen != 1) exit 1 }
+    ' "$1"
+}
+
+llvm_23_1_snapshot_build_staging() {
+    [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || return 1
+    llvm_23_1_snapshot_origin_prefix="$1"
+    llvm_23_1_snapshot_origin_manifest="$2"
+    llvm_23_1_snapshot_expected_manifest_sha256="$3"
+    llvm_23_1_snapshot_dir="$4"
+    llvm_23_1_snapshot_manifest_prefix=${5:-$llvm_23_1_snapshot_dir}
+
+    printf '%s\n' "$llvm_23_1_snapshot_expected_manifest_sha256" |
+        grep -Eq '^[0-9a-f]{64}$' || return 1
+    [ -d "$llvm_23_1_snapshot_origin_prefix" ] &&
+        [ ! -L "$llvm_23_1_snapshot_origin_prefix" ] &&
+        [ -d "$llvm_23_1_snapshot_origin_prefix/bin" ] &&
+        [ ! -L "$llvm_23_1_snapshot_origin_prefix/bin" ] || return 1
+    llvm_23_1_snapshot_origin_prefix_real="$(
+        CDPATH= cd -- "$llvm_23_1_snapshot_origin_prefix" 2>/dev/null && pwd -P
+    )" || return 1
+    [ "$llvm_23_1_snapshot_origin_prefix_real" = "$llvm_23_1_snapshot_origin_prefix" ] ||
+        return 1
+    [ -f "$llvm_23_1_snapshot_origin_manifest" ] &&
+        [ ! -L "$llvm_23_1_snapshot_origin_manifest" ] || return 1
+    [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_origin_manifest")" = "$llvm_23_1_snapshot_expected_manifest_sha256" ] || return 1
+    [ "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_origin_manifest" LLVM_23_1_PROVIDER_SCHEMA)" = "llvm-23.1-provider-v3" ] || return 1
+    [ "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_origin_manifest" LLVM_23_1_PREFIX)" = "$llvm_23_1_snapshot_origin_prefix" ] || return 1
+    [ ! -e "$llvm_23_1_snapshot_dir" ] &&
+        [ ! -L "$llvm_23_1_snapshot_dir" ] || return 1
+
+    mkdir -m 700 "$llvm_23_1_snapshot_dir" || return 1
+    mkdir -m 700 "$llvm_23_1_snapshot_dir/bin" || return 1
+    cp -p "$llvm_23_1_snapshot_origin_manifest" "$llvm_23_1_snapshot_dir/origin-provider.env" ||
+        return 1
+    [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_dir/origin-provider.env")" = "$llvm_23_1_snapshot_expected_manifest_sha256" ] || return 1
+    llvm_23_1_snapshot_authenticated_manifest="$llvm_23_1_snapshot_dir/origin-provider.env"
+    llvm_23_1_snapshot_tools='
+CLANG:clang
+LINKER:ld.lld
+LLVM_AR:llvm-ar
+LLVM_AS:llvm-as
+LLVM_OPT:opt
+LLVM_LLC:llc
+LLVM_CONFIG:llvm-config
+LLVM_OBJCOPY:llvm-objcopy
+LLVM_NM:llvm-nm
+LLVM_READOBJ:llvm-readobj'
+    llvm_23_1_snapshot_tool_lines="$llvm_23_1_snapshot_tools"
+    while IFS=: read -r llvm_23_1_snapshot_key llvm_23_1_snapshot_name; do
+        [ -n "$llvm_23_1_snapshot_key" ] || continue
+        llvm_23_1_snapshot_origin_tool="$(
+            llvm_23_1_snapshot_manifest_value \
+                "$llvm_23_1_snapshot_authenticated_manifest" "$llvm_23_1_snapshot_key"
+        )" || return 1
+        llvm_23_1_snapshot_origin_hash="$(
+            llvm_23_1_snapshot_manifest_value \
+                "$llvm_23_1_snapshot_authenticated_manifest" "${llvm_23_1_snapshot_key}_SHA256"
+        )" || return 1
+        [ "$llvm_23_1_snapshot_origin_tool" = "$llvm_23_1_snapshot_origin_prefix/bin/$llvm_23_1_snapshot_name" ] || return 1
+        printf '%s\n' "$llvm_23_1_snapshot_origin_hash" |
+            grep -Eq '^[0-9a-f]{64}$' || return 1
+        [ -x "$llvm_23_1_snapshot_origin_tool" ] &&
+            [ -f "$llvm_23_1_snapshot_origin_tool" ] &&
+            [ ! -L "$llvm_23_1_snapshot_origin_tool" ] || return 1
+        [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_origin_tool")" = "$llvm_23_1_snapshot_origin_hash" ] || return 1
+        llvm_23_1_snapshot_destination="$llvm_23_1_snapshot_dir/bin/$llvm_23_1_snapshot_name"
+        cp -p "$llvm_23_1_snapshot_origin_tool" "$llvm_23_1_snapshot_destination" || return 1
+        [ ! -L "$llvm_23_1_snapshot_destination" ] || return 1
+        [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_destination")" = "$llvm_23_1_snapshot_origin_hash" ] || return 1
+    done <<EOF
+$llvm_23_1_snapshot_tool_lines
+EOF
+
+    llvm_23_1_snapshot_manifest="$llvm_23_1_snapshot_dir/provider.env"
+    llvm_23_1_snapshot_manifest_tmp="$llvm_23_1_snapshot_manifest.tmp.$$"
+    awk -F= -v OFS= -v prefix="$llvm_23_1_snapshot_manifest_prefix" '
+        BEGIN {
+            tool["CLANG"]="clang"; tool["LINKER"]="ld.lld"
+            tool["LLVM_AR"]="llvm-ar"; tool["LLVM_AS"]="llvm-as"
+            tool["LLVM_OPT"]="opt"; tool["LLVM_LLC"]="llc"
+            tool["LLVM_CONFIG"]="llvm-config"
+            tool["LLVM_OBJCOPY"]="llvm-objcopy"
+            tool["LLVM_NM"]="llvm-nm"; tool["LLVM_READOBJ"]="llvm-readobj"
+        }
+        {
+            if ($1 in tool) $0 = $1 "=" prefix "/bin/" tool[$1]
+            if ($1 == "LLVM_23_1_PREFIX") $0 = $1 "=" prefix
+            print
+        }
+    ' "$llvm_23_1_snapshot_authenticated_manifest" >"$llvm_23_1_snapshot_manifest_tmp" || return 1
+    printf 'LLVM_23_1_ORIGIN_MANIFEST_SHA256=%s\n' \
+        "$llvm_23_1_snapshot_expected_manifest_sha256" \
+        >>"$llvm_23_1_snapshot_manifest_tmp" || return 1
+    mv "$llvm_23_1_snapshot_manifest_tmp" "$llvm_23_1_snapshot_manifest" || return 1
+    chmod 500 "$llvm_23_1_snapshot_dir" "$llvm_23_1_snapshot_dir/bin" || return 1
+    chmod 500 "$llvm_23_1_snapshot_dir/bin"/* || return 1
+    chmod 400 "$llvm_23_1_snapshot_manifest" "$llvm_23_1_snapshot_dir/origin-provider.env" ||
+        return 1
+    LLVM_23_1_SNAPSHOT_PREFIX="$llvm_23_1_snapshot_dir"
+    LLVM_23_1_SNAPSHOT_MANIFEST="$llvm_23_1_snapshot_manifest"
+    LLVM_23_1_SNAPSHOT_MANIFEST_SHA256="$(
+        llvm_23_1_snapshot_sha256_file "$LLVM_23_1_SNAPSHOT_MANIFEST"
+    )" || return 1
+    export LLVM_23_1_SNAPSHOT_PREFIX LLVM_23_1_SNAPSHOT_MANIFEST \
+        LLVM_23_1_SNAPSHOT_MANIFEST_SHA256
+}
+
+llvm_23_1_snapshot_validate() {
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || return 1
+    llvm_23_1_snapshot_validate_dir=$1
+    llvm_23_1_snapshot_validate_origin_sha=$2
+    llvm_23_1_snapshot_validate_declared_prefix=${3:-$llvm_23_1_snapshot_validate_dir}
+    llvm_23_1_snapshot_validate_manifest="$llvm_23_1_snapshot_validate_dir/provider.env"
+    [ -d "$llvm_23_1_snapshot_validate_dir" ] &&
+        [ ! -L "$llvm_23_1_snapshot_validate_dir" ] &&
+        [ -d "$llvm_23_1_snapshot_validate_dir/bin" ] &&
+        [ ! -L "$llvm_23_1_snapshot_validate_dir/bin" ] &&
+        [ -f "$llvm_23_1_snapshot_validate_manifest" ] &&
+        [ ! -L "$llvm_23_1_snapshot_validate_manifest" ] &&
+        [ -f "$llvm_23_1_snapshot_validate_dir/origin-provider.env" ] &&
+        [ ! -L "$llvm_23_1_snapshot_validate_dir/origin-provider.env" ] || return 1
+    [ "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_manifest" LLVM_23_1_ORIGIN_MANIFEST_SHA256)" = "$llvm_23_1_snapshot_validate_origin_sha" ] ||
+        return 1
+    [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_validate_dir/origin-provider.env")" = "$llvm_23_1_snapshot_validate_origin_sha" ] ||
+        return 1
+    for llvm_23_1_snapshot_validate_owned in \
+        "$llvm_23_1_snapshot_validate_dir" "$llvm_23_1_snapshot_validate_dir/bin" \
+        "$llvm_23_1_snapshot_validate_manifest" "$llvm_23_1_snapshot_validate_dir/origin-provider.env"
+    do
+        [ "$(llvm_23_1_snapshot_stat_uid "$llvm_23_1_snapshot_validate_owned")" = "$(id -u)" ] ||
+            return 1
+    done
+    [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_validate_dir")" = 500 ] &&
+        [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_validate_dir/bin")" = 500 ] &&
+        [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_validate_manifest")" = 400 ] &&
+        [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_validate_dir/origin-provider.env")" = 400 ] ||
+        return 1
+    for llvm_23_1_snapshot_validate_stable in \
+        LLVM_23_1_PROVIDER_SCHEMA LLVM_SOURCE_DIR LLVM_TARGETS LLVM_TAG LLVM_TAG_COMMIT
+    do
+        [ "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_manifest" "$llvm_23_1_snapshot_validate_stable")" = \
+            "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_dir/origin-provider.env" "$llvm_23_1_snapshot_validate_stable")" ] ||
+            return 1
+    done
+    for llvm_23_1_snapshot_validate_entry in \
+        CLANG:clang LINKER:ld.lld LLVM_AR:llvm-ar LLVM_AS:llvm-as \
+        LLVM_OPT:opt LLVM_LLC:llc LLVM_CONFIG:llvm-config \
+        LLVM_OBJCOPY:llvm-objcopy LLVM_NM:llvm-nm LLVM_READOBJ:llvm-readobj
+    do
+        llvm_23_1_snapshot_validate_key=${llvm_23_1_snapshot_validate_entry%%:*}
+        llvm_23_1_snapshot_validate_name=${llvm_23_1_snapshot_validate_entry#*:}
+        llvm_23_1_snapshot_validate_tool="$llvm_23_1_snapshot_validate_dir/bin/$llvm_23_1_snapshot_validate_name"
+        llvm_23_1_snapshot_validate_hash="$(
+            llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_manifest" "${llvm_23_1_snapshot_validate_key}_SHA256"
+        )" || return 1
+        [ "$llvm_23_1_snapshot_validate_hash" = "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_dir/origin-provider.env" "${llvm_23_1_snapshot_validate_key}_SHA256")" ] ||
+            return 1
+        [ "$(llvm_23_1_snapshot_manifest_value "$llvm_23_1_snapshot_validate_manifest" "$llvm_23_1_snapshot_validate_key")" = "$llvm_23_1_snapshot_validate_declared_prefix/bin/$llvm_23_1_snapshot_validate_name" ] ||
+            return 1
+        [ -f "$llvm_23_1_snapshot_validate_tool" ] &&
+            [ -x "$llvm_23_1_snapshot_validate_tool" ] &&
+            [ ! -L "$llvm_23_1_snapshot_validate_tool" ] || return 1
+        [ "$(llvm_23_1_snapshot_stat_uid "$llvm_23_1_snapshot_validate_tool")" = "$(id -u)" ] &&
+            [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_validate_tool")" = 500 ] ||
+            return 1
+        [ "$(llvm_23_1_snapshot_sha256_file "$llvm_23_1_snapshot_validate_tool")" = "$llvm_23_1_snapshot_validate_hash" ] ||
+            return 1
+    done
+}
+
+llvm_23_1_snapshot_create_locked() (
+    [ "$#" -eq 4 ] || return 1
+    llvm_23_1_snapshot_create_origin=$1
+    llvm_23_1_snapshot_create_manifest=$2
+    llvm_23_1_snapshot_create_expected_sha=$3
+    llvm_23_1_snapshot_create_destination=$4
+    llvm_23_1_snapshot_create_parent=$(dirname -- "$llvm_23_1_snapshot_create_destination")
+    umask 077
+    if [ ! -e "$llvm_23_1_snapshot_create_parent" ]; then
+        mkdir -p "$llvm_23_1_snapshot_create_parent" || return 1
+    fi
+    [ -d "$llvm_23_1_snapshot_create_parent" ] &&
+        [ ! -L "$llvm_23_1_snapshot_create_parent" ] || return 1
+    llvm_23_1_snapshot_create_owner=$(llvm_23_1_snapshot_stat_uid "$llvm_23_1_snapshot_create_parent") ||
+        return 1
+    [ "$llvm_23_1_snapshot_create_owner" = "$(id -u)" ] || return 1
+    [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_create_parent")" = 700 ] ||
+        return 1
+    llvm_23_1_snapshot_create_lock="$llvm_23_1_snapshot_create_parent/.simple-llvm23-snapshot-generation.lock"
+    if [ -e "$llvm_23_1_snapshot_create_lock" ] || [ -L "$llvm_23_1_snapshot_create_lock" ]; then
+        [ -f "$llvm_23_1_snapshot_create_lock" ] &&
+            [ ! -L "$llvm_23_1_snapshot_create_lock" ] &&
+            [ "$(llvm_23_1_snapshot_stat_uid "$llvm_23_1_snapshot_create_lock")" = "$(id -u)" ] &&
+            [ "$(llvm_23_1_snapshot_stat_mode "$llvm_23_1_snapshot_create_lock")" = 400 ] || return 1
+        llvm_23_1_snapshot_create_lock_pid=$(cat "$llvm_23_1_snapshot_create_lock")
+        case "$llvm_23_1_snapshot_create_lock_pid" in *[!0-9]*|'') return 1 ;; esac
+        kill -0 "$llvm_23_1_snapshot_create_lock_pid" 2>/dev/null && return 1
+        rm "$llvm_23_1_snapshot_create_lock" || return 1
+    fi
+    (umask 277; set -C; printf '%s\n' "$$" >"$llvm_23_1_snapshot_create_lock") 2>/dev/null ||
+        return 1
+    llvm_23_1_snapshot_create_staging=""
+    llvm_23_1_snapshot_create_cleanup() {
+        if [ -n "$llvm_23_1_snapshot_create_staging" ] &&
+            [ -e "$llvm_23_1_snapshot_create_staging" ]; then
+            chmod -R u+w "$llvm_23_1_snapshot_create_staging" 2>/dev/null || true
+            rm -rf "$llvm_23_1_snapshot_create_staging"
+        fi
+        rm -f "$llvm_23_1_snapshot_create_lock"
+    }
+    trap llvm_23_1_snapshot_create_cleanup 0
+    trap 'exit 1' HUP INT TERM
+    if [ -e "$llvm_23_1_snapshot_create_destination" ]; then
+        if ! llvm_23_1_snapshot_validate "$llvm_23_1_snapshot_create_destination" "$llvm_23_1_snapshot_create_expected_sha"; then
+            rm -f "$llvm_23_1_snapshot_create_lock"
+            return 1
+        fi
+        LLVM_23_1_SNAPSHOT_PREFIX=$llvm_23_1_snapshot_create_destination
+        LLVM_23_1_SNAPSHOT_MANIFEST=$llvm_23_1_snapshot_create_destination/provider.env
+        LLVM_23_1_SNAPSHOT_MANIFEST_SHA256=$(llvm_23_1_snapshot_sha256_file "$LLVM_23_1_SNAPSHOT_MANIFEST") ||
+            return 1
+        export LLVM_23_1_SNAPSHOT_PREFIX LLVM_23_1_SNAPSHOT_MANIFEST LLVM_23_1_SNAPSHOT_MANIFEST_SHA256
+        return 0
+    fi
+    if [ -e "$llvm_23_1_snapshot_create_destination" ]; then
+        rm -f "$llvm_23_1_snapshot_create_lock" || return 1
+        llvm_23_1_snapshot_create "$@"
+        return $?
+    fi
+    llvm_23_1_snapshot_create_staging="$llvm_23_1_snapshot_create_destination.staging.$$"
+    rm -rf "$llvm_23_1_snapshot_create_staging"
+    if ! llvm_23_1_snapshot_build_staging "$llvm_23_1_snapshot_create_origin" \
+        "$llvm_23_1_snapshot_create_manifest" "$llvm_23_1_snapshot_create_expected_sha" \
+        "$llvm_23_1_snapshot_create_staging" "$llvm_23_1_snapshot_create_destination"; then
+        chmod -R u+w "$llvm_23_1_snapshot_create_staging" 2>/dev/null || true
+        rm -rf "$llvm_23_1_snapshot_create_staging"
+        rm -f "$llvm_23_1_snapshot_create_lock"
+        return 1
+    fi
+    llvm_23_1_snapshot_validate "$llvm_23_1_snapshot_create_staging" "$llvm_23_1_snapshot_create_expected_sha" "$llvm_23_1_snapshot_create_destination" || {
+        chmod -R u+w "$llvm_23_1_snapshot_create_staging" 2>/dev/null || true
+        rm -rf "$llvm_23_1_snapshot_create_staging"
+        rm -f "$llvm_23_1_snapshot_create_lock"
+        return 1
+    }
+    mv "$llvm_23_1_snapshot_create_staging" "$llvm_23_1_snapshot_create_destination" || {
+        rm -f "$llvm_23_1_snapshot_create_lock"
+        return 1
+    }
+    llvm_23_1_snapshot_create_staging=""
+    llvm_23_1_snapshot_validate "$llvm_23_1_snapshot_create_destination" "$llvm_23_1_snapshot_create_expected_sha" ||
+        return 1
+    LLVM_23_1_SNAPSHOT_PREFIX=$llvm_23_1_snapshot_create_destination
+    LLVM_23_1_SNAPSHOT_MANIFEST=$llvm_23_1_snapshot_create_destination/provider.env
+    LLVM_23_1_SNAPSHOT_MANIFEST_SHA256=$(llvm_23_1_snapshot_sha256_file "$LLVM_23_1_SNAPSHOT_MANIFEST") ||
+        return 1
+    export LLVM_23_1_SNAPSHOT_PREFIX LLVM_23_1_SNAPSHOT_MANIFEST LLVM_23_1_SNAPSHOT_MANIFEST_SHA256
+)
+
+llvm_23_1_snapshot_create() {
+    [ "$#" -eq 4 ] || return 1
+    llvm_23_1_snapshot_create_locked "$@" || return 1
+    LLVM_23_1_SNAPSHOT_PREFIX=$4
+    LLVM_23_1_SNAPSHOT_MANIFEST=$4/provider.env
+    LLVM_23_1_SNAPSHOT_MANIFEST_SHA256=$(llvm_23_1_snapshot_sha256_file "$LLVM_23_1_SNAPSHOT_MANIFEST") ||
+        return 1
+    export LLVM_23_1_SNAPSHOT_PREFIX LLVM_23_1_SNAPSHOT_MANIFEST LLVM_23_1_SNAPSHOT_MANIFEST_SHA256
+}

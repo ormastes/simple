@@ -5,6 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 producer="$repo_root/scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
 signed_provider="$repo_root/scripts/check/lib/llvm-23-1-signed-provider.shs"
+snapshot_provider="$repo_root/scripts/check/lib/llvm-23-1-provider-snapshot.shs"
 builder="$repo_root/scripts/setup/build-llvm-23-1-provider.shs"
 test_source_dir="${SIMPLE_LLVM_23_1_TEST_SOURCE_DIR:-}"
 test_prefix_dir=""
@@ -23,9 +24,65 @@ cleanup() {
 
 [ -f "$producer" ] || fail "missing ARM64 LLVM provider producer"
 [ -f "$signed_provider" ] || fail "missing isolated LLVM signing-key helper"
+[ -f "$snapshot_provider" ] || fail "missing private LLVM provider snapshot helper"
 [ -f "$builder" ] || fail "missing LLVM provider builder"
 sh -n "$producer" || fail "ARM64 LLVM provider producer is not valid POSIX shell"
 sh -n "$signed_provider" || fail "isolated LLVM signing-key helper is not valid POSIX shell"
+sh -n "$snapshot_provider" || fail "LLVM provider snapshot helper is not valid POSIX shell"
+for snapshot_required in \
+    'llvm_23_1_snapshot_create()' \
+    '[ "$#" -eq 4 ]' \
+    'LLVM_23_1_SNAPSHOT_PREFIX' \
+    'LLVM_23_1_SNAPSHOT_MANIFEST' \
+    'llvm-as'; do
+    grep -Fq "$snapshot_required" "$snapshot_provider" ||
+        fail "LLVM provider snapshot helper is missing contract token: $snapshot_required"
+done
+
+for required in \
+    'LLVM_23_1_EXPECTED_PROVIDER_SCHEMA="llvm-23.1-provider-v3"' \
+    'LLVM_PROVIDER_SCHEMA' \
+    'LLVM_NM_23_1' \
+    'LLVM_READOBJ_23_1' \
+    'LLVM_AS_23_1' \
+    'llvm_23_1_snapshot_create' \
+    'LLVM_23_1_EXPECTED_MANIFEST_SHA256' \
+    'LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST' \
+    'LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256' \
+    'llvm_provider_origin_manifest_expected_path=' \
+    'llvm_provider_origin_manifest_expected_sha256=' \
+    'llvm_provider_snapshot_manifest_expected_path=' \
+    'llvm_provider_snapshot_manifest_expected_sha256=' \
+    'LLVM_23_1_SNAPSHOT_PREFIX' \
+    'LLVM_23_1_SNAPSHOT_MANIFEST' \
+    'llvm_nm_path=' \
+    'llvm_readobj_path=' \
+    'verify_llvm_23_1_provider_unchanged'
+do
+    grep -Fq "$required" "$producer" ||
+        fail "ARM64 producer is missing provider contract token: $required"
+done
+for required in \
+    'llvm_provider_schema' \
+    'LLVM_23_1_ORIGIN_MANIFEST="${LLVM_23_1_ORIGIN_MANIFEST:-}"' \
+    'LLVM_23_1_EXPECTED_MANIFEST_SHA256="${LLVM_23_1_EXPECTED_MANIFEST_SHA256:-}"' \
+    'LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST="${LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST:-}"' \
+    'LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256="${LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256:-}"' \
+    'independent-llvm-origin-manifest-input-required' \
+    'independent-llvm-snapshot-manifest-sha256-input-required' \
+    'llvm_nm_path' \
+    'llvm_nm_sha256' \
+    'llvm_readobj_path' \
+    'llvm_readobj_sha256' \
+    'llvm_as_path' \
+    'llvm_as_sha256' \
+    'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3' \
+    'verify_manifest_provider_tool llvm-nm' \
+    'verify_manifest_provider_tool llvm-readobj'
+do
+    grep -Fq "$required" "$repo_root/scripts/check/check-simpleos-arm64-qmp-input-evidence.shs" ||
+        fail "ARM64 QMP consumer is missing provider contract token: $required"
+done
 
 . "$signed_provider"
 trap cleanup EXIT HUP INT TERM
@@ -41,8 +98,10 @@ if llvm_23_1_prepare_isolated_keyring "$LLVM_23_1_RELEASE_SIGNER_KEY" \
     fail "untrusted LLVM signer fingerprint was accepted"
 fi
 [ "$LLVM_23_1_SIGNED_GNUPGHOME" = /tmp ] || fail "failed signing-key setup altered caller GNUPGHOME"
-[ -n "$test_source_dir" ] || fail "set SIMPLE_LLVM_23_1_TEST_SOURCE_DIR to the signed llvmorg-23.1.0-rc2 checkout"
-[ -d "$test_source_dir/.git" ] || fail "test source is not an LLVM Git checkout"
+if [ -z "$test_source_dir" ] || [ ! -d "$test_source_dir/.git" ]; then
+    printf 'UNAVAILABLE: signed LLVM 23.1.0 test checkout is not configured; set SIMPLE_LLVM_23_1_TEST_SOURCE_DIR\n' >&2
+    exit 2
+fi
 test_prefix_dir=$(mktemp -d /tmp/simple-llvm23-provider-prefix.XXXXXX)
 llvm_23_1_prepare_isolated_keyring || fail "isolated keyring setup for builder regression failed"
 if builder_output=$(env GNUPGHOME="$LLVM_23_1_SIGNED_GNUPGHOME" sh "$builder" \

@@ -28,18 +28,89 @@ grep -F 'git -C "$SOURCE_DIR" verify-tag "$TAG"' "$builder" >/dev/null \
     || fail "builder does not verify the tag signature"
 grep -F -- "-DLLVM_ENABLE_PROJECTS='clang;lld'" "$builder" >/dev/null \
     || fail "builder does not limit projects to clang and lld"
-grep -F -- "-DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-as;opt;llc;llvm-objcopy;llvm-config'" "$builder" >/dev/null \
+grep -F -- "-DLLVM_DISTRIBUTION_COMPONENTS='clang;lld;llvm-ar;llvm-as;opt;llc;llvm-objcopy;llvm-config;llvm-nm;llvm-readobj'" "$builder" >/dev/null \
     || fail "builder does not install the complete native LLVM provider components"
-for tool in llvm-as opt llc; do
+for tool in llvm-as opt llc llvm-objcopy llvm-nm llvm-readobj; do
     grep -F "missing installed $tool:" "$builder" >/dev/null \
         || fail "builder does not validate $tool"
 done
+grep -F 'llvm_nm_bin="$PREFIX/bin/llvm-nm"' "$builder" >/dev/null \
+    || fail "builder does not place llvm_nm in the canonical provider prefix"
+grep -F 'llvm_readobj_bin="$PREFIX/bin/llvm-readobj"' "$builder" >/dev/null \
+    || fail "builder does not place llvm_readobj in the canonical provider prefix"
+for tool in llvm_nm llvm_readobj; do
+    grep -F "${tool}_bin=\$(canonical_path \"\$${tool}_bin\")" "$builder" >/dev/null \
+        || fail "builder does not canonicalize $tool"
+done
+provider_tool_list=$(sed -n '/for provider_bin in/,/; do/p' "$builder")
+for tool in llvm_nm llvm_readobj; do
+    printf '%s\n' "$provider_tool_list" | grep -F "\"\$${tool}_bin\"" >/dev/null \
+        || fail "builder does not include $tool in the prefix containment tool list"
+done
+grep -F 'llvm_nm_version=$("$llvm_nm_bin" --version)' "$builder" >/dev/null \
+    || fail "builder does not check llvm-nm version"
+grep -F 'llvm_readobj_version=$("$llvm_readobj_bin" --version)' "$builder" >/dev/null \
+    || fail "builder does not check llvm-readobj version"
+grep -F 'llvm_objcopy_version=$("$llvm_objcopy_bin" --version)' "$builder" >/dev/null \
+    || fail "builder does not check llvm-objcopy version"
+grep -F 'llvm-nm is not LLVM 23.1.0:' "$builder" >/dev/null \
+    || fail "builder does not require llvm-nm LLVM 23.1.0"
+grep -F 'llvm-readobj is not LLVM 23.1.0:' "$builder" >/dev/null \
+    || fail "builder does not require llvm-readobj LLVM 23.1.0"
+grep -F 'llvm-objcopy is not LLVM 23.1.0:' "$builder" >/dev/null \
+    || fail "builder does not require llvm-objcopy LLVM 23.1.0"
+grep -F "grep -Eq '^clang version 23\\.1\\.0$'" "$builder" >/dev/null \
+    || fail "builder does not require the complete clang version output form"
+grep -F "grep -Eq '^LLD 23\\.1\\.0$'" "$builder" >/dev/null \
+    || fail "builder does not require the complete LLD version output form"
+grep -F "grep -Eq '^LLVM version 23\\.1\\.0$'" "$builder" >/dev/null \
+    || fail "builder does not require the complete LLVM tool version output form"
+grep -F "grep -Eq '^23\\.1\\.0$'" "$builder" >/dev/null \
+    || fail "builder does not require the exact llvm-config version output form"
+
+reject_version_output() {
+    label=$1
+    output=$2
+    pattern=$3
+    if printf '%s\n' "$output" | grep -Eq "$pattern"; then
+        fail "$label was accepted by the exact-version contract"
+    fi
+}
+
+reject_version_output "clang arbitrary suffix" \
+    'clang version 23.1.0-custom' '^clang version 23\.1\.0$'
+reject_version_output "clang whitespace suffix" \
+    'clang version 23.1.0 custom' '^clang version 23\.1\.0$'
+reject_version_output "clang patch drift" \
+    'clang version 23.1.1' '^clang version 23\.1\.0$'
+reject_version_output "LLD arbitrary suffix" \
+    'LLD 23.1.0-custom' '^LLD 23\.1\.0$'
+reject_version_output "LLD whitespace suffix" \
+    'LLD 23.1.0 custom' '^LLD 23\.1\.0$'
+reject_version_output "LLD patch drift" \
+    'LLD 23.1.1' '^LLD 23\.1\.0$'
+reject_version_output "LLVM tool arbitrary suffix" \
+    'LLVM version 23.1.0-custom' '^LLVM version 23\.1\.0$'
+reject_version_output "LLVM tool whitespace suffix" \
+    'LLVM version 23.1.0 custom' '^LLVM version 23\.1\.0$'
+reject_version_output "LLVM tool patch drift" \
+    'LLVM version 23.1.1' '^LLVM version 23\.1\.0$'
+reject_version_output "llvm-config arbitrary suffix" \
+    '23.1.0-custom' '^23\.1\.0$'
+reject_version_output "llvm-config whitespace suffix" \
+    '23.1.0 custom' '^23\.1\.0$'
+reject_version_output "llvm-config patch drift" \
+    '23.1.1' '^23\.1\.0$'
 grep -F 'TARGETS="X86;AArch64;RISCV;WebAssembly"' "$builder" >/dev/null \
     || fail "builder does not declare the reviewed target set"
 grep -F 'LLVM_23_1_PREFIX=%s' "$builder" >/dev/null \
     || fail "builder does not emit provider handoff metadata"
-grep -F 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2' "$builder" >/dev/null \
+grep -F 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3' "$builder" >/dev/null \
     || fail "builder does not emit an attested provider receipt"
+for field in LLVM_NM LLVM_NM_SHA256 LLVM_READOBJ LLVM_READOBJ_SHA256; do
+    grep -F "${field}=%s" "$builder" >/dev/null \
+        || fail "builder does not emit $field manifest field"
+done
 grep -F 'provider tool escapes installed prefix' "$builder" >/dev/null \
     || fail "builder does not reject provider tool symlinks outside the prefix"
 grep -F 'LLVM_LLC_SHA256=%s' "$builder" >/dev/null \

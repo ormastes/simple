@@ -13,6 +13,7 @@ cd "$ROOT_DIR"
 . scripts/check/lib/qemu-frozen-source-admission.shs
 . scripts/check/lib/clang-23-1-toolchain.shs
 . scripts/check/lib/llvm-23-1-signed-provider.shs
+. scripts/check/lib/llvm-23-1-provider-snapshot.shs
 
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
@@ -33,6 +34,21 @@ QEMU_PID=""
 LLVM_23_1_EXPECTED_TAG="llvmorg-23.1.0-rc2"
 LLVM_23_1_EXPECTED_TAG_COMMIT="561093d94eb7156dea780c1c71a779824ef90e5b"
 LLVM_23_1_PROVIDER_BUILDER="scripts/setup/build-llvm-23-1-provider.shs"
+LLVM_23_1_ORIGIN_MANIFEST="${LLVM_23_1_ORIGIN_MANIFEST:-}"
+LLVM_23_1_EXPECTED_MANIFEST_SHA256="${LLVM_23_1_EXPECTED_MANIFEST_SHA256:-}"
+LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST="${LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST:-}"
+LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256="${LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256:-}"
+
+llvm_23_1_exact_version() {
+    llvm_23_1_version_output=$("$1" --version 2>/dev/null) || return 1
+    case "$(basename -- "$1"):$llvm_23_1_version_output" in
+        clang:'clang version 23.1.0') printf '%s\n' 23.1.0 ;;
+        ld.lld:'LLD 23.1.0') printf '%s\n' 23.1.0 ;;
+        llvm-config:23.1.0) printf '%s\n' 23.1.0 ;;
+        *:'LLVM version 23.1.0') printf '%s\n' 23.1.0 ;;
+        *) return 1 ;;
+    esac
+}
 
 mkdir -p "$EVIDENCE_DIR"
 rm -f "$EVIDENCE_ENV" "$EVIDENCE_REPORT" "$SERIAL_LOG" "$QEMU_LOG" "$QMP_LOG" \
@@ -56,6 +72,14 @@ sha256_file() {
     esac
     [ "${#sha256_value}" -eq 64 ] || return 1
     printf '%s\n' "$sha256_value"
+}
+
+canonical_receipt_path() {
+    receipt_path="$1"
+    [ -f "$receipt_path" ] && [ ! -L "$receipt_path" ] || return 1
+    receipt_dir="$(CDPATH= cd -- "$(dirname -- "$receipt_path")" 2>/dev/null && pwd -P)" ||
+        return 1
+    RECEIPT_CANONICAL_PATH="$receipt_dir/$(basename -- "$receipt_path")"
 }
 
 fail_evidence() {
@@ -84,6 +108,26 @@ fail_evidence() {
     fail_evidence "canonical-build-manifest-missing"
 [ -f "$FROZEN_BUILD_MANIFEST" ] && [ -s "$FROZEN_BUILD_MANIFEST" ] ||
     fail_evidence "canonical-frozen-source-admission-missing"
+[ -n "$LLVM_23_1_ORIGIN_MANIFEST" ] ||
+    fail_evidence "independent-llvm-origin-manifest-input-required"
+[ -n "$LLVM_23_1_EXPECTED_MANIFEST_SHA256" ] ||
+    fail_evidence "independent-llvm-origin-manifest-sha256-input-required"
+[ -n "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST" ] ||
+    fail_evidence "independent-llvm-snapshot-manifest-input-required"
+[ -n "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256" ] ||
+    fail_evidence "independent-llvm-snapshot-manifest-sha256-input-required"
+printf '%s\n' "$LLVM_23_1_EXPECTED_MANIFEST_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "independent-llvm-origin-manifest-sha256-invalid"
+printf '%s\n' "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "independent-llvm-snapshot-manifest-sha256-invalid"
+canonical_receipt_path "$LLVM_23_1_ORIGIN_MANIFEST" ||
+    fail_evidence "independent-llvm-origin-manifest-unavailable"
+QMP_EXPECTED_ORIGIN_MANIFEST="$RECEIPT_CANONICAL_PATH"
+canonical_receipt_path "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST" ||
+    fail_evidence "independent-llvm-snapshot-manifest-unavailable"
+QMP_EXPECTED_SNAPSHOT_MANIFEST="$RECEIPT_CANONICAL_PATH"
 
 for frozen_key in schema repo_revision dirty_state_policy frozen_worktree \
     entry_path entry_sha256 source_roots source_fingerprint source_file_count \
@@ -118,9 +162,19 @@ for key in \
     compiler_arch \
     llvm_provider_attestation \
     llvm_provider_builder_attestation \
+    llvm_provider_schema \
     llvm_provider_source_dir \
     llvm_provider_tag \
     llvm_provider_tag_commit \
+    llvm_provider_origin_prefix \
+    llvm_provider_origin_manifest \
+    llvm_provider_origin_manifest_sha256 \
+    llvm_provider_origin_manifest_expected_path \
+    llvm_provider_origin_manifest_expected_sha256 \
+    llvm_provider_snapshot_manifest \
+    llvm_provider_snapshot_manifest_sha256 \
+    llvm_provider_snapshot_manifest_expected_path \
+    llvm_provider_snapshot_manifest_expected_sha256 \
     llvm_23_1_prefix \
     simple_llvm_prefix \
     llvm_clang_path \
@@ -132,6 +186,9 @@ for key in \
     llvm_ar_path \
     llvm_ar_version \
     llvm_ar_sha256 \
+    llvm_as_path \
+    llvm_as_version \
+    llvm_as_sha256 \
     llvm_opt_path \
     llvm_opt_version \
     llvm_opt_sha256 \
@@ -144,6 +201,12 @@ for key in \
     llvm_objcopy_path \
     llvm_objcopy_version \
     llvm_objcopy_sha256 \
+    llvm_nm_path \
+    llvm_nm_version \
+    llvm_nm_sha256 \
+    llvm_readobj_path \
+    llvm_readobj_version \
+    llvm_readobj_sha256 \
     build_command \
     build_environment
 do
@@ -175,9 +238,19 @@ MANIFEST_COMPILER_FORMAT="$(manifest_field compiler_format)"
 MANIFEST_COMPILER_ARCH="$(manifest_field compiler_arch)"
 MANIFEST_LLVM_PROVIDER_ATTESTATION="$(manifest_field llvm_provider_attestation)"
 MANIFEST_LLVM_PROVIDER_BUILDER_ATTESTATION="$(manifest_field llvm_provider_builder_attestation)"
+MANIFEST_LLVM_PROVIDER_SCHEMA="$(manifest_field llvm_provider_schema)"
 MANIFEST_LLVM_PROVIDER_SOURCE_DIR="$(manifest_field llvm_provider_source_dir)"
 MANIFEST_LLVM_PROVIDER_TAG="$(manifest_field llvm_provider_tag)"
 MANIFEST_LLVM_PROVIDER_TAG_COMMIT="$(manifest_field llvm_provider_tag_commit)"
+MANIFEST_LLVM_ORIGIN_PREFIX="$(manifest_field llvm_provider_origin_prefix)"
+MANIFEST_LLVM_ORIGIN_MANIFEST="$(manifest_field llvm_provider_origin_manifest)"
+MANIFEST_LLVM_ORIGIN_MANIFEST_SHA256="$(manifest_field llvm_provider_origin_manifest_sha256)"
+MANIFEST_LLVM_ORIGIN_MANIFEST_EXPECTED_PATH="$(manifest_field llvm_provider_origin_manifest_expected_path)"
+MANIFEST_LLVM_ORIGIN_MANIFEST_EXPECTED_SHA256="$(manifest_field llvm_provider_origin_manifest_expected_sha256)"
+MANIFEST_LLVM_SNAPSHOT_MANIFEST="$(manifest_field llvm_provider_snapshot_manifest)"
+MANIFEST_LLVM_SNAPSHOT_MANIFEST_SHA256="$(manifest_field llvm_provider_snapshot_manifest_sha256)"
+MANIFEST_LLVM_SNAPSHOT_MANIFEST_EXPECTED_PATH="$(manifest_field llvm_provider_snapshot_manifest_expected_path)"
+MANIFEST_LLVM_SNAPSHOT_MANIFEST_EXPECTED_SHA256="$(manifest_field llvm_provider_snapshot_manifest_expected_sha256)"
 MANIFEST_LLVM_PREFIX="$(manifest_field llvm_23_1_prefix)"
 MANIFEST_SIMPLE_LLVM_PREFIX="$(manifest_field simple_llvm_prefix)"
 MANIFEST_LLVM_CLANG_PATH="$(manifest_field llvm_clang_path)"
@@ -189,6 +262,9 @@ MANIFEST_LLVM_LLD_SHA256="$(manifest_field llvm_lld_sha256)"
 MANIFEST_LLVM_AR_PATH="$(manifest_field llvm_ar_path)"
 MANIFEST_LLVM_AR_VERSION="$(manifest_field llvm_ar_version)"
 MANIFEST_LLVM_AR_SHA256="$(manifest_field llvm_ar_sha256)"
+MANIFEST_LLVM_AS_PATH="$(manifest_field llvm_as_path)"
+MANIFEST_LLVM_AS_VERSION="$(manifest_field llvm_as_version)"
+MANIFEST_LLVM_AS_SHA256="$(manifest_field llvm_as_sha256)"
 MANIFEST_LLVM_OPT_PATH="$(manifest_field llvm_opt_path)"
 MANIFEST_LLVM_OPT_VERSION="$(manifest_field llvm_opt_version)"
 MANIFEST_LLVM_OPT_SHA256="$(manifest_field llvm_opt_sha256)"
@@ -201,6 +277,12 @@ MANIFEST_LLVM_CONFIG_SHA256="$(manifest_field llvm_config_sha256)"
 MANIFEST_LLVM_OBJCOPY_PATH="$(manifest_field llvm_objcopy_path)"
 MANIFEST_LLVM_OBJCOPY_VERSION="$(manifest_field llvm_objcopy_version)"
 MANIFEST_LLVM_OBJCOPY_SHA256="$(manifest_field llvm_objcopy_sha256)"
+MANIFEST_LLVM_NM_PATH="$(manifest_field llvm_nm_path)"
+MANIFEST_LLVM_NM_VERSION="$(manifest_field llvm_nm_version)"
+MANIFEST_LLVM_NM_SHA256="$(manifest_field llvm_nm_sha256)"
+MANIFEST_LLVM_READOBJ_PATH="$(manifest_field llvm_readobj_path)"
+MANIFEST_LLVM_READOBJ_VERSION="$(manifest_field llvm_readobj_version)"
+MANIFEST_LLVM_READOBJ_SHA256="$(manifest_field llvm_readobj_sha256)"
 MANIFEST_BUILD_COMMAND="$(manifest_field build_command)"
 MANIFEST_BUILD_ENVIRONMENT="$(manifest_field build_environment)"
 HOST_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
@@ -297,6 +379,8 @@ printf '%s\n' "$MANIFEST_COMPILER_SHA256" |
     fail_evidence "canonical-build-manifest-llvm-provider-attestation-mismatch"
 [ "$MANIFEST_LLVM_PROVIDER_BUILDER_ATTESTATION" = "llvm-23.1-signed-builder-v1" ] ||
     fail_evidence "canonical-build-manifest-llvm-provider-builder-attestation-mismatch"
+[ "$MANIFEST_LLVM_PROVIDER_SCHEMA" = "llvm-23.1-provider-v3" ] ||
+    fail_evidence "canonical-build-manifest-llvm-provider-schema-mismatch"
 [ "$MANIFEST_LLVM_PROVIDER_TAG" = "$LLVM_23_1_EXPECTED_TAG" ] ||
     fail_evidence "canonical-build-manifest-llvm-provider-tag-mismatch"
 [ "$MANIFEST_LLVM_PROVIDER_TAG_COMMIT" = "$LLVM_23_1_EXPECTED_TAG_COMMIT" ] ||
@@ -321,6 +405,51 @@ esac
     fail_evidence "canonical-build-manifest-llvm-prefix-not-canonical"
 [ "$MANIFEST_SIMPLE_LLVM_PREFIX" = "$MANIFEST_LLVM_PREFIX" ] ||
     fail_evidence "canonical-build-manifest-simple-llvm-prefix-mismatch"
+[ "$MANIFEST_LLVM_ORIGIN_PREFIX" != "$MANIFEST_LLVM_PREFIX" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-not-private"
+[ "$MANIFEST_LLVM_ORIGIN_MANIFEST" = "$QMP_EXPECTED_ORIGIN_MANIFEST" ] ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-input-mismatch"
+[ "$MANIFEST_LLVM_ORIGIN_MANIFEST_EXPECTED_PATH" = "$QMP_EXPECTED_ORIGIN_MANIFEST" ] ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-expected-path-mismatch"
+[ "$MANIFEST_LLVM_ORIGIN_MANIFEST_SHA256" = "$LLVM_23_1_EXPECTED_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-expected-sha256-mismatch"
+[ "$MANIFEST_LLVM_ORIGIN_MANIFEST_EXPECTED_SHA256" = "$LLVM_23_1_EXPECTED_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-expected-receipt-sha256-mismatch"
+[ "$MANIFEST_LLVM_SNAPSHOT_MANIFEST" = "$QMP_EXPECTED_SNAPSHOT_MANIFEST" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-input-mismatch"
+[ "$MANIFEST_LLVM_SNAPSHOT_MANIFEST_EXPECTED_PATH" = "$QMP_EXPECTED_SNAPSHOT_MANIFEST" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-expected-path-mismatch"
+[ "$MANIFEST_LLVM_SNAPSHOT_MANIFEST_SHA256" = "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-expected-sha256-mismatch"
+[ "$MANIFEST_LLVM_SNAPSHOT_MANIFEST_EXPECTED_SHA256" = "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-expected-receipt-sha256-mismatch"
+case "$MANIFEST_LLVM_ORIGIN_PREFIX" in
+    /*) ;;
+    *) fail_evidence "canonical-build-manifest-llvm-origin-prefix-invalid" ;;
+esac
+[ "$(CDPATH= cd -- "$MANIFEST_LLVM_ORIGIN_PREFIX" 2>/dev/null && pwd -P)" =
+    "$MANIFEST_LLVM_ORIGIN_PREFIX" ] ||
+    fail_evidence "canonical-build-manifest-llvm-origin-prefix-not-canonical"
+for provider_manifest_path in "$MANIFEST_LLVM_ORIGIN_MANIFEST" \
+    "$MANIFEST_LLVM_SNAPSHOT_MANIFEST"; do
+    [ -f "$provider_manifest_path" ] && [ ! -L "$provider_manifest_path" ] ||
+        fail_evidence "canonical-build-manifest-provider-manifest-unavailable"
+    [ "$(CDPATH= cd -- "$(dirname -- "$provider_manifest_path")" 2>/dev/null &&
+        pwd -P)/$(basename -- "$provider_manifest_path")" = "$provider_manifest_path" ] ||
+        fail_evidence "canonical-build-manifest-provider-manifest-not-canonical"
+done
+printf '%s\n' "$MANIFEST_LLVM_ORIGIN_MANIFEST_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-sha256-invalid"
+[ "$(sha256_file "$MANIFEST_LLVM_ORIGIN_MANIFEST")" =
+    "$LLVM_23_1_EXPECTED_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-origin-manifest-sha256-mismatch"
+printf '%s\n' "$MANIFEST_LLVM_SNAPSHOT_MANIFEST_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-sha256-invalid"
+[ "$(sha256_file "$MANIFEST_LLVM_SNAPSHOT_MANIFEST")" =
+    "$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-provider-snapshot-manifest-sha256-mismatch"
 [ -f "$LLVM_23_1_PROVIDER_BUILDER" ] && [ ! -L "$LLVM_23_1_PROVIDER_BUILDER" ] ||
     fail_evidence "canonical-build-manifest-llvm-provider-builder-unavailable"
 llvm_23_1_prepare_isolated_keyring ||
@@ -328,12 +457,29 @@ llvm_23_1_prepare_isolated_keyring ||
 LLVM_PROVIDER_REVERIFY_RECEIPT="$(
     env GNUPGHOME="$LLVM_23_1_SIGNED_GNUPGHOME" \
         sh "$LLVM_23_1_PROVIDER_BUILDER" --source-dir "$MANIFEST_LLVM_PROVIDER_SOURCE_DIR" \
-        --prefix "$MANIFEST_LLVM_PREFIX" --verify-only
+        --prefix "$MANIFEST_LLVM_ORIGIN_PREFIX" --verify-only
 )" || fail_evidence "canonical-build-manifest-llvm-provider-signed-builder-rejected"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" |
+    cmp -s - "$MANIFEST_LLVM_ORIGIN_MANIFEST" ||
+    fail_evidence "canonical-build-manifest-llvm-provider-origin-receipt-mismatch"
 printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_TAG=$LLVM_23_1_EXPECTED_TAG" ||
     fail_evidence "canonical-build-manifest-llvm-provider-builder-tag-receipt-invalid"
 printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_TAG_COMMIT=$LLVM_23_1_EXPECTED_TAG_COMMIT" ||
     fail_evidence "canonical-build-manifest-llvm-provider-builder-tag-commit-receipt-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3" ||
+    fail_evidence "canonical-build-manifest-llvm-provider-schema-receipt-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_NM=$MANIFEST_LLVM_ORIGIN_PREFIX/bin/llvm-nm" ||
+    fail_evidence "canonical-build-manifest-llvm-nm-receipt-path-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_NM_SHA256=$MANIFEST_LLVM_NM_SHA256" ||
+    fail_evidence "canonical-build-manifest-llvm-nm-receipt-sha256-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_READOBJ=$MANIFEST_LLVM_ORIGIN_PREFIX/bin/llvm-readobj" ||
+    fail_evidence "canonical-build-manifest-llvm-readobj-receipt-path-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_READOBJ_SHA256=$MANIFEST_LLVM_READOBJ_SHA256" ||
+    fail_evidence "canonical-build-manifest-llvm-readobj-receipt-sha256-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_AS=$MANIFEST_LLVM_ORIGIN_PREFIX/bin/llvm-as" ||
+    fail_evidence "canonical-build-manifest-llvm-as-receipt-path-invalid"
+printf '%s\n' "$LLVM_PROVIDER_REVERIFY_RECEIPT" | grep -qx "LLVM_AS_SHA256=$MANIFEST_LLVM_AS_SHA256" ||
+    fail_evidence "canonical-build-manifest-llvm-as-receipt-sha256-invalid"
 
 verify_manifest_provider_tool() {
     manifest_tool_name="$1"
@@ -349,8 +495,8 @@ verify_manifest_provider_tool() {
         fail_evidence "canonical-build-manifest-llvm-tool-not-canonical"
     [ "$manifest_tool_dir/$manifest_tool_name" = "$manifest_tool_path" ] ||
         fail_evidence "canonical-build-manifest-llvm-tool-not-canonical"
-    [ "$(clang_23_1_version "$manifest_tool_path")" = "23.1" ] &&
-        [ "$manifest_tool_version" = "23.1" ] ||
+    [ "$(llvm_23_1_exact_version "$manifest_tool_path")" = "23.1.0" ] &&
+        [ "$manifest_tool_version" = "23.1.0" ] ||
         fail_evidence "canonical-build-manifest-llvm-tool-version-mismatch"
     printf '%s\n' "$manifest_tool_sha256" | grep -Eq '^[0-9a-f]{64}$' ||
         fail_evidence "canonical-build-manifest-llvm-tool-sha256-invalid"
@@ -361,12 +507,15 @@ verify_manifest_provider_tool() {
 verify_manifest_provider_tool clang "$MANIFEST_LLVM_CLANG_PATH" "$MANIFEST_LLVM_CLANG_VERSION" "$MANIFEST_LLVM_CLANG_SHA256"
 verify_manifest_provider_tool ld.lld "$MANIFEST_LLVM_LLD_PATH" "$MANIFEST_LLVM_LLD_VERSION" "$MANIFEST_LLVM_LLD_SHA256"
 verify_manifest_provider_tool llvm-ar "$MANIFEST_LLVM_AR_PATH" "$MANIFEST_LLVM_AR_VERSION" "$MANIFEST_LLVM_AR_SHA256"
+verify_manifest_provider_tool llvm-as "$MANIFEST_LLVM_AS_PATH" "$MANIFEST_LLVM_AS_VERSION" "$MANIFEST_LLVM_AS_SHA256"
 verify_manifest_provider_tool opt "$MANIFEST_LLVM_OPT_PATH" "$MANIFEST_LLVM_OPT_VERSION" "$MANIFEST_LLVM_OPT_SHA256"
 verify_manifest_provider_tool llc "$MANIFEST_LLVM_LLC_PATH" "$MANIFEST_LLVM_LLC_VERSION" "$MANIFEST_LLVM_LLC_SHA256"
 verify_manifest_provider_tool llvm-config "$MANIFEST_LLVM_CONFIG_PATH" "$MANIFEST_LLVM_CONFIG_VERSION" "$MANIFEST_LLVM_CONFIG_SHA256"
 verify_manifest_provider_tool llvm-objcopy "$MANIFEST_LLVM_OBJCOPY_PATH" "$MANIFEST_LLVM_OBJCOPY_VERSION" "$MANIFEST_LLVM_OBJCOPY_SHA256"
+verify_manifest_provider_tool llvm-nm "$MANIFEST_LLVM_NM_PATH" "$MANIFEST_LLVM_NM_VERSION" "$MANIFEST_LLVM_NM_SHA256"
+verify_manifest_provider_tool llvm-readobj "$MANIFEST_LLVM_READOBJ_PATH" "$MANIFEST_LLVM_READOBJ_VERSION" "$MANIFEST_LLVM_READOBJ_SHA256"
 
-EXPECTED_BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER PATH=$MANIFEST_LLVM_PREFIX/bin:\$PATH SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 LLVM_23_1_PREFIX=$MANIFEST_LLVM_PREFIX SIMPLE_LLVM_PREFIX=$MANIFEST_SIMPLE_LLVM_PREFIX CLANG=$MANIFEST_LLVM_CLANG_PATH LINKER=$MANIFEST_LLVM_LLD_PATH LLVM_AR=$MANIFEST_LLVM_AR_PATH LLVM_OPT=$MANIFEST_LLVM_OPT_PATH LLVM_LLC=$MANIFEST_LLVM_LLC_PATH LLVM_CONFIG=$MANIFEST_LLVM_CONFIG_PATH LLVM_OBJCOPY=$MANIFEST_LLVM_OBJCOPY_PATH"
+EXPECTED_BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER PATH=$MANIFEST_LLVM_PREFIX/bin:\$PATH SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 LLVM_23_1_PREFIX=$MANIFEST_LLVM_PREFIX SIMPLE_LLVM_PREFIX=$MANIFEST_SIMPLE_LLVM_PREFIX LLVM_23_1_ORIGIN_MANIFEST=$QMP_EXPECTED_ORIGIN_MANIFEST LLVM_23_1_EXPECTED_MANIFEST_SHA256=$LLVM_23_1_EXPECTED_MANIFEST_SHA256 LLVM_23_1_SNAPSHOT_MANIFEST=$MANIFEST_LLVM_SNAPSHOT_MANIFEST LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST=$QMP_EXPECTED_SNAPSHOT_MANIFEST LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256=$LLVM_23_1_EXPECTED_SNAPSHOT_MANIFEST_SHA256 CLANG=$MANIFEST_LLVM_CLANG_PATH LINKER=$MANIFEST_LLVM_LLD_PATH LLVM_AR=$MANIFEST_LLVM_AR_PATH LLVM_AS=$MANIFEST_LLVM_AS_PATH LLVM_OPT=$MANIFEST_LLVM_OPT_PATH LLVM_LLC=$MANIFEST_LLVM_LLC_PATH LLVM_CONFIG=$MANIFEST_LLVM_CONFIG_PATH LLVM_OBJCOPY=$MANIFEST_LLVM_OBJCOPY_PATH LLVM_NM=$MANIFEST_LLVM_NM_PATH LLVM_READOBJ=$MANIFEST_LLVM_READOBJ_PATH"
 [ "$MANIFEST_BUILD_ENVIRONMENT" = "$EXPECTED_BUILD_ENVIRONMENT" ] ||
     fail_evidence "canonical-build-manifest-environment-mismatch"
 [ "$MANIFEST_BUILD_COMMAND" = "env $EXPECTED_BUILD_ENVIRONMENT $MANIFEST_COMPILER_PATH os build --scenario=arm64-desktop-engine2d" ] ||
@@ -1068,8 +1217,13 @@ arm64_guest_source_snapshot ||
     echo "arm64_qmp_input_llvm_clang_sha256=$MANIFEST_LLVM_CLANG_SHA256"
     echo "arm64_qmp_input_llvm_lld_sha256=$MANIFEST_LLVM_LLD_SHA256"
     echo "arm64_qmp_input_llvm_ar_sha256=$MANIFEST_LLVM_AR_SHA256"
+    echo "arm64_qmp_input_llvm_as_sha256=$MANIFEST_LLVM_AS_SHA256"
     echo "arm64_qmp_input_llvm_opt_sha256=$MANIFEST_LLVM_OPT_SHA256"
     echo "arm64_qmp_input_llvm_llc_sha256=$MANIFEST_LLVM_LLC_SHA256"
+    echo "arm64_qmp_input_llvm_config_sha256=$MANIFEST_LLVM_CONFIG_SHA256"
+    echo "arm64_qmp_input_llvm_objcopy_sha256=$MANIFEST_LLVM_OBJCOPY_SHA256"
+    echo "arm64_qmp_input_llvm_nm_sha256=$MANIFEST_LLVM_NM_SHA256"
+    echo "arm64_qmp_input_llvm_readobj_sha256=$MANIFEST_LLVM_READOBJ_SHA256"
     echo "arm64_qmp_input_build_command=$MANIFEST_BUILD_COMMAND"
     echo "arm64_qmp_input_build_environment=$MANIFEST_BUILD_ENVIRONMENT"
     echo "arm64_qmp_input_kernel=$KERNEL"

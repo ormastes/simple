@@ -1,73 +1,73 @@
-"""Fail-closed LLVM 23.1 admission for the ARM64 SimpleOS producer."""
+"""Executable, fail-closed LLVM 23.1 provider evidence for SimpleOS ARM64."""
 
-use std.io_runtime.{file_read}
+use std.io_runtime.{process_run_timeout}
 use std.spec.*
 
-describe "SimpleOS ARM64 LLVM 23.1 producer attestation":
-    it "requires one explicit provider for the pure-Simple LLVM backend":
-        val producer = file_read("scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs")
-        expect(producer).to_contain("attest_llvm_23_1_provider")
-        expect(producer).to_contain("llvm-23-1-prefix-required")
-        expect(producer).to_contain("simple-llvm-prefix-required")
-        expect(producer).to_contain("llvm-provider-prefix-mismatch")
-        expect(producer).to_contain("llvm-provider-prefix-unsafe")
-        expect(producer).to_contain("llvm-provider-tool-override-forbidden")
-        expect(producer).to_contain("validate_clang_23_1_toolchain")
-        expect(producer).to_contain("SIMPLE_OS_BUILD_BACKEND=llvm")
+val CONTRACT_TIMEOUT_MS: i64 = 120000
+val BUILDER_CONTRACT: text = "scripts/check/check-llvm-23-1-provider-builder-contract.shs"
+val SNAPSHOT_CONTRACT: text = "scripts/check/check-llvm-23-1-provider-snapshot-contract.shs"
+val ARM_CONTRACT: text = "scripts/check/check-simpleos-arm64-llvm23-provider-contract.shs"
+val FREEBSD_CONTRACT: text = "scripts/check/check-freebsd-llvm-23-1-provider-contract.shs"
 
-    it "binds all provider tools and their versions to the published receipt":
-        val producer = file_read("scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs")
-        expect(producer).to_contain("llvm_provider_attestation=llvm-clang-23.1-host-native-build-v1")
-        expect(producer).to_contain("attest_authenticated_llvm_23_1_builder")
-        expect(producer).to_contain("llvm-23-1-builder-tag-commit-mismatch")
-        expect(producer).to_contain("llvm_provider_tag_commit=")
-        expect(producer).to_contain("llvm_23_1_prepare_isolated_keyring")
-        expect(producer).to_contain("llvm_clang_sha256=")
-        expect(producer).to_contain("llvm_lld_sha256=")
-        expect(producer).to_contain("llvm_ar_sha256=")
-        expect(producer).to_contain("llvm_opt_sha256=")
-        expect(producer).to_contain("llvm_llc_sha256=")
-        expect(producer).to_contain("llvm_config_sha256=")
-        expect(producer).to_contain("llvm_objcopy_sha256=")
-        expect(producer).to_contain("scripts/check/lib/clang-23-1-toolchain.shs")
-        expect(producer).to_contain("canonical_provider_tool")
-        expect(producer).to_contain("llvm-provider-tool-not-canonical")
-        expect(producer).to_contain("llvm-23-1-provider-changed-during-build")
+fn run_contract(path: text) -> (text, text, i32):
+    process_run_timeout("/bin/sh", [path], CONTRACT_TIMEOUT_MS)
 
-    it "freezes the attested environment and makes QMP revalidate it":
-        val producer = file_read("scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs")
-        val qmp = file_read("scripts/check/check-simpleos-arm64-qmp-input-evidence.shs")
-        expect(producer).to_contain("BUILD_COMMAND=\"env $BUILD_ENVIRONMENT")
-        expect(producer).to_contain("LLVM_LLC=$LLVM_LLC_23_1")
-        expect(producer).to_contain("verify_llvm_23_1_provider_unchanged")
-        expect(qmp).to_contain("verify_manifest_provider_tool opt")
-        expect(qmp).to_contain("verify_manifest_provider_tool llc")
-        expect(qmp).to_contain("verify_manifest_provider_tool llvm-config")
-        expect(qmp).to_contain("verify_manifest_provider_tool llvm-objcopy")
-        expect(qmp).to_contain("canonical-build-manifest-llvm-provider-signed-builder-rejected")
-        expect(qmp).to_contain("canonical-build-manifest-llvm-provider-signing-key-rejected")
-        expect(qmp).to_contain("canonical-build-manifest-llvm-tool-not-canonical")
-        expect(qmp).to_contain("canonical-build-manifest-llvm-prefix-unsafe")
-        expect(qmp).to_contain("canonical-build-manifest-llvm-tool-sha256-mismatch")
-        expect(qmp).to_contain("arm64_qmp_input_llvm_llc_sha256=")
+fn combined_output(stdout: text, stderr: text) -> text:
+    stdout + "\n" + stderr
 
-    it "tracks the resolver as part of the frozen ARM64 source identity":
-        val fingerprint = file_read("scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs")
-        expect(fingerprint).to_contain("scripts/check/lib/clang-23-1-toolchain.shs")
-        expect(fingerprint).to_contain("scripts/check/lib/llvm-23-1-signed-provider.shs")
-        expect(fingerprint).to_contain("scripts/setup/keys/llvm-release-tobias-hieta.asc")
+fn assert_required_pass(output: text, exit_code: i32, pass_marker: text):
+    expect(exit_code).to_equal(0)
+    expect(output).to_contain(pass_marker)
+    expect(output.contains("FAIL:")).to_equal(false)
 
-    it "does not represent host provider readiness as compiler-in-guest proof":
-        val manual = file_read("doc/06_spec/03_system/check/simpleos_arm64_llvm23_provider_contract_spec.md")
-        expect(manual).to_contain("host-provider readiness")
-        expect(manual).to_contain("does not prove that a compiler runs inside the ARM64 guest")
-        expect(manual).to_contain("guest serial/QEMU execution transcript")
+describe "SimpleOS ARM64 LLVM 23.1 provider evidence":
+    it "executes the signed builder receipt contract within the test deadline":
+        step("Run the bounded builder contract")
+        val (stdout, stderr, exit_code) = run_contract(BUILDER_CONTRACT)
+        val output = combined_output(stdout, stderr)
+        assert_required_pass(
+            output,
+            exit_code,
+            "PASS: LLVM 23.1 provider builder is pinned, explicit, and fail-closed")
 
-    it "has an executable shell gate for negative provider cases":
-        val shell_gate = file_read("scripts/check/check-simpleos-arm64-llvm23-provider-contract.shs")
-        expect(shell_gate).to_contain("--llvm-provider-self-test")
-        expect(shell_gate).to_contain("arm64_llvm_provider_tag_commit_rejection_status=pass")
-        expect(shell_gate).to_contain("untrusted LLVM signer fingerprint was accepted")
-        expect(shell_gate).to_contain("arm64_llvm_provider_untrusted_signer_rejection_status=pass")
-        expect(shell_gate).to_contain("SIMPLE_LLVM_23_1_TEST_SOURCE_DIR")
-        expect(shell_gate).to_contain("isolated_builder_verify_tag_status=pass")
+    it "executes the private snapshot sealing and reuse contract":
+        step("Run the bounded snapshot contract")
+        val (stdout, stderr, exit_code) = run_contract(SNAPSHOT_CONTRACT)
+        val output = combined_output(stdout, stderr)
+        assert_required_pass(
+            output,
+            exit_code,
+            "PASS: LLVM 23.1 provider snapshots are locked, atomic, immutable, and reusable")
+
+    it "executes ARM receipt admission, allowing only explicit missing-checkout unavailability":
+        step("Run the bounded ARM provider contract")
+        val (stdout, stderr, exit_code) = run_contract(ARM_CONTRACT)
+        val output = combined_output(stdout, stderr)
+        if output.contains("UNAVAILABLE:"):
+            expect(exit_code).to_equal(2)
+            expect(output).to_contain("SIMPLE_LLVM_23_1_TEST_SOURCE_DIR")
+            expect(output.contains("PASS:")).to_equal(false)
+        else:
+            assert_required_pass(
+                output,
+                exit_code,
+                "PASS: ARM64 LLVM 23.1 provider rejects escaped tools, LLVM 18 tools, and retargeted tag receipts")
+            for receipt in [
+                "arm64_llvm_provider_canonical_rejection_status=pass",
+                "arm64_llvm_provider_version_rejection_status=pass",
+                "arm64_llvm_provider_tag_commit_rejection_status=pass",
+                "arm64_llvm_provider_contract_self_test_status=pass",
+                "arm64_llvm_provider_isolated_keyring_status=pass",
+                "arm64_llvm_provider_untrusted_signer_rejection_status=pass",
+                "arm64_llvm_provider_isolated_builder_verify_tag_status=pass"
+            ]:
+                expect(output).to_contain(receipt)
+
+    it "executes the FreeBSD provider receipt contract with the complete tool set":
+        step("Run the bounded FreeBSD receipt contract")
+        val (stdout, stderr, exit_code) = run_contract(FREEBSD_CONTRACT)
+        val output = combined_output(stdout, stderr)
+        assert_required_pass(
+            output,
+            exit_code,
+            "PASS: FreeBSD QEMU bootstrap requires one complete explicit LLVM 23.1 provider")

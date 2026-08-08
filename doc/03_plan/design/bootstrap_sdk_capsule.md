@@ -99,6 +99,14 @@ not choose or override it. Likewise, the Stage4 lane owns the allowed provider
 ids and symbol-prefix contracts; a provider cannot authorize arbitrary `rt_*`
 or compiler/runtime ownership merely by listing those symbols itself.
 
+The canonical toolset-copy interface is
+`llvm_23_1_snapshot_create ORIGIN_PREFIX ORIGIN_MANIFEST EXPECTED_MANIFEST_SHA256 SNAPSHOT_DIR`
+from `scripts/check/lib/llvm-23-1-provider-snapshot.shs`. The expected digest
+is selected by the bootstrap lane, never derived from a provider-selected
+receipt. Consumers execute only tools below the returned
+`LLVM_23_1_SNAPSHOT_PREFIX`; the copied origin receipt and rewritten snapshot
+receipt are read-only generation inputs.
+
 Snapshot replay compares every stable origin field with the sealed snapshot:
 provider/lane/ABI identity, source revision, artifact kind/format, symbol
 contract, producer identity, and LLVM toolset receipt. It then compares every

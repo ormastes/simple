@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$repo_root/scripts/check/lib/llvm-23-1-provider-snapshot.shs"
+fail() { printf 'FAIL: %s
+' "$*" >&2; exit 1; }
+sha256_file() { llvm_23_1_snapshot_sha256 "$1"; }
+mode() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-llvm23-snapshot.XXXXXX")
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+origin="$tmp/origin"
+mkdir -p "$origin/bin"
+manifest="$tmp/provider.env"
+printf 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3
+LLVM_23_1_PREFIX=%s
+LLVM_SOURCE_DIR=/reviewed/llvm-project
+LLVM_TARGETS=X86;AArch64;RISCV;WebAssembly
+LLVM_TAG=llvmorg-23.1.0-rc2
+LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b
+' "$origin" > "$manifest"
+for entry in CLANG:clang LINKER:ld.lld LLVM_AR:llvm-ar LLVM_NM:llvm-nm     LLVM_READOBJ:llvm-readobj LLVM_AS:llvm-as LLVM_OPT:opt LLVM_LLC:llc     LLVM_OBJCOPY:llvm-objcopy LLVM_CONFIG:llvm-config
+do
+    key=${entry%%:*}
+    name=${entry#*:}
+    printf '#!/bin/sh
+printf "%%s\n" "%s fixture"
+' "$name" > "$origin/bin/$name"
+    chmod 0700 "$origin/bin/$name"
+    printf '%s=%s
+%s_SHA256=%s
+' "$key" "$origin/bin/$name"         "$key" "$(sha256_file "$origin/bin/$name")" >> "$manifest"
+done
+expected=$(sha256_file "$manifest")
+snapshot="$tmp/generation"
+llvm_23_1_snapshot_create "$origin" "$manifest" "$expected" "$snapshot" ||
+    fail "valid selected provider was not snapshotted"
+[ "$LLVM_23_1_SNAPSHOT_PREFIX" = "$snapshot" ] || fail "snapshot prefix was not exported"
+[ "$LLVM_23_1_SNAPSHOT_MANIFEST" = "$snapshot/provider.env" ] || fail "snapshot receipt was not exported"
+[ "$LLVM_23_1_SNAPSHOT_MANIFEST_SHA256" = "$(sha256_file "$snapshot/provider.env")" ] ||
+    fail "snapshot receipt digest was not exported"
+[ "$(mode "$snapshot")" = 500 ] || fail "published snapshot was not sealed"
+[ "$(mode "$snapshot/bin")" = 500 ] || fail "published bin directory was not sealed"
+cmp -s "$manifest" "$snapshot/origin-provider.env" || fail "origin receipt was not copied exactly"
+[ "$(mode "$snapshot/provider.env")" = 400 ] || fail "snapshot receipt was not read-only"
+[ "$(mode "$snapshot/origin-provider.env")" = 400 ] || fail "origin receipt copy was not read-only"
+[ "$(llvm_23_1_snapshot_stat_uid "$snapshot")" = "$(id -u)" ] || fail "snapshot owner changed"
+
+for entry in CLANG:clang LINKER:ld.lld LLVM_AR:llvm-ar LLVM_AS:llvm-as LLVM_OPT:opt     LLVM_LLC:llc LLVM_CONFIG:llvm-config LLVM_OBJCOPY:llvm-objcopy LLVM_NM:llvm-nm     LLVM_READOBJ:llvm-readobj
+do
+    key=${entry%%:*}
+    name=${entry#*:}
+    origin_hash=$(sha256_file "$origin/bin/$name")
+    [ "$(sha256_file "$snapshot/bin/$name")" = "$origin_hash" ] ||
+        fail "$name was not rehashed after sealing"
+    [ "$(mode "$snapshot/bin/$name")" = 500 ] || fail "$name was not sealed"
+    [ "$(llvm_23_1_snapshot_manifest_value "$snapshot/provider.env" "${key}_SHA256")" = "$origin_hash" ] ||
+        fail "$name receipt hash was incorrect"
+done
+
+llvm_23_1_snapshot_create "$origin" "$manifest" "$expected" "$snapshot" ||
+    fail "valid immutable snapshot was not safely reusable"
+[ "$LLVM_23_1_SNAPSHOT_PREFIX" = "$snapshot" ] || fail "reuse changed snapshot identity"
+cp "$manifest" "$tmp/origin-before-mutation.env"
+printf 'LLVM_TAG_COMMIT=untrusted\n' >>"$manifest"
+llvm_23_1_snapshot_create "$origin" "$manifest" "$expected" "$snapshot" ||
+    fail "mutable origin receipt change invalidated authenticated snapshot reuse"
+cmp -s "$tmp/origin-before-mutation.env" "$snapshot/origin-provider.env" ||
+    fail "authenticated copied origin receipt changed during reuse"
+
+chmod 700 "$snapshot"
+if llvm_23_1_snapshot_create "$origin" "$manifest" "$expected" "$snapshot"; then
+    fail "unsealed snapshot directory was reused"
+fi
+chmod 500 "$snapshot"
+
+chmod 700 "$snapshot/bin/llvm-nm"
+printf '#!/bin/sh
+exit 99
+' > "$snapshot/bin/llvm-nm"
+chmod 500 "$snapshot/bin/llvm-nm"
+if llvm_23_1_snapshot_create "$origin" "$manifest" "$expected" "$snapshot"; then
+    fail "tampered reusable snapshot was accepted"
+fi
+
+locked_parent="$tmp/locked"
+mkdir -m 700 "$locked_parent"
+printf '%s\n' "$$" >"$locked_parent/.simple-llvm23-snapshot-generation.lock"
+chmod 400 "$locked_parent/.simple-llvm23-snapshot-generation.lock"
+if llvm_23_1_snapshot_create "$origin" "$manifest" "$expected"     "$locked_parent/generation"; then
+    fail "an active snapshot lock was ignored"
+fi
+rm "$locked_parent/.simple-llvm23-snapshot-generation.lock"
+printf '99999999\n' >"$locked_parent/.simple-llvm23-snapshot-generation.lock"
+chmod 400 "$locked_parent/.simple-llvm23-snapshot-generation.lock"
+if ! llvm_23_1_snapshot_create "$origin" "$tmp/origin-before-mutation.env" "$expected" \
+    "$locked_parent/generation"; then
+    fail "dead same-owner snapshot lock was not recovered"
+fi
+
+unsafe_parent="$tmp/unsafe"
+mkdir -m 700 "$unsafe_parent"
+chmod 0775 "$unsafe_parent"
+if llvm_23_1_snapshot_create "$origin" "$manifest" "$expected"     "$unsafe_parent/generation"; then
+    fail "externally writable snapshot parent was accepted"
+fi
+
+mkdir "$tmp/origin-symlink"
+ln -s "$origin/bin" "$tmp/origin-symlink/bin"
+sed "s|LLVM_23_1_PREFIX=$origin|LLVM_23_1_PREFIX=$tmp/origin-symlink|"     "$manifest" > "$tmp/symlink.env"
+if llvm_23_1_snapshot_create "$tmp/origin-symlink" "$tmp/symlink.env"     "$(sha256_file "$tmp/symlink.env")" "$tmp/bad-symlink"; then
+    fail "symlinked provider bin directory was accepted"
+fi
+
+printf 'PASS: LLVM 23.1 provider snapshots are locked, atomic, immutable, and reusable
+'

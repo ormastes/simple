@@ -53,8 +53,28 @@ Platform evidence:
 - No fresh live SimpleOS, FreeBSD, AArch64, RISC-V, or macOS ARM receipt exists.
   The next platform command is the canonical FreeBSD smoke wrapper, not a full
   bootstrap: `sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke`.
+- Retained prerequisites discovered on 2026-08-08:
+  `/home/ormastes/dev/pub/simple-stage4-x86-phase4-llvm23-integrated/build/toolchains/llvm-project-23.1.0-rc2`
+  is available for the signed-provider executable contract. FreeBSD 14.4 base
+  qcow2, cloud-init ISO, and prior overlays/logs are present under
+  `/home/ormastes/dev/pub/simple/build/freebsd/vm`; reuse these inputs rather
+  than downloading or rebuilding them unconditionally.
 
-Proposed provider-capsule direction (not yet implemented or admitted):
+Provider-capsule status:
+
+- The LLVM toolset foundation is implemented with signed-provider schema
+  `llvm-23.1-provider-v3`, exact LLVM `23.1.0` admission, and complete
+  `clang`/`ld.lld`/`llvm-*` path and hash fields, including `llvm-as`,
+  `llvm-nm`, and `llvm-readobj`.
+- `scripts/check/lib/llvm-23-1-provider-snapshot.shs` requires a
+  bootstrap-selected expected manifest SHA-256 and copies the admitted tools
+  and origin receipt into a read-only private generation before use.
+- Focused snapshot and FreeBSD provider contracts pass. The ARM contract
+  reaches explicit `UNAVAILABLE` because
+  `SIMPLE_LLVM_23_1_TEST_SOURCE_DIR` is not configured with the signed
+  `llvmorg-23.1.0-rc2` checkout; this is not PASS evidence.
+- The external SFFI provider capsule and Stage4 candidate provenance binding
+  remain pending:
 
 - Stage4 external SFFI inputs must be archive/shared-library providers bound by
   canonical path, SHA-256, target, backend, runtime bundle, producer hash, and

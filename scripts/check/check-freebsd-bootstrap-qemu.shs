@@ -32,6 +32,10 @@ set -eu
 #                        provider. Full mode defaults to an authenticated,
 #                        guest-built provider below the synced checkout; smoke
 #                        mode requires an already provisioned provider.
+#   FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256
+#                        Externally selected SHA-256 of the complete provider
+#                        receipt. The run fails closed when it is absent or
+#                        does not match the origin receipt.
 #   FREEBSD_LLVM_23_1_SOURCE_DIR
 #                        Absolute guest source checkout path. Full mode defaults
 #                        beside the provider prefix.
@@ -53,6 +57,7 @@ QEMU_CPUS="${QEMU_CPUS:-4}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 FREEBSD_LLVM_23_1_PREFIX="${FREEBSD_LLVM_23_1_PREFIX:-}"
+FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256="${FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256:-}"
 FREEBSD_LLVM_23_1_SOURCE_DIR="${FREEBSD_LLVM_23_1_SOURCE_DIR:-}"
 FREEBSD_LLVM_23_1_JOBS="${FREEBSD_LLVM_23_1_JOBS:-2}"
 FREEBSD_LLVM_23_1_TIMEOUT="${FREEBSD_LLVM_23_1_TIMEOUT:-10800}"
@@ -97,19 +102,69 @@ require_freebsd_llvm_23_1_provider() {
     case "$FREEBSD_LLVM_23_1_PREFIX" in
         *[!A-Za-z0-9_./-]*) fail "FREEBSD_LLVM_23_1_PREFIX contains unsupported characters" ;;
     esac
+    printf '%s\n' "$FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+        || fail "FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256 must be an externally selected lowercase SHA-256"
+    FREEBSD_LLVM_23_1_ORIGIN_PREFIX="${FREEBSD_LLVM_23_1_ORIGIN_PREFIX:-$FREEBSD_LLVM_23_1_PREFIX}"
+    FREEBSD_PROVIDER_MANIFEST="${FREEBSD_PROVIDER_MANIFEST:-${VM_HOME}/simple/build/freebsd/llvm-23.1-provider.env}"
+    FREEBSD_LLVM_23_1_SNAPSHOT_ROOT="${FREEBSD_LLVM_23_1_SNAPSHOT_ROOT:-${FREEBSD_LLVM_23_1_SNAPSHOT_DIR:-${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-snapshots}}"
+    case "$FREEBSD_LLVM_23_1_SNAPSHOT_ROOT" in
+        /*) ;;
+        *) fail "FREEBSD_LLVM_23_1_SNAPSHOT_ROOT must be an absolute guest path" ;;
+    esac
+    FREEBSD_LLVM_23_1_SNAPSHOT_DIR="${FREEBSD_LLVM_23_1_SNAPSHOT_ROOT}/${FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256}"
 
-    FREEBSD_PROVIDER_OUT=$($VM_SSH "provider_prefix=\$(realpath ${FREEBSD_LLVM_23_1_PREFIX}) || exit 1; for provider_tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do provider_bin=\$(realpath \$provider_prefix/bin/\$provider_tool) || { echo missing:\$provider_tool; exit 1; }; case \$provider_bin in \$provider_prefix/bin/*) ;; *) echo escaped:\$provider_tool; exit 1;; esac; provider_version=\$(\$provider_bin --version 2>/dev/null | sed -n 's/[^0-9]*\\([0-9][0-9]*\\)\\.\\([0-9][0-9]*\\).*/\\1.\\2/p' | head -n 1); test \"\$provider_version\" = 23.1 || { echo rejected:\$provider_tool:\${provider_version:-unparseable}; exit 1; }; provider_hash=\$(sha256 -q \$provider_bin) || exit 1; printf 'tool_%s_path=%s\\ntool_%s_version=%s\\ntool_%s_sha256=%s\\n' \$provider_tool \$provider_bin \$provider_tool \$provider_version \$provider_tool \$provider_hash; done; printf 'provider_prefix=%s\\nfreebsd_llvm_23_1_provider=true\\n' \$provider_prefix" 2>&1) || {
+    FREEBSD_PROVIDER_OUT=$($VM_SSH "cd ${VM_HOME}/simple && \
+origin_prefix=\$(realpath ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX}) || exit 1; \
+origin_manifest=${FREEBSD_PROVIDER_MANIFEST}; \
+expected_manifest_sha256=${FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256}; \
+snapshot_dir=${FREEBSD_LLVM_23_1_SNAPSHOT_DIR}; \
+actual_manifest_sha256=\$(sha256 -q \"\$origin_manifest\") || exit 1; \
+test \"\$actual_manifest_sha256\" = \"\$expected_manifest_sha256\" || { echo manifest_sha256_mismatch; exit 1; }; \
+. scripts/check/lib/llvm-23-1-provider-snapshot.shs || exit 1; \
+. scripts/check/lib/clang-23-1-toolchain.shs || exit 1; \
+if [ -e \"\$snapshot_dir\" ] || [ -L \"\$snapshot_dir\" ]; then \
+    llvm_23_1_snapshot_validate "\$snapshot_dir" "\$expected_manifest_sha256" || { echo snapshot_reuse_validation_failed; exit 1; }; \
+else \
+    llvm_23_1_snapshot_create \"\$origin_prefix\" \"\$origin_manifest\" \"\$expected_manifest_sha256\" \"\$snapshot_dir\" || exit 1; \
+    llvm_23_1_snapshot_validate "\$snapshot_dir" "\$expected_manifest_sha256" || { echo snapshot_creation_validation_failed; exit 1; }; \
+fi; \
+snapshot_manifest=\"\$snapshot_dir/provider.env\"; \
+snapshot_manifest_sha256=\$(llvm_23_1_snapshot_sha256_file \"\$snapshot_manifest\") || exit 1; \
+for provider_tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do \
+    case \"\$provider_tool\" in clang) provider_key=CLANG ;; ld.lld) provider_key=LINKER ;; llvm-ar) provider_key=LLVM_AR ;; llvm-nm) provider_key=LLVM_NM ;; llvm-readobj) provider_key=LLVM_READOBJ ;; llvm-as) provider_key=LLVM_AS ;; opt) provider_key=LLVM_OPT ;; llc) provider_key=LLVM_LLC ;; llvm-config) provider_key=LLVM_CONFIG ;; llvm-objcopy) provider_key=LLVM_OBJCOPY ;; esac; \
+    provider_bin=\"\$snapshot_dir/bin/\$provider_tool\"; \
+    provider_version=\$(clang_23_1_version \"\$provider_bin\" \"\$provider_tool\") || exit 1; \
+    [ \"\$provider_version\" = 23.1.0 ] || exit 1; \
+    provider_hash_key=\"\$provider_key\"_SHA256; \
+    provider_hash=\$(llvm_23_1_snapshot_manifest_value \"\$snapshot_manifest\" \"\$provider_hash_key\") || exit 1; \
+    printf 'tool_%s_version=%s\\ntool_%s_sha256=%s\\n' \"\$provider_tool\" \"\$provider_version\" \"\$provider_tool\" \"\$provider_hash\"; \
+done; \
+printf 'snapshot_dir=%s\\nsnapshot_manifest_sha256=%s\\nprovider_prefix=%s\\nprovider_manifest=%s\\nfreebsd_llvm_23_1_provider=true\\n' \"\$snapshot_dir\" \"\$snapshot_manifest_sha256\" \"\$snapshot_dir\" \"\$snapshot_manifest\"" 2>&1) || {
         printf '%s\n' "$FREEBSD_PROVIDER_OUT" >&2
-        fail "FreeBSD LLVM provider is incomplete or not version 23.1"
+        fail "FreeBSD LLVM provider snapshot is incomplete, untrusted, or not exact version 23.1.0"
     }
     printf '%s\n' "$FREEBSD_PROVIDER_OUT" | grep -qx 'freebsd_llvm_23_1_provider=true' || fail "FreeBSD LLVM provider receipt missing"
+    for provider_tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do
+        printf '%s\n' "$FREEBSD_PROVIDER_OUT" | grep -Eq "^tool_${provider_tool}_version=23\\.1\\.0$" \
+            || fail "FreeBSD LLVM provider version receipt missing: ${provider_tool}"
+        printf '%s\n' "$FREEBSD_PROVIDER_OUT" | grep -Eq "^tool_${provider_tool}_sha256=[0-9a-f]{64}$" \
+            || fail "FreeBSD LLVM provider hash receipt missing: ${provider_tool}"
+    done
 
     # This is intentionally an assignment fragment for commands executed in the
     # guest.  The validated prefix is prepended before every compiler-facing
     # bootstrap and smoke command, so a system llvm/clang cannot win PATH order.
-    FREEBSD_LLVM_23_1_PREFIX=$(printf '%s\n' "$FREEBSD_PROVIDER_OUT" | sed -n 's/^provider_prefix=//p')
-    [ -n "$FREEBSD_LLVM_23_1_PREFIX" ] || fail "FreeBSD LLVM provider canonical prefix receipt missing"
-    FREEBSD_LLVM_23_1_ENV="PATH=${FREEBSD_LLVM_23_1_PREFIX}/bin:\$PATH LLVM_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} LLVM_23_1_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} SIMPLE_LLVM_PREFIX=${FREEBSD_LLVM_23_1_PREFIX} CC=${FREEBSD_LLVM_23_1_PREFIX}/bin/clang AR=${FREEBSD_LLVM_23_1_PREFIX}/bin/llvm-ar"
+    FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX=$(printf '%s\n' "$FREEBSD_PROVIDER_OUT" | sed -n 's/^provider_prefix=//p')
+    [ -n "$FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX" ] || fail "FreeBSD LLVM provider snapshot prefix receipt missing"
+    FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST=$(printf '%s\n' "$FREEBSD_PROVIDER_OUT" | sed -n 's/^provider_manifest=//p')
+    [ -n "$FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST" ] || fail "FreeBSD LLVM provider snapshot manifest receipt missing"
+    FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST_SHA256=$(printf '%s\n' "$FREEBSD_PROVIDER_OUT" | sed -n 's/^snapshot_manifest_sha256=//p')
+    printf '%s\n' "$FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+        || fail "FreeBSD LLVM provider snapshot manifest digest receipt missing"
+    [ "$FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX" = "$FREEBSD_LLVM_23_1_SNAPSHOT_DIR" ] \
+        || fail "FreeBSD LLVM provider snapshot is not content-addressed by the selected manifest digest"
+    FREEBSD_LLVM_23_1_PREFIX="$FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX"
+    FREEBSD_LLVM_23_1_ENV="env -u LLVM_PREFIX -u LLVM_23_1_PREFIX -u SIMPLE_LLVM_PREFIX -u CC -u CLANG -u LINKER -u AR -u LLVM_AR -u LLVM_NM -u LLVM_READOBJ -u LLVM_AS -u LLVM_OPT -u LLVM_LLC -u LLVM_CONFIG -u LLVM_OBJCOPY PATH=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin:\$PATH LLVM_PREFIX=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX} LLVM_23_1_PREFIX=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX} SIMPLE_LLVM_PREFIX=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX} CC=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/clang CLANG=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/clang LINKER=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/ld.lld AR=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-ar LLVM_AR=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-ar LLVM_NM=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-nm LLVM_READOBJ=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-readobj LLVM_AS=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-as LLVM_OPT=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/opt LLVM_LLC=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llc LLVM_CONFIG=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-config LLVM_OBJCOPY=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-objcopy"
 }
 
 provision_freebsd_llvm_23_1_provider() {
@@ -117,6 +172,7 @@ provision_freebsd_llvm_23_1_provider() {
         FREEBSD_LLVM_23_1_PREFIX="${VM_HOME}/simple/build/toolchains/llvm-23.1.0-rc2"
     [ -n "$FREEBSD_LLVM_23_1_SOURCE_DIR" ] ||
         FREEBSD_LLVM_23_1_SOURCE_DIR="${VM_HOME}/simple/build/toolchains/llvm-project-23.1.0-rc2"
+    FREEBSD_LLVM_23_1_ORIGIN_PREFIX="$FREEBSD_LLVM_23_1_PREFIX"
     case "$FREEBSD_LLVM_23_1_JOBS" in
         ''|*[!0-9]*|0) fail "FREEBSD_LLVM_23_1_JOBS must be a positive integer" ;;
     esac
@@ -139,13 +195,15 @@ provision_freebsd_llvm_23_1_provider() {
     $VM_SSH "rm -rf ${FREEBSD_LLVM_GNUPGHOME} && mkdir -m 700 ${FREEBSD_LLVM_GNUPGHOME} && cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} gpg --batch --import scripts/setup/keys/llvm-release-tobias-hieta.asc >/dev/null && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} gpg --with-colons --list-keys ${FREEBSD_LLVM_23_1_SIGNER_FPR} | grep -q '^fpr:::::::::${FREEBSD_LLVM_23_1_SIGNER_FPR}:$'" ||
         fail "FreeBSD LLVM release signing key import failed"
 
-    info "Building or verifying authenticated guest LLVM/Clang 23.1 provider..."
-    if ! $VM_SSH "cd ${VM_HOME}/simple && mkdir -p build/freebsd && if test -d ${FREEBSD_LLVM_23_1_SOURCE_DIR}/.git; then gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; else gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --clone --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; fi"; then
+    info "Reusing or building authenticated guest LLVM/Clang 23.1 provider..."
+    if $VM_SSH "cd ${VM_HOME}/simple && mkdir -p build/freebsd && if test -d ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX}/bin; then gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-verify.log ${FREEBSD_PROVIDER_MANIFEST}; else exit 1; fi"; then
+        pass "Existing complete authenticated guest LLVM/Clang 23.1 provider verified and reused"
+    elif ! $VM_SSH "cd ${VM_HOME}/simple && mkdir -p build/freebsd && if test -d ${FREEBSD_LLVM_23_1_SOURCE_DIR}/.git; then gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; else gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT} env GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --clone --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX} --targets X86 --jobs ${FREEBSD_LLVM_23_1_JOBS} > build/freebsd/llvm-23.1-provider-build.log 2>&1; fi"; then
         $VM_SSH "tail -80 ${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-build.log" >&2 || true
         copy_guest_bootstrap_logs
         fail "authenticated guest LLVM 23.1 provider build failed"
     fi
-    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-verify.log ${FREEBSD_PROVIDER_MANIFEST}"; then
+    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-verify.log ${FREEBSD_PROVIDER_MANIFEST}"; then
         copy_guest_bootstrap_logs
         fail "authenticated guest LLVM 23.1 provider verification failed"
     fi
@@ -154,7 +212,7 @@ provision_freebsd_llvm_23_1_provider() {
 
 reverify_freebsd_llvm_23_1_provider() {
     FREEBSD_PROVIDER_POST_MANIFEST="${VM_HOME}/simple/build/freebsd/llvm-23.1-provider-post.env"
-    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-post-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-post-verify.log ${FREEBSD_PROVIDER_POST_MANIFEST}"; then
+    if ! $VM_SSH "cd ${VM_HOME}/simple && GNUPGHOME=${FREEBSD_LLVM_GNUPGHOME} sh scripts/setup/build-llvm-23-1-provider.shs --source-dir ${FREEBSD_LLVM_23_1_SOURCE_DIR} --prefix ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX} --targets X86 --verify-only > build/freebsd/llvm-23.1-provider-post-verify.log 2>&1 && cp build/freebsd/llvm-23.1-provider-post-verify.log ${FREEBSD_PROVIDER_POST_MANIFEST}"; then
         copy_guest_bootstrap_logs
         fail "post-bootstrap FreeBSD LLVM 23.1 provider verification failed"
     fi
@@ -168,7 +226,56 @@ reverify_freebsd_llvm_23_1_provider() {
         copy_guest_bootstrap_logs
         fail "FreeBSD LLVM provider receipt changed during bootstrap/native checks"
     }
-    pass "FreeBSD LLVM/Clang 23.1 provider receipt unchanged after bootstrap/native checks"
+    FREEBSD_SNAPSHOT_POST_OUT=$($VM_SSH "cd ${VM_HOME}/simple && \
+snapshot_dir=${FREEBSD_LLVM_23_1_SNAPSHOT_DIR}; \
+expected_manifest_sha256=${FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256}; \
+expected_snapshot_manifest_sha256=${FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST_SHA256}; \
+. scripts/check/lib/llvm-23-1-provider-snapshot.shs || exit 1; \
+snapshot_manifest=\"\$snapshot_dir/provider.env\"; snapshot_origin_manifest=\"\$snapshot_dir/origin-provider.env\"; \
+[ -d \"\$snapshot_dir\" ] && [ ! -L \"\$snapshot_dir\" ] || exit 1; \
+[ \"\$(realpath \"\$snapshot_dir\")\" = \"\$snapshot_dir\" ] || exit 1; \
+[ -d \"\$snapshot_dir/bin\" ] && [ ! -L \"\$snapshot_dir/bin\" ] || exit 1; \
+[ -f \"\$snapshot_manifest\" ] && [ ! -L \"\$snapshot_manifest\" ] || exit 1; \
+[ -f \"\$snapshot_origin_manifest\" ] && [ ! -L \"\$snapshot_origin_manifest\" ] || exit 1; \
+[ \"\$(llvm_23_1_snapshot_sha256_file \"\$snapshot_origin_manifest\")\" = \"\$expected_manifest_sha256\" ] || exit 1; \
+[ \"\$(llvm_23_1_snapshot_sha256_file \"\$snapshot_manifest\")\" = \"\$expected_snapshot_manifest_sha256\" ] || exit 1; \
+[ \"\$(llvm_23_1_snapshot_manifest_value \"\$snapshot_manifest\" LLVM_23_1_PROVIDER_SCHEMA)\" = llvm-23.1-provider-v3 ] || exit 1; \
+[ \"\$(llvm_23_1_snapshot_manifest_value \"\$snapshot_manifest\" LLVM_23_1_PREFIX)\" = \"\$snapshot_dir\" ] || exit 1; \
+for provider_tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do \
+    case \"\$provider_tool\" in \
+        clang) provider_key=CLANG ;; ld.lld) provider_key=LINKER ;; llvm-ar) provider_key=LLVM_AR ;; \
+        llvm-nm) provider_key=LLVM_NM ;; llvm-readobj) provider_key=LLVM_READOBJ ;; llvm-as) provider_key=LLVM_AS ;; \
+        opt) provider_key=LLVM_OPT ;; llc) provider_key=LLVM_LLC ;; llvm-config) provider_key=LLVM_CONFIG ;; \
+        llvm-objcopy) provider_key=LLVM_OBJCOPY ;; *) exit 1 ;; \
+    esac; \
+    provider_path=\$(llvm_23_1_snapshot_manifest_value \"\$snapshot_manifest\" \"\$provider_key\"); \
+    provider_hash=\$(llvm_23_1_snapshot_manifest_value \"\$snapshot_manifest\" \"\${provider_key}_SHA256\"); \
+    [ \"\$provider_path\" = \"\$snapshot_dir/bin/\$provider_tool\" ] || exit 1; \
+    provider_bin=\$(realpath \"\$snapshot_dir/bin/\$provider_tool\") || exit 1; \
+    [ \"\$provider_bin\" = \"\$provider_path\" ] || exit 1; \
+    [ -f \"\$provider_bin\" ] && [ ! -L \"\$provider_bin\" ] && [ -x \"\$provider_bin\" ] || exit 1; \
+    [ \"\$(sha256 -q \"\$provider_bin\")\" = \"\$provider_hash\" ] || exit 1; \
+done; \
+printf 'snapshot_dir=%s\\nsnapshot_manifest_sha256=%s\\nfreebsd_llvm_23_1_snapshot=true\\n' \"\$snapshot_dir\" \"\$(llvm_23_1_snapshot_sha256_file \"\$snapshot_manifest\")\"" 2>&1) || {
+        printf '%s\n' "$FREEBSD_SNAPSHOT_POST_OUT" >&2
+        copy_guest_bootstrap_logs
+        fail "Consumed FreeBSD LLVM provider snapshot changed during bootstrap/native checks"
+    }
+    printf '%s\n' "$FREEBSD_SNAPSHOT_POST_OUT" | grep -qx 'freebsd_llvm_23_1_snapshot=true' || {
+        copy_guest_bootstrap_logs
+        fail "Consumed FreeBSD LLVM provider snapshot receipt missing after bootstrap/native checks"
+    }
+    FREEBSD_LLVM_23_1_SNAPSHOT_POST_DIR=$(printf '%s\n' "$FREEBSD_SNAPSHOT_POST_OUT" | sed -n 's/^snapshot_dir=//p')
+    [ "$FREEBSD_LLVM_23_1_SNAPSHOT_POST_DIR" = "$FREEBSD_LLVM_23_1_SNAPSHOT_DIR" ] || {
+        copy_guest_bootstrap_logs
+        fail "FreeBSD post-bootstrap verification used a different provider snapshot"
+    }
+    FREEBSD_LLVM_23_1_SNAPSHOT_POST_MANIFEST_SHA256=$(printf '%s\n' "$FREEBSD_SNAPSHOT_POST_OUT" | sed -n 's/^snapshot_manifest_sha256=//p')
+    [ "$FREEBSD_LLVM_23_1_SNAPSHOT_POST_MANIFEST_SHA256" = "$FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST_SHA256" ] || {
+        copy_guest_bootstrap_logs
+        fail "FreeBSD provider snapshot manifest digest changed during bootstrap/native checks"
+    }
+    pass "FreeBSD LLVM/Clang 23.1 origin and consumed snapshot receipts unchanged after bootstrap/native checks"
 }
 
 SCRIPT_OK=0
@@ -550,12 +657,12 @@ else
     mkdir -p "$(dirname "$FREEBSD_PROVIDER_HOST_MANIFEST")"
     scp ${SCP_OPTS} "${VM_USER}@localhost:${FREEBSD_PROVIDER_MANIFEST}" \
         "$FREEBSD_PROVIDER_HOST_MANIFEST" 2>/dev/null || fail "Failed to retrieve FreeBSD LLVM provider receipt"
-    grep -qx 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v2' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider receipt schema missing"
+    grep -qx 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider receipt schema missing"
     grep -qx 'LLVM_TAG=llvmorg-23.1.0-rc2' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider tag receipt missing"
     grep -qx 'LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider peeled-tag receipt missing"
     grep -qx 'LLVM_TARGETS=X86' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider target receipt missing"
     grep -Eq '^LLVM_LLC_SHA256=[0-9a-f]{64}$' "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider llc hash receipt missing"
-    for provider_hash in CLANG LINKER LLVM_AR LLVM_AS LLVM_OPT LLVM_LLC LLVM_OBJCOPY LLVM_CONFIG; do
+    for provider_hash in CLANG LINKER LLVM_AR LLVM_NM LLVM_READOBJ LLVM_AS LLVM_OPT LLVM_LLC LLVM_OBJCOPY LLVM_CONFIG; do
         grep -Eq "^${provider_hash}_SHA256=[0-9a-f]{64}$" "$FREEBSD_PROVIDER_HOST_MANIFEST" || fail "FreeBSD LLVM provider hash receipt missing: ${provider_hash}"
     done
     pass "FreeBSD LLVM/Clang 23.1 provider admitted without generic fallback"

@@ -2,56 +2,56 @@
 
 **Executable spec:** `test/03_system/check/simpleos_arm64_llvm23_provider_contract_spec.spl`
 
-`scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` is the
-canonical ARM64 desktop producer. Before it invokes the pure-Simple LLVM
-backend, it requires both `LLVM_23_1_PREFIX` and `SIMPLE_LLVM_PREFIX`, resolves
-both prefixes physically, and rejects a mismatch. It forbids per-tool
-`CLANG`, `LINKER`, and `LLVM_AR` overrides so the resolver can only admit
-`clang`, `ld.lld`, `llvm-ar`, `opt`, `llc`, `llvm-config`, and `llvm-objcopy` below that one
-prefix. Each tool must be a non-symlink canonical path under the physical
-provider prefix and report major/minor version `23.1`.
-The prefix is restricted to manifest-safe absolute path characters so the
-recorded command remains an exact replayable environment contract.
+The spec executes four bounded shell contracts with a 120-second outer
+deadline. It does not treat source-text markers as evidence. Builder,
+snapshot, and FreeBSD receipt contracts must exit successfully and emit their
+canonical `PASS:` receipt. Any failure, timeout, or unexpected exit is a test
+failure.
 
-Before the build, the producer also executes the signed provider builder in
-`--verify-only` mode against `LLVM_23_1_SOURCE_DIR`, then requires the exact
-signed `llvmorg-23.1.0-rc2` peeled commit
-`561093d94eb7156dea780c1c71a779824ef90e5b`. The builder receipt, source path,
-tag, and commit are recorded; QMP repeats that authenticated verification before
-launching the artifact.
-Both paths import only the checked-in Tobias Hieta release key into a fresh
-temporary `GNUPGHOME`, require primary fingerprint
-`D574BD5D1D0E98895E3BF90044F2485E45D59042`, and pass that isolated keyring to
-the builder. Host GPG keyring contents therefore cannot satisfy this check. The
-key and isolated-keyring helper are frozen source inputs.
+## Provider authority
 
-Providers installed before this contract may lack `opt`, `llc`, `llvm-config`,
-or `llvm-objcopy`. Re-run
-`scripts/setup/build-llvm-23-1-provider.shs` with the signed source checkout;
-its `--verify-only` mode deliberately rejects that incomplete layout.
+The ARM64 producer admits one explicitly selected LLVM provider and records
+the authenticated origin receipt and its caller-selected SHA-256 digest. It
+does not use an arbitrary host `PATH` or per-tool override. The signed source
+checkout and the checked-in Tobias Hieta release key are separate inputs to
+that admission decision.
 
-The admitted shared provider contains eight tools, including `llvm-as`. The
-ARM64 producer consumes and records its seven-tool subset: `clang`, `ld.lld`,
-`llvm-ar`, `opt`, `llc`, `llvm-config`, and `llvm-objcopy`, with parsed versions
-and SHA-256 values. It freezes the exact provider environment before
-the build, re-hashes the tools afterwards, and the downstream QMP evidence
-runner revalidates those paths, versions, hashes, and frozen command before it
-can boot the produced kernel. The resolver is also part of the frozen source
-fingerprint, so a change to admission code invalidates a prior receipt.
+The provider contains ten canonical tools, all below the admitted prefix:
 
-The companion shell gate
-`scripts/check/check-simpleos-arm64-llvm23-provider-contract.shs` executes
-negative cases for a provider tool escaping its prefix, an LLVM 18 tool, and a
-retargeted tag receipt. It does not merely inspect source text.
-It also rejects an untrusted signer fingerprint through the isolated-keyring
-auth path, preserves a caller-provided keyring path, and (with
-`SIMPLE_LLVM_23_1_TEST_SOURCE_DIR` set to the signed checkout) invokes the
-actual builder `--verify-only` path under the isolated `GNUPGHOME`. The
-regression expects the later missing-provider error, proving `git verify-tag`
-completed with the pinned key before provider validation.
+`clang`, `ld.lld`, `llvm-ar`, `llvm-as`, `opt`, `llc`, `llvm-config`,
+`llvm-objcopy`, `llvm-nm`, and `llvm-readobj`.
 
-This is **host-provider readiness** for an ARM64 SimpleOS native build. It
-does not prove that a compiler runs inside the ARM64 guest or that guest output
-executes. Those are separate claims and require a guest serial/QEMU execution
-transcript showing the in-guest compiler invocation and the resulting program's
-execution.
+Each tool is admitted at LLVM `23.1.0` and is recorded in the provider
+receipt with its exact executable path and SHA-256 digest. The receipt also
+records the provider schema, origin manifest digest, private snapshot
+manifest digest, source tag, and peeled tag commit. The ARM build command is
+bound to the private snapshot and the downstream QMP evidence path revalidates
+the same receipt inputs and all ten tool hashes.
+
+## Private snapshot contract
+
+The snapshot contract creates or reuses a private, content-addressed provider
+generation selected by the authenticated origin receipt digest. It copies the
+origin receipt into `origin-provider.env`, copies the ten admitted tools into
+the generation, computes the snapshot receipt, and seals the published
+generation and receipt against ordinary mutation. It checks ownership, exact
+paths, executable contents, receipt hashes, reuse, lock handling, unsafe
+parents, and tampering rejection. The snapshot is the compiler authority;
+the mutable shared provider is not consumed after snapshot admission.
+
+## Contract statuses
+
+The ARM shell contract runs its executable negative cases for escaped tools,
+LLVM 18 tools, retargeted tag receipts, isolated signing-key rejection, and
+the signed builder verification path. When
+`SIMPLE_LLVM_23_1_TEST_SOURCE_DIR` is not configured, the signed-checkout
+portion reports exit code `2` and an `UNAVAILABLE:` line. The SSpec accepts
+that one explicit environment-dependent result, but never treats it as a
+pass. With the signed checkout configured, the ARM contract must emit all
+negative-case `*_status=pass` receipts and its final `PASS:` line.
+
+The FreeBSD contract is receipt and admission evidence for the QEMU bootstrap
+path; it does not claim that a FreeBSD VM was booted. Live guest compiler
+execution requires a separate QEMU serial transcript. Likewise, host-provider
+readiness does not prove that a compiler runs inside the ARM64 guest or that
+guest output executes.

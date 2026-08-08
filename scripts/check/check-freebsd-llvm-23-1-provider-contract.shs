@@ -14,6 +14,8 @@ fail() {
 [ -f "$helper" ] || fail "missing LLVM 23.1 toolchain helper"
 [ -f "$freebsd_qemu" ] || fail "missing FreeBSD QEMU bootstrap runner"
 [ -f "$authority" ] || fail "missing bootstrap C compiler authority helper"
+snapshot_helper="$repo_root/scripts/check/lib/llvm-23-1-provider-snapshot.shs"
+[ -f "$snapshot_helper" ] || fail "missing shared LLVM 23.1 provider snapshot helper"
 sh -n "$helper" || fail "toolchain helper is not valid POSIX shell"
 sh -n "$freebsd_qemu" || fail "FreeBSD QEMU runner is not valid POSIX shell"
 
@@ -21,20 +23,42 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-freebsd-llvm23.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/provider/bin"
 
-for tool in clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy; do
+write_provider_tool() {
+    tool=$1
+    version=$2
     case "$tool" in
-        clang) version='clang version 23.1.0' ;;
-        ld.lld) version='LLD 23.1.0' ;;
-        llvm-config) version='23.1.0' ;;
-        *) version='LLVM version 23.1.0' ;;
+        clang) output="clang version $version" ;;
+        ld.lld) output="LLD $version" ;;
+        llvm-config) output="$version" ;;
+        *) output="LLVM version $version" ;;
     esac
-    printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "'$version'" > "$tmp/provider/bin/$tool"
+    printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "'$output'" > "$tmp/provider/bin/$tool"
     chmod +x "$tmp/provider/bin/$tool"
+}
+
+for tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do
+    write_provider_tool "$tool" 23.1.0
 done
 
 if ! sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider"; then
     fail "complete explicit LLVM 23.1 provider was rejected"
 fi
+
+for tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do
+    write_provider_tool "$tool" 23.1.1
+    if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider" >/dev/null 2>&1; then
+        fail "LLVM 23.1.1 $tool was accepted by the explicit provider gate"
+    fi
+    write_provider_tool "$tool" 23.1.0
+done
+
+for tool in clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy; do
+    write_provider_tool "$tool" '23.1.0 custom'
+    if sh -c '. "$1"; clang_23_1_require_full_provider_prefix "$2"' sh "$helper" "$tmp/provider" >/dev/null 2>&1; then
+        fail "whitespace-suffixed LLVM 23.1.0 $tool was accepted by the explicit provider gate"
+    fi
+    write_provider_tool "$tool" 23.1.0
+done
 
 mkdir -p "$tmp/external"
 printf '#!/bin/sh\nprintf "%%s\\n" "LLVM version 23.1.0"\n' > "$tmp/external/llc"
@@ -61,7 +85,21 @@ grep -Fq 'require_freebsd_llvm_23_1_provider' "$freebsd_qemu" \
     || fail "FreeBSD runner lacks provider admission"
 grep -Fq 'FREEBSD_LLVM_23_1_PREFIX is required' "$freebsd_qemu" \
     || fail "FreeBSD runner permits an implicit provider"
-grep -Fq 'clang ld.lld llvm-ar llvm-as opt llc llvm-config llvm-objcopy' "$freebsd_qemu" \
+grep -Fq 'FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not require an externally selected provider receipt digest"
+grep -Fq 'FREEBSD_LLVM_23_1_SNAPSHOT_ROOT' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not separate the snapshot root from its content-addressed generation"
+grep -Fq 'FREEBSD_LLVM_23_1_SNAPSHOT_DIR="${FREEBSD_LLVM_23_1_SNAPSHOT_ROOT}/${FREEBSD_LLVM_23_1_EXPECTED_MANIFEST_SHA256}"' "$freebsd_qemu" \
+    || fail "FreeBSD snapshot path is not content-addressed by the expected provider receipt digest"
+grep -Fq 'llvm_23_1_snapshot_create' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not snapshot the provider before compiler use"
+grep -Fq 'snapshot_reuse_validation_failed' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not validate an existing snapshot before incremental reuse"
+grep -Fq 'snapshot_creation_validation_failed' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not validate a newly created snapshot"
+grep -Fq 'LLVM_23_1_SNAPSHOT_PREFIX' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not consume the shared snapshot prefix"
+grep -Fq 'clang ld.lld llvm-ar llvm-nm llvm-readobj llvm-as opt llc llvm-config llvm-objcopy' "$freebsd_qemu" \
     || fail "FreeBSD runner does not require all LLVM native-build tools"
 grep -Fq 'FREEBSD_LLVM_23_1_ENV' "$freebsd_qemu" \
     || fail "FreeBSD runner does not bind the admitted provider to guest commands"
@@ -71,20 +109,44 @@ grep -Fq 'llvm-release-tobias-hieta.asc' "$freebsd_qemu" \
     || fail "FreeBSD provider provisioning has no pinned signing key"
 grep -Fq 'build-llvm-23-1-provider.shs --clone' "$freebsd_qemu" \
     || fail "FreeBSD provider provisioning does not build in the guest"
-grep -Fq 'realpath \$provider_prefix/bin/\$provider_tool' "$freebsd_qemu" \
-    || fail "FreeBSD provider paths can escape their explicit prefix"
-grep -Fq 'LLVM_LLC_SHA256' "$freebsd_qemu" \
-    || fail "FreeBSD provider receipt does not bind llc"
+grep -Fq '. scripts/check/lib/llvm-23-1-provider-snapshot.shs' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not delegate canonical path rejection to the snapshot owner"
+grep -Fq 'for provider_hash in CLANG LINKER LLVM_AR LLVM_NM LLVM_READOBJ LLVM_AS LLVM_OPT LLVM_LLC LLVM_OBJCOPY LLVM_CONFIG' "$freebsd_qemu" \
+    || fail "FreeBSD provider manifest does not bind llvm-nm and llvm-readobj"
+grep -Fq '^tool_${provider_tool}_version=23\\.1\\.0$' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt does not require exact tool versions"
+grep -Fq '^tool_${provider_tool}_sha256=[0-9a-f]{64}$' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt does not require tool hashes"
+grep -Fq 'LLVM_23_1_PROVIDER_SCHEMA=llvm-23.1-provider-v3' "$freebsd_qemu" \
+    || fail "FreeBSD provider receipt does not require schema v3"
 grep -Fq 'gtimeout -k 60 ${FREEBSD_LLVM_23_1_TIMEOUT}' "$freebsd_qemu" \
     || fail "FreeBSD provider build has no bounded timeout"
 grep -Fq -- '--targets X86' "$freebsd_qemu" \
     || fail "FreeBSD provider build is not constrained to X86"
 grep -Fq 'LLVM_TAG_COMMIT=561093d94eb7156dea780c1c71a779824ef90e5b' "$freebsd_qemu" \
     || fail "FreeBSD provider receipt does not pin the peeled tag commit"
+grep -Fq 'env -u LLVM_PREFIX -u LLVM_23_1_PREFIX -u SIMPLE_LLVM_PREFIX -u CC -u CLANG -u LINKER -u AR -u LLVM_AR -u LLVM_NM -u LLVM_READOBJ -u LLVM_AS -u LLVM_OPT -u LLVM_LLC -u LLVM_CONFIG -u LLVM_OBJCOPY' "$freebsd_qemu" \
+    || fail "FreeBSD compiler commands do not clear inherited LLVM overrides"
+grep -Fq 'LLVM_NM=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-nm' "$freebsd_qemu" \
+    || fail "FreeBSD compiler commands do not pin llvm-nm to the snapshot"
+grep -Fq 'LLVM_READOBJ=${FREEBSD_LLVM_23_1_SNAPSHOT_PREFIX}/bin/llvm-readobj' "$freebsd_qemu" \
+    || fail "FreeBSD compiler commands do not pin llvm-readobj to the snapshot"
+grep -Fq 'test -d ${FREEBSD_LLVM_23_1_ORIGIN_PREFIX}/bin' "$freebsd_qemu" \
+    || fail "FreeBSD provider reuse does not gate verify-only on an existing prefix"
+verify_line=$(grep -n -- '--verify-only' "$freebsd_qemu" | head -n 1 | cut -d: -f1)
+build_line=$(grep -n -- 'build-llvm-23-1-provider.shs --clone' "$freebsd_qemu" | head -n 1 | cut -d: -f1)
+[ -n "$verify_line" ] && [ -n "$build_line" ] && [ "$verify_line" -lt "$build_line" ] \
+    || fail "FreeBSD provider reuse does not attempt verify-only before rebuilding"
 grep -Fq 'reverify_freebsd_llvm_23_1_provider()' "$freebsd_qemu" \
     || fail "FreeBSD runner does not reverify the provider after native checks"
 grep -Fq 'cmp -s "$FREEBSD_PROVIDER_HOST_MANIFEST" "$FREEBSD_PROVIDER_HOST_POST_MANIFEST"' "$freebsd_qemu" \
     || fail "FreeBSD runner does not compare complete pre/post provider receipts"
+grep -Fq 'FREEBSD_LLVM_23_1_SNAPSHOT_MANIFEST_SHA256' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not retain the consumed snapshot manifest digest"
+grep -Fq 'Consumed FreeBSD LLVM provider snapshot changed' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not revalidate the exact consumed snapshot"
+grep -Fq 'provider snapshot manifest digest changed' "$freebsd_qemu" \
+    || fail "FreeBSD runner does not compare pre/post snapshot manifest digests"
 grep -Fq 'llvm-23.1-provider-post-verify.log' "$freebsd_qemu" \
     || fail "FreeBSD runner does not retain post-native provider verification evidence"
 for compiler_gate in \
