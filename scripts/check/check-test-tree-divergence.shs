@@ -44,11 +44,24 @@
 #     this repo has been bitten by repeatedly.
 #   * The verdict line always states how many pairs were actually compared.
 #
-# Usage: check-test-tree-divergence.shs [--generate-baseline]
+# Usage: check-test-tree-divergence.shs [--generate-baseline] [--ref <commit-ish>]
 #   --generate-baseline   overwrite the baseline file with the CURRENT
 #                          diverged-pair list (only for deliberate,
 #                          reviewed baseline updates — never run this to
 #                          make a failure go away without reading it first).
+#   --ref <commit-ish>    compare the COMMITTED content of both trees at this
+#                          ref (via `git show`/`git ls-tree`) instead of the
+#                          live on-disk working copy. This repo's dev hosts
+#                          run several agent sessions against ONE shared
+#                          working copy; an unrelated session's uncommitted
+#                          scratch edits under test/ sit in the WC and, since
+#                          `git push` only ever sends committed content, make
+#                          this guard fail (or falsely pass) on divergence
+#                          that was never part of the push. pre-push always
+#                          passes `--ref "$local_sha"` (the exact commit being
+#                          pushed) for this reason — see
+#                          doc/08_tracking/bug/pre_push_full_scan_guards_read_dirty_shared_wc_2026-08-08.md.
+#                          Without --ref, behavior is unchanged (reads disk).
 #
 # Env overrides (for sabotage/self-test only — do not use in normal runs):
 #   TEST_TREE_DIVERGENCE_PAIRS="label:canon_rel:shadow_rel[;label:canon_rel:shadow_rel...]"
@@ -76,8 +89,17 @@ cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
 BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/scripts/check/test_tree_divergence_baseline.txt}"
 
 generate=0
-if [ "${1:-}" = "--generate-baseline" ]; then
-    generate=1
+ref=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --generate-baseline) generate=1; shift ;;
+        --ref) ref="${2:-}"; [ -n "$ref" ] || die 2 "--ref requires a commit-ish argument"; shift 2 ;;
+        *) die 2 "unrecognized argument: $1" ;;
+    esac
+done
+if [ -n "$ref" ]; then
+    git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null \
+        || die 2 "--ref '$ref' does not resolve to a commit"
 fi
 
 # --- 1. which pairs to check ------------------------------------------------
@@ -120,28 +142,53 @@ for line in $pairs_raw; do
         /*) shadow_dir="$shadow_rel" ;;
         *)  shadow_dir="$toplevel/$shadow_rel" ;;
     esac
-    [ -d "$canon_dir" ]  || die 2 "canonical dir does not exist: $canon_dir"
-    [ -d "$shadow_dir" ] || die 2 "shadow dir does not exist: $shadow_dir"
+    if [ -n "$ref" ]; then
+        # Committed-content mode: enumerate/read via git, never the live WC —
+        # a dirty shared working copy must not affect this comparison.
+        git ls-tree -r --name-only "$ref" -- "$shadow_rel" 2>/dev/null \
+            | /usr/bin/grep -E '\.spl$' \
+            | /usr/bin/grep -vE '/\.spipe_matchers_[^/]*$|/\.sspec_wrapped_entry_[^/]*$' \
+            > "$work/shadow_files.txt"
+        fr=$?
+        [ "$fr" -eq 0 ] || die 2 "git ls-tree failed (status $fr) for $shadow_rel@$ref"
 
-    find "$shadow_dir" -type f -name '*.spl' \
-        ! -name '.spipe_matchers_*' ! -name '.sspec_wrapped_entry_*' \
-        > "$work/shadow_files.txt"
-    fr=$?
-    [ "$fr" -eq 0 ] || die 2 "find failed (status $fr) under $shadow_dir"
+        while IFS= read -r shpath; do
+            [ -n "$shpath" ] || continue
+            relpath=${shpath#"$shadow_rel"/}
+            canon_path="$canon_rel/$relpath"
+            git cat-file -e "$ref:$canon_path" 2>/dev/null || continue   # not mirrored — out of scope
+            total_common=$((total_common + 1))
+            if git diff --quiet "$ref:$canon_path" "$ref:$shpath" 2>/dev/null; then
+                total_identical=$((total_identical + 1))
+            else
+                total_diverged=$((total_diverged + 1))
+                echo "$label:$relpath" >> "$current_diverged"
+            fi
+        done < "$work/shadow_files.txt"
+    else
+        [ -d "$canon_dir" ]  || die 2 "canonical dir does not exist: $canon_dir"
+        [ -d "$shadow_dir" ] || die 2 "shadow dir does not exist: $shadow_dir"
 
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        relpath=${f#"$shadow_dir"/}
-        canon_file="$canon_dir/$relpath"
-        [ -f "$canon_file" ] || continue   # not a mirrored path — out of scope
-        total_common=$((total_common + 1))
-        if cmp -s "$canon_file" "$f"; then
-            total_identical=$((total_identical + 1))
-        else
-            total_diverged=$((total_diverged + 1))
-            echo "$label:$relpath" >> "$current_diverged"
-        fi
-    done < "$work/shadow_files.txt"
+        find "$shadow_dir" -type f -name '*.spl' \
+            ! -name '.spipe_matchers_*' ! -name '.sspec_wrapped_entry_*' \
+            > "$work/shadow_files.txt"
+        fr=$?
+        [ "$fr" -eq 0 ] || die 2 "find failed (status $fr) under $shadow_dir"
+
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            relpath=${f#"$shadow_dir"/}
+            canon_file="$canon_dir/$relpath"
+            [ -f "$canon_file" ] || continue   # not a mirrored path — out of scope
+            total_common=$((total_common + 1))
+            if cmp -s "$canon_file" "$f"; then
+                total_identical=$((total_identical + 1))
+            else
+                total_diverged=$((total_diverged + 1))
+                echo "$label:$relpath" >> "$current_diverged"
+            fi
+        done < "$work/shadow_files.txt"
+    fi
     IFS='
 '
 done

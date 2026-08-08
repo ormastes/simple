@@ -218,9 +218,20 @@ run_guard() {
     rm -f "$_out"
 }
 
+pushed_sha_file=$(mktemp) || exit 1
+trap 'rm -f "$pushed_sha_file"' EXIT INT TERM
+
 while read -r _local_ref local_sha _remote_ref remote_sha; do
     # Deleting a remote ref: nothing to inspect.
     [ "$local_sha" = "$zero" ] && continue
+
+    # Record the last non-deleted local_sha for guards that run AFTER this
+    # loop (once per push, full scan) but still need the exact commit being
+    # pushed -- e.g. check-test-tree-divergence.shs --ref. Written to a file,
+    # not just left in the shell variable: on some shells `while read` here
+    # runs in a subshell (stdin is a pipe from git), so a plain variable does
+    # not survive past `done`.
+    printf '%s\n' "$local_sha" > "$pushed_sha_file"
 
     if [ "$remote_sha" = "$zero" ]; then
         # New ref: bound the walk by whatever the remote already has, so we do
@@ -408,7 +419,21 @@ run_guard "$utf8_slice_audit_live_guard" "utf8-slice-audit-instrument liveness p
 # entry fails it. As of 2026-08-08 it is EXPECTED GREEN against the 981-pair
 # baseline recorded in scripts/check/test_tree_divergence_baseline.txt -- the
 # real divergence is tracked separately and is not this guard's job to fix.
-run_guard "$test_tree_divergence_guard" "test-tree mirrored-pair divergence meta-guard (full scan, not range-bound)"
+# 2026-08-08: this guard used to read the live on-disk working copy, so
+# another concurrent session's uncommitted scratch edits under test/ (this
+# host runs several agent sessions against ONE shared WC) could flip its
+# verdict for a push that never touched test/ at all -- `git push` only ever
+# sends committed content. `--ref <pushed-sha>` makes it compare the
+# COMMITTED tree actually being pushed instead (see pushed_sha_file above).
+pushed_sha=$(cat "$pushed_sha_file" 2>/dev/null)
+if [ -n "$pushed_sha" ]; then
+    run_guard "$test_tree_divergence_guard" "test-tree mirrored-pair divergence meta-guard (full scan, not range-bound)" --ref "$pushed_sha"
+else
+    # No non-deleted ref went out (e.g. a delete-only push) -- nothing was
+    # actually pushed for this guard to check against; skip rather than fall
+    # back to the live WC, which would reintroduce the exact hazard above.
+    echo "pre-push: no pushed commit to check test-tree divergence against — skipping (delete-only push)" >&2
+fi
 
 # check-no-sabotage-residue.shs: fences unrestored sabotage/verification
 # markers (SABOTAGE, MARKER-/MARKER_, TEMP-PROBE, XXX-DEBUG, DEBUGME) left in
