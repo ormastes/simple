@@ -333,3 +333,76 @@ describe "Manual projection":
         expect(manual_block_kind_name(blocks[0].kind)).to_equal("expected_actual")
         expect(blocks[0].lines[0]).to_contain("Selector")
         expect(blocks[1].lines[0]).to_contain("PASS")
+
+describe "Red-team hardening of the evaluator":
+    """
+    Findings from the 2026-08-08 adversarial audit. Each example is a capture
+    that previously reported PASS while establishing nothing a reader would
+    recognise as verified.
+    """
+
+    it "rejects an oracle built only from correlation binds":
+        step("Declare an oracle whose only non-ignore check merely captures a value")
+        val bind_only = oracle_spec(
+            "simple-list/1",
+            [
+                check_bind("request.headers.correlation-id", "request_id"),
+                check_ignore("response.headers.date", "server clock")
+            ]
+        )
+
+        step("Verify a bind alone does not count as a positive production check")
+        assert_false(has_positive_oracle(bind_only))
+        val result = compare_evidence(list_response_evidence(), bind_only)
+        expect(result.status).to_equal(EvidenceStatus.failed)
+        expect(result.summary).to_contain("no positive production check")
+
+    it "rejects a tolerance comparison between values that are not numbers":
+        step("Compare two unrelated words under a numeric tolerance oracle")
+        val evidence = canonical_evidence("statistics", "throughput/1", [evidence_node("rps", "banana")])
+        val result = compare_evidence(
+            evidence,
+            oracle_spec("throughput/1", [check_numeric_tolerance("rps", "elephant", 0, "measured jitter")])
+        )
+
+        step("Verify neither value is silently read as zero")
+        expect(result.status).to_equal(EvidenceStatus.failed)
+        var reported = false
+        for check in result.checks:
+            if check.selector == "rps":
+                reported = true
+                expect(check.detail).to_contain("not numeric")
+        assert_true(reported)
+
+    it "rejects a tolerance comparison whose difference would overflow":
+        step("Compare the largest and smallest representable measurements")
+        val evidence = canonical_evidence(
+            "statistics",
+            "throughput/1",
+            [evidence_node("rps", "-9223372036854775807")]
+        )
+        val result = compare_evidence(
+            evidence,
+            oracle_spec("throughput/1", [check_numeric_tolerance("rps", "9223372036854775807", 1, "measured jitter")])
+        )
+
+        step("Verify the widest possible disagreement does not wrap into a pass")
+        expect(result.status).to_equal(EvidenceStatus.failed)
+
+    it "rejects a manifest whose digests are not digests":
+        step("Record provenance with placeholder text where hashes belong")
+        var manifest = evidence_manifest(
+            "list-projects",
+            "simple-list/1",
+            "test/03_system/tools/spipe/examples/text_protocol_manual_spec.spl",
+            "z",
+            "protocol_trace_provider",
+            "1",
+            "run-2026-08-08-01",
+            "linux-x86_64",
+            "not-a-hash",
+            EvidenceStatus.passed
+        )
+
+        step("Verify the receipt is refused because it identifies nothing")
+        assert_false(evidence_manifest_is_complete(manifest))
