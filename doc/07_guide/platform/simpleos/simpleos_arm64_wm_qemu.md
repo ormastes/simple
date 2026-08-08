@@ -16,7 +16,8 @@ test -x "$SIMPLE"
 Build the WM kernel:
 
 ```bash
-SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+env -u SIMPLE_ALLOW_FREESTANDING_STUBS \
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 \
 LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18 \
 PATH=/opt/homebrew/opt/llvm@18/bin:$PATH \
 LIBRARY_PATH=/opt/homebrew/opt/zstd/lib:$LIBRARY_PATH \
