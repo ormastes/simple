@@ -147,3 +147,34 @@ describe "Binary layout evidence format":
         val grouped = u64_binary_grouped(pte)
         assert_true(grouped.starts_with("0b10000000_00000000"))
         assert_true(grouped.ends_with("00000011"))
+
+describe "Red-team hardening: wide-field table hex":
+    """
+    A field wider than one byte must not be truncated to its low byte in the
+    generated table, because the table is supposed to be derived from the
+    same decode the comparator uses — a masked table disagrees with the
+    evidence it claims to describe.
+    """
+
+    fn wide_field_layout() -> BinaryLayout:
+        BinaryLayout(
+            layout_id: "wide-field/1",
+            total_bits: 64,
+            byte_order: ByteOrder.little,
+            bit_order: BitOrder.lsb0,
+            fields: [BinaryFieldSpec(name: "phys_addr", lsb: 12, width: 40, reserved: false, description: "")],
+            source_ref: "test fixture"
+        )
+
+    it "renders the full field width in the table, not just its low byte":
+        val layout = wide_field_layout()
+        val value = 0x0000_0000_1234_5000
+        val rows = binary_field_table(value, layout)
+        val decoded = field_extract(value, 12, 40)
+        expect(decoded).to_equal(0x1234_5)
+        var found = false
+        for row in rows:
+            if row.starts_with("1 | "):
+                found = true
+                expect(row).to_contain("0000012345")
+        assert_true(found)
