@@ -41,6 +41,10 @@ The broad `std.gc_async_mut.gpu.engine2d.engine.Engine2D` facade pulls host/GPU 
 
 The same boundary applies to browser rendering in QEMU: Simple Web may produce pixels, but `browser_backend` and the hosted/full `Engine2D` facade stay out of the freestanding QEMU entry closure.
 
+### ARM64 production adapter (2026-08-09)
+
+The ARM64 RAMFB desktop preserves the canonical `SharedWmScene -> DrawIrComposition -> Engine2dWmFrameExecutor` route. When `SIMPLE_TARGET_OS=simpleos`, its Engine2D import resolves to `engine_baremetal.spl`: a concrete `BaremetalBackend` owner for scanout and a concrete `SoftwareBackend` owner for bounded offscreen composition. Hosted builds retain `engine.spl`. This is a target feature transform at the backend boundary, not a second Draw IR executor. Freestanding code must not store either backend behind `RenderBackend`; native trait-object dispatch remains unsafe on this lane.
+
 ## std.game2d Layer Architecture (2026-04-25)
 
 A `std.game2d` framework layer sits on top of `engine/`. All new code lives under `src/lib/nogc_sync_mut/game2d/**` (28 files, ~2237 LOC, every file ≤ 260 LOC). The full module tree and rationale is in `.sstack/game2d-framework/state.md` `### 3-arch §A "Final on-disk module tree"`.

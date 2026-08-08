@@ -110,6 +110,9 @@ for key in \
     compiler_version \
     compiler_format \
     compiler_arch \
+    target_os \
+    target_arch \
+    native_backend \
     build_command \
     build_environment
 do
@@ -139,6 +142,9 @@ MANIFEST_COMPILER_SHA256="$(manifest_field compiler_sha256)"
 MANIFEST_COMPILER_VERSION="$(manifest_field compiler_version)"
 MANIFEST_COMPILER_FORMAT="$(manifest_field compiler_format)"
 MANIFEST_COMPILER_ARCH="$(manifest_field compiler_arch)"
+MANIFEST_TARGET_OS="$(manifest_field target_os)"
+MANIFEST_TARGET_ARCH="$(manifest_field target_arch)"
+MANIFEST_NATIVE_BACKEND="$(manifest_field native_backend)"
 MANIFEST_BUILD_COMMAND="$(manifest_field build_command)"
 MANIFEST_BUILD_ENVIRONMENT="$(manifest_field build_environment)"
 HOST_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
@@ -231,10 +237,36 @@ printf '%s\n' "$MANIFEST_COMPILER_SHA256" |
     fail_evidence "canonical-build-manifest-compiler-sha256-invalid"
 [ -n "$MANIFEST_COMPILER_VERSION" ] ||
     fail_evidence "canonical-build-manifest-compiler-version-missing"
-[ "$MANIFEST_BUILD_COMMAND" = "env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 $MANIFEST_COMPILER_PATH os build --scenario=arm64-desktop-engine2d" ] ||
-    fail_evidence "canonical-build-manifest-command-mismatch"
-[ "$MANIFEST_BUILD_ENVIRONMENT" = "-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000" ] ||
-    fail_evidence "canonical-build-manifest-environment-mismatch"
+[ "$MANIFEST_TARGET_OS" = "simpleos" ] ||
+    fail_evidence "canonical-build-manifest-target-os-mismatch"
+[ "$MANIFEST_TARGET_ARCH" = "arm64" ] ||
+    fail_evidence "canonical-build-manifest-target-arch-mismatch"
+case "$MANIFEST_NATIVE_BACKEND" in
+    llvm|cranelift) ;;
+    *) fail_evidence "canonical-build-manifest-native-backend-invalid" ;;
+esac
+printf '%s\n' "$MANIFEST_BUILD_COMMAND" |
+    grep -Fq "sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts" ||
+    fail_evidence "canonical-build-manifest-disk-command-mismatch"
+for command_token in \
+    "$MANIFEST_COMPILER_PATH native-build --verbose" \
+    "--backend $MANIFEST_NATIVE_BACKEND" \
+    "--entry-closure --entry $MANIFEST_ENTRY_PATH" \
+    "--target aarch64-unknown-none -o $KERNEL" \
+    "--linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld"
+do
+    printf '%s\n' "$MANIFEST_BUILD_COMMAND" | grep -Fq -- "$command_token" ||
+        fail_evidence "canonical-build-manifest-command-mismatch"
+done
+for environment_token in \
+    "-u SIMPLE_ALLOW_FREESTANDING_STUBS" \
+    "SIMPLE_TARGET_OS=simpleos" \
+    "SIMPLE_TARGET_ARCH=arm64" \
+    "SIMPLE_NO_STUB_FALLBACK=1"
+do
+    printf '%s\n' "$MANIFEST_BUILD_ENVIRONMENT" | grep -Fq -- "$environment_token" ||
+        fail_evidence "canonical-build-manifest-environment-mismatch"
+done
 
 if arm64_guest_source_dirty; then
     fail_evidence "guest-source-worktree-dirty-before-launch"

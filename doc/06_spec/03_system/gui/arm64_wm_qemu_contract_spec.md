@@ -291,6 +291,10 @@ expect(cli).to_contain("val ok = test_scenario(scenario, scenario_test_timeout_m
 
 </details>
 
+#### selects a concrete freestanding Engine2D without replacing Draw IR
+
+The SimpleOS target selects concrete bare-metal/software backend owners, excludes hosted GPU backend imports, and continues through the shared advanced Draw IR composition-present entrypoint. The executable source contract rejects a `RenderBackend` trait field because native freestanding trait dispatch is not safe.
+
 ## At a Glance
 
 | Field | Value |
@@ -298,7 +302,7 @@ expect(cli).to_contain("val ok = test_scenario(scenario, scenario_test_timeout_m
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/arm64_wm_qemu_contract_spec.spl` |
-| Updated | 2026-07-14 |
+| Updated | 2026-08-09 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -310,8 +314,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

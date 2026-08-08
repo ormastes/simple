@@ -46,3 +46,7 @@ Use backend-specific adapters that emit one frozen evidence schema. Keep
 transient GPU/readback details inside each backend. Compare normalized captures
 through `wm_compare`, and fail closed when backend identity, SIMD counters,
 event order, source revision, or capture metadata are absent.
+
+## ARM64 closure finding (2026-08-09)
+
+The attested ARM64 build proved that the full hosted Engine2D retains accelerator vtables and 148 host-GPU externs even with per-function sections and linker GC. The selected fix keeps the shared Draw IR executor and conditionally selects a concrete freestanding Engine2D backend owner. The prior trait-typed Draw IR attempt remains rejected because native mixin traits lower to a `ud2` trap.
