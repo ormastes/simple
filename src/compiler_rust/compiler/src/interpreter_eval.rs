@@ -33,7 +33,7 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
-    FUNCTION_MODULE_OWNER, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS,
     MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
     SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
@@ -952,40 +952,53 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // Regular impl - register as before
                     register_trait_impl(&mut trait_impl_registry, impl_block)?;
                     let type_name = get_type_name(&impl_block.target_type);
+                    // Owner-tag every method pulled from this impl block, mirroring
+                    // interpreter_module/module_evaluator/evaluation_helpers.rs's
+                    // `tagged_method` fix (see
+                    // doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md).
+                    // This is the script-eval path (`bin/simple run`/`-c`), which has
+                    // no `module_ident`, so it uses the same `"<entry>"` sentinel that
+                    // Node::Function registration below already tags entry-script
+                    // functions with -- without this, impl-block methods registered
+                    // here got NO owner tag at all (not even the `<entry>` fallback),
+                    // so a call from another module's frame left `CURRENT_EXEC_MODULE`
+                    // holding the CALLER's owner and mis-attributed coverage rows to
+                    // the wrong file instead of merely falling back to `<entry>`.
+                    let tagged_method = |m: &FunctionDef| -> FunctionDef {
+                        let mut method = method_with_impl_driver_attrs(m, &impl_block.attributes);
+                        tag_function_module_owner(&mut method, "<entry>");
+                        method
+                    };
                     let methods = impl_methods.entry(type_name.clone()).or_default();
                     for method in &impl_block.methods {
-                        methods.push(Arc::new(method_with_impl_driver_attrs(method, &impl_block.attributes)));
+                        methods.push(Arc::new(tagged_method(method)));
                     }
 
                     // Populate GLOBAL_IMPL_METHODS for cross-module fallback
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let global_methods = global_impls.entry(type_name.clone()).or_default();
-                        global_methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| Arc::new(method_with_impl_driver_attrs(m, &impl_block.attributes))),
-                        );
+                        global_methods.extend(impl_block.methods.iter().map(|m| Arc::new(tagged_method(m))));
                     });
 
                     // Also add impl methods to class/struct definition for Constructor method dispatch
                     if let Some(class_def) = classes.get_mut(&type_name) {
-                        Arc::make_mut(class_def).methods.extend(
-                            impl_block
-                                .methods
-                                .iter()
-                                .map(|m| method_with_impl_driver_attrs(m, &impl_block.attributes)),
-                        );
+                        Arc::make_mut(class_def)
+                            .methods
+                            .extend(impl_block.methods.iter().map(tagged_method));
                     }
 
                     // Register static methods from impl blocks as mangled free functions
                     for method in &impl_block.methods {
-                        let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                        let method = tagged_method(method);
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
                             let arc_method = Arc::new(method);
+                            FUNCTION_MODULE_OWNER.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(Arc::as_ptr(&arc_method) as usize, Arc::from("<entry>"));
+                            });
                             functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             FUNCTION_OVERLOADS.with(|cell| {
                                 cell.borrow_mut()

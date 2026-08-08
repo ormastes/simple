@@ -1,7 +1,8 @@
 # Coverage `<entry>` placeholder attribution — two root causes, not one; B collapses into A
 
-Status: root-caused, both fixes landed (Node::Impl owner-tagging gap; entry-script
-`<entry>`-sentinel coverage fallback).
+Status: root-caused, all three fixes landed (Node::Impl owner-tagging gap in
+the import-module path; entry-script `<entry>`-sentinel coverage fallback;
+Node::Impl owner-tagging gap in the sibling script-eval path).
 
 ## Background
 
@@ -188,6 +189,95 @@ owner tagging — one test in that family panics (pre-existing, matches the
 "one native_project test" noted in the RC1 landing) and poisons the mutex for
 the rest of that lock's tests; reproduces identically with `--test-threads=1`,
 so it is not new flakiness introduced by this change.
+
+## RC1 sibling (fixed 2026-08-08): the script-eval `Node::Impl` path had the same untagged pattern
+
+Higher-model review of the RC1 landing (`b6a43042`) found a second, parallel
+copy of the pre-fix bug: RC1's fix only touched
+`interpreter_module/module_evaluator/evaluation_helpers.rs`'s
+`register_definitions()` — the path used when a module is loaded as an
+*import*. `bin/simple run <file>`/`-c` on the *entry script itself* does not
+go through that function at all; its top-level items (including the entry
+script's own `impl` blocks) are registered by a structurally separate
+function, `evaluate_module_impl()` in `interpreter_eval.rs`. That function's
+`Node::Impl` arm (pre-fix lines 935-1010) had the identical untagged
+`method_with_impl_driver_attrs(...)` pattern at all 4 of its method-copy call
+sites — none of them called `tag_function_module_owner` (or anything
+equivalent), so entry-script impl-block methods got **no owner tag at all**,
+not even the `"<entry>"` sentinel that the same function's `Node::Function`
+arm (~line 505) deliberately assigns to entry-script free functions.
+
+This is a strictly worse failure mode than RC1's or RC2's: `<entry>` is at
+least a stable, distinct fallback bucket. With no tag whatsoever,
+`function_module_owner()` (`interpreter_call/core/function_exec.rs`) returns
+`None`, and `CURRENT_EXEC_MODULE` (per its `execute_function_body`
+save/restore) is left holding whatever the **caller's** frame had — so an
+entry-script impl-block method invoked from inside another module's function
+body can have its coverage rows attributed to that OTHER module's file, not
+merely to `<entry>`.
+
+### Enumeration
+
+`grep -rn 'method_with_impl_driver_attrs(' src/compiler_rust/compiler/src/`
+across the whole crate returns exactly 3 families:
+
+- `interpreter_eval.rs:935-1010` (`Node::Impl` in `evaluate_module_impl`,
+  the script-eval / entry-file path) — **4 sites, all untagged pre-fix**:
+  the `impl_methods` push, the `GLOBAL_IMPL_METHODS` extend, the
+  `classes.get_mut(&type_name)` extend, and the static-method-from-impl-block
+  loop. Fixed this pass.
+- `interpreter_module/module_evaluator/evaluation_helpers.rs` (`Node::Impl`
+  in `register_definitions`, the import-module path) — 6 sites, already
+  fixed by RC1 (`b6a43042`).
+- `hir/lower/module_lowering/module_pass.rs` (3 sites) — HIR lowering for the
+  AOT/native pipeline, not the interpreter's `FUNCTION_MODULE_OWNER`/
+  `CURRENT_EXEC_MODULE` coverage-attribution mechanism at all (no such
+  concept exists in HIR lowering); out of scope for this defect family.
+
+### Fix
+
+Mirrors RC1's `tagged_method` closure shape. `interpreter_eval.rs`'s
+`Node::Impl` branch has no `module_ident` (the script-eval path never had a
+module identity concept), so it uses the same `"<entry>"` literal sentinel
+the co-located `Node::Function` arm already uses for entry-script functions —
+giving entry-script impl methods the same distinct-but-stable fallback bucket
+that free functions and RC2 already have, instead of silently inheriting a
+foreign `CURRENT_EXEC_MODULE`. The static-method loop additionally records
+into the pointer-keyed `FUNCTION_MODULE_OWNER` thread-local directly (inlined,
+since `evaluation_helpers.rs`'s `record_function_owner` helper is private to
+that module), matching RC1's belt-and-suspenders pattern for that site.
+
+Changed: `src/compiler_rust/compiler/src/interpreter_eval.rs` — imports
+`tag_function_module_owner`; `Node::Impl` arm's 4 method-construction sites
+now route through a `tagged_method` closure.
+
+### Verification
+
+Confirms the "strictly worse than `<entry>`" prediction above, not merely the
+`<entry>`-sentinel case: a 2-file repro where the entry spec (`rc1sib_spec.spl`)
+defines `class Widget` / `impl Widget: fn compute(self, x)` with an `if x > 0`
+decision, and an imported module (`helper_mod.spl`, `fn call_it(w) ->
+w.compute(5)`) calls into it — i.e. the impl method's body executes from
+*inside an imported module's stack frame*, the scenario that inherits a
+foreign `CURRENT_EXEC_MODULE` pre-fix. Run via `simple test rc1sib_spec.spl
+--no-session-daemon --sequential` under `SIMPLE_COVERAGE=1`:
+
+- OLD (`bin/release/x86_64-unknown-linux-gnu/simple`, deployed seed, pre-fix):
+  `compute`'s line-9 hit and its line-8 `if` decision are both attributed to
+  `helper_mod.spl` — the CALLER's file, not the entry spec that defines
+  `compute`. `total_files: 1` (the entry file's own line dropped out of the
+  report entirely, folded into the wrong file).
+- NEW (`src/compiler_rust/target/release/simple`, this fix): both rows
+  correctly key to the entry spec file's own path (its `.spipe_cov_*` staged
+  copy); `total_files: 2`, `helper_mod.spl` correctly shows only its own
+  line 2.
+
+Raw artifacts: `/tmp/cov_probe_rc1sib/old.sdn` (OLD), `/tmp/cov_probe_rc1sib/new.sdn`
+(NEW), repro sources in `/tmp/cov_probe_rc1sib/spec_test/`.
+
+`cargo build --release` (full workspace, this session's build slot): 0 errors,
+pre-existing warnings only, `Finished \`release\` profile [optimized] target(s)
+in 4m 16s`.
 
 ## Evidence retained
 
