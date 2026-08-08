@@ -28,6 +28,8 @@ GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
 BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs"
+MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v2"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
 
@@ -41,7 +43,14 @@ cleanup() {
         rmdir "$SELF_TEST_DIR" >/dev/null 2>&1 || true
     fi
 }
-trap cleanup EXIT INT TERM
+on_signal() {
+    signal_code="$1"
+    cleanup
+    exit "$signal_code"
+}
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 fail_build() {
     echo "arm64_desktop_engine2d_attested_build_status=fail"
@@ -148,9 +157,8 @@ receipt_field() {
 }
 
 validate_pinned_compiler_receipt() {
-    [ -n "$PINNED_COMPILER" ] || return 0
     [ -n "$COMPILER_RECEIPT" ] || {
-        COMPILER_REJECTION_REASON="pinned-compiler-receipt-missing"
+        COMPILER_REJECTION_REASON="compiler-receipt-missing"
         return 1
     }
     [ -f "$COMPILER_RECEIPT" ] && [ ! -L "$COMPILER_RECEIPT" ] || {
@@ -190,6 +198,7 @@ validate_pinned_compiler_receipt() {
         return 1
     }
     [ "$receipt_schema" = "simpleos-arm64-compiler-receipt-v1" ] &&
+        [ -n "$PINNED_COMPILER" ] &&
         [ "$receipt_path" = "$PINNED_COMPILER" ] &&
         [ "$receipt_native_smoke" = pass ] &&
         [ "$receipt_stub_fallback" = forbidden ] &&
@@ -232,6 +241,12 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 0
 fi
 
+# Invalidate every prior claim before compiler/source admission. A failed
+# preflight must not leave an older manifest pair available for consumption.
+rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST" "$MANIFEST_TMP" \
+    "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
+    fail_build "stale-attestation-invalidation-failed"
+
 resolve_compiler() {
     compiler_os="$(uname -s)" || return 1
     compiler_arch="$(uname -m)" || return 1
@@ -270,6 +285,7 @@ resolve_compiler() {
         COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
         return 1
     fi
+    PINNED_COMPILER="$compiler_candidate"
     validate_pinned_compiler_receipt || return 1
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
@@ -305,6 +321,14 @@ PRE_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
     fail_build "canonical-compiler-sha256-failed"
 PRE_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
     fail_build "canonical-entry-sha256-failed"
+PRE_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
+    fail_build "canonical-producer-script-sha256-failed"
+HOST_OS="$(uname -s)" || fail_build "host-os-unavailable"
+HOST_ARCH="$(uname -m)" || fail_build "host-arch-unavailable"
+HOST_KERNEL_RELEASE="$(uname -r)" || fail_build "host-kernel-release-unavailable"
+HOST_IDENTITY="$HOST_OS:$HOST_ARCH:$HOST_KERNEL_RELEASE"
+printf '%s\n' "$HOST_IDENTITY" | grep -q '[[:cntrl:]]' &&
+    fail_build "host-identity-not-manifest-safe"
 PRE_COMPILER_VERSION_OUTPUT="$("$COMPILER" --version 2>/dev/null)" ||
     fail_build "canonical-compiler-version-command-failed"
 PRE_COMPILER_VERSION="$(printf '%s\n' "$PRE_COMPILER_VERSION_OUTPUT" |
@@ -323,15 +347,8 @@ qemu_admission_begin arm64 \
     scripts/check/lib/qemu-frozen-source-admission.shs ||
     fail_build "frozen-source-admission-rejected"
 
-# Remove a previously valid receipt before starting: a failed or interrupted
-# rebuild must never leave stale provenance beside new/partial artifacts.
-rm -f "$BUILD_MANIFEST" ||
-    fail_build "stale-build-manifest-remove-failed"
 # A provenance-producing invocation must execute both native-build and the disk
 # producer. Existing kernel/disk/writer artifacts cannot serve as fresh proof.
-rm -f "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
-    fail_build "persistent-artifact-cache-invalidation-failed"
-
 rm -f "$BUILD_LOG" "$BUILD_STATUS" || fail_build "build-log-reset-failed"
 set +e
 {
@@ -357,9 +374,9 @@ reject_fabricated_build_receipts ||
 # its success path. Restore the same normalized state used by the pre-snapshot.
 rm -f "$GENERATED_LOG_CONFIG" ||
     fail_build "generated-log-config-cleanup-failed"
-[ -f "$KERNEL" ] && [ -s "$KERNEL" ] ||
+[ -f "$KERNEL" ] && [ -s "$KERNEL" ] && [ ! -L "$KERNEL" ] ||
     fail_build "canonical-kernel-missing-after-build"
-[ -f "$DISK" ] && [ -s "$DISK" ] ||
+[ -f "$DISK" ] && [ -s "$DISK" ] && [ ! -L "$DISK" ] ||
     fail_build "canonical-desktop-disk-missing-after-build"
 [ -x "$DISK_PRODUCER" ] && [ -f "$DISK_PRODUCER" ] ||
     fail_build "canonical-disk-producer-missing-after-build"
@@ -381,10 +398,14 @@ POST_COMPILER_SHA256="$(sha256_file "$COMPILER")" ||
     fail_build "post-build-compiler-sha256-failed"
 POST_ENTRY_SHA256="$(sha256_file "$ENTRY")" ||
     fail_build "entry-changed-during-build"
+POST_PRODUCER_SCRIPT_SHA256="$(sha256_file "$PRODUCER_SCRIPT")" ||
+    fail_build "post-build-producer-script-sha256-failed"
 POST_COMPILER_VERSION_OUTPUT="$("$COMPILER" --version 2>/dev/null)" ||
     fail_build "post-build-compiler-version-command-failed"
 POST_COMPILER_VERSION="$(printf '%s\n' "$POST_COMPILER_VERSION_OUTPUT" |
     sed -n '1p')"
+POST_COMPILER_RECEIPT_SHA256="$(sha256_file "$COMPILER_RECEIPT")" ||
+    fail_build "post-build-compiler-receipt-sha256-failed"
 
 [ "$POST_HEAD" = "$PRE_HEAD" ] ||
     fail_build "source-revision-changed-during-build"
@@ -396,8 +417,14 @@ POST_COMPILER_VERSION="$(printf '%s\n' "$POST_COMPILER_VERSION_OUTPUT" |
     fail_build "compiler-changed-during-build"
 [ "$POST_ENTRY_SHA256" = "$PRE_ENTRY_SHA256" ] ||
     fail_build "entry-changed-during-build"
+[ "$POST_PRODUCER_SCRIPT_SHA256" = "$PRE_PRODUCER_SCRIPT_SHA256" ] ||
+    fail_build "producer-script-changed-during-build"
 [ "$POST_COMPILER_VERSION" = "$PRE_COMPILER_VERSION" ] ||
     fail_build "compiler-version-changed-during-build"
+[ "$POST_COMPILER_RECEIPT_SHA256" = "$COMPILER_RECEIPT_SHA256" ] ||
+    fail_build "compiler-receipt-changed-during-build"
+validate_pinned_compiler_receipt ||
+    fail_build "post-build-compiler-receipt-revalidation-failed"
 
 KERNEL_SHA256="$(sha256_file "$KERNEL")" ||
     fail_build "canonical-kernel-sha256-failed"
@@ -405,12 +432,23 @@ DISK_SHA256="$(sha256_file "$DISK")" ||
     fail_build "canonical-disk-sha256-failed"
 DISK_PRODUCER_SHA256="$(sha256_file "$DISK_PRODUCER")" ||
     fail_build "canonical-disk-producer-sha256-failed"
+BUILD_LOG_SHA256="$(sha256_file "$BUILD_LOG")" ||
+    fail_build "canonical-build-log-sha256-failed"
 printf '%s\n' "$PRE_COMPILER_VERSION" | grep -q '[[:cntrl:]]' &&
     fail_build "compiler-version-not-manifest-safe"
 
 umask 077
 {
+    echo "schema=$MANIFEST_SCHEMA"
     echo "artifact_kind=simpleos-arm64-desktop-engine2d"
+    echo "bootstrap_status=not-claimed"
+    echo "physical_board_status=not-claimed"
+    echo "producer_script_path=$PRODUCER_SCRIPT"
+    echo "producer_script_sha256=$POST_PRODUCER_SCRIPT_SHA256"
+    echo "host_os=$HOST_OS"
+    echo "host_arch=$HOST_ARCH"
+    echo "host_kernel_release=$HOST_KERNEL_RELEASE"
+    echo "host_identity=$HOST_IDENTITY"
     echo "source_revision=$PRE_HEAD"
     echo "source_roots=$SOURCE_ROOTS"
     echo "source_fingerprint=$PRE_SOURCE_FINGERPRINT"
@@ -431,6 +469,7 @@ umask 077
     echo "compiler_receipt_path=$COMPILER_RECEIPT"
     echo "compiler_receipt_sha256=$COMPILER_RECEIPT_SHA256"
     echo "build_log_path=$BUILD_LOG"
+    echo "build_log_sha256=$BUILD_LOG_SHA256"
     echo "build_command=$BUILD_COMMAND"
     echo "build_environment=$BUILD_ENVIRONMENT"
 } >"$MANIFEST_TMP"

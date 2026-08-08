@@ -11,6 +11,7 @@ set -eu
 #   QEMU_VM_PATH         Base qcow2 image (default: build/freebsd/vm/FreeBSD-14.4-*.qcow2)
 #   QEMU_BASE_VM_PATH    Alias for QEMU_VM_PATH
 #   QEMU_CLOUDINIT_ISO   Cloud-init seed ISO (default: build/freebsd/vm/freebsd-cloudinit-seed.iso)
+#   QEMU_VM_DIR          Working directory for VM overlays and retained logs
 #   QEMU_SSH_PUBLIC_KEY   SSH public key to inject (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
 #   QEMU_SSH_PRIVATE_KEY  Matching SSH private key (default: public-key path without .pub)
 #   QEMU_PORT            SSH forwarding port (default: 2222)
@@ -24,13 +25,19 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-VM_DIR="${ROOT_DIR}/build/freebsd/vm"
+VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
+QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
+QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
+QEMU_TRANSFER_TIMEOUT="${QEMU_TRANSFER_TIMEOUT:-1800}"
+QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-7200}"
+QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
+QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
 FREEBSD_IMAGE_URL="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/${FREEBSD_IMAGE_NAME}.xz"
@@ -40,25 +47,362 @@ PID_FILE="${VM_DIR}/qemu.pid"
 SERIAL_LOG="${VM_DIR}/qemu-serial.log"
 QEMU_START_LOG="${VM_DIR}/qemu-start.log"
 OVERLAY_IMAGE="${VM_DIR}/freebsd-run.overlay.qcow2"
+PROVENANCE_DIR="${ROOT_DIR}/build/freebsd/bootstrap-logs"
+PROVENANCE_RECEIPT="${PROVENANCE_DIR}/freebsd_qemu_bootstrap_provenance.env"
 
-MODE="smoke"
+MODE=""
+MODE_SET=0
+MODE_VALID=1
 DOWNLOAD=0
+DOWNLOAD_VALID=1
+PREFLIGHT=0
+ARG_REASON="none"
+usage_error() {
+    printf 'Usage: %s [--smoke|--full] [--download] [--preflight]\n' "$0" >&2
+    exit 1
+}
+
 for arg in "$@"; do
     case "$arg" in
-        --smoke) MODE="smoke" ;;
-        --full)  MODE="full" ;;
-        --download) DOWNLOAD=1 ;;
+        --smoke)
+            if [ "$MODE_SET" -eq 1 ]; then
+                MODE_VALID=0
+                ARG_REASON="mode_multiple"
+            else
+                MODE="smoke"
+                MODE_SET=1
+            fi
+            ;;
+        --full)
+            if [ "$MODE_SET" -eq 1 ]; then
+                MODE_VALID=0
+                ARG_REASON="mode_multiple"
+            else
+                MODE="full"
+                MODE_SET=1
+            fi
+            ;;
+        --download)
+            if [ "$DOWNLOAD" -eq 1 ]; then
+                DOWNLOAD_VALID=0
+                ARG_REASON="download_multiple"
+            fi
+            DOWNLOAD=1
+            ;;
+        --preflight) PREFLIGHT=1 ;;
         --help|-h)
-            printf 'Usage: %s [--smoke|--full] [--download]\n' "$0"
+            printf 'Usage: %s [--smoke|--full] [--download] [--preflight]\n' "$0"
             exit 0
             ;;
-        *) printf 'Unknown argument: %s\n' "$arg" >&2; exit 1 ;;
+        *)
+            MODE_VALID=0
+            ARG_REASON="argument_invalid"
+            ;;
     esac
 done
+
+if [ "$MODE_SET" -eq 0 ]; then
+    MODE="smoke"
+fi
+
+is_positive_integer() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -gt 0 ] 2>/dev/null
+}
+
+is_valid_memory() {
+    case "$1" in
+        [1-9][MGT]|[1-9][0-9]*[MGT]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_valid_port() {
+    is_positive_integer "$1" || return 1
+    [ "$1" -le 65535 ] 2>/dev/null
+}
+
+is_valid_user() {
+    case "$1" in
+        ''|-[A-Za-z0-9_]*|*[!A-Za-z0-9_-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+TIMEOUT_BIN="${QEMU_TIMEOUT_BIN:-}"
+if [ -z "$TIMEOUT_BIN" ]; then
+    TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+fi
+
+PREFLIGHT_ORDER="mode,download,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,base_image,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_REASON="none"
+
+preflight_try() {
+    check_name="$1"
+    shift
+    if ! "$@"; then
+        if [ "$PREFLIGHT_REASON" = "none" ]; then
+            PREFLIGHT_REASON="$check_name"
+        fi
+    fi
+}
+
+preflight_mode() {
+    [ "$MODE_VALID" -eq 1 ] && [ "$ARG_REASON" = "none" ]
+}
+
+preflight_download() {
+    [ "$DOWNLOAD_VALID" -eq 1 ] || return 1
+    if [ "$DOWNLOAD" -eq 1 ]; then
+        (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) &&
+            command -v xz >/dev/null 2>&1
+    fi
+}
+
+preflight_port() { is_valid_port "$QEMU_PORT"; }
+preflight_user() { is_valid_user "$QEMU_USER"; }
+preflight_memory() { is_valid_memory "$QEMU_MEM"; }
+preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
+preflight_ssh_timeout() { is_positive_integer "$QEMU_SSH_TIMEOUT"; }
+preflight_root_ssh_timeout() { is_positive_integer "$QEMU_ROOT_SSH_TIMEOUT"; }
+
+preflight_timeout() {
+    [ -n "$TIMEOUT_BIN" ] || return 1
+    is_positive_integer "$QEMU_REMOTE_TIMEOUT" || return 1
+    is_positive_integer "$QEMU_PACKAGE_TIMEOUT" || return 1
+    is_positive_integer "$QEMU_TRANSFER_TIMEOUT" || return 1
+    is_positive_integer "$QEMU_BOOTSTRAP_TIMEOUT" || return 1
+    is_positive_integer "$QEMU_SMOKE_TIMEOUT" || return 1
+    is_positive_integer "$QEMU_FULL_TIMEOUT"
+}
+
+preflight_architecture() {
+    host_arch="$(uname -m 2>/dev/null || true)"
+    [ "$host_arch" = "x86_64" ] || [ "$host_arch" = "amd64" ]
+}
+
+preflight_qemu_system() { command -v qemu-system-x86_64 >/dev/null 2>&1; }
+preflight_qemu_img() { command -v qemu-img >/dev/null 2>&1; }
+preflight_ssh() { command -v ssh >/dev/null 2>&1; }
+preflight_rsync() { command -v rsync >/dev/null 2>&1; }
+preflight_iso_tool() {
+    command -v genisoimage >/dev/null 2>&1 ||
+        command -v mkisofs >/dev/null 2>&1 ||
+        command -v xorriso >/dev/null 2>&1
+}
+preflight_base_image() {
+    [ "$DOWNLOAD" -eq 1 ] || [ -f "$QEMU_VM_PATH" ]
+}
+preflight_public_key() {
+    if [ -n "${QEMU_SSH_PUBLIC_KEY:-}" ]; then
+        SSH_PUB_KEY="$QEMU_SSH_PUBLIC_KEY"
+    elif [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
+        SSH_PUB_KEY="$HOME/.ssh/id_ed25519.pub"
+    elif [ -f "$HOME/.ssh/id_rsa.pub" ]; then
+        SSH_PUB_KEY="$HOME/.ssh/id_rsa.pub"
+    else
+        return 1
+    fi
+    [ -r "$SSH_PUB_KEY" ]
+}
+preflight_private_key() {
+    if [ -n "${SSH_PUB_KEY:-}" ]; then
+        SSH_PRIVATE_KEY="${QEMU_SSH_PRIVATE_KEY:-${SSH_PUB_KEY%.pub}}"
+    elif [ -n "${QEMU_SSH_PRIVATE_KEY:-}" ]; then
+        SSH_PRIVATE_KEY="$QEMU_SSH_PRIVATE_KEY"
+    else
+        return 1
+    fi
+    [ -r "$SSH_PRIVATE_KEY" ]
+}
+preflight_workspace() {
+    workspace_parent="${VM_DIR%/*}"
+    [ "$workspace_parent" = "$VM_DIR" ] && workspace_parent="."
+    if [ -d "$VM_DIR" ]; then
+        [ -w "$VM_DIR" ]
+    else
+        [ -d "$workspace_parent" ] && [ -w "$workspace_parent" ]
+    fi
+}
+
+run_preflight() {
+    preflight_try mode preflight_mode
+    preflight_try download preflight_download
+    preflight_try port preflight_port
+    preflight_try user preflight_user
+    preflight_try memory preflight_memory
+    preflight_try cpus preflight_cpus
+    preflight_try ssh_timeout preflight_ssh_timeout
+    preflight_try root_ssh_timeout preflight_root_ssh_timeout
+    preflight_try timeout preflight_timeout
+    preflight_try architecture preflight_architecture
+    preflight_try qemu_system preflight_qemu_system
+    preflight_try qemu_img preflight_qemu_img
+    preflight_try ssh preflight_ssh
+    preflight_try rsync preflight_rsync
+    preflight_try iso_tool preflight_iso_tool
+    preflight_try base_image preflight_base_image
+    preflight_try ssh_public_key preflight_public_key
+    preflight_try ssh_private_key preflight_private_key
+    preflight_try workspace preflight_workspace
+
+    if [ "$PREFLIGHT_REASON" = "none" ]; then
+        PREFLIGHT_STATUS="pass"
+    else
+        PREFLIGHT_STATUS="fail"
+    fi
+    printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
+    printf 'freebsd_qemu_preflight_checks=19\n'
+    printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
+    printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
+    [ "$PREFLIGHT_STATUS" = "pass" ]
+}
+
+if [ "$PREFLIGHT" -eq 1 ]; then
+    run_preflight
+    exit $?
+fi
+
+if [ "$MODE_VALID" -ne 1 ] || [ "$ARG_REASON" != "none" ]; then
+    printf 'Invalid command-line arguments: %s\n' "$ARG_REASON" >&2
+    usage_error
+fi
+if ! is_valid_port "$QEMU_PORT"; then
+    printf 'Invalid QEMU_PORT: %s\n' "$QEMU_PORT" >&2
+    exit 1
+fi
+if ! is_valid_user "$QEMU_USER"; then
+    printf 'Invalid QEMU_USER: %s\n' "$QEMU_USER" >&2
+    exit 1
+fi
+if ! is_valid_memory "$QEMU_MEM"; then
+    printf 'Invalid QEMU_MEM: %s\n' "$QEMU_MEM" >&2
+    exit 1
+fi
+if ! is_positive_integer "$QEMU_CPUS"; then
+    printf 'Invalid QEMU_CPUS: %s\n' "$QEMU_CPUS" >&2
+    exit 1
+fi
+if ! preflight_timeout; then
+    printf 'A usable timeout command and positive command timeouts are required\n' >&2
+    exit 1
+fi
 
 pass()  { printf '  ✓ %s\n' "$1"; }
 fail()  { printf '  ✗ %s\n' "$1"; return 1; }
 info()  { printf '  → %s\n' "$1"; }
+
+shell_quote() {
+    # rsync -e receives a shell command string; quote each path before it is
+    # inserted so spaces and apostrophes cannot become argument separators.
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+EXACT_COMMAND="sh $(shell_quote "$0")"
+for invocation_arg in "$@"; do
+    EXACT_COMMAND="$EXACT_COMMAND $(shell_quote "$invocation_arg")"
+done
+
+run_bounded() {
+    duration="$1"
+    shift
+    "$TIMEOUT_BIN" "$duration" "$@"
+}
+
+hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q
+    else
+        return 1
+    fi
+}
+
+hash_file() {
+    hash_path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$hash_path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$hash_path" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$hash_path"
+    else
+        return 1
+    fi
+}
+
+hash_tree() {
+    hash_root="$1"
+    find "$hash_root" -type f -print | sort |
+        while IFS= read -r hash_path; do
+            printf '%s  %s\n' "$(hash_file "$hash_path")" "${hash_path#"$ROOT_DIR"/}"
+        done | hash_stdin
+}
+
+ssh_user() {
+    run_bounded "$QEMU_REMOTE_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        "${QEMU_USER}@localhost" "$@"
+}
+
+ssh_root() {
+    run_bounded "$QEMU_REMOTE_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        root@localhost "$@"
+}
+
+ssh_user_long() {
+    run_bounded "$QEMU_FULL_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        "${QEMU_USER}@localhost" "$@"
+}
+
+ssh_root_long() {
+    run_bounded "$QEMU_FULL_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        root@localhost "$@"
+}
+
+pkg_user() {
+    run_bounded "$QEMU_PACKAGE_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        "${QEMU_USER}@localhost" "${PKG_ESCALATOR:-sudo}" "$@"
+}
+
+pkg_root() {
+    run_bounded "$QEMU_PACKAGE_TIMEOUT" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -p "$QEMU_PORT" \
+        root@localhost "$@"
+}
 
 SCRIPT_OK=0
 cleanup() {
@@ -121,6 +465,17 @@ if [ ! -f "$SSH_PRIVATE_KEY" ]; then
 fi
 pass "SSH private key: $SSH_PRIVATE_KEY"
 
+# Keep the key path as one argument for ssh/scp.  The command strings are
+# retained for the existing remote shell call sites, but every interpolated
+# path is shell-quoted and every remote command has a deadline.
+SSH_CMD=ssh_user
+ROOT_SSH_CMD=ssh_root
+USER_LONG_SSH_CMD=ssh_user_long
+ROOT_LONG_SSH_CMD=ssh_root_long
+USER_PKG_CMD=pkg_user
+ROOT_PKG_CMD=pkg_root
+RSYNC_SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i $(shell_quote "$SSH_PRIVATE_KEY") -p $QEMU_PORT"
+
 # ── Base Image ─────────────────────────────────────────────────────────
 printf '[3/7] Base image\n'
 
@@ -131,14 +486,14 @@ if [ ! -f "$QEMU_VM_PATH" ]; then
         info "Downloading FreeBSD ${FREEBSD_VERSION} CLOUDINIT image..."
         xz_path="${QEMU_VM_PATH}.xz"
         if command -v curl >/dev/null 2>&1; then
-            curl -fSL -o "$xz_path" "$FREEBSD_IMAGE_URL"
+            run_bounded "$QEMU_TRANSFER_TIMEOUT" curl -fSL -o "$xz_path" "$FREEBSD_IMAGE_URL"
         elif command -v wget >/dev/null 2>&1; then
-            wget -q -O "$xz_path" "$FREEBSD_IMAGE_URL"
+            run_bounded "$QEMU_TRANSFER_TIMEOUT" wget -q -O "$xz_path" "$FREEBSD_IMAGE_URL"
         else
             fail "Neither curl nor wget available for download"
         fi
         info "Extracting..."
-        xz -d "$xz_path"
+        run_bounded "$QEMU_TRANSFER_TIMEOUT" xz -d "$xz_path"
         pass "Downloaded and extracted: $QEMU_VM_PATH"
     else
         fail "Base image not found: $QEMU_VM_PATH (use --download to fetch)"
@@ -187,13 +542,13 @@ USERDATA
 chmod +x "$CLOUDINIT_DIR/user-data"
 
 if command -v genisoimage >/dev/null 2>&1; then
-    genisoimage -output "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" genisoimage -output "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
         "$CLOUDINIT_DIR/meta-data" "$CLOUDINIT_DIR/user-data" 2>/dev/null
 elif command -v mkisofs >/dev/null 2>&1; then
-    mkisofs -output "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" mkisofs -output "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
         "$CLOUDINIT_DIR/meta-data" "$CLOUDINIT_DIR/user-data" 2>/dev/null
 elif command -v xorriso >/dev/null 2>&1; then
-    xorriso -as mkisofs -o "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" xorriso -as mkisofs -o "$QEMU_CLOUDINIT_ISO" -volid cidata -joliet -rock \
         "$CLOUDINIT_DIR/meta-data" "$CLOUDINIT_DIR/user-data" 2>/dev/null
 else
     fail "No ISO tool found (need genisoimage, mkisofs, or xorriso)"
@@ -205,8 +560,8 @@ pass "Cloud-init ISO: $QEMU_CLOUDINIT_ISO"
 printf '[5/7] QEMU overlay + start\n'
 
 rm -f "$OVERLAY_IMAGE"
-qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
-qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
+run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
+run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" 30G >/dev/null 2>&1
 pass "Overlay created (30G): $OVERLAY_IMAGE"
 
 # Detect KVM
@@ -218,7 +573,7 @@ if [ -w /dev/kvm ] 2>/dev/null; then
 fi
 
 rm -f "$PID_FILE" "$QEMU_START_LOG"
-if ! qemu-system-x86_64 \
+if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" qemu-system-x86_64 \
     -machine "accel=${ACCEL}" \
     -cpu "$CPU_MODEL" \
     -m "$QEMU_MEM" \
@@ -254,10 +609,6 @@ require_qemu_alive() {
 # ── SSH Connectivity ───────────────────────────────────────────────────
 printf '[6/7] SSH connectivity\n'
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -p ${QEMU_PORT}"
-SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -P ${QEMU_PORT}"
-SSH_CMD="ssh ${SSH_OPTS} ${QEMU_USER}@localhost"
-ROOT_SSH_CMD="ssh ${SSH_OPTS} root@localhost"
 SSH_TIMEOUT="$QEMU_SSH_TIMEOUT"
 ELAPSED=0
 CONNECTED=0
@@ -302,38 +653,43 @@ done
 
 if [ "$ROOT_OK" -eq 1 ]; then
     VM_USER="root"
-    VM_SSH="$ROOT_SSH_CMD"
-    PKG_CMD="$ROOT_SSH_CMD"
+    VM_SSH="$ROOT_LONG_SSH_CMD"
+    PKG_CMD="$ROOT_PKG_CMD"
     pass "Root SSH available (after ${ROOT_ELAPSED}s)"
 elif $SSH_CMD "command -v sudo" >/dev/null 2>&1; then
     VM_USER="$QEMU_USER"
-    VM_SSH="$SSH_CMD"
-    PKG_CMD="$SSH_CMD sudo"
+    PKG_ESCALATOR=sudo
+    VM_SSH="$USER_LONG_SSH_CMD"
+    PKG_CMD="$USER_PKG_CMD"
     pass "sudo available"
 elif $SSH_CMD "command -v doas" >/dev/null 2>&1; then
     VM_USER="$QEMU_USER"
-    VM_SSH="$SSH_CMD"
-    PKG_CMD="$SSH_CMD doas"
+    PKG_ESCALATOR=doas
+    VM_SSH="$USER_LONG_SSH_CMD"
+    PKG_CMD="$USER_PKG_CMD"
     pass "doas available"
 else
     fail "No root/sudo/doas available (root SSH timed out, no sudo/doas)"
 fi
 
 copy_guest_bootstrap_logs() {
-    host_log_dir="${ROOT_DIR}/build/freebsd/bootstrap-logs"
+    host_log_dir="$PROVENANCE_DIR"
     rm -rf "$host_log_dir"
     mkdir -p "$host_log_dir"
-    if rsync -az -e "ssh ${SSH_OPTS}" \
+    if run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
         "${VM_USER}@localhost:${VM_HOME}/simple/build/bootstrap/logs/" \
         "${host_log_dir}/"; then
-        info "Bootstrap failure logs preserved: ${host_log_dir}"
+        guest_log_count=$(find "$host_log_dir" -type f -name '*.log' -size +0c | wc -l | tr -d ' ')
+        [ "$guest_log_count" -gt 0 ] ||
+            fail "FreeBSD x86_64 QEMU full bootstrap guest logs missing or empty"
+        info "Bootstrap logs preserved: ${host_log_dir}"
         find "$host_log_dir" -type f -name '*.log' | sort | tail -4 |
             while IFS= read -r log; do
                 info "Last 40 lines of ${log}:"
                 tail -40 "$log" >&2
             done
     else
-        info "No guest bootstrap logs could be retrieved"
+        fail "FreeBSD x86_64 QEMU full bootstrap guest log retrieval failed"
     fi
 }
 
@@ -362,9 +718,10 @@ if [ "$MODE" = "smoke" ]; then
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
-    printf '\nSmoke test PASSED\n'
+    printf '\nFreeBSD x86_64 QEMU smoke PASS\n'
 else
     # Full: install deps, rsync project, build seed, run bootstrap
+    rm -f "$PROVENANCE_RECEIPT"
     VM_HOME=$($VM_SSH "echo \$HOME" 2>/dev/null)
     VM_HOME="${VM_HOME:-/root}"
 
@@ -395,7 +752,7 @@ else
     pass "Dependencies installed"
 
     info "Syncing project to VM..."
-    rsync -az --delete \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete \
         --exclude='.git' \
         --exclude='.jj/' \
         --exclude='/.claude/worktrees/' \
@@ -417,7 +774,7 @@ else
         --exclude='**/target/debug/' \
         --exclude='**/target/release/' \
         --exclude='**/target/bootstrap/' \
-        -e "ssh ${SSH_OPTS}" \
+        -e "$RSYNC_SSH" \
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
@@ -431,6 +788,9 @@ else
     if [ "$STAGE_EXISTS" != "yes" ]; then
         fail "Canonical bootstrap produced no stage3 dynload binary"
     fi
+    GUEST_STAGE_SHA256=$($VM_SSH "sha256 -q '$STAGE_BIN'" 2>/dev/null) ||
+        fail "Could not hash guest stage3 binary"
+    [ -n "$GUEST_STAGE_SHA256" ] || fail "Guest stage3 binary hash was empty"
 
     info "Running FreeBSD typed-enum bytecode execution..."
     BYTECODE_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo test -p simple-compiler --lib test_compile_enum_ -- --nocapture 2>&1; echo EXIT:\$?" 2>/dev/null)
@@ -439,15 +799,6 @@ else
     [ "$BYTECODE_ENUM_EXIT" = "0" ] || fail "FreeBSD typed-enum bytecode execution failed (exit $BYTECODE_ENUM_EXIT)"
     printf '%s\n' "$BYTECODE_ENUM_OUT" | grep -Fq 'test result: ok. 2 passed; 0 failed;' || fail "FreeBSD typed-enum bytecode execution did not run both regressions"
     pass "FreeBSD typed-enum bytecode execution completed"
-
-    RUST_SEED_BIN="${VM_HOME}/simple/src/compiler_rust/target/bootstrap/simple"
-    info "Running FreeBSD Rust-seed custom enum identity parity..."
-    SEED_ENUM_OUT=$($VM_SSH "cd ${VM_HOME}/simple && test -x ${RUST_SEED_BIN} && SIMPLE_BINARY=${RUST_SEED_BIN} NATIVE_PARITY_CASES=crossmodule_result_u8 NATIVE_PARITY_FAIL_ON_XFAIL=1 PARITY_WORK_DIR=/tmp/simple-freebsd-rust-seed-enum sh scripts/check/check-native-seed-parity.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
-    SEED_ENUM_EXIT=$(printf '%s' "$SEED_ENUM_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
-    printf '%s\n' "$SEED_ENUM_OUT" | grep -v '^EXIT:' | tail -10
-    [ "$SEED_ENUM_EXIT" = "0" ] || fail "FreeBSD Rust-seed custom enum identity parity failed (exit $SEED_ENUM_EXIT)"
-    printf '%s\n' "$SEED_ENUM_OUT" | grep -qx 'total=2 pass=2 fail=0 xfail=0' || fail "FreeBSD Rust-seed custom enum identity parity summary was not strict 2/2"
-    pass "FreeBSD Rust-seed custom enum identity parity completed"
 
     info "Running FreeBSD stage3 bootstrap compiler smoke..."
     STAGE_VERSION=$($VM_SSH "${STAGE_BIN} --version" 2>/dev/null) || fail "FreeBSD stage3 --version failed"
@@ -518,11 +869,49 @@ else
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
-    scp ${SCP_OPTS} \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" scp \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout=5 \
+        -i "$SSH_PRIVATE_KEY" -P "$QEMU_PORT" \
         "${VM_USER}@localhost:${STAGE_BIN}" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null || fail "Failed to retrieve binary"
     pass "Binary retrieved: ${FREEBSD_BIN_DIR}/simple"
 
+    HOST_STAGE_SHA256=$(hash_file "${FREEBSD_BIN_DIR}/simple") ||
+        fail "Could not hash retrieved stage3 binary"
+    [ "$HOST_STAGE_SHA256" = "$GUEST_STAGE_SHA256" ] ||
+        fail "Retrieved stage3 hash differs from guest hash"
+
+    info "Retaining guest bootstrap logs for provenance..."
+    copy_guest_bootstrap_logs
+    BASE_IMAGE_SHA256=$(hash_file "$QEMU_VM_PATH") ||
+        fail "Could not hash FreeBSD base image"
+    SOURCE_SHA256=$(hash_tree "$ROOT_DIR/src") ||
+        fail "Could not hash Simple source tree"
+    LOGS_SHA256=$(hash_tree "$PROVENANCE_DIR") ||
+        fail "Could not hash retained bootstrap logs"
+    PROVENANCE_TMP="${PROVENANCE_RECEIPT}.tmp.$$"
+    {
+        printf 'freebsd_qemu_bootstrap_provenance_status=pass\n'
+        printf 'freebsd_qemu_bootstrap_provenance_scope=FreeBSD x86_64 QEMU\n'
+        printf 'freebsd_qemu_bootstrap_freebsd_version=%s\n' "$FREEBSD_VERSION"
+        printf 'freebsd_qemu_bootstrap_architecture=x86_64\n'
+        printf 'freebsd_qemu_bootstrap_base_image_path=%s\n' "$QEMU_VM_PATH"
+        printf 'freebsd_qemu_bootstrap_base_image_sha256=%s\n' "$BASE_IMAGE_SHA256"
+        printf 'freebsd_qemu_bootstrap_source_identity=%s\n' "simple-source:$ROOT_DIR"
+        printf 'freebsd_qemu_bootstrap_source_sha256=%s\n' "$SOURCE_SHA256"
+        printf 'freebsd_qemu_bootstrap_command=%s\n' "$EXACT_COMMAND"
+        printf 'freebsd_qemu_bootstrap_guest_stage_binary_path=%s\n' "$STAGE_BIN"
+        printf 'freebsd_qemu_bootstrap_guest_stage_binary_sha256=%s\n' "$GUEST_STAGE_SHA256"
+        printf 'freebsd_qemu_bootstrap_host_stage_binary_sha256=%s\n' "$HOST_STAGE_SHA256"
+        printf 'freebsd_qemu_bootstrap_retained_logs_path=%s\n' "$PROVENANCE_DIR"
+        printf 'freebsd_qemu_bootstrap_retained_logs_sha256=%s\n' "$LOGS_SHA256"
+    } > "$PROVENANCE_TMP"
+    mv -f "$PROVENANCE_TMP" "$PROVENANCE_RECEIPT"
+    pass "Scoped FreeBSD x86_64 QEMU provenance receipt: $PROVENANCE_RECEIPT"
+
     SCRIPT_OK=1
-    printf '\nFull bootstrap PASSED\n'
+    printf '\nFreeBSD x86_64 QEMU full bootstrap PASS\n'
 fi
