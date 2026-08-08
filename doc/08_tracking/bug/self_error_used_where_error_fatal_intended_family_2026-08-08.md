@@ -320,3 +320,87 @@ allowlist prefix — a future rewording of any of these strings would silently
 flip them back to non-fatal with no compiler error to catch it (this is
 exactly the deprecated-allowlist failure mode the `error_fatal` mechanism
 exists to replace).
+
+## Follow-up pass (final 2 sites, 2026-08-08, third lane)
+
+Resolved the last two open items from the "Recommended follow-up" list
+(1b and 2 above): `switch_operators_calls.spl:2041` and `:2657`.
+
+1. `switch_operators_calls.spl:2041` (in `lower_enum_match`) —
+   **[FIXED]**, converted `self.error(` -> `self.error_fatal(`, no other
+   logic change. This is the `owner_count == 1` arm of the same
+   contested-bare-variant if/elif chain whose `owner_count > 1` sibling
+   (line 2043, `enum match: bare variant ... is ambiguous`) and
+   `owner_count == 0` sibling (line 2045, `enum match: unknown variant
+   ...`) are both already effectively fatal via the `enum match:`
+   allowlist prefix. Line 2041's message starts with `enum variant lookup
+   miss:` instead, so it alone slipped through the allowlist despite
+   reporting the same class of contested/unreliable resolution as its two
+   already-fatal siblings — an oversight, not an intentional soft-fallback.
+   Confirmed by reading: the diagnostic fires *after* `d` is already
+   assigned (line 2026) and does not itself change `d` or take a recovery
+   branch, so promoting it to fatal only makes a real ambiguity loud; it
+   cannot change behavior on any input that doesn't hit this exact
+   contested-bare-name-collision condition.
+2. `switch_operators_calls.spl:2657` (in `lower_try_expr`) —
+   **left non-fatal, on purpose**. Traced the surrounding code: when the
+   bare name `"Option"` has been evicted by a name collision,
+   `enum_variant_discriminant("Option", "None")` returns -1, but the very
+   next line (`none_disc = 1`) unconditionally resets `none_disc` to the
+   reserved `Some=0/None=1` layout *before* it is used to build
+   `none_key`/`is_boxed_none` below — this is a real, already-safe
+   in-place recovery, not a bug being masked. `?` on a boxed `Option` is a
+   hot path (every `?`-desugared Option unwrap in ordinary user code), so
+   making this fatal would hard-abort compilation on a rare, already-
+   neutralized name-collision edge case instead of just warning about it.
+   No `recovery`/`partial`/`lsp`/`best_effort` mode flag exists nearby or
+   gates this branch — the softness here is inherent to the code's own
+   fallback design, not an external error-recovery mode. Added a one-line
+   (multi-line) comment directly above the call explaining why it is
+   intentionally non-fatal, referencing this doc.
+
+### Verification
+
+Functional smoke test (native-build oracle, same style as prior passes):
+a program with a 3-variant `enum Color` matched via `match c: case
+Color.X: ...` (exercises `lower_enum_match`, the function containing the
+:2041 fix) and a `Result`-returning function using `find_it(5)?` on an
+`Option<i64>` (exercises `lower_try_expr`, the function containing the
+:2657 non-fatal path) was built through `env -u SIMPLE_BOOTSTRAP
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --entry-closure --entry
+<dir>/main.spl ...`. Build exited successfully (binary produced) and the
+binary ran to completion printing `green` then `done` (rc=0) — both
+functions were reached and produced correct output on a clean, non-
+contested input, so the :2041 fix does not regress ordinary enum-match
+compilation and the :2657 fallback continues to behave as before (no
+behavior change was made there).
+
+A first attempt at this verification added `eprint("MARKER-...")` as the
+first statement of both `lower_enum_match` and `lower_try_expr` to prove
+direct liveness; the markers did not surface in native-build's captured
+stderr (its wrapper appears to filter/buffer interpreter-level debug
+prints even on a successful run), so liveness was instead confirmed via
+the stronger functional signal above (correct compiled+run output, which
+has no other code path than these two functions for a `match` on an enum
+and a `?` on an `Option`). Markers were added, found inconclusive for this
+harness, and removed — not left in source.
+
+As with the second-lane pass above, no isolated positive repro that
+actually drives the :2041 or :2657 branches to their miss-condition (a
+genuine bare-name eviction) was attempted in this pass, for the same
+reason recorded there: manufacturing that eviction previously surfaced an
+unrelated, independently-fatal HIR-level error first. Treat both as
+evidence-based (correct-by-construction reasoning documented per-site
+above), consistent with the standard set by the earlier passes in this
+doc.
+
+### Shared-workspace note
+
+Mid-pass, an uncommitted edit to this file (the :2041/:2657 changes plus
+temporary eprint markers) was silently reverted by a concurrent session's
+working-copy reconcile before it could be committed (confirmed via `git
+status`/`git diff` showing no pending changes against HEAD immediately
+after the edit tool reported success). The edits were redone and committed
+immediately afterward with no further gap between edit and commit, per the
+standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
+memory notes on write-tool/edit clobbering.

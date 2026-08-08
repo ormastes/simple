@@ -2038,7 +2038,7 @@ impl MirLowering:
                             # still live for it.
                             if not self.enum_variant_index_q.has(owner) and self.enum_bare_name_collisions.has(owner):
                                 val owner_collision = self.enum_bare_name_collisions[owner]
-                                self.error("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
+                                self.error_fatal("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
                         elif owner_count > 1:
                             self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
                         else:
@@ -2654,6 +2654,17 @@ impl MirLowering:
                             # reserved Some=0/None=1 default so the comparison
                             # stays meaningful, and say so loudly.
                             val miss_detail = self.enum_variant_miss_detail("Option", "None")
+                            # Intentionally left non-fatal (self.error, not
+                            # error_fatal): this is a deliberate, verified-safe
+                            # recovery, not a masked bug. `none_disc` is reset
+                            # to the reserved Some=0/None=1 layout on the very
+                            # next line before any use, so the -1 sentinel
+                            # never reaches codegen; every `?` on a boxed
+                            # Option (a hot path) would otherwise hard-abort
+                            # compilation on a name-collision that this
+                            # fallback already neutralizes. See bug doc
+                            # self_error_used_where_error_fatal_intended_family_2026-08-08.md,
+                            # "Follow-up pass (final 2 sites)".
                             self.error("enum variant lookup miss: 'Option.None' resolved to discriminant -1 while lowering the '?' try-operator; falling back to the reserved None=1{miss_detail}", nil)
                             none_disc = 1
                     val none_key = b_boxed.emit_const_int(none_disc)
