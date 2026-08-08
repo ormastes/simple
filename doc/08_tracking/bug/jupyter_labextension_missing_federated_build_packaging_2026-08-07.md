@@ -37,7 +37,34 @@ task agent.
 
 ## Status
 
-Open. Recommend: add `pyproject.toml` + `hatch-jupyter-builder` config to
-`tools/jupyter/labextension/` (standard JupyterLab 4.x extension packaging) in a
-dedicated task before X3/X4's galata verification is attempted, or set up an isolated
-venv for the labextension build/test toolchain.
+**Fixed 2026-08-08.** Standard JupyterLab 4.x federated-extension packaging added to
+`tools/jupyter/labextension/` (modeled on the official extension-template, frontend-only
+variant, minimal — no cookiecutter/CI/binder cruft):
+
+- `pyproject.toml` — hatchling + `hatch-jupyter-builder` build hook (`npm_builder`,
+  `build_cmd = "build:prod"`), wheel shared-data mapping to
+  `share/jupyter/labextensions/@simple-lang/jupyterlab-simple`. Carries the Stream P /
+  P0 sanctioned-Python-exception header (same exception as `kernel_wrapper.py`).
+- `install.json` + `simple_labextension/__init__.py` (packaging glue only:
+  `_jupyter_labextension_paths`, needed by `labextension develop`).
+- `package.json` — added `@jupyterlab/builder ^4.0.0` devDependency and
+  `build:prod` / `build:labextension[:dev]` scripts; `clean` also removes the
+  federated output dir; `.gitignore` covers `simple_labextension/labextension/`.
+
+Verified end-to-end in the host user env (jupyterlab 4.5.5 in `~/.local`, PEP 668
+externally-managed → `pip3 install --user --break-system-packages`, matching how
+jupyterlab itself was installed):
+
+1. `npm run build` (tsc -b) clean; Jest 48/48 (6 suites) green.
+2. `npm run build:prod` — webpack federated bundle compiled successfully into
+   `simple_labextension/labextension/` (static/style.js + package.json present);
+   `pip3 install --user --break-system-packages -e .` → "Successfully installed
+   simple_labextension-0.1.0".
+3. `jupyter labextension develop . --overwrite` then `jupyter labextension list`:
+   `@simple-lang/jupyterlab-simple v0.1.0 enabled OK (python, simple_labextension)`,
+   installed at `~/.local/share/jupyter/labextensions/@simple-lang/jupyterlab-simple`.
+   (Develop emits a harmless `PermissionError: /usr/share/jupyter` warning while
+   probing the sys-prefix location before falling back to the user dir.)
+
+Remaining gap narrowed to: actually running the galata/browser smoke for X2/X3/X4 —
+the packaging blocker itself is closed.
