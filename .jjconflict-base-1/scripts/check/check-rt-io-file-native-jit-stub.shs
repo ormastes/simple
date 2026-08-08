@@ -1,0 +1,227 @@
+#!/bin/sh
+# Regression gate for `rt_io_file_*` (File/FileHandle) real-disk I/O across
+# engines: interpreter vs JIT (`bin/simple run` with no SIMPLE_EXECUTION_MODE
+# override -- per .claude/rules/testing.md, that is ALWAYS JIT, never AOT).
+#
+# WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
+# interpreter and has no execution mode that reaches the JIT/native-build
+# codegen lanes, so no `*_spec.spl` can ever observe this defect. Only a
+# script that drives the engines directly can fence it.
+#
+# Bug: doc/08_tracking/bug/rt_io_file_family_interpreter_fixed_native_still_stubbed_2026-08-05.md
+#
+# Status as of 2026-08-08 (re-verified this session):
+#   - interpreter (SIMPLE_EXECUTION_MODE=interpret): real disk round-trip
+#     works -- write, exists, read-back, size all correct.
+#   - JIT (bin/simple run, no env override): STILL FAILS. `FileHandle.open`
+#     in WriteOnly mode returns fd=-1 and an `strace -f -e trace=openat,open`
+#     across the whole process tree shows ZERO syscalls referencing the
+#     target path -- confirms the call never reaches the real Rust
+#     implementation, it is still served by a stub. Re-confirmed with a
+#     minimal fixture, not the SdnRow/DB probe that first found it.
+#   - Interesting new data point: `nm -g --defined-only
+#     bin/release/x86_64-unknown-linux-gnu/libsimple_runtime.a | grep
+#     rt_io_file` now lists all 16 symbols (the bug doc's blocking claim was
+#     that the deployed archive predates them -- that appears to no longer be
+#     true), yet JIT still doesn't reach them. This means the ordering
+#     blocker described in the bug doc is not the whole story for the JIT
+#     lane; JIT symbol resolution does not necessarily go through the same
+#     archive-link path as `native-build`. Do not assume dropping the
+#     RT_KEEP entries alone would fix JIT.
+#   - `native-build` (true AOT/LLVM) was attempted this session directly but
+#     did not complete within available compute (heavy concurrent load from
+#     other sessions building full-stdlib native artifacts; two attempts
+#     each ran 10+ CPU-minutes without finishing or erroring). AOT status is
+#     UNVERIFIED THIS SESSION -- this script's JIT branch is the fast,
+#     reliable fence. NOTE: the "slower native-build branch ... (see below)"
+#     this header used to promise DOES NOT EXIST and never did; the AOT half
+#     of this row is genuinely unfenced. Corrected 2026-08-08 rather than
+#     left as an aspirational description of absent coverage.
+#
+# 2026-08-08 -- why the AOT branch is still not here, with a DISCRIMINATING
+# control rather than a shrug:
+#   - Two independent cold `native-build` attempts on this fixture (timeout
+#     560s and 590s) both returned rc=124 with an EMPTY cache dir (0 files),
+#     and both halted at the identical last log line (a `daemon_sdk.protocol`
+#     gc-warning), ~1512 lines in. Two cold runs stopping at the same point
+#     with zero cache output is evidence of a stall or a very slow phase
+#     after module loading -- not simply "needs more wall clock".
+#   - The control that makes this actionable: `test/fixtures/
+#     native_tuple_to_text/main.spl` -- the other known-good AOT fence --
+#     native-built SUCCESSFULLY in 164s at comparable or WORSE load (1-min
+#     avg 43 -> 51). So "the host is too loaded for any native-build" is
+#     FALSE. This fixture specifically is the problem.
+#   - IMPORT-SURFACE HYPOTHESIS: FALSIFIED 2026-08-08. Do not spend time on it.
+#     The fixture's imports are already minimal (2 `use` lines); neither
+#     file.spl nor its siblings reference cuda_sffi/vulkan_sffi/daemon_sdk/
+#     llvm_loader at all. DECISIVE CONTROL: a brand-new fixture containing only
+#     `use std.common.io.types.{FileMode, SeekFrom}` and a trivial print -- no
+#     FileHandle, no File, nothing from io/ -- stalls IDENTICALLY: same rc=124,
+#     same 1515-line log, byte-identical last 5 lines (confirmed by diff).
+#     So touching essentially ANY std.* module triggers a fixed, deterministic
+#     global pass (family-boundary scanning across nogc_sync_mut /
+#     nogc_async_mut / gc_async_mut) that always reaches the same stopping
+#     point regardless of program size. That contradicts --entry-closure's
+#     documented promise to walk only the entry's reachable modules
+#     (src/app/cli/bootstrap_main.spl:165). native_tuple_to_text builds in 164s
+#     precisely because it touches ZERO stdlib modules, so the pass is skipped
+#     entirely rather than being fast. THIS is the blocker, and it deserves its
+#     own bug -- shrinking this fixture cannot fix it.
+#   - Superseded (kept for the record) likely cause: import surface. This fixture's build log is 1500+ lines
+#     and drags in llvm_loader, cuda_sffi, vulkan_sffi and daemon_sdk via
+#     transitive `use`; the tuple fixture's log is far shorter. It probably
+#     needs only FileHandle/File.
+#   - RECOMMENDED NEXT STEP: do NOT retry blind. Trim the fixture's transitive
+#     imports first and re-measure -- the tuple-fixture comparison suggests
+#     that alone may cut compile time enough to fence this row. Failing that,
+#     a window able to run >900s foreground is required (note the agent Bash
+#     tool caps at 600000ms, so rc=124 at <=590s does NOT establish that 900s
+#     also fails).
+#
+# 2026-08-08 (later same day) -- the "stall" framing above is FALSIFIED. Full
+#   analysis: doc/08_tracking/bug/entry_closure_runs_global_stdlib_pass_regardless_of_imports_2026-08-08.md
+#   (see "Update 2026-08-08b" and "Update 2026-08-08c"). Summary: this is NOT a
+#   stall and NOT an --entry-closure scoping bug (closure BFS correctly visits
+#   only the ~6 files this fixture needs, in under 5s). It is a forced-interpret
+#   performance defect, now localised further than before: even a direct-worker
+#   run with a full 590s budget (both a shell `timeout 585` AND the agent tool's
+#   own `timeout` param set to 600000ms -- the earlier "identical stopping
+#   point" runs never passed that param and were silently cut at the tool's
+#   120s default) still doesn't finish. It gets well past the old ~1512-line
+#   stopping point (closure BFS done in ~5s; `main.spl` parses in ~77s) but then
+#   stalls out the rest of the budget still *parsing* (not yet codegen)
+#   `src/std/nogc_sync_mut/io/file.spl` (16723 chars, the FileHandle/File class
+#   defs this fixture needs) -- confirmed genuinely slow rather than
+#   trace-print overhead by re-running without SIMPLE_COMPILER_TRACE=1, which
+#   still didn't finish in 585s. The cache-dir was EMPTY after every attempt --
+#   nothing persists until a module's full pipeline completes, so there is no
+#   warm-cache shortcut for a retry today. THE AOT BRANCH BELOW STILL DOES NOT
+#   EXIST: the build never reaches a linked binary, so whether AOT rt_io_file_*
+#   is stubbed or working remains genuinely UNDETERMINED, not a KNOWN-OPEN
+#   result -- do not assume either without a completed build to test.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+WORK_DIR="${WORK_DIR:-/tmp/check-rt-io-file-native-jit-stub.$$}"
+FIXTURE="test/fixtures/rt_io_file_roundtrip/main.spl"
+PROBE_PATH="/tmp/rt_io_file_roundtrip_probe.$$.txt"
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR" "$PROBE_PATH"' EXIT HUP INT TERM
+
+fail=0
+
+# The fixture hardcodes /tmp/rt_io_file_roundtrip_probe.txt; override via env
+# not supported by the fixture today, so use that fixed path and always
+# rm -f it immediately before each run (a stubbed delete/write pair could
+# otherwise leave stale bytes that a read-back would match by accident).
+# Must match the literal hardcoded in the fixture (main.spl:13) exactly -- it is
+# NOT free to be $$-suffixed. Known race: parallel sessions share this path, so a
+# sibling's leftover file can be read as this run's evidence. Mitigated by the
+# `rm -f "$FIXED_PATH"` immediately before each leg; the real fix is to make the
+# fixture take its path from argv/env.
+FIXED_PATH="/tmp/rt_io_file_roundtrip_probe.txt"
+
+# --- Interpreter: must PASS with a REAL on-disk file ------------------------
+rm -f "$FIXED_PATH"
+interp_log="$WORK_DIR/interp.log"
+interp_out="$(SIMPLE_EXECUTION_MODE=interpret timeout 60 "$SIMPLE_BINARY" run "$FIXTURE" 2>"$interp_log" || true)"
+interp_verdict="$(printf '%s\n' "$interp_out" | grep '^VERDICT' || true)"
+
+if [ "$interp_verdict" != "VERDICT: PASS rt_io_file roundtrip ok" ]; then
+    echo "FAIL — interpreter rt_io_file roundtrip regressed"
+    echo "  expected: VERDICT: PASS rt_io_file roundtrip ok"
+    echo "  actual:   $interp_verdict"
+    sed -n '1,20p' "$interp_log"
+    fail=1
+else
+    # External, out-of-process verification: the file must genuinely exist
+    # on disk with the right size AFTER the process exited (rules out an
+    # in-process-only fake read).
+    if [ ! -f "$FIXED_PATH" ]; then
+        echo "FAIL — interpreter reported PASS but $FIXED_PATH does not exist on disk after exit"
+        fail=1
+    else
+        on_disk_size="$(wc -c < "$FIXED_PATH" | tr -d ' ')"
+        on_disk_content="$(cat "$FIXED_PATH")"
+        if [ "$on_disk_size" != "10" ] || [ "$on_disk_content" != "0123456789" ]; then
+            echo "FAIL — interpreter on-disk file content/size wrong (external check)"
+            echo "  size=$on_disk_size content=[$on_disk_content]"
+            fail=1
+        else
+            echo "PASS — interpreter rt_io_file roundtrip verified ON DISK from the shell (size=10, content matches)"
+        fi
+    fi
+fi
+
+# --- JIT (bin/simple run, no SIMPLE_EXECUTION_MODE override): known-open ----
+rm -f "$FIXED_PATH"
+jit_log="$WORK_DIR/jit.log"
+jit_strace="$WORK_DIR/jit.strace"
+command -v strace >/dev/null 2>&1 || {
+    echo "ERROR — strace is unavailable; the JIT leg's whole claim is 'ZERO openat/open"
+    echo "        syscalls', which cannot be evaluated without it. Nothing was measured."
+    exit 2
+}
+jit_out="$(env -u SIMPLE_EXECUTION_MODE timeout 60 strace -f -e trace=openat,open -o "$jit_strace" \
+    "$SIMPLE_BINARY" run "$FIXTURE" 2>"$jit_log" || true)"
+# Fail-closed: an empty trace means strace never ran or the JIT process never
+# started. Without this, "the run never happened" is indistinguishable from
+# "the run happened and made no syscalls" -- and the KNOWN-OPEN branch below
+# would print a green verdict for both.
+if [ ! -s "$jit_strace" ]; then
+    echo "ERROR — strace produced no output ($jit_strace is empty): the JIT run did not"
+    echo "        happen. NOTHING was measured; a 'zero syscalls' verdict here would be"
+    echo "        an artefact of the run failing, not of a stub."
+    exit 2
+fi
+jit_verdict="$(printf '%s\n' "$jit_out" | grep '^VERDICT' || true)"
+
+if [ "$jit_verdict" = "VERDICT: PASS rt_io_file roundtrip ok" ]; then
+    echo "NOTE — JIT (bin/simple run) rt_io_file roundtrip now PASSES. The gap in"
+    echo "       doc/08_tracking/bug/rt_io_file_family_interpreter_fixed_native_still_stubbed_2026-08-05.md"
+    echo "       has closed for the JIT lane. Promote this branch to a hard PASS"
+    echo "       assertion (including the on-disk check done for the interpreter"
+    echo "       above) instead of accepting either outcome. Also re-check the"
+    echo "       native-build (true AOT) lane, which is a separate codegen path."
+    if [ -f "$FIXED_PATH" ]; then
+        echo "  on-disk file present after JIT run (size=$(wc -c < "$FIXED_PATH" | tr -d ' '))"
+    else
+        echo "  WARNING: VERDICT said PASS but no on-disk file exists -- that would be a fake-success stub, not a real fix. FAIL."
+        fail=1
+    fi
+elif [ -f "$FIXED_PATH" ]; then
+    # Any outcome (even a reported FAIL) that still wrote real bytes to disk
+    # is progress worth flagging loudly -- the last known state was that
+    # nothing touched the disk at all.
+    echo "NOTE — JIT run left a real on-disk file at $FIXED_PATH even though VERDICT != PASS ($jit_verdict). This is a change from the last known state (zero openat syscalls). Investigate before assuming still-fully-stubbed."
+    fail=1
+else
+    if grep -q "openat($FIXED_PATH" "$jit_strace" 2>/dev/null || grep -q "\"$FIXED_PATH\"" "$jit_strace" 2>/dev/null; then
+        echo "FAIL — JIT made an openat/open syscall against the probe path but still didn't leave a file and/or didn't print the expected FAIL verdict; unexpected shape, investigate."
+        fail=1
+    else
+        if [ -z "$jit_verdict" ]; then
+            echo "ERROR — the JIT run printed no VERDICT line at all. strace ran and the"
+            echo "        fixture produced no verdict, so this is a crashed/failed run, not"
+            echo "        an observation of a stub. Nothing was measured."
+            exit 2
+        fi
+        echo "KNOWN-OPEN — JIT (bin/simple run) rt_io_file_open returns failure with ZERO"
+        echo "             openat/open syscalls against the target path. Verified positively:"
+        echo "             strace ran and captured $(wc -l < "$jit_strace" | tr -d ' ') lines,"
+        echo "             and the fixture printed verdict=[$jit_verdict]."
+        echo "             CORRECT behaviour is a real fd and a real file on disk, exactly as"
+        echo "             the interpreter leg above proves is achievable. Still a stub."
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    exit 1
+fi
+
+echo "PASS — rt_io_file_*: interpreter verified via real on-disk round-trip; JIT known-open gap unchanged"

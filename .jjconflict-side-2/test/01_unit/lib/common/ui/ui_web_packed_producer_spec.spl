@@ -1,0 +1,324 @@
+# @cover src/lib/common/ui/ui_web_packed_producer.spl 70%
+# @tag: unit, ui, draw_ir, draw_ir_v3, unified_packed_ui_scene, l7
+
+use std.spec
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use common.ui.draw_ir_v3.{DRAW_IR_V3_NO_ID}
+use common.ui.ui_scene_counts.{
+    UiSceneCounts,
+    UiSceneCapacityExtensionV1,
+    UI_PRODUCER_WEB,
+    UI_SCENE_TABLE_COMMANDS,
+    UI_SCENE_TABLE_GEOMETRY,
+    UI_SCENE_TABLE_PAINT,
+    UI_SCENE_TABLE_TEXT_RUNS,
+    UI_SCENE_TABLE_GLYPHS,
+    UI_SCENE_TABLE_RESOURCES,
+    UI_SCENE_TABLE_PATH_SPANS,
+    UI_SCENE_TABLE_PATH_POINTS,
+    UI_SCENE_TABLE_CLIPS,
+    UI_SCENE_TABLE_TRANSFORMS,
+    UI_SCENE_TABLE_HIT_SHAPES,
+    UI_SCENE_TABLE_PROVENANCE_EDGES,
+    UI_SCENE_TABLE_OWNER_RECORDS,
+    UI_SCENE_TABLE_ACTION_BINDINGS,
+    ui_scene_counts_zero,
+    ui_scene_scan,
+    ui_scene_capacity_zero,
+    ui_scene_capacity_set
+}
+use common.ui.ui_scene_slice.{UiSceneEmitResult, UiPackedProducer}
+use nogc_sync_mut.ui.ui_scene_arena.{UiSceneArena}
+use nogc_sync_mut.ui.draw_ir_v3_native_writer.{
+    UiSceneNativeWriter,
+    UiSceneNativeOwnerWriter,
+    UiSceneNativeActionWriter,
+    ui_scene_commit_draw_write,
+    ui_scene_commit_owner_write
+}
+use common.ui.ui_web_packed_producer.{WebPackedProducer}
+
+# Web corpus: real HTML -> DrawIR layout (`simple_web_html_layout_renderer.spl`,
+# the production HTML/CSS layout renderer), two absolutely-positioned colored
+# boxes -- pinned from `draw_ir_v2_v3_pixel_parity_spec.spl`'s own Web
+# corpus (lane L3). Confirmed by probe: this oracle marks ordinary boxes
+# hit-testable on its own (5 HIT_SHAPES rows from 6 commands for this exact
+# page), so no interactive tag is needed to exercise gate (b).
+val L7_CORPUS_HTML: text = "<html><head><style>html,body{margin:0;padding:0}#a{position:absolute;left:5px;top:5px;width:40px;height:20px;background:#1D4ED8}#b{position:absolute;left:20px;top:30px;width:30px;height:15px;background:#EF4444}</style></head><body><div id='a'></div><div id='b'></div></body></html>"
+
+fn _l7_generous_capacity() -> UiSceneCapacityExtensionV1:
+    """Sized generously (not exactly) -- this fixture only needs to be big
+    enough for the corpus, not a precise fit."""
+    var cap = ui_scene_capacity_zero()
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_COMMANDS, 200u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_GEOMETRY, 200u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_PAINT, 200u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_TEXT_RUNS, 200u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_GLYPHS, 400u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_RESOURCES, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_PATH_SPANS, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_PATH_POINTS, 200u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_CLIPS, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_TRANSFORMS, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_HIT_SHAPES, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_PROVENANCE_EDGES, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_OWNER_RECORDS, 50u32)
+    cap = ui_scene_capacity_set(cap, UI_SCENE_TABLE_ACTION_BINDINGS, 10u32)
+    cap
+
+describe "WebPackedProducer count/emit exactness (design section 2.2, lane L7)":
+    """The Web HTML/CSS layout path adopts the UiPackedProducer contract:
+    count() reports exact rows for a real HTML page, emit() writes exactly
+    that many into externally-owned writers, and finish() reaches Exact --
+    never Deficit/Surplus -- on a non-trivial corpus."""
+
+    it "reports and emits exactly the reserved rows for a real HTML page":
+        step("A page with two absolutely-positioned boxes")
+        val producer = WebPackedProducer(id_val: 1u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        expect(counts.commands).to_be_greater_than(0u32)
+        expect(counts.geometry).to_be_greater_than(0u32)
+        expect(counts.paint).to_be_greater_than(0u32)
+        expect(counts.hit_shapes).to_be_greater_than(0u32)
+        expect(counts.owner_records).to_equal(counts.hit_shapes)
+
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(1u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+        print "l7_web_producer_exactness commands={counts.commands} hit_shapes={counts.hit_shapes} owners={counts.owner_records}"
+
+    it "reports the same counts twice for the same page (count is repeatable)":
+        val producer = WebPackedProducer(id_val: 2u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
+        val first = producer.count(5u64, ui_scene_counts_zero())
+        val second = producer.count(5u64, ui_scene_counts_zero())
+        expect(first.commands).to_equal(second.commands)
+        expect(first.hit_shapes).to_equal(second.hit_shapes)
+        expect(first.owner_records).to_equal(second.owner_records)
+
+describe "WebPackedProducer owner records (design section 2.4, gate b)":
+    """Every HIT_SHAPES row this producer emits gets exactly one
+    OWNER_RECORDS row, tagged `producer_kind==WEB`, correlated by
+    `component_id == semantic_id`. `semantic_generation` is 0u32,
+    matching draw_ir_v2_to_v3's adapter (which sets `component_generation:
+    0u32` unconditionally on every command it emits) -- ui_scene_event_route.spl's
+    recycled-slot check compares these two fields for EQUALITY, so the owner
+    must mirror whatever generation the backing command actually carries,
+    not an arbitrary nonzero constant."""
+
+    it "emits one owner record per hit-shape row, tagged WEB with the oracle's generation":
+        val producer = WebPackedProducer(id_val: 3u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(3u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+        val hit_shapes = draw.hit_shapes_snapshot()
+        val records = owners.records_snapshot()
+        expect(hit_shapes.len()).to_equal(records.len())
+        expect(records.len()).to_be_greater_than(0)
+        var i = 0
+        while i < records.len():
+            val rec = records[i]
+            expect(rec.producer_kind).to_equal(UI_PRODUCER_WEB)
+            expect(rec.semantic_generation).to_equal(0u32)
+            expect(hit_shapes[i].component_id).to_equal(rec.semantic_id)
+            i = i + 1
+        print "l7_web_producer_owners hit_shapes={hit_shapes.len()} owners={records.len()}"
+
+describe "WebPackedProducer host_owner_id reparenting (cross-producer owner-chain wiring)":
+    """When this producer is nested inside a host (e.g. a GUI WebView-host
+    widget), the host passes its own OWNER_RECORDS absolute index as
+    `host_owner_id`, and every owner record this producer emits -- one per
+    hit-shape row, all flat/root within its own scope -- gets re-parented
+    onto it, closing the cross-producer chain
+    ui_scene_event_route.spl's own routing walks."""
+
+    it "re-parents every owner record onto host_owner_id when nested":
+        val host_owner_id = 77u32
+        val producer = WebPackedProducer(id_val: 7u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: host_owner_id)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                val records = owners.records_snapshot()
+                expect(records.len()).to_be_greater_than(0)
+                var i = 0
+                while i < records.len():
+                    expect(records[i].parent_owner_id).to_equal(host_owner_id)
+                    i = i + 1
+                print "l7_web_producer_host_owner_id owners={records.len()} parent={host_owner_id}"
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+describe "WebPackedProducer WebView nesting (design section 2.2 nesting rule, gate c/d)":
+    """A host hosting this producer as a WebView child: the child's root
+    command(s) get re-parented onto the host's WebView component id, and
+    committing the child's write into the SHARED arena costs zero extra
+    allocation -- the arena's `alloc_count` only ever increments at
+    `UiSceneArena.new()`, never again."""
+
+    it "re-parents the web root onto the host's WebView component and costs no extra arena allocation":
+        val host_webview_component_id = 77u32
+        val capacity = _l7_generous_capacity()
+        val arena = UiSceneArena.new(capacity)
+        val before_alloc = arena.alloc_count()
+
+        val web = WebPackedProducer(id_val: 20u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: host_webview_component_id, host_owner_id: DRAW_IR_V3_NO_ID)
+        val web_counts = web.count(1u64, ui_scene_counts_zero())
+
+        var host_counts = ui_scene_counts_zero()
+        host_counts.commands = 1u32
+
+        val scanned = ui_scene_scan([host_counts, web_counts])
+        val child_ranges = scanned[1]
+
+        var draw = UiSceneNativeWriter.new(child_ranges)
+        var owners = UiSceneNativeOwnerWriter.new(child_ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(child_ranges.action_bindings)
+        val result = web.emit(1u64, child_ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                val commands = draw.commands_snapshot()
+                var reparented = 0
+                var i = 0
+                while i < commands.len():
+                    if commands[i].parent_id == host_webview_component_id:
+                        reparented = reparented + 1
+                    i = i + 1
+                expect(reparented).to_be_greater_than(0)
+
+                val draw_committed = ui_scene_commit_draw_write(arena, draw, child_ranges)
+                assert_true(draw_committed)
+                val owner_committed = ui_scene_commit_owner_write(arena, owners, child_ranges.owner_records)
+                assert_true(owner_committed)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+        val after_alloc = arena.alloc_count()
+        expect(after_alloc).to_equal(before_alloc)
+        print "l7_web_producer_nesting host_component={host_webview_component_id} alloc_before={before_alloc} alloc_after={after_alloc}"
+
+describe "WebPackedProducer id rebasing under a non-zero assigned range (multi-producer composition)":
+    """Ids embedded in emitted commands (geometry_id, paint_id, ...) are read
+    back as ABSOLUTE indices into the assembled arena's combined per-table
+    array (draw_ir_v3_group_resolve.spl's own accessor convention, and the
+    landed `ranges.<table>.start + cursor()` pattern in
+    draw_ir_v3_emit_full.spl). When this producer is scanned alongside
+    another producer with non-zero counts, its assigned `ranges.geometry`/
+    `ranges.paint` no longer start at 0 -- every id it copies from the v2
+    oracle's locally-numbered scene must be rebased by that start, or a
+    downstream reader indexing the combined arena lands on the wrong row.
+    (The WebView-nesting test above only exercises a non-zero `commands`
+    start; this test exercises geometry/paint too.)"""
+
+    it "keeps geometry_id/paint_id arena-absolute when scanned after a producer with non-zero counts":
+        var dummy_counts = ui_scene_counts_zero()
+        dummy_counts.commands = 2u32
+        dummy_counts.geometry = 2u32
+        dummy_counts.paint = 2u32
+        dummy_counts.text_runs = 1u32
+        dummy_counts.glyphs = 3u32
+        dummy_counts.resources = 1u32
+        dummy_counts.path_spans = 1u32
+        dummy_counts.path_points = 2u32
+        dummy_counts.clips = 1u32
+        dummy_counts.transforms = 1u32
+        dummy_counts.hit_shapes = 1u32
+
+        val producer = WebPackedProducer(id_val: 6u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
+        val web_counts = producer.count(1u64, ui_scene_counts_zero())
+
+        val scanned = ui_scene_scan([dummy_counts, web_counts])
+        val web_ranges = scanned[1]
+        assert_true(web_ranges.geometry.start > 0u32)
+        assert_true(web_ranges.paint.start > 0u32)
+
+        var draw = UiSceneNativeWriter.new(web_ranges)
+        var owners = UiSceneNativeOwnerWriter.new(web_ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(web_ranges.action_bindings)
+        val result = producer.emit(1u64, web_ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(6u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+        val commands = draw.commands_snapshot()
+        var checked_geometry = 0
+        var checked_paint = 0
+        var i = 0
+        while i < commands.len():
+            if commands[i].geometry_id != DRAW_IR_V3_NO_ID:
+                assert_true(commands[i].geometry_id >= web_ranges.geometry.start)
+                checked_geometry = checked_geometry + 1
+            if commands[i].paint_id != DRAW_IR_V3_NO_ID:
+                assert_true(commands[i].paint_id >= web_ranges.paint.start)
+                checked_paint = checked_paint + 1
+            i = i + 1
+        assert_true(checked_geometry > 0)
+        assert_true(checked_paint > 0)
+        print "l7_web_producer_id_rebasing geometry_start={web_ranges.geometry.start} paint_start={web_ranges.paint.start} checked_geometry={checked_geometry} checked_paint={checked_paint}"
+
+describe "WebPackedProducer parity with the v2 oracle (design section 9, gate d)":
+    """The producer adopts the EXISTING renderer
+    (`simple_web_layout_render_html_draw_ir` + the landed v2->v3 adapter)
+    rather than re-deriving cascade/layout/paint, so its emitted COMMANDS/
+    GEOMETRY/PAINT rows must match that oracle's output command-for-command,
+    row-for-row on a non-trivial corpus (non-nested: `host_parent_id` is
+    NO_ID, so no re-parenting alters the comparison)."""
+
+    it "matches simple_web_layout_render_html_draw_ir + draw_ir_v2_to_v3 on commands, geometry and paint":
+        val oracle_v3 = draw_ir_v2_to_v3(simple_web_layout_render_html_draw_ir(L7_CORPUS_HTML, 100, 70))
+
+        val producer = WebPackedProducer(id_val: 4u32, html: L7_CORPUS_HTML, width: 100, height: 70, host_parent_id: DRAW_IR_V3_NO_ID, host_owner_id: DRAW_IR_V3_NO_ID)
+        val counts = producer.count(1u64, ui_scene_counts_zero())
+        val ranges = ui_scene_scan([counts])[0]
+        var draw = UiSceneNativeWriter.new(ranges)
+        var owners = UiSceneNativeOwnerWriter.new(ranges.owner_records)
+        var actions = UiSceneNativeActionWriter.new(ranges.action_bindings)
+        val result = producer.emit(1u64, ranges, draw, owners, actions)
+        match result:
+            UiSceneEmitResult.Emitted(slice):
+                expect(slice.scene_slot).to_equal(4u32)
+            UiSceneEmitResult.Refused(receipt):
+                expect(true).to_equal(false)
+
+        val produced_commands = draw.commands_snapshot()
+        expect(produced_commands.len()).to_equal(oracle_v3.commands.len())
+
+        val produced_geometry = draw.geometry_snapshot()
+        expect(produced_geometry.len()).to_equal(oracle_v3.geometry.xs.len())
+        var i = 0
+        while i < produced_geometry.len():
+            expect(produced_geometry[i].x).to_equal(oracle_v3.geometry.xs[i])
+            expect(produced_geometry[i].y).to_equal(oracle_v3.geometry.ys[i])
+            expect(produced_geometry[i].width).to_equal(oracle_v3.geometry.widths[i])
+            expect(produced_geometry[i].height).to_equal(oracle_v3.geometry.heights[i])
+            i = i + 1
+
+        val produced_paint = draw.paint_snapshot()
+        expect(produced_paint.len()).to_equal(oracle_v3.paint.fill_colors.len())
+        i = 0
+        while i < produced_paint.len():
+            expect(produced_paint[i].fill_color).to_equal(oracle_v3.paint.fill_colors[i])
+            i = i + 1
+        print "l7_web_producer_parity commands={produced_commands.len()} geometry={produced_geometry.len()} paint={produced_paint.len()}"

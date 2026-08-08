@@ -1,0 +1,157 @@
+"""
+# `resource` invariant 7 -- `*R` does not grant exclusive (`mut`) methods
+
+**WP:** WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
+**Architecture:** `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
+§8, invariant 7.
+
+Before this change, NOTHING checked this invariant: `resource_ownership_kind`
+(`compiler.frontend.resource_registry`) was written by WP-B but never read
+by anything (grep confirmed zero other call sites). This lane adds the
+missing enforcement at MIR lowering (`_MirLoweringExpr/method_calls_
+literals.spl`'s `lower_method_call`, right after the `.close()` consuming-
+drop check): a new `MirLowering.mir_hir_type_is_shared_resource` helper
+(`mir_lowering_stmts.spl`, mirrors `mir_hir_type_is_resource`) recognizes a
+`*R` receiver (`HirTypeKind.Ptr(Named(sym))` where `sym` is a declared
+resource -- `*R` lowers to plain `Ptr`, `hir_lowering/types.spl`'s
+`d_pointer` branch), and when the resolved `InstanceMethod`'s own symbol
+carries `is_mutable: true`, calls `self.error_fatal(...)` -- a real,
+build-aborting lowering diagnostic (`asm_and_targets.spl`'s `error_fatal`
+docstring: "MUST abort the build before codegen").
+
+**Scope limitation, stated up front:** only the `*R` (shared) sigil is
+covered. `@R` (atomic) and `-R` (weak) are NOT reachable by this check --
+`hir_lowering/types.spl`'s `lower_type` erases both to `HirTypeKind.Infer`
+before this pass ever sees them (its `else` branch names "Atomic" among the
+erased kinds explicitly); there is no HIR-level representation left to key
+a check on for those two sigils. This matches the architecture doc's own
+wording for invariant 7 ("`*R` does not grant..."), which only names the
+shared case.
+
+Hand-built-HIR harness (same technique as `resource_use_after_move_spec.spl`)
+driving `MirLowering.lower_module` directly and reading `mir_lowering.errors`
+(a `[MirError]`, the lowering-time diagnostic channel -- NOT the borrow
+checker's `[NLLError]`, since this invariant is enforced at HIR->MIR
+lowering, the earliest point both facts -- the receiver's sigil and the
+called method's own mutability bit -- are jointly available).
+"""
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind, MethodResolution}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.frontend.resource_registry.{resource_registry_reset, resource_registry_declare}
+
+fn mk_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span(0))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+# Builds a symbol table with a "File" resource struct symbol, a "mutate"
+# method symbol whose `is_mutable` bit is configurable, and declares "File"
+# in the frontend resource registry (required for
+# mir_hir_type_is_shared_resource to resolve true).
+fn make_table(method_is_mutable: bool) -> (SymbolTable, SymbolId, SymbolId):
+    resource_registry_reset()
+    resource_registry_declare("File", "prefix=rt_file;handle=i64;invalid=-1;release=rt_file_close;sharing=shared")
+    var table = SymbolTable.new()
+    val type_sym = table.define("File", SymbolKind.Struct, nil, mk_span(0), Visibility.Public, false, nil)
+    val method_sym = table.define("mutate", SymbolKind.Method, nil, mk_span(0), Visibility.Public, method_is_mutable, nil)
+    (table, type_sym, method_sym)
+
+fn shared_resource_type(type_sym: SymbolId) -> HirType:
+    val named = HirType(kind: HirTypeKind.Named(type_sym, []), span: mk_span(0))
+    HirType(kind: HirTypeKind.Ptr(named, false), span: mk_span(0))
+
+fn make_fn(receiver_sym: SymbolId, receiver_type: HirType, type_sym: SymbolId, method_sym: SymbolId) -> HirFunction:
+    val receiver_expr = HirExpr(kind: HirExprKind.Var(receiver_sym), has_type_: true, type_: receiver_type, span: mk_span(15))
+    val call_expr = HirExpr(
+        kind: HirExprKind.MethodCall(receiver_expr, "mutate", [], MethodResolution.InstanceMethod(type_sym, method_sym)),
+        has_type_: true, type_: i64_type(), span: mk_span(15)
+    )
+    val call_stmt = HirStmt(kind: HirStmtKind.Expr(call_expr), span: mk_span(15))
+    val param = HirParam(symbol: receiver_sym, name: "a", type_: receiver_type, has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+    val body = HirBlock(stmts: [call_stmt], has: true, value: int_lit(0, 20), span: mk_span(1))
+    HirFunction(
+        symbol: SymbolId(id: 200),
+        name: "use_shared",
+        type_params: [],
+        params: [param],
+        return_type: i64_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn make_hir_module(symbols: SymbolTable, fn_: HirFunction) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[fn_.symbol] = fn_
+    HirModule(
+        name: "resource_shared_mut_method_test",
+        path: "synthetic/resource_shared_mut_method_test.spl",
+        imports: [], exports: [], domain_blocks: [],
+        symbols: symbols, functions: functions,
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {},
+        impls: [], constants: {}, static_asserts: [], aop_advices: [],
+        di_bindings: [], arch_rules: [], mock_decls: [], types: []
+    )
+
+fn lowering_errors(symbols: SymbolTable, fn_: HirFunction) -> [MirError]:
+    val hir_module = make_hir_module(symbols, fn_)
+    var mir_lowering = MirLowering.new(symbols)
+    mir_lowering.lower_module(hir_module)
+    mir_lowering.errors
+
+describe "invariant 7: a mut-marked method through a *R (shared) resource receiver is a hard compile error":
+    it "reports a fatal lowering diagnostic for `fn use_shared(a: *File) -> i64: a.mutate(); 0` when mutate() is declared mut":
+        val (symbols, type_sym, method_sym) = make_table(true)
+        val receiver_sym = SymbolId(id: 1)
+        val fn_ = make_fn(receiver_sym, shared_resource_type(type_sym), type_sym, method_sym)
+        val errors = lowering_errors(symbols, fn_)
+        assert_true(errors.len() > 0)
+
+    it "reports no diagnostic for the identical shape when mutate() is NOT declared mut":
+        val (symbols, type_sym, method_sym) = make_table(false)
+        val receiver_sym = SymbolId(id: 1)
+        val fn_ = make_fn(receiver_sym, shared_resource_type(type_sym), type_sym, method_sym)
+        val errors = lowering_errors(symbols, fn_)
+        assert_true(errors.len() == 0)
+
+    it "reports no diagnostic for the identical mut-method call through a UNIQUE (plain, non-sigiled) resource receiver":
+        # Control: proves the diagnostic is keyed on the `*R` sigil, not on
+        # calling any mut method on any resource-typed receiver.
+        val (symbols, type_sym, method_sym) = make_table(true)
+        val receiver_sym = SymbolId(id: 1)
+        val unique_type = HirType(kind: HirTypeKind.Named(type_sym, []), span: mk_span(0))
+        val fn_ = make_fn(receiver_sym, unique_type, type_sym, method_sym)
+        val errors = lowering_errors(symbols, fn_)
+        assert_true(errors.len() == 0)

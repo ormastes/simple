@@ -1,0 +1,57 @@
+#!/usr/bin/env sh
+# Gate: cache_identity Lean proofs — the Option-C global-cache identity layer.
+# Builds src/verification/cache_identity and asserts every safety theorem exists.
+# See doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+CHECK_LEAN="$ROOT_DIR/scripts/check/check-lean-proofs.shs"
+
+require_theorem() {
+    file="$1"
+    name="$2"
+    if ! grep -Eq "^[[:space:]]*theorem[[:space:]]+$name([[:space:]]|:|\\(|$)" "$ROOT_DIR/$file"; then
+        echo "FAIL: missing theorem $name in $file" >&2
+        exit 1
+    fi
+}
+
+THMS="src/verification/cache_identity/src/CacheIdentity/Theorems.lean"
+
+# Self-test: require_theorem must reject a stripped theorem (no repo files touched).
+if [ "${1:-}" = "--self-test" ]; then
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+    mutated="$tmp_dir/Theorems.lean"
+    grep -v "^theorem no_false_hit" "$ROOT_DIR/$THMS" >"$mutated"
+    if (ROOT_DIR="$tmp_dir" require_theorem "Theorems.lean" "no_false_hit" 2>/dev/null); then
+        echo "STATUS: FAIL cache-identity-formal-proofs self-test: require_theorem did not fail after stripping no_false_hit" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS cache-identity-formal-proofs self-test"
+    exit 0
+fi
+
+sh "$CHECK_LEAN" --project "$ROOT_DIR/src/verification/cache_identity" "verification/cache_identity"
+
+# Injectivity core — digest equality recovers every semantic input
+require_theorem "$THMS" "encode_determines_canon"
+require_theorem "$THMS" "canon_determines_encode"
+require_theorem "$THMS" "encode_eq_iff_canon"
+# Field completeness — no omitted-input false hit
+require_theorem "$THMS" "source_change_visible"
+require_theorem "$THMS" "deps_change_visible"
+require_theorem "$THMS" "aop_change_visible"
+require_theorem "$THMS" "macro_change_visible"
+require_theorem "$THMS" "resolution_change_visible"
+require_theorem "$THMS" "compiler_change_visible"
+# Cache soundness
+require_theorem "$THMS" "no_false_hit"
+# C ≡ A bridge (stamp fast path is a sound acceleration of strict mode)
+require_theorem "$THMS" "stamp_fast_eq_strict"
+# Order-independence (completeness side)
+require_theorem "$THMS" "deps_reorder_hits"
+require_theorem "$THMS" "cfg_reorder_hits"
+require_theorem "$THMS" "source_differs_misses"
+
+echo "STATUS: PASS cache-identity-formal-proofs (build + 14 required theorems)"

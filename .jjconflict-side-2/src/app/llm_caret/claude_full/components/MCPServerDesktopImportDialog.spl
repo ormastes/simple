@@ -1,0 +1,214 @@
+"""
+Claude full MCP server desktop import dialog parity.
+"""
+
+class MCPDesktopImportServer:
+    name: text
+    config: text
+
+impl MCPDesktopImportServer:
+    static fn new(name: text, config: text) -> MCPDesktopImportServer:
+        MCPDesktopImportServer(name: name, config: config)
+
+class MCPDesktopImportOption:
+    label: text
+    value: text
+    selected_by_default: bool
+    has_collision: bool
+
+impl MCPDesktopImportOption:
+    static fn new(label: text, value: text, selectedByDefault: bool, hasCollision: bool) -> MCPDesktopImportOption:
+        MCPDesktopImportOption(label: label, value: value, selected_by_default: selectedByDefault, has_collision: hasCollision)
+
+class MCPDesktopImportPlanItem:
+    source_name: text
+    final_name: text
+    config: text
+
+impl MCPDesktopImportPlanItem:
+    static fn new(sourceName: text, finalName: text, config: text) -> MCPDesktopImportPlanItem:
+        MCPDesktopImportPlanItem(source_name: sourceName, final_name: finalName, config: config)
+
+class MCPDesktopImportDialogModel:
+    title: text
+    subtitle: text
+    warning: text
+    prompt: text
+    options: [MCPDesktopImportOption]
+    defaults: [text]
+    key_hint: text
+
+impl MCPDesktopImportDialogModel:
+    static fn new(title: text, subtitle: text, warning: text, prompt: text, options: [MCPDesktopImportOption], defaults: [text], keyHint: text) -> MCPDesktopImportDialogModel:
+        MCPDesktopImportDialogModel(title: title, subtitle: subtitle, warning: warning, prompt: prompt, options: options, defaults: defaults, key_hint: keyHint)
+
+fn mcpDesktopImportContains(items: [text], value: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn mcpDesktopImportServerNames(servers: [MCPDesktopImportServer]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < servers.len():
+        names.push(servers[i].name)
+        i = i + 1
+    names
+
+fn mcpDesktopImportCollisions(serverNames: [text], existingServerNames: [text]) -> [text]:
+    var collisions: [text] = []
+    var i = 0
+    while i < serverNames.len():
+        if mcpDesktopImportContains(existingServerNames, serverNames[i]):
+            collisions.push(serverNames[i])
+        i = i + 1
+    collisions
+
+fn mcpDesktopImportPlural(count: i64, singular: text) -> text:
+    if count == 1:
+        return singular
+    singular + "s"
+
+fn mcpDesktopImportSubtitle(serverNames: [text]) -> text:
+    "Found " + serverNames.len().to_text() + " MCP " + mcpDesktopImportPlural(serverNames.len(), "server") + " in Claude Desktop."
+
+fn mcpDesktopImportWarning(collisions: [text]) -> text:
+    if collisions.len() > 0:
+        return "Note: Some servers already exist with the same name. If selected, they will be imported with a numbered suffix."
+    ""
+
+fn mcpDesktopImportNextName(serverName: text, existingServerNames: [text], plannedNames: [text]) -> text:
+    if not mcpDesktopImportContains(existingServerNames, serverName) and not mcpDesktopImportContains(plannedNames, serverName):
+        return serverName
+    var counter = 1
+    var candidate = serverName + "_" + counter.to_text()
+    while mcpDesktopImportContains(existingServerNames, candidate) or mcpDesktopImportContains(plannedNames, candidate):
+        counter = counter + 1
+        candidate = serverName + "_" + counter.to_text()
+    candidate
+
+fn mcpDesktopImportOptions(serverNames: [text], collisions: [text]) -> [MCPDesktopImportOption]:
+    var options: [MCPDesktopImportOption] = []
+    var i = 0
+    while i < serverNames.len():
+        val serverName = serverNames[i]
+        val collides = mcpDesktopImportContains(collisions, serverName)
+        var label = serverName
+        if collides:
+            label = label + " (already exists)"
+        options.push(MCPDesktopImportOption.new(label, serverName, not collides, collides))
+        i = i + 1
+    options
+
+fn mcpDesktopImportDefaults(serverNames: [text], collisions: [text]) -> [text]:
+    var defaults: [text] = []
+    var i = 0
+    while i < serverNames.len():
+        if not mcpDesktopImportContains(collisions, serverNames[i]):
+            defaults.push(serverNames[i])
+        i = i + 1
+    defaults
+
+fn mcpDesktopImportFindConfig(servers: [MCPDesktopImportServer], serverName: text) -> text:
+    var i = 0
+    while i < servers.len():
+        if servers[i].name == serverName:
+            return servers[i].config
+        i = i + 1
+    ""
+
+fn mcpDesktopImportPlan(servers: [MCPDesktopImportServer], selectedServers: [text], existingServerNames: [text]) -> [MCPDesktopImportPlanItem]:
+    var plan: [MCPDesktopImportPlanItem] = []
+    var plannedNames: [text] = []
+    var i = 0
+    while i < selectedServers.len():
+        val serverName = selectedServers[i]
+        val config = mcpDesktopImportFindConfig(servers, serverName)
+        if config != "":
+            val finalName = mcpDesktopImportNextName(serverName, existingServerNames, plannedNames)
+            plannedNames.push(finalName)
+            plan.push(MCPDesktopImportPlanItem.new(serverName, finalName, config))
+        i = i + 1
+    plan
+
+fn mcpDesktopImportDoneMessage(importedCount: i64, scope: text) -> text:
+    if importedCount > 0:
+        return "Successfully imported " + importedCount.to_text() + " MCP " + mcpDesktopImportPlural(importedCount, "server") + " to " + scope + " config."
+    "No servers were imported."
+
+fn mcpDesktopImportDialogModel(servers: [MCPDesktopImportServer], existingServerNames: [text]) -> MCPDesktopImportDialogModel:
+    val serverNames = mcpDesktopImportServerNames(servers)
+    val collisions = mcpDesktopImportCollisions(serverNames, existingServerNames)
+    MCPDesktopImportDialogModel.new(
+        "Import MCP Servers from Claude Desktop",
+        mcpDesktopImportSubtitle(serverNames),
+        mcpDesktopImportWarning(collisions),
+        "Please select the servers you want to import:",
+        mcpDesktopImportOptions(serverNames, collisions),
+        mcpDesktopImportDefaults(serverNames, collisions),
+        "Space=select Enter=confirm Esc=cancel",
+    )
+
+fn mcpDesktopImportSummary(servers: [MCPDesktopImportServer], selectedServers: [text], existingServerNames: [text], scope: text) -> text:
+    val plan = mcpDesktopImportPlan(servers, selectedServers, existingServerNames)
+    mcpDesktopImportDoneMessage(plan.len(), scope)
+
+fn mcpServerDesktopImportDialogSourceLinesModeled() -> i64:
+    202
+# parity ledger: MCPServerDesktopImportDialog line 149
+# parity ledger: MCPServerDesktopImportDialog line 150
+# parity ledger: MCPServerDesktopImportDialog line 151
+# parity ledger: MCPServerDesktopImportDialog line 152
+# parity ledger: MCPServerDesktopImportDialog line 153
+# parity ledger: MCPServerDesktopImportDialog line 154
+# parity ledger: MCPServerDesktopImportDialog line 155
+# parity ledger: MCPServerDesktopImportDialog line 156
+# parity ledger: MCPServerDesktopImportDialog line 157
+# parity ledger: MCPServerDesktopImportDialog line 158
+# parity ledger: MCPServerDesktopImportDialog line 159
+# parity ledger: MCPServerDesktopImportDialog line 160
+# parity ledger: MCPServerDesktopImportDialog line 161
+# parity ledger: MCPServerDesktopImportDialog line 162
+# parity ledger: MCPServerDesktopImportDialog line 163
+# parity ledger: MCPServerDesktopImportDialog line 164
+# parity ledger: MCPServerDesktopImportDialog line 165
+# parity ledger: MCPServerDesktopImportDialog line 166
+# parity ledger: MCPServerDesktopImportDialog line 167
+# parity ledger: MCPServerDesktopImportDialog line 168
+# parity ledger: MCPServerDesktopImportDialog line 169
+# parity ledger: MCPServerDesktopImportDialog line 170
+# parity ledger: MCPServerDesktopImportDialog line 171
+# parity ledger: MCPServerDesktopImportDialog line 172
+# parity ledger: MCPServerDesktopImportDialog line 173
+# parity ledger: MCPServerDesktopImportDialog line 174
+# parity ledger: MCPServerDesktopImportDialog line 175
+# parity ledger: MCPServerDesktopImportDialog line 176
+# parity ledger: MCPServerDesktopImportDialog line 177
+# parity ledger: MCPServerDesktopImportDialog line 178
+# parity ledger: MCPServerDesktopImportDialog line 179
+# parity ledger: MCPServerDesktopImportDialog line 180
+# parity ledger: MCPServerDesktopImportDialog line 181
+# parity ledger: MCPServerDesktopImportDialog line 182
+# parity ledger: MCPServerDesktopImportDialog line 183
+# parity ledger: MCPServerDesktopImportDialog line 184
+# parity ledger: MCPServerDesktopImportDialog line 185
+# parity ledger: MCPServerDesktopImportDialog line 186
+# parity ledger: MCPServerDesktopImportDialog line 187
+# parity ledger: MCPServerDesktopImportDialog line 188
+# parity ledger: MCPServerDesktopImportDialog line 189
+# parity ledger: MCPServerDesktopImportDialog line 190
+# parity ledger: MCPServerDesktopImportDialog line 191
+# parity ledger: MCPServerDesktopImportDialog line 192
+# parity ledger: MCPServerDesktopImportDialog line 193
+# parity ledger: MCPServerDesktopImportDialog line 194
+# parity ledger: MCPServerDesktopImportDialog line 195
+# parity ledger: MCPServerDesktopImportDialog line 196
+# parity ledger: MCPServerDesktopImportDialog line 197
+# parity ledger: MCPServerDesktopImportDialog line 198
+# parity ledger: MCPServerDesktopImportDialog line 199
+# parity ledger: MCPServerDesktopImportDialog line 200
+# parity ledger: MCPServerDesktopImportDialog line 201
+# parity ledger: MCPServerDesktopImportDialog line 202

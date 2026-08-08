@@ -1,0 +1,128 @@
+"""
+# RemoteExec — QEMU RV32 lane session lifecycle
+
+**Feature:** Notebook Execution Lanes, Stream K, task K4 —
+`src/lib/nogc_sync_mut/notebook/remote_exec.spl`
+**Design:** `doc/05_design/app/tools/notebook_lanes_architecture.md` §4.3
+**Plan:** `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`
+(Stream K, K4)
+
+## Overview
+
+Exercises `RemoteExec` against the `interpreter(remote(baremetal(riscv32)))`
+lane — QEMU RV32 + GDB-MI, the same adapter
+(`src/lib/nogc_sync_mut/debug/remote/exec/adapter_qemu_rv32.spl`) the test
+runner's `jit(remote(...))` lane already uses. This spec is host-aware, like
+the existing remote-baremetal specs
+(`test/03_system/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl`):
+missing tooling or a live-connect failure both count as an acceptable,
+non-failing outcome (`skip:`/`blocked:`), never a hard spec failure.
+
+## What this proves, and what it does NOT
+
+`RemoteExec.execute_cell()` compiles each cell through the existing
+`compile_remote_binary` bridge, which is currently a fixed stub that ignores
+the cell's source text and always emits the same "return 0" bytes for a given
+architecture (`doc/08_tracking/bug/remote_exec_compile_remote_binary_is_a_stub_2026-08-07.md`).
+That means no two cells can differ at the compiled-code level yet, so this
+spec cannot — and does not attempt to — prove cell-code-driven VALUE state
+(a `val x = 1` cell's `x` changing a later cell's compiled result). What it
+DOES prove: the same QEMU process (and therefore its target RAM) stays live
+across three `execute_cell()` calls made through one `RemoteExec` instance,
+`%reset` tears that process down and reconnects to a fresh one, and every
+outcome — available, skip, blocked, or a live execute — surfaces as a
+`LaneStatus`/`CellResult`, never a panic. That is the session-lifecycle
+contract K4 owns; the compiled-value-state contract is blocked on the bug
+above and tracked there, not weakened here.
+
+## Syntax
+
+```simple
+val ex = RemoteExec.make("interpreter(remote(baremetal(riscv32)))")
+val status = ex.probe()
+ex.start(session_opts_default("s1", ex.mode_spec()))
+val r1 = ex.execute_cell("val x = 1", "cell-1")
+val r2 = ex.execute_cell("fn f(): 2", "cell-2")
+val r3 = ex.execute_cell("f()", "cell-3")
+ex.reset()
+ex.shutdown()
+```
+"""
+
+use std.spec
+use std.io_runtime.{shell}
+use std.notebook.remote_exec.{RemoteExec}
+use std.notebook.types.{LaneStatus, session_opts_default}
+
+val RV32_SPEC = "interpreter(remote(baremetal(riscv32)))"
+
+fn command_available(cmd: text) -> bool:
+    val result = shell("command -v {cmd} >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn qemu_rv32_toolchain_present() -> bool:
+    """Same tool-presence gate the existing remote-baremetal specs use
+    (remote_baremetal_runtime_spec.spl's qemu_riscv32_remote_memory_status)."""
+    if not command_available("qemu-system-riscv32"):
+        return false
+    if command_available("gdb-multiarch"):
+        return true
+    if command_available("riscv32-unknown-elf-gdb"):
+        return true
+    command_available("riscv64-unknown-elf-gdb")
+
+fn lane_outcome_is_acceptable(status_text: text) -> bool:
+    """A live lane must self-report as one of these — anything else (a
+    panic, or a status string outside this convention) is the failure."""
+    status_text == "available" or status_text.starts_with("skip:") or status_text.starts_with("blocked:")
+
+describe "RemoteExec — QEMU RV32 lane (Stream K, K4)":
+
+    it "probe() reuses probe_qemu_rv32 verbatim and never panics":
+        val ex = RemoteExec.make(RV32_SPEC)
+        expect(ex.mode_spec()).to_equal(RV32_SPEC)
+        val status = ex.probe()
+        assert_true(lane_outcome_is_acceptable(status.to_text()))
+        if not qemu_rv32_toolchain_present():
+            # Tooling genuinely absent in this sandbox — probe() must say so,
+            # not silently claim availability.
+            expect_not(status.is_available())
+
+    it "session lifecycle: connect once, 3 cells, %reset, shutdown — SKIP-clean without a live QEMU+GDB session":
+        val ex = RemoteExec.make(RV32_SPEC)
+        val status = ex.probe()
+
+        if not status.is_available():
+            # Documented, non-failing outcome (design §3 skip:/blocked:
+            # wording): missing tooling. SKIP-clean.
+            assert_true(lane_outcome_is_acceptable(status.to_text()))
+        else:
+            ex.start(session_opts_default("remote-exec-spec", RV32_SPEC))
+
+            val r1 = ex.execute_cell("val x = 1", "cell-1")
+            val r2 = ex.execute_cell("fn f(): 2", "cell-2")
+            val r3 = ex.execute_cell("f()", "cell-3")
+
+            # Every cell result must be well-formed (design §4.1 CellResult
+            # contract: "error?" is populated whenever is_ok() is false —
+            # never a silent blank) — either a genuine execution, a session
+            # fault (§4.3 "a target fault reports the fault record and
+            # leaves the session usable"), or a documented blocked:
+            # diagnostic (e.g. this sandbox's live GDB-MI connect failure,
+            # tracked in
+            # doc/08_tracking/bug/gdb_mi_client_connect_times_out_despite_live_qemu_rv32_2026-08-07.md).
+            # Never a panic, never an untagged empty-string error.
+            assert_true(r1.is_ok() or r1.error != "")
+            assert_true(r2.is_ok() or r2.error != "")
+            assert_true(r3.is_ok() or r3.error != "")
+
+            ex.reset()
+
+            # After reset, a session that was live before must either still
+            # be usable (fresh reconnect succeeded) or cleanly report why not
+            # — the prior session's state is gone either way (fresh target
+            # process).
+            val r4 = ex.execute_cell("val y = 2", "cell-4")
+            assert_true(r4.is_ok() or r4.error != "")
+
+            ex.shutdown()

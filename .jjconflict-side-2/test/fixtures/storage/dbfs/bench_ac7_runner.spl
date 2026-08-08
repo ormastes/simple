@@ -1,0 +1,247 @@
+use std.io_runtime.{time_now_unix_micros, getpid, file_write, file_read, file_delete, file_exists, dir_create}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions, FileHandle}
+use std.fs_driver.error.{FsError}
+
+struct BenchEntry:
+    workload: text
+    driver: text
+    p50_us: i64
+    p99_us: i64
+
+fn now_us() -> i64:
+    time_now_unix_micros()
+
+fn elapsed(start: i64) -> i64:
+    time_now_unix_micros() - start
+
+fn sort_asc(arr: [i64]) -> [i64]:
+    var out: [i64] = arr
+    var i: i64 = 1
+    while i < out.len():
+        val key = out[i]
+        var j: i64 = i - 1
+        while j >= 0 and out[j] > key:
+            var jn: i64 = j + 1
+            out[jn] = out[j]
+            j = j - 1
+        var jn2: i64 = j + 1
+        out[jn2] = key
+        i = i + 1
+    out
+
+fn percentile(lats: [i64], pct: i64) -> i64:
+    if lats.len() == 0:
+        return 0
+    val sorted = sort_asc(lats)
+    val idx = (sorted.len() * pct) / 100
+    sorted[idx]
+
+fn make_buf(size: i64) -> [u8]:
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        buf.push(65)
+        i = i + 1
+    buf
+
+fn posix_tmp() -> text:
+    val pid = getpid()
+    val dir = "/tmp/simple_bench_ac7_" + pid.to_text()
+    dir_create(dir, true)
+    dir
+
+fn run_ramfs_metadata_storm() -> BenchEntry:
+    var d = RamFsDriver.new()
+    d.mount(MountOptions.default()).unwrap()
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val path = "/storm_" + i.to_text()
+        val path_r = path + "_r"
+        val t0 = now_us()
+        d.open(Path(raw: path), OpenFlags.create_write()).unwrap()
+        d.stat(Path(raw: path)).unwrap()
+        d.rename(Path(raw: path), Path(raw: path_r)).unwrap()
+        d.unlink(Path(raw: path_r)).unwrap()
+        lats.push(elapsed(t0))
+        i = i + 1
+    BenchEntry(workload: "metadata_storm", driver: "ramfs", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_posix_metadata_storm() -> BenchEntry:
+    val tmp = posix_tmp()
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val path = tmp + "/storm_" + i.to_text() + ".txt"
+        val path_r = path + "_r"
+        val t0 = now_us()
+        file_write(path, "x")
+        file_exists(path)
+        file_write(path_r, "x")
+        file_delete(path)
+        file_delete(path_r)
+        lats.push(elapsed(t0))
+        i = i + 1
+    BenchEntry(workload: "metadata_storm", driver: "posix", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_ramfs_append_log() -> BenchEntry:
+    var d = RamFsDriver.new()
+    d.mount(MountOptions.default()).unwrap()
+    val fh = d.open(Path(raw: "/append.bin"), OpenFlags.create_write()).unwrap()
+    val chunk = make_buf(64)
+    var lats: [i64] = []
+    var off: i64 = 0
+    var i: i64 = 0
+    while i < 20:
+        val t0 = now_us()
+        d.write(fh, off, chunk).unwrap()
+        lats.push(elapsed(t0))
+        off = off + 64
+        i = i + 1
+    d.close(fh).unwrap()
+    BenchEntry(workload: "append_log", driver: "ramfs", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_posix_append_log() -> BenchEntry:
+    val tmp = posix_tmp()
+    val path = tmp + "/append.bin"
+    val data = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val t0 = now_us()
+        file_write(path, data)
+        lats.push(elapsed(t0))
+        i = i + 1
+    file_delete(path)
+    BenchEntry(workload: "append_log", driver: "posix", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_ramfs_random_overwrite() -> BenchEntry:
+    var d = RamFsDriver.new()
+    d.mount(MountOptions.default()).unwrap()
+    val fh = d.open(Path(raw: "/random.bin"), OpenFlags.create_write()).unwrap()
+    val chunk = make_buf(64)
+    var fill: i64 = 0
+    while fill < 10:
+        d.write(fh, fill * 64, chunk).unwrap()
+        fill = fill + 1
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val off = (i * 64) % 640
+        val t0 = now_us()
+        d.write(fh, off, chunk).unwrap()
+        lats.push(elapsed(t0))
+        i = i + 1
+    d.close(fh).unwrap()
+    BenchEntry(workload: "random_overwrite", driver: "ramfs", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_posix_random_overwrite() -> BenchEntry:
+    val tmp = posix_tmp()
+    val path = tmp + "/random.bin"
+    val data = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    file_write(path, data)
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val t0 = now_us()
+        file_write(path, data)
+        lats.push(elapsed(t0))
+        i = i + 1
+    file_delete(path)
+    BenchEntry(workload: "random_overwrite", driver: "posix", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_ramfs_mmap_read() -> BenchEntry:
+    var d = RamFsDriver.new()
+    d.mount(MountOptions.default()).unwrap()
+    val fh_w = d.open(Path(raw: "/mmap.bin"), OpenFlags.create_write()).unwrap()
+    val chunk = make_buf(64)
+    var fill: i64 = 0
+    while fill < 4:
+        d.write(fh_w, fill * 64, chunk).unwrap()
+        fill = fill + 1
+    d.close(fh_w).unwrap()
+    val fh_r = d.open(Path(raw: "/mmap.bin"), OpenFlags.read_only()).unwrap()
+    val buf = make_buf(64)
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val off = (i * 64) % 256
+        val t0 = now_us()
+        d.read(fh_r, off, buf).unwrap()
+        lats.push(elapsed(t0))
+        i = i + 1
+    d.close(fh_r).unwrap()
+    BenchEntry(workload: "mmap_read", driver: "ramfs", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_posix_mmap_read() -> BenchEntry:
+    val tmp = posix_tmp()
+    val path = tmp + "/mmap.bin"
+    file_write(path, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    var lats: [i64] = []
+    var i: i64 = 0
+    while i < 20:
+        val t0 = now_us()
+        file_read(path)
+        lats.push(elapsed(t0))
+        i = i + 1
+    file_delete(path)
+    BenchEntry(workload: "mmap_read", driver: "posix", p50_us: percentile(lats, 50), p99_us: percentile(lats, 99))
+
+fn run_all_benchmarks() -> [BenchEntry]:
+    var results: [BenchEntry] = []
+    results.push(run_ramfs_metadata_storm())
+    results.push(run_posix_metadata_storm())
+    results.push(run_ramfs_append_log())
+    results.push(run_posix_append_log())
+    results.push(run_ramfs_random_overwrite())
+    results.push(run_posix_random_overwrite())
+    results.push(run_ramfs_mmap_read())
+    results.push(run_posix_mmap_read())
+    results
+
+fn print_report(results: [BenchEntry]):
+    print("=== AC-7 Benchmark: Simple RamFS vs POSIX ===")
+    print("")
+    print("workload          | driver | p50_us | p99_us")
+    print("------------------|--------|--------|-------")
+    var i: i64 = 0
+    while i < results.len():
+        val r = results[i]
+        val line = r.workload + " | " + r.driver + " | " + r.p50_us.to_text() + " | " + r.p99_us.to_text()
+        print(line)
+        i = i + 1
+    print("")
+    var wins: i64 = 0
+    var wi: i64 = 0
+    while wi < results.len():
+        if wi + 1 < results.len():
+            val ramfs_r = results[wi]
+            val posix_r = results[wi + 1]
+            if ramfs_r.driver == "ramfs" and posix_r.driver == "posix":
+                if ramfs_r.p50_us <= posix_r.p50_us:
+                    print(ramfs_r.workload + ": RamFS WINS (p50 " + ramfs_r.p50_us.to_text() + " vs " + posix_r.p50_us.to_text() + " us)")
+                    wins = wins + 1
+                else:
+                    val ratio = ramfs_r.p50_us * 100 / posix_r.p50_us
+                    print(ramfs_r.workload + ": POSIX wins (ratio " + ratio.to_text() + "%)")
+        wi = wi + 2
+    print("")
+    print("RamFS wins: " + wins.to_text() + " / 4 workloads")
+    if wins >= 2:
+        print("AC-7 PASSED: >= 2 workloads where Simple matches or beats C")
+    else:
+        print("AC-7: " + wins.to_text() + " wins — see AC-B5 analysis for interpreter overhead explanation")
+
+fn count_wins(results: [BenchEntry]) -> i64:
+    var wins: i64 = 0
+    var wi: i64 = 0
+    while wi < results.len():
+        if wi + 1 < results.len():
+            val ramfs_r = results[wi]
+            val posix_r = results[wi + 1]
+            if ramfs_r.driver == "ramfs" and posix_r.driver == "posix":
+                if ramfs_r.p50_us <= posix_r.p50_us:
+                    wins = wins + 1
+        wi = wi + 2
+    wins

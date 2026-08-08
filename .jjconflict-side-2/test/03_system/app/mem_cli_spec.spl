@@ -1,0 +1,292 @@
+# M8 CLI skeleton for `simple mem`: post-mortem TSV snapshot inspection
+# (top/diff/help). Exercises src/app/mem/main.spl directly via
+# `simple run <file> <args...>` (no `--` separator: `simple run` forwards a
+# literal "--" token as the first post-separator arg, per
+# app/io/_CliCommands/handler_commands.spl::cli_handle_run, which would land
+# as our verb) — the "simple mem <verb>" dispatch arm in
+# app/cli/_CliMain/main_and_help.spl is source-only until the next binary
+# deploy (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md).
+#
+# That arm is NO LONGER unexercised: the second describe block below runs the
+# pure-Simple CLI's own entry module as a source program and asserts the
+# routing decision, so a broken `mem` arm now turns this suite red. Renaming
+# the arm's tag was verified to do exactly that. What is still NOT covered
+# here is delivery through the deployed `bin/simple` — that binary is the Rust
+# seed and answers `bin/simple mem help` with "error: file not found: mem".
+# Implementation and routing are proven; end-to-end reachability needs a
+# self-hosted redeploy.
+
+use std.spec.*
+use std.io_runtime.{env_get, process_spawn_async, process_kill, remove_file_if_exists}
+# thread_sleep does not resolve through the std.io_runtime shim under
+# interpreter execution (see src/app/mem/live_poll.spl for the full note) --
+# import it directly so this spec's own waits are real, not silent no-ops.
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val SNAP_A = "test/fixture/memstat/snap_a.tsv"
+val SNAP_B = "test/fixture/memstat/snap_b.tsv"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    "/proc/self/exe"
+
+fn run_mem(mem_args: [text]) -> (text, text, i32):
+    run_mem_timeout(mem_args, 30000)
+
+fn run_mem_timeout(mem_args: [text], timeout_ms: i64) -> (text, text, i32):
+    var args = ["run", "src/app/mem/main.spl"]
+    for a in mem_args:
+        args.push(a)
+    rt_process_run_timeout(simple_binary(), args, timeout_ms)
+
+# The six verbs plan §M8 requires: `simple mem top|snapshot|diff|trace|gpu|gate`.
+# HARDCODED HERE ON PURPOSE. The lane's previous claim — "all help-listed verbs
+# dispatch" — could not fail, because print_help() lists exactly the verbs that
+# were implemented. Anchoring on the plan's list instead makes a missing verb a
+# RED spec rather than a shorter help screen.
+val PLAN_REQUIRED_VERBS = ["top", "snapshot", "diff", "trace", "gpu", "gate"]
+
+# Drives the REAL `simple mem` dispatch arm in
+# src/app/cli/_CliMain/main_and_help.spl, not src/app/mem/main.spl directly.
+#
+# The deployed bin/simple is the Rust seed and carries no `mem` subcommand
+# (`bin/simple mem help` -> "error: file not found: mem"), so end-to-end
+# delivery still needs a self-hosted redeploy. What IS reachable today is the
+# pure-Simple CLI's own entry module run as a source program. Two things are
+# needed for that:
+#   * SIMPLE_MODULE_LIMIT=0 — the CLI's transitive import graph exceeds the
+#     default 800-module cap, which otherwise aborts before dispatch.
+#   * env(1) rather than the parent environment — a persistent test daemon
+#     freezes its env at daemon start, so an inherited assignment would be
+#     stale; `env` sets it live for this invocation.
+# The routing decision is observable because cli_run_file names the file it
+# resolved to before failing on seed SFFI support.
+#
+# NOTE: this cannot use `simple_binary()`'s "/proc/self/exe" fallback. That
+# path is per-process: once `env` is the exec'd program, `/proc/self/exe`
+# resolves to env(1) itself, and the run dies with 127 before reaching any
+# dispatch. A real filesystem path is required, so resolve one explicitly.
+fn dispatch_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    "src/compiler_rust/target/debug/simple"
+
+fn run_cli_dispatch(cli_args: [text], timeout_ms: i64) -> (text, text, i32):
+    var args = ["SIMPLE_MODULE_LIMIT=0", dispatch_binary(), "run", "src/app/cli/_CliMain/main_and_help.spl"]
+    for a in cli_args:
+        args.push(a)
+    rt_process_run_timeout("env", args, timeout_ms)
+
+describe "simple mem CLI":
+    it "top --profile prints an owner from the fixture snapshot":
+        val (out, _err, code) = run_mem(["top", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("app.mem.top")
+
+    it "top --once --profile produces one table without entering TUI loop":
+        val (out, _err, code) = run_mem(["top", "--once", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("Snapshot:")
+        expect(out).to_contain("app.mem.top")
+
+    it "top --pid triggers a live SIGUSR2 poll and reports the live process's own snapshot":
+        # This exercises the M8 live-process channel that was previously an
+        # orphan: src/app/mem/live_poll.spl existed but no verb ever called
+        # it, and this spec is the fix for that gap.
+        #
+        # The fixture (test/fixture/mem_infra/live_poll_target.spl) ONLY
+        # installs the SIGUSR2 dump handler and pumps signal_dispatch_pending()
+        # -- it never writes a snapshot on its own. So the snapshot file at
+        # dump_path can only appear if `simple mem top --pid` genuinely sends
+        # SIGUSR2 (via src/app/mem/live_poll.spl's send_sigusr2) and the
+        # fixture's handler actually fires. A dropped --pid arm, a broken
+        # send_sigusr2, or a live_poll.spl that stops being invoked all leave
+        # no file behind and this test goes RED rather than passing on a
+        # stale leftover file.
+        # The target's own SIGUSR2 handler (on_mem_dump_usr2 in
+        # src/lib/nogc_sync_mut/mem/dump.spl) always writes to
+        # mem_dump_target_path(), which reads $SIMPLE_MEM_DUMP_PATH -- it has
+        # no way to learn `top --pid`'s --path after the fact. So the two
+        # sides are wired together the same way `simple mem trace` already
+        # does it (main.spl::cmd_trace): export SIMPLE_MEM_DUMP_PATH into the
+        # target's own environment at spawn time via `env`.
+        # dispatch_binary(), NOT simple_binary(): simple_binary() can return
+        # the "/proc/self/exe" fallback, and once `env` is the exec'd program
+        # that path resolves to env(1) itself (see dispatch_binary()'s own
+        # comment above) -- a real filesystem path is required here.
+        #
+        # `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE`: `bin/simple
+        # test` sets both to force the tree-walk interpreter for the spec
+        # process tree, and Command::spawn() inherits the full parent
+        # environment, so without this the fixture inherits interpreter mode
+        # too. rt_signal_install/rt_signal_check (src/lib/nogc_sync_mut/io/
+        # signal_stubs.spl -- the SIGUSR2 registration this whole channel is
+        # built on) are registered as real runtime symbols for JIT/native
+        # codegen but are NOT in interpreter_extern's dispatch table, so under
+        # an inherited interpreter mode the fixture dies immediately with
+        # "unknown extern function: rt_signal_install" before it can even
+        # install the handler -- confirmed by watching it go zombie within 1s
+        # and by dumping its inherited environment. A real target process
+        # launched normally (`bin/simple run prog.spl`, no override) already
+        # defaults to JIT, so this override just restores that default for a
+        # fixture spawned from inside an interpreter-forced test process.
+        val dump_path = "build/mem_cli_spec_live_snapshot.tsv"
+        remove_file_if_exists(dump_path)
+        val pid = process_spawn_async("env", [
+            "-u", "SIMPLE_EXECUTION_MODE", "-u", "SIMPLE_RUNTIME_MODE",
+            "SIMPLE_MEM_DUMP_PATH={dump_path}",
+            dispatch_binary(), "run", "test/fixture/mem_infra/live_poll_target.spl"
+        ])
+        expect(pid > 0).to_equal(true)
+        thread_sleep(1000)
+        val (out, _err, code) = run_mem_timeout(["top", "--pid", "{pid}", "--path", dump_path, "--wait-ms", "1500"], 30000)
+        process_kill(pid)
+        expect(code).to_equal(0)
+        assert_true(file_exists(dump_path))
+        val content = file_read_text(dump_path)
+        assert_true(content.starts_with("simple-mem-snapshot\tv1"))
+        expect(out).to_contain("Snapshot: {dump_path}")
+        expect(out).to_contain("Kinds by live bytes:")
+
+    it "top --pid fails loudly against a pid that never dumps (no dead-file false positive)":
+        # Negative control for the test above: a bare `sleep` child has no
+        # SIGUSR2 handler installed at all. If this went green too, the
+        # positive test above would be proving nothing (e.g. a stale file,
+        # or a --pid arm that always reports success). SIGUSR2's default
+        # disposition is "ignore", so the process survives and simply times
+        # out with no snapshot -- proving --pid depends on the target
+        # actually cooperating, not merely existing.
+        val dump_path = "build/mem_cli_spec_live_snapshot_negative.tsv"
+        remove_file_if_exists(dump_path)
+        val pid = process_spawn_async("sleep", ["5"])
+        expect(pid > 0).to_equal(true)
+        thread_sleep(300)
+        val (out, _err, code) = run_mem_timeout(["top", "--pid", "{pid}", "--path", dump_path, "--wait-ms", "500"], 30000)
+        process_kill(pid)
+        expect(code).to_equal(1)
+        expect(file_exists(dump_path)).to_equal(false)
+        expect(out).to_contain("no live snapshot from pid")
+
+    it "diff prints the biggest-delta owner before the others":
+        val (out, _err, code) = run_mem(["diff", SNAP_A, SNAP_B])
+        expect(code).to_equal(0)
+        val idx_diff_cmd = out.index_of("app.mem.diff_cmd")
+        val idx_top = out.index_of("app.mem.top")
+        val idx_json = out.index_of("lib.json.parser")
+        expect(idx_diff_cmd >= 0).to_equal(true)
+        expect(idx_top >= 0).to_equal(true)
+        expect(idx_json >= 0).to_equal(true)
+        expect(idx_diff_cmd < idx_top).to_equal(true)
+        expect(idx_diff_cmd < idx_json).to_equal(true)
+
+    it "help exits 0 and prints usage":
+        val (out, _err, code) = run_mem(["help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("simple mem")
+        expect(out).to_contain("Usage:")
+
+    it "unknown verb exits 1 with help":
+        val (out, _err, code) = run_mem(["bogus-verb"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("Usage:")
+
+    it "snapshot -o writes a v1 snapshot that top --profile can then read":
+        val snap_path = "build/mem_cli_spec_snapshot.tsv"
+        val (_snap_out, _snap_err, snap_code) = run_mem(["snapshot", "-o", snap_path])
+        expect(snap_code).to_equal(0)
+        expect(file_exists(snap_path)).to_equal(true)
+        val content = file_read_text(snap_path)
+        val first_line = content.split("\n")[0]
+        expect(first_line.starts_with("simple-mem-snapshot\tv1")).to_equal(true)
+        val (_top_out, _top_err, top_code) = run_mem(["top", "--profile", snap_path])
+        expect(top_code).to_equal(0)
+
+    it "gate exits 0 and prints the stage4-memory-gate verdict":
+        val (out, _err, code) = run_mem_timeout(["gate"], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("stage4-memory-gate")
+
+    it "offers every verb the M8 plan requires, not just the ones implemented":
+        # Non-circular by construction: PLAN_REQUIRED_VERBS is the plan's list,
+        # not print_help()'s. Deleting cmd_trace/cmd_gpu makes this RED.
+        val (out, _err, code) = run_mem(["help"])
+        expect(code).to_equal(0)
+        for verb in PLAN_REQUIRED_VERBS:
+            assert_true(out.index_of("simple mem " + verb) >= 0)
+
+    it "trace records an attributed profile that top can then query":
+        # This is plan §M8's own end-to-end exit criterion, finally executable:
+        # `simple mem trace prog.spl` then `simple mem top --profile <file>`
+        # shows the traced program's owners.
+        val trace_path = "build/mem_cli_spec_trace.tsv"
+        val (t_out, _t_err, t_code) = run_mem_timeout(
+            ["trace", "test/fixture/mem_infra/trace_workload.spl", "-o", trace_path], 180000)
+        expect(t_code).to_equal(0)
+        expect(t_out).to_contain("Trace written")
+        assert_true(file_exists(trace_path))
+        val content = file_read_text(trace_path)
+        assert_true(content.starts_with("simple-mem-snapshot\tv1"))
+        # Attribution was ON in the traced child, so the profile carries an
+        # OWNER row. Without SIMPLE_MEM_ATTR=1 there would be none.
+        assert_true(content.index_of("\nOWNER\t") >= 0)
+        val (top_out, _top_err, top_code) = run_mem_timeout(["top", "--profile", trace_path], 120000)
+        expect(top_code).to_equal(0)
+        expect(top_out).to_contain("Top owners by live bytes:")
+        # KIND rows from a live dump carry 4 fields, not 5. The parser used to
+        # require 5 and silently dropped every one of them.
+        expect(top_out).to_contain("Kinds by live bytes:")
+
+    it "trace fails loudly when the traced program emits no snapshot":
+        # A trace that records nothing must not exit 0 and look successful.
+        val (out, _err, code) = run_mem_timeout(
+            ["trace", "test/fixture/mem_infra/attr_enabled_probe.spl",
+             "-o", "build/mem_cli_spec_empty_trace.tsv"], 180000)
+        expect(code).to_equal(1)
+        expect(out).to_contain("no snapshot at")
+        expect(out).to_contain("mem_dump_to")
+
+    it "gpu reports device counters honestly on a host with no tracked device alloc":
+        val (out, _err, code) = run_mem_timeout(["gpu"], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("LIVE_BYTES")
+        expect(out).to_contain("PEAK_BYTES")
+
+    it "gpu --sanitize refuses an unverified backend deterministically":
+        # HIP has no verified sanitizer wrapper; the lane must say so rather
+        # than silently no-op. 127 is the wrapper's documented not-available code.
+        val (out, _err, code) = run_mem_timeout(
+            ["gpu", "--sanitize", "memcheck", "--backend", "hip", "--", "/bin/true"], 120000)
+        expect(code).to_equal(127)
+        expect(out).to_contain("no sanitizer wrapper for backend 'hip'")
+
+    it "gpu --profile reports no DEVICE rows for a host-only snapshot":
+        val (out, _err, code) = run_mem_timeout(["gpu", "--profile", SNAP_A], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("No DEVICE rows in this snapshot")
+
+describe "simple mem dispatch arm (real CLI routing)":
+
+    it "routes `mem` through the CLI dispatch arm to src/app/mem/main.spl":
+        # Drives src/app/cli/_CliMain/main_and_help.spl, the file that owns the
+        # `elif str_eq(first, "mem")` arm — NOT src/app/mem/main.spl directly.
+        # The previous 7/7 suite never touched this file, so it stayed green
+        # while the subcommand was unreachable. Renaming the arm's tag or its
+        # target file turns this RED.
+        val (out, err, _code) = run_cli_dispatch(["mem", "help"], 300000)
+        val combined = out + "\n" + err
+        assert_true(combined.index_of("src/app/mem/main.spl") >= 0)
+
+    it "does not route an unrelated subcommand to the mem entry":
+        # Negative control: proves the assertion above is about the `mem` arm
+        # specifically and not about some path echoed for every invocation.
+        val (out, err, _code) = run_cli_dispatch(["log", "help"], 300000)
+        val combined = out + "\n" + err
+        assert_true(combined.index_of("src/app/mem/main.spl") < 0)

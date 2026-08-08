@@ -1,0 +1,330 @@
+# Symbol Root Registry
+#
+# Runtime symbol root registry, root validation, and ABI surface definition.
+# Implements AC-1 (symbol root registry), AC-2 (root validation),
+# and AC-5 (ABI surface definition).
+#
+# A "symbol root" is a symbol that must be retained in the final binary
+# (entry points, exported externs, runtime hooks, etc.).
+
+# ============================================================================
+# SymbolRoot — a single retained symbol
+# ============================================================================
+
+struct SymbolRoot:
+    """A symbol that must be retained in the final binary."""
+    name: text
+    source: text
+    is_extern: bool
+    size_bytes: i64
+
+impl SymbolRoot:
+    static fn create(name: text, source: text, is_extern: bool, size_bytes: i64) -> SymbolRoot:
+        SymbolRoot(name: name, source: source, is_extern: is_extern, size_bytes: size_bytes)
+
+    static fn rt(name: text, size_bytes: i64) -> SymbolRoot:
+        SymbolRoot(name: name, source: "runtime", is_extern: true, size_bytes: size_bytes)
+
+    fn is_runtime() -> bool:
+        self.source == "runtime"
+
+    fn summary() -> text:
+        var ext = ""
+        if self.is_extern:
+            ext = " [extern]"
+        self.name + " (" + self.source + ext + ", " + self.size_bytes.to_text() + "B)"
+
+# ============================================================================
+# SymbolRootRegistry — flat 32-slot registry
+# ============================================================================
+
+struct SymbolRootRegistry:
+    """Flat 32-slot registry of retained symbols. Slots r0..r31."""
+    r0: text   r1: text   r2: text   r3: text
+    r4: text   r5: text   r6: text   r7: text
+    r8: text   r9: text   r10: text  r11: text
+    r12: text  r13: text  r14: text  r15: text
+    r16: text  r17: text  r18: text  r19: text
+    r20: text  r21: text  r22: text  r23: text
+    r24: text  r25: text  r26: text  r27: text
+    r28: text  r29: text  r30: text  r31: text
+
+    s0: text   s1: text   s2: text   s3: text
+    s4: text   s5: text   s6: text   s7: text
+    s8: text   s9: text   s10: text  s11: text
+    s12: text  s13: text  s14: text  s15: text
+    s16: text  s17: text  s18: text  s19: text
+    s20: text  s21: text  s22: text  s23: text
+    s24: text  s25: text  s26: text  s27: text
+    s28: text  s29: text  s30: text  s31: text
+
+    e0: bool   e1: bool   e2: bool   e3: bool
+    e4: bool   e5: bool   e6: bool   e7: bool
+    e8: bool   e9: bool   e10: bool  e11: bool
+    e12: bool  e13: bool  e14: bool  e15: bool
+    e16: bool  e17: bool  e18: bool  e19: bool
+    e20: bool  e21: bool  e22: bool  e23: bool
+    e24: bool  e25: bool  e26: bool  e27: bool
+    e28: bool  e29: bool  e30: bool  e31: bool
+
+    z0: i64    z1: i64    z2: i64    z3: i64
+    z4: i64    z5: i64    z6: i64    z7: i64
+    z8: i64    z9: i64    z10: i64   z11: i64
+    z12: i64   z13: i64   z14: i64   z15: i64
+    z16: i64   z17: i64   z18: i64   z19: i64
+    z20: i64   z21: i64   z22: i64   z23: i64
+    z24: i64   z25: i64   z26: i64   z27: i64
+    z28: i64   z29: i64   z30: i64   z31: i64
+
+    count: i32
+
+impl SymbolRootRegistry:
+    static fn create() -> SymbolRootRegistry:
+        SymbolRootRegistry(
+            r0: "", r1: "", r2: "", r3: "",
+            r4: "", r5: "", r6: "", r7: "",
+            r8: "", r9: "", r10: "", r11: "",
+            r12: "", r13: "", r14: "", r15: "",
+            r16: "", r17: "", r18: "", r19: "",
+            r20: "", r21: "", r22: "", r23: "",
+            r24: "", r25: "", r26: "", r27: "",
+            r28: "", r29: "", r30: "", r31: "",
+            s0: "", s1: "", s2: "", s3: "",
+            s4: "", s5: "", s6: "", s7: "",
+            s8: "", s9: "", s10: "", s11: "",
+            s12: "", s13: "", s14: "", s15: "",
+            s16: "", s17: "", s18: "", s19: "",
+            s20: "", s21: "", s22: "", s23: "",
+            s24: "", s25: "", s26: "", s27: "",
+            s28: "", s29: "", s30: "", s31: "",
+            e0: false, e1: false, e2: false, e3: false,
+            e4: false, e5: false, e6: false, e7: false,
+            e8: false, e9: false, e10: false, e11: false,
+            e12: false, e13: false, e14: false, e15: false,
+            e16: false, e17: false, e18: false, e19: false,
+            e20: false, e21: false, e22: false, e23: false,
+            e24: false, e25: false, e26: false, e27: false,
+            e28: false, e29: false, e30: false, e31: false,
+            z0: 0, z1: 0, z2: 0, z3: 0,
+            z4: 0, z5: 0, z6: 0, z7: 0,
+            z8: 0, z9: 0, z10: 0, z11: 0,
+            z12: 0, z13: 0, z14: 0, z15: 0,
+            z16: 0, z17: 0, z18: 0, z19: 0,
+            z20: 0, z21: 0, z22: 0, z23: 0,
+            z24: 0, z25: 0, z26: 0, z27: 0,
+            z28: 0, z29: 0, z30: 0, z31: 0,
+            count: 0)
+
+    fn name_at(idx: i32) -> text:
+        if idx == 0: self.r0
+        elif idx == 1: self.r1
+        elif idx == 2: self.r2
+        elif idx == 3: self.r3
+        elif idx == 4: self.r4
+        elif idx == 5: self.r5
+        elif idx == 6: self.r6
+        elif idx == 7: self.r7
+        elif idx == 8: self.r8
+        elif idx == 9: self.r9
+        elif idx == 10: self.r10
+        elif idx == 11: self.r11
+        elif idx == 12: self.r12
+        elif idx == 13: self.r13
+        elif idx == 14: self.r14
+        elif idx == 15: self.r15
+        elif idx == 16: self.r16
+        elif idx == 17: self.r17
+        elif idx == 18: self.r18
+        elif idx == 19: self.r19
+        elif idx == 20: self.r20
+        elif idx == 21: self.r21
+        elif idx == 22: self.r22
+        elif idx == 23: self.r23
+        elif idx == 24: self.r24
+        elif idx == 25: self.r25
+        elif idx == 26: self.r26
+        elif idx == 27: self.r27
+        elif idx == 28: self.r28
+        elif idx == 29: self.r29
+        elif idx == 30: self.r30
+        else: self.r31
+
+    fn source_at(idx: i32) -> text:
+        if idx == 0: self.s0
+        elif idx == 1: self.s1
+        elif idx == 2: self.s2
+        elif idx == 3: self.s3
+        elif idx == 4: self.s4
+        elif idx == 5: self.s5
+        elif idx == 6: self.s6
+        elif idx == 7: self.s7
+        elif idx == 8: self.s8
+        elif idx == 9: self.s9
+        elif idx == 10: self.s10
+        elif idx == 11: self.s11
+        elif idx == 12: self.s12
+        elif idx == 13: self.s13
+        elif idx == 14: self.s14
+        elif idx == 15: self.s15
+        elif idx == 16: self.s16
+        elif idx == 17: self.s17
+        elif idx == 18: self.s18
+        elif idx == 19: self.s19
+        elif idx == 20: self.s20
+        elif idx == 21: self.s21
+        elif idx == 22: self.s22
+        elif idx == 23: self.s23
+        elif idx == 24: self.s24
+        elif idx == 25: self.s25
+        elif idx == 26: self.s26
+        elif idx == 27: self.s27
+        elif idx == 28: self.s28
+        elif idx == 29: self.s29
+        elif idx == 30: self.s30
+        else: self.s31
+
+    fn size_at(idx: i32) -> i64:
+        if idx == 0: self.z0
+        elif idx == 1: self.z1
+        elif idx == 2: self.z2
+        elif idx == 3: self.z3
+        elif idx == 4: self.z4
+        elif idx == 5: self.z5
+        elif idx == 6: self.z6
+        elif idx == 7: self.z7
+        elif idx == 8: self.z8
+        elif idx == 9: self.z9
+        elif idx == 10: self.z10
+        elif idx == 11: self.z11
+        elif idx == 12: self.z12
+        elif idx == 13: self.z13
+        elif idx == 14: self.z14
+        elif idx == 15: self.z15
+        elif idx == 16: self.z16
+        elif idx == 17: self.z17
+        elif idx == 18: self.z18
+        elif idx == 19: self.z19
+        elif idx == 20: self.z20
+        elif idx == 21: self.z21
+        elif idx == 22: self.z22
+        elif idx == 23: self.z23
+        elif idx == 24: self.z24
+        elif idx == 25: self.z25
+        elif idx == 26: self.z26
+        elif idx == 27: self.z27
+        elif idx == 28: self.z28
+        elif idx == 29: self.z29
+        elif idx == 30: self.z30
+        else: self.z31
+
+    fn has(name: text) -> bool:
+        var found = false
+        var i = 0
+        while i < self.count:
+            if self.name_at(i) == name:
+                found = true
+            i = i + 1
+        found
+
+    fn detect_conflict(name: text) -> text:
+        if self.has(name):
+            "duplicate symbol root: " + name
+        else:
+            ""
+
+    fn add(root: SymbolRoot) -> bool:
+        if self.count >= 32:
+            false
+        elif self.has(root.name):
+            false
+        else:
+            true
+
+    fn total_size() -> i64:
+        var total = 0i64
+        var i = 0
+        while i < self.count:
+            total = total + self.size_at(i)
+            i = i + 1
+        total
+
+    fn count_by_source(source: text) -> i32:
+        var found = 0
+        var i = 0
+        while i < self.count:
+            if self.source_at(i) == source:
+                found = found + 1
+            i = i + 1
+        found
+
+    fn summary() -> text:
+        "SymbolRootRegistry(count=" + self.count.to_text() + ", total_size=" + self.total_size().to_text() + "B)"
+
+# ============================================================================
+# AbiSurface — ABI boundary between runtime and loader
+# ============================================================================
+
+struct AbiSurface:
+    """Defines the ABI boundary between runtime and loader."""
+    boundary_name: text
+    symbol_count: i32
+    total_size: i64
+    is_stable: bool
+
+impl AbiSurface:
+    static fn create(boundary_name: text, symbol_count: i32, total_size: i64, is_stable: bool) -> AbiSurface:
+        AbiSurface(
+            boundary_name: boundary_name,
+            symbol_count: symbol_count,
+            total_size: total_size,
+            is_stable: is_stable)
+
+    fn is_runtime() -> bool:
+        self.boundary_name == "runtime-abi"
+
+    fn is_loader() -> bool:
+        self.boundary_name == "loader-abi"
+
+    fn summary() -> text:
+        var stability = "unstable"
+        if self.is_stable:
+            stability = "stable"
+        self.boundary_name + "(" + self.symbol_count.to_text() + " syms, " + self.total_size.to_text() + "B, " + stability + ")"
+
+# ============================================================================
+# AbiBoundaryCheck — validates ABI separation
+# ============================================================================
+
+struct AbiBoundaryCheck:
+    """Validates ABI separation between runtime and loader."""
+    runtime_symbols: i32
+    loader_symbols: i32
+    shared_symbols: i32
+
+impl AbiBoundaryCheck:
+    static fn create(runtime_symbols: i32, loader_symbols: i32, shared_symbols: i32) -> AbiBoundaryCheck:
+        AbiBoundaryCheck(
+            runtime_symbols: runtime_symbols,
+            loader_symbols: loader_symbols,
+            shared_symbols: shared_symbols)
+
+    fn is_clean() -> bool:
+        self.shared_symbols == 0
+
+    fn separation_score() -> i32:
+        if self.shared_symbols == 0:
+            100
+        else:
+            var total = self.runtime_symbols + self.loader_symbols
+            if total == 0:
+                100
+            else:
+                var penalty = (self.shared_symbols * 100) / total
+                if penalty > 100:
+                    0
+                else:
+                    100 - penalty
+
+    fn summary() -> text:
+        var score = self.separation_score()
+        "AbiBoundaryCheck(rt=" + self.runtime_symbols.to_text() + ", loader=" + self.loader_symbols.to_text() + ", shared=" + self.shared_symbols.to_text() + ", score=" + score.to_text() + ")"

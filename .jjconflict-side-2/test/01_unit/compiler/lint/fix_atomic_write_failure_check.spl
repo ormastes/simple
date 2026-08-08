@@ -1,0 +1,33 @@
+use compiler.tools.fix.main.{FixApplicator}
+use std.tooling.easy_fix.{EasyFix, Replacement, FixConfidence}
+use std.io_runtime.{dir_create, dir_exists, dir_remove_all, getpid}
+
+extern fn rt_exit(code: i32)
+
+# Direct oracle for the trust boundary: a failed disk write must not be
+# reported as an applied fix.
+val target = "/tmp/simple_fix_write_failure_{getpid()}"
+dir_remove_all(target)
+if not dir_create(target, false):
+    print "FAIL: could not create write-failure target"
+    rt_exit(1)
+
+var fix = EasyFix.create("TEST001", "exercise failed write", FixConfidence.Certain)
+fix.add_replacement(Replacement.create(target, 0, 1, 1, 1, "b"))
+var sources: Dict<text, text> = {}
+sources[target] = "a"
+
+val result = FixApplicator.apply_to_disk([fix], sources, false)
+match result:
+    case Ok(_report):
+        dir_remove_all(target)
+        print "FAIL: failed fix write was reported as applied"
+        rt_exit(1)
+    case Err(_error):
+        if not dir_exists(target):
+            print "FAIL: failed fix write removed the destination"
+            rt_exit(1)
+
+dir_remove_all(target)
+print "PASS: failed fix writes are rejected without removing the destination"
+rt_exit(0)

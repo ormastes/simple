@@ -1,0 +1,277 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Status registers (70h/F1h/7Bh) + EDC + factory bad-block spec
+# ============================================================================
+#
+# Exercises status.spl (70h/F1h/7Bh assembly), edc.spl (1 bit/528 B parity +
+# copy-back validity invalidation), and badblock.spl (deterministic factory
+# bad-block map). All oracles are absolute values traced to
+# doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+# §1.4 (status registers), §7.2 (EDC last rule), §8 (scenario 9/13) — never
+# self-comparison.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{NeStatus, NeProfile}
+use hardware.nand_emu.geometry.ne_profile_geometry
+use hardware.nand_emu.status.{ne_status_after_reset, ne_status_70, ne_status_f1, ne_status_7b}
+use hardware.nand_emu.edc.{ne_edc_parity, ne_edc_check, ne_edc_invalidate_on_subsector}
+use hardware.nand_emu.badblock.{
+    ne_good_block_marker, ne_bad_marker_column, ne_factory_bad_map, ne_is_factory_bad
+}
+
+# ----------------------------------------------------------------------------
+# Local helper: a 528-byte all-zero sector (one EDC unit, doc §7.2).
+# ----------------------------------------------------------------------------
+
+fn zero_sector() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 528:
+        out = out.push(0 as u8)
+        i = i + 1
+    out
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # ne_status_70 (doc §1.4)
+    # ------------------------------------------------------------------
+    describe("ne_status_70"):
+        it("reads C0h for a ready chip with WP high (reset default)"):
+            """doc §1.4: after reset with WP high the status register reads
+            C0h. A ready+pass+wp_enabled NeStatus must assemble to the exact
+            same C0h that ne_status_after_reset(true) already returns."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: false, edc_valid: true)
+            expect(ne_status_70(st)).to_equal(0xC0)
+            expect(ne_status_70(st)).to_equal(ne_status_after_reset(true))
+
+        it("reads 40h for a ready chip with WP low (protected)"):
+            """doc §1.4: reset with WP low reads 40h — ready bit set, WP bit
+            clear."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: false,
+                plane0_pass: true, plane1_pass: true, edc_error: false, edc_valid: true)
+            expect(ne_status_70(st)).to_equal(0x40)
+            expect(ne_status_70(st)).to_equal(ne_status_after_reset(false))
+
+        it("clears the ready bit while busy"):
+            """I/O6 = 0 while busy: a busy, WP-enabled, passing chip reads
+            80h (bit7 WP set, bit6 ready clear, bit0 pass clear)."""
+            val st = NeStatus(pass: true, ready: false, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: false, edc_valid: true)
+            expect(ne_status_70(st)).to_equal(0x80)
+
+        it("sets the fail bit on a failed operation"):
+            """I/O0 = 1 (fail) is the odd bit out among the reset-default
+            polarities: a ready, WP-enabled, FAILED chip reads C1h."""
+            val st = NeStatus(pass: false, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: false, edc_valid: true)
+            expect(ne_status_70(st)).to_equal(0xC1)
+
+    # ------------------------------------------------------------------
+    # ne_status_f1 (doc §1.4)
+    # ------------------------------------------------------------------
+    describe("ne_status_f1"):
+        it("adds the plane0 fail bit on I/O1"):
+            """doc §1.4: F1h I/O1 is plane0 P/F. A ready, WP-enabled chip
+            with only plane0 failing reads C2h (C0h base | 02h)."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: false, plane1_pass: true, edc_error: false, edc_valid: true)
+            expect(ne_status_f1(st)).to_equal(0xC2)
+
+        it("adds the plane1 fail bit on I/O2"):
+            """doc §1.4: F1h I/O2 is plane1 P/F. A ready, WP-enabled chip
+            with only plane1 failing reads C4h (C0h base | 04h)."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: false, edc_error: false, edc_valid: true)
+            expect(ne_status_f1(st)).to_equal(0xC4)
+
+        it("combines chip fail + both plane fails"):
+            """All three P/F bits (I/O0 chip, I/O1 plane0, I/O2 plane1) are
+            independent and additive: a ready, WP-enabled chip failing on
+            every axis reads C7h (C0h base | 01h | 02h | 04h)."""
+            val st = NeStatus(pass: false, ready: true, wp_enabled: true,
+                plane0_pass: false, plane1_pass: false, edc_error: false, edc_valid: true)
+            expect(ne_status_f1(st)).to_equal(0xC7)
+
+    # ------------------------------------------------------------------
+    # ne_status_7b (doc §1.4, §8 scenario 13)
+    # ------------------------------------------------------------------
+    describe("ne_status_7b"):
+        it("sets the EDC error bit on I/O1"):
+            """doc §1.4: 7Bh I/O1 is EDC error. A ready, WP-enabled, valid-EDC
+            chip with an EDC error reads C6h (C0h base | edc_valid 04h |
+            edc_error 02h)."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: true, edc_valid: true)
+            expect(ne_status_7b(st)).to_equal(0xC6)
+
+        it("clears the EDC validity bit when invalidated"):
+            """doc §8 scenario 13: sub-sector random data input before
+            copy-back drives 7Bh I/O2 = 0 (invalid). A ready, WP-enabled,
+            no-error chip with invalidated EDC reads C0h (I/O2 cleared, so
+            the edc_valid contribution drops out of the base C0h+04h)."""
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: false, edc_valid: false)
+            expect(ne_status_7b(st)).to_equal(0xC0)
+
+        it("combines an EDC error with an invalidated EDC"):
+            val st = NeStatus(pass: true, ready: true, wp_enabled: true,
+                plane0_pass: true, plane1_pass: true, edc_error: true, edc_valid: false)
+            expect(ne_status_7b(st)).to_equal(0xC2)
+
+    # ------------------------------------------------------------------
+    # ne_edc_parity (doc §7.2)
+    # ------------------------------------------------------------------
+    describe("ne_edc_parity"):
+        it("is 0 for an all-zero sector"):
+            """doc §7.2: the 1-bit EDC is a parity code — a sector with zero
+            set bits has even (0) parity."""
+            val sector = zero_sector()
+            expect(ne_edc_parity(sector)).to_equal(0)
+
+        it("flips when exactly one bit flips"):
+            """Flipping a single bit anywhere in the 528 B sector must flip
+            the parity from even (0) to odd (1) — the defining property of a
+            parity code."""
+            var sector = zero_sector()
+            sector[0] = 1 as u8
+            expect(ne_edc_parity(sector)).to_equal(1)
+
+        it("flips back to 0 when a second bit flips"):
+            """Two flipped bits restore even parity — parity detects odd bit
+            counts, not merely 'any change'."""
+            var sector = zero_sector()
+            sector[0] = 1 as u8
+            sector[300] = 4 as u8
+            expect(ne_edc_parity(sector)).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # ne_edc_check (doc §7.2)
+    # ------------------------------------------------------------------
+    describe("ne_edc_check"):
+        it("passes when the stored parity matches the recomputed parity"):
+            var sector = zero_sector()
+            sector[0] = 1 as u8
+            expect(ne_edc_check(sector, 1)).to_equal(true)
+
+        it("fails when the stored parity does not match"):
+            """7Bh I/O1 EDC error is the negation of this check — a stale
+            stored parity of 0 against a now-odd sector must fail."""
+            var sector = zero_sector()
+            sector[0] = 1 as u8
+            expect(ne_edc_check(sector, 0)).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # ne_edc_invalidate_on_subsector (doc §7.2 last rule, §8 scenario 13)
+    # ------------------------------------------------------------------
+    describe("ne_edc_invalidate_on_subsector"):
+        it("invalidates a fresh (valid) edc_state"):
+            """doc §7.2: sub-sector random data input before copy-back
+            invalidates the sector's EDC. A fresh ne_block_meta_new() state
+            (0) invalidates to exactly 1 (bit0 set)."""
+            expect(ne_edc_invalidate_on_subsector(0)).to_equal(1)
+
+        it("touches exactly that sector's bit and preserves other state"):
+            """Invalidation must not clobber unrelated accumulation bits
+            already present in edc_state — only bit0 (the validity flag)
+            changes."""
+            expect(ne_edc_invalidate_on_subsector(0x02)).to_equal(0x03)
+
+        it("is idempotent on an already-invalidated state"):
+            expect(ne_edc_invalidate_on_subsector(1)).to_equal(1)
+
+    # ------------------------------------------------------------------
+    # ne_bad_marker_column (doc §8 scenario 9)
+    # ------------------------------------------------------------------
+    describe("ne_bad_marker_column"):
+        it("places the marker at column 512 for a single-sector S1 page"):
+            """doc §8 scenario 9: the real chip's marker sits at the
+            main/spare boundary (column 4,096 = 8 sectors * 512 B main).
+            S1 has 1 sector/page, so its boundary shrinks to column 512."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            expect(ne_bad_marker_column(geo)).to_equal(512)
+
+        it("places the marker at the real chip's own column 4,096 for S3"):
+            """S3 is the full 8-sector page size, so its shrunk marker
+            column equals the real datasheet column exactly: 4,096."""
+            val geo = ne_profile_geometry(NeProfile.S3)
+            expect(ne_bad_marker_column(geo)).to_equal(4096)
+
+    # ------------------------------------------------------------------
+    # ne_factory_bad_map / ne_is_factory_bad (doc §8 scenario 9)
+    # ------------------------------------------------------------------
+    describe("ne_factory_bad_map"):
+        it("marks exactly the deterministic set of blocks for a fixed seed (S1)"):
+            """doc §8 scenario 9: bad blocks are chosen deterministically
+            from a seed. For (S1 geometry: 8 blocks, count=3, seed=1) the
+            algorithm's fixed LCG sequence lands on blocks {3, 5, 6} — an
+            exact, reproduced-by-hand oracle, not a self-comparison."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val bad = ne_factory_bad_map(geo, 3, 1)
+            expect(ne_is_factory_bad(bad, 0)).to_equal(false)
+            expect(ne_is_factory_bad(bad, 1)).to_equal(false)
+            expect(ne_is_factory_bad(bad, 2)).to_equal(false)
+            expect(ne_is_factory_bad(bad, 3)).to_equal(true)
+            expect(ne_is_factory_bad(bad, 4)).to_equal(false)
+            expect(ne_is_factory_bad(bad, 5)).to_equal(true)
+            expect(ne_is_factory_bad(bad, 6)).to_equal(true)
+            expect(ne_is_factory_bad(bad, 7)).to_equal(false)
+
+        it("marks exactly count blocks, never block 0, on a larger geometry (S2)"):
+            """Same seed on a different geometry (S2: 32 blocks) proves the
+            map scales with geo.blocks: the fixed LCG sequence lands on
+            {7, 11, 22} for count=3, seed=1 — block 0 stays good, matching
+            the datasheet guarantee that block 0 is always valid."""
+            val geo = ne_profile_geometry(NeProfile.S2)
+            val bad = ne_factory_bad_map(geo, 3, 1)
+            expect(ne_is_factory_bad(bad, 0)).to_equal(false)
+            expect(ne_is_factory_bad(bad, 7)).to_equal(true)
+            expect(ne_is_factory_bad(bad, 11)).to_equal(true)
+            expect(ne_is_factory_bad(bad, 22)).to_equal(true)
+            var count = 0
+            var i = 0
+            while i < geo.blocks:
+                if ne_is_factory_bad(bad, i):
+                    count = count + 1
+                i = i + 1
+            expect(count).to_equal(3)
+
+        it("is deterministic across repeated calls with the same seed"):
+            """Two independent calls with identical (geo, count, seed) must
+            agree bit-for-bit — the map is a pure function of its inputs, not
+            drawn from process-global state."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val bad_a = ne_factory_bad_map(geo, 3, 1)
+            val bad_b = ne_factory_bad_map(geo, 3, 1)
+            expect(ne_is_factory_bad(bad_a, 3)).to_equal(ne_is_factory_bad(bad_b, 3))
+            expect(ne_is_factory_bad(bad_a, 5)).to_equal(ne_is_factory_bad(bad_b, 5))
+            expect(ne_is_factory_bad(bad_a, 6)).to_equal(ne_is_factory_bad(bad_b, 6))
+            expect(ne_is_factory_bad(bad_a, 0)).to_equal(false)
+            expect(ne_is_factory_bad(bad_b, 0)).to_equal(false)
+
+        it("never marks block 0 bad even when count nearly covers the geometry"):
+            """doc §8: block 0 must always stay valid. Requesting bad blocks
+            covering nearly the whole S1 geometry (count=7 of 8 blocks)
+            still leaves block 0 untouched — the achievable ceiling is
+            geo.blocks - 1, and block 0 is excluded by construction, not by
+            luck of the draw."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val bad = ne_factory_bad_map(geo, 7, 9)
+            expect(ne_is_factory_bad(bad, 0)).to_equal(false)
+            var count = 0
+            var i = 0
+            while i < geo.blocks:
+                if ne_is_factory_bad(bad, i):
+                    count = count + 1
+                i = i + 1
+            expect(count).to_equal(7)
+
+    describe("ne_good_block_marker"):
+        it("is FFh, the value a good block reads at the marker column"):
+            """doc §8 scenario 9: good blocks read FFh at the bad-block
+            marker; this constant anchors what ne_factory_bad_map's flag
+            means for the block's on-disk marker byte."""
+            expect(ne_good_block_marker()).to_equal(255)

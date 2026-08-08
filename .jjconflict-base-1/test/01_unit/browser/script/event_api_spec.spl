@@ -1,0 +1,106 @@
+"""
+# Event API Spec
+
+Unit tests for the Simple browser engine Event API.
+"""
+
+use std.spec.{describe, it, expect, fail}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{
+    node_add_event_listener, node_remove_event_listener,
+    event_create, event_dispatch_route,
+    event_dispatch_target_author_id, event_dispatch_current_author_id,
+    event_dispatch_related_author_id,
+    event_prevent_default, event_stop_propagation
+}
+
+fn _event_api_index(root: BeDomNode) -> DomIdentityIndex:
+    val generation = match DomDocumentGeneration.create(1):
+        Ok(value): value
+        Err(reason): fail("Expected valid generation: {reason}")
+    match dom_identity_index_build(root, generation):
+        Ok(value): value
+        Err(reason): fail("Expected identity index: {reason}")
+
+fn _event_api_route(index: DomIdentityIndex, author_id: text) -> DomNodeRoute:
+    match index.route_for_author_id(author_id):
+        Some(route): route
+        nil: fail("Expected route for #{author_id}")
+
+describe "Event API - Listener Registration":
+    it "adds an event listener":
+        val el = BeDomNode.element("button")
+        node_add_event_listener(el, "click", "handle_click", false)
+        expect(el.event_listener_types.len()).to_equal(1)
+
+    it "removes an event listener":
+        val el = BeDomNode.element("button")
+        node_add_event_listener(el, "click", "handle_click", false)
+        node_remove_event_listener(el, "click", "handle_click")
+        expect(el.event_listener_types.len()).to_equal(0)
+
+    it "adds capture phase listener":
+        val el = BeDomNode.element("div")
+        node_add_event_listener(el, "click", "cap_handler", true)
+        expect(el.event_listener_capture[0]).to_equal(true)
+
+describe "Event API - Event Creation":
+    it "creates an event with type":
+        val ev = event_create("click")
+        expect(ev.event_type).to_equal("click")
+
+    it "creates an event without route state":
+        val ev = event_create("click")
+        expect(ev.namespace_uri).to_equal("")
+
+    it "created events bubble by default":
+        val ev = event_create("keydown")
+        expect(ev.bubbles).to_equal(true)
+
+describe "Event API - Event Control":
+    it "prevents default action":
+        val ev = event_create("submit")
+        event_prevent_default(ev)
+        expect(ev.default_prevented).to_equal(true)
+
+    it "stops propagation":
+        val ev = event_create("click")
+        event_stop_propagation(ev)
+        expect(ev.propagation_stopped).to_equal(true)
+
+describe "Event API - Dispatch":
+    it "dispatches typed routes and projects author ids on demand":
+        var root = BeDomNode.element_with_id(1, "document")
+        var el = BeDomNode.element_with_id(2, "button")
+        el.set_attr("id", "btn1")
+        node_add_event_listener(el, "click", "on_click", false)
+        var related = BeDomNode.element_with_id(3, "div")
+        related.set_attr("id", "other")
+        root.children.push(el)
+        root.children.push(related)
+        val index = _event_api_index(root)
+        val target_route = _event_api_route(index, "btn1")
+        val related_route = _event_api_route(index, "other")
+        var ev = event_create("click")
+        ev.namespace_uri = "urn:test-payload"
+        ev.client_x = 9
+        val dispatch = event_dispatch_route(
+            root, index, target_route, Some(related_route), ev
+        )
+
+        expect(dispatch.actions).to_equal(["on_click"])
+        expect(dispatch.event.namespace_uri).to_equal("urn:test-payload")
+        expect(dispatch.event.client_x).to_equal(9)
+        expect(event_dispatch_target_author_id(index, dispatch)).to_equal(
+            Some("btn1")
+        )
+        expect(event_dispatch_current_author_id(index, dispatch, 0)).to_equal(
+            Some("btn1")
+        )
+        expect(event_dispatch_related_author_id(index, dispatch)).to_equal(
+            Some("other")
+        )

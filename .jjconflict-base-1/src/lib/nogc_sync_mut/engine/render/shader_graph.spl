@@ -1,0 +1,208 @@
+# Shader Graph — Visual node-based shader editing data model
+#
+# Represents a directed acyclic graph of shader nodes connected
+# by typed ports. Supports graph construction, validation, and
+# connection management.
+#
+# Usage:
+#   var graph = ShaderGraph.new("PBR Material")
+#   val color_id = graph.add_node("color", "base_color")
+#   val out_id = graph.add_node("output", "surface_output")
+#   graph.connect(color_id, "color", out_id, "albedo")
+
+# ============================================================================
+# ShaderPort
+# ============================================================================
+
+struct ShaderPort:
+    name: text
+    port_type: text
+    direction: text
+
+# ============================================================================
+# ShaderNode
+# ============================================================================
+
+struct ShaderNode:
+    id: i32
+    node_type: text
+    name: text
+    inputs: [ShaderPort]
+    outputs: [ShaderPort]
+    parameters: [text]
+
+impl ShaderNode:
+    static fn new(id: i32, node_type: text, name: text) -> ShaderNode:
+        ShaderNode(
+            id: id,
+            node_type: node_type,
+            name: name,
+            inputs: [],
+            outputs: [],
+            parameters: []
+        )
+
+    me add_input(name: text, port_type: text):
+        self.inputs.push(ShaderPort(name: name, port_type: port_type, direction: "input"))
+
+    me add_output(name: text, port_type: text):
+        self.outputs.push(ShaderPort(name: name, port_type: port_type, direction: "output"))
+
+    me add_parameter(param: text):
+        self.parameters.push(param)
+
+    fn input_count() -> i32:
+        var count: i32 = self.inputs.len()
+        count
+
+    fn output_count() -> i32:
+        var count: i32 = self.outputs.len()
+        count
+
+# ============================================================================
+# ShaderConnection
+# ============================================================================
+
+struct ShaderConnection:
+    from_node: i32
+    from_port: text
+    to_node: i32
+    to_port: text
+
+# ============================================================================
+# ShaderGraph
+# ============================================================================
+
+class ShaderGraph:
+    nodes: [ShaderNode]
+    connections: [ShaderConnection]
+    next_id: i32
+    name: text
+
+impl ShaderGraph:
+    static fn new(name: text) -> ShaderGraph:
+        ShaderGraph(nodes: [], connections: [], next_id: 0, name: name)
+
+    me add_node(node_type: text, name: text) -> i32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        var node = ShaderNode.new(id, node_type, name)
+        # Add default ports based on node type
+        if node_type == "color":
+            node.add_output("color", "vec4")
+        if node_type == "texture_sample":
+            node.add_input("uv", "vec2")
+            node.add_output("color", "vec4")
+        if node_type == "multiply":
+            node.add_input("a", "float")
+            node.add_input("b", "float")
+            node.add_output("result", "float")
+        if node_type == "add":
+            node.add_input("a", "float")
+            node.add_input("b", "float")
+            node.add_output("result", "float")
+        if node_type == "mix":
+            node.add_input("a", "vec4")
+            node.add_input("b", "vec4")
+            node.add_input("factor", "float")
+            node.add_output("result", "vec4")
+        if node_type == "normal_map":
+            node.add_input("texture", "texture")
+            node.add_output("normal", "vec3")
+        if node_type == "fresnel":
+            node.add_input("normal", "vec3")
+            node.add_output("factor", "float")
+        if node_type == "output":
+            node.add_input("albedo", "vec4")
+            node.add_input("normal", "vec3")
+            node.add_input("metallic", "float")
+            node.add_input("roughness", "float")
+        self.nodes.push(node)
+        id
+
+    me connect(from_node: i32, from_port: text, to_node: i32, to_port: text) -> bool:
+        # Verify both nodes exist
+        var from_found = false
+        var to_found = false
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].id == from_node:
+                from_found = true
+            if self.nodes[i].id == to_node:
+                to_found = true
+            i = i + 1
+        if from_found == false:
+            return false
+        if to_found == false:
+            return false
+        self.connections.push(ShaderConnection(
+            from_node: from_node,
+            from_port: from_port,
+            to_node: to_node,
+            to_port: to_port
+        ))
+        true
+
+    me disconnect(from_node: i32, from_port: text, to_node: i32, to_port: text) -> bool:
+        var i = 0
+        while i < self.connections.len():
+            val conn = self.connections[i]
+            if (conn.from_node == from_node and
+                conn.from_port == from_port and
+                conn.to_node == to_node and
+                conn.to_port == to_port):
+                self.connections.remove(i)
+                return true
+            i = i + 1
+        false
+
+    fn get_node(node_id: i32) -> ShaderNode?:
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].id == node_id:
+                return Some(self.nodes[i])
+            i = i + 1
+        None
+
+    fn node_count() -> i32:
+        var count: i32 = self.nodes.len()
+        count
+
+    fn connection_count() -> i32:
+        var count: i32 = self.connections.len()
+        count
+
+    fn get_connections_to(node_id: i32) -> [ShaderConnection]:
+        var result: [ShaderConnection] = []
+        var i = 0
+        while i < self.connections.len():
+            if self.connections[i].to_node == node_id:
+                result.push(self.connections[i])
+            i = i + 1
+        result
+
+    fn validate() -> bool:
+        # Check that all connections reference existing nodes
+        var i = 0
+        while i < self.connections.len():
+            val conn = self.connections[i]
+            var from_found = false
+            var to_found = false
+            var j = 0
+            while j < self.nodes.len():
+                if self.nodes[j].id == conn.from_node:
+                    from_found = true
+                if self.nodes[j].id == conn.to_node:
+                    to_found = true
+                j = j + 1
+            if from_found == false:
+                return false
+            if to_found == false:
+                return false
+            i = i + 1
+        true
+
+    me clear():
+        self.nodes = []
+        self.connections = []
+        self.next_id = 0

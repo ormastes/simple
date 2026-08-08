@@ -1,0 +1,248 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_read_text(path: text) -> text
+
+fn _shell(script: text) -> (text, text, i32):
+    rt_process_run_timeout("/bin/sh", ["-c", script], 15000)
+
+fn _setup_fake_nvme(base: text, name: text, serial: text, nsid: text) -> text:
+    val dev_dir = base + "_device"
+    val sysfs_root = base + "_sysfs"
+    val dev = dev_dir + "/" + name
+    val sysfs = sysfs_root + "/" + name
+    val script = "rm -rf \"" + dev_dir + "\" \"" + sysfs_root + "\" && " +
+        "mkdir -p \"" + dev_dir + "\" \"" + sysfs + "/device\" && " +
+        "printf device > \"" + dev + "\" && " +
+        "printf 'Samsung PM9A3\\n' > \"" + sysfs + "/device/model\" && " +
+        "printf '" + serial + "\\n' > \"" + sysfs + "/device/serial\" && " +
+        "printf '" + nsid + "\\n' > \"" + sysfs + "/nsid\""
+    val (_stdout, _stderr, code) = _shell(script)
+    expect(code).to_equal(0)
+    dev
+
+fn _add_fake_nvme_namespace(base: text, name: text, serial: text, nsid: text) -> text:
+    val dev_dir = base + "_device"
+    val sysfs_root = base + "_sysfs"
+    val dev = dev_dir + "/" + name
+    val sysfs = sysfs_root + "/" + name
+    val script = "mkdir -p \"" + dev_dir + "\" \"" + sysfs + "/device\" && " +
+        "printf device > \"" + dev + "\" && " +
+        "printf 'Samsung PM9A3\\n' > \"" + sysfs + "/device/model\" && " +
+        "printf '" + serial + "\\n' > \"" + sysfs + "/device/serial\" && " +
+        "printf '" + nsid + "\\n' > \"" + sysfs + "/nsid\""
+    val (_stdout, _stderr, code) = _shell(script)
+    expect(code).to_equal(0)
+    dev
+
+describe "SimpleOS physical NVMe preflight wrapper":
+    it "writes scan and selected preflight reports for one ready namespace":
+        val base = "/tmp/simpleos_nvme_preflight_script_ready"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNREADY", "1")
+        val user_dev = _add_fake_nvme_namespace(base, "nvme8n2", "SNREADY", "2")
+        val report = "/tmp/simpleos_nvme_preflight_script_ready_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_ready_selected.sdn"
+        val cleanup = "rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+
+        val (stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val preflight_text = rt_file_read_text(preflight) ?? ""
+
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("preflight-scan=ready")
+        expect(report_text).to_contain("accepted: true")
+        expect(report_text).to_contain("selected_device: " + dev)
+        expect(report_text).to_contain("selected_preflight_report: " + preflight)
+        expect(report_text).to_contain("preflight_identity:")
+        expect(report_text).to_contain("user_namespace_device: " + user_dev)
+        expect(preflight_text).to_contain("physical_nvme_preflight:")
+        expect(preflight_text).to_contain("accepted: true")
+        expect(preflight_text).to_contain("device: " + dev)
+        expect(preflight_text).to_contain("user_namespace_device: " + user_dev)
+        expect(preflight_text).to_contain("same_physical_device: true")
+
+    it "requires scan report output before writing selected preflight output":
+        val base = "/tmp/simpleos_nvme_preflight_script_requires_report"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNREPORT", "1")
+        val preflight = "/tmp/simpleos_nvme_preflight_script_requires_report.sdn"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell("rm -f \"" + preflight + "\" \"" + preflight + ".tmp.\"*")
+        expect(cleanup_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan --preflight-out \"" + preflight + "\""
+        )
+        val output_text = rt_file_read_text(preflight) ?? ""
+
+        expect(code).to_equal(2)
+        expect(stderr).to_contain("--preflight-scan --preflight-out requires --report-out")
+        expect(output_text).to_equal("")
+
+    it "rejects scan report and selected preflight output path aliasing":
+        val base = "/tmp/simpleos_nvme_preflight_script_same_output"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNSAME", "1")
+        val output = "/tmp/simpleos_nvme_preflight_script_same_output.sdn"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell("rm -f \"" + output + "\" \"" + output + ".tmp.\"*")
+        expect(cleanup_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + output + "\" --preflight-out \"" + output + "\""
+        )
+        val output_text = rt_file_read_text(output) ?? ""
+
+        expect(code).to_equal(2)
+        expect(stderr).to_contain("--preflight-scan report outputs must differ")
+        expect(output_text).to_equal("")
+
+    it "removes stale selected preflight output before writing a ready scan selection":
+        val base = "/tmp/simpleos_nvme_preflight_script_existing_selected"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNEXISTING", "1")
+        val user_dev = _add_fake_nvme_namespace(base, "nvme8n2", "SNEXISTING", "2")
+        val report = "/tmp/simpleos_nvme_preflight_script_existing_selected_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_existing_selected.sdn"
+        val cleanup = "rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+        val (_seed_out, _seed_err, seed_code) = _shell("printf 'existing preflight\\n' > \"" + preflight + "\"")
+        expect(seed_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val preflight_text = rt_file_read_text(preflight) ?? ""
+
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(report_text).to_contain("accepted: true")
+        expect(report_text).to_contain("selected_preflight_report: " + preflight)
+        expect(preflight_text).to_contain("physical_nvme_preflight:")
+        expect(preflight_text).to_contain("accepted: true")
+        expect(preflight_text).to_contain("user_namespace_device: " + user_dev)
+
+    it "rejects preflight scan when scan report output already exists":
+        val base = "/tmp/simpleos_nvme_preflight_script_existing_scan"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNEXISTINGSCAN", "1")
+        val report = "/tmp/simpleos_nvme_preflight_script_existing_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_existing_scan_selected.sdn"
+        val cleanup = "rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+        val (_seed_out, _seed_err, seed_code) = _shell("printf 'existing scan report\\n' > \"" + report + "\"")
+        expect(seed_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val preflight_text = rt_file_read_text(preflight) ?? ""
+
+        expect(code).to_equal(2)
+        expect(stderr).to_contain("preflight scan report already exists")
+        expect(report_text).to_equal("existing scan report\n")
+        expect(preflight_text).to_equal("")
+
+    it "removes selected preflight temp output when scan is not ready":
+        val base = "/tmp/simpleos_nvme_preflight_script_not_ready"
+        val dev = _setup_fake_nvme(base, "nvme8n1", "SNNOTREADY", "1")
+        val report = "/tmp/simpleos_nvme_preflight_script_not_ready_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_not_ready_selected.sdn"
+        val cleanup = "rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val (_probe_out, _probe_err, probe_code) = _shell("test ! -e \"" + preflight + "\" && ! ls " + preflight + ".tmp.* >/dev/null 2>&1")
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("preflight-scan=not-ready")
+        expect(report_text).to_contain("status: not-ready")
+        expect(probe_code).to_equal(0)
+
+    it "writes a not-ready scan report when no namespace devices match":
+        val base = "/tmp/simpleos_nvme_preflight_script_no_match"
+        val dev_dir = base + "_device"
+        val report = "/tmp/simpleos_nvme_preflight_script_no_match_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_no_match_selected.sdn"
+        val cleanup = "rm -rf \"" + dev_dir + "\" && rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+        val (_mkdir_out, _mkdir_err, mkdir_code) = _shell("mkdir -p \"" + dev_dir + "\"")
+        expect(mkdir_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev_dir + "/nvme*n1\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val (_probe_out, _probe_err, probe_code) = _shell(
+            "test ! -e \"" + preflight + "\" && " +
+            "! ls " + preflight + ".tmp.* >/dev/null 2>&1 && " +
+            "! grep -q selected_preflight_report \"" + report + "\""
+        )
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("preflight-scan=not-ready matched_devices=0 ready_devices=0")
+        expect(report_text).to_contain("accepted: false")
+        expect(report_text).to_contain("status: not-ready")
+        expect(report_text).to_contain("matched_devices: 0")
+        expect(report_text).to_contain("ready_devices: 0")
+        expect(probe_code).to_equal(0)
+
+    it "does not write selected preflight output when scan is ambiguous":
+        val base = "/tmp/simpleos_nvme_preflight_script_ambiguous"
+        val dev_a = _setup_fake_nvme(base, "nvme8n1", "SNAMBIGA", "1")
+        val _user_dev_a = _add_fake_nvme_namespace(base, "nvme8n2", "SNAMBIGA", "2")
+        val dev_b = _add_fake_nvme_namespace(base, "nvme9n1", "SNAMBIGB", "1")
+        val _user_dev_b = _add_fake_nvme_namespace(base, "nvme9n2", "SNAMBIGB", "2")
+        val report = "/tmp/simpleos_nvme_preflight_script_ambiguous_scan.sdn"
+        val preflight = "/tmp/simpleos_nvme_preflight_script_ambiguous_selected.sdn"
+        val cleanup = "rm -f \"" + report + "\" \"" + report + ".tmp.\"* \"" + preflight + "\" \"" + preflight + ".tmp.\"*"
+        val (_cleanup_out, _cleanup_err, cleanup_code) = _shell(cleanup)
+        expect(cleanup_code).to_equal(0)
+
+        val (_stdout, stderr, code) = _shell(
+            "SIMPLEOS_NVME_DEVICE_GLOB=\"" + dev_a + " " + dev_b + "\" " +
+            "SIMPLEOS_NVME_SYSFS_ROOT=\"" + base + "_sysfs\" " +
+            "sh scripts/os/run_simpleos_physical_nvme_perf.shs --preflight-scan " +
+            "--report-out \"" + report + "\" --preflight-out \"" + preflight + "\""
+        )
+        val report_text = rt_file_read_text(report) ?? ""
+        val (_probe_out, _probe_err, probe_code) = _shell(
+            "test ! -e \"" + preflight + "\" && " +
+            "! ls " + preflight + ".tmp.* >/dev/null 2>&1 && " +
+            "! grep -q selected_preflight_report \"" + report + "\""
+        )
+
+        expect(code).to_equal(1)
+        expect(stderr).to_contain("preflight-scan=ambiguous")
+        expect(report_text).to_contain("status: ambiguous")
+        expect(report_text).to_contain("ready_devices: 2")
+        expect(report_text).to_contain("candidates: " + dev_a + " " + dev_b)
+        expect(probe_code).to_equal(0)

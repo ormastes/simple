@@ -1,0 +1,58 @@
+# @tag: system, gpu, vulkan, processing-ir, fault-injection, native, source-contract
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read}
+
+val PROBE = "src/app/test/processing_vulkan_fault_probe.spl"
+val WRAPPER = "scripts/check/check-processing-vulkan-fault-native.shs"
+
+describe "native Vulkan ProcessingIR fault evidence contract":
+    it "requires exact device output and positive native provenance":
+        val source = file_read(PROBE)
+        expect(file_exists(PROBE)).to_equal(true)
+        expect(source).to_contain("result.completed and result.reason == \"ok\" and values_exact")
+        expect(source).to_contain("result.backend_handle > 0 and result.device_identity > 0")
+        expect(source).to_contain("processing_ir_fill_u32(64, value)")
+        expect(source).to_contain("processing_vulkan_device_identity(\"abc\") == 96354")
+        expect(source).to_contain("hash_sanity and not fault_active")
+        expect(source).to_contain("fn _values_exact(values: [u32], expected_count: i64, expected_value: u32) -> bool:")
+        expect(source).to_contain("_values_exact(result.values, 64, value)")
+        expect(source.contains("result.values[index]")).to_equal(false)
+
+    it "fails closed for every injected phase":
+        val source = file_read(PROBE)
+        for phase in ["unavailable", "init", "submit", "readback", "mismatch", "dispatch-ineligible"]:
+            expect(source).to_contain("phase == \"" + phase + "\"")
+        for phase in ["none", "unavailable", "init", "submit", "readback", "mismatch", "dispatch-ineligible"]:
+            expect(source).to_contain("if arg == \"--phase=" + phase + "\": return \"" + phase + "\"")
+        expect(source).to_contain("if arg == \"--recover=submit\": return \"recover-submit\"")
+        expect(source).to_contain("not result.completed and result.reason == _expected_reason(phase)")
+        expect(source).to_contain("result.values.len() == 0 and result.backend_handle == 0")
+        expect(source).to_contain("result.device_identity == 0 and fault_active")
+
+    it "runs one default and six bounded isolated native processes":
+        val probe_source = file_read(PROBE)
+        val source = file_read(WRAPPER)
+        expect(probe_source).to_contain("fn _phase_from_args(args: [text]) -> text:")
+        expect(probe_source.contains(".starts_with(")).to_equal(false)
+        expect(file_exists(WRAPPER)).to_equal(true)
+        expect(source).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
+        expect(source.split("2>&1").len() - 1).to_equal(3)
+        expect(source.split("set +e").len() - 1).to_equal(3)
+        expect(source.split("code=$?").len() - 1).to_equal(3)
+        expect(source.split("set -e\n").len() - 1).to_equal(3)
+        expect(source.split("[ \"$code\" -eq 0 ] || return \"$code\"").len() - 1).to_equal(2)
+        expect(source).to_contain("[ \"$recovery_code\" -eq 0 ]")
+        expect(source).to_contain("env -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES SIMPLE_GPU_TEST=1 SIMPLE_GPU_FAULT_INJECT=\"vulkan:$phase\"")
+        expect(source).to_contain("run_case none")
+        expect(source).to_contain("for phase in unavailable init submit readback mismatch dispatch-ineligible")
+        expect(source).to_contain("processing_vulkan_fault_native_status=pass")
+        expect(source).to_contain("grep -Ec '^VULKAN_FAULT_NATIVE '")
+        expect(source).to_contain("[ \"$total\" -eq 1 ] && [ \"$valid\" -eq 1 ]")
+        expect(source).to_contain("hash_sanity=true handle=[1-9][0-9]* identity=[1-9][0-9]*$")
+        expect(source).to_contain("\"$PROBE_BIN\" --recover=submit")
+        expect(source).to_contain("VULKAN_FAULT_RECOVERY status=pass")
+        expect(source).to_contain("grep -Ec '^VULKAN_FAULT_RECOVERY '")
+        expect(source).to_contain("[ \"$recovery_total\" -eq 1 ] && [ \"$recovery_valid\" -eq 1 ]")
+        expect(probe_source).to_contain("recovered.device_identity == before.device_identity")
+        expect(source).to_contain("identity_stable=true")

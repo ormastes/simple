@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+BENCH_DIR="$ROOT/test/perf/port_algorithms"
+BUILD_DIR="$ROOT/build/perf/port_algorithms"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+SIMPLE_NATIVE_BACKEND="${SIMPLE_NATIVE_BACKEND:-}"
+SIMPLE_NATIVE_RUNTIME_BUNDLE="${SIMPLE_NATIVE_RUNTIME_BUNDLE:-auto}"
+SIMPLE_ALLOW_INTERPRETER_FALLBACK="${SIMPLE_ALLOW_INTERPRETER_FALLBACK:-0}"
+SIMPLE_REQUIRE_FASTER_THAN_BASELINES="${SIMPLE_REQUIRE_FASTER_THAN_BASELINES:-0}"
+SIMPLE_LLVM_PROBE="${SIMPLE_LLVM_PROBE:-1}"
+SIMPLE_DISASM_PROBE="${SIMPLE_DISASM_PROBE:-1}"
+SIMPLE_BENCH_SAMPLES="${SIMPLE_BENCH_SAMPLES:-1}"
+
+dump_function_calls() {
+    local bin="$1"
+    local symbol="$2"
+
+    objdump -Cd "$bin" \
+        | awk -v symbol="$symbol" '
+            $0 ~ "<" symbol ">:" {
+                in_fn = 1
+                found = 1
+                print "### function " symbol
+                print
+                next
+            }
+            in_fn && /^([[:xdigit:]]+ )?<[^>]+>:/ { in_fn = 0 }
+            in_fn && /^$/ { in_fn = 0 }
+            in_fn && /call|jmp.*<|rt_index_|rt_bytes_u8|_xxh64_|chacha20_|crc32|adler32/ { print }
+            END { if (found) print "" }
+        '
+}
+
+dump_runtime_relocations() {
+    local bin="$1"
+
+    if ! command -v readelf >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "### runtime relocation slots"
+    runtime_addr_pattern="$(
+        nm -n "$bin" \
+            | awk '/ rt_(index_get|index_set|len|string_new|bytes_u8_at|bytes_u8_set)$/ { print $1 }' \
+            | paste -sd '|' -
+    )"
+    if [[ -n "$runtime_addr_pattern" ]]; then
+        readelf -r "$bin" \
+            | grep -E "rt_|$runtime_addr_pattern" \
+            | sed -n '1,80p' || true
+    fi
+    echo "### runtime symbols"
+    nm -n "$bin" \
+        | grep -E ' rt_(index_get|index_set|len|string_new|bytes_u8_at|bytes_u8_set)$' \
+        | sed -n '1,80p' || true
+    echo ""
+}
+
+alg_mbps() {
+    local out_file="$1"
+    local alg="$2"
+    grep "alg=$alg " "$out_file" \
+        | sed -n 's/.*mbps=\([0-9][0-9]*\).*/\1/p' \
+        | sort -n \
+        | awk '
+            { values[NR] = $1 }
+            END {
+                if (NR == 0) {
+                    exit 1
+                }
+                if (NR % 2 == 1) {
+                    printf "%d", values[(NR + 1) / 2]
+                } else {
+                    printf "%.0f", (values[NR / 2] + values[(NR / 2) + 1]) / 2
+                }
+            }
+        '
+}
+
+alg_checksum() {
+    local out_file="$1"
+    local alg="$2"
+    grep "alg=$alg " "$out_file" \
+        | sed -n 's/.*checksum=\([0-9]*\).*/\1/p' \
+        | sort -u \
+        | awk '
+            { values[NR] = $1 }
+            END {
+                if (NR != 1) {
+                    exit 1
+                }
+                print values[1]
+            }
+        '
+}
+
+run_benchmark_samples() {
+    local label="$1"
+    local out_file="$2"
+    shift 2
+
+    rm -f "$out_file"
+    if [[ "$SIMPLE_BENCH_SAMPLES" -le 1 ]]; then
+        "$@" | tee "$out_file"
+        return
+    fi
+
+    local sample=1
+    while [[ "$sample" -le "$SIMPLE_BENCH_SAMPLES" ]]; do
+        local sample_file="$out_file.sample_$sample"
+        echo "[algbench-sample] impl=$label sample=$sample/$SIMPLE_BENCH_SAMPLES"
+        "$@" | tee "$sample_file"
+        cat "$sample_file" >> "$out_file"
+        sample=$((sample + 1))
+    done
+}
+
+speed_ratio() {
+    local numerator="$1"
+    local denominator="$2"
+    awk -v n="$numerator" -v d="$denominator" 'BEGIN {
+        if (d == 0) {
+            printf "n/a"
+        } else {
+            printf "%.2fx", n / d
+        }
+    }'
+}
+
+speed_gt() {
+    local lhs="$1"
+    local rhs="$2"
+    awk -v l="$lhs" -v r="$rhs" 'BEGIN { exit !(l > r) }'
+}
+
+mkdir -p "$BUILD_DIR"
+rm -f "$BUILD_DIR/simple_llvm.out"
+rm -f "$BUILD_DIR/disasm_summary.txt"
+
+echo "=================================================================="
+echo "  Port Algorithm C/Rust/Simple Benchmark"
+echo "=================================================================="
+echo "Simple: $SIMPLE_BIN"
+echo "Runtime bundle: $SIMPLE_NATIVE_RUNTIME_BUNDLE"
+if [[ -n "$SIMPLE_NATIVE_BACKEND" ]]; then
+    echo "Backend: $SIMPLE_NATIVE_BACKEND"
+fi
+if [[ "$SIMPLE_LLVM_PROBE" == "1" ]]; then
+    echo "LLVM probe: enabled"
+fi
+if [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+    echo "Disassembly probe: enabled"
+fi
+echo "Build:  $BUILD_DIR"
+echo "Samples: $SIMPLE_BENCH_SAMPLES"
+echo ""
+
+gcc -O3 -march=native -std=c11 "$BENCH_DIR/port_algorithms_ref.c" -o "$BUILD_DIR/port_algorithms_c"
+rustc -C opt-level=3 -C target-cpu=native "$BENCH_DIR/port_algorithms_ref.rs" -o "$BUILD_DIR/port_algorithms_rust"
+
+echo "--- C reference ---"
+run_benchmark_samples c "$BUILD_DIR/c.out" "$BUILD_DIR/port_algorithms_c"
+
+echo "--- Rust reference ---"
+run_benchmark_samples rust "$BUILD_DIR/rust.out" "$BUILD_DIR/port_algorithms_rust"
+
+echo "--- Simple reference ---"
+simple_compile_args=(compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive)
+if [[ -n "$SIMPLE_NATIVE_BACKEND" ]]; then
+    simple_compile_args+=(--backend="$SIMPLE_NATIVE_BACKEND")
+fi
+if [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+    simple_compile_args+=(--no-strip)
+fi
+simple_compile_args+=(-o "$BUILD_DIR/port_algorithms_simple")
+if SIMPLE_NATIVE_RUNTIME_BUNDLE="$SIMPLE_NATIVE_RUNTIME_BUNDLE" "$SIMPLE_BIN" "${simple_compile_args[@]}" >/tmp/port_algorithms_simple_compile.log 2>&1; then
+    run_benchmark_samples simple "$BUILD_DIR/simple.out" "$BUILD_DIR/port_algorithms_simple"
+else
+    echo "[algbench-note] simple_native_compile=failed log=/tmp/port_algorithms_simple_compile.log"
+    if [[ "$SIMPLE_ALLOW_INTERPRETER_FALLBACK" != "1" ]]; then
+        sed -n '1,20p' /tmp/port_algorithms_simple_compile.log
+        exit 1
+    fi
+    run_benchmark_samples simple-interpreter "$BUILD_DIR/simple.out" env SIMPLE_LIB="$ROOT/src" "$SIMPLE_BIN" run "$BENCH_DIR/port_algorithms_simple.spl"
+fi
+
+if [[ "$SIMPLE_LLVM_PROBE" == "1" && "$SIMPLE_NATIVE_BACKEND" != "llvm" ]]; then
+    echo "--- Simple LLVM probe ---"
+    llvm_compile_log="$BUILD_DIR/simple_llvm_compile.log"
+    llvm_compile_args=(compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive --backend=llvm -o "$BUILD_DIR/port_algorithms_simple_llvm")
+    if [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+        llvm_compile_args=(compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive --backend=llvm --no-strip -o "$BUILD_DIR/port_algorithms_simple_llvm")
+    fi
+    if SIMPLE_NATIVE_RUNTIME_BUNDLE="$SIMPLE_NATIVE_RUNTIME_BUNDLE" "$SIMPLE_BIN" "${llvm_compile_args[@]}" >"$llvm_compile_log" 2>&1; then
+        run_benchmark_samples simple-llvm "$BUILD_DIR/simple_llvm.out" "$BUILD_DIR/port_algorithms_simple_llvm"
+    else
+        echo "[algbench-note] simple_llvm_compile=failed log=$llvm_compile_log"
+        sed -n '1,12p' "$llvm_compile_log"
+    fi
+fi
+
+if [[ "$SIMPLE_DISASM_PROBE" == "1" ]] && command -v objdump >/dev/null 2>&1; then
+    disasm_summary="$BUILD_DIR/disasm_summary.txt"
+    {
+        echo "# Port algorithm disassembly summary"
+        echo "simple_bin=$SIMPLE_BIN"
+        echo "backend=${SIMPLE_NATIVE_BACKEND:-default}"
+        echo ""
+    } >"$disasm_summary"
+    for pair in \
+        "c:$BUILD_DIR/port_algorithms_c" \
+        "rust:$BUILD_DIR/port_algorithms_rust" \
+        "simple:$BUILD_DIR/port_algorithms_simple" \
+        "simple_llvm:$BUILD_DIR/port_algorithms_simple_llvm"
+    do
+        lang="${pair%%:*}"
+        bin="${pair#*:}"
+        if [[ -x "$bin" ]]; then
+            {
+                echo "## $lang"
+                objdump -Cd "$bin" \
+                    | grep -E "<(xxhash64|xxhash64_ref|chacha20|chacha20_|crc32|crc32_ref|adler32|adler32_ref|_crc32|_xxh64_|rt_index_|rt_bytes_u8)|call.*(xxhash64|chacha20|crc32|adler32|_crc32|_xxh64_|rt_index_|rt_bytes_u8)" \
+                    | sed -n '1,80p'
+                echo ""
+                dump_function_calls "$bin" "xxhash64_ref"
+                dump_function_calls "$bin" "xxhash64"
+                dump_function_calls "$bin" "crc32_ref"
+                dump_function_calls "$bin" "crc32"
+                dump_function_calls "$bin" "adler32_ref"
+                dump_function_calls "$bin" "adler32"
+                dump_function_calls "$bin" "chacha20_encrypt"
+                dump_function_calls "$bin" "chacha20_encrypt_checksum_local"
+                dump_function_calls "$bin" "chacha20_xor_block_checksum_local"
+                dump_function_calls "$bin" "chacha20_xor_words4_checksum_local"
+                if [[ "$lang" == "simple" || "$lang" == "simple_llvm" ]]; then
+                    dump_runtime_relocations "$bin"
+                fi
+            } >>"$disasm_summary" || true
+        fi
+    done
+    echo "[algbench-note] disasm_summary=$disasm_summary"
+elif [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+    echo "[algbench-note] disasm_summary=skipped reason=objdump-not-found"
+fi
+
+for alg in xxhash64 crc32 adler32 chacha20; do
+    c_sum="$(alg_checksum "$BUILD_DIR/c.out" "$alg" || true)"
+    rust_sum="$(alg_checksum "$BUILD_DIR/rust.out" "$alg" || true)"
+    simple_sum="$(alg_checksum "$BUILD_DIR/simple.out" "$alg" || true)"
+    if [[ -z "$c_sum" || "$c_sum" != "$rust_sum" || "$c_sum" != "$simple_sum" ]]; then
+        echo "[algbench-error] checksum mismatch alg=$alg c=$c_sum rust=$rust_sum simple=$simple_sum" >&2
+        exit 1
+    fi
+    if [[ -f "$BUILD_DIR/simple_llvm.out" ]]; then
+        simple_llvm_sum="$(alg_checksum "$BUILD_DIR/simple_llvm.out" "$alg" || true)"
+        if [[ -z "$simple_llvm_sum" || "$c_sum" != "$simple_llvm_sum" ]]; then
+            echo "[algbench-error] checksum mismatch alg=$alg c=$c_sum simple_llvm=$simple_llvm_sum" >&2
+            exit 1
+        fi
+    fi
+done
+
+echo "[algbench-ok] checksum parity passed for xxhash64, crc32, adler32, and chacha20"
+if [[ -f "$BUILD_DIR/simple_llvm.out" ]]; then
+    echo "[algbench-ok] LLVM checksum parity passed for xxhash64, crc32, adler32, and chacha20"
+fi
+
+ratio_file="$BUILD_DIR/speed_ratios.tsv"
+{
+    printf 'algorithm\tc_mbps\trust_mbps\tsimple_mbps\tsimple_vs_c\tsimple_vs_rust\tfaster_than_c\tfaster_than_rust\n'
+    speed_fail=0
+    for alg in xxhash64 crc32 adler32 chacha20; do
+        c_mbps="$(alg_mbps "$BUILD_DIR/c.out" "$alg")"
+        rust_mbps="$(alg_mbps "$BUILD_DIR/rust.out" "$alg")"
+        simple_mbps="$(alg_mbps "$BUILD_DIR/simple.out" "$alg")"
+        simple_vs_c="$(speed_ratio "$simple_mbps" "$c_mbps")"
+        simple_vs_rust="$(speed_ratio "$simple_mbps" "$rust_mbps")"
+        faster_c="no"
+        faster_rust="no"
+        if speed_gt "$simple_mbps" "$c_mbps"; then
+            faster_c="yes"
+        fi
+        if speed_gt "$simple_mbps" "$rust_mbps"; then
+            faster_rust="yes"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$alg" "$c_mbps" "$rust_mbps" "$simple_mbps" "$simple_vs_c" "$simple_vs_rust" "$faster_c" "$faster_rust"
+        echo "[algbench-speed] alg=$alg simple_vs_c=$simple_vs_c simple_vs_rust=$simple_vs_rust faster_than_c=$faster_c faster_than_rust=$faster_rust" >&2
+        if [[ "$SIMPLE_REQUIRE_FASTER_THAN_BASELINES" == "1" && ( "$faster_c" != "yes" || "$faster_rust" != "yes" ) ]]; then
+            speed_fail=1
+        fi
+    done
+    if [[ "${speed_fail:-0}" -eq 1 ]]; then
+        echo "[algbench-error] Simple was not faster than both C and Rust for every measured algorithm" >&2
+        exit 1
+    fi
+} | tee "$ratio_file"
+echo "[algbench-note] speed_samples=$SIMPLE_BENCH_SAMPLES speed_value=median"
+echo "[algbench-note] speed_ratios=$ratio_file"

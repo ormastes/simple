@@ -1,0 +1,179 @@
+#!/bin/sh
+# Guard: the trait solver must return a MethodResolution VARIANT, never a field bag.
+#
+# Bug:  doc/08_tracking/bug/primitive_receiver_trait_impl_dispatch_2026-08-07.md
+# Fix:  af3ad25e761e (35.semantics/resolve_strategies.spl)
+#
+# WHAT WENT WRONG
+# ---------------
+# `MethodResolver.try_trait_method_with_solver` built its success value as
+#
+#     return Some(MethodResolution(
+#         trait_name: ..., impl_block: ..., method_name: ..., is_generic: ...))
+#
+# `MethodResolution` (src/compiler/20.hir/hir_types.spl) is an ENUM. Its only
+# shapes are InstanceMethod / TraitMethod / FreeFunction / StaticMethod /
+# Unresolved -- there is no struct form with those fields. The value produced
+# there could not be matched by any consumer: neither 50.mir's discriminant
+# checks (_MirLoweringExpr/method_calls_literals.spl) nor 70.backend's
+# `case MethodResolution.TraitMethod(...)`.
+#
+# WHY THIS IS A SHELL GUARD AND NOT A `*_spec.spl`
+# ------------------------------------------------
+# There is no runtime oracle for this defect today, for two independent reasons:
+#
+#  1. The path is UNREACHABLE at runtime. The only resolver entry point wired
+#     into the driver (`resolve_methods`) builds its solver via
+#     `create_trait_solver_for_resolution` (35.semantics/resolve.spl), a
+#     TraitSolver with every map empty and never populated, so the guard
+#     `trait_solver.trait_methods.has(method)` is always false. The
+#     solver-carrying entry point `resolve_methods_with_solver` is a stub
+#     returning `(module, [])`. Probes at the solver entry, at its success path,
+#     and at the no-symbol bail all recorded ZERO hits. No spec can execute what
+#     never runs -- an assertion there would be vacuous, passing on broken and
+#     fixed code alike.
+#  2. `bin/simple native-build`, the lane where a malformed resolution would
+#     surface, is broken for EVERY input as of 2026-08-08 (see
+#     doc/08_tracking/bug/native_build_nil_deref_total_outage_2026-08-08.md),
+#     and it truncates the MIDDLE of stderr, so diagnostic counts over its
+#     output are fail-open anyway.
+#
+# So the property is enforced STATICALLY: the shape must be well-formed even
+# though nothing calls it yet, because the moment the solver is populated this
+# becomes live. The inline RED fixture below is the pre-fix source; --selftest
+# proves the guard rejects it.
+
+set -u
+
+TARGET_DEFAULT="src/compiler/35.semantics/resolve_strategies.spl"
+FN="try_trait_method_with_solver"
+
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+oops() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+# Print the body of `fn`, from its definition line to the next sibling def.
+extract_fn() {
+  awk -v fname="$2" '
+    $0 ~ "^    (me|fn|static fn) " fname "\\(" { inside=1; print; next }
+    inside && /^    (me|fn|static fn) [a-zA-Z_]+\(/ { exit }
+    inside { print }
+  ' "$1"
+}
+
+# Strip comments so prose mentioning the bad shape cannot false-positive.
+strip_comments() { sed 's/#.*//' ; }
+
+# Returns 0 when the file satisfies the property, 1 otherwise (reason on stdout).
+check_file() {
+  _f="$1"
+  [ -s "$_f" ] || { echo "target '$_f' is missing or empty"; return 1; }
+
+  _body=$(extract_fn "$_f" "$FN" | strip_comments)
+  if [ -z "$_body" ]; then
+    echo "could not locate '$FN' in '$_f' — the guard's anchor is gone (renamed or deleted); refusing to pass vacuously"
+    return 1
+  fi
+
+  # 1. The success path must construct an ENUM VARIANT.
+  if ! printf '%s\n' "$_body" | /usr/bin/grep -aq 'MethodResolution\.'; then
+    echo "'$FN' never constructs a 'MethodResolution.<Variant>' — its resolution cannot be matched by any consumer"
+    return 1
+  fi
+
+  # 2. It must NOT construct the struct-style field bag.
+  if printf '%s\n' "$_body" | /usr/bin/grep -aq 'MethodResolution('; then
+    echo "'$FN' constructs a struct-style 'MethodResolution(...)' field bag; MethodResolution is an enum with no such shape"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- selftest
+# Fatal, and runs before the real scan: a guard that cannot reject known-bad
+# code is not evidence of anything.
+selftest() {
+  _tmp=$(mktemp) || oops "mktemp failed"
+  # RED fixture: the pre-fix source, verbatim in shape.
+  cat > "$_tmp" <<'REDEOF'
+    me try_trait_method_with_solver(receiver_type: HirType, method: text) -> MethodResolution?:
+        """Enhanced trait method resolution using TraitSolver."""
+        if self.trait_solver.trait_methods.has(method):
+            val trait_names: [HirSymbol] = self.trait_solver.trait_methods[method]
+            for trait_name in trait_names:
+                val impl_result = self.trait_solver.find_impl(receiver_type, trait_name)
+                if val Some(impl_block) = impl_result:
+                    return Some(MethodResolution(
+                        trait_name: Some(trait_name),
+                        impl_block: Some(impl_block),
+                        method_name: method,
+                        is_generic: impl_block.type_params.len() > 0
+                    ))
+        nil
+
+    me try_ufcs(receiver_type: HirType, method: text) -> MethodResolution?:
+        nil
+REDEOF
+  if check_file "$_tmp" >/dev/null 2>&1; then
+    rm -f "$_tmp"
+    oops "SELFTEST FAILED — the guard ACCEPTED the known-bad pre-fix field-bag fixture, so a green verdict would prove nothing"
+  fi
+
+  # GREEN fixture: the fixed shape must pass, so the guard is not simply
+  # rejecting everything.
+  cat > "$_tmp" <<'GREENEOF'
+    me try_trait_method_with_solver(receiver_type: HirType, method: text) -> MethodResolution?:
+        """Enhanced trait method resolution using TraitSolver."""
+        if self.trait_solver.trait_methods.has(method):
+            val trait_names: [HirSymbol] = self.trait_solver.trait_methods[method]
+            for trait_name in trait_names:
+                val impl_result = self.trait_solver.find_impl(receiver_type, trait_name)
+                if val Some(impl_block) = impl_result:
+                    if val method_sym = self.symbols.lookup_trait_method_raw(trait_name.id.id, method):
+                        return Some(MethodResolution.TraitMethod(trait_name.id, method_sym))
+                    continue
+        nil
+
+    me try_ufcs(receiver_type: HirType, method: text) -> MethodResolution?:
+        nil
+GREENEOF
+  if ! check_file "$_tmp" >/dev/null 2>&1; then
+    rm -f "$_tmp"
+    oops "SELFTEST FAILED — the guard REJECTED the known-good fixed fixture"
+  fi
+
+  # Anchor check: a renamed/absent function must be an error, not a pass.
+  printf 'me something_else():\n    nil\n' > "$_tmp"
+  if check_file "$_tmp" >/dev/null 2>&1; then
+    rm -f "$_tmp"
+    oops "SELFTEST FAILED — the guard PASSED a file with no '$FN' at all (fails open on rename)"
+  fi
+  rm -f "$_tmp"
+}
+
+# ------------------------------------------------------------------- main
+selftest
+
+TARGET="${1:-$TARGET_DEFAULT}"
+[ -f "$TARGET" ] || oops "target '$TARGET' not found — run from the repo root of a real clone (cwd: $(pwd))"
+
+reason=$(check_file "$TARGET") || fail "$reason"
+files_checked=1
+
+# Repo-wide: no struct-style MethodResolution construction anywhere in the
+# compiler. A sibling call site would be the same defect in a new home.
+if [ -d src/compiler ]; then
+  offenders=$(/usr/bin/grep -rn --include=*.spl 'MethodResolution(' src/compiler 2>/dev/null \
+                | sed 's/#.*//' \
+                | /usr/bin/grep -a 'MethodResolution(' \
+                | /usr/bin/grep -av 'enum MethodResolution' || true)
+  if [ -n "$offenders" ]; then
+    fail "struct-style 'MethodResolution(...)' construction found under src/compiler (MethodResolution is an enum):
+$offenders"
+  fi
+  scanned=$(/usr/bin/grep -rl --include=*.spl 'MethodResolution' src/compiler 2>/dev/null | wc -l | tr -d ' ')
+  [ "${scanned:-0}" -gt 0 ] || oops "repo-wide scan matched 0 files mentioning MethodResolution — the scan is not looking where it thinks it is"
+  files_checked=$scanned
+fi
+
+printf 'PASS — %d file(s) checked (selftest: 3 fixtures) — %s returns a MethodResolution enum VARIANT, and no struct-style MethodResolution(...) field bag exists under src/compiler\n' "$files_checked" "$FN"
+exit 0

@@ -1,0 +1,156 @@
+use std.spec.*
+use common.ui.gpu_web_capacity_manifest.{
+    GpuWebCapacityManifest,
+    gpu_web_capacity_manifest_zero
+}
+use common.ui.gpu_web_capacity_strides.{
+    GpuWebBackendStrideProfile,
+    gpu_web_stride_profile_vulkan,
+    gpu_web_stride_profile_metal,
+    gpu_web_stride_profile_d3d12,
+    gpu_web_capacity_bytes
+}
+
+describe "GPU web capacity strides (backend-aware sizing, S5)":
+
+    it "should expose the canonical Vulkan lane strides field by field":
+        step("Read every stride off the Vulkan profile against the derivation table")
+        val p = gpu_web_stride_profile_vulkan()
+        # DrawIrV3Command: 13 lanes x 4 B (2 u16 widened + 11 u32) = 52
+        expect(p.command_stride_bytes).to_equal(52)
+        # 5 x i32
+        expect(p.geometry_stride_bytes).to_equal(20)
+        # 2 u32 + 2 i32 + u16 lane (packed 18 -> lane 20)
+        expect(p.paint_stride_bytes).to_equal(20)
+        # 7 run columns x 4 B
+        expect(p.text_run_stride_bytes).to_equal(28)
+        # u32 + 2 i32 + i64 (packed 20 -> 24 with i64 tail pad)
+        expect(p.glyph_stride_bytes).to_equal(24)
+        # u16 lane + 3 u32 + i64 (packed 22 -> lane 24)
+        expect(p.resource_stride_bytes).to_equal(24)
+        # 2 i32 + u16 lane (packed 10 -> lane 12)
+        expect(p.path_point_stride_bytes).to_equal(12)
+        # 5 i32 + u32
+        expect(p.clip_stride_bytes).to_equal(24)
+        # 6 i32
+        expect(p.transform_stride_bytes).to_equal(24)
+        # conservative constant: node snapshot numeric core 60 -> 64
+        expect(p.node_stride_bytes).to_equal(64)
+        # LayoutBox: 5 x i64
+        expect(p.layout_box_stride_bytes).to_equal(40)
+        # S4 dispatch record: 3 u32 + i64 key (20 -> 24)
+        expect(p.batch_stride_bytes).to_equal(24)
+        # DrawIrPatchOp fixed-width mapping: 5 lanes + command 52 + 2 rects
+        expect(p.patch_operation_stride_bytes).to_equal(112)
+        # LayoutFragment: 8+8+40+8+8
+        expect(p.fragment_stride_bytes).to_equal(72)
+        # LayoutLineBox: 8+8+40+8+8
+        expect(p.line_box_stride_bytes).to_equal(72)
+        # conservative minStorageBufferOffsetAlignment ceiling
+        expect(p.alignment_bytes).to_equal(256)
+
+    it "should share strides across Metal but with 16-byte alignment":
+        step("Metal keeps the canonical layout; only the alignment differs")
+        val vk = gpu_web_stride_profile_vulkan()
+        val mtl = gpu_web_stride_profile_metal()
+        expect(mtl.command_stride_bytes).to_equal(vk.command_stride_bytes)
+        expect(mtl.geometry_stride_bytes).to_equal(vk.geometry_stride_bytes)
+        expect(mtl.paint_stride_bytes).to_equal(vk.paint_stride_bytes)
+        expect(mtl.text_run_stride_bytes).to_equal(vk.text_run_stride_bytes)
+        expect(mtl.glyph_stride_bytes).to_equal(vk.glyph_stride_bytes)
+        expect(mtl.resource_stride_bytes).to_equal(vk.resource_stride_bytes)
+        expect(mtl.path_point_stride_bytes).to_equal(vk.path_point_stride_bytes)
+        expect(mtl.clip_stride_bytes).to_equal(vk.clip_stride_bytes)
+        expect(mtl.transform_stride_bytes).to_equal(vk.transform_stride_bytes)
+        expect(mtl.node_stride_bytes).to_equal(vk.node_stride_bytes)
+        expect(mtl.layout_box_stride_bytes).to_equal(vk.layout_box_stride_bytes)
+        expect(mtl.batch_stride_bytes).to_equal(vk.batch_stride_bytes)
+        expect(mtl.patch_operation_stride_bytes).to_equal(vk.patch_operation_stride_bytes)
+        expect(mtl.fragment_stride_bytes).to_equal(vk.fragment_stride_bytes)
+        expect(mtl.line_box_stride_bytes).to_equal(vk.line_box_stride_bytes)
+        expect(mtl.alignment_bytes).to_equal(16)
+
+    it "should pad only the D3D12 command record and keep 256-byte alignment":
+        step("D3D12 command tiles on 8-byte boundaries: 52 -> 56; other strides canonical")
+        val vk = gpu_web_stride_profile_vulkan()
+        val dx = gpu_web_stride_profile_d3d12()
+        expect(dx.command_stride_bytes).to_equal(56)
+        expect(dx.geometry_stride_bytes).to_equal(vk.geometry_stride_bytes)
+        expect(dx.paint_stride_bytes).to_equal(vk.paint_stride_bytes)
+        expect(dx.text_run_stride_bytes).to_equal(vk.text_run_stride_bytes)
+        expect(dx.glyph_stride_bytes).to_equal(vk.glyph_stride_bytes)
+        expect(dx.resource_stride_bytes).to_equal(vk.resource_stride_bytes)
+        expect(dx.path_point_stride_bytes).to_equal(vk.path_point_stride_bytes)
+        expect(dx.clip_stride_bytes).to_equal(vk.clip_stride_bytes)
+        expect(dx.transform_stride_bytes).to_equal(vk.transform_stride_bytes)
+        expect(dx.alignment_bytes).to_equal(256)
+
+    it "should measure an all-zero manifest as exactly 0 bytes":
+        step("Zero counts reserve nothing; 0 never rounds up to a nonzero pool")
+        val manifest = gpu_web_capacity_manifest_zero()
+        expect(gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_vulkan())).to_equal(0)
+        expect(gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_metal())).to_equal(0)
+        expect(gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_d3d12())).to_equal(0)
+
+    it "should round a pool that lands mid-alignment up to the next boundary":
+        step("Metal, 5 path points: 5 x 12 = 60 B, mid 16-byte stride -> 64 B")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_path_points = 5u32
+        val total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_metal())
+        expect(total).to_equal(64)
+
+    it "should not round a pool that already sits on an alignment boundary":
+        step("Metal, 2 glyphs: 2 x 24 = 48 B, an exact 16-byte multiple, stays 48")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_glyphs = 2u32
+        val total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_metal())
+        expect(total).to_equal(48)
+
+    it "should produce different totals for the same manifest under Vulkan vs Metal":
+        step("One 52 B command pool: Vulkan rounds to 256, Metal rounds to 64")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_draw_commands = 1u32
+        val vk_total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_vulkan())
+        val mtl_total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_metal())
+        expect(vk_total).to_equal(256)
+        expect(mtl_total).to_equal(64)
+        expect(vk_total != mtl_total).to_equal(true)
+
+    it "should let the D3D12 command padding surface in the total":
+        step("100 commands: Vulkan 5200 -> 5376; D3D12 5600 -> 5632 (both 256-aligned)")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_draw_commands = 100u32
+        expect(gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_vulkan())).to_equal(5376)
+        expect(gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_d3d12())).to_equal(5632)
+
+    it "should sum per-pool rounded sizes, not round the grand total once":
+        step("Vulkan: 4 nodes (256 exact) + 1 layout box (40 -> 256) = 512")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_nodes = 4u32
+        manifest.max_layout_boxes = 1u32
+        val total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_vulkan())
+        # Rounding the summed base (256 + 40 = 296 -> 512) happens to agree
+        # here, so also pin the per-pool shape with a case where they differ:
+        expect(total).to_equal(512)
+        var m2 = gpu_web_capacity_manifest_zero()
+        m2.max_layout_boxes = 1u32
+        m2.max_path_points = 1u32
+        # Per-pool: 40 -> 256 and 12 -> 256, sum 512. A single grand-total
+        # rounding of 40 + 12 = 52 would give 256 instead.
+        expect(gpu_web_capacity_bytes(m2, gpu_web_stride_profile_vulkan())).to_equal(512)
+
+    it "should cover every stride-bearing manifest count in the total":
+        step("One of each record on Metal: sum of per-pool 16-byte roundings")
+        var manifest = gpu_web_capacity_manifest_zero()
+        manifest.max_nodes = 1u32            # 64  -> 64
+        manifest.max_layout_boxes = 1u32     # 40  -> 48
+        manifest.max_fragments = 1u32        # 72  -> 80
+        manifest.max_line_boxes = 1u32       # 72  -> 80
+        manifest.max_glyphs = 1u32           # 24  -> 32
+        manifest.max_draw_batches = 1u32     # 24  -> 32
+        manifest.max_draw_commands = 1u32    # 52  -> 64
+        manifest.max_path_points = 1u32      # 12  -> 16
+        manifest.max_patch_operations = 1u32 # 112 -> 112 (exact multiple)
+        val total = gpu_web_capacity_bytes(manifest, gpu_web_stride_profile_metal())
+        # 64 + 48 + 80 + 80 + 32 + 32 + 64 + 16 + 112 = 528
+        expect(total).to_equal(528)

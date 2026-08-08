@@ -1,0 +1,181 @@
+#!/bin/sh
+# Cross-build the Simple toolchain binary for riscv64-unknown-simpleos with the
+# pure-Simple self-hosted compiler by default.
+#
+# Prereqs (run once):
+#   sh scripts/os/simpleos-core-archive.shs --target riscv64-unknown-simpleos --backend cranelift
+#   sh scripts/os/simpleos-sysroot-riscv64.shs
+#
+# The riscv64 sysroot is separate (build/os/sysroot-riscv64) so the x86_64
+# sysroot is never clobbered. crt0 is injected via INPUT() in the linker
+# script; libc + the pure-Simple core runtime ride the compiler-builtins link
+# slot through the CC wrapper (cc-riscv64-simpleos -print-libgcc-file-name),
+# because the seed's simpleos_user_runtime_paths() is x86_64-gated.
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+TARGET="riscv64-unknown-simpleos"
+ENTRY="src/app/simpleos_tool/main.spl"
+OUTPUT="bin/release/$TARGET/simple"
+SYSROOT="$REPO_ROOT/build/os/sysroot-riscv64"
+BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
+
+# ---- find compiler ----------------------------------------------------------
+# Mirrors the hardened x86_64 lane in scripts/os/simpleos-native-build.shs
+# (commit ea995e86810). The previous default here was a bare
+# `${SIMPLE_BUILD_COMPILER:-bin/release/simple}` with no seed check and no
+# capability check, which was fail-open three ways:
+#
+#   1. bin/release/simple currently resolves to a Rust bootstrap SEED copy, so
+#      the default silently produced a seed-built payload — and BOTH install
+#      image provenance guards (_validate_simple_binary in
+#      src/os/installer/image_builder.spl, validate_simple_payload_provenance in
+#      scripts/os/make_os_disk.shs) REJECT a compiler value matching
+#      *compiler_rust* / *simple_seed*, so the artifact could never ship.
+#   2. A discovery glob over bin/release/*/simple can match the SimpleOS PAYLOAD
+#      being built here — a cross-target ELF that fails to exec with rc=126 and
+#      no output — letting the thing under construction be picked as its own
+#      builder.
+#   3. `--help` alone is not a capability probe: the stale SEGV-ing compiler at
+#      release/x86_64-unknown-linux-gnu/simple exits 0 on `--help` because it
+#      returns before any environment write, then dies rc=139 on real work
+#      (defect D1, deployed_selfhost_env_set_miscompile_segv_2026-07-14.md).
+#
+# So selection is a POSITIVE capability search: iterate candidates, skip the
+# seed and skip anything that cannot demonstrate `native-build --target
+# riscv64-unknown-simpleos` support AND survive a command that actually writes
+# the environment. An explicit SIMPLE_BUILD_COMPILER is still honoured (the D1
+# route-around is deliberate and documented) but is labelled loudly.
+compiler_can_build_target() {
+  probe_bin="$1"
+  probe_out="$(timeout 120 "$probe_bin" native-build --target "$TARGET" --help 2>&1)" \
+    && probe_rc=0 || probe_rc=$?
+  [ "$probe_rc" -eq 0 ] || return 1
+  case "$probe_out" in
+    *"Simple Native Build"*) ;;
+    *) return 1 ;;
+  esac
+  case "$probe_out" in
+    *"--runtime-bundle"*) ;;
+    *) return 1 ;;
+  esac
+  case "$probe_out" in
+    *"unknown"*"--target"*|*"unrecognized"*"--target"*) return 1 ;;
+  esac
+  # Environment-write probe: `check` drives rt_env_set (SIMPLE_BOOTSTRAP_* on
+  # ast_reset), which is exactly what the D1 miscompile faults on. Only a
+  # SIGNAL death is disqualifying here — a plain non-zero exit is a verdict
+  # about the fixture, not about the compiler's ABI.
+  env_probe_file="${TMPDIR:-/tmp}/simpleos-native-build-rv64-envprobe.$$.spl"
+  printf 'fn main():\n    print("ok")\n' > "$env_probe_file"
+  timeout 120 "$probe_bin" check "$env_probe_file" >/dev/null 2>&1 \
+    && env_rc=0 || env_rc=$?
+  rm -f "$env_probe_file"
+  if [ "$env_rc" -ge 128 ]; then
+    echo "  (candidate died with signal rc=$env_rc on the environment-write probe)" >&2
+    return 1
+  fi
+  return 0
+}
+
+is_bootstrap_seed() {
+  case "$(timeout 60 "$1" --version 2>&1 || true)" in
+    *"bootstrap seed only"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+COMPILER="${SIMPLE_BUILD_COMPILER:-}"
+COMPILER_IS_SEED=0
+if [ -z "$COMPILER" ]; then
+  for candidate in \
+    build/bootstrap/stage3/*/simple \
+    build/bootstrap/stage2/*/simple \
+    release/*/simple \
+    bin/release/*/simple
+  do
+    [ -x "$candidate" ] || continue
+    if is_bootstrap_seed "$candidate"; then
+      echo "skipping Rust bootstrap seed: $candidate" >&2
+      continue
+    fi
+    if ! compiler_can_build_target "$candidate"; then
+      echo "skipping compiler that failed the native-build capability probe: $candidate" >&2
+      continue
+    fi
+    COMPILER="$candidate"
+    break
+  done
+  if [ -z "$COMPILER" ]; then
+    echo "error: no self-hosted Simple compiler passed the native-build capability probe" >&2
+    echo "hint: run the bootstrap, or set SIMPLE_BUILD_COMPILER explicitly" >&2
+    exit 1
+  fi
+else
+  [ -x "$COMPILER" ] || { echo "error: SIMPLE_BUILD_COMPILER is not executable: $COMPILER" >&2; exit 1; }
+  if is_bootstrap_seed "$COMPILER"; then
+    COMPILER_IS_SEED=1
+    echo "warning: building with the Rust bootstrap seed (explicitly selected): $COMPILER" >&2
+    echo "warning: the resulting payload is STAGING evidence only and will FAIL both install-image provenance guards" >&2
+  fi
+  if ! compiler_can_build_target "$COMPILER"; then
+    echo "error: SIMPLE_BUILD_COMPILER failed the native-build --target capability probe: $COMPILER" >&2
+    exit 1
+  fi
+fi
+echo "Compiler: $COMPILER"
+
+[ -f "$SYSROOT/share/simpleos/simpleos.ld" ] || { echo "error: run simpleos-sysroot-riscv64.shs first" >&2; exit 1; }
+[ -f "build/os/simple-core-simpleos-riscv64/libsimple_runtime.a" ] || { echo "error: run simpleos-core-archive.shs first" >&2; exit 1; }
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+CC="$SYSROOT/lib/cc-riscv64-simpleos" \
+SIMPLEOS_SYSROOT="$SYSROOT" \
+SIMPLE_SIMPLE_CORE_PATH="build/os/simple-core-simpleos-riscv64" \
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 \
+"$COMPILER" native-build \
+  --source src/compiler --source src/lib --source src/app \
+  --backend "$BACKEND" \
+  --runtime-bundle simple-core \
+  --entry-closure \
+  --entry "$ENTRY" \
+  --target "$TARGET" \
+  --linker-script "$SYSROOT/share/simpleos/simpleos.ld" \
+  -o "$OUTPUT"
+
+[ -f "$OUTPUT" ] || { echo "FAILED: no output $OUTPUT" >&2; exit 1; }
+FILE_INFO="$(file "$OUTPUT")"
+case "$FILE_INFO" in
+  *"ELF 64-bit"*RISC-V*"statically linked"*) ;;
+  *) echo "FAILED: expected a static RISC-V ELF: $FILE_INFO" >&2; exit 1 ;;
+esac
+command -v readelf >/dev/null 2>&1 || { echo "FAILED: readelf is required" >&2; exit 1; }
+readelf -h "$OUTPUT" | grep -Eq 'Class:[[:space:]]+ELF64' || {
+  echo "FAILED: ELF header is not 64-bit" >&2
+  exit 1
+}
+readelf -h "$OUTPUT" | grep -Eq 'Machine:[[:space:]]+RISC-V' || {
+  echo "FAILED: ELF header is not RISC-V" >&2
+  exit 1
+}
+printf '%s\n' "$FILE_INFO"
+
+cat > "$OUTPUT.build_stamp" <<EOF
+target=$TARGET
+entry=$ENTRY
+entry_closure=true
+backend=$BACKEND
+runtime_bundle=simple-core
+runtime_archive=build/os/simple-core-simpleos-riscv64/libsimple_runtime.a (14 parts, cranelift --emit-archive --no-mangle)
+linker_script=$SYSROOT/share/simpleos/simpleos.ld (base 0x100000000)
+compiler=$COMPILER
+compiler_is_bootstrap_seed=$COMPILER_IS_SEED
+compiler_sha256=$(sha256sum "$COMPILER" | awk '{print $1}')
+artifact_sha256=$(sha256sum "$OUTPUT" | awk '{print $1}')
+built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+size=$(wc -c < "$OUTPUT")
+EOF
+echo "SUCCESS: $OUTPUT"

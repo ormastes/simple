@@ -1,0 +1,589 @@
+# Option-Receiver Mutating-Method Lint
+#
+# OPTME001: a `me` (mutating) method invoked through a receiver whose static
+#           type is `T?`                                            WARNING
+#
+# Calling a `me` method on an option-typed binding mutates a temporary unwrap
+# that is then discarded: the binding — and anything re-wrapped from it — keeps
+# the pre-call value. There is no error, no warning and no runtime signal; the
+# write is simply lost. See
+# doc/08_tracking/bug/me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+# for the measured idiom table and the repo-wide enumeration this rule replaces.
+#
+# Broken (flagged):
+#   val x = <T? expr>        then  x.mutate()      # alias, `val` and `var` alike
+#   if o != nil:                   o.mutate()      # a nil-test is not an unwrap
+#   if o.?:                        o.mutate()      # nor is an exists-check
+#   (re-storing the alias afterwards does NOT rescue the write)
+#
+# Safe (not flagged):
+#   val x = o.?              then  x.mutate()      # explicit unwrap
+#   val x = f()?             then  x.mutate()      # try-operator unwrap
+#   if val Some(x) = o:            x.mutate()      # destructure — correct form
+#   self.<non-optional>.mutate()                   # defect is option-specific
+#
+# Severity is WARNING, not DENY, on purpose: the tree still carries known
+# unfixed sites (the cuda/metal/opencl/rocm engine2d backends, left to their
+# owners because they cannot be exercised on the dev host), so a deny-level
+# rule would fail the build on day one.
+#
+# ---------------------------------------------------------------------------
+# Why this is a text/declaration scan and not an AST type query
+# ---------------------------------------------------------------------------
+# The arena AST's flat type-tag lane CANNOT represent `Optional<NamedClass>`:
+# `parser_absorb_optional_suffix` (src/compiler/10.frontend/core/parser.spl)
+# collapses `CudaBackend?` to bare `TYPE_OPTION` (14), erasing the class, and
+# there is no TYPE_OPTION_<named> encoding. So `decl_get_field_types` can say
+# "this field is optional" but never "optional of what" — which is exactly the
+# half the rule needs. The declaration text, by contrast, spells the class out.
+# `me`-ness IS available from the AST (`decl_get_is_async` doubles as the
+# method mode: 0=fn, 1=static, 2=me), but the method is usually declared in a
+# DIFFERENT file from the call, and lint is single-file, so the me-index has to
+# be supplied by the caller anyway.
+#
+# The index is therefore passed in: `check_option_me_call` is pure and local
+# (one call site, one receiver type, one declaration lookup — no dataflow
+# analysis). `check_option_me_call_source` builds a single-file index for the
+# `bin/simple lint <file>` path and for specs; `src/app/optme_lint/optme_scan.spl`
+# builds a repo-wide index for the cross-file sites.
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+pub struct OptionMeCallWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    binding: text
+    class_name: text
+    method: text
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+# ============================================================================
+# Small text helpers
+# ============================================================================
+
+fn _om_is_ident_char(ch: text) -> bool:
+    """True for identifier characters (alnum or underscore)."""
+    if ch == "_":
+        return true
+    val is_lower = ch >= "a" and ch <= "z"
+    val is_upper = ch >= "A" and ch <= "Z"
+    val is_digit = ch >= "0" and ch <= "9"
+    is_lower or is_upper or is_digit
+
+fn _om_indent(line: text) -> i64:
+    """Number of leading spaces on a raw source line."""
+    var i = 0
+    val n = line.len()
+    while i < n:
+        if line.substring(i, i + 1) == " ":
+            i = i + 1
+        else:
+            break
+    i
+
+fn _om_ident_at(s: text, start: i64) -> text:
+    """Longest identifier beginning at `start` ("" when none)."""
+    var i = start
+    var out = ""
+    val n = s.len()
+    while i < n:
+        val ch = s.substring(i, i + 1)
+        if _om_is_ident_char(ch):
+            out = out + ch
+            i = i + 1
+        else:
+            break
+    out
+
+fn _om_strip_pub(t: text) -> text:
+    """Drop a leading `pub ` visibility marker from an already-trimmed line."""
+    if t.starts_with("pub "):
+        return t.substring(4, t.len()).trim()
+    t
+
+fn _om_is_builtin(name: text) -> bool:
+    """Type names that are never a user class, so never an OPTME receiver."""
+    val builtins = "|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|text|str|char|void|byte|bytes|int|float|string|List|Dict|Set|Array|Map|Vec|Option|Result|Any|any|usize|isize|"
+    builtins.contains("|" + name + "|")
+
+fn _om_index_of(names: [text], want: text) -> i64:
+    var i = 0
+    while i < names.len():
+        if names[i] == want:
+            return i
+        i = i + 1
+    -1
+
+fn _om_remove_at(items: [text], at: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < items.len():
+        if i != at:
+            out.push(items[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Declaration recognisers
+# ============================================================================
+
+fn _om_class_header_name(t_in: text) -> text:
+    """Class name opened by a `class|struct|actor|object|impl` header line.
+
+    Handles `impl C:`, `impl Trait for C:` and `impl<T> C:`; returns "" when
+    the line is not a type-scope header."""
+    val t = _om_strip_pub(t_in)
+    if t.starts_with("class "):
+        return _om_ident_at(t, 6)
+    if t.starts_with("struct "):
+        return _om_ident_at(t, 7)
+    if t.starts_with("actor "):
+        return _om_ident_at(t, 6)
+    if t.starts_with("object "):
+        return _om_ident_at(t, 7)
+    if t.starts_with("impl ") or t.starts_with("impl<"):
+        var rest = t.substring(4, t.len())
+        if rest.starts_with("<"):
+            val gt = rest.find(">")
+            if gt < 0:
+                return ""
+            rest = rest.substring(gt + 1, rest.len())
+        rest = rest.trim()
+        val fpos = rest.find(" for ")
+        if fpos >= 0:
+            rest = rest.substring(fpos + 5, rest.len()).trim()
+        return _om_ident_at(rest, 0)
+    ""
+
+fn _om_def_name_after(t: text, kw: text) -> text:
+    """Method/function name declared by `<kw> NAME(` on a trimmed line."""
+    if not t.starts_with(kw):
+        return ""
+    var rest = t.substring(kw.len(), t.len()).trim()
+    if kw == "me " and rest.starts_with("fn "):
+        rest = rest.substring(3, rest.len()).trim()
+    val name = _om_ident_at(rest, 0)
+    if name == "":
+        return ""
+    val after = rest.substring(name.len(), rest.len())
+    if not after.starts_with("("):
+        return ""
+    name
+
+fn _om_me_method_name(t_in: text) -> text:
+    """`me NAME(` or `me fn NAME(` — Simple's explicit MUTABLE receiver form."""
+    _om_def_name_after(_om_strip_pub(t_in), "me ")
+
+fn _om_fn_me_receiver_name(t_in: text) -> text:
+    """`fn NAME(me)` / `fn NAME(me, ...)` — `me` written as the first parameter.
+
+    The parser promotes this to the same mutable-receiver mode as `me NAME()`
+    (parser_decls_use.parse_class_body_method, static_flag = 2)."""
+    val t = _om_strip_pub(t_in)
+    val name = _om_def_name_after(t, "fn ")
+    if name == "":
+        return ""
+    val open_at = t.find("(")
+    if open_at < 0:
+        return ""
+    val rest = t.substring(open_at + 1, t.len()).trim()
+    if not rest.starts_with("me"):
+        return ""
+    val tail = rest.substring(2, rest.len())
+    if tail.starts_with(")") or tail.starts_with(",") or tail.starts_with(":"):
+        return name
+    ""
+
+fn _om_is_def_line(t_in: text) -> bool:
+    """Any function/method definition header — a fresh local-binding scope."""
+    val t = _om_strip_pub(t_in)
+    if t.starts_with("static "):
+        return _om_def_name_after(t.substring(7, t.len()).trim(), "fn ") != ""
+    if _om_def_name_after(t, "fn ") != "":
+        return true
+    _om_def_name_after(t, "me ") != ""
+
+fn _om_opt_field(t_in: text) -> text:
+    """`[var|val|mut] NAME: Class?` field declaration -> "NAME::Class", else "".
+
+    Both the `var fld: C?` and the bare `fld: C?` struct-field spellings are
+    accepted; `C??` and builtin element types are rejected."""
+    var t = _om_strip_pub(t_in)
+    if t.starts_with("var "):
+        t = t.substring(4, t.len()).trim()
+    elif t.starts_with("val "):
+        t = t.substring(4, t.len()).trim()
+    elif t.starts_with("mut "):
+        t = t.substring(4, t.len()).trim()
+    val name = _om_ident_at(t, 0)
+    if name == "":
+        return ""
+    var rest = t.substring(name.len(), t.len()).trim()
+    if not rest.starts_with(":"):
+        return ""
+    rest = rest.substring(1, rest.len()).trim()
+    val ty = _om_ident_at(rest, 0)
+    if ty == "" or _om_is_builtin(ty):
+        return ""
+    var after = rest.substring(ty.len(), rest.len()).trim()
+    if not after.starts_with("?"):
+        return ""
+    after = after.substring(1, after.len()).trim()
+    if after == "" or after.starts_with("=") or after.starts_with("#"):
+        return name + "::" + ty
+    ""
+
+fn _om_ret_optional(t_in: text) -> text:
+    """`fn NAME(...) -> Class?:` -> "NAME::Class", else ""."""
+    val t = _om_strip_pub(t_in)
+    var name = _om_def_name_after(t, "fn ")
+    if name == "":
+        name = _om_def_name_after(t, "me ")
+    if name == "":
+        return ""
+    val arrow = t.find("->")
+    if arrow < 0:
+        return ""
+    var rest = t.substring(arrow + 2, t.len()).trim()
+    val ty = _om_ident_at(rest, 0)
+    if ty == "" or _om_is_builtin(ty):
+        return ""
+    rest = rest.substring(ty.len(), rest.len()).trim()
+    if not rest.starts_with("?"):
+        return ""
+    rest = rest.substring(1, rest.len()).trim()
+    if rest.starts_with(":"):
+        return name + "::" + ty
+    ""
+
+# ============================================================================
+# Enclosing-class map
+# ============================================================================
+
+fn _om_enclosing_classes(lines: [text]) -> [text]:
+    """Per-line enclosing class name ("" outside any type scope)."""
+    var out: [text] = []
+    var cur = ""
+    var cur_ind = -1
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val t = line.trim()
+        if t != "" and not t.starts_with("#"):
+            val ind = _om_indent(line)
+            val cn = _om_class_header_name(t)
+            if cn != "":
+                cur = cn
+                cur_ind = ind
+            elif cur != "" and ind <= cur_ind:
+                cur = ""
+        out.push(cur)
+        i = i + 1
+    out
+
+# ============================================================================
+# Index collection (one source file at a time; callers accumulate)
+# ============================================================================
+
+pub fn optme_collect_me_methods(source: text) -> [text]:
+    """Every mutable-receiver method declared in `source`, as "Class::method"."""
+    var out: [text] = []
+    val lines = source.split("\n")
+    val encl = _om_enclosing_classes(lines)
+    var i = 0
+    while i < lines.len():
+        val cls = encl[i]
+        if cls != "":
+            val t = lines[i].trim()
+            var m = _om_me_method_name(t)
+            if m == "":
+                m = _om_fn_me_receiver_name(t)
+            if m != "":
+                out.push(cls + "::" + m)
+        i = i + 1
+    out
+
+pub fn optme_collect_opt_fields(source: text) -> [text]:
+    """Every option-typed field of a named class, as "Class::field::Type"."""
+    var out: [text] = []
+    val lines = source.split("\n")
+    val encl = _om_enclosing_classes(lines)
+    var fn_ind = -1
+    var i = 0
+    while i < lines.len():
+        val cls = encl[i]
+        val raw = lines[i]
+        val t = raw.trim()
+        if t != "" and not t.starts_with("#"):
+            val ind = _om_indent(raw)
+            val is_def = _om_is_def_line(t)
+            if is_def:
+                fn_ind = ind
+            else:
+                if fn_ind >= 0 and ind <= fn_ind:
+                    fn_ind = -1
+                # A `name: Class?` line inside a method body is a LOCAL, not a
+                # field; only class-scope lines declare fields.
+                if cls != "" and fn_ind < 0 and ind > 0:
+                    val f = _om_opt_field(t)
+                    if f != "":
+                        out.push(cls + "::" + f)
+        i = i + 1
+    out
+
+pub fn optme_collect_ret_optionals(source: text) -> [text]:
+    """Every function declared `-> Class?`, as "fname::Class"."""
+    var out: [text] = []
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val r = _om_ret_optional(lines[i].trim())
+        if r != "":
+            out.push(r)
+        i = i + 1
+    out
+
+# ============================================================================
+# Binding parse
+# ============================================================================
+
+struct _OmBind:
+    ok: bool
+    name: text
+    ann: text
+    ann_opt: bool
+    rhs: text
+
+fn _om_parse_binding(t_in: text) -> _OmBind:
+    """Parse `val|var NAME[: Type[?]] = RHS` on a trimmed line."""
+    val empty = _OmBind(ok: false, name: "", ann: "", ann_opt: false, rhs: "")
+    val s = _om_strip_pub(t_in)
+    var rest = ""
+    if s.starts_with("val "):
+        rest = s.substring(4, s.len()).trim()
+    elif s.starts_with("var "):
+        rest = s.substring(4, s.len()).trim()
+    else:
+        return empty
+    val name = _om_ident_at(rest, 0)
+    if name == "":
+        return empty
+    rest = rest.substring(name.len(), rest.len()).trim()
+    var ann = ""
+    var ann_opt = false
+    if rest.starts_with(":"):
+        rest = rest.substring(1, rest.len()).trim()
+        ann = _om_ident_at(rest, 0)
+        rest = rest.substring(ann.len(), rest.len()).trim()
+        if rest.starts_with("?"):
+            ann_opt = true
+            rest = rest.substring(1, rest.len()).trim()
+    if not rest.starts_with("="):
+        return empty
+    var rhs = rest.substring(1, rest.len()).trim()
+    val hashpos = rhs.find("#")
+    if hashpos >= 0:
+        rhs = rhs.substring(0, hashpos).trim()
+    _OmBind(ok: true, name: name, ann: ann, ann_opt: ann_opt, rhs: rhs)
+
+fn _om_self_field(rhs: text) -> text:
+    """`self.F` / `me.F` / `this.F` (and nothing else) -> "F", else ""."""
+    var rest = ""
+    if rhs.starts_with("self."):
+        rest = rhs.substring(5, rhs.len())
+    elif rhs.starts_with("this."):
+        rest = rhs.substring(5, rhs.len())
+    elif rhs.starts_with("me."):
+        rest = rhs.substring(3, rhs.len())
+    else:
+        return ""
+    val f = _om_ident_at(rest, 0)
+    if f == "":
+        return ""
+    if rest.len() != f.len():
+        return ""
+    f
+
+fn _om_is_plain_ident(rhs: text) -> bool:
+    val id = _om_ident_at(rhs, 0)
+    id != "" and id.len() == rhs.len()
+
+fn _om_call_name(rhs: text) -> text:
+    """Callee name of a plain `[a.b.]name(...)` right-hand side, else ""."""
+    val open_at = rhs.find("(")
+    if open_at <= 0:
+        return ""
+    val head = rhs.substring(0, open_at)
+    var j = head.len()
+    while j > 0:
+        if _om_is_ident_char(head.substring(j - 1, j)):
+            j = j - 1
+        else:
+            break
+    head.substring(j, head.len())
+
+# ============================================================================
+# Main Entry Points
+# ============================================================================
+
+pub fn check_option_me_call(
+    file_path: text,
+    source: text,
+    me_keys: Dict<text, i64>,
+    opt_fields: Dict<text, text>,
+    field_owner: Dict<text, text>,
+    ret_opt: Dict<text, text>
+) -> [OptionMeCallWarning]:
+    """OPTME001 — mutating `me` call through an option-typed receiver.
+
+    `me_keys` holds "Class::method" for every mutable-receiver method,
+    `opt_fields` maps "Class::field" -> option element class, `field_owner`
+    maps a repo-unique bare field name -> option element class (fallback when
+    the enclosing class cannot be resolved), `ret_opt` maps a repo-unique
+    function name -> the class it returns as `Class?`. Build them with the
+    `optme_collect_*` helpers; `check_option_me_call_source` does that for a
+    single file."""
+    var out: [OptionMeCallWarning] = []
+    val lines = source.split("\n")
+    val encl = _om_enclosing_classes(lines)
+    var track_names: [text] = []
+    var track_types: [text] = []
+    var fn_ind = -1
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            i = i + 1
+            continue
+        val ind = _om_indent(line)
+        val is_def = _om_is_def_line(t)
+        if is_def or (fn_ind >= 0 and ind <= fn_ind):
+            fn_ind = if is_def: ind else: -1
+            track_names = []
+            track_types = []
+            i = i + 1
+            continue
+        if fn_ind < 0:
+            i = i + 1
+            continue
+
+        val b = _om_parse_binding(t)
+        if b.ok:
+            var ty = ""
+            # `x = o.?` and `x = f()?` unwrap for real — those are SAFE and
+            # must never be tracked (measured: arms D/E/F/J in the bug doc).
+            if not b.rhs.ends_with("?"):
+                if b.ann != "" and b.ann_opt and not _om_is_builtin(b.ann):
+                    ty = b.ann
+                else:
+                    val fld = _om_self_field(b.rhs)
+                    if fld != "":
+                        val key = encl[i] + "::" + fld
+                        if encl[i] != "" and opt_fields.contains_key(key):
+                            ty = opt_fields[key]
+                        elif field_owner.contains_key(fld):
+                            ty = field_owner[fld]
+                    if ty == "" and _om_is_plain_ident(b.rhs):
+                        val ai = _om_index_of(track_names, b.rhs)
+                        if ai >= 0:
+                            ty = track_types[ai]
+                    if ty == "":
+                        val callee = _om_call_name(b.rhs)
+                        if callee != "" and ret_opt.contains_key(callee):
+                            ty = ret_opt[callee]
+            val existing = _om_index_of(track_names, b.name)
+            if ty != "":
+                if existing >= 0:
+                    track_types[existing] = ty
+                else:
+                    track_names.push(b.name)
+                    track_types.push(ty)
+            elif existing >= 0:
+                track_names = _om_remove_at(track_names, existing)
+                track_types = _om_remove_at(track_types, existing)
+
+        # The call scan runs on EVERY statement line, binding lines included:
+        # `val installed = cuda.install_font_atlas_ptx(ptx)` is both a binding
+        # and a lost mutation, and skipping such lines hid 10 real sites
+        # (engine2d 296/2374, display_service 126/133/172/178/222,
+        # wm_access_cli 262) on the first repo-wide run of this rule.
+        var k = 0
+        while k < track_names.len():
+            val nm = track_names[k]
+            val cls = track_types[k]
+            val nlen = nm.len()
+            var p = 0
+            while p + nlen + 1 < t.len():
+                var matched = t.substring(p, p + nlen) == nm
+                if matched and p > 0:
+                    val prev = t.substring(p - 1, p)
+                    if _om_is_ident_char(prev) or prev == ".":
+                        matched = false
+                if matched and t.substring(p + nlen, p + nlen + 1) == ".":
+                    val meth = _om_ident_at(t, p + nlen + 1)
+                    val mend = p + nlen + 1 + meth.len()
+                    if meth != "" and mend < t.len() and t.substring(mend, mend + 1) == "(":
+                        if me_keys.contains_key(cls + "::" + meth):
+                            out.push(OptionMeCallWarning(
+                                code: "OPTME001",
+                                severity: "WARNING",
+                                message: "`{meth}` is a `me` (mutating) method but `{nm}` is `{cls}?`; the mutation is applied to a discarded temporary and is lost",
+                                hint: "destructure the option first — `if val Some({nm}) = <source>:` — then write the value back; a plain alias, a `!= nil` test and a `.?` existence test are NOT unwraps",
+                                binding: nm,
+                                class_name: cls,
+                                method: meth,
+                                line_num: i + 1,
+                                file_path: file_path
+                            ))
+                p = p + 1
+            k = k + 1
+        i = i + 1
+    out
+
+pub fn check_option_me_call_source(file_path: text, source: text) -> [OptionMeCallWarning]:
+    """Single-file OPTME001 check: builds the index from `source` alone.
+
+    This is what `bin/simple lint <file>` uses. It only resolves classes
+    declared in the SAME file; the repo-wide runner
+    (`src/app/optme_lint/optme_scan.spl`) supplies a cross-file index."""
+    var me_keys: Dict<text, i64> = {}
+    for key in optme_collect_me_methods(source):
+        me_keys[key] = 1
+    var opt_fields: Dict<text, text> = {}
+    var field_owner: Dict<text, text> = {}
+    for entry in optme_collect_opt_fields(source):
+        val first = entry.find("::")
+        if first > 0:
+            val cls = entry.substring(0, first)
+            val tail = entry.substring(first + 2, entry.len())
+            val second = tail.find("::")
+            if second > 0:
+                val fld = tail.substring(0, second)
+                val ty = tail.substring(second + 2, tail.len())
+                opt_fields[cls + "::" + fld] = ty
+                if field_owner.contains_key(fld):
+                    if field_owner[fld] != ty:
+                        field_owner[fld] = ""
+                else:
+                    field_owner[fld] = ty
+    var ret_opt: Dict<text, text> = {}
+    for entry in optme_collect_ret_optionals(source):
+        val sep = entry.find("::")
+        if sep > 0:
+            val fname = entry.substring(0, sep)
+            val ty = entry.substring(sep + 2, entry.len())
+            if ret_opt.contains_key(fname):
+                if ret_opt[fname] != ty:
+                    ret_opt[fname] = ""
+            else:
+                ret_opt[fname] = ty
+    check_option_me_call(file_path, source, me_keys, opt_fields, field_owner, ret_opt)

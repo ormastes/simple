@@ -1,0 +1,74 @@
+"""
+# Claude Full InProcessTransport
+
+## Overview
+
+Checks the in-process linked MCP transport pair: peer wiring, message delivery,
+idempotent close, peer close propagation, and send-after-close failure.
+
+**Requirements:** N/A - strict llm_caret Claude CLI parity lane.
+**Plan:** N/A - target selected from strict checker output.
+**Design:** N/A - source mirror for `tmp/claude/claude-code-main/src/services/mcp/InProcessTransport.ts`.
+**Research:** N/A - upstream TypeScript file is the source reference.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.services.mcp.InProcessTransport.*
+
+describe "Claude full InProcessTransport":
+    it "should create linked peers":
+        step("Create a linked client/server pair")
+        val pair = createLinkedTransportPair()
+        expect(pair.client.peerIndex).to_equal(1)
+        expect(pair.server.peerIndex).to_equal(0)
+        expect(pair.client.closed).to_equal(false)
+
+    it "should deliver client messages to server":
+        step("Send a message from client to server")
+        val pair = createLinkedTransportPair()
+        expect(pair.clientSend("{\"id\":1}")).to_equal(true)
+        expect(pair.server.messages[0]).to_equal("{\"id\":1}")
+
+    it "should deliver server messages to client":
+        step("Send a response from server to client")
+        val pair = createLinkedTransportPair()
+        expect(pair.serverSend("{\"result\":true}")).to_equal(true)
+        expect(pair.client.messages[0]).to_equal("{\"result\":true}")
+
+    it "should close both sides from client":
+        step("Close client and observe peer close")
+        val pair = createLinkedTransportPair()
+        pair.closeClient()
+        expect(pair.client.closed).to_equal(true)
+        expect(pair.server.closed).to_equal(true)
+        expect(pair.client.closeCount).to_equal(1)
+        expect(pair.server.closeCount).to_equal(1)
+
+    it "should close both sides from server":
+        step("Close server and observe peer close")
+        val pair = createLinkedTransportPair()
+        pair.closeServer()
+        expect(pair.client.closed).to_equal(true)
+        expect(pair.server.closed).to_equal(true)
+
+    it "should make close idempotent":
+        step("Close the same side twice")
+        val pair = createLinkedTransportPair()
+        pair.closeClient()
+        pair.closeClient()
+        expect(pair.client.closeCount).to_equal(1)
+        expect(pair.server.closeCount).to_equal(1)
+
+    it "should reject send after close":
+        step("Close and then send")
+        val pair = createLinkedTransportPair()
+        pair.closeClient()
+        expect(pair.clientSend("{\"id\":2}")).to_equal(false)
+        expect(pair.client.error).to_equal("Transport is closed")
+        expect(pair.server.messages.len()).to_equal(0)
+
+    it "should expose source-backed constants":
+        step("Pin source surface")
+        val transport = InProcessTransport.new()
+        transport.start()
+        expect(inProcessTransportSourceLinesModeled()).to_equal(63)

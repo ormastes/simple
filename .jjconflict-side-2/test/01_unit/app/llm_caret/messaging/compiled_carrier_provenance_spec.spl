@@ -1,0 +1,34 @@
+# @req REQ-LLM-MSG-013 REQ-LLM-MSG-016
+use std.spec.*
+use std.io_runtime.{mkdir_p, file_write, file_delete}
+use app.llm_caret.messaging.database_execution.{DatabaseArtifactKind, DatabaseExecutionPlan}
+use app.llm_caret.messaging.cli.{messaging_artifact_fresh, messaging_artifact_provenance}
+
+describe "LLM Caret compiled carrier provenance":
+    it "rejects artifacts without exact source dependency and compiler provenance":
+        step("Create an isolated carrier fixture without invoking the compiler")
+        val root = "build/verify/llm-caret-messaging-provenance"
+        mkdir_p(root)
+        val source = root + "/worker.spl"
+        val dependency = root + "/database.spl"
+        val artifact = root + "/worker.bin"
+        file_write(source, "fn main() -> i64: 0\n")
+        file_write(dependency, "fn database_marker() -> text: \"pure-simple\"\n")
+        file_write(artifact, "fixture-only")
+        val plan = DatabaseExecutionPlan(kind: DatabaseArtifactKind.NativeExecutable,
+            artifact_path: artifact, source_path: source,
+            requires_fresh_artifact: true, reason: "test")
+        expect(messaging_artifact_fresh(plan, [dependency])).to_equal(false)
+
+        step("Record the exact compiler source and dependency identity")
+        val provenance = messaging_artifact_provenance(plan, [dependency], "bin/simple")
+        file_write(artifact + ".provenance.sdn", provenance)
+        expect(messaging_artifact_fresh(plan, [dependency])).to_equal(true)
+
+        step("Reject a forged or stale provenance record")
+        file_write(artifact + ".provenance.sdn", provenance + "unexpected=true\n")
+        expect(messaging_artifact_fresh(plan, [dependency])).to_equal(false)
+        file_delete(artifact + ".provenance.sdn")
+        file_delete(artifact)
+        file_delete(dependency)
+        file_delete(source)

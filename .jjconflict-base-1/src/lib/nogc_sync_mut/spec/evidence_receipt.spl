@@ -1,0 +1,187 @@
+# SimpleOS Fail-Closed Evidence Receipt (master plan §21.4, lane A11)
+#
+# One SDN evidence receipt per release-gate run. The struct mirrors the
+# §21.4 field list exactly; the verification functions implement the
+# HARD fail-closed rules a gate must apply before trusting a receipt:
+#
+#   - missing artifact           -> FAIL
+#   - stale artifact              -> FAIL
+#   - hosted fallback in a bare-metal test    -> FAIL
+#   - interpreter fallback in a native-perf test -> FAIL
+#   - an unsupported architecture cannot silently pass
+#
+# All verification functions are PURE: they take previously-observed
+# facts (path_exists, mtime, run_start) as PARAMETERS instead of doing
+# their own IO. That keeps the module usable from any tier (interp,
+# native, bootstrap) and fully unit-testable without a filesystem.
+#
+# `target` records the declared execution class the receipt is making a
+# claim about (e.g. "bare_metal", "native_perf", "hosted", "generic").
+# `machine_or_qemu` records what actually produced the result (e.g.
+# "board:kv260", "qemu:riscv64", "hosted_fallback", "interpreter_fallback",
+# "unsupported", "blocked"). Honesty and arch-support rules are derived
+# from the relationship between these two fields plus `result` -- no
+# extra fields are needed beyond the §21.4 list.
+
+struct EvidenceReceipt:
+    commit: text
+    source_digest: text
+    compiler_digest: text
+    image_digest: text
+    target: text
+    firmware: text
+    machine_or_qemu: text
+    test_id: text
+    test_version: text
+    start_time: i64
+    duration: i64
+    result: text
+    metrics: text
+    logs: text
+    artifacts: text
+    failure_reason: text
+
+# Plain outcome struct for a single rule check. Avoids cross-module
+# Result<T, E> construction, which does not resolve reliably from an
+# imported method body (see landmines).
+struct RuleOutcome:
+    passed: bool
+    rule: text
+    reason: text
+
+# Aggregate outcome for receipt_verify: fail-closed, first failing rule
+# wins (distinct reason per rule), a receipt only passes when every
+# rule passes.
+struct VerifyOutcome:
+    passed: bool
+    rule: text
+    reason: text
+
+fn _ok(rule: text) -> RuleOutcome:
+    RuleOutcome(passed: true, rule: rule, reason: "ok")
+
+fn _fail(rule: text, reason: text) -> RuleOutcome:
+    RuleOutcome(passed: false, rule: rule, reason: reason)
+
+# Rule 1: missing artifact = FAIL.
+# `path_exists` is the caller-observed existence check for the
+# receipt's declared `artifacts` path (or the AND of all declared
+# artifacts if there are several -- the caller does that IO, this
+# function stays pure).
+fn receipt_artifact_present(receipt: EvidenceReceipt, path_exists: bool) -> RuleOutcome:
+    if receipt.artifacts == "":
+        return _fail("artifact_present", "missing_artifact: no artifact declared on receipt")
+    if not path_exists:
+        return _fail("artifact_present", "missing_artifact: declared artifact not found on disk: " + receipt.artifacts)
+    _ok("artifact_present")
+
+# Rule 2: stale artifact = FAIL (not pass).
+# An artifact that predates the run it is supposedly evidence for is
+# leftover from a previous run and must not be trusted.
+fn receipt_artifact_fresh(receipt: EvidenceReceipt, artifact_mtime: i64, run_start: i64) -> RuleOutcome:
+    if artifact_mtime < run_start:
+        return _fail("artifact_fresh", "stale_artifact: artifact mtime " + artifact_mtime.to_text() + " predates run start " + run_start.to_text())
+    _ok("artifact_fresh")
+
+# Rule 3: an expected string without causally verified behavior is a
+# FAIL. Here that means: a receipt cannot claim a bare-metal result
+# while recording a hosted fallback, and cannot claim a native-perf
+# result while recording an interpreter fallback.
+fn receipt_execution_honest(receipt: EvidenceReceipt) -> RuleOutcome:
+    if receipt.target == "bare_metal" and receipt.machine_or_qemu == "hosted_fallback":
+        return _fail("execution_honest", "hosted_fallback_in_baremetal: bare_metal target recorded a hosted fallback execution")
+    if receipt.target == "native_perf" and receipt.machine_or_qemu == "interpreter_fallback":
+        return _fail("execution_honest", "interpreter_fallback_in_native_perf: native_perf target recorded an interpreter fallback execution")
+    _ok("execution_honest")
+
+# Rule 4: an unsupported/unavailable architecture must be recorded as
+# unsupported/blocked and must NEVER be counted as PASS.
+fn receipt_arch_supported(receipt: EvidenceReceipt) -> RuleOutcome:
+    val unsupported = receipt.machine_or_qemu == "unsupported" or receipt.machine_or_qemu == "blocked"
+    if unsupported and receipt.result == "PASS":
+        return _fail("arch_supported", "unsupported_arch_claims_pass: machine_or_qemu=" + receipt.machine_or_qemu + " but result=PASS")
+    _ok("arch_supported")
+
+# Fail-closed composite: run every rule in order, stop at (and report)
+# the first failure. Only passes when every rule passes.
+fn receipt_verify(receipt: EvidenceReceipt, path_exists: bool, artifact_mtime: i64, run_start: i64) -> VerifyOutcome:
+    val r1 = receipt_artifact_present(receipt, path_exists)
+    if not r1.passed:
+        return VerifyOutcome(passed: false, rule: r1.rule, reason: r1.reason)
+
+    val r2 = receipt_artifact_fresh(receipt, artifact_mtime, run_start)
+    if not r2.passed:
+        return VerifyOutcome(passed: false, rule: r2.rule, reason: r2.reason)
+
+    val r3 = receipt_execution_honest(receipt)
+    if not r3.passed:
+        return VerifyOutcome(passed: false, rule: r3.rule, reason: r3.reason)
+
+    val r4 = receipt_arch_supported(receipt)
+    if not r4.passed:
+        return VerifyOutcome(passed: false, rule: r4.rule, reason: r4.reason)
+
+    VerifyOutcome(passed: true, rule: "", reason: "ok")
+
+# Convenience builder for consumers that only care about the fail-closed
+# artifact rules: fills digest/log bookkeeping fields with explicit
+# placeholders so a gate spec can build a receipt in one line. Still pure
+# (no IO); callers observe path_exists/mtime themselves and pass them to
+# receipt_verify.
+fn receipt_new(test_id: text, target: text, machine_or_qemu: text, result: text, artifacts: text) -> EvidenceReceipt:
+    EvidenceReceipt(
+        commit: "unrecorded",
+        source_digest: "unrecorded",
+        compiler_digest: "unrecorded",
+        image_digest: "unrecorded",
+        target: target,
+        firmware: "none",
+        machine_or_qemu: machine_or_qemu,
+        test_id: test_id,
+        test_version: "1",
+        start_time: 0,
+        duration: 0,
+        result: result,
+        metrics: "",
+        logs: "",
+        artifacts: artifacts,
+        failure_reason: "")
+
+# Machine-checkable verdict string for a verify outcome: "PASS" only when
+# every fail-closed rule passed, otherwise "FAIL". Gates should compare
+# against this string rather than re-deriving pass/fail themselves.
+fn verify_verdict(outcome: VerifyOutcome) -> text:
+    if outcome.passed:
+        return "PASS"
+    "FAIL"
+
+# Serialize a receipt to SDN text. Built by plain string concatenation
+# (never as a single brace-literal template) -- SDN reserves `{`/`}`
+# for its own block structure and `}}` collapses to `}` inside a
+# Simple string literal, so a literal-brace template silently
+# corrupts the output.
+fn receipt_to_sdn(receipt: EvidenceReceipt) -> text:
+    var out = "evidence_receipt:\n"
+    out = out + "  commit: " + receipt.commit + "\n"
+    out = out + "  source_digest: " + receipt.source_digest + "\n"
+    out = out + "  compiler_digest: " + receipt.compiler_digest + "\n"
+    out = out + "  image_digest: " + receipt.image_digest + "\n"
+    out = out + "  target: " + receipt.target + "\n"
+    out = out + "  firmware: " + receipt.firmware + "\n"
+    out = out + "  machine_or_qemu: " + receipt.machine_or_qemu + "\n"
+    out = out + "  test_id: " + receipt.test_id + "\n"
+    out = out + "  test_version: " + receipt.test_version + "\n"
+    out = out + "  start_time: " + receipt.start_time.to_text() + "\n"
+    out = out + "  duration: " + receipt.duration.to_text() + "\n"
+    out = out + "  result: " + receipt.result + "\n"
+    out = out + "  metrics: " + receipt.metrics + "\n"
+    out = out + "  logs: " + receipt.logs + "\n"
+    out = out + "  artifacts: " + receipt.artifacts + "\n"
+    out = out + "  failure_reason: " + receipt.failure_reason + "\n"
+    out
+
+export EvidenceReceipt, RuleOutcome, VerifyOutcome
+export receipt_artifact_present, receipt_artifact_fresh
+export receipt_execution_honest, receipt_arch_supported
+export receipt_verify, receipt_to_sdn
+export receipt_new, verify_verdict

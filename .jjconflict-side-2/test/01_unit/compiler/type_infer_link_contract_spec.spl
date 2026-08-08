@@ -1,0 +1,32 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.hir.hir.{HirSymbol, HirType, HirTypeKind, ScopeId, SymbolId, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.traits.trait_def.{MethodSignature, TraitDef}
+use compiler.traits.trait_solver.{ObligationCause, TraitSolver}
+
+val EFFECTS_PATH = "src/compiler/30.types/type_infer/inference_effects.spl"
+val EXPR_PATH = "src/compiler/30.types/type_infer/inference_expr.spl"
+val TRAIT_SOLVER_PATH = "src/compiler/25.traits/trait_solver.spl"
+
+describe "type inference link contracts":
+    it "finds registered trait methods":
+        var solver = TraitSolver.create()
+        val trait_name = HirSymbol(id: SymbolId(id: 42), name: "Render", kind: SymbolKind.Trait, type_: nil, scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public, is_public: true, is_mutable: false, defining_module: nil)
+        val trait_def = TraitDef(name: trait_name, methods: [MethodSignature(name: "render", params: [], return_type: HirType(kind: HirTypeKind.Unit, span: Span.empty()), effects: [], span: Span.empty())], defaults: [], supertraits: [], type_params: [], assoc_types: {}, span: Span.empty())
+        solver.add_trait(trait_def)
+        val found = solver.find_trait_for_method("render")
+        expect(found != nil).to_equal(true)
+        expect(found.unwrap().id.id).to_equal(42)
+        expect(solver.find_trait_for_method("missing")).to_be_nil()
+
+    it "binds effect accumulation to its owner module":
+        val effects = file_read(EFFECTS_PATH)
+        val expr = file_read(EXPR_PATH)
+        val trait_solver = file_read(TRAIT_SOLVER_PATH)
+        expect(effects).to_contain("me accumulate_effect(effect: Effect):")
+        expect(effects).to_contain("self.merge_effects(self.current_function_effects, [effect])")
+        expect(expr).to_contain("use compiler.types.type_infer.inference_effects.*")
+        expect(trait_solver).to_contain("MethodCall(HirSymbol, text)")
+        expect(ObligationCause.MethodCall(trait_name, "render").description()).to_equal("method call Render.render")

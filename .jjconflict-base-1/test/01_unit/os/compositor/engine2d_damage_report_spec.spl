@@ -1,0 +1,117 @@
+# @tag: compositor, engine2d, glass, damage
+# @cover src/os/compositor/compositor_engine2d.spl 20%
+#
+# WS-D3 §9 fix — explicit damage-reporting contract.
+#
+# `Engine2dCompositorBackend.get_pixel_buffer()` returns a LIVE ALIAS to the
+# backend's own pixel mirror; `glass_dispatch.spl`'s cap_* helpers mutate
+# that alias in place. Damage tracking cannot safely infer what changed by
+# diffing the aliased buffer (see
+# `doc/03_plan/os/simpleos/screens/ws_d3_damage_present_investigation.md`
+# §9), so each mutator now calls `backend.report_damage(x, y, w, h)`
+# explicitly with the region it just touched, instead of relying on the
+# buffer alias for a damage signal.
+#
+# This spec proves two things about that fix:
+#   1. Correctness is unaffected — report_damage only appends to a side
+#      table; it must not change a single rendered pixel.
+#   2. The damage signal is now real — after a mutation, the backend's
+#      damage table records a rect covering the touched region.
+#
+# A sabotage pass (report of what happens if a mutator "forgets" to call
+# report_damage) is described in the accompanying report; it is not
+# encoded as a permanent test because it requires temporarily reverting a
+# source line, which the runner cannot do safely per-example.
+
+use std.spec.{describe, context, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
+
+fn _make_backend(w: i32, h: i32, fill: u32) -> Engine2dCompositorBackend:
+    var engine = Engine2D.create_with_backend(w, h, "cpu")
+    engine.clear(fill)
+    engine.present()
+    Engine2dCompositorBackend.create(engine)
+
+describe "Engine2dCompositorBackend explicit damage report (WS-D3 fix)":
+    """Each glass mutator reports its own damage instead of relying on
+    the live-aliased buffer for an inferred signal."""
+
+    context "pixel correctness is unaffected":
+
+        it "report_damage() alone never changes a rendered pixel":
+            """report_damage() only appends to the side damage table; it
+            must be a pure bookkeeping call. Sample every pixel before and
+            after calling it directly (with no mutation in between) on a
+            backend that was already mutated by a real glass op."""
+            val backend = _make_backend(8, 8, 0xFF000000)
+            cap_blend_rect(backend, 0, 0, 4, 4, 0xFFFFFFFF, 128u8)
+            var before: [u32] = []
+            var y = 0
+            while y < 8:
+                var x = 0
+                while x < 8:
+                    before.push(cap_read_pixel(backend, x, y))
+                    x = x + 1
+                y = y + 1
+
+            step("Call report_damage several more times with no pixel mutation in between")
+            backend.report_damage(0, 0, 4, 4)
+            backend.report_damage(2, 2, 3, 3)
+            backend.report_damage(100, 100, 4, 4)
+
+            y = 0
+            var i = 0
+            while y < 8:
+                var x = 0
+                while x < 8:
+                    expect(cap_read_pixel(backend, x, y)).to_equal(before[i])
+                    x = x + 1
+                    i = i + 1
+                y = y + 1
+
+    context "damage signal is real":
+
+        it "records zero damage rects on a fresh backend":
+            val backend = _make_backend(8, 8, 0xFF000000)
+            expect(backend.damage_rect_count()).to_equal(0)
+
+        it "cap_blend_rect reports the exact rect it touched":
+            val backend = _make_backend(8, 8, 0xFF000000)
+            cap_blend_rect(backend, 1, 2, 3, 4, 0xFFFFFFFF, 128u8)
+            expect(backend.damage_rect_count()).to_equal(1)
+            val rect = backend.damage_rect_at(0)
+            expect(rect.0).to_equal(1)
+            expect(rect.1).to_equal(2)
+            expect(rect.2).to_equal(3)
+            expect(rect.3).to_equal(4)
+
+        it "cap_gradient_v and cap_blur_region each append their own rect":
+            val backend = _make_backend(8, 8, 0xFF808080)
+            cap_gradient_v(backend, 0, 0, 4, 8, 0xFF000000, 0xFFFFFFFF)
+            cap_blur_region(backend, 0, 0, 4, 4, 1u32)
+            expect(backend.damage_rect_count()).to_equal(2)
+
+        it "clips a rect that overhangs the backend bounds":
+            step("A rect requested past the right/bottom edge is clipped, not dropped or overcounted")
+            val backend = _make_backend(4, 4, 0xFF000000)
+            cap_blend_rect(backend, 2, 2, 10, 10, 0xFFFFFFFF, 200u8)
+            expect(backend.damage_rect_count()).to_equal(1)
+            val rect = backend.damage_rect_at(0)
+            expect(rect.0).to_equal(2)
+            expect(rect.1).to_equal(2)
+            expect(rect.2).to_equal(2)
+            expect(rect.3).to_equal(2)
+
+        it "drops a fully out-of-bounds report instead of recording an empty rect":
+            val backend = _make_backend(4, 4, 0xFF000000)
+            backend.report_damage(100, 100, 4, 4)
+            expect(backend.damage_rect_count()).to_equal(0)
+
+        it "clear_damage() resets the table":
+            val backend = _make_backend(8, 8, 0xFF000000)
+            cap_blend_rect(backend, 0, 0, 2, 2, 0xFFFFFFFF, 128u8)
+            expect(backend.damage_rect_count()).to_equal(1)
+            backend.clear_damage()
+            expect(backend.damage_rect_count()).to_equal(0)

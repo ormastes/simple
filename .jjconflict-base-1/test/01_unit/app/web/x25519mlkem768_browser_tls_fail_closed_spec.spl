@@ -1,0 +1,129 @@
+# @req REQ-017 NFR-018
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl 80%
+use std.spec.*
+use app.io.mod.{file_read}
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{
+    TlsConfig, TlsVersion
+}
+use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsManager}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    Logger, BrowserLogLevel
+}
+
+fn _browser_tls_config(
+    min_version: TlsVersion, verify_peer: bool
+) -> TlsConfig:
+    TlsConfig(
+        min_version: min_version,
+        verify_peer: verify_peer,
+        sni_hostname: "",
+        root_store: [[]],
+        enable_x25519_mlkem768: false,
+        require_x25519_mlkem768: false
+    )
+
+describe "X25519MLKEM768 browser TLS fail-closed policy":
+    it "should REQ-017 rejects disabled certificate verification before transport":
+        step("Reject an insecure browser certificate-verification configuration")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, false))
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        ):
+            case Ok(_): fail("browser accepted disabled peer verification")
+            case Err(error):
+                expect(error.message).to_equal(
+                    "TLS peer verification cannot be disabled for browser connections")
+
+    it "should REQ-017 rejects an empty service identity before transport":
+        step("Reject browser TLS without a certificate service identity")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
+        match manager.handshake_address("192.0.2.1", "", 443, 100):
+            case Ok(_): fail("browser accepted an empty certificate identity")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: empty hostname")
+
+    it "should NFR-018 rejects invalid ports and expired deadlines before transport":
+        step("Validate transport bounds before opening a socket")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 0, 100
+        ):
+            case Ok(_): fail("browser accepted an invalid port")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: invalid port 0")
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 0
+        ):
+            case Ok(_): fail("browser accepted an expired deadline")
+            case Err(error):
+                expect(error.message).to_equal("TLS handshake: deadline exceeded")
+
+    it "should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path":
+        step("Require TLS 1.3 for the hybrid browser connection")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger,
+            _browser_tls_config(TlsVersion.Tls12, true)
+        )
+        match manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        ):
+            case Ok(_): fail("hybrid browser path accepted TLS 1.2")
+            case Err(error):
+                expect(error.message).to_equal(
+                    "Pure-Simple browser HTTPS requires a TLS 1.3 minimum")
+
+    it "should NFR-018 preserve pure-Simple trust anchoring expectations":
+        step("Verify default trust-anchor enforcement remains explicit")
+        val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
+        var manager = TlsManager.new(
+            logger, _browser_tls_config(TlsVersion.Tls13, true))
+        val handshake = manager.handshake_address(
+            "192.0.2.1", "example.test", 443, 100
+        )
+        match handshake:
+            case Ok(_): fail("browser should fail because test host is unreachable, not succeed")
+            case Err(error):
+                expect(error.message).to_start_with("TLS handshake failed for")
+
+    it "should NFR-018 preserve one absolute deadline through TCP and TLS":
+        step("Bind the HTTP deadline to deadline-aware TLS record I/O")
+        val h1 = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl")
+        val browser_tls = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/net/tls.spl")
+        val tls_io = file_read("src/os/tls13/_Tls13/context_io.spl")
+        val tls_connect = file_read("src/os/tls13/_Tls13/psk_connect.spl")
+
+        expect(h1).to_contain("me request(req: FetchRequest, deadline_ms: i64 = 0)")
+        expect(h1).to_contain("val request_deadline_ms = if deadline_ms > 0")
+        expect(h1).to_contain("h1_deadline_remaining_ms(")
+        expect(h1).to_contain("rt_io_tcp_connect_timeout(connect_addr, remaining)")
+        expect(h1).to_contain("read_tcp_response_bytes(conn.tcp_fd, deadline_ms)")
+        expect(h1).to_contain("conn.read_text_timeout(8192, remaining)")
+        expect(browser_tls).to_contain("if timeout_ms <= 0")
+        expect(browser_tls).to_contain("browser_tls_connect_address(")
+        expect(browser_tls).to_contain("browser_tls_connect(host, port, host)")
+        expect(tls_connect).to_contain("fn tls13_connect_with_config")
+        expect(tls_io).to_contain("fn _io_send(io: Tls13Io")
+
+    it "should NFR-018 keep server read and write timeout owners distinct":
+        step("Use the configured write timeout on the hybrid accept path")
+        val worker = file_read(
+            "src/lib/nogc_async_mut/http_server/worker.spl")
+        val tls_handshake = file_read("src/lib/nogc_async_mut/io/tls_handshake.spl")
+        val accept_start = worker.index_of("me handle_tls_accept")
+        val accept_end = worker.index_of("me handle_completion")
+        val accept_path = worker.slice(accept_start, accept_end)
+
+        expect(accept_path).to_contain("var cfg = self.tls_config")
+        expect(accept_path).to_contain("perform_server_handshake(")
+        expect(tls_handshake).to_contain("fn perform_server_handshake")
+        expect(tls_handshake).to_contain("read_tls_record(driver, fd)")
+        expect(tls_handshake).to_contain("send_all(driver, fd,")

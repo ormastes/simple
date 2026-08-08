@@ -1,0 +1,68 @@
+@no_gc
+"""Canonical two-hook DirectX frame/readback facade."""
+
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32, raw_write_i64}
+
+#[runtime_intrinsics]
+extern fn rt_directx_execute_readback_checked(width: i64, height: i64, words_ptr: i64, words_len: i64, out_ptr: i64, out_len: i64) -> i64
+extern fn rt_directx_hardware_adapter_identity() -> i64
+
+class DirectXCheckedReadback:
+    status: i64
+    completed: bool
+    completion_known: bool
+    backend_handle: i64
+    device_identity: i64
+    pixels: [u32]
+
+fn directx_execute_readback_checked(width: i32, height: i32, words: [u32]) -> DirectXCheckedReadback:
+    val pixel_count = width.to_i64() * height.to_i64()
+    if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647 or words.len() < 4 or words.len().to_i64() > 268435455:
+        return DirectXCheckedReadback(status: 0, completed: false, completion_known: true, backend_handle: 0, device_identity: 0, pixels: [])
+
+    val words_bytes = words.len().to_i64() * 8
+    val output_words = pixel_count + 2
+    val output_bytes = output_words * 4
+    val words_ptr = raw_alloc(words_bytes)
+    val output_ptr = raw_alloc(output_bytes)
+    if words_ptr == 0 or output_ptr == 0:
+        if output_ptr != 0:
+            raw_free(output_ptr, output_bytes)
+        if words_ptr != 0:
+            raw_free(words_ptr, words_bytes)
+        return DirectXCheckedReadback(status: 0, completed: false, completion_known: true, backend_handle: 0, device_identity: 0, pixels: [])
+
+    var i = 0
+    while i < words.len():
+        raw_write_i64(words_ptr, i.to_i64() * 8, words[i].to_i64())
+        i = i + 1
+
+    val status = rt_directx_execute_readback_checked(width.to_i64(), height.to_i64(), words_ptr, words.len().to_i64(), output_ptr, output_words)
+    var device_identity: i64 = 0
+    var pixels: [u32] = []
+    if status > 0:
+        val identity_low = raw_read_i32(output_ptr, 0).to_u32().to_u64()
+        val identity_high = raw_read_i32(output_ptr, 4).to_u32().to_u64()
+        device_identity = (identity_low | (identity_high << 32u32)).to_i64()
+        i = 0
+        while i.to_i64() < pixel_count:
+            pixels.push(raw_read_i32(output_ptr, (i.to_i64() + 2) * 4) as u32)
+            i = i + 1
+
+    raw_free(output_ptr, output_bytes)
+    raw_free(words_ptr, words_bytes)
+    DirectXCheckedReadback(
+        status: status,
+        completed: status > 0,
+        completion_known: status >= 0,
+        backend_handle: if status > 0: status else: 0,
+        device_identity: if status > 0: device_identity else: 0,
+        pixels: pixels
+    )
+
+fn directx_hardware_adapter_identity() -> i64:
+    val identity = rt_directx_hardware_adapter_identity()
+    if identity > 0: identity else: 0
+
+export DirectXCheckedReadback
+export directx_execute_readback_checked, directx_hardware_adapter_identity

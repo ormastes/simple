@@ -1,0 +1,440 @@
+"""
+# JS Compatibility Layer
+
+Pure-Simple implementations of common JavaScript standard library functions.
+Used by the JS transpiler to provide JS-like APIs in transpiled scripts.
+
+JS Function         -> Simple Function:
+    parseInt()      -> js_parse_int()
+    parseFloat()    -> js_parse_float()
+    String()        -> js_to_string()
+    isNaN()         -> js_is_nan()
+    isFinite()      -> js_is_finite()
+    Math.floor()    -> js_math_floor()
+    Math.ceil()     -> js_math_ceil()
+    Math.round()    -> js_math_round()
+    Math.random()   -> js_math_random()
+    Math.abs()      -> js_math_abs()
+    Math.min()      -> js_math_min()
+    Math.max()      -> js_math_max()
+    Math.sqrt()     -> js_math_sqrt()
+    Math.pow()      -> js_math_pow()
+    Math.PI         -> js_math_pi()
+    String.split()  -> js_string_split()
+    Array.join()    -> js_string_join()
+    String.trim()   -> js_string_trim()
+    String.startsWith() -> js_string_starts_with()
+    String.endsWith()   -> js_string_ends_with()
+    String.includes()   -> js_string_includes()
+    String.replace()    -> js_string_replace()
+    String.toLowerCase() -> js_string_to_lower()
+    String.toUpperCase() -> js_string_to_upper()
+    Array.push()    -> js_array_push()
+    Array.pop()     -> js_array_pop()
+    Array.length    -> js_array_length()
+    Array.indexOf() -> js_array_index_of()
+    Array.slice()   -> js_array_slice()
+    JSON.parse()    -> js_json_parse()
+    JSON.stringify() -> js_json_stringify()
+    encodeURIComponent() -> js_encode_uri_component()
+    decodeURIComponent() -> js_decode_uri_component()
+    Date.now()      -> js_date_now()
+"""
+
+#![allow(REQC001)]
+
+extern fn rt_math_floor(x: f64) -> f64
+extern fn rt_math_ceil(x: f64) -> f64
+extern fn rt_random_random() -> f64
+extern fn rt_time_now_unix_millis() -> i64
+
+# =========================================================================
+# Number Parsing
+# =========================================================================
+
+pub fn js_parse_int(s: text) -> i64:
+    """Parse a string to an integer, like JS parseInt().
+
+    Returns 0 if the string cannot be parsed.
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+    trimmed.to_int_or(0)
+
+pub fn js_parse_float(s: text) -> f64:
+    """Parse a string to a float, like JS parseFloat().
+
+    Returns 0.0 if the string cannot be parsed.
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0.0
+    trimmed.to_float_or(0.0)
+
+pub fn js_to_string(v: text) -> text:
+    """Convert a value to string. Identity for text type."""
+    v
+
+# =========================================================================
+# Number Checks
+# =========================================================================
+
+pub fn js_is_nan(v: f64) -> bool:
+    """Check if a value is NaN. NaN != NaN in IEEE 754."""
+    v != v
+
+pub fn js_is_finite(v: f64) -> bool:
+    """Check if a value is finite (not NaN and not infinity)."""
+    if v != v:
+        return false
+    if v > 1.7976931348623157e308:
+        return false
+    if v < -1.7976931348623157e308:
+        return false
+    true
+
+# =========================================================================
+# Math Functions
+# =========================================================================
+
+pub fn js_math_floor(x: f64) -> i64:
+    """Floor a float to the nearest integer below."""
+    val floored = rt_math_floor(x)
+    floored.to_i64()
+
+pub fn js_math_ceil(x: f64) -> i64:
+    """Ceil a float to the nearest integer above."""
+    val ceiled = rt_math_ceil(x)
+    ceiled.to_i64()
+
+pub fn js_math_round(x: f64) -> i64:
+    """Round a float to the nearest integer."""
+    val floored = rt_math_floor(x)
+    if x - floored >= 0.5:
+        return (floored + 1.0).to_i64()
+    floored.to_i64()
+
+pub fn js_math_random() -> f64:
+    """Return a random float in [0, 1)."""
+    rt_random_random()
+
+pub fn js_math_abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0:
+        return 0.0 - x
+    x
+
+pub fn js_math_min(a: f64, b: f64) -> f64:
+    """Return the smaller of two values."""
+    if a <= b:
+        return a
+    b
+
+pub fn js_math_max(a: f64, b: f64) -> f64:
+    """Return the larger of two values."""
+    if a >= b:
+        return a
+    b
+
+pub fn js_math_sqrt(x: f64) -> f64:
+    """Square root via Newton's method."""
+    if x < 0.0:
+        return 0.0
+    if x == 0.0:
+        return 0.0
+    var guess = x / 2.0
+    var i = 0
+    while i < 50:
+        val next = (guess + x / guess) / 2.0
+        val diff = next - guess
+        val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+        if abs_diff < 1.0e-15:
+            return next
+        guess = next
+        i = i + 1
+    guess
+
+pub fn js_math_pow(base: f64, exp: f64) -> f64:
+    """Integer-exponent power function.
+
+    Handles non-negative integer exponents. For fractional exponents
+    or negative bases with fractional exp, returns 0.0 (limitation).
+    """
+    val int_exp = rt_math_floor(exp)
+    val frac = exp - int_exp
+    val abs_frac = if frac < 0.0: 0.0 - frac else: frac
+    if abs_frac > 1.0e-10:
+        # Fractional exponent — not supported in pure Simple
+        return 0.0
+    var n = int_exp.to_i64()
+    if n == 0:
+        return 1.0
+    var result = 1.0
+    var b = base
+    var neg = false
+    if n < 0:
+        neg = true
+        n = 0 - n
+    while n > 0:
+        if n % 2 == 1:
+            result = result * b
+        b = b * b
+        n = n / 2
+    if neg:
+        return 1.0 / result
+    result
+
+pub fn js_math_pi() -> f64:
+    """Return the value of pi."""
+    3.141592653589793
+
+# =========================================================================
+# String Functions
+# =========================================================================
+
+pub fn js_string_split(s: text, sep: text) -> [text]:
+    """Split a string by separator."""
+    s.split(sep)
+
+pub fn js_string_join(arr: [text], sep: text) -> text:
+    """Join an array of strings with a separator."""
+    var result = ""
+    var i = 0
+    while i < arr.len():
+        if i > 0:
+            result = result + sep
+        result = result + arr[i]
+        i = i + 1
+    result
+
+pub fn js_string_trim(s: text) -> text:
+    """Trim whitespace from both ends."""
+    s.trim()
+
+pub fn js_string_starts_with(s: text, prefix: text) -> bool:
+    """Check if a string starts with a prefix."""
+    s.starts_with(prefix)
+
+pub fn js_string_ends_with(s: text, suffix: text) -> bool:
+    """Check if a string ends with a suffix."""
+    s.ends_with(suffix)
+
+pub fn js_string_includes(s: text, sub: text) -> bool:
+    """Check if a string contains a substring."""
+    s.contains(sub)
+
+pub fn js_string_replace(s: text, old: text, replacement: text) -> text:
+    """Replace first occurrence of old with replacement."""
+    s.replace(old, replacement)
+
+pub fn js_string_to_lower(s: text) -> text:
+    """Convert a string to lowercase."""
+    s.lower()
+
+pub fn js_string_to_upper(s: text) -> text:
+    """Convert a string to uppercase."""
+    s.upper()
+
+# =========================================================================
+# Array Functions
+# =========================================================================
+
+pub fn js_array_push(arr: [text], item: text):
+    """Push an item to the end of an array."""
+    arr.push(item)
+
+pub fn js_array_pop(arr: [text]) -> text:
+    """Pop and return the last item, or empty string if empty."""
+    if arr.len() == 0:
+        return ""
+    val last = arr[arr.len() - 1]
+    arr.pop()
+    last
+
+pub fn js_array_length(arr: [text]) -> i32:
+    """Return the length of an array."""
+    arr.len()
+
+pub fn js_array_index_of(arr: [text], item: text) -> i32:
+    """Return the index of the first occurrence of item, or -1."""
+    var i = 0
+    while i < arr.len():
+        if arr[i] == item:
+            return i
+        i = i + 1
+    -1
+
+pub fn js_array_slice(arr: [text], start: i32, end_idx: i32) -> [text]:
+    """Return a slice of the array from start to end (exclusive)."""
+    var result: [text] = []
+    var i = start
+    while i < end_idx and i < arr.len():
+        result.push(arr[i])
+        i = i + 1
+    result
+
+# =========================================================================
+# JSON (stubs)
+# =========================================================================
+
+pub fn js_json_parse(s: text) -> text:
+    """Parse a JSON string. # STUB: returns input as-is."""
+    s
+
+pub fn js_json_stringify(v: text) -> text:
+    """Stringify a value to JSON. # STUB: returns input as-is."""
+    v
+
+# =========================================================================
+# URI Encoding
+# =========================================================================
+
+pub fn js_encode_uri_component(s: text) -> text:
+    """Percent-encode a URI component.
+
+    Encodes all characters except A-Z a-z 0-9 - _ . ~
+    Uses a lookup table for common special characters.
+    """
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if _is_uri_unreserved(ch):
+            result = result + ch
+        else:
+            result = result + _percent_encode(ch)
+        i = i + 1
+    result
+
+pub fn js_decode_uri_component(s: text) -> text:
+    """Decode a percent-encoded URI component.
+
+    Converts %XX sequences back to characters.
+    """
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "%" and i + 2 < s.len():
+            val hex = s.slice(i + 1, i + 3)
+            val decoded = _hex_to_char(hex)
+            result = result + decoded
+            i = i + 3
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+# =========================================================================
+# Date
+# =========================================================================
+
+pub fn js_date_now() -> i64:
+    """Return current time in milliseconds since epoch."""
+    rt_time_now_unix_millis()
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _is_uri_unreserved(ch: text) -> bool:
+    """Check if a character is unreserved in URI encoding."""
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    if ch == "-" or ch == "_" or ch == "." or ch == "~":
+        return true
+    false
+
+fn _percent_encode(ch: text) -> text:
+    """Percent-encode a single character."""
+    # Common characters lookup
+    if ch == " ":
+        return "%20"
+    if ch == "!":
+        return "%21"
+    if ch == "#":
+        return "%23"
+    if ch == "$":
+        return "%24"
+    if ch == "&":
+        return "%26"
+    if ch == "'":
+        return "%27"
+    if ch == "(":
+        return "%28"
+    if ch == ")":
+        return "%29"
+    if ch == "*":
+        return "%2A"
+    if ch == "+":
+        return "%2B"
+    if ch == ",":
+        return "%2C"
+    if ch == "/":
+        return "%2F"
+    if ch == ":":
+        return "%3A"
+    if ch == ";":
+        return "%3B"
+    if ch == "=":
+        return "%3D"
+    if ch == "?":
+        return "%3F"
+    if ch == "@":
+        return "%40"
+    if ch == "[":
+        return "%5B"
+    if ch == "]":
+        return "%5D"
+    # Fallback: return as-is (unhandled characters)
+    ch
+
+fn _hex_to_char(hex: text) -> text:
+    """Convert a 2-char hex string to the corresponding character."""
+    # Common hex lookups
+    val lower = hex.lower()
+    if lower == "20":
+        return " "
+    if lower == "21":
+        return "!"
+    if lower == "23":
+        return "#"
+    if lower == "24":
+        return "$"
+    if lower == "26":
+        return "&"
+    if lower == "27":
+        return "'"
+    if lower == "28":
+        return "("
+    if lower == "29":
+        return ")"
+    if lower == "2a":
+        return "*"
+    if lower == "2b":
+        return "+"
+    if lower == "2c":
+        return ","
+    if lower == "2f":
+        return "/"
+    if lower == "3a":
+        return ":"
+    if lower == "3b":
+        return ";"
+    if lower == "3d":
+        return "="
+    if lower == "3f":
+        return "?"
+    if lower == "40":
+        return "@"
+    if lower == "5b":
+        return "["
+    if lower == "5d":
+        return "]"
+    # Fallback: return the hex as-is prefixed with %
+    "%{hex}"

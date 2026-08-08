@@ -1,0 +1,290 @@
+# QPACK Encoder — RFC 9204 section 4.5
+#
+# Implements the QPACK header field encoding instructions for HTTP/3.
+# QPACK uses prefixed integers (RFC 7541 section 5.1) and Huffman coding
+# (inherited from HPACK) to encode header field representations.
+#
+# This module provides:
+#   - Prefixed integer encode (RFC 7541 section 5.1 / RFC 9204 section 4.1.1)
+#   - Literal header field with name reference (static table, section 4.5.4)
+#   - Literal header field without name reference (section 4.5.6)
+#   - Indexed header field (static table, section 4.5.2)
+#   - Header block prefix (required insert count + sign + delta base, section 4.5.1)
+#
+# Scope: static-table-only encoding (no dynamic table management).
+# Context: builds on qpack_static.spl for table lookups.
+#
+# Reference: RFC 9204 section 4.5, RFC 7541 section 5.1
+
+# ============================================================================
+# Prefixed integer encoding — RFC 7541 section 5.1
+#
+# Used throughout QPACK and HPACK. An integer I is encoded with a prefix
+# of N bits (N = number of low bits in the first byte available for the value):
+#   - If I < 2^N - 1: encode I directly in those N bits.
+#   - Else: set all N prefix bits to 1, then encode I - (2^N - 1) in
+#     subsequent bytes using 7-bit chunks with continuation bit (0x80).
+# ============================================================================
+
+pub fn qpack_encode_prefixed_int(value: i64, prefix_bits: i64, prefix_byte: i64) -> [u8]:
+    """Encode an integer with the HPACK/QPACK prefixed-integer encoding.
+
+    value: the non-negative integer to encode.
+    prefix_bits: number of bits available in the first byte (1..8).
+    prefix_byte: the high bits of the first byte (already shifted into position).
+    Returns: encoded bytes.
+    """
+    val max_prefix = (1 << prefix_bits) - 1
+    var out: [u8] = []
+    if value < max_prefix:
+        out.push((prefix_byte | value) & 0xff)
+        return out
+    # Value does not fit in prefix
+    out.push((prefix_byte | max_prefix) & 0xff)
+    var remaining = value - max_prefix
+    loop:
+        if remaining < 128:
+            out.push(remaining & 0x7f)
+            break
+        out.push((remaining & 0x7f) | 0x80)
+        remaining = remaining >> 7
+    return out
+
+# ============================================================================
+# String literal encoding — RFC 9204 section 4.1.2
+#
+# A string literal is: H(1 bit) + Length(7-bit prefixed int) + String data.
+# H=0 means raw octets; H=1 means Huffman-encoded.
+# This implementation uses H=0 (raw) for simplicity.
+# ============================================================================
+
+pub fn qpack_encode_string_literal(s: text) -> [u8]:
+    """Encode a header name or value as a QPACK string literal (no Huffman).
+
+    Format: 0(H=0) + length(7-bit prefix) + raw bytes.
+    """
+    val slen = s.len()
+    # H=0 bit is already 0, prefix_byte=0x00, prefix_bits=7
+    var out = qpack_encode_prefixed_int(slen, 7, 0x00)
+    var i = 0
+    while i < slen:
+        val c = s[i]
+        out.push(c & 0xff)
+        i = i + 1
+    return out
+
+# ============================================================================
+# Header block prefix — RFC 9204 section 4.5.1
+#
+# Required Insert Count (8-bit prefix) + S(1 bit) + Delta Base (7-bit prefix).
+# For static-only encoding: Required Insert Count = 0, S = 0, Delta Base = 0.
+# ============================================================================
+
+pub fn qpack_encode_header_block_prefix() -> [u8]:
+    """Encode the header block prefix for static-only encoding.
+
+    Required Insert Count = 0 (no dynamic table entries needed).
+    Sign bit = 0, Delta Base = 0.
+    Returns: 2 bytes [0x00, 0x00].
+    """
+    var out: [u8] = []
+    # Required Insert Count = 0, encoded as prefixed int with 8-bit prefix
+    out.push(0x00)
+    # S=0, Delta Base=0, encoded as 1+7 bits
+    out.push(0x00)
+    return out
+
+# ============================================================================
+# Indexed header field — RFC 9204 section 4.5.2
+#
+# Wire format: 1(static) T(1=static) index(6-bit prefixed int)
+# First byte pattern: 0b11xxxxxx (T=1 for static table)
+# ============================================================================
+
+pub fn qpack_encode_indexed_static(index: i64) -> [u8]:
+    """Encode a reference to a static table entry (indexed header field).
+
+    Wire: 0b11 + index(6-bit prefix). For static table entries only.
+    """
+    # Prefix byte: 0b11000000 = 0xc0, prefix_bits = 6
+    return qpack_encode_prefixed_int(index, 6, 0xc0)
+
+# ============================================================================
+# Literal header field with name reference — RFC 9204 section 4.5.4
+#
+# Wire format: 0b0101(N=0,T=1,static) + name_index(4-bit prefix) + value_string
+# First byte pattern: 0b01x1xxxx (N=never-indexed bit, T=1 for static)
+# ============================================================================
+
+pub fn qpack_encode_literal_with_static_name(name_index: i64, value: text) -> [u8]:
+    """Encode a literal header field referencing a static table name.
+
+    Wire: 0b0101 + name_index(4-bit prefix) + value_string(H + length + data).
+    N (never-indexed) = 0, T (static) = 1.
+    """
+    # Prefix byte: 0b01010000 = 0x50, prefix_bits = 4
+    var out = qpack_encode_prefixed_int(name_index, 4, 0x50)
+    val value_bytes = qpack_encode_string_literal(value)
+    var i = 0
+    while i < value_bytes.len():
+        out.push(value_bytes[i])
+        i = i + 1
+    return out
+
+# ============================================================================
+# Literal header field without name reference — RFC 9204 section 4.5.6
+#
+# Wire format: 0b001(N=0) + name_string + value_string
+# First byte pattern: 0b001xxxxx
+# ============================================================================
+
+pub fn qpack_encode_literal(name: text, value: text) -> [u8]:
+    """Encode a literal header field with both name and value inline.
+
+    Wire: 0b0010(N=0) + name_string(3-bit prefix len + data) + value_string.
+    """
+    # Name is encoded with 3-bit prefix (H bit is bit 3)
+    # prefix_byte: 0b00100000 = 0x20, but we use H=0 so name string prefix = 0x20
+    val name_len = name.len()
+    var out = qpack_encode_prefixed_int(name_len, 3, 0x20)
+    # Append name bytes
+    var i = 0
+    while i < name_len:
+        val c = name[i]
+        out.push(c & 0xff)
+        i = i + 1
+    # Append value as string literal
+    val value_bytes = qpack_encode_string_literal(value)
+    i = 0
+    while i < value_bytes.len():
+        out.push(value_bytes[i])
+        i = i + 1
+    return out
+
+# ============================================================================
+# Convenience: encode a list of (name, value) header pairs
+# ============================================================================
+
+class QpackHeader:
+    """A header field pair for QPACK encoding."""
+    name: text
+    value: text
+
+pub fn qpack_encode_header_block(headers: [QpackHeader]) -> [u8]:
+    """Encode a complete QPACK header block (prefix + field lines).
+
+    Tries static table indexed match first, then static name reference,
+    then falls back to full literal. Returns the complete encoded block
+    including the 2-byte prefix.
+    """
+    # Import static table lookup functions
+    # (These are from qpack_static.spl in the same package)
+
+    var out = qpack_encode_header_block_prefix()
+    var i = 0
+    val n = headers.len()
+    loop:
+        if i >= n:
+            break
+        val h = headers[i]
+        # Try exact match in static table
+        val exact_idx = _qpack_find_exact(h.name, h.value)
+        if exact_idx >= 0:
+            val encoded = qpack_encode_indexed_static(exact_idx)
+            var j = 0
+            while j < encoded.len():
+                out.push(encoded[j])
+                j = j + 1
+        else:
+            # Try name-only match
+            val name_idx = _qpack_find_name(h.name)
+            if name_idx >= 0:
+                val encoded = qpack_encode_literal_with_static_name(name_idx, h.value)
+                var j = 0
+                while j < encoded.len():
+                    out.push(encoded[j])
+                    j = j + 1
+            else:
+                # Full literal
+                val encoded = qpack_encode_literal(h.name, h.value)
+                var j = 0
+                while j < encoded.len():
+                    out.push(encoded[j])
+                    j = j + 1
+        i = i + 1
+    return out
+
+# ============================================================================
+# Internal static table lookup stubs
+#
+# These replicate the qpack_static_find_exact / qpack_static_find_name logic
+# inline to avoid cross-file import complexity. In a fully wired build, these
+# would call the qpack_static.spl functions directly.
+# ============================================================================
+
+fn _qpack_find_exact(name: text, value: text) -> i64:
+    """Stub: find exact (name, value) match in static table. Returns -1 if not found."""
+    # Well-known exact matches for common pseudo-headers
+    if name == ":method" and value == "GET": return 17
+    if name == ":method" and value == "POST": return 20
+    if name == ":method" and value == "HEAD": return 18
+    if name == ":method" and value == "PUT": return 21
+    if name == ":method" and value == "DELETE": return 16
+    if name == ":method" and value == "CONNECT": return 15
+    if name == ":method" and value == "OPTIONS": return 19
+    if name == ":scheme" and value == "http": return 22
+    if name == ":scheme" and value == "https": return 23
+    if name == ":status" and value == "200": return 25
+    if name == ":status" and value == "304": return 26
+    if name == ":status" and value == "404": return 27
+    if name == ":status" and value == "503": return 28
+    if name == ":status" and value == "100": return 63
+    if name == ":status" and value == "204": return 64
+    if name == ":status" and value == "400": return 67
+    if name == ":status" and value == "403": return 68
+    if name == ":status" and value == "500": return 71
+    if name == ":path" and value == "/": return 1
+    if name == "accept" and value == "*/*": return 29
+    if name == "accept-encoding" and value == "gzip, deflate, br": return 31
+    if name == "content-type" and value == "application/json": return 46
+    if name == "content-type" and value == "text/html; charset=utf-8": return 52
+    if name == "content-type" and value == "text/plain": return 53
+    if name == "content-length" and value == "0": return 4
+    return -1
+
+fn _qpack_find_name(name: text) -> i64:
+    """Stub: find first static table index matching name. Returns -1 if not found."""
+    if name == ":authority": return 0
+    if name == ":path": return 1
+    if name == ":method": return 15
+    if name == ":scheme": return 22
+    if name == ":status": return 24
+    if name == "age": return 2
+    if name == "content-disposition": return 3
+    if name == "content-length": return 4
+    if name == "cookie": return 5
+    if name == "date": return 6
+    if name == "etag": return 7
+    if name == "if-modified-since": return 8
+    if name == "if-none-match": return 9
+    if name == "last-modified": return 10
+    if name == "link": return 11
+    if name == "location": return 12
+    if name == "referer": return 13
+    if name == "set-cookie": return 14
+    if name == "accept": return 29
+    if name == "accept-encoding": return 31
+    if name == "accept-ranges": return 32
+    if name == "access-control-allow-headers": return 33
+    if name == "access-control-allow-origin": return 35
+    if name == "cache-control": return 36
+    if name == "content-encoding": return 42
+    if name == "content-type": return 44
+    if name == "range": return 55
+    if name == "strict-transport-security": return 56
+    if name == "vary": return 59
+    if name == "x-content-type-options": return 61
+    if name == "authorization": return 84
+    if name == "server": return 92
+    if name == "user-agent": return 95
+    return -1

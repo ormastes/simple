@@ -1,0 +1,648 @@
+# ============================================================================
+# nand_emu — Command FSM (legality + sequencing)
+# ============================================================================
+#
+# The NeChipState command state machine per doc §7.2, plus the legality rules
+# each transition enforces (each rule is a bug real firmware has shipped):
+#   - Nop <= 4 partial programs per page without an intervening erase.
+#   - Pages within a block programmed LSB -> MSB (random page program = violation).
+#   - Program to an unerased page ANDs data + ProgramWithoutErase warning.
+#   - Between 11h and 80h/81h/85h only 70h/F1h/FFh are legal.
+#   - Two-plane addressing constraints (A19 / A13-A18 fixing).
+#   - WP low => program/erase silently refused; WP raised during busy = violation.
+#   - Copy-back only within the same plane.
+#   - Sub-sector random data input before copy-back invalidates the EDC bit.
+#   - FFh reset always works and escapes Undefined.
+#
+# Two-plane and 2 KB-compat commands are RECOGNIZED and logged as
+# UnsupportedCommand violations — never faked (doc "nand_emu architecture").
+#
+# Value semantics: NeFsmCtx (and its event ring) is a value type, so the
+# stateful drivers (ne_step_command / ne_step_ready) follow the "return the
+# object" rule — they return the updated ctx and the caller must reassign.
+# `ne_on_command` / `ne_on_address` stay pure over the state (return NeChipState
+# only) so callers that only want the next state pay nothing for the ring.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+#   §1.3 command set, §6.2 event ring, §7.2 command FSM.
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.{
+    NeChipState, NeViolation, NeViolationKind, NeEvent, NeEventKind, NePageMeta
+}
+
+# ----------------------------------------------------------------------------
+# Commands legal while the chip is busy (doc §7.2) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_cmd_legal_during_busy(cmd: i64) -> bool:
+    """Only Read Status (70h), Read Status 2 (F1h), Read EDC Status (7Bh) and
+    Reset (FFh) are legal while busy (doc §7.2). Any other command during busy
+    is a CmdDuringBusy violation."""
+    cmd == 0x70 or cmd == 0xF1 or cmd == 0x7B or cmd == 0xFF
+
+pub fn ne_cmd_is_unsupported(cmd: i64) -> bool:
+    """True for the command bytes that only ever appear in two-plane / 2 KB-compat
+    sequences (doc §1.3): 11h (two-plane 1st program marker) and 81h (two-plane
+    2nd program). v1 is single-plane, so these are RECOGNIZED and logged as
+    UnsupportedCommand — never faked into a success. The 60h..60h two-plane
+    read/erase is caught separately by ne_classify_violation because 60h is a
+    legal single-plane command on its own."""
+    cmd == 0x11 or cmd == 0x81
+
+# ----------------------------------------------------------------------------
+# FSM transition context (doc §7.2 Ctx) — the mutable command environment.
+# The event ring (doc §6.2) is bounded; overflow is a hard flag (EVT_LOST),
+# never a silent drop.
+# ----------------------------------------------------------------------------
+
+pub struct NeFsmCtx:
+    """Mutable environment threaded through command transitions (doc §7.2).
+
+    busy            — chip is executing a read/program/erase.
+    wp_high         — write-protect pin state (true = writes enabled).
+    prior_state     — coarse prior operation (selects reset busy time).
+    violated        — a violation was raised on the last recorded transition.
+    status_reg      — last selected status register (70h/F1h/7Bh); 0 = none.
+    wp_refused      — the last program/erase was silently refused (WP low).
+    events          — bounded event ring (doc §6.2).
+    ring_cap        — event ring capacity.
+    ring_overflow   — the ring overflowed (EVT_LOST hard error, doc §6.2).
+    violation_count — number of violations pushed to the ring.
+    last_violation  — most recent violation (sentinel cmd -1 when none).
+    """
+    busy: bool
+    wp_high: bool
+    prior_state: i64
+    violated: bool
+    status_reg: i64
+    wp_refused: bool
+    events: [NeEvent]
+    ring_cap: i64
+    ring_overflow: bool
+    violation_count: i64
+    last_violation: NeViolation
+
+pub fn ne_no_violation() -> NeViolation:
+    """The "no violation recorded yet" sentinel: cmd -1 marks it absent. Callers
+    must gate on ctx.violation_count (> 0) before trusting last_violation, not on
+    this sentinel's kind (doc §7.2 event ring semantics)."""
+    NeViolation(kind: NeViolationKind.IllegalLatch, cmd: -1, arg: -1)
+
+pub fn ne_fsm_ctx_new(wp_high: bool) -> NeFsmCtx:
+    """Fresh idle context with an empty 64-entry event ring."""
+    val ring: [NeEvent] = []
+    NeFsmCtx(
+        busy: false,
+        wp_high: wp_high,
+        prior_state: 0,
+        violated: false,
+        status_reg: 0,
+        wp_refused: false,
+        events: ring,
+        ring_cap: 64,
+        ring_overflow: false,
+        violation_count: 0,
+        last_violation: ne_no_violation())
+
+# ----------------------------------------------------------------------------
+# Event ring push (doc §6.2) — bounded, overflow is a hard flag.
+# ----------------------------------------------------------------------------
+
+pub fn ne_record_event(ctx: NeFsmCtx, kind: NeEventKind, code: i64, arg: i64) -> NeFsmCtx:
+    """Push one NeEvent onto the bounded ring and RETURN the ctx (value type).
+    At capacity the event is dropped and ring_overflow latched true — a lost
+    event is a hard error (EVT_LOST, doc §6.2), never a silent drop."""
+    var nc = ctx
+    if nc.events.len() >= nc.ring_cap:
+        nc.ring_overflow = true
+        return nc
+    val ev = NeEvent(kind: kind, code: code, row: -1, col: -1, time_ns: 0, arg: arg)
+    nc.events = nc.events.push(ev)
+    nc
+
+pub fn ne_record_violation(ctx: NeFsmCtx, kind: NeViolationKind, cmd: i64) -> NeFsmCtx:
+    """Record a protocol violation: latch last_violation, bump violation_count,
+    and push a Violation event carrying the kind ordinal in its arg (doc §6.2 /
+    §7.2). RETURNs the ctx (value type)."""
+    var nc = ctx
+    nc.violated = true
+    nc.violation_count = nc.violation_count + 1
+    nc.last_violation = NeViolation(kind: kind, cmd: cmd, arg: ne_violation_kind_ord(kind))
+    ne_record_event(nc, NeEventKind.Violation, cmd, ne_violation_kind_ord(kind))
+
+# ----------------------------------------------------------------------------
+# Decision core (doc §7.2) — one private authority shared by the pure
+# (ne_on_command) and stateful (ne_step_command) entry points.
+# ----------------------------------------------------------------------------
+
+pub struct NeFsmDecision:
+    """The outcome of applying one command byte, before it is folded into ctx.
+
+    state         — the next NeChipState.
+    has_violation — the command raised a protocol violation.
+    vkind         — the violation kind (meaningful only when has_violation).
+    sets_busy     — the new state begins a busy op (Read/Prog/Erase busy).
+    clears_busy   — the command clears busy (reset).
+    wp_refused    — a program/erase was silently refused because WP is low.
+    status_reg    — a status register was selected (70h/F1h/7Bh); 0 = none.
+    """
+    state: NeChipState
+    has_violation: bool
+    vkind: NeViolationKind
+    sets_busy: bool
+    clears_busy: bool
+    wp_refused: bool
+    status_reg: i64
+
+fn ne_decide_ok(state: NeChipState) -> NeFsmDecision:
+    """A plain, no-side-effect transition to `state`."""
+    NeFsmDecision(
+        state: state,
+        has_violation: false,
+        vkind: NeViolationKind.IllegalLatch,
+        sets_busy: false,
+        clears_busy: false,
+        wp_refused: false,
+        status_reg: 0)
+
+fn ne_decide_violation(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeFsmDecision:
+    """An illegal (state, cmd) pair: land in Undefined (only FFh escapes) and
+    classify the violation kind (doc §7.2)."""
+    var d = ne_decide_ok(NeChipState.Undefined)
+    d.has_violation = true
+    d.vkind = ne_classify_violation(st, cmd, ctx)
+    d
+
+fn ne_is_erase_pending(st: NeChipState) -> bool:
+    """True while an erase address sequence is in flight (post-60h, pre-D0h):
+    a second 60h here is the two-plane erase/read marker (doc §1.3)."""
+    match st:
+        case AddrLatch(c, g):
+            c == 0x60
+        case EraseSetup:
+            true
+        case _:
+            false
+
+pub fn ne_classify_violation(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeViolationKind:
+    """Classify the violation kind for an illegal (state, cmd) pair (doc §7.2),
+    independently of the transition core so it is correct when called alone:
+      - a non-status command while busy => CmdDuringBusy;
+      - a two-plane / 2 KB marker (11h/81h), or a second 60h in an erase
+        sequence => UnsupportedCommand;
+      - anything else => IllegalLatch, used here for a well-formed command latch
+        that is illegal in the current FSM state (nand_types documents
+        IllegalLatch as the electrical CLE+ALE case; the FSM broadens it to the
+        generic out-of-sequence command, e.g. D0h without a preceding 60h or a
+        data latch arriving in Idle)."""
+    if ctx.busy and not ne_cmd_legal_during_busy(cmd):
+        NeViolationKind.CmdDuringBusy
+    elif ne_cmd_is_unsupported(cmd):
+        NeViolationKind.UnsupportedCommand
+    elif cmd == 0x60 and ne_is_erase_pending(st):
+        NeViolationKind.UnsupportedCommand
+    else:
+        NeViolationKind.IllegalLatch
+
+fn ne_fsm_decide(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeFsmDecision:
+    """The single transition authority (doc §7.2). Check order matters:
+    FFh reset (any state, works during busy) -> status reads (any state) ->
+    busy gate -> unsupported markers -> state-directed table."""
+    # 1. Reset: FFh from ANY state (works during busy) -> Idle.
+    if cmd == 0xFF:
+        var reset = ne_decide_ok(NeChipState.Idle)
+        reset.clears_busy = true
+        return reset
+    # 2. Status reads (70h/F1h/7Bh) are legal in ANY state, including busy. While
+    #    busy they select the register but leave the running op untouched;
+    #    otherwise they enter StatusOut(reg).
+    if cmd == 0x70 or cmd == 0xF1 or cmd == 0x7B:
+        if ctx.busy:
+            var stay = ne_decide_ok(st)
+            stay.status_reg = cmd
+            return stay
+        var out = ne_decide_ok(NeChipState.StatusOut(cmd))
+        out.status_reg = cmd
+        return out
+    # 3. Busy gate: only the status/reset commands above are legal while busy.
+    if ctx.busy:
+        return ne_decide_violation(st, cmd, ctx)
+    # 4. Recognized-but-unsupported two-plane / 2 KB markers (11h / 81h).
+    if ne_cmd_is_unsupported(cmd):
+        return ne_decide_violation(st, cmd, ctx)
+    # 5. State-directed transition table.
+    ne_fsm_table(st, cmd, ctx)
+
+fn ne_fsm_table(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeFsmDecision:
+    """The (state, cmd) table for the single-plane v1 command set (doc §1.3, §7.2).
+    Reached only when non-busy and the command is not FFh/status/unsupported."""
+    match st:
+        case Idle:
+            ne_table_idle(cmd, st, ctx)
+        case StatusOut(r):
+            ne_table_idle(cmd, st, ctx)
+        case IdOut:
+            ne_table_idle(cmd, st, ctx)
+        case ReadOut:
+            if cmd == 0x05:
+                ne_decide_ok(NeChipState.AddrLatch(0x05, 0))
+            else:
+                ne_table_idle(cmd, st, ctx)
+        case AddrLatch(c, g):
+            ne_table_addr(c, g, cmd, st, ctx)
+        case ProgLoad:
+            ne_table_load(cmd, st, ctx)
+        case CopyLoad:
+            ne_table_load(cmd, st, ctx)
+        case EraseSetup:
+            ne_table_erase_setup(cmd, st, ctx)
+        case _:
+            ne_decide_violation(st, cmd, ctx)
+
+fn ne_table_idle(cmd: i64, st: NeChipState, ctx: NeFsmCtx) -> NeFsmDecision:
+    """Commands legal from Idle (and the Idle-like resume states StatusOut /
+    IdOut / ReadOut): read, program, copy-back program, erase, read-ID."""
+    if cmd == 0x00:
+        ne_decide_ok(NeChipState.AddrLatch(0x00, 0))
+    elif cmd == 0x80:
+        ne_decide_ok(NeChipState.AddrLatch(0x80, 0))
+    elif cmd == 0x85:
+        ne_decide_ok(NeChipState.AddrLatch(0x85, 0))
+    elif cmd == 0x60:
+        ne_decide_ok(NeChipState.AddrLatch(0x60, 0))
+    elif cmd == 0x90:
+        ne_decide_ok(NeChipState.IdOut)
+    else:
+        ne_decide_violation(st, cmd, ctx)
+
+fn ne_table_addr(c: i64, g: i64, cmd: i64, st: NeChipState, ctx: NeFsmCtx) -> NeFsmDecision:
+    """Confirm commands arriving in an address-latch phase. Read confirms
+    (30h normal / 35h copy-back) fire once the full 5-cycle address is latched;
+    the random-out column resume (E0h) fires once the 2-cycle column is latched.
+    Program (80h) and erase (60h) address phases leave AddrLatch on their own
+    (see ne_on_address -> ProgLoad / EraseSetup), so their confirms are handled
+    from those states, not here. A second 60h here is a two-plane marker."""
+    if c == 0x00 and (cmd == 0x30 or cmd == 0x35) and g == 5:
+        var d = ne_decide_ok(NeChipState.ReadBusy)
+        d.sets_busy = true
+        return d
+    if c == 0x05 and cmd == 0xE0 and g == 2:
+        return ne_decide_ok(NeChipState.ReadOut)
+    ne_decide_violation(st, cmd, ctx)
+
+fn ne_table_load(cmd: i64, st: NeChipState, ctx: NeFsmCtx) -> NeFsmDecision:
+    """The program / copy-back data-load phase. 10h confirms the program (WP
+    gated); 85h is a random-data-input column change that keeps the load state.
+
+    WP low: the program is SILENTLY refused (no busy, no violation) and status
+    bit 7 reads 0 (doc §7.2). v1 models the 85h random-data-input column
+    re-address at the sequencer level only — the following 2 column-address
+    bytes are absorbed by the data-buffer layer, not re-sequenced here, and the
+    sub-sector EDC-validity consequence (doc §7.2) is edc.spl's concern."""
+    if cmd == 0x10:
+        if ctx.wp_high:
+            var d = ne_decide_ok(NeChipState.ProgBusy)
+            d.sets_busy = true
+            return d
+        var refused = ne_decide_ok(NeChipState.Idle)
+        refused.wp_refused = true
+        return refused
+    if cmd == 0x85:
+        return ne_decide_ok(st)
+    ne_decide_violation(st, cmd, ctx)
+
+fn ne_table_erase_setup(cmd: i64, st: NeChipState, ctx: NeFsmCtx) -> NeFsmDecision:
+    """Erase confirm (D0h, WP gated) from the erase-setup state. WP low silently
+    refuses the erase (status bit 7 = 0, doc §7.2). A second 60h is a two-plane
+    erase marker -> UnsupportedCommand."""
+    if cmd == 0xD0:
+        if ctx.wp_high:
+            var d = ne_decide_ok(NeChipState.EraseBusy)
+            d.sets_busy = true
+            return d
+        var refused = ne_decide_ok(NeChipState.Idle)
+        refused.wp_refused = true
+        return refused
+    ne_decide_violation(st, cmd, ctx)
+
+# ----------------------------------------------------------------------------
+# Command / address / sequencing transitions (doc §7.2) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_on_command(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeChipState:
+    """Apply a command byte to the FSM (doc §7.2 on_command) and return the next
+    state only. FFh always resets to Idle; a non-status command while busy =>
+    Undefined; a two-plane / 2 KB marker => Undefined; otherwise dispatch per the
+    (state, cmd) table. Use ne_step_command when you also need the event ring and
+    busy/WP side effects folded into ctx."""
+    ne_fsm_decide(st, cmd, ctx).state
+
+pub fn ne_on_address(st: NeChipState, addr_byte: i64, ctx: NeFsmCtx) -> NeChipState:
+    """Latch one address byte, advancing the address-cycle count (doc §1.2, §7.2).
+    Read/program/copy-back latch 5 cycles; erase latches 3; the random-out column
+    resume (05h) latches 2. On completion the state advances to the phase that
+    follows the address:
+      - read (00h): holds AddrLatch(00h, 5) awaiting the 30h/35h confirm;
+      - program (80h): -> ProgLoad (awaiting data + 10h);
+      - copy-back program (85h): -> CopyLoad (awaiting data + 10h);
+      - erase (60h): -> EraseSetup (awaiting D0h);
+      - random-out column (05h): holds AddrLatch(05h, 2) awaiting E0h.
+    Address bytes outside an address phase are column-pointer updates handled by
+    the data-buffer layer, so ProgLoad / CopyLoad are returned unchanged; any
+    other non-address state returns Undefined (a stray latch)."""
+    match st:
+        case AddrLatch(c, g):
+            ne_advance_addr(c, g)
+        case ProgLoad:
+            st
+        case CopyLoad:
+            st
+        case _:
+            NeChipState.Undefined
+
+fn ne_addr_cycles(cmd: i64) -> i64:
+    """Address cycles the latching command `cmd` requires (doc §1.2): 3 for erase
+    (60h), 2 for the random-out column (05h), 5 for read/program/copy-back."""
+    if cmd == 0x60:
+        3
+    elif cmd == 0x05:
+        2
+    else:
+        5
+
+fn ne_advance_addr(c: i64, g: i64) -> NeChipState:
+    """Advance one address cycle for latching command `c` at count `g`, moving to
+    the next phase once the required cycle count is reached."""
+    val need = ne_addr_cycles(c)
+    val got = g + 1
+    if got < need:
+        NeChipState.AddrLatch(c, got)
+    elif c == 0x80:
+        NeChipState.ProgLoad
+    elif c == 0x85:
+        NeChipState.CopyLoad
+    elif c == 0x60:
+        NeChipState.EraseSetup
+    else:
+        NeChipState.AddrLatch(c, got)
+
+# ----------------------------------------------------------------------------
+# Busy completion (R/B ready edge) — the emulated op-done transition.
+# ----------------------------------------------------------------------------
+
+pub fn ne_on_ready(st: NeChipState) -> NeChipState:
+    """The R/B line going ready when a busy op completes (doc §1.6 tR/tPROG/tBERS
+    modelled by chip.spl advancing emulated time): a read lands in ReadOut with
+    data available; a program or erase returns to Idle. Any non-busy state is
+    unchanged."""
+    match st:
+        case ReadBusy:
+            NeChipState.ReadOut
+        case ProgBusy:
+            NeChipState.Idle
+        case EraseBusy:
+            NeChipState.Idle
+        case _:
+            st
+
+# ----------------------------------------------------------------------------
+# Stateful drivers — fold a transition into ctx (events + busy + WP + violation).
+# ----------------------------------------------------------------------------
+
+pub struct NeFsmStep:
+    """The result of a stateful FSM step: the next state plus the updated ctx
+    (return-the-object — the caller reassigns both)."""
+    state: NeChipState
+    ctx: NeFsmCtx
+
+pub fn ne_step_command(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeFsmStep:
+    """Apply a command byte AND fold its side effects into ctx (doc §7.2, §6.2):
+    set/clear busy, select a status register, latch a WP-refusal, and push a
+    StateChange or Violation event onto the ring. RETURNs the next state and the
+    updated ctx."""
+    val d = ne_fsm_decide(st, cmd, ctx)
+    var nc = ctx
+    if d.clears_busy:
+        nc.busy = false
+    if d.sets_busy:
+        nc.busy = true
+    if d.status_reg != 0:
+        nc.status_reg = d.status_reg
+    nc.wp_refused = d.wp_refused
+    if d.has_violation:
+        nc = ne_record_violation(nc, d.vkind, cmd)
+    else:
+        nc = ne_record_event(nc, NeEventKind.StateChange, cmd, 0)
+    NeFsmStep(state: d.state, ctx: nc)
+
+pub fn ne_step_ready(st: NeChipState, ctx: NeFsmCtx) -> NeFsmStep:
+    """Complete a busy op (R/B ready edge): clear busy, advance the state via
+    ne_on_ready, and push a StateChange event. RETURNs the next state + ctx."""
+    var nc = ctx
+    nc.busy = false
+    val ns = ne_on_ready(st)
+    nc = ne_record_event(nc, NeEventKind.StateChange, 0, 0)
+    NeFsmStep(state: ns, ctx: nc)
+
+# ----------------------------------------------------------------------------
+# Data-input latch legality (doc §7.2) — a data byte is only legal in a load
+# phase; a data latch in Idle is an illegal sequence.
+# ----------------------------------------------------------------------------
+
+pub fn ne_data_latch_legal(st: NeChipState) -> bool:
+    """True only where the sequencer accepts a data-input latch: the program /
+    copy-back data-load phases (doc §7.2). A data latch anywhere else (notably
+    Idle) is an illegal sequence."""
+    match st:
+        case ProgLoad:
+            true
+        case CopyLoad:
+            true
+        case _:
+            false
+
+pub fn ne_step_data(st: NeChipState, ctx: NeFsmCtx) -> NeFsmStep:
+    """Drive one data-input latch (doc §7.2). Legal in the load phases: the state
+    is held (bytes accumulate in the page buffer) and a StateChange event is
+    pushed. A data latch outside a load phase (e.g. in Idle) is an IllegalLatch
+    violation that drops the FSM to Undefined (only FFh escapes). The offending
+    latch is not command-scoped, so the recorded NeViolation carries cmd 0."""
+    if ne_data_latch_legal(st):
+        val nc = ne_record_event(ctx, NeEventKind.StateChange, 0, 0)
+        return NeFsmStep(state: st, ctx: nc)
+    val bad = ne_record_violation(ctx, NeViolationKind.IllegalLatch, 0)
+    NeFsmStep(state: NeChipState.Undefined, ctx: bad)
+
+# ----------------------------------------------------------------------------
+# Program legality primitives (doc §7.2 rules) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_check_page_order(new_page: i64, last_page: i64) -> bool:
+    """True when programming new_page is a forward (LSB -> MSB) step within the
+    block (doc §7.2): strictly `new_page > last_page`. A lower page is a regress
+    (RandomPageProgram); an equal page is not a forward step — same-page partial
+    programs are routed to the Nop rule by ne_program_violation_kind_text, not
+    treated as a page-order forward step. The first program of a fresh block uses
+    last_page = -1, so page 0 passes."""
+    new_page > last_page
+
+pub fn ne_check_nop(nop_count: i64) -> bool:
+    """True when another partial program to the same page is still within the
+    Nop <= 4 budget (doc §7.2): legal while nop_count < 4 (the page has been
+    programmed 0..3 times so far); the 5th partial program (nop_count == 4) is a
+    NopExceeded violation."""
+    nop_count < 4
+
+pub fn ne_page_nop_bump(meta: NePageMeta) -> NePageMeta:
+    """Record one more partial program to this page: bump NePageMeta.nop_count
+    (doc §7.2 Nop <= 4). Call after a legal program-confirm; ne_check_nop gates
+    whether the NEXT partial program is still within budget. RETURNs the updated
+    meta (value type — the caller reassigns)."""
+    var m = meta
+    m.nop_count = m.nop_count + 1
+    m
+
+pub fn ne_page_nop_reset(meta: NePageMeta) -> NePageMeta:
+    """Reset the partial-program counter to zero (doc §7.2): an erase clears the
+    page and a fresh higher page starts its own Nop budget, so nop_count returns
+    to 0. RETURNs the updated meta (value type)."""
+    var m = meta
+    m.nop_count = 0
+    m
+
+pub fn ne_program_violation_kind_text(new_page: i64, last_page: i64, nop_count: i64) -> text:
+    """Classify a page-program attempt against the two write-ordering rules
+    (doc §7.2), returning the violation kind label or "ok":
+      - new_page <  last_page => "random_page_program" (a regress to a lower page);
+      - new_page == last_page => a same-page partial program: "nop_exceeded" once
+        the Nop <= 4 budget is spent (nop_count >= 4), else "ok";
+      - new_page >  last_page => "ok" (a forward step; the Nop budget resets for
+        the new page).
+    Use ne_violation_kind_text / the NeViolationKind enum when recording the
+    matching violation into the ring via ne_record_violation."""
+    if new_page < last_page:
+        "random_page_program"
+    elif new_page == last_page:
+        if ne_check_nop(nop_count):
+            "ok"
+        else:
+            "nop_exceeded"
+    else:
+        "ok"
+
+pub fn ne_reject(st: NeChipState, cmd: i64, ctx: NeFsmCtx) -> NeViolation:
+    """Build the violation for an illegal (state, cmd) pair (doc §7.2): the kind
+    from ne_classify_violation, carrying the offending command byte."""
+    NeViolation(kind: ne_classify_violation(st, cmd, ctx), cmd: cmd, arg: 0)
+
+# ----------------------------------------------------------------------------
+# Introspection helpers (test / trace) — stable text + ordinal labels.
+# ----------------------------------------------------------------------------
+
+pub fn ne_state_text(st: NeChipState) -> text:
+    """Stable label for a NeChipState (trace + spec oracles)."""
+    match st:
+        case Idle:
+            "idle"
+        case AddrLatch(c, g):
+            "addr_latch"
+        case ReadBusy:
+            "read_busy"
+        case ReadOut:
+            "read_out"
+        case ProgLoad:
+            "prog_load"
+        case ProgBusy:
+            "prog_busy"
+        case EraseSetup:
+            "erase_setup"
+        case EraseBusy:
+            "erase_busy"
+        case StatusOut(r):
+            "status_out"
+        case IdOut:
+            "id_out"
+        case CopyLoad:
+            "copy_load"
+        case TwoPlaneStage(s):
+            "two_plane_stage"
+        case Undefined:
+            "undefined"
+
+pub fn ne_state_addr_cmd(st: NeChipState) -> i64:
+    """The latching command of an AddrLatch state, else -1."""
+    match st:
+        case AddrLatch(c, g):
+            c
+        case _:
+            -1
+
+pub fn ne_state_addr_got(st: NeChipState) -> i64:
+    """The address-cycle count of an AddrLatch state, else -1."""
+    match st:
+        case AddrLatch(c, g):
+            g
+        case _:
+            -1
+
+pub fn ne_state_status_reg(st: NeChipState) -> i64:
+    """The selected register of a StatusOut state, else -1."""
+    match st:
+        case StatusOut(r):
+            r
+        case _:
+            -1
+
+pub fn ne_violation_kind_ord(kind: NeViolationKind) -> i64:
+    """Stable ordinal for a NeViolationKind (event ring payload, doc §6.2),
+    matching the nand_types declaration order."""
+    match kind:
+        case CmdDuringBusy:
+            0
+        case NopExceeded:
+            1
+        case RandomPageProgram:
+            2
+        case ProgramWithoutErase:
+            3
+        case WpDuringBusy:
+            4
+        case TwoPlaneMisaddress:
+            5
+        case CopyBackCrossPlane:
+            6
+        case SubSectorRandomInput:
+            7
+        case TimingViolation:
+            8
+        case UnsupportedCommand:
+            9
+        case IllegalLatch:
+            10
+
+pub fn ne_violation_kind_text(kind: NeViolationKind) -> text:
+    """Stable label for a NeViolationKind (spec oracles)."""
+    match kind:
+        case CmdDuringBusy:
+            "cmd_during_busy"
+        case NopExceeded:
+            "nop_exceeded"
+        case RandomPageProgram:
+            "random_page_program"
+        case ProgramWithoutErase:
+            "program_without_erase"
+        case WpDuringBusy:
+            "wp_during_busy"
+        case TwoPlaneMisaddress:
+            "two_plane_misaddress"
+        case CopyBackCrossPlane:
+            "copy_back_cross_plane"
+        case SubSectorRandomInput:
+            "sub_sector_random_input"
+        case TimingViolation:
+            "timing_violation"
+        case UnsupportedCommand:
+            "unsupported_command"
+        case IllegalLatch:
+            "illegal_latch"

@@ -1,0 +1,41 @@
+# Environment Collector
+#
+# Collects Claude Code artifact data for the dashboard.
+# Uses llm_diagnostics.env_scanner to discover CLAUDE.md, skills, agents, MCPs.
+
+use std.nogc_async_mut.llm_diagnostics.env_scanner.{EnvSummary, scan_environment}
+use app.io.mod.{env_get}
+
+extern fn rt_file_exists(path: text) -> bool
+
+# --- Collection ---
+#
+# Previously cached the last scan in a module-level `var EnvSummary` global
+# and short-circuited repeat calls with a bare `return ENV_CACHE`. On this
+# interpreter, reading a module-level `var` holding a struct/class value from
+# a later, separate top-level call crashes with "variable `ENV_CACHE` not
+# found" (reproduced live: /agents/full works once, then the whole
+# DashboardServer process dies on the second identical request -- exactly
+# the fast path a 10s panel-refresh interval would hit immediately). Nothing
+# outside this file used the cache-bypass entrypoints, so the fix is to drop
+# the cache and always recompute; env scanning is comparable in cost to the
+# already-uncached collect_project_stats() collector used alongside it.
+
+fn env_collect(project_dir: text) -> EnvSummary:
+    """Collect environment data (always a fresh scan; see note above)."""
+    scan_environment(project_dir)
+
+fn env_refresh(project_dir: text) -> EnvSummary:
+    """Force re-scan of environment (kept for API compatibility; env_collect
+    always re-scans now, so this is equivalent)."""
+    env_collect(project_dir)
+
+fn detect_project_dir() -> text:
+    """Detect project directory from cwd or env."""
+    val pwd = env_get("PWD")
+    if pwd.len() > 0:
+        return pwd
+    val home = env_get("HOME")
+    if home.len() > 0:
+        return home
+    "."

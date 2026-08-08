@@ -1,0 +1,247 @@
+# UI Surface Manager
+#
+# Manages named surfaces (windows/panels) with handle semantics.
+# Surfaces can be opened, updated, and closed via handles that
+# prevent use-after-close via generation counters.
+#
+# Uses list-based storage (not Dict) to avoid runtime generics limitation.
+
+use common.ui.widget.{WidgetNode, UITree}
+
+# =========================================================================
+# Surface Entry (key-value pair stored in list)
+# =========================================================================
+
+struct SurfaceEntry:
+    id: text
+    tree: UITree
+    focused_id: text
+    generation: i32
+
+# =========================================================================
+# Surface Handle
+# =========================================================================
+
+struct SurfaceHandle:
+    id: text
+    generation: i32
+
+# =========================================================================
+# Surface Manager
+# =========================================================================
+
+class SurfaceManager:
+    entries: [SurfaceEntry]
+    active_surface: text
+    next_generation: i32
+
+    static fn new() -> SurfaceManager:
+        return SurfaceManager(
+            entries: [],
+            active_surface: "",
+            next_generation: 1
+        )
+
+# =========================================================================
+# Constructor Shorthand
+# =========================================================================
+
+fn new_surface_manager() -> SurfaceManager:
+    """Create a new empty surface manager."""
+    return SurfaceManager.new()
+
+# =========================================================================
+# SurfaceManager Methods
+# =========================================================================
+
+impl SurfaceManager:
+
+    # -- Open / Close --------------------------------------------------------
+
+    me open(id: text, tree: UITree) -> SurfaceHandle:
+        """Open a new named surface with a widget tree."""
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1
+        val new_entry = SurfaceEntry(id: id, tree: tree, focused_id: tree.root_id, generation: generation)
+        var keep_count = 0
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id != id:
+                keep_count = keep_count + 1
+            read_idx = read_idx + 1
+        var updated: [SurfaceEntry] = [new_entry; keep_count + 1]
+        var write_idx = 0
+        read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id != id:
+                updated[write_idx] = entry
+                write_idx = write_idx + 1
+            read_idx = read_idx + 1
+        updated[write_idx] = new_entry
+        self.entries = updated
+        if self.active_surface == "":
+            self.active_surface = id
+        return SurfaceHandle(id: id, generation: generation)
+
+    me close(handle: SurfaceHandle) -> bool:
+        """Close a surface. Returns false if handle is stale."""
+        val valid = self.validate_handle(handle)
+        if not valid:
+            return false
+        var keep_count = 0
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id != handle.id:
+                keep_count = keep_count + 1
+            read_idx = read_idx + 1
+        if keep_count == 0:
+            self.entries = []
+        else:
+            var removed: [SurfaceEntry] = [self.entries[0]; keep_count]
+            var write_idx = 0
+            read_idx = 0
+            while read_idx < self.entries.len():
+                val entry = self.entries[read_idx]
+                if entry.id != handle.id:
+                    removed[write_idx] = entry
+                    write_idx = write_idx + 1
+                read_idx = read_idx + 1
+            self.entries = removed
+        if self.active_surface == handle.id:
+            if self.has("main"):
+                self.active_surface = "main"
+            elif self.entries.len() > 0:
+                self.active_surface = self.entries[0].id
+            else:
+                self.active_surface = ""
+        return true
+
+    # -- Getters -------------------------------------------------------------
+
+    fn get(id: text) -> UITree?:
+        """Get the tree for a surface."""
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id == id:
+                return entry.tree
+            read_idx = read_idx + 1
+        return nil
+
+    fn focused(id: text) -> text:
+        """Get the retained focus for a surface."""
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id == id:
+                return entry.focused_id
+            read_idx = read_idx + 1
+        return ""
+
+    fn has(id: text) -> bool:
+        """Check if a surface exists."""
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id == id:
+                return true
+            read_idx = read_idx + 1
+        return false
+
+    fn surface_ids() -> [text]:
+        """Get all surface IDs."""
+        val entry_count = self.entries.len()
+        if entry_count == 0:
+            return []
+        var ids: [text] = [""; entry_count]
+        var write_idx = 0
+        while write_idx < entry_count:
+            ids[write_idx] = self.entries[write_idx].id
+            write_idx = write_idx + 1
+        return ids
+
+    fn surface_count() -> i32:
+        """Get the number of open surfaces."""
+        return self.entries.len()
+
+    fn active() -> text:
+        """Get the active surface ID."""
+        return self.active_surface
+
+    # -- Active surface ------------------------------------------------------
+
+    me set_active(id: text):
+        """Set the active surface (only if it exists)."""
+        if self.has(id):
+            self.active_surface = id
+
+    # -- Handle validation ---------------------------------------------------
+
+    fn validate_handle(handle: SurfaceHandle) -> bool:
+        """Check that a handle's generation matches the current generation."""
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id == handle.id:
+                return entry.generation == handle.generation
+            read_idx = read_idx + 1
+        return false
+
+    fn handle_for(id: text) -> SurfaceHandle?:
+        """Get a current handle for an existing surface."""
+        var read_idx = 0
+        while read_idx < self.entries.len():
+            val entry = self.entries[read_idx]
+            if entry.id == id:
+                return SurfaceHandle(id: entry.id, generation: entry.generation)
+            read_idx = read_idx + 1
+        return nil
+
+    # -- Tree update ---------------------------------------------------------
+
+    me update_tree(id: text, new_tree: UITree):
+        """Replace the tree for a surface."""
+        val entry_count = self.entries.len()
+        if entry_count == 0:
+            self.entries = []
+            return
+        var updated: [SurfaceEntry] = [self.entries[0]; entry_count]
+        var write_idx = 0
+        while write_idx < entry_count:
+            val entry = self.entries[write_idx]
+            if entry.id == id:
+                val retained_focus = if new_tree.find_widget(entry.focused_id) == nil: new_tree.root_id else: entry.focused_id
+                updated[write_idx] = SurfaceEntry(
+                    id: entry.id,
+                    tree: new_tree,
+                    focused_id: retained_focus,
+                    generation: entry.generation
+                )
+            else:
+                updated[write_idx] = entry
+            write_idx = write_idx + 1
+        self.entries = updated
+
+    me update_focus(id: text, focused_id: text):
+        """Retain focus independently for each surface."""
+        val entry_count = self.entries.len()
+        if entry_count == 0:
+            return
+        var updated: [SurfaceEntry] = [self.entries[0]; entry_count]
+        var write_idx = 0
+        while write_idx < entry_count:
+            val entry = self.entries[write_idx]
+            if entry.id == id:
+                updated[write_idx] = SurfaceEntry(
+                    id: entry.id,
+                    tree: entry.tree,
+                    focused_id: focused_id,
+                    generation: entry.generation
+                )
+            else:
+                updated[write_idx] = entry
+            write_idx = write_idx + 1
+        self.entries = updated

@@ -1,0 +1,232 @@
+# gui_sdl_bridge.spl
+#
+# Simple-language SDL bridge for the editor GUI shell.
+# Uses editor-facing rt_sdl_* extern aliases backed by the runtime SDL implementation.
+#
+# Rendering model: canonical Engine2D software framebuffer converted to
+# [i64] packed RGBA pixels for rt_sdl_present_rgba. Text therefore shares
+# Engine2D's selected vector face and bitmap fallback with GUI/Web/WM/2D.
+#
+# Pixel format: R*16777216 + G*65536 + B*256 + A  (each channel 0-255)
+#
+# Extern constants for rt_sdl_poll_event() return codes:
+#   0=none 1=quit 2=keydown 3=keyup
+#   4=mousemotion 5=mousedown 6=mouseup 7=mousewheel
+#   8=windowevent 9=textinput
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.color.{rgba, color_r, color_g, color_b, color_a}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_batch_with_source,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_source_gui_ast,
+    draw_ir_text,
+    draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics}
+use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
+
+# ============================================================
+# Tier 1: Extern Declarations (Raw SFFI to the runtime SDL backend)
+# ============================================================
+
+# --- Initialization ---
+extern fn rt_sdl_init() -> i64
+extern fn rt_sdl_quit()
+
+# --- Window Management ---
+extern fn rt_sdl_create_window(title: text, width: i64, height: i64) -> i64
+extern fn rt_sdl_destroy_window(handle: i64)
+extern fn rt_sdl_get_window_width(handle: i64) -> i64
+extern fn rt_sdl_get_window_height(handle: i64) -> i64
+extern fn rt_sdl_set_window_title(handle: i64, title: text)
+
+# --- Framebuffer Present ---
+# pixels is [i64] (SplArray* of packed RGBA i64 values)
+extern fn rt_sdl_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
+
+# --- Event Polling ---
+# Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
+#   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
+#   8=windowevent, 9=textinput
+extern fn rt_sdl_poll_event() -> i64
+extern fn rt_sdl_event_key_sym() -> i64
+extern fn rt_sdl_event_key_mod() -> i64
+extern fn rt_sdl_event_text() -> text
+extern fn rt_sdl_event_mouse_x() -> i64
+extern fn rt_sdl_event_mouse_y() -> i64
+extern fn rt_sdl_event_mouse_button() -> i64
+extern fn rt_sdl_event_window_event_id() -> i64
+extern fn rt_sdl_event_window_data1() -> i64
+extern fn rt_sdl_event_window_data2() -> i64
+
+# --- Window State ---
+extern fn rt_sdl_window_should_close() -> i64
+extern fn rt_sdl_clear_quit()
+
+# ============================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================
+
+# --- Helpers ---
+
+# Pack RGBA bytes into a single i64 pixel value.
+fn _sdl_pack_rgba(r: i64, g: i64, b: i64, a: i64) -> i64:
+    r * 16777216 + g * 65536 + b * 256 + a
+
+# Convert canonical Engine2D ARGB pixels to the SDL bridge's packed RGBA.
+fn _sdl_engine_pixels(pixels: [u32]) -> [i64]:
+    var converted: [i64] = []
+    for pixel in pixels:
+        converted.push(_sdl_pack_rgba(
+            color_r(pixel).to_i64(), color_g(pixel).to_i64(),
+            color_b(pixel).to_i64(), color_a(pixel).to_i64()
+        ))
+    converted
+
+# ============================================================
+# Public API
+# ============================================================
+
+# Initialise SDL and create a window.
+# Returns the window handle (0 on failure).
+fn gui_sdl_init(title: text, width: i64, height: i64) -> i64:
+    val ok = rt_sdl_init()
+    if ok == 0:
+        return 0
+    rt_sdl_create_window(title, width, height)
+
+# Destroy a window and shut down SDL.
+fn gui_sdl_shutdown(window: i64):
+    rt_sdl_destroy_window(window)
+    rt_sdl_quit()
+
+fn _sdl_text_command(component_id: text, x: i32, y: i32, value: text, color: u32, font_size: i32) -> DrawIrCommand:
+    val candidate = simpleos_default_font_asset_candidate()
+    val metrics = resolve_font_metrics(candidate.family, value, font_size)
+    if not metrics.valid:
+        return draw_ir_text(component_id, x, y, value, color)
+    if metrics.shaping_required:
+        return draw_ir_text_shaped_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, font_size, metrics.glyph_run)
+    draw_ir_text_resolved_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, font_size)
+
+# Append plain-text lines to the legacy GUI's canonical Draw IR scene.
+fn gui_sdl_render_text_block(commands: [DrawIrCommand], lines: [text], component_prefix: text, x: i32, y: i32, line_height: i32, fg: u32) -> [DrawIrCommand]:
+    var result = commands
+    var row: i64 = 0
+    while row < lines.len():
+        result.push(_sdl_text_command("{component_prefix}:{row}", x, y + row.to_i32() * line_height, lines[row], fg, line_height - 2))
+        row = row + 1
+    result
+
+fn gui_sdl_frame_draw_ir(frame: GuiFrame, w: i32, h: i32) -> DrawIrComposition:
+    val bg   = rgba(30, 30, 30, 255)
+    val fg   = rgba(220, 220, 220, 255)
+    val hdr  = rgba(50, 50, 80, 255)
+    val stat = rgba(40, 60, 40, 255)
+    val line_h: i32 = 16
+    val tab_h:  i32 = 20
+    val tree_w: i32 = 200
+    val stat_h: i32 = 20
+    val stat_y = h - stat_h
+
+    var commands: [DrawIrCommand] = [
+        draw_ir_rect("editor-sdl:background", 0, 0, w, h, bg),
+        draw_ir_rect("editor-sdl:tab-background", 0, 0, w, tab_h, hdr),
+        draw_ir_rect("editor-sdl:status-background", 0, stat_y, w, stat_h, stat)
+    ]
+    commands = gui_sdl_render_text_block(commands, [frame.tab_bar_html], "editor-sdl:tab", 4, 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.file_tree_html], "editor-sdl:tree", 4, tab_h + 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.editor_html], "editor-sdl:editor", tree_w + 4, tab_h + 2, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, [frame.status_html], "editor-sdl:status", 4, stat_y + 2, line_h, fg)
+
+    val embedding = draw_ir_embedding_config("editor-sdl", "", 0, 0, w, h, 0, 1000, true)
+    val source = draw_ir_source_gui_ast("editor-sdl", "editor-sdl", "1")
+    val batch = draw_ir_batch_with_source("editor-sdl:batch", DRAW_IR_BACKEND_CPU, embedding, commands, source)
+    draw_ir_composition("editor-sdl:composition", "editor-sdl:scene", DRAW_IR_BACKEND_CPU, [batch])
+
+# Clear the window to a background color, render each section of the
+# GuiFrame as plain text rows, then present the completed framebuffer.
+fn gui_sdl_present_frame(window: i64, frame: GuiFrame) -> bool:
+    if window == 0:
+        return false
+    val w = rt_sdl_get_window_width(window)
+    val h = rt_sdl_get_window_height(window)
+    if w <= 0 or h <= 0 or w > 2147483647 or h > 2147483647:
+        return false
+
+    var engine = Engine2D.create_offscreen(w.to_i32(), h.to_i32())
+    val result = engine2d_draw_ir_adv_composition(engine, gui_sdl_frame_draw_ir(frame, w.to_i32(), h.to_i32()), false)
+    engine.shutdown()
+    if result.skipped_command_count != 0 or result.pixels.len() != w * h:
+        return false
+    rt_sdl_present_rgba(window, _sdl_engine_pixels(result.pixels), w, h)
+
+# Poll one SDL event and translate it to a GuiEvent.
+fn gui_sdl_poll() -> GuiEvent:
+    val ev = rt_sdl_poll_event()
+    if ev == 0:
+        return GuiEvent(kind: "", data: "")
+    if ev == 1:
+        return GuiEvent(kind: "close", data: "")
+    if ev == 2:
+        val sym = rt_sdl_event_key_sym()
+        val mods = rt_sdl_event_key_mod()
+        val ctrl = (mods & 192) != 0
+        val shift = (mods & 3) != 0
+        val alt = (mods & 768) != 0
+        if shift and alt and sym == 1073741903:
+            return GuiEvent(kind: "key", data: "Shift+Alt+Right")
+        if shift and alt and sym == 1073741904:
+            return GuiEvent(kind: "key", data: "Shift+Alt+Left")
+        if ctrl and sym >= 65 and sym <= 90:
+            val letter = char_from_code(sym)
+            if shift:
+                return GuiEvent(kind: "key", data: "Ctrl+Shift+" + letter)
+            return GuiEvent(kind: "key", data: "Ctrl+" + letter)
+        if ctrl and sym >= 97 and sym <= 122:
+            val letter = char_from_code(sym - 32)
+            if shift:
+                return GuiEvent(kind: "key", data: "Ctrl+Shift+" + letter)
+            return GuiEvent(kind: "key", data: "Ctrl+" + letter)
+        if sym == 27:
+            return GuiEvent(kind: "key", data: "Escape")
+        if sym == 13:
+            return GuiEvent(kind: "key", data: "Enter")
+        if sym == 8:
+            return GuiEvent(kind: "key", data: "Backspace")
+        if sym == 9:
+            return GuiEvent(kind: "key", data: "Tab")
+        if sym >= 32 and sym <= 126:
+            return GuiEvent(kind: "key", data: char_from_code(sym))
+        return GuiEvent(kind: "key", data: str(sym))
+    if ev == 4:
+        val mx = rt_sdl_event_mouse_x()
+        val my = rt_sdl_event_mouse_y()
+        return GuiEvent(kind: "mouse-move", data: str(mx) + "," + str(my))
+    if ev == 5:
+        val mx = rt_sdl_event_mouse_x()
+        val my = rt_sdl_event_mouse_y()
+        return GuiEvent(kind: "mouse-down", data: str(mx) + "," + str(my))
+    if ev == 6:
+        return GuiEvent(kind: "mouse-up", data: "")
+    if ev == 9:
+        return GuiEvent(kind: "text", data: rt_sdl_event_text())
+    if ev == 8:
+        val window_event = rt_sdl_event_window_event_id()
+        if window_event == 5 or window_event == 6:
+            val w = rt_sdl_event_window_data1()
+            val h = rt_sdl_event_window_data2()
+            return GuiEvent(kind: "resize", data: str(w) + "," + str(h))
+        if window_event == 12:
+            return GuiEvent(kind: "focus", data: "")
+        if window_event == 13:
+            return GuiEvent(kind: "blur", data: "")
+    GuiEvent(kind: "", data: "")

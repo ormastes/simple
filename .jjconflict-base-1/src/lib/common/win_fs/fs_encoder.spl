@@ -1,0 +1,105 @@
+# FS Encoder — encode WindowRecord into an FsTree for publication.
+#
+# Provides: FsEntry, FsTree, FsOp, FsEncoder trait, DefaultFsEncoder,
+#           encode_record, decode_tree, tree_has_path.
+
+use std.common.win_fs.window_record.{WindowRecord, WindowState}
+
+enum FsOp:
+    Open
+    Read
+    Write
+    Close
+
+struct FsEntry:
+    path: text
+    content: [u8]
+
+class FsDecodeValue:
+    wid: u64
+    app: text
+    title: text
+
+class FsDecodeResult:
+    ok: bool
+    value: FsDecodeValue
+    error: text
+
+class FsTree:
+    entries: [FsEntry]
+
+    static fn empty() -> FsTree:
+        FsTree(entries: [])
+
+    me add(path: text, content: [u8]):
+        me.entries = me.entries.push(FsEntry(path: path, content: content))
+
+trait FsEncoder:
+    fn encode(rec: WindowRecord) -> FsTree
+
+class DefaultFsEncoder:
+    pass_dn
+
+impl FsEncoder for DefaultFsEncoder:
+    fn encode(rec: WindowRecord) -> FsTree:
+        encode_record(rec)
+
+fn _state_text(state: WindowState) -> text:
+    match state:
+        WindowState.Normal:    "normal"
+        WindowState.Minimized: "minimized"
+        WindowState.Maximized: "maximized"
+        WindowState.Hidden:    "hidden"
+        WindowState.Destroyed: "destroyed"
+
+fn _parse_u64(s: text) -> u64:
+    val bs = s.bytes()
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < bs.len():
+        result = result * 10 + ((bs[i] as i64) - 48)
+        i = i + 1
+    result as u64
+
+fn encode_record(rec: WindowRecord) -> FsTree:
+    val tree = FsTree.empty()
+    val wid_text = rec.wid.to_text()
+    val base = "/{rec.app}/{wid_text}"
+    tree.add("{base}/title",    rec.title.bytes())
+    tree.add("{base}/state",    _state_text(rec.state).bytes())
+    tree.add("{base}/geometry", "".bytes())
+    tree.add("{base}/buffer",   "".bytes())
+    tree.add("{base}/meta",     "".bytes())
+    tree.add("{base}/actions",  "".bytes())
+    # decode hint: /_decode/<wid>/<app>/<title>
+    tree.add("/_decode/{wid_text}/{rec.app}/{rec.title}", [])
+    tree
+
+fn tree_has_path(tree: FsTree, path: text) -> bool:
+    var i: i64 = 0
+    while i < tree.entries.len():
+        if tree.entries[i].path == path:
+            return true
+        i = i + 1
+    false
+
+fn decode_tree(tree: FsTree) -> FsDecodeResult:
+    val prefix = "/_decode/"
+    var i: i64 = 0
+    while i < tree.entries.len():
+        val path = tree.entries[i].path
+        if path.starts_with(prefix):
+            val rest = path[prefix.len():path.len()]
+            val parts = rest.split("/")
+            if parts.len() >= 3:
+                val wid_text = parts[0]
+                val app = parts[1]
+                val title = parts[2]
+                val wid = _parse_u64(wid_text)
+                return FsDecodeResult(ok: true, value: FsDecodeValue(wid: wid, app: app, title: title), error: "")
+        i = i + 1
+    FsDecodeResult(ok: false, value: FsDecodeValue(wid: 0 as u64, app: "", title: ""), error: "no decode hint found")
+
+export FsEntry, FsTree, FsOp, FsDecodeValue, FsDecodeResult
+export FsEncoder, DefaultFsEncoder
+export encode_record, decode_tree, tree_has_path

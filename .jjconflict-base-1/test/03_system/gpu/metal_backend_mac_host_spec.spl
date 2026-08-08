@@ -1,0 +1,165 @@
+# @tag: system, gpu, metal, macos, host
+#
+# This is a host-local contract. Non-macOS runs register one explicit pending
+# test and do not execute Metal assertions. A macOS run must prove both the
+# current Metal source-emission contract and the canonical native receipt.
+
+use std.spec.{describe, it, expect, pending, fail_test}
+use std.io_runtime.{file_exists, file_read, process_run}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+val EMITTER = "src/compiler/70.backend/backend/gpu_portable_compute.spl"
+val MSL = "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
+val GENERATED_CHECK = "scripts/check/check-metal-generated-2d-readback.shs"
+val GENERATED_HARNESS = "scripts/check/metal_generated_2d_readback_harness.spl"
+val MSL_MICRO_DIAGNOSTIC = "test/02_integration/rendering/macos_metal_msl_library_micro_diagnostic.spl"
+val MSL_MICRO_CHECK = "scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs"
+val RECEIPT_DIR = "build/metal_backend_mac_host"
+val RECEIPT = RECEIPT_DIR + "/evidence.env"
+
+fn canonical_helpers_exist() -> bool:
+    file_exists(GENERATED_CHECK) and file_exists(GENERATED_HARNESS)
+
+fn run_native_receipt() -> (text, text, i64):
+    val command = "BUILD_DIR=" + RECEIPT_DIR +
+        " REPORT_PATH=" + RECEIPT_DIR + "/report.md" +
+        " sh " + GENERATED_CHECK
+    process_run("/bin/sh", ["-c", command])
+
+fn receipt_has(lines: text, key: text, value: text) -> bool:
+    lines.contains(key + "=" + value)
+
+fn receipt_value(lines: text, key: text) -> text:
+    val prefix = key + "="
+    var found = ""
+    for line in lines.split("\n"):
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "macOS Metal backend host verification":
+    if not is_macos():
+        it "requires an explicit macOS Metal host capability":
+            pending("macOS host capability unavailable; live Metal evidence is postponed")
+        return
+
+    it "requires canonical Metal source-emission markers":
+        expect(file_exists(EMITTER)).to_equal(true)
+        expect(file_exists(MSL)).to_equal(true)
+        val emitter = file_read(EMITTER)
+        val msl = file_read(MSL)
+        expect(emitter).to_contain("PortableComputeTarget.Metal")
+        expect(emitter).to_contain("emit_portable_2d_optimization_module")
+        expect(emitter).to_contain("metal-shading-language")
+        expect(emitter).to_contain("kernel void {name}(")
+        expect(msl).to_contain("#include <metal_stdlib>")
+        expect(msl).to_contain("using namespace metal;")
+        expect(msl).to_contain("kernel void kernel_clear(")
+        expect(msl).to_contain("kernel void kernel_draw_rect_filled(")
+        expect(msl).to_contain("kernel void kernel_blit_image(")
+        expect(msl).to_contain("kernel void kernel_indexed_fill(")
+        expect(msl).to_contain("kernel void kernel_glyph_atlas_blit(")
+
+    it "keeps the admitted windowless MSL micro diagnostic bounded to library creation":
+        expect(file_exists(MSL_MICRO_DIAGNOSTIC)).to_equal(true)
+        expect(file_exists(MSL_MICRO_CHECK)).to_equal(true)
+        val diagnostic = file_read(MSL_MICRO_DIAGNOSTIC)
+        val checker = file_read(MSL_MICRO_CHECK)
+        expect(diagnostic).to_contain("macos-metal-msl-library-micro-v1")
+        expect(diagnostic).to_contain("metal_sffi_compile_shader(device, source)")
+        expect(diagnostic).to_contain("metal_msl_library_probe_device_create_status=")
+        expect(diagnostic.contains("metal_sffi_create_command_queue")).to_equal(false)
+        expect(diagnostic.contains("metal_sffi_create_compute_pipeline")).to_equal(false)
+        expect(checker).to_contain("verify_trusted_manifest")
+        expect(checker).to_contain("run_bounded_process")
+
+    it "requires the canonical native compile and readback receipt":
+        if not canonical_helpers_exist():
+            fail_test("canonical Metal compile/readback helpers are missing")
+            return
+        val (_stdout, _stderr, code) = run_native_receipt()
+        expect(code).to_equal(0)
+        expect(file_exists(RECEIPT)).to_equal(true)
+        val receipt = file_read(RECEIPT)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_status", "pass")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_module_verified", "true")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_submit_attempted", "true")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_readback_available", "true")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_provenance_status", "trusted-build-admitted-toolchain-verified")).to_equal(true)
+        expect(receipt).to_contain("metal_generated_2d_readback_trusted_manifest=")
+        expect(receipt).to_contain("metal_generated_2d_readback_trusted_manifest_sha256=")
+        expect(receipt).to_contain("metal_generated_2d_readback_toolchain_manifest=")
+        expect(receipt).to_contain("metal_generated_2d_readback_toolchain_manifest_sha256=")
+        expect(receipt).to_contain("metal_generated_2d_readback_simple_bin_sha256=")
+        expect(receipt).to_contain("metal_generated_2d_readback_generated_source=")
+        expect(receipt).to_contain("metal_generated_2d_readback_generated_source_sha256=")
+        expect(receipt).to_contain("metal_generated_2d_readback_metallib_sha256=")
+        expect(receipt_has(receipt, "metal_generated_2d_readback_harness_exit_code", "0")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_reason", "gpu-readback-verified")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_mismatch_count", "0")).to_equal(true)
+        val fill_checksum = receipt_value(receipt, "metal_generated_2d_readback_fill_checksum")
+        val fill_expected = receipt_value(receipt, "metal_generated_2d_readback_fill_expected")
+        val copy_checksum = receipt_value(receipt, "metal_generated_2d_readback_copy_checksum")
+        val copy_expected = receipt_value(receipt, "metal_generated_2d_readback_copy_expected")
+        val alpha_checksum = receipt_value(receipt, "metal_generated_2d_readback_alpha_checksum")
+        val alpha_expected = receipt_value(receipt, "metal_generated_2d_readback_alpha_expected")
+        val scroll_checksum = receipt_value(receipt, "metal_generated_2d_readback_scroll_checksum")
+        val scroll_expected = receipt_value(receipt, "metal_generated_2d_readback_scroll_expected")
+        expect(fill_checksum.to_i64()).to_be_greater_than(0)
+        expect(copy_checksum.to_i64()).to_be_greater_than(0)
+        expect(alpha_checksum.to_i64()).to_be_greater_than(0)
+        expect(scroll_checksum.to_i64()).to_be_greater_than(0)
+        expect(fill_checksum).to_equal(fill_expected)
+        expect(copy_checksum).to_equal(copy_expected)
+        expect(alpha_checksum).to_equal(alpha_expected)
+        expect(scroll_checksum).to_equal(scroll_expected)
+        val generated_checker = file_read(GENERATED_CHECK)
+        expect(generated_checker).to_contain("macos_gpu_trusted_manifest_admit")
+        expect(generated_checker).to_contain("MACOS_GPU_ADMISSION_COMPILER")
+        expect(generated_checker).to_contain("REQUESTED_METALLIB_PATH")
+        expect(generated_checker).to_contain("metal_generated_source_sha256")
+        expect(generated_checker).to_contain("metal_artifact_sha256")
+        expect(generated_checker).to_contain("metal_generated_2d_readback_simple_bin_sha256")
+        expect(generated_checker).to_contain("harness_exit=$?")
+        expect(generated_checker).to_contain("harness-exit-status-")
+        expect(generated_checker.contains(">\"$harness_out\" 2>\"$harness_err\" || true")).to_equal(false)
+        expect(generated_checker).to_contain("readback_positive_decimal")
+        expect(generated_checker).to_contain("gpu-readback-verified")
+
+    it "renders exact pixels through production Metal without a CPU mirror":
+        var backend = MetalBackend.create()
+        expect(backend.init(16, 16)).to_equal(true)
+        backend.use_gpu_only()
+
+        val black = rgb(0, 0, 0)
+        val red = rgb(255, 0, 0)
+        backend.clear(black)
+        expect(backend.gpu_frame_complete).to_equal(true)
+        val clear_readback = backend.read_pixels_with_source()
+        expect(clear_readback.source).to_equal("device_readback")
+        expect(clear_readback.backend_handle).to_be_greater_than(0)
+        expect(clear_readback.device_identity).to_be_greater_than(0)
+        expect(clear_readback.pixels.len()).to_equal(16 * 16)
+        var clear_i: i32 = 0
+        while clear_i < 16 * 16:
+            expect(clear_readback.pixels[clear_i]).to_equal(black)
+            clear_i = clear_i + 1
+
+        backend.draw_rect_filled(4, 4, 8, 8, red)
+        expect(backend.gpu_frame_complete).to_equal(true)
+        val rect_readback = backend.read_pixels_with_source()
+        expect(rect_readback.source).to_equal("device_readback")
+        expect(rect_readback.backend_handle).to_equal(clear_readback.backend_handle)
+        expect(rect_readback.device_identity).to_equal(clear_readback.device_identity)
+        expect(rect_readback.pixels.len()).to_equal(16 * 16)
+        var y: i32 = 0
+        while y < 16:
+            var x: i32 = 0
+            while x < 16:
+                val expected = if x >= 4 and x < 12 and y >= 4 and y < 12: red else: black
+                expect(rect_readback.pixels[y * 16 + x]).to_equal(expected)
+                x = x + 1
+            y = y + 1
+        backend.shutdown()

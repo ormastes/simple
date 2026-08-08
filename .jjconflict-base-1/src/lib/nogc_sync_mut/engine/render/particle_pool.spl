@@ -1,0 +1,158 @@
+# Particle Pool — manages multiple particle emitters with pooling
+#
+# Maintains a fixed-capacity pool of ParticleEmitter instances that
+# can be spawned and despawned by index or tag. Inactive emitters
+# are recycled on subsequent spawn calls.
+
+use std.nogc_sync_mut.engine.render.particle.{ParticleEmitter, EmitterConfig}
+
+# ============================================================================
+# PoolEntry — single slot in the particle pool
+# ============================================================================
+
+struct PoolEntry:
+    emitter: ParticleEmitter
+    active: bool
+    tag: text
+
+# ============================================================================
+# ParticlePool — fixed-capacity emitter manager
+# ============================================================================
+
+class ParticlePool:
+    entries: [PoolEntry]
+    max_emitters: i32
+
+impl ParticlePool:
+    static fn new(max_emitters: i32) -> ParticlePool:
+        """Create an empty pool with the given capacity."""
+        ParticlePool(
+            entries: [],
+            max_emitters: max_emitters
+        )
+
+    me spawn(config: EmitterConfig, x: f64, y: f64, tag: text) -> i32:
+        """Spawn a new emitter at (x, y) with the given tag.
+        Reuses an inactive slot if available. Returns the index,
+        or -1 if the pool is full."""
+        # Try to reuse an inactive entry
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if not entry.active:
+                var emitter = ParticleEmitter.new(config)
+                emitter.set_position(x, y)
+                emitter.start()
+                val new_entry = PoolEntry(
+                    emitter: emitter,
+                    active: true,
+                    tag: tag
+                )
+                self.entries = self._replace_entry(i, new_entry)
+                return i
+            i = i + 1
+
+        # No inactive slot — add new if under capacity
+        if self.entries.len() < self.max_emitters:
+            var emitter = ParticleEmitter.new(config)
+            emitter.set_position(x, y)
+            emitter.start()
+            val new_entry = PoolEntry(
+                emitter: emitter,
+                active: true,
+                tag: tag
+            )
+            self.entries = self.entries.push(new_entry)
+            return self.entries.len() - 1
+
+        -1
+
+    me despawn(index: i32):
+        """Deactivate the emitter at the given index."""
+        if index >= 0 and index < self.entries.len():
+            val old = self.entries[index]
+            var em = old.emitter
+            em.stop()
+            val new_entry = PoolEntry(
+                emitter: em,
+                active: false,
+                tag: old.tag
+            )
+            self.entries = self._replace_entry(index, new_entry)
+
+    me despawn_by_tag(tag: text):
+        """Deactivate all emitters matching the given tag."""
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.active and entry.tag == tag:
+                self.despawn(i)
+            i = i + 1
+
+    me update_all(dt: f64):
+        """Update all active emitters. Auto-despawn emitters that have
+        finished (not active and no alive particles)."""
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.active:
+                var em = entry.emitter
+                em.update(dt)
+                # Auto-despawn if emitter stopped and all particles dead
+                if not em.is_active() and em.alive_count() == 0:
+                    val dead_entry = PoolEntry(
+                        emitter: em,
+                        active: false,
+                        tag: entry.tag
+                    )
+                    self.entries = self._replace_entry(i, dead_entry)
+                else:
+                    val updated_entry = PoolEntry(
+                        emitter: em,
+                        active: true,
+                        tag: entry.tag
+                    )
+                    self.entries = self._replace_entry(i, updated_entry)
+            i = i + 1
+
+    fn active_count(self) -> i32:
+        """Return the number of active emitters in the pool."""
+        var count = 0
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].active:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn total_particles(self) -> i32:
+        """Sum of alive_count across all active emitters."""
+        var total = 0
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.active:
+                total = total + entry.emitter.alive_count()
+            i = i + 1
+        total
+
+    me clear():
+        """Despawn all emitters and reset the pool."""
+        var i = 0
+        while i < self.entries.len():
+            self.despawn(i)
+            i = i + 1
+        self.entries = []
+
+    # --- internal helper ---
+    me _replace_entry(index: i32, new_entry: PoolEntry) -> [PoolEntry]:
+        """Replace entry at index, returning new list."""
+        var result: [PoolEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i == index:
+                result = result.push(new_entry)
+            else:
+                result = result.push(self.entries[i])
+            i = i + 1
+        result

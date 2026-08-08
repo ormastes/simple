@@ -1,0 +1,270 @@
+# @cover src/compiler/70.backend/backend/vhdl/vhdl_kernel_entity.spl 80%
+# @tag: unit, compiler, fpga, codegen, vhdl
+
+# W3.2 FPGA kernel attributes — @unroll/@pipeline(ii)/@memory(banks) contract spec.
+#
+# Tests:
+#   (a) baseline emission (no attrs) unchanged vs W3.1 expectations
+#   (b) @unroll(2) output structurally differs — UNROLL_ITERATION_0 + UNROLL_ITERATION_1 present
+#   (c) @pipeline(ii=3) — GENERIC II constant present in entity, PIPELINE_II_3 marker in process
+#   (d) @memory(banks=2) — banked ports (param_bank0_addr_out … param_bank1_we_out) present
+#   (e) rejection diagnostics for invalid values (<= 0, == 1 no-op, conflicting)
+#
+# Dict-struct-key iteration workaround: call emit_vhdl_kernel_entity_with_attrs
+# per kernel directly rather than iterating a module Dict.
+
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, GpuBarrierScope}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind}
+use compiler.backend.vhdl.vhdl_kernel_entity.{vhdl_kernel_accepts, emit_vhdl_kernel_entity, emit_vhdl_kernel_entity_with_attrs, VhdlKernelAttrs, vhdl_kernel_attrs_default, vhdl_kernel_attrs_validate}
+
+# ---------------------------------------------------------------------------
+# Shared helpers (mirrors vhdl_kernel_entity_contract_spec.spl)
+# ---------------------------------------------------------------------------
+
+fn u32_type() -> MirType:
+    MirType(kind: MirTypeKind.U32)
+
+fn global_u32_ptr_type() -> MirType:
+    MirType.ptr(u32_type(), true)
+
+fn arg_local(id: i64, index: i64, name: text, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: type_, kind: LocalKind.Arg(index), is_ghost: false)
+
+fn empty_kernel_block() -> MirBlock:
+    MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [], terminator: MirTerminator.Ret(nil))
+
+fn gpu_id_kernel_block() -> MirBlock:
+    MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 0), 0), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+
+fn make_vhdl_kernel(sym_id: i64, name: text, params: [MirType], locals: [MirLocal], block: MirBlock) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: params, return_type: MirType.unit(), is_variadic: false),
+        locals: locals,
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: true,
+        gpu_target: "vhdl",
+        gpu_backend_order: "vhdl",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn make_vhdl_scalar_kernel() -> MirFunction:
+    make_vhdl_kernel(
+        2,
+        "vhdl_scale_u32",
+        [u32_type(), u32_type()],
+        [arg_local(0, 0, "n", u32_type()), arg_local(1, 1, "factor", u32_type())],
+        gpu_id_kernel_block()
+    )
+
+fn make_vhdl_vector_add_kernel() -> MirFunction:
+    val ptr_u32 = global_u32_ptr_type()
+    make_vhdl_kernel(
+        1,
+        "vhdl_vector_add_u32",
+        [ptr_u32, ptr_u32, ptr_u32],
+        [arg_local(0, 0, "a", ptr_u32), arg_local(1, 1, "b", ptr_u32), arg_local(2, 2, "out", ptr_u32)],
+        gpu_id_kernel_block()
+    )
+
+fn no_attrs() -> VhdlKernelAttrs:
+    vhdl_kernel_attrs_default()
+
+fn unroll_attrs(n: i64) -> VhdlKernelAttrs:
+    VhdlKernelAttrs(unroll_factor: n, pipeline_ii: 0, memory_banks: 0)
+
+fn pipeline_attrs(ii: i64) -> VhdlKernelAttrs:
+    VhdlKernelAttrs(unroll_factor: 0, pipeline_ii: ii, memory_banks: 0)
+
+fn memory_attrs(banks: i64) -> VhdlKernelAttrs:
+    VhdlKernelAttrs(unroll_factor: 0, pipeline_ii: 0, memory_banks: banks)
+
+# ---------------------------------------------------------------------------
+# Contract spec
+# ---------------------------------------------------------------------------
+
+describe "VHDL kernel attrs W3.2 contract":
+
+    it "(a) baseline emission with no attrs is identical to emit_vhdl_kernel_entity":
+        val func = make_vhdl_scalar_kernel()
+        val baseline = emit_vhdl_kernel_entity(func).unwrap()
+        val with_no_attrs = emit_vhdl_kernel_entity_with_attrs(func, no_attrs()).unwrap()
+
+        expect(baseline).to_equal(with_no_attrs)
+
+    it "(a) baseline has standard W3.1 entity structure":
+        val func = make_vhdl_scalar_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, no_attrs()).unwrap()
+
+        expect(source).to_contain("entity vhdl_scale_u32 is")
+        expect(source).to_contain("clk : in bit")
+        expect(source).to_contain("rst : in bit")
+        expect(source).to_contain("ndrange_size : in unsigned(31 downto 0)")
+        expect(source).to_contain("done_out : out bit")
+        expect(source).to_contain("architecture rtl of vhdl_scale_u32 is")
+        expect(source).to_contain("kernel_loop")
+        expect(source).to_contain("work_counter")
+        expect(source).to_contain("end architecture rtl;")
+
+    it "(b) @unroll(2) emits two UNROLL_ITERATION markers and no single-item comment":
+        val func = make_vhdl_scalar_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, unroll_attrs(2)).unwrap()
+
+        expect(source).to_contain("UNROLL_ITERATION_0")
+        expect(source).to_contain("UNROLL_ITERATION_1")
+
+    it "(b) @unroll(2) output differs structurally from baseline":
+        val func = make_vhdl_scalar_kernel()
+        val baseline = emit_vhdl_kernel_entity_with_attrs(func, no_attrs()).unwrap()
+        val unrolled = emit_vhdl_kernel_entity_with_attrs(func, unroll_attrs(2)).unwrap()
+
+        # Baseline has no unroll markers; unrolled version does
+        expect(baseline.contains("UNROLL_ITERATION_0")).to_equal(false)
+        expect(unrolled.contains("UNROLL_ITERATION_0")).to_equal(true)
+
+    it "(b) @unroll(4) emits four UNROLL_ITERATION markers":
+        val func = make_vhdl_scalar_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, unroll_attrs(4)).unwrap()
+
+        expect(source).to_contain("UNROLL_ITERATION_0")
+        expect(source).to_contain("UNROLL_ITERATION_1")
+        expect(source).to_contain("UNROLL_ITERATION_2")
+        expect(source).to_contain("UNROLL_ITERATION_3")
+
+    it "(c) @pipeline(ii=3) emits GENERIC II constant in entity":
+        val func = make_vhdl_scalar_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, pipeline_attrs(3)).unwrap()
+
+        expect(source).to_contain("II")
+        expect(source).to_contain("3")
+
+    it "(c) @pipeline(ii=3) emits PIPELINE_II_3 marker in process":
+        val func = make_vhdl_scalar_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, pipeline_attrs(3)).unwrap()
+
+        expect(source).to_contain("PIPELINE_II_3")
+
+    it "(c) @pipeline(ii=3) output differs from baseline":
+        val func = make_vhdl_scalar_kernel()
+        val baseline = emit_vhdl_kernel_entity_with_attrs(func, no_attrs()).unwrap()
+        val pipelined = emit_vhdl_kernel_entity_with_attrs(func, pipeline_attrs(3)).unwrap()
+
+        # Baseline has no PIPELINE_II marker; pipelined version does
+        expect(baseline.contains("PIPELINE_II_3")).to_equal(false)
+        expect(pipelined.contains("PIPELINE_II_3")).to_equal(true)
+
+    it "(d) @memory(banks=2) emits banked port groups for pointer params":
+        val func = make_vhdl_vector_add_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, memory_attrs(2)).unwrap()
+
+        # Banked ports for first pointer param 'a'
+        expect(source).to_contain("a_bank0_addr_out")
+        expect(source).to_contain("a_bank0_data_in")
+        expect(source).to_contain("a_bank0_data_out")
+        expect(source).to_contain("a_bank0_we_out")
+        expect(source).to_contain("a_bank1_addr_out")
+        expect(source).to_contain("a_bank1_data_in")
+        expect(source).to_contain("a_bank1_data_out")
+        expect(source).to_contain("a_bank1_we_out")
+
+    it "(d) @memory(banks=2) produces n=2 bank groups per array param vs n=1 default":
+        val func = make_vhdl_vector_add_kernel()
+        val baseline = emit_vhdl_kernel_entity_with_attrs(func, no_attrs()).unwrap()
+        val banked = emit_vhdl_kernel_entity_with_attrs(func, memory_attrs(2)).unwrap()
+
+        # Baseline has no _bank0_ ports; banked version does
+        expect(baseline.contains("a_bank0_addr_out")).to_equal(false)
+        expect(banked.contains("a_bank0_addr_out")).to_equal(true)
+
+    it "(d) @memory(banks=3) emits three bank groups per pointer param":
+        val func = make_vhdl_vector_add_kernel()
+        val source = emit_vhdl_kernel_entity_with_attrs(func, memory_attrs(3)).unwrap()
+
+        expect(source).to_contain("a_bank0_addr_out")
+        expect(source).to_contain("a_bank1_addr_out")
+        expect(source).to_contain("a_bank2_addr_out")
+
+    it "(e) @unroll(0) is accepted as default (no-op sentinel)":
+        val func = make_vhdl_scalar_kernel()
+        val result = emit_vhdl_kernel_entity_with_attrs(func, unroll_attrs(0))
+
+        expect(result.is_ok()).to_equal(true)
+
+    it "(e) @unroll(1) is invalid — no-op, must use n >= 2":
+        val attrs = unroll_attrs(1)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_contain("VHDL-KERNEL-ATTR-INVALID")
+        expect(diag).to_contain("unroll")
+
+    it "(e) @unroll(-1) is invalid — negative value":
+        val attrs = unroll_attrs(-1)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_contain("VHDL-KERNEL-ATTR-INVALID")
+        expect(diag).to_contain("unroll")
+
+    it "(e) @pipeline(ii=-1) is invalid — negative value":
+        val attrs = pipeline_attrs(-1)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_contain("VHDL-KERNEL-ATTR-INVALID")
+        expect(diag).to_contain("pipeline")
+
+    it "(e) @memory(banks=1) is invalid — no-op, must use n >= 2":
+        val attrs = memory_attrs(1)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_contain("VHDL-KERNEL-ATTR-INVALID")
+        expect(diag).to_contain("memory")
+
+    it "(e) @memory(banks=-2) is invalid — negative value":
+        val attrs = memory_attrs(-2)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_contain("VHDL-KERNEL-ATTR-INVALID")
+        expect(diag).to_contain("memory")
+
+    it "(e) invalid attrs cause emit_vhdl_kernel_entity_with_attrs to return Err":
+        val func = make_vhdl_scalar_kernel()
+        val bad_attrs = unroll_attrs(1)
+        val result = emit_vhdl_kernel_entity_with_attrs(func, bad_attrs)
+
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("VHDL-KERNEL-ATTR-INVALID")
+
+    it "vhdl_kernel_attrs_default returns all-zero attrs (no attributes active)":
+        val attrs = vhdl_kernel_attrs_default()
+
+        expect(attrs.unroll_factor).to_equal(0)
+        expect(attrs.pipeline_ii).to_equal(0)
+        expect(attrs.memory_banks).to_equal(0)
+
+    it "vhdl_kernel_attrs_validate returns empty string for valid attrs":
+        val attrs = VhdlKernelAttrs(unroll_factor: 2, pipeline_ii: 3, memory_banks: 2)
+        val diag = vhdl_kernel_attrs_validate(attrs)
+
+        expect(diag).to_equal("")

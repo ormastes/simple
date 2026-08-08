@@ -1,0 +1,60 @@
+use std.spipe.*
+use std.hardware.rv32i_rtl.m_extension.{Rv32MState, rv32m_decode, rv32m_execute, rv32m_create, rv32m_start, rv32m_tick}
+use std.hardware.rv32i_rtl.m_extension.{RV32M_MUL, RV32M_MULH, RV32M_MULHSU, RV32M_MULHU}
+use std.hardware.rv32i_rtl.m_extension.{RV32M_DIV, RV32M_DIVU, RV32M_REM, RV32M_REMU}
+
+fn sequential_result(operation: i64, lhs: i64, rhs: i64) -> i64:
+    var state: Rv32MState = rv32m_start(rv32m_create(), operation, lhs, rhs)
+    while state.busy:
+        state = rv32m_tick(state)
+    state.result
+
+describe "RV32M arithmetic owner":
+    it "decodes only OP/funct7=1 and executes all multiply high words":
+        val mul = rv32m_decode(0x02000033)
+        expect(mul.matched).to_be(true)
+        expect(mul.operation).to_equal(RV32M_MUL)
+        expect(rv32m_decode(0x00000033).matched).to_be(false)
+        expect(rv32m_execute(RV32M_MUL, 0xFFFF_FFFF, 2)).to_equal(0xFFFF_FFFE)
+        expect(rv32m_execute(RV32M_MULH, -1, -1)).to_equal(0)
+        expect(rv32m_execute(RV32M_MULHSU, -1, 2)).to_equal(0xFFFF_FFFF)
+        expect(rv32m_execute(RV32M_MULHU, 0xFFFF_FFFF, 2)).to_equal(1)
+
+    it "implements signed and unsigned divide/remainder corner cases":
+        expect(rv32m_execute(RV32M_DIV, -20, 3)).to_equal(0xFFFF_FFFA)
+        expect(rv32m_execute(RV32M_REM, -20, 3)).to_equal(0xFFFF_FFFE)
+        expect(rv32m_execute(RV32M_DIV, 0x8000_0000, -1)).to_equal(0x8000_0000)
+        expect(rv32m_execute(RV32M_REM, 0x8000_0000, -1)).to_equal(0)
+        expect(rv32m_execute(RV32M_DIV, 7, 0)).to_equal(0xFFFF_FFFF)
+        expect(rv32m_execute(RV32M_REM, 0x8000_0005, 0)).to_equal(0x8000_0005)
+        expect(rv32m_execute(RV32M_DIVU, 0xFFFF_FFFF, 2)).to_equal(0x7FFF_FFFF)
+        expect(rv32m_execute(RV32M_DIVU, 7, 0)).to_equal(0xFFFF_FFFF)
+        expect(rv32m_execute(RV32M_REMU, 0xFFFF_FFFF, 2)).to_equal(1)
+        expect(rv32m_execute(RV32M_REMU, 0x8000_0005, 0)).to_equal(0x8000_0005)
+
+    it "uses a 32-step result-valid handshake with exact iterative corners":
+        var state = rv32m_start(rv32m_create(), RV32M_MULHU, 0xFFFF_FFFF, 2)
+        expect(state.busy).to_be(true)
+        expect(state.result_valid).to_be(false)
+        var cycles = 0
+        while state.busy:
+            state = rv32m_tick(state)
+            cycles = cycles + 1
+        expect(cycles).to_equal(32)
+        expect(state.result_valid).to_be(true)
+        expect(state.result).to_equal(1)
+        expect(rv32m_tick(state).result_valid).to_be(true)
+        state = rv32m_start(state, RV32M_DIV, 7, 3)
+        expect(state.result_valid).to_be(false)
+
+        expect(sequential_result(RV32M_MULH, -1, 2)).to_equal(0xFFFF_FFFF)
+        expect(sequential_result(RV32M_MULHSU, 0x8000_0000, 2)).to_equal(0xFFFF_FFFF)
+        expect(sequential_result(RV32M_MULHU, 0xFFFF_FFFF, 0xFFFF_FFFF)).to_equal(0xFFFF_FFFE)
+        expect(sequential_result(RV32M_DIV, 0x8000_0000, -1)).to_equal(0x8000_0000)
+        expect(sequential_result(RV32M_REM, 0x8000_0000, -1)).to_equal(0)
+        expect(sequential_result(RV32M_DIVU, 0xFFFF_FFFF, 2)).to_equal(0x7FFF_FFFF)
+        expect(sequential_result(RV32M_REMU, 0xFFFF_FFFF, 2)).to_equal(1)
+        val div_zero = rv32m_tick(rv32m_start(rv32m_create(), RV32M_DIV, 7, 0))
+        expect(div_zero.busy).to_be(false)
+        expect(div_zero.result_valid).to_be(true)
+        expect(div_zero.result).to_equal(0xFFFF_FFFF)

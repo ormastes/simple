@@ -1,0 +1,59 @@
+# Positive behavioural probe for the `harden` capability-matrix row
+# (src/lib/common/mem_infra/config.spl `mem_infra_matrix`).
+#
+# `harden` (SIMPLE_MEM_HARDEN=1) is a quarantine allocator: rt_free does not
+# release a block immediately, it poisons the user bytes with 0xDE and parks
+# the block in a fixed-size ring. A later "harden check" scans the ring and
+# returns how many parked blocks are no longer all-poison — i.e. how many were
+# written to after being freed.
+#
+# The row is only true if that detection is OBSERVABLE. Source that implements
+# a quarantine somewhere is not evidence, and neither is a check call that
+# returns 0 — 0 is exactly what an unresolved symbol returns under cranelift.
+# So this probe makes the count *differential*: it frees three blocks, then
+# tampers them one at a time, printing the reported count after each step.
+#
+#   harden real     -> t0=0 t1=1 t2=2 t3=3   (count tracks OUR writes exactly)
+#   harden inert    -> t0=0 t1=0 t2=0 t3=0   (nothing is quarantined at all)
+#
+# A monotonic 0,1,2,3 cannot be produced by an unresolved symbol (always 0) nor
+# by a quarantine that simply never poisons (every parked block would read as
+# tampered from t0, giving 3,3,3,3). That is what makes this a positive result
+# rather than an absence-of-failure.
+#
+# The check is spelled `rt_mem_harden_check_native` because that is the
+# exported C symbol. The interpreter registers the same capability under the
+# name `rt_mem_harden_check` instead; the two backends genuinely disagree on
+# the spelling, which is tracked in
+# doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md.
+# This fixture therefore covers cranelift; the interpreter arm of the parity
+# spec uses harden_poison_workload.spl, which uses the interpreter spelling.
+#
+# Used by test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl.
+
+extern fn rt_mem_harden_check_native() -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+fn main() -> i64:
+    val a = rt_alloc(64)
+    val b = rt_alloc(64)
+    val c = rt_alloc(64)
+    rt_free(a)
+    rt_free(b)
+    rt_free(c)
+
+    # Nothing has been touched since the frees, so a working quarantine holds
+    # three fully-poisoned blocks and must report zero tampering.
+    print "harden_tamper_probe: t0={rt_mem_harden_check_native()}"
+
+    rt_ptr_write_i64(a, 0, 999)
+    print "harden_tamper_probe: t1={rt_mem_harden_check_native()}"
+
+    rt_ptr_write_i64(b, 0, 999)
+    print "harden_tamper_probe: t2={rt_mem_harden_check_native()}"
+
+    rt_ptr_write_i64(c, 0, 999)
+    print "harden_tamper_probe: t3={rt_mem_harden_check_native()}"
+    0

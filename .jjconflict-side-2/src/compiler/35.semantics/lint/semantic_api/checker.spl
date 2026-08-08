@@ -1,0 +1,244 @@
+# semantic_api checker — recursive primitive-API surface lint (lane A1)
+#
+# Mission-critical plan (doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md
+# §3 + §13.1; agent-task plan A1 row): a primitive leaf reachable ANYWHERE in a
+# public-surface type graph is a violation. Unlike the legacy primitive_api
+# lints this checker:
+#   - recurses through generics/arrays/tuples/optionals/unions/fn-types
+#     (Option<i32> IS a violation; Option<RetryCount> is not),
+#   - has NO pure-math exemption (_all_same_primitive) — every hit is emitted,
+#   - reports extern fns under a distinct informational code instead of
+#     skipping them silently.
+#
+# Emitted codes:
+#   MC-API-001  fn/me signature (param or return) reaches a primitive leaf
+#   MC-API-002  struct/class field reaches a primitive leaf (public AND
+#               private fields both emit this code; the severity distinction
+#               is strictness-profile configuration applied later)
+#   MC-API-003  extern fn signature reaches a primitive leaf (informational —
+#               FFI boundaries often legitimately speak raw machine types)
+#
+# Input model: the flat typed-Node AST of compiler.frontend.ast
+# ({Node, FunctionDef, StructDef, ClassDef} — the richer of the two
+# primitive_api input models: it carries full type TEXT, whereas the arena
+# tag model of primitive_api_arena.spl is lossy — the parser erases
+# Option<i32>'s element to bare TYPE_OPTION, making the recursive walk
+# impossible from tags). Text-level entry points are also exported so callers
+# holding only signature text (extern decl lines, arena decl_name +
+# type-text reconstruction) can reuse the same engine.
+#
+# Visibility note: the flat FunctionDef carries no visibility flag, so
+# check_module_items covers ALL fns (superset of the required pub fn/me
+# coverage); pub-only filtering happens at integration time where
+# decl_get_visibility_text() is available (arena layer).
+#
+# Enum payloads: NOT WIRED IN (capture itself is no longer the blocker).
+# Lanes EPC1 (single-payload) and EPA1 (full arity, 2026-07-29) landed real
+# capture: the parser records every variant's payload field types
+# (enum_module_body.spl / parser_decls_types.spl), decl_enum_def() carries
+# them via decl_field_types (flat, in-order across all variants) +
+# decl_field_bits (reused as a per-variant field-count array), and the
+# production bridge (_FlatAstBridge/module_assembly.spl) builds real
+# `VariantKind.Tuple([...])` nodes with every field's type, not `Tuple([])`.
+# See decl_enum_def's docstring in _Ast/decl_nodes.spl for the encoding.
+# What remains out of scope for THIS module: HIR still only carries what
+# declaration_lowering.spl's lower_variant threads through, and this checker
+# has no integration step wired to walk enum payload types at all yet —
+# that routing (each payload type through check_type_text with MC-API-002
+# semantics, mirroring struct/class fields) is still a later serialized
+# step, same as the rest of this file's "standalone library" note below.
+#
+# Standalone library — NOT wired into the live lint pipeline (integration is
+# a later serialized step).
+
+use compiler.frontend.ast.{Node, FunctionDef, StructDef, ClassDef}
+use compiler.semantics.lint.semantic_api.type_walk.{semantic_api_primitive_leaves, sa_split_top}
+
+struct ApiViolation:
+    code: text        # "MC-API-001" | "MC-API-002" | "MC-API-003"
+    item_name: text   # fn/struct/class name
+    member: text      # "param 'x'" | "return" | "field 'f'"
+    type_text: text   # the declared (outer) type text
+    leaf: text        # the primitive leaf that was reached
+
+    fn fmt() -> text:
+        "{self.code}: bare primitive '{self.leaf}' reachable in {self.member} of '{self.item_name}' (declared type '{self.type_text}')"
+
+# ---------------------------------------------------------------------------
+# text-level checks (core engine)
+# ---------------------------------------------------------------------------
+
+fn check_type_text(code: text, item_name: text, member: text, type_text: text) -> [ApiViolation]:
+    """One ApiViolation per primitive leaf reachable in `type_text`."""
+    var out: [ApiViolation] = []
+    val leaves = semantic_api_primitive_leaves(type_text)
+    for leaf in leaves:
+        out.push(ApiViolation(
+            code: code,
+            item_name: item_name,
+            member: member,
+            type_text: type_text.trim(),
+            leaf: leaf
+        ))
+    out
+
+fn _param_name_of(param_text: text) -> text:
+    val parts = sa_split_top(param_text, ":")
+    var name = parts[0].trim()
+    if name.starts_with("mut "):
+        name = name.slice(4).trim()
+    name
+
+fn _param_type_of(param_text: text) -> text:
+    """Type text of a 'name: Type' param entry; "" when untyped."""
+    val parts = sa_split_top(param_text, ":")
+    if parts.len() < 2:
+        return ""
+    # rejoin in case the type itself contained a top-level ':' (should not
+    # happen for params, but be lossless)
+    var ty = parts[1]
+    var i = 2
+    while i < parts.len():
+        ty = ty + ":" + parts[i]
+        i = i + 1
+    ty.trim()
+
+fn check_fn_signature(fn_name: text, param_texts: [text], ret_text: text, is_extern: bool) -> [ApiViolation]:
+    """Check every param type and the return type of a fn/me signature.
+
+    param_texts entries are 'name: Type' (flat-AST form). Receivers
+    ('self'/'me') are skipped. extern fns emit MC-API-003 (informational)
+    instead of being skipped silently; everything else emits MC-API-001.
+    NO pure-math exemption."""
+    val code = if is_extern: "MC-API-003" else: "MC-API-001"
+    var out: [ApiViolation] = []
+    for p in param_texts:
+        val pname = _param_name_of(p)
+        if pname == "self" or pname == "me":
+            continue
+        val pty = _param_type_of(p)
+        if pty == "":
+            continue
+        val vs = check_type_text(code: code, item_name: fn_name, member: "param '{pname}'", type_text: pty)
+        for v in vs:
+            out.push(v)
+    val ret = ret_text.trim()
+    if ret != "" and ret != "void":
+        val rvs = check_type_text(code: code, item_name: fn_name, member: "return", type_text: ret)
+        for v in rvs:
+            out.push(v)
+    out
+
+fn check_field_texts(owner_name: text, field_texts: [text]) -> [ApiViolation]:
+    """Check struct/class fields ('name: Type' entries) — MC-API-002.
+
+    Public AND private fields both emit; severity split is profile config
+    applied at a later stage."""
+    var out: [ApiViolation] = []
+    for f in field_texts:
+        val fname = _param_name_of(f)
+        val fty = _param_type_of(f)
+        if fty == "":
+            continue
+        val vs = check_type_text(code: "MC-API-002", item_name: owner_name, member: "field '{fname}'", type_text: fty)
+        for v in vs:
+            out.push(v)
+    out
+
+fn check_extern_signature_text(sig0: text) -> [ApiViolation]:
+    """Parse an 'extern fn name(params) -> ret' text line and check it
+    under MC-API-003. Non-extern text yields []."""
+    val sig = sig0.trim()
+    if not sig.starts_with("extern fn"):
+        return []
+    val rest = sig.slice(9).trim()
+    # split off the param list
+    var lp = -1
+    var i = 0
+    while i < rest.len():
+        if rest.slice(i, i + 1) == "(":
+            lp = i
+            break
+        i = i + 1
+    if lp < 0:
+        return []
+    val fn_name = rest.slice(0, lp).trim()
+    # matching close paren
+    var depth = 0
+    var rp = -1
+    i = lp
+    while i < rest.len():
+        val c = rest.slice(i, i + 1)
+        if c == "(" or c == "<" or c == "[" or c == "{":
+            depth = depth + 1
+        elif c == ")" or c == ">" or c == "]" or c == "}":
+            if c == ">" and i > 0 and rest.slice(i - 1, i) == "-":
+                pass
+            else:
+                depth = depth - 1
+                if depth == 0:
+                    rp = i
+                    break
+        i = i + 1
+    if rp < 0:
+        return []
+    val params_str = rest.slice(lp + 1, rp).trim()
+    var param_texts: [text] = []
+    if params_str != "":
+        param_texts = sa_split_top(params_str, ",")
+    var ret_text = ""
+    val tail = rest.slice(rp + 1).trim()
+    if tail.starts_with("->"):
+        ret_text = tail.slice(2).trim()
+    check_fn_signature(fn_name: fn_name, param_texts: param_texts, ret_text: ret_text, is_extern: true)
+
+# ---------------------------------------------------------------------------
+# module-level entry point (flat typed-Node AST)
+# ---------------------------------------------------------------------------
+
+fn check_module_items(items: [Node]) -> [ApiViolation]:
+    """Entry point: run the recursive semantic-API check over parsed module
+    items (compiler.frontend.ast Node list).
+
+    Functions -> MC-API-001, struct/class fields -> MC-API-002,
+    'extern fn ...' Other lines -> MC-API-003. Enums: nothing emitted —
+    payload types are discarded by the parser (see header; lane A4)."""
+    var out: [ApiViolation] = []
+    for item in items:
+        match item:
+            case Function(func):
+                # has_return_type is a DESUGARED optional flag that real
+                # producers (e.g. monomorphize deferred_deserialize) do not
+                # always set — fall back to the return_type text itself.
+                var ret = ""
+                if func.has_return_type == true:
+                    ret = func.return_type
+                elif func.return_type != "" and func.return_type != nil:
+                    ret = func.return_type
+                val fvs = check_fn_signature(fn_name: func.name, param_texts: func.params, ret_text: ret, is_extern: false)
+                for v in fvs:
+                    out.push(v)
+            case Struct(struct_def):
+                val svs = check_field_texts(struct_def.name, struct_def.fields)
+                for v in svs:
+                    out.push(v)
+            case Class(class_def):
+                val cvs = check_field_texts(class_def.name, class_def.fields)
+                for v in cvs:
+                    out.push(v)
+            case Enum(_):
+                # Payload types structurally unavailable — see header comment
+                # and doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md
+                # (lane A4E, 2026-07-29: confirmed blocker, not a lossy-tag gap).
+                pass
+            case Other(line):
+                val evs = check_extern_signature_text(line)
+                for v in evs:
+                    out.push(v)
+            case _("trait/other non-decl Node kinds carry no checkable API type surface"):
+                pass
+    out
+
+export ApiViolation
+export check_type_text, check_fn_signature, check_field_texts
+export check_extern_signature_text, check_module_items

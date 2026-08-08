@@ -1,0 +1,160 @@
+"""
+# Module Namespace Retained-Surface Unit Spec
+
+Module-only imports may resolve through a canonical alias whose key differs
+from the retained physical ModuleSurface name. The namespace receiver and its
+imported callables must share the retained owner so qualified calls lower
+before MIR rather than escaping as LoadGlobal.
+"""
+
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+
+fn namespace_owner_surfaces(reverse: bool, tier: text) -> Result<ModuleSurfacesByName, text>:
+    val log = Logger(level: 0)
+    val variables_path = "src/lib/" + tier + "/env/variables.spl"
+    val path_path = "src/lib/" + tier + "/path.spl"
+    val platform_path = "src/lib/" + tier + "/env/platform.spl"
+    val variables_lib_name = "lib." + tier + ".env.variables"
+    val variables_std_name = "std." + tier + ".env.variables"
+    val path_lib_name = "lib." + tier + ".path"
+    val path_std_name = "std." + tier + ".path"
+    val platform_lib_name = "lib." + tier + ".env.platform"
+    val platform_std_name = "std." + tier + ".env.platform"
+    val variables_source = "pub fn env_get(key: text) -> text:\n    key"
+    val path_source = "pub fn join2(left: text, right: text) -> text:\n    left + right"
+    val platform_source = "pub fn detect_os() -> text:\n    \"linux\""
+    val variables = parse_full_frontend(
+        variables_source, variables_path, variables_lib_name, log)
+    val path = parse_full_frontend(
+        path_source, path_path, path_lib_name, log)
+    val platform = parse_full_frontend(
+        platform_source, platform_path, platform_lib_name, log)
+
+    var modules: Dict<text, Module> = {}
+    for alias in [variables_lib_name, variables_std_name, "std.env.variables"]:
+        modules[alias] = variables
+    for alias in [path_lib_name, path_std_name, "std.path"]:
+        modules[alias] = path
+    for alias in [platform_lib_name, platform_std_name, "std.env.platform"]:
+        modules[alias] = platform
+
+    val variables_lib = SourceFile(
+        path: variables_path, content: variables_source,
+        module_name: variables_lib_name)
+    val variables_std = SourceFile(
+        path: variables_path.replace("/", "\\"), content: variables_source,
+        module_name: variables_std_name)
+    val path_lib = SourceFile(
+        path: path_path, content: path_source,
+        module_name: path_lib_name)
+    val path_std = SourceFile(
+        path: path_path.replace("/", "\\"), content: path_source,
+        module_name: path_std_name)
+    val platform_lib = SourceFile(
+        path: platform_path, content: platform_source,
+        module_name: platform_lib_name)
+    val platform_std = SourceFile(
+        path: platform_path.replace("/", "\\"), content: platform_source,
+        module_name: platform_std_name)
+    val sources = if reverse:
+        [platform_std, platform_lib, path_std, path_lib, variables_std, variables_lib]
+    else:
+        [variables_lib, variables_std, path_lib, path_std, platform_lib, platform_std]
+    module_surfaces_from_modules(modules, sources)
+
+fn namespace_owner_expected(reverse: bool, lib_name: text, std_name: text) -> text:
+    if reverse: std_name else: lib_name
+
+fn verify_namespace_owner_lowering(reverse: bool, tier: text):
+    val surfaces_result = namespace_owner_surfaces(reverse, tier)
+    expect(surfaces_result.is_ok()).to_equal(true)
+    if surfaces_result.is_err():
+        return
+    val surfaces = surfaces_result.unwrap()
+    val consumer_source = "import std.env.variables\n" +
+        "import std.path\n" +
+        "import std.env.platform\n" +
+        "fn main() -> text:\n" +
+        "    val env = variables.env_get(\"PATH\")\n" +
+        "    val joined = path.join2(\"a\", \"b\")\n" +
+        "    val os = platform.detect_os()\n" +
+        "    env + joined + os"
+    val consumer = parse_full_frontend(
+        consumer_source, "alias/consumer.spl", "alias.consumer", Logger(level: 0))
+    var lowering = hirlowering_for_module("alias.consumer", surfaces)
+    val hir = lowering.lower_module(consumer)
+    expect(lowering.errors.len()).to_equal(0)
+
+    val expected_variables = namespace_owner_expected(
+        reverse, "lib." + tier + ".env.variables", "std." + tier + ".env.variables")
+    val expected_path = namespace_owner_expected(
+        reverse, "lib." + tier + ".path", "std." + tier + ".path")
+    val expected_platform = namespace_owner_expected(
+        reverse, "lib." + tier + ".env.platform", "std." + tier + ".env.platform")
+    for binding in [
+        ["variables", expected_variables],
+        ["env_get", expected_variables],
+        ["path", expected_path],
+        ["join2", expected_path],
+        ["platform", expected_platform],
+        ["detect_os", expected_platform]
+    ]:
+        val symbol_id = hir.symbols.lookup(binding[0])
+        expect(symbol_id != nil).to_equal(true)
+        if symbol_id != nil:
+            val symbol = hir.symbols.get_symbol_raw(symbol_id.unwrap().id)
+            expect(symbol != nil).to_equal(true)
+            if symbol != nil:
+                expect(symbol.unwrap().defining_module.unwrap()).to_equal(binding[1])
+
+    val mir = MirLowering.new(hir.symbols).lower_module(hir)
+    var load_global_count = 0
+    var direct_env_get = false
+    var direct_join2 = false
+    var direct_detect_os = false
+    for function in mir.functions.values():
+        if function.name == "main":
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.LoadGlobal(_, _):
+                            load_global_count = load_global_count + 1
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name.ends_with(".env_get") or name == "env_get":
+                                        direct_env_get = true
+                                    elif name.ends_with(".join2") or name == "join2":
+                                        direct_join2 = true
+                                    elif name.ends_with(".detect_os") or name == "detect_os":
+                                        direct_detect_os = true
+                                case _:
+                                    pass
+                        case _:
+                            pass
+    expect(load_global_count).to_equal(0)
+    expect(direct_env_get).to_equal(true)
+    expect(direct_join2).to_equal(true)
+    expect(direct_detect_os).to_equal(true)
+
+describe "module namespace retained surface ownership":
+    it "lowers async env path namespaces through retained lib owners":
+        verify_namespace_owner_lowering(false, "nogc_async_mut")
+
+    it "lowers the same namespaces after reverse overlay discovery":
+        verify_namespace_owner_lowering(true, "nogc_async_mut")
+
+    it "keeps sync env path namespaces on their retained owners":
+        verify_namespace_owner_lowering(false, "nogc_sync_mut")

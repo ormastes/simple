@@ -1,0 +1,111 @@
+# Focused macOS Vulkan provider diagnostic.
+#
+# This probe deliberately stops below the renderer and window system. It opens
+# one explicit runtime provider dylib, resolves the provider aliases, and
+# records the provider's own initialization result. DynLib.call0 returns i64,
+# while rt_vulkan_get_last_error returns text, so this probe does not invoke
+# that symbol through an unsafe ABI reinterpretation.
+
+use std.cli.cli_util.{get_cli_args}
+use std.sffi.dynamic.{DynLib}
+
+fn emit_unavailable(path: text, loader_error: text, reason: text) -> i64:
+    print("vulkan_provider_probe_schema=macos-vulkan-provider-micro-v1")
+    print("vulkan_provider_probe_status=fail")
+    print("vulkan_provider_probe_reason=" + reason)
+    print("vulkan_provider_probe_path=" + path)
+    print("vulkan_provider_probe_dylib_loaded=0")
+    print("vulkan_provider_probe_availability_symbol=0")
+    print("vulkan_provider_probe_device_count_symbol=0")
+    print("vulkan_provider_probe_init_symbol=0")
+    print("vulkan_provider_probe_last_error_symbol=0")
+    print("vulkan_provider_probe_shutdown_symbol=0")
+    print("vulkan_provider_probe_is_available=0")
+    print("vulkan_provider_probe_init=0")
+    print("vulkan_provider_probe_device_count=0")
+    print("vulkan_provider_probe_loader_error=" + loader_error)
+    print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+    print("vulkan_provider_probe_provider_error_abi=blocked")
+    2
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 1:
+        return emit_unavailable("", "provider-path-argument-required", "invalid-arguments")
+
+    val provider_path = args[0]
+    var provider = DynLib.open(provider_path)
+    if provider.handle <= 0:
+        return emit_unavailable(provider_path, "dlopen-failed", "provider-dylib-load-failed")
+
+    val availability_symbol = provider.sym("rt_vulkan_provider_is_available")
+    val device_count_symbol = provider.sym("rt_vulkan_provider_device_count")
+    val init_symbol = provider.sym("rt_vulkan_init")
+    val last_error_symbol = provider.sym("rt_vulkan_get_last_error")
+    val shutdown_symbol = provider.sym("rt_vulkan_shutdown")
+
+    print("vulkan_provider_probe_schema=macos-vulkan-provider-micro-v1")
+    print("vulkan_provider_probe_path=" + provider_path)
+    print("vulkan_provider_probe_dylib_loaded=1")
+    print("vulkan_provider_probe_availability_symbol=" + (if availability_symbol > 0: "1" else: "0"))
+    print("vulkan_provider_probe_device_count_symbol=" + (if device_count_symbol > 0: "1" else: "0"))
+    print("vulkan_provider_probe_init_symbol=" + (if init_symbol > 0: "1" else: "0"))
+    print("vulkan_provider_probe_last_error_symbol=" + (if last_error_symbol > 0: "1" else: "0"))
+    print("vulkan_provider_probe_shutdown_symbol=" + (if shutdown_symbol > 0: "1" else: "0"))
+
+    if availability_symbol <= 0 or device_count_symbol <= 0 or init_symbol <= 0 or last_error_symbol <= 0 or shutdown_symbol <= 0:
+        print("vulkan_provider_probe_status=fail")
+        print("vulkan_provider_probe_reason=provider-symbol-missing")
+        print("vulkan_provider_probe_is_available=0")
+        print("vulkan_provider_probe_init=0")
+        print("vulkan_provider_probe_device_count=0")
+        print("vulkan_provider_probe_loader_error=provider-symbol-missing")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
+        provider.close()
+        return 3
+
+    val is_available = provider.call0("rt_vulkan_provider_is_available")
+    if is_available == 0:
+        print("vulkan_provider_probe_is_available=0")
+        print("vulkan_provider_probe_init=0")
+        print("vulkan_provider_probe_device_count=0")
+        print("vulkan_provider_probe_loader_error=")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
+        print("vulkan_provider_probe_status=fail")
+        print("vulkan_provider_probe_reason=provider-unavailable")
+        provider.close()
+        return 4
+
+    val initialized = provider.call0("rt_vulkan_init")
+    if initialized == 0:
+        print("vulkan_provider_probe_is_available=1")
+        print("vulkan_provider_probe_init=0")
+        print("vulkan_provider_probe_device_count=0")
+        print("vulkan_provider_probe_loader_error=")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
+        print("vulkan_provider_probe_status=fail")
+        print("vulkan_provider_probe_reason=provider-init-failed")
+        provider.close()
+        return 4
+
+    val device_count = provider.call0("rt_vulkan_provider_device_count")
+
+    print("vulkan_provider_probe_is_available=" + is_available.to_text())
+    print("vulkan_provider_probe_init=" + initialized.to_text())
+    print("vulkan_provider_probe_device_count=" + device_count.to_text())
+    print("vulkan_provider_probe_loader_error=")
+    print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+    print("vulkan_provider_probe_provider_error_abi=blocked")
+
+    provider.call0("rt_vulkan_shutdown")
+    provider.close()
+
+    print("vulkan_provider_probe_status=fail")
+    if device_count > 0:
+        print("vulkan_provider_probe_reason=provider-error-abi-unavailable")
+    else:
+        print("vulkan_provider_probe_reason=provider-device-missing")
+    4

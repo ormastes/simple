@@ -1,0 +1,247 @@
+# RenderDoc Vulkan autocapture shim contract
+
+> Locks the diagnostic contract for the Chromium GPU-process autocapture shim. The shim is used only for Linux Chrome/Electron RenderDoc blocker evidence; it must report its final capture state even when the GPU process exits before any wrapped Vulkan submit, present, or EGL swap path is reached.
+
+<!-- sdn-diagram:id=renderdoc_vulkan_autocapture_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=renderdoc_vulkan_autocapture_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+renderdoc_vulkan_autocapture_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=renderdoc_vulkan_autocapture_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# RenderDoc Vulkan autocapture shim contract
+
+Locks the diagnostic contract for the Chromium GPU-process autocapture shim. The shim is used only for Linux Chrome/Electron RenderDoc blocker evidence; it must report its final capture state even when the GPU process exits before any wrapped Vulkan submit, present, or EGL swap path is reached.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md |
+| Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
+| Research | N/A |
+| Source | `test/03_system/check/renderdoc_vulkan_autocapture_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Locks the diagnostic contract for the Chromium GPU-process autocapture shim.
+The shim is used only for Linux Chrome/Electron RenderDoc blocker evidence; it
+must report its final capture state even when the GPU process exits before any
+wrapped Vulkan submit, present, or EGL swap path is reached.
+
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** N/A
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+**Bug:** doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/renderdoc_vulkan_autocapture_spec.spl --native
+```
+
+## Operator Flow
+
+1. Use `RDOC_CHROME_GPU_AUTOCAPTURE=1` or
+   `RDOC_ELECTRON_GPU_AUTOCAPTURE=1` only on a prepared Linux GUI host.
+2. Read the `gpu-launcher.log` written by `scripts/tool/renderdoc-gpu-launcher.shs`.
+3. Treat `rdoc_autocapture_summary` as diagnostic state, not `.rdc` proof.
+4. A passing browser RenderDoc gate still requires a capture file with `RDOC`
+   magic from the normal RenderDoc evidence wrappers.
+
+## Evidence Contract
+
+Every loaded autocapture shim writes:
+
+- `rdoc_autocapture_loaded=1`
+- `rdoc_autocapture_summary=status:<state> api:<0|1> started:<0|1> finished:<0|1> ...`
+
+The summary includes submit, present, EGL swap, ANGLE prepare/wait, queue
+lock/unlock, and proc-name trace counters. This lets later Linux Vulkan hosts
+distinguish "RenderDoc API ready but no capturable frame hook was reached" from
+"the shim did not load."
+
+Summary states are intentionally conservative:
+
+- `not-started`: the shim loaded but did not start RenderDoc capture. If
+  `api:0`, RenderDoc API discovery never completed; if `api:1`, no configured
+  start hook fired.
+- `started-not-ended`: a start hook fired but no end hook ran before process
+  exit. Inspect `start_source`, submit/present/EGL counters, and Chromium GPU
+  process exit reason.
+- `ended`: start and end hooks ran. This is still not a browser capture pass
+  unless the wrapper also records a `.rdc` file with `RDOC` magic.
+- `trigger-only`: `RDOC_AUTOCAPTURE_TRIGGER_ONLY=1` fired RenderDoc's trigger
+  path. This mode is diagnostic and must not be promoted to gate pass without
+  a valid `.rdc`.
+
+The summary row is append-only evidence. It does not replace:
+
+- `rdoc_capture_magic=RDOC`
+- `rdoc_external_host_capture_gate_status=pass`
+- `rdoc_electron_html_gate_status=pass`
+- `linux_vulkan_render_log_compare_renderdoc_chrome_status=pass`
+- `linux_vulkan_render_log_compare_renderdoc_electron_status=pass`
+
+## Failure Triage
+
+Use the fields as follows:
+
+- `rdoc_autocapture_loaded=1` missing: Chromium did not load the shim; inspect
+  `--gpu-launcher`, `LD_PRELOAD`, and sandbox flags first.
+- `api:0`: RenderDoc API discovery failed in the GPU process; inspect
+  `RDOC_GPU_LAUNCHER_PRELOAD_RENDERDOC`, `RDOC_GPU_LAUNCHER_ALLOW_DLOPEN`, and
+  `RDOC_AUTOCAPTURE_RENDERDOC_LIB`.
+- `api:1 started:0`: RenderDoc is reachable but the GPU path did not call a
+  wrapped submit/present/EGL hook; inspect ANGLE/Vulkan backend selection and
+  proc-name trace rows.
+- `started:1 finished:0`: the start source is known, but the frame did not end
+  before crash/timeout; compare Chromium GPU exit status and any RenderDoc log.
+- Nonzero submit/present/EGL counters with missing `.rdc`: capture API timing
+  is wrong or RenderDoc rejected the target; keep the aggregate gate failed.
+
+## Host Notes
+
+The executable test uses fixture headers so it can compile on Linux CI without
+system Vulkan or RenderDoc development packages. Real browser runs must use the
+repo launcher and the actual RenderDoc installation because fixture headers
+only prove the shim's diagnostic logging contract.
+
+## Non-Goals
+
+This spec does not validate Chrome, Electron, ANGLE, Vulkan device selection,
+or RenderDoc capture correctness. It deliberately avoids a GUI display and a
+GPU so it can run on ordinary CI hosts. Platform completion remains owned by
+the Linux Vulkan, macOS Metal, and Windows D3D12 render-log compare gates.
+
+Do not copy the fixture preload log into production evidence reports. It proves
+only that the shim can be built and that its constructor/destructor write the
+expected normalized diagnostic fields.
+
+## Test Matrix
+
+1. Build the shim against tiny fixture Vulkan/RenderDoc headers and preload it
+   into `/bin/true`; the constructor and destructor must emit the loaded and
+   summary rows without real GPU access.
+2. Assert the source keeps start/end source tracking and records the same
+   counter names the blocker runbook expects.
+
+## Scenarios
+
+### RenderDoc Vulkan autocapture shim
+
+#### emits a final not-started summary when the shim loads without GPU work
+
+- Compile the autocapture shim against fixture headers and preload it
+- "printf '#ifndef RENDERDOC APP H\\n#define RENDERDOC APP H\\n#include <stdint h>\\ntypedef enum RENDERDOC Version { eRENDERDOC API Version 1 6 0 = 10600 } RENDERDOC Version;\\ntypedef enum RENDERDOC CaptureOption { eRENDERDOC Option APIValidation = 0, eRENDERDOC Option CaptureAllCmdLists = 1 } RENDERDOC CaptureOption;\\ntypedef struct RENDERDOC API 1 6 0 { void
+- "printf '#ifndef VULKAN H\\n#define VULKAN H\\n#include <stdint h>\\n#define VKAPI ATTR\\n#define VKAPI CALL\\ntypedef int32 t VkResult; typedef void* VkQueue; typedef void* VkFence; typedef void* VkDevice; typedef void* VkInstance; typedef struct VkSubmitInfo { int unused; } VkSubmitInfo; typedef struct VkSubmitInfo2 { int unused; } VkSubmitInfo2; typedef struct VkPresentInfoKHR { int unused; } VkPresentInfoKHR; typedef void
+   - Expected: code equals `0`
+- Read the final diagnostic summary
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Compile the autocapture shim against fixture headers and preload it")
+val command = "rm -rf build/test-renderdoc-vulkan-autocapture-load && " +
+    "mkdir -p build/test-renderdoc-vulkan-autocapture-load/include/vulkan && " +
+    "printf '#ifndef RENDERDOC_APP_H\\n#define RENDERDOC_APP_H\\n#include <stdint.h>\\ntypedef enum RENDERDOC_Version { eRENDERDOC_API_Version_1_6_0 = 10600 } RENDERDOC_Version;\\ntypedef enum RENDERDOC_CaptureOption { eRENDERDOC_Option_APIValidation = 0, eRENDERDOC_Option_CaptureAllCmdLists = 1 } RENDERDOC_CaptureOption;\\ntypedef struct RENDERDOC_API_1_6_0 { void (*SetCaptureFilePathTemplate)(const char *); void (*SetCaptureOptionU32)(enum RENDERDOC_CaptureOption, uint32_t); void (*TriggerCapture)(void); void (*StartFrameCapture)(void *, void *); uint32_t (*EndFrameCapture)(void *, void *); } RENDERDOC_API_1_6_0;\\ntypedef int (*pRENDERDOC_GetAPI)(enum RENDERDOC_Version, void **);\\n#endif\\n' > build/test-renderdoc-vulkan-autocapture-load/include/renderdoc_app.h && " +
+    "printf '#ifndef VULKAN_H\\n#define VULKAN_H\\n#include <stdint.h>\\n#define VKAPI_ATTR\\n#define VKAPI_CALL\\ntypedef int32_t VkResult; typedef void* VkQueue; typedef void* VkFence; typedef void* VkDevice; typedef void* VkInstance; typedef struct VkSubmitInfo { int unused; } VkSubmitInfo; typedef struct VkSubmitInfo2 { int unused; } VkSubmitInfo2; typedef struct VkPresentInfoKHR { int unused; } VkPresentInfoKHR; typedef void (*PFN_vkVoidFunction)(void); typedef VkResult (VKAPI_CALL *PFN_vkQueuePresentKHR)(VkQueue,const VkPresentInfoKHR*); typedef VkResult (VKAPI_CALL *PFN_vkQueueSubmit)(VkQueue,uint32_t,const VkSubmitInfo*,VkFence); typedef VkResult (VKAPI_CALL *PFN_vkQueueSubmit2)(VkQueue,uint32_t,const VkSubmitInfo2*,VkFence); typedef VkResult (VKAPI_CALL *PFN_vkQueueSubmit2KHR)(VkQueue,uint32_t,const VkSubmitInfo2*,VkFence); typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vkGetDeviceProcAddr)(VkDevice,const char*); typedef PFN_vkVoidFunction (VKAPI_CALL *PFN_vkGetInstanceProcAddr)(VkInstance,const char*);\\nVKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance,const char*); VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice,const char*); VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue,uint32_t,const VkSubmitInfo*,VkFence); VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue,uint32_t,const VkSubmitInfo2*,VkFence); VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2KHR(VkQueue,uint32_t,const VkSubmitInfo2*,VkFence); VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue,const VkPresentInfoKHR*);\\n#define VK_ERROR_INITIALIZATION_FAILED (-3)\\n#endif\\n' > build/test-renderdoc-vulkan-autocapture-load/include/vulkan/vulkan.h && " +
+    "cc -shared -fPIC -Ibuild/test-renderdoc-vulkan-autocapture-load/include -o build/test-renderdoc-vulkan-autocapture-load/renderdoc-vulkan-autocapture.so scripts/tool/renderdoc-vulkan-autocapture.c -ldl -pthread && " +
+    "RDOC_AUTOCAPTURE_LOG=$PWD/build/test-renderdoc-vulkan-autocapture-load/autocapture.log LD_PRELOAD=$PWD/build/test-renderdoc-vulkan-autocapture-load/renderdoc-vulkan-autocapture.so /bin/true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Read the final diagnostic summary")
+val log = file_read("build/test-renderdoc-vulkan-autocapture-load/autocapture.log")
+expect(log).to_contain("rdoc_autocapture_loaded=1")
+expect(log).to_contain("rdoc_autocapture_summary=status:not-started")
+expect(log).to_contain("api:0")
+expect(log).to_contain("started:0")
+expect(log).to_contain("finished:0")
+expect(log).to_contain("start_source:none")
+expect(log).to_contain("end_source:none")
+expect(log).to_contain("submit:0")
+expect(log).to_contain("present:0")
+expect(log).to_contain("egl_swap:0")
+expect(log).to_contain("egl_prepare_swap:0")
+expect(log).to_contain("egl_wait_scheduled:0")
+```
+
+</details>
+
+#### keeps source-stage and counter fields in the autocapture source
+
+- Inspect the source-level diagnostic contract
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the source-level diagnostic contract")
+val source = file_read("scripts/tool/renderdoc-vulkan-autocapture.c")
+expect(source).to_contain("capture_start_source = source")
+expect(source).to_contain("capture_end_source = source")
+expect(source).to_contain("rdoc_autocapture_summary=status:%s")
+expect(source).to_contain("egl_vk_lock:%llu")
+expect(source).to_contain("egl_vk_unlock:%llu")
+expect(source).to_contain("proc_trace:%llu")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+
+
+</details>

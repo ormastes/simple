@@ -1,0 +1,113 @@
+# OpenCL loader honesty probe (lane N3,
+# doc/03_plan/runtime/native_binding/dlopen_conversion_lanes.md).
+#
+# rt_opencl_probe_stage (src/runtime/runtime_simd_dispatch.c) walks the same
+# dlopen -> platform -> device -> context sequence as rt_opencl_create_context
+# but returns a DISTINCT stage per honest outcome instead of collapsing every
+# failure into one generic 0/false:
+#   0 lib_absent | 1 no_platform | 2 no_device | 3 context_failed | 4 context_ok
+#
+# Host truth (verified empirically this session via a standalone dlopen probe
+# AND `clinfo`, both showing 2x NVIDIA GPU with a working CUDA-bundled OpenCL
+# ICD): platform_count=1 and clCreateContext SUCCEEDS on THIS host today under
+# native/JIT codegen, via the real C path (confirmed with a native-build
+# artifact calling rt_opencl_probe_stage(1) directly -- see the N3 lane
+# report). That contradicts an assumed-fixed "context creation always fails
+# here" baseline; the seed interpreter's OWN rt_opencl_create_context_fn
+# (src/compiler_rust/compiler/src/interpreter_extern/gpu.rs) is in fact a
+# hardcoded stub that always returns 0 regardless of host state, which likely
+# explains that assumption.
+#
+# Engine note: the seed interpreter dispatches each `extern fn` through a
+# hand-written per-symbol wrapper in gpu.rs (out of this lane's owns-list --
+# see the survey/plan). Brand-new C symbols are therefore not reachable from
+# `bin/simple test` (which runs under that interpreter) until a wrapper is
+# added there by whichever lane is responsible for that shared file. This
+# spec's `it` blocks are deliberately interpreter-safe: they exercise the
+# ALREADY-registered rt_opencl_is_available/rt_opencl_platform_count externs
+# live, and verify the new probe's honesty properties via source inspection
+# (the same pattern test/01_unit/runtime/gpu_destroy_bool_abi_contract_spec.spl
+# uses for engine-specific code the interpreter can't otherwise reach).
+# rt_opencl_probe_stage/rt_opencl_probe_last_status are additionally verified
+# live under native-build (JIT codegen) as a separate, direct-execution
+# artifact -- ground rule #4 requires an actual native-build artifact
+# executed directly for native coverage, not another interpreter run.
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_opencl_is_available() -> bool
+extern fn rt_opencl_platform_count() -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+val STAGE_LIB_ABSENT = 0
+val STAGE_NO_PLATFORM = 1
+val STAGE_NO_DEVICE = 2
+val STAGE_CONTEXT_FAILED = 3
+val STAGE_CONTEXT_OK = 4
+
+fn opencl_stage_text(stage: i64) -> text:
+    if stage == STAGE_LIB_ABSENT:
+        "lib_absent"
+    else if stage == STAGE_NO_PLATFORM:
+        "no_platform"
+    else if stage == STAGE_NO_DEVICE:
+        "no_device"
+    else if stage == STAGE_CONTEXT_FAILED:
+        "context_failed"
+    else if stage == STAGE_CONTEXT_OK:
+        "context_ok"
+    else:
+        "unknown_stage"
+
+describe "OpenCL loader honesty probe":
+    it "rt_opencl_is_available/rt_opencl_platform_count report a real, non-fake state on this host":
+        # Live call through the seed interpreter's already-registered OpenCL
+        # wrappers (gpu.rs), which delegate to a real dlopen-backed check --
+        # not a stub. This host really has a working ICD (2x NVIDIA GPU,
+        # verified via clinfo + a standalone dlopen probe this session).
+        val available = rt_opencl_is_available()
+        val count = rt_opencl_platform_count()
+        expect(count >= 0).to_equal(true)
+        if available:
+            expect(count > 0).to_equal(true)
+        else:
+            expect(count).to_equal(0)
+
+    it "the five stage labels are pairwise-distinct text -- a sabotage that collapses them must fail this":
+        val text_absent = opencl_stage_text(STAGE_LIB_ABSENT)
+        val text_no_platform = opencl_stage_text(STAGE_NO_PLATFORM)
+        val text_no_device = opencl_stage_text(STAGE_NO_DEVICE)
+        val text_failed = opencl_stage_text(STAGE_CONTEXT_FAILED)
+        val text_ok = opencl_stage_text(STAGE_CONTEXT_OK)
+        expect(text_absent == text_no_platform).to_equal(false)
+        expect(text_no_platform == text_no_device).to_equal(false)
+        expect(text_no_device == text_failed).to_equal(false)
+        expect(text_failed == text_ok).to_equal(false)
+        expect(text_absent == text_ok).to_equal(false)
+
+    it "the honest lib_absent branch in rt_opencl_probe_stage is a real early return, not a substitute/fake handle":
+        val source = rt_file_read_text("src/runtime/runtime_simd_dispatch.c")
+        val probe_start = source.index_of("int64_t rt_opencl_probe_stage")
+        expect(probe_start).to_be_greater_than(-1)
+        val probe_body = source.substring(probe_start, probe_start + 700)
+        expect(probe_body).to_contain("RT_OPENCL_PROBE_LIB_ABSENT")
+        expect(probe_body).to_contain("rt_opencl_load_symbols")
+
+    it "the context_failed branch is real and reachable on any host, not merged into context_ok":
+        val source = rt_file_read_text("src/runtime/runtime_simd_dispatch.c")
+        val probe_start = source.index_of("int64_t rt_opencl_probe_stage")
+        val probe_body = source.substring(probe_start, probe_start + 1600)
+        expect(probe_body).to_contain("RT_OPENCL_PROBE_FORCE_CONTEXT_FAIL")
+        expect(probe_body).to_contain("RT_OPENCL_PROBE_CONTEXT_FAILED")
+        expect(probe_body).to_contain("RT_OPENCL_PROBE_CONTEXT_OK")
+        # The forced-fail branch must call the real create_context entry
+        # point with a deliberately empty device list -- not fabricate a
+        # status.
+        expect(probe_body).to_contain("create_context(properties, 0, NULL")
+
+    it "rt_opencl_probe_last_status is a distinct accessor exposing the real CL status, not aliased to another probe":
+        val source = rt_file_read_text("src/runtime/runtime_simd_dispatch.c")
+        val accessor_start = source.index_of("int64_t rt_opencl_probe_last_status")
+        expect(accessor_start).to_be_greater_than(-1)
+        val accessor_body = source.substring(accessor_start, accessor_start + 200)
+        expect(accessor_body).to_contain("rt_opencl_probe_last_status_g")

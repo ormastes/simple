@@ -1,0 +1,118 @@
+# Custom editor routing on document open.
+#
+# `ExtensionManifest.contributes_custom_editors` (writer.rich_document_editor,
+# sheets.grid, slides.canvas) is bound into a resolvable registry on
+# ExtensionHost -- resolve_custom_editor(document_kind) / custom_editor_registered
+# (see test/01_unit/lib/editor/custom_editor_contribution_spec.spl) -- but until
+# now nothing in src/ ever called it from the document-open path: the registry
+# had zero readers.
+#
+# ctrl_activate_active_language (src/app/editor/editor_ctrl_core.spl), the real
+# post-open hook every interactive open path runs through (file-tree "open" via
+# ctrl_dispatch_file_tree_key, the command palette via ctrl_open_palette, MCP's
+# editor.open_file), now also calls ctrl_route_to_custom_editor: it resolves the
+# opened file's extension to a document_kind through the extension host's
+# language index (the same index sheets_ext.spl/spl_language.spl/etc. populate
+# via contributes_languages), and -- only when a custom editor is registered for
+# that kind -- emits an "onDidResolveCustomEditor:<kind>" event carrying the
+# winning editor id. Unclaimed extensions and kinds with no registered editor are
+# a silent no-op: the document keeps rendering in the default text editor, which
+# is the real, already-existing fallback, not a stand-in.
+#
+# These tests build a real EditorController (EditorController.new() wires the
+# same extension_host_with_builtins() the shipped app uses, indexing sheets_ext's
+# real manifest -- ExtensionLanguage(id: "sheets", extensions:
+# [".xlsx",".xls",".csv"]) + ExtensionCustomEditor(id: "sheets.grid",
+# document_kind: "sheets")) and drive the real open-file + activate call
+# sequence. The tests activate the builtin explicitly (host.activate(name) is
+# idempotent -- a no-op if a given host build already activates it eagerly) so
+# the routing assertion holds regardless of which activation policy the
+# extension host build in the tree currently ships.
+
+use std.spec
+use std.editor.core.session.{EditSession}
+use std.editor.extensions.host.*
+use app.editor.editor_controller.{EditorController}
+use app.editor.editor_ctrl_core.{ctrl_activate_active_language}
+use app.editor.gui_shell_core.*
+use app.editor.gui_shell_render.*
+use std.editor.backend.gui_backend.*
+
+fn _has_event(host: ExtensionHost, event: text, payload: text) -> bool:
+    for record in host.event_log:
+        if record.event == event and record.payload == payload:
+            return true
+    false
+
+describe "document open routes to a registered contributes_custom_editors entry":
+
+    it "opening a .csv document resolves the real sheets.grid custom editor":
+        var session = EditSession.new()
+        session.open_file("custom_editor_routing_fixture_budget.csv")
+        var ctrl: EditorController = EditorController.new(session)
+        ctrl.extension_host.activate("sheets-function-registry-demo")
+
+        # Precondition: the builtin sheets extension really is active and its
+        # custom editor really is registered for "sheets" -- if this were
+        # false the routing assertion below would be vacuous.
+        expect(ctrl.extension_host.custom_editor_registered("sheets")).to_equal(true)
+
+        ctrl_activate_active_language(ctrl)
+
+        expect(_has_event(ctrl.extension_host, "onDidResolveCustomEditor:sheets", "sheets.grid")).to_equal(true)
+
+    it "opening a .rs document (no contributed custom editor for its kind) stays on the default editor":
+        var session = EditSession.new()
+        session.open_file("custom_editor_routing_fixture_notes.rs")
+        var ctrl: EditorController = EditorController.new(session)
+
+        ctrl_activate_active_language(ctrl)
+
+        var routed = false
+        for record in ctrl.extension_host.event_log:
+            if record.event.starts_with("onDidResolveCustomEditor:"):
+                routed = true
+        expect(routed).to_equal(false)
+
+    it "resolve_custom_editor for an unclaimed extension's kind returns no entry (the fallback source of truth)":
+        var session = EditSession.new()
+        session.open_file("custom_editor_routing_fixture_notes.rs")
+        var ctrl: EditorController = EditorController.new(session)
+
+        # ".rs" is not registered by any builtin's contributes_languages, so
+        # the language index can't resolve a document_kind for it at all --
+        # confirming the earlier no-event assertion is because there is
+        # genuinely no kind to route on, not a bug that swallowed the event.
+        expect(ctrl.extension_host.find_language_for_ext(".rs")).to_equal("")
+
+    it "a resolved custom editor is observable beyond the event log -- it changes what the GUI status bar renders":
+        # Until now, onDidResolveCustomEditor fired into a void: nothing
+        # recorded which editor won, and nothing downstream ever read it
+        # back, so a .csv document rendered byte-identically to a plain-text
+        # one. ctrl_route_to_custom_editor now stamps the resolved editor id
+        # onto EditorDocument.custom_editor_id, and gui_shell_render_frame's
+        # status bar reads it back -- so opening a document with a
+        # registered custom editor now produces a genuinely different
+        # rendered frame, not just a different event log entry.
+        var session = EditSession.new()
+        session.open_file("custom_editor_routing_fixture_budget.csv")
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.extension_host.activate("sheets-function-registry-demo")
+        ctrl_activate_active_language(ctrl)
+        state.ctrl = ctrl
+
+        expect(state.ctrl.session.active_document().custom_editor_id).to_equal("sheets.grid")
+        val frame = gui_shell_render_frame(state)
+        expect(frame.status_html.contains("custom-editor:sheets.grid")).to_equal(true)
+
+        var session_plain = EditSession.new()
+        session_plain.open_file("custom_editor_routing_fixture_notes.rs")
+        var state_plain = gui_shell_new(session_plain)
+        var ctrl_plain = state_plain.ctrl
+        ctrl_activate_active_language(ctrl_plain)
+        state_plain.ctrl = ctrl_plain
+
+        expect(state_plain.ctrl.session.active_document().custom_editor_id).to_equal("")
+        val frame_plain = gui_shell_render_frame(state_plain)
+        expect(frame_plain.status_html.contains("custom-editor:")).to_equal(false)

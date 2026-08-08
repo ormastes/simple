@@ -1,0 +1,61 @@
+# Regression: gpu_driver status wrappers must not accept POSITIVE CUDA errors
+# as success.
+#
+# ORACLE (external -- CUDA Driver API `enum CUresult` in cuda.h, not taken from
+# the code under test):
+#     CUDA_SUCCESS                = 0
+#     CUDA_ERROR_INVALID_VALUE    = 1
+#     CUDA_ERROR_OUT_OF_MEMORY    = 2
+#     CUDA_ERROR_NOT_INITIALIZED  = 3
+# Every error enumerator is non-zero, so "did it fail?" is `status != 0`.
+#
+# 4e52c40fccc fixed exactly this in gc_async_mut/gpu_ops.spl but left
+# nogc_sync_mut/gpu_driver/mod.spl -- a near-clone of the same API -- still
+# testing `result < 0`. Ten wrappers there handed every raw-positive driver
+# failure to callers as Ok(()): a silently-wrong success that leaves the caller
+# operating on a dead context or an untransferred buffer.
+#
+# Calls returning a POINTER or HANDLE (cuda_mem_alloc, cuda_ctx_create,
+# cuda_module_load*) legitimately keep `< 0` and are NOT routed through
+# gpu_status -- their hooks negate on failure and a successful value is
+# positive. gpu_alloc's null-pointer control below pins that distinction.
+
+use std.nogc_sync_mut.gpu_driver.mod.{gpu_status, gpu_free, GpuPtr, GpuError}
+
+fn is_ok(r: Result<(), GpuError>) -> bool:
+    match r:
+        case Ok(_):
+            true
+        case Err(e):
+            false
+
+describe "gpu_driver CUDA status sign":
+    it "treats CUDA_SUCCESS (0) as success":
+        # Control: passes both before and after the fix. Proves the predicate is
+        # not simply reporting failure for everything.
+        assert_true(is_ok(gpu_status(0)))
+
+    it "treats a POSITIVE CUresult as failure":
+        # The regression. `< 0` accepted all three of these as success.
+        assert_false(is_ok(gpu_status(1)))
+        assert_false(is_ok(gpu_status(2)))
+        assert_false(is_ok(gpu_status(3)))
+
+    it "treats a NEGATED CUresult as failure":
+        # Control: passes both before and after the fix. The hooks that return
+        # the status pre-negated must keep working.
+        assert_false(is_ok(gpu_status(-1)))
+        assert_false(is_ok(gpu_status(-3)))
+
+    it "preserves the reported status code in the error":
+        match gpu_status(3):
+            case Ok(_):
+                assert_equal("no error for CUDA_ERROR_NOT_INITIALIZED", "an error")
+            case Err(e):
+                assert_equal(e.code, 3)
+
+    it "still succeeds on the null-pointer short circuit (control)":
+        # Control: gpu_free short-circuits before any driver call, so this is Ok
+        # in both directions and shows the suite is not uniformly red.
+        val nullp = GpuPtr(device_ptr: 0, size: 0, is_valid: false)
+        assert_true(is_ok(gpu_free(nullp)))

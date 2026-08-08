@@ -1,0 +1,28 @@
+# @req REQ-LLM-MSG-006 REQ-LLM-MSG-007 REQ-LLM-MSG-008 REQ-LLM-MSG-014
+"""Claude hooks enqueue normalized lifecycle state without external calls."""
+
+use std.spec.*
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.adapter.agent.claude_hooks.{ClaudeHooksAdapter}
+
+fn binding() -> AgentBinding:
+    AgentBinding(binding_id: messaging_id("binding", "b1"), room_id: messaging_id("room", "r1"),
+        agent_id: messaging_id("agent", "builder"), handler: AgentHandler.Main,
+        session_policy: "persistent_per_room", trigger_policy: "mention", update_policy: "milestones",
+        context_policy: "bounded", permissions: [])
+
+describe "Claude AgentControl adapter":
+    it "registers a stable session and normalizes hook transitions":
+        var adapter = ClaudeHooksAdapter.new()
+        val session_id = adapter.attach_session(binding())
+        expect(session_id.starts_with("claude-builder-")).to_equal(true)
+        expect(adapter.accept_hook(session_id, "UserPromptSubmit", "m1")).to_equal("enqueued:running")
+        expect(adapter.accept_hook(session_id, "PermissionRequest", "approve tool")).to_equal("enqueued:waiting_input")
+        expect(adapter.accept_hook(session_id, "Stop", "answer")).to_equal("enqueued:completed")
+        expect(adapter.registry.event_count()).to_equal(4)
+
+    it "fails closed for unknown hooks and unavailable sessions":
+        var adapter = ClaudeHooksAdapter.new()
+        expect(adapter.accept_hook("missing", "Stop", "answer")).to_equal("error:session_unavailable")
+        val session_id = adapter.attach_session(binding())
+        expect(adapter.accept_hook(session_id, "UntrustedHook", "payload")).to_equal("error:unknown_claude_hook")

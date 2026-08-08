@@ -1,0 +1,492 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+"""# CSS custom-property graph resolution
+
+Exercises missing, cyclic, malformed, deep, and shared `var()` graphs through
+Web semantic/layout, canonical Draw IR, Engine2D, and compatibility readback.
+Resolution depth is capped at 32 and use-site fallbacks remain authoritative.
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    BrowserLogLevel,
+    Logger
+}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    CSSDeclaration,
+    CSSValue
+}
+use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{
+    CustomPropertyStore
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode,
+    simple_web_layout_render_html_draw_ir_result
+}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 48
+
+fn _custom_property_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var index = 0
+    for command in commands:
+        if command.component_id == component_id:
+            return index
+        index = index + 1
+    fail("missing Draw IR command: {component_id}")
+    -1
+
+fn _custom_property_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing Draw IR computed style: {key}")
+    ""
+
+fn _custom_property_pixel_at(
+    pixels: [u32], width: i32, x: i32, y: i32
+) -> u32:
+    val index = y * width + x
+    if width <= 0 or x < 0 or y < 0 or index >= pixels.len():
+        fail("pixel coordinate outside readback")
+        return 0u32
+    pixels[index]
+
+fn _custom_property_count_color(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _custom_property_node_index(
+    nodes: [HNode], component_id: text
+) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing semantic node: {component_id}")
+    -1
+
+fn _custom_property_chain(prefix: text, depth: i32, color: text) -> text:
+    var css = "--" + prefix + "0:" + color + ";"
+    var current = 1
+    while current <= depth:
+        css = (
+            "--" + prefix + current.to_text() +
+            ":var(--" + prefix + (current - 1).to_text() + ");" + css
+        )
+        current = current + 1
+    css
+
+fn _repeated_shared_branches(count: i32) -> text:
+    var css = ""
+    var current = 0
+    while current < count:
+        css = (
+            css + "--branch" + current.to_text() +
+            ":var(--missing,var(--shared24));"
+        )
+        current = current + 1
+    css
+
+fn _custom_property_value_text(value: CSSValue) -> text:
+    match value:
+        CSSValue.Keyword(keyword):
+            keyword
+        CSSValue.Initial:
+            "<initial>"
+        _:
+            "<other>"
+
+describe "Production CSS custom properties":
+    it "should type every direct store failure and enforce 1024 substitutions":
+        val logger = Logger.new(
+            "custom-property-cycle2", BrowserLogLevel.Error
+        )
+        val store = CustomPropertyStore.new(logger)
+        store.set_property(1, "--self", "var(--self)")
+        store.set_property(1, "--left", "var(--right)")
+        store.set_property(1, "--right", "var(--left)")
+        store.set_property(1, "--bad", "prefix var(--missing)")
+        store.set_property(
+            1, "--literal-invalid", "__simple_custom_property_invalid__"
+        )
+        store.set_property(
+            1, "--literal-cycle", "__simple_custom_property_cycle__"
+        )
+        store.set_property(
+            1, "--literal-core-invalid", "__simple_css_var_invalid__"
+        )
+        store.set_property(
+            1, "--literal-core-cycle", "__simple_css_var_cycle__"
+        )
+        var declarations: [CSSDeclaration] = [
+            CSSDeclaration(
+                property: "missing", value: CSSValue.Keyword(
+                    v: "var(--missing,A)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "self", value: CSSValue.Keyword(
+                    v: "var(--self,B)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "mutual", value: CSSValue.Keyword(
+                    v: "var(--left,C)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "bad", value: CSSValue.Keyword(
+                    v: "var(--bad,D)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "literal-invalid", value: CSSValue.Keyword(
+                    v: "var(--literal-invalid)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "literal-cycle", value: CSSValue.Keyword(
+                    v: "var(--literal-cycle)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "literal-core-invalid", value: CSSValue.Keyword(
+                    v: "var(--literal-core-invalid)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "literal-core-cycle", value: CSSValue.Keyword(
+                    v: "var(--literal-core-cycle)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "bad-first", value: CSSValue.Keyword(
+                    v: "var(--bad,first)"
+                ), important: false
+            ),
+            CSSDeclaration(
+                property: "bad-second", value: CSSValue.Keyword(
+                    v: "var(--bad,second)"
+                ), important: false
+            )
+        ]
+        val branches = store.resolve_all_vars(declarations, 1)
+        if branches.len() != 10:
+            fail("direct custom-property branch count mismatch")
+
+        step("Use consumer fallbacks without caching failed graph tails")
+        expect(_custom_property_value_text(
+            branches[0].value
+        )).to_equal("A")
+        expect(_custom_property_value_text(
+            branches[1].value
+        )).to_equal("B")
+        expect(_custom_property_value_text(
+            branches[2].value
+        )).to_equal("C")
+        expect(_custom_property_value_text(
+            branches[3].value
+        )).to_equal("D")
+        expect(_custom_property_value_text(
+            branches[8].value
+        )).to_equal("first")
+        expect(_custom_property_value_text(
+            branches[9].value
+        )).to_equal("second")
+
+        step("Keep former sentinel spellings as ordinary author text")
+        # RED: cycle2 magic-sentinel collision before typed outcomes.
+        expect(_custom_property_value_text(
+            branches[4].value
+        )).to_equal("__simple_custom_property_invalid__")
+        expect(_custom_property_value_text(
+            branches[5].value
+        )).to_equal("__simple_custom_property_cycle__")
+        expect(_custom_property_value_text(
+            branches[6].value
+        )).to_equal("__simple_css_var_invalid__")
+        expect(_custom_property_value_text(
+            branches[7].value
+        )).to_equal("__simple_css_var_cycle__")
+
+        step("Admit substitution 1024 and invalidate substitution 1025")
+        var budget_declarations: [CSSDeclaration] = []
+        var budget_index = 0
+        while budget_index < 1025:
+            budget_declarations.push(CSSDeclaration(
+                property: "budget", value: CSSValue.Keyword(
+                    v: "var(--missing,ok)"
+                ), important: false
+            ))
+            budget_index = budget_index + 1
+        val budget_values = store.resolve_all_vars(
+            budget_declarations, 1
+        )
+        if budget_values.len() != 1025:
+            fail("custom-property budget result count mismatch")
+        expect(_custom_property_value_text(
+            budget_values[1023].value
+        )).to_equal("ok")
+        expect(_custom_property_value_text(
+            budget_values[1024].value
+        )).to_equal("<initial>")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should use use-site fallbacks for missing cyclic and malformed graphs":
+        var html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "/* standalone root preamble */\n@layer theme;\n" +
+            ":root{" +
+            "--brand:var(--missing,#16a34a);" +
+            "--self:var(--self);" +
+            "--left:var(--right);--right:var(--left);" +
+            "--invalid:var(color)}" +
+            ".not-root:root{{--brand:#9333ea}}" +
+            "div{width:12px;height:8px}" +
+            "#brand{background:var(--brand)}" +
+            "#self{background:var(--self,#9333ea)}" +
+            "#mutual{background:var(--left,#2563eb)}" +
+            "#invalid{background:var(--invalid,#dc2626)}" +
+            "</style><div id='brand'></div><div id='self'></div>" +
+            "<div id='mutual'></div><div id='invalid'></div>"
+        )
+        val inspected = simple_web_layout_render_html_draw_ir_result(
+            html, WIDTH, HEIGHT
+        )
+        val brand_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "brand"
+        )
+        val self_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "self"
+        )
+        val mutual_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "mutual"
+        )
+        val invalid_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "invalid"
+        )
+        if (
+            brand_node < 0 or self_node < 0 or mutual_node < 0 or
+            invalid_node < 0
+        ):
+            fail("missing required semantic node")
+        for node_index in [
+            brand_node, self_node, mutual_node, invalid_node
+        ]:
+            if (
+                node_index >= inspected.hit_index.styles.len() or
+                node_index >= inspected.hit_index.boxes.by.len()
+            ):
+                fail("semantic node outside style/layout arrays")
+
+        step("Collect standalone root after preamble and reject suffix root")
+        expect(inspected.hit_index.styles[brand_node].bg).to_equal(
+            0xFF16A34Au32
+        )
+        expect(inspected.hit_index.styles[self_node].bg).to_equal(
+            0xFF9333EAu32
+        )
+        expect(inspected.hit_index.styles[mutual_node].bg).to_equal(
+            0xFF2563EBu32
+        )
+        expect(inspected.hit_index.styles[invalid_node].bg).to_equal(
+            0xFFDC2626u32
+        )
+        expect(inspected.hit_index.boxes.by[invalid_node]).to_equal(24)
+
+        step("Lower graph winners through canonical Draw IR")
+        val composition = inspected.composition
+        if composition.batches.len() == 0:
+            fail("missing Draw IR batch")
+        val commands = composition.batches[0].commands
+        val brand_index = _custom_property_command_index(commands, "brand")
+        val self_index = _custom_property_command_index(commands, "self")
+        val mutual_index = _custom_property_command_index(commands, "mutual")
+        val invalid_index = _custom_property_command_index(commands, "invalid")
+        if (
+            brand_index < 0 or self_index < 0 or mutual_index < 0 or
+            invalid_index < 0
+        ):
+            fail("missing required Draw IR command")
+        val brand = commands[brand_index]
+        val self_cycle = commands[self_index]
+        val mutual = commands[mutual_index]
+        val invalid = commands[invalid_index]
+        expect([
+            brand.x, brand.y, brand.width, brand.height
+        ]).to_equal([0, 0, 12, 8])
+        expect([
+            self_cycle.x, self_cycle.y, self_cycle.width, self_cycle.height
+        ]).to_equal([0, 8, 12, 8])
+        expect([
+            mutual.x, mutual.y, mutual.width, mutual.height
+        ]).to_equal([0, 16, 12, 8])
+        expect([
+            invalid.x, invalid.y, invalid.width, invalid.height
+        ]).to_equal([0, 24, 12, 8])
+        expect(_custom_property_style(
+            brand, "background-color"
+        )).to_equal("4279673674")
+        expect(_custom_property_style(
+            self_cycle, "background-color"
+        )).to_equal("4287837162")
+        expect(_custom_property_style(
+            mutual, "background-color"
+        )).to_equal("4280640491")
+        expect(_custom_property_style(
+            invalid, "background-color"
+        )).to_equal("4292617766")
+
+        step("Read identical exact pixels through both production paths")
+        val raster = Engine2dCompositorBackend.create_named(
+            WIDTH, HEIGHT, "software"
+        )
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels.len()).to_equal(WIDTH * HEIGHT)
+        val engine_pixels = rendered.pixels
+        val compatibility_pixels = BrowserRenderer.create(
+            WIDTH, HEIGHT
+        ).render_html_to_pixels(html).pixel_data
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 2
+        )).to_equal(0xFF16A34Au32)
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 10
+        )).to_equal(0xFF9333EAu32)
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 18
+        )).to_equal(0xFF2563EBu32)
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 26
+        )).to_equal(0xFFDC2626u32)
+        expect(compatibility_pixels).to_equal(engine_pixels)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should bound deep graphs and memoize repeated shared branches":
+        val pass_chain = _custom_property_chain("p", 32, "#16a34a")
+        val fail_chain = _custom_property_chain("q", 33, "#dc2626")
+        val shared_chain = _custom_property_chain(
+            "shared", 24, "#0e7490"
+        )
+        val branches = _repeated_shared_branches(64)
+        var html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            ":root{" + pass_chain + fail_chain +
+            shared_chain + branches + "}" +
+            "div{width:12px;height:8px}" +
+            "#limit{background:var(--p32,#9333ea)}" +
+            "#over{background:var(--q33,#ea580c)}" +
+            "#branch{background:var(--branch0,#dc2626)}"
+        )
+        var branch_index = 1
+        while branch_index < 64:
+            html = (
+                html + "#branch{background:var(--branch" +
+                branch_index.to_text() + ",#dc2626)}"
+            )
+            branch_index = branch_index + 1
+        html = (
+            html + "</style><div id='limit'></div><div id='over'></div>" +
+            "<div id='branch'></div>"
+        )
+        val inspected = simple_web_layout_render_html_draw_ir_result(
+            html, WIDTH, 32
+        )
+        val limit_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "limit"
+        )
+        val over_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "over"
+        )
+        val branch_node = _custom_property_node_index(
+            inspected.hit_index.nodes, "branch"
+        )
+        if limit_node < 0 or over_node < 0 or branch_node < 0:
+            fail("missing required semantic node")
+        for node_index in [limit_node, over_node, branch_node]:
+            if (
+                node_index >= inspected.hit_index.styles.len() or
+                node_index >= inspected.hit_index.boxes.by.len()
+            ):
+                fail("semantic node outside style/layout arrays")
+
+        step("Resolve the exact depth boundary and shared branch graph")
+        expect(inspected.hit_index.styles[limit_node].bg).to_equal(
+            0xFF16A34Au32
+        )
+        expect(inspected.hit_index.styles[over_node].bg).to_equal(
+            0xFFEA580Cu32
+        )
+        expect(inspected.hit_index.styles[branch_node].bg).to_equal(
+            0xFF0E7490u32
+        )
+        expect(inspected.hit_index.boxes.by[branch_node]).to_equal(16)
+
+        step("Preserve bounded winners in canonical Draw IR")
+        val composition = inspected.composition
+        if composition.batches.len() == 0:
+            fail("missing Draw IR batch")
+        val commands = composition.batches[0].commands
+        val limit_index = _custom_property_command_index(commands, "limit")
+        val over_index = _custom_property_command_index(commands, "over")
+        val branch_command_index = _custom_property_command_index(
+            commands, "branch"
+        )
+        if (
+            limit_index < 0 or over_index < 0 or branch_command_index < 0
+        ):
+            fail("missing required Draw IR command")
+        val limit = commands[limit_index]
+        val over = commands[over_index]
+        val branch = commands[branch_command_index]
+        expect(_custom_property_style(
+            limit, "background-color"
+        )).to_equal("4279673674")
+        expect(_custom_property_style(
+            over, "background-color"
+        )).to_equal("4293548044")
+        expect(_custom_property_style(
+            branch, "background-color"
+        )).to_equal("4279137424")
+
+        step("Read exact bounded pixels through both renderers")
+        val raster = Engine2dCompositorBackend.create_named(
+            WIDTH, 32, "software"
+        )
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels.len()).to_equal(WIDTH * 32)
+        val engine_pixels = rendered.pixels
+        val compatibility_pixels = BrowserRenderer.create(
+            WIDTH, 32
+        ).render_html_to_pixels(html).pixel_data
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 2
+        )).to_equal(0xFF16A34Au32)
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 10
+        )).to_equal(0xFFEA580Cu32)
+        expect(_custom_property_pixel_at(
+            engine_pixels, WIDTH, 2, 18
+        )).to_equal(0xFF0E7490u32)
+        expect(_custom_property_count_color(
+            engine_pixels, 0xFFDC2626u32
+        )).to_equal(0)
+        expect(compatibility_pixels).to_equal(engine_pixels)

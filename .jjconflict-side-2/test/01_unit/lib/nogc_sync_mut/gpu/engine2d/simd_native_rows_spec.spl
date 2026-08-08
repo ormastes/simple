@@ -1,0 +1,169 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl 80%
+# @tag: unit, gpu, engine2d, simd, native_rows
+#
+# Wrapper-parity closure for the narrow native ABI in simd_native_rows.spl
+# (plan unit F7). Every `pub fn` here is a thin extern delegate to
+# `rt_engine2d_simd_*` — see
+# src/compiler_rust/compiler/src/interpreter_extern/simd.rs and
+# src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs for the bridge
+# these calls actually execute (verified 2026-08-07 by probe, not assumed):
+#
+# - `engine2d_simd_fill_row_u32` / `engine2d_simd_copy_row_u32` route through
+#   `fill_row_u32` / `copy_row_u32` in engine2d_simd_ops.rs, whose SSE2 path
+#   (x86_64, span >= 4 pixels) calls `record_simd_row_hit()` — confirmed by
+#   probe: hits goes 0 -> 1 after one 64-pixel fill_row/copy_row call, and
+#   stays 0 for a 2-pixel call (below the 4-pixel SIMD threshold, scalar
+#   fallback taken, no hit recorded).
+# - `engine2d_simd_blend_row_u32` / `engine2d_simd_blend_span_u32` /
+#   `engine2d_simd_blend_const_span_u32` do NOT touch the hit counter at all
+#   (their Rust bridges compute the blend inline in
+#   interpreter_extern/simd.rs and never call `sffi_fill_row_u32` /
+#   `sffi_copy_row_u32`) — confirmed by probe: hits stays 0 across all three
+#   blend-family calls even though each one blends a real 64-pixel span.
+#
+# CORRECTION vs the plan (2026-08-07): the plan's fifth `it` reads "wrappers
+# fall back safely when native rows disabled (native_pixel_rows_enabled=false
+# path)". `native_pixel_rows_enabled()` does not live in this file and does
+# not gate any function in it (grepped: it's defined in
+# simd_kernels.spl:352 and only read at call sites in backend_software.spl /
+# engine.spl, one layer above this module). simd_native_rows.spl has no
+# config-driven fallback branch of its own — every wrapper here always calls
+# its extern. The real, in-file "fallback" is the 4-pixel SIMD-vs-scalar
+# threshold inside the Rust bridge (below it, output is still correct, hits
+# stays 0); that is what the fifth `it` below actually pins.
+
+use std.spec
+use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
+    engine2d_simd_fill_row_u32,
+    engine2d_simd_fill_buffer_u32,
+    engine2d_simd_fill_rows_u32,
+    engine2d_simd_copy_row_u32,
+    engine2d_simd_blend_row_u32,
+    engine2d_simd_blend_span_u32,
+    engine2d_simd_blend_const_span_u32,
+    engine2d_simd_native_hits,
+    engine2d_simd_native_reset,
+}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_fill_const,
+    oracle_src_over_image,
+    oracle_src_over_const,
+    oracle_hash_span,
+}
+
+# Deterministic generator, mirrors scalar_oracle_spec.spl's fixed-seed LCG so
+# "randomized" spans are reproducible.
+fn lcg_next(s: i64) -> i64:
+    ((s * 6364136223846793005 + 1442695040888963407) >> 16) & 0x7FFFFFFF
+
+fn filled_random(n: i64, seed: i64) -> [u32]:
+    var out: [u32] = [0; n.to_i32()]
+    var s: i64 = seed
+    var i: i64 = 0
+    while i < n:
+        s = lcg_next(s)
+        out[i.to_i32()] = (s & 0xFFFFFFFF) as u32
+        i = i + 1
+    out
+
+describe "simd_native_rows — fill_row_u32 / fill_buffer_u32 / fill_rows_u32 parity":
+    it "fill_row_u32 matches oracle_fill_const per element":
+        val n: i64 = 64
+        val native = engine2d_simd_fill_row_u32(n, 0xFF224466)
+        var oracle_buf: [u32] = [0; 64]
+        oracle_fill_const(oracle_buf, 0, n, 0xFF224466)
+        assert_true(oracle_hash_span(oracle_buf, 0, n) == oracle_hash_span(native, 0, n))
+        assert_true(native.len() == 64)
+        assert_true(native[0] == 0xFF224466)
+
+    it "fill_buffer_u32 mirrors fill_row_u32 for positive count and returns empty for count<=0":
+        val n: i64 = 32
+        val native = engine2d_simd_fill_buffer_u32(n, 0x11223344)
+        var oracle_buf: [u32] = [0; 32]
+        oracle_fill_const(oracle_buf, 0, n, 0x11223344)
+        assert_true(oracle_hash_span(oracle_buf, 0, n) == oracle_hash_span(native, 0, n))
+        assert_true(engine2d_simd_fill_buffer_u32(0, 0xFFFFFFFF).len() == 0)
+        assert_true(engine2d_simd_fill_buffer_u32(-1, 0xFFFFFFFF).len() == 0)
+
+    it "fill_rows_u32 fills width*height pixels and returns empty for non-positive dims":
+        val rows = engine2d_simd_fill_rows_u32(8, 4, 0xAABBCCDD, 1)
+        var oracle_buf: [u32] = [0; 32]
+        oracle_fill_const(oracle_buf, 0, 32, 0xAABBCCDD)
+        assert_true(rows.len() == 32)
+        assert_true(oracle_hash_span(oracle_buf, 0, 32) == oracle_hash_span(rows, 0, 32))
+        assert_true(engine2d_simd_fill_rows_u32(0, 4, 0xFFFFFFFF, 1).len() == 0)
+        assert_true(engine2d_simd_fill_rows_u32(4, 0, 0xFFFFFFFF, 1).len() == 0)
+        assert_true(engine2d_simd_fill_rows_u32(-1, 4, 0xFFFFFFFF, 1).len() == 0)
+
+describe "simd_native_rows — copy_row_u32 / blend family parity":
+    it "copy_row_u32 reproduces src content bit-exact":
+        val src = filled_random(64, 42)
+        val cp = engine2d_simd_copy_row_u32(src)
+        assert_true(cp.len() == 64)
+        assert_true(oracle_hash_span(cp, 0, 64) == oracle_hash_span(src, 0, 64))
+
+    it "blend_row_u32 matches oracle_src_over_image (pinned via oracle hash)":
+        var dst_row = filled_random(64, 7)
+        var src_row = filled_random(64, 8)
+        val blended = engine2d_simd_blend_row_u32(dst_row, src_row)
+        var oracle_dst = filled_random(64, 7)
+        var oracle_src = filled_random(64, 8)
+        oracle_src_over_image(oracle_dst, 0, oracle_src, 0, 64)
+        assert_true(oracle_hash_span(blended, 0, 64) == oracle_hash_span(oracle_dst, 0, 64))
+
+    it "blend_span_u32 matches oracle_src_over_image (pinned hash)":
+        var dst = filled_random(64, 100)
+        var src = filled_random(64, 101)
+        val blended = engine2d_simd_blend_span_u32(dst, 0, src, 0, 64)
+        var oracle_dst = filled_random(64, 100)
+        var oracle_src = filled_random(64, 101)
+        oracle_src_over_image(oracle_dst, 0, oracle_src, 0, 64)
+        assert_true(oracle_hash_span(blended, 0, 64) == oracle_hash_span(oracle_dst, 0, 64))
+
+    it "blend_const_span_u32 matches oracle_src_over_const":
+        var dst = filled_random(64, 200)
+        val blended = engine2d_simd_blend_const_span_u32(dst, 0, 64, 0x80FF2244)
+        var oracle_dst = filled_random(64, 200)
+        oracle_src_over_const(oracle_dst, 0, 64, 0x80FF2244)
+        assert_true(oracle_hash_span(blended, 0, 64) == oracle_hash_span(oracle_dst, 0, 64))
+
+    it "blend_const_span_u32 with sa==0 constant colour is a no-op, matching the oracle":
+        var dst = filled_random(64, 201)
+        val blended = engine2d_simd_blend_const_span_u32(dst, 0, 64, 0x00FF2244)
+        var oracle_dst = filled_random(64, 201)
+        oracle_src_over_const(oracle_dst, 0, 64, 0x00FF2244)
+        assert_true(oracle_hash_span(blended, 0, 64) == oracle_hash_span(oracle_dst, 0, 64))
+
+describe "simd_native_rows — native_hits accounting (real, verified per-function)":
+    it "native_hits increments exactly once for a fill_row_u32 call at/above the SIMD threshold, and reset zeroes it":
+        engine2d_simd_native_reset()
+        assert_true(engine2d_simd_native_hits() == 0)
+        engine2d_simd_fill_row_u32(64, 0xFF000000)
+        assert_true(engine2d_simd_native_hits() == 1)
+        engine2d_simd_native_reset()
+        assert_true(engine2d_simd_native_hits() == 0)
+
+    it "native_hits increments exactly once for a copy_row_u32 call at/above the SIMD threshold":
+        engine2d_simd_native_reset()
+        engine2d_simd_copy_row_u32(filled_random(64, 5))
+        assert_true(engine2d_simd_native_hits() == 1)
+        engine2d_simd_native_reset()
+
+    it "a below-threshold fill_row_u32 call (count<4) falls back to scalar and does not record a SIMD hit, but is still correct":
+        engine2d_simd_native_reset()
+        val small = engine2d_simd_fill_row_u32(2, 0xFF000000)
+        assert_true(engine2d_simd_native_hits() == 0)
+        assert_true(small.len() == 2)
+        assert_true(small[0] == 0xFF000000)
+        assert_true(small[1] == 0xFF000000)
+        engine2d_simd_native_reset()
+
+    it "blend_row_u32/blend_span_u32/blend_const_span_u32 never record a native_hits SIMD row hit (Rust bridge computes blends inline, not via the row-hit-counted fill/copy path)":
+        engine2d_simd_native_reset()
+        engine2d_simd_blend_row_u32(filled_random(64, 1), filled_random(64, 2))
+        assert_true(engine2d_simd_native_hits() == 0)
+        engine2d_simd_blend_span_u32(filled_random(64, 3), 0, filled_random(64, 4), 0, 64)
+        assert_true(engine2d_simd_native_hits() == 0)
+        engine2d_simd_blend_const_span_u32(filled_random(64, 6), 0, 64, 0x80FF2244)
+        assert_true(engine2d_simd_native_hits() == 0)
+        engine2d_simd_native_reset()

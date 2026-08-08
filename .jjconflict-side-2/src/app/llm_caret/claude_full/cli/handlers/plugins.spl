@@ -1,0 +1,728 @@
+class PluginValidationResult:
+    fileType: text
+    filePath: text
+    success: bool
+    errors: [text]
+    warnings: [text]
+
+impl PluginValidationResult:
+    static fn new(fileType: text, filePath: text, success: bool, errors: [text], warnings: [text]) -> PluginValidationResult:
+        PluginValidationResult(fileType: fileType, filePath: filePath, success: success, errors: errors, warnings: warnings)
+
+class PluginInstallRecord:
+    id: text
+    version: text
+    scope: text
+    installPath: text
+    installedAt: text
+    lastUpdated: text
+    projectPath: text
+
+impl PluginInstallRecord:
+    static fn new(id: text, version: text, scope: text, installPath: text) -> PluginInstallRecord:
+        PluginInstallRecord(id: id, version: version, scope: scope, installPath: installPath, installedAt: "", lastUpdated: "", projectPath: "")
+
+class LoadedPluginRecord:
+    source: text
+    name: text
+    version: text
+    path: text
+    enabled: bool
+    mcpServers: [text]
+
+impl LoadedPluginRecord:
+    static fn new(source: text, name: text, version: text, path: text, enabled: bool) -> LoadedPluginRecord:
+        LoadedPluginRecord(source: source, name: name, version: version, path: path, enabled: enabled, mcpServers: [])
+
+class PluginLoadError:
+    source: text
+    plugin: text
+    path: text
+    message: text
+
+impl PluginLoadError:
+    static fn new(source: text, plugin: text, path: text, message: text) -> PluginLoadError:
+        PluginLoadError(source: source, plugin: plugin, path: path, message: message)
+
+class MarketplaceRecord:
+    name: text
+    sourceKind: text
+    location: text
+    installLocation: text
+    sparsePaths: [text]
+    pluginNames: [text]
+
+impl MarketplaceRecord:
+    static fn new(name: text, sourceKind: text, location: text) -> MarketplaceRecord:
+        MarketplaceRecord(name: name, sourceKind: sourceKind, location: location, installLocation: "", sparsePaths: [], pluginNames: [])
+
+class PluginCommandResult:
+    stdout: text
+    stderr: text
+    exitCode: i64
+    events: [text]
+    cacheCleared: bool
+    coworkEnabled: bool
+    scope: text
+    keepData: bool
+
+impl PluginCommandResult:
+    static fn ok(stdout: text, events: [text]) -> PluginCommandResult:
+        PluginCommandResult(stdout: stdout, stderr: "", exitCode: 0, events: events, cacheCleared: false, coworkEnabled: false, scope: "", keepData: false)
+
+    static fn error(stderr: text) -> PluginCommandResult:
+        PluginCommandResult(stdout: "", stderr: stderr, exitCode: 1, events: [], cacheCleared: false, coworkEnabled: false, scope: "", keepData: false)
+
+fn handleMarketplaceError(message: text, action: text) -> PluginCommandResult:
+    PluginCommandResult.error("✖ Failed to " + action + ": " + message)
+
+fn printValidationResult(result: PluginValidationResult) -> text:
+    var out = ""
+    if result.errors.len() > 0:
+        out = out + "✖ Found " + result.errors.len().to_text() + " " + plural(result.errors.len(), "error") + ":\n\n"
+        var i = 0
+        while i < result.errors.len():
+            out = out + "  ‣ " + result.errors[i] + "\n"
+            i = i + 1
+        out = out + "\n"
+    if result.warnings.len() > 0:
+        out = out + "⚠ Found " + result.warnings.len().to_text() + " " + plural(result.warnings.len(), "warning") + ":\n\n"
+        var j = 0
+        while j < result.warnings.len():
+            out = out + "  ‣ " + result.warnings[j] + "\n"
+            j = j + 1
+        out = out + "\n"
+    out
+
+fn pluginValidateHandler(manifest: PluginValidationResult, contentResults: [PluginValidationResult], cowork: bool) -> PluginCommandResult:
+    var out = "Validating " + manifest.fileType + " manifest: " + manifest.filePath + "\n\n"
+    out = out + printValidationResult(manifest)
+    var allSuccess = manifest.success
+    var hasWarnings = manifest.warnings.len() > 0
+    var i = 0
+    while i < contentResults.len():
+        val result = contentResults[i]
+        out = out + "Validating " + result.fileType + ": " + result.filePath + "\n\n"
+        out = out + printValidationResult(result)
+        if not result.success:
+            allSuccess = false
+        if result.warnings.len() > 0:
+            hasWarnings = true
+        i = i + 1
+    if allSuccess:
+        val suffix = if hasWarnings: "✓ Validation passed with warnings" else: "✓ Validation passed"
+        val command = PluginCommandResult.ok(out + suffix, [])
+        command.coworkEnabled = cowork
+        return command
+    val failed = PluginCommandResult.error(out + "✖ Validation failed")
+    failed.coworkEnabled = cowork
+    failed
+
+fn pluginValidateUnexpectedError(message: text) -> PluginCommandResult:
+    val result = PluginCommandResult.error("✖ Unexpected error during validation: " + message)
+    result.exitCode = 2
+    result
+
+fn pluginListHandler(installed: [PluginInstallRecord], loaded: [LoadedPluginRecord], loadErrors: [PluginLoadError], enabledIds: [text], marketplaces: [MarketplaceRecord], json: bool, available: bool, cowork: bool) -> PluginCommandResult:
+    val result = if json:
+        PluginCommandResult.ok(pluginListJson(installed, loaded, loadErrors, enabledIds, marketplaces, available), [pluginListEventName()])
+    else:
+        PluginCommandResult.ok(pluginListHuman(installed, loaded, loadErrors, enabledIds), [pluginListEventName()])
+    result.coworkEnabled = cowork
+    result
+
+fn pluginListJson(installed: [PluginInstallRecord], loaded: [LoadedPluginRecord], loadErrors: [PluginLoadError], enabledIds: [text], marketplaces: [MarketplaceRecord], available: bool) -> text:
+    var out = "{\n  \"installed\": ["
+    var first = true
+    var i = 0
+    while i < installed.len():
+        if not first:
+            out = out + ","
+        first = false
+        val item = installed[i]
+        out = out + "\n    {\"id\":\"" + item.id + "\",\"version\":\"" + defaultUnknown(item.version) + "\",\"scope\":\"" + item.scope + "\",\"enabled\":" + boolText(containsText(enabledIds, item.id)) + ",\"installPath\":\"" + item.installPath + "\""
+        val errors = errorsForPlugin(item.id, parsePluginName(item.id), loadErrors)
+        if errors.len() > 0:
+            out = out + ",\"errors\":" + textArrayJson(errors)
+        val servers = serversForLoaded(item.id, loaded)
+        if servers.len() > 0:
+            out = out + ",\"mcpServers\":" + textArrayJson(servers)
+        out = out + "}"
+        i = i + 1
+    var j = 0
+    while j < loaded.len():
+        val inline = loaded[j]
+        if inline.source.ends_with("@inline"):
+            if not first:
+                out = out + ","
+            first = false
+            out = out + "\n    {\"id\":\"" + inline.source + "\",\"version\":\"" + defaultUnknown(inline.version) + "\",\"scope\":\"session\",\"enabled\":" + boolText(inline.enabled) + ",\"installPath\":\"" + inline.path + "\""
+            val inlineErrors = errorsForPlugin(inline.source, inline.name, loadErrors)
+            if inlineErrors.len() > 0:
+                out = out + ",\"errors\":" + textArrayJson(inlineErrors)
+            if inline.mcpServers.len() > 0:
+                out = out + ",\"mcpServers\":" + textArrayJson(inline.mcpServers)
+            out = out + "}"
+        j = j + 1
+    var k = 0
+    while k < loadErrors.len():
+        val err = loadErrors[k]
+        if err.source.starts_with("inline["):
+            if not first:
+                out = out + ","
+            first = false
+            out = out + "\n    {\"id\":\"" + err.source + "\",\"version\":\"unknown\",\"scope\":\"session\",\"enabled\":false,\"installPath\":\"" + err.path + "\",\"errors\":[\"" + err.message + "\"]}"
+        k = k + 1
+    out = out + "\n  ]"
+    if available:
+        out = out + ",\n  \"available\": " + availablePluginsJson(installed, marketplaces)
+    out + "\n}"
+
+fn pluginListHuman(installed: [PluginInstallRecord], loaded: [LoadedPluginRecord], loadErrors: [PluginLoadError], enabledIds: [text]) -> text:
+    val inlineErrors = inlineLoadErrors(loadErrors)
+    val inlineCount = countInlinePlugins(loaded)
+    if installed.len() == 0 and inlineCount == 0 and inlineErrors.len() == 0:
+        return noPluginsInstalledMessage()
+    var out = ""
+    if installed.len() > 0:
+        out = out + "Installed plugins:\n\n"
+    var i = 0
+    while i < installed.len():
+        val item = installed[i]
+        val errors = errorsForPlugin(item.id, parsePluginName(item.id), loadErrors)
+        val status = if errors.len() > 0: "✖ failed to load" else: if containsText(enabledIds, item.id): "✓ enabled" else: "✖ disabled"
+        out = out + "  ‣ " + item.id + "\n"
+        out = out + "    Version: " + defaultUnknown(item.version) + "\n"
+        out = out + "    Scope: " + item.scope + "\n"
+        out = out + "    Status: " + status + "\n"
+        var e = 0
+        while e < errors.len():
+            out = out + "    Error: " + errors[e] + "\n"
+            e = e + 1
+        out = out + "\n"
+        i = i + 1
+    if inlineCount > 0 or inlineErrors.len() > 0:
+        out = out + "Session-only plugins (--plugin-dir):\n\n"
+        var j = 0
+        while j < loaded.len():
+            val plugin = loaded[j]
+            if plugin.source.ends_with("@inline"):
+                val errors = errorsForPlugin(plugin.source, plugin.name, loadErrors)
+                val status = if errors.len() > 0: "✖ loaded with errors" else: "✓ loaded"
+                out = out + "  ‣ " + plugin.source + "\n"
+                out = out + "    Version: " + defaultUnknown(plugin.version) + "\n"
+                out = out + "    Path: " + plugin.path + "\n"
+                out = out + "    Status: " + status + "\n"
+                var p = 0
+                while p < errors.len():
+                    out = out + "    Error: " + errors[p] + "\n"
+                    p = p + 1
+                out = out + "\n"
+            j = j + 1
+        var k = 0
+        while k < inlineErrors.len():
+            out = out + "  ‣ " + inlineErrors[k].source + ": ✖ " + inlineErrors[k].message + "\n"
+            k = k + 1
+    out
+
+fn marketplaceAddHandler(source: text, sourceKind: text, scope: text, sparse: [text], alreadyMaterialized: bool, cowork: bool) -> PluginCommandResult:
+    val requestedScope = if scope == "": defaultPluginScope() else: scope
+    if not validMarketplaceScope(requestedScope):
+        return PluginCommandResult.error("✖ Invalid scope '" + requestedScope + "'. Use: user, project, or local")
+    if sparse.len() > 0 and sourceKind != "github" and sourceKind != "git":
+        return PluginCommandResult.error("✖ --sparse is only supported for github and git marketplace sources (got: " + sourceKind + ")")
+    if not validMarketplaceSourceKind(sourceKind):
+        return PluginCommandResult.error("✖ Invalid marketplace source format. Try: owner/repo, https://..., or ./path")
+    val name = marketplaceNameFromSource(source, sourceKind)
+    val prefix = "Adding marketplace...\n"
+    val message = if alreadyMaterialized:
+        "✓ Marketplace '" + name + "' already on disk - declared in " + requestedScope + " settings"
+    else:
+        "✓ Successfully added marketplace: " + name + " (declared in " + requestedScope + " settings)"
+    val result = PluginCommandResult.ok(prefix + message, [marketplaceAddedEventName() + ":" + sourceKind])
+    result.cacheCleared = true
+    result.coworkEnabled = cowork
+    result.scope = requestedScope
+    result
+
+fn marketplaceListHandler(records: [MarketplaceRecord], json: bool, cowork: bool) -> PluginCommandResult:
+    val out = if json: marketplaceListJson(records) else: marketplaceListHuman(records)
+    val result = PluginCommandResult.ok(out, [])
+    result.coworkEnabled = cowork
+    result
+
+fn marketplaceRemoveHandler(name: text, cowork: bool) -> PluginCommandResult:
+    val result = PluginCommandResult.ok("✓ Successfully removed marketplace: " + name, [marketplaceRemovedEventName() + ":" + name])
+    result.cacheCleared = true
+    result.coworkEnabled = cowork
+    result
+
+fn marketplaceUpdateHandler(name: text, configuredCount: i64, cowork: bool) -> PluginCommandResult:
+    if name != "":
+        val result = PluginCommandResult.ok("Updating marketplace: " + name + "...\n✓ Successfully updated marketplace: " + name, [marketplaceUpdatedEventName() + ":" + name])
+        result.cacheCleared = true
+        result.coworkEnabled = cowork
+        return result
+    if configuredCount == 0:
+        val empty = PluginCommandResult.ok(noMarketplacesConfiguredMessage(), [])
+        empty.coworkEnabled = cowork
+        return empty
+    val all = PluginCommandResult.ok("Updating " + configuredCount.to_text() + " marketplace(s)...\n✓ Successfully updated " + configuredCount.to_text() + " marketplace(s)", [marketplaceUpdatedAllEventName() + ":" + configuredCount.to_text()])
+    all.cacheCleared = true
+    all.coworkEnabled = cowork
+    all
+
+fn pluginInstallHandler(plugin: text, scopeOption: text, cowork: bool) -> PluginCommandResult:
+    val scope = if scopeOption == "": defaultPluginScope() else: scopeOption
+    val scopeError = validateCoworkScope(scope, cowork, true)
+    if scopeError != "":
+        return PluginCommandResult.error(scopeError)
+    val id = parsePluginIdentifier(plugin)
+    val result = PluginCommandResult.ok("", [pluginInstallEventName() + ":" + id.name + ":" + id.marketplace + ":" + scope])
+    result.coworkEnabled = cowork
+    result.scope = scope
+    result
+
+fn pluginUninstallHandler(plugin: text, scopeOption: text, cowork: bool, keepData: bool) -> PluginCommandResult:
+    val scope = if scopeOption == "": defaultPluginScope() else: scopeOption
+    val scopeError = validateCoworkScope(scope, cowork, true)
+    if scopeError != "":
+        return PluginCommandResult.error(scopeError)
+    val id = parsePluginIdentifier(plugin)
+    val result = PluginCommandResult.ok("", [pluginUninstallEventName() + ":" + id.name + ":" + id.marketplace + ":" + scope])
+    result.coworkEnabled = cowork
+    result.scope = scope
+    result.keepData = keepData
+    result
+
+fn pluginEnableHandler(plugin: text, scopeOption: text, cowork: bool) -> PluginCommandResult:
+    val scope = resolveOptionalCoworkScope(scopeOption, cowork)
+    val scopeError = validateOptionalScope(scope, cowork)
+    if scopeError != "":
+        return PluginCommandResult.error(scopeError)
+    val id = parsePluginIdentifier(plugin)
+    val eventScope = if scope == "": "auto" else: scope
+    val result = PluginCommandResult.ok("", [pluginEnableEventName() + ":" + id.name + ":" + id.marketplace + ":" + eventScope])
+    result.coworkEnabled = cowork
+    result.scope = scope
+    result
+
+fn pluginDisableHandler(plugin: text, scopeOption: text, cowork: bool, all: bool) -> PluginCommandResult:
+    if all and plugin != "":
+        return PluginCommandResult.error("Cannot use --all with a specific plugin")
+    if not all and plugin == "":
+        return PluginCommandResult.error("Please specify a plugin name or use --all to disable all plugins")
+    if all:
+        if scopeOption != "":
+            return PluginCommandResult.error("Cannot use --scope with --all")
+        val allResult = PluginCommandResult.ok("", [pluginDisableEventName() + ":all"])
+        allResult.coworkEnabled = cowork
+        return allResult
+    val scope = resolveOptionalCoworkScope(scopeOption, cowork)
+    val scopeError = validateOptionalScope(scope, cowork)
+    if scopeError != "":
+        return PluginCommandResult.error(scopeError)
+    val id = parsePluginIdentifier(plugin)
+    val eventScope = if scope == "": "auto" else: scope
+    val result = PluginCommandResult.ok("", [pluginDisableEventName() + ":" + id.name + ":" + id.marketplace + ":" + eventScope])
+    result.coworkEnabled = cowork
+    result.scope = scope
+    result
+
+fn pluginUpdateHandler(plugin: text, scopeOption: text, cowork: bool) -> PluginCommandResult:
+    val scope = if scopeOption == "": defaultUpdateScope() else: scopeOption
+    if not containsText(validUpdateScopes(), scope):
+        return PluginCommandResult.error("Invalid scope \"" + scope + "\". Valid scopes: " + joinText(validUpdateScopes(), ", "))
+    if cowork and scope != "user":
+        return PluginCommandResult.error("--cowork can only be used with user scope")
+    val id = parsePluginIdentifier(plugin)
+    val result = PluginCommandResult.ok("", [pluginUpdateEventName() + ":" + id.name + ":" + id.marketplace + ":" + scope])
+    result.coworkEnabled = cowork
+    result.scope = scope
+    result
+
+class ParsedPluginIdentifier:
+    name: text
+    marketplace: text
+
+fn parsePluginIdentifier(plugin: text) -> ParsedPluginIdentifier:
+    val at = indexOf(plugin, "@")
+    if at >= 0:
+        return ParsedPluginIdentifier(name: plugin.substring(0, at), marketplace: plugin.substring(at + 1, plugin.len()))
+    ParsedPluginIdentifier(name: plugin, marketplace: "")
+
+fn parsePluginName(plugin: text) -> text:
+    parsePluginIdentifier(plugin).name
+
+fn errorsForPlugin(source: text, name: text, errors: [PluginLoadError]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < errors.len():
+        val err = errors[i]
+        if err.source == source or (err.plugin != "" and err.plugin == name):
+            out.push(err.message)
+        i = i + 1
+    out
+
+fn inlineLoadErrors(errors: [PluginLoadError]) -> [PluginLoadError]:
+    var out: [PluginLoadError] = []
+    var i = 0
+    while i < errors.len():
+        if errors[i].source.ends_with("@inline") or errors[i].source.starts_with("inline["):
+            out.push(errors[i])
+        i = i + 1
+    out
+
+fn countInlinePlugins(loaded: [LoadedPluginRecord]) -> i64:
+    var count = 0
+    var i = 0
+    while i < loaded.len():
+        if loaded[i].source.ends_with("@inline"):
+            count = count + 1
+        i = i + 1
+    count
+
+fn serversForLoaded(source: text, loaded: [LoadedPluginRecord]) -> [text]:
+    var i = 0
+    while i < loaded.len():
+        if loaded[i].source == source:
+            return loaded[i].mcpServers
+        i = i + 1
+    []
+
+fn availablePluginsJson(installed: [PluginInstallRecord], marketplaces: [MarketplaceRecord]) -> text:
+    var out = "["
+    var first = true
+    var i = 0
+    while i < marketplaces.len():
+        val marketplace = marketplaces[i]
+        var j = 0
+        while j < marketplace.pluginNames.len():
+            val pluginId = marketplace.pluginNames[j] + "@" + marketplace.name
+            if not installedContains(installed, pluginId):
+                if not first:
+                    out = out + ","
+                first = false
+                out = out + "{\"pluginId\":\"" + pluginId + "\",\"name\":\"" + marketplace.pluginNames[j] + "\",\"marketplaceName\":\"" + marketplace.name + "\",\"source\":\"" + marketplace.sourceKind + "\"}"
+            j = j + 1
+        i = i + 1
+    out + "]"
+
+fn marketplaceListHuman(records: [MarketplaceRecord]) -> text:
+    if records.len() == 0:
+        return noMarketplacesConfiguredMessage()
+    var out = "Configured marketplaces:\n\n"
+    var i = 0
+    while i < records.len():
+        val item = records[i]
+        out = out + "  ‣ " + item.name + "\n"
+        out = out + "    Source: " + marketplaceSourceLabel(item.sourceKind, item.location) + "\n\n"
+        i = i + 1
+    out
+
+fn marketplaceListJson(records: [MarketplaceRecord]) -> text:
+    var out = "["
+    var i = 0
+    while i < records.len():
+        if i > 0:
+            out = out + ","
+        val item = records[i]
+        out = out + "{\"name\":\"" + item.name + "\",\"source\":\"" + item.sourceKind + "\",\"location\":\"" + item.location + "\",\"installLocation\":\"" + item.installLocation + "\"}"
+        i = i + 1
+    out + "]"
+
+fn marketplaceSourceLabel(kind: text, location: text) -> text:
+    if kind == "github":
+        return "GitHub (" + location + ")"
+    if kind == "git":
+        return "Git (" + location + ")"
+    if kind == "url":
+        return "URL (" + location + ")"
+    if kind == "directory":
+        return "Directory (" + location + ")"
+    if kind == "file":
+        return "File (" + location + ")"
+    kind + " (" + location + ")"
+
+fn marketplaceNameFromSource(source: text, sourceKind: text) -> text:
+    if sourceKind == "github":
+        val slash = lastIndexOf(source, "/")
+        if slash >= 0:
+            return source.substring(slash + 1, source.len())
+    basenameWithoutSuffix(source)
+
+fn basenameWithoutSuffix(source: text) -> text:
+    val slash = lastIndexOf(source, "/")
+    val base = if slash >= 0: source.substring(slash + 1, source.len()) else: source
+    if base.ends_with(".git"):
+        return base.substring(0, base.len() - 4)
+    base
+
+fn validateCoworkScope(scope: text, cowork: bool, installable: bool) -> text:
+    if cowork and scope != "user":
+        return "--cowork can only be used with user scope"
+    val scopes = if installable: validInstallableScopes() else: validUpdateScopes()
+    if not containsText(scopes, scope):
+        return "Invalid scope: " + scope + ". Must be one of: " + joinText(scopes, ", ") + "."
+    ""
+
+fn validateOptionalScope(scope: text, cowork: bool) -> text:
+    if scope != "" and not containsText(validInstallableScopes(), scope):
+        return "Invalid scope \"" + scope + "\". Valid scopes: " + joinText(validInstallableScopes(), ", ")
+    if cowork and scope != "" and scope != "user":
+        return "--cowork can only be used with user scope"
+    ""
+
+fn resolveOptionalCoworkScope(scope: text, cowork: bool) -> text:
+    if cowork and scope == "":
+        return "user"
+    scope
+
+fn validMarketplaceScope(scope: text) -> bool:
+    scope == "user" or scope == "project" or scope == "local"
+
+fn validMarketplaceSourceKind(kind: text) -> bool:
+    kind == "github" or kind == "git" or kind == "url" or kind == "directory" or kind == "file"
+
+fn installedContains(installed: [PluginInstallRecord], id: text) -> bool:
+    var i = 0
+    while i < installed.len():
+        if installed[i].id == id:
+            return true
+        i = i + 1
+    false
+
+fn containsText(values: [text], needle: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == needle:
+            return true
+        i = i + 1
+    false
+
+fn joinText(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+        i = i + 1
+    out
+
+fn textArrayJson(values: [text]) -> text:
+    var out = "["
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + ","
+        out = out + "\"" + values[i] + "\""
+        i = i + 1
+    out + "]"
+
+fn indexOf(value: text, needle: text) -> i64:
+    var i = 0
+    while i <= value.len() - needle.len():
+        if value.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn lastIndexOf(value: text, needle: text) -> i64:
+    var i = value.len() - needle.len()
+    while i >= 0:
+        if value.substring(i, i + needle.len()) == needle:
+            return i
+        i = i - 1
+    -1
+
+fn defaultUnknown(value: text) -> text:
+    if value == "":
+        return "unknown"
+    value
+
+fn boolText(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn plural(count: i64, singular: text) -> text:
+    if count == 1:
+        return singular
+    singular + "s"
+
+fn validInstallableScopes() -> [text]:
+    ["user", "project", "local"]
+
+fn validUpdateScopes() -> [text]:
+    ["user", "project"]
+
+fn defaultPluginScope() -> text:
+    "user"
+
+fn defaultUpdateScope() -> text:
+    "user"
+
+fn noPluginsInstalledMessage() -> text:
+    "No plugins installed. Use `claude plugin install` to install a plugin."
+
+fn noMarketplacesConfiguredMessage() -> text:
+    "No marketplaces configured"
+
+fn pluginListEventName() -> text:
+    "tengu_plugin_list_command"
+
+fn pluginInstallEventName() -> text:
+    "tengu_plugin_install_command"
+
+fn pluginUninstallEventName() -> text:
+    "tengu_plugin_uninstall_command"
+
+fn pluginEnableEventName() -> text:
+    "tengu_plugin_enable_command"
+
+fn pluginDisableEventName() -> text:
+    "tengu_plugin_disable_command"
+
+fn pluginUpdateEventName() -> text:
+    "tengu_plugin_update_command"
+
+fn marketplaceAddedEventName() -> text:
+    "tengu_marketplace_added"
+
+fn marketplaceRemovedEventName() -> text:
+    "tengu_marketplace_removed"
+
+fn marketplaceUpdatedEventName() -> text:
+    "tengu_marketplace_updated"
+
+fn marketplaceUpdatedAllEventName() -> text:
+    "tengu_marketplace_updated_all"
+
+fn dynamicImportOnlyWhenPluginCommandRuns() -> bool:
+    true
+
+fn validateAlsoChecksPluginContentsInClaudePluginDir() -> bool:
+    true
+
+fn listSurfacesInlinePlugins() -> bool:
+    true
+
+fn listSurfacesPathLevelInlineErrors() -> bool:
+    true
+
+fn listLoadsMcpServersForJson() -> bool:
+    true
+
+fn availableMarketplaceListExcludesInstalledPlugins() -> bool:
+    true
+
+fn marketplaceAddClearsCaches() -> bool:
+    true
+
+fn marketplaceRemoveClearsCaches() -> bool:
+    true
+
+fn marketplaceUpdateClearsCaches() -> bool:
+    true
+
+fn coworkForcesUserScopeWhenScopeOmitted() -> bool:
+    true
+
+fn disableAllRejectsSpecificPlugin() -> bool:
+    true
+
+fn disableSpecificRequiresPluginName() -> bool:
+    true
+
+fn updateUsesValidUpdateScopesOnly() -> bool:
+    true
+
+fn installAndUninstallUseInstallableScopes() -> bool:
+    true
+
+fn analyticsUsePrivilegedPluginColumns() -> bool:
+    true
+
+# Source parity notes for plugins.ts:
+# module is lazy-loaded only for plugin command families.
+# installable scopes are re-exported for option definitions.
+# update scopes are re-exported for option definitions.
+# marketplace errors are logged before user-facing cliError output.
+# validation prints errors before warnings.
+# validation pluralizes error and warning labels.
+# validation reports the manifest file type and path first.
+# plugin manifests inside .claude-plugin trigger content validation.
+# content validation covers skills, agents, commands, and hooks.
+# validation with warnings still succeeds when every result is successful.
+# validation failure exits with code 1.
+# unexpected validation exceptions exit with code 2.
+# plugin list records tengu_plugin_list_command.
+# plugin list dynamically imports startup scope state only inside handler.
+# plugin list loads installed plugin V2 bookkeeping.
+# plugin list loads all plugins once for human and JSON views.
+# plugin list merges loaded enabled and disabled plugin arrays.
+# plugin list detects session-only plugins by @inline source suffix.
+# plugin list detects path-level inline load errors by inline[N] source.
+# JSON list builds installed records from every installation scope.
+# JSON list includes version, scope, enabled state, and install path.
+# JSON list includes installedAt when present in source data.
+# JSON list includes lastUpdated when present in source data.
+# JSON list includes projectPath when present in source data.
+# JSON list attaches load errors to matching plugin ids.
+# JSON list also matches errors by manifest plugin name.
+# JSON list loads plugin MCP servers on demand.
+# JSON list omits empty MCP server collections.
+# JSON list includes inline plugins as session scope.
+# JSON list includes inline plugin errors by source or plugin name.
+# JSON list includes path-level inline failures as disabled session records.
+# JSON available mode loads marketplace config and install counts together.
+# JSON available mode gracefully degrades marketplace loading failures.
+# JSON available mode excludes already installed plugin ids.
+# human list prints no-installed guidance only when there are no inline errors.
+# human list prints installed section only when installed plugins exist.
+# human list renders failed-to-load status before enabled status.
+# human list renders enabled and disabled status with figure markers.
+# human list prints each load error below the affected installation.
+# human list prints session-only plugins in a separate section.
+# human inline status distinguishes loaded from loaded-with-errors.
+# human inline path-level errors are visible without a LoadedPlugin object.
+# marketplace add accepts owner/repo, URL, git, directory, and file inputs.
+# marketplace add validates user, project, and local scopes.
+# marketplace add rejects sparse paths for URL, directory, and file sources.
+# marketplace add writes marketplace intent to requested settings scope.
+# marketplace add clears plugin caches after saving settings.
+# marketplace add logs source type for analytics.
+# marketplace list supports JSON and human output.
+# marketplace list includes installLocation in JSON output.
+# marketplace list prints GitHub, Git, URL, Directory, and File labels.
+# marketplace remove clears caches after removing the source.
+# marketplace remove logs marketplace_name analytics metadata.
+# marketplace update can update one named marketplace.
+# marketplace update can update all configured marketplaces.
+# marketplace update prints an empty-config message without clearing caches.
+# marketplace update clears caches after refresh.
+# plugin install defaults scope to user.
+# plugin install rejects cowork with non-user scope.
+# plugin install validates installable scopes.
+# plugin install logs plugin name through privileged PII metadata.
+# plugin install logs marketplace name through privileged PII metadata.
+# plugin uninstall shares installable scope validation.
+# plugin uninstall forwards keepData to the command layer.
+# plugin enable accepts optional scope.
+# plugin enable validates optional installable scope.
+# plugin enable forces user scope when cowork omits scope.
+# plugin enable logs auto scope when no scope is selected.
+# plugin disable rejects --all with a specific plugin.
+# plugin disable requires either plugin name or --all.
+# plugin disable rejects --scope with --all.
+# plugin disable all logs no plugin-specific metadata.
+# plugin disable specific mirrors enable scope resolution.
+# plugin update defaults update scope to user.
+# plugin update validates update scopes separately from install scopes.
+# plugin update rejects local scope.
+# plugin update rejects cowork with project scope.
+# plugin update delegates to updatePluginCli after analytics.
+
+fn pluginHandlerSourceLinesModeled() -> i64:
+    742

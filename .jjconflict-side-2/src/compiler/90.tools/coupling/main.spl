@@ -1,0 +1,187 @@
+# ============================================================================
+# Coupling Analysis CLI Entry Point
+# ============================================================================
+#
+# Provides `bin/simple build coupling` subcommand.
+#
+# Usage:
+#   bin/simple build coupling [options]
+#
+# Options:
+#   --format=text|json|md     Output format (default: text)
+#   --threshold=N             CBO warning threshold (default: 15)
+#   --layers                  Show layer violations only
+#   --dsm                     Show DSM matrix
+#   --cycles                  Show SCC cycles only
+#   --api                     Show public API quality report
+#   --lcom                    Show LCOM cohesion report
+#   --relaxed                 Use relaxed token-kind duplication mode
+#   --gap=N                   Gap tolerance for duplication (default: 0)
+#   --atss-threshold=N        ATSS edit distance threshold (default: 1)
+# ============================================================================
+
+use compiler.tools.coupling.metrics.{compute_all_metrics, find_cycles, find_instability_inversions, CouplingMetrics, InstabilityInversion}
+use compiler.tools.coupling.layer_check.{find_layer_violations, LayerViolation}
+use compiler.tools.coupling.lcom.{compute_lcom4, LCOMResult, MethodFieldAccess}
+use compiler.tools.coupling.api_quality.{compute_api_quality, PublicAPIMetrics, MethodUsage}
+use compiler.tools.coupling.dsm.{build_layer_ordered_dsm, DSMMatrix}
+use compiler.tools.coupling.atss.{check_atss, ATSSWarning}
+use compiler.tools.coupling.report.{CouplingReport, format_text, format_json, format_markdown, format_dsm_text, format_dsm_markdown, format_layers_text, format_cycles_text}
+use compiler.common.dependency.graph.{ImportGraph}
+
+# ============================================================================
+# CLI Config
+# ============================================================================
+
+struct CouplingCLIConfig:
+    format: text              # "text", "json", "md"
+    cbo_threshold: i64
+    show_layers_only: bool
+    show_dsm: bool
+    show_cycles_only: bool
+    show_api: bool
+    show_lcom: bool
+    relaxed: bool
+    gap_tolerance: i64
+    atss_threshold: i64
+    target_path: text
+
+fn default_cli_config() -> CouplingCLIConfig:
+    CouplingCLIConfig(
+        format: "text",
+        cbo_threshold: 15,
+        show_layers_only: false,
+        show_dsm: false,
+        show_cycles_only: false,
+        show_api: false,
+        show_lcom: false,
+        relaxed: false,
+        gap_tolerance: 0,
+        atss_threshold: 1,
+        target_path: "src/"
+    )
+
+# ============================================================================
+# Argument Parsing
+# ============================================================================
+
+fn parse_coupling_args(args: [text]) -> CouplingCLIConfig:
+    var config = default_cli_config()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--layers":
+            config.show_layers_only = true
+        else if arg == "--dsm":
+            config.show_dsm = true
+        else if arg == "--cycles":
+            config.show_cycles_only = true
+        else if arg == "--api":
+            config.show_api = true
+        else if arg == "--lcom":
+            config.show_lcom = true
+        else if arg == "--relaxed":
+            config.relaxed = true
+        else if arg.starts_with("--format="):
+            config.format = arg.substring(9)
+        else if arg.starts_with("--threshold="):
+            config.cbo_threshold = arg.substring(12).to_i64()
+        else if arg.starts_with("--gap="):
+            config.gap_tolerance = arg.substring(6).to_i64()
+        else if arg.starts_with("--atss-threshold="):
+            config.atss_threshold = arg.substring(17).to_i64()
+        else if not arg.starts_with("--"):
+            config.target_path = arg
+        i = i + 1
+    config
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn run_coupling_analysis(args: [text], graph: ImportGraph) -> i64:
+    """Run coupling analysis and print results.
+
+    Args:
+        args: CLI arguments after 'build coupling'
+        graph: Pre-built import graph from compiler pipeline
+
+    Returns:
+        Exit code (0 = success, 1 = warnings found)
+    """
+    val config = parse_coupling_args(args)
+
+    # Layers-only mode
+    if config.show_layers_only:
+        val violations = find_layer_violations(graph)
+        val output = format_layers_text(violations)
+        print output
+        return if violations.len() > 0: 1 else: 0
+
+    # Cycles-only mode
+    if config.show_cycles_only:
+        val cycles = find_cycles(graph)
+        val output = format_cycles_text(cycles)
+        print output
+        return if cycles.len() > 0: 1 else: 0
+
+    # Full analysis
+    val metrics = compute_all_metrics(graph)
+    val cycles = find_cycles(graph)
+    val violations = find_layer_violations(graph)
+    val inversions = find_instability_inversions(metrics, graph)
+
+    # LCOM (computed separately per class — placeholder empty for CLI without AST context)
+    var lcom_results: [LCOMResult] = []
+
+    # API quality (placeholder empty for CLI without call-site data)
+    var api_metrics: [PublicAPIMetrics] = []
+
+    # ATSS (placeholder empty — needs AST declaration indices)
+    var atss_warnings: [ATSSWarning] = []
+
+    # DSM
+    var dsm: Option<DSMMatrix> = Option.None
+    if config.show_dsm:
+        dsm = Option.Some(build_layer_ordered_dsm(graph))
+
+    # Build report
+    val report = CouplingReport(
+        metrics: metrics,
+        cycles: cycles,
+        layer_violations: violations,
+        inversions: inversions,
+        lcom_results: lcom_results,
+        api_metrics: api_metrics,
+        dsm: dsm,
+        atss_warnings: atss_warnings,
+        cbo_threshold: config.cbo_threshold
+    )
+
+    # Format and print
+    val output = match config.format:
+        "json": format_json(report)
+        "md": format_markdown(report)
+        _: format_text(report)
+
+    print output
+
+    # Print DSM if requested
+    if val dsm_matrix = dsm:
+        val dsm_output = match config.format:
+            "md": format_dsm_markdown(dsm_matrix)
+            _: format_dsm_text(dsm_matrix)
+        print dsm_output
+
+    # Return code: 1 if any issues found
+    val has_issues = cycles.len() > 0 or violations.len() > 0 or inversions.len() > 0
+    if has_issues: 1 else: 0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CouplingCLIConfig
+export default_cli_config
+export parse_coupling_args
+export run_coupling_analysis

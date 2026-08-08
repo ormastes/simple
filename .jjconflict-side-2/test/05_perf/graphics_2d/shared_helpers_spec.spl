@@ -1,0 +1,139 @@
+# test/perf/graphics_2d/shared_helpers_spec.spl
+#
+# **Feature IDs:** AC-11 — All benchmarks write structured output to
+#   test/perf/graphics_2d/ and test/perf/local_gpu_check/;
+#   report_spec.spl parses and prints pass/fail vs thresholds.
+#   (Deduplication: shared BenchFrameRecord schema used by all bench drivers)
+# **Category:** Graphics | Benchmark | Shared Helpers
+# **Status:** Pending implementation (Phase 5)
+#
+# Verifies:
+#   - BenchFrameRecord has a canonical schema used across all bench drivers
+#   - report_spec.spl can parse records from GPU, SIMD, Tauri-equiv, Chrome-equiv
+#   - Output paths are well-defined for graphics_2d/ and local_gpu_check/
+#   - FramePacingCounters fields are correctly initialized
+#   - WM frame pacing event-sleep is measured and idle_cpu_us is reported
+#
+# @cover test/perf/graphics_2d/report_spec.spl
+# @cover test/perf/local_gpu_check/gpu_perf_compare.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/wm_frame_pacing.spl
+
+val OUTPUT_DIR_GRAPHICS_2D:    text = "test/perf/graphics_2d/"
+val OUTPUT_DIR_LOCAL_GPU_CHECK: text = "test/perf/local_gpu_check/"
+
+struct FramePacingCountersSentinel:
+    event_sleep_us:    i64
+    dirty_rect_count:  i64
+    present_batch_count: i64
+    idle_cpu_us:       i64
+    frame_count:       i64
+
+struct BenchFrameRecordSentinel:
+    backend:      text
+    kernel:       text
+    us_per_frame: i64
+    scene_id:     text
+    pass:         bool
+    threshold_us: i64
+
+fn make_frame_pacing_sentinel(es: i64, dr: i64, pb: i64, ic: i64, fc: i64) -> FramePacingCountersSentinel:
+    FramePacingCountersSentinel(
+        event_sleep_us:     es,
+        dirty_rect_count:   dr,
+        present_batch_count: pb,
+        idle_cpu_us:        ic,
+        frame_count:        fc
+    )
+
+fn make_bench_record(bk: text, kn: text, us: i64, sid: text, thresh: i64) -> BenchFrameRecordSentinel:
+    BenchFrameRecordSentinel(
+        backend:      bk,
+        kernel:       kn,
+        us_per_frame: us,
+        scene_id:     sid,
+        pass:         us <= thresh,
+        threshold_us: thresh
+    )
+
+describe "shared_helpers — AC-11: shared BenchFrameRecord, output paths, frame pacing":
+
+    describe "BenchFrameRecord canonical schema":
+
+        it "AC-11: backend field stores backend name":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.backend).to_equal("cuda")
+
+        it "AC-11: kernel field stores kernel name":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.kernel).to_equal("fill")
+
+        it "AC-11: us_per_frame field stores microseconds":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.us_per_frame).to_equal(800)
+
+        it "AC-11: scene_id field stores scene name":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.scene_id).to_equal("fill_1080p")
+
+        it "AC-11: pass field is true when us_per_frame is below threshold":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.pass).to_equal(true)
+
+        it "AC-11: pass field is false when us_per_frame exceeds threshold":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 3000, "fill_1080p", 2000)
+            expect(r.pass).to_equal(false)
+
+        it "AC-11: threshold_us field stores threshold":
+            val r: BenchFrameRecordSentinel = make_bench_record("cuda", "fill", 800, "fill_1080p", 2000)
+            expect(r.threshold_us).to_equal(2000)
+
+    describe "output directory paths":
+
+        it "AC-11: graphics_2d output path is correct":
+            expect(OUTPUT_DIR_GRAPHICS_2D).to_equal("test/perf/graphics_2d/")
+
+        it "AC-11: local_gpu_check output path is correct":
+            expect(OUTPUT_DIR_LOCAL_GPU_CHECK).to_equal("test/perf/local_gpu_check/")
+
+        it "AC-11: output paths are distinct":
+            expect(OUTPUT_DIR_GRAPHICS_2D).to_not_equal(OUTPUT_DIR_LOCAL_GPU_CHECK)
+
+    describe "FramePacingCounters fields":
+
+        it "AC-11: event_sleep_us field is present":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 3, 1, 1200, 60)
+            expect(c.event_sleep_us).to_equal(500)
+
+        it "AC-11: dirty_rect_count field is present":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 3, 1, 1200, 60)
+            expect(c.dirty_rect_count).to_equal(3)
+
+        it "AC-11: present_batch_count field is present":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 3, 1, 1200, 60)
+            expect(c.present_batch_count).to_equal(1)
+
+        it "AC-11: idle_cpu_us field is present":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 3, 1, 1200, 60)
+            expect(c.idle_cpu_us).to_equal(1200)
+
+        it "AC-11: frame_count field is present":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 3, 1, 1200, 60)
+            expect(c.frame_count).to_equal(60)
+
+    describe "WM frame pacing — idle CPU budget":
+
+        it "AC-11: event_sleep_us is greater than zero when frame is idle":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 0, 0, 1200, 60)
+            expect(c.event_sleep_us > 0).to_equal(true)
+
+        it "AC-11: idle_cpu_us is greater than zero in an idle frame":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 0, 0, 1200, 60)
+            expect(c.idle_cpu_us > 0).to_equal(true)
+
+        it "AC-11: dirty_rect_count is zero in an idle frame":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 0, 0, 1200, 60)
+            expect(c.dirty_rect_count).to_equal(0)
+
+        it "AC-11: present_batch_count is zero in an idle frame":
+            val c: FramePacingCountersSentinel = make_frame_pacing_sentinel(500, 0, 0, 1200, 60)
+            expect(c.present_batch_count).to_equal(0)

@@ -1,0 +1,53 @@
+# Module-level `[text]` array write-then-read-back, isolating T11's real
+# root cause.
+#
+# Origin: doc/08_tracking/bug/glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md
+# characterized this as "`[text]`-array element read is corrupt under
+# native/JIT". Re-investigation for T11 (render-perf replan, 2026-08-07)
+# found that characterization does not hold: a plain module-level `[text]`
+# array pushed-to and read-back **directly inline inside an `it` block**
+# works correctly on both the JIT (`bin/simple run`, default engine) and the
+# interpreter (`bin/simple test`, this spec). See probes below and
+# `doc/08_tracking/bug/glyph_raster_cache_text_array_index_corrupt_zero_hit_rate_2026-08-06.md`
+# for the corrected root cause: the corruption is **not** an array/text
+# codegen defect at all -- it reproduces only when the `.push()` happens
+# **inside a free function called from the `it` block**, on the interpreter
+# lane specifically. The identical construct is unaffected by array element
+# type (`[text]` and `[i64]` both reproduce) and unaffected by describe/it
+# file position (sole example, first-of-two, and second-of-two all
+# reproduce identically) -- ruling out both a text-specific defect and a
+# test-runner single-example special case.
+#
+# This spec intentionally asserts the CORRECT behaviour (module-level state
+# mutated by a free function must be visible to the caller), so the
+# indirected-push cases below are expected to go RED until the underlying
+# interpreter defect (free-function write-back to module-level array
+# globals silently lost) is fixed. Per testing rules this is left red on
+# purpose rather than weakened.
+
+val _direct_keys: [text] = []
+val _indirect_keys: [text] = []
+val _indirect_nums: [i64] = []
+
+fn _store_text(k: text):
+    _indirect_keys.push(k)
+
+fn _store_num(n: i64):
+    _indirect_nums.push(n)
+
+describe "module-level [text] array write-then-read-back":
+    it "direct inline push+index-read agrees (positive control)":
+        _direct_keys.push("hello")
+        expect(_direct_keys.len()).to_equal(1)
+        expect(_direct_keys[0]).to_equal("hello")
+        expect(_direct_keys[0].len()).to_equal(5)
+
+    it "push via a free function is visible to the caller ([text])":
+        _store_text("hello")
+        expect(_indirect_keys.len()).to_equal(1)
+        expect(_indirect_keys[0]).to_equal("hello")
+
+    it "push via a free function is visible to the caller ([i64], not text-specific)":
+        _store_num(42)
+        expect(_indirect_nums.len()).to_equal(1)
+        expect(_indirect_nums[0]).to_equal(42)

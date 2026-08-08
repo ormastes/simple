@@ -1,0 +1,127 @@
+extern fn rt_file_read_text(path: text) -> text
+
+fn expr_dispatch_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+
+fn mir_lowering_stmts_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+
+fn switch_operators_calls_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+
+fn mir_to_llvm_core_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
+
+fn hir_items_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+
+fn mir_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+fn mir_function_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+
+fn method_calls_literals_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+
+describe "bootstrap MIR binary lowering source":
+    it "lowers normal binary operators without optional special-op nil checks":
+        val source = expr_dispatch_source()
+
+        expect(source).to_contain("case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:")
+        expect(source).to_contain("case _:")
+        expect(source).to_contain("val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)")
+
+    it "defaults only unknown bootstrap indexes to text values":
+        val source = expr_dispatch_source()
+
+        expect(source).to_contain("if (mir_expr_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\" and not result_type_from_base:")
+        expect(source).to_contain("result_type = self.bootstrap_text_type()")
+        expect(source).to_contain("val base_local = self.lower_expr(base)")
+        expect(source).to_contain("if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):")
+        expect(source).to_contain("return cli_arg_local")
+
+        val helper_source = switch_operators_calls_source()
+        expect(helper_source).to_contain("MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)")
+
+    it "preserves explicit branch terminators in lowered if blocks":
+        val source = mir_lowering_stmts_source()
+
+        expect(source).to_contain("if not b3.current_block_has_explicit_terminator():")
+        expect(source).to_contain("if not b5.current_block_has_explicit_terminator():")
+        expect(source).to_contain("b3.terminate_goto(merge_block)")
+        expect(source).to_contain("b5.terminate_goto(merge_block)")
+
+    it "preserves inferred float and bool locals through shared MIR type predicates":
+        val expr_source = expr_dispatch_source()
+        val stmt_source = mir_lowering_stmts_source()
+
+        expect(expr_source).to_contain("fn local_is_float(local: LocalId) -> bool:")
+        expect(expr_source).to_contain("case MirTypeKind.F32 | MirTypeKind.F64: return true")
+        expect(stmt_source).to_contain("self.local_is_float(init_local)")
+        expect(stmt_source).to_contain("fn local_is_bool(local: LocalId) -> bool:")
+        expect(stmt_source).to_contain("case MirTypeKind.Bool: return true")
+        expect(stmt_source.split("self.local_is_bool(init_local)").len() - 1).to_equal(2)
+
+    it "preserves class array-field metadata and mutating projection provenance":
+        val hir_source = hir_items_module_lowering_source()
+        val mir_source = mir_module_lowering_source()
+        val expr_source = expr_dispatch_source()
+        val method_source = method_calls_literals_source()
+
+        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_struct.fields)")
+        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_class.fields)")
+        expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)")
+        expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)")
+        expect(mir_source).to_contain("if overwrite or not self.struct_field_order.has(name):")
+        expect(mir_source).to_contain("if overwrite or not self.struct_field_array_element_type_name.has(name):")
+        expect(mir_source).to_contain("field_array_element_type_name = \"__runtime_array__\"")
+        expect(mir_source).to_contain("self.struct_field_array_element_type_name[name] = field_array_element_type_names")
+        expect(mir_source).to_contain("if overwrite or not self.struct_field_array_elem_type.has(name):")
+        expect(mir_source).to_contain("self.struct_field_array_elem_type[name] = field_elem_types")
+        expect(expr_source.split("self.struct_field_array_elem_type.has(").len() - 1).to_equal(2)
+        expect(expr_source.split("self.remember_field_projection_provenance(base, base_local, field_idx").len() - 1).to_equal(2)
+        expect(method_source).to_contain("self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)")
+
+    it "lowers pointer text equality through runtime string compare":
+        val source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("if eq_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
+        expect(source).to_contain("if ne_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
+        expect(source).to_contain("self.unknown_func_decls[\"rt_strcmp\"] = true")
+        expect(source).to_contain("self.should_use_bootstrap_strcmp(left, right)")
+        expect(source).to_contain("me should_use_bootstrap_strcmp(left: MirOperand, right: MirOperand) -> bool:")
+        expect(source).to_contain("self.is_string_operand(left) or self.is_string_operand(right)")
+        expect(source).to_contain("self.string_locals[dest_id] = true")
+        expect(source).to_contain("self.string_locals.has(self.local_id_value(local))")
+        expect(source).to_contain("call i64 @rt_strcmp(ptr")
+        expect(source).to_contain("declare ptr @spl_get_arg(i64)")
+        expect(source).to_contain("declare i64 @rt_strcmp(ptr, ptr)")
+        expect(source).to_contain("bare_func_name == \"spl_get_arg\"")
+        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"eq\", \"i64\", strcmp_result, \"0\")")
+        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"ne\", \"i64\", strcmp_result, \"0\")")
+
+    it "lowers raw-pointer offset as a typed, element-scaled MIR operation":
+        val type_source = mir_function_lowering_source()
+        val method_source = method_calls_literals_source()
+        val llvm_source = mir_to_llvm_core_source()
+
+        expect(type_source).to_contain("case Ptr(inner, mutable):")
+        expect(type_source).to_contain("MirType.ptr(self.lower_type(inner), mutable)")
+        expect(method_source).to_contain("if method == \"offset\" and args.len() == 1 and resolution_is_unresolved:")
+        expect(method_source).to_contain("case MirTypeKind.Ptr(pointee, _):")
+        expect(method_source).to_contain("val pointee_size = pointee.size_bytes()")
+        expect(method_source).to_contain("MirBinOp.Mul")
+        expect(method_source).to_contain("MirBinOp.Offset")
+        expect(llvm_source).to_contain("{dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
+        expect(llvm_source.contains("ptrtoint ptr {offset_ptr}")).to_equal(false)
+
+    it "lowers bootstrap print calls through runtime println":
+        val source = switch_operators_calls_source()
+        val llvm_source = mir_to_llvm_core_source()
+
+        expect(source).to_contain("me lower_bootstrap_print_call(args: [HirCallArg]) -> LocalId:")
+        expect(source).to_contain("MirConstValue.Str(\"rt_println\")")
+        expect(source).to_contain("b.emit_call(func_operand, [mir_operand_copy(arg_local)], MirType.unit())")
+        expect(llvm_source).to_contain("declare void @rt_println(ptr)")
+        expect(llvm_source).to_contain("bare_func_name == \"eprint\" or bare_func_name == \"rt_println\"")

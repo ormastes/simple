@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_DIR = "/tmp/simple_context_log_mode_fixture"
+
+fn _setup_fixture():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", [
+        "-c",
+        "rm -rf " + FIXTURE_DIR + " && mkdir -p " + FIXTURE_DIR
+    ])
+
+fn _run_context(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); cd " + FIXTURE_DIR + " && SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/context/main.spl\" " + joined
+    ])
+
+describe "context log mode CLI options":
+    it "shows shared log options in help":
+        _setup_fixture()
+        val (out, err, code) = _run_context(["--help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("--log-mode")
+        expect(out).to_contain("--progress")
+
+    it "supports log-mode json for missing source":
+        _setup_fixture()
+        val (out, err, code) = _run_context(["--log-mode=json", "missing.spl"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("\"command\":\"context\"")
+        expect(out).to_contain("\"status\":\"error\"")
+        expect(out).to_contain("\"source\":\"missing.spl\"")
+
+    it "supports dot progress for missing source":
+        _setup_fixture()
+        val (out, err, code) = _run_context(["--progress=dot", "missing.spl"])
+        expect(code).to_equal(1)
+        expect(out).to_contain(".")
+        expect(out).to_contain("context: cannot read missing.spl")
+
+    it "rejects invalid log mode":
+        _setup_fixture()
+        val (out, err, code) = _run_context(["--log-mode=noisy", "missing.spl"])
+        expect(code).to_equal(1)

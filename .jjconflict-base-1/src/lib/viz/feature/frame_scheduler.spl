@@ -1,0 +1,127 @@
+# Frame scheduler — tick-based frame cadence controller.
+#
+# Mirrors Chromium's viz::FrameScheduler. Given a target refresh interval
+# (e.g. 16.667ms for 60Hz), tracks when the next frame should be produced,
+# notes deadline misses, and can be stepped by a caller-driven clock.
+#
+# Simplification: no real wall-clock or platform timers. Caller calls
+# `advance(now)` with a monotonic time; the scheduler decides whether to
+# emit a BeginFrame.
+
+# ============================================================================
+# enum FrameState
+# Mirrors viz::FrameScheduler's internal state machine. Idle = no frame in
+# flight. Pending = BeginFrame dispatched but begin_frame() not yet called.
+# Running = producer is actively building the frame. Missed = last frame
+# completed past its deadline (transient; next advance returns to Idle).
+# ============================================================================
+
+enum FrameState:
+    Idle
+    Pending
+    Running
+    Missed
+
+# ============================================================================
+# class FrameArgs
+# Mirrors viz::BeginFrameArgs: the contract handed to the frame producer for
+# a single tick. deadline is an absolute time; interval_ms echoes the
+# scheduler's cadence so the producer can pace sub-frame work.
+# ============================================================================
+
+class FrameArgs:
+    frame_id: i64
+    deadline: f64
+    interval_ms: f64
+
+# ============================================================================
+# class FrameScheduler
+# Holds cadence + bookkeeping. last_frame_time is the monotonic time at
+# which the previous BeginFrame was emitted. next_frame_id is handed to the
+# next FrameArgs. missed_count counts end_frame calls that overran the
+# deadline.
+# ============================================================================
+
+class FrameScheduler:
+    interval_ms: f64
+    last_frame_time: f64
+    next_frame_id: i64
+    state: FrameState
+    missed_count: i64
+
+# ============================================================================
+# fn frame_scheduler_new
+# Construct a scheduler targeting interval_ms per frame. Starts Idle with
+# no elapsed history (last_frame_time=0) and frame id counter at 0.
+# ============================================================================
+
+fn frame_scheduler_new(interval_ms: f64) -> FrameScheduler:
+    """Construct an Idle FrameScheduler with the given target interval."""
+    FrameScheduler(
+        interval_ms: interval_ms,
+        last_frame_time: 0.0,
+        next_frame_id: 0,
+        state: FrameState.Idle,
+        missed_count: 0
+    )
+
+# ============================================================================
+# impl FrameScheduler
+# ============================================================================
+
+impl FrameScheduler:
+
+    me set_interval(ms: f64) -> ():
+        """Update target cadence and reset state/bookkeeping."""
+        me.interval_ms = ms
+        me.last_frame_time = 0.0
+        me.next_frame_id = 0
+        me.state = FrameState.Idle
+        me.missed_count = 0
+
+    me advance(now_ms: f64) -> Option<FrameArgs>:
+        """If the cadence has elapsed since last_frame_time, emit a FrameArgs
+        for this tick and advance last_frame_time to now_ms; otherwise None."""
+        val elapsed = now_ms - me.last_frame_time
+        if elapsed >= me.interval_ms:
+            val fid = me.next_frame_id
+            me.next_frame_id = me.next_frame_id + 1
+            me.last_frame_time = now_ms
+            me.state = FrameState.Pending
+            val args = FrameArgs(
+                frame_id: fid,
+                deadline: now_ms + me.interval_ms,
+                interval_ms: me.interval_ms
+            )
+            Some(args)
+        else:
+            None
+
+    me begin_frame(args: FrameArgs) -> ():
+        """Producer acknowledges the BeginFrame; transition to Running."""
+        me.state = FrameState.Running
+
+    me end_frame(completed_at_ms: f64, deadline_ms: f64) -> ():
+        """Mark the frame complete. If completed_at_ms overran deadline_ms,
+        bump missed_count and flag Missed before settling back to Idle."""
+        if completed_at_ms > deadline_ms:
+            me.missed_count = me.missed_count + 1
+            me.state = FrameState.Missed
+            me.state = FrameState.Idle
+        else:
+            me.state = FrameState.Idle
+
+    me missed_frames() -> i64:
+        """Return the cumulative count of deadline-missed frames."""
+        me.missed_count
+
+    me target_fps() -> f64:
+        """Derive target frames-per-second from the current interval_ms."""
+        1000.0 / me.interval_ms
+
+    me reset() -> ():
+        """Zero out counters and return to Idle without changing interval_ms."""
+        me.missed_count = 0
+        me.next_frame_id = 0
+        me.last_frame_time = 0.0
+        me.state = FrameState.Idle

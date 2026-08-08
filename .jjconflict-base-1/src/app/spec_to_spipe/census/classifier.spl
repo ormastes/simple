@@ -1,0 +1,75 @@
+# codex-impl
+# Text-only first-pass classifier. It deliberately reports weak coverage before
+# stronger-looking categories so placeholders and tautologies cannot be promoted.
+
+fn _has_meaningful_assertion(source: text) -> bool:
+    source.contains("expect(") or source.contains("expect_not(") or
+        source.contains("to_equal(") or source.contains("to_be(") or
+        source.contains("to_contain(") or source.contains("assert(") or
+        source.contains("check(")
+
+fn _has_compiler_invocation(source: text) -> bool:
+    source.contains("compile_source(") or source.contains("compile_file(") or
+        source.contains("compile_text(") or source.contains("run_check(") or
+        source.contains("compiler_run(") or source.contains("simple check") or
+        source.contains("simple build")
+
+fn _has_production_observation(source: text) -> bool:
+    source.contains("use app.") or
+        source.contains("process_run(") or source.contains("run_cli(") or
+        source.contains("render(") or source.contains("execute(")
+
+# Classify one executable specification into exactly one migration category.
+# This is a deterministic heuristic, not the final semantic verifier.
+fn classify_spec_text(spec_text: text) -> text:
+    val source = spec_text.lower()
+    val trimmed = source.trim()
+    val pending_marker = "pass_" + "todo"
+    val intentional_noop_marker = "pass_" + "do_nothing"
+    val short_noop_marker = "pass_" + "dn"
+    val true_tautology = "expect(true)" + ".to_equal(true)"
+    val false_tautology = "expect(false)" + ".to_equal(false)"
+
+    if (trimmed == "" or source.contains(pending_marker) or
+        source.contains(intentional_noop_marker) or source.contains(short_noop_marker) or
+        source.contains("todo:") or source.contains("fixme:") or
+        source.contains("assert_compiles()") or source.contains("placeholder test")):
+        return "placeholder"
+
+    if (source.contains(true_tautology) or source.contains(false_tautology) or
+        source.contains("check(true,") or source.contains("assert(true)")):
+        return "vacuous"
+
+    if not source.contains("it \"") and not source.contains("slow_it \""):
+        return "vacuous"
+
+    if (source.contains("file_read(") or source.contains("read_file(")) and
+       (source.contains(".contains(") or source.contains("implementation text") or source.contains("source text")):
+        return "source_grep"
+
+    if _has_compiler_invocation(source) and
+       (source.contains("compile_fail") or source.contains("compile error") or
+        source.contains("diagnostic") or source.contains("exit_code != 0") or
+        source.contains("exit_code).to_equal(1)")):
+        return "compile_fail"
+
+    if _has_compiler_invocation(source) and _has_meaningful_assertion(source):
+        return "compile_pass"
+
+    if (source.contains("@evidence") or source.contains("retained artifact") or
+        source.contains("external result artifact")) and not _has_production_observation(source):
+        return "evidence_only"
+
+    if source.contains("ast") or source.contains("schema") or source.contains("abi") or
+       source.contains("layout") or source.contains("json_parse(") or
+       source.contains("generated artifact") or source.contains("snapshot"):
+        return "structural"
+
+    if _has_meaningful_assertion(source) and _has_production_observation(source):
+        return "behavioral"
+
+    # A local assertion without a production observation is not conformance.
+    # Structural and evidence-only cases were classified above.
+    if _has_meaningful_assertion(source):
+        return "vacuous"
+    "vacuous"

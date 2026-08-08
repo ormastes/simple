@@ -1,0 +1,131 @@
+# @cover src/os/services/devfs_service.spl 80%
+"""
+# DevfsService Specification (G7)
+
+**Feature IDs:** #G7
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Device filesystem capsule backed by ECS. Validates registration,
+lookup (hit and miss), unregistration, device count, and permission
+retrieval across char and block devices.
+"""
+
+use std.spec
+use os.services.devfs_service.{DevfsService, DEV_CHAR, DEV_BLOCK}
+
+describe "DevfsService initial state":
+    """
+    ## Initial State
+
+    A freshly constructed DevfsService must have zero registered nodes
+    and expose the device kind constants at their specified values.
+    """
+
+    it "constructs with zero registered devices":
+        """Verify the node count starts at 0 on a fresh service."""
+        val svc = DevfsService.new()
+        expect(svc.dev_list_count()).to_equal(0)
+
+    it "DEV_CHAR constant equals 0":
+        """Character device kind constant must be 0."""
+        expect(DEV_CHAR).to_equal(0)
+
+    it "DEV_BLOCK constant equals 1":
+        """Block device kind constant must be 1."""
+        expect(DEV_BLOCK).to_equal(1)
+
+describe "DevfsService dev_register":
+    """
+    ## Device Registration
+
+    Validates that registering a device increments the count and
+    returns a live entity with a positive id.
+    """
+
+    it "register returns entity with positive id":
+        """dev_register must return an entity whose id is > 0."""
+        var svc = DevfsService.new()
+        val e = svc.dev_register("tty0", 0, DEV_CHAR, 0o620, 100)
+        expect(e.id).to_be_greater_than(0)
+
+    it "register increments device count":
+        """After one registration the count must be 1."""
+        var svc = DevfsService.new()
+        val _e = svc.dev_register("sda", 1, DEV_BLOCK, 0o660, 200)
+        expect(svc.dev_list_count()).to_equal(1)
+
+    it "register two devices yields count 2":
+        """After two registrations the count must be 2."""
+        var svc = DevfsService.new()
+        val _a = svc.dev_register("tty0", 0, DEV_CHAR, 0o620, 100)
+        val _b = svc.dev_register("sda",  1, DEV_BLOCK, 0o660, 200)
+        expect(svc.dev_list_count()).to_equal(2)
+
+describe "DevfsService dev_lookup":
+    """
+    ## Device Lookup
+
+    Validates that registered devices are found by name and that
+    missing devices return -ENOENT (-2).
+    """
+
+    it "lookup registered device returns its backend endpoint":
+        """dev_lookup must return the exact endpoint value used at registration."""
+        var svc = DevfsService.new()
+        val _e = svc.dev_register("null", 3, DEV_CHAR, 0o666, 9999)
+        val ep = svc.dev_lookup("null")
+        expect(ep).to_equal(9999)
+
+    it "lookup missing device returns -2":
+        """dev_lookup must return -ENOENT (-2) when name is not registered."""
+        val svc = DevfsService.new()
+        val ep = svc.dev_lookup("nonexistent")
+        expect(ep).to_equal(-2)
+
+describe "DevfsService dev_unregister":
+    """
+    ## Device Unregistration
+
+    After unregistering a device the count decrements and lookup
+    returns -ENOENT.
+    """
+
+    it "unregister decrements count":
+        """After registering then unregistering one device the count is 0."""
+        var svc = DevfsService.new()
+        val _e = svc.dev_register("tty1", 4, DEV_CHAR, 0o620, 300)
+        svc.dev_unregister("tty1")
+        expect(svc.dev_list_count()).to_equal(0)
+
+    it "unregister makes lookup return -2":
+        """Lookup of an unregistered device must return -ENOENT."""
+        var svc = DevfsService.new()
+        val _e = svc.dev_register("tty2", 5, DEV_CHAR, 0o620, 400)
+        svc.dev_unregister("tty2")
+        val ep = svc.dev_lookup("tty2")
+        expect(ep).to_equal(-2)
+
+describe "DevfsService dev_permissions_of":
+    """
+    ## Permission Query
+
+    Validates that the permission mode stored at registration is
+    returned correctly and that an unknown device returns 0.
+    """
+
+    it "permissions_of returns registered mode":
+        """dev_permissions_of must return the exact mode bits from registration."""
+        var svc = DevfsService.new()
+        val _e = svc.dev_register("mem", 1, DEV_CHAR, 0o640, 500)
+        val mode = svc.dev_permissions_of("mem")
+        expect(mode).to_equal(0o640)
+
+    it "permissions_of unknown device returns 0":
+        """dev_permissions_of must return 0 for an unregistered name."""
+        val svc = DevfsService.new()
+        val mode = svc.dev_permissions_of("nosuchdev")
+        expect(mode).to_equal(0)

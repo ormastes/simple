@@ -1,0 +1,77 @@
+# SPM RPC — Simple Process Manager wire protocol request/response types.
+#
+# Provides: SpmRequest, SpmResponse, rpc_kind_* constants,
+#           spm_encode_request, spm_encode_response,
+#           spm_decode_request, spm_decode_response.
+
+use std.common.privilege.authority_token.{AuthorityToken}
+
+# An RPC request sent to the SPM service.
+struct SpmRequest:
+    kind: text
+    body: [u8]
+    token_hint: AuthorityToken
+
+# An RPC response returned by the SPM service.
+class SpmResponse:
+    ok: bool
+    body: [u8]
+    error: text
+
+impl SpmResponse:
+    static fn ok_with(body: [u8]) -> SpmResponse:
+        SpmResponse(ok: true, body: body, error: "")
+
+    static fn denied(reason: text) -> SpmResponse:
+        SpmResponse(ok: false, body: [], error: reason)
+
+# Well-known RPC kind identifiers.
+fn rpc_kind_ping() -> text:          "ping"
+fn rpc_kind_priv_check() -> text:    "priv_check"
+fn rpc_kind_win_register() -> text:  "win_register"
+fn rpc_kind_win_destroy() -> text:   "win_destroy"
+
+# Serialize an SpmRequest to bytes for transport.
+fn spm_encode_request(req: SpmRequest) -> [u8]:
+    val header = req.kind + "\n"
+    val header_bytes = header.bytes()
+    var out: [u8] = []
+    for b in header_bytes:
+        out.push(b)
+    for b in req.body:
+        out.push(b)
+    out
+
+# Serialize an SpmResponse to bytes for transport.
+fn spm_encode_response(resp: SpmResponse) -> [u8]:
+    val status = if resp.ok: "ok\n" else: "err " + resp.error + "\n"
+    val header_bytes = status.bytes()
+    var out: [u8] = []
+    for b in header_bytes:
+        out.push(b)
+    for b in resp.body:
+        out.push(b)
+    out
+
+# Deserialize bytes into an SpmRequest (kind from first line, rest is body).
+fn spm_decode_request(data: [u8]) -> SpmRequest:
+    val text_data = data.to_text()
+    val nl = text_data.index_of("\n")
+    if nl < 0:
+        return SpmRequest(kind: text_data.trim(), body: [], token_hint: AuthorityToken.public())
+    val kind = text_data.slice(0, nl)
+    val body_text = text_data.slice(nl + 1, text_data.len())
+    SpmRequest(kind: kind, body: body_text.bytes(), token_hint: AuthorityToken.public())
+
+# Deserialize bytes into an SpmResponse.
+fn spm_decode_response(data: [u8]) -> SpmResponse:
+    val text_data = data.to_text()
+    val nl = text_data.index_of("\n")
+    if nl < 0:
+        return SpmResponse.denied("malformed response")
+    val status_line = text_data.slice(0, nl)
+    val body_text = text_data.slice(nl + 1, text_data.len())
+    if status_line == "ok":
+        return SpmResponse.ok_with(body_text.bytes())
+    val reason = if status_line.starts_with("err "): status_line.slice(4, status_line.len()) else: status_line
+    SpmResponse.denied(reason)

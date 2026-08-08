@@ -1,0 +1,42 @@
+use common.wine_ntdll_system_info.{
+    WineNtdllSystemInfo,
+    wine_ntdll_execute_system_info,
+    wine_ntdll_system_info_default
+}
+
+fn _classes() -> [text]:
+    ["SystemBasicInformation", "SystemProcessorInformation", "SystemTimeOfDayInformation"]
+
+describe "Wine NTDLL system information bridge":
+    it "executes a bounded NtQuerySystemInformation sequence":
+        val result = wine_ntdll_execute_system_info(["NtQuerySystemInformation"], _classes(), wine_ntdll_system_info_default())
+
+        expect(result.ok).to_equal(true)
+        expect(result.page_size).to_equal(4096)
+        expect(result.allocation_granularity).to_equal(65536)
+        expect(result.processor_count).to_equal(4)
+        expect(result.timer_resolution_100ns).to_equal(156250)
+        expect(result.system_root).to_equal("C:\\windows")
+        expect(result.classes).to_equal("SystemBasicInformation SystemProcessorInformation SystemTimeOfDayInformation")
+        expect(result.operations).to_equal("NtQuerySystemInformation")
+
+    it "keeps system information dispatch and classes bounded":
+        val wrong_family = wine_ntdll_execute_system_info(["NtCreateFile"], _classes(), wine_ntdll_system_info_default())
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtCreateFile")
+
+        val wrong_class = wine_ntdll_execute_system_info(["NtQuerySystemInformation"], ["SystemProcessorInformation", "SystemBasicInformation", "SystemTimeOfDayInformation"], wine_ntdll_system_info_default())
+        expect(wrong_class.ok).to_equal(false)
+        expect(wrong_class.error).to_equal("ntdll-system-info-class-expected:SystemBasicInformation")
+
+    it "rejects invalid system information facts":
+        val invalid = WineNtdllSystemInfo(
+            page_size: 4096,
+            allocation_granularity: 65536,
+            processor_count: 0,
+            timer_resolution_100ns: 156250,
+            system_root: "C:\\windows"
+        )
+        val result = wine_ntdll_execute_system_info(["NtQuerySystemInformation"], _classes(), invalid)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("NtQuerySystemInformation:invalid-processor-count")

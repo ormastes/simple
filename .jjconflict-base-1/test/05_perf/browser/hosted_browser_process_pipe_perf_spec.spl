@@ -1,0 +1,130 @@
+# codex-system-test
+# @tag: web, rendering, engine2d, process, performance
+"""# Hosted browser process and pipe performance
+
+Measures the production parent/worker request path, including request encoding,
+pipe transport, worker rendering, response SBRF decoding, polling, and
+compositor revision-cache routing.
+"""
+
+use std.spec.*
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+
+val PIPE_PERF_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+val PIPE_PERF_PAIRS: i64 = 7
+
+fn pipe_perf_pairs() -> i64:
+    if env_get("SIMPLE_HOSTED_PIPE_PERF_SMOKE") == "1":
+        return 3
+    PIPE_PERF_PAIRS
+
+fn pipe_perf_sorted(values: [i64]) -> [i64]:
+    var sorted = values
+    var i: i64 = 1
+    while i < sorted.len():
+        val value = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > value:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = value
+        i = i + 1
+    sorted
+
+describe "hosted browser process and pipe performance":
+    it "reuses an unchanged frame after each changed process reply":
+        val configured = env_get("SIMPLE_HOSTED_BROWSER_EXECUTABLE") ?? ""
+        val executable = if configured == "": "bin/simple" else: configured
+        val pairs = pipe_perf_pairs()
+        var renderer: HostedBrowserRendererProcess = (
+            HostedBrowserRendererProcess.create(7, 64, 64)
+        )
+        val started: HostedBrowserRendererResult = renderer.start(
+            executable, 10000)
+        expect(started.ok).to_equal(true)
+        expect(renderer.state).to_equal("await-init")
+
+        val initial: HostedBrowserRendererResult = renderer.render(
+            "init", PIPE_PERF_HTML, 10000)
+        expect(initial.ok).to_equal(true)
+        expect(initial.producer_generation).to_equal(7)
+        expect(initial.composition_revision).to_be_greater_than(-1)
+        var raster: Engine2dCompositorBackend = (
+            Engine2dCompositorBackend.create_named(64, 64, "software")
+        )
+        val initial_render: Engine2dDrawIrAdvResult = (
+            raster.render_draw_ir_composition_resources_revision(
+                initial.composition,
+                initial.image_resources,
+                initial.producer_generation,
+                initial.composition_revision
+            )
+        )
+        expect(initial_render.pixels.len()).to_equal(4096)
+
+        var changed_samples: [i64] = []
+        var unchanged_samples: [i64] = []
+        var mismatches: i64 = 0
+        var previous_revision = initial.composition_revision
+        var previous_pixels = initial_render.pixels
+        var sample: i64 = 0
+        while sample < pairs:
+            val animation_ms = (sample + 1) * 100
+            val changed_start = time_now_nanos()
+            val changed: HostedBrowserRendererResult = renderer.render(
+                "advance", str(animation_ms), 10000)
+            val changed_render: Engine2dDrawIrAdvResult = (
+                raster.render_draw_ir_composition_resources_revision(
+                    changed.composition,
+                    changed.image_resources,
+                    changed.producer_generation,
+                    changed.composition_revision
+                )
+            )
+            changed_samples.push(time_now_nanos() - changed_start)
+
+            val unchanged_start = time_now_nanos()
+            val unchanged: HostedBrowserRendererResult = renderer.render(
+                "advance", str(animation_ms), 10000)
+            val unchanged_render: Engine2dDrawIrAdvResult = (
+                raster.render_draw_ir_composition_resources_revision(
+                    unchanged.composition,
+                    unchanged.image_resources,
+                    unchanged.producer_generation,
+                    unchanged.composition_revision
+                )
+            )
+            unchanged_samples.push(time_now_nanos() - unchanged_start)
+
+            if (not changed.ok or not unchanged.ok or
+                changed.producer_generation != 7 or
+                unchanged.producer_generation != 7 or
+                changed.composition_revision <= previous_revision or
+                unchanged.composition_revision !=
+                    changed.composition_revision or
+                changed_render.pixels == previous_pixels or
+                unchanged_render.pixels != changed_render.pixels):
+                mismatches = mismatches + 1
+            previous_revision = changed.composition_revision
+            previous_pixels = changed_render.pixels
+            sample = sample + 1
+
+        val changed = pipe_perf_sorted(changed_samples)
+        val unchanged = pipe_perf_sorted(unchanged_samples)
+        val changed_p50_ns = changed[changed.len() / 2]
+        val unchanged_p50_ns = unchanged[unchanged.len() / 2]
+        print "hosted_process_pipe_perf executable={executable} pairs={pairs} changed_p50_ns={changed_p50_ns} unchanged_p50_ns={unchanged_p50_ns} ratio_x1000={unchanged_p50_ns * 1000 / changed_p50_ns} render_count={raster.revision_render_count} reuse_count={raster.revision_reuse_count} final_revision={previous_revision}"
+        expect(mismatches).to_equal(0)
+        expect(raster.revision_render_count).to_equal(1 + pairs)
+        expect(raster.revision_reuse_count).to_equal(pairs)
+        expect(changed_p50_ns).to_be_greater_than(0)
+        expect(unchanged_p50_ns).to_be_greater_than(0)
+        expect(unchanged_p50_ns).to_be_less_than(changed_p50_ns)
+        raster.shutdown()
+        expect(renderer.close()).to_equal(true)

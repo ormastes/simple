@@ -1,0 +1,42 @@
+use std.spec
+use std.nogc_async_mut.storage.shared.wal.{WAL_RECORD_DATA, WAL_RECORD_COMMIT, Lsn, WalRecord, SharedWal}
+use std.nogc_async_mut.storage.shared.btree.{BTreeKey, BTree}
+use std.nogc_async_mut.storage.shared.checkpoint_ring.{RingSlot, ring_register_persist_callback, ring_clear_persist_callback, ring_persist_callback_tag, ring_is_callback_registered, ring_cb_slot_count, SharedCheckpointRing}
+use std.nogc_async_mut.storage.shared.intent_log.{IntentLogRecord, intent_register_persist_callback, intent_clear_persist_callback, intent_persist_callback_tag, intent_is_callback_registered, intent_cb_record_count, SharedIntentLog}
+
+describe "nogc_async_mut storage shared facade":
+
+    it "re-exports wal and btree primitives":
+        var wal = SharedWal.new()
+        val lsn = wal.append(WalRecord(txn_id: 7, record_type: WAL_RECORD_DATA, payload: "payload")).unwrap()
+        expect(lsn.value).to_equal(1)
+        expect(wal.read_record(Lsn(value: 1)).unwrap().payload).to_equal("payload")
+        expect(wal.flush_wal().is_ok()).to_equal(true)
+        expect(wal.get_durable_lsn().value).to_equal(1)
+        expect(WAL_RECORD_COMMIT).to_equal(3)
+
+        var tree = BTree<text>.new(2)
+        expect(tree.insert(BTreeKey(a: 1, b: 2), "value").is_ok()).to_equal(true)
+        val found = tree.lookup(BTreeKey(a: 1, b: 2)).unwrap()
+        expect(found).to_equal("value")
+
+    it "re-exports checkpoint ring and intent log persistence helpers":
+        ring_clear_persist_callback()
+        ring_register_persist_callback("facade-ring")
+        expect(ring_is_callback_registered()).to_equal(true)
+        expect(ring_persist_callback_tag()).to_equal("facade-ring")
+        var ring = SharedCheckpointRing.new_with_size(4)
+        expect(ring.write_slot(0, RingSlot(slot_gen: 2, clean: true, btree_root_page: 99)).is_ok()).to_equal(true)
+        expect(ring_cb_slot_count()).to_equal(1)
+        expect(ring.latest_clean().unwrap().btree_root_page).to_equal(99)
+
+        intent_clear_persist_callback()
+        intent_register_persist_callback("facade-intent")
+        expect(intent_is_callback_registered()).to_equal(true)
+        expect(intent_persist_callback_tag()).to_equal("facade-intent")
+        var log = SharedIntentLog.new_persistent()
+        expect(log.append(IntentLogRecord(txn_id: 1, lsn: 5, committed: true)).is_ok()).to_equal(true)
+        log.set_head(5)
+        expect(log.flush().is_ok()).to_equal(true)
+        expect(intent_cb_record_count()).to_equal(1)
+        expect(log.head_pointer().tail_lsn).to_equal(5)

@@ -1,0 +1,114 @@
+# macOS Metal Render Log Aggregate Forwarding
+
+> Verifies the lightweight contract that macOS Metal render-log diagnostics keep their structured blocker fields visible at aggregate level. This spec reads the wrapper source directly so it can run without a macOS host, Xcode GPU Frame Capture, Chrome, Electron, or the broad GUI aggregate fixture.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+## Overview
+
+Verifies the lightweight contract that macOS Metal render-log diagnostics keep
+their structured blocker fields visible at aggregate level. This spec reads the
+wrapper source directly so it can run without a macOS host, Xcode GPU Frame
+Capture, Chrome, Electron, or the broad GUI aggregate fixture.
+
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+```sh
+SIMPLE_LIB=src bin/simple test test/03_system/check/macos_metal_render_log_aggregate_forwarding_spec.spl --mode=interpreter --clean
+```
+
+## Acceptance
+
+- The macOS Metal comparison wrapper emits blocked-gate count/list and
+  per-gate statuses.
+- The GUI RenderDoc aggregate reads and emits those same macOS fields.
+- A macOS Metal row that otherwise says `pass` is rejected when
+  `macos_metal_render_log_compare_blocked_gate_count` is not `0`.
+
+## Completion Criteria
+
+This spec does not prove macOS Metal capture is complete. Goal completion still
+requires a prepared macOS GUI host to produce:
+
+- `macos_metal_render_log_compare_status=pass`
+- `macos_metal_render_log_compare_blocked_gate_count=0`
+- `macos_metal_render_log_compare_gpu_capture_artifact_magic=XCODE-GPUTRACE`
+- `macos_metal_render_log_compare_browser_backing_gate_status=pass`
+- `macos_metal_render_log_compare_pairwise_gate_status=pass`
+- `gui_showcase_4k_200fps_status=pass`
+- `gui_showcase_8k_perf_status=pass`
+
+If a later macOS run lacks native Metal readback, browser Metal backing,
+pairwise pixels, ARGB source evidence, or Xcode GPU capture, keep the aggregate
+incomplete and use the forwarded structured blockers instead of parsing a
+summarized reason string.
+
+## Scenarios
+
+### macOS Metal render log aggregate forwarding
+
+#### keeps structured Metal blocker fields in the aggregate contract
+
+- Read the macOS Metal comparison wrapper
+- Assert the macOS wrapper emits blocked gates and per-gate statuses
+- Read the GUI RenderDoc aggregate wrapper
+- Assert the aggregate reads the macOS structured blocker fields
+- Assert blocked macOS rows cannot pass aggregate validation
+- Assert the aggregate emits the macOS structured blocker fields
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+
+```simple
+step("Read the macOS Metal comparison wrapper")
+val macos_compare = file_read("scripts/check/check-macos-metal-render-log-compare.shs")
+
+step("Assert the macOS wrapper emits blocked gates and per-gate statuses")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_blocked_gate_count\" \"$blocked_gate_count\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_blocked_gates\" \"$blocked_gates\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_generated_readback_gate_status\" \"$metal_generated_gate_status\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_framebuffer_readback_gate_status\" \"$metal_framebuffer_gate_status\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_browser_backing_gate_status\" \"$browser_backing_gate_status\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_pairwise_gate_status\" \"$pixel_gate_status\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_argb_source_gate_status\" \"$argb_source_gate_status\"")
+expect(macos_compare).to_contain("render_log_append_kv \"macos_metal_render_log_compare_gpu_capture_gate_status\" \"$gpu_capture_gate_status\"")
+
+step("Read the GUI RenderDoc aggregate wrapper")
+val aggregate = file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")
+
+step("Assert the aggregate reads the macOS structured blocker fields")
+expect(aggregate).to_contain("macos_metal_render_log_blocked_gate_count = value_of(\"macos_metal_render_log_compare_blocked_gate_count\"")
+expect(aggregate).to_contain("macos_metal_render_log_blocked_gates = value_of(\"macos_metal_render_log_compare_blocked_gates\"")
+expect(aggregate).to_contain("macos_metal_render_log_generated_readback_gate_status = value_of(\"macos_metal_render_log_compare_generated_readback_gate_status\"")
+expect(aggregate).to_contain("macos_metal_render_log_framebuffer_readback_gate_status = value_of(\"macos_metal_render_log_compare_framebuffer_readback_gate_status\"")
+expect(aggregate).to_contain("macos_metal_render_log_browser_backing_gate_status = value_of(\"macos_metal_render_log_compare_browser_backing_gate_status\"")
+expect(aggregate).to_contain("macos_metal_render_log_pairwise_gate_status = value_of(\"macos_metal_render_log_compare_pairwise_gate_status\"")
+expect(aggregate).to_contain("macos_metal_render_log_argb_source_gate_status = value_of(\"macos_metal_render_log_compare_argb_source_gate_status\"")
+expect(aggregate).to_contain("macos_metal_render_log_gpu_capture_gate_status = value_of(\"macos_metal_render_log_compare_gpu_capture_gate_status\"")
+
+step("Assert blocked macOS rows cannot pass aggregate validation")
+expect(aggregate).to_contain("elif macos_metal_render_log_blocked_gate_count != \"0\":")
+expect(aggregate).to_contain("macos_metal_render_log_reason = \"macos-metal-blocked-gates-present:\"")
+
+step("Assert the aggregate emits the macOS structured blocker fields")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_blocked_gate_count\", macos_metal_render_log_blocked_gate_count)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_blocked_gates\", macos_metal_render_log_blocked_gates)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_generated_readback_gate_status\", macos_metal_render_log_generated_readback_gate_status)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_framebuffer_readback_gate_status\", macos_metal_render_log_framebuffer_readback_gate_status)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_browser_backing_gate_status\", macos_metal_render_log_browser_backing_gate_status)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_pairwise_gate_status\", macos_metal_render_log_pairwise_gate_status)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_argb_source_gate_status\", macos_metal_render_log_argb_source_gate_status)")
+expect(aggregate).to_contain("emit(\"macos_metal_render_log_compare_gpu_capture_gate_status\", macos_metal_render_log_gpu_capture_gate_status)")
+```
+
+</details>
+

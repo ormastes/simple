@@ -1,0 +1,189 @@
+# @cover src/lib/common/perf/perf_stats.spl 80%
+# @tag: unit, perf, statistics, render_perf, gpu, engine2d
+#
+# Real p50/p95 statistics harness — fills the §10 "second gate" gap identified
+# for the 4 SIMD kernels landed this session
+# (doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md lines 434-435):
+# the existing simd_isa_provider_spec.spl timing blocks are ONE t1-t0 sample
+# over N iterations, not a distribution. Here each TRIAL is independently
+# timed (its own t0..t1 block), N trials collected per kernel, and p50/p95
+# computed by real sort+index (perf_stats.spl). Engine: this file was run via
+# `bin/simple run <spec>` (Cranelift JIT), NOT `bin/simple test` (tree-walk
+# interpreter, and too slow under CPU-guard for 4096px x N-trial workloads
+# here) — numbers below are JIT-engine numbers. `bin/simple test` still
+# collects and gates the same file's assertions under the interpreter; only
+# the printed us numbers are JIT-sourced.
+#
+# RSS/memory: this repo has no real process-RSS primitive and no allocator
+# counter wired to interpreter array literals (see perf_stats.spl banner) —
+# reported as ABSENT below, not fabricated.
+#
+# Budget check: grepped render_perf_redesign_plan_2026-08-06.md and the wider
+# doc/ tree for a numeric p95 or RSS budget to gate against — none exists.
+# "p95/RSS inside budget" is stated with no budget number defined anywhere.
+# Numbers below are therefore reported as EVIDENCE ONLY, not pass/fail.
+
+use std.spec
+use common.perf.perf_stats.{
+    perf_stats_sort_i64,
+    perf_stats_percentile,
+    perf_stats_p50,
+    perf_stats_p95,
+    perf_stats_pct_win,
+}
+use common.gpu.engine2d.scalar_oracle.{
+    oracle_src_over_const,
+    oracle_src_over_image,
+    oracle_mask_src_over,
+}
+use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
+    simd_isa_src_over_const,
+    simd_isa_src_over_image,
+    simd_isa_mask_src_over,
+}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+
+fn lcg_next(s: i64) -> i64:
+    ((s * 6364136223846793005 + 1442695040888963407) >> 16) & 0x7FFFFFFF
+
+fn filled_random(n: i64, seed: i64) -> [u32]:
+    var out: [u32] = [0; n.to_i32()]
+    var s: i64 = seed
+    var i: i64 = 0
+    while i < n:
+        s = lcg_next(s)
+        out[i.to_i32()] = (s & 0xFFFFFFFF) as u32
+        i = i + 1
+    out
+
+val TRIALS: i64 = 11
+val INNER_ITERS: i64 = 8
+val N: i64 = 4096
+
+describe "perf_stats — statistics harness self-test (sabotage)":
+    it "computes a real p50/p95 that is NOT the mean, and p95 is outlier-sensitive":
+        # 9 clean values around 100us plus one deliberate 10000us outlier.
+        var trials: [i64] = [100, 101, 99, 102, 98, 100, 103, 97, 100, 10000]
+        val p50 = perf_stats_p50(trials)
+        val p95 = perf_stats_p95(trials)
+        val mean = (100+101+99+102+98+100+103+97+100+10000) / 10
+        # p50 ignores the tail outlier entirely — stays near the clean cluster.
+        assert_true(p50 >= 97 and p50 <= 103)
+        # p95 is dragged by the outlier at n=10 (index 9 -> the outlier itself).
+        assert_true(p95 == 10000)
+        # Neither equals the naive mean (1108) — proves this isn't a mean in disguise.
+        assert_true(p50 != mean)
+        assert_true(p95 != mean)
+        print("sabotage-test: p50=" + p50.to_text() + " p95=" + p95.to_text() + " mean=" + mean.to_text())
+
+    it "sort is a genuine ascending sort, not an identity pass-through":
+        val s = perf_stats_sort_i64([5, 3, 9, 1, 7])
+        assert_true(s[0] == 1 and s[1] == 3 and s[2] == 5 and s[3] == 7 and s[4] == 9)
+
+describe "perf_stats — real p50/p95 for registered SIMD kernels vs scalar (N independent trials, JIT engine via bin/simple run)":
+    it "src_over_const: N independent trials x M inner iters at 4096px":
+        var scalar_trials: [i64] = []
+        var simd_trials: [i64] = []
+        var t: i64 = 0
+        while t < TRIALS:
+            var buf_s = filled_random(N, 555 + t)
+            val ts0 = time_now_unix_micros()
+            var k0: i64 = 0
+            while k0 < INNER_ITERS:
+                oracle_src_over_const(buf_s, 0, N, 0x40203040)
+                k0 = k0 + 1
+            val ts1 = time_now_unix_micros()
+            scalar_trials.push(ts1 - ts0)
+
+            var buf_v = filled_random(N, 555 + t)
+            val tv0 = time_now_unix_micros()
+            var k1: i64 = 0
+            while k1 < INNER_ITERS:
+                simd_isa_src_over_const(buf_v, 0, N, 0x40203040)
+                k1 = k1 + 1
+            val tv1 = time_now_unix_micros()
+            simd_trials.push(tv1 - tv0)
+            t = t + 1
+
+        val scalar_p50 = perf_stats_p50(scalar_trials)
+        val scalar_p95 = perf_stats_p95(scalar_trials)
+        val simd_p50 = perf_stats_p50(simd_trials)
+        val simd_p95 = perf_stats_p95(simd_trials)
+        val win_pct = perf_stats_pct_win(scalar_p50, simd_p50)
+        print("src_over_const p50/p95 us (n=" + TRIALS.to_text() + " trials x " + INNER_ITERS.to_text()
+            + " iters): scalar_p50=" + scalar_p50.to_text() + " scalar_p95=" + scalar_p95.to_text()
+            + " simd_p50=" + simd_p50.to_text() + " simd_p95=" + simd_p95.to_text()
+            + " win_pct=" + win_pct.to_text() + " rss=ABSENT-no-primitive")
+        assert_true(scalar_p50 >= 0 and simd_p50 >= 0)
+
+    it "src_over_image: N independent trials x M inner iters at 4096px":
+        var scalar_trials: [i64] = []
+        var simd_trials: [i64] = []
+        var src = filled_random(N, 777)
+        var t: i64 = 0
+        while t < TRIALS:
+            var buf_s = filled_random(N, 666 + t)
+            val ts0 = time_now_unix_micros()
+            var k0: i64 = 0
+            while k0 < INNER_ITERS:
+                oracle_src_over_image(buf_s, 0, src, 0, N)
+                k0 = k0 + 1
+            val ts1 = time_now_unix_micros()
+            scalar_trials.push(ts1 - ts0)
+
+            var buf_v = filled_random(N, 666 + t)
+            val tv0 = time_now_unix_micros()
+            var k1: i64 = 0
+            while k1 < INNER_ITERS:
+                simd_isa_src_over_image(buf_v, 0, src, 0, N)
+                k1 = k1 + 1
+            val tv1 = time_now_unix_micros()
+            simd_trials.push(tv1 - tv0)
+            t = t + 1
+
+        val scalar_p50 = perf_stats_p50(scalar_trials)
+        val scalar_p95 = perf_stats_p95(scalar_trials)
+        val simd_p50 = perf_stats_p50(simd_trials)
+        val simd_p95 = perf_stats_p95(simd_trials)
+        val win_pct = perf_stats_pct_win(scalar_p50, simd_p50)
+        print("src_over_image p50/p95 us (n=" + TRIALS.to_text() + " trials x " + INNER_ITERS.to_text()
+            + " iters): scalar_p50=" + scalar_p50.to_text() + " scalar_p95=" + scalar_p95.to_text()
+            + " simd_p50=" + simd_p50.to_text() + " simd_p95=" + simd_p95.to_text()
+            + " win_pct=" + win_pct.to_text() + " rss=ABSENT-no-primitive")
+        assert_true(scalar_p50 >= 0 and simd_p50 >= 0)
+
+    it "mask_src_over: N independent trials x M inner iters at 4096px":
+        var scalar_trials: [i64] = []
+        var simd_trials: [i64] = []
+        var mask = filled_random(N, 999)
+        var t: i64 = 0
+        while t < TRIALS:
+            var buf_s = filled_random(N, 888 + t)
+            val ts0 = time_now_unix_micros()
+            var k0: i64 = 0
+            while k0 < INNER_ITERS:
+                oracle_mask_src_over(buf_s, 0, 0x60778899, mask, 0, N)
+                k0 = k0 + 1
+            val ts1 = time_now_unix_micros()
+            scalar_trials.push(ts1 - ts0)
+
+            var buf_v = filled_random(N, 888 + t)
+            val tv0 = time_now_unix_micros()
+            var k1: i64 = 0
+            while k1 < INNER_ITERS:
+                simd_isa_mask_src_over(buf_v, 0, 0x60778899, mask, 0, N)
+                k1 = k1 + 1
+            val tv1 = time_now_unix_micros()
+            simd_trials.push(tv1 - tv0)
+            t = t + 1
+
+        val scalar_p50 = perf_stats_p50(scalar_trials)
+        val scalar_p95 = perf_stats_p95(scalar_trials)
+        val simd_p50 = perf_stats_p50(simd_trials)
+        val simd_p95 = perf_stats_p95(simd_trials)
+        val win_pct = perf_stats_pct_win(scalar_p50, simd_p50)
+        print("mask_src_over p50/p95 us (n=" + TRIALS.to_text() + " trials x " + INNER_ITERS.to_text()
+            + " iters): scalar_p50=" + scalar_p50.to_text() + " scalar_p95=" + scalar_p95.to_text()
+            + " simd_p50=" + simd_p50.to_text() + " simd_p95=" + simd_p95.to_text()
+            + " win_pct=" + win_pct.to_text() + " rss=ABSENT-no-primitive")
+        assert_true(scalar_p50 >= 0 and simd_p50 >= 0)

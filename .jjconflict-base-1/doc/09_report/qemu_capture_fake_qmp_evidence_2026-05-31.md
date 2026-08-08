@@ -1,0 +1,26 @@
+# QEMU Capture Fake QMP Evidence - 2026-05-31
+
+- status: pass
+- reason: fake-qmp-screendump-pass
+- simple_bin: /home/ormastes/dev/pub/simple/bin/simple
+- simple_bin_source: explicit-env
+- simple_bin_status: pass
+- simple_exit_code: 0
+- fake_qmp_exit_code: 0
+- backend: qemu_vm
+- dimensions: 64x48
+- pixels: 3072
+- pixel0_argb: 4280307872
+- pixel384_argb: 4279310375
+- pixel1000_argb: 4293257195
+- capture_checksum: 20215336677919650
+- reference_checksum: 20215336677919650
+- mismatch_count: 0
+- first_mismatch: -1
+- blur_or_tolerance_used: false
+- expected_argb_path: build/tmp_fake_qmp_check/expected-argb.json
+- captured_argb_path: build/tmp_fake_qmp_check/captured-argb.json
+- capture_us: 45455
+- error: 
+- socket_path: build/tmp_fake_qmp_check/fake-qmp.sock
+- screendump_path: build/tmp_fake_qmp_check/fake-screendump.ppm

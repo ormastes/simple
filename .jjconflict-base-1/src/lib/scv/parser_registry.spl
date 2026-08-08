@@ -1,0 +1,272 @@
+# SCV parser registry, language map, and locked WASM artifacts.
+
+use app.io.mod (file_exists, file_read, dir_create)
+use std.nogc_sync_mut.io.file_ops.{file_read_bytes, file_write_bytes}
+use std.scv.core.{scv_parsers_dir, scv_parser_lock_path, scv_langmap_path, scv_line_set_contains}
+use std.scv.store.{scv_repo_exists, scv_content_id_for_file, scv_write_text, scv_i64_bytes_to_u8}
+
+fn scv_path_extension(path: text) -> text:
+    val parts = path.split(".")
+    if parts.len() > 1:
+        parts[parts.len() - 1]
+    else:
+        ""
+
+fn scv_parser_field_safe(value: text) -> bool:
+    value != "" and not value.contains("|") and not value.contains("\n") and not value.contains("\r")
+
+fn scv_langmap_entry_error(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed == "":
+        return ""
+    val parts = trimmed.split("|")
+    if parts.len() != 4:
+        return "ERROR bad language mapping entry"
+    if not scv_parser_field_safe(parts[0]) or not scv_parser_field_safe(parts[1]) or not scv_parser_field_safe(parts[2]) or not scv_parser_field_safe(parts[3]):
+        return "ERROR unsafe language mapping metadata"
+    ""
+
+fn scv_langmap_validate(root: text) -> text:
+    val map_path = scv_langmap_path(root)
+    if not file_exists(map_path):
+        return ""
+    var seen = ""
+    for line in file_read(map_path).split("\n"):
+        val error = scv_langmap_entry_error(line)
+        if error != "":
+            return error
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val extension = trimmed.split("|")[0]
+        if scv_line_set_contains(seen, extension):
+            return "ERROR duplicate language mapping entry"
+        seen = seen + extension + "\n"
+    ""
+
+fn scv_language_for_path(root: text, path: text) -> text:
+    val ext = scv_path_extension(path)
+    val map_path = scv_langmap_path(root)
+    if file_exists(map_path):
+        for line in file_read(map_path).split("\n"):
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val parts = trimmed.split("|")
+            if parts.len() == 4 and parts[0] == ext:
+                return parts[1]
+    if ext == "spl":
+        "simple"
+    elif ext == "py":
+        "python"
+    elif ext == "rs":
+        "rust"
+    elif ext == "md":
+        "markdown"
+    else:
+        "fallback"
+
+fn scv_wasm_magic_ok(bytes: [i64]) -> bool:
+    bytes.len() >= 4 and (bytes[0] & 0xFF) == 0 and (bytes[1] & 0xFF) == 0x61 and (bytes[2] & 0xFF) == 0x73 and (bytes[3] & 0xFF) == 0x6D
+
+fn scv_parser_artifact_expected_path(root: text, hash: text) -> text:
+    "{scv_parsers_dir(root)}/{hash}.wasm"
+
+fn scv_locked_parser_matches(root: text, language: text, grammar: text, version: text) -> bool:
+    scv_locked_parser_error(root, language, grammar, version) == ""
+
+fn scv_locked_parser_error(root: text, language: text, grammar: text, version: text) -> text:
+    val lock_path = scv_parser_lock_path(root)
+    if not file_exists(lock_path):
+        return "ERROR missing parser lockfile"
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 8 and parts[0] == "parser" and parts[1] == language and parts[2] == grammar and parts[3] == version:
+            if parts[4] != "wasm":
+                return "ERROR unsupported parser runtime: {parts[4]}"
+            val artifact_path = parts[7]
+            if artifact_path != scv_parser_artifact_expected_path(root, parts[6]):
+                return "ERROR unsafe parser artifact path: {parts[1]} {parts[2]}"
+            if not file_exists(artifact_path):
+                return "ERROR missing parser artifact: {parts[1]} {parts[2]}"
+            val raw = file_read_bytes(artifact_path) ?? []
+            if not scv_wasm_magic_ok(raw):
+                return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}"
+            val actual = scv_content_id_for_file(artifact_path)
+            if actual != parts[6]:
+                return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}"
+            return ""
+    "ERROR missing locked parser: {language} {grammar} {version}"
+
+fn scv_locked_parser_hash(root: text, language: text, grammar: text, version: text) -> text:
+    val lock_path = scv_parser_lock_path(root)
+    if not file_exists(lock_path):
+        return "builtin"
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 8 and parts[0] == "parser" and parts[1] == language and parts[2] == grammar and parts[3] == version:
+            return parts[6]
+    "builtin"
+
+fn scv_first_locked_parser_for_language(root: text, language: text) -> (text, text):
+    val lock_path = scv_parser_lock_path(root)
+    if not file_exists(lock_path):
+        return ("", "")
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 8 and parts[0] == "parser" and parts[1] == language:
+            val error = scv_locked_parser_error(root, language, parts[2], parts[3])
+            if error != "":
+                return (error, "")
+            return (parts[2], parts[3])
+    ("", "")
+
+fn scv_parser_for_path(root: text, path: text, language: text) -> (text, text):
+    val ext = scv_path_extension(path)
+    val map_path = scv_langmap_path(root)
+    if file_exists(map_path):
+        for line in file_read(map_path).split("\n"):
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            val parts = trimmed.split("|")
+            if parts.len() == 4 and parts[0] == ext and parts[1] == language:
+                val error = scv_locked_parser_error(root, language, parts[2], parts[3])
+                if error == "":
+                    return (parts[2], parts[3])
+                if error != "ERROR missing locked parser: {language} {parts[2]} {parts[3]}":
+                    return (error, "")
+                return ("fallback-line", "builtin")
+    val (grammar, version) = scv_first_locked_parser_for_language(root, language)
+    if grammar.starts_with("ERROR"):
+        return (grammar, "")
+    if grammar != "":
+        (grammar, version)
+    else:
+        ("fallback-line", "builtin")
+
+fn scv_parsers(root: text) -> text:
+    if file_exists(scv_parser_lock_path(root)):
+        file_read(scv_parser_lock_path(root))
+    else:
+        "language: fallback-line\nruntime: pure-simple\nversion: builtin\n"
+
+fn scv_parser_lock_replace(root: text, language: text, grammar: text, line: text) -> text:
+    val lock_path = scv_parser_lock_path(root)
+    val current = if file_exists(lock_path): file_read(lock_path) else: ""
+    var next = ""
+    var replaced = false
+    for existing in current.split("\n"):
+        val trimmed = existing.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() >= 3 and parts[0] == "parser" and parts[1] == language and parts[2] == grammar:
+            if not replaced:
+                next = next + line
+                replaced = true
+        else:
+            next = next + trimmed + "\n"
+    if not replaced:
+        next = next + line
+    scv_write_text(lock_path, next)
+    next
+
+fn scv_parser_install(root: text, language: text, grammar: text, version: text, wasm_path: text, abi: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    if not scv_parser_field_safe(language) or not scv_parser_field_safe(grammar) or not scv_parser_field_safe(version) or not scv_parser_field_safe(abi):
+        return "ERROR unsafe parser metadata\n"
+    if not file_exists(wasm_path):
+        return "ERROR missing parser artifact\n"
+    val raw = file_read_bytes(wasm_path) ?? []
+    if not scv_wasm_magic_ok(raw):
+        return "ERROR parser artifact is not wasm\n"
+    val hash = scv_content_id_for_file(wasm_path)
+    val parser_dir = scv_parsers_dir(root)
+    dir_create(parser_dir, true)
+    val dest = scv_parser_artifact_expected_path(root, hash)
+    file_write_bytes(dest, scv_i64_bytes_to_u8(raw))
+    val line = "parser|{language}|{grammar}|{version}|wasm|{abi}|{hash}|{dest}\n"
+    scv_parser_lock_replace(root, language, grammar, line)
+    "parser-install {language} {grammar} {version} runtime=wasm abi={abi} hash={hash}\n"
+
+fn scv_parser_verify(root: text) -> text:
+    if not scv_repo_exists(root):
+        return "ERROR repository not initialized\n"
+    val lock_path = scv_parser_lock_path(root)
+    if not file_exists(lock_path):
+        return "ERROR missing parser lockfile\n"
+    var checked = 0
+    var seen = ""
+    for line in file_read(lock_path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if not trimmed.starts_with("parser|"):
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 8:
+            return "ERROR bad parser lock entry\n"
+        if not scv_parser_field_safe(parts[1]) or not scv_parser_field_safe(parts[2]) or not scv_parser_field_safe(parts[3]) or not scv_parser_field_safe(parts[4]) or not scv_parser_field_safe(parts[5]) or not scv_parser_field_safe(parts[6]):
+            return "ERROR unsafe parser lock entry\n"
+        val key = "{parts[1]}|{parts[2]}"
+        if scv_line_set_contains(seen, key):
+            return "ERROR duplicate parser lock entry: {parts[1]} {parts[2]}\n"
+        seen = seen + key + "\n"
+        if parts[4] != "wasm":
+            return "ERROR unsupported parser runtime: {parts[4]}\n"
+        val artifact_path = parts[7]
+        if artifact_path != scv_parser_artifact_expected_path(root, parts[6]):
+            return "ERROR unsafe parser artifact path: {parts[1]} {parts[2]}\n"
+        if not file_exists(artifact_path):
+            return "ERROR missing parser artifact: {parts[1]} {parts[2]}\n"
+        val raw = file_read_bytes(artifact_path) ?? []
+        if not scv_wasm_magic_ok(raw):
+            return "ERROR parser artifact is not wasm: {parts[1]} {parts[2]}\n"
+        val actual = scv_content_id_for_file(artifact_path)
+        if actual != parts[6]:
+            return "ERROR parser artifact hash mismatch: {parts[1]} {parts[2]}\n"
+        checked = checked + 1
+    "parser-verify checked={checked}\n"
+
+fn scv_langmap(root: text) -> text:
+    if file_exists(scv_langmap_path(root)):
+        val content = file_read(scv_langmap_path(root))
+        if content == "":
+            "empty\n"
+        else:
+            content
+    else:
+        "empty\n"
+
+fn scv_langmap_set(root: text, extension: text, language: text, grammar: text, version: text) -> text:
+    if not scv_parser_field_safe(extension) or not scv_parser_field_safe(language) or not scv_parser_field_safe(grammar) or not scv_parser_field_safe(version):
+        return "ERROR unsafe language mapping metadata\n"
+    val line = "{extension}|{language}|{grammar}|{version}\n"
+    val current = if file_exists(scv_langmap_path(root)): file_read(scv_langmap_path(root)) else: ""
+    var next = ""
+    var replaced = false
+    for existing in current.split("\n"):
+        val trimmed = existing.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() == 4 and parts[0] == extension:
+            next = next + line
+            replaced = true
+        else:
+            next = next + trimmed + "\n"
+    if not replaced:
+        next = next + line
+    scv_write_text(scv_langmap_path(root), next)
+    "langmap {extension} {language} {grammar} {version}\n"

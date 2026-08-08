@@ -1,0 +1,153 @@
+name: AOT Lane Fences
+
+# WHY THIS WORKFLOW EXISTS
+# ------------------------
+# `bin/simple test` hard-defaults to the tree-walk interpreter and
+# TestExecutionMode has no AOT/native variant, so no `*_spec.spl` can ever
+# observe the `native-build` (AOT/LLVM) lane. The only working fences for that
+# lane are the nine `scripts/check/check-native-*.shs` /
+# `check-rt-io-file-native-jit-stub.shs` / `check-u32-array-not-packed.shs`
+# scripts aggregated by `scripts/check/check-aot-lane-fences.shs`.
+#
+# An audit on 2026-08-08 found none of the nine referenced by any workflow,
+# hook, or aggregate gate -- nine fences nothing ran, which reads as
+# protection while providing none. This workflow is the missing caller.
+#
+# CADENCE
+# -------
+# Each fence drives a real `native-build` invocation; one was measured at
+# ~435s on a loaded host, so the full nine-fence roster is too slow and too
+# expensive to run on every push. It runs:
+#   - on push/PR when a path that plausibly changes AOT-lane behaviour changes
+#     (the fence scripts themselves, their fixtures, or the native codegen
+#     tree), so a regression is caught close to the change that caused it;
+#   - nightly on a schedule, as a backstop against drift with no matching
+#     path-filtered push (e.g. a `src/runtime` or LLVM-toolchain change this
+#     filter doesn't list);
+#   - on `workflow_dispatch`, for on-demand runs.
+#
+# EXIT-CODE HANDLING
+# -------------------
+# The aggregator uses exit 0=PASS / 1=FAIL / 2=ERROR (nothing measured -- e.g.
+# missing llvm-as/opt/llc/strace). This job installs those tools explicitly on
+# its own (Linux) runner, so an exit-2 here means the CI environment itself is
+# broken, not that some third-party host lacks a tool -- it is treated as a
+# job failure (red), never silently green, exactly like exit 1. The two cases
+# are told apart in the failure annotation so triage doesn't confuse "found a
+# regression" with "could not run at all".
+on:
+  push:
+    paths:
+      - 'scripts/check/check-native-*.shs'
+      - 'scripts/check/check-rt-io-file-native-jit-stub.shs'
+      - 'scripts/check/check-u32-array-not-packed.shs'
+      - 'scripts/check/check-aot-lane-fences.shs'
+      - 'test/fixtures/**'
+      - 'src/compiler/**'
+      - '.github/workflows/aot-lane-fences.yml'
+  pull_request:
+    paths:
+      - 'scripts/check/check-native-*.shs'
+      - 'scripts/check/check-rt-io-file-native-jit-stub.shs'
+      - 'scripts/check/check-u32-array-not-packed.shs'
+      - 'scripts/check/check-aot-lane-fences.shs'
+      - 'test/fixtures/**'
+      - 'src/compiler/**'
+      - '.github/workflows/aot-lane-fences.yml'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  aot-lane-fences:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      # Unversioned llvm-as/opt/llc are required by
+      # check-native-option-bool-llvm-verify.shs and strace by
+      # check-rt-io-file-native-jit-stub.shs. Both are checked for
+      # availability by the fences themselves (exit 2 if missing) -- install
+      # them here so a missing tool means something broke in this workflow,
+      # not that the fence is unfenced-by-design.
+      - name: Install native toolchain and probe tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 llvm-18-dev libpolly-18-dev \
+            libfreetype6-dev libunwind-dev strace
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: ${{ runner.os }}-${{ runner.arch }}-aot-fences-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-aot-fences-
+            ${{ runner.os }}-${{ runner.arch }}-bootstrap-
+
+      - name: Build seed and native_all library
+        working-directory: src/compiler_rust
+        run: |
+          cargo build --profile bootstrap -p simple-driver --features llvm
+          cargo build --profile bootstrap -p simple-native-all --features driver-compat,llvm
+          cargo build --profile bootstrap -p simple-compiler-backfill
+
+      - name: Build self-hosted stage3 compiler (native-build capable)
+        id: pure_simple_bootstrap
+        env:
+          SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
+          SIMPLE_NO_STUB_FALLBACK: "1"
+        run: |
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm \
+            --mode=dynload \
+            --full-bootstrap \
+            --no-mcp \
+            --jobs=2
+
+      - name: Upload bootstrap failure logs
+        if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aot-fences-bootstrap-failure-logs-${{ github.sha }}
+          path: build/bootstrap/logs/**
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run AOT-lane fence aggregator
+        id: aot_fences
+        run: |
+          stage3="$(find build/bootstrap/stage3 -type f -name simple -print -quit)"
+          test -n "$stage3"
+          chmod +x "$stage3"
+          rc=0
+          SIMPLE_RUNTIME_PATH="$PWD/src/compiler_rust/target/bootstrap" \
+            SIMPLE_BINARY="$(readlink -f "$stage3")" \
+            AOT_FENCE_LOG_DIR="build/check/aot-lane-fences" \
+            sh scripts/check/check-aot-lane-fences.shs || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::AOT lane fence aggregator returned ERROR (exit 2) on a controlled CI runner with llvm-as/opt/llc/strace installed -- nothing was measured. This is a CI-environment defect, not a third-party missing-tool case; treat as a failed run, not a pass." >&2
+          elif [ "$rc" -eq 1 ]; then
+            echo "::error::AOT lane fence aggregator returned FAIL (exit 1) -- at least one fence found a real AOT-lane regression. See the fence logs artifact." >&2
+          fi
+          exit "$rc"
+
+      - name: Upload AOT-lane fence logs
+        if: always() && steps.aot_fences.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aot-lane-fences-logs-${{ github.sha }}
+          path: build/check/aot-lane-fences/**
+          if-no-files-found: warn
+          retention-days: 14

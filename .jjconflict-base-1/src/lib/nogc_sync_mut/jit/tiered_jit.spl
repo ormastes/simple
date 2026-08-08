@@ -1,0 +1,123 @@
+# Tiered JIT Manager
+#
+# Tracks function call counts and promotes hot functions to native code
+# via the JIT compiler. Supports multi-architecture targets.
+#
+# Usage:
+#   use std.jit.tiered_jit.{TieredJitManager}
+
+use std.io
+
+extern fn rt_jit_create() -> i64
+extern fn rt_jit_create_for_target(arch: text) -> i64
+extern fn rt_jit_backend_name(handle: i64) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_call_void(handle: i64, name: text) -> i64
+extern fn rt_jit_call_i64_i64(handle: i64, name: text, a: i64, b: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
+extern fn rt_time_now_micros() -> i64
+
+class HotFunction:
+    name: text
+    source: text
+    call_count: i64
+    threshold: i64
+    compiled: bool
+    jit_handle: i64
+
+    static fn create(name: text, source: text, threshold: i64) -> HotFunction:
+        HotFunction(
+            name: name,
+            source: source,
+            call_count: 0,
+            threshold: threshold,
+            compiled: false,
+            jit_handle: 0
+        )
+
+class TieredJitManager:
+    jit_handle: i64
+    target_arch: text
+    backend: text
+    functions: [HotFunction]
+    compile_count: i64
+    total_compile_us: i64
+
+    static fn create() -> TieredJitManager:
+        val h = rt_jit_create()
+        val b = rt_jit_backend_name(h)
+        TieredJitManager(
+            jit_handle: h,
+            target_arch: "host",
+            backend: b,
+            functions: [],
+            compile_count: 0,
+            total_compile_us: 0
+        )
+
+    static fn create_for_target(arch: text) -> TieredJitManager:
+        val h = rt_jit_create_for_target(arch)
+        val b = rt_jit_backend_name(h)
+        TieredJitManager(
+            jit_handle: h,
+            target_arch: arch,
+            backend: b,
+            functions: [],
+            compile_count: 0,
+            total_compile_us: 0
+        )
+
+    me register(name: text, source: text, threshold: i64):
+        val hf = HotFunction.create(name, source, threshold)
+        self.functions.push(hf)
+
+    me try_compile(idx: i64) -> text:
+        val hf = self.functions[idx]
+        if hf.compiled:
+            return ""
+        val t0 = rt_time_now_micros()
+        val err = rt_jit_compile_source(self.jit_handle, hf.source)
+        val t1 = rt_time_now_micros()
+        if err == "":
+            hf.compiled = true
+            hf.jit_handle = self.jit_handle
+            self.compile_count = self.compile_count + 1
+            self.total_compile_us = self.total_compile_us + (t1 - t0)
+        return err
+
+    me call_i64(name: text, arg: i64) -> i64:
+        val idx = self.find_function(name)
+        if idx >= 0:
+            val hf = self.functions[idx]
+            hf.call_count = hf.call_count + 1
+            if hf.compiled == false:
+                if hf.call_count >= hf.threshold:
+                    val err = self.try_compile(idx)
+                    if err != "":
+                        print("JIT compile failed for " + name + ": " + err)
+            if hf.compiled:
+                return rt_jit_call_i64(self.jit_handle, name, arg)
+        return -1
+
+    me find_function(name: text) -> i64:
+        var i = 0
+        while i < self.functions.length():
+            if self.functions[i].name == name:
+                return i
+            i = i + 1
+        return -1
+
+    me is_compiled(name: text) -> bool:
+        return rt_jit_has_function(self.jit_handle, name)
+
+    me stats() -> text:
+        var msg = "TieredJIT[" + self.target_arch + "/" + self.backend + "] "
+        msg = msg + "compiled=" + self.compile_count.to_text()
+        msg = msg + " compile_time=" + self.total_compile_us.to_text() + "us"
+        msg = msg + " tracked=" + self.functions.length().to_text()
+        return msg
+
+    me cleanup():
+        rt_jit_cleanup(self.jit_handle)

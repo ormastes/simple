@@ -1,0 +1,99 @@
+# SDL3 hosted adapter over the canonical bounded scalar window-event contract.
+
+use common.io.window_capability.{WINDOW_CAP_TEXT_INPUT, WindowCapability, window_capability}
+use common.io.window_event.{WINDOW_EVENT_NONE, WINDOW_EVENT_TEXT, WINDOW_STATUS_BACKEND_ERROR, WINDOW_STATUS_OK, WINDOW_MOD_SHIFT, WINDOW_MOD_CTRL, WINDOW_MOD_ALT, WINDOW_MOD_SUPER, WindowEventLoop}
+
+extern fn rt_sdl3_available() -> i64
+extern fn rt_sdl3_init() -> i64
+extern fn rt_sdl3_quit()
+extern fn rt_sdl3_create_window(title: text, width: i64, height: i64) -> i64
+extern fn rt_sdl3_destroy_window(handle: i64) -> i64
+extern fn rt_sdl3_live_window_count() -> i64
+extern fn rt_sdl3_pop_event() -> i64
+extern fn rt_sdl3_event_window() -> i64
+extern fn rt_sdl3_event_sequence() -> i64
+extern fn rt_sdl3_event_timestamp_ns() -> i64
+extern fn rt_sdl3_event_key() -> i64
+extern fn rt_sdl3_event_scancode() -> i64
+extern fn rt_sdl3_event_action() -> i64
+extern fn rt_sdl3_event_modifiers() -> i64
+extern fn rt_sdl3_event_x_milli() -> i64
+extern fn rt_sdl3_event_y_milli() -> i64
+extern fn rt_sdl3_event_dx_milli() -> i64
+extern fn rt_sdl3_event_dy_milli() -> i64
+extern fn rt_sdl3_event_width() -> i64
+extern fn rt_sdl3_event_height() -> i64
+extern fn rt_sdl3_event_text() -> text
+extern fn rt_sdl3_last_error() -> text
+
+fn sdl3_normalize_modifiers(raw: i64) -> i64:
+    var normalized = 0
+    if raw & 3 != 0:
+        normalized = normalized | WINDOW_MOD_SHIFT
+    if raw & 192 != 0:
+        normalized = normalized | WINDOW_MOD_CTRL
+    if raw & 768 != 0:
+        normalized = normalized | WINDOW_MOD_ALT
+    if raw & 3072 != 0:
+        normalized = normalized | WINDOW_MOD_SUPER
+    normalized
+
+class SimpleSdl3:
+    available: bool
+    init_status: i64
+    events: WindowEventLoop
+
+    static fn create(event_capacity: i64, text_capacity: i64) -> SimpleSdl3:
+        val initialized = rt_sdl3_available() != 0 and rt_sdl3_init() != 0
+        SimpleSdl3(available: initialized, init_status: if initialized: WINDOW_STATUS_OK else: WINDOW_STATUS_BACKEND_ERROR, events: WindowEventLoop.create(event_capacity, text_capacity))
+
+    fn backend_identity() -> text:
+        if self.available: "sdl3" else: "sdl3-unavailable"
+
+    fn capability(operation: i64) -> WindowCapability:
+        val supported = self.available and operation == WINDOW_CAP_TEXT_INPUT
+        window_capability(operation, supported, if supported: "" elif not self.available: "SDL3 runtime is unavailable" else: "SDL3 operation is unsupported")
+
+    fn create_window(title: text, width: i64, height: i64) -> i64:
+        if not self.available:
+            return 0
+        rt_sdl3_create_window(title, width, height)
+
+    me destroy_window(handle: i64) -> i64:
+        if not self.available:
+            return WINDOW_STATUS_BACKEND_ERROR
+        val status = rt_sdl3_destroy_window(handle)
+        if status == WINDOW_STATUS_OK:
+            self.events.drop_window_events(handle)
+        status
+
+    me poll_events() -> i64:
+        if not self.available:
+            return WINDOW_STATUS_BACKEND_ERROR
+        var kind = rt_sdl3_pop_event()
+        while kind != WINDOW_EVENT_NONE:
+            val window_handle = rt_sdl3_event_window()
+            val sequence = rt_sdl3_event_sequence()
+            val timestamp_ns = rt_sdl3_event_timestamp_ns()
+            if kind == WINDOW_EVENT_TEXT:
+                self.events.enqueue_text(window_handle, sequence, timestamp_ns, rt_sdl3_event_text())
+            else:
+                self.events.enqueue_scalar(kind, window_handle, sequence, timestamp_ns, rt_sdl3_event_key(), rt_sdl3_event_scancode(), rt_sdl3_event_action(), sdl3_normalize_modifiers(rt_sdl3_event_modifiers()), rt_sdl3_event_x_milli(), rt_sdl3_event_y_milli(), rt_sdl3_event_dx_milli(), rt_sdl3_event_dy_milli(), rt_sdl3_event_width(), rt_sdl3_event_height())
+            kind = rt_sdl3_pop_event()
+        WINDOW_STATUS_OK
+
+    me poll_event_scalar() -> i64:
+        self.events.poll_scalar()
+
+    fn live_window_count() -> i64:
+        rt_sdl3_live_window_count()
+
+    fn last_error() -> text:
+        rt_sdl3_last_error()
+
+    me terminate():
+        if self.available:
+            rt_sdl3_quit()
+        self.available = false
+
+export SimpleSdl3, sdl3_normalize_modifiers

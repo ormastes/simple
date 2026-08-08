@@ -1,0 +1,36 @@
+# Check target expansion shared by the public entry and isolated worker.
+
+use app.io.source_discovery.{discover_spl_files, source_path_identity}
+
+extern fn rt_dir_exists(path: text) -> bool
+
+fn expand_check_targets(targets: [text]) -> ([text], [text]):
+    var files: [text] = []
+    var empty_directories: [text] = []
+    # Dedupe via dict-keyed sets, NOT an array `.contains()` scan. At repo
+    # scale (~32k discovered files) the array form is O(n^2) and does not
+    # finish. Dict shape is `{text: bool}` deliberately: never call
+    # `Dict.len()` (returns -1 under native codegen) and never `.get()` a
+    # struct-valued dict — `contains_key` + `d[k] = v` is safe on every engine.
+    var seen_targets: {text: bool} = {}
+    var seen_files: {text: bool} = {}
+    for target in targets:
+        val target_identity = source_path_identity(target)
+        if seen_targets.contains_key(target_identity):
+            continue
+        seen_targets[target_identity] = true
+        if not rt_dir_exists(target):
+            if not seen_files.contains_key(target_identity):
+                files.push(target)
+                seen_files[target_identity] = true
+            continue
+        val discovered = discover_spl_files(target)
+        if discovered.len() == 0:
+            empty_directories.push(target)
+            continue
+        for file in discovered:
+            val file_identity = source_path_identity(file)
+            if not seen_files.contains_key(file_identity):
+                files.push(file)
+                seen_files[file_identity] = true
+    (files, empty_directories)

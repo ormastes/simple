@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.tools.duplicate_check.benchmark.{run_benchmark_iterations, format_benchmark_stats, save_benchmark_results, load_benchmark_results}
+use compiler.tools.duplicate_check.config.{default_config, apply_analysis_mode}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn benchmark_config():
+    var config = default_config()
+    config = apply_analysis_mode(config, "cosine")
+    config.min_tokens = 8
+    config.min_lines = 3
+    config.min_impact = 1
+    config.similarity_threshold = 0.55
+    config.exclude_patterns = []
+    config.quiet = true
+    config
+
+describe "duplicate-check qualification benchmark":
+    slow_it "measures repeated detection and reports real outcomes":
+        val root = "/tmp/simple_duplicate_benchmark"
+        val _ = rt_dir_create(root, true)
+        val body = "fn shared_logic(seed: i64) -> i64:\n    val base = seed + 1\n    val total = base * 2\n    return total\n"
+        val file_a = "{root}/a.spl"
+        val file_b = "{root}/b.spl"
+        expect(rt_file_write_text(file_a, body)).to_equal(true)
+        expect(rt_file_write_text(file_b, body)).to_equal(true)
+
+        val stats = run_benchmark_iterations("qualification", [file_a, file_b], benchmark_config(), 2)
+
+        expect(stats.runs.len()).to_equal(2)
+        expect(stats.runs[0].files_count).to_equal(2)
+        expect(stats.runs[0].groups_found).to_be_greater_than(0)
+        expect(stats.runs[0].config_hash).to_equal(stats.runs[1].config_hash)
+        expect(stats.min_ms).to_be_less_than(stats.max_ms + 1)
+        expect(format_benchmark_stats(stats)).to_contain("Benchmark Statistics (2 runs)")
+
+    slow_it "persists and reloads measured results":
+        val root = "/tmp/simple_duplicate_benchmark_persistence"
+        val _ = rt_dir_create(root, true)
+        val source = "{root}/source.spl"
+        val output = "{root}/results.txt"
+        val _deleted = rt_file_delete(output)
+        expect(rt_file_write_text(source, "fn measured():\n    val value = 1\n    return value\n")).to_equal(true)
+        val stats = run_benchmark_iterations("persistence", [source], benchmark_config(), 1)
+
+        save_benchmark_results(stats.runs, output)
+        val loaded = load_benchmark_results(output)
+
+        expect(loaded.len()).to_equal(1)
+        expect(loaded[0].name).to_equal("persistence_iter_0")
+        expect(loaded[0].files_count).to_equal(1)
+        expect(loaded[0].config_hash).to_equal(stats.runs[0].config_hash)

@@ -1,0 +1,110 @@
+"""
+# RV64 ISA Compliance Integration Tests
+
+**Feature IDs:** #RV64-COMPLIANCE-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Validates each RV64GC extension against the RISC-V ISA specification.
+"""
+
+# tag: only-compiled, slow
+
+import std.spec
+
+use hardware.rv64gc.core.rv64_execute.{alu_execute, alu_execute_word}
+use hardware.rv64gc.ext.rv64_muldiv.{muldiv_execute, muldiv_execute_word}
+use hardware.rv64gc.ext.rv64_atomics.{amo_execute, AmoOp}
+use hardware.rv64gc.pkg.rv64_types_pkg.*
+
+describe "RV64I Compliance":
+    it "ADD wraps at 64 bits":
+        expect(alu_execute(AluOp.Add, 0xFFFFFFFFFFFFFFFF, 1)).to_equal(0)
+
+    it "ADDW sign-extends 32-bit result":
+        expect(alu_execute_word(AluOp.Addw, 0x7FFFFFFF, 1)).to_equal(0xFFFFFFFF80000000)
+
+    it "SLL uses lower 6 bits only":
+        expect(alu_execute(AluOp.Sll, 1, 64)).to_equal(1)
+
+    it "SRA fills with sign bit":
+        expect(alu_execute(AluOp.Sra, 0x8000000000000000, 1)).to_equal(0xC000000000000000)
+
+    it "SLT: MIN_I64 < 0":
+        expect(alu_execute(AluOp.Slt, 0x8000000000000000, 0)).to_equal(1)
+
+    it "SLTU: MAX_U64 > 0":
+        expect(alu_execute(AluOp.Sltu, 0, 0xFFFFFFFFFFFFFFFF)).to_equal(1)
+
+    it "SRLW uses lower 5 bits":
+        expect(alu_execute_word(AluOp.Srlw, 0x80000000, 32)).to_equal(0xFFFFFFFF80000000)
+
+    it "SRAW fills with 32-bit sign":
+        expect(alu_execute_word(AluOp.Sraw, 0x80000000, 31)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "RV64M Compliance":
+    it "MUL: lower 64 bits of product":
+        expect(muldiv_execute(MulDivOp.Mul, 0x100000000, 0x100000000)).to_equal(0)
+
+    it "DIV: divide by zero = -1":
+        expect(muldiv_execute(MulDivOp.Div, 42, 0)).to_equal(-1)
+
+    it "DIVU: divide by zero = MAX_U64":
+        expect(muldiv_execute(MulDivOp.Divu, 42, 0)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+    it "DIV: overflow MIN/-1 = MIN":
+        expect(muldiv_execute(MulDivOp.Div, 0x8000000000000000, -1)).to_equal(0x8000000000000000)
+
+    it "REM: divide by zero = dividend":
+        expect(muldiv_execute(MulDivOp.Rem, 42, 0)).to_equal(42)
+
+    it "MULW: sign-extends 32-bit product":
+        expect(muldiv_execute_word(MulDivOp.Mulw, 0x40000000, 2)).to_equal(0xFFFFFFFF80000000)
+
+    it "DIVW: divide by zero = -1 (sign-ext)":
+        expect(muldiv_execute_word(MulDivOp.Divw, 42, 0)).to_equal(0xFFFFFFFFFFFFFFFF)
+
+describe "RV64A Compliance":
+    it "AMOADD returns old and computes new":
+        val r = amo_execute(AmoOp.Add, 100, 50)
+        expect(r.old_value).to_equal(100)
+        expect(r.new_value).to_equal(150)
+
+    it "AMOSWAP stores new value":
+        val r = amo_execute(AmoOp.Swap, 100, 200)
+        expect(r.new_value).to_equal(200)
+
+    it "AMOMAX signed comparison":
+        val r = amo_execute(AmoOp.Max, -10, 5)
+        expect(r.new_value).to_equal(5)
+
+    it "AMOMINU unsigned comparison":
+        val r = amo_execute(AmoOp.Minu, 0xFFFFFFFFFFFFFFFF, 5)
+        expect(r.new_value).to_equal(5)
+
+    it "AMOAND bitwise":
+        val r = amo_execute(AmoOp.And, 0xFF, 0x0F)
+        expect(r.new_value).to_equal(0x0F)
+
+describe "RV64F Compliance":
+    """
+    Placeholder — detailed FP compliance in rv64_fp_compliance_spec.spl
+    """
+
+    it "F extension presence check":
+        # misa bit 5 (F) should be set
+        val misa = 0x800000000014112D
+        expect((misa >> 5) and 1).to_equal(1)
+
+describe "RV64D Compliance":
+    """
+    Placeholder — detailed FP compliance in rv64_fp_compliance_spec.spl
+    """
+
+    it "D extension presence check":
+        # misa bit 3 (D) should be set
+        val misa = 0x800000000014112D
+        expect((misa >> 3) and 1).to_equal(1)

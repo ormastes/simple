@@ -1,0 +1,32 @@
+# Canonical SPipe-manual composition; never synthesizes missing behavioral prose.
+use app.sspec_maintain.model.{SspecDocumentizeResult}
+use app.sspec_maintain.analyzer.{analyze_sspec_pair_text}
+use app.sspec_maintain.report.{render_human_report}
+use std.crypto.sha256.{sha256_text}
+
+fn _without_generated_section(content: text, start_marker: text,
+        end_marker: text) -> text:
+    val start = content.find(start_marker)
+    if start < 0: return content
+    val suffix = content[start:].find(end_marker)
+    if suffix < 0: return content[:start].trim() + "\n"
+    val end_offset = start + suffix + end_marker.len()
+    (content[:start] + content[end_offset:]).trim() + "\n"
+
+fn compose_sspec_documentized_manual(path: text, source: text,
+        spipe_manual: text, include_scorecard: bool) -> SspecDocumentizeResult:
+    """Compose observed provenance and optional scoring around SPipe output; O(bytes+findings)."""
+    var base = _without_generated_section(spipe_manual,
+        "<!-- sspec-maintain:scorecard:start -->",
+        "<!-- sspec-maintain:scorecard:end -->")
+    base = _without_generated_section(base,
+        "<!-- sspec-maintain:provenance:start -->",
+        "<!-- sspec-maintain:provenance:end -->")
+    val source_hash = sha256_text(source)
+    val provenance = "\n<!-- sspec-maintain:provenance:start -->\n## Generation history\n\n- Canonical SPipe generation for source `{source_hash}`; maintenance tool `1`, rules `ssdoc-rules/1`.\n\nSource SHA-256: `{source_hash}`.\n<!-- sspec-maintain:provenance:end -->\n"
+    val observed = base.trim() + "\n" + provenance
+    val report = analyze_sspec_pair_text(path, source, Some(observed))
+    var content = observed
+    if include_scorecard:
+        content = content + "\n<!-- sspec-maintain:scorecard:start -->\n## SSpec documentization scorecard\n\nSource SHA-256: `{report.source_hash}`  \nAnalyzer: `{report.tool_version}`; rules: `{report.rule_version}`  \nRaw score: **{report.score.raw_aggregate}/100**; effective score: **{report.score.effective_aggregate}/100**; blockers: **{report.score.blocker_count}**.\n\n{render_human_report(report)}\n<!-- sspec-maintain:scorecard:end -->\n"
+    SspecDocumentizeResult(content: content, report: report)

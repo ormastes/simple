@@ -1,0 +1,91 @@
+"""
+# LLM Agent Dashboard TUI
+
+**Feature IDs:** FR-LLM-DASHBOARD-TUI
+**Category:** Tooling
+**Status:** Implemented
+**Design:** src/app/llm_dashboard/main.spl
+
+## Overview
+
+The LLM Agent Dashboard gives an operator a terminal view of work in flight
+across the Claude, Codex, and Gemini agent lanes. Running
+`bin/simple run src/app/llm_dashboard/main.spl` on an interactive terminal
+opens the full room-based TUI (src/app/llm_dashboard/tui_main.spl). On a
+non-interactive terminal (TERM=dumb, piped output, CI) it instead prints a
+one-shot summary line built from the real AgentDashboardStore collector, so
+scripted callers never see a canned/fake string — only real (possibly zero)
+counts.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Interactive mode | Real room-based TUI (Research/Code/Skills/Server/Chat/TestLab rooms), entered when the terminal is interactive |
+| Plain mode | One-shot real collector summary ("Agents: N  Files: NR NW  URLs: N  Tools: N"), used when non-interactive |
+| Clean exit | Process drains any queued input and exits 0 without hanging |
+
+## Related Specifications
+
+- src/app/llm_dashboard/main.spl — dashboard entrypoint, mode dispatch
+- src/app/llm_dashboard/data/store.spl — AgentDashboardStore.summary_line()
+"""
+
+# @req REQ-SSPEC-MODERN
+
+use std.spec.*
+use std.io_runtime.{process_run, dir_create_all, file_write}
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+# @manual_section: Opening the dashboard
+
+# Named so docgen renders `open_dashboard_with_keys(...)` as readable prose.
+# TERM=dumb forces the non-interactive plain-summary path deterministically
+# (see _is_interactive_tty in src/app/llm_dashboard/main.spl); the queued
+# keys are then irrelevant noise the process must still exit cleanly through.
+fn open_dashboard_with_keys(keys: text) -> (text, text, i64):
+    process_run("/bin/bash", ["-c",
+        "printf '" + keys + "' | TERM=dumb bin/simple run src/app/llm_dashboard/main.spl 2>/dev/null"])
+
+fn capture_tui_screen(name: text, screen_text: text, check: [text]) -> bool:
+    dir_create_all("build/spec_captures")
+    val wrote = file_write("build/spec_captures/" + name + ".txt", screen_text)
+    if not wrote:
+        return false
+    for region in check:
+        if not screen_text.contains(region):
+            return false
+    true
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Monitoring agent work
+
+describe "LLM Dashboard TUI":
+    """
+    In plain (non-interactive) mode the dashboard prints a real collector
+    summary and exits cleanly, even when the terminal has a burst of keys
+    queued up before it starts.
+    """
+
+    it "opens in plain mode, shows a real collector summary, and exits cleanly under rapid keys":
+        step("Open the dashboard with a burst of queued keypresses, forcing non-interactive mode")
+        val (out, _err, code) = open_dashboard_with_keys("123456jjkkrq")
+
+        step("Confirm the process exited cleanly")
+        expect(code).to_equal(0)
+
+        step("Confirm the dashboard header is visible")
+        expect(out.contains("LLM Agent Dashboard")).to_equal(true)
+
+        step("Confirm the real collector summary line is visible")
+        expect(out.contains("Agents:")).to_equal(true)
+        expect(out.contains("Files:")).to_equal(true)
+
+        # @capture(tui)
+        step("Capture the plain-mode screen")
+        val captured = capture_tui_screen("llm_dashboard_home", out, ["Agents:", "Files:"])
+        expect(captured).to_equal(true)

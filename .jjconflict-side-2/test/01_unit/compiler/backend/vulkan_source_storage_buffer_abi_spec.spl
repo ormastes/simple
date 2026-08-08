@@ -1,0 +1,116 @@
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl 5%
+# @cover src/compiler/70.backend/backend/vulkan_backend.spl 5%
+# @tag: unit, compiler, backend, gpu, vulkan, source-abi
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.backend.backend.vulkan_backend.{VulkanCodegenBackend}
+use compiler.backend.backend.backend_types.{compileoptions_default_options}
+use compiler.backend.codegen_types.{Codegen}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+fn hir_module_gpu_target_count(module: HirModule) -> i64:
+    module.gpu_function_targets.keys().len()
+
+fn symbol_table_has_copy_gpu(symbols: SymbolTable) -> bool:
+    symbols.has_gpu_function_metadata("copy")
+
+fn hir_function_is_gpu(function: HirFunction) -> bool:
+    function.is_gpu_kernel
+
+fn hir_function_returns_unit(function: HirFunction) -> bool:
+    match function.return_type.kind:
+        case HirTypeKind.Unit: true
+        case _: false
+
+describe "source Vulkan storage-buffer ABI":
+    it "lowers a bounded [u32] copy kernel to StorageBuffer parameters":
+        val source = "@gpu(\"vulkan\")\n" +
+            "fn copy(input: [u32], mut output: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i + 1 < n:\n" +
+            "        output[i + 1] = input[i] + 1\n"
+        val parsed = parse_full_frontend(source, "vulkan_storage_buffer.spl", "vulkan_storage_buffer", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("vulkan_storage_buffer.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(hir.gpu_function_targets.has("copy")).to_equal(true)
+        expect(hir.symbols.has_gpu_function_metadata("copy")).to_equal(true)
+        expect(hir.symbols.gpu_function_target("copy")).to_equal("vulkan")
+        expect(hir_module_gpu_target_count(hir)).to_equal(1)
+        expect(symbol_table_has_copy_gpu(hir.symbols)).to_equal(true)
+        expect(hir_function_is_gpu(hir.functions.values()[0])).to_equal(true)
+        expect(hir_function_returns_unit(hir.functions.values()[0])).to_equal(true)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val fn_ = mir.functions.values()[0]
+        expect(fn_.is_kernel).to_equal(true)
+        expect(fn_.gpu_target).to_equal("vulkan")
+        expect(fn_.signature.return_type.kind).to_equal(MirTypeKind.Unit)
+        expect(fn_.signature.params.len()).to_equal(3)
+        expect(fn_.locals.len()).to_be_greater_than(2)
+        val ptr_disc = 422722806  # hash("Ptr")
+        val u32_disc = 1163175990  # hash("U32")
+        expect(rt_enum_discriminant(fn_.signature.params[0].kind)).to_equal(ptr_disc)
+        expect(rt_enum_discriminant(fn_.signature.params[1].kind)).to_equal(ptr_disc)
+        expect(rt_enum_discriminant(fn_.signature.params[2].kind)).to_equal(u32_disc)
+        expect(rt_enum_discriminant(fn_.locals[0].type_.kind)).to_equal(ptr_disc)
+        expect(rt_enum_discriminant(fn_.locals[1].type_.kind)).to_equal(ptr_disc)
+        expect(rt_enum_discriminant(fn_.locals[2].type_.kind)).to_equal(u32_disc)
+        match fn_.signature.params[0].kind:
+            case MirTypeKind.Ptr(pointee, mutable):
+                expect(pointee.kind).to_equal(MirTypeKind.U32)
+                expect(mutable).to_equal(false)
+            case _:
+                expect(false).to_equal(true)
+        match fn_.signature.params[1].kind:
+            case MirTypeKind.Ptr(pointee, mutable):
+                expect(pointee.kind).to_equal(MirTypeKind.U32)
+                expect(mutable).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
+        expect(fn_.signature.params[2].kind).to_equal(MirTypeKind.U32)
+        val result = VulkanCodegenBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(mir)
+        expect(result.is_ok()).to_equal(true)
+        val output = result.unwrap().text_output
+        val _written = rt_file_write_text("/tmp/simple_vulkan_source_storage_buffer.spvasm", output)
+        expect(output).to_contain("OpTypePointer StorageBuffer")
+        expect(output).to_contain("DescriptorSet 0")
+        expect(output).to_contain("Binding 0")
+        expect(output).to_contain("Binding 1")
+        expect(output).to_contain("OpAccessChain")
+        expect(output).to_contain("OpLoad")
+        expect(output).to_contain("OpStore")
+
+    it "rejects source buffer elements outside the Vulkan U32 ABI":
+        val source = "@gpu(\"vulkan\")\n" +
+            "fn copy(input: [i32], mut output: [u32], n: u32) -> ():\n" +
+            "    ()\n"
+        val parsed = parse_full_frontend(source, "vulkan_storage_buffer_bad.spl", "vulkan_storage_buffer_bad", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("vulkan_storage_buffer_bad.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)
+        expect(mir_lowering.errors[0].message).to_contain("require U32 elements")
+
+    it "rejects writes through immutable source buffers":
+        val source = "@gpu(\"vulkan\")\n" +
+            "fn copy(input: [u32], n: u32) -> ():\n" +
+            "    input[gpu_global_id(0)] = n\n"
+        val parsed = parse_full_frontend(source, "vulkan_storage_buffer_immutable.spl", "vulkan_storage_buffer_immutable", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("vulkan_storage_buffer_immutable.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)
+        expect(mir_lowering.errors[0].message).to_contain("immutable Vulkan storage buffer")

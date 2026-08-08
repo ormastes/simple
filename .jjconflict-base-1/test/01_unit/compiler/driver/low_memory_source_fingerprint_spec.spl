@@ -1,0 +1,113 @@
+use std.spec
+use std.io.{file_write, file_read, file_delete}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.config.{Logger}
+
+describe "low-memory native source metadata":
+    it "preserves cache identity and path metadata while evicting content":
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [
+            SourceFile(path: "a.spl", content: "fn a() -> i64: 1", module_name: "a"),
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 2", module_name: "b")
+        ]
+        ctx.native_sources_fingerprint = driver_native_sources_fingerprint(ctx.sources)
+        val fingerprint = ctx.native_sources_fingerprint
+
+        ctx.evict_sources()
+
+        expect(ctx.sources.len()).to_equal(2)
+        expect(ctx.sources[0].path).to_equal("a.spl")
+        expect(ctx.sources[0].module_name).to_equal("a")
+        expect(ctx.sources[0].content).to_equal("")
+        expect(ctx.sources[1].path).to_equal("b.spl")
+        expect(ctx.native_sources_fingerprint).to_equal(fingerprint)
+
+        val changed_sources = [
+            SourceFile(path: "a.spl", content: "fn a() -> i64: 1", module_name: "a"),
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 3", module_name: "b")
+        ]
+        expect(driver_native_sources_fingerprint(changed_sources) == ctx.native_sources_fingerprint).to_equal(false)
+
+    it "captures the fingerprint before phase-two parsing":
+        val source = file_read("src/compiler/80.driver/driver.spl")
+        val fingerprint_pos = source.find("self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)")
+        val parse_pos = source.find("val (parsed_ctx, parse_ok) = self.parse_all_impl()")
+        val frontend_release_pos = source.find("lexer_release_parse_source_globals()")
+        val reclaim_pos = source.find("self.ctx.reclaim_source_contents()")
+        val evict_pos = source.find("self.ctx.evict_sources()")
+
+        expect(fingerprint_pos).to_be_greater_than(0)
+        expect(parse_pos).to_be_greater_than(fingerprint_pos)
+        expect(frontend_release_pos).to_be_greater_than(parse_pos)
+        expect(reclaim_pos).to_be_greater_than(frontend_release_pos)
+        expect(evict_pos).to_be_greater_than(reclaim_pos)
+
+    it "reclaims same-allocation aliases once through the registry":
+        val path = "/tmp/simple_phase2_reclaim_alias.spl"
+        expect(file_write(path, "pub fn alias_value() -> i64:\n    7\n")).to_equal(true)
+        val shared = file_read(path)
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [
+            SourceFile(path: "first_alias.spl", content: shared, module_name: "first_alias"),
+            SourceFile(path: "second_alias.spl", content: shared, module_name: "second_alias")
+        ]
+
+        lexer_release_parse_source_globals()
+        expect(ctx.reclaim_source_contents()).to_equal(1)
+        ctx.evict_sources()
+        expect(ctx.sources[0].content).to_equal("")
+        expect(ctx.sources[1].content).to_equal("")
+        file_delete(path)
+
+    it "reclaims distinct allocations even when their logical path matches":
+        val path = "/tmp/simple_phase2_reclaim_distinct.spl"
+        expect(file_write(path, "pub fn distinct_value() -> i64:\n    8\n")).to_equal(true)
+        val first = file_read(path)
+        val second = file_read(path)
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [
+            SourceFile(path: "same_path.spl", content: first, module_name: "first"),
+            SourceFile(path: "same_path.spl", content: second, module_name: "second")
+        ]
+
+        lexer_release_parse_source_globals()
+        expect(ctx.reclaim_source_contents()).to_equal(2)
+        ctx.evict_sources()
+        expect(ctx.sources.len()).to_equal(2)
+        file_delete(path)
+
+    it "parses then clears frontend source globals before reclaim and HIR use":
+        val path = "/tmp/simple_phase2_reclaim_hir.spl"
+        expect(file_write(path, "pub fn retained_value() -> i64:\n    9\n")).to_equal(true)
+        val source = file_read(path)
+        val module = parse_full_frontend(source, path, "reclaim_hir", Logger(level: 0))
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [SourceFile(path: path, content: source, module_name: "reclaim_hir")]
+
+        lexer_release_parse_source_globals()
+        expect(ctx.reclaim_source_contents()).to_equal(1)
+        ctx.evict_sources()
+        val hir = HirLowering.with_filename(path).lower_module(module)
+        expect(hir.functions.has("retained_value")).to_equal(true)
+        file_delete(path)
+
+    it "only enables reclamation for low-memory non-VHDL compilation":
+        var regular = CompileOptions.default()
+        var regular_ctx = CompileContext.create(regular)
+        expect(regular_ctx.source_contents_reclaimable()).to_equal(false)
+
+        regular.low_memory = true
+        regular.backend = "cranelift"
+        regular_ctx = CompileContext.create(regular)
+        # No native-entry environment is required for this post-parse path.
+        expect(regular_ctx.source_contents_reclaimable()).to_equal(true)
+
+        regular.backend = "vhdl"
+        regular_ctx = CompileContext.create(regular)
+        expect(regular_ctx.source_contents_reclaimable()).to_equal(false)

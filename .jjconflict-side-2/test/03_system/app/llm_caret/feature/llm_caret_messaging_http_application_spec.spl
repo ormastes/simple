@@ -1,0 +1,85 @@
+"""# LLM Caret Primitive HTTP Application
+
+Executable request-dispatch evidence for authorization, idempotency, rooms,
+messages, history, cursors, SSE, direct-room ACL, and restart recovery.
+"""
+
+use std.spec
+use std.io_runtime.{file_delete, getpid}
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.adapter.server.primitive_dispatch.{PrimitiveRequest, PrimitiveMessagingApplication}
+
+fn http_principal(identity: text, scopes: [text]) -> AuthPrincipal:
+    AuthPrincipal(authenticated: true, identity_id: identity, workspace_id: "http-workspace",
+        scopes: scopes, expires_at: 10000)
+
+fn http_request(method: text, path: text, body: text, key: text,
+        principal: AuthPrincipal, at: i64) -> PrimitiveRequest:
+    PrimitiveRequest(method: method, path: path, body: body, idempotency_key: key,
+        principal: principal, occurred_at: at)
+
+describe "LLM Caret primitive HTTP application":
+    it "creates a room, sends once, reads history, advances a cursor, and streams SSE":
+        step("Create and bind a room")
+        var app = PrimitiveMessagingApplication.memory()
+        val owner = http_principal("owner-http", ["room:manage", "room:write", "room:read",
+            "agent:control", "profile:read"])
+        val created = app.handle(http_request("POST", "/v1/rooms",
+            "{\"room_id\":\"http-room\",\"kind\":\"channel\",\"name\":\"HTTP Room\",\"topic\":\"test\",\"visibility\":\"public\",\"mode\":\"room\"}",
+            "create-http-room", owner, 1))
+        expect(created.status).to_equal(202)
+        expect(app.handle(http_request("POST", "/v1/agents",
+            "{\"agent_id\":\"http-agent\",\"display_name\":\"builder-claude-01\",\"provider\":\"claude\",\"role_summary\":\"implementation\"}",
+            "create-http-agent", owner, 2)).status).to_equal(202)
+        val bound = app.handle(http_request("POST", "/v1/agent-bindings",
+            "{\"binding_id\":\"http-agent-binding\",\"agent_id\":\"http-agent\",\"provider\":\"claude\",\"room_id\":\"http-room\",\"handler\":\"main\",\"session_policy\":\"persistent_per_room\",\"trigger_policy\":\"room\",\"update_policy\":\"milestones\",\"context_policy\":\"bounded\"}",
+            "bind-http-agent", owner, 3))
+        expect(bound.status).to_equal(201)
+        step("Route a message to an agent")
+        val sent = app.handle(http_request("POST", "/v1/rooms/http-room/messages",
+            "{\"message_id\":\"http-message-1\",\"body\":\"hello over HTTP\",\"correlation_id\":\"http-correlation\",\"main_agent_id\":\"http-agent\"}",
+            "send-http-message", owner, 4))
+        expect(sent.status).to_equal(202)
+        expect(sent.body).to_contain("\"room_seq\":1")
+        expect(sent.body).to_contain("\"routed\":true")
+        expect(sent.body).to_contain("\"task_id\":\"task-http-message-1\"")
+        val task = app.handle(http_request("GET", "/v1/tasks/task-http-message-1", "", "",
+            owner, 5))
+        expect(task.status).to_equal(200)
+        val duplicate = app.handle(http_request("POST", "/v1/rooms/http-room/messages",
+            "{\"message_id\":\"different-id\",\"body\":\"duplicate\"}",
+            "send-http-message", owner, 6))
+        expect(duplicate.body).to_contain("\"duplicate\":true")
+        step("Observe task and receipt transitions")
+        val history = app.handle(http_request("GET", "/v1/rooms/http-room/messages?after_seq=0&limit=10",
+            "", "", owner, 7))
+        expect(history.body).to_contain("hello over HTTP")
+        val cursor = app.handle(http_request("PUT", "/v1/rooms/http-room/cursor",
+            "{\"room_seq\":1}", "cursor-http-0001", owner, 8))
+        expect(cursor.body).to_contain("local_cursor")
+        val tagged = app.handle(http_request("GET", "/v1/rooms/http-room/messages?after_seq=0&limit=10",
+            "", "", owner, 9))
+        expect(tagged.body).to_contain("[read:local]")
+        val events = app.handle(http_request("GET", "/v1/rooms/http-room/events?after_seq=0",
+            "", "", owner, 10))
+        expect(events.content_type).to_equal("text/event-stream")
+        expect(events.body).to_contain("event: message")
+
+    it "persists direct-room membership and denies an outsider after restart":
+        step("Create and bind a room")
+        val path = "/tmp/llm_caret_http_restart_" + getpid().to_text() + ".db"
+        file_delete(path)
+        var app = PrimitiveMessagingApplication.open(path)
+        val owner = http_principal("owner-http", ["dm:write", "room:write", "room:read"])
+        expect(app.handle(http_request("POST", "/v1/direct-rooms",
+            "{\"room_id\":\"private-http\",\"target_identity_id\":\"agent-http\"}",
+            "create-private-http", owner, 1)).status).to_equal(202)
+        expect(app.close()).to_equal(true)
+        step("Recover messaging state after restart")
+        app = PrimitiveMessagingApplication.open(path)
+        val member = http_principal("agent-http", ["room:read"])
+        val outsider = http_principal("outsider-http", ["room:read"])
+        expect(app.handle(http_request("GET", "/v1/rooms/private-http", "", "", member, 2)).status).to_equal(200)
+        expect(app.handle(http_request("GET", "/v1/rooms/private-http", "", "", outsider, 2)).status).to_equal(403)
+        expect(app.close()).to_equal(true)
+        file_delete(path)

@@ -1,0 +1,352 @@
+# Test Runner Configuration and CLI Helpers
+#
+# CLI argument handling, environment variable propagation,
+# mode conversion, run management, and memory reporting.
+
+use std.io.{env_set, env_get}
+use std.io.{file_read}
+use std.sffi.cli.{cli_get_args}
+
+use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions}
+use std.test_runner.test_runner_args.{normalize_profile_name}
+
+# =========================================================================
+# CLI Args Helper (inlined to avoid extra module load)
+# =========================================================================
+
+fn get_cli_args() -> [text]:
+    val all_args = cli_get_args()
+    var args: [text] = []
+    var start_idx = 1
+    var scan_idx = 0
+    while scan_idx < all_args.len():
+        if all_args[scan_idx].ends_with("/app/test_runner_new/main.spl") or all_args[scan_idx] == "src/app/test_runner_new/main.spl":
+            start_idx = scan_idx + 1
+        scan_idx = scan_idx + 1
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
+
+# =========================================================================
+# Environment Variable Propagation
+# =========================================================================
+
+# =========================================================================
+# REQ-MC-012 profile-aware execution: resolve simple.sdn lints.profile
+# =========================================================================
+#
+# Minimal, self-contained reader for the CANONICAL simple.sdn form
+#
+#     lints:
+#       profile: critical
+#
+# (doc/06_spec/system/compiler/modules/tooling/formatting_lints.md:345,:438).
+# The former TOML-ish `[lints]` / `profile = "x"` shape was removed in WP-4 of
+# the aerospace hardening plan — premise 4 established that no manifest in the
+# tree ever carried it, so there is no legacy form to preserve.
+#
+# Still hand-rolled rather than calling
+# compiler.driver.project.ProjectContext.load_from_sdn (the canonical typed
+# mapping, which does use std.common.sdn.parser): src/lib must not depend
+# upward on the compiler driver, and *executing* extra module init in the
+# session that also drives `run`/`test`'s frontend parsing deterministically
+# corrupts the later frontend call — see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+# Collapsing this copy into the typed loader is WP-3's job, not WP-4's.
+#
+# Takes an explicit path so it is testable; resolve_effective_profile supplies
+# the cwd-relative default.
+pub fn read_sdn_lints_profile(sdn_path: text) -> text:
+    val content = file_read(sdn_path) ?? ""
+    if content == "":
+        return ""
+    var in_lints = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val indented = line.starts_with(" ") or line.starts_with("\t")
+        if not indented:
+            in_lints = trimmed == "lints:"
+            continue
+        if in_lints and trimmed.starts_with("profile") and trimmed.contains(":"):
+            val sep = trimmed.index_of(":") ?? -1
+            if sep > 0 and trimmed.substring(0, sep).trim() == "profile":
+                var val_str = trimmed.substring(sep + 1).trim()
+                val_str = val_str.replace("\"", "")
+                val_str = val_str.replace("'", "")
+                val_str = val_str.trim()
+                return normalize_profile_name(val_str)
+    ""
+
+# Resolution order (REQ-MC-012, highest first): explicit --profile= CLI flag
+# (already normalized onto options.profile by parse_test_args) > simple.sdn
+# lints.profile in the current working directory > engine default (unset
+# here -- driver_safety_severity.safety_pass_severity() already treats an
+# unset SIMPLE_SAFETY_PROFILE as Advisory, i.e. today's behavior).
+fn resolve_effective_profile(options: TestOptions) -> text:
+    if options.profile != "":
+        return options.profile
+    read_sdn_lints_profile("simple.sdn")
+
+# =========================================================================
+# Editions plumbing -- decision-free manifest slice (lane ED1). See scoping
+# doc doc/01_research/language/editions_mechanism_scoping_2026-07-29.md for
+# what a real edition mechanism would gate and why it isn't gated yet.
+# =========================================================================
+#
+# PLUMBING ONLY: nothing beyond resolve_edition() and its spec consumes this
+# value -- no language/lint semantics are gated on an edition anywhere in
+# the compiler or test runner today. Do not wire new behavior to this
+# accessor without a design decision recorded in the scoping doc first.
+
+val EDITION_DEFAULT = "2026"
+
+# Tracks which unknown simple.sdn [package] edition= values have already
+# warned this process. Mirrors _warn_deprecated_profile_alias_once
+# (src/compiler/90.tools/lint/_LintMain/config_and_model.spl:60-74):
+# module-level state, not a struct field (structs are value types), keyed by
+# the exact bad spelling so it warns once no matter how many times
+# resolve_edition() runs in one process.
+var _EDITION_UNKNOWN_WARN_COUNTS: Dict<text, i64> = {}
+
+fn _warn_unknown_edition_once(raw: text):
+    if _EDITION_UNKNOWN_WARN_COUNTS.contains_key(raw):
+        return
+    _EDITION_UNKNOWN_WARN_COUNTS[raw] = 1
+    print "warning: simple.sdn [package] edition=\"{raw}\" is not a recognized edition; using the default edition \"{EDITION_DEFAULT}\". Valid: {EDITION_DEFAULT}."
+
+# Test-support accessor: how many times has the unknown-edition warning
+# actually fired for this raw value (0 or 1, never more)? Mirrors
+# deprecated_profile_alias_warn_count in config_and_model.spl -- exists so
+# specs can prove the warn-once contract directly, not used by production
+# logic.
+fn edition_unknown_warn_count(raw: text) -> i64:
+    if _EDITION_UNKNOWN_WARN_COUNTS.contains_key(raw):
+        return 1
+    0
+
+# Minimal, self-contained [package] section scan -- mirrors
+# _read_sdn_lints_profile above for the same reason: a self-contained
+# scanner avoids importing a heavier sdn loader into this interpreter
+# session. See doc/01_research/language/editions_mechanism_scoping_2026-07-29.md
+# section 2 for the caveat that no simple.sdn checked into this repo
+# currently has a [package] section either -- this reader is precedent-
+# matching, decision-free plumbing, not proof the format is in active use.
+fn _read_sdn_package_edition(sdn_path: text) -> text:
+    val content = file_read(sdn_path) ?? ""
+    if content == "":
+        return ""
+    var in_package = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "[package]":
+            in_package = true
+            continue
+        if trimmed.starts_with("[") and trimmed.ends_with("]"):
+            in_package = false
+            continue
+        if in_package and trimmed.starts_with("edition") and trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                var val_str = parts[1].trim()
+                val_str = val_str.replace("\"", "")
+                val_str = val_str.replace("'", "")
+                val_str = val_str.trim()
+                return val_str
+    ""
+
+# Pure resolution step (mirrors normalize_profile_name's shape: takes a raw
+# value, not a path, so specs can drive the unknown-value -> warn-once ->
+# fallback path directly without needing a real simple.sdn on disk -- this
+# repo has none with a [package] section, see scoping doc section 2). Not
+# underscore-prefixed since, like normalize_profile_name, it is meant to be
+# spec'd directly.
+fn resolve_edition_from_value(raw: text) -> text:
+    if raw == "":
+        return EDITION_DEFAULT
+    if raw == EDITION_DEFAULT:
+        return raw
+    _warn_unknown_edition_once(raw)
+    EDITION_DEFAULT
+
+# Resolution order (scoping doc section 3): simple.sdn [package] edition= >
+# engine default (the one currently-defined value, EDITION_DEFAULT -- today's
+# implicit edition, since no prior edition ever existed). No CLI flag exists
+# yet: nothing consumes an edition today, so there is nothing to override --
+# see the scoping doc for why adding one is a design decision, not plumbing.
+# Unknown values warn once and fall back to EDITION_DEFAULT rather than
+# failing -- an edition value error should never itself break `test`/`run`.
+fn resolve_edition() -> text:
+    resolve_edition_from_value(_read_sdn_package_edition("simple.sdn"))
+
+fn propagate_env_vars(options: TestOptions):
+    # Set SIMPLE_TEST_MODE for child processes
+    val mode_str = mode_to_str(options.mode)
+    env_set("SIMPLE_TEST_MODE", mode_str)
+
+    # REQ-MC-012: export the resolved profile to the one consumer that
+    # already exists -- driver_safety_severity's safety-pass severity gate
+    # (src/compiler/80.driver/driver_safety_severity.spl reads this exact
+    # env var). Left unset when no CLI flag and no simple.sdn lints.
+    # profile= are present, preserving prior (Advisory) behavior.
+    val resolved_profile = resolve_effective_profile(options)
+    if resolved_profile != "":
+        env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
+
+    if options.only_slow:
+        env_set("SIMPLE_TEST_FILTER", "slow")
+    elif options.only_skipped:
+        env_set("SIMPLE_TEST_FILTER", "skipped")
+
+    if options.show_tags:
+        env_set("SIMPLE_TEST_SHOW_TAGS", "1")
+
+    # Enable coverage tracking for child processes
+    if options.coverage:
+        env_set("SIMPLE_COVERAGE", "1")
+
+    # Propagate advanced testing mode env vars
+    if options.fuzz_mode:
+        env_set("SIMPLE_FUZZ_MODE", "true")
+        env_set("SIMPLE_FUZZ_TIME", "{options.fuzz_time_secs}")
+        env_set("SIMPLE_FUZZ_CORPUS", options.fuzz_corpus_dir)
+        if options.fuzz_differential:
+            env_set("SIMPLE_FUZZ_DIFFERENTIAL", "true")
+        if not options.fuzz_shrink:
+            env_set("SIMPLE_FUZZ_SHRINK", "false")
+    if options.chaos_mode:
+        env_set("SIMPLE_CHAOS_MODE", "true")
+        env_set("SIMPLE_CHAOS_TRIALS", "{options.chaos_trials}")
+        env_set("SIMPLE_CHAOS_FAULT_RATE", "{options.chaos_fault_rate}")
+    if options.deploy_mode:
+        env_set("SIMPLE_DEPLOY_MODE", "true")
+        if options.deploy_platform != "":
+            env_set("SIMPLE_DEPLOY_PLATFORM", options.deploy_platform)
+        if options.deploy_upgrade:
+            env_set("SIMPLE_DEPLOY_UPGRADE", "true")
+    if options.security_mode:
+        env_set("SIMPLE_SECURITY_MODE", "true")
+        if options.security_scan:
+            env_set("SIMPLE_SECURITY_SCAN", "true")
+        if options.security_supply_chain:
+            env_set("SIMPLE_SECURITY_SUPPLY_CHAIN", "true")
+
+    # Propagate JIT settings (default: JIT enabled with threshold=10)
+    env_set("SIMPLE_JIT_ENABLED", "1")
+
+# =========================================================================
+# Mode Conversion
+# =========================================================================
+
+fn mode_to_str(mode: TestExecutionMode) -> text:
+    match mode:
+        case TestExecutionMode.Interpreter:
+            "interpreter"
+        case TestExecutionMode.Smf:
+            "smf"
+        case TestExecutionMode.Native:
+            "native"
+        case TestExecutionMode.Compile:
+            "compile"
+        case TestExecutionMode.Composite(spec):
+            spec
+
+# =========================================================================
+# Flag Parsing Helpers
+# =========================================================================
+
+fn get_flag_value(args: [text], flag: text) -> text?:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len():
+            return Some(args[i + 1])
+        if args[i].starts_with(flag + "="):
+            return Some(args[i][flag.len() + 1:])
+        i = i + 1
+    nil
+
+fn has_run_management_flag(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--list-runs" or arg == "--cleanup-runs" or arg == "--prune-runs" or arg.starts_with("--prune-runs="):
+            return true
+        i = i + 1
+    false
+
+# MEMORY DEBUG: entire body commented out (uses GROUP 4)
+fn handle_run_management(args: [text]) -> i64:
+    print "DISABLED: handle_run_management (memory debug)"
+    return 1
+    # val db_result = load_test_db_compat()
+    # match db_result:
+    #     case Err(err):
+    #         print "Error: Could not load test database: {err}"
+    #         return 1
+    #     case Ok(db):
+    #         pass
+    #
+    # for arg in args:
+    #     if arg == "--list-runs":
+    #         val status_filter = get_flag_value(args, "--runs-status") ?? "all"
+    #         val runs = db.list_runs(status_filter)
+    #         print "Test Runs ({runs.len()}):"
+    #         print ""
+    #         print "| Run ID | Status | Tests | Passed | Failed | Start Time |"
+    #         print "|--------|--------|-------|--------|--------|------------|"
+    #         for r in runs:
+    #             print "| {r.run_id} | {r.status} | {r.test_count} | {r.passed} | {r.failed} | {r.start_time} |"
+    #         return 0
+    #
+    #     if arg == "--cleanup-runs":
+    #         db.cleanup_stale_runs(2)
+    #         val save_result = db.save()
+    #         match save_result:
+    #             case Err(err):
+    #                 print "Error saving: {err}"
+    #                 return 1
+    #             case Ok(_):
+    #                 pass
+    #         print "Stale runs cleaned up."
+    #         return 0
+    #
+    #     if arg.starts_with("--prune-runs="):
+    #         val count_str = arg[13:]
+    #         val keep = count_str.to_int_or(50)
+    #         db.prune_runs(keep)
+    #         val save_result = db.save()
+    #         match save_result:
+    #             case Err(err):
+    #                 print "Error saving: {err}"
+    #                 return 1
+    #             case Ok(_):
+    #                 pass
+    #         print "Runs pruned (keeping {keep})."
+    #         return 0
+    #
+    # 0
+
+# =========================================================================
+# MEMORY DEBUG: report free memory
+# =========================================================================
+
+fn report_free_mem(label: text):
+    val avail_line = file_read("/proc/meminfo") ?? ""
+    val lines = avail_line.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with("MemAvailable"):
+            print "[MEM] {label}: {line}"
+            return
+        i = i + 1
+    print "[MEM] {label}: (could not read /proc/meminfo)"
+
+# =========================================================================
+# Exports
+# =========================================================================

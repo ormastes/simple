@@ -1,0 +1,53 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+use std.spec.*
+use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_ui_access.*
+
+fn _pixels_same(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+describe "BrowserSession focus editability ordering":
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-021
+    it "should stop beforeinput when focus makes a text field disabled":
+        step("Open an editable field whose focus listener disables it")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/edit-order",
+            "<html><body><input value='old' onfocus=\"set-attr:disabled=disabled;document.title='Focused'\" onbeforeinput=\"document.title='WrongBeforeInput'\"></body></html>"
+        ).is_ok()).to_equal(true)
+        val pixels_before = session.render_to_pixels(16, 16).pixels
+
+        step("Request text mutation through the public UI action")
+        val inputs = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session",
+            "textfield", "old", 1
+        )
+        val result = session.ui_access_act(WinTextActionRequest(
+            target_id: inputs[0].canonical_id, action: "set_value",
+            text_value: "new", x: 0, y: 0
+        ))
+
+        step("Observe focus only: no beforeinput callback, mutation, or pixels")
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("action_failed")
+        expect(session.dom_callback_count).to_equal(1)
+        expect(session.current_title).to_equal("Focused")
+        expect(session.current_body_html).to_contain("value=\"old\"")
+        expect(session.current_body_html.contains("value=\"new\"")).to_equal(false)
+        val post_focus = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "textfield", "old", 1
+        )
+        expect(post_focus.len()).to_equal(1)
+        expect(post_focus[0].enabled).to_equal(false)
+        expect(_pixels_same(
+            session.render_to_pixels(16, 16).pixels, pixels_before
+        )).to_equal(true)

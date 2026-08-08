@@ -1,0 +1,231 @@
+name: GPU Remote Lane Tests
+
+# GPU remote-interpreter test lanes (cuda/vulkan). Plan:
+# doc/03_plan/agent_tasks/gpu_remote_interpreter_parallel_plan_2026-08-07.md
+# (Task E2). Wiki: doc/00_llm_process/feature_expert/gpu_remote_lanes/skill.md
+# Lane matrix: doc/08_tracking/lane_matrix.md
+#
+# Two tiers, never inferring GPU presence from the OS/platform:
+#   - portable-gates: routing/grammar (A1-A3) + SVM-G host-reference
+#     conformance (D1-D4) specs. No GPU hardware required — these run on
+#     every push/PR, on every hosted runner.
+#   - {cuda,vulkan}-live: the real B2-C3 executor system specs, which need
+#     actual GPU hardware. Gated on an explicit `[self-hosted, <backend>-live]`
+#     runner LABEL (never an OS/platform check) per
+#     .claude/rules/board-runnable.md's "never silently ship
+#     hardware-optional and imply hardware-verified" spirit. Neither
+#     `cuda-live` nor `vulkan-live` runner is provisioned in this repo's
+#     Actions fleet yet (same honest-placeholder situation as
+#     notebook-lanes-tests.yml's `gpu-notebook-fixtures` job) — these jobs
+#     are `workflow_dispatch`-only so an unprovisioned label never blocks
+#     push/PR status checks by queuing forever.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/test_executor_composite_parse.spl'
+      - 'src/lib/common/svmg/**'
+      - 'src/lib/gc_async_mut/gpu_lane/**'
+      - 'src/compiler/70.backend/svmg_lowering.spl'
+      - 'test/01_unit/lib/svmg/**'
+      - 'test/01_unit/compiler/backend/svmg_lowering_spec.spl'
+      - 'test/01_unit/compiler/backend/vulkan_jit_step_budget_loop_lowering_spec.spl'
+      - 'test/02_integration/svmg/**'
+      - 'test/02_integration/gpu_lane/**'
+      - 'test/03_system/compiler/gpu_lane_common_spec.spl'
+      - 'test/03_system/compiler/remote_interpreter_backend_spec.spl'
+      - 'test/03_system/gpu_lane/**'
+      - 'doc/08_tracking/lane_matrix.md'
+      - '.github/workflows/gpu-lane-tests.yml'
+  pull_request:
+    paths:
+      - 'src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/test_executor_composite.spl'
+      - 'src/lib/nogc_sync_mut/test_runner/test_executor_composite_parse.spl'
+      - 'src/lib/common/svmg/**'
+      - 'src/lib/gc_async_mut/gpu_lane/**'
+      - 'src/compiler/70.backend/svmg_lowering.spl'
+      - 'test/01_unit/lib/svmg/**'
+      - 'test/01_unit/compiler/backend/svmg_lowering_spec.spl'
+      - 'test/01_unit/compiler/backend/vulkan_jit_step_budget_loop_lowering_spec.spl'
+      - 'test/02_integration/svmg/**'
+      - 'test/02_integration/gpu_lane/**'
+      - 'test/03_system/compiler/gpu_lane_common_spec.spl'
+      - 'test/03_system/compiler/remote_interpreter_backend_spec.spl'
+      - 'test/03_system/gpu_lane/**'
+      - 'doc/08_tracking/lane_matrix.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================================================
+  # Portable gates — no GPU hardware required. Grammar/routing (A1-A3) and
+  # SVM-G host-reference conformance (D1-D4) specs only; the readiness-probing
+  # contract asserted here (gpu_lane_matrix_status_spec.spl) pins
+  # driver_present: false so it passes identically on a GPU-less runner.
+  # Runs on Linux, macOS, and Windows — none of these need real CUDA/Vulkan.
+  # F2 (doc/07_guide/infra/testing.md): sequential per spec file against the
+  # shared test DB, not a parallel directory glob.
+  # ============================================================================
+  portable-gates:
+    name: Portable GPU-lane gates (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: macos-latest
+            name: macOS aarch64
+          - os: windows-latest
+            name: Windows x86_64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: gpu-lane-${{ matrix.os }}-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            gpu-lane-${{ matrix.os }}-bootstrap-
+
+      - name: Build Simple bootstrap seed
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-driver
+
+      - name: Resolve SIMPLE_BIN
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="src/compiler_rust/target/bootstrap/simple.exe"
+          else
+            bin="src/compiler_rust/target/bootstrap/simple"
+          fi
+          test -x "$bin"
+          echo "SIMPLE_BIN=$bin" >> "$GITHUB_ENV"
+
+      # A1 — grammar/extractor routing table.
+      - name: A1 — remote_interpreter_backend_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/compiler/remote_interpreter_backend_spec.spl --mode=interpreter
+
+      # A2 — GMB-1 mailbox library.
+      - name: A2 — gpu_mailbox_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/01_unit/lib/test_runner/gpu_mailbox_spec.spl --mode=interpreter
+
+      # A3 — route_gpu_lane skip:/blocked: contract.
+      - name: A3 — gpu_lane_common_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/compiler/gpu_lane_common_spec.spl --mode=interpreter
+
+      # D1 — SVM-G ISA/assembler.
+      - name: D1 — opcodes_and_sgp_header_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/01_unit/lib/svmg/opcodes_and_sgp_header_spec.spl --mode=interpreter
+
+      # D2 — host reference VM.
+      - name: D2 — ref_vm_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/01_unit/lib/svmg/ref_vm_spec.spl --mode=interpreter
+
+      # D3 — 61-vector conformance suite (host reference VM only, no GPU).
+      - name: D3 — conformance_suite_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/02_integration/svmg/conformance/conformance_suite_spec.spl --mode=interpreter
+
+      # D4 — test-body lowering to SVM-G.
+      - name: D4 — svmg_lowering_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/01_unit/compiler/backend/svmg_lowering_spec.spl --mode=interpreter
+
+      # E2 — lane matrix status spec (no-GPU-host skip:/blocked: contract;
+      # pins driver_present: false, so this is portable by construction).
+      - name: E2 — gpu_lane_matrix_status_spec
+        shell: bash
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/gpu_lane/gpu_lane_matrix_status_spec.spl --mode=interpreter
+
+  # ============================================================================
+  # cuda-live — real B2/B3/B4 executor specs against actual CUDA hardware.
+  # Explicit runner-LABEL gate (never an OS/platform inference) per this
+  # repo's board-runnable rule. `cuda-live` is not provisioned as a
+  # self-hosted runner label in this repo's Actions fleet as of 2026-08-07 —
+  # workflow_dispatch-only so it never silently blocks push/PR checks.
+  # ============================================================================
+  cuda-live:
+    name: CUDA live lanes (self-hosted, cuda-live)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, cuda-live]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + deploy bin/simple (bootstrap seed)
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+          mkdir -p ../../bin
+          ln -sf ../src/compiler_rust/target/bootstrap/simple ../../bin/simple
+          echo "SIMPLE_BIN=$(pwd)/target/bootstrap/simple" >> "$GITHUB_ENV"
+
+      - name: cuda_jit — cuda_jit_hello_spec
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/gpu_lane/cuda_jit_hello_spec.spl --mode=interpreter
+
+      - name: cuda_vm_resident — cuda_resident_session_spec
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/gpu_lane/cuda_resident_session_spec.spl --mode=interpreter
+
+      - name: Note — cuda_vm has no in-tree conformance spec yet
+        run: |
+          echo "::notice::cuda_vm (CudaVmExecutor) has no checked-in system spec driving the D3 conformance table yet — see doc/08_tracking/lane_matrix.md and doc/08_tracking/bug/gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07.md. Nothing to run here until that spec exists."
+
+  # ============================================================================
+  # vulkan-live — real C2/C3 executor specs against actual Vulkan hardware.
+  # Same explicit-label discipline as cuda-live above. `vulkan-live` is a NEW
+  # label for this repo; not provisioned as of 2026-08-07.
+  # ============================================================================
+  vulkan-live:
+    name: Vulkan live lanes (self-hosted, vulkan-live)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, vulkan-live]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + deploy bin/simple (bootstrap seed)
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+          mkdir -p ../../bin
+          ln -sf ../src/compiler_rust/target/bootstrap/simple ../../bin/simple
+          echo "SIMPLE_BIN=$(pwd)/target/bootstrap/simple" >> "$GITHUB_ENV"
+
+      - name: vulkan_jit — vulkan_jit_hello_spec
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/gpu_lane/vulkan_jit_hello_spec.spl --mode=interpreter
+
+      - name: vulkan_jit — vulkan_jit_step_budget_loop_lowering_spec
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/01_unit/compiler/backend/vulkan_jit_step_budget_loop_lowering_spec.spl --mode=interpreter
+
+      - name: vulkan_vm — vulkan_vm_executor_conformance_spec
+        run: SIMPLE_LIB=src "$SIMPLE_BIN" test test/03_system/gpu_lane/vulkan_vm_executor_conformance_spec.spl --mode=interpreter

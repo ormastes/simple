@@ -1,0 +1,133 @@
+# Windowless diagnostic for the exact Engine2D Metal shader-library path.
+#
+# This deliberately stops after MTLDevice library creation.  It uses the same
+# generated MSL and typed SFFI wrapper as MetalSession.init(), but never creates
+# a command queue, compute pipeline, framebuffer, CPU fallback, or window.
+
+use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
+    metal_sffi_create_device, metal_sffi_destroy_device,
+    metal_sffi_compile_shader, metal_sffi_destroy_shader,
+    metal_last_error
+}
+
+val ERROR_MAX_BYTES: i64 = 1024
+
+fn bounded_error(raw: text) -> text:
+    var clean = raw.replace("\r", " ").replace("\n", " ")
+    if clean.len() > ERROR_MAX_BYTES:
+        clean = clean.slice(0, ERROR_MAX_BYTES)
+    clean
+
+fn emit(
+    status: text,
+    reason: text,
+    source_sha256: text,
+    source_bytes: i64,
+    available: bool,
+    initialized: bool,
+    device_count: i64,
+    device: i64,
+    library: i64,
+    raw_error_bytes: i64,
+    error_text: text,
+    error_truncated: bool,
+    library_destroyed: bool,
+    device_destroyed: bool
+):
+    print("metal_msl_library_probe_schema=macos-metal-msl-library-micro-v1")
+    print("metal_msl_library_probe_status=" + status)
+    print("metal_msl_library_probe_reason=" + reason)
+    print("metal_msl_library_probe_source_sha256=" + source_sha256)
+    print("metal_msl_library_probe_source_bytes=" + source_bytes.to_text())
+    print("metal_msl_library_probe_is_available=" + (if available: "1" else: "0"))
+    print("metal_msl_library_probe_init=" + (if initialized: "1" else: "0"))
+    print("metal_msl_library_probe_device_count=" + device_count.to_text())
+    print("metal_msl_library_probe_device_create_status=" + (if device > 0: "pass" else: "fail"))
+    print("metal_msl_library_probe_compiler_status=" + (if library > 0: "pass" else: "fail"))
+    print("metal_msl_library_probe_library_create_status=" + (if library > 0: "pass" else: "fail"))
+    print("metal_msl_library_probe_error_abi=typed-cstring-to-text")
+    print("metal_msl_library_probe_error_raw_bytes=" + raw_error_bytes.to_text())
+    print("metal_msl_library_probe_error_bounded_bytes=" + error_text.len().to_text())
+    print("metal_msl_library_probe_error_truncated=" + (if error_truncated: "1" else: "0"))
+    print("metal_msl_library_probe_error=" + error_text)
+    print("metal_msl_library_probe_library_destroyed=" + (if library_destroyed: "1" else: "0"))
+    print("metal_msl_library_probe_device_destroyed=" + (if device_destroyed: "1" else: "0"))
+    print("metal_msl_library_probe_cpu_fallback=unused")
+    print("metal_msl_library_probe_window_system=unused")
+
+fn fail_before_device(
+    reason: text,
+    source_sha256: text,
+    source_bytes: i64,
+    available: bool,
+    initialized: bool,
+    device_count: i64
+) -> i64:
+    emit(
+        "fail", reason, source_sha256, source_bytes, available, initialized,
+        device_count, 0, 0, 0, "", false, true, true
+    )
+    2
+
+fn main() -> i64:
+    val source = _engine2d_msl()
+    val source_sha256 = sha256_text(source)
+    val source_bytes = source.len()
+
+    val available = metal_sffi_is_available()
+    if not available:
+        return fail_before_device(
+            "metal-unavailable", source_sha256, source_bytes,
+            false, false, 0
+        )
+
+    val initialized = metal_sffi_init()
+    if not initialized:
+        return fail_before_device(
+            "metal-init-failed", source_sha256, source_bytes,
+            true, false, 0
+        )
+
+    val device_count = metal_sffi_device_count()
+    if device_count <= 0:
+        return fail_before_device(
+            "metal-device-missing", source_sha256, source_bytes,
+            true, true, device_count
+        )
+
+    val device = metal_sffi_create_device(0)
+    if device <= 0:
+        emit(
+            "fail", "metal-device-create-failed", source_sha256, source_bytes,
+            true, true, device_count, 0, 0, 0, "", false, true, true
+        )
+        return 3
+
+    val library = metal_sffi_compile_shader(device, source)
+    if library <= 0:
+        # This typed wrapper is the safe ABI boundary:
+        # rt_metal_get_last_error() -> C pointer -> rt_cstring_to_text().
+        val raw_error = metal_last_error()
+        val error_text = bounded_error(raw_error)
+        val error_truncated = raw_error.len() > ERROR_MAX_BYTES
+        val device_destroyed = metal_sffi_destroy_device(device)
+        emit(
+            "fail", "metal-library-create-failed", source_sha256, source_bytes,
+            true, true, device_count, device, 0, raw_error.len(), error_text,
+            error_truncated, true, device_destroyed
+        )
+        return 4
+
+    val library_destroyed = metal_sffi_destroy_shader(library)
+    val device_destroyed = metal_sffi_destroy_device(device)
+    val cleanup_ok = library_destroyed and device_destroyed
+    emit(
+        if cleanup_ok: "pass" else: "fail",
+        if cleanup_ok: "metal-library-created" else: "metal-cleanup-failed",
+        source_sha256, source_bytes, true, true, device_count, device, library,
+        0, "", false, library_destroyed, device_destroyed
+    )
+    if cleanup_ok: 0 else: 5

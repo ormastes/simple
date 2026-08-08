@@ -1,0 +1,62 @@
+# Vestigial VFS boot block adapter — link-clean stub.
+#
+# MDSOC: feature dimension, vfs layer, block adapter boundary
+#
+# Historically wrapped a baremetal C NVMe bridge (simpleos_nvme_*). Those C
+# symbols were phantom externs with NO definition on any target and broke the
+# riscv64 link (and the arm64 closure). The boot_fs NVFS/DBFS probe path that
+# uses this adapter has therefore never functioned on rv64.
+#
+# Real rv64 storage is served by the freestanding virtio-blk PCI driver
+# (rt_storage_*) in src/os/kernel/arch/riscv64/boot/freestanding_runtime.c,
+# driven by riscv_services.spl — a path independent of this adapter. This
+# adapter is reduced to an honest, extern-free stub: it reports the C bridge as
+# unavailable rather than faking sector I/O, which makes simpleos_nvme_* vanish
+# from the closure on every target without introducing any new undefined
+# symbol. The class name and two-field constructor are preserved so out-of-tree
+# importers compile unchanged.
+#
+# The simpleos_fat32_* externs/exports below are a separate (unrelated) FAT32
+# path-read bridge surface still re-exported by vfs_boot_init; they are left in
+# place (unused → DCE) and are not part of the NVMe link error this change fixes.
+
+use os.services.block_device.{BlockDevice}
+
+extern fn simpleos_fat32_path_read_buffer_addr() -> u64
+extern fn simpleos_fat32_read_path(path: text) -> i64
+extern fn simpleos_fat32_read_path_size(path: text) -> i64
+extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
+
+# Fixed C compatibility bridge cap, aligned with the pure-Simple reader.
+val FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
+
+class CNvmeBlockAdapter:
+    """Vestigial block adapter; C NVMe bridge is unavailable (link-clean stub)."""
+    sector_buf_addr: u64
+    ready: bool
+
+impl CNvmeBlockAdapter:
+    static fn new() -> CNvmeBlockAdapter:
+        CNvmeBlockAdapter(
+            sector_buf_addr: 0,
+            ready: false
+        )
+
+    me init_c_bridge() -> bool:
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        false
+
+    me init() -> Result<bool, text>:
+        """C NVMe bridge has no backing on any target; report unavailable."""
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
+
+impl BlockDevice for CNvmeBlockAdapter:
+    me read_sector(lba: u64) -> Result<[u8], text>:
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
+
+    me write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Err("CNvmeBlockAdapter: C NVMe bridge unavailable")
+
+    me fn sector_size() -> u32:
+        val default_sector_size: u32 = 512
+        default_sector_size

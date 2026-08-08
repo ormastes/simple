@@ -1,0 +1,131 @@
+"""Direct backend: optional capability-gated path."""
+
+use std.common.compute.placement_contracts.backend.{
+    PlacementBackend,
+    PlacementCapabilities,
+    PlacementError,
+    PlacementPlan,
+    LeaseSet,
+    TransferReceipt,
+    CheckpointReceipt,
+    RecoveryReceipt,
+    PlacementRequestArenaRef
+}
+use std.common.compute.placement_contracts.semantic.{
+    BackendId,
+    ObjectSetView,
+    Hash256,
+    DeviceMask,
+    PlacementRequestArena
+}
+use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
+use std.common.compute.placement_contracts.planner.{CostEstimate, PlacementBudget}
+use std.common.compute.placement_contracts.planner.{make_plan_from_requests}
+use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id, artifact_id_valid}
+use std.nogc_async_mut.io.env_ops.{env_get}
+
+class DirectPlacementBackend:
+    pass
+
+impl PlacementBackend for DirectPlacementBackend:
+    fn probe() -> PlacementCapabilities:
+        val enabled = _direct_enabled()
+        PlacementCapabilities(
+            backend: BackendId(value: "direct"),
+            available: enabled,
+            production: false,
+            supported_tiers: [],
+            device_mask: DeviceMask(bits: 0),
+            reason: if enabled:
+                "direct path enabled in this profile"
+            else:
+                "direct path disabled by default"
+        )
+
+    fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+        make_plan_from_requests(requests, budget)
+
+    fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>:
+        if not _direct_enabled():
+            return Err(PlacementError.Unsupported)
+
+        Ok(LeaseSet(leases: []))
+
+    fn prefetch(plan: PlacementPlan) -> Result<TransferReceipt, PlacementError>:
+        if not _direct_enabled():
+            return Err(PlacementError.Unsupported)
+
+        Ok(TransferReceipt(
+            artifact_id: artifact_id(digest: "", byte_len: 0),
+            backend: "direct",
+            sequence: 0,
+            ring_slot: 0,
+            bytes_transferred: 0,
+            device_address: 0,
+            checksum: "",
+            completed: true,
+            error: ""
+        ))
+
+    fn checkpoint(objects: ObjectSetView) -> CheckpointReceipt:
+        CheckpointReceipt(
+            ok: true,
+            root: artifact_id(digest: "", byte_len: 0),
+            object_count: objects.objects.len() as i64,
+            bytes_written: 0,
+            error: ""
+        )
+
+    fn release(leases: LeaseSet):
+        var i = 0
+        while i < leases.leases.len():
+            i = i + 1
+
+    fn recover(root: ArtifactId) -> RecoveryReceipt:
+        if not artifact_id_valid(root):
+            RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "invalid-root")
+        elif _direct_enabled():
+            RecoveryReceipt(ok: true, root: root, recovered_objects: 0, error: "")
+        else:
+            RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "direct-disabled")
+
+fn _direct_enabled() -> bool:
+    env_get("SIMPLE_MMU_DIRECT_BACKEND") == "1"
+
+fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
+    object_ref(object_slot: slot, generation: 1)
+
+fn budget_to_cost_estimate(budget: PlacementBudget) -> CostEstimate:
+    CostEstimate(
+        cpu_work: 0,
+        simd_work: 0,
+        gpu_work: if budget.device_bytes > 0:
+            budget.device_bytes
+        else:
+            0,
+        host_to_device_bytes: if budget.device_bytes > 0:
+            budget.device_bytes
+        else:
+            0,
+        device_to_host_bytes: if budget.host_pinned_bytes > 0:
+            budget.host_pinned_bytes
+        else:
+            0,
+        ssd_read_bytes: if budget.host_hot_bytes > 0:
+            budget.host_hot_bytes
+        else:
+            0,
+        ssd_write_bytes: if budget.staging_bytes > 0:
+            budget.staging_bytes
+        else:
+            0,
+        synchronization_points: 1,
+        predicted_latency_us: if budget.runtime_base_bytes > 0:
+            budget.runtime_base_bytes
+        else:
+            0,
+        confidence_milli: 850
+    )
+
+export DirectPlacementBackend
+export budget_to_cost_estimate

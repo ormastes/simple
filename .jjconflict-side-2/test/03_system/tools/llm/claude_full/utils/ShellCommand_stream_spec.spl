@@ -1,0 +1,71 @@
+"""
+# Claude Full ShellCommand And Stream
+
+Checks shell command and stream blocker parity surfaces.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.stream.{Stream, streamSourceLinesModeled}
+use app.llm_caret.claude_full.utils.ShellCommand.{StreamWrapper, ShellCommandImpl, AbortedShellCommand, prependStderr, exitPromise, wrapSpawn, createAbortedCommand, createFailedCommand, shellCommandSourceLinesModeled}
+
+describe "Claude full ShellCommand and stream utilities":
+    it "models stream writes, pipe, close, and cancel state":
+        var source = Stream.new()
+        source = source.append("hel")
+        source = source.append("lo\nworld")
+        expect(source.text()).to_equal("hello\nworld")
+        expect(source.lineCount()).to_equal(2)
+        expect(source.byteLength()).to_equal(11)
+        var target = Stream.new()
+        target = source.pipeTo(target)
+        expect(target.text()).to_equal("hello\nworld")
+        expect(target.chunks.len()).to_equal(2)
+        source = source.closeStream()
+        expect(source.status()).to_equal("closed")
+        source = source.append("ignored")
+        expect(source.text()).to_equal("hello\nworld")
+        var cancelled = Stream.new()
+        cancelled = cancelled.cancel("stop")
+        expect(cancelled.status()).to_equal("cancelled")
+        expect(cancelled.errorMessage).to_equal("stop")
+
+    it "wraps stdout and stderr streams":
+        var wrapper = StreamWrapper.new()
+        wrapper = wrapper.writeStdout("out")
+        wrapper = wrapper.writeStderr("err")
+        expect(wrapper.stdoutText()).to_equal("out")
+        expect(wrapper.stderrText()).to_equal("err")
+        expect(wrapper.combinedText()).to_equal("outerr")
+        wrapper = wrapper.close()
+        wrapper = wrapper.writeStdout("ignored")
+        expect(wrapper.stdoutText()).to_equal("out")
+
+    it "models command lifecycle results and stderr prefixing":
+        var command = wrapSpawn("echo", ["hello"], "/tmp")
+        expect(command.isRunning()).to_equal(true)
+        expect(command.command.displayCommand()).to_equal("echo hello")
+        command = command.writeStdout("hello")
+        command = command.complete(0)
+        val result = exitPromise(command)
+        expect(result.ok()).to_equal(true)
+        expect(result.stdout).to_equal("hello")
+        expect(command.summary()).to_equal("completed:0")
+        expect(prependStderr("a\nb", "ERR: ")).to_equal("ERR: a\nERR: b")
+
+    it "models abort and failed command factories":
+        val aborted = createAbortedCommand("sleep", "user cancelled")
+        val abortedResult = aborted.result()
+        expect(aborted.displayCommand()).to_equal("sleep")
+        expect(abortedResult.interrupted).to_equal(true)
+        expect(abortedResult.errorName).to_equal("AbortError")
+        expect(abortedResult.stderr).to_equal("user cancelled")
+        var timedOut = ShellCommandImpl.new("sleep", ["9"], "/tmp")
+        timedOut = timedOut.timeout()
+        expect(timedOut.result().errorMessage).to_equal("Command timed out")
+        val failed = createFailedCommand("bad", "boom").result()
+        expect(failed.failed()).to_equal(true)
+        expect(failed.stderr).to_contain("boom")
+
+    it "exposes strict gate source sizes":
+        expect(streamSourceLinesModeled()).to_equal(76)
+        expect(shellCommandSourceLinesModeled()).to_equal(465)

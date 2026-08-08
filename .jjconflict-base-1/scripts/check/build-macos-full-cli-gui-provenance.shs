@@ -1,0 +1,528 @@
+#!/bin/sh
+# Produce or verify the only full-CLI GUI driver admitted by macOS live evidence.
+set -eu
+
+if [ "${MACOS_GUI_PROVENANCE_SOURCE_ONLY:-0}" = 1 ]; then
+    : "${MACOS_GUI_PROVENANCE_ROOT:?source-only root is required}"
+    ROOT_DIR="$MACOS_GUI_PROVENANCE_ROOT"
+else
+    ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+fi
+FACADE="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH="$FACADE"
+. "$FACADE"
+EXECUTION_HISTORY_FACADE=\
+"$ROOT_DIR/scripts/check/lib/macos-gui-execution-history-boundary.shs"
+. "$EXECUTION_HISTORY_FACADE"
+
+SCHEMA="simple-macos-full-cli-gui-provenance-v1"
+SOURCE_ROOTS="src/compiler:src/app:src/lib:examples/10_tooling"
+ENTRY_REL="src/app/cli/main.spl"
+PROBE_REL="test/01_unit/scripts/fixtures/macos_gui_driver_in_process_probe.spl"
+NO_DELEGATE_SOURCE_REL="src/app/io/cli_ops.spl"
+
+fail() {
+    echo "macOS full CLI GUI provenance: FAIL ($1)" >&2
+    exit 1
+}
+
+value_of() {
+    key=$1
+    receipt=$2
+    count="$(grep -c "^${key}=" "$receipt" 2>/dev/null || true)"
+    [ "$count" = 1 ] || return 1
+    sed -n "s/^${key}=//p" "$receipt"
+}
+
+hash_file() {
+    [ -f "$1" ] || return 1
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+
+hash_args() {
+    for argument in "$@"; do
+        printf '%s:%s\n' "${#argument}" "$argument"
+    done | shasum -a 256 | awk '{print $1}'
+}
+
+is_sha256() {
+    case "${1:-}" in
+        *[!0-9a-f]*|"") return 1 ;;
+        *) [ "${#1}" = 64 ] ;;
+    esac
+}
+
+canonical_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    directory="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)" || return 1
+    printf '%s/%s\n' "$directory" "$(basename -- "$1")"
+}
+
+configure_paths() {
+    PLATFORM="$(bootstrap_stage3_host_platform)" ||
+        fail "unsupported-host-platform"
+    case "$PLATFORM" in
+        aarch64-apple-darwin|x86_64-apple-darwin) ;;
+        *) [ "${MACOS_GUI_PROVENANCE_SELF_TEST:-0}" = 1 ] ||
+            fail "host-is-not-macos" ;;
+    esac
+    FULL_ROOT="$ROOT_DIR/build/bootstrap/full/$PLATFORM"
+    PROVENANCE_ROOT="$FULL_ROOT/provenance"
+    DRIVER_PATH="$FULL_ROOT/simple"
+    MANIFEST_PATH="$PROVENANCE_ROOT/gui-driver.env"
+    SOURCE_SNAPSHOT_PATH="$PROVENANCE_ROOT/source-inputs.txt"
+    GIT_STATE_PATH="$PROVENANCE_ROOT/git-state.env"
+    BUILD_TRANSCRIPT_PATH="$PROVENANCE_ROOT/build.transcript"
+    BUILD_LOG_PATH="$PROVENANCE_ROOT/build.log"
+    BEHAVIOR_TRANSCRIPT_PATH="$PROVENANCE_ROOT/behavior.transcript"
+    BEHAVIOR_LOG_PATH="$PROVENANCE_ROOT/behavior.log"
+    BEHAVIOR_RECEIPT_PATH="$PROVENANCE_ROOT/behavior.es-history.env"
+    BEHAVIOR_TREE_PATH="$PROVENANCE_ROOT/behavior.es-events"
+    BEHAVIOR_HANDSHAKE_PATH="$PROVENANCE_ROOT/behavior.es-history.env"
+    BUILD_HOME="$PROVENANCE_ROOT/build-home"
+    BUILD_TMP="$PROVENANCE_ROOT/build-tmp"
+    BUILD_CACHE="$PROVENANCE_ROOT/native-cache"
+    STAGE3_PATH="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$PLATFORM/simple"
+    STAGE3_MANIFEST="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$PLATFORM/provenance.env"
+    WINIT_PROVIDER="$ROOT_DIR/build/sffi/libspl_winit.dylib"
+    RUNTIME_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib"
+    RUNTIME_C_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib"
+    ENTRY_PATH="$ROOT_DIR/$ENTRY_REL"
+    PROBE_PATH="$ROOT_DIR/$PROBE_REL"
+    NO_DELEGATE_SOURCE_PATH="$ROOT_DIR/$NO_DELEGATE_SOURCE_REL"
+    PRODUCER_PATH="$ROOT_DIR/scripts/check/build-macos-full-cli-gui-provenance.shs"
+    EXECUTION_HISTORY_FACADE_PATH="$EXECUTION_HISTORY_FACADE"
+    ES_HISTORY_POLICY_PATH=\
+"$ROOT_DIR/config/security/macos_gui_es_collector_policy.env"
+    ES_HISTORY_COLLECTOR_PATH=\
+"$ROOT_DIR/build/sffi/simple_es_history_collector"
+    ES_HISTORY_COLLECTOR_BUILDER_PATH=\
+"$ROOT_DIR/scripts/check/build-macos-es-history-collector.shs"
+    ES_HISTORY_COLLECTOR_PROVENANCE_PATH=\
+"$ROOT_DIR/build/sffi/simple_es_history_collector.provenance.env"
+    BUILD_OUTPUT_REL="build/bootstrap/full/$PLATFORM/simple"
+    BUILD_CACHE_REL="build/bootstrap/full/$PLATFORM/provenance/native-cache"
+}
+
+require_clean_git() {
+    clean_root=$1
+    git -C "$clean_root" diff --quiet --no-ext-diff -- ||
+        fail "tracked-source-dirty"
+    git -C "$clean_root" diff --cached --quiet --no-ext-diff -- ||
+        fail "staged-source-dirty"
+    [ -z "$(git -C "$clean_root" ls-files --others --exclude-standard)" ] ||
+        fail "untracked-source-present"
+}
+
+canonical_full_driver_path() {
+    candidate=$1
+    expected_root=$2
+    expected_platform=$3
+    [ "$candidate" = \
+        "$expected_root/build/bootstrap/full/$expected_platform/simple" ]
+}
+
+forbidden_driver_substitution() {
+    case "$1" in
+        */simple_seed|*/stage3/*|*/compiler_rust/*|*/debug/*|\
+        */test/02_integration/rendering/*live_harness*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+forbidden_driver_binary_identity() {
+    command -v strings >/dev/null 2>&1 || return 1
+    strings "$1" 2>/dev/null |
+        grep -Eiq 'Rust-built|bootstrap seed only|simple_seed|debug build'
+}
+
+require_execution_history_trust_root() {
+    if macos_gui_history_require_trust_root "$ROOT_DIR"; then
+        return 0
+    else
+        execution_history_status=$?
+    fi
+    exit "$execution_history_status"
+}
+
+snapshot_sources() {
+    output=$1
+    bootstrap_stage3_source_snapshot "$output" "$ROOT_DIR" ||
+        fail "source-snapshot-failed"
+}
+
+build_args_sha256() {
+    hash_args native-build --backend cranelift --threads 4 \
+        --mode one-binary --cache-dir "$BUILD_CACHE_REL" \
+        --runtime-bundle core-c-bootstrap --source src/compiler \
+        --source src/app --source src/lib --entry-closure \
+        --entry "$ENTRY_REL" --strip --verbose --output "$BUILD_OUTPUT_REL"
+}
+
+build_environment_sha256() {
+    hash_args SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER:$RUNTIME_PROVIDER:$RUNTIME_C_PROVIDER"
+}
+
+behavior_args_sha256() {
+    hash_args /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$DRIVER_PATH" \
+        --events "$BEHAVIOR_TREE_PATH" --receipt "$BEHAVIOR_HANDSHAKE_PATH" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon
+}
+
+behavior_environment_sha256() {
+    hash_args SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "MACOS_GUI_ES_HISTORY_POLICY=$ES_HISTORY_POLICY_PATH" \
+        "MACOS_GUI_ES_HISTORY_POLICY_SHA256=$(hash_file "$ES_HISTORY_POLICY_PATH")"
+}
+
+verify_common_inputs() {
+    [ "$(canonical_file "$FACADE")" = "$FACADE" ] ||
+        fail "stage3-facade-not-canonical"
+    for input in "$ENTRY_PATH" "$PROBE_PATH" "$NO_DELEGATE_SOURCE_PATH" \
+        "$PRODUCER_PATH" "$EXECUTION_HISTORY_FACADE_PATH" "$ES_HISTORY_POLICY_PATH" \
+        "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        "$WINIT_PROVIDER" "$RUNTIME_PROVIDER" "$RUNTIME_C_PROVIDER"; do
+        [ "$(canonical_file "$input")" = "$input" ] ||
+            fail "canonical-input-missing"
+    done
+    [ "$(canonical_file "$STAGE3_PATH")" = "$STAGE3_PATH" ] &&
+        [ -x "$STAGE3_PATH" ] ||
+        fail "stage3-compiler-missing"
+    [ "$(canonical_file "$STAGE3_MANIFEST")" = "$STAGE3_MANIFEST" ] ||
+        fail "stage3-manifest-missing"
+    bootstrap_stage3_verify_manifest \
+        "$STAGE3_MANIFEST" "$ROOT_DIR" "$STAGE3_PATH" >/dev/null ||
+        fail "stage3-provenance-invalid"
+}
+
+run_behavior_probe() {
+    behavior_driver=$1
+    behavior_log=$2
+    behavior_transcript=$3
+    behavior_home=$4
+    behavior_tmp=$5
+    behavior_receipt=$6
+    behavior_events=$7
+    behavior_handshake=$8
+    macos_gui_history_require_trust_root "$ROOT_DIR"
+    bootstrap_stage3_run_transcribed "$behavior_transcript" "$ROOT_DIR" \
+        "$behavior_log" "$behavior_home" "$behavior_tmp" "$PATH" \
+        SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "MACOS_GUI_ES_HISTORY_POLICY=$ES_HISTORY_POLICY_PATH" \
+        "MACOS_GUI_ES_HISTORY_POLICY_SHA256=$(hash_file "$ES_HISTORY_POLICY_PATH")" -- \
+        /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$behavior_driver" \
+        --events "$behavior_events" --receipt "$behavior_handshake" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon
+}
+
+write_manifest() {
+    manifest_tmp="$MANIFEST_PATH.tmp.$$"
+    {
+        echo "schema=$SCHEMA"
+        echo "status=pass"
+        echo "created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "platform=$PLATFORM"
+        echo "source_roots=$SOURCE_ROOTS"
+        echo "source_file_count=$(wc -l <"$SOURCE_SNAPSHOT_PATH" | tr -d ' ')"
+        echo "source_fingerprint=$(hash_file "$SOURCE_SNAPSHOT_PATH")"
+        echo "source_snapshot_path=$SOURCE_SNAPSHOT_PATH"
+        echo "source_snapshot_sha256=$(hash_file "$SOURCE_SNAPSHOT_PATH")"
+        echo "git_state_path=$GIT_STATE_PATH"
+        echo "git_state_sha256=$(hash_file "$GIT_STATE_PATH")"
+        echo "git_head=$(value_of head "$GIT_STATE_PATH")"
+        echo "git_dirty_fingerprint=$(value_of dirty_fingerprint "$GIT_STATE_PATH")"
+        echo "producer_path=$PRODUCER_PATH"
+        echo "producer_sha256=$(hash_file "$PRODUCER_PATH")"
+        echo "entry_path=$ENTRY_PATH"
+        echo "entry_sha256=$(hash_file "$ENTRY_PATH")"
+        echo "probe_path=$PROBE_PATH"
+        echo "probe_sha256=$(hash_file "$PROBE_PATH")"
+        echo "no_bootstrap_delegate_source_path=$NO_DELEGATE_SOURCE_PATH"
+        echo "no_bootstrap_delegate_source_sha256=$(hash_file "$NO_DELEGATE_SOURCE_PATH")"
+        echo "stage3_compiler_path=$STAGE3_PATH"
+        echo "stage3_compiler_sha256=$(hash_file "$STAGE3_PATH")"
+        echo "stage3_manifest_path=$STAGE3_MANIFEST"
+        echo "stage3_manifest_sha256=$(hash_file "$STAGE3_MANIFEST")"
+        echo "winit_provider_path=$WINIT_PROVIDER"
+        echo "winit_provider_sha256=$(hash_file "$WINIT_PROVIDER")"
+        echo "runtime_provider_path=$RUNTIME_PROVIDER"
+        echo "runtime_provider_sha256=$(hash_file "$RUNTIME_PROVIDER")"
+        echo "runtime_c_provider_path=$RUNTIME_C_PROVIDER"
+        echo "runtime_c_provider_sha256=$(hash_file "$RUNTIME_C_PROVIDER")"
+        echo "build_command_transcript_path=$BUILD_TRANSCRIPT_PATH"
+        echo "build_command_transcript_sha256=$(hash_file "$BUILD_TRANSCRIPT_PATH")"
+        echo "build_log_path=$BUILD_LOG_PATH"
+        echo "build_log_sha256=$(hash_file "$BUILD_LOG_PATH")"
+        echo "build_args_sha256=$(build_args_sha256)"
+        echo "build_environment_sha256=$(build_environment_sha256)"
+        echo "behavior_command_transcript_path=$BEHAVIOR_TRANSCRIPT_PATH"
+        echo "behavior_command_transcript_sha256=$(hash_file "$BEHAVIOR_TRANSCRIPT_PATH")"
+        echo "behavior_log_path=$BEHAVIOR_LOG_PATH"
+        echo "behavior_log_sha256=$(hash_file "$BEHAVIOR_LOG_PATH")"
+        echo "execution_history_facade_path=$EXECUTION_HISTORY_FACADE_PATH"
+        echo "execution_history_facade_sha256=$(hash_file "$EXECUTION_HISTORY_FACADE_PATH")"
+        echo "execution_history_policy_path=$ES_HISTORY_POLICY_PATH"
+        echo "execution_history_policy_sha256=$(hash_file "$ES_HISTORY_POLICY_PATH")"
+        echo "execution_history_event_log_path=$BEHAVIOR_TREE_PATH"
+        echo "execution_history_event_log_sha256=$(hash_file "$BEHAVIOR_TREE_PATH")"
+        echo "execution_history_receipt_path=$BEHAVIOR_HANDSHAKE_PATH"
+        echo "execution_history_receipt_sha256=$(hash_file "$BEHAVIOR_HANDSHAKE_PATH")"
+        echo "behavior_args_sha256=$(behavior_args_sha256)"
+        echo "behavior_environment_sha256=$(behavior_environment_sha256)"
+        echo "execution_history_status=pass"
+        echo "execution_history_observer=endpointsecurity-es-v2"
+        echo "execution_history_coverage=root-and-descendants-through-exit-gap-checked"
+        echo "no_bootstrap_delegate_support=b7"
+        echo "winit_marker=rt_winit_event_loop_new"
+        echo "output_path=$DRIVER_PATH"
+        echo "output_sha256=$(hash_file "$DRIVER_PATH")"
+        echo "output_status=pass"
+    } >"$manifest_tmp"
+    mv "$manifest_tmp" "$MANIFEST_PATH"
+}
+
+verify_manifest() {
+    receipt=$1
+    origin=$2
+    require_execution_history_trust_root
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "manifest-invalid"
+    [ "$origin" = "$MANIFEST_PATH" ] || fail "manifest-origin-not-canonical"
+    [ -f "$origin" ] && [ ! -L "$origin" ] || fail "manifest-origin-invalid"
+    [ "$(hash_file "$receipt")" = "$(hash_file "$origin")" ] ||
+        fail "manifest-snapshot-origin-mismatch"
+    for key in schema status created_at_utc platform source_roots \
+        source_file_count source_fingerprint source_snapshot_path \
+        source_snapshot_sha256 git_state_path git_state_sha256 git_head \
+        git_dirty_fingerprint producer_path producer_sha256 entry_path \
+        entry_sha256 probe_path probe_sha256 stage3_compiler_path \
+        no_bootstrap_delegate_source_path no_bootstrap_delegate_source_sha256 \
+        stage3_compiler_sha256 stage3_manifest_path stage3_manifest_sha256 \
+        winit_provider_path winit_provider_sha256 runtime_provider_path \
+        runtime_provider_sha256 runtime_c_provider_path \
+        runtime_c_provider_sha256 build_command_transcript_path \
+        build_command_transcript_sha256 build_log_path build_log_sha256 \
+        build_args_sha256 build_environment_sha256 \
+        behavior_command_transcript_path behavior_command_transcript_sha256 \
+        behavior_log_path behavior_log_sha256 behavior_args_sha256 \
+        execution_history_facade_path execution_history_facade_sha256 \
+        execution_history_policy_path execution_history_policy_sha256 \
+        execution_history_event_log_path execution_history_event_log_sha256 \
+        execution_history_receipt_path execution_history_receipt_sha256 \
+        behavior_environment_sha256 execution_history_status \
+        execution_history_observer execution_history_coverage \
+        no_bootstrap_delegate_support winit_marker output_path output_sha256 \
+        output_status; do
+        value_of "$key" "$receipt" >/dev/null ||
+            fail "manifest-$key-not-singular"
+    done
+    [ "$(value_of schema "$receipt")" = "$SCHEMA" ] &&
+        [ "$(value_of status "$receipt")" = pass ] &&
+        [ "$(value_of platform "$receipt")" = "$PLATFORM" ] &&
+        [ "$(value_of source_roots "$receipt")" = "$SOURCE_ROOTS" ] ||
+        fail "manifest-identity-mismatch"
+    require_clean_git "$ROOT_DIR"
+    verify_common_inputs
+    verify_snapshot="$PROVENANCE_ROOT/source-verify.$$"
+    verify_git="$PROVENANCE_ROOT/git-verify.$$"
+    snapshot_sources "$verify_snapshot"
+    bootstrap_stage3_git_state "$ROOT_DIR" "$verify_git" ||
+        fail "git-state-verify-failed"
+    current_source_sha="$(hash_file "$verify_snapshot")"
+    current_git_sha="$(hash_file "$verify_git")"
+    current_count="$(wc -l <"$verify_snapshot" | tr -d ' ')"
+    [ "$(value_of source_file_count "$receipt")" = "$current_count" ] &&
+        [ "$(value_of source_fingerprint "$receipt")" = "$current_source_sha" ] &&
+        [ "$(value_of source_snapshot_sha256 "$receipt")" = \
+            "$current_source_sha" ] &&
+        [ "$(value_of git_state_sha256 "$receipt")" = "$current_git_sha" ] &&
+        [ "$(value_of git_head "$receipt")" = "$(git -C "$ROOT_DIR" rev-parse HEAD)" ] &&
+        [ "$(value_of git_head "$receipt")" = "$(value_of head "$verify_git")" ] &&
+        [ "$(value_of git_dirty_fingerprint "$receipt")" = \
+            "$(value_of dirty_fingerprint "$verify_git")" ] ||
+        fail "current-source-mismatch"
+    rm -f "$verify_snapshot" "$verify_git"
+    for binding in \
+        "producer_path:$PRODUCER_PATH:producer_sha256" \
+        "entry_path:$ENTRY_PATH:entry_sha256" \
+        "probe_path:$PROBE_PATH:probe_sha256" \
+        "no_bootstrap_delegate_source_path:$NO_DELEGATE_SOURCE_PATH:no_bootstrap_delegate_source_sha256" \
+        "stage3_compiler_path:$STAGE3_PATH:stage3_compiler_sha256" \
+        "stage3_manifest_path:$STAGE3_MANIFEST:stage3_manifest_sha256" \
+        "winit_provider_path:$WINIT_PROVIDER:winit_provider_sha256" \
+        "runtime_provider_path:$RUNTIME_PROVIDER:runtime_provider_sha256" \
+        "runtime_c_provider_path:$RUNTIME_C_PROVIDER:runtime_c_provider_sha256" \
+        "source_snapshot_path:$SOURCE_SNAPSHOT_PATH:source_snapshot_sha256" \
+        "git_state_path:$GIT_STATE_PATH:git_state_sha256" \
+        "build_command_transcript_path:$BUILD_TRANSCRIPT_PATH:build_command_transcript_sha256" \
+        "build_log_path:$BUILD_LOG_PATH:build_log_sha256" \
+        "behavior_command_transcript_path:$BEHAVIOR_TRANSCRIPT_PATH:behavior_command_transcript_sha256" \
+        "behavior_log_path:$BEHAVIOR_LOG_PATH:behavior_log_sha256" \
+        "execution_history_facade_path:$EXECUTION_HISTORY_FACADE_PATH:execution_history_facade_sha256" \
+        "execution_history_policy_path:$ES_HISTORY_POLICY_PATH:execution_history_policy_sha256" \
+        "execution_history_event_log_path:$BEHAVIOR_TREE_PATH:execution_history_event_log_sha256" \
+        "execution_history_receipt_path:$BEHAVIOR_HANDSHAKE_PATH:execution_history_receipt_sha256" \
+        "output_path:$DRIVER_PATH:output_sha256"; do
+        path_key=${binding%%:*}
+        binding_rest=${binding#*:}
+        expected_path=${binding_rest%:*}
+        sha_key=${binding##*:}
+        [ "$(value_of "$path_key" "$receipt")" = "$expected_path" ] &&
+            [ "$(value_of "$sha_key" "$receipt")" = \
+                "$(hash_file "$expected_path")" ] ||
+            fail "manifest-$path_key-binding-mismatch"
+    done
+    [ "$(value_of build_args_sha256 "$receipt")" = "$(build_args_sha256)" ] &&
+        [ "$(value_of build_environment_sha256 "$receipt")" = \
+            "$(build_environment_sha256)" ] &&
+        [ "$(value_of behavior_args_sha256 "$receipt")" = \
+            "$(behavior_args_sha256)" ] &&
+        [ "$(value_of behavior_environment_sha256 "$receipt")" = \
+            "$(behavior_environment_sha256)" ] ||
+        fail "manifest-command-binding-mismatch"
+    bootstrap_stage3_verify_command_transcript "$BUILD_TRANSCRIPT_PATH" \
+        "$ROOT_DIR" SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER:$RUNTIME_PROVIDER:$RUNTIME_C_PROVIDER" \
+        -- "$STAGE3_PATH" native-build --backend cranelift --threads 4 \
+        --mode one-binary --cache-dir "$BUILD_CACHE_REL" \
+        --runtime-bundle core-c-bootstrap --source src/compiler \
+        --source src/app --source src/lib --entry-closure \
+        --entry "$ENTRY_REL" --strip --verbose --output "$BUILD_OUTPUT_REL" ||
+        fail "build-transcript-invalid"
+    [ "$(value_of execution_history_status "$receipt")" = pass ] &&
+        [ "$(value_of execution_history_observer "$receipt")" = \
+        endpointsecurity-es-v2 ] &&
+        [ "$(value_of execution_history_coverage "$receipt")" = \
+            root-and-descendants-through-exit-gap-checked ] &&
+        [ "$(value_of no_bootstrap_delegate_support "$receipt")" = b7 ] &&
+        [ "$(value_of winit_marker "$receipt")" = rt_winit_event_loop_new ] &&
+        [ "$(value_of output_status "$receipt")" = pass ] ||
+        fail "manifest-capability-status-invalid"
+    grep -Fq 'SIMPLE_NO_BOOTSTRAP_DELEGATE' "$NO_DELEGATE_SOURCE_PATH" ||
+        fail "no-bootstrap-delegate-source-marker-missing"
+    canonical_full_driver_path "$DRIVER_PATH" "$ROOT_DIR" "$PLATFORM" ||
+        fail "output-path-not-canonical-full-cli"
+    ! forbidden_driver_substitution "$DRIVER_PATH" ||
+        fail "driver-substitution"
+    ! forbidden_driver_binary_identity "$DRIVER_PATH" ||
+        fail "driver-binary-identity-forbidden"
+    [ -x "$DRIVER_PATH" ] && [ ! -L "$DRIVER_PATH" ] ||
+        fail "driver-not-executable"
+    LC_ALL=C grep -aq "rt_winit_event_loop_new" "$DRIVER_PATH" ||
+        fail "driver-winit-marker-missing"
+    macos_gui_history_verify "$BEHAVIOR_HANDSHAKE_PATH" "$DRIVER_PATH" \
+        "$(hash_file "$DRIVER_PATH")" "$ROOT_DIR" ||
+        fail "execution-history-invalid"
+    verify_behavior_log="$PROVENANCE_ROOT/behavior-verify.log.$$"
+    verify_behavior_transcript="$PROVENANCE_ROOT/behavior-verify.transcript.$$"
+    verify_behavior_receipt="$PROVENANCE_ROOT/behavior-verify.receipt.$$"
+    verify_behavior_tree="$PROVENANCE_ROOT/behavior-verify.process-tree.$$"
+    verify_behavior_handshake="$PROVENANCE_ROOT/behavior-verify.handshake.$$"
+    verify_behavior_home="$PROVENANCE_ROOT/behavior-verify-home.$$"
+    verify_behavior_tmp="$PROVENANCE_ROOT/behavior-verify-tmp.$$"
+    run_behavior_probe "$DRIVER_PATH" "$verify_behavior_log" \
+        "$verify_behavior_transcript" "$verify_behavior_home" \
+        "$verify_behavior_tmp" "$verify_behavior_receipt" \
+        "$verify_behavior_tree" "$verify_behavior_handshake" ||
+        fail "driver-execution-history-probe-failed"
+    macos_gui_history_verify_normalized "$verify_behavior_handshake" \
+        "$DRIVER_PATH" "$(hash_file "$DRIVER_PATH")" ||
+        fail "fresh-execution-history-invalid"
+    macos_gui_history_verify_admitted_binding "$verify_behavior_handshake" \
+        "$ROOT_DIR" || fail "fresh-execution-history-binding-invalid"
+    bootstrap_stage3_verify_command_transcript "$verify_behavior_transcript" \
+        "$ROOT_DIR" SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "MACOS_GUI_ES_HISTORY_POLICY=$ES_HISTORY_POLICY_PATH" \
+        "MACOS_GUI_ES_HISTORY_POLICY_SHA256=$(hash_file "$ES_HISTORY_POLICY_PATH")" -- \
+        /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$DRIVER_PATH" \
+        --events "$verify_behavior_tree" --receipt "$verify_behavior_handshake" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon ||
+        fail "fresh-behavior-transcript-invalid"
+    macos_gui_history_remove_executed_snapshot "$verify_behavior_handshake" \
+        "$verify_behavior_handshake.driver-snapshot" ||
+        fail "fresh-executed-snapshot-cleanup-failed"
+    macos_gui_history_remove_collector_private_snapshot \
+        "$verify_behavior_handshake" ||
+        fail "fresh-collector-snapshot-cleanup-failed"
+    rm -f "$verify_behavior_log" "$verify_behavior_transcript" \
+        "$verify_behavior_receipt" "$verify_behavior_tree" \
+        "$verify_behavior_handshake"
+    rmdir "$verify_behavior_home" "$verify_behavior_tmp" 2>/dev/null || true
+    printf 'gui_driver_path=%s\n' "$DRIVER_PATH"
+    printf 'gui_driver_sha256=%s\n' "$(hash_file "$DRIVER_PATH")"
+    printf 'gui_driver_provenance_path=%s\n' "$origin"
+    printf 'gui_driver_provenance_sha256=%s\n' "$(hash_file "$receipt")"
+}
+
+build_driver() {
+    [ "$(uname -s)" = Darwin ] || fail "requires-macos"
+    require_execution_history_trust_root
+    require_clean_git "$ROOT_DIR"
+    verify_common_inputs
+    mkdir -p "$PROVENANCE_ROOT" "$BUILD_HOME" "$BUILD_TMP" "$BUILD_CACHE"
+    before="$PROVENANCE_ROOT/source-before.$$"
+    snapshot_sources "$before"
+    bootstrap_stage3_git_state "$ROOT_DIR" "$GIT_STATE_PATH" ||
+        fail "git-state-snapshot-failed"
+    bootstrap_stage3_run_transcribed "$BUILD_TRANSCRIPT_PATH" "$ROOT_DIR" \
+        "$BUILD_LOG_PATH" "$BUILD_HOME" "$BUILD_TMP" "$PATH" \
+        SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "SIMPLE_LINK_OBJECTS=$WINIT_PROVIDER:$RUNTIME_PROVIDER:$RUNTIME_C_PROVIDER" \
+        -- "$STAGE3_PATH" native-build --backend cranelift --threads 4 \
+        --mode one-binary --cache-dir "$BUILD_CACHE_REL" \
+        --runtime-bundle core-c-bootstrap --source src/compiler \
+        --source src/app --source src/lib --entry-closure \
+        --entry "$ENTRY_REL" --strip --verbose --output "$BUILD_OUTPUT_REL" ||
+        fail "full-cli-build-failed"
+    [ -x "$DRIVER_PATH" ] || fail "full-cli-output-missing"
+    ! forbidden_driver_binary_identity "$DRIVER_PATH" ||
+        fail "full-cli-output-forbidden-identity"
+    LC_ALL=C grep -aq "rt_winit_event_loop_new" "$DRIVER_PATH" ||
+        fail "full-cli-winit-marker-missing"
+    snapshot_sources "$SOURCE_SNAPSHOT_PATH"
+    cmp -s "$before" "$SOURCE_SNAPSHOT_PATH" ||
+        fail "source-changed-during-build"
+    rm -f "$before"
+    run_behavior_probe "$DRIVER_PATH" "$BEHAVIOR_LOG_PATH" \
+        "$BEHAVIOR_TRANSCRIPT_PATH" "$BUILD_HOME" "$BUILD_TMP" \
+        "$BEHAVIOR_RECEIPT_PATH" "$BEHAVIOR_TREE_PATH" \
+        "$BEHAVIOR_HANDSHAKE_PATH" ||
+        fail "full-cli-execution-history-probe-failed"
+    write_manifest
+    verify_manifest "$MANIFEST_PATH" "$MANIFEST_PATH"
+}
+
+usage() {
+    echo "usage: sh scripts/check/build-macos-full-cli-gui-provenance.shs --build|--verify [frozen-manifest canonical-origin]" >&2
+    exit 2
+}
+
+if [ "${MACOS_GUI_PROVENANCE_SOURCE_ONLY:-0}" != 1 ]; then
+    configure_paths
+    case "${1:-}" in
+        --build)
+            [ "$#" = 1 ] || usage
+            build_driver
+            ;;
+        --verify)
+            case "$#" in
+                1) verify_manifest "$MANIFEST_PATH" "$MANIFEST_PATH" ;;
+                3) verify_manifest "$2" "$3" ;;
+                *) usage ;;
+            esac
+            ;;
+        *) usage ;;
+    esac
+fi

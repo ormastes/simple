@@ -1,0 +1,220 @@
+# Chromium Shell DevTools — CSS Inspector (V3 simple_browser shell — M10)
+#
+# Second half of M10's acceptance criteria: "CSS inspector shows computed
+# styles". This module owns the *computed style* side of the devtools
+# attach contract — a keyed collection of `(property, value)` pairs per
+# DOM node id, plus a shell that tracks which node is currently selected.
+#
+# The inspector is intentionally loose about the CSS value type: M10
+# only requires that the panel can show a string like `color: rgb(…)`
+# next to a property name, so every value is stored as `text`. Upgrading
+# to a structured CSSValue later is a mechanical change confined to this
+# module.
+#
+# No Chrome DevTools Protocol parity; the chromium shell feeds the
+# inspector directly during snapshot rebuild.
+
+# =========================================================================
+# DevToolsComputedStyle
+# =========================================================================
+
+class DevToolsComputedStyle:
+    """The computed style block for one DOM node.
+
+    Two parallel arrays model an order-preserving property map; the
+    devtools panel iterates them in insertion order so sibling properties
+    stay adjacent in the inspector view. No hash table: a linear scan on
+    at most a few dozen properties is trivially cheap for devtools.
+    """
+    node_id: i64
+    property_names: [text]
+    property_values: [text]
+
+impl DevToolsComputedStyle:
+
+    static fn new(node_id: i64) -> DevToolsComputedStyle:
+        DevToolsComputedStyle(
+            node_id: node_id,
+            property_names: [],
+            property_values: []
+        )
+
+    fn node_id_of() -> i64:
+        self.node_id
+
+    fn count() -> i32:
+        self.property_names.len().to_i32()
+
+    fn is_empty() -> bool:
+        self.property_names.len() == 0
+
+    fn names() -> [text]:
+        self.property_names
+
+    fn values() -> [text]:
+        self.property_values
+
+    fn index_of(name: text) -> i32:
+        """Return the index of `name` in the property list, or -1."""
+        var i: i32 = 0
+        val n = self.property_names.len().to_i32()
+        while i < n:
+            if self.property_names[i] == name:
+                return i
+            i = i + 1
+        -1
+
+    fn has_property(name: text) -> bool:
+        self.index_of(name) >= 0
+
+    fn value_of(name: text) -> text:
+        """Return the computed value for `name`, or "" if not present."""
+        val idx = self.index_of(name)
+        if idx < 0:
+            ""
+        else:
+            self.property_values[idx]
+
+    me set(name: text, value: text):
+        """Insert or update a property. Existing entries keep their
+        position in the ordered list so the devtools panel sees stable
+        ordering across snapshots."""
+        val idx = self.index_of(name)
+        if idx < 0:
+            self.property_names = self.property_names + [name]
+            self.property_values = self.property_values + [value]
+        else:
+            # Rebuild values with the replacement in place.
+            var out: [text] = []
+            var i: i32 = 0
+            val n = self.property_values.len().to_i32()
+            while i < n:
+                if i == idx:
+                    out = out + [value]
+                else:
+                    out = out + [self.property_values[i]]
+                i = i + 1
+            self.property_values = out
+
+    me clear():
+        """Drop every property; used on snapshot rebuild."""
+        self.property_names = []
+        self.property_values = []
+
+    fn format_line(idx: i32) -> text:
+        """Return `"name: value"` for the property at `idx`. The devtools
+        panel concatenates these into the inspector column.
+        """
+        self.property_names[idx] + ": " + self.property_values[idx]
+
+# =========================================================================
+# DevToolsCssInspector
+# =========================================================================
+
+class DevToolsCssInspector:
+    """Top-level CSS inspector: owns a computed-style block per DOM node
+    id plus a `selected_id` pointer that the devtools panel uses to
+    decide which block to render.
+
+    `selected_id == -1` means nothing is selected; the panel renders an
+    empty inspector.
+    """
+    blocks: [DevToolsComputedStyle]
+    selected_id: i64
+
+impl DevToolsCssInspector:
+
+    static fn new() -> DevToolsCssInspector:
+        DevToolsCssInspector(
+            blocks: [],
+            selected_id: -1
+        )
+
+    fn count() -> i32:
+        self.blocks.len().to_i32()
+
+    fn is_empty() -> bool:
+        self.blocks.len() == 0
+
+    fn selected_id_of() -> i64:
+        self.selected_id
+
+    fn has_selection() -> bool:
+        self.selected_id >= 0
+
+    fn find_block_index(node_id: i64) -> i32:
+        var i: i32 = 0
+        val n = self.blocks.len().to_i32()
+        while i < n:
+            if self.blocks[i].node_id_of() == node_id:
+                return i
+            i = i + 1
+        -1
+
+    fn has_block(node_id: i64) -> bool:
+        self.find_block_index(node_id) >= 0
+
+    fn block_at(idx: i32) -> DevToolsComputedStyle:
+        self.blocks[idx]
+
+    fn block_for(node_id: i64) -> DevToolsComputedStyle:
+        """Return the block for `node_id`. Caller must ensure `has_block`
+        is true — fetching a missing block is a programming error.
+        """
+        val idx = self.find_block_index(node_id)
+        self.blocks[idx]
+
+    me ensure_block(node_id: i64) -> DevToolsComputedStyle:
+        """Return the block for `node_id`, creating it if necessary."""
+        val idx = self.find_block_index(node_id)
+        if idx >= 0:
+            return self.blocks[idx]
+        val fresh = DevToolsComputedStyle.new(node_id)
+        self.blocks = self.blocks + [fresh]
+        fresh
+
+    me set_property(node_id: i64, name: text, value: text):
+        """Insert or update a computed-style property for `node_id`.
+        Creates the block lazily so the chromium shell can stream
+        properties in any order."""
+        val block = self.ensure_block(node_id)
+        block.set(name, value)
+
+    me select(node_id: i64) -> bool:
+        """Select a node for display in the inspector view. Returns
+        false if there is no computed-style block for the id yet; the
+        devtools panel treats this as 'no selection available'."""
+        if self.has_block(node_id):
+            self.selected_id = node_id
+            true
+        else:
+            self.selected_id = -1
+            false
+
+    me clear_selection():
+        self.selected_id = -1
+
+    me clear():
+        """Drop every computed-style block and the selection."""
+        self.blocks = []
+        self.selected_id = -1
+
+    fn selected_block() -> DevToolsComputedStyle:
+        """Return the currently selected block. Caller must ensure
+        `has_selection()` is true."""
+        self.block_for(self.selected_id)
+
+    fn selected_lines() -> [text]:
+        """Return the formatted property lines for the current selection,
+        or an empty list if nothing is selected. The devtools panel
+        renders these verbatim in the inspector column."""
+        if not self.has_selection():
+            return []
+        val block = self.selected_block()
+        var out: [text] = []
+        var i: i32 = 0
+        val n = block.count()
+        while i < n:
+            out = out + [block.format_line(i)]
+            i = i + 1
+        out

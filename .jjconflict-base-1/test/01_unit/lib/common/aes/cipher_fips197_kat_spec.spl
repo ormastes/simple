@@ -1,0 +1,228 @@
+# AES key-schedule + block-cipher known-answer tests for src/lib/common/aes/
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Every pre-existing consumer of `std.common.aes.cipher` was round-trip-only:
+# encrypt then decrypt with the SAME key schedule. Such a test agrees with
+# itself under ANY wrong key schedule, wrong S-box orientation, or wrong
+# round-key slicing, so it can never detect one. This spec pins the module
+# against PUBLISHED vectors instead, in both directions.
+#
+# WHAT IT SETTLED (2026-08-08)
+# ----------------------------
+# A sibling lane reported this module's key schedule as BROKEN, citing round
+# key 1 = [64,72,16,24,...] against a published w[4] of d6aa74fd for the key
+# 2b7e1516...09cf4f3c. That report is REFUTED, on two counts:
+#   * The expected value was misattributed. d6aa74fd is w[4] for the FIPS 197
+#     Appendix C.1 key 000102...0f, NOT for 2b7e1516...09cf4f3c, whose A.1
+#     w[4] is a0fafe17 — the value this module actually produces.
+#   * All 19 assertions below pass unmodified against the module as shipped.
+# No source file was changed. The schedule, both block directions, and both
+# engines are FIPS-conformant. Positive control: flipping rcon[9] from 0x1b to
+# 0x1c in key_expansion.spl turns 6 of these 19 RED, and restoring it turns
+# them GREEN again, so this file discriminates rather than merely loading.
+#
+# Vectors (all verbatim from the standards, no derived/reformatted values):
+#   FIPS 197 Appendix A.1 — AES-128 key expansion, key 2b7e1516...09cf4f3c
+#   FIPS 197 Appendix A.3 — AES-256 key expansion, key 603deb10...0914dff4
+#   FIPS 197 Appendix C.1 — AES-128 block, key 000102...0f
+#   FIPS 197 Appendix C.3 — AES-256 block, key 000102...1f
+#
+# Comparisons are on RAW byte lists via to_equal. No hex-formatting helper is
+# used anywhere in the assertions: a buggy formatter would otherwise be able to
+# turn a correct value into a wrong-looking one (and vice versa).
+#
+# ENGINE NOTE — cipher.spl routes encrypt and decrypt through DIFFERENT engines:
+#   aes_encrypt_block / aes_encrypt_block_with_expanded -> _simd_ (AES-NI chain)
+#   aes_decrypt_block / aes_decrypt_block_with_expanded -> _scalar_ (software
+#                                                          rounds)
+# so `_scalar_aes_encrypt_block_with_expanded` and the whole
+# sub_bytes/shift_rows/mix_columns software chain have no caller on the encrypt
+# side. Both encrypt paths are therefore asserted SEPARATELY below, so a red
+# result attributes to the right engine.
+
+use std.spec.*
+use std.common.aes.key_expansion.{expand_key, get_key_word, get_round_key}
+use std.common.aes.cipher.{
+    aes_encrypt_block,
+    aes_decrypt_block,
+    aes_encrypt_block_with_expanded,
+    aes_decrypt_block_with_expanded,
+    _scalar_aes_encrypt_block_with_expanded
+}
+
+# ============================================================================
+# Keys and vectors
+# ============================================================================
+
+# FIPS 197 A.1 cipher key: 2b7e151628aed2a6abf7158809cf4f3c
+fn _a1_key() -> list:
+    [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+     0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c]
+
+# FIPS 197 A.3 cipher key:
+# 603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4
+fn _a3_key() -> list:
+    [0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+     0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+     0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+     0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4]
+
+# C.1 / C.3 shared plaintext: 00112233445566778899aabbccddeeff
+fn _c_pt() -> list:
+    [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+
+# C.1 AES-128 key: 000102030405060708090a0b0c0d0e0f
+fn _c1_key() -> list:
+    [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f]
+
+# C.1 AES-128 ciphertext: 69c4e0d86a7b0430d8cdb78070b4c55a
+fn _c1_ct() -> list:
+    [0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+     0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a]
+
+# C.3 AES-256 key: 000102...1c1d1e1f
+fn _c3_key() -> list:
+    [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+     0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f]
+
+# C.3 AES-256 ciphertext: 8ea2b7ca516745bfeafc49904b496089
+fn _c3_ct() -> list:
+    [0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf,
+     0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89]
+
+# ============================================================================
+# FIPS 197 Appendix A.1 — AES-128 key expansion
+# ============================================================================
+
+describe "AES-128 key expansion — FIPS 197 Appendix A.1":
+
+    it "produces round key 0 equal to the cipher key itself":
+        val w = expand_key(_a1_key(), 16)
+        expect(get_round_key(w, 0)).to_equal(_a1_key())
+
+    it "produces the published w4..w7 (round key 1)":
+        # A.1: w4=a0fafe17 w5=88542cb1 w6=23a33939 w7=2a6c7605
+        # This is the assertion a round-trip test can never make. It is also
+        # the one that catches a RotWord/SubWord ordering swap or an rcon[1]
+        # off-by-one.
+        val w = expand_key(_a1_key(), 16)
+        expect(get_key_word(w, 4)).to_equal([0xa0, 0xfa, 0xfe, 0x17])
+        expect(get_key_word(w, 5)).to_equal([0x88, 0x54, 0x2c, 0xb1])
+        expect(get_key_word(w, 6)).to_equal([0x23, 0xa3, 0x39, 0x39])
+        expect(get_key_word(w, 7)).to_equal([0x2a, 0x6c, 0x76, 0x05])
+
+    it "produces the published round key 1 as a contiguous 16-byte slice":
+        val w = expand_key(_a1_key(), 16)
+        expect(get_round_key(w, 1)).to_equal(
+            [0xa0, 0xfa, 0xfe, 0x17, 0x88, 0x54, 0x2c, 0xb1,
+             0x23, 0xa3, 0x39, 0x39, 0x2a, 0x6c, 0x76, 0x05])
+
+    it "produces the published w36..w39 (round key 9, exercises rcon[9]=0x1b)":
+        # rcon[9] = 0x1b is where the round constant stops being a plain
+        # power of two. Asserting only w4 cannot catch a corrupt entry here.
+        val w = expand_key(_a1_key(), 16)
+        expect(get_round_key(w, 9)).to_equal(
+            [0xac, 0x77, 0x66, 0xf3, 0x19, 0xfa, 0xdc, 0x21,
+             0x28, 0xd1, 0x29, 0x41, 0x57, 0x5c, 0x00, 0x6e])
+
+    it "produces the published final round key 10 (exercises rcon[10]=0x36)":
+        # A.1 last line: w40=d014f9a8 w41=c9ee2589 w42=e13f0cc8 w43=b6630ca6
+        val w = expand_key(_a1_key(), 16)
+        expect(get_round_key(w, 10)).to_equal(
+            [0xd0, 0x14, 0xf9, 0xa8, 0xc9, 0xee, 0x25, 0x89,
+             0xe1, 0x3f, 0x0c, 0xc8, 0xb6, 0x63, 0x0c, 0xa6])
+
+    it "expands to exactly 11 round keys (176 bytes)":
+        expect(expand_key(_a1_key(), 16).length()).to_equal(176)
+
+# ============================================================================
+# FIPS 197 Appendix A.3 — AES-256 key expansion
+# ============================================================================
+
+describe "AES-256 key expansion — FIPS 197 Appendix A.3":
+
+    it "produces round keys 0 and 1 equal to the two halves of the cipher key":
+        val w = expand_key(_a3_key(), 32)
+        expect(get_round_key(w, 0)).to_equal(
+            [0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+             0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81])
+        expect(get_round_key(w, 1)).to_equal(
+            [0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7,
+             0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4])
+
+    it "produces the published w8..w11 (round key 2)":
+        # A.3: w8=9ba35411 w9=8e6925af w10=a51a8b5f w11=2067fcde
+        val w = expand_key(_a3_key(), 32)
+        expect(get_key_word(w, 8)).to_equal([0x9b, 0xa3, 0x54, 0x11])
+        expect(get_key_word(w, 9)).to_equal([0x8e, 0x69, 0x25, 0xaf])
+        expect(get_key_word(w, 10)).to_equal([0xa5, 0x1a, 0x8b, 0x5f])
+        expect(get_key_word(w, 11)).to_equal([0x20, 0x67, 0xfc, 0xde])
+
+    it "produces the published w12..w15 (round key 3, the extra SubWord step)":
+        # AES-256 applies an EXTRA SubWord at i % Nk == 4 with no RotWord and
+        # no rcon. w12..w15 is the first place that branch runs, so this is
+        # the assertion that catches it being missing, misplaced, or applied
+        # with a spurious RotWord.
+        val w = expand_key(_a3_key(), 32)
+        expect(get_key_word(w, 12)).to_equal([0xa8, 0xb0, 0x9c, 0x1a])
+        expect(get_key_word(w, 13)).to_equal([0x93, 0xd1, 0x94, 0xcd])
+        expect(get_key_word(w, 14)).to_equal([0xbe, 0x49, 0x84, 0x6e])
+        expect(get_key_word(w, 15)).to_equal([0xb7, 0x5d, 0x5b, 0x9a])
+
+    it "produces the published final round key 14":
+        # A.3 last line: w56=fe4890d1 w57=e6188d0b w58=046df344 w59=706c631e
+        val w = expand_key(_a3_key(), 32)
+        expect(get_round_key(w, 14)).to_equal(
+            [0xfe, 0x48, 0x90, 0xd1, 0xe6, 0x18, 0x8d, 0x0b,
+             0x04, 0x6d, 0xf3, 0x44, 0x70, 0x6c, 0x63, 0x1e])
+
+    it "expands to exactly 15 round keys (240 bytes)":
+        expect(expand_key(_a3_key(), 32).length()).to_equal(240)
+
+# ============================================================================
+# FIPS 197 Appendix C — block cipher, both directions, both engines
+# ============================================================================
+
+describe "AES block cipher — FIPS 197 Appendix C.1 (AES-128)":
+
+    it "encrypts the published plaintext to the published ciphertext":
+        expect(aes_encrypt_block(_c_pt(), _c1_key())).to_equal(_c1_ct())
+
+    it "decrypts the published ciphertext back to the published plaintext":
+        expect(aes_decrypt_block(_c1_ct(), _c1_key())).to_equal(_c_pt())
+
+    it "encrypts identically through the software (scalar) round chain":
+        # aes_encrypt_block routes to the SIMD chain, leaving the scalar
+        # encrypt path and its sub_bytes/shift_rows/mix_columns helpers
+        # untested by the public API. Pin it directly.
+        val w = expand_key(_c1_key(), 16)
+        expect(_scalar_aes_encrypt_block_with_expanded(_c_pt(), w, 10)).to_equal(_c1_ct())
+
+    it "round-trips through the with_expanded entry points":
+        val w = expand_key(_c1_key(), 16)
+        val ct = aes_encrypt_block_with_expanded(_c_pt(), w, 10)
+        expect(ct).to_equal(_c1_ct())
+        expect(aes_decrypt_block_with_expanded(ct, w, 10)).to_equal(_c_pt())
+
+describe "AES block cipher — FIPS 197 Appendix C.3 (AES-256)":
+
+    it "encrypts the published plaintext to the published ciphertext":
+        expect(aes_encrypt_block(_c_pt(), _c3_key())).to_equal(_c3_ct())
+
+    it "decrypts the published ciphertext back to the published plaintext":
+        expect(aes_decrypt_block(_c3_ct(), _c3_key())).to_equal(_c_pt())
+
+    it "encrypts identically through the software (scalar) round chain":
+        val w = expand_key(_c3_key(), 32)
+        expect(_scalar_aes_encrypt_block_with_expanded(_c_pt(), w, 14)).to_equal(_c3_ct())
+
+    it "round-trips through the with_expanded entry points":
+        val w = expand_key(_c3_key(), 32)
+        val ct = aes_encrypt_block_with_expanded(_c_pt(), w, 14)
+        expect(ct).to_equal(_c3_ct())
+        expect(aes_decrypt_block_with_expanded(ct, w, 14)).to_equal(_c_pt())

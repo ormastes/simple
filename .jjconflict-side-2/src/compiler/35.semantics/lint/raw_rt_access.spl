@@ -1,0 +1,147 @@
+# Raw Runtime Intrinsic Access Lint
+#
+# raw_rt_access: warns when a module OUTSIDE the privileged tiers declares a
+# raw `extern fn rt_*` runtime intrinsic directly. Application and library code
+# must use the std wrappers instead of binding raw runtime symbols.
+#
+# RAW-RT-001: `extern fn rt_<name>` declared outside src/lib/ or src/runtime/   WARNING
+#
+# Privileged tiers may declare raw intrinsics directly. A source path is
+# privileged when it sits under `src/lib/` or `src/runtime/` — the facade
+# owners. `src/compiler/` is NOT privileged: a refactor (see
+# llvm_native_link.spl) routed ~65 raw rt_* call sites in the compiler
+# backend through the std.nogc_sync_mut.io_runtime facade because new
+# `extern fn rt_*` decls in CLI-closure modules brick the deployed binary
+# (unknown-extern rejection at module load kills ALL native-builds). This
+# lint stays at WARNING severity (not Deny) so the many pre-existing
+# `extern fn rt_*` declarations still in src/compiler/ (the compiler defines
+# and bridges most of the rt_* runtime interface) do not fail the build —
+# it flags them for review without gating on the existing count.
+#
+# This file uses text-heuristic analysis (no AST dependency) so it can run in
+# interpreter-mode specs. It scans `extern fn` lines the way
+# concurrency_api_misuse's E-PAR-005 scan does and extracts the declared name
+# to test the `rt_` prefix.
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct RawRtAccessFinding:
+    code: text
+    severity: text
+    message: text
+    name: text
+    note: text
+    line_num: i64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} — {self.note}"
+
+# ============================================================================
+# Path Privilege Helper
+# ============================================================================
+
+fn _rra_is_privileged_path(file_path: text) -> bool:
+    """Privileged (facade-owner) tiers may declare raw intrinsics directly:
+    any path under `src/lib/` or `src/runtime/`.
+
+    `src/compiler/` is intentionally NOT privileged: it is CLI-closure code,
+    and a new `extern fn rt_*` declared there can brick the deployed binary
+    (unknown-extern rejection at module load). The compiler's many existing
+    `extern fn rt_*` declarations are still only WARNING-level findings (see
+    file header), so this does not fail the build — it surfaces them for
+    review and stops new ones from blending in silently."""
+    if file_path.contains("src/lib/"):
+        return true
+    if file_path.contains("src/runtime/"):
+        return true
+    false
+
+fn _rra_marks_runtime_intrinsics(source: text) -> bool:
+    """File-level `@runtime_intrinsics` / `#[runtime_intrinsics]` opt-out marker.
+
+    Code that legitimately implements or bridges the runtime (emulators,
+    baremetal MMIO, crypto/protocol impls) may keep raw `rt_*` externs by
+    declaring this marker near the top of the file. Mirrors the Rust seed
+    `file_marks_runtime_intrinsics` (top-of-file scan)."""
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len() and i < 30:
+        val t = lines[i].trim()
+        if t == "@runtime_intrinsics" or t.starts_with("@runtime_intrinsics ") or t == "#[runtime_intrinsics]":
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Extern Name Extraction
+# ============================================================================
+
+fn _rra_extern_fn_name(trimmed: text) -> text:
+    """Extract the declared name from a trimmed `extern fn <name>...` line.
+
+    Returns "" when the line is not an extern fn declaration with a name."""
+    if not trimmed.starts_with("extern fn "):
+        return ""
+    val rest = trimmed.substring(10, trimmed.len()).trim()
+    var name = ""
+    var i = 0
+    val rlen = rest.len()
+    while i < rlen:
+        val ch = rest.substring(i, i + 1)
+        if _rra_is_ident_char(ch):
+            name = name + ch
+        else:
+            break
+        i = i + 1
+    name
+
+fn _rra_is_ident_char(ch: text) -> bool:
+    """True for identifier characters (alnum or underscore)."""
+    if ch == "_":
+        return true
+    val is_lower = ch >= "a" and ch <= "z"
+    val is_upper = ch >= "A" and ch <= "Z"
+    val is_digit = ch >= "0" and ch <= "9"
+    is_lower or is_upper or is_digit
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn check_raw_rt_access(source: text, file_path: text) -> [RawRtAccessFinding]:
+    """Text-based heuristic for RAW-RT-001 detection.
+
+    Emits a WARNING for each `extern fn rt_*` declaration in a non-privileged
+    source file. Privileged tiers (src/lib/, src/runtime/) are skipped, matching
+    the Rust seed lint `raw_rt_access`. Pass "" for file_path when unknown
+    (treated as non-privileged)."""
+    var findings: [RawRtAccessFinding] = []
+    if _rra_is_privileged_path(file_path):
+        return findings
+    if _rra_marks_runtime_intrinsics(source):
+        return findings
+
+    val lines = source.split("\n")
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        val t = line.trim()
+        if not t.starts_with("extern fn "):
+            continue
+        val name = _rra_extern_fn_name(t)
+        if name == "":
+            continue
+        if not name.starts_with("rt_"):
+            continue
+        val msg = "application code must not declare raw runtime intrinsic `{name}` directly; use the std wrapper"
+        findings.push(RawRtAccessFinding(
+            code: "RAW-RT-001",
+            severity: "WARNING",
+            message: msg,
+            name: name,
+            note: "use the std wrapper (e.g. std.io_runtime.file_read / file_write) instead of extern fn rt_*",
+            line_num: line_num
+        ))
+    findings

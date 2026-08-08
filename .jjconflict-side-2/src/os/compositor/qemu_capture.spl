@@ -1,0 +1,219 @@
+
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.shared_mdi_framebuffer_scene.{render_shared_mdi_framebuffer_scene}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
+use std.nogc_sync_mut.qemu.qmp_client.{QmpClient, qmp_connect, qmp_disconnect, qmp_screendump}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_thread_sleep(millis: i64)
+
+class QemuScreendumpCommandResult:
+    success: bool
+    error: text
+
+class QemuScreendumpProbeResult:
+    success: bool
+    backend_name: text
+    width: i32
+    height: i32
+    pixel_count: i64
+    non_black_count: i64
+    sample_match_count: i64
+    sample_mismatch_count: i64
+    sample_checksum: i64
+    scene_mismatch_count: i64
+    first_mismatch_x: i64
+    first_mismatch_y: i64
+    error: text
+
+fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
+    val pixels = render_scene_to_backend(scene, nil)
+    CaptureResult(backend_name: "browser_compositor", width: scene.width, height: scene.height, pixels: pixels, success: true, error: "")
+
+fn decode_qemu_screendump_ppm(data: [u8]) -> CaptureResult:
+    match decode_ppm_to_argb(data):
+        Ok(image):
+            CaptureResult(backend_name: "qemu_vm", width: image.width, height: image.height, pixels: image.pixels, success: true, error: "")
+        Err(msg):
+            capture_error("qemu_vm", 0, 0, "QEMU screendump PPM decode failed: {msg}")
+
+fn qemu_screendump_to_file(qmp_socket: text, out_path: text) -> QemuScreendumpCommandResult:
+    # Drive the persistent pure-Simple QMP client (greeting + capabilities +
+    # screendump HMC). QEMU writes the framebuffer asynchronously, so poll the
+    # output file until it has bytes (up to ~5s) before reporting success.
+    val client = qmp_connect(qmp_socket)
+    if client.fd < 0:
+        return QemuScreendumpCommandResult(success: false, error: "QMP connect failed for socket: {qmp_socket}")
+    val sent = qmp_screendump(client, out_path, "ppm")
+    var ready = false
+    var attempt: i64 = 0
+    while attempt < 50:
+        if rt_file_exists(out_path) and rt_file_size(out_path) > 0:
+            ready = true
+            break
+        rt_thread_sleep(100)
+        attempt = attempt + 1
+    val _ = qmp_disconnect(client)
+    if sent and ready:
+        return QemuScreendumpCommandResult(success: true, error: "")
+    val detail = if not sent: "screendump command rejected" else: "screendump produced no output within timeout"
+    QemuScreendumpCommandResult(success: false, error: detail)
+
+fn capture_qemu_vm(qmp_socket: text, out_path: text) -> CaptureResult:
+    if qmp_socket.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty output path")
+    if not rt_file_exists(qmp_socket):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable for socket: {qmp_socket}")
+    val dumped = qemu_screendump_to_file(qmp_socket, out_path)
+    if not dumped.success:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump command failed for socket: {qmp_socket} ({dumped.error})")
+    if not rt_file_exists(out_path):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump did not create output: {out_path}")
+    val data: [u8] = rt_file_read_bytes(out_path) ?? []
+    decode_qemu_screendump_ppm(data)
+
+fn probe_qemu_vm_screendump(qmp_socket: text, out_path: text) -> QemuScreendumpProbeResult:
+    if qmp_socket.len() == 0:
+        return _qemu_probe_error("QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return _qemu_probe_error("QEMU screendump unavailable: empty output path")
+    val cap = capture_qemu_vm(qmp_socket, out_path)
+    if not cap.success:
+        return _qemu_probe_error(cap.error)
+    val pixels = cap.pixels
+    val pixel_count = pixels.len().to_i64()
+    var nonblack: i64 = 0
+    var idx: i64 = 0
+    while idx < pixel_count:
+        if (pixels[idx] & 0x00FFFFFFu32) != 0u32:
+            nonblack = nonblack + 1
+        idx = idx + 1
+
+    # `expected_scene` is a synthetic seed-window scene (shared_mdi_seed_windows,
+    # a fixed demo surface list, not live GUI content): its fixed synthetic seed
+    # strings render verbatim through the live-text branch of
+    # shared_wm_scene_render_app_content — still canned demo constants, not live
+    # per-window WmContentFrame data, since none exists for this synthetic scene
+    # to route through the honest content-frame render path instead. Its own readback_status field is left
+    # "unavailable:qemu-framebuffer-write-only" (never "verified:*") for that
+    # reason; this probe only uses `expected.pixels` for a local pixel
+    # comparison and never re-exports that field as evidence.
+    val expected_scene = render_shared_mdi_framebuffer_scene(cap.width, cap.height, "qemu-framebuffer-cpu-simd")
+    val expected = expected_scene.pixels
+    val s0 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 100, 40)
+    val s1 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 200, 750)
+    val s2 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 10, 750)
+    val s3 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 130, 90)
+    val s4 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 470, 130)
+    val s5 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 150, 132)
+    val s6 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 300, 132)
+    val s7 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 150, 180)
+    val s8 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 500, 180)
+    val s9 = _qemu_probe_sample_expected(pixels, expected, cap.width, cap.height, 860, 750)
+    val matches = s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8 + s9
+    val mismatches = 10 - matches
+    val checksum = _qemu_probe_checksum(pixels, cap.width, cap.height)
+
+    var scene_mismatches: i64 = 0
+    var first_x: i64 = -1
+    var first_y: i64 = -1
+    var y: i32 = 0
+    while y < cap.height:
+        var x: i32 = 0
+        while x < cap.width:
+            val offset = (y.to_i64() * cap.width.to_i64() + x.to_i64()).to_i64()
+            val expected_rgb = _qemu_expected_shared_scene_rgb(expected, cap.width, cap.height, x, y)
+            if (pixels[offset] & 0x00FFFFFFu32) != expected_rgb:
+                scene_mismatches = scene_mismatches + 1
+                if first_x < 0:
+                    first_x = x.to_i64()
+                    first_y = y.to_i64()
+            x = x + 1
+        y = y + 1
+
+    QemuScreendumpProbeResult(
+        success: cap.width > 0 and cap.height > 0 and pixel_count > 0 and nonblack > 0 and mismatches == 0 and scene_mismatches == 0,
+        backend_name: "qemu_vm",
+        width: cap.width,
+        height: cap.height,
+        pixel_count: pixel_count,
+        non_black_count: nonblack,
+        sample_match_count: matches,
+        sample_mismatch_count: mismatches,
+        sample_checksum: checksum,
+        scene_mismatch_count: scene_mismatches,
+        first_mismatch_x: first_x,
+        first_mismatch_y: first_y,
+        error: "")
+
+fn _qemu_probe_error(error: text) -> QemuScreendumpProbeResult:
+    QemuScreendumpProbeResult(success: false, backend_name: "qemu_vm", width: 0, height: 0, pixel_count: 0, non_black_count: 0, sample_match_count: 0, sample_mismatch_count: 0, sample_checksum: 0, scene_mismatch_count: 0, first_mismatch_x: -1, first_mismatch_y: -1, error: error)
+
+fn _qemu_probe_sample_expected(pixels: [u32], expected: [u32], width: i32, height: i32, x: i32, y: i32) -> i64:
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return 0
+    val offset = (y.to_i64() * width.to_i64() + x.to_i64()).to_i64()
+    if offset < 0 or offset >= pixels.len().to_i64():
+        return 0
+    val expected_rgb = _qemu_expected_shared_scene_rgb(expected, width, height, x, y)
+    if expected_rgb == (pixels[offset] & 0x00FFFFFFu32):
+        return 1
+    0
+
+fn _qemu_probe_checksum(pixels: [u32], width: i32, height: i32) -> i64:
+    var checksum: i64 = 0
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 100, 40)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 200, 750)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 10, 750)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 130, 90)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 470, 130)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 150, 132)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 300, 132)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 150, 180)
+    checksum = _qemu_probe_checksum_sample(checksum, pixels, width, height, 500, 180)
+    _qemu_probe_checksum_sample(checksum, pixels, width, height, 860, 750)
+
+fn _qemu_probe_checksum_sample(seed: i64, pixels: [u32], width: i32, height: i32, x: i32, y: i32) -> i64:
+    var got_sum: i64 = 0
+    if x >= 0 and y >= 0 and x < width and y < height:
+        val offset = (y.to_i64() * width.to_i64() + x.to_i64()).to_i64()
+        if offset >= 0 and offset < pixels.len().to_i64():
+            val px = pixels[offset]
+            got_sum = (((px >> 16) & 0xFFu32) + ((px >> 8) & 0xFFu32) + (px & 0xFFu32)).to_i64()
+    ((seed * 131 + x.to_i64() * 31 + y.to_i64() * 17 + got_sum) % 922337203685477)
+
+fn _qemu_cursor_overlay_hit(x: i32, y: i32, cx: i32, cy: i32) -> bool:
+    if x >= cx and x < cx + 2 and y >= cy and y < cy + 22:
+        return true
+    if x >= cx + 2 and x < cx + 4 and y >= cy + 2 and y < cy + 20:
+        return true
+    if x >= cx + 4 and x < cx + 6 and y >= cy + 4 and y < cy + 18:
+        return true
+    if x >= cx + 6 and x < cx + 8 and y >= cy + 6 and y < cy + 16:
+        return true
+    if x >= cx + 8 and x < cx + 10 and y >= cy + 8 and y < cy + 14:
+        return true
+    if x >= cx + 5 and x < cx + 15 and y >= cy + 16 and y < cy + 18:
+        return true
+    if x >= cx + 8 and x < cx + 16 and y >= cy + 18 and y < cy + 20:
+        return true
+    if x >= cx + 12 and x < cx + 18 and y >= cy + 20 and y < cy + 22:
+        return true
+    false
+
+fn _qemu_expected_shared_scene_rgb(expected: [u32], width: i32, height: i32, x: i32, y: i32) -> u32:
+    if y == 0 and x >= 0 and x < 32:
+        return 0x00FF0000u32
+    if _qemu_cursor_overlay_hit(x, y, 360, 190):
+        return 0x00FFFFFFu32
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return 0u32
+    val offset = (y.to_i64() * width.to_i64() + x.to_i64()).to_i64()
+    if offset < 0 or offset >= expected.len().to_i64():
+        return 0u32
+    expected[offset] & 0x00FFFFFFu32

@@ -1,0 +1,58 @@
+# @cover src/compiler/30.types/units/unit_registry.spl
+# # Newunit Registry Collection Specification
+#
+# `newunit Name: T as suffix` declarations are recorded by the parser via
+# `newunit_register` (compiler.core.types) and collected into the compiler's
+# UnitRegistry by `unit_registry_build` / `unit_registry_collect_newunits`.
+# Before this landed, unit_registry_build was a no-op skeleton and newunit
+# declarations never reached the registry.
+#
+# Assertion style note: `.?` on an Option evaluates to the PAYLOAD (object),
+# not a bool, on both engines (2026-07-28) — so these specs assert via match
+# on lookup_entry and concrete field values, never `expect(x != nil).to_equal(true)`.
+
+use std.spec
+use compiler.core.types.{newunit_register, newunit_count, TYPE_I64, TYPE_F64}
+use compiler.types.units.unit_registry.{
+    UnitRegistry, unit_registry_build, unit_registry_collect_newunits
+}
+
+describe "newunit registry collection":
+
+    it "records a newunit declaration in the parser-side registry":
+        val idx = newunit_register("SpecUserId", "suid", TYPE_I64)
+        assert_true(idx >= 0)
+        assert_true(newunit_count() > idx)
+
+    it "unit_registry_build makes a recorded newunit visible by suffix":
+        newunit_register("SpecMeters", "smtr", TYPE_I64)
+        val reg = unit_registry_build()
+        assert_true(reg.has("smtr"))
+
+    it "collected entry carries name, suffix, and underlying kind":
+        newunit_register("SpecPrice", "sprc", TYPE_F64)
+        val reg = unit_registry_build()
+        match reg.lookup_entry("sprc"):
+            case Some(entry):
+                expect(entry.short_symbol).to_equal("sprc")
+                expect(entry.full_symbol).to_equal("SpecPrice")
+                expect(entry.kind).to_equal("f64")
+            case None:
+                assert_true(false)
+
+    it "entry is also visible by full type name":
+        newunit_register("SpecWeight", "swt", TYPE_I64)
+        val reg = unit_registry_build()
+        match reg.lookup_entry("SpecWeight"):
+            case Some(entry):
+                expect(entry.short_symbol).to_equal("swt")
+            case None:
+                assert_true(false)
+
+    it "re-registering the same name updates instead of duplicating":
+        val a = newunit_register("SpecDup", "sd1", TYPE_I64)
+        val b = newunit_register("SpecDup", "sd2", TYPE_I64)
+        expect(a).to_equal(b)
+        val reg = UnitRegistry.new()
+        unit_registry_collect_newunits(reg)
+        assert_true(reg.has("sd2"))

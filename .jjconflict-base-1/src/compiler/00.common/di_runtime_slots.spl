@@ -1,0 +1,192 @@
+# DI Runtime Slots - plugin-backed DI extension point index
+#
+# Runtime slots are explicit DI graph holes that may be satisfied by trusted
+# plugin metadata. The index validates declarations once at startup, keeps
+# diagnostics typed, and resolves hot requests from prefiltered slot entries.
+
+class DiRuntimeSlot:
+    name: text
+    type_name: text
+    collection: bool
+    final_binding: bool
+
+class DiRuntimePluginBinding:
+    slot_name: text
+    type_name: text
+    plugin_name: text
+    library_path: text
+    implementation: text
+    order: i64
+
+class DiRuntimeSlotDiagnostic:
+    ok: bool
+    kind: text
+    message: text
+    slot_name: text
+
+class DiRuntimeSlotIndex:
+    slots: [DiRuntimeSlot]
+    bindings: [DiRuntimePluginBinding]
+    diagnostics: [DiRuntimeSlotDiagnostic]
+    startup_scan_count: i64
+
+class DiRuntimeResolveResult:
+    ok: bool
+    implementation: text
+    implementations: [text]
+    diagnostic: DiRuntimeSlotDiagnostic
+    startup_scan_count: i64
+    hot_resolve_count: i64
+
+fn di_runtime_slot(name: text, type_name: text) -> DiRuntimeSlot:
+    DiRuntimeSlot(name: name, type_name: type_name, collection: false, final_binding: false)
+
+fn di_runtime_collection_slot(name: text, type_name: text) -> DiRuntimeSlot:
+    DiRuntimeSlot(name: name, type_name: type_name, collection: true, final_binding: false)
+
+fn di_runtime_final_slot(name: text, type_name: text) -> DiRuntimeSlot:
+    DiRuntimeSlot(name: name, type_name: type_name, collection: false, final_binding: true)
+
+fn di_runtime_plugin_binding(
+    slot_name: text,
+    type_name: text,
+    plugin_name: text,
+    library_path: text,
+    implementation: text,
+    order: i64) -> DiRuntimePluginBinding:
+    DiRuntimePluginBinding(
+        slot_name: slot_name,
+        type_name: type_name,
+        plugin_name: plugin_name,
+        library_path: library_path,
+        implementation: implementation,
+        order: order)
+
+fn di_runtime_ok() -> DiRuntimeSlotDiagnostic:
+    DiRuntimeSlotDiagnostic(ok: true, kind: "Ok", message: "", slot_name: "")
+
+fn _di_runtime_error(kind: text, slot_name: text, message: text) -> DiRuntimeSlotDiagnostic:
+    DiRuntimeSlotDiagnostic(ok: false, kind: kind, message: message, slot_name: slot_name)
+
+fn _di_runtime_find_slot(slots: [DiRuntimeSlot], name: text) -> i64:
+    var idx = 0
+    while idx < slots.len():
+        if slots[idx].name == name:
+            return idx
+        idx = idx + 1
+    -1
+
+fn _di_runtime_is_safe_relative_path(path: text) -> bool:
+    if path == "":
+        return false
+    if path.starts_with("/") or path.starts_with("~"):
+        return false
+    if path.contains("..") or path.contains("\\"):
+        return false
+    if path.contains("://"):
+        return false
+    true
+
+fn di_runtime_validate_binding(slots: [DiRuntimeSlot], binding: DiRuntimePluginBinding) -> DiRuntimeSlotDiagnostic:
+    val slot_idx = _di_runtime_find_slot(slots, binding.slot_name)
+    if slot_idx < 0:
+        return _di_runtime_error("UndeclaredRuntimeSlot", binding.slot_name, "runtime slot is not declared")
+    val slot = slots[slot_idx]
+    if slot.final_binding:
+        return _di_runtime_error("FinalRuntimeSlot", binding.slot_name, "runtime slot is final and cannot be plugin-bound")
+    if slot.type_name != binding.type_name:
+        return _di_runtime_error("RuntimeSlotTypeMismatch", binding.slot_name, "plugin binding type does not match declared slot type")
+    if binding.plugin_name == "" or binding.implementation == "":
+        return _di_runtime_error("InvalidRuntimeSlotBinding", binding.slot_name, "plugin name and implementation are required")
+    if not _di_runtime_is_safe_relative_path(binding.library_path):
+        return _di_runtime_error("UnsafeRuntimeSlotPath", binding.slot_name, "plugin library path must be safe and relative")
+    di_runtime_ok()
+
+fn _di_runtime_binding_before(a: DiRuntimePluginBinding, b: DiRuntimePluginBinding) -> bool:
+    if a.order < b.order:
+        return true
+    if a.order > b.order:
+        return false
+    if a.plugin_name < b.plugin_name:
+        return true
+    if a.plugin_name > b.plugin_name:
+        return false
+    a.implementation < b.implementation
+
+fn _di_runtime_insert_ordered(items: [DiRuntimePluginBinding], binding: DiRuntimePluginBinding) -> [DiRuntimePluginBinding]:
+    var out: [DiRuntimePluginBinding] = []
+    var inserted = false
+    var idx = 0
+    while idx < items.len():
+        if not inserted and _di_runtime_binding_before(binding, items[idx]):
+            out.push(binding)
+            inserted = true
+        out.push(items[idx])
+        idx = idx + 1
+    if not inserted:
+        out.push(binding)
+    out
+
+fn di_runtime_build_slot_index(slots: [DiRuntimeSlot], bindings: [DiRuntimePluginBinding]) -> DiRuntimeSlotIndex:
+    var valid: [DiRuntimePluginBinding] = []
+    var diagnostics: [DiRuntimeSlotDiagnostic] = []
+    var idx = 0
+    while idx < bindings.len():
+        val binding = bindings[idx]
+        val diag = di_runtime_validate_binding(slots, binding)
+        if diag.ok:
+            valid = _di_runtime_insert_ordered(valid, binding)
+        else:
+            diagnostics.push(diag)
+        idx = idx + 1
+    DiRuntimeSlotIndex(slots: slots, bindings: valid, diagnostics: diagnostics, startup_scan_count: bindings.len())
+
+fn _di_runtime_duplicate_result(index: DiRuntimeSlotIndex, slot: DiRuntimeSlot, first: text, second: text, hot_count: i64) -> DiRuntimeResolveResult:
+    DiRuntimeResolveResult(
+        ok: false,
+        implementation: "",
+        implementations: [],
+        diagnostic: _di_runtime_error("DuplicateRuntimeSlotImplementation", slot.name, "runtime slot has multiple plugin implementations: {first}, {second}"),
+        startup_scan_count: index.startup_scan_count,
+        hot_resolve_count: hot_count)
+
+fn di_runtime_resolve_indexed(index: DiRuntimeSlotIndex, slot_name: text) -> DiRuntimeResolveResult:
+    val slot_idx = _di_runtime_find_slot(index.slots, slot_name)
+    if slot_idx < 0:
+        return DiRuntimeResolveResult(
+            ok: false,
+            implementation: "",
+            implementations: [],
+            diagnostic: _di_runtime_error("UndeclaredRuntimeSlot", slot_name, "runtime slot is not declared"),
+            startup_scan_count: index.startup_scan_count,
+            hot_resolve_count: 0)
+    val slot = index.slots[slot_idx]
+    var implementations: [text] = []
+    var hot_count = 0
+    var idx = 0
+    while idx < index.bindings.len():
+        val binding = index.bindings[idx]
+        if binding.slot_name == slot_name:
+            implementations.push(binding.implementation)
+            hot_count = hot_count + 1
+            if not slot.collection and implementations.len() > 1:
+                return _di_runtime_duplicate_result(index, slot, implementations[0], implementations[1], hot_count)
+        idx = idx + 1
+    if implementations.len() == 0:
+        return DiRuntimeResolveResult(
+            ok: false,
+            implementation: "",
+            implementations: [],
+            diagnostic: _di_runtime_error("MissingRuntimeSlotImplementation", slot_name, "runtime slot has no plugin implementation"),
+            startup_scan_count: index.startup_scan_count,
+            hot_resolve_count: hot_count)
+    DiRuntimeResolveResult(
+        ok: true,
+        implementation: implementations[0],
+        implementations: implementations,
+        diagnostic: di_runtime_ok(),
+        startup_scan_count: index.startup_scan_count,
+        hot_resolve_count: hot_count)
+
+fn di_runtime_index_diagnostics(index: DiRuntimeSlotIndex) -> [DiRuntimeSlotDiagnostic]:
+    index.diagnostics

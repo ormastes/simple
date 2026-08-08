@@ -1,0 +1,515 @@
+# Typed X.509 v3 certificate parser — Pure Simple.
+#
+# MDSOC: feature dimension, crypto layer. RFC 5280 §4.
+#
+# This module provides a *typed* certificate view (`X509Cert`) richer than
+# crypto/x509.spl's `X509Certificate`:
+#   - OIDs as decoded arc arrays ([i64]) instead of dotted text
+#   - validity as Unix epoch seconds (i64) instead of raw bytes
+#   - EC SubjectPublicKeyInfo support (raw EC point in `spki_key`)
+#   - parsed v3 extensions ([X509Extension])
+#
+# It is intentionally SELF-CONTAINED: crypto/x509.spl does NOT export its
+# `_x_*` TLV helpers, and its `_x_parse_spki` hard-requires an RSAPublicKey
+# SEQUENCE (so it returns Err on the EC certs this module targets). Reusing it
+# is infeasible; we re-implement the (small) DER TLV walker here. We also do
+# NOT `use` crypto/x509.spl, so `x509_parse_der` / `X509ParseResult` never
+# collide in the global symbol registry.
+#
+# tag: crypto, x509, der, certificate, typed
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+struct X509Extension:
+    """A parsed v3 certificate extension."""
+    oid: [i64]                # extension OID as arc array
+    critical: bool            # criticality flag (DEFAULT FALSE)
+    value: [u8]               # extnValue OCTET STRING contents
+
+struct X509Cert:
+    """Typed X.509 v3 certificate view."""
+    version: i64              # 0=v1, 1=v2, 2=v3
+    serial: [u8]              # serial number bytes (leading 0x00 stripped)
+    sig_alg_oid: [i64]        # TBS signature algorithm OID arcs
+    issuer: [u8]              # issuer Name — full SEQUENCE TLV (tag+len+value)
+    not_before_unix: i64      # validity notBefore as Unix epoch seconds
+    not_after_unix: i64       # validity notAfter as Unix epoch seconds
+    subject: [u8]             # subject Name — full SEQUENCE TLV (tag+len+value)
+    spki_alg_oid: [i64]       # SPKI algorithm OID arcs
+    spki_params: [u8]         # SPKI algorithm parameters (e.g. EC named-curve)
+    spki_key: [u8]            # public key bytes (BITSTRING minus unused-bits byte)
+    extensions: [X509Extension]
+    sig_value: [u8]           # signatureValue (BITSTRING minus unused-bits byte)
+
+enum X509ParseResult:
+    Ok(cert: X509Cert)
+    Err(reason: text)
+
+# ============================================================================
+# TLV walker (self-contained)
+# ============================================================================
+
+struct _XtTlvOk:
+    tag: u8
+    value: [u8]
+    next_off: u64
+
+enum _XtTlv:
+    Ok(r: _XtTlvOk)
+    Err(msg: text)
+
+fn _xt_slice(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(data[start + i])
+        i = i + 1
+    out
+
+fn _xt_strip_padding(bytes: [u8]) -> [u8]:
+    var start: u64 = 0
+    while start + 1 < bytes.len() and bytes[start] == 0x00:
+        start = start + 1
+    _xt_slice(bytes, start, bytes.len() - start)
+
+fn _xt_read_tlv(data: [u8], off: u64) -> _XtTlv:
+    if off + 2 > data.len():
+        return _XtTlv.Err(msg: "InvalidDer: truncated TLV at {off}")
+    val tag = data[off]
+    val first = data[off + 1]
+    var value_off: u64 = off + 2
+    var length: u64 = 0
+    if (first & 0x80) == 0:
+        length = first.to_u64()
+    elif first == 0x81:
+        if off + 3 > data.len():
+            return _XtTlv.Err(msg: "InvalidDer: truncated len(0x81)")
+        length = data[off + 2].to_u64()
+        value_off = off + 3
+    elif first == 0x82:
+        if off + 4 > data.len():
+            return _XtTlv.Err(msg: "InvalidDer: truncated len(0x82)")
+        val hi = data[off + 2].to_u64()
+        val lo = data[off + 3].to_u64()
+        length = (hi << 8) | lo
+        value_off = off + 4
+    elif first == 0x83:
+        if off + 5 > data.len():
+            return _XtTlv.Err(msg: "InvalidDer: truncated len(0x83)")
+        val b2 = data[off + 2].to_u64()
+        val b3 = data[off + 3].to_u64()
+        val b4 = data[off + 4].to_u64()
+        length = (b2 << 16) | (b3 << 8) | b4
+        value_off = off + 5
+    else:
+        return _XtTlv.Err(msg: "InvalidDer: unsupported length form {first}")
+    if value_off + length > data.len():
+        return _XtTlv.Err(msg: "InvalidDer: value extends past buffer")
+    _XtTlv.Ok(r: _XtTlvOk(
+        tag: tag,
+        value: _xt_slice(data, value_off, length),
+        next_off: value_off + length
+    ))
+
+fn _xt_expect(data: [u8], off: u64, want: u8, label: text) -> _XtTlv:
+    val r = _xt_read_tlv(data, off)
+    if val _XtTlv.Ok(tlv) = r:
+        if tlv.tag == want:
+            return _XtTlv.Ok(r: tlv)
+        return _XtTlv.Err(msg: "InvalidDer: {label}: tag {tlv.tag} != {want}")
+    r
+
+# ============================================================================
+# OID + string + time helpers
+# ============================================================================
+
+# Decode OID content bytes -> arc array.
+fn _xt_oid_arcs(raw: [u8]) -> [i64]:
+    var arcs: [i64] = []
+    if raw.len() == 0:
+        return arcs
+    val first = raw[0].to_i64()
+    arcs.push(first / 40)
+    arcs.push(first % 40)
+    var i: u64 = 1
+    while i < raw.len():
+        var acc: i64 = 0
+        while i < raw.len():
+            val bv = raw[i].to_i64()
+            acc = (acc << 7) | (bv & 0x7F)
+            i = i + 1
+            if (bv & 0x80) == 0:
+                break
+        arcs.push(acc)
+    arcs
+
+# Build text from a byte slice. DN string values (CN) are ASCII/UTF-8;
+# i64.chr() renders a code point (non-ASCII high bytes become '?').
+fn _xt_bytes_to_text(bytes: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    while i < bytes.len():
+        val b = bytes[i].to_i64()
+        if b < 0x80:
+            s = s + b.chr()
+        else:
+            s = s + "?"
+        i = i + 1
+    s
+
+fn _xt_digit(b: u8) -> i64:
+    b.to_i64() - 48
+
+fn _xt_2d(v: [u8], i: u64) -> i64:
+    _xt_digit(v[i]) * 10 + _xt_digit(v[i + 1])
+
+# Days since Unix epoch (1970-01-01) for a proleptic-Gregorian civil date.
+# Howard Hinnant's days_from_civil algorithm.
+fn _xt_days_from_civil(y: i64, m: i64, d: i64) -> i64:
+    val yy = if m <= 2: y - 1 else: y
+    val era = (if yy >= 0: yy else: yy - 399) / 400
+    val yoe = yy - era * 400
+    val mp = if m > 2: m - 3 else: m + 9
+    val doy = (153 * mp + 2) / 5 + d - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+
+# Parse a DER UTCTime (0x17) or GeneralizedTime (0x18) value -> Unix seconds.
+fn _xt_parse_time(tag: u8, v: [u8]) -> i64:
+    var year: i64 = 0
+    var base: u64 = 0
+    if tag == 0x18:
+        # GeneralizedTime: YYYYMMDDHHMMSSZ
+        year = _xt_2d(v, 0) * 100 + _xt_2d(v, 2)
+        base = 4
+    else:
+        # UTCTime: YYMMDDHHMMSSZ — pivot at 50 per RFC 5280.
+        val yy = _xt_2d(v, 0)
+        year = if yy < 50: 2000 + yy else: 1900 + yy
+        base = 2
+    val mon = _xt_2d(v, base)
+    val day = _xt_2d(v, base + 2)
+    val hh = _xt_2d(v, base + 4)
+    val mm = _xt_2d(v, base + 6)
+    val ss = _xt_2d(v, base + 8)
+    _xt_days_from_civil(year, mon, day) * 86400 + hh * 3600 + mm * 60 + ss
+
+# ============================================================================
+# Distinguished Name CN extraction
+#
+# Name ::= SEQUENCE OF RelativeDistinguishedName
+# RelativeDistinguishedName ::= SET OF AttributeTypeAndValue
+# AttributeTypeAndValue ::= SEQUENCE { type OID, value ANY }
+# CN attribute type OID id-at-commonName = 2.5.4.3 = bytes 55 04 03.
+# ============================================================================
+
+fn _xt_dn_cn(dn: [u8]) -> text:
+    # dn is the full SEQUENCE TLV (tag+len+value); read it.
+    val seq_r = _xt_expect(dn, 0, 0x30, "DN SEQUENCE")
+    if val _XtTlv.Ok(seq) = seq_r:
+        val rdns = seq.value
+        var off: u64 = 0
+        while off < rdns.len():
+            val set_r = _xt_read_tlv(rdns, off)
+            if val _XtTlv.Ok(set_tlv) = set_r:
+                # Walk AttributeTypeAndValue entries inside the SET.
+                val atvs = set_tlv.value
+                var aoff: u64 = 0
+                while aoff < atvs.len():
+                    val atv_r = _xt_read_tlv(atvs, aoff)
+                    if val _XtTlv.Ok(atv) = atv_r:
+                        val oid_r = _xt_expect(atv.value, 0, 0x06, "ATV OID")
+                        if val _XtTlv.Ok(oid_tlv) = oid_r:
+                            val ob = oid_tlv.value
+                            if (ob.len() == 3 and ob[0u64] == 0x55
+                                    and ob[1u64] == 0x04 and ob[2u64] == 0x03):
+                                val vr = _xt_read_tlv(atv.value, oid_tlv.next_off)
+                                if val _XtTlv.Ok(vtlv) = vr:
+                                    return _xt_bytes_to_text(vtlv.value)
+                        aoff = atv.next_off
+                    else:
+                        break
+                off = set_tlv.next_off
+            else:
+                break
+    nil
+
+# ============================================================================
+# Extensions parser
+#
+# Extensions ::= SEQUENCE OF Extension
+# Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+#                          extnValue OCTET STRING }
+# ============================================================================
+
+fn _xt_parse_extensions(extseq: [u8]) -> [X509Extension]:
+    var out: [X509Extension] = []
+    var off: u64 = 0
+    while off < extseq.len():
+        val ext_r = _xt_read_tlv(extseq, off)
+        if val _XtTlv.Ok(ext) = ext_r:
+            val body = ext.value
+            var oid: [i64] = []
+            var critical = false
+            var value: [u8] = []
+            val oid_r = _xt_expect(body, 0, 0x06, "ext OID")
+            if val _XtTlv.Ok(oid_tlv) = oid_r:
+                oid = _xt_oid_arcs(oid_tlv.value)
+                val nxt_r = _xt_read_tlv(body, oid_tlv.next_off)
+                if val _XtTlv.Ok(nxt) = nxt_r:
+                    if nxt.tag == 0x01:
+                        # critical BOOLEAN present
+                        if nxt.value.len() > 0 and nxt.value[0u64] != 0x00:
+                            critical = true
+                        val ov_r = _xt_read_tlv(body, nxt.next_off)
+                        if val _XtTlv.Ok(ov) = ov_r:
+                            value = ov.value
+                    else:
+                        # OCTET STRING directly
+                        value = nxt.value
+            out.push(X509Extension(oid: oid, critical: critical, value: value))
+            off = ext.next_off
+        else:
+            break
+    out
+
+# ============================================================================
+# SubjectPublicKeyInfo parser (algorithm-agnostic).
+#
+# spki = SEQUENCE { AlgorithmIdentifier SEQUENCE { OID, params? },
+#                   subjectPublicKey BIT STRING }
+# spki_key = BITSTRING value minus the leading unused-bits byte. For EC keys
+# this is the raw uncompressed point (e.g. 65 bytes for P-256).
+# ============================================================================
+
+struct _XtSpki:
+    alg_oid: [i64]
+    params: [u8]
+    key: [u8]
+
+fn _xt_parse_spki(spki_seq_value: [u8]) -> _XtSpki:
+    var alg_oid: [i64] = []
+    var params: [u8] = []
+    var key: [u8] = []
+    val alg_r = _xt_expect(spki_seq_value, 0, 0x30, "spki alg SEQUENCE")
+    if val _XtTlv.Ok(alg) = alg_r:
+        val oid_r = _xt_expect(alg.value, 0, 0x06, "spki alg OID")
+        if val _XtTlv.Ok(oid_tlv) = oid_r:
+            alg_oid = _xt_oid_arcs(oid_tlv.value)
+            # parameters (optional) follow the algorithm OID
+            val par_r = _xt_read_tlv(alg.value, oid_tlv.next_off)
+            if val _XtTlv.Ok(par) = par_r:
+                params = par.value
+        # BIT STRING follows the AlgorithmIdentifier within the SPKI SEQUENCE
+        val bs_r = _xt_expect(spki_seq_value, alg.next_off, 0x03, "spki bitstring")
+        if val _XtTlv.Ok(bs) = bs_r:
+            if bs.value.len() >= 1:
+                key = _xt_slice(bs.value, 1, bs.value.len() - 1)
+    _XtSpki(alg_oid: alg_oid, params: params, key: key)
+
+# ============================================================================
+# Full certificate parser
+# ============================================================================
+
+fn x509_parse_der(der: [u8]) -> X509ParseResult:
+    val cert_r = _xt_expect(der, 0, 0x30, "Certificate SEQUENCE")
+    if val _XtTlv.Err(msg) = cert_r:
+        return X509ParseResult.Err(reason: msg)
+    if val _XtTlv.Ok(cert_tlv) = cert_r:
+        val cert_val = cert_tlv.value
+
+        val tbs_r = _xt_expect(cert_val, 0, 0x30, "TBSCertificate SEQUENCE")
+        if val _XtTlv.Err(msg) = tbs_r:
+            return X509ParseResult.Err(reason: msg)
+        if val _XtTlv.Ok(tbs_tlv) = tbs_r:
+            val tbs = tbs_tlv.value
+            var pos: u64 = 0
+
+            # version [0] EXPLICIT INTEGER OPTIONAL (tag 0xA0)
+            var version: i64 = 0
+            val ft_r = _xt_read_tlv(tbs, pos)
+            if val _XtTlv.Ok(ft) = ft_r:
+                if ft.tag == 0xA0:
+                    val vi_r = _xt_expect(ft.value, 0, 0x02, "version INTEGER")
+                    if val _XtTlv.Ok(vi) = vi_r:
+                        if vi.value.len() > 0:
+                            version = vi.value[0u64].to_i64()
+                    pos = ft.next_off
+
+            # serialNumber INTEGER
+            val ser_r = _xt_expect(tbs, pos, 0x02, "serialNumber")
+            if val _XtTlv.Err(msg) = ser_r:
+                return X509ParseResult.Err(reason: msg)
+            var serial_bytes: [u8] = []
+            if val _XtTlv.Ok(ser_tlv) = ser_r:
+                serial_bytes = _xt_strip_padding(ser_tlv.value)
+                pos = ser_tlv.next_off
+
+            # signature AlgorithmIdentifier SEQUENCE
+            val sa_r = _xt_expect(tbs, pos, 0x30, "signature AlgId")
+            if val _XtTlv.Err(msg) = sa_r:
+                return X509ParseResult.Err(reason: msg)
+            var sig_alg_oid: [i64] = []
+            if val _XtTlv.Ok(sa_tlv) = sa_r:
+                val oid_r = _xt_expect(sa_tlv.value, 0, 0x06, "sig alg OID")
+                if val _XtTlv.Ok(oid_tlv) = oid_r:
+                    sig_alg_oid = _xt_oid_arcs(oid_tlv.value)
+                pos = sa_tlv.next_off
+
+            # issuer Name SEQUENCE — store full TLV (tag+len+value)
+            val iss_r = _xt_expect(tbs, pos, 0x30, "issuer")
+            if val _XtTlv.Err(msg) = iss_r:
+                return X509ParseResult.Err(reason: msg)
+            var issuer_raw: [u8] = []
+            if val _XtTlv.Ok(iss_tlv) = iss_r:
+                issuer_raw = _xt_slice(tbs, pos, iss_tlv.next_off - pos)
+                pos = iss_tlv.next_off
+
+            # validity SEQUENCE
+            val val_r = _xt_expect(tbs, pos, 0x30, "validity")
+            if val _XtTlv.Err(msg) = val_r:
+                return X509ParseResult.Err(reason: msg)
+            var not_before: i64 = 0
+            var not_after: i64 = 0
+            if val _XtTlv.Ok(val_tlv) = val_r:
+                val nb_r = _xt_read_tlv(val_tlv.value, 0)
+                if val _XtTlv.Ok(nb_tlv) = nb_r:
+                    not_before = _xt_parse_time(nb_tlv.tag, nb_tlv.value)
+                    val na_r = _xt_read_tlv(val_tlv.value, nb_tlv.next_off)
+                    if val _XtTlv.Ok(na_tlv) = na_r:
+                        not_after = _xt_parse_time(na_tlv.tag, na_tlv.value)
+                pos = val_tlv.next_off
+
+            # subject Name SEQUENCE — store full TLV (tag+len+value)
+            val subj_r = _xt_expect(tbs, pos, 0x30, "subject")
+            if val _XtTlv.Err(msg) = subj_r:
+                return X509ParseResult.Err(reason: msg)
+            var subject_raw: [u8] = []
+            if val _XtTlv.Ok(subj_tlv) = subj_r:
+                subject_raw = _xt_slice(tbs, pos, subj_tlv.next_off - pos)
+                pos = subj_tlv.next_off
+
+            # subjectPublicKeyInfo SEQUENCE
+            val spki_r = _xt_expect(tbs, pos, 0x30, "subjectPublicKeyInfo")
+            if val _XtTlv.Err(msg) = spki_r:
+                return X509ParseResult.Err(reason: msg)
+            var spki = _XtSpki(alg_oid: [], params: [], key: [])
+            if val _XtTlv.Ok(spki_seq) = spki_r:
+                spki = _xt_parse_spki(spki_seq.value)
+                pos = spki_seq.next_off
+
+            # Optional fields after SPKI: [1] issuerUID, [2] subjectUID,
+            # [3] EXPLICIT extensions (tag 0xA3).
+            var extensions: [X509Extension] = []
+            var scan: u64 = pos
+            while scan < tbs.len():
+                val opt_r = _xt_read_tlv(tbs, scan)
+                if val _XtTlv.Ok(opt) = opt_r:
+                    if opt.tag == 0xA3:
+                        val es_r = _xt_expect(opt.value, 0, 0x30, "extensions SEQUENCE")
+                        if val _XtTlv.Ok(es) = es_r:
+                            extensions = _xt_parse_extensions(es.value)
+                    scan = opt.next_off
+                else:
+                    break
+
+            # signatureAlgorithm + signatureValue follow TBS in cert_val.
+            var sig_bytes: [u8] = []
+            val osa_r = _xt_expect(cert_val, tbs_tlv.next_off, 0x30, "outer sigAlg")
+            if val _XtTlv.Ok(osa_tlv) = osa_r:
+                val sv_r = _xt_expect(cert_val, osa_tlv.next_off, 0x03, "signatureValue")
+                if val _XtTlv.Ok(sv_tlv) = sv_r:
+                    if sv_tlv.value.len() > 1:
+                        sig_bytes = _xt_slice(sv_tlv.value, 1, sv_tlv.value.len() - 1)
+
+            return X509ParseResult.Ok(cert: X509Cert(
+                version: version,
+                serial: serial_bytes,
+                sig_alg_oid: sig_alg_oid,
+                issuer: issuer_raw,
+                not_before_unix: not_before,
+                not_after_unix: not_after,
+                subject: subject_raw,
+                spki_alg_oid: spki.alg_oid,
+                spki_params: spki.params,
+                spki_key: spki.key,
+                extensions: extensions,
+                sig_value: sig_bytes
+            ))
+    X509ParseResult.Err(reason: "InvalidDer: outer parse failed")
+
+# ============================================================================
+# PEM wrapper
+# ============================================================================
+
+val _PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
+val _PEM_END = "-----END CERTIFICATE-----"
+
+# Minimal RFC 4648 base64 decoder to [u8]. We do NOT use stdlib base64_decode
+# because it returns `text` (lossy for binary DER); we need raw bytes.
+fn _xt_b64_val(c: i64) -> i64:
+    if c >= 65 and c <= 90:
+        c - 65
+    elif c >= 97 and c <= 122:
+        c - 97 + 26
+    elif c >= 48 and c <= 57:
+        c - 48 + 52
+    elif c == 43:
+        62
+    elif c == 47:
+        63
+    else:
+        -1
+
+fn _xt_b64_decode(s: text) -> [u8]:
+    var out: [u8] = []
+    var acc: i64 = 0
+    var bits: i64 = 0
+    val n = s.length()
+    var i: i64 = 0
+    while i < n:
+        val c = s.char_code_at(i)
+        i = i + 1
+        if c == 61:        # '=' padding terminates
+            break
+        val v = _xt_b64_val(c)
+        if v < 0:
+            continue       # skip whitespace / newlines / armor noise
+        acc = (acc << 6) | v
+        bits = bits + 6
+        if bits >= 8:
+            bits = bits - 8
+            out.push(((acc >> bits) & 0xFF).to_u8())
+    out
+
+fn x509_parse_pem(pem: text) -> X509ParseResult:
+    val begin = pem.find(_PEM_BEGIN)
+    val end = pem.find(_PEM_END)
+    if begin < 0 or end < 0 or end <= begin:
+        return X509ParseResult.Err(reason: "InvalidPem: missing BEGIN/END CERTIFICATE markers")
+    # Body lies between the end of the BEGIN marker and the START of the END
+    # marker. `find` returns a byte offset; markers are pure ASCII so byte and
+    # char offsets coincide here, and slicing the ASCII base64 body is safe.
+    val body_start = begin + _PEM_BEGIN.length()
+    val body = pem.slice(body_start, end)
+    val der = _xt_b64_decode(body)
+    if der.len() == 0:
+        return X509ParseResult.Err(reason: "InvalidPem: empty base64 body")
+    x509_parse_der(der)
+
+# ============================================================================
+# Accessors
+# ============================================================================
+
+fn x509_cert_cn(cert: X509Cert) -> text:
+    """Common Name (OID 2.5.4.3) from the subject DN, or nil."""
+    _xt_dn_cn(cert.subject)
+
+fn x509_cert_issuer_cn(cert: X509Cert) -> text:
+    """Common Name (OID 2.5.4.3) from the issuer DN, or nil."""
+    _xt_dn_cn(cert.issuer)
+
+export X509Cert, X509Extension, X509ParseResult
+export x509_parse_der, x509_parse_pem, x509_cert_cn, x509_cert_issuer_cn

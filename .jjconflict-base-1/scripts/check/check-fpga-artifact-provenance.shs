@@ -1,0 +1,229 @@
+#!/bin/bash
+# check-fpga-artifact-provenance.shs — Verify FPGA artifact manifests and reject stale/mismatched RTL
+#
+# Usage: bash scripts/check/check-fpga-artifact-provenance.shs [--manifest <path>] [--verbose]
+#
+# This script validates that generated FPGA artifacts (CPU RTL, bitstreams) have
+# correct provenance tracking and rejects artifacts that don't match their declared hashes.
+#
+# Manifest format (JSON):
+# {
+#   "artifact_type": "rv32_cpu|rv64_cpu|bitstream",
+#   "artifact_name": "rv32_core.vhd",
+#   "provenance": {
+#     "source_commit": "sha256",
+#     "compiler_commit": "sha256",
+#     "compiler_binary_hash": "sha256",
+#     "config_hash": "sha256",
+#     "aop_aspect_hash": "sha256",
+#     "hardware_mir_hash": "sha256",
+#     "rtl_hash": "sha256",
+#     "simulation_hash": "sha256|none",
+#     "synthesis_hash": "sha256|none",
+#     "bitstream_hash": "sha256|none"
+#   },
+#   "generation_timestamp": "ISO8601",
+#   "generation_command": "full command line"
+# }
+
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
+VERBOSE=0
+MANIFEST_PATH=""
+STRICT_MODE=1  # Reject by default
+
+# Parse args
+for arg in "$@"; do
+    case "$arg" in
+        --manifest=*) MANIFEST_PATH="${arg#--manifest=}" ;;
+        --verbose) VERBOSE=1 ;;
+        --non-strict) STRICT_MODE=0 ;;
+        --help)
+            echo "Usage: $0 [--manifest <path>] [--verbose] [--non-strict]"
+            echo "  --manifest    Path to specific manifest file to validate"
+            echo "  --verbose     Show detailed validation steps"
+            echo "  --non-strict  Report mismatches but don't exit with error"
+            exit 0
+            ;;
+    esac
+done
+
+# Function to log messages when verbose
+log_verbose() {
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo "[VERBOSE] $*" >&2
+    fi
+}
+
+# Function to compute SHA256 hash of a file
+compute_file_hash() {
+    local file_path="$1"
+    if [ -f "$file_path" ]; then
+        sha256sum "$file_path" | awk '{print $1}'
+    else
+        echo "none"
+    fi
+}
+
+# Function to validate a single manifest
+validate_manifest() {
+    local manifest_file="$1"
+    local validation_failed=0
+
+    log_verbose "Validating manifest: $manifest_file"
+
+    if [ ! -f "$manifest_file" ]; then
+        echo "ERROR: Manifest file not found: $manifest_file" >&2
+        return 1
+    fi
+
+    # Check if jq is available for JSON parsing
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "ERROR: jq required for manifest validation" >&2
+        return 1
+    fi
+
+    # Extract artifact path
+    local artifact_name
+    artifact_name=$(jq -r '.artifact_name' "$manifest_file" 2>/dev/null)
+    if [ -z "$artifact_name" ] || [ "$artifact_name" = "null" ]; then
+        echo "ERROR: Invalid manifest - missing artifact_name in $manifest_file" >&2
+        return 1
+    fi
+
+    # Determine artifact directory (assume manifest is adjacent to artifact)
+    local artifact_dir
+    artifact_dir=$(dirname "$manifest_file")
+    local artifact_path="$artifact_dir/$artifact_name"
+
+    log_verbose "Artifact path: $artifact_path"
+
+    # Check if artifact exists
+    if [ ! -f "$artifact_path" ]; then
+        echo "ERROR: Artifact not found: $artifact_path" >&2
+        return 1
+    fi
+
+    # Validate each hash field
+    local hash_fields=(
+        "source_commit"
+        "compiler_commit"
+        "compiler_binary_hash"
+        "config_hash"
+        "aop_aspect_hash"
+        "hardware_mir_hash"
+        "rtl_hash"
+        "simulation_hash"
+        "synthesis_hash"
+        "bitstream_hash"
+    )
+
+    for field in "${hash_fields[@]}"; do
+        local declared_hash
+        declared_hash=$(jq -r ".provenance.$field" "$manifest_file" 2>/dev/null)
+
+        if [ "$declared_hash" = "null" ] || [ -z "$declared_hash" ]; then
+            log_verbose "WARNING: Missing hash field: $field"
+            continue
+        fi
+
+        if [ "$declared_hash" = "none" ]; then
+            log_verbose "Field $field is 'none' (not yet computed)"
+            continue
+        fi
+
+        # For source_commit and compiler_commit, validate against git
+        if [ "$field" = "source_commit" ]; then
+            local current_source_commit
+            current_source_commit=$(jj log -r '@' --no-graph -T 'commit_id' 2>/dev/null || echo "unknown")
+            if [ "$current_source_commit" != "$declared_hash" ] && [ "$STRICT_MODE" -eq 1 ]; then
+                echo "ERROR: Source commit mismatch - current: $current_source_commit, declared: $declared_hash" >&2
+                validation_failed=1
+            fi
+        fi
+
+        if [ "$field" = "compiler_commit" ]; then
+            # For now, we can't easily validate compiler commit without build metadata
+            log_verbose "Compiler commit validation not yet implemented"
+        fi
+
+        if [ "$field" = "compiler_binary_hash" ]; then
+            local current_compiler_hash="none"
+            if [ -f "bin/release/simple" ]; then
+                current_compiler_hash=$(sha256sum bin/release/simple | awk '{print $1}')
+            fi
+            if [ "$current_compiler_hash" != "$declared_hash" ] && [ "$current_compiler_hash" != "none" ] && [ "$STRICT_MODE" -eq 1 ]; then
+                echo "ERROR: Compiler binary hash mismatch - current: $current_compiler_hash, declared: $declared_hash" >&2
+                validation_failed=1
+            fi
+        fi
+
+        # For rtl_hash, validate against actual artifact file
+        if [ "$field" = "rtl_hash" ]; then
+            local actual_hash
+            actual_hash=$(compute_file_hash "$artifact_path")
+            if [ "$actual_hash" != "$declared_hash" ] && [ "$STRICT_MODE" -eq 1 ]; then
+                echo "ERROR: RTL hash mismatch for $artifact_name - actual: $actual_hash, declared: $declared_hash" >&2
+                validation_failed=1
+            fi
+        fi
+
+        log_verbose "Hash field $field: $declared_hash (valid)"
+    done
+
+    # Validate generation timestamp is reasonable
+    local gen_timestamp
+    gen_timestamp=$(jq -r '.generation_timestamp' "$manifest_file" 2>/dev/null)
+    if [ "$gen_timestamp" != "null" ] && [ -n "$gen_timestamp" ]; then
+        log_verbose "Generation timestamp: $gen_timestamp"
+    fi
+
+    if [ $validation_failed -eq 0 ]; then
+        echo "PASS: Manifest validation successful for $manifest_file"
+        return 0
+    else
+        echo "FAIL: Manifest validation failed for $manifest_file"
+        return 1
+    fi
+}
+
+# Main validation logic
+main() {
+    local exit_code=0
+
+    if [ -n "$MANIFEST_PATH" ]; then
+        # Validate specific manifest
+        if ! validate_manifest "$MANIFEST_PATH"; then
+            exit_code=1
+        fi
+    else
+        # Scan for all manifests in build directories
+        log_verbose "Scanning for FPGA manifests in build directories"
+
+        local manifest_count=0
+        while IFS= read -r -d '' manifest_file; do
+            manifest_count=$((manifest_count + 1))
+            if ! validate_manifest "$manifest_file"; then
+                exit_code=1
+            fi
+        done < <(find build/fpga build/vhdl build/test-* -name "*.manifest.json" -print0 2>/dev/null)
+
+        if [ $manifest_count -eq 0 ]; then
+            echo "WARNING: No FPGA manifests found in build directories" >&2
+            if [ "$STRICT_MODE" -eq 1 ]; then
+                echo "ERROR: Strict mode requires manifests for all FPGA artifacts" >&2
+                exit_code=1
+            fi
+        else
+            echo "INFO: Validated $manifest_count FPGA manifest(s)"
+        fi
+    fi
+
+    exit $exit_code
+}
+
+main "$@"

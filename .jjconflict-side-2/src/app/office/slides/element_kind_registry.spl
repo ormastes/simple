@@ -1,0 +1,124 @@
+# Slide Element-Kind Registry
+#
+# Decouples "add an element by kind" from the closed `SlideElementKind` enum
+# (slide.spl:16-20). The enum stays as-is -- this registry sits alongside it
+# so slides_app.spl's "+Text"/"+Image"/"+Shape" toolbar actions and
+# third-party-style extensions (slides_ext.spl) create elements by a stable
+# kind id + factory lookup instead of hardcoding `SlideElementKind.*` at each
+# call site. Builtin factories reproduce, exactly, the element values
+# slides_app.spl used to construct inline for "add_text"/"add_image"/
+# "add_shape" (slides_app.spl:111-141, pre-registry).
+#
+# This file (unlike layout_registry.spl) DOES import slide.spl, so it must
+# never be imported BACK from slide.spl -- only from app-level callers
+# (slides_app.spl, slides_ext.spl) and specs.
+#
+# Singleton storage mirrors app.office.sheets.function_registry.spl (see
+# layout_registry.spl's header comment for why the whole array is
+# read-modify-written on every registration).
+
+use app.office.slides.slide.{SlideElement, SlideElementKind}
+
+struct ElementKindDescriptor:
+    id: text            # e.g. "text_box" -- stable, used for lookup
+    display_name: text  # e.g. "Text Box"
+    make: fn(text, i32, i32, i32, i32) -> SlideElement  # (id, x, y, width, height) -> SlideElement
+
+class ElementKindRegistry:
+    entries: [ElementKindDescriptor]
+
+    static fn new() -> ElementKindRegistry:
+        ElementKindRegistry(entries: _builtin_element_kind_descriptors())
+
+    # First registration for an id wins; a duplicate id is rejected so a
+    # misbehaving extension cannot shadow an already-registered kind.
+    me register(descriptor: ElementKindDescriptor) -> bool:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].id == descriptor.id:
+                return false
+            i = i + 1
+        self.entries = self.entries.push(descriptor)
+        true
+
+    fn has(self, id: text) -> bool:
+        for d in self.entries:
+            if d.id == id:
+                return true
+        false
+
+    fn find(self, id: text) -> ElementKindDescriptor?:
+        for d in self.entries:
+            if d.id == id:
+                return d
+        nil
+
+    fn ids(self) -> [text]:
+        var out: [text] = []
+        for d in self.entries:
+            out.push(d.id)
+        out
+
+    fn count(self) -> i64:
+        self.entries.len()
+
+# ---- builtin factories --------------------------------------------------
+fn _text_box_factory(id: text, x: i32, y: i32, w: i32, h: i32) -> SlideElement:
+    SlideElement(id: id, kind: SlideElementKind.TextBox(content: "New Text"), x: x, y: y, width: w, height: h)
+
+fn _image_factory(id: text, x: i32, y: i32, w: i32, h: i32) -> SlideElement:
+    SlideElement(id: id, kind: SlideElementKind.ImageEl(src: "", alt: "Image Frame"), x: x, y: y, width: w, height: h)
+
+fn _shape_factory(id: text, x: i32, y: i32, w: i32, h: i32) -> SlideElement:
+    SlideElement(id: id, kind: SlideElementKind.ShapeEl(shape_type: "rectangle", fill_color: "#4A90D9"), x: x, y: y, width: w, height: h)
+
+fn _table_factory(id: text, x: i32, y: i32, w: i32, h: i32) -> SlideElement:
+    SlideElement(id: id, kind: SlideElementKind.TableEl(rows: "1,1"), x: x, y: y, width: w, height: h)
+
+fn _builtin_element_kind_descriptors() -> [ElementKindDescriptor]:
+    [
+        ElementKindDescriptor(id: "text_box", display_name: "Text Box", make: _text_box_factory),
+        ElementKindDescriptor(id: "image", display_name: "Image", make: _image_factory),
+        ElementKindDescriptor(id: "shape", display_name: "Shape", make: _shape_factory),
+        ElementKindDescriptor(id: "table", display_name: "Table", make: _table_factory)
+    ]
+
+var _element_kind_registry_singleton: [ElementKindRegistry] = []
+
+fn element_kind_registry() -> ElementKindRegistry:
+    if _element_kind_registry_singleton.len() > 0:
+        return _element_kind_registry_singleton[0]
+    val registry = ElementKindRegistry.new()
+    _element_kind_registry_singleton = [registry]
+    registry
+
+fn element_kind_registry_has(id: text) -> bool:
+    element_kind_registry().has(id)
+
+fn element_kind_registry_find(id: text) -> ElementKindDescriptor?:
+    element_kind_registry().find(id)
+
+fn element_kind_registry_ids() -> [text]:
+    element_kind_registry().ids()
+
+fn element_kind_registry_count() -> i64:
+    element_kind_registry().count()
+
+fn element_kind_registry_register(descriptor: ElementKindDescriptor) -> bool:
+    var reg = element_kind_registry()
+    val ok = reg.register(descriptor)
+    _element_kind_registry_singleton = [reg]
+    ok
+
+fn element_kind_registry_reset():
+    """Test-only: reset to the four builtin kinds, dropping any registered
+    extras (process-wide singleton)."""
+    _element_kind_registry_singleton = []
+
+fn create_slide_element_by_kind(kind_id: text, id: text, x: i32, y: i32, w: i32, h: i32) -> Result<SlideElement, text>:
+    """Create a SlideElement using the registered factory for `kind_id`.
+    Unknown ids error cleanly instead of constructing a default element."""
+    if val desc = element_kind_registry().find(kind_id):
+        val factory = desc.make
+        return Ok(factory(id, x, y, w, h))
+    Err("unknown slide element kind id: {kind_id}")

@@ -1,0 +1,109 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/rocm_session.spl 60%
+# @tag: unit, gpu, engine2d, rocm, hip, session, compute
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_session.{BackendSessionKind}
+use std.gc_async_mut.gpu.engine2d.generated_kernel_dispatch.{GENERATED_2D_ALPHA, GENERATED_2D_BITMAP_GLYPH_RASTER, GENERATED_2D_FILL}
+use std.gc_async_mut.gpu.engine2d.rocm_session.{RocmSession}
+use std.gpu.engine2d.backend_rocm_kernels.{_engine2d_hip_source, rocm_2d_generated_source}
+use std.gpu.engine2d.sffi_rocm.{RocmFfi}
+
+describe "RocmSession compute contract":
+
+    it "reports ROCm kind and unavailable without an injected HIP FFI":
+        val session = RocmSession.create()
+
+        expect(session.kind()).to_equal(BackendSessionKind.Rocm)
+        expect(session.is_available()).to_equal(false)
+        expect(session.is_valid()).to_equal(false)
+
+    it "fails closed when initializing or launching without HIP FFI":
+        val session = RocmSession.create()
+
+        expect(session.init()).to_equal(1)
+        expect(session.load_module("")).to_equal(0)
+        expect(session.alloc(16)).to_equal(0)
+        expect(session.read_pixels(1, [], 16)).to_equal(false)
+        expect(session.synchronize()).to_equal(1)
+        expect(session.launch_kernel("kernel_clear", 1, 1, 1, 1)).to_equal(1)
+        expect(session.fill_kernel(64, 64, 4096)).to_equal(1)
+        expect(session.copy_kernel(64, 64, 4096)).to_equal(1)
+        expect(session.alpha_blend_kernel(64, 64, 4096)).to_equal(1)
+        expect(session.scroll_kernel(64, 64, 4096)).to_equal(1)
+
+    it "shutdown is safe on an uninitialized session":
+        var session = RocmSession.create()
+
+        session.shutdown()
+        expect(session.is_valid()).to_equal(false)
+        expect(session.ref_count).to_equal(0)
+
+    it "reports shared generated 2D runtime provenance without HIP FFI":
+        var session = RocmSession.create()
+        val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_ALPHA, 64, 64, 4096)
+        session.is_initialized = true
+        session.module_cache = 11
+        val still_missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_ALPHA, 64, 64, 4096)
+
+        expect(missing_runtime.ready).to_equal(false)
+        expect(missing_runtime.typed_status).to_equal("hip-runtime-unavailable")
+        expect(still_missing_runtime.ready).to_equal(false)
+        expect(still_missing_runtime.typed_status).to_equal("hip-runtime-unavailable")
+        expect(still_missing_runtime.diagnostic_text()).to_contain("launch=rt_rocm_launch_kernel")
+
+    it "reports typed ROCm session evidence for generated module launch and readback gates":
+        var session = RocmSession.create()
+        val init_ev = session.init_evidence()
+        val load_ev = session.load_module_evidence(rocm_2d_generated_source())
+        val launch_missing_args = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 8, 8, 0)
+        val launch_missing_ffi = session.launch_generated_2d_evidence(GENERATED_2D_FILL, 8, 8, 4096)
+        val read_ev = session.read_pixels_evidence(0, [], 0, 1, 1)
+        val matched = session.readback_evidence(true, 99, 99)
+
+        expect(init_ev.success).to_equal(false)
+        expect(init_ev.status_code).to_equal("missing-ffi")
+        expect(load_ev.success).to_equal(false)
+        expect(load_ev.reason).to_equal("missing-rocm-ffi")
+        expect(launch_missing_args.status_code).to_equal("missing-args-pointer")
+        expect(launch_missing_ffi.status_code).to_equal("missing-ffi")
+        expect(read_ev.status_code).to_equal("missing-ffi")
+        expect(matched.success).to_equal(true)
+        expect(matched.status_code).to_equal("readback-matched")
+
+    it "static HIP FFI exposes runtime-backed init evidence without missing FFI":
+        var session = RocmSession.create_with_ffi(RocmFfi.create_static())
+        val init_ev = session.init_evidence()
+
+        expect(init_ev.reason).to_not_equal("missing-rocm-ffi")
+        expect(init_ev.status_code == "initialized" or init_ev.status_code == "runtime-unavailable" or init_ev.status_code == "device-unavailable" or init_ev.status_code == "init-failed").to_equal(true)
+        session.shutdown()
+
+    it "exports the HIP nonzero image blit kernel for transparent text":
+        val source = _engine2d_hip_source()
+
+        expect(source).to_contain("kernel_blit_image_nonzero")
+        expect(source).to_contain("if (pixel == 0) return")
+
+    it "exports shared generated HIP kernels with CUDA and OpenCL entry names":
+        val source = rocm_2d_generated_source()
+
+        expect(source).to_contain("simple_2d_fill_u32")
+        expect(source).to_contain("simple_2d_copy_u32")
+        expect(source).to_contain("simple_2d_alpha_u32")
+        expect(source).to_contain("simple_2d_scroll_u32")
+        expect(source).to_contain("simple_2d_bitmap_glyph_raster_u32")
+
+    it "routes generated bitmap glyph raster through the ROCm session helper":
+        var session = RocmSession.create()
+        val missing_runtime = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 4096)
+        session.is_initialized = true
+        session.module_cache = 11
+        val missing_args = session.launch_generated_2d_runtime_provenance(GENERATED_2D_BITMAP_GLYPH_RASTER, 8, 4, 0)
+
+        expect(missing_runtime.operation).to_equal(GENERATED_2D_BITMAP_GLYPH_RASTER)
+        expect(missing_runtime.entry_name).to_equal("simple_2d_bitmap_glyph_raster_u32")
+        expect(missing_runtime.typed_status).to_equal("hip-runtime-unavailable")
+        expect(missing_args.typed_status).to_equal("hip-runtime-unavailable")
+        expect(missing_args.diagnostic_text()).to_contain("op=bitmap_glyph_raster")
+        session.module_cache = 0
+        expect(session.bitmap_glyph_raster_kernel(9, 4, 4096)).to_equal(1)

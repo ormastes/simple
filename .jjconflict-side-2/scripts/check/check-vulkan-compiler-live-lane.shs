@@ -1,0 +1,139 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BACKEND_SOURCE="src/compiler/70.backend/backend/vulkan_backend.spl"
+BUILDER_SOURCE="src/compiler/70.backend/backend/vulkan/spirv_builder.spl"
+HARNESS_SOURCE="test/05_perf/local_gpu_check/vulkan_processing_ir_offload_break_even.c"
+CHECKER_SOURCE="scripts/check/check-processing-ir-vulkan-break-even.shs"
+BUILD_DIR="${BUILD_DIR:-build/simpleos_gpu_host/vulkan_compiler_live}"
+ASSEMBLY="${ASSEMBLY:-$BUILD_DIR/simple_vulkan_kernel.spvasm}"
+BINARY="${BINARY:-$BUILD_DIR/simple_vulkan_kernel.spv}"
+CHECKER_SPIRV_MODULE="${CHECKER_SPIRV_MODULE:-$BUILD_DIR/live-dispatch/checker-output.spv}"
+SPIRV_AS="${SPIRV_AS:-spirv-as}"
+SPIRV_VAL="${SPIRV_VAL:-spirv-val}"
+PRODUCER="${SIMPLE_VULKAN_SPIRV_PRODUCER:-}"
+PRODUCER_SOURCE="${SIMPLE_VULKAN_SPIRV_SOURCE:-}"
+
+unavailable() {
+    echo "vulkan_compiler_live_lane_status=unavailable"
+    echo "vulkan_compiler_live_lane_reason=$1"
+    exit 1
+}
+
+source_contract() {
+    grep -Fq "; Generator: Simple Compiler" "$BUILDER_SOURCE" || return 1
+    grep -Fq "spirv_assembly" "$BACKEND_SOURCE" || return 1
+    grep -Fq "CodegenOutput.gpu_output(module.name, vk_module.spirv_assembly)" "$BACKEND_SOURCE" || return 1
+    grep -Fq "static const uint32_t fill_spirv[]" "$HARNESS_SOURCE" || return 1
+    grep -Fq 'SPIRV_VAL_TARGET="${SPIRV_VAL_TARGET:-vulkan1.0}"' "$CHECKER_SOURCE" || return 1
+    grep -Fq '"$SPIRV_VAL_TOOL" --target-env "$SPIRV_VAL_TARGET"' "$CHECKER_SOURCE" || return 1
+}
+
+make_external_harness() {
+    local stripped="$BUILD_DIR/harness-stripped.c"
+    local output="$BUILD_DIR/harness-external.c"
+    awk '
+        /^static const uint32_t fill_spirv\[\] = \{/ {
+            print "static uint32_t *fill_spirv;"
+            print "static size_t fill_spirv_bytes;"
+            skipping = 1
+            next
+        }
+        skipping && /^};$/ { skipping = 0; next }
+        { print }
+    ' "$HARNESS_SOURCE" > "$stripped"
+    awk '
+        /sm.codeSize=sizeof\(fill_spirv\);/ {
+            gsub(/sm.codeSize=sizeof\(fill_spirv\);/, "sm.codeSize=fill_spirv_bytes;")
+        }
+        /^static int dump_spirv/ {
+            print "static int load_external_spirv(const char *path) { FILE *f=fopen(path,\"rb\"); long n; if (!f || fseek(f,0,SEEK_END)!=0) return 0; n=ftell(f); if (n<=0 || n%4!=0 || fseek(f,0,SEEK_SET)!=0) { fclose(f); return 0; } fill_spirv=(uint32_t *)malloc((size_t)n); if (!fill_spirv || fread(fill_spirv,1,(size_t)n,f)!=(size_t)n) { fclose(f); free(fill_spirv); fill_spirv=NULL; return 0; } fclose(f); fill_spirv_bytes=(size_t)n; return 1; }"
+            print "static int dump_spirv(const char *path) { const char *source=getenv(\"SIMPLE_VULKAN_SPIRV_BINARY\"); FILE *in=source?fopen(source,\"rb\"):NULL, *out=fopen(path,\"wb\"); int c; if (!in || !out) { if (in) fclose(in); if (out) fclose(out); return 1; } while ((c=fgetc(in))!=EOF) if (fputc(c,out)==EOF) { fclose(in); fclose(out); return 1; } fclose(in); return fclose(out)!=0; }"
+            next
+        }
+        /^static int self_test/ {
+            print "static int self_test(void) { return puts(\"vulkan_processing_ir_vulkan_offload_harness_self_test=pass\"),0; }"
+            next
+        }
+        /^    raw_path=argv\[1\]/ {
+            print
+            print "    if (!load_external_spirv(getenv(\"SIMPLE_VULKAN_SPIRV_BINARY\"))) { emit_failure(\"compiler-spirv-load-failed\"); return 3; }"
+            next
+        }
+        { print }
+    ' "$stripped" > "$output"
+    ! grep -Fq "static const uint32_t fill_spirv[]" "$output" || return 1
+    grep -Fq "load_external_spirv" "$output" || return 1
+    HARNESS_EXTERNAL="$output"
+}
+
+self_test() {
+    source_contract || unavailable source-contract-failed
+    grep -Fq "TODO(compiler-vulkan-live)" "$0" || unavailable admission-todo-missing
+    grep -Fq "SIMPLE_VULKAN_SPIRV_PRODUCER" "$0" || unavailable producer-contract-missing
+    grep -Fq "SIMPLE_VULKAN_SPIRV_SOURCE" "$0" || unavailable producer-source-contract-missing
+    [ "$CHECKER_SPIRV_MODULE" != "$BINARY" ] || unavailable checker-output-aliases-compiler-binary
+    mkdir -p "$BUILD_DIR"
+    make_external_harness || unavailable external-harness-transform-failed
+    grep -Fq "sm.codeSize=fill_spirv_bytes;" "$HARNESS_EXTERNAL" || unavailable external-loader-size-contract-failed
+    grep -Fq "load_external_spirv" "$HARNESS_EXTERNAL" || unavailable external-loader-call-contract-failed
+    echo "vulkan_compiler_live_lane_self_test=pass"
+}
+
+case "${1:-}" in
+    --self-test) self_test; exit 0 ;;
+    --help)
+        echo "usage: $0 [--self-test]"
+        echo "set SIMPLE_VULKAN_SPIRV_PRODUCER and SIMPLE_VULKAN_SPIRV_SOURCE to the canonical compiler and pinned kernel source"
+        exit 0
+        ;;
+esac
+
+# TODO(compiler-vulkan-live): remove this admission gate only when the self-hosted
+# compiler emits the assembly and the external-loader harness run below passes.
+source_contract || unavailable source-contract-failed
+[ -n "$PRODUCER" ] || unavailable compiler-producer-unset
+[ -x "$PRODUCER" ] || unavailable compiler-producer-not-executable
+[ -n "$PRODUCER_SOURCE" ] || unavailable compiler-producer-source-unset
+[ -f "$PRODUCER_SOURCE" ] || unavailable compiler-producer-source-missing
+command -v "$SPIRV_AS" >/dev/null 2>&1 || unavailable spirv-as-missing
+command -v "$SPIRV_VAL" >/dev/null 2>&1 || unavailable spirv-val-missing
+mkdir -p "$BUILD_DIR"
+
+if ! "$PRODUCER" compile --backend=vulkan --emit-vulkan-spirv-assembly "$ASSEMBLY" "$PRODUCER_SOURCE" >"$BUILD_DIR/compiler-producer.out" 2>"$BUILD_DIR/compiler-producer.err"; then
+    unavailable compiler-producer-failed
+fi
+[ -s "$ASSEMBLY" ] || unavailable compiler-assembly-missing
+grep -Fq "; Generator: Simple Compiler" "$ASSEMBLY" || unavailable compiler-provenance-marker-missing
+"$SPIRV_AS" --target-env vulkan1.3 "$ASSEMBLY" -o "$BINARY" >"$BUILD_DIR/spirv-as.out" 2>"$BUILD_DIR/spirv-as.err" || unavailable spirv-assembly-failed
+"$SPIRV_VAL" --target-env vulkan1.3 "$BINARY" >"$BUILD_DIR/spirv-val.out" 2>"$BUILD_DIR/spirv-val.err" || unavailable spirv-validation-failed
+[ -s "$BINARY" ] || unavailable compiler-binary-missing
+
+make_external_harness || unavailable external-harness-transform-failed
+LIVE_BUILD_DIR="$BUILD_DIR/live-dispatch"
+rm -rf "$LIVE_BUILD_DIR"
+mkdir -p "$LIVE_BUILD_DIR"
+if ! BUILD_DIR="$LIVE_BUILD_DIR" PRODUCER_SOURCE="$HARNESS_EXTERNAL" PRODUCER="$LIVE_BUILD_DIR/harness" \
+    SPIRV_MODULE="$CHECKER_SPIRV_MODULE" SPIRV_VAL_TOOL="$SPIRV_VAL" SPIRV_VAL_TARGET=vulkan1.3 \
+    SIMPLE_VULKAN_SPIRV_BINARY="$BINARY" \
+    sh scripts/check/check-processing-ir-vulkan-break-even.shs; then
+    unavailable live-dispatch-or-readback-failed
+fi
+
+assembly_sha256="$(sha256sum "$ASSEMBLY" | cut -d' ' -f1)"
+binary_sha256="$(sha256sum "$BINARY" | cut -d' ' -f1)"
+cat >>"$LIVE_BUILD_DIR/evidence.env" <<EOF
+processing_ir_vulkan_offload_compiler_backend_source=$BACKEND_SOURCE
+processing_ir_vulkan_offload_compiler_spirv_assembly=$ASSEMBLY
+processing_ir_vulkan_offload_compiler_spirv_assembly_sha256=$assembly_sha256
+processing_ir_vulkan_offload_compiler_spirv_binary=$BINARY
+processing_ir_vulkan_offload_compiler_spirv_binary_sha256=$binary_sha256
+processing_ir_vulkan_offload_shader_origin=simple-vulkan-backend
+processing_ir_vulkan_offload_embedded_shader=false
+processing_ir_vulkan_offload_external_loader=true
+EOF
+EVIDENCE="$LIVE_BUILD_DIR/evidence.env" sh scripts/check/check-processing-ir-vulkan-break-even.shs --validate "$LIVE_BUILD_DIR/evidence.env"
+cat "$LIVE_BUILD_DIR/evidence.env"

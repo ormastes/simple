@@ -1,0 +1,63 @@
+#!/bin/sh
+# Stage-4 memory gate (lane L5): run a small fixed workload under the
+# out-of-process memstat sampler and fail when peak RSS exceeds the threshold
+# or when the sampler produced no data.
+#
+#   sh scripts/check/check-stage4-memory-gate.shs
+#
+# Env knobs:
+#   STAGE4_MEM_GATE_RSS_KB       peak-RSS threshold in kB (default 8388608 = 8 GB)
+#   STAGE4_MEM_GATE_INTERVAL_MS  sampler interval (default 200)
+#   STAGE4_MEM_GATE_WORKLOAD_MS  workload lifetime (default 6000)
+#   BUILD_DIR                    artifact dir (default build/stage4-memory-gate)
+#
+# Verdict: single "stage4-memory-gate: PASS|FAIL ..." line; exit 0 on PASS.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BUILD_DIR=${BUILD_DIR:-"$ROOT/build/stage4-memory-gate"}
+CSV="$BUILD_DIR/memstat.csv"
+THRESHOLD_KB=${STAGE4_MEM_GATE_RSS_KB:-8388608}
+INTERVAL_MS=${STAGE4_MEM_GATE_INTERVAL_MS:-200}
+WORKLOAD_MS=${STAGE4_MEM_GATE_WORKLOAD_MS:-6000}
+FIXTURE="$ROOT/test/fixture/memstat/gate_workload.spl"
+SAMPLER="$ROOT/src/app/memstat/main.spl"
+SIMPLE_BIN="$ROOT/bin/simple"
+
+fail() {
+    echo "stage4-memory-gate: FAIL reason=$1 csv=$CSV threshold_kb=$THRESHOLD_KB"
+    exit 1
+}
+
+[ -x "$SIMPLE_BIN" ] || fail "simple-binary-missing"
+[ -f "$FIXTURE" ] || fail "fixture-missing"
+[ -f "$SAMPLER" ] || fail "sampler-missing"
+mkdir -p "$BUILD_DIR" || fail "build-dir"
+rm -f "$CSV"
+
+# 1. Launch the fixed workload in the background.
+STAGE4_MEM_GATE_WORKLOAD_MS="$WORKLOAD_MS" \
+    "$SIMPLE_BIN" run "$FIXTURE" >"$BUILD_DIR/workload.log" 2>&1 &
+WPID=$!
+
+# 2. Sample it in the foreground; memstat exits when the workload PID vanishes.
+"$SIMPLE_BIN" run "$SAMPLER" "$WPID" "$CSV" "$INTERVAL_MS" \
+    >"$BUILD_DIR/memstat.log" 2>&1
+SAMPLER_RC=$?
+
+wait "$WPID" 2>/dev/null || true
+
+[ "$SAMPLER_RC" -eq 0 ] || fail "sampler-rc-$SAMPLER_RC"
+[ -s "$CSV" ] || fail "csv-missing-or-empty"
+
+ROWS=$(wc -l <"$CSV" | tr -d ' ')
+[ "$ROWS" -ge 2 ] || fail "csv-no-data-rows"
+
+# 3. Gate on peak RSS (column 2, kB) across all data rows.
+PEAK_KB=$(awk -F, 'NR>1 && ($2+0) > max { max = $2+0 } END { print max+0 }' "$CSV")
+[ "$PEAK_KB" -gt 0 ] || fail "rss-not-sampled"
+[ "$PEAK_KB" -le "$THRESHOLD_KB" ] || fail "peak-rss-${PEAK_KB}kb-over-threshold"
+
+echo "stage4-memory-gate: PASS peak_rss_kb=$PEAK_KB threshold_kb=$THRESHOLD_KB data_rows=$((ROWS - 1)) csv=$CSV"
+exit 0

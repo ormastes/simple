@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.io_runtime.{read_file}
+use app.io.cli_ops.{_cli_resolve_argv0, cli_current_exe_path}
+use app.ui.backend_loader.{ui_backend_binary_for_runtime}
+
+describe "CLI argv0 resolution":
+    it "keeps an absolute executable path":
+        expect(_cli_resolve_argv0("/repo", "/repo/bin/simple")).to_equal("/repo/bin/simple")
+
+    it "makes a relative executable path absolute from cwd":
+        expect(_cli_resolve_argv0("/repo", "bin/simple")).to_equal("/repo/bin/simple")
+
+    it "rejects a bare command name when no path is known":
+        expect(_cli_resolve_argv0("/repo", "simple")).to_equal("")
+
+    it "preserves absolute and resolves relative Windows executable paths":
+        expect(_cli_resolve_argv0("C:\\repo", "C:\\repo\\bin\\simple.exe")).to_equal("C:\\repo\\bin\\simple.exe")
+        expect(_cli_resolve_argv0("C:\\repo", "C:/repo/bin/simple.exe")).to_equal("C:/repo/bin/simple.exe")
+        expect(_cli_resolve_argv0("C:\\repo", "bin\\simple.exe")).to_equal("C:\\repo/bin\\simple.exe")
+
+    it "preserves UNC executable paths without promoting relative slash paths":
+        expect(_cli_resolve_argv0("C:\\repo", "\\\\server\\share\\simple.exe")).to_equal("\\\\server\\share\\simple.exe")
+        expect(_cli_resolve_argv0("/repo", "//server/share/simple")).to_equal("//server/share/simple")
+        expect(_cli_resolve_argv0("/repo", "tools/simple")).to_equal("/repo/tools/simple")
+
+    it "derives the compiled backend sibling for Windows absolute forms":
+        expect(ui_backend_binary_for_runtime("C:/Simple/simple.exe")).to_equal("C:/Simple/simple_ui_backend.exe")
+        expect(ui_backend_binary_for_runtime("\\\\server\\share\\simple.exe")).to_equal("\\\\server\\share\\simple_ui_backend.exe")
+
+    it "resolves our own exe, not the spawned readlink helper":
+        # Regression: `readlink -f /proc/self/exe` resolves the CHILD (readlink
+        # itself), so exe_path became /usr/bin/readlink -> seed sibling
+        # /usr/bin/simple_seed missing -> delegate to bin/simple -> fork bomb.
+        val exe = cli_current_exe_path()
+        assert_true(exe.len() > 0)
+        assert_false(exe.ends_with("/readlink"))
+        assert_false(exe.ends_with("/sh"))
+
+    it "establishes its own identity in-process":
+        # The shell-out is the defect, not an implementation detail: any
+        # /proc/self read done by a spawned helper describes the HELPER. Pinned
+        # positively — a "no readlink" text assertion can't tell code from the
+        # comments explaining why readlink is wrong.
+        val source = read_file("src/app/io/cli_ops.spl")
+        expect(source).to_contain("_cli_resolve_symlink(\"/proc/self/exe\")")
+
+    it "canonicalizes a driver override while preserving bare PATH fallback":
+        val source = read_file("src/app/io/cli_ops.spl")
+        expect(source).to_contain("val resolved = _cli_resolve_symlink(path)")
+        expect(source).to_contain("current == resolved or current == path")
+        expect(source).to_contain("current.ends_with(\"/\" + path)")
+        expect(source).to_contain("if _cli_is_current_exe(override):")
+        expect(source).to_contain("return \"\"")
+
+    it "falls back to the repo seed before reporting a missing executable sibling":
+        val source = read_file("src/app/io/cli_ops.spl")
+        expect(source).to_contain("fn _cli_repo_seed_path() -> text:")
+        expect(source).to_contain("val candidate = \"bin/simple_seed\"")
+        expect(source).to_contain("val repo_seed = _cli_repo_seed_path()")
+        expect(source).to_contain("return repo_seed")
+        expect(source).to_contain("simple: seed sibling not found")

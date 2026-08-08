@@ -1,0 +1,118 @@
+# @tag: system, nvme, rv32, nand, ghdl, fpga
+# @req REQ-RV32-NAND-001 REQ-RV32-NAND-002 REQ-RV32-NAND-003 REQ-RV32-NAND-004 REQ-RV32-NAND-005 REQ-RV32-NAND-006 REQ-RV32-NAND-007 NFR-RV32-NAND-001 NFR-RV32-NAND-002 NFR-RV32-NAND-003 NFR-RV32-NAND-004
+"""
+RV32 RAM-backed NAND read-level recovery and prevention contract.
+
+The host contract proves the pure policy and fail-closed evidence wrapper. GHDL
+and FPGA evidence use the same wrapper's `--ghdl` and `--fpga` modes; those modes
+remain hard failures when the compiler, Vivado, board, or JTAG path is absent.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+use app.io.mod.{file_read_text}
+
+val LOGIC: text = "examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_nand_read_level.spl"
+val ENTRY: text = "examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl"
+val CHECK: text = "scripts/check/check-rv32-nvme-nand-recovery.shs"
+val AXI_CHECK: text = "scripts/fpga/ghdl_rv32_nvme_axi_ram.shs"
+val QEMU_CHECK: text = "scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs"
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "RV32 NVMe RAM-backed NAND read-level policy":
+    it "should model sensing, bounded read retry, prevention, and recovery":
+        step("Inspect the pure RV32 NAND policy")
+        val source = file_read_text(LOGIC)
+        expect(source).to_contain("rv32_nand_sense_data")
+        expect(source).to_contain("rv32_nand_retry_reference")
+        expect(source).to_contain("rv32_nand_ecc_correctable")
+        expect(source).to_contain("rv32_nand_refresh_allowed")
+        expect(source).to_contain("rv32_nand_disturb_level")
+
+        step("Verify the retained reference ladder and prevention threshold")
+        expect(source).to_contain("return 128")
+        expect(source).to_contain("return 120")
+        expect(source).to_contain("return 112")
+        expect(source).to_contain("return 104")
+        expect(source).to_contain("return 136")
+        expect(source).to_contain("return 144")
+        expect(source).to_contain("return 152")
+        expect(source).to_contain("rv32_nand_prevention_read_limit")
+
+    it "should execute startup, queues, media operations, and RAM telemetry":
+        step("Inspect the RV32-only volatile NAND RAM path")
+        val source = file_read_text(ENTRY)
+        expect(source).to_contain("_nandram_start")
+        expect(source).to_contain("_nand_ram_startup")
+        expect(source).to_contain("_nand_ram_erase")
+        expect(source).to_contain("_nand_ram_program")
+        expect(source).to_contain("_nand_ram_read")
+        expect(source).to_contain("_nand_ram_fcr")
+        expect(source).to_contain("_nand_ram_remap")
+        expect(source).to_contain("rv32_nand_ecc_decode")
+        expect(source).to_contain("_nand_ram_read()")
+        expect(source).to_contain("_nand_ram_reap_completion")
+        expect(source).to_contain("_nand_ram_delete_io_queue")
+        expect(source).to_contain("_nand_ram_submit_io")
+        expect(source).to_contain("_nand_ram_complete_io")
+        expect(source).to_contain("_nand_ram_store(64, 0xDEADBEEF)")
+        expect(source).to_contain("if _nand_ram_load(64) != 0:")
+        expect(source).to_contain("NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS")
+
+        step("Verify every required JTAG transcript marker is retained")
+        val (out, err, code) = _run("sh " + CHECK + " --self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("STATUS: PASS rv32-nvme-nand-recovery self-test")
+
+    it "should retain fail-closed GHDL and FPGA execution modes":
+        step("Inspect the canonical evidence runner")
+        val source = file_read_text(CHECK)
+        val axi_source = file_read_text(AXI_CHECK)
+        val qemu_source = file_read_text(QEMU_CHECK)
+        expect(source).to_contain("--ghdl")
+        expect(source).to_contain("--fpga")
+        expect(source).to_contain("require_self_hosted")
+        expect(source).to_contain("SELF_HOSTED_BIN")
+        expect(source).to_contain("nvme_rv32_source_matched")
+        expect(source).to_contain("manifest.txt")
+        expect(source).to_contain("source_manifest_version=2")
+        expect(source).to_contain("jj log -r @")
+        expect(source).to_contain("logic*.spl")
+        expect(source).to_contain("exact-bram.log")
+        expect(source).to_contain("FW_ELF=\"$ROOT/build/nvme_fw_rv32.elf\"")
+        expect(source).to_contain("FW_ELF=\"$ROOT/build/nvme_fw_rv32.elf\" sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs")
+        expect(source).to_contain("GARBAGE_FILL=1 FW_ELF=\"$ROOT/build/nvme_fw_rv32.elf\"")
+        expect(source).to_contain("ghdl_rv32_nvme_axi_ram.shs")
+        expect(source).to_contain("GARBAGE_FILL=1")
+        expect(source).to_contain("nvme_rv32_bram_soc/clean/sim.log")
+        expect(source).to_contain("nvme_rv32_bram_soc/garbage/sim.log")
+        expect(source).to_contain(">>\"$evidence/manifest.txt\"")
+        expect(source).to_contain("read_rv32_tiny_bram_obs.shs transcript")
+        expect(source).to_contain("sha256sum")
+        expect(axi_source).to_contain("SIM_LOG=\"$EVIDENCE_DIR/sim.log\"")
+        expect(axi_source).to_contain("WORK_DIR=\"$EVIDENCE_DIR\"")
+        expect(axi_source).to_contain("firmware .nandram size is $trace_bytes bytes, expected 256")
+        expect(qemu_source).to_contain("missing _nandram_end")
+        expect(qemu_source).to_contain("fail \"invalid .nandram size\"")
+
+    it "should execute the production NAND path on both GHDL cores":
+        step("Build the RV32 firmware and run clean plus garbage-filled GHDL")
+        val (out, err, code) = _run("sh " + CHECK + " --ghdl")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("STATUS: PASS rv32-nvme-nand-recovery ghdl")
+        expect(out).to_contain("NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS")
+
+    it "should execute prevention and recovery through AXI RAM":
+        step("Run the RV32 firmware with NAND state transported through full AXI4")
+        val (out, err, code) = _run("sh " + AXI_CHECK)
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("NAND PREVENT PASS")
+        expect(out).to_contain("NAND RECOVERY PASS")
+        expect(out).to_contain("K26_TRACE_READS=")
+        expect(out).to_contain("K26_TRACE_WRITES=")
+        expect(out).to_contain("RV32_NVME_AXI_RAM_PASS")

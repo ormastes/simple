@@ -1,0 +1,110 @@
+# @tag: unit, os, simpleos, compositor, screen, backend
+"""
+# Boot Screen Backend Selection
+
+**Feature IDs:** simpleos-config-screen-selection
+**Category:** OS / Compositor / Screen Selection
+**Status:** In Progress
+**Plan:** doc/03_plan/os/simpleos/screens/ws_a_config_screen_selection_detail.md
+
+## Overview
+
+As an operator I want the screen type I asked for whenever the machine can
+actually drive it, and a logged, explained fallback whenever it cannot — never
+a blank display. `resolve_screen_type` is the pure decision core: it is handed
+a runtime profile as a value, so these scenarios can drive the full desktop
+profile and the capability-free FPGA serial profile through the same function
+without any device present.
+"""
+
+use std.spec.*
+use os.compositor.backend_factory.{
+    resolve_screen_type,
+    screen_type_from_text,
+    screen_type_name,
+    screen_capability_key,
+    screen_selection_reason_or_none
+}
+use os.simpleos_config_matrix.{
+    qemu_riscv64_desktop_profile,
+    fpga_riscv64_serial_profile
+}
+
+describe "screen type naming":
+
+    it "round-trips every supported name":
+        assert_equal(screen_type_name(screen_type_from_text("wm")), "wm")
+        assert_equal(screen_type_name(screen_type_from_text("2d")), "2d")
+        assert_equal(screen_type_name(screen_type_from_text("web")), "web")
+        assert_equal(screen_type_name(screen_type_from_text("gui")), "gui")
+
+    it "maps unknown text to the wm floor":
+        assert_equal(screen_type_name(screen_type_from_text("quake")), "wm")
+
+    it "maps each type to the capability it needs":
+        assert_equal(screen_capability_key(screen_type_from_text("wm")), "wm")
+        assert_equal(screen_capability_key(screen_type_from_text("2d")), "simple2d-engine2d")
+        assert_equal(screen_capability_key(screen_type_from_text("web")), "framebuffer")
+        assert_equal(screen_capability_key(screen_type_from_text("gui")), "framebuffer")
+
+describe "resolve_screen_type on a fully capable desktop profile":
+
+    it "grants 2d when the engine2d capability is present":
+        step("Request the 2d screen on the QEMU riscv64 desktop profile")
+        val decided = resolve_screen_type("2d", qemu_riscv64_desktop_profile())
+        assert_equal(decided.0, "2d")
+        assert_equal(decided.1, "")
+
+    it "grants gui when the surface capability is present":
+        val decided = resolve_screen_type("gui", qemu_riscv64_desktop_profile())
+        assert_equal(decided.0, "gui")
+        assert_equal(decided.1, "")
+
+    it "grants web when the surface capability is present":
+        val decided = resolve_screen_type("web", qemu_riscv64_desktop_profile())
+        assert_equal(decided.0, "web")
+        assert_equal(decided.1, "")
+
+describe "resolve_screen_type falls closed on a capability-free profile":
+
+    it "falls back to wm with a reason when 2d is unsupported":
+        step("Request the 2d screen on the FPGA serial-only profile")
+        val decided = resolve_screen_type("2d", fpga_riscv64_serial_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "unsupported:2d:simple2d-engine2d")
+
+    it "falls back to wm with a reason when web is unsupported":
+        val decided = resolve_screen_type("web", fpga_riscv64_serial_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "unsupported:web:framebuffer")
+
+    it "falls back to wm with a reason when gui is unsupported":
+        val decided = resolve_screen_type("gui", fpga_riscv64_serial_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "unsupported:gui:framebuffer")
+
+describe "wm is the never-blank floor":
+
+    it "resolves wm cleanly on the desktop profile":
+        val decided = resolve_screen_type("wm", qemu_riscv64_desktop_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "")
+
+    it "resolves wm cleanly even when the profile declares no wm support":
+        step("The FPGA profile has supports_wm false; wm must still be granted")
+        val decided = resolve_screen_type("wm", fpga_riscv64_serial_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "")
+
+    it "resolves unknown text to wm with no fallback reason":
+        val decided = resolve_screen_type("quake", qemu_riscv64_desktop_profile())
+        assert_equal(decided.0, "wm")
+        assert_equal(decided.1, "")
+
+describe "boot log reason rendering":
+
+    it "renders a clean selection as none":
+        assert_equal(screen_selection_reason_or_none(""), "none")
+
+    it "passes a real reason through unchanged":
+        assert_equal(screen_selection_reason_or_none("unsupported:2d:simple2d-engine2d"), "unsupported:2d:simple2d-engine2d")

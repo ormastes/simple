@@ -1,0 +1,201 @@
+#!/bin/sh
+# Fail when a mirrored test-tree path diverges from its canonical copy.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS
+# ---------------------------------------------------------------------------
+# doc/09_report/infra/duplicate_test_tree_divergence_audit_2026-08-08.md
+# found that test/01_unit/ and test/unit/ (and test/02_integration/ and
+# test/integration/) are LIVE duplicate trees: test_runner_main.spl scans
+# `test/` recursively with no exclusion for either shadow tree, and the
+# discovery manifest indexes both copies as separate entries. 982 path pairs
+# (891 unit + 91 integration) differ byte-for-byte between canonical and
+# shadow, including CONTRADICTORY assertions on the same behavior
+# (os/kernel/loader/app_registry_spec.spl: len()==19 canonical vs ==18
+# shadow) and a stub silently shadowing a real 20-assertion spec
+# (app/dap/dap_spec.spl). Both run under default `bin/simple test` and can
+# report opposite verdicts for what looks like one spec. This guard turns
+# that silent drift into a loud, immediate failure — the same failure mode
+# named in the "grep is a wrapped ugrep" incident (commit 22b8d81821): a
+# sweep that reports success while missing half the call sites.
+#
+# ---------------------------------------------------------------------------
+# BASELINE DESIGN — must not fail on day one with 982 findings
+# ---------------------------------------------------------------------------
+# A guard that immediately reports 982 failures gets ignored, not fixed. So
+# this guard is baseline-relative, like a `git blame`-clean lint: the 982
+# pairs known-diverged as of 2026-08-08 are recorded in
+# scripts/check/test_tree_divergence_baseline.txt (one "label:relpath" per
+# line). The guard FAILS only on:
+#   (a) a NEW divergence not already in the baseline (regression), or
+#   (b) a baselined pair that is now IDENTICAL (the baseline is stale and
+#       MUST be shrunk — a baseline that only ever grows is exactly the
+#       kind of gate that quietly stops meaning anything).
+# Reconciling a pair (dropping it from the baseline) is therefore a real,
+# tracked improvement instead of invisible.
+#
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED CONTRACT (see .claude/rules/vcs.md verdict-line convention)
+# ---------------------------------------------------------------------------
+#   * Every command's exit status is checked; a tool failure is an ERROR
+#     (exit 2), never treated as a clean 0-diff result.
+#   * A run that compares 0 pairs is an ERROR (exit 2), not a PASS — a guard
+#     that "passes" because it checked nothing is the exact failure mode
+#     this repo has been bitten by repeatedly.
+#   * The verdict line always states how many pairs were actually compared.
+#
+# Usage: check-test-tree-divergence.shs [--generate-baseline]
+#   --generate-baseline   overwrite the baseline file with the CURRENT
+#                          diverged-pair list (only for deliberate,
+#                          reviewed baseline updates — never run this to
+#                          make a failure go away without reading it first).
+#
+# Env overrides (for sabotage/self-test only — do not use in normal runs):
+#   TEST_TREE_DIVERGENCE_PAIRS="label:canon_rel:shadow_rel[;label:canon_rel:shadow_rel...]"
+#   TEST_TREE_DIVERGENCE_BASELINE=/path/to/alternate/baseline.txt
+#
+# Exit 0 = no unbaselined divergence, 1 = divergence found, 2 = could not
+# determine (ERROR).
+
+set -u
+
+SELF=check-test-tree-divergence
+
+die() {
+    status="$1"; shift
+    echo "$SELF: ERROR: $*" >&2
+    echo "$SELF: ERROR — nothing was checked"
+    exit "$status"
+}
+
+# --- 0. locate repo root, refuse to run outside a real clone ---------------
+toplevel=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$toplevel" ] || die 2 "not inside a git repository (cwd=$(pwd))"
+cd "$toplevel" || die 2 "cannot cd to repo root $toplevel"
+
+BASELINE="${TEST_TREE_DIVERGENCE_BASELINE:-$toplevel/scripts/check/test_tree_divergence_baseline.txt}"
+
+generate=0
+if [ "${1:-}" = "--generate-baseline" ]; then
+    generate=1
+fi
+
+# --- 1. which pairs to check ------------------------------------------------
+if [ -n "${TEST_TREE_DIVERGENCE_PAIRS:-}" ]; then
+    pairs_raw=$(printf '%s' "$TEST_TREE_DIVERGENCE_PAIRS" | tr ';' '\n')
+else
+    pairs_raw='unit:test/01_unit:test/unit
+integration:test/02_integration:test/integration'
+fi
+
+# --- 2. scratch state --------------------------------------------------------
+work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence.XXXXXX") \
+    || die 2 "mktemp failed"
+trap 'rm -rf "$work"' EXIT INT TERM
+
+current_diverged="$work/current_diverged.txt"
+: > "$current_diverged"
+total_common=0
+total_identical=0
+total_diverged=0
+
+# --- 3. compare every pair ---------------------------------------------------
+oldifs="$IFS"
+IFS='
+'
+for line in $pairs_raw; do
+    IFS="$oldifs"
+    [ -n "$line" ] || continue
+    label=$(printf '%s' "$line" | cut -d: -f1)
+    canon_rel=$(printf '%s' "$line" | cut -d: -f2)
+    shadow_rel=$(printf '%s' "$line" | cut -d: -f3)
+    [ -n "$label" ] && [ -n "$canon_rel" ] && [ -n "$shadow_rel" ] \
+        || die 2 "malformed pair spec: '$line' (want label:canon_rel:shadow_rel)"
+
+    case "$canon_rel" in
+        /*) canon_dir="$canon_rel" ;;
+        *)  canon_dir="$toplevel/$canon_rel" ;;
+    esac
+    case "$shadow_rel" in
+        /*) shadow_dir="$shadow_rel" ;;
+        *)  shadow_dir="$toplevel/$shadow_rel" ;;
+    esac
+    [ -d "$canon_dir" ]  || die 2 "canonical dir does not exist: $canon_dir"
+    [ -d "$shadow_dir" ] || die 2 "shadow dir does not exist: $shadow_dir"
+
+    find "$shadow_dir" -type f -name '*.spl' \
+        ! -name '.spipe_matchers_*' ! -name '.sspec_wrapped_entry_*' \
+        > "$work/shadow_files.txt"
+    fr=$?
+    [ "$fr" -eq 0 ] || die 2 "find failed (status $fr) under $shadow_dir"
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        relpath=${f#"$shadow_dir"/}
+        canon_file="$canon_dir/$relpath"
+        [ -f "$canon_file" ] || continue   # not a mirrored path — out of scope
+        total_common=$((total_common + 1))
+        if cmp -s "$canon_file" "$f"; then
+            total_identical=$((total_identical + 1))
+        else
+            total_diverged=$((total_diverged + 1))
+            echo "$label:$relpath" >> "$current_diverged"
+        fi
+    done < "$work/shadow_files.txt"
+    IFS='
+'
+done
+IFS="$oldifs"
+
+sort -u "$current_diverged" -o "$current_diverged"
+
+[ "$total_common" -gt 0 ] \
+    || die 2 "0 mirrored pairs found across all pair specs — nothing was compared"
+
+# --- 4. --generate-baseline: write and stop ---------------------------------
+if [ "$generate" -eq 1 ]; then
+    cp "$current_diverged" "$BASELINE"
+    n=$(wc -l < "$current_diverged" | tr -d ' ')
+    echo "$SELF: baseline written to $BASELINE ($n entries)"
+    exit 0
+fi
+
+# --- 5. diff against baseline ------------------------------------------------
+[ -f "$BASELINE" ] || die 2 "baseline file missing: $BASELINE (run --generate-baseline once, reviewed, to create it)"
+sort -u "$BASELINE" > "$work/baseline_sorted.txt"
+
+comm -23 "$current_diverged" "$work/baseline_sorted.txt" > "$work/new_divergence.txt"
+comm -13 "$current_diverged" "$work/baseline_sorted.txt" > "$work/fixed_baseline.txt"
+
+n_new=$(wc -l < "$work/new_divergence.txt" | tr -d ' ')
+n_fixed=$(wc -l < "$work/fixed_baseline.txt" | tr -d ' ')
+n_baseline=$(wc -l < "$work/baseline_sorted.txt" | tr -d ' ')
+
+# machine-readable output for a future reconciliation lane (persists past
+# the trap-cleaned scratch dir unless the caller redirects it elsewhere)
+out="${TEST_TREE_DIVERGENCE_OUT:-${TMPDIR:-/tmp}/test_tree_divergence_current.txt}"
+cp "$current_diverged" "$out" 2>/dev/null || out="(failed to write $out)"
+
+echo "$SELF: $total_common pairs compared, $total_identical identical, $total_diverged diverged"
+echo "$SELF: baseline has $n_baseline known-diverged entries"
+echo "$SELF: diverged-path list written to $out"
+
+status=0
+if [ "$n_new" -gt 0 ]; then
+    echo "$SELF: NEW divergence(s) not in baseline:" >&2
+    sed 's/^/  + /' "$work/new_divergence.txt" >&2
+    status=1
+fi
+if [ "$n_fixed" -gt 0 ]; then
+    echo "$SELF: baseline entries that are now IDENTICAL (baseline is stale — remove these lines from $BASELINE):" >&2
+    sed 's/^/  - /' "$work/fixed_baseline.txt" >&2
+    status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+    echo "$SELF: FAIL — $total_diverged diverged vs $n_baseline baselined ($n_new new, $n_fixed fixed-but-still-baselined)"
+    exit 1
+fi
+
+echo "$SELF: PASS — $total_common pairs checked, $total_diverged diverged (all baselined), 0 new, 0 stale-fixed"
+exit 0

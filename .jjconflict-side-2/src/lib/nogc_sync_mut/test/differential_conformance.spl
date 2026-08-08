@@ -1,0 +1,221 @@
+"""Test-only semantic comparator for GPU/Vulkan/Venus and web-renderer traces.
+
+Reference adapters use the canonical no-GC dynamic SFFI owner separately; this
+helper accepts only normalized values.  It must never become a production
+renderer or a foreign dependency of a production driver.
+"""
+
+use common.spec.differential_trace.{TraceEvent, NormalizedTrace, normalized_trace_valid}
+
+pub struct GpuEnvironmentProfile:
+    id: text
+    ui_environment_profile_id: text
+    expected_arch: text
+    expected_transport: text
+    required_features: [text]
+    expected_venus_version: text
+    expected_device_identity: text
+    expected_oracle_identity: text
+    required_operations: [text]
+    requires_device_execution: bool
+    requires_device_origin_readback: bool
+    requires_fence: bool
+    requires_no_fallback: bool
+    max_trace_events: i64
+    max_elapsed_ns: i64
+
+pub struct ReferenceOracleAdapter:
+    name: text
+    library_name: text
+    abi_version: i64
+    required_symbols: [text]
+    test_only: bool
+
+pub struct TraceComparisonPolicy:
+    require_schema_match: bool
+    require_environment_match: bool
+    compare_monotonic_order: bool
+    compare_run_id: bool
+
+pub struct TraceComparison:
+    matched: bool
+    mismatch_count: i64
+    first_sequence: i64
+    reason: text
+
+pub fn trace_comparison_policy_semantic() -> TraceComparisonPolicy:
+    TraceComparisonPolicy(
+        require_schema_match: true,
+        require_environment_match: true,
+        compare_monotonic_order: true,
+        compare_run_id: false,
+    )
+
+fn _simpleos_qemu_gpu_environment_profile(id: text, arch: text, transport: text) -> GpuEnvironmentProfile:
+    GpuEnvironmentProfile(
+        id: id,
+        ui_environment_profile_id: id,
+        expected_arch: arch,
+        expected_transport: transport,
+        required_features: ["3d", "capset-query-fix", "resource-blob", "host-visible", "context-init"],
+        expected_venus_version: "1",
+        expected_device_identity: "virtio-gpu",
+        expected_oracle_identity: "mesa-vulkan-oracle",
+        required_operations: ["virtio_transport:discover", "venus_protocol:handshake", "vulkan_api:submit", "vulkan_api:fence", "vulkan_api:device_readback"],
+        requires_device_execution: true,
+        requires_device_origin_readback: true,
+        requires_fence: true,
+        requires_no_fallback: true,
+        max_trace_events: 4096,
+        max_elapsed_ns: 0,
+    )
+
+pub fn simpleos_qemu_gpu_environment_profiles() -> [GpuEnvironmentProfile]:
+    [
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-x86_64-vulkan-virtio", "x86_64", "virtio-gpu-pci"),
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-aarch64-vulkan-virtio", "aarch64", "virtio-gpu-mmio"),
+        _simpleos_qemu_gpu_environment_profile("simpleos-qemu-riscv64-vulkan-virtio", "riscv64", "virtio-gpu-mmio"),
+    ]
+
+# This is an emulator/prepared-host admission policy, not an execution result.
+# It shares the comparator with SimpleOS rather than introducing a macOS-only
+# renderer or oracle, and therefore rejects incomplete host receipts.
+pub fn macos_emulator_vulkan_draw_ir_environment_profile() -> GpuEnvironmentProfile:
+    GpuEnvironmentProfile(
+        id: "macos-emulator-vulkan-drawir",
+        ui_environment_profile_id: "macos-host-aarch64-emulated",
+        expected_arch: "aarch64",
+        expected_transport: "hvf-moltenvk",
+        required_features: [
+            "draw-ir", "animation", "pointer-keyboard-modifiers", "font",
+            "audio", "device-readback", "no-fallback", "perf-receipt"
+        ],
+        expected_venus_version: "n/a",
+        expected_device_identity: "moltenvk-device",
+        expected_oracle_identity: "macos-vulkan-dynload-oracle",
+        required_operations: [
+            "draw_ir:compose", "draw_ir:animation_frame",
+            "draw_ir:input_ctrl_alt", "draw_ir:font", "draw_ir:audio",
+            "vulkan_api:submit", "vulkan_api:fence",
+            "vulkan_api:device_readback", "vulkan_api:perf_receipt"
+        ],
+        requires_device_execution: true,
+        requires_device_origin_readback: true,
+        requires_fence: true,
+        requires_no_fallback: true,
+        max_trace_events: 128,
+        # Time limits are admitted only with a measured prepared-host budget.
+        max_elapsed_ns: 0,
+    )
+
+pub fn reference_oracle_adapter_valid(adapter: ReferenceOracleAdapter) -> bool:
+    if not adapter.test_only or adapter.name == "" or adapter.library_name == "":
+        return false
+    if adapter.abi_version <= 0 or adapter.required_symbols.len() == 0:
+        return false
+    var index = 0
+    while index < adapter.required_symbols.len():
+        if adapter.required_symbols[index] == "":
+            return false
+        index = index + 1
+    true
+
+fn _mapped_id(candidate_id: text, candidate_ids: [text], reference_ids: [text]) -> text:
+    var index = 0
+    while index < candidate_ids.len() and index < reference_ids.len():
+        if candidate_ids[index] == candidate_id:
+            return reference_ids[index]
+        index = index + 1
+    candidate_id
+
+fn _event_semantically_equal(candidate: TraceEvent, reference: TraceEvent, policy: TraceComparisonPolicy, candidate_ids: [text], reference_ids: [text]) -> bool:
+    if candidate.sequence != reference.sequence or candidate.layer_id != reference.layer_id or
+        candidate.operation != reference.operation or candidate.result_class != reference.result_class or
+        candidate.error_class != reference.error_class or candidate.payload_digest != reference.payload_digest or
+        candidate.scalar_fields != reference.scalar_fields:
+        return false
+    if _mapped_id(candidate.object_id, candidate_ids, reference_ids) != reference.object_id or
+        _mapped_id(candidate.parent_id, candidate_ids, reference_ids) != reference.parent_id:
+        return false
+    if policy.require_environment_match and candidate.environment_profile_id != reference.environment_profile_id:
+        return false
+    # Each trace is independently validated as monotonically ordered. Timestamps
+    # are not a cross-provider equality oracle: devices legitimately differ.
+    true
+
+pub fn compare_normalized_traces(candidate: NormalizedTrace, reference: NormalizedTrace, policy: TraceComparisonPolicy, candidate_ids: [text], reference_ids: [text]) -> TraceComparison:
+    if not normalized_trace_valid(candidate) or not normalized_trace_valid(reference):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "invalid-trace")
+    if candidate_ids.len() != reference_ids.len():
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "object-map-size-mismatch")
+    if policy.require_schema_match and candidate.schema_version != reference.schema_version:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "schema-mismatch")
+    if policy.require_environment_match and candidate.environment_profile_id != reference.environment_profile_id:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-profile-mismatch")
+    if policy.require_environment_match and (candidate.ui_environment_profile_id != reference.ui_environment_profile_id or candidate.arch != reference.arch or candidate.transport != reference.transport or candidate.venus_version != reference.venus_version or candidate.device_identity != reference.device_identity or candidate.oracle_identity != reference.oracle_identity or candidate.device_origin_readback != reference.device_origin_readback or candidate.fallback_used != reference.fallback_used):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-fact-mismatch")
+    if policy.compare_run_id and candidate.run_id != reference.run_id:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "run-id-mismatch")
+    if candidate.events.len() != reference.events.len():
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "event-count-mismatch")
+    var mismatches: i64 = 0
+    var first: i64 = -1
+    var index = 0
+    while index < candidate.events.len():
+        if not _event_semantically_equal(candidate.events[index], reference.events[index], policy, candidate_ids, reference_ids):
+            mismatches = mismatches + 1
+            if first < 0:
+                first = candidate.events[index].sequence
+        index = index + 1
+    if mismatches == 0:
+        TraceComparison(matched: true, mismatch_count: 0, first_sequence: -1, reason: "match")
+    else:
+        TraceComparison(matched: false, mismatch_count: mismatches, first_sequence: first, reason: "semantic-event-mismatch")
+
+fn _trace_has_operation(trace: NormalizedTrace, required: text) -> bool:
+    var index = 0
+    while index < trace.events.len():
+        val event = trace.events[index]
+        if "{event.layer_id}:{event.operation}" == required:
+            return true
+        index = index + 1
+    false
+
+fn _trace_has_feature(trace: NormalizedTrace, required: text) -> bool:
+    var index = 0
+    while index < trace.enabled_features.len():
+        if trace.enabled_features[index] == required:
+            return true
+        index = index + 1
+    false
+
+pub fn trace_satisfies_environment_profile(trace: NormalizedTrace, profile: GpuEnvironmentProfile) -> TraceComparison:
+    if not normalized_trace_valid(trace) or trace.environment_profile_id != profile.id or trace.ui_environment_profile_id != profile.ui_environment_profile_id:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-profile-mismatch")
+    if trace.arch != profile.expected_arch or trace.transport != profile.expected_transport or trace.venus_version != profile.expected_venus_version or trace.device_identity != profile.expected_device_identity or trace.oracle_identity != profile.expected_oracle_identity:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "environment-fact-mismatch")
+    var feature_index = 0
+    while feature_index < profile.required_features.len():
+        if not _trace_has_feature(trace, profile.required_features[feature_index]):
+            return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "required-feature-missing")
+        feature_index = feature_index + 1
+    if profile.max_trace_events > 0 and trace.events.len() > profile.max_trace_events:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "trace-event-budget-exceeded")
+    if trace.events.len() > 0 and profile.max_elapsed_ns > 0:
+        val elapsed = trace.events[trace.events.len() - 1].monotonic_ns - trace.events[0].monotonic_ns
+        if elapsed > profile.max_elapsed_ns:
+            return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "trace-time-budget-exceeded")
+    var index = 0
+    while index < profile.required_operations.len():
+        if not _trace_has_operation(trace, profile.required_operations[index]):
+            return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "required-operation-missing")
+        index = index + 1
+    if profile.requires_device_execution and not _trace_has_operation(trace, "vulkan_api:submit"):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "device-execution-missing")
+    if profile.requires_fence and not _trace_has_operation(trace, "vulkan_api:fence"):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fence-missing")
+    if profile.requires_device_origin_readback and (not trace.device_origin_readback or not _trace_has_operation(trace, "vulkan_api:device_readback")):
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "device-readback-missing")
+    if profile.requires_no_fallback and trace.fallback_used:
+        return TraceComparison(matched: false, mismatch_count: 1, first_sequence: -1, reason: "fallback-forbidden")
+    TraceComparison(matched: true, mismatch_count: 0, first_sequence: -1, reason: "match")

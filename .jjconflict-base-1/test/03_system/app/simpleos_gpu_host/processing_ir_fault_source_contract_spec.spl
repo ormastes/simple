@@ -1,0 +1,159 @@
+# @tag: system, gpu, processing-ir, fault-injection, source-contract
+
+use std.io_runtime.{file_exists, file_read}
+use std.spec.{describe, it, expect}
+
+val FAULT_HELPER = "src/lib/gc_async_mut/processing/fault_injection.spl"
+val CUDA_EXECUTOR = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
+val VULKAN_EXECUTOR = "src/lib/gc_async_mut/processing/vulkan_fill_u32.spl"
+val METAL_EXECUTOR = "src/lib/gc_async_mut/processing/metal_fill_u32.spl"
+val METAL_LIVE_SPEC = "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl"
+
+val BACKENDS = [
+    ["cuda", CUDA_EXECUTOR],
+    ["vulkan", VULKAN_EXECUTOR],
+    ["metal", METAL_EXECUTOR]
+]
+val PHASES = ["unavailable", "init", "submit", "readback", "mismatch"]
+val FAULT_IMPORT = "use std.gc_async_mut.processing.fault_injection." + "{" + "processing_ir_fault_reason" + "}"
+
+fn _assert_exists_and_read(path: text) -> text:
+    expect(file_exists(path)).to_equal(true)
+    file_read(path)
+
+fn _phase_guard(backend: text, phase: text) -> text:
+    if backend == "cuda" and phase == "readback":
+        return "if synced and readback_fault != \"\""
+    if backend == "cuda" and phase == "mismatch":
+        return "if copied and mismatch_fault != \"\""
+    if backend == "vulkan" and phase == "readback":
+        return "if dispatch_status == 1 and readback_fault != \"\""
+    if backend == "vulkan" and phase == "mismatch":
+        return "if read and mismatch_fault != \"\""
+    "if " + phase + "_fault != \"\""
+
+fn _assert_guarded_phase(source: text, backend: text, phase: text):
+    val call = "val " + phase + "_fault = processing_ir_fault_reason(\"" + backend + "\", \"" + phase + "\")"
+    expect(source).to_contain(call + "\n    " + _phase_guard(backend, phase))
+
+fn _assert_cleanup_before_boundary(source: text, branch_start: text, cleanup: text, boundary_text: text):
+    val start = source.index_of(branch_start)
+    expect(start).to_be_greater_than(0)
+    val branch = source.slice(start, source.len())
+    val boundary_at = branch.index_of(boundary_text)
+    expect(boundary_at).to_be_greater_than(0)
+    expect(branch.slice(0, boundary_at)).to_contain(cleanup)
+
+describe "ProcessingIR GPU executor fault source contract":
+    it "imports the shared fault reason helper in every executor":
+        expect(file_read(CUDA_EXECUTOR)).to_contain(FAULT_IMPORT)
+        for entry in BACKENDS:
+            val source = _assert_exists_and_read(entry[1])
+            expect(source).to_contain(FAULT_IMPORT)
+
+    it "guards every init, submit, readback, and mismatch phase":
+        expect(file_read(METAL_EXECUTOR)).to_contain(
+            "processing_ir_fault_reason(\"metal\", \"mismatch\")")
+        for entry in BACKENDS:
+            val source = _assert_exists_and_read(entry[1])
+            for phase in PHASES:
+                _assert_guarded_phase(source, entry[0], phase)
+
+    it "requires both the test gate and exact backend phase selection":
+        val source = _assert_exists_and_read(FAULT_HELPER)
+        expect(source).to_contain(
+            "if env_get(\"SIMPLE_GPU_TEST\") != \"1\" or\n       env_get(\"SIMPLE_GPU_FAULT_INJECT\") != target:")
+        expect(source).to_contain(
+            "if _processing_ir_fault_target != target:\n        _processing_ir_fault_target = target\n        _processing_ir_fault_match_count = 0")
+        expect(source).to_contain(
+            "_processing_ir_fault_match_count = _processing_ir_fault_match_count + 1")
+        expect(source).to_contain(
+            "env_get(\"SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES\") != \"1\" or\n        _processing_ir_fault_match_count > 1")
+
+    it "requires exact Metal success output and checksum":
+        val source = _assert_exists_and_read(METAL_LIVE_SPEC)
+        expect(source).to_contain(
+            "processing_ir_fill_u32, processing_ir_output_matches")
+        expect(source).to_contain(
+            "val values_exact = processing_ir_output_matches(ir, result.values)")
+        expect(source).to_contain("val checksum = _checksum(result.values)")
+        expect(source).to_contain(
+            "values=8 values_exact=true checksum=135272480")
+        expect(source).to_contain(
+            "values=0 values_exact=false checksum=0 handle=0 identity=0")
+
+    it "keeps runtime Metal unavailability distinct from initialization failure":
+        val metal = _assert_exists_and_read(METAL_EXECUTOR)
+        val unavailable = metal.index_of("if not metal_sffi_is_available():")
+        val initialization = metal.index_of(
+            "if not metal_sffi_init() or metal_sffi_device_count() <= 0:")
+        expect(unavailable).to_be_greater_than(0)
+        expect(initialization).to_be_greater_than(unavailable)
+        expect(metal.slice(unavailable, initialization)).to_contain(
+            "_processing_metal_failure(\"metal-unavailable\")")
+        expect(metal.slice(initialization, metal.len())).to_contain(
+            "_processing_metal_failure(\"metal-init-failed\")")
+
+    it "returns non-owning provenance after resource cleanup":
+        val vulkan = file_read(VULKAN_EXECUTOR)
+        val metal = file_read(METAL_EXECUTOR)
+        expect(vulkan).to_contain("val handle = device_identity")
+        expect(metal).to_contain("val handle = identity")
+        expect(vulkan.contains("val handle = buffer.handle")).to_equal(false)
+        expect(metal.contains("val handle = output")).to_equal(false)
+
+    it "releases exactly the Metal resources owned at each failure boundary":
+        val metal = file_read(METAL_EXECUTOR)
+        expect(metal).to_contain("fn _processing_metal_cleanup")
+        _assert_cleanup_before_boundary(metal, "if queue == 0:", "_processing_metal_cleanup(device, 0, 0, 0, 0, 0, 0, 0)", "return _processing_metal_failure(\"metal-command-queue-create-failed\")")
+        _assert_cleanup_before_boundary(metal, "if shader == 0:", "_processing_metal_cleanup(device, queue, 0, 0, 0, 0, 0, 0)", "return _processing_metal_failure(\"metal-shader-compile-failed\")")
+        _assert_cleanup_before_boundary(metal, "if pipeline == 0:", "_processing_metal_cleanup(device, queue, shader, 0, 0, 0, 0, 0)", "return _processing_metal_failure(\"metal-pipeline-create-failed\")")
+        val full = "_processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)"
+        _assert_cleanup_before_boundary(metal, "if output == 0 or dummy == 0 or host == 0:", full, "return _processing_metal_failure(\"metal-allocation-failed\")")
+        _assert_cleanup_before_boundary(metal, "if submit_fault != \"\":", full, "return _processing_metal_failure(submit_fault)")
+        _assert_cleanup_before_boundary(metal, "if not dispatched:", full, "return _processing_metal_failure(\"metal-dispatch-failed\")")
+        _assert_cleanup_before_boundary(metal, "if readback_fault != \"\":", full, "return _processing_metal_failure(readback_fault)")
+        _assert_cleanup_before_boundary(metal, "if not copied:", full, "return _processing_metal_failure(\"metal-readback-failed\")")
+        _assert_cleanup_before_boundary(metal, "if values.len().to_i64() != ir.element_count:", full, "return _processing_metal_failure(\"metal-readback-size-mismatch\")")
+        _assert_cleanup_before_boundary(metal, "if mismatch_fault != \"\":", full, "return _processing_metal_failure(mismatch_fault)")
+        _assert_cleanup_before_boundary(metal, "val handle = identity", full, "ProcessingMetalResult(completed: true")
+
+    it "releases CUDA allocations before every post-context return":
+        val cuda = file_read(CUDA_EXECUTOR)
+        expect(cuda).to_contain("fn _processing_cuda_cleanup")
+        expect(cuda).to_contain("if device > 0:\n        session.free(device)")
+        expect(cuda).to_contain("if values_ptr != 0:\n        raw_free(values_ptr, PROCESSING_CUDA_ARG_BYTES)")
+        expect(cuda).to_contain("if args_ptr != 0:\n        raw_free(args_ptr, PROCESSING_CUDA_ARG_BYTES)")
+        expect(cuda).to_contain("if host_ptr != 0:\n        raw_free(host_ptr, byte_count)")
+        val full = "_processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)"
+        _assert_cleanup_before_boundary(cuda, "if device <= 0 or values_ptr == 0 or args_ptr == 0 or host_ptr == 0:", full, "return ProcessingCudaResult(completed: false")
+        _assert_cleanup_before_boundary(cuda, "if submit_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
+        _assert_cleanup_before_boundary(cuda, "if synced and readback_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
+        _assert_cleanup_before_boundary(cuda, "if copied and mismatch_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
+        _assert_cleanup_before_boundary(cuda, "val handle = device_handle + 1", full, "if not dispatch_ok:")
+
+    it "releases or quarantines Vulkan dependencies before every owned return":
+        val vulkan = file_read(VULKAN_EXECUTOR)
+        expect(vulkan).to_contain("device_type != \"discrete\" and device_type != \"integrated\"")
+        expect(vulkan).to_contain("reason: \"vulkan-physical-device-required\"")
+        expect(vulkan).to_contain("if dispatch_status < 0:")
+        expect(vulkan).to_contain("processing_ir_fault_reason(\"vulkan\", \"dispatch-ineligible\")")
+        _assert_cleanup_before_boundary(vulkan, "if not buffer.is_valid:", "vulkan_sffi_shutdown_reaped()", "return ProcessingVulkanResult(completed: false")
+        val shader_failure = "vulkan_free_buffer(buffer)\n        vulkan_sffi_shutdown_reaped()"
+        _assert_cleanup_before_boundary(vulkan, "if not shader.is_valid:", shader_failure, "return ProcessingVulkanResult(completed: false")
+        val pipeline_failure = "vulkan_destroy_shader(shader)\n        vulkan_free_buffer(buffer)\n        vulkan_sffi_shutdown_reaped()"
+        _assert_cleanup_before_boundary(vulkan, "if not pipeline.is_valid:", pipeline_failure, "return ProcessingVulkanResult(completed: false")
+        val full = "vulkan_destroy_pipeline(pipeline)\n        vulkan_destroy_shader(shader)\n        vulkan_free_buffer(buffer)\n        vulkan_sffi_shutdown_reaped()"
+        _assert_cleanup_before_boundary(vulkan, "if submit_fault != \"\":", full, "return ProcessingVulkanResult(completed: false")
+        val quarantine = "vulkan_sffi_quarantine_dependencies(0, buffer.handle, pipeline.handle, shader.handle)"
+        _assert_cleanup_before_boundary(vulkan, "if dispatch_status < 0:", quarantine, "return ProcessingVulkanResult(completed: false")
+        _assert_cleanup_before_boundary(vulkan, "if dispatch_status == 1 and readback_fault != \"\":", full, "return ProcessingVulkanResult(completed: false")
+        _assert_cleanup_before_boundary(vulkan, "if read and mismatch_fault != \"\":", full, "return ProcessingVulkanResult(completed: false")
+        val success_full = "vulkan_destroy_pipeline(pipeline)\n    vulkan_destroy_shader(shader)\n    vulkan_free_buffer(buffer)\n    vulkan_sffi_shutdown_reaped()"
+        _assert_cleanup_before_boundary(vulkan, "val handle = device_identity", success_full, "if not read or device_identity <= 0:")
+
+    it "keeps real CUDA dispatch and readback failures distinct":
+        val cuda = file_read(CUDA_EXECUTOR)
+        expect(cuda).to_contain("reason: \"cuda-dispatch-failed\"")
+        expect(cuda).to_contain("reason: \"cuda-readback-failed\"")
+        expect(cuda.contains("cuda-dispatch-or-readback-failed")).to_equal(false)

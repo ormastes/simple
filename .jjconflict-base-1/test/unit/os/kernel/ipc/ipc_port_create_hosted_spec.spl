@@ -1,0 +1,88 @@
+"""IPC Port Creation — Hosted Path Specification.
+
+Proves that the kernel-side IpcManager.create_port and the hosted
+_handle_ipc_create_port dispatcher both succeed (return positive port id)
+when run in the in-process hosted runtime.
+
+This is the parity test for the wm-service '-38' bug observed on the
+x86_64 baremetal live-QEMU lane. If these pass but the baremetal lane
+still fails, the gap is confirmed to be in the baremetal stub layer
+(examples/simple_os/arch/x86_64/boot/baremetal_stubs.c) and NOT in the
+Simple-language kernel dispatcher.
+"""
+
+use std.spec
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.log.klog.{KernelLog}
+
+describe "IpcManager.create_port (hosted)":
+    it "returns a port with a positive id":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 7)
+        val port = mgr.create_port(owner, "compositor")
+        expect(port.id).to_be_greater_than(0)
+
+    it "stores the owner task id on the created port":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 42)
+        val port = mgr.create_port(owner, "compositor")
+        expect(port.owner).to_equal(42)
+
+    it "assigns distinct ids to successive ports":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 1)
+        val p1 = mgr.create_port(owner, "compositor")
+        val p2 = mgr.create_port(owner, "launcher")
+        val different = p1.id != p2.id
+        expect(different).to_equal(true)
+
+    it "allows connect-by-name after create":
+        var mgr = IpcManager.new()
+        val owner = TaskId(id: 3)
+        mgr.create_port(owner, "compositor")
+        val found = mgr.connect("compositor")
+        val found_ok = found != nil
+        expect(found_ok).to_equal(true)
+
+describe "syscall_handler id=22 SYS_IPC_CREATE_PORT (hosted)":
+    it "dispatches to _handle_ipc_create_port and returns positive id":
+        var scheduler = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(
+                id: 22,
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0
+            ),
+            scheduler,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # Hosted path must NOT return -38; it must return a valid port id.
+        val is_enosys = result.value == -38
+        expect(is_enosys).to_equal(false)
+        expect(result.value).to_be_greater_than(0)
+
+    it "returns monotonically increasing ids on repeated calls":
+        var scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val klog = KernelLog.new(16)
+        val a = syscall_handler(
+            SyscallArgs(id: 22, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler, ipc, klog
+        )
+        val b = syscall_handler(
+            SyscallArgs(id: 22, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            scheduler, ipc, klog
+        )
+        expect(a.value).to_be_greater_than(0)
+        expect(b.value).to_be_greater_than(0)
+        val growing = b.value > a.value
+        expect(growing).to_equal(true)

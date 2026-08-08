@@ -1,0 +1,146 @@
+#!/bin/sh
+# Staleness probe for the deployed lint oracle
+# (bin/release/<triple>/simple, normally symlinked from bin/simple).
+#
+# WP-3.5 (doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md)
+# proved this session that `bin/simple lint` runs a binary OLDER than its own
+# source: the deployed binary contains the diagnostic-code string `MEXH001`
+# but NOT `MEXH006`, which sits at
+# src/compiler/90.tools/lint/_LintMain/lint_checks.spl:65. Every lint-based
+# check landed this session (REQC001-004 semantic wiring, STUB001/STUB003,
+# W-MC-RES-001, ...) exists in pure-Simple source but fires for NOBODY running
+# `bin/simple lint` today, because that binary never saw the source.
+#
+# Root cause found while building this probe (2026-08-07): the deployed
+# binary is not merely a STALE self-hosted build, it is the RUST SEED itself.
+# `bin/release/x86_64-unknown-linux-gnu/simple --version` prints the seed
+# WARNING banner, and `MEXH001` lives in src/compiler_rust/compiler/src/lint/
+# types.rs (Rust), not only in the pure-Simple lint_checks.spl. MEXH006 and
+# W-MC-RES-001 are pure-Simple-only diagnostics (src/compiler/90.tools/lint,
+# src/compiler/35.semantics/lint) that were never ported to the Rust seed and
+# structurally CANNOT appear in a seed binary no matter how it is rebuilt.
+# They can only appear in a genuinely self-hosted Stage-3 binary — which is
+# separately blocked; see
+# doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
+# (Stage 3 self-host currently SIGSEGVs during monomorphize/MIR lowering).
+#
+# This probe is deliberately mechanical and cheap (grep, no build): any later
+# WP runs it FIRST to decide whether `bin/simple lint` is a trustworthy
+# oracle for source-level lint claims. Per the plan's amendment, a WP that
+# cannot prove it ran against a fresh binary reports its result as
+# UNVERIFIED, not as pass.
+#
+# Usage:
+#   sh scripts/check/check-lint-binary-staleness.shs [binary-path]
+#   sh scripts/check/check-lint-binary-staleness.shs --selftest
+#
+# --selftest proves the PASS path is not dead code: it builds a scratch
+# fixture binary-like file that DOES contain the fresh markers and asserts
+# the probe reports PASS on it, without requiring a real redeploy.
+#
+# OUTPUT CONTRACT (verdict is always the LAST line of stdout)
+#   PASS  — deployed binary at <path> contains <n> fresh marker(s): <list>
+#   FAIL  — deployed binary at <path> is STALE: missing <k> of <n> fresh
+#           marker(s): <list>
+#   ERROR — nothing was checked (bad path, or a marker is missing from
+#           CURRENT SOURCE, meaning the probe's own premise broke — e.g. a
+#           diagnostic code got renamed)
+# Exit: 0 = PASS, 1 = FAIL, 2 = ERROR
+
+set -u
+
+# Run from the repo root regardless of invocation directory.
+cd "$(dirname "$0")/../.." || exit 2
+
+GREP=/usr/bin/grep
+[ -x "$GREP" ] || GREP=grep
+
+# Markers that must be present in a genuinely fresh, self-hosted pure-Simple
+# lint binary. Both are required (not "either") per the WP-3.5 task
+# instructions. Keep this list append-only as newer diagnostics land.
+MARKER_MEXH006="MEXH006"
+MEXH006_SRC="src/compiler/90.tools/lint/_LintMain/lint_checks.spl"
+MARKER_WMCRES001="W-MC-RES-001"
+WMCRES001_SRC="src/compiler/35.semantics/lint/unwrapped_foreign_resource.spl"
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — could not create selftest scratch dir"; exit 2; }
+    trap 'rm -rf "$tmp"' EXIT
+
+    fresh="$tmp/fresh_fixture.bin"
+    stale="$tmp/stale_fixture.bin"
+    printf 'MEXH001 some other bytes %s and %s here\n' "$MARKER_MEXH006" "$MARKER_WMCRES001" > "$fresh"
+    printf 'MEXH001 some other bytes, no fresh markers here\n' > "$stale"
+
+    fresh_out=$(run_probe "$fresh"); fresh_rc=$?
+    stale_out=$(run_probe "$stale"); stale_rc=$?
+
+    echo "-- selftest: fresh fixture --"
+    echo "$fresh_out"
+    echo "-- selftest: stale fixture --"
+    echo "$stale_out"
+
+    if [ "$fresh_rc" -eq 0 ] && [ "$stale_rc" -eq 1 ]; then
+        echo "PASS — selftest: fixture-PASS and fixture-FAIL paths both verified live"
+        exit 0
+    else
+        echo "FAIL — selftest: expected fresh_rc=0 stale_rc=1, got fresh_rc=$fresh_rc stale_rc=$stale_rc"
+        exit 1
+    fi
+}
+
+# run_probe <binary-path> — prints verdict lines, returns 0/1/2.
+run_probe() {
+    bin_path="$1"
+
+    if [ ! -e "$bin_path" ]; then
+        echo "ERROR — nothing was checked: no file at $bin_path"
+        return 2
+    fi
+
+    # Fail-closed on premise breakage: confirm each marker still exists in
+    # CURRENT SOURCE before trusting its absence from the binary as
+    # "stale" evidence. A renamed diagnostic code must not read as
+    # permanent staleness.
+    if ! $GREP -q -- "$MARKER_MEXH006" "$MEXH006_SRC" 2>/dev/null; then
+        echo "ERROR — premise broken: $MARKER_MEXH006 not found in current source ($MEXH006_SRC); update the probe's marker list"
+        return 2
+    fi
+    if ! $GREP -q -- "$MARKER_WMCRES001" "$WMCRES001_SRC" 2>/dev/null; then
+        echo "ERROR — premise broken: $MARKER_WMCRES001 not found in current source ($WMCRES001_SRC); update the probe's marker list"
+        return 2
+    fi
+
+    found=0
+    missing=0
+    found_list=""
+    missing_list=""
+
+    if $GREP -a -q -- "$MARKER_MEXH006" "$bin_path" 2>/dev/null; then
+        found=$((found + 1)); found_list="$found_list $MARKER_MEXH006"
+    else
+        missing=$((missing + 1)); missing_list="$missing_list $MARKER_MEXH006"
+    fi
+
+    if $GREP -a -q -- "$MARKER_WMCRES001" "$bin_path" 2>/dev/null; then
+        found=$((found + 1)); found_list="$found_list $MARKER_WMCRES001"
+    else
+        missing=$((missing + 1)); missing_list="$missing_list $MARKER_WMCRES001"
+    fi
+
+    if [ "$missing" -eq 0 ]; then
+        echo "PASS — deployed binary at $bin_path contains $found fresh marker(s):$found_list"
+        return 0
+    else
+        echo "FAIL — deployed binary at $bin_path is STALE: missing $missing of $((found + missing)) fresh marker(s):$missing_list (present:$found_list)"
+        return 1
+    fi
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest
+fi
+
+TARGET="${1:-bin/release/x86_64-unknown-linux-gnu/simple}"
+run_probe "$TARGET"
+exit $?

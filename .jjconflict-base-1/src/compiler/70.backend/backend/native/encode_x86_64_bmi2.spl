@@ -1,0 +1,217 @@
+# src/compiler/70.backend/backend/native/encode_x86_64_bmi2.spl
+#
+# x86_64 BMI2 Instruction Byte-Emit Encoder — Pure Simple
+#
+# Produces exact byte sequences for BMI2 bit-manipulation instructions:
+#   PDEP   (Parallel Bit Deposit,  VEX.LZ.F2.0F38.W0/W1 F5 /r)
+#   PEXT   (Parallel Bit Extract,  VEX.LZ.F3.0F38.W0/W1 F5 /r)
+#   BZHI   (Zero High Bits,        VEX.LZ.NP.0F38.W0/W1 F5 /r)
+#
+# All three instructions share opcode 0xF5 in the 0F38 map and differ only
+# in the VEX.pp field:
+#   pp=11 (F2) → PDEP
+#   pp=10 (F3) → PEXT
+#   pp=00 (NP) → BZHI
+#
+# VEX 3-byte prefix (C4h) for BMI2 GPR forms (L=0, 0F38 map):
+#   Byte 0: 0xC4
+#   Byte 1: ~R  ~X  ~B  m4 m3 m2 m1 m0
+#     ~R   = 1 when dst < 8,  else 0  (inverted REX.R — extends ModRM.reg)
+#     ~X   = 1 (no SIB; register-direct only)
+#     ~B   = 1 when rm  < 8,  else 0  (inverted REX.B — extends ModRM.rm)
+#     mmmmm= 00010 (2) for 0F38 map
+#   Byte 2: W  ~v3 ~v2 ~v1 ~v0  L  p1 p0
+#     W    = 1 for 64-bit form (W=0 for 32-bit)
+#     ~vvvv= inverted 4-bit vvvv index: (15 - vvvv_reg)
+#     L    = 0 (LZ — scalar/128-bit)
+#     pp   = 11 for PDEP (F2), 10 for PEXT (F3), 00 for BZHI (NP)
+#   Byte 3: 0xF5 (opcode, shared by all three)
+#   Byte 4: ModRM — mod=11, reg=dst%8, rm=rm_reg%8
+#
+# PDEP/PEXT operand routing (uniform, dst/src1/src2 convention):
+#   vvvv = src1 (index operand / mask register in src1 position)
+#   rm   = src2 (data source / mask register in src2 position)
+#
+# BZHI operand routing (Intel: BZHI dst, src, index):
+#   vvvv = idx  (bit-count index register; src2 in caller's (dst,src,idx) view)
+#   rm   = src  (data source; src1 in caller's (dst,src,idx) view)
+#   Docstring names params (dst, src, idx) to match Intel mnemonics.
+#
+# Arithmetic for VEX byte1 (0F38 map, mmmmm=2, no SIB):
+#   byte1 = 226 - (dst/8)*128 - (rm/8)*32
+#   (226 = 0xE2 = 1110_0010 = ~R=1, ~X=1, ~B=1, mmmmm=2)
+#
+# Arithmetic for VEX byte2:
+#   byte2_r64(vvvv, pp) = 128 + (15 - vvvv)*8 + pp
+#   byte2_r32(vvvv, pp) =       (15 - vvvv)*8 + pp
+#   (W=1 adds 128; L=0 contributes 0)
+#
+# ALL byte goldens verified with llvm-mc --show-encoding -triple=x86_64 -mattr=+bmi2
+# Reference: Intel SDM Vol 2B PDEP/PEXT/BZHI entries; Vol 2A §2.3.5 (VEX prefix).
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _modrm_direct(reg: i64, rm: i64) -> i64:
+    """
+    ModRM byte for register-direct operands (mod=11).
+    mod=11 → 192; reg field uses low 3 bits of reg; rm field uses low 3 bits of rm.
+    """
+    192 + ((reg % 8) * 8) + (rm % 8)
+
+fn _bmi2_vex_byte1(dst: i64, rm: i64) -> i64:
+    """
+    VEX Byte 1 for 0F38 map (mmmmm=2), register-register.
+    ~R=1 when dst<8, ~X=1 (no SIB), ~B=1 when rm<8, mmmmm=2.
+    byte1 = 226 - (dst/8)*128 - (rm/8)*32
+    """
+    226 - (dst / 8) * 128 - (rm / 8) * 32
+
+fn _bmi2_vex_byte2_r64(vvvv: i64, pp: i64) -> i64:
+    """
+    VEX Byte 2 for 64-bit BMI2 form: W=1, ~vvvv=(15-vvvv), L=0, pp=pp.
+    byte2 = 128 + (15 - vvvv)*8 + pp
+    pp: 0=NP(BZHI), 2=F3(PEXT), 3=F2(PDEP)
+    """
+    128 + (15 - vvvv) * 8 + pp
+
+fn _bmi2_vex_byte2_r32(vvvv: i64, pp: i64) -> i64:
+    """
+    VEX Byte 2 for 32-bit BMI2 form: W=0, ~vvvv=(15-vvvv), L=0, pp=pp.
+    byte2 = (15 - vvvv)*8 + pp
+    pp: 0=NP(BZHI), 2=F3(PEXT), 3=F2(PDEP)
+    """
+    (15 - vvvv) * 8 + pp
+
+fn _emit_bmi2_r64(dst: i64, vvvv: i64, rm: i64, pp: i64) -> [i64]:
+    """
+    Core 3-byte VEX emit for 64-bit BMI2 instructions (opcode=F5, 0F38 map).
+    dst:  destination GPR index 0..15
+    vvvv: source routed through VEX.vvvv field (index 0..15)
+    rm:   source routed through ModRM.rm field (index 0..15)
+    pp:   VEX.pp — 0=NP/BZHI, 2=F3/PEXT, 3=F2/PDEP
+    """
+    val b1    = _bmi2_vex_byte1(dst, rm)
+    val b2    = _bmi2_vex_byte2_r64(vvvv, pp)
+    val modrm = _modrm_direct(dst, rm)
+    [0xC4, b1, b2, 0xF5, modrm]
+
+fn _emit_bmi2_r32(dst: i64, vvvv: i64, rm: i64, pp: i64) -> [i64]:
+    """
+    Core 3-byte VEX emit for 32-bit BMI2 instructions (opcode=F5, 0F38 map).
+    dst:  destination GPR index 0..15
+    vvvv: source routed through VEX.vvvv field (index 0..15)
+    rm:   source routed through ModRM.rm field (index 0..15)
+    pp:   VEX.pp — 0=NP/BZHI, 2=F3/PEXT, 3=F2/PDEP
+    """
+    val b1    = _bmi2_vex_byte1(dst, rm)
+    val b2    = _bmi2_vex_byte2_r32(vvvv, pp)
+    val modrm = _modrm_direct(dst, rm)
+    [0xC4, b1, b2, 0xF5, modrm]
+
+# ============================================================================
+# PDEP — Parallel Bit Deposit  (VEX.LZ.F2.0F38.W1 F5 /r)
+# PDEP dst, src1, src2
+#   dst  ← parallel-deposit bits of src1 into positions set in src2 mask
+#   Routing: vvvv=src1 (data), rm=src2 (mask)
+# ============================================================================
+
+fn emit_pdep_r64(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    PDEP r64, r64, r64 — 64-bit parallel bit deposit.
+    Encoding: VEX.LZ.F2.0F38.W1 F5 /r
+    dst, src1, src2: GPR indices 0..15 (rax=0, rcx=1, rdx=2, ...).
+    src1 → vvvv (data), src2 → ModRM.rm (mask).
+    Example: emit_pdep_r64(0, 1, 2) → [0xC4, 0xE2, 0xF3, 0xF5, 0xC2]
+      VEX byte2: W=1, ~vvvv=14(src1=1), L=0, pp=3(F2) → 128+14*8+3=0xF3
+    llvm-mc: pdepq %rdx, %rcx, %rax → [0xc4,0xe2,0xf3,0xf5,0xc2]
+    """
+    _emit_bmi2_r64(dst, src1, src2, 3)
+
+fn emit_pdep_r32(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    PDEP r32, r32, r32 — 32-bit parallel bit deposit.
+    Encoding: VEX.LZ.F2.0F38.W0 F5 /r
+    dst, src1, src2: GPR indices 0..15 (eax=0, ecx=1, edx=2, ...).
+    src1 → vvvv (data), src2 → ModRM.rm (mask).
+    Example: emit_pdep_r32(0, 1, 2) → [0xC4, 0xE2, 0x73, 0xF5, 0xC2]
+      VEX byte2: W=0, ~vvvv=14(src1=1), L=0, pp=3(F2) → 14*8+3=0x73
+    llvm-mc: pdepl %edx, %ecx, %eax → [0xc4,0xe2,0x73,0xf5,0xc2]
+    """
+    _emit_bmi2_r32(dst, src1, src2, 3)
+
+# ============================================================================
+# PEXT — Parallel Bit Extract  (VEX.LZ.F3.0F38.W1 F5 /r)
+# PEXT dst, src1, src2
+#   dst  ← parallel-extract bits of src1 at positions set in src2 mask
+#   Routing: vvvv=src1 (data), rm=src2 (mask)
+# ============================================================================
+
+fn emit_pext_r64(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    PEXT r64, r64, r64 — 64-bit parallel bit extract.
+    Encoding: VEX.LZ.F3.0F38.W1 F5 /r
+    dst, src1, src2: GPR indices 0..15 (rax=0, rcx=1, rdx=2, ...).
+    src1 → vvvv (data), src2 → ModRM.rm (mask).
+    Example: emit_pext_r64(0, 1, 2) → [0xC4, 0xE2, 0xF2, 0xF5, 0xC2]
+      VEX byte2: W=1, ~vvvv=14(src1=1), L=0, pp=2(F3) → 128+14*8+2=0xF2
+    llvm-mc: pextq %rdx, %rcx, %rax → [0xc4,0xe2,0xf2,0xf5,0xc2]
+    """
+    _emit_bmi2_r64(dst, src1, src2, 2)
+
+fn emit_pext_r32(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    PEXT r32, r32, r32 — 32-bit parallel bit extract.
+    Encoding: VEX.LZ.F3.0F38.W0 F5 /r
+    dst, src1, src2: GPR indices 0..15 (eax=0, ecx=1, edx=2, ...).
+    src1 → vvvv (data), src2 → ModRM.rm (mask).
+    Example: emit_pext_r32(0, 1, 2) → [0xC4, 0xE2, 0x72, 0xF5, 0xC2]
+      VEX byte2: W=0, ~vvvv=14(src1=1), L=0, pp=2(F3) → 14*8+2=0x72
+    llvm-mc: pextl %edx, %ecx, %eax → [0xc4,0xe2,0x72,0xf5,0xc2]
+    """
+    _emit_bmi2_r32(dst, src1, src2, 2)
+
+# ============================================================================
+# BZHI — Zero High Bits From Index  (VEX.LZ.NP.0F38.W1 F5 /r)
+# BZHI dst, src, idx
+#   dst  ← src with bits at and above idx zeroed
+#   Routing: vvvv=idx (bit-count index), rm=src (data source)
+#   Note: operand order differs from PDEP/PEXT; vvvv=idx not src1.
+# ============================================================================
+
+fn emit_bzhi_r64(dst: i64, src: i64, idx: i64) -> [i64]:
+    """
+    BZHI r64, r64, r64 — 64-bit zero high bits from index.
+    Encoding: VEX.LZ.NP.0F38.W1 F5 /r
+    dst, src, idx: GPR indices 0..15 (rax=0, rcx=1, rdx=2, ...).
+    idx → vvvv (bit-count register), src → ModRM.rm (data source).
+    Example: emit_bzhi_r64(0, 1, 2) → [0xC4, 0xE2, 0xE8, 0xF5, 0xC1]
+      VEX byte2: W=1, ~vvvv=13(idx=2), L=0, pp=0(NP) → 128+13*8+0=0xE8
+      ModRM: mod=11, reg=0(rax), rm=1(rcx) → 0xC1
+    llvm-mc: bzhiq %rdx, %rcx, %rax → [0xc4,0xe2,0xe8,0xf5,0xc1]
+    """
+    _emit_bmi2_r64(dst, idx, src, 0)
+
+fn emit_bzhi_r32(dst: i64, src: i64, idx: i64) -> [i64]:
+    """
+    BZHI r32, r32, r32 — 32-bit zero high bits from index.
+    Encoding: VEX.LZ.NP.0F38.W0 F5 /r
+    dst, src, idx: GPR indices 0..15 (eax=0, ecx=1, edx=2, ...).
+    idx → vvvv (bit-count register), src → ModRM.rm (data source).
+    Example: emit_bzhi_r32(0, 1, 2) → [0xC4, 0xE2, 0x68, 0xF5, 0xC1]
+      VEX byte2: W=0, ~vvvv=13(idx=2), L=0, pp=0(NP) → 13*8+0=0x68
+      ModRM: mod=11, reg=0(eax), rm=1(ecx) → 0xC1
+    """
+    _emit_bmi2_r32(dst, idx, src, 0)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_pdep_r64
+export emit_pdep_r32
+export emit_pext_r64
+export emit_pext_r32
+export emit_bzhi_r64
+export emit_bzhi_r32

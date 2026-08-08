@@ -1,0 +1,283 @@
+#!/bin/sh
+# Probe the Windows DirectX/D3D11 GUI-web browser backing lane.
+#
+# This is the DirectX counterpart to the Vulkan browser-backing setup script. It
+# records native D3D11 readback proof, launches Electron/Chrome with ANGLE D3D11
+# flags when requested, and writes fail-closed key/value evidence.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---check}"
+BUILD_DIR="${GUI_WEB_2D_DIRECTX_BUILD_DIR:-$ROOT_DIR/build/gui-web-2d-directx-env}"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+HTML_PATH="${GUI_WEB_2D_DIRECTX_HTML_PATH:-$ROOT_DIR/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+WIDTH="${GUI_WEB_2D_DIRECTX_WIDTH:-1280}"
+HEIGHT="${GUI_WEB_2D_DIRECTX_HEIGHT:-720}"
+TIMEOUT_SECS="${GUI_WEB_2D_DIRECTX_TIMEOUT_SECS:-60}"
+
+usage() {
+    cat <<'EOF'
+usage: scripts/setup/setup-gui-web-2d-directx-env.shs [--check|--browser-backing]
+
+  --check            Record host, native DirectX readback, Electron, and Chrome readiness.
+  --browser-backing  Also capture Electron/Chrome ARGB proof with ANGLE D3D11 flags.
+
+Evidence is written to build/gui-web-2d-directx-env/evidence.env by default.
+EOF
+}
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+append_kv() {
+    key="$1"
+    value="${2:-}"
+    printf '%s=%s\n' "$key" "$value" >>"$EVIDENCE_ENV"
+}
+
+field_of() {
+    key="$1"
+    file="$2"
+    if [ -s "$file" ]; then
+        sed -n "s/^${key}=//p" "$file" | tail -n 1
+    fi
+}
+
+run_bound() {
+    if have timeout; then
+        timeout "$TIMEOUT_SECS" "$@"
+    else
+        "$@"
+    fi
+}
+
+find_chrome_bin() {
+    if [ -n "${CHROME_CAPTURE_BIN:-}" ] && [ -f "$CHROME_CAPTURE_BIN" ]; then
+        printf '%s\n' "$CHROME_CAPTURE_BIN"
+        return 0
+    fi
+    for candidate in \
+        "${LOCALAPPDATA:-}/Google/Chrome/Application/chrome.exe" \
+        "${PROGRAMFILES:-}/Google/Chrome/Application/chrome.exe" \
+        "${PROGRAMFILES:-}/Microsoft/Edge/Application/msedge.exe" \
+        "${ProgramFiles:-}/Google/Chrome/Application/chrome.exe" \
+        "${ProgramFiles:-}/Microsoft/Edge/Application/msedge.exe" \
+        "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+        "/c/Program Files/Microsoft/Edge/Application/msedge.exe"; do
+        if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    command -v chrome.exe 2>/dev/null || command -v msedge.exe 2>/dev/null || true
+}
+
+parse_argb() {
+    argb_path="$1"
+    prefix="$2"
+    if [ ! -s "$argb_path" ]; then
+        append_kv "${prefix}_argb_status" "missing"
+        append_kv "${prefix}_argb_path" "$argb_path"
+        return 0
+    fi
+    if ! have node; then
+        append_kv "${prefix}_argb_status" "unavailable"
+        append_kv "${prefix}_argb_reason" "missing-node"
+        append_kv "${prefix}_argb_path" "$argb_path"
+        return 0
+    fi
+    node - "$argb_path" "$prefix" >>"$EVIDENCE_ENV" <<'NODE'
+const fs = require("fs");
+const argbPath = process.argv[2] || "";
+const prefix = process.argv[3] || "argb";
+function emit(k, v) { console.log(`${prefix}_argb_${k}=${v ?? ""}`); }
+try {
+  const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
+  const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  let nonblank = 0;
+  let checksum = 0n;
+  for (let i = 0; i < pixels.length; i += 1) {
+    const pixel = Number(pixels[i]) >>> 0;
+    checksum += BigInt(pixel) * BigInt(i + 1);
+    if (((pixel >>> 24) & 255) !== 0 && pixel !== 0xffffffff) nonblank++;
+  }
+  emit("status", pixels.length > 0 && nonblank > 0 ? "pass" : "fail");
+  emit("path", argbPath);
+  emit("width", Number(payload.width || 0));
+  emit("height", Number(payload.height || 0));
+  emit("pixel_count", pixels.length);
+  emit("nonblank_pixel_count", nonblank);
+  emit("weighted_checksum", checksum.toString());
+} catch (_err) {
+  emit("status", "invalid");
+  emit("reason", "invalid-json");
+  emit("path", argbPath);
+}
+NODE
+}
+
+browser_proof_status() {
+    proof_path="$1"
+    prefix="$2"
+    if ! have node; then
+        append_kv "${prefix}_browser_backing_proof" "$proof_path"
+        append_kv "${prefix}_browser_backing_proof_file_status" "unavailable"
+        append_kv "${prefix}_browser_backing_status" "unavailable"
+        append_kv "${prefix}_browser_backing_reason" "missing-node"
+        return 0
+    fi
+    node "$ROOT_DIR/scripts/check/gui-web-2d-directx-browser-backing-status.js" "$proof_path" "$prefix" >>"$EVIDENCE_ENV"
+}
+
+case "$MODE" in
+    --check | --browser-backing) ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+rm -f "$EVIDENCE_ENV"
+
+UNAME_S="$(uname -s 2>/dev/null || printf unknown)"
+UNAME_M="$(uname -m 2>/dev/null || printf unknown)"
+DIRECTX_FLAGS="--no-sandbox --disable-gpu-sandbox --use-angle=d3d11 --enable-gpu-rasterization --enable-zero-copy"
+electron_bin="$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron.cmd"
+if [ ! -f "$electron_bin" ]; then
+    electron_bin="$ROOT_DIR/tools/electron-shell/node_modules/.bin/electron"
+fi
+chrome_bin="$(find_chrome_bin)"
+
+append_kv "gui_web_2d_directx_mode" "$MODE"
+append_kv "gui_web_2d_directx_root" "$ROOT_DIR"
+append_kv "gui_web_2d_directx_build_dir" "$BUILD_DIR"
+append_kv "gui_web_2d_directx_uname_s" "$UNAME_S"
+append_kv "gui_web_2d_directx_uname_m" "$UNAME_M"
+append_kv "gui_web_2d_directx_html_path" "$HTML_PATH"
+append_kv "gui_web_2d_directx_width" "$WIDTH"
+append_kv "gui_web_2d_directx_height" "$HEIGHT"
+append_kv "gui_web_2d_directx_timeout_secs" "$TIMEOUT_SECS"
+append_kv "gui_web_2d_directx_requested_api" "directx"
+append_kv "gui_web_2d_directx_requested_angle" "d3d11"
+append_kv "gui_web_2d_directx_requested_features" "Direct3D11,ANGLE"
+append_kv "gui_web_2d_directx_electron" "$electron_bin"
+append_kv "gui_web_2d_directx_electron_launch_flags" "$DIRECTX_FLAGS"
+append_kv "gui_web_2d_directx_chrome" "$chrome_bin"
+append_kv "gui_web_2d_directx_chrome_launch_flags" "$DIRECTX_FLAGS"
+
+directx_dir="$BUILD_DIR/directx-native"
+mkdir -p "$directx_dir"
+set +e
+BUILD_DIR="$directx_dir" REPORT_PATH="$directx_dir/report.md" SIMPLE_DIRECTX_NATIVE_TIMEOUT_SECS="$TIMEOUT_SECS" \
+    run_bound sh "$ROOT_DIR/scripts/check/check-directx-native-readback.shs" >"$directx_dir/stdout.env" 2>"$directx_dir/stderr.log"
+directx_code=$?
+set -e
+directx_env="$directx_dir/evidence.env"
+append_kv "gui_web_2d_directx_native_readback_exit_code" "$directx_code"
+append_kv "gui_web_2d_directx_native_readback_status" "$(field_of directx_native_readback_status "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_source" "$(field_of directx_native_readback_source "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_backend_handle" "$(field_of directx_native_readback_backend_handle "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_expected_checksum" "$(field_of directx_native_readback_expected_checksum "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_actual_checksum" "$(field_of directx_native_readback_actual_checksum "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_gate_status" "$(field_of directx_native_readback_wrapper_gate_status "$directx_env")"
+append_kv "gui_web_2d_directx_native_readback_report" "$directx_dir/report.md"
+
+if [ "$MODE" = "--browser-backing" ]; then
+    electron_argb="$BUILD_DIR/electron_argb.json"
+    electron_proof="$BUILD_DIR/electron_argb_proof.json"
+    electron_out="$BUILD_DIR/electron.out"
+    electron_log="$BUILD_DIR/electron.log"
+    electron_port="${GUI_WEB_2D_DIRECTX_ELECTRON_CDP_PORT:-$((43000 + ($$ % 10000)))}"
+    if [ -f "$electron_bin" ]; then
+        set +e
+        ELECTRON_CAPTURE_HTML="$HTML_PATH" \
+        ELECTRON_CAPTURE_WIDTH="$WIDTH" \
+        ELECTRON_CAPTURE_HEIGHT="$HEIGHT" \
+        ELECTRON_CAPTURE_OUTPUT="$electron_argb" \
+        ELECTRON_CAPTURE_PROOF_PATH="$electron_proof" \
+        ELECTRON_CAPTURE_REMOTE_DEBUGGING_PORT="$electron_port" \
+        ELECTRON_CAPTURE_SETTLE_MS="${GUI_WEB_2D_DIRECTX_SETTLE_MS:-1000}" \
+        ELECTRON_ENABLE_LOGGING=1 \
+            run_bound "$electron_bin" $DIRECTX_FLAGS "$ROOT_DIR/tools/electron-live-bitmap/capture_html_argb.js" >"$electron_out" 2>"$electron_log"
+        electron_code=$?
+        set -e
+        append_kv "gui_web_2d_directx_electron_exit_code" "$electron_code"
+        append_kv "gui_web_2d_directx_electron_stdout" "$electron_out"
+        append_kv "gui_web_2d_directx_electron_log" "$electron_log"
+        append_kv "gui_web_2d_directx_electron_argb_proof" "$electron_proof"
+        parse_argb "$electron_argb" "gui_web_2d_directx_electron"
+        browser_proof_status "$electron_proof" "gui_web_2d_directx_electron"
+    else
+        append_kv "gui_web_2d_directx_electron_exit_code" ""
+        append_kv "gui_web_2d_directx_electron_browser_backing_status" "unavailable"
+        append_kv "gui_web_2d_directx_electron_browser_backing_reason" "missing-electron"
+    fi
+
+    chrome_argb="$BUILD_DIR/chrome_argb.json"
+    chrome_proof="$BUILD_DIR/chrome_argb_proof.json"
+    chrome_geometry="$BUILD_DIR/chrome_geometry.json"
+    chrome_out="$BUILD_DIR/chrome_argb.out"
+    if [ -n "$chrome_bin" ] && [ -f "$chrome_bin" ]; then
+        set +e
+        CHROME_CAPTURE_HTML="$HTML_PATH" \
+        CHROME_CAPTURE_WIDTH="$WIDTH" \
+        CHROME_CAPTURE_HEIGHT="$HEIGHT" \
+        CHROME_CAPTURE_OUTPUT="$chrome_argb" \
+        CHROME_CAPTURE_PROOF_PATH="$chrome_proof" \
+        CHROME_CAPTURE_GEOMETRY_OUTPUT="$chrome_geometry" \
+        CHROME_CAPTURE_BIN="$chrome_bin" \
+        CHROME_CAPTURE_DISABLE_GPU=false \
+        CHROME_CAPTURE_EXTRA_ARGS="$DIRECTX_FLAGS" \
+        CHROME_CAPTURE_TIMEOUT_MS="$((TIMEOUT_SECS * 1000))" \
+            run_bound node "$ROOT_DIR/tools/chrome-live-bitmap/capture_html_argb.js" >"$chrome_out" 2>&1
+        chrome_code=$?
+        set -e
+        append_kv "gui_web_2d_directx_chrome_argb_exit_code" "$chrome_code"
+        append_kv "gui_web_2d_directx_chrome_argb_stdout" "$chrome_out"
+        append_kv "gui_web_2d_directx_chrome_argb_proof" "$chrome_proof"
+        append_kv "gui_web_2d_directx_chrome_geometry" "$chrome_geometry"
+        parse_argb "$chrome_argb" "gui_web_2d_directx_chrome"
+        browser_proof_status "$chrome_proof" "gui_web_2d_directx_chrome"
+    else
+        append_kv "gui_web_2d_directx_chrome_argb_exit_code" ""
+        append_kv "gui_web_2d_directx_chrome_browser_backing_status" "unavailable"
+        append_kv "gui_web_2d_directx_chrome_browser_backing_reason" "missing-chrome"
+    fi
+else
+    append_kv "gui_web_2d_directx_electron_browser_backing_status" "not-run"
+    append_kv "gui_web_2d_directx_electron_browser_backing_reason" "check-only"
+    append_kv "gui_web_2d_directx_chrome_browser_backing_status" "not-run"
+    append_kv "gui_web_2d_directx_chrome_browser_backing_reason" "check-only"
+fi
+
+native_status="$(field_of gui_web_2d_directx_native_readback_gate_status "$EVIDENCE_ENV")"
+electron_status="$(field_of gui_web_2d_directx_electron_browser_backing_status "$EVIDENCE_ENV")"
+chrome_status="$(field_of gui_web_2d_directx_chrome_browser_backing_status "$EVIDENCE_ENV")"
+if [ "$MODE" = "--browser-backing" ]; then
+    if [ "$native_status" = "pass" ] && [ "$electron_status" = "pass" ] && [ "$chrome_status" = "pass" ]; then
+        append_kv "gui_web_2d_directx_browser_backing_status" "pass"
+        append_kv "gui_web_2d_directx_browser_backing_reason" "native-d3d11-electron-chrome-pass"
+    else
+        append_kv "gui_web_2d_directx_browser_backing_status" "fail"
+        append_kv "gui_web_2d_directx_browser_backing_reason" "native-or-browser-directx-proof-missing"
+    fi
+else
+    if [ "$native_status" = "pass" ]; then
+        append_kv "gui_web_2d_directx_browser_backing_status" "native-only"
+        append_kv "gui_web_2d_directx_browser_backing_reason" "browser-backing-not-run"
+    else
+        append_kv "gui_web_2d_directx_browser_backing_status" "unavailable"
+        append_kv "gui_web_2d_directx_browser_backing_reason" "native-d3d11-readback-not-proven"
+    fi
+fi
+append_kv "gui_web_2d_directx_evidence_env" "$EVIDENCE_ENV"
+
+cat "$EVIDENCE_ENV"

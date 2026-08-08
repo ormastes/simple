@@ -1,0 +1,137 @@
+# Validate SimpleOS hardening matrix QEMU MDI PPM anchors.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+
+struct PpmHeader:
+    magic: i64
+    width: i64
+    height: i64
+    max_value: i64
+    data_offset: i64
+    ok: bool
+
+struct NumParse:
+    value: i64
+    next: i64
+    ok: bool
+
+struct AnchorChecks:
+    probe: bool
+    header: bool
+    body_a: bool
+    body_b: bool
+    top: bool
+    taskbar: bool
+
+fn byte_at(data: [u8], idx: i64) -> i64:
+    if idx < 0 or idx >= data.len():
+        return 0
+    data[idx] as i64
+
+fn is_ws(b: i64) -> bool:
+    b == 32 or b == 9 or b == 10 or b == 13
+
+fn is_digit(b: i64) -> bool:
+    b >= 48 and b <= 57
+
+fn skip_ws_comments(data: [u8], pos: i64) -> i64:
+    var i = pos
+    var again = true
+    while again:
+        again = false
+        while i < data.len() and is_ws(byte_at(data, i)):
+            i = i + 1
+        if i < data.len() and byte_at(data, i) == 35:
+            while i < data.len() and byte_at(data, i) != 10 and byte_at(data, i) != 13:
+                i = i + 1
+            again = true
+    i
+
+fn parse_num(data: [u8], pos: i64) -> NumParse:
+    var i = skip_ws_comments(data, pos)
+    if i >= data.len() or not is_digit(byte_at(data, i)):
+        return NumParse(value: 0, next: i, ok: false)
+    var value: i64 = 0
+    while i < data.len() and is_digit(byte_at(data, i)):
+        value = (value * 10) + (byte_at(data, i) - 48)
+        i = i + 1
+    NumParse(value: value, next: i, ok: true)
+
+fn parse_header(data: [u8]) -> PpmHeader:
+    var pos = skip_ws_comments(data, 0)
+    if pos + 1 >= data.len() or byte_at(data, pos) != 80:
+        return PpmHeader(magic: 0, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val magic = byte_at(data, pos + 1)
+    if magic != 54:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    pos = pos + 2
+    val width = parse_num(data, pos)
+    if not width.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val height = parse_num(data, width.next)
+    if not height.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    val maxv = parse_num(data, height.next)
+    if not maxv.ok:
+        return PpmHeader(magic: magic, width: 0, height: 0, max_value: 0, data_offset: 0, ok: false)
+    var data_offset = maxv.next
+    while data_offset < data.len() and is_ws(byte_at(data, data_offset)):
+        data_offset = data_offset + 1
+    PpmHeader(magic: magic, width: width.value, height: height.value, max_value: maxv.value, data_offset: data_offset, ok: true)
+
+fn abs_i64(value: i64) -> i64:
+    if value < 0:
+        return 0 - value
+    value
+
+fn near_rgb(data: [u8], data_offset: i64, width: i64, x: i64, y: i64, er: i64, eg: i64, eb: i64) -> bool:
+    val i = data_offset + ((y * width + x) * 3)
+    abs_i64(byte_at(data, i) - er) <= 8 and abs_i64(byte_at(data, i + 1) - eg) <= 8 and abs_i64(byte_at(data, i + 2) - eb) <= 8
+
+fn count_nonblack(data: [u8], start: i64, total_values: i64) -> i64:
+    var count: i64 = 0
+    var i = start
+    val end = start + total_values
+    while i < end:
+        if byte_at(data, i) != 0 or byte_at(data, i + 1) != 0 or byte_at(data, i + 2) != 0:
+            count = count + 1
+        i = i + 3
+    count
+
+fn all_checks(checks: AnchorChecks) -> bool:
+    checks.probe and checks.header and checks.body_a and checks.body_b and checks.top and checks.taskbar
+
+fn print_result(status: text, nonblack: i64, checks: AnchorChecks):
+    print "simpleos_hardening_qemu_mdi_ppm_anchor_status=" + status
+    print "simpleos_hardening_qemu_mdi_ppm_nonblack=" + nonblack.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_probe=" + checks.probe.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_header=" + checks.header.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_bodyA=" + checks.body_a.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_bodyB=" + checks.body_b.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_top=" + checks.top.to_string()
+    print "simpleos_hardening_qemu_mdi_ppm_taskbar=" + checks.taskbar.to_string()
+
+fn main() -> i32:
+    val path = rt_env_get("SIMPLEOS_HARDENING_QEMU_MDI_PPM") ?? ""
+    var checks = AnchorChecks(probe: false, header: false, body_a: false, body_b: false, top: false, taskbar: false)
+    if path == "":
+        print_result("fail", 0, checks)
+        return 0
+    val data = rt_file_read_bytes(path) ?? []
+    val header = parse_header(data)
+    val total_values = header.width * header.height * 3
+    var nonblack: i64 = 0
+    var status = "fail"
+    if header.ok and header.width == 1024 and header.height == 768 and header.max_value == 255 and data.len() - header.data_offset >= total_values:
+        nonblack = count_nonblack(data, header.data_offset, total_values)
+        checks.probe = near_rgb(data, header.data_offset, header.width, 10, 0, 255, 0, 0)
+        checks.header = near_rgb(data, header.data_offset, header.width, 404, 166, 0x20, 0x50, 0xA0)
+        checks.body_a = near_rgb(data, header.data_offset, header.width, 404, 200, 0x18, 0x22, 0x30)
+        checks.body_b = near_rgb(data, header.data_offset, header.width, 450, 300, 0x1F, 0x29, 0x37)
+        checks.top = near_rgb(data, header.data_offset, header.width, 64, 20, 0x20, 0x50, 0xA0) and near_rgb(data, header.data_offset, header.width, 500, 42, 0x34, 0x98, 0xDB) and near_rgb(data, header.data_offset, header.width, 900, 20, 0x1F, 0x29, 0x37)
+        checks.taskbar = near_rgb(data, header.data_offset, header.width, 346, 750, 0x34, 0x98, 0xDB) and near_rgb(data, header.data_offset, header.width, 500, 740, 0x17, 0x20, 0x2A) and near_rgb(data, header.data_offset, header.width, 920, 748, 0x24, 0x34, 0x47)
+        if nonblack > 100000 and all_checks(checks):
+            status = "pass"
+    print_result(status, nonblack, checks)
+    0

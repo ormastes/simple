@@ -1,0 +1,188 @@
+#!/bin/sh
+# build_spawn_wait_ring3.shs — Lane B3 proof: a ring-3 FS-exec process spawns a
+# CHILD and observes its exit status, under REAL UEFI firmware (OVMF pflash).
+#
+# Chain: clang builds examples/09_embedded/simpleos_hello_c/spawn_wait_fs.c ->
+# staged onto the FAT32 image as /FSEXEC.ELF -> OVMF -> GRUB EFI -> multiboot ->
+# fs_exec_spawn_wait_ring3_entry.spl -> ring-3 PARENT -> syscall 120 SpawnWait ->
+# ring-3 CHILD (same ELF, argv={"child"}) -> child exit(7) longjmps back through
+# its OWN savepoint slot -> parent resumes and prints the status it saw.
+#
+# NEVER `-kernel`: per .claude/rules/board-runnable.md the real-firmware proxy is
+# mandatory, so this uses the same OVMF pflash + grub-mkstandalone ESP path as
+# scripts/os/ssh_ring3_uefi_boot.shs.
+#
+# Fail-closed: every marker below must appear or the script exits non-zero.
+#   B3-PARENT-START / B3-CHILD-RAN / B3-PARENT-SAW-STATUS=7 / B3-SPAWN-WAIT-OK
+#
+# Env: SKIP_KERNEL=1 reuse kernel, SKIP_PAYLOAD=1 reuse the ELF+image,
+#      QEMU_MEM (2G), BOOT_WAIT (60s).
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="src/compiler_rust/target/release/simple"
+SR=build/os/sysroot
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_exec_spawn_wait_ring3_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+SRC=examples/09_embedded/simpleos_hello_c/spawn_wait_fs.c
+OUT=build/os/hello
+KERNEL=build/os/spawn_wait_ring3.elf
+HELLO_IMG=$OUT/fat32-hello.img
+BUILD=build/os/uefi-b3
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+SERIAL=build/os/spawn_wait_ring3.serial.log
+CACHE=build/os/cache-b3
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-60}"
+
+fail() { echo "FAIL: $*"; exit 1; }
+
+command -v clang-20 >/dev/null 2>&1 || fail "need host clang-20 on PATH"
+command -v grub-mkstandalone >/dev/null 2>&1 || fail "grub-mkstandalone missing"
+[ -f "$OVMF_CODE" ] || fail "OVMF_CODE not found at $OVMF_CODE"
+[ -f "$SR/share/simpleos/simpleos.ld" ] || fail "missing sysroot $SR"
+mkdir -p "$OUT" build/os/generated/generated
+
+# ---- 1. Payload: one ELF that is both parent and child -------------------
+# Host ld.lld-20 substitutes for the (absent) cross ld.lld: this is a static
+# freestanding x86_64 ELF with no target-specific relocations.
+LLD=build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld
+[ -x "$LLD" ] || LLD=$(command -v ld.lld-20) || fail "no ld.lld available"
+if [ "${SKIP_PAYLOAD:-0}" != "1" ]; then
+    echo "[b3] 1/4 compile+link $SRC"
+    clang-20 --target=x86_64-unknown-simpleos --sysroot="$SR" -ffreestanding \
+        -fno-stack-protector -nostdlib -static -O0 -c "$SRC" -o "$OUT/spawn_wait_fs.o"
+    "$LLD" -T "$SR/share/simpleos/simpleos.ld" -e _start \
+        "$OUT/spawn_wait_fs.o" -o "$OUT/hello_fs.elf"
+
+    echo "[b3] 2/4 stage as /FSEXEC.ELF on the FAT32 image"
+    # patch_fsexec_image.spl rewrites build/os/elfexec/fat32-fsexec.img ->
+    # build/os/hello/fat32-hello.img. The elfexec bake output is gitignored and
+    # often absent; a previously patched hello image has the identical fixed
+    # layout (512B clusters, FSEXEC.ELF as the first root dirent), so it is a
+    # valid base for a re-patch.
+    BASE_IMG=build/os/elfexec/fat32-fsexec.img
+    if [ ! -f "$BASE_IMG" ]; then
+        mkdir -p build/os/elfexec
+        bin/simple run examples/09_embedded/simpleos_hello_c/make_fsexec_base_image.spl
+        [ -f "$BASE_IMG" ] || fail "could not create FAT32 base image $BASE_IMG"
+    fi
+    rm -f "$HELLO_IMG"
+    bin/simple run examples/09_embedded/simpleos_hello_c/patch_fsexec_image.spl
+    [ -f "$HELLO_IMG" ] || fail "image patch failed"
+fi
+
+# ---- 2. Kernel -----------------------------------------------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    echo "[b3] 3/4 building kernel -> $KERNEL"
+    # `--source examples/09_embedded/simple_os` (the PARENT of arch/x86_64) is
+    # load-bearing: with the narrower arch/x86_64 root, native-build compiled
+    # baremetal_stubs.c but NOT boot/enter_user_first.s, and silently linked the
+    # weak stubs for rt_x86_enter_user_first / rt_x86_ring3_resume instead — a
+    # kernel that can never reach ring 3. The symbol guard below catches it.
+    # Private cache dir: parallel sessions clobber the default one.
+    rm -rf "$CACHE"; mkdir -p "$CACHE"
+    rm -f "$KERNEL"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --entry-closure --cache-dir "$CACHE" --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -40
+    [ -f "$KERNEL" ] || fail "kernel build failed"
+fi
+
+# Anti-false-green: prove the Lane B3 code is actually IN the booted kernel.
+# baremetal_stubs.c and enter_user_first.s are compiled by native-build's own
+# cache; a stale cache would boot a kernel without the nested-spawn bookkeeping
+# and any green result below would be meaningless.
+for sym in rt_bare_spawn_enter rt_bare_spawn_leave spl_handle_spawn_wait _ring3_resume_depth; do
+    nm "$KERNEL" 2>/dev/null | grep -qw "$sym" || fail "kernel lacks $sym (stale build cache?)"
+done
+echo "[b3] kernel carries the Lane B3 symbols"
+
+# ---- 3. Boot under OVMF (real firmware proxy, never -kernel) -------------
+echo "[b3] 4/4 booting under OVMF"
+rm -rf "$BUILD"; mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS Lane B3 spawn+wait (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+grub-mkstandalone --format=x86_64-efi --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" "boot/kernel.elf=$KERNEL"
+[ -f "$EFIAPP" ] || fail "grub-mkstandalone produced no $EFIAPP"
+
+rm -f "$SERIAL"
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -drive "file=$HELLO_IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+i=0
+while [ $i -lt "$BOOT_WAIT" ]; do
+    grep -qa "B3-SPAWN-WAIT-OK\|B3-SPAWN-WAIT-FAIL\|TEST FAILED" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; i=$((i+1))
+done
+kill "$QEMU_PID" 2>/dev/null || true
+
+echo "===== Lane B3 ladder ====="
+RC=0
+rung() {
+    if grep -qa "$1" "$SERIAL" 2>/dev/null; then echo "  [ok]   $2"
+    else echo "  [MISS] $2"; RC=1; fi
+}
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader)"
+rung "Lane B3 spawn+wait"              "multiboot handoff -> kernel _start"
+rung "B3-PARENT-START"                 "ring-3 PARENT running"
+rung "spawn-wait. child-enter"         "syscall 120 reached the kernel"
+rung "B3-CHILD-RAN"                    "nested ring-3 CHILD ran"
+rung "B3-PARENT-SAW-STATUS=7"          "PARENT observed the child's exit status"
+rung "B3-SPAWN-WAIT-OK"                "GATE: spawn + wait round trip"
+
+if [ "$RC" != "0" ]; then
+    echo "--- last 40 serial lines ---"
+    sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" 2>/dev/null | grep -a . | tail -40
+    echo "LANE B3 FAILED"
+    exit 1
+fi
+echo "LANE B3 PASS: ring-3 process spawned a child and observed its exit status under OVMF"

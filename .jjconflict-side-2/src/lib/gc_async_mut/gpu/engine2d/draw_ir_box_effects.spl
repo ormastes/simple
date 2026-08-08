@@ -1,0 +1,777 @@
+# Engine2D-owned typed CSS box-effect decoding and transient raster execution.
+#
+# Draw IR carries only command/style data. This module validates that data
+# before any narrowing conversion, owns bounded transient masks, and executes
+# shadows/background clips through Engine2D.
+
+use std.common.ui.draw_ir.{DrawIrCommand, DrawIrStyleProp}
+use std.common.ui.native_scalar_text.{ui_native_i64_text}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
+
+val _E2D_BOX_MAX_STYLE_VALUE_BYTES: i64 = 65536
+val _E2D_BOX_MAX_SHADOW_LAYERS: i32 = 24
+val _E2D_BOX_MAX_SHADOW_EXTENT: i64 = 65536
+val _E2D_BOX_MAX_TRANSIENT_PIXELS: i64 = 16777216
+val _E2D_BOX_I32_MIN: i64 = -2147483648
+val _E2D_BOX_I32_MAX: i64 = 2147483647
+val _E2D_BOX_INVALID_I64: i64 = -9223372036854775807
+
+struct Engine2dDrawIrBoxShadowLayer:
+    kind: text
+    offset_x: i32
+    offset_y: i32
+    blur_radius: i32
+    spread_radius: i32
+    color: u32
+
+struct Engine2dDrawIrTypedBoxShadows:
+    schema_present: bool
+    valid: bool
+    layers: [Engine2dDrawIrBoxShadowLayer]
+
+struct Engine2dDrawIrCornerRadii:
+    schema_present: bool
+    valid: bool
+    top_left: i32
+    top_right: i32
+    bottom_right: i32
+    bottom_left: i32
+
+struct Engine2dDrawIrLegacyShadow:
+    visible: bool
+    safe: bool
+    offset_x: i32
+    offset_y: i32
+    blur_radius: i32
+    color: u32
+
+fn _e2d_box_style_value(props: [DrawIrStyleProp], key: text) -> text:
+    for prop in props:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _e2d_box_unique_style_value(
+    props: [DrawIrStyleProp], key: text
+) -> text:
+    var found = ""
+    var count = 0
+    for prop in props:
+        if prop.key == key:
+            found = prop.value
+            count = count + 1
+    if count != 1:
+        return ""
+    found
+
+fn _e2d_box_style_key_count(
+    props: [DrawIrStyleProp], key: text
+) -> i32:
+    var count = 0
+    for prop in props:
+        if prop.key == key:
+            count = count + 1
+    count
+
+fn _e2d_box_nth_int(value: text, n: i32, fallback: i64) -> i64:
+    if value.len() > _E2D_BOX_MAX_STYLE_VALUE_BYTES:
+        return fallback
+    var count = 0
+    var index: i64 = 0
+    val cs = value.chars()
+    while index < cs.len():
+        val first: i64 = cs[index].char_code_at(0)
+        val digit = first >= 48 and first <= 57
+        var sign = false
+        if (first == 45 or first == 43) and index + 1 < cs.len():
+            val next: i64 = cs[index + 1].char_code_at(0)
+            sign = next >= 48 and next <= 57
+        if digit or sign:
+            val negative = first == 45
+            if first == 45 or first == 43:
+                index = index + 1
+            var parsed: i64 = 0
+            while index < cs.len():
+                val ch: i64 = cs[index].char_code_at(0)
+                if ch < 48 or ch > 57:
+                    break
+                val value_digit = ch - 48
+                if parsed > (9223372036854775807 - value_digit) / 10:
+                    return fallback
+                parsed = parsed * 10 + value_digit
+                index = index + 1
+            if negative:
+                parsed = 0 - parsed
+            if count == n:
+                return parsed
+            count = count + 1
+        else:
+            index = index + 1
+    fallback
+
+fn _e2d_box_decimal(
+    value: text, minimum: i64, maximum: i64
+) -> i64:
+    if value.len() == 0 or value.len() > 20:
+        return _E2D_BOX_INVALID_I64
+    var index: i64 = 0
+    var negative = false
+    if value.char_code_at(0) == 45:
+        negative = true
+        index = 1
+    if index >= value.len():
+        return _E2D_BOX_INVALID_I64
+    var parsed: i64 = 0
+    while index < value.len():
+        val ch: i64 = value.char_code_at(index)
+        if ch < 48 or ch > 57:
+            return _E2D_BOX_INVALID_I64
+        val digit = ch - 48
+        if parsed > (9223372036854775807 - digit) / 10:
+            return _E2D_BOX_INVALID_I64
+        parsed = parsed * 10 + digit
+        index = index + 1
+    if negative:
+        parsed = 0 - parsed
+    if parsed < minimum or parsed > maximum:
+        return _E2D_BOX_INVALID_I64
+    parsed
+
+fn _e2d_box_shadow_layer_key(index: i32, field: text) -> text:
+    (
+        "box-shadow-layer-" + ui_native_i64_text(index as i64) +
+        "-" + field
+    )
+
+fn engine2d_draw_ir_typed_shadow_key_supported(key: text) -> bool:
+    if key == "box-shadow-layer-schema" or key == "box-shadow-layer-count":
+        return true
+    var index = 0
+    while index < _E2D_BOX_MAX_SHADOW_LAYERS:
+        if key == _e2d_box_shadow_layer_key(index, "kind"):
+            return true
+        if key == _e2d_box_shadow_layer_key(index, "offset-x"):
+            return true
+        if key == _e2d_box_shadow_layer_key(index, "offset-y"):
+            return true
+        if key == _e2d_box_shadow_layer_key(index, "blur-radius"):
+            return true
+        if key == _e2d_box_shadow_layer_key(index, "spread-radius"):
+            return true
+        if key == _e2d_box_shadow_layer_key(index, "color"):
+            return true
+        index = index + 1
+    false
+
+fn _e2d_box_typed_shadow_prop_count(
+    style: [DrawIrStyleProp]
+) -> i32:
+    var count = 0
+    for prop in style:
+        if prop.key.starts_with("box-shadow-layer-"):
+            count = count + 1
+    count
+
+fn engine2d_draw_ir_typed_box_shadows(
+    style: [DrawIrStyleProp]
+) -> Engine2dDrawIrTypedBoxShadows:
+    var empty: [Engine2dDrawIrBoxShadowLayer] = []
+    val schema_count = _e2d_box_style_key_count(
+        style, "box-shadow-layer-schema")
+    if schema_count == 0:
+        return Engine2dDrawIrTypedBoxShadows(
+            schema_present: false, valid: false, layers: empty)
+    val schema = _e2d_box_unique_style_value(
+        style, "box-shadow-layer-schema")
+    if schema_count != 1 or schema != "web-box-shadow-layers-v1":
+        return Engine2dDrawIrTypedBoxShadows(
+            schema_present: true, valid: false, layers: empty)
+    val count64 = _e2d_box_decimal(
+        _e2d_box_unique_style_value(style, "box-shadow-layer-count"),
+        0,
+        _E2D_BOX_MAX_SHADOW_LAYERS as i64
+    )
+    if count64 == _E2D_BOX_INVALID_I64:
+        return Engine2dDrawIrTypedBoxShadows(
+            schema_present: true, valid: false, layers: empty)
+    val count = count64 as i32
+    if _e2d_box_typed_shadow_prop_count(style) != 2 + count * 6:
+        return Engine2dDrawIrTypedBoxShadows(
+            schema_present: true, valid: false, layers: empty)
+    var layers: [Engine2dDrawIrBoxShadowLayer] = []
+    var index = 0
+    while index < count:
+        val kind = _e2d_box_unique_style_value(
+            style, _e2d_box_shadow_layer_key(index, "kind"))
+        val offset_x = _e2d_box_decimal(
+            _e2d_box_unique_style_value(
+                style, _e2d_box_shadow_layer_key(index, "offset-x")),
+            0 - _E2D_BOX_MAX_SHADOW_EXTENT,
+            _E2D_BOX_MAX_SHADOW_EXTENT
+        )
+        val offset_y = _e2d_box_decimal(
+            _e2d_box_unique_style_value(
+                style, _e2d_box_shadow_layer_key(index, "offset-y")),
+            0 - _E2D_BOX_MAX_SHADOW_EXTENT,
+            _E2D_BOX_MAX_SHADOW_EXTENT
+        )
+        val blur_radius = _e2d_box_decimal(
+            _e2d_box_unique_style_value(
+                style, _e2d_box_shadow_layer_key(index, "blur-radius")),
+            0,
+            _E2D_BOX_MAX_SHADOW_EXTENT
+        )
+        val spread_radius = _e2d_box_decimal(
+            _e2d_box_unique_style_value(
+                style, _e2d_box_shadow_layer_key(index, "spread-radius")),
+            0 - _E2D_BOX_MAX_SHADOW_EXTENT,
+            _E2D_BOX_MAX_SHADOW_EXTENT
+        )
+        val color = _e2d_box_decimal(
+            _e2d_box_unique_style_value(
+                style, _e2d_box_shadow_layer_key(index, "color")),
+            0,
+            4294967295
+        )
+        if ((kind != "outer" and kind != "inset") or
+            offset_x == _E2D_BOX_INVALID_I64 or
+            offset_y == _E2D_BOX_INVALID_I64 or
+            blur_radius == _E2D_BOX_INVALID_I64 or
+            spread_radius == _E2D_BOX_INVALID_I64 or
+            color == _E2D_BOX_INVALID_I64):
+            return Engine2dDrawIrTypedBoxShadows(
+                schema_present: true, valid: false, layers: empty)
+        layers.push(Engine2dDrawIrBoxShadowLayer(
+            kind: kind,
+            offset_x: offset_x as i32,
+            offset_y: offset_y as i32,
+            blur_radius: blur_radius as i32,
+            spread_radius: spread_radius as i32,
+            color: color as u32
+        ))
+        index = index + 1
+    Engine2dDrawIrTypedBoxShadows(
+        schema_present: true, valid: true, layers: layers)
+
+fn engine2d_draw_ir_typed_corner_radii(
+    style: [DrawIrStyleProp]
+) -> Engine2dDrawIrCornerRadii:
+    val top_left_count = _e2d_box_style_key_count(
+        style, "border-top-left-radius")
+    val top_right_count = _e2d_box_style_key_count(
+        style, "border-top-right-radius")
+    val bottom_right_count = _e2d_box_style_key_count(
+        style, "border-bottom-right-radius")
+    val bottom_left_count = _e2d_box_style_key_count(
+        style, "border-bottom-left-radius")
+    val schema_present = (
+        top_left_count + top_right_count +
+        bottom_right_count + bottom_left_count > 0
+    )
+    if not schema_present:
+        return Engine2dDrawIrCornerRadii(
+            schema_present: false, valid: false,
+            top_left: 0, top_right: 0, bottom_right: 0, bottom_left: 0)
+    if (top_left_count != 1 or top_right_count != 1 or
+        bottom_right_count != 1 or bottom_left_count != 1):
+        return Engine2dDrawIrCornerRadii(
+            schema_present: true, valid: false,
+            top_left: 0, top_right: 0, bottom_right: 0, bottom_left: 0)
+    val top_left = _e2d_box_decimal(
+        _e2d_box_unique_style_value(style, "border-top-left-radius"),
+        0, _E2D_BOX_I32_MAX)
+    val top_right = _e2d_box_decimal(
+        _e2d_box_unique_style_value(style, "border-top-right-radius"),
+        0, _E2D_BOX_I32_MAX)
+    val bottom_right = _e2d_box_decimal(
+        _e2d_box_unique_style_value(style, "border-bottom-right-radius"),
+        0, _E2D_BOX_I32_MAX)
+    val bottom_left = _e2d_box_decimal(
+        _e2d_box_unique_style_value(style, "border-bottom-left-radius"),
+        0, _E2D_BOX_I32_MAX)
+    val valid = (
+        top_left != _E2D_BOX_INVALID_I64 and
+        top_right != _E2D_BOX_INVALID_I64 and
+        bottom_right != _E2D_BOX_INVALID_I64 and
+        bottom_left != _E2D_BOX_INVALID_I64
+    )
+    Engine2dDrawIrCornerRadii(
+        schema_present: true,
+        valid: valid,
+        top_left: if valid: top_left as i32 else: 0,
+        top_right: if valid: top_right as i32 else: 0,
+        bottom_right: if valid: bottom_right as i32 else: 0,
+        bottom_left: if valid: bottom_left as i32 else: 0
+    )
+
+fn engine2d_draw_ir_uniform_corner_radius(
+    corners: Engine2dDrawIrCornerRadii
+) -> i32:
+    if (corners.valid and corners.top_left == corners.top_right and
+        corners.top_right == corners.bottom_right and
+        corners.bottom_right == corners.bottom_left):
+        return corners.top_left
+    -1
+
+fn engine2d_draw_ir_clamp_uniform_radius(
+    radius: i32, width: i32, height: i32
+) -> i32:
+    if radius < 0:
+        return radius
+    if width <= 0 or height <= 0:
+        return 0
+    var clamped = radius
+    if clamped > width / 2:
+        clamped = width / 2
+    if clamped > height / 2:
+        clamped = height / 2
+    clamped
+
+fn engine2d_draw_ir_uniform_corners(
+    radius: i32
+) -> Engine2dDrawIrCornerRadii:
+    val safe_radius = if radius > 0: radius else: 0
+    Engine2dDrawIrCornerRadii(
+        schema_present: false,
+        valid: true,
+        top_left: safe_radius,
+        top_right: safe_radius,
+        bottom_right: safe_radius,
+        bottom_left: safe_radius
+    )
+
+fn engine2d_draw_ir_legacy_uniform_radius(
+    style: [DrawIrStyleProp]
+) -> i32:
+    val radius = _e2d_box_nth_int(
+        _e2d_box_style_value(style, "border-radius"),
+        0,
+        _E2D_BOX_INVALID_I64
+    )
+    if radius < 0 or radius > _E2D_BOX_I32_MAX:
+        return 0
+    radius as i32
+
+fn _e2d_box_i32(value: i64) -> bool:
+    value >= _E2D_BOX_I32_MIN and value <= _E2D_BOX_I32_MAX
+
+fn engine2d_draw_ir_mask_geometry_safe(
+    x: i32, y: i32, width: i32, height: i32
+) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    val right = (x as i64) + (width as i64)
+    val bottom = (y as i64) + (height as i64)
+    val pixels = (width as i64) * (height as i64)
+    (
+        _e2d_box_i32(right) and _e2d_box_i32(bottom) and
+        pixels > 0 and pixels <= _E2D_BOX_MAX_TRANSIENT_PIXELS
+    )
+
+fn _e2d_box_shadow_call_safe(
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    offset_x: i64,
+    offset_y: i64,
+    blur: i64
+) -> bool:
+    if (not _e2d_box_i32(x) or not _e2d_box_i32(y) or
+        not _e2d_box_i32(width) or not _e2d_box_i32(height) or
+        not _e2d_box_i32(offset_x) or not _e2d_box_i32(offset_y) or
+        blur < 0 or not _e2d_box_i32(blur) or width <= 0 or height <= 0):
+        return false
+    val shifted_x = x + offset_x
+    val shifted_y = y + offset_y
+    val expanded_width = width + 2 * blur
+    val expanded_height = height + 2 * blur
+    val left = shifted_x - blur
+    val top = shifted_y - blur
+    val right = left + expanded_width
+    val bottom = top + expanded_height
+    if (not _e2d_box_i32(shifted_x) or not _e2d_box_i32(shifted_y) or
+        not _e2d_box_i32(expanded_width) or
+        not _e2d_box_i32(expanded_height) or
+        not _e2d_box_i32(left) or not _e2d_box_i32(top) or
+        not _e2d_box_i32(right) or not _e2d_box_i32(bottom) or
+        expanded_width <= 0 or expanded_height <= 0):
+        return false
+    val expanded_pixels = expanded_width * expanded_height
+    (
+        expanded_pixels > 0 and
+        expanded_pixels <= _E2D_BOX_MAX_TRANSIENT_PIXELS
+    )
+
+fn engine2d_draw_ir_typed_shadow_geometry_safe(
+    layers: [Engine2dDrawIrBoxShadowLayer],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    for layer in layers:
+        if layer.kind == "outer":
+            val spread = layer.spread_radius as i64
+            val shadow_x = (x as i64) - spread
+            val shadow_y = (y as i64) - spread
+            val shadow_width = (width as i64) + 2 * spread
+            val shadow_height = (height as i64) + 2 * spread
+            # A sufficiently negative spread erases this layer without a draw.
+            if shadow_width > 0 and shadow_height > 0:
+                if not _e2d_box_shadow_call_safe(
+                    shadow_x,
+                    shadow_y,
+                    shadow_width,
+                    shadow_height,
+                    layer.offset_x as i64,
+                    layer.offset_y as i64,
+                    layer.blur_radius as i64
+                ):
+                    return false
+        elif layer.kind == "inset":
+            val thickness = (
+                (layer.blur_radius as i64) +
+                (layer.spread_radius as i64)
+            )
+            if (not _e2d_box_i32(thickness) or
+                not engine2d_draw_ir_mask_geometry_safe(
+                    x, y, width, height)):
+                return false
+        else:
+            return false
+    true
+
+fn engine2d_draw_ir_has_inset_shadow(
+    layers: [Engine2dDrawIrBoxShadowLayer]
+) -> bool:
+    for layer in layers:
+        if layer.kind == "inset":
+            return true
+    false
+
+fn _e2d_box_legacy_shadow(
+    style: [DrawIrStyleProp],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+) -> Engine2dDrawIrLegacyShadow:
+    val value = _e2d_box_style_value(style, "box-shadow")
+    if value == "" or value == "none":
+        return Engine2dDrawIrLegacyShadow(
+            visible: false, safe: true,
+            offset_x: 0, offset_y: 0, blur_radius: 0, color: 0u32)
+    val offset_x = _e2d_box_nth_int(value, 0, _E2D_BOX_INVALID_I64)
+    val offset_y = _e2d_box_nth_int(value, 1, _E2D_BOX_INVALID_I64)
+    val color = _e2d_box_nth_int(value, 2, _E2D_BOX_INVALID_I64)
+    val blur = _e2d_box_nth_int(
+        _e2d_box_style_value(style, "box-shadow-blur-radius"),
+        0,
+        0
+    )
+    if color < 0 or color > 4294967295:
+        return Engine2dDrawIrLegacyShadow(
+            visible: false, safe: true,
+            offset_x: 0, offset_y: 0, blur_radius: 0, color: 0u32)
+    val packed_color = color as u32
+    val visible = ((packed_color >> 24) & 0xFFu32) != 0u32
+    if not visible:
+        return Engine2dDrawIrLegacyShadow(
+            visible: false, safe: true,
+            offset_x: 0, offset_y: 0, blur_radius: 0, color: packed_color)
+    val values_safe = (
+        offset_x >= 0 - _E2D_BOX_MAX_SHADOW_EXTENT and
+        offset_x <= _E2D_BOX_MAX_SHADOW_EXTENT and
+        offset_y >= 0 - _E2D_BOX_MAX_SHADOW_EXTENT and
+        offset_y <= _E2D_BOX_MAX_SHADOW_EXTENT and
+        blur >= 0 and blur <= _E2D_BOX_MAX_SHADOW_EXTENT
+    )
+    if not values_safe:
+        return Engine2dDrawIrLegacyShadow(
+            visible: true, safe: false,
+            offset_x: 0, offset_y: 0, blur_radius: 0, color: packed_color)
+    val geometry_safe = _e2d_box_shadow_call_safe(
+        x as i64,
+        y as i64,
+        width as i64,
+        height as i64,
+        offset_x,
+        offset_y,
+        blur
+    )
+    Engine2dDrawIrLegacyShadow(
+        visible: visible,
+        safe: geometry_safe,
+        offset_x: offset_x as i32,
+        offset_y: offset_y as i32,
+        blur_radius: blur as i32,
+        color: packed_color
+    )
+
+fn engine2d_draw_ir_legacy_shadow_safe(
+    style: [DrawIrStyleProp],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+) -> bool:
+    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    shadow.safe
+
+fn engine2d_draw_ir_render_legacy_shadow(
+    engine: Engine2D,
+    style: [DrawIrStyleProp],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+) -> Engine2D:
+    var eng = engine
+    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    if shadow.visible and shadow.safe:
+        eng.draw_shadow_rect(
+            x, y, width, height,
+            shadow.offset_x, shadow.offset_y,
+            shadow.blur_radius, shadow.color)
+    eng
+
+fn engine2d_draw_ir_render_typed_outer_shadows(
+    engine: Engine2D,
+    layers: [Engine2dDrawIrBoxShadowLayer],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32
+) -> Engine2D:
+    var eng = engine
+    var index = layers.len()
+    while index > 0:
+        index = index - 1
+        val layer = layers[index]
+        if layer.kind == "outer" and ((layer.color >> 24) & 0xFFu32) != 0u32:
+            val spread = layer.spread_radius as i64
+            val shadow_x = (x as i64) - spread
+            val shadow_y = (y as i64) - spread
+            val shadow_width = (width as i64) + 2 * spread
+            val shadow_height = (height as i64) + 2 * spread
+            if (shadow_width > 0 and shadow_height > 0 and
+                _e2d_box_shadow_call_safe(
+                    shadow_x, shadow_y, shadow_width, shadow_height,
+                    layer.offset_x as i64, layer.offset_y as i64,
+                    layer.blur_radius as i64)):
+                eng.draw_shadow_rect(
+                    shadow_x as i32,
+                    shadow_y as i32,
+                    shadow_width as i32,
+                    shadow_height as i32,
+                    layer.offset_x,
+                    layer.offset_y,
+                    layer.blur_radius,
+                    layer.color
+                )
+    eng
+
+fn _e2d_box_corner_radius(
+    radius: i32, width: i32, height: i32
+) -> i32:
+    var clamped = radius
+    if clamped < 0:
+        clamped = 0
+    if clamped > width / 2:
+        clamped = width / 2
+    if clamped > height / 2:
+        clamped = height / 2
+    clamped
+
+fn _e2d_box_inside_corner(
+    dx: i32, dy: i32, radius: i32
+) -> bool:
+    if radius <= 0:
+        return true
+    val nx = dx.to_f64() / radius.to_f64()
+    val ny = dy.to_f64() / radius.to_f64()
+    nx * nx + ny * ny <= 1.0
+
+fn _e2d_box_inside_corners(
+    px: i32,
+    py: i32,
+    width: i32,
+    height: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> bool:
+    val top_left = _e2d_box_corner_radius(
+        corners.top_left, width, height)
+    val top_right = _e2d_box_corner_radius(
+        corners.top_right, width, height)
+    val bottom_right = _e2d_box_corner_radius(
+        corners.bottom_right, width, height)
+    val bottom_left = _e2d_box_corner_radius(
+        corners.bottom_left, width, height)
+    if px < top_left and py < top_left:
+        return _e2d_box_inside_corner(
+            top_left - 1 - px, top_left - 1 - py, top_left)
+    if px >= width - top_right and py < top_right:
+        return _e2d_box_inside_corner(
+            px - (width - top_right), top_right - 1 - py, top_right)
+    if px >= width - bottom_right and py >= height - bottom_right:
+        return _e2d_box_inside_corner(
+            px - (width - bottom_right),
+            py - (height - bottom_right),
+            bottom_right)
+    if px < bottom_left and py >= height - bottom_left:
+        return _e2d_box_inside_corner(
+            bottom_left - 1 - px,
+            py - (height - bottom_left),
+            bottom_left)
+    true
+
+fn _e2d_box_gradient_row_color(
+    top_color: u32, bottom_color: u32, row: i32, height: i32
+) -> u32:
+    val denominator = if height > 1: height - 1 else: 1
+    rgba(
+        color_r(top_color) +
+            (color_r(bottom_color) - color_r(top_color)) * row / denominator,
+        color_g(top_color) +
+            (color_g(bottom_color) - color_g(top_color)) * row / denominator,
+        color_b(top_color) +
+            (color_b(bottom_color) - color_b(top_color)) * row / denominator,
+        color_a(top_color) +
+            (color_a(bottom_color) - color_a(top_color)) * row / denominator
+    )
+
+fn engine2d_draw_ir_render_typed_background(
+    engine: Engine2D,
+    command: DrawIrCommand,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    if not engine2d_draw_ir_mask_geometry_safe(x, y, width, height):
+        return eng
+    val work = (width as i64) * (height as i64)
+    val background_image = _e2d_box_style_value(
+        command.computed_style, "background-image")
+    val gradient = background_image.starts_with("linear-gradient(")
+    val gradient_from64 = _e2d_box_nth_int(
+        background_image, 0, command.color as i64)
+    val gradient_to64 = _e2d_box_nth_int(
+        background_image, 1, command.color as i64)
+    val gradient_from = if gradient_from64 >= 0 and gradient_from64 <= 4294967295:
+        gradient_from64 as u32
+    else:
+        command.color
+    val gradient_to = if gradient_to64 >= 0 and gradient_to64 <= 4294967295:
+        gradient_to64 as u32
+    else:
+        command.color
+    if not gradient and ((command.color >> 24) & 0xFFu32) == 0u32:
+        return eng
+    val work_i32 = work as i32
+    var pixels: [u32] = [0u32; work_i32]
+    var row = 0
+    while row < height:
+        val row_color = if gradient:
+            _e2d_box_gradient_row_color(
+                gradient_from, gradient_to, row, height)
+        else:
+            command.color
+        var column = 0
+        while column < width:
+            if _e2d_box_inside_corners(
+                column, row, width, height, corners):
+                pixels[row * width + column] = row_color
+            column = column + 1
+        row = row + 1
+    eng.draw_image_blend(x, y, width, height, pixels)
+    eng
+
+fn engine2d_draw_ir_render_typed_inset_shadows(
+    engine: Engine2D,
+    layers: [Engine2dDrawIrBoxShadowLayer],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    if not engine2d_draw_ir_mask_geometry_safe(x, y, width, height):
+        return eng
+    val work = (width as i64) * (height as i64)
+    val work_i32 = work as i32
+    var index = layers.len()
+    while index > 0:
+        index = index - 1
+        val layer = layers[index]
+        if layer.kind == "inset" and ((layer.color >> 24) & 0xFFu32) != 0u32:
+            var thickness64 = (
+                (layer.blur_radius as i64) +
+                (layer.spread_radius as i64)
+            )
+            if thickness64 < 0:
+                thickness64 = 0
+            if thickness64 > width.to_i64():
+                thickness64 = width.to_i64()
+            if thickness64 > height.to_i64():
+                thickness64 = height.to_i64()
+            if thickness64 > 0:
+                val thickness = thickness64 as i32
+                var pixels: [u32] = [0u32; work_i32]
+                var row = 0
+                while row < height:
+                    var column = 0
+                    while column < width:
+                        val left_distance = (
+                            (column as i64) - (layer.offset_x as i64))
+                        val right_distance = (
+                            (width as i64) - 1 - (column as i64) +
+                            (layer.offset_x as i64))
+                        val top_distance = (
+                            (row as i64) - (layer.offset_y as i64))
+                        val bottom_distance = (
+                            (height as i64) - 1 - (row as i64) +
+                            (layer.offset_y as i64))
+                        val edge = (
+                            (left_distance >= 0 and
+                                left_distance < thickness64) or
+                            (right_distance >= 0 and
+                                right_distance < thickness64) or
+                            (top_distance >= 0 and
+                                top_distance < thickness64) or
+                            (bottom_distance >= 0 and
+                                bottom_distance < thickness64)
+                        )
+                        if (edge and _e2d_box_inside_corners(
+                            column, row, width, height, corners)):
+                            pixels[row * width + column] = layer.color
+                        column = column + 1
+                    row = row + 1
+                eng.draw_image_blend(x, y, width, height, pixels)
+    eng
+
+export Engine2dDrawIrBoxShadowLayer
+export Engine2dDrawIrTypedBoxShadows
+export Engine2dDrawIrCornerRadii
+export engine2d_draw_ir_typed_shadow_key_supported
+export engine2d_draw_ir_typed_box_shadows
+export engine2d_draw_ir_typed_corner_radii
+export engine2d_draw_ir_uniform_corner_radius
+export engine2d_draw_ir_clamp_uniform_radius
+export engine2d_draw_ir_uniform_corners
+export engine2d_draw_ir_legacy_uniform_radius
+export engine2d_draw_ir_mask_geometry_safe
+export engine2d_draw_ir_typed_shadow_geometry_safe
+export engine2d_draw_ir_has_inset_shadow
+export engine2d_draw_ir_legacy_shadow_safe
+export engine2d_draw_ir_render_legacy_shadow
+export engine2d_draw_ir_render_typed_outer_shadows
+export engine2d_draw_ir_render_typed_background
+export engine2d_draw_ir_render_typed_inset_shadows

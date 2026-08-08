@@ -1,0 +1,134 @@
+use std.spec
+use app.llm_caret.messaging.composition.{MessagingRuntime}
+use std.io_runtime.{file_delete, getpid}
+use app.llm_caret.messaging.domain.model.{IdentityKind, AgentBinding, AgentHandler, RoomKind, MessageOrigin, AgentProfile, AgentStatus, messaging_id}
+use app.llm_caret.messaging.adapter.chat.rest_common.{CredentialHttpRequestTemplate}
+
+describe "LLM Caret messaging composition":
+    it "should persist a canonical room message through the runtime":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.ready()).to_equal(true)
+        val room = runtime.create_canonical_room("dev", "workspace", RoomKind.Channel, "Development",
+            "", "public", "room", "human-1", 1)
+        expect(room.accepted).to_equal(true)
+        val sent = runtime.send_message("m-1", "workspace", "dev", "human-1", "", MessageOrigin.Human,
+            "hello agents", "", "corr-1", "", 0, 2, "idem-message-1")
+        expect(sent.ok).to_equal(true)
+        expect(sent.room_seq).to_equal(1)
+        val messages = runtime.read_messages("dev", "human-1", 0, 10)
+        expect(messages.len()).to_equal(1)
+        expect(messages[0].body).to_equal("hello agents")
+
+    it "should isolate canonical direct rooms":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.open_direct_room("dm", "workspace", "human-1", "agent-owner", 1).accepted).to_equal(true)
+        expect(runtime.send_message("m-1", "workspace", "dm", "human-1", "", MessageOrigin.Human,
+            "private", "", "corr", "", 0, 2, "idem-private-1").ok).to_equal(true)
+        expect(runtime.read_messages("dm", "outsider", 0, 10).len()).to_equal(0)
+        expect(runtime.read_messages("dm", "agent-owner", 0, 10).len()).to_equal(1)
+        expect(runtime.store.identity("human-1").kind).to_equal(IdentityKind.Human)
+        expect(runtime.store.identity("agent-owner").kind).to_equal(IdentityKind.Human)
+
+    it "should project an agent identity when an API-created profile is bound":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.create_canonical_room("agent-room", "workspace", RoomKind.Channel,
+            "Agents", "", "public", "mention", "human-1", 1).accepted).to_equal(true)
+        val profile = AgentProfile(agent_id: messaging_id("agent", "agent-api"),
+            display_name: "reviewer-gemini-01", aliases: ["reviewer"], provider: "gemini",
+            role_summary: "review", capabilities: ["Simple"], current_task_id: "",
+            status: AgentStatus.Idle, owner_identity_id: "human-1", room_ids: [],
+            last_activity_at: 2)
+        expect(runtime.register_profile(profile).accepted).to_equal(true)
+        val agent_binding = AgentBinding(binding_id: messaging_id("agent_binding", "binding-api"),
+            room_id: messaging_id("room", "agent-room"), agent_id: messaging_id("agent", "agent-api"),
+            handler: AgentHandler.Subagent, session_policy: "persistent_per_thread",
+            trigger_policy: "mention", update_policy: "milestones", context_policy: "bounded",
+            permissions: ["room:read"])
+        expect(runtime.register_agent_binding("gemini", agent_binding).ok).to_equal(true)
+        expect(runtime.store.identity("agent-api").kind).to_equal(IdentityKind.Agent)
+
+    it "should route a room message into a task and consumed context":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.create_canonical_room("routed-room", "workspace", RoomKind.Channel,
+            "Routed", "", "public", "room", "human-1", 1).accepted).to_equal(true)
+        val profile = AgentProfile(agent_id: messaging_id("agent", "builder"),
+            display_name: "builder-claude-01", aliases: ["builder"], provider: "claude",
+            role_summary: "implementation", capabilities: ["Simple"], current_task_id: "",
+            status: AgentStatus.Idle, owner_identity_id: "human-1", room_ids: ["routed-room"],
+            last_activity_at: 2)
+        expect(runtime.register_profile(profile).accepted).to_equal(true)
+        val agent_binding = AgentBinding(binding_id: messaging_id("agent_binding", "binding-builder"),
+            room_id: messaging_id("room", "routed-room"), agent_id: messaging_id("agent", "builder"),
+            handler: AgentHandler.Main, session_policy: "persistent_per_room",
+            trigger_policy: "room", update_policy: "milestones", context_policy: "bounded",
+            permissions: ["room:read", "room:write"])
+        expect(runtime.register_agent_binding("claude", agent_binding).ok).to_equal(true)
+        expect(runtime.send_message("route-me", "workspace", "routed-room", "human-1", "",
+            MessageOrigin.Human, "Implement the feature", "", "corr-route", "", 0, 3,
+            "route-message-key").ok).to_equal(true)
+        val routed = runtime.route_human_message("route-me", "builder", 4)
+        expect(routed.routed).to_equal(true)
+        expect(routed.agent_id).to_equal("builder")
+        expect(routed.task_id).to_equal("task-route-me")
+        expect(runtime.tasks.len()).to_equal(1)
+        expect(runtime.store.context_manifest_count()).to_equal(1)
+        val receipts = runtime.store.receipts("route-me")
+        expect(receipts[receipts.len() - 1].identity_id).to_equal("builder")
+
+    it "should recover ACL, profile, and task projections after restart":
+        val path = "/tmp/llm_caret_composition_restart_" + getpid().to_text() + ".db"
+        file_delete(path)
+        var runtime = MessagingRuntime.open(path)
+        expect(runtime.open_direct_room("restart-dm", "workspace", "human-1", "agent-1", 1).accepted).to_equal(true)
+        val profile = AgentProfile(agent_id: messaging_id("agent", "agent-1"), display_name: "builder-claude-01",
+            aliases: ["builder"], provider: "claude", role_summary: "implementation",
+            capabilities: ["Simple", "tests"], current_task_id: "", status: AgentStatus.Idle,
+            owner_identity_id: "human-1", room_ids: ["restart-dm"], last_activity_at: 2)
+        expect(runtime.register_profile(profile).accepted).to_equal(true)
+        val agent_binding = AgentBinding(binding_id: messaging_id("agent_binding", "binding-agent-1"),
+            room_id: messaging_id("room", "restart-dm"), agent_id: messaging_id("agent", "agent-1"),
+            handler: AgentHandler.Main, session_policy: "persistent_per_room",
+            trigger_policy: "mention", update_policy: "milestones", context_policy: "bounded",
+            permissions: ["room:read", "room:write"])
+        expect(runtime.register_agent_binding("claude", agent_binding).ok).to_equal(true)
+        expect(runtime.assign_task("task-1", "origin-1", "agent-1", "Implement restart", 3).accepted).to_equal(true)
+        expect(runtime.send_message("transport-message", "workspace", "restart-dm", "human-1", "",
+            MessageOrigin.Human, "bridge me", "", "transport-correlation", "", 0, 4,
+            "transport-idempotency").ok).to_equal(true)
+        expect(runtime.bind_transport("slack-binding", "restart-dm", "slack", "D123", "full",
+            "slack-v1").accepted).to_equal(true)
+        expect(runtime.map_external_message("slack-binding:transport-message", "slack-binding",
+            "transport-message", "171.2", "171.1", 5).accepted).to_equal(true)
+        expect(runtime.advance_transport_cursors("slack-binding", "event-7", "171.2").accepted).to_equal(true)
+        val request_template = CredentialHttpRequestTemplate(accepted: true, method: "POST",
+            url_template: "https://slack.com/api/chat.postMessage",
+            headers: ["Content-Type: application/json"], body: "{}",
+            credential_ref: "secret://slack/development", credential_mode: "bearer",
+            idempotency_key: "stable-runtime-delivery", error: "")
+        expect(runtime.queue_transport_template("runtime-delivery", "transport-message",
+            "slack-binding", request_template, 6).accepted).to_equal(true)
+        expect(runtime.close()).to_equal(true)
+
+        runtime = MessagingRuntime.open(path)
+        val recovered_messages = runtime.read_messages("restart-dm", "agent-1", 0, 10)
+        expect(recovered_messages.len()).to_equal(1)
+        expect(recovered_messages[0].body).to_equal("bridge me")
+        expect(runtime.who("builder").found).to_equal(true)
+        expect(runtime.tasks.len()).to_equal(1)
+        expect(runtime.tasks[0].objective).to_equal("Implement restart")
+        expect(runtime.store.workspace("workspace").name).to_equal("workspace")
+        expect(runtime.store.identity("human-1").kind).to_equal(IdentityKind.Human)
+        expect(runtime.store.identity("agent-1").kind).to_equal(IdentityKind.Agent)
+        expect(runtime.store.task_events("task-1").len()).to_equal(1)
+        expect(runtime.store.task_events("task-1")[0].state).to_equal("queued")
+        expect(runtime.bindings.len()).to_equal(1)
+        expect(runtime.bindings[0].agent_id.value).to_equal("agent-1")
+        expect(runtime.transport_binding("slack-binding").external_room_id).to_equal("D123")
+        expect(runtime.transport_binding("slack-binding").last_inbound_cursor).to_equal("event-7")
+        expect(runtime.external_message_ref("slack-binding", "transport-message").external_message_id).to_equal("171.2")
+        expect(runtime.external_message_ref("slack-binding", "transport-message").external_thread_id).to_equal("171.1")
+        val recovered_delivery = runtime.store.queued_transport_requests(100, 10)
+        expect(recovered_delivery.len()).to_equal(1)
+        expect(recovered_delivery[0].credential_ref).to_equal("secret://slack/development")
+        expect(runtime.close()).to_equal(true)
+        file_delete(path)

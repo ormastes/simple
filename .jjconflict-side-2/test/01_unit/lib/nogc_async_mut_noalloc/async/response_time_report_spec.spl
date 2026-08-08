@@ -1,0 +1,69 @@
+# WP-18 (response-time report) spec for
+# doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md.
+#
+# Proves build_response_time_margin() correctly flags a task whose observed
+# max exceeds its period-as-relative-deadline, correctly clears one that
+# doesn't, and that the rendered report always carries the load-bearing
+# observed-vs-proven caveat text.
+
+use std.nogc_async_mut_noalloc.async.scheduler.{NoallocScheduler}
+use std.nogc_async_mut_noalloc.async.response_time_report.{build_response_time_margin, format_response_time_report}
+
+describe "Response-time report (WP-18)":
+    """Proves the report correctly flags a task whose observed_max_ticks
+    exceeds its period, correctly clears one within its period, and always
+    carries the observed-not-proven caveat."""
+
+    it "flags a task whose observed max exceeds its period (deadline at risk)":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(1, 0, 0, 100)    # period = 100 ticks
+
+        val margin = build_response_time_margin(sched, id, 150)    # observed max 150 > period 100
+        expect(margin.period_ticks).to_equal(100)
+        expect(margin.observed_max_ticks).to_equal(150)
+        expect(margin.margin_ticks).to_equal(-50)
+        expect(margin.meets_deadline_observed).to_equal(false)
+
+        val report = format_response_time_report(margin)
+        expect(report).to_contain("DEADLINE AT RISK")
+        expect(report).to_contain("50 ticks")
+
+    it "clears a task whose observed max is within its period (deadline met, with margin)":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(2, 0, 0, 100)    # period = 100 ticks
+
+        val margin = build_response_time_margin(sched, id, 60)    # observed max 60 <= period 100
+        expect(margin.period_ticks).to_equal(100)
+        expect(margin.observed_max_ticks).to_equal(60)
+        expect(margin.margin_ticks).to_equal(40)
+        expect(margin.meets_deadline_observed).to_equal(true)
+
+        val report = format_response_time_report(margin)
+        expect(report).to_contain("OK (observed margin 40 ticks)")
+
+    it "clears exactly at the boundary (observed max equal to period)":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(3, 0, 0, 100)
+
+        val margin = build_response_time_margin(sched, id, 100)
+        expect(margin.margin_ticks).to_equal(0)
+        expect(margin.meets_deadline_observed).to_equal(true)
+
+    it "reports not-applicable for an aperiodic task (period 0)":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn(4, 0)    # no period set
+
+        val margin = build_response_time_margin(sched, id, 999)
+        expect(margin.period_ticks).to_equal(0)
+        expect(margin.meets_deadline_observed).to_equal(false)
+
+        val report = format_response_time_report(margin)
+        expect(report).to_contain("NOT APPLICABLE")
+
+    it "every rendered report carries the load-bearing observed-vs-proven caveat":
+        val sched = NoallocScheduler.new()
+        val id = sched.spawn_periodic(5, 0, 0, 100)
+        val margin = build_response_time_margin(sched, id, 60)
+        val report = format_response_time_report(margin)
+        expect(report).to_contain("NOT a proven WCET bound")
+        expect(report).to_contain("NOT sufficient evidence for a certification claim")

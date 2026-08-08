@@ -1,0 +1,204 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl
+# @req REQ-WEB-CSS-001
+# @gui: headless
+"""
+# Web CSS Box Model System Test
+
+**Plan:** doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md (unit U3.1)
+
+## Purpose and Audience
+
+A reader wants to know whether the headless web/HTML-CSS renderer computes the
+CSS box model correctly: margins offsetting siblings, padding growing the
+painted (border) box while leaving the content box untouched, box-sizing:
+border-box holding the outer width fixed while shrinking the content box,
+min/max-width clamping, overflow: hidden clipping a child's Draw IR to its
+parent's box, and aspect-ratio deriving one box dimension from the other.
+
+## Scope and Preconditions
+
+Runs entirely in-process, headless, no display server:
+`simple_web_layout_render_html_draw_ir(html, width, height)` produces a
+`common.ui.draw_ir.DrawIrComposition`. Every assertion reads computed box
+geometry straight off `DrawIrCommand` (`x`/`y`/`width`/`height` = border box,
+`content_rect` = content box, `clip_rect` = the ancestor-clip region applied
+at paint time) — never a "didn't crash" check.
+
+## Primary Workflow
+
+Render small fixed HTML/CSS fixtures at a fixed viewport, look up the command
+for a named element by `component_id`, and assert exact computed pixel
+geometry.
+
+## Evidence and Provenance
+
+DrawIR-tree oracle per plan §3.6; source:
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+describe "Web CSS box model":
+    """
+    Readers of this manual section can trust that the headless HTML/CSS
+    renderer's Draw IR carries correct computed box-model geometry for
+    margins, padding, box-sizing, min/max clamping, overflow clipping, and
+    aspect-ratio.
+    """
+
+    # @manual_section "Box model geometry"
+
+    it "margins offset a block from its parent and siblings":
+        step("Render two blocks: a top/left/right margin, b a top/left margin only")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#a{display:block;width:10px;height:10px;" +
+            "margin:4px 4px 0 4px;background-color:#ef4444}" +
+            "#b{display:block;width:10px;height:10px;" +
+            "margin:6px 0 0 5px;background-color:#22c55e}" +
+            "</style></head><body><div id='a'></div><div id='b'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val commands = composition.batches[0].commands
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+
+        step("Assert a is offset from the body edge by its own margin")
+        expect(a.x).to_equal(4)
+        expect(a.y).to_equal(4)
+
+        step("Assert b is offset from a by b's own top/left margin")
+        expect(b.x).to_equal(5)
+        expect(b.y).to_equal(a.y + a.height + 6)
+
+    it "padding grows the painted background but not the content box":
+        step("Render a block with 5px padding on all sides")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#c{display:block;width:20px;height:12px;padding:5px;" +
+            "background-color:#3b82f6}" +
+            "</style></head><body><div id='c'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val c = _draw_ir_command_by_id(composition.batches[0].commands, "c")
+
+        step("Assert the painted (border) box grew by padding on both axes")
+        expect(c.width).to_equal(30)
+        expect(c.height).to_equal(22)
+
+        step("Assert the content box kept the authored content width/height")
+        expect(c.content_rect.width).to_equal(20)
+        expect(c.content_rect.height).to_equal(12)
+
+    it "box-sizing: border-box keeps the outer width fixed":
+        step("Render a block with padding+border under box-sizing:border-box")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#d{display:block;width:40px;height:20px;padding:5px;" +
+            "border:2px solid #000000;box-sizing:border-box;" +
+            "background-color:#111827}" +
+            "</style></head><body><div id='d'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val d = _draw_ir_command_by_id(composition.batches[0].commands, "d")
+
+        step("Assert the outer (border) box stayed exactly the authored width")
+        expect(d.width).to_equal(40)
+        expect(d.height).to_equal(20)
+
+        step("Assert the content box shrank to absorb padding + border")
+        expect(d.content_rect.width).to_equal(40 - 2 * 5 - 2 * 2)
+        expect(d.content_rect.height).to_equal(20 - 2 * 5 - 2 * 2)
+
+    it "min- and max-width clamp an over- and under-sized block":
+        step("Render an undersized block clamped up by min-width")
+        val html_min = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#e{display:block;width:5px;height:10px;min-width:20px;" +
+            "background-color:#000000}" +
+            "</style></head><body><div id='e'></div></body></html>"
+        )
+        val composition_min = simple_web_layout_render_html_draw_ir(html_min, 64, 64)
+        val e = _draw_ir_command_by_id(composition_min.batches[0].commands, "e")
+
+        step("Assert the width was clamped up to min-width")
+        expect(e.width).to_equal(20)
+
+        step("Render an oversized block clamped down by max-width")
+        val html_max = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#f{display:block;width:500px;max-width:50px;height:10px;" +
+            "background-color:#000000}" +
+            "</style></head><body><div id='f'></div></body></html>"
+        )
+        val composition_max = simple_web_layout_render_html_draw_ir(html_max, 600, 64)
+        val f = _draw_ir_command_by_id(composition_max.batches[0].commands, "f")
+
+        step("Assert the width was clamped down to max-width")
+        expect(f.width).to_equal(50)
+
+    it "overflow: hidden clips a child's DrawIR to the parent rect":
+        step("Render a narrow overflow:hidden shell around a wider child")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#shell{display:block;overflow:hidden;width:12px;height:8px;" +
+            "background-color:#e5e7eb}" +
+            "#wide{display:block;width:30px;height:6px;" +
+            "background-color:#ef4444}" +
+            "</style></head><body><section id='shell'>" +
+            "<div id='wide'></div></section></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val shell = _draw_ir_command_by_id(composition.batches[0].commands, "shell")
+        val wide = _draw_ir_command_by_id(composition.batches[0].commands, "wide")
+
+        step("Assert the child's own painted box kept its full authored width")
+        expect(wide.width).to_equal(30)
+
+        step("Assert the child's clip rect was narrowed to the shell's box")
+        expect(wide.clip_rect.present).to_be(true)
+        expect(wide.clip_rect.x).to_equal(shell.x)
+        expect(wide.clip_rect.y).to_equal(shell.y)
+        expect(wide.clip_rect.width).to_equal(shell.width)
+        expect(wide.clip_rect.height).to_equal(shell.height)
+
+    it "aspect-ratio derives height from width":
+        step("Render a block with only a width and an aspect-ratio declared")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#g{display:block;width:40px;aspect-ratio:2/1;" +
+            "background-color:#000000}" +
+            "#h{display:block;width:32px;aspect-ratio:16/9;" +
+            "background-color:#000000}" +
+            "</style></head><body><div id='g'></div><div id='h'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 128)
+        val g = _draw_ir_command_by_id(composition.batches[0].commands, "g")
+        val h = _draw_ir_command_by_id(composition.batches[0].commands, "h")
+
+        step("Assert height was derived from width using the declared ratio")
+        expect(g.width).to_equal(40)
+        expect(g.height).to_equal(20)
+        expect(h.width).to_equal(32)
+        expect(h.height).to_equal(18)

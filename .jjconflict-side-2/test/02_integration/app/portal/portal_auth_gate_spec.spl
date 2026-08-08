@@ -1,0 +1,76 @@
+use std.spec
+use app.portal.server.{PortalServer}
+use app.portal.services.auth_service.{sign_session_cookie}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+val _SECRET = "portal-auth-gate-spec-secret"
+
+fn _server() -> PortalServer:
+    PortalServer.with_repo_root("127.0.0.1", "0", ".")
+
+fn _cookie_header(value: text) -> text:
+    "Cookie: portal_session={value}\n"
+
+describe "portal auth gate (PORTAL_AUTH)":
+    it "serves pages without a login when PORTAL_AUTH is off (default)":
+        val _ = rt_env_remove("PORTAL_AUTH")
+        val resp = _server().route_request("GET", "/", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+
+    it "redirects to /login when PORTAL_AUTH=1 and there is no session cookie":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val resp = _server().route_request("GET", "/", "", "")
+        expect(resp).to_start_with("HTTP/1.1 302 Found")
+        expect(resp).to_contain("Location: /login")
+        val _cleanup = rt_env_remove("PORTAL_AUTH")
+
+    it "still serves the /repos page as a redirect (not a 404) when gated":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val resp = _server().route_request("GET", "/repos", "", "")
+        expect(resp).to_start_with("HTTP/1.1 302 Found")
+        expect(resp).to_contain("Location: /login")
+        val _cleanup = rt_env_remove("PORTAL_AUTH")
+
+    it "always serves the login page itself, even when gated":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val resp = _server().route_request("GET", "/login", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        expect(resp).to_contain("Log In")
+        val _cleanup = rt_env_remove("PORTAL_AUTH")
+
+    it "does not gate static assets":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val resp = _server().route_request("GET", "/css/app.css", "", "")
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        val _cleanup = rt_env_remove("PORTAL_AUTH")
+
+    it "grants access with a valid signed session cookie":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val _ = rt_env_set("PORTAL_AUTH_SECRET", _SECRET)
+        val cookie_value = sign_session_cookie("admin", _SECRET)
+        val resp = _server().route_request("GET", "/", "", _cookie_header(cookie_value))
+        expect(resp).to_start_with("HTTP/1.1 200 OK")
+        val _c1 = rt_env_remove("PORTAL_AUTH")
+        val _c2 = rt_env_remove("PORTAL_AUTH_SECRET")
+
+    it "rejects a tampered session cookie and redirects to login":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val _ = rt_env_set("PORTAL_AUTH_SECRET", _SECRET)
+        val cookie_value = sign_session_cookie("admin", _SECRET)
+        val forged = cookie_value + "0"
+        val resp = _server().route_request("GET", "/", "", _cookie_header(forged))
+        expect(resp).to_start_with("HTTP/1.1 302 Found")
+        expect(resp).to_contain("Location: /login")
+        val _c1 = rt_env_remove("PORTAL_AUTH")
+        val _c2 = rt_env_remove("PORTAL_AUTH_SECRET")
+
+    it "rejects a session cookie signed with a different secret":
+        val _ = rt_env_set("PORTAL_AUTH", "1")
+        val _ = rt_env_set("PORTAL_AUTH_SECRET", _SECRET)
+        val cookie_value = sign_session_cookie("admin", "wrong-secret")
+        val resp = _server().route_request("GET", "/", "", _cookie_header(cookie_value))
+        expect(resp).to_start_with("HTTP/1.1 302 Found")
+        val _c1 = rt_env_remove("PORTAL_AUTH")
+        val _c2 = rt_env_remove("PORTAL_AUTH_SECRET")

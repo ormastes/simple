@@ -1,0 +1,101 @@
+"""Bounded, reproducible room context construction for agent injection."""
+
+use app.llm_caret.messaging.domain.model.{AgentProfile, MessageOrigin, RoomMessage}
+use app.llm_caret.messaging.application.profile_service.{profile_summary}
+
+struct ContextManifest:
+    context_bundle_id: text
+    task_id: text
+    included_message_ids: [text]
+    included_profile_ids: [text]
+    source_pack_hash: text
+    summary_version: text
+    redaction_policy_version: text
+    token_estimate: i64
+
+struct ContextBundle:
+    accepted: bool
+    error: text
+    text_content: text
+    messages: [RoomMessage]
+    profiles: [AgentProfile]
+    manifest: ContextManifest
+
+fn _redact(value: text, secrets: [text]) -> text:
+    var result = value
+    for secret in secrets:
+        if secret.len() >= 4:
+            result = result.replace(secret, "[REDACTED]")
+    result
+
+fn _contains_id(messages: [RoomMessage], id: text) -> bool:
+    for message in messages:
+        if message.message_id.value == id: return true
+    false
+
+fn _append_unique(messages: [RoomMessage], message: RoomMessage) -> [RoomMessage]:
+    if _contains_id(messages, message.message_id.value): return messages
+    messages + [message]
+
+fn _empty_manifest(bundle_id: text, task_id: text) -> ContextManifest:
+    ContextManifest(context_bundle_id: bundle_id, task_id: task_id, included_message_ids: [],
+        included_profile_ids: [], source_pack_hash: "", summary_version: "",
+        redaction_policy_version: "", token_estimate: 0)
+
+pub fn build_context_bundle(bundle_id: text, task_id: text, agent_id: text, room_id: text,
+        trigger: RoomMessage, history: [RoomMessage], profiles: [AgentProfile], room_summary: text,
+        source_context: text, source_pack_hash: text, secrets: [text], max_bytes: i64,
+        previous_count: i64, summary_version: text, redaction_version: text) -> ContextBundle:
+    if trigger.room_id.value != room_id:
+        return ContextBundle(accepted: false, error: "cross_room_trigger_denied", text_content: "",
+            messages: [], profiles: [], manifest: _empty_manifest(bundle_id, task_id))
+    if max_bytes < 256:
+        return ContextBundle(accepted: false, error: "context_budget_too_small", text_content: "",
+            messages: [], profiles: [], manifest: _empty_manifest(bundle_id, task_id))
+
+    var selected: [RoomMessage] = []
+    if trigger.reply_to_id != "":
+        for message in history:
+            if message.room_id.value == room_id and message.message_id.value == trigger.reply_to_id:
+                selected = _append_unique(selected, message)
+    var prior: [RoomMessage] = []
+    for message in history:
+        if message.room_id.value == room_id and message.room_seq < trigger.room_seq and
+                message.origin != MessageOrigin.AgentUpdate:
+            prior = prior + [message]
+    var start = prior.len() - previous_count
+    if start < 0: start = 0
+    var i = start
+    while i < prior.len():
+        selected = _append_unique(selected, prior[i])
+        i = i + 1
+    selected = _append_unique(selected, trigger)
+
+    var selected_profiles: [AgentProfile] = []
+    for profile in profiles:
+        if profile.agent_id.value == agent_id or trigger.body.lower().contains("@" + profile.display_name.lower()):
+            selected_profiles = selected_profiles + [profile]
+
+    var parts: [text] = []
+    if room_summary != "": parts = parts + ["Room summary:\n" + _redact(room_summary, secrets)]
+    for message in selected:
+        parts = parts + ["[#" + message.message_id.value + "] " + _redact(message.body, secrets)]
+    for profile in selected_profiles:
+        parts = parts + ["Profile:\n" + _redact(profile_summary(profile), secrets)]
+    if source_context != "": parts = parts + ["Source context:\n" + _redact(source_context, secrets)]
+    var content = parts.join("\n\n")
+    if content.len() > max_bytes:
+        content = content.substring(0, max_bytes)
+
+    var message_ids: [text] = []
+    for message in selected: message_ids = message_ids + [message.message_id.value]
+    var profile_ids: [text] = []
+    for profile in selected_profiles: profile_ids = profile_ids + [profile.agent_id.value]
+    val manifest = ContextManifest(context_bundle_id: bundle_id, task_id: task_id,
+        included_message_ids: message_ids, included_profile_ids: profile_ids,
+        source_pack_hash: source_pack_hash, summary_version: summary_version,
+        redaction_policy_version: redaction_version, token_estimate: (content.len() + 3) / 4)
+    ContextBundle(accepted: true, error: "", text_content: content, messages: selected,
+        profiles: selected_profiles, manifest: manifest)
+
+export ContextManifest, ContextBundle, build_context_bundle

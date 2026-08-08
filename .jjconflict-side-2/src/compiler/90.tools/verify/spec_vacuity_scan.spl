@@ -1,0 +1,304 @@
+# Spec-vacuity census — WP-23 of the aerospace hardening plan.
+#
+# Plan: doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md
+# Precedent (same reporting shape): 90.tools/verify/termination_census_scan.spl
+# (WP-14), flight_rule_census_scan.spl (WP-2).
+#
+# WHAT THIS IS: a read-only, text-based census of `test/**/*_spec.spl` (and
+# any other `*.spl` under `test/`) that flags specs LIKELY to assert nothing
+# meaningful. It is a fact extractor over source text, not a real parser and
+# not a truth-value evaluator — it cannot tell whether an assertion that IS
+# present is correct, only whether one is present at all. That is explicitly
+# out of scope (see the plan's WP-23 scope note: "REPORTING ONLY").
+#
+# Evidence base for why this census exists (read before changing detectors):
+#   - doc/08_tracking/bug/bare_assert_statement_vacuity_2026-08-02.md — bare
+#     `assert <cond>` was silently inert in the Rust seed interpreter outside
+#     the top-level statement path; measured "7 passed" for `assert 1 == 2`
+#     pre-fix. The interpreter path is fixed; the pure-Simple compiler path
+#     (`parser_stmts.spl`) is documented STILL inert for bare `assert`
+#     ("OPEN 1 — pure-Simple compiler DISCARDS `assert` entirely") as of that
+#     doc's last update. This scanner does not re-verify which engine is
+#     live today — it flags every bare-`assert` occurrence unconditionally,
+#     because the failure mode (an inert oracle reporting green) recurs
+#     across engines and reappears whenever a build is redeployed.
+#   - commit `3695df74c59` — the pure-Simple lint parser's
+#     `try_parse_bare_ident_string_call()` rejected `describe "...", fn():`
+#     (comma-separated args after the bare-ident string call), silently
+#     skipping AST checks for every file using that form. Detector (c) below
+#     census-counts remaining call sites of the same shape family
+#     (`describe`/`context`/`it` followed by a string then a comma) as a
+#     STATED heuristic for "could this same parser-crash class still recur
+#     elsewhere" — it does not re-invoke the parser itself (out of scope,
+#     same reasoning as termination_census_scan.spl's stated ceilings).
+#
+# THREE detectors, each independent and each reported with an honest count:
+#
+#   (a) bare `assert` occurrences — a line whose trimmed text starts with
+#       literal `"assert "` (assert, one space, then a condition). This
+#       excludes `assert(...)` (paren-call form, no space before `(`),
+#       `assert!(...)` (macro form), and every `assert_xxx(...)` matcher —
+#       all of those are documented as NOT inert. Every occurrence is
+#       flagged (path:line), not sampled.
+#
+#   (b) `it` blocks with zero assertion calls in their body — an `it
+#       "...":` or `it "...", fn():` block (indent-delimited body, same
+#       extraction shape as termination_census_scan's function-body
+#       extraction) whose body contains none of: bare `assert `,
+#       `assert(`, `assert!(`, `assert_` (any matcher), `expect(`,
+#       `expect_` (any of the repo's expect_* helper family — expect_call,
+#       expect_all_equal, expect_byte_slice, etc; NOTE `expect_not(` does
+#       NOT contain the substring `expect(`, only `expect_` catches it —
+#       fixed before trusting the real-tree count), `fail_assertion(`.
+#       Measured over the full test/ tree this detector's positive rate
+#       (~63%) is far higher than this repo's previously-measured "~15% of
+#       EXAMPLES assert nothing" figure (see
+#       reference_spec_corpus_is_15_percent_vacuous_and_46_percent_duplicated
+#       in this session's memory) — those are NOT the same population: the
+#       15% figure sampled a curated example set, this detector census-scans
+#       every `it` block in the whole tree, including ones that legitimately
+#       delegate all assertion to a called helper function or a shared
+#       examples group (`shared_examples_spec.spl`-style) that this
+#       text-level scanner cannot see into. That is a STATED ceiling, not a
+#       claim that ~63% of the suite is provably vacuous — cross-checking
+#       which zero-assertion `it` blocks call an assertion-bearing helper
+#       (vs. truly asserting nothing) needs a call-graph pass, out of scope
+#       for this WP (same "text scanner, not a call-graph pass" ceiling
+#       termination_census_scan.spl states for its own recursion detector).
+#       A zero-assertion `it` block is flagged
+#       (path:line:description) unconditionally — no sampling.
+#
+#   (c) `describe`/`context`/`it` call sites shaped like the parser-crash
+#       class fixed in `3695df74c59`: a bare-ident string call immediately
+#       followed by a comma (`describe "...", ...` / `context "...", ...` /
+#       `it "...", ...`). Every one of these is now expected to parse
+#       (the fix landed), so this detector's count is a REGRESSION TRIPWIRE,
+#       not a defect list — it tells a future reader how many call sites
+#       depend on that fix staying correct, which is exactly the census this
+#       WP asked for ("check whether your scanner would catch a similarly
+#       shaped parse failure").
+#
+# SCOPE: `test/**/*.spl`, excluding vendored/third-party paths per CLAUDE.md
+# "Owned-Code Scope" (same exclusion list as the other census scanners; none
+# of those prefixes currently exist under test/, kept for symmetry and in
+# case vendored fixtures are added later).
+
+use std.nogc_sync_mut.io.dir_ops.{dir_walk}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val SCAN_ROOT = "test"
+val VENDOR_PREFIXES = ["src/compiler_rust/vendor/", "src/runtime/vendor/"]
+
+# "expect_" (not just "expect(") catches the repo's expect_* helper family
+# (expect_call, expect_all_equal, expect_byte_slice, ...) — `expect_not(`
+# does NOT contain the substring "expect(" (the char after `expect` is `_`,
+# not `(`), so a marker list with only "expect(" silently flagged every
+# `expect_not`-only body as zero-assertion. Fixed 2026-08-07 before trusting
+# the real-tree count (see spec_vacuity_scan.spl module header).
+val ASSERTION_MARKERS = ["assert_", "expect(", "expect_", "assert(", "assert!(", "fail_assertion("]
+
+pub struct BareAssertHit:
+    path: text
+    line: i64
+    text: text
+
+pub struct EmptyItBlock:
+    path: text
+    line: i64
+    description: text
+
+pub struct CommaShapeHit:
+    path: text
+    line: i64
+    keyword: text
+
+pub struct VacuityReport:
+    files_scanned: i64
+    bare_asserts: [BareAssertHit]
+    empty_it_blocks: [EmptyItBlock]
+    it_blocks_scanned: i64
+    comma_shape_hits: [CommaShapeHit]
+
+fn is_excluded(path: text) -> bool:
+    for prefix in VENDOR_PREFIXES:
+        if path.starts_with(prefix):
+            return true
+    false
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line[n:n + 1] == " ":
+        n = n + 1
+    n
+
+fn _trim_leading_indent(line: text) -> text:
+    line.trim()
+
+# True when `t` (already trimmed) is a bare `assert <cond>` statement: the
+# literal prefix `assert ` (assert, one space), which excludes `assert(`,
+# `assert!(`, and `assert_xxx(` — none of those match "assert " because the
+# character immediately after `assert` in each of them is `(`, `!`, or `_`,
+# never a space.
+fn _is_bare_assert_line(t: text) -> bool:
+    t.starts_with("assert ")
+
+fn _line_has_any_assertion_marker(t: text) -> bool:
+    if _is_bare_assert_line(t):
+        return true
+    for marker in ASSERTION_MARKERS:
+        if t.contains(marker):
+            return true
+    false
+
+# `it "description":` or `it "description", fn():` -> the description text,
+# or "" if the line is not an `it` header at all.
+fn _it_description(t: text) -> text:
+    if not t.starts_with("it "):
+        return ""
+    var rest = t[3:t.len()]
+    rest = rest.trim()
+    if not rest.starts_with("\""):
+        return ""
+    var i = 1
+    while i < rest.len() and rest[i:i + 1] != "\"":
+        i = i + 1
+    if i >= rest.len():
+        return ""
+    rest[1:i]
+
+fn _is_it_header(t: text) -> bool:
+    _it_description(t) != "" or (t.starts_with("it \"") )
+
+# Comma-shape census: `describe "..."`,` / `context "..."`,` / `it "..."`,`
+# — a bare-ident string call immediately followed by a comma, the exact
+# shape the parser rejected pre-3695df74c59.
+fn _comma_shape_keyword(t: text) -> text:
+    for kw in ["describe", "context", "it"]:
+        val prefix = kw + " \""
+        if t.starts_with(prefix):
+            # prefix = kw + space + opening-quote, so the opening quote sits
+            # at index kw.len()+1 and the string body starts at kw.len()+2.
+            # (Fixed 2026-08-07: this used to start scanning ON the opening
+            # quote itself, so the while loop below never advanced past it
+            # and this detector could never fire — verified against
+            # test/.../parser_describe_fn_literal_spec.spl as a positive
+            # control before trusting the real-tree count.)
+            var i = kw.len() + 2
+            while i < t.len() and t[i:i + 1] != "\"":
+                i = i + 1
+            if i < t.len():
+                var j = i + 1
+                if j < t.len() and t[j:j + 1] == "," :
+                    return kw
+    ""
+
+pub fn scan_file_content(path: text, content: text) -> VacuityReport:
+    """Unit-test seam: run all three detectors over one synthetic file's
+    content directly, without touching disk or the rest of the tree."""
+    val lines = content.split("\n")
+
+    var bare_asserts: [BareAssertHit] = []
+    var comma_shape_hits: [CommaShapeHit] = []
+    var i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val t = raw.trim()
+        if _is_bare_assert_line(t):
+            bare_asserts.push(BareAssertHit(path: path, line: i + 1, text: t))
+        val kw = _comma_shape_keyword(t)
+        if kw != "":
+            comma_shape_hits.push(CommaShapeHit(path: path, line: i + 1, keyword: kw))
+        i = i + 1
+
+    var empty_it_blocks: [EmptyItBlock] = []
+    var it_blocks_scanned = 0
+    i = 0
+    while i < lines.len():
+        val raw = lines[i]
+        val t = raw.trim()
+        if _is_it_header(t):
+            val header_indent = _indent_of(raw)
+            val desc = _it_description(t)
+            var has_assertion = false
+            var j = i + 1
+            while j < lines.len():
+                val body_raw = lines[j]
+                val body_t = body_raw.trim()
+                if body_t != "" and _indent_of(body_raw) <= header_indent:
+                    break
+                if body_t != "" and _line_has_any_assertion_marker(body_t):
+                    has_assertion = true
+                j = j + 1
+            it_blocks_scanned = it_blocks_scanned + 1
+            if not has_assertion:
+                empty_it_blocks.push(EmptyItBlock(path: path, line: i + 1, description: desc))
+            i = j
+            continue
+        i = i + 1
+
+    VacuityReport(files_scanned: 1, bare_asserts: bare_asserts,
+        empty_it_blocks: empty_it_blocks, it_blocks_scanned: it_blocks_scanned,
+        comma_shape_hits: comma_shape_hits)
+
+pub fn run_vacuity_census() -> VacuityReport:
+    var files_scanned = 0
+    var bare_asserts: [BareAssertHit] = []
+    var empty_it_blocks: [EmptyItBlock] = []
+    var it_blocks_scanned = 0
+    var comma_shape_hits: [CommaShapeHit] = []
+
+    for path in dir_walk(SCAN_ROOT):
+        if not path.ends_with(".spl"):
+            continue
+        if is_excluded(path):
+            continue
+        files_scanned = files_scanned + 1
+        val content = file_read(path)
+        val r = scan_file_content(path, content)
+        for h in r.bare_asserts:
+            bare_asserts.push(h)
+        for e in r.empty_it_blocks:
+            empty_it_blocks.push(e)
+        for c in r.comma_shape_hits:
+            comma_shape_hits.push(c)
+        it_blocks_scanned = it_blocks_scanned + r.it_blocks_scanned
+
+    VacuityReport(files_scanned: files_scanned, bare_asserts: bare_asserts,
+        empty_it_blocks: empty_it_blocks, it_blocks_scanned: it_blocks_scanned,
+        comma_shape_hits: comma_shape_hits)
+
+pub fn format_human_report(report: VacuityReport) -> text:
+    var lines: [text] = []
+    lines.push("Spec-vacuity census (WP-23) — bare assert, zero-assertion it blocks, comma-shape tripwire")
+    lines.push("Scope: test/**/*.spl, excluding vendor paths (see module header)")
+    lines.push("Files scanned: {report.files_scanned}")
+    lines.push("")
+    lines.push("(a) bare `assert <cond>` occurrences (inert per bare_assert_statement_vacuity_2026-08-02.md): {report.bare_asserts.len()}")
+    for h in report.bare_asserts:
+        lines.push("    {h.path}:{h.line}: {h.text}")
+    lines.push("")
+    lines.push("(b) `it` blocks scanned: {report.it_blocks_scanned}, zero-assertion `it` blocks: {report.empty_it_blocks.len()}")
+    for e in report.empty_it_blocks:
+        lines.push("    {e.path}:{e.line}: it \"{e.description}\"")
+    lines.push("")
+    lines.push("(c) comma-shape tripwire (describe/context/it \"...\", ...  — the class fixed in 3695df74c59): {report.comma_shape_hits.len()}")
+    for c in report.comma_shape_hits:
+        lines.push("    {c.path}:{c.line}: {c.keyword} \"...\", ...")
+    lines.join("\n")
+
+pub fn format_sdn(report: VacuityReport) -> text:
+    var lines: [text] = []
+    lines.push("spec_vacuity_census:")
+    lines.push("  files_scanned: {report.files_scanned}")
+    lines.push("  bare_assert_count: {report.bare_asserts.len()}")
+    lines.push("  it_blocks_scanned: {report.it_blocks_scanned}")
+    lines.push("  empty_it_block_count: {report.empty_it_blocks.len()}")
+    lines.push("  comma_shape_hit_count: {report.comma_shape_hits.len()}")
+    lines.join("\n")
+
+# Standalone CLI entry: `bin/simple run src/compiler/90.tools/verify/spec_vacuity_scan.spl`
+# prints the full human report over the real test/ tree. Kept in the same
+# file as the scanner (same "one file, unit-test seams + CLI entry" shape as
+# noalloc_manifest_scan.spl) rather than a separate runner module.
+fn main():
+    print(format_human_report(run_vacuity_census()))

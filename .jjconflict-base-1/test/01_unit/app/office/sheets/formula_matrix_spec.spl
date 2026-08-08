@@ -1,0 +1,203 @@
+"""Calc matrix + sum-combination + math/text-niche spec.
+
+Array-returning matrix functions (MMULT/MINVERSE/MUNIT) evaluate to a 2D grid:
+the top-left value stays in the formula's own cell and the rest spills into the
+adjacent rectangle (via recalculate_formula_cells). MDETERM is a scalar routed
+through the raw-range path so the square shape survives. The sum-combination and
+math/text niche functions are scalar. Every expected value is hand-computed
+against Excel semantics.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _disp(sh: Sheet, ref: text) -> text:
+    """Display text of one cell."""
+    cell_display_text(sh.get_cell(ref))
+
+describe "Calc matrix functions — spill":
+    it "MMULT computes the matrix product":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("I1", "2")
+        sh.set_value("H2", "3")
+        sh.set_value("I2", "4")
+        sh.set_value("K1", "5")
+        sh.set_value("L1", "6")
+        sh.set_value("K2", "7")
+        sh.set_value("L2", "8")
+        sh.set_value("A1", "=MMULT(H1:I2,K1:L2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("19")
+        expect(_disp(sh, "B1")).to_equal("22")
+        expect(_disp(sh, "A2")).to_equal("43")
+        expect(_disp(sh, "B2")).to_equal("50")
+
+    it "MMULT fails closed with #ERR on a dimension mismatch":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("I1", "2")
+        sh.set_value("H2", "3")
+        sh.set_value("I2", "4")
+        sh.set_value("K1", "5")
+        sh.set_value("L1", "6")
+        sh.set_value("M1", "7")
+        sh.set_value("A1", "=MMULT(H1:I2,K1:M1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_contain("#ERR")
+
+    it "MINVERSE inverts a 2x2 matrix":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "4")
+        sh.set_value("I1", "7")
+        sh.set_value("H2", "2")
+        sh.set_value("I2", "6")
+        sh.set_value("A1", "=MINVERSE(H1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("0.6")
+        expect(_disp(sh, "B1")).to_equal("-0.7")
+        expect(_disp(sh, "A2")).to_equal("-0.2")
+        expect(_disp(sh, "B2")).to_equal("0.4")
+
+    it "MINVERSE fails closed with #ERR on a singular matrix":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("I1", "2")
+        sh.set_value("H2", "2")
+        sh.set_value("I2", "4")
+        sh.set_value("A1", "=MINVERSE(H1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_contain("#ERR")
+
+    it "MUNIT builds the identity matrix":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=MUNIT(2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1")
+        expect(_disp(sh, "B1")).to_equal("0")
+        expect(_disp(sh, "A2")).to_equal("0")
+        expect(_disp(sh, "B2")).to_equal("1")
+
+describe "Calc MDETERM — scalar":
+    it "MDETERM of a 2x2 matrix":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "3")
+        sh.set_value("I1", "8")
+        sh.set_value("H2", "4")
+        sh.set_value("I2", "6")
+        sh.set_value("A1", "=MDETERM(H1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("-14")
+
+    it "MDETERM of a 3x3 matrix":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("I1", "2")
+        sh.set_value("J1", "3")
+        sh.set_value("H2", "4")
+        sh.set_value("I2", "5")
+        sh.set_value("J2", "6")
+        sh.set_value("H3", "7")
+        sh.set_value("I3", "8")
+        sh.set_value("J3", "10")
+        sh.set_value("A1", "=MDETERM(H1:J3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("-3")
+
+describe "Calc sum-of-products combinations — scalar":
+    it "SUMX2MY2 sums x^2 - y^2":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "2")
+        sh.set_value("H2", "3")
+        sh.set_value("I1", "1")
+        sh.set_value("I2", "2")
+        sh.set_value("A1", "=SUMX2MY2(H1:H2,I1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("8")
+
+    it "SUMX2PY2 sums x^2 + y^2":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "2")
+        sh.set_value("H2", "3")
+        sh.set_value("I1", "1")
+        sh.set_value("I2", "2")
+        sh.set_value("A1", "=SUMX2PY2(H1:H2,I1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("18")
+
+    it "SUMXMY2 sums (x - y)^2":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "2")
+        sh.set_value("H2", "3")
+        sh.set_value("I1", "1")
+        sh.set_value("I2", "2")
+        sh.set_value("A1", "=SUMXMY2(H1:H2,I1:I2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("2")
+
+describe "Calc math niche — scalar":
+    it "FACTDOUBLE of an even n":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=FACTDOUBLE(6)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("48")
+
+    it "FACTDOUBLE of an odd n":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=FACTDOUBLE(7)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("105")
+
+    it "FACTDOUBLE fails closed with #ERR on a negative n":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=FACTDOUBLE(-1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_contain("#ERR")
+
+    it "MULTINOMIAL computes (sum)! / product of factorials":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=MULTINOMIAL(2,3,4)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("1260")
+
+    it "SERIESSUM evaluates a power series":
+        var sh = Sheet.new("s")
+        sh.set_value("H1", "1")
+        sh.set_value("H2", "1")
+        sh.set_value("H3", "1")
+        sh.set_value("A1", "=SERIESSUM(2,0,1,H1:H3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("7")
+
+describe "Calc text niche — Roman numerals":
+    it "ROMAN uses the classic subtractive form (499)":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=ROMAN(499)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("CDXCIX")
+
+    it "ROMAN of a four-figure year":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=ROMAN(2026)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("MMXXVI")
+
+    it "ROMAN fails closed with #ERR outside 1..3999":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=ROMAN(4000)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_contain("#ERR")
+
+    it "ARABIC inverts a Roman numeral":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=ARABIC(\"MMXXVI\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("2026")
+
+    it "ARABIC is case-insensitive":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=ARABIC(\"cdxcix\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("499")

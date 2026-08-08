@@ -1,0 +1,180 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+"""4x4 transform matrix for CSS/render-scene geometry.
+
+Row-major storage: element (row, col) lives at index `row * 4 + col`, so a
+translation occupies the last column. `multiply` is the standard matrix product
+`self * other`, which composes transforms left-to-right when used as
+`acc = acc.multiply(next)`.
+
+This module is the library home for `Matrix4`. It previously did not exist at
+all: `src/lib/gc_async_mut/gpu/browser_engine/style/transform.spl` imported it
+from a non-existent `examples.browser.shared.matrix4` tree, which the compiler
+only WARNs about, so every `Matrix4.identity()` call died at runtime with
+"Function 'identity' not found" instead of failing at build time.
+"""
+
+val PI: f64 = 3.141592653589793
+
+pub class Matrix4:
+    m: [f64]
+
+    static fn from_rows(values: [f64]) -> Matrix4:
+        """Build from 16 row-major values. Short input is padded with identity."""
+        var cells: [f64] = []
+        var i = 0
+        while i < 16:
+            val row = i / 4
+            val col = i - row * 4
+            val fallback = if row == col: 1.0 else: 0.0
+            cells.push(_el(values, i, fallback))
+            i = i + 1
+        Matrix4(m: cells)
+
+    static fn identity() -> Matrix4:
+        Matrix4.from_rows([
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn translate(tx: f64, ty: f64, tz: f64) -> Matrix4:
+        Matrix4.from_rows([
+            1.0, 0.0, 0.0, tx,
+            0.0, 1.0, 0.0, ty,
+            0.0, 0.0, 1.0, tz,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn scale(sx: f64, sy: f64, sz: f64) -> Matrix4:
+        Matrix4.from_rows([
+            sx, 0.0, 0.0, 0.0,
+            0.0, sy, 0.0, 0.0,
+            0.0, 0.0, sz, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn rotate_z(degrees: f64) -> Matrix4:
+        """Rotate about the Z axis. Angle is in degrees, as CSS supplies it."""
+        val c = cos_deg(degrees)
+        val s = sin_deg(degrees)
+        Matrix4.from_rows([
+            c, 0.0 - s, 0.0, 0.0,
+            s, c, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    static fn skew(ax_degrees: f64, ay_degrees: f64) -> Matrix4:
+        """CSS skew(ax, ay): tan(ax) in (0,1), tan(ay) in (1,0)."""
+        Matrix4.from_rows([
+            1.0, tan_deg(ax_degrees), 0.0, 0.0,
+            tan_deg(ay_degrees), 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ])
+
+    fn get(row: i64, col: i64) -> f64:
+        """Element at (row, col); out-of-range reads return 0.0."""
+        if row < 0 or row > 3 or col < 0 or col > 3:
+            return 0.0
+        _el(self.m, row * 4 + col, 0.0)
+
+    fn multiply(other: Matrix4) -> Matrix4:
+        """Standard matrix product `self * other`."""
+        var cells: [f64] = []
+        var row = 0
+        while row < 4:
+            var col = 0
+            while col < 4:
+                var sum = 0.0
+                var k = 0
+                while k < 4:
+                    sum = sum + self.get(row, k) * other.get(k, col)
+                    k = k + 1
+                cells.push(sum)
+                col = col + 1
+            row = row + 1
+        Matrix4(m: cells)
+
+    fn to_row_major() -> [f64]:
+        """Flat row-major copy of the 16 elements."""
+        var out: [f64] = []
+        var i = 0
+        while i < 16:
+            out.push(_el(self.m, i, 0.0))
+            i = i + 1
+        out
+
+fn _el(values: [f64], index: i64, default_val: f64) -> f64:
+    """Positional read of a [f64].
+
+    Uses iteration rather than subscripting on purpose: cross-module `[f64]`
+    indexing is unreliable on the current backends (see the same workaround in
+    `browser_engine/style/transform.spl::_arg_at`).
+    """
+    var result = default_val
+    var i = 0
+    for v in values:
+        if i == index:
+            result = v
+        i = i + 1
+    result
+
+pub fn sin_deg(degrees: f64) -> f64:
+    """sin of an angle given in degrees."""
+    _sin_rad(_normalize_rad(degrees * PI / 180.0))
+
+pub fn cos_deg(degrees: f64) -> f64:
+    """cos of an angle given in degrees."""
+    _cos_rad(_normalize_rad(degrees * PI / 180.0))
+
+pub fn tan_deg(degrees: f64) -> f64:
+    """tan of an angle given in degrees. Returns 0.0 at the poles."""
+    val c = cos_deg(degrees)
+    if c > 0.0 - 0.000000000001 and c < 0.000000000001:
+        return 0.0
+    sin_deg(degrees) / c
+
+fn _normalize_rad(radians: f64) -> f64:
+    """Fold an angle into (-PI, PI] so the series stays accurate."""
+    val two_pi = 2.0 * PI
+    var x = radians
+    var guard = 0
+    while x > PI and guard < 1000:
+        x = x - two_pi
+        guard = guard + 1
+    guard = 0
+    while x <= 0.0 - PI and guard < 1000:
+        x = x + two_pi
+        guard = guard + 1
+    x
+
+fn _sin_rad(x: f64) -> f64:
+    """Taylor series for sin on (-PI, PI]; 10 terms is well past f64 precision."""
+    var term = x
+    var sum = x
+    val x2 = x * x
+    var n = 1
+    while n < 10:
+        val d1 = (2.0 * n.to_f64()) * (2.0 * n.to_f64() + 1.0)
+        term = 0.0 - term * x2 / d1
+        sum = sum + term
+        n = n + 1
+    sum
+
+fn _cos_rad(x: f64) -> f64:
+    """Taylor series for cos on (-PI, PI]; 10 terms is well past f64 precision."""
+    var term = 1.0
+    var sum = 1.0
+    val x2 = x * x
+    var n = 1
+    while n < 10:
+        val d1 = (2.0 * n.to_f64() - 1.0) * (2.0 * n.to_f64())
+        term = 0.0 - term * x2 / d1
+        sum = sum + term
+        n = n + 1
+    sum

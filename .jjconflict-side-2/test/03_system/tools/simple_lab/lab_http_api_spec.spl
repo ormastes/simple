@@ -1,0 +1,391 @@
+"""
+# Simple Lab HTTP/WS API — real loopback system spec (Stream L, task L3)
+
+Drives `src/app/simple_lab/lab_server.spl` as a **separate OS process** over a
+**real TCP socket** — the same pattern `test/helpers/browser_h1_loopback_driver.spl`
+uses for the browser engine's H1 client, and for the same reason: an in-process
+call proves nothing about the actual wire, and `bin/simple test` runs specs
+under the tree-walk interpreter while `bin/simple run` on the server side can
+default to the JIT, so a real subprocess + a real client socket is the only
+way to exercise the code path a browser or `curl` would actually take.
+
+Flow: `POST /api/lab/sessions` (create) -> `POST .../cells/:cid/execute`
+(execute, buffers `stream`+`status` WS frames server-side) -> `GET
+.../events` (WebSocket upgrade, drains and sends the buffered frames) ->
+`PUT`/`GET .../notebooks/:name` (save/load a real `.snb.sdn`, validated
+through L1's `snb_sdn.spl` on the server).
+
+Design: doc/05_design/app/tools/notebook_lanes_architecture.md §7.4
+Plan:   doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md (Stream L, L3)
+"""
+
+# tag: slow, system
+
+use std.spec.*
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_cwd() -> text
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val SERVER_ENTRYPOINT = "src/app/simple_lab/lab_server.spl"
+
+# H1 (Stream H) requires a bearer token on every /api/lab/* call (design
+# §8.2 "Auth"); pin one here so this L3 spec keeps exercising the real
+# HTTP/WS wire under the post-H1 contract instead of getting 401 on
+# everything. See test/03_system/tools/simple_lab/lab_hardening_spec.spl
+# for the auth/origin/bounds contract itself.
+val TEST_TOKEN = "l3-http-api-test-token"
+
+# ============================================================================
+# Subprocess driver — spawns lab_server.spl as a real OS process on an
+# ephemeral loopback port, mirroring test/helpers/browser_h1_loopback_driver.spl.
+# ============================================================================
+
+fn env_or(key: text, fallback: text) -> text:
+    val v = rt_env_get(key)
+    if v == nil or v == "":
+        fallback
+    else:
+        v
+
+fn scratch_dir() -> text:
+    val t = rt_env_get("SIMPLE_TEST_SCRATCH_DIR")
+    if t != nil and t != "":
+        return t
+    val tmp = rt_env_get("TMPDIR")
+    if tmp != nil and tmp != "" and tmp.starts_with("/"):
+        return tmp
+    return "/tmp"
+
+fn repo_root() -> text:
+    val r = rt_env_get("SIMPLE_REPO_ROOT")
+    if r != nil and r != "":
+        return r
+    val c = rt_env_cwd()
+    if c == nil:
+        return "."
+    return c
+
+class LabServerProc:
+    pid: i64
+    addr: text
+    port: i64
+    portfile: text
+    notebook_root: text
+    started: bool
+
+    me stop():
+        if self.pid > 0:
+            val _ = rt_process_kill(self.pid)
+            self.pid = -1
+        if self.portfile != "":
+            val _ = rt_file_delete(self.portfile)
+
+fn start_lab_server(max_requests: i64) -> LabServerProc:
+    val root = repo_root()
+    val stamp = rt_time_now_unix_micros()
+    val me_pid = rt_getpid()
+    val dir = scratch_dir()
+    val base = "{dir}/simple_lab_http_{me_pid}_{stamp}"
+    val portfile = "{base}.port"
+    val notebook_root = "{base}_notebooks"
+
+    var server = LabServerProc(pid: -1, addr: "", port: -1, portfile: portfile, notebook_root: notebook_root, started: false)
+
+    if rt_file_exists(portfile):
+        val _ = rt_file_delete(portfile)
+
+    # SIMPLE_EXECUTION_MODE=interpreter pins the server subprocess off the
+    # JIT: this repo's own notes document named-function-as-value route
+    # handlers (exactly what lab_server.spl's Router registration does)
+    # returning garbage under the JIT (`bin/simple run` bare default).
+    val args = [
+        "SIMPLE_EXECUTION_MODE=interpreter",
+        "SIMPLE_LAB_HTTP_PORT=0",
+        "SIMPLE_LAB_HTTP_MAX={max_requests}",
+        "SIMPLE_LAB_HTTP_PORTFILE={portfile}",
+        "SIMPLE_LAB_HTTP_ACCEPT_TIMEOUT_MS=20000",
+        "SIMPLE_LAB_NOTEBOOK_ROOT={notebook_root}",
+        "SIMPLE_LAB_TOKEN={TEST_TOKEN}",
+        "{root}/bin/simple",
+        "run",
+        "{root}/{SERVER_ENTRYPOINT}"
+    ]
+    val pid = rt_process_spawn_async("env", args)
+    if pid <= 0:
+        return server
+    server.pid = pid
+
+    # 15s was too short: bin/simple run's cold-start compile+lint pass alone
+    # took ~50s in this environment before the server subprocess even began
+    # listening (confirmed via a direct manual run: the portfile appeared
+    # only after ~50s, well past the old budget, causing every example to
+    # read server.started == false even though the server DID come up).
+    var waited = 0
+    var bound = ""
+    while waited < 150000:
+        if rt_file_exists(portfile):
+            val t = rt_file_read_text(portfile)
+            if t != nil and t.trim() != "":
+                bound = t.trim()
+                waited = 15000
+        if bound == "":
+            rt_sleep_ms(50)
+            waited = waited + 50
+
+    if bound == "":
+        server.stop()
+        return server
+
+    server.addr = bound
+    server.started = true
+    val colon = bound.last_index_of(":")
+    if colon >= 0:
+        server.port = bound.substring(colon + 1, bound.len()).to_i64()
+    return server
+
+# ============================================================================
+# Minimal real HTTP/1.1 client over TcpStream (no mocks, no in-process shim).
+# ============================================================================
+
+struct HttpProbe:
+    ok: bool
+    status: i64
+    headers: text
+    body: text
+
+fn http_request(addr: text, method: text, path: text, body: text) -> HttpProbe:
+    val stream_res = TcpStream.connect(addr)
+    if stream_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "connect failed")
+    var stream = stream_res.unwrap()
+
+    val clen = body.len()
+    var req = "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {clen}\r\nContent-Type: application/json\r\nAuthorization: Bearer {TEST_TOKEN}\r\nConnection: close\r\n\r\n{body}"
+    val w = stream.write_text(req)
+    if w.is_err():
+        val _ = stream.close()
+        return HttpProbe(ok: false, status: -1, headers: "", body: "write failed")
+    val _f = stream.flush()
+
+    val read_res = stream.read_text()
+    val _c = stream.close()
+    if read_res.is_err():
+        return HttpProbe(ok: false, status: -1, headers: "", body: "read failed")
+    val raw = read_res.unwrap()
+
+    val split = raw.index_of("\r\n\r\n")
+    if split < 0:
+        return HttpProbe(ok: false, status: -1, headers: raw, body: "")
+    val head = raw.slice(0, split)
+    val resp_body = raw.slice(split + 4, raw.len())
+
+    var status: i64 = -1
+    val first_nl = head.index_of("\r\n")
+    val status_line = if first_nl > 0: head.slice(0, first_nl) else: head
+    val sp1 = status_line.index_of(" ")
+    if sp1 > 0:
+        val rest = status_line.slice(sp1 + 1, status_line.len())
+        val sp2 = rest.index_of(" ")
+        val code_text = if sp2 > 0: rest.slice(0, sp2) else: rest
+        status = code_text.to_i64()
+
+    HttpProbe(ok: status > 0, status: status, headers: head, body: resp_body)
+
+fn json_field(body: text, key: text) -> text:
+    """Tiny flat-object field extractor for the server's own JSON responses
+    (no escaped-quote payloads in this spec's fixtures, so a substring scan
+    is sufficient — the server itself uses the real std.common.json library
+    for its own parsing, see src/app/simple_lab/lab_server.spl)."""
+    val needle = "\"{key}\":\""
+    val idx = body.index_of(needle)
+    if idx < 0:
+        return ""
+    val start = idx + needle.len()
+    val rest = body.slice(start, body.len())
+    val endq = rest.index_of("\"")
+    if endq < 0:
+        return ""
+    rest.slice(0, endq)
+
+# ============================================================================
+# Minimal real WebSocket client: RFC6455 handshake + unmasked server->client
+# text-frame reader (server frames are never masked, so no unmask step is
+# needed — see src/app/simple_lab/lab_server.spl::_lab_ws_frame_bytes).
+# ============================================================================
+
+fn ws_connect_and_drain(addr: text, path: text, max_frames: i64) -> [text]:
+    var frames: [text] = []
+    val stream_res = TcpStream.connect(addr)
+    if stream_res.is_err():
+        return frames
+    var stream = stream_res.unwrap()
+
+    # Fixed RFC6455 test-vector key (rfc6455 §1.3) — the server only needs a
+    # syntactically valid base64 key to compute Sec-WebSocket-Accept.
+    val key = "dGhlIHNhbXBsZSBub25jZQ=="
+    val full_path = "{path}?token={TEST_TOKEN}"
+    val req = "GET {full_path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    val w = stream.write_text(req)
+    if w.is_err():
+        val _ = stream.close()
+        return frames
+
+    # Read the 101 handshake response headers (terminated by the blank line).
+    var header_text = ""
+    var reading = true
+    while reading:
+        match stream.read_line():
+            Err(_):
+                reading = false
+            Ok(line):
+                val trimmed = line.trim()
+                header_text = "{header_text}{trimmed}\n"
+                if trimmed == "":
+                    reading = false
+
+    var got = 0
+    while got < max_frames:
+        match stream.read(2):
+            Err(_):
+                got = max_frames
+            Ok(hdr):
+                if hdr.len() < 2:
+                    got = max_frames
+                else:
+                    val byte1 = hdr[1]
+                    val len7 = (byte1 & 0x7F) as i64
+                    var payload_len = len7
+                    if len7 == 126:
+                        match stream.read(2):
+                            Ok(ext):
+                                payload_len = ((ext[0] as i64) * 256) + (ext[1] as i64)
+                            Err(_):
+                                payload_len = 0
+                    match stream.read(payload_len):
+                        Ok(payload):
+                            frames.push(bytes_to_text(payload))
+                            got = got + 1
+                        Err(_):
+                            got = max_frames
+
+    val _c = stream.close()
+    frames
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn bytes_to_text(data: [u8]) -> text:
+    rt_bytes_to_text(data)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+val NB_NAME = "http_api_test.snb.sdn"
+
+describe "Simple Lab HTTP/WS API (real loopback)":
+
+    it "boots a real listening server process":
+        step("spawn src/app/simple_lab/lab_server.spl as a subprocess on an ephemeral port")
+        val server = start_lab_server(20)
+        expect(server.started).to_equal(true)
+        server.stop()
+
+    it "drives the full create -> execute -> stream -> save flow over one real server":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("GET /api/lab/status carries the version header and reports zero sessions")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.ok).to_equal(true)
+        expect(status_resp.status).to_equal(200)
+        expect(status_resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+        expect(status_resp.body).to_contain("\"session_count\":0")
+
+        step("POST /api/lab/sessions creates a real session")
+        val create_resp = http_request(server.addr, "POST", "/api/lab/sessions", "{\"default_mode\":\"interpreter\"}")
+        expect(create_resp.ok).to_equal(true)
+        expect(create_resp.status).to_equal(201)
+        val session_id = json_field(create_resp.body, "id")
+        expect(session_id).to_start_with("sess_")
+
+        step("POST .../cells/c1/execute runs a real cell through KernelSessionManager")
+        val exec_path = "/api/lab/sessions/{session_id}/cells/c1/execute"
+        val exec_resp = http_request(server.addr, "POST", exec_path, "{\"source\":\"print(\\\"lab-http-api-ok\\\")\"}")
+        expect(exec_resp.ok).to_equal(true)
+        expect(exec_resp.status).to_equal(200)
+        expect(exec_resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+        expect(exec_resp.body).to_contain("\"ok\":true")
+        expect(exec_resp.body).to_contain("lab-http-api-ok")
+
+        step("GET .../events over a real WebSocket drains the stream+status frames the execute call buffered")
+        val events_path = "/api/lab/sessions/{session_id}/events"
+        val frames = ws_connect_and_drain(server.addr, events_path, 2)
+        expect(frames.len()).to_equal(2)
+        expect(frames[0]).to_contain("\"type\":\"stream\"")
+        expect(frames[0]).to_contain("lab-http-api-ok")
+        expect(frames[1]).to_contain("\"type\":\"status\"")
+        expect(frames[1]).to_contain("\"ok\":true")
+
+        step("a second WS connect drains nothing — the buffer was cleared")
+        val frames2 = ws_connect_and_drain(server.addr, events_path, 1)
+        expect(frames2.len()).to_equal(0)
+
+        step("PUT .../notebooks/{name} saves a real .snb.sdn, validated by L1's snb_sdn.spl on the server")
+        val nb_body = "{ snb_version: 1 nbformat_minor: 5 metadata_json: \"{}\" cells: [ { cell_type: \"code\" metadata_json: \"{}\" source: \"print(\\\"lab-http-api-ok\\\")\" has_execution_count: true execution_count: 1 outputs: [] } ] }"
+        val put_resp = http_request(server.addr, "PUT", "/api/lab/notebooks/{NB_NAME}", nb_body)
+        expect(put_resp.ok).to_equal(true)
+        expect(put_resp.status).to_equal(200)
+        expect(put_resp.body).to_contain("\"saved\":true")
+
+        step("GET .../notebooks/{name} reads back the exact bytes just saved")
+        val get_resp = http_request(server.addr, "GET", "/api/lab/notebooks/{NB_NAME}", "")
+        expect(get_resp.ok).to_equal(true)
+        expect(get_resp.status).to_equal(200)
+        expect(get_resp.body).to_contain("lab-http-api-ok")
+
+        step("the file landed on disk exactly where SIMPLE_LAB_NOTEBOOK_ROOT jailed it")
+        val on_disk = rt_file_read_text("{server.notebook_root}/{NB_NAME}")
+        expect(on_disk).to_contain("lab-http-api-ok")
+
+        server.stop()
+
+    it "rejects a malformed .snb.sdn PUT with 400 and the version header, and never panics":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        step("PUT .../notebooks/bad.snb.sdn with garbage body")
+        val resp = http_request(server.addr, "PUT", "/api/lab/notebooks/bad.snb.sdn", "not valid sdn {{{")
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(400)
+        expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        step("the server is still alive and answers the next request")
+        val status_resp = http_request(server.addr, "GET", "/api/lab/status", "")
+        expect(status_resp.ok).to_equal(true)
+        expect(status_resp.status).to_equal(200)
+
+        server.stop()
+
+    it "GET .../notebooks/{name} on a name that was never saved returns 404 with the version header":
+        val server = start_lab_server(20)
+        if not server.started:
+            fail("lab_server subprocess did not start listening")
+
+        val resp = http_request(server.addr, "GET", "/api/lab/notebooks/never_saved.snb.sdn", "")
+        expect(resp.ok).to_equal(true)
+        expect(resp.status).to_equal(404)
+        expect(resp.headers.to_lower()).to_contain("x-lab-protocol-version: 1")
+
+        server.stop()

@@ -1,0 +1,406 @@
+# Static Constant Desugaring
+#
+# Transforms static constant definitions in impl blocks into module-level
+# constants. The convention is TypeName__CONSTANT_NAME (double underscore).
+#
+# INPUT:
+#   impl Point:
+#       static val ORIGIN = Point(x: 0, y: 0)
+#       static val MAX_X = 1000
+#       fn distance() -> f64:
+#           (self.x ** 2 + self.y ** 2).sqrt()
+#
+# OUTPUT:
+#   val Point__ORIGIN = Point(x: 0, y: 0)
+#   val Point__MAX_X = 1000
+#   impl Point:
+#       fn distance() -> f64:
+#           (self.x ** 2 + self.y ** 2).sqrt()
+#
+# NOTE: This module runs on the Rust runtime, so it MUST NOT use
+# static fn patterns. All BUG workarounds applied.
+
+
+export desugar_static_constants
+
+# Main entry: desugar all static constants in source text
+fn desugar_static_constants(source: text) -> text:
+    val lines = source.split("\n")
+    var result_lines = []
+    var i = 0
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Check if this line starts an impl block
+        val impl_info = parse_impl_header(trimmed)
+        if impl_info.is_impl:
+            val type_name = impl_info.type_name
+            val trait_name = impl_info.trait_name
+            val type_params = impl_info.type_params
+            val impl_indent = get_indent(line)
+
+            # Collect the entire impl block
+            var impl_lines = [line]
+            var j = i + 1
+            while j < lines.len():
+                val next_line = lines[j]
+                # Empty lines inside the block are part of it
+                if next_line.trim() == "":
+                    impl_lines.push(next_line)
+                    j = j + 1
+                # Lines with greater indent are part of the block
+                elif get_indent(next_line) > impl_indent:
+                    impl_lines.push(next_line)
+                    j = j + 1
+                # Lines with same or less indent end the block
+                else:
+                    break
+
+            # Process the impl block: extract static constants, keep the rest
+            val processed = process_impl_block(type_name, trait_name, type_params, impl_indent, impl_lines)
+
+            # Add hoisted static constants BEFORE the impl block
+            for hoisted_line in processed.hoisted_lines:
+                result_lines.push(hoisted_line)
+
+            # Add remaining impl block (may have instance methods, static methods)
+            if processed.remaining_lines.len() > 0:
+                # Add blank line separator if we hoisted anything
+                if processed.hoisted_lines.len() > 0:
+                    result_lines.push("")
+
+                for remaining_line in processed.remaining_lines:
+                    result_lines.push(remaining_line)
+
+            i = j
+        else:
+            result_lines.push(line)
+            i = i + 1
+
+    result_lines.join("\n")
+
+# ================================================================
+# Impl Header Parsing
+# ================================================================
+
+struct ImplInfo:
+    is_impl: bool
+    type_name: text
+    trait_name: text  # empty if inherent impl
+    type_params: text  # generic parameters like "<T>" or "<K, V>"
+
+fn parse_impl_header(trimmed: text) -> ImplInfo:
+    # Match "impl TypeName:" or "impl Trait for TypeName:"
+    if not trimmed.starts_with("impl "):
+        return ImplInfo(is_impl: false, type_name: "", trait_name: "", type_params: "")
+
+    # Remove trailing ':'
+    var header = trimmed
+    if header.ends_with(":"):
+        val hlen = header.len()
+        header = header[0:hlen - 1]
+
+    # Remove "impl " prefix
+    header = header[5:]
+    header = header.trim()
+
+    # Check for "Trait for Type" pattern
+    val for_parts = split_on_for(header)
+    if for_parts.len() == 2:
+        val trait_part = for_parts[0]
+        val trait_name = trait_part.trim()
+        val type_part = for_parts[1]
+        val type_name_with_params = type_part.trim()
+        # Extract type parameters before stripping
+        val type_params = extract_generics(type_name_with_params)
+        val type_name = strip_generics(type_name_with_params)
+        return ImplInfo(is_impl: true, type_name: type_name, trait_name: trait_name, type_params: type_params)
+
+    # Inherent impl: "impl TypeName" or "impl TypeName<T>"
+    val type_name_with_params = header.trim()
+    val type_params = extract_generics(type_name_with_params)
+    val type_name = strip_generics(type_name_with_params)
+    ImplInfo(is_impl: true, type_name: type_name, trait_name: "", type_params: type_params)
+
+# Split "Trait for Type" on first " for " occurrence
+fn split_on_for(s: text) -> [text]:
+    # Find " for " in the string
+    var idx = -1
+    var ci = 0
+    val slen = s.len()
+    while ci < slen - 4:
+        val chunk = s[ci:ci + 5]
+        if chunk == " for ":
+            idx = ci
+            break
+        ci = ci + 1
+
+    if idx < 0:
+        return [s]
+
+    val before = s[0:idx]
+    val after = s[idx + 5:]
+    [before, after]
+
+# Strip generic parameters: "Foo<T, U>" -> "Foo"
+fn strip_generics(name: text) -> text:
+    var angle = -1
+    var ni = 0
+    val nlen = name.len()
+    while ni < nlen:
+        val ch = name[ni:ni + 1]
+        if ch == "<":
+            angle = ni
+            break
+        ni = ni + 1
+
+    if angle >= 0:
+        return name[0:angle]
+    name
+
+# Extract generic parameters: "Foo<T, U>" -> "<T, U>"
+fn extract_generics(name: text) -> text:
+    var angle_start = -1
+    var ni = 0
+    val nlen = name.len()
+
+    # Find opening <
+    while ni < nlen:
+        val ch = name[ni:ni + 1]
+        if ch == "<":
+            angle_start = ni
+            break
+        ni = ni + 1
+
+    if angle_start < 0:
+        return ""  # No generics
+
+    # Find closing > (handle nested <>)
+    var depth = 0
+    var ci = angle_start
+    while ci < nlen:
+        val ch = name[ci:ci + 1]
+        if ch == "<":
+            depth = depth + 1
+        elif ch == ">":
+            depth = depth - 1
+            if depth == 0:
+                # Found matching >
+                return name[angle_start:ci + 1]
+        ci = ci + 1
+
+    # No matching >, return what we have
+    name[angle_start:]
+
+# ================================================================
+# Impl Block Processing
+# ================================================================
+
+struct ProcessedImpl:
+    hoisted_lines: [text]       # Static constants as module-level values
+    remaining_lines: [text]     # Impl block with everything except static constants
+
+fn process_impl_block(type_name: text, trait_name: text, type_params: text, impl_indent: i64,
+                      impl_lines: [text]) -> ProcessedImpl:
+    # Parse the impl block into individual declarations
+    val declarations = extract_declarations(impl_lines, impl_indent)
+
+    var hoisted = []
+    var remaining_decls = []
+
+    for decl in declarations:
+        if decl.is_static_val:
+            # Hoist this static constant as a module-level value
+            val hoisted_lines = hoist_static_constant(type_name, type_params, decl, impl_indent)
+            for hl in hoisted_lines:
+                hoisted.push(hl)
+        else:
+            remaining_decls.push(decl)
+
+    # Rebuild impl block without static constants
+    var remaining = []
+    if remaining_decls.len() > 0:
+        # Reconstruct impl header
+        val indent_str = " ".repeat(impl_indent)
+        if trait_name != "":
+            remaining.push("{indent_str}impl {trait_name} for {type_name}:")
+        else:
+            remaining.push("{indent_str}impl {type_name}:")
+
+        for decl in remaining_decls:
+            for dl in decl.lines:
+                remaining.push(dl)
+    # else: impl block is empty after removing static constants, drop it
+
+    ProcessedImpl(hoisted_lines: hoisted, remaining_lines: remaining)
+
+# ================================================================
+# Declaration Extraction
+# ================================================================
+
+struct DeclBlock:
+    name: text
+    is_static_val: bool
+    lines: [text]         # Raw source lines including definition
+
+fn extract_declarations(impl_lines: [text], impl_indent: i64) -> [DeclBlock]:
+    var declarations = []
+    val decl_indent = impl_indent + 4  # Declarations are indented one level deeper
+
+    # Skip the impl header line
+    var i = 1
+    while i < impl_lines.len():
+        val line = impl_lines[i]
+        val trimmed = line.trim()
+
+        # Skip blank lines between declarations
+        if trimmed == "":
+            i = i + 1
+            continue
+
+        # Check if this line is a static val declaration
+        val decl_info = parse_declaration_header(trimmed)
+        if decl_info.is_static_val:
+            var decl_lines = [line]
+            var j = i + 1
+
+            # Static val declarations are typically single-line, but may span multiple
+            # if the value is complex (multi-line expression)
+            while j < impl_lines.len():
+                val next_line = impl_lines[j]
+                if next_line.trim() == "":
+                    # Check if next non-empty line is continuation
+                    var k = j + 1
+                    while k < impl_lines.len() and impl_lines[k].trim() == "":
+                        k = k + 1
+                    if k < impl_lines.len() and get_indent(impl_lines[k]) > decl_indent:
+                        decl_lines.push(next_line)
+                        j = j + 1
+                    else:
+                        break
+                elif get_indent(next_line) > decl_indent:
+                    decl_lines.push(next_line)
+                    j = j + 1
+                else:
+                    break
+
+            declarations.push(DeclBlock(
+                name: decl_info.name,
+                is_static_val: true,
+                lines: decl_lines))
+            i = j
+        else:
+            # Not a static val - could be method, comment, etc.
+            # We don't process it here, just include it in remaining lines
+            declarations.push(DeclBlock(
+                name: "",
+                is_static_val: false,
+                lines: [line]))
+            i = i + 1
+
+    declarations
+
+struct DeclInfo:
+    is_static_val: bool
+    name: text
+
+fn parse_declaration_header(trimmed: text) -> DeclInfo:
+    var s = trimmed
+
+    # Check for doc comments or decorators - not a declaration
+    if s.starts_with("#") or s.starts_with("@") or s.starts_with("\"\"\""):
+        return DeclInfo(is_static_val: false, name: "")
+
+    # Check for "static val " or "static var " pattern
+    var is_static_val = false
+    if s.starts_with("static val "):
+        is_static_val = true
+        s = s[11:]
+    elif s.starts_with("static var "):
+        # static var also treated as constant at module level
+        is_static_val = true
+        s = s[11:]
+    else:
+        return DeclInfo(is_static_val: false, name: "")
+
+    # Extract constant name (everything before '=' or ':')
+    var name = ""
+    var ci = 0
+    val slen = s.len()
+    while ci < slen:
+        val ch = s[ci:ci + 1]
+        if ch == "=" or ch == ":" or ch == " ":
+            break
+        name = name + ch
+        ci = ci + 1
+
+    if name == "":
+        return DeclInfo(is_static_val: false, name: "")
+
+    DeclInfo(is_static_val: true, name: name)
+
+# ================================================================
+# Static Constant Hoisting
+# ================================================================
+
+# Transform a static constant into a module-level value
+fn hoist_static_constant(type_name: text, type_params: text, decl: DeclBlock, impl_indent: i64) -> [text]:
+    var result = []
+    val decl_indent = impl_indent + 4
+
+    # The first line is the constant definition
+    val first_line = decl.lines[0]
+    val first_trimmed = first_line.trim()
+
+    # Remove "static " prefix, change name to TypeName__NAME
+    var def_line = first_trimmed
+    if def_line.starts_with("static val "):
+        def_line = def_line[11:]
+    elif def_line.starts_with("static var "):
+        def_line = def_line[11:]
+
+    # Replace "NAME = value" with "val TypeName__NAME = value"
+    # def_line now looks like: "CONSTANT = value" or "CONSTANT: Type = value"
+    val const_name = decl.name
+    val rest = def_line[const_name.len():]
+    def_line = "val {type_name}__{const_name}{rest}"
+
+    # Add at module level (no indent)
+    result.push(def_line)
+
+    # Add continuation lines if multi-line value, de-indented to module level
+    var li = 1
+    while li < decl.lines.len():
+        val cont_line = decl.lines[li]
+        if cont_line.trim() == "":
+            result.push("")
+        else:
+            # De-indent: remove impl_indent + 4 (decl) -> just use body indent level
+            val current_indent = get_indent(cont_line)
+            val new_indent = current_indent - decl_indent
+            val new_indent = if new_indent < 4: 4 else: new_indent
+            val indent_str = " ".repeat(new_indent)
+            result.push("{indent_str}{cont_line.trim()}")
+        li = li + 1
+
+    result
+
+# ================================================================
+# Helpers
+# ================================================================
+
+# Get the indentation level (number of leading spaces) of a line
+fn get_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4  # Tab = 4 spaces
+        else:
+            break
+    count

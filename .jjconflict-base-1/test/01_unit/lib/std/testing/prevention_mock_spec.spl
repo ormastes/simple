@@ -1,0 +1,115 @@
+"""
+Prevention Mock Specification
+
+A prevention mock is the inverse of a normal expectation: it exists to FAIL a
+test when a forbidden call path is taken (a real fs write in a pure test,
+network I/O in a unit test, a deprecated API) instead of asserting that a
+wanted call happened. `ForbiddenCallGuard` wraps a `MockFunction` with a
+reason and a call budget (normally 0, "never call this"); `check_guards`
+evaluates a list of guards and returns one human-readable failure message per
+violated guard, naming both the mock and the reason.
+
+This spec covers the per-test guard shape (`ForbiddenCallGuard.new`,
+`ForbiddenCallGuard.at_most`) and, since the spec-DSL auto-check hook
+(`prevent`/`prevent_file` in spec.spl) is a separate unit not landed here,
+simulates file scope by calling `check_guards` after each of several
+examples against one guard armed once — proving `check_guards` is safe to
+call repeatedly without losing or resetting guard state on its own.
+
+Feature IDs: Testing Infrastructure - Prevention Mocks
+Category: Testing
+# @req REQ-PREVENT-MOCK-1
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
+use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "prevention mocks":
+    """
+    Per-test prevention guards: a mock stands in for a forbidden seam, and
+    check_guards() turns any recorded call into a named failure message.
+    """
+    it "a prevention mock that is never called leaves the example green":
+        step("declare a prevention mock for the deprecated writer")
+        val m = MockFunction.new("legacy_write")
+        val g = ForbiddenCallGuard.new(m, "legacy_write is deprecated; use write_v2")
+        step("code under test never takes the forbidden path")
+        val msgs = check_guards([g])
+        expect msgs.len() == 0
+
+    it "a forbidden call fails the example and names the mock and the reason":
+        step("declare a prevention mock for the deprecated writer")
+        val m = MockFunction.new("legacy_write")
+        val reason = "legacy_write is deprecated; use write_v2"
+        step("code under test takes the forbidden path")
+        m.record_call(["/tmp/x"])
+        step("check_guards reports exactly one failure naming mock and reason")
+        val msgs = check_guards([ForbiddenCallGuard.new(m, reason)])
+        expect msgs.len() == 1
+        expect msgs[0].contains("legacy_write")
+        expect msgs[0].contains(reason)
+
+    it "prevent_at_most allows the budget and fails on budget+1":
+        step("declare a budget guard: at most 2 retries")
+        val m = MockFunction.new("retry_call")
+        val reason = "at most 2 retries allowed"
+        step("two calls stay within budget")
+        m.record_call([])
+        m.record_call([])
+        val within_budget = check_guards([ForbiddenCallGuard.at_most(m, 2, reason)])
+        expect within_budget.len() == 0
+        step("a third call exceeds the budget")
+        m.record_call([])
+        val over_budget = check_guards([ForbiddenCallGuard.at_most(m, 2, reason)])
+        expect over_budget.len() == 1
+        expect over_budget[0].contains("retry_call")
+
+    it "verify_called with zero times is the manual equivalent":
+        step("the old idiom: was_called_n_times(0) after the fact")
+        val m = MockFunction.new("network_send")
+        expect m.was_called_n_times(0)
+        m.record_call([])
+        expect m.was_called_n_times(0) == false
+        step("a guard expresses the same intent declaratively")
+        val msgs = check_guards([ForbiddenCallGuard.new(m, "network is banned in unit specs")])
+        expect msgs.len() == 1
+
+describe "prevention mock file scope":
+    """
+    File-scope guards (via the not-yet-landed `prevent_file` DSL) would be
+    checked after every example in the file, sharing one mock across
+    examples. Without that DSL hook, this simulates the sequence: one mock
+    lives for "the whole file", multiple examples call check_guards()
+    against its current state in turn, and the mock's own running call
+    count (not guard identity) is what must carry state across examples —
+    see doc/08_tracking/bug/prevention_guard_captures_mock_by_value_2026-08-07.md
+    for why a guard built before its mock's calls cannot be reused as-is.
+    """
+    it "prevent_file guard is checked on every example":
+        step("share one mock, simulating file-scope placement at the top of a spec")
+        val m = MockFunction.new("real_http_send")
+        val reason = "unit specs must not hit the network"
+        step("example 1: mock untouched stays green")
+        expect check_guards([ForbiddenCallGuard.new(m, reason)]).len() == 0
+        step("example 2 (simulated): forbidden call happens")
+        m.record_call(["GET", "http://example.com"])
+        expect check_guards([ForbiddenCallGuard.new(m, reason)]).len() == 1
+        step("example 3 (simulated): still recorded, still red until the mock is reset")
+        expect check_guards([ForbiddenCallGuard.new(m, reason)]).len() == 1
+
+    it "file guard failure message carries the file-scope reason":
+        step("share a file-scope mock for a network seam")
+        val m = MockFunction.new("real_http_send")
+        val reason = "unit specs must not hit the network"
+        step("code under test hits the network")
+        m.record_call(["POST", "http://example.com"])
+        step("the failure message names both the mock and the file-scope reason")
+        val msgs = check_guards([ForbiddenCallGuard.new(m, reason)])
+        expect msgs.len() == 1
+        expect msgs[0].contains("real_http_send")
+        expect msgs[0].contains(reason)

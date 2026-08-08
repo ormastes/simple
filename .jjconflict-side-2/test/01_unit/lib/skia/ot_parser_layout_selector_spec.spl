@@ -1,0 +1,612 @@
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser.{OtTable, OtFont, parse_offset_table}
+use std.skia.feature.glyph.ot_parser_layout.{apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, select_gsub_lookup_plan, select_gpos_lookup_plan, select_gsub_lookups, select_gpos_lookups, GlyphClass, parse_gdef_glyph_class}
+use std.skia.feature.glyph.ot_parser_fvar.{parse_avar_mapping}
+
+fn _put_u32(bytes: [u8], offset: i64, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = ((value >> 24) & 255) as u8
+    out[offset + 1] = ((value >> 16) & 255) as u8
+    out[offset + 2] = ((value >> 8) & 255) as u8
+    out[offset + 3] = (value & 255) as u8
+    out
+
+fn _put_u16(bytes: [u8], offset: i64, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = ((value >> 8) & 255) as u8
+    out[offset + 1] = (value & 255) as u8
+    out
+
+fn _selected_layout_font(table_tag: u32) -> OtFont:
+    var blob: [u8] = []
+    var i: i64 = 0
+    while i < 208:
+        blob.push(0)
+        i = i + 1
+    blob = _put_u32(blob, 0, 65536u32)
+    blob = _put_u16(blob, 4, 10)
+    blob = _put_u16(blob, 6, 100)
+    blob = _put_u16(blob, 8, 160)
+    # ScriptList: requested latn plus DFLT.
+    blob = _put_u16(blob, 10, 2)
+    blob = _put_u32(blob, 12, 1145457748u32)
+    blob = _put_u16(blob, 16, 60)
+    blob = _put_u32(blob, 18, 1818326126u32)
+    blob = _put_u16(blob, 22, 14)
+    # latn: exact ENG, another sorted LangSys, and DefaultLangSys.
+    blob = _put_u16(blob, 24, 32)
+    blob = _put_u16(blob, 26, 2)
+    blob = _put_u32(blob, 28, 1162757920u32)
+    blob = _put_u16(blob, 32, 16)
+    blob = _put_u32(blob, 34, 1163087904u32)
+    blob = _put_u16(blob, 38, 24)
+    blob = _put_u16(blob, 42, 3)
+    blob = _put_u16(blob, 44, 1)
+    blob = _put_u16(blob, 46, 2)
+    blob = _put_u16(blob, 50, 65535)
+    blob = _put_u16(blob, 56, 0)
+    blob = _put_u16(blob, 58, 65535)
+    blob = _put_u16(blob, 60, 1)
+    blob = _put_u16(blob, 62, 1)
+    # DFLT DefaultLangSys.
+    blob = _put_u16(blob, 70, 4)
+    blob = _put_u16(blob, 74, 0)
+    blob = _put_u16(blob, 76, 65535)
+    blob = _put_u16(blob, 78, 1)
+    blob = _put_u16(blob, 80, 0)
+    # Four sorted features; duplicate tags are permitted by the parser.
+    blob = _put_u16(blob, 100, 4)
+    blob = _put_u32(blob, 102, 1667329140u32)
+    blob = _put_u16(blob, 106, 26)
+    blob = _put_u32(blob, 108, 1801810542u32)
+    blob = _put_u16(blob, 112, 32)
+    blob = _put_u32(blob, 114, 1818847073u32)
+    blob = _put_u16(blob, 118, 38)
+    blob = _put_u32(blob, 120, 1919707495u32)
+    blob = _put_u16(blob, 124, 46)
+    blob = _put_u16(blob, 128, 1)
+    blob = _put_u16(blob, 130, 0)
+    blob = _put_u16(blob, 134, 1)
+    blob = _put_u16(blob, 136, 1)
+    blob = _put_u16(blob, 140, 2)
+    blob = _put_u16(blob, 142, 1)
+    blob = _put_u16(blob, 144, 2)
+    blob = _put_u16(blob, 148, 2)
+    blob = _put_u16(blob, 150, 2)
+    blob = _put_u16(blob, 152, 0)
+    # Three minimal lookups with distinct subtables.
+    blob = _put_u16(blob, 160, 3)
+    blob = _put_u16(blob, 162, 8)
+    blob = _put_u16(blob, 164, 22)
+    blob = _put_u16(blob, 166, 36)
+    for lookup in [168, 182, 196]:
+        blob = _put_u16(blob, lookup, 1)
+        blob = _put_u16(blob, lookup + 4, 1)
+        blob = _put_u16(blob, lookup + 6, 8)
+        blob = _put_u16(blob, lookup + 8, 1)
+    # Lookup 1 uses MarkFilteringSet 5 and moves its subtable past that field.
+    blob = _put_u16(blob, 184, 16)
+    blob = _put_u16(blob, 188, 10)
+    blob = _put_u16(blob, 190, 5)
+    blob = _put_u16(blob, 192, 1)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
+fn _selected_layout_font_v11(table_tag: u32) -> OtFont:
+    val v10 = _selected_layout_font(table_tag)
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 280:
+        blob.push(0)
+        index = index + 1
+    index = 0
+    while index < 10:
+        blob[index] = v10.blob[index]
+        index = index + 1
+    index = 10
+    while index < v10.blob.len():
+        blob[index + 4] = v10.blob[index]
+        index = index + 1
+    blob = _put_u32(blob, 0, 65537u32)
+    blob = _put_u16(blob, 4, 14)
+    blob = _put_u16(blob, 6, 104)
+    blob = _put_u16(blob, 8, 164)
+    blob = _put_u32(blob, 10, 212u32)
+    blob = _put_u16(blob, 212, 1)
+    blob = _put_u16(blob, 214, 0)
+    blob = _put_u32(blob, 216, 0u32)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
+fn _empty_layout_font_v11(table_tag: u32) -> OtFont:
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 68:
+        blob.push(0)
+        index = index + 1
+    blob = _put_u32(blob, 0, 65537u32)
+    blob = _put_u16(blob, 4, 14)
+    blob = _put_u16(blob, 6, 32)
+    blob = _put_u16(blob, 8, 40)
+    blob = _put_u32(blob, 10, 52u32)
+    blob = _put_u16(blob, 52, 1)
+    blob = _put_u16(blob, 54, 0)
+    blob = _put_u32(blob, 56, 0u32)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
+fn _layout_font_with_65_active_features() -> OtFont:
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 814:
+        blob.push(0)
+        index = index + 1
+    blob = _put_u32(blob, 0, 65536u32)
+    blob = _put_u16(blob, 4, 10)
+    blob = _put_u16(blob, 6, 160)
+    blob = _put_u16(blob, 8, 812)
+    blob = _put_u16(blob, 10, 1)
+    blob = _put_u32(blob, 12, 1818326126u32)
+    blob = _put_u16(blob, 16, 8)
+    blob = _put_u16(blob, 18, 4)
+    blob = _put_u16(blob, 22, 0)
+    blob = _put_u16(blob, 24, 65535)
+    blob = _put_u16(blob, 26, 65)
+    blob = _put_u16(blob, 160, 65)
+    index = 0
+    while index < 65:
+        blob = _put_u16(blob, 28 + index * 2, index as u32)
+        blob = _put_u32(blob, 162 + index * 6, (1000 + index) as u32)
+        blob = _put_u16(blob, 166 + index * 6, (392 + index * 4) as u32)
+        index = index + 1
+    OtFont(blob: blob, tables: [OtTable(tag: 1196643650u32, offset: 0, length: blob.len() as u32)])
+
+describe "parse_gsub_skeleton":
+    it "returns empty list when GSUB table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gsub_skeleton(empty_font)
+        expect(result.len()).to_equal(0)
+
+    it "retains absolute lookup and subtable offsets":
+        # GSUB begins at 2; LookupList at 12; lookup at 16; subtable at 24.
+        val blob: [u8] = [
+            99, 99,
+            0, 1, 0, 0, 0, 30, 0, 32, 0, 10,
+            0, 1, 0, 4,
+            0, 1, 0, 0, 0, 1, 0, 8,
+            0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 7
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1196643650, offset: 2, length: 34)])
+        val result = parse_gsub_skeleton(font)
+        expect(result.len()).to_equal(1)
+        expect(result[0].lookup_offset).to_equal(16)
+        expect(result[0].subtable_offsets[0]).to_equal(24)
+
+    it "rejects lookup offsets that alias LookupList metadata":
+        val blob: [u8] = [
+            0, 1, 0, 0, 0, 0, 0, 0, 0, 10,
+            0, 1, 0, 2,
+            0, 1, 0, 0, 0, 0
+        ]
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1196643650, offset: 0, length: 20)])
+        expect(parse_gsub_skeleton(font).len()).to_equal(0)
+
+describe "select layout lookups":
+    it "uses exact, then Script default, then absent-script DFLT in LookupList order":
+        val gsub = _selected_layout_font(1196643650u32)
+        val plan = select_gsub_lookup_plan(gsub, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices).to_equal([0, 1, 2])
+        expect(plan.activations.len()).to_equal(3)
+        expect(plan.activations[0].lookup_index).to_equal(0)
+        expect(plan.activations[0].feature_mask).to_equal(2u64)
+        expect(plan.activations[1].lookup_index).to_equal(1)
+        expect(plan.activations[1].feature_mask).to_equal(1u64)
+        expect(plan.activations[2].lookup_index).to_equal(2)
+        expect(plan.activations[2].feature_mask).to_equal(3u64)
+        expect(plan.features.len()).to_equal(2)
+        expect(plan.features[0].feature_tag).to_equal(1818847073u32)
+        expect(plan.features[0].feature_mask).to_equal(1u64)
+        expect(plan.features[1].feature_tag).to_equal(1919707495u32)
+        expect(plan.features[1].feature_mask).to_equal(2u64)
+        val exact = select_gsub_lookups(gsub, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(exact.len()).to_equal(3)
+        expect(exact[0].lookup_index).to_equal(0)
+        expect(exact[1].lookup_index).to_equal(1)
+        expect(exact[2].lookup_index).to_equal(2)
+        expect(exact[0].mark_filtering_set).to_equal(-1)
+        expect(exact[1].mark_filtering_set).to_equal(5)
+        val default_language = select_gsub_lookups(gsub, 1818326126u32, 1515870810u32, [1801810542u32])
+        expect(default_language.len()).to_equal(1)
+        expect(default_language[0].lookup_index).to_equal(1)
+        val default_script = select_gsub_lookups(gsub, 1515870810u32, 1515870810u32, [1667329140u32])
+        expect(default_script.len()).to_equal(1)
+        expect(default_script[0].lookup_index).to_equal(0)
+        val gpos = _selected_layout_font(1196445523u32)
+        val positioned_plan = select_gpos_lookup_plan(gpos, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(positioned_plan.valid).to_equal(true)
+        expect(positioned_plan.lookup_indices).to_equal([0, 1, 2])
+        val positioned = select_gpos_lookups(gpos, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(positioned.len()).to_equal(3)
+        expect(positioned[0].lookup_index).to_equal(0)
+        expect(positioned[2].lookup_index).to_equal(2)
+
+    it "ignores an unadvertised optional feature":
+        val plan = select_gsub_lookup_plan(
+            _selected_layout_font(1196643650u32), 1818326126u32, 1162757920u32, [1u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices).to_equal([0, 2])
+
+    it "rejects more active features than fit the bounded mask":
+        var requested: [u32] = []
+        var index: i64 = 0
+        while index < 65:
+            requested.push((1000 + index) as u32)
+            index = index + 1
+        expect(select_gsub_lookup_plan(
+            _layout_font_with_65_active_features(), 1818326126u32, 0u32, requested).valid).to_equal(false)
+
+    it "does not fall back after a malformed exact language system":
+        var font = _selected_layout_font(1196643650u32)
+        font.blob[41] = 1
+        val plan = select_gsub_lookup_plan(font, 1818326126u32, 1162757920u32, [1801810542u32])
+        expect(plan.valid).to_equal(false)
+        expect(plan.lookup_indices.len()).to_equal(0)
+
+    it "does not use DFLT when the requested Script exists without a usable LangSys":
+        var font = _selected_layout_font(1196643650u32)
+        font.blob = _put_u16(font.blob, 24, 0)
+        val plan = select_gsub_lookup_plan(font, 1818326126u32, 1515870810u32, [1667329140u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices.len()).to_equal(0)
+
+    it "distinguishes valid empty from malformed versions and FeatureVariations":
+        val empty_font = OtFont(blob: [], tables: [])
+        val empty = select_gsub_lookup_plan(empty_font, 1818326126u32, 1162757920u32, [])
+        expect(empty.valid).to_equal(true)
+        expect(empty.lookup_indices.len()).to_equal(0)
+        expect(empty.activations.len()).to_equal(0)
+        expect(empty.features.len()).to_equal(0)
+        var bad_version = _selected_layout_font(1196643650u32)
+        bad_version.blob = _put_u32(bad_version.blob, 0, 131072u32)
+        expect(select_gsub_lookup_plan(bad_version, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        val variations_empty = _empty_layout_font_v11(1196643650u32)
+        val empty_plan = select_gsub_lookup_plan(variations_empty, 1751215726u32, 1515870810u32, [])
+        expect(empty_plan.valid).to_equal(true)
+        expect(empty_plan.lookup_indices.len()).to_equal(0)
+        val variations_noop = _selected_layout_font_v11(1196643650u32)
+        val noop_plan = select_gsub_lookup_plan(variations_noop, 1818326126u32, 1162757920u32, [])
+        expect(noop_plan.valid).to_equal(true)
+        expect(noop_plan.lookup_indices).to_equal([0, 2])
+        var legal_zero_offsets = _empty_layout_font_v11(1196643650u32)
+        legal_zero_offsets.blob = _put_u32(legal_zero_offsets.blob, 56, 1u32)
+        val legal_empty = select_gsub_lookup_plan(legal_zero_offsets, 1751215726u32, 1515870810u32, [])
+        expect(legal_empty.valid).to_equal(true)
+        expect(legal_empty.lookup_indices.len()).to_equal(0)
+        var variations_active = _selected_layout_font_v11(1196643650u32)
+        variations_active.blob = _put_u32(variations_active.blob, 216, 1u32)
+        expect(select_gsub_lookup_plan(variations_active, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var malformed_variations = _empty_layout_font_v11(1196643650u32)
+        malformed_variations.blob = _put_u16(malformed_variations.blob, 52, 0)
+        expect(select_gsub_lookup_plan(malformed_variations, 1751215726u32, 1515870810u32, []).valid).to_equal(false)
+
+    it "validates FeatureTableSubstitution indices and alternate FeatureTables":
+        var zero_alternate = _selected_layout_font_v11(1196643650u32)
+        zero_alternate.blob = _put_u32(zero_alternate.blob, 216, 1u32)
+        zero_alternate.blob = _put_u32(zero_alternate.blob, 224, 16u32)
+        zero_alternate.blob = _put_u16(zero_alternate.blob, 228, 1)
+        zero_alternate.blob = _put_u16(zero_alternate.blob, 232, 1)
+        zero_alternate.blob = _put_u16(zero_alternate.blob, 234, 0)
+        expect(select_gsub_lookup_plan(zero_alternate, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var bad_feature_index = _selected_layout_font_v11(1196643650u32)
+        bad_feature_index.blob = _put_u32(bad_feature_index.blob, 216, 1u32)
+        bad_feature_index.blob = _put_u32(bad_feature_index.blob, 224, 16u32)
+        bad_feature_index.blob = _put_u16(bad_feature_index.blob, 228, 1)
+        bad_feature_index.blob = _put_u16(bad_feature_index.blob, 232, 1)
+        bad_feature_index.blob = _put_u16(bad_feature_index.blob, 234, 4)
+        expect(select_gsub_lookup_plan(bad_feature_index, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var unsorted_features = _selected_layout_font_v11(1196643650u32)
+        unsorted_features.blob = _put_u32(unsorted_features.blob, 216, 1u32)
+        unsorted_features.blob = _put_u32(unsorted_features.blob, 224, 16u32)
+        unsorted_features.blob = _put_u16(unsorted_features.blob, 228, 1)
+        unsorted_features.blob = _put_u16(unsorted_features.blob, 232, 2)
+        unsorted_features.blob = _put_u16(unsorted_features.blob, 234, 2)
+        unsorted_features.blob = _put_u16(unsorted_features.blob, 240, 1)
+        expect(select_gsub_lookup_plan(unsorted_features, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var alternate = _selected_layout_font_v11(1196643650u32)
+        alternate.blob = _put_u16(alternate.blob, 28, 0)
+        alternate.blob = _put_u32(alternate.blob, 216, 1u32)
+        alternate.blob = _put_u32(alternate.blob, 224, 16u32)
+        alternate.blob = _put_u16(alternate.blob, 228, 1)
+        alternate.blob = _put_u16(alternate.blob, 232, 1)
+        alternate.blob = _put_u16(alternate.blob, 234, 0)
+        alternate.blob = _put_u32(alternate.blob, 236, 12u32)
+        alternate.blob = _put_u16(alternate.blob, 242, 1)
+        alternate.blob = _put_u16(alternate.blob, 244, 0)
+        val alternate_empty = select_gsub_lookup_plan(alternate, 1818326126u32, 1515870810u32, [])
+        expect(alternate_empty.valid).to_equal(true)
+        expect(alternate_empty.lookup_indices.len()).to_equal(0)
+        var bad_alternate = alternate
+        bad_alternate.blob = _put_u16(bad_alternate.blob, 244, 9)
+        expect(select_gsub_lookup_plan(bad_alternate, 1818326126u32, 1515870810u32, []).valid).to_equal(false)
+        var bad_alternate_params = alternate
+        bad_alternate_params.blob = _put_u16(bad_alternate_params.blob, 240, 4)
+        expect(select_gsub_lookup_plan(bad_alternate_params, 1818326126u32, 1515870810u32, []).valid).to_equal(false)
+
+    it "bounds FeatureVariations against every top-level sibling":
+        for offset in [15, 33, 41]:
+            var crossing = _empty_layout_font_v11(1196643650u32)
+            crossing.blob = _put_u32(crossing.blob, 10, offset as u32)
+            crossing.blob = _put_u16(crossing.blob, offset, 1)
+            crossing.blob = _put_u32(crossing.blob, offset + 4, 0u32)
+            expect(select_gsub_lookup_plan(crossing, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+
+    it "accepts duplicate FeatureTags by selected feature index":
+        var font = _selected_layout_font(1196643650u32)
+        font.blob = _put_u32(font.blob, 114, 1801810542u32)
+        font.blob = _put_u16(font.blob, 44, 2)
+        font.blob = _put_u16(font.blob, 46, 1)
+        font.blob = _put_u16(font.blob, 48, 2)
+        val plan = select_gsub_lookup_plan(font, 1818326126u32, 1162757920u32, [1801810542u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices).to_equal([0, 1, 2])
+        expect(plan.features.len()).to_equal(2)
+        expect(plan.features[0].feature_tag).to_equal(1801810542u32)
+        expect(plan.features[0].feature_mask).to_equal(3u64)
+        expect(plan.features[1].feature_tag).to_equal(1919707495u32)
+        expect(plan.features[1].feature_mask).to_equal(4u64)
+        expect(plan.activations[0].feature_mask).to_equal(4u64)
+        expect(plan.activations[1].feature_mask).to_equal(3u64)
+        expect(plan.activations[2].feature_mask).to_equal(6u64)
+
+    it "rejects descending FeatureTags and aliased FeatureTables":
+        var descending = _selected_layout_font(1196643650u32)
+        descending.blob = _put_u32(descending.blob, 108, 1u32)
+        expect(select_gsub_lookup_plan(descending, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var aliased = _selected_layout_font(1196643650u32)
+        aliased.blob = _put_u16(aliased.blob, 112, 26)
+        expect(select_gsub_lookup_plan(aliased, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+
+    it "rejects unsorted or duplicate Script and LangSys records":
+        var duplicate_script = _selected_layout_font(1196643650u32)
+        duplicate_script.blob = _put_u32(duplicate_script.blob, 18, 1145457748u32)
+        expect(select_gsub_lookup_plan(duplicate_script, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var unsorted_script = _selected_layout_font(1196643650u32)
+        unsorted_script.blob = _put_u32(unsorted_script.blob, 12, 2054847098u32)
+        expect(select_gsub_lookup_plan(unsorted_script, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var duplicate_language = _selected_layout_font(1196643650u32)
+        duplicate_language.blob = _put_u32(duplicate_language.blob, 34, 1162757920u32)
+        expect(select_gsub_lookup_plan(duplicate_language, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var unsorted_language = _selected_layout_font(1196643650u32)
+        unsorted_language.blob = _put_u32(unsorted_language.blob, 34, 1094795585u32)
+        expect(select_gsub_lookup_plan(unsorted_language, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var default_alias = _selected_layout_font(1196643650u32)
+        default_alias.blob = _put_u16(default_alias.blob, 24, 16)
+        expect(select_gsub_lookup_plan(default_alias, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+
+    it "rejects aliased sections, records, lookups, and subtables":
+        var duplicate_script = _selected_layout_font(1196643650u32)
+        duplicate_script.blob = _put_u16(duplicate_script.blob, 22, 60)
+        expect(select_gsub_lookup_plan(duplicate_script, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var aliased_section = _selected_layout_font(1196643650u32)
+        aliased_section.blob = _put_u16(aliased_section.blob, 6, 10)
+        expect(parse_gsub_skeleton(aliased_section).len()).to_equal(0)
+        var aliased_lookup = _selected_layout_font(1196643650u32)
+        aliased_lookup.blob = _put_u16(aliased_lookup.blob, 164, 8)
+        expect(parse_gsub_skeleton(aliased_lookup).len()).to_equal(0)
+        var aliased_subtable = _selected_layout_font(1196643650u32)
+        aliased_subtable.blob = _put_u16(aliased_subtable.blob, 172, 2)
+        aliased_subtable.blob = _put_u16(aliased_subtable.blob, 174, 10)
+        aliased_subtable.blob = _put_u16(aliased_subtable.blob, 176, 10)
+        expect(parse_gsub_skeleton(aliased_subtable).len()).to_equal(0)
+
+    it "bounds selected Script, LangSys, Feature, Lookup, and subtable siblings":
+        var script_crossing = _selected_layout_font(1196643650u32)
+        script_crossing.blob = _put_u16(script_crossing.blob, 24, 44)
+        expect(select_gsub_lookup_plan(script_crossing, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var language_crossing = _selected_layout_font(1196643650u32)
+        language_crossing.blob = _put_u16(language_crossing.blob, 44, 2)
+        expect(select_gsub_lookup_plan(language_crossing, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
+        var feature_crossing = _selected_layout_font(1196643650u32)
+        feature_crossing.blob = _put_u16(feature_crossing.blob, 140, 3)
+        expect(select_gsub_lookup_plan(feature_crossing, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
+        var lookup_crossing = _selected_layout_font(1196643650u32)
+        lookup_crossing.blob = _put_u16(lookup_crossing.blob, 172, 4)
+        expect(select_gsub_lookup_plan(lookup_crossing, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
+        var subtable_crossing = _selected_layout_font(1196643650u32)
+        subtable_crossing.blob = _put_u16(subtable_crossing.blob, 172, 2)
+        subtable_crossing.blob = _put_u16(subtable_crossing.blob, 174, 10)
+        subtable_crossing.blob = _put_u16(subtable_crossing.blob, 176, 11)
+        expect(select_gsub_lookup_plan(subtable_crossing, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
+
+    it "rejects bad required, optional-feature, and lookup indices":
+        var required = _selected_layout_font(1196643650u32)
+        required.blob = _put_u16(required.blob, 42, 9)
+        expect(select_gsub_lookup_plan(required, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var optional = _selected_layout_font(1196643650u32)
+        optional.blob = _put_u16(optional.blob, 46, 9)
+        expect(select_gsub_lookup_plan(optional, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
+        var lookup = _selected_layout_font(1196643650u32)
+        lookup.blob = _put_u16(lookup.blob, 150, 9)
+        expect(select_gsub_lookup_plan(lookup, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+
+    it "bounds nonzero active FeatureParams and rejects unsupported parameters":
+        var bounded = _selected_layout_font(1196643650u32)
+        bounded.blob = _put_u16(bounded.blob, 146, 12)
+        expect(select_gsub_lookup_plan(bounded, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var overlaps_lookups = _selected_layout_font(1196643650u32)
+        overlaps_lookups.blob = _put_u16(overlaps_lookups.blob, 146, 6)
+        expect(select_gsub_lookup_plan(overlaps_lookups, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+
+    it "uses the real GPOS tag and ignores the historical typo":
+        val real = _selected_layout_font(1196445523u32)
+        expect(select_gpos_lookup_plan(real, 1818326126u32, 1162757920u32, [1818847073u32]).lookup_indices.len()).to_equal(3)
+        val typo = _selected_layout_font(1196643155u32)
+        val empty = select_gpos_lookup_plan(typo, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(empty.valid).to_equal(true)
+        expect(empty.lookup_indices.len()).to_equal(0)
+
+describe "apply_gsub_single":
+    it "decodes format 1 through Coverage format 1 using absolute offsets":
+        # SingleSubst1(delta +3), followed by Coverage1 containing glyph 7.
+        val blob: [u8] = [0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7]
+        val result = apply_gsub_single(blob, 0, blob.len(), 0, 7)
+        expect(result.valid).to_equal(true)
+        expect(result.applied).to_equal(true)
+        expect(result.glyph_id).to_equal(10)
+
+    it "decodes format 2 through bounded Coverage format 2":
+        # Substitute[coverage index 1] is 41; Coverage2 range 20..21 starts at 0.
+        val blob: [u8] = [0, 2, 0, 10, 0, 2, 0, 40, 0, 41, 0, 2, 0, 1, 0, 20, 0, 21, 0, 0]
+        val result = apply_gsub_single(blob, 0, blob.len(), 0, 21)
+        expect(result.valid).to_equal(true)
+        expect(result.applied).to_equal(true)
+        expect(result.glyph_id).to_equal(41)
+
+    it "returns unchanged and invalid for malformed coverage or unsupported format":
+        val truncated: [u8] = [0, 1, 0, 6, 0, 1, 0, 1, 0, 2, 0, 7]
+        val malformed = apply_gsub_single(truncated, 0, truncated.len(), 0, 7)
+        expect(malformed.valid).to_equal(false)
+        expect(malformed.applied).to_equal(false)
+        expect(malformed.glyph_id).to_equal(7)
+        val unsupported: [u8] = [0, 3, 0, 6, 0, 0, 0, 1, 0, 1, 0, 7]
+        val declined = apply_gsub_single(unsupported, 0, unsupported.len(), 0, 7)
+        expect(declined.valid).to_equal(false)
+        expect(declined.glyph_id).to_equal(7)
+        expect(apply_gsub_single(unsupported, 0, unsupported.len(), 0, 8).valid).to_equal(false)
+        val crosses_table = apply_gsub_single([0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7], 0, 10, 0, 7)
+        expect(crosses_table.valid).to_equal(false)
+        expect(crosses_table.glyph_id).to_equal(7)
+        val before_table = apply_gsub_single([0, 1, 0, 6, 0, 3, 0, 1, 0, 1, 0, 7], 2, 12, 0, 7)
+        expect(before_table.valid).to_equal(false)
+        val mismatched_count = apply_gsub_single([0, 2, 0, 8, 0, 1, 0, 40, 0, 1, 0, 2, 0, 7, 0, 8, 0, 0], 0, 18, 0, 7)
+        expect(mismatched_count.valid).to_equal(false)
+
+    it "wraps signed format 1 deltas modulo 65536":
+        val positive: [u8] = [0, 1, 0, 6, 0, 2, 0, 1, 0, 1, 255, 255]
+        expect(apply_gsub_single(positive, 0, positive.len(), 0, 65535).glyph_id).to_equal(1)
+        val negative: [u8] = [0, 1, 0, 6, 255, 255, 0, 1, 0, 1, 0, 0]
+        expect(apply_gsub_single(negative, 0, negative.len(), 0, 0).glyph_id).to_equal(65535)
+
+describe "parse_gpos_skeleton":
+    it "returns empty list when GPOS table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gpos_skeleton(empty_font)
+        expect(result.len()).to_equal(0)
+
+describe "parse_gdef_glyph_class":
+    it "returns Unknown when GDEF table is absent":
+        val buf: [u8] = [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        val empty_font = OtFont(blob: buf, tables: [])
+        val result = parse_gdef_glyph_class(empty_font, 5)
+        expect(result).to_equal(GlyphClass.Unknown)
+
+describe "parse_avar_mapping":
+    it "returns normalized unchanged when no avar table":
+        # font with only a cmap table (no avar), axis_index=0, normalized=0.75
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            99, 109, 97, 112,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 4,
+            0, 0, 0, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.75)
+        expect(result).to_equal(0.75)
+
+    it "returns exact to-coordinate for 3-point segment map when input matches from-coordinate":
+        # avar table with 1 axis, 3 AxisValueMaps: (-1→-1), (0→0.25), (1→1)
+        # input normalized=0.0 should return 0.25 exactly (exact segment boundary match)
+        # F2DOT14: -1.0 = 0xC000 (-16384 as i16), 0.0 = 0x0000, 0.25 = 0x1000 (4096), 1.0 = 0x4000 (16384)
+        # avar tag = 0x61766172 = [97, 118, 97, 114]
+        # Header: majorVersion=1(u16), minorVersion=0(u16), reserved=0(u16), axisCount=1(u16) -> 8 bytes
+        # SegmentMap: positionMapCount=3(u16) -> 2 bytes
+        # Pair 0: from=-1.0(0xC000=-16384 as i16 -> bytes [192,0]), to=-1.0([192,0])
+        # Pair 1: from=0.0([0,0]), to=0.25(4096=[16,0])
+        # Pair 2: from=1.0(16384=[64,0]), to=1.0([64,0])
+        val avar_data: [u8] = [
+            0, 1,        # majorVersion = 1
+            0, 0,        # minorVersion = 0
+            0, 0,        # reserved
+            0, 1,        # axisCount = 1
+            0, 3,        # positionMapCount = 3
+            192, 0,      # from=-1.0
+            192, 0,      # to=-1.0
+            0, 0,        # from=0.0
+            16, 0,       # to=0.25 (4096/16384)
+            64, 0,       # from=1.0
+            64, 0        # to=1.0
+        ]
+        # Build font blob with avar table at offset 28
+        # avar tag bytes: 97=a, 118=v, 97=a, 114=r
+        val avar_len = avar_data.len() as u8
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,   # 'avar'
+            0, 0, 0, 0,
+            0, 0, 0, 28,        # offset = 28
+            0, 0, 0, 22,        # length = 22 (avar_data size)
+            0, 1,               # majorVersion=1
+            0, 0,               # minorVersion=0
+            0, 0,               # reserved
+            0, 1,               # axisCount=1
+            0, 3,               # positionMapCount=3
+            192, 0,             # from=-1.0
+            192, 0,             # to=-1.0
+            0, 0,               # from=0.0
+            16, 0,              # to=0.25
+            64, 0,              # from=1.0
+            64, 0               # to=1.0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.0)
+        # 0.0 matches from-coord of pair 1 exactly -> to=0.25
+        val diff = result - 0.25
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)
+
+    it "returns linearly interpolated value for input halfway between two segment boundaries":
+        # Same 3-point map: (-1→-1), (0→0.25), (1→1)
+        # input=0.5 is halfway between from=0.0 and from=1.0
+        # t = (0.5 - 0.0) / (1.0 - 0.0) = 0.5
+        # result = 0.25 + 0.5*(1.0 - 0.25) = 0.25 + 0.375 = 0.625
+        val buf: [u8] = [
+            0, 1, 0, 0,
+            0, 1,
+            0, 16,
+            0, 0,
+            0, 1,
+            97, 118, 97, 114,
+            0, 0, 0, 0,
+            0, 0, 0, 28,
+            0, 0, 0, 22,
+            0, 1,
+            0, 0,
+            0, 0,
+            0, 1,
+            0, 3,
+            192, 0,
+            192, 0,
+            0, 0,
+            16, 0,
+            64, 0,
+            64, 0
+        ]
+        val font_opt = parse_offset_table(buf)
+        val font = font_opt.unwrap()
+        val result = parse_avar_mapping(font, 0, 0.5)
+        val expected = 0.625
+        val diff = result - expected
+        val abs_diff = if diff < 0.0: -diff else: diff
+        expect(abs_diff < 0.000001).to_equal(true)

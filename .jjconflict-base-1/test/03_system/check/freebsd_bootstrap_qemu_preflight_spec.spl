@@ -1,0 +1,87 @@
+use std.io.{file_read}
+use std.io_runtime.{process_run}
+use std.spec.*
+
+val SCRIPT = "scripts/check/check-freebsd-bootstrap-qemu.shs"
+val PREFLIGHT_ORDER =
+    "mode,download,port,user,memory,cpus,ssh_timeout,root_ssh_timeout," +
+    "timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool," +
+    "base_image,ssh_public_key,ssh_private_key,workspace"
+
+fn receipt_value(output: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var matches: i64 = 0
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            value = line.substring(prefix.len())
+            matches = matches + 1
+    if matches == 1:
+        value
+    else:
+        ""
+
+fn step_freebsd_bootstrap_preflight(extra_env: text) -> (text, text, i64):
+    step("Run the FreeBSD QEMU bootstrap preflight without network or QEMU")
+    val command =
+        "set -eu; " +
+        "fixture='/tmp/freebsd bootstrap qemu preflight spec'; " +
+        "/bin/rm -rf \"$fixture\"; /bin/mkdir -p \"$fixture/bin\"; " +
+        "trap '/bin/rm -rf \"$fixture\"' EXIT; " +
+        "for tool in qemu-system-x86_64 qemu-img ssh base64 tr timeout genisoimage; do " +
+        "  /bin/ln -s /bin/false \"$fixture/bin/$tool\"; " +
+        "done; " +
+        "/bin/printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$fixture/bin/rsync\"; " +
+        "/bin/chmod 755 \"$fixture/bin/rsync\"; " +
+        "/bin/printf '%s\\n' 'base image fixture' > \"$fixture/base.qcow2\"; " +
+        "/bin/printf '%s\\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFreeBSDPreflightFixture freebsd-preflight' > \"$fixture/key public.pub\"; " +
+        "/bin/printf '%s\\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'freebsd-preflight-fixture' '-----END OPENSSH PRIVATE KEY-----' > \"$fixture/key private\"; " +
+        "/usr/bin/env PATH=\"$fixture/bin:$PATH\" " +
+        "QEMU_SSH_PUBLIC_KEY=\"$fixture/key public.pub\" " +
+        "QEMU_SSH_PRIVATE_KEY=\"$fixture/key private\" " +
+        "QEMU_BASE_VM_PATH=\"$fixture/base.qcow2\" " +
+        "QEMU_WORKSPACE=\"$fixture/workspace\" " +
+        "QEMU_MEM=8G QEMU_USER=freebsd " + extra_env + " " +
+        "/bin/sh " + SCRIPT + " --preflight"
+    process_run("/bin/sh", ["-c", command])
+
+describe "FreeBSD QEMU bootstrap bounded preflight":
+    it "accepts canonical memory and key paths containing spaces without live execution":
+        val (stdout, stderr, code) = step_freebsd_bootstrap_preflight("")
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("none")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("pass")
+        expect(stdout.contains("Smoke test PASSED")).to_equal(false)
+        expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "rejects an invalid port with its exact reason before live prerequisites":
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "QEMU_PORT=not-a-port")
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("port")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
+        expect(stdout.contains("Smoke test PASSED")).to_equal(false)
+        expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "rejects a leading-hyphen guest user with its exact reason":
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "QEMU_USER=-root")
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("19")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("user")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
+        expect(stdout.contains("Smoke test PASSED")).to_equal(false)
+        expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "keeps PASS evidence scoped to the FreeBSD QEMU preflight contract":
+        val source = file_read(SCRIPT)
+        expect(source).to_contain("freebsd_qemu_preflight_status=pass")
+        expect(source).to_contain("freebsd_qemu_preflight_status=fail")
+        expect(source.contains("Smoke test PASSED")).to_equal(false)
+        expect(source.contains("Full bootstrap PASSED")).to_equal(false)

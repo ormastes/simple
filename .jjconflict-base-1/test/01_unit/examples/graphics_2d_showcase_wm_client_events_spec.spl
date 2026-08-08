@@ -1,0 +1,48 @@
+use std.io_runtime.{file_read}
+
+val ENTRY: text = "examples/06_io/ui/graphics_2d_showcase_gui.spl"
+
+fn source() -> text:
+    file_read(ENTRY)
+
+describe "graphics 2D showcase WM client event receipts":
+
+    it "consumes ordered pointer edges and publishes an event-correlated frame":
+        val s = source()
+        expect(s).to_contain("wm_fs_app_event_seq_path(event_path, next_seq)")
+        expect(s).to_contain("wm_fs_app_event_decode(file_read(next_path))")
+        expect(s).to_contain("if ev.seq != next_seq:")
+        expect(s).to_contain("ev.kind == \"move\"")
+        expect(s).to_contain("ev.kind == \"down\" and ev.button == 0 and ev.pressed")
+        expect(s).to_contain("ev.kind == \"up\" and ev.button == 0 and not ev.pressed")
+        expect(s).to_contain("frame_seq = frame_seq + 1")
+        expect(s).to_contain("receipt.last_event_seq, frame_seq, actual_backend")
+        expect(s).to_contain("\"child_frame_write_done\"")
+
+    it "commits payload and receipt before publishing the sequence marker":
+        val s = source()
+        val publish = s.index_of("fn wm_publish_client_frame(")
+        val client = s.index_of("fn run_wm_client_graphics_2d(")
+        expect(publish >= 0).to_be(true)
+        expect(client > publish).to_be(true)
+        val body = s.substring(publish, client)
+        val frame_write = body.index_of("file_write_bytes(frame_path, bytes)")
+        val receipt_write = body.index_of("file_write(receipt_path, wm_fs_frame_receipt_encode(receipt))")
+        val seq_write = body.index_of("file_write(seq_path, receipt.frame_seq.to_text())")
+        expect(frame_write >= 0).to_be(true)
+        expect(receipt_write > frame_write).to_be(true)
+        expect(seq_write > receipt_write).to_be(true)
+
+    it "fails closed unless requested backend and Vulkan readback are proven":
+        val s = source()
+        expect(s).to_contain("Engine2D.create_requested_backend(frame_w, frame_h, requested_backend)")
+        expect(s).to_contain("if actual_backend != requested_backend:")
+        expect(s).to_contain("error=backend-mismatch")
+        expect(s).to_contain("val initial_pixels = engine2d_read_pixels_snapshot(engine)")
+        expect(s).to_contain("val initial_readback_source = engine2d_readback_source_snapshot(engine)")
+        expect(s).to_contain("val initial_backend_handle = engine2d_readback_handle_snapshot(engine)")
+        expect(s).to_contain("val initial_device_identity = engine2d_readback_device_identity_snapshot(engine)")
+        expect(s).to_contain("initial_readback_source != \"device_readback\"")
+        expect(s).to_contain("initial_backend_handle <= 0")
+        expect(s).to_contain("initial_device_identity <= 0")
+        expect(s).to_contain("dbg_stage(\"wm_child\", \"device_readback_done\")")

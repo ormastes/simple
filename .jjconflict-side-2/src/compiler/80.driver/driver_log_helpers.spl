@@ -1,0 +1,119 @@
+# Driver — Logging Helpers
+#
+# Lightweight logging free functions shared across driver modules.
+# Extracted from driver.spl.
+
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_append}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_time_now_monotonic_ms() -> i64
+
+fn driver_phase_trace_enabled() -> bool:
+    ((rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1") or ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1")
+
+# Monotonic base captured at the first log_phase call, so every phase marker
+# carries a wall-clock delta. This is what turns the [BOOTSTRAP-PHASE] trail
+# into a usable profile: the stage-4 graph-load wall
+# (doc/08_tracking/bug/bootstrap_stage4_graph_load_timeout_2026-07-05.md) was
+# root-caused to interpreted parse (phase2) using exactly these deltas.
+var _g_phase_t0_ms: i64 = 0
+var _g_phase_t0_set: bool = false
+var _g_progress_path: text = ""
+var _g_progress_path_set: bool = false
+
+fn _phase_elapsed_ms() -> i64:
+    val now = rt_time_now_monotonic_ms()
+    if not _g_phase_t0_set:
+        _g_phase_t0_ms = now
+        _g_phase_t0_set = true
+    now - _g_phase_t0_ms
+
+pub fn log_debug(msg: text):
+    val _ = msg
+    ()
+pub fn log_trace(msg: text):
+    val _ = msg
+    ()
+pub fn log_info(msg: text):
+    val _ = msg
+    ()
+pub fn log_warn(msg: text):
+    print "[WARN] {msg}"
+pub fn log_error(msg: text):
+    print "[ERROR] {msg}"
+
+pub fn log_phase(msg: text):
+    if driver_phase_trace_enabled():
+        val line = "[BOOTSTRAP-PHASE] +{_phase_elapsed_ms()}ms {msg} heap_registry={rt_heap_registry_count()}"
+        eprint(line)
+        # The native-build worker's stderr is dropped by the parent's
+        # capture/relay chain (see memory: native-build eprint lost), so the
+        # eprint above never reaches the user on the native-build path. Emit a
+        # stdout twin so phase profiling works there too (stdout IS relayed).
+        print line
+        # stdout is block-buffered under redirection and lost if the worker is
+        # killed mid-build (e.g. timeout during a ~1h stage-3 build). When a
+        # sink file is named, append each record durably as it is produced.
+        val sink = rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE_FILE") ?? ""
+        if sink != "":
+            val _ = file_append(sink, line + "\n")
+
+fn _build_progress_path() -> text:
+    if not _g_progress_path_set:
+        _g_progress_path = rt_env_get("SIMPLE_BUILD_PROGRESS_EVENTS") ?? ""
+        _g_progress_path_set = true
+    _g_progress_path
+
+fn _build_progress_number(value: i64) -> text:
+    if value < 0: "unknown" else: value.to_string()
+
+fn _build_progress_token(value: text) -> text:
+    value.replace("%", "%25").replace(" ", "%20").replace("=", "%3D").replace("\n", "%0A")
+
+pub fn log_build_progress(
+    phase: text,
+    unit_kind: text,
+    done: i64,
+    total: i64,
+    current: text,
+    tasks_done: i64,
+    tasks_total: i64,
+    failed: i64,
+    cached: i64,
+    terminal: text
+):
+    val path = _build_progress_path()
+    if path == "":
+        return
+    val remaining = if done >= 0 and total >= 0:
+        val delta = total - done
+        if delta > 0: delta else: 0
+    else:
+        -1
+    val tasks_remaining = if tasks_done >= 0 and tasks_total >= 0:
+        val delta = tasks_total - tasks_done
+        if delta > 0: delta else: 0
+    else:
+        -1
+    val line = "event=build_progress phase={_build_progress_token(phase)} unit_kind={_build_progress_token(unit_kind)} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} tasks_done={_build_progress_number(tasks_done)} tasks_total={_build_progress_number(tasks_total)} tasks_remaining={_build_progress_number(tasks_remaining)} failed={_build_progress_number(failed)} cached={_build_progress_number(cached)} current={_build_progress_token(current)} terminal={_build_progress_token(terminal)}\n"
+    val _ = file_append(path, line)
+
+pub fn log_module_surface_released(path: text, seq: i64):
+    eprint("phase2:surface:file:released path={path} seq={seq} heap_registry={rt_heap_registry_count()}\\n")
+
+# --- Stage-4 memory snapshot (lane L5, append-only region) -------------------
+# One fixed-format line per phase, correlated with the out-of-process memstat
+# sampler (src/app/memstat). Gated by SIMPLE_MEM_SNAPSHOT=1 (default OFF); no
+# per-event string building happens in loops — call once at phase boundaries.
+
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_peak_bytes() -> i64
+
+fn mem_snapshot_enabled() -> bool:
+    (rt_env_get("SIMPLE_MEM_SNAPSHOT") ?? "") == "1"
+
+pub fn log_mem_snapshot(phase: text):
+    if mem_snapshot_enabled():
+        eprint("[MEM-SNAPSHOT] phase={phase} t_ms={_phase_elapsed_ms()} heap_live_bytes={rt_heap_live_bytes()} heap_peak_bytes={rt_heap_peak_bytes()} heap_registry={rt_heap_registry_count()}")

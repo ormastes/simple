@@ -1,0 +1,331 @@
+# @cover src/lib/common/ui/host_input_event.spl 80%
+# @tag: unit, ui, input, host_input_event, screen_host
+"""
+# HostInputEvent — single host->widget input ingress type
+
+## Overview
+
+`common.ui.host_input_event` is the SOLE definition site for the ingress
+event every screen host (2d / gui / web / wm) hands to the widget layer.
+It exists because `UIEvent.MouseEvent` carries `x: f64, y: f64,
+button: text` while `widget_hit.widget_dispatch_click` consumes `i32, i32`,
+so every backend used to do its own truncation and button-name mapping and
+could diverge on rounding, naming and wheel sign.
+
+This spec pins the conversions that used to be per-backend: f64 truncation,
+button-name mapping (including the unknown-name fallback), the wheel sign
+convention (positive = content scrolls DOWN, matching the `dy` argument of
+`widget_dispatch_scroll`), and the WM file-bridge round trip including the
+additive `key_code` / `ch` / `mods` / `wheel` fields — plus the
+backward-compatibility guarantee that a document written with only the
+historic six keys still decodes.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/os/simpleos/screens/ws_b_screenhost_showcase_detail.md
+
+## Design
+
+**Design:** doc/05_design/os/desktop/screen_backend_selection_and_shared_showcase.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+A left mouse-down at (3.7, 4.2) becomes `Pointer(3, 4, HOST_BTN_LEFT, true, 0)`;
+an unknown button name falls back to `HOST_BTN_NONE`; a wheel event survives
+the WM file bridge with its sign intact.
+"""
+
+use std.spec.*
+use common.ui.widget.{UIEvent}
+use common.ui.wm_app_process_contract.{
+    WmFsAppEvent, wm_fs_app_event, wm_fs_key_event, wm_fs_key_char_event,
+    wm_fs_wheel_event, wm_fs_app_event_encode, wm_fs_app_event_decode
+}
+use common.ui.host_input_event.{
+    HostInputEvent,
+    HOST_BTN_NONE, HOST_BTN_LEFT, HOST_BTN_RIGHT, HOST_BTN_MIDDLE,
+    HOST_MOD_SHIFT, HOST_MOD_CTRL,
+    host_pointer_down, host_pointer_up, host_pointer_move, host_pointer_wheel,
+    host_key_down, host_key_up, host_resize,
+    host_button_from_name, host_button_name, host_key_name, host_key_text,
+    host_input_from_ui_event, host_input_to_ui_event,
+    host_input_from_wm_fs_event, host_input_to_wm_fs_event
+}
+
+# --- Field accessors: destructure once here so each example reads flatly. ---
+
+fn p_x(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): x
+        _: -999
+
+fn p_y(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): y
+        _: -999
+
+fn p_button(ev: HostInputEvent) -> i64:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): button
+        _: -999
+
+fn p_pressed(ev: HostInputEvent) -> bool:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): pressed
+        _: false
+
+fn p_wheel(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): wheel
+        _: -999
+
+fn k_code(ev: HostInputEvent) -> i64:
+    match ev:
+        HostInputEvent.Key(code, ch, down, mods): code
+        _: -999
+
+fn k_ch(ev: HostInputEvent) -> text:
+    match ev:
+        HostInputEvent.Key(code, ch, down, mods): ch
+        _: "<not-key>"
+
+fn k_down(ev: HostInputEvent) -> bool:
+    match ev:
+        HostInputEvent.Key(code, ch, down, mods): down
+        _: false
+
+fn k_mods(ev: HostInputEvent) -> i64:
+    match ev:
+        HostInputEvent.Key(code, ch, down, mods): mods
+        _: -999
+
+fn r_w(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Resize(w, h): w
+        _: -999
+
+fn r_h(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Resize(w, h): h
+        _: -999
+
+fn tag_of(ev: HostInputEvent) -> text:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): "pointer"
+        HostInputEvent.Key(code, ch, down, mods): "key"
+        HostInputEvent.Resize(w, h): "resize"
+
+describe "HostInputEvent — constructors":
+
+    it "host_pointer_down carries the button, pressed=true and no wheel":
+        step("Build a left-button press at (12, 34)")
+        val ev = host_pointer_down(12, 34, HOST_BTN_LEFT)
+
+        expect(tag_of(ev)).to_equal("pointer")
+        expect(p_x(ev)).to_equal(12)
+        expect(p_y(ev)).to_equal(34)
+        expect(p_button(ev)).to_equal(HOST_BTN_LEFT)
+        expect(p_pressed(ev)).to_equal(true)
+        expect(p_wheel(ev)).to_equal(0)
+
+    it "host_pointer_up carries pressed=false with the button preserved":
+        step("Release the right button at (5, 6)")
+        val ev = host_pointer_up(5, 6, HOST_BTN_RIGHT)
+
+        expect(p_pressed(ev)).to_equal(false)
+        expect(p_button(ev)).to_equal(HOST_BTN_RIGHT)
+        expect(p_wheel(ev)).to_equal(0)
+
+    it "host_pointer_move is button-NONE and pressed, so a move is not a press":
+        step("Motion to (7, 8)")
+        val ev = host_pointer_move(7, 8)
+
+        expect(p_button(ev)).to_equal(HOST_BTN_NONE)
+        expect(p_pressed(ev)).to_equal(true)
+        expect(p_wheel(ev)).to_equal(0)
+
+    it "host_pointer_wheel carries notches and no button":
+        step("Three notches at (2, 3)")
+        val ev = host_pointer_wheel(2, 3, 3)
+
+        expect(p_wheel(ev)).to_equal(3)
+        expect(p_button(ev)).to_equal(HOST_BTN_NONE)
+        expect(p_pressed(ev)).to_equal(false)
+
+    it "host_key_down / host_key_up carry code, char, mods and direction":
+        step("Shift+Ctrl 'x' down then up")
+        val mods = HOST_MOD_SHIFT + HOST_MOD_CTRL
+        val down = host_key_down(120, "x", mods)
+        val up = host_key_up(120, "x", mods)
+
+        expect(tag_of(down)).to_equal("key")
+        expect(k_code(down)).to_equal(120)
+        expect(k_ch(down)).to_equal("x")
+        expect(k_mods(down)).to_equal(mods)
+        expect(k_down(down)).to_equal(true)
+        expect(k_down(up)).to_equal(false)
+
+    it "host_resize carries the new surface size":
+        step("Resize to 800x600")
+        val ev = host_resize(800, 600)
+
+        expect(tag_of(ev)).to_equal("resize")
+        expect(r_w(ev)).to_equal(800)
+        expect(r_h(ev)).to_equal(600)
+
+describe "HostInputEvent — button and key vocabulary":
+
+    it "button names map to HOST_BTN_* and unknown names fall back to NONE":
+        step("Map every known name plus two unknowns")
+        expect(host_button_from_name("left")).to_equal(HOST_BTN_LEFT)
+        expect(host_button_from_name("RIGHT")).to_equal(HOST_BTN_RIGHT)
+        expect(host_button_from_name("middle")).to_equal(HOST_BTN_MIDDLE)
+        expect(host_button_from_name("")).to_equal(HOST_BTN_NONE)
+        expect(host_button_from_name("thumb4")).to_equal(HOST_BTN_NONE)
+
+    it "host_button_name inverts the mapping, with NONE mapping to empty":
+        step("Round-trip each code back to its name")
+        expect(host_button_name(HOST_BTN_LEFT)).to_equal("left")
+        expect(host_button_name(HOST_BTN_RIGHT)).to_equal("right")
+        expect(host_button_name(HOST_BTN_MIDDLE)).to_equal("middle")
+        expect(host_button_name(HOST_BTN_NONE)).to_equal("")
+
+    it "host_key_text prefers the printable char and falls back to the key name":
+        step("A char key and a bare backspace keycode")
+        expect(host_key_text(host_key_down(120, "x", 0))).to_equal("x")
+        expect(host_key_text(host_key_down(8, "", 0))).to_equal("backspace")
+        expect(host_key_name(37)).to_equal("left")
+        expect(host_key_name(9999)).to_equal("")
+
+describe "HostInputEvent — UIEvent seam (the lossy conversion, done once)":
+
+    it "MouseEvent down truncates f64 coords and maps the button name":
+        step("MouseEvent(3.7, 4.2, \"left\", \"down\")")
+        val ev = host_input_from_ui_event(
+            UIEvent.MouseEvent(x: 3.7, y: 4.2, button: "left", kind: "down")
+        )
+
+        expect(ev != nil).to_equal(true)
+        expect(p_x(ev!)).to_equal(3)
+        expect(p_y(ev!)).to_equal(4)
+        expect(p_button(ev!)).to_equal(HOST_BTN_LEFT)
+        expect(p_pressed(ev!)).to_equal(true)
+
+    it "MouseEvent up is pressed=false and an unknown button name becomes NONE":
+        step("An 'up' with a button name the widget layer has never heard of")
+        val ev = host_input_from_ui_event(
+            UIEvent.MouseEvent(x: 9.9, y: 1.1, button: "pinky", kind: "up")
+        )
+
+        expect(p_pressed(ev!)).to_equal(false)
+        expect(p_button(ev!)).to_equal(HOST_BTN_NONE)
+        expect(p_x(ev!)).to_equal(9)
+
+    it "ScrollEvent dy keeps its sign: positive dy stays positive wheel":
+        step("widget_dispatch_scroll takes dy with the same sign, so no negation may creep in")
+        val down = host_input_from_ui_event(
+            UIEvent.ScrollEvent(x: 4.0, y: 5.0, dx: 0.0, dy: 3.0)
+        )
+        val up = host_input_from_ui_event(
+            UIEvent.ScrollEvent(x: 4.0, y: 5.0, dx: 0.0, dy: -2.0)
+        )
+
+        expect(p_wheel(down!)).to_equal(3)
+        expect(p_wheel(up!)).to_equal(-2)
+        expect(p_button(down!)).to_equal(HOST_BTN_NONE)
+
+    it "UIEvent variants with no host input convert to nil":
+        step("Action carries no pointer, key or size")
+        expect(host_input_from_ui_event(UIEvent.Action(name: "save")) == nil).to_equal(true)
+        expect(host_input_from_ui_event(UIEvent.Quit) == nil).to_equal(true)
+
+    it "host_input_to_ui_event round-trips a left press back to a MouseEvent":
+        step("Pointer -> UIEvent -> Pointer")
+        val back = host_input_to_ui_event(host_pointer_down(11, 22, HOST_BTN_LEFT))
+        val again = host_input_from_ui_event(back!)
+
+        expect(p_x(again!)).to_equal(11)
+        expect(p_y(again!)).to_equal(22)
+        expect(p_button(again!)).to_equal(HOST_BTN_LEFT)
+        expect(p_pressed(again!)).to_equal(true)
+
+    it "host_input_to_ui_event turns a wheel into a ScrollEvent, not a MouseEvent":
+        step("Wheel +2 must survive as dy=+2")
+        val back = host_input_to_ui_event(host_pointer_wheel(1, 2, 2))
+        val again = host_input_from_ui_event(back!)
+
+        expect(p_wheel(again!)).to_equal(2)
+
+describe "HostInputEvent — WM file-bridge seam":
+
+    it "a historic key event still decodes: keycode arrives in `button`":
+        step("wm_fs_key_event has always shipped the keycode in `button`")
+        val wire = wm_fs_app_event_encode(wm_fs_key_event(7, 65, true))
+        val ev = host_input_from_wm_fs_event(wm_fs_app_event_decode(wire))
+
+        expect(tag_of(ev!)).to_equal("key")
+        expect(k_code(ev!)).to_equal(65)
+        expect(k_down(ev!)).to_equal(true)
+
+    it "a char/mods key event round-trips through the additive fields":
+        step("wm_fs_key_char_event -> encode -> decode -> HostInputEvent")
+        val src = wm_fs_key_char_event(9, 120, "x", HOST_MOD_CTRL, true)
+        val decoded = wm_fs_app_event_decode(wm_fs_app_event_encode(src))
+
+        expect(decoded.ch).to_equal("x")
+        expect(decoded.key_code).to_equal(120)
+        expect(decoded.mods).to_equal(HOST_MOD_CTRL)
+
+        val ev = host_input_from_wm_fs_event(decoded)
+        expect(k_ch(ev!)).to_equal("x")
+        expect(k_code(ev!)).to_equal(120)
+        expect(k_mods(ev!)).to_equal(HOST_MOD_CTRL)
+
+    it "a wheel event crosses the bridge with its sign intact":
+        step("wm_fs_wheel_event -> encode -> decode -> HostInputEvent")
+        val decoded = wm_fs_app_event_decode(wm_fs_app_event_encode(wm_fs_wheel_event(3, 40, 50, 2)))
+        val ev = host_input_from_wm_fs_event(decoded)
+
+        expect(p_wheel(ev!)).to_equal(2)
+        expect(p_x(ev!)).to_equal(40)
+        expect(p_y(ev!)).to_equal(50)
+
+    it "a pointer press round-trips through host_input_to_wm_fs_event":
+        step("HostInputEvent -> WmFsAppEvent -> encode -> decode -> HostInputEvent")
+        val wire = wm_fs_app_event_encode(host_input_to_wm_fs_event(4, host_pointer_down(60, 70, HOST_BTN_LEFT)))
+        val ev = host_input_from_wm_fs_event(wm_fs_app_event_decode(wire))
+
+        expect(p_x(ev!)).to_equal(60)
+        expect(p_y(ev!)).to_equal(70)
+        expect(p_button(ev!)).to_equal(HOST_BTN_LEFT)
+        expect(p_pressed(ev!)).to_equal(true)
+
+    it "BACKWARD COMPAT: a document with only the historic six keys decodes with new fields defaulted":
+        step("Hand-write the pre-extension wire format — no key_code/ch/mods/wheel lines")
+        val legacy = "seq=2\nkind=down\nx=15\ny=25\nbutton=1\npressed=true\n"
+        val decoded = wm_fs_app_event_decode(legacy)
+
+        expect(decoded.seq).to_equal(2)
+        expect(decoded.kind).to_equal("down")
+        expect(decoded.x).to_equal(15)
+        expect(decoded.y).to_equal(25)
+        expect(decoded.button).to_equal(1)
+        expect(decoded.pressed).to_equal(true)
+        expect(decoded.key_code).to_equal(0)
+        expect(decoded.ch).to_equal("")
+        expect(decoded.mods).to_equal(0)
+        expect(decoded.wheel).to_equal(0)
+
+    it "the historic six keys are still emitted first and unchanged":
+        step("Old readers scan line-by-line, so the prefix must be byte-stable")
+        val wire = wm_fs_app_event_encode(wm_fs_app_event(1, "down", 3, 4, HOST_BTN_LEFT, true))
+
+        expect(wire.starts_with("seq=1\nkind=down\nx=3\ny=4\nbutton=1\npressed=true\n")).to_equal(true)

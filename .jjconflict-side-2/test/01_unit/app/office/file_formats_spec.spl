@@ -1,0 +1,76 @@
+"""Office file formats spec.
+
+Verifies real open/save round-trips: Markdown <-> RichDocument (Writer) and
+CSV <-> Sheet (Calc), plus that opened files render through the HTML adapter.
+"""
+
+use std.spec
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
+use app.office.render_adapter.{office_render_source}
+use app.office.sheets.cell.{cell_display_text}
+
+describe "Writer markdown round-trip":
+    """Parsing then serializing markdown preserves structure."""
+
+    it "parses headings, bullets, quotes and code fences into blocks":
+        val md = "# Title\n\nBody text.\n\n## Sub\n\n- a\n- b\n\n> quote\n\n```\ncode line\n```"
+        val doc = parse_markdown_document(md, "Doc")
+        expect(doc.title).to_equal("Doc")
+        expect(doc.blocks.len()).to_equal(7)
+
+    it "round-trips headings and a bullet back to markdown":
+        val md = "# My Report\n\nHello.\n\n## Section\n\n- item one"
+        val doc = parse_markdown_document(md, "r")
+        val out = document_to_markdown(doc)
+        expect(out).to_contain("# My Report")
+        expect(out).to_contain("## Section")
+        expect(out).to_contain("- item one")
+
+    it "renders an opened markdown file to a full HTML page":
+        val result = office_render_source("word", "r.md", "# Hi\n\nWorld.")
+        expect(result.html_output).to_start_with("<!DOCTYPE html>")
+        expect(result.html_output).to_contain("Hi")
+        expect(result.html_output).to_contain("World.")
+
+    it "parses **bold**, *italic* and `code` into styled inline HTML":
+        val result = office_render_source("word", "s.md", "Mix **bold** and *ital* and `code` here.")
+        expect(result.html_output).to_contain("<strong>bold</strong>")
+        expect(result.html_output).to_contain("<em>ital</em>")
+        expect(result.html_output).to_contain(">code</code>")
+
+    it "round-trips inline styles back to markdown markers":
+        val doc = parse_markdown_document("Mix **bold** and *ital* and `code`.", "s")
+        val out = document_to_markdown(doc)
+        expect(out).to_contain("**bold**")
+        expect(out).to_contain("*ital*")
+        expect(out).to_contain("`code`")
+
+describe "Calc CSV round-trip":
+    """Parsing then serializing CSV preserves the grid."""
+
+    it "parses a CSV grid into cells":
+        val sheet = parse_csv_sheet("Name,Q1\nRevenue,1200\nCosts,800", "s")
+        expect(cell_display_text(sheet.get_cell("A1"))).to_equal("Name")
+        expect(cell_display_text(sheet.get_cell("B2"))).to_equal("1200")
+        expect(cell_display_text(sheet.get_cell("A3"))).to_equal("Costs")
+
+    it "round-trips a CSV grid back to CSV text":
+        val csv = "Name,Q1,Q2\nRevenue,1200,1488\nCosts,800,920"
+        val sheet = parse_csv_sheet(csv, "s")
+        expect(sheet_to_csv(sheet)).to_equal(csv)
+
+    it "honors double-quoted fields containing commas":
+        val sheet = parse_csv_sheet("\"Smith, John\",42", "s")
+        expect(cell_display_text(sheet.get_cell("A1"))).to_equal("Smith, John")
+        expect(cell_display_text(sheet.get_cell("B1"))).to_equal("42")
+
+    it "renders an opened CSV file to a full HTML table":
+        val result = office_render_source("sheets", "s.csv", "Name,Q1\nRevenue,1200")
+        expect(result.html_output).to_contain("<table")
+        expect(result.html_output).to_contain("Revenue")
+        expect(result.html_output).to_contain("1200")
+
+    it "computes formulas loaded from CSV (=A1+B2 -> sum)":
+        val sheet = parse_csv_sheet("10,20\n30,40\n=A1+B2,=A1+A2", "s")
+        expect(cell_display_text(sheet.get_cell("A3"))).to_equal("50")
+        expect(cell_display_text(sheet.get_cell("B3"))).to_equal("40")

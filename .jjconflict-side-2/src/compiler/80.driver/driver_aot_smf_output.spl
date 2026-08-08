@@ -1,0 +1,217 @@
+# Driver AOT SMF and self-contained outputs.
+
+use compiler.backend.backend.backend_helpers.{
+    compile_module_with_backend,
+    get_effective_backend_name
+}
+use compiler.backend.linker.linker_wrapper.{
+    link_to_smf,
+    link_to_self_contained,
+    SelfContainedConfig
+}
+use compiler.driver.smf_writer.{
+    generate_smf_with_options,
+    generate_smf_with_raw_code_options,
+    Target,
+    build_smf_with_relocations,
+    SmfBuildOptions,
+    SmfDependencyEntry
+}
+use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{
+    CompileResult,
+    compileoptions_effective_mir_opt_level
+}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.config.{Logger}
+use compiler.common.attributes.{DriverManifestAttr}
+use compiler.mir.mir_data.{MirModule}
+
+fn smf_log_debug(log: Logger, message: text):
+    if log.level >= 10:
+        print "[DEBUG] {message}"
+
+fn smf_log_trace(log: Logger, message: text):
+    if log.level >= 20:
+        print "[TRACE] {message}"
+
+fn smf_log_info(log: Logger, message: text):
+    if log.level >= 4:
+        print "[INFO] {message}"
+
+fn smf_render_launch_metadata() -> text:
+    val target = Target.host()
+    "simple_launch_metadata:\n" +
+        "  entry_kind: \"smf\"\n" +
+        "  target_os: \"" + target.os + "\"\n" +
+        "  target_arch: \"" + target.arch + "\"\n" +
+        "  target_abi: \"smf\"\n" +
+        "  uses_arg_parser: true\n" +
+        "  mmap_hint: true\n"
+
+impl CompilerDriver:
+    me compile_to_smf(output: text) -> CompileResult:
+        val ctx = self.ctx
+        val log = ctx.logger
+        val backend_name = ctx.options.backend
+        val effective_backend = get_effective_backend_name(
+            backend_name, ctx.options.release)
+        smf_log_debug(
+            log,
+            "AOT SMF: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+        val smf_bytes = smf_result.get_value()
+
+        match link_to_smf(smf_bytes, output, ctx.options.verbose):
+            case Ok(_):
+                smf_log_info(
+                    log,
+                    "SMF module written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Failed to write SMF file: {e}")
+
+    me compile_to_self_contained(output: text) -> CompileResult:
+        val ctx = self.ctx
+        val log = ctx.logger
+        val backend_name = ctx.options.backend
+        val effective_backend = get_effective_backend_name(
+            backend_name, ctx.options.release)
+        smf_log_debug(
+            log,
+            "AOT self-contained: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+        val smf_bytes = smf_result.get_value()
+
+        var config = SelfContainedConfig.default()
+        config.verbose = ctx.options.verbose
+        match link_to_self_contained(smf_bytes, output, config):
+            case Ok(_):
+                smf_log_info(
+                    log,
+                    "Self-contained binary written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Self-contained build failed: {e}")
+
+    me collect_smf_bytes() -> CompileResult:
+        val ctx: CompileContext = self.ctx
+        val log = ctx.logger
+        val backend_name = ctx.options.backend
+        val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
+        var all_object_bytes: [u8] = []
+
+        for name in ctx.mir_modules.keys():
+            smf_log_trace(log, "compiling module for SMF: {name}")
+            val compiled = compile_module_with_backend(
+                backend_name,
+                ctx.mir_modules[name],
+                ctx.options.release,
+                opt_level
+            )
+            match compiled:
+                case Err(err):
+                    return CompileResult.CodegenError(
+                        "AOT compile error in {name}: {err.to_text()}")
+                case Ok(module):
+                    if val obj_bytes = module.object_code:
+                        all_object_bytes = all_object_bytes.concat(obj_bytes)
+                case _:
+                    return CompileResult.CodegenError(
+                        "AOT compile error in {name}: backend result not Ok")
+
+        val deps = smf_collect_dependency_hashes(ctx)
+        val manifest_bytes = smf_collect_driver_manifest_bytes(ctx.mir_modules)
+        val launch_metadata_bytes = smf_render_launch_metadata().bytes()
+        val target = Target.host()
+        val mode = ctx.options.smf_output_mode
+        val smf_bytes = if mode == "elf_embedded":
+            var opts = SmfBuildOptions.create(target)
+            opts.deps = deps
+            opts.driver_manifest_bytes = manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
+            generate_smf_with_raw_code_options(all_object_bytes, opts)
+        elif mode == "reloc_sections":
+            var opts = SmfBuildOptions.create(target)
+            opts.deps = deps
+            opts.driver_manifest_bytes = manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
+            build_smf_with_relocations(all_object_bytes, opts)
+        else:
+            var opts = SmfBuildOptions.create(target)
+            opts.deps = deps
+            opts.driver_manifest_bytes = manifest_bytes
+            opts.launch_metadata_bytes = launch_metadata_bytes
+            generate_smf_with_options(all_object_bytes, opts)
+        CompileResult.Success(smf_bytes)
+
+fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
+    var payload: [u8] = []
+    for module_name in modules.keys():
+        val module = modules[module_name]
+        for fn_ in module.functions.values():
+            if fn_.has_driver_manifest_attr:
+                payload = payload.concat(
+                    smf_encode_driver_manifest_record(
+                        fn_.name, fn_.driver_manifest_attr))
+    payload
+
+fn smf_encode_driver_manifest_record(
+    name: text,
+    attr: DriverManifestAttr
+) -> [u8]:
+    var buf: [u8] = []
+    buf = buf.concat(smf_u32_to_bytes(0x44525653))
+    var kind_byte: u8 = 0
+    match attr.kind:
+        case Driver:
+            kind_byte = 0
+        case NativeLib:
+            kind_byte = 1
+    buf = buf.push(kind_byte)
+    buf = buf.push((attr.driver_class & 0xFF).to_u8())
+    buf = buf.push(1)
+    buf = buf.push(0)
+    buf = buf.concat(smf_u32_to_bytes(attr.vendor as i32))
+    buf = buf.concat(smf_u32_to_bytes(attr.device_ids.len() as i32))
+    buf = buf.concat(smf_fixed_ascii_bytes(attr.version, 16))
+    buf = buf.concat(smf_fixed_ascii_bytes(name, 32))
+    for id in attr.device_ids:
+        buf = buf.concat(smf_u32_to_bytes(0))
+        buf = buf.concat(smf_u32_to_bytes(id as i32))
+    buf
+
+fn smf_fixed_ascii_bytes(value: text, width: i64) -> [u8]:
+    var out: [u8] = []
+    val raw = value.bytes()
+    var i = 0
+    while i < width:
+        if i < raw.len():
+            out = out.push(raw[i])
+        else:
+            out = out.push(0)
+        i = i + 1
+    out
+
+fn smf_collect_dependency_hashes(ctx: CompileContext) -> [SmfDependencyEntry]:
+    use compiler.driver.cache.cache_validator.{
+        get_shb_interface_hash
+    }
+    var deps: [SmfDependencyEntry] = []
+    var seen: Dict<text, bool> = {}
+    for input_path in ctx.options.input_files:
+        val hash = get_shb_interface_hash(input_path)
+        if hash != 0 and not seen.has(input_path):
+            seen[input_path] = true
+            deps.push(
+                SmfDependencyEntry(
+                    module_path: input_path,
+                    interface_hash: hash))
+    deps

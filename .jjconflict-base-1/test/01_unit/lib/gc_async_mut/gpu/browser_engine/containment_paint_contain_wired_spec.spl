@@ -1,0 +1,215 @@
+# Proves `contain: paint` wired into the REAL paint pipeline
+# (simple_web_html_layout_renderer_paint_layout.spl's `paint_selected`),
+# not merely the text-token detector (`contain_value_contains_paint` in
+# containment.spl). Mirrors containment_layout_contain_wired_spec.spl's
+# two-claim structure for the sibling `contain: layout` lane.
+#
+# Two independent claims:
+#   (a) correctness — `paint_selected` seeded from a `contain: paint`
+#       boundary produces a framebuffer BIT-IDENTICAL, pixel for pixel, to
+#       an unconditional full `paint()` of the same (post-mutation) tree.
+#       Covers both the case where the fast path is actually taken
+#       (boundary has a fixed size, so its own box doesn't change between
+#       the retained frame and this one) and the case where the post-hoc
+#       box-mismatch guard rejects it (boundary's own box DOES change,
+#       e.g. auto-height) and falls back to a full repaint — both must
+#       still match exactly.
+#   (b) proportionality — `paint_contain_boundary_subtree_size` reports a
+#       node count strictly smaller than the whole tree when a `contain:
+#       paint` boundary covers every dirty id, which bounds how many
+#       nodes `paint_selected` leaves un-suppressed (every other node is
+#       forced `visibility_hidden` before the underlying `paint()` call,
+#       so it performs zero raster work for them) — the same "no shared
+#       boundary => no savings claimed" fallback as the layout lane.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/containment.spl
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, TextWrapCache, paint, paint_selected, paint_contain_boundary_subtree_size,
+    parse_html, build_child_index, extract_css_vw, compute_styles, layout,
+    browser_layout_framebuffer_filled, argb,
+    zero_i32_list, empty_i32_lists, neg_one_i32_list
+}
+
+val WIDTH: i32 = 400
+val HEIGHT: i32 = 300
+
+fn find_structural_id(nodes: [HNode], target_id: text) -> i64:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == target_id:
+            return (i + 1) as i64
+        i = i + 1
+    -1
+
+# Full render pipeline up to a painted framebuffer, plus the raw box
+# arrays (needed to read the boundary's own bw/bh for `paint_selected`'s
+# retained_bw/retained_bh arguments) and node/style arrays for reuse.
+fn render_full(html: text) -> ([HNode], [i32], [i32], [i32], [i32], [u32]):
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, WIDTH, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val boxes = layout(
+        nodes, styles, child_index, 0, 0, 0, WIDTH, HEIGHT,
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        empty_i32_lists(node_count), empty_i32_lists(node_count),
+        neg_one_i32_list(node_count)
+    )
+    val white = argb(255, 255, 255)
+    var fb = browser_layout_framebuffer_filled(white, WIDTH, HEIGHT)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    val out = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, WIDTH, HEIGHT, false)
+    (nodes, boxes.bx, boxes.by, boxes.bw, boxes.bh, out)
+
+fn diff_count(a: [u32], b: [u32]) -> i64:
+    var diffs: i64 = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            diffs = diffs + 1
+        i = i + 1
+    diffs
+
+fn html_c_fixed(a_text: text) -> text:
+    "<html><body><div id=\"root\"><div id=\"c\" style=\"width:200px;height:80px;overflow:hidden;background:#eeeeee\" contain=\"paint\"><div id=\"a\" style=\"background:#3355ff\">" + a_text + "</div><div id=\"b\" style=\"background:#22aa22\">B</div></div><div id=\"sibling\" style=\"background:#aa2222\">Sibling</div></div></body></html>"
+
+fn html_c_auto(a_text: text) -> text:
+    "<html><body><div id=\"root\"><div id=\"c\" style=\"width:200px;background:#eeeeee\" contain=\"paint\"><div id=\"a\" style=\"background:#3355ff\">" + a_text + "</div><div id=\"b\" style=\"background:#22aa22\">B</div></div><div id=\"sibling\" style=\"background:#aa2222\">Sibling</div></div></body></html>"
+
+# Two INDEPENDENT contain:paint boundaries side by side. A dirty id inside
+# c1 plus a dirty id inside c2 must NOT resolve to a shared boundary --
+# this is the case that specifically exercises the `elif b != boundary`
+# rejection in `paint_contain_boundary` (as opposed to one dirty id having
+# no contain:paint ancestor at all, which the earlier `b < 0` check alone
+# already rejects).
+fn html_two_boundaries() -> text:
+    "<html><body><div id=\"root\">" +
+        "<div id=\"c1\" style=\"width:100px;height:60px;overflow:hidden;background:#eeeeee\" contain=\"paint\"><div id=\"a1\" style=\"background:#3355ff\">A1</div></div>" +
+        "<div id=\"c2\" style=\"width:100px;height:60px;overflow:hidden;background:#eeeeee\" contain=\"paint\"><div id=\"a2\" style=\"background:#22aa22\">A2</div></div>" +
+        "</div></body></html>"
+
+describe "CSS contain:paint wired into the real paint_selected hot path":
+
+    it "(a) correctness: fast-path repaint (boundary box unchanged) is pixel-identical to a full repaint":
+        val (nodes1, bx1, by1, bw1, bh1, fb1) = render_full(html_c_fixed("Short"))
+        val id_c1 = find_structural_id(nodes1, "c")
+        expect(id_c1 > 0).to_equal(true)
+        val idx_c1 = (id_c1 - 1) as i32
+        val retained_bw = bw1[idx_c1]
+        val retained_bh = bh1[idx_c1]
+
+        val html2 = html_c_fixed("Much longer text content inside A that changes how it wraps across the contained box")
+        val nodes2 = parse_html(html2)
+        val rules2 = extract_css_vw(html2, WIDTH, false)
+        val child_index2 = build_child_index(nodes2)
+        val styles2 = compute_styles(nodes2, rules2, child_index2, false, true)
+        val node_count2 = nodes2.len() as i32
+        val boxes2 = layout(
+            nodes2, styles2, child_index2, 0, 0, 0, WIDTH, HEIGHT,
+            zero_i32_list(node_count2), zero_i32_list(node_count2),
+            zero_i32_list(node_count2), zero_i32_list(node_count2),
+            empty_i32_lists(node_count2), empty_i32_lists(node_count2),
+            neg_one_i32_list(node_count2)
+        )
+        val wrap_cache2 = TextWrapCache(starts: boxes2.wrap_starts, ends: boxes2.wrap_ends)
+        val id_a = find_structural_id(nodes2, "a")
+        expect(id_a > 0).to_equal(true)
+
+        val white = argb(255, 255, 255)
+        val fresh_fb = browser_layout_framebuffer_filled(white, WIDTH, HEIGHT)
+        val full = paint(nodes2, styles2, boxes2.bx, boxes2.by, boxes2.bw, boxes2.bh, wrap_cache2, fresh_fb, WIDTH, HEIGHT, false)
+
+        val fast = paint_selected(
+            nodes2, styles2, boxes2.bx, boxes2.by, boxes2.bw, boxes2.bh, wrap_cache2,
+            fb1, retained_bw, retained_bh, WIDTH, HEIGHT, false, [id_a]
+        )
+        expect(fast.len()).to_equal(full.len())
+        expect(diff_count(fast, full)).to_equal(0)
+
+    it "(a) correctness: guard rejects a fast path whose boundary box changed (auto-height), still matches a full repaint of the same retained buffer":
+        # This case falls all the way through `paint_selected`'s fallback,
+        # which -- like the fast path -- draws onto `retained_fb`, not a
+        # freshly-filled buffer (paint() only overwrites pixels an actual
+        # node draws; reusing the retained buffer avoids paying for a
+        # fresh-fill on every mismatch). The oracle below must draw onto
+        # that SAME starting buffer to isolate "did the fallback draw
+        # everything a full repaint would" from "did the two runs start
+        # from different backgrounds" -- confirmed with test 1's fixture:
+        # a fresh-white oracle only coincidentally matches when the
+        # document fully covers the canvas.
+        val (nodes1, bx1, by1, bw1, bh1, fb1) = render_full(html_c_auto("Short"))
+        val id_c1 = find_structural_id(nodes1, "c")
+        expect(id_c1 > 0).to_equal(true)
+        val idx_c1 = (id_c1 - 1) as i32
+        val retained_bw = bw1[idx_c1]
+        val retained_bh = bh1[idx_c1]
+
+        val html2 = html_c_auto("Much longer text content inside A that wraps across several lines and grows the auto-height container c")
+        val nodes2 = parse_html(html2)
+        val rules2 = extract_css_vw(html2, WIDTH, false)
+        val child_index2 = build_child_index(nodes2)
+        val styles2 = compute_styles(nodes2, rules2, child_index2, false, true)
+        val node_count2 = nodes2.len() as i32
+        val boxes2 = layout(
+            nodes2, styles2, child_index2, 0, 0, 0, WIDTH, HEIGHT,
+            zero_i32_list(node_count2), zero_i32_list(node_count2),
+            zero_i32_list(node_count2), zero_i32_list(node_count2),
+            empty_i32_lists(node_count2), empty_i32_lists(node_count2),
+            neg_one_i32_list(node_count2)
+        )
+        val wrap_cache2 = TextWrapCache(starts: boxes2.wrap_starts, ends: boxes2.wrap_ends)
+        val id_a = find_structural_id(nodes2, "a")
+        expect(id_a > 0).to_equal(true)
+        val id_c2 = find_structural_id(nodes2, "c")
+        val idx_c2 = (id_c2 - 1) as i32
+        # Sanity: this fixture must actually grow the boundary's box, or the
+        # test would trivially pass through the fast path instead of
+        # exercising the fallback guard.
+        expect(boxes2.bh[idx_c2] != retained_bh).to_equal(true)
+
+        val full = paint(nodes2, styles2, boxes2.bx, boxes2.by, boxes2.bw, boxes2.bh, wrap_cache2, fb1, WIDTH, HEIGHT, false)
+
+        val fast = paint_selected(
+            nodes2, styles2, boxes2.bx, boxes2.by, boxes2.bw, boxes2.bh, wrap_cache2,
+            fb1, retained_bw, retained_bh, WIDTH, HEIGHT, false, [id_a]
+        )
+        expect(fast.len()).to_equal(full.len())
+        expect(diff_count(fast, full)).to_equal(0)
+
+    it "(b) proportionality: a contain:paint boundary bounds the repaint to a strict subtree":
+        val html2 = html_c_fixed("Much longer text content inside A that changes how it wraps across the contained box")
+        val nodes2 = parse_html(html2)
+        val id_a = find_structural_id(nodes2, "a")
+        expect(id_a > 0).to_equal(true)
+
+        val subtree_size = paint_contain_boundary_subtree_size(nodes2, [id_a])
+        expect(subtree_size < nodes2.len() as i32).to_equal(true)
+        expect(subtree_size > 0).to_equal(true)
+
+    it "(b) proportionality: no shared contain:paint boundary reports the full tree (no savings claimed)":
+        val html2 = html_c_fixed("Short")
+        val nodes2 = parse_html(html2)
+        val id_a = find_structural_id(nodes2, "a")
+        val id_sibling = find_structural_id(nodes2, "sibling")
+        expect(id_a > 0).to_equal(true)
+        expect(id_sibling > 0).to_equal(true)
+
+        # "a" is inside the c boundary, "sibling" is not -- no single shared
+        # boundary covers both, so the fast path must not be claimed.
+        val subtree_size = paint_contain_boundary_subtree_size(nodes2, [id_a, id_sibling])
+        expect(subtree_size).to_equal(nodes2.len() as i32)
+
+    it "(b) proportionality: two DIFFERENT contain:paint boundaries in one dirty set also report the full tree":
+        val html3 = html_two_boundaries()
+        val nodes3 = parse_html(html3)
+        val id_a1 = find_structural_id(nodes3, "a1")
+        val id_a2 = find_structural_id(nodes3, "a2")
+        expect(id_a1 > 0).to_equal(true)
+        expect(id_a2 > 0).to_equal(true)
+
+        val subtree_size = paint_contain_boundary_subtree_size(nodes3, [id_a1, id_a2])
+        expect(subtree_size).to_equal(nodes3.len() as i32)

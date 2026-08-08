@@ -1,0 +1,298 @@
+# @cover src/compiler/35.semantics/value_struct_layout.spl 60%
+"""
+# value_struct_layout — by-value struct cycle validation (lane VSL1)
+
+**Category:** Compiler / Semantics
+**Lane:** VSL1 (mission-critical hardening follow-up to `newly_live_symbolkind_arms_audit_2026-07-30.md`)
+
+## Overview
+
+`validate_value_struct_layouts` (`src/compiler/35.semantics/value_struct_layout.spl`)
+walks every non-generic struct's fields looking for a DIRECT by-value
+containment cycle (a struct that recursively embeds itself by value, which
+would need infinite size). It is wired into three driver call sites
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:130,212,355`) that
+HARD-FAIL the compile via `ctx.add_error(...)` when it fires. Before this
+lane the function had zero test coverage anywhere in `test/`, despite being
+live on every normal and bootstrap compile.
+
+## Why this spec hand-builds HIR instead of parsing struct source text
+
+The natural-looking approach -- drive real `struct ...:` source through
+`parse_full_frontend` + `HirLowering.lower_module`, the pattern used by
+`test/01_unit/compiler/hir/hir_function_span_populate_spec.spl` for
+functions -- was tried first and does NOT work in this environment: on
+this seed binary, running `parse_full_frontend` on ANY source containing a
+`struct` declaration from inside a `bin/simple test`-interpreted spec fails
+with `semantic: function `Field` not found`, even for a trivial one-field
+struct with no recursion at all. A minimal single-`it` probe with only
+`struct Probe:\n    x: i64\n` reproduces it in isolation; the identical
+harness parsing FUNCTION-only source (no `struct`) succeeds (see
+`hir_function_span_populate_spec.spl`, unaffected). Root cause traced to
+`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:308`, where flat
+struct/class field conversion NAMED-constructs the frontend AST `Field`
+struct type (`Field(name: ..., type_: ..., ...)`); under the nested
+interpreter context, this constructor call resolves as an ordinary function
+lookup and misses. This is a real, reproducible gap in the harness's
+compiler-on-compiler path for struct-bearing source, entirely upstream of
+`35.semantics/value_struct_layout.spl` and out of this lane's ownership
+scope (frontend/bridge layer + interpreter constructor-call resolution, not
+`35.semantics/`); recorded in
+`doc/08_tracking/bug/newly_live_symbolkind_arms_audit_2026-07-30.md`
+("VSL1 follow-up").
+
+This spec instead hand-builds `HirModule`/`HirStruct`/`HirField` directly --
+the same technique already used for this exact reason by
+`test/01_unit/compiler/semantics/transfer_share_semantic_spec.spl` and
+`test/01_unit/compiler/borrow/iso_move_pipeline_spec.spl`. Because
+`validate_value_struct_layouts` operates purely on the SHAPE of
+`HirModule.structs` / `HirField.type_` / `HirSymbol.kind` (a structural
+graph walk, not an emergent lowering property like span placement), a
+hand-built module exercises the checker's real logic faithfully: every field
+type below (`Named`, `Optional`, `Array`) is the literal `HirTypeKind`
+variant the real lowering would produce for `T`, `T?`, and `[T]`
+respectively (`src/compiler/20.hir/hir_types.spl:643-666`).
+
+## What is pinned
+
+- **Negative** — genuinely cyclic by-value layouts (self-reference, 2-node
+  mutual recursion, 3-node chain) must produce the diagnostic.
+- **Positive** — layouts that only LOOK recursive but are safe (indirection
+  via `T?`, indirection via `[T]`, a shared-but-non-cyclic "diamond" type,
+  the same value type appearing twice as sibling fields) must NOT be
+  rejected. A false positive here hard-fails a legitimate compile, which is
+  worse than the check being absent — per campaign guidance this direction
+  is the more important of the two.
+- **Documented gap** — recursion mediated through a generic struct
+  instantiation (`Box<Node>`) is invisible to this checker by construction
+  (see the last `describe` block). Pinned as current behavior, not endorsed
+  as sufficient.
+"""
+
+use std.spec
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+
+fn mk_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span())
+
+fn named_type(sym: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, []), span: mk_span())
+
+fn named_type_args(sym: SymbolId, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(sym, args), span: mk_span())
+
+fn optional_type(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner), span: mk_span())
+
+fn array_type(elem: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Array(elem, nil), span: mk_span())
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span())
+
+fn mk_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: nil_expr(),
+        visibility: Visibility.Public,
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: mk_span()
+    )
+
+fn mk_struct(sym: SymbolId, name: text, fields: [HirField], type_params: [HirTypeParam]) -> HirStruct:
+    HirStruct(
+        symbol: sym,
+        name: name,
+        type_params: type_params,
+        fields: fields,
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false,
+        platform_has_error: false,
+        platform_has_warning: false,
+        platform_diagnostic_message: "",
+        platform_diagnostic_line: 0,
+        is_generic_template: false,
+        has_specialization_of: false,
+        specialization_of: "",
+        type_bindings: {}
+    )
+
+fn mk_type_param(sym: SymbolId, name: text) -> HirTypeParam:
+    HirTypeParam(symbol: sym, name: name, bounds: [], has_default: false, default: i64_type(), span: mk_span())
+
+fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
+    var structs_dict: Dict<SymbolId, HirStruct> = {}
+    for s in structs:
+        structs_dict[s.symbol] = s
+    HirModule(
+        name: name,
+        path: "synthetic/" + name + ".spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: table,
+        functions: {},
+        classes: {},
+        structs: structs_dict,
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
+    it "flags a struct that embeds itself by value":
+        var table = SymbolTable.new()
+        val node_sym = table.define("VslSelfNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val node_struct = mk_struct(node_sym, "VslSelfNode", [mk_field("value", i64_type()), mk_field("next", named_type(node_sym))], [])
+        val hir = mk_module("vsl_self_cycle", table, [node_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_self_cycle"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("recursive by-value struct layout")
+        expect(errors[0]).to_contain("VslSelfNode")
+
+    it "flags a two-struct mutual by-value cycle (A -> B -> A)":
+        var table = SymbolTable.new()
+        val a_sym = table.define("VslMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val b_sym = table.define("VslMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val a_struct = mk_struct(a_sym, "VslMutA", [mk_field("b", named_type(b_sym))], [])
+        val b_struct = mk_struct(b_sym, "VslMutB", [mk_field("a", named_type(a_sym))], [])
+        val hir = mk_module("vsl_mutual_cycle", table, [a_struct, b_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_mutual_cycle"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("recursive by-value struct layout")
+
+    it "flags a three-struct chain by-value cycle (A -> B -> C -> A)":
+        var table = SymbolTable.new()
+        val a_sym = table.define("VslChainA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val b_sym = table.define("VslChainB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val c_sym = table.define("VslChainC", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val a_struct = mk_struct(a_sym, "VslChainA", [mk_field("b", named_type(b_sym))], [])
+        val b_struct = mk_struct(b_sym, "VslChainB", [mk_field("c", named_type(c_sym))], [])
+        val c_struct = mk_struct(c_sym, "VslChainC", [mk_field("a", named_type(a_sym))], [])
+        val hir = mk_module("vsl_chain_cycle", table, [a_struct, b_struct, c_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_chain_cycle"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(1)
+        expect(errors[0]).to_contain("recursive by-value struct layout")
+
+describe "validate_value_struct_layouts accepts layouts that only look recursive":
+    it "does not flag self-reference through an optional (T?) indirection — classic linked-list node":
+        var table = SymbolTable.new()
+        val node_sym = table.define("VslOptNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val node_struct = mk_struct(node_sym, "VslOptNode", [mk_field("value", i64_type()), mk_field("next", optional_type(named_type(node_sym)))], [])
+        val hir = mk_module("vsl_optional_self", table, [node_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_optional_self"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
+
+    it "does not flag mutual recursion mediated entirely by optional (T?) indirection":
+        var table = SymbolTable.new()
+        val a_sym = table.define("VslOptMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val b_sym = table.define("VslOptMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val a_struct = mk_struct(a_sym, "VslOptMutA", [mk_field("b", optional_type(named_type(b_sym)))], [])
+        val b_struct = mk_struct(b_sym, "VslOptMutB", [mk_field("a", optional_type(named_type(a_sym)))], [])
+        val hir = mk_module("vsl_optional_mutual", table, [a_struct, b_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_optional_mutual"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
+
+    it "does not flag self-reference through an array/slice field — heap-backed collection of children":
+        var table = SymbolTable.new()
+        val node_sym = table.define("VslArrNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val node_struct = mk_struct(node_sym, "VslArrNode", [mk_field("value", i64_type()), mk_field("children", array_type(named_type(node_sym)))], [])
+        val hir = mk_module("vsl_array_children", table, [node_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_array_children"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
+
+    it "does not flag a non-cyclic diamond where two structs share one common by-value field type":
+        var table = SymbolTable.new()
+        val shared_sym = table.define("VslShared", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val a_sym = table.define("VslDiamondA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val b_sym = table.define("VslDiamondB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val shared_struct = mk_struct(shared_sym, "VslShared", [mk_field("x", i64_type())], [])
+        val a_struct = mk_struct(a_sym, "VslDiamondA", [mk_field("shared", named_type(shared_sym))], [])
+        val b_struct = mk_struct(b_sym, "VslDiamondB", [mk_field("shared", named_type(shared_sym))], [])
+        val hir = mk_module("vsl_diamond", table, [shared_struct, a_struct, b_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_diamond"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
+
+    it "does not flag the same by-value struct type appearing twice as sibling fields (not a cycle)":
+        var table = SymbolTable.new()
+        val point_sym = table.define("VslPoint", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val line_sym = table.define("VslLine", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val point_struct = mk_struct(point_sym, "VslPoint", [mk_field("x", i64_type())], [])
+        val line_struct = mk_struct(line_sym, "VslLine", [mk_field("p1", named_type(point_sym)), mk_field("p2", named_type(point_sym))], [])
+        val hir = mk_module("vsl_repeated_sibling", table, [point_struct, line_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_repeated_sibling"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
+
+describe "validate_value_struct_layouts and generic-mediated recursion (documented coverage gap, not a false positive)":
+    it "does not flag (and cannot currently detect) recursion mediated through a generic struct instantiation":
+        """
+        `value_layout_named_symbol` only treats `HirTypeKind.Named(symbol, args)`
+        as a struct reference when `args.len() == 0` (see
+        `value_struct_layout.spl:11-18`), and generic struct definitions are
+        skipped entirely as walk roots (`type_params.len() > 0` at
+        `value_struct_layout.spl:38`). So a field typed `VslGenBox<VslGenNode>`
+        is invisible to this checker even though, if `VslGenBox<T>` stores `T`
+        by value, this is a genuine unbounded-size cycle. This is a real
+        coverage gap (false NEGATIVE), not the false-positive risk this lane
+        prioritizes — documented here and in the VSL1 follow-up write-up
+        rather than silently left unexercised. This spec pins the CURRENT
+        (limited) behavior; it is not an endorsement that the gap is fine to
+        leave open.
+        """
+        var table = SymbolTable.new()
+        val t_sym = table.define("T", SymbolKind.TypeParam, nil, mk_span(), Visibility.Public, false, nil)
+        val box_sym = table.define("VslGenBox", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val node_sym = table.define("VslGenNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val box_struct = mk_struct(box_sym, "VslGenBox", [mk_field("value", i64_type())], [mk_type_param(t_sym, "T")])
+        val node_struct = mk_struct(node_sym, "VslGenNode", [mk_field("value", i64_type()), mk_field("child", named_type_args(box_sym, [named_type(node_sym)]))], [])
+        val hir = mk_module("vsl_generic_gap", table, [box_struct, node_struct])
+        var modules: Dict<text, HirModule> = {}
+        modules["vsl_generic_gap"] = hir
+        val errors = validate_value_struct_layouts(modules)
+        expect(errors.len()).to_equal(0)
