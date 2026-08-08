@@ -253,6 +253,106 @@ where
     }
 }
 
+/// Dispatch an already-evaluated `Value` as a callable.
+///
+/// Returns `Ok(Some(result))` when `val` was callable and the call was made,
+/// and `Ok(None)` when `val` is not callable so the caller can continue its own
+/// resolution chain. This is the single place that knows which `Value` variants
+/// are invocable; both the bare-identifier callee path and the field-access
+/// callee path route through it so `f(x)`, `(self.f)(x)` and `(obj.f)(x)` agree.
+fn call_value_as_callable(
+    val: Value,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // Callable objects use the `__call__` protocol and need `val` by reference,
+    // so they are handled before the by-value match below takes ownership.
+    if matches!(val, Value::Object { .. }) {
+        let evaluated_args: Vec<Value> = args
+            .iter()
+            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+            .collect::<Result<Vec<_>, _>>()?;
+        return super::interpreter_control::call_method_if_exists(
+            &val,
+            "__call__",
+            &evaluated_args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        );
+    }
+
+    match val {
+        Value::Function { def, captured_env, .. } => {
+            let mut captured_env_clone = Env::clone(&captured_env);
+            Ok(Some(core::exec_function_with_captured_env(
+                &def,
+                args,
+                env,
+                &mut captured_env_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?))
+        }
+        Value::Lambda {
+            params,
+            body,
+            env: captured,
+        } => {
+            let mut captured_clone = Env::clone(&captured);
+            Ok(Some(core::exec_lambda(
+                &params,
+                &body,
+                args,
+                env,
+                &mut captured_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?))
+        }
+        Value::Constructor { class_name } => Ok(Some(core::instantiate_class(
+            &class_name,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?)),
+        // Calling a generator returns the next yielded value (or Nil if exhausted)
+        Value::Generator(gen) => Ok(Some(gen.next().unwrap_or(Value::Nil))),
+        Value::NativeFunction(native) => {
+            let evaluated: Vec<Value> = args
+                .iter()
+                .map(|a| {
+                    if a.name.is_some() {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("native functions do not support named arguments");
+                        return Err(CompileError::semantic_with_context(
+                            "native function does not support named arguments".to_string(),
+                            ctx,
+                        ));
+                    }
+                    evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some((native.func)(&evaluated)?))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
@@ -360,83 +460,8 @@ pub(crate) fn evaluate_call(
         // Priority 6: Check env for decorated functions and closures (decorators store
         // the decorated version in env while the original remains in functions)
         if let Some(val) = env.get(name).cloned() {
-            match val {
-                Value::Function { def, captured_env, .. } => {
-                    let mut captured_env_clone = Env::clone(&captured_env);
-                    return core::exec_function_with_captured_env(
-                        &def,
-                        args,
-                        env,
-                        &mut captured_env_clone,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                }
-                Value::Lambda {
-                    params,
-                    body,
-                    env: captured,
-                } => {
-                    let mut captured_clone = Env::clone(&captured);
-                    return core::exec_lambda(
-                        &params,
-                        &body,
-                        args,
-                        env,
-                        &mut captured_clone,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
-                }
-                Value::Constructor { class_name } => {
-                    return core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods);
-                }
-                Value::Generator(gen) => {
-                    // Calling a generator returns the next yielded value (or Nil if exhausted)
-                    return Ok(gen.next().unwrap_or(Value::Nil));
-                }
-                Value::NativeFunction(native) => {
-                    let evaluated: Vec<Value> = args
-                        .iter()
-                        .map(|a| {
-                            if a.name.is_some() {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
-                                    .with_help("native functions do not support named arguments");
-                                return Err(CompileError::semantic_with_context(
-                                    "native function does not support named arguments".to_string(),
-                                    ctx,
-                                ));
-                            }
-                            evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    return (native.func)(&evaluated);
-                }
-                Value::Object { .. } => {
-                    // Support __call__ protocol for callable objects
-                    let evaluated_args: Vec<Value> = args
-                        .iter()
-                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(result) = super::interpreter_control::call_method_if_exists(
-                        &val,
-                        "__call__",
-                        &evaluated_args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )? {
-                        return Ok(result);
-                    }
-                }
-                _ => {}
+            if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                return Ok(result);
             }
         }
 
@@ -756,6 +781,23 @@ pub(crate) fn evaluate_call(
             let mangled_name = format!("{}__{}", module_name, field);
             if let Some(func) = functions.get(&mangled_name).cloned() {
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+            }
+
+            // Grouped field access used as a callee: `(self.cb)(x)` / `(obj.cb)(x)`.
+            // The whole chain above assumes `module_name` names a module or class,
+            // because that is how `module.function()` reaches here. But a
+            // parenthesized call on a function-typed FIELD also lands here, and for
+            // those the receiver is an ordinary in-scope value, not a module. The
+            // unparenthesized `self.cb(x)` parses as a MethodCall and never reaches
+            // this branch, which is why only the grouped form failed to resolve.
+            // Evaluate the field and dispatch it through the same callable path a
+            // bare `f(x)` uses; fall through to the error if it is not callable.
+            if let Ok(field_val) = evaluate_expr(callee.as_ref(), env, functions, classes, enums, impl_methods) {
+                if let Some(result) =
+                    call_value_as_callable(field_val, args, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(result);
+                }
             }
 
             let ctx = ErrorContext::new()
