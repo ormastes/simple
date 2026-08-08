@@ -1851,3 +1851,119 @@ paths, unions computed directly from the raw `lines`/`decisions` rows of
 all 5, not re-derived from stdout banners). `df -h /`: not recorded this
 unit (no cargo/bootstrap run; each spec run stayed inside the JIT/interp
 test-runner path).
+
+
+## U4.4 `simple_web_html_layout_renderer_core.spl` — round 3 (session N+5)
+
+Round 2 landed `core_coverage_closure_spec.spl` (47 examples) at 80.43%
+(1669/2075), short of the >=90% (1868/2075) target, and classified a 30-line
+hand sample of the remaining gap at roughly 40% collector artifact (never
+instrumented — comments/signatures/continuations) vs 60% genuinely-reachable
+untested logic, naming three families: deeper `var()` cycle branches, more
+`@-wrapper`/`:has()` selector shapes, and material-admission rejection paths.
+
+This round confirmed `core.spl` (sha of `git show origin/main:...` unchanged
+since round 2) and both baseline specs unchanged since round 2's report, so
+the round-2 line map (297, 345, 575, 980, 2021, 2475, 2908, 2982, etc.) was
+still valid as a starting point, and extended `core_coverage_closure_spec.spl`
+with 9 new examples (56 total) targeting exactly those named families:
+
+- `_css_resolve_vars` cycle detection: a direct `--a: var(--a)` self-reference
+  with and without a fallback (traces the active-names-stack match at line
+  296-297, the `Cycle` match arm at 342-345, and the nested-return arm at
+  364-366).
+- `_css_resolve_vars`'s active-names capacity guard (315-316), reached
+  directly with `active_count=33` (distinct from the already-tested
+  `resolution_depth > 32` outer check — the two counters only stay in
+  lockstep through the function's own recursion).
+- `_css_scan_rules_simple`'s wrapper-overflow push (574-577): 34 nested
+  `@layer` wrappers around one selector.
+- `_media_group_applies`'s `max-width` branch (both satisfied/unsatisfied)
+  and unknown-feature-name branch, plus `_media_prelude_applies`'s
+  comma-OR (first group fails, second passes) — none reached by the
+  `min-width`-only tests round 1/2 landed.
+- `compute_styles_with_material`'s entry-rejected diagnostic: a node
+  declaring `data-wm-theme-fallback='solid-material'` but no
+  `data-wm-theme-bg` (so `declared_opaque` is false and neither admission
+  path succeeds) — distinct from the existing "neither channel" test, whose
+  node has no fallback contract at all and so never reaches the
+  `wm_fallback == "solid-material"` guard on that print line.
+
+All 56 examples passed (`Results: 56 total, 56 passed, 0 failed`,
+`/tmp/core3/round3.log`).
+
+### Measurement (re-run fresh, not assumed from round 2)
+
+Same three-artifact union methodology as round 2, `SIMPLE_COVERAGE_OUTPUT`
+per spec-file sub-process, filtered to the `.sdn`'s `lines |file, line,
+hit_count|` section only (this collector never emits a 0-hit row — every row
+present has `hit_count > 0` — so "instrumented" and "hit" coincide per
+artifact; the 2075 denominator comes from the tool's own summary line, not
+from enumerating the `.sdn`):
+
+- `simple_web_html_layout_renderer_coverage_spec.spl` alone: 39/39 passed,
+  `core.spl` 54% (1127/2075) (`/tmp/core3/base_full.sdn`).
+- `simple_web_html_layout_renderer_core_pure_helpers_coverage_closure_spec.spl`
+  alone: 69/69 passed, `core.spl` 27% (571/2075) (`/tmp/core3/base_pure.sdn`).
+- `core_coverage_closure_spec.spl` (56 examples, round 3) alone: 56/56
+  passed, `core.spl` 51% (1073/2075) (`/tmp/core3/round3.sdn`).
+
+Three-way per-line union: **1682/2075 = 81.06%**.
+
+**Before (round 2 checkpoint): 80.43% (1669/2075). After (round 3): 81.06%
+(1682/2075).** A **+13-line / +0.63-point** gain from 9 new hand-traced
+assertions — smaller than round 2's own gain, consistent with diminishing
+returns as the easier reachable branches in the three named families are
+exhausted. Still short of the >=90% (1868/2075) target by **186 lines**.
+
+### A concrete collector-attribution anomaly found this round
+
+The wrapper-overflow test (`_css_scan_rules_simple`, 34 nested `@layer`s)
+passed both its assertions — `out.wrapper_kinds[last]` matched
+`CssWrapperKind.Unsupported` and `out.wrapper_preludes[last]` matched
+`"@unsupported-overflow"`, which is only possible if lines 575-576
+(`wrapper_kinds.push(CssWrapperKind.Unsupported)` /
+`wrapper_preludes.push("@unsupported-overflow")`) executed. Yet the
+per-line union shows line 574 (`if wrapper_overflow:`, already hit by an
+earlier baseline) and line 577 (`wrapper_count = wrapper_count + 1`) hit,
+but **575 and 576 not hit** in any of the three artifacts. This is evidence
+the collector's per-line attribution has gaps beyond the already-documented
+comment/signature/continuation exclusions — a `.push(EnumVariant)` /
+`.push("literal")` call pair inside an `if` body was logically executed
+(proven by the assertions) but not counted. Filed as a fact for whoever next
+tries to close this file's remaining gap by line-number chasing: passing
+assertions are not proof a specific cited line number will show as hit, and
+absence of a hit is not proof the branch didn't run.
+
+### Ceiling assessment
+
+An exhaustive (not sampled) mechanical pass over all 1,416 physical lines
+outside the round-3 union (of the file's 3,098 physical lines) classified
+by regex against the source:
+
+- 251 pure comments, 84 blank lines, 70 bare `fn`/`pub fn` signatures, 6
+  `class`/`enum` declaration lines, 195 lines starting with a closing
+  bracket/`elif`/`else:`/bare `:` (continuation-shaped) — **606 lines
+  (43%) matching the documented collector-exclusion shapes**, close to
+  round 2's 40% hand-sample estimate.
+- 810 lines (57%) did not match any of those four regexes ("other_code").
+  This is an over-count of genuinely-reachable-but-untested logic: manual
+  spot-checks of the first lines in this bucket (1-51) show class-field
+  declarations (`remaining: i32`, `active_names: [text]`, import/`use`
+  lines) that are structurally non-executable and never instrumented,
+  which the regex pass does not exclude. The true reachable-logic count is
+  therefore somewhere between round 2's ~60%-of-gap estimate and this
+  round's cruder 57%-of-gap ceiling, i.e. **90% is not proven unreachable
+  by this round either**, but the two consecutive rounds' diminishing
+  per-test yield (round 2: hundreds of lines from 47 examples; round 3: 13
+  lines from 9 examples, several of which — per the anomaly above — should
+  have yielded more) indicate real, further gains from this same file-level
+  testing strategy will require materially more fixture work per line
+  closed than either prior round.
+
+### Provenance / disk
+
+Artifacts this session: `/tmp/core3/base_full.sdn`, `/tmp/core3/base_pure.sdn`,
+`/tmp/core3/round3.sdn`. Extended spec sha (`git hash-object`, whole file,
+706 lines, all 11 `describe` blocks):
+`657fd9d87536b1914d93f85147b44e68d5100b30`.

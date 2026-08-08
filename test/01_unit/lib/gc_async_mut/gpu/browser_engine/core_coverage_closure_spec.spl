@@ -560,3 +560,147 @@ describe "core.spl: compute_styles_with_material":
             cpu_material_nodes, solid_material_nodes
         )
         assert_equal(styles.len(), nodes.len())
+
+# Round 3 (session N+5) — branches round 1/2 did not reach. Line numbers are
+# from core.spl as of this session (unchanged since round 2's report):
+#
+# - _css_resolve_vars cycle detection (293-301, 342-345, 364-366): a
+#   `--a: var(--a)` self-reference recurses one level; the active-names scan
+#   (296) finds the name already on the stack (cycle=true, 297); the nested
+#   frame hits the Cycle match arm at 364-366 and returns early, while the
+#   outer (nested=false) frame hits the OTHER Cycle arm (342-345,
+#   `should_use_fallback = not nested`) and either swallows it to empty text
+#   (no fallback) or re-resolves the fallback text (with one).
+# - _css_resolve_vars active-names capacity guard (315-316): distinct from
+#   the already-tested `resolution_depth > 32` outer check — reached by
+#   calling with active_count=33 directly (the two counters only stay in
+#   lockstep through the function's own recursion; a caller can decouple
+#   them).
+# - _css_scan_rules_simple wrapper-overflow push (574-577): 34 nested @layer
+#   wrappers around one selector drive `depth-1 > 32` (wrapper_overflow),
+#   pushing a synthetic Unsupported/"@unsupported-overflow" entry instead of
+#   walking the ancestor stack.
+# - _media_group_applies (via _extract_css_vw_with_rule_limit, 419-424): the
+#   max-width branch (satisfied and unsatisfied) and the unknown-feature
+#   `else: ok = false` branch, neither reached by the existing min-width-only
+#   and @supports tests.
+# - _media_prelude_applies's comma-OR (440-443): a two-group prelude where
+#   the first group fails and the second passes.
+# - compute_styles_with_material's rejection diagnostic (~2960-2964):
+#   reached only when wm_fallback == "solid-material" AND neither admission
+#   path succeeds. The existing "neither channel" test uses a node with NO
+#   fallback contract at all, which never reaches this line (wm_fallback !=
+#   "solid-material"). Declaring the fallback contract without a
+#   data-wm-theme-bg attribute (so declared_opaque is false) reaches it.
+#
+# Every expected value below is hand-traced against the source before
+# running, per the existing spec's evidence bar.
+
+describe "core.spl: _css_resolve_vars — cycle detection":
+    it "a direct self-reference with no fallback resolves to empty text (cycle swallowed at top level)":
+        val state = CssVarResolutionState.new("--a:var(--a)")
+        val result = _css_resolve_vars("var(--a)", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "")
+            _:
+                assert_true(false)
+
+    it "a direct self-reference WITH a fallback resolves to the fallback text":
+        val state = CssVarResolutionState.new("--a:var(--a)")
+        val result = _css_resolve_vars("var(--a, blue)", state, 0, 0, false)
+        match result:
+            CssVarResolution.Resolved(value):
+                assert_equal(value, "blue")
+            _:
+                assert_true(false)
+
+    it "reports DepthExceeded via the active-names capacity guard, independent of resolution_depth":
+        val state = CssVarResolutionState.new("--a:red")
+        val result = _css_resolve_vars("var(--a)", state, 0, 33, false)
+        match result:
+            CssVarResolution.DepthExceeded:
+                assert_true(true)
+            _:
+                assert_true(false)
+
+describe "core.spl: _css_scan_rules_simple — wrapper overflow":
+    it "pushes a synthetic Unsupported/@unsupported-overflow wrapper past 32 nested @-wrappers":
+        var css = ""
+        var depth_i = 0
+        while depth_i < 34:
+            css = css + "@layer l" + depth_i.to_text() + "{"
+            depth_i = depth_i + 1
+        css = css + "div{color:red}"
+        var close_i = 0
+        while close_i < 34:
+            css = css + "}"
+            close_i = close_i + 1
+        val out = _css_scan_rules_simple(css, 10)
+        assert_equal(out.selectors.len(), 1)
+        val last_kind_idx = out.wrapper_kinds.len() - 1
+        val last_prelude_idx = out.wrapper_preludes.len() - 1
+        match out.wrapper_kinds[last_kind_idx]:
+            CssWrapperKind.Unsupported:
+                assert_true(true)
+            _:
+                assert_true(false)
+        assert_equal(out.wrapper_preludes[last_prelude_idx], "@unsupported-overflow")
+
+describe "core.spl: _extract_css_vw_with_rule_limit — media-group shapes":
+    it "includes an @media rule whose max-width condition is satisfied by the viewport":
+        val html = (
+            "<html><style>@media (max-width: 500px) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+
+    it "excludes an @media rule whose max-width condition is NOT satisfied by the viewport":
+        val html = (
+            "<html><style>@media (max-width: 500px) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 600, false, 10)
+        assert_equal(out.group_parts.len(), 0)
+
+    it "excludes an @media rule whose feature name is unrecognized (neither min-width nor max-width)":
+        val html = (
+            "<html><style>@media (prefers-color-scheme: dark) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 0)
+
+    it "includes an @media rule via its second comma-separated group when the first group fails":
+        val html = (
+            "<html><style>@media (min-width: 999px), (max-width: 999px) {" +
+            "div{color:red}}</style></html>"
+        )
+        val out = _extract_css_vw_with_rule_limit(html, 400, false, 10)
+        assert_equal(out.group_parts.len(), 1)
+
+describe "core.spl: compute_styles_with_material — rejection diagnostic":
+    it "reaches the entry-rejected diagnostic when the fallback contract is declared but no admission condition is met":
+        val html = (
+            "<html><body><section id='s' " +
+            "data-wm-theme-fallback='solid-material' " +
+            "style='background:#123456'>" +
+            "</section></body></html>"
+        )
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 400, false)
+        val child_index = build_child_index(nodes)
+        var material_entries: [text] = ["", ""]
+        var material_counts: [i64] = [0, 0]
+        var cpu_material_nodes: [i32] = []
+        var solid_material_nodes: [i32] = []
+        val styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+        assert_equal(material_counts[0], 0)
+        assert_equal(material_counts[1], 0)
+        assert_equal(cpu_material_nodes.len(), 0)
+        assert_equal(solid_material_nodes.len(), 0)
