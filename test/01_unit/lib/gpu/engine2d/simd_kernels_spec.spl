@@ -9,7 +9,7 @@ detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
 
 use std.spec.{describe, context, it, expect}
 use std.io_runtime.{file_read}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, CpuSimdRuntimeEvidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, simd_blend_row, simd_blit_row, _scalar_blend_row, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv, active_arch_text, active_feature_text, simd_config_mode, blit_rect, _scalar_blit_rect, scroll_region, _scalar_scroll_region}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, CpuSimdRuntimeEvidence, simd_fill_row, engine2d_simd_fill_buffer_u32, engine2d_simd_fill_rows_u32, rt_engine2d_simd_fill_span_u32, rt_engine2d_simd_copy_span_u32, engine2d_simd_blend_row_u32, engine2d_simd_blend_span_u32, engine2d_simd_blend_const_span_u32, simd_blend_row, simd_blit_row, _scalar_blend_row, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv, active_arch_text, active_feature_text, simd_config_mode, blit_rect, _scalar_blit_rect, scroll_region, _scalar_scroll_region}
 use std.env.variables.{env_set, env_unset}
 
 # ============================================================================
@@ -466,3 +466,62 @@ describe "CpuSimdRuntimeEvidence.diagnostic_text":
         expect(text_out).to_contain("feature=" + active_feature_text())
         expect(text_out).to_contain("native_simd_executed=")
         expect(text_out).to_contain("native_simd_hits=" + evidence.native_simd_hits.to_text())
+
+# ============================================================================
+# rt_engine2d_simd_blend_span_u32 / rt_engine2d_simd_blend_const_span_u32
+#
+# T16 (doc/08_tracking/bug/t16_blend_span_c_symbol_not_reachable_three_implementations_2026-08-07.md)
+# tracked these two kernels as absent from the deployed native ABI. `nm` on
+# the current deployed binary shows both symbols present again, but no spec
+# asserted pixel output for the in-place span form — only the row form
+# (engine2d_simd_blend_row_u32) had exact-value coverage. These cases close
+# that gap with the same straight-alpha src-over fixtures already proven
+# bit-exact for the row kernel above.
+# ============================================================================
+
+describe "engine2d_simd_blend_span_u32 (in-place span blend, bit-exact)":
+    it "blends a bounded span in place without touching pixels outside it":
+        var dst: [u32] = [0x11111111u32, 0xFF0000FFu32, 0xFF0000FFu32, 0x22222222u32]
+        val src: [u32] = [0xFFFF0000u32, 0xFFFF0000u32]
+        dst = engine2d_simd_blend_span_u32(dst, 1, src, 0, 2)
+        expect(dst[0]).to_equal(0x11111111u32)
+        expect(dst[1]).to_equal(0xFFFF0000u32)
+        expect(dst[2]).to_equal(0xFFFF0000u32)
+        expect(dst[3]).to_equal(0x22222222u32)
+
+    it "transparent source leaves destination span unchanged":
+        var dst: [u32] = [0xFF0000FFu32, 0xFF0000FFu32]
+        val src: [u32] = [0x00000000u32, 0x00000000u32]
+        dst = engine2d_simd_blend_span_u32(dst, 0, src, 0, 2)
+        expect(dst[0]).to_equal(0xFF0000FFu32)
+        expect(dst[1]).to_equal(0xFF0000FFu32)
+
+    it "matches the scalar row kernel value-for-value (bit-exact parity)":
+        val dst_row: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
+        val src_row: [u32] = [0x80FFFFFFu32, 0x80FF0000u32, 0x00000000u32, 0xFFFFFFFFu32]
+        var scalar_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
+        _scalar_blend_row(scalar_dst, src_row, 0, 4)
+        var span_dst: [u32] = [0x00000000u32, 0x800000FFu32, 0x00112233u32, 0x7FFFFFFFu32]
+        span_dst = engine2d_simd_blend_span_u32(span_dst, 0, src_row, 0, 4)
+        expect(span_dst).to_equal(scalar_dst)
+        expect(span_dst[1]).to_equal(0xBFAA0054u32)
+
+describe "engine2d_simd_blend_const_span_u32 (constant-colour span blend, bit-exact)":
+    it "blends one constant colour over a bounded span in place":
+        var dst: [u32] = [0x11111111u32, 0xFF0000FFu32, 0xFF0000FFu32, 0x22222222u32]
+        dst = engine2d_simd_blend_const_span_u32(dst, 1, 2, 0xFFFF0000i64)
+        expect(dst[0]).to_equal(0x11111111u32)
+        expect(dst[1]).to_equal(0xFFFF0000u32)
+        expect(dst[2]).to_equal(0xFFFF0000u32)
+        expect(dst[3]).to_equal(0x22222222u32)
+
+    it "zero-alpha constant colour is a no-op":
+        var dst: [u32] = [0xFF0000FFu32, 0xFF0000FFu32]
+        dst = engine2d_simd_blend_const_span_u32(dst, 0, 2, 0x00FFFFFFi64)
+        expect(dst[0]).to_equal(0xFF0000FFu32)
+        expect(dst[1]).to_equal(0xFF0000FFu32)
+
+    it "50%-alpha constant colour matches the row kernel's known bit-exact value":
+        var dst: [u32] = [0x800000FFu32]
+        dst = engine2d_simd_blend_const_span_u32(dst, 0, 1, 0x80FF0000i64)
+        expect(dst[0]).to_equal(0xBFAA0054u32)
