@@ -663,6 +663,55 @@ fn parse_primary_expr() -> i64:
         body_stmts.push(call)
         return expr_lambda(param_names, body_stmts, 0)
 
+    # Pipe lambda: |params| expr  (Ruby/Rust style; mirrors the seed's
+    # parse_pipe_lambda_params in expressions/postfix.rs).
+    # Syntax: | |             — zero params (NOTE: `||` lexes as logical-or
+    #                           (TOK_OR/56) per lexer_struct G32, so the
+    #                           zero-param form must be written with a space)
+    #         |x|             — single param
+    #         |x, y|          — multiple params (comma-separated)
+    #         |_|             — wildcard param
+    #         |x: i64|        — per-param type annotation; parsed and validated,
+    #                           then dropped, because EXPR_LAMBDA stores param
+    #                           NAMES only (same as parse_fn_lambda_after_kw).
+    #
+    # Disambiguation — this production is reachable ONLY in prefix position, so
+    # it cannot steal any pre-existing meaning of `|`:
+    #   - bitwise-or is INFIX, consumed by the precedence climb in parser_expr
+    #     (parser_expr.spl:421/508), which never re-enters parse_primary at `|`
+    #   - union types (`i64 | text`) are consumed by parser_parse_type_with_union
+    #   - enum variant separators are consumed by enum_module_body.spl:376
+    #   - match-arm alternation (parser_stmts.spl:1417/1477/1609) and asm
+    #     clobber lists (parser_asm.spl:33) parser_advance() past the `|`
+    #     before parsing the next element, so parse_primary never sees it
+    #   - `|>` (175) and `||` (56) are separate tokens from the lexer, and a
+    #     line-leading `|` continuation is handled in lexer_struct, not here
+    if par_kind_get() == 121:
+        parser_advance()
+        var pipe_params: [i64] = []
+        # Zero-param `| |`: closing pipe is already here, skip the param loop.
+        if par_kind_get() != 121:
+            while true:
+                if par_kind_get() != 6 and par_kind_get() != 169:
+                    parser_error("expected parameter name in pipe lambda")
+                    break
+                val pipe_pn = par_text_get()
+                parser_advance()
+                pipe_params.push(expr_ident(pipe_pn, 0))
+                # Optional per-param type. Use parser_parse_type (single type),
+                # NOT parser_parse_type_with_union: the union form continues
+                # through `|` and would swallow this lambda's own closing pipe.
+                if par_kind_get() == 161:
+                    parser_advance()
+                    parser_parse_type()
+                if par_kind_get() != 160:
+                    break
+                parser_advance()
+        parser_expect(121)
+        var pipe_stmts: [i64] = []
+        pipe_stmts.push(parse_expr())
+        return expr_lambda(pipe_params, pipe_stmts, 0)
+
     # Backslash lambda: \params: expr  or  \params:\n INDENT stmts DEDENT
     # Syntax: \: expr         — zero params
     #         \x: expr        — single param
