@@ -42,6 +42,25 @@ anti-patterns: `doc/07_guide/infra/sspec_antipatterns.md`, example manuals:
 `doc/07_guide/app/spipe/manual_examples/`, requirements:
 `doc/02_requirements/feature/sspec_scenario_manual.md`.
 
+### Typed evidence oracles
+
+An observation (screenshot, terminal grid, protocol transcript, bytes, scene graph) is
+**not an oracle** — it proves something was captured, not that it was correct. Typed
+evidence declares checks as data and evaluates them fail-closed.
+
+- Modules: `src/lib/common/spec/evidence/model.spl` (records, selectors, `oracle_spec`),
+  `src/lib/common/spec/evidence/evidence_comparator.spl` (fail-closed evaluation + manual
+  projection).
+- Fail-closed rules: parse error, unresolved selector, ambiguous cardinality, ignore
+  without a reason, all-ignore vacuity, closed-mode undeclared field, zero positive
+  resolutions — each fails the capture rather than reporting a clean pass.
+- `check_full_pattern` patterns are **anchored class tokens** (`hex:16`, `digit:*`,
+  `alnum:N`) — never regex, never substring match.
+- Run with `bin/simple run <spec>`, not `test`: the `test` daemon path trips the
+  800-module transitive-import cap during load.
+- Guide: `doc/07_guide/infra/sspec_typed_evidence.md`. Glossary:
+  [Typed Evidence](../../doc/glossary.md).
+
 ### Scoring & modernization triage — `sspec-maintain scan`
 Score a spec/dir for modernness: `simple sspec-maintain scan <spec|dir>` (7
 weighted dimensions → `SSpec documentization score: N/100`). Operator manual:

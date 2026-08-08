@@ -46,16 +46,21 @@ use std.common.ui.draw_ir.{
     DRAW_IR_COMMAND_EDGE,
     DRAW_IR_EDGE_BEZIER,
     DRAW_IR_EDGE_STRAIGHT,
+    DrawIrComposition,
     draw_edge,
     draw_ir_batch,
+    draw_ir_composition,
     draw_ir_edge_command,
     draw_ir_embedding_config,
     draw_ir_path_command,
     draw_ir_point,
-    draw_ir_style_prop
+    draw_ir_rect,
+    draw_ir_style_prop,
+    draw_ir_text_resolved_font
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_count}
 
 # Count pixels that differ between two equal-length framebuffers.
@@ -104,6 +109,44 @@ fn line_oracle(w: i32, h: i32, x1: i32, y1: i32, x2: i32, y2: i32, bg: u32, fg: 
             err = err + dx
             cy = cy + sy
     pixels
+
+# A performance receipt is accepted only when an external live runner records
+# exactly twenty positive frame/RSS samples and reports the nearest-rank p95.
+# This unit suite intentionally supplies no synthetic positive timings.
+fn warm_perf_receipt_schema_valid(frame_ns: [i64], rss_kib: [i64], p95_ns: i64) -> bool:
+    if frame_ns.len() != 20 or rss_kib.len() != 20 or p95_ns <= 0:
+        return false
+    var less = 0
+    var equal = 0
+    for sample in frame_ns:
+        if sample <= 0:
+            return false
+        if sample < p95_ns:
+            less = less + 1
+        elif sample == p95_ns:
+            equal = equal + 1
+    for rss in rss_kib:
+        if rss <= 0:
+            return false
+    # ceil(20 * .95) == 19; p95 must itself be a measured sample.
+    less < 19 and less + equal >= 19
+
+fn showcase_vulkan_frame(
+    frame_id: text, marker_x: i32, family: text, identity: text,
+    advances: [i32], text_width: i32, line_height: i32
+) -> DrawIrComposition:
+    val text = draw_ir_text_resolved_font(
+        "showcase-title", 8, 8, "Simple2D Vulkan", 0xFFF0DCB4u32,
+        family, identity, advances, text_width, line_height, 18)
+    val batch = draw_ir_batch(
+        "showcase-batch-" + frame_id, DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("showcase", "vulkan", 0, 0, 128, 72, 0, 1000, false),
+        [draw_ir_rect("background", 0, 0, 128, 72, 0xFF03070Bu32),
+         draw_ir_rect("animated-marker", marker_x, 48, 16, 12, 0xFF22D3EEu32),
+         text])
+    draw_ir_composition(
+        "showcase-frame-" + frame_id, "simple2d-showcase",
+        DRAW_IR_BACKEND_GPU, [batch])
 
 # First-principles vertical-gradient oracle: an endpoint-exact integer lerp.
 # row 0 == top color, row h-1 == bottom color; channel = top + (bot-top)*row/max_t
@@ -283,6 +326,89 @@ describe "Engine2D Vulkan backend compute matches the reference":
         expect(result.device_identity).to_be_greater_than(0)
         expect(pixel_mismatches(result.pixels, cpu.read_pixels())).to_equal(0)
         engine.shutdown()
+
+    it "Simple2D showcase animation reuses one Vulkan font batch/session and produces distinct device frames":
+        val width: i32 = 128
+        val height: i32 = 72
+        val font_path = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+        val content = "Simple2D Vulkan"
+        val created = Engine2D.create_with_backend_strict(width, height, "vulkan")
+        if not created.is_ok():
+            expect(vulkan_sffi_device_count()).to_equal(0)
+            return
+        var engine = created.unwrap()
+        expect(engine.load_font(font_path)).to_be(true)
+        val metrics = resolve_font_metrics(font_path, content, 18)
+        expect(metrics.valid).to_be(true)
+        expect(metrics.identity).to_equal(engine.selected_font_identity())
+
+        # Frame state changes only the marker position. Text remains the same
+        # semantic DrawIR command so the FontRenderer/FontRenderBatch cache is
+        # required to stay owned by the persistent Engine2D session.
+        val first_frame = showcase_vulkan_frame(
+            "1", 12, metrics.family, metrics.identity, metrics.advances,
+            metrics.width, metrics.line_height)
+        val second_frame = showcase_vulkan_frame(
+            "2", 72, metrics.family, metrics.identity, metrics.advances,
+            metrics.width, metrics.line_height)
+        val font_before = engine.font_cache_stats()
+        val cold = engine2d_draw_ir_adv_composition(engine, first_frame, true)
+        val font_cold = engine.font_cache_stats()
+        val warm = engine2d_draw_ir_adv_composition(engine, second_frame, true)
+        val font_warm = engine.font_cache_stats()
+
+        expect(engine.backend_name()).to_equal("vulkan")
+        expect(cold.selected_backend).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(cold.rendered_command_count).to_equal(3)
+        expect(cold.skipped_command_count).to_equal(0)
+        expect(cold.fallback_required).to_be(false)
+        expect(cold.fallback_reason).to_equal("")
+        expect(cold.readback_source).to_equal("device_readback")
+        expect(cold.backend_handle).to_be_greater_than(0)
+        expect(cold.device_identity).to_be_greater_than(0)
+        expect(cold.readback_checksum).to_be_greater_than(0)
+        expect(cold.font_execution_target).to_equal("vulkan")
+        expect(cold.font_identity).to_equal(metrics.identity)
+        expect(cold.font_batch_identity != "").to_be(true)
+        expect(cold.font_readback_source).to_equal("device_readback")
+        expect(cold.font_device_checksum).to_be_greater_than(0)
+        expect(cold.font_device_checksum).to_equal(cold.font_oracle_checksum)
+        expect(cold.font_readback_nonblank_pixels).to_be_greater_than(0)
+        expect(cold.font_parity).to_be(true)
+        expect(cold.font_device_executed).to_be(true)
+        expect(cold.font_promotion_ready).to_be(true)
+        expect(cold.font_atlas_upload_count).to_be_greater_than(0)
+        expect(cold.font_atlas_upload_bytes).to_be_greater_than(0)
+        expect(cold.font_atlas_payload_sha256.len()).to_equal(64)
+
+        expect(warm.rendered_command_count).to_equal(3)
+        expect(warm.skipped_command_count).to_equal(0)
+        expect(warm.fallback_required).to_be(false)
+        expect(warm.fallback_reason).to_equal("")
+        expect(warm.readback_source).to_equal("device_readback")
+        expect(warm.backend_handle).to_equal(cold.backend_handle)
+        expect(warm.device_identity).to_equal(cold.device_identity)
+        expect(warm.readback_checksum).to_be_greater_than(0)
+        expect(warm.readback_checksum == cold.readback_checksum).to_be(false)
+        expect(warm.font_execution_target).to_equal("vulkan")
+        expect(warm.font_batch_identity).to_equal(cold.font_batch_identity)
+        expect(warm.font_readback_source).to_equal("device_readback")
+        expect(warm.font_device_checksum).to_equal(warm.font_oracle_checksum)
+        expect(warm.font_parity).to_be(true)
+        expect(warm.font_device_executed).to_be(true)
+        expect(warm.font_promotion_ready).to_be(true)
+        expect(warm.font_atlas_upload_count).to_equal(cold.font_atlas_upload_count)
+        expect(warm.font_atlas_upload_bytes).to_equal(cold.font_atlas_upload_bytes)
+        expect(warm.font_atlas_payload_sha256).to_equal(cold.font_atlas_payload_sha256)
+        expect(font_cold.rasterizations - font_before.rasterizations).to_be_greater_than(0)
+        expect(font_warm.rasterizations - font_cold.rasterizations).to_equal(0)
+        expect(font_warm.hits - font_cold.hits).to_be_greater_than(0)
+        engine.shutdown()
+
+    it "does not certify unmeasured or short showcase performance receipts":
+        # Do not manufacture frame times/RSS in a unit test. A live wrapper is
+        # responsible for filling this schema with twenty real warm samples.
+        expect(warm_perf_receipt_schema_valid([], [], 0)).to_be(false)
 
     it "DrawIR curved EDGE fails closed before Vulkan dispatch":
         val w: i32 = 12

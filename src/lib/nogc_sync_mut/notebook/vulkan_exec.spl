@@ -106,6 +106,7 @@ class VulkanExec:
     initialized: bool
     blocked_reason: text
     last_arena: [u8]
+    last_data_off: i64
     step_budget: i64
 
     static fn make(mode_spec: text) -> VulkanExec:
@@ -115,6 +116,7 @@ class VulkanExec:
             initialized: false,
             blocked_reason: "",
             last_arena: [],
+            last_data_off: 0,
             step_budget: DEFAULT_STEP_BUDGET,
         )
 
@@ -145,6 +147,7 @@ class VulkanExec:
         self.initialized = true
         self.blocked_reason = ""
         self.last_arena = build_svmg_arena([], self.step_budget, 0)
+        self.last_data_off = SGP_HEADER_SIZE
 
 impl NotebookExecutor for VulkanExec:
     fn mode_spec() -> text:
@@ -186,10 +189,13 @@ impl NotebookExecutor for VulkanExec:
         # doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md,
         # owned by vulkan_vm_executor.spl) overlays this cell's header+code
         # onto a COPY of `self.last_arena` and resets the transient output
-        # channels -- see module docstring. `prior_data_off` is unused by
-        # Vulkan's persistence contract (passed as 0 for API symmetry with
-        # cuda_vm_executor's equivalent).
-        val arena = build_svmg_arena_persisting_data(code_bytes, self.step_budget, 0, self.last_arena, 0)
+        # channels -- see module docstring. `self.last_data_off` is the
+        # PREVIOUS cell's own data_off (where its persisted globals actually
+        # live in `self.last_arena`), not this cell's -- mirrors
+        # cuda_exec.spl's `last_arena`/`last_data_off` pairing. Passing a
+        # hardcoded 0 here was the bug: it made the copy read from
+        # `last_arena`'s header/code bytes instead of its DATA region.
+        val arena = build_svmg_arena_persisting_data(code_bytes, self.step_budget, 0, self.last_arena, self.last_data_off)
 
         if not self.session.arena_write(arena):
             self.blocked_reason = "vulkan arena write failed"
@@ -210,6 +216,7 @@ impl NotebookExecutor for VulkanExec:
 
         # Persist for the next cell's DATA region.
         self.last_arena = out_arena
+        self.last_data_off = data_off
 
         val sentinel = read_sentinel(out_arena)
         val log_text = read_log(out_arena)

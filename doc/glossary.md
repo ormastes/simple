@@ -511,6 +511,55 @@ SPipe is the BDD (Behavior-Driven Development) test framework for Simple.
 Uses `describe`/`it`/`expect` blocks with built-in matchers. Integrated into sstack Phase 4 (spec-first, before implementation).
 Coverage markers: `# @cover src/path/to/impl.spl <pct>%`.
 
+## Anchored Pattern Class
+In typed evidence (`check_full_pattern`), a pattern is a class token (`hex`, `digit`,
+`alnum`) plus an exact length or `*` — never a regex and never a substring match. The
+whole selected value must consist of that class end-to-end, so a value that merely
+*contains* the right shape fails. Prevents a truncated or prefixed identifier from
+passing review. See `doc/07_guide/infra/sspec_typed_evidence.md`.
+
+## Canonical Evidence
+The parsed, structured form an observation (screenshot, terminal grid, protocol
+transcript, bytes, scene graph) is normalized into after a format adapter runs, prior to
+oracle comparison. `CanonicalEvidence` is the shared shape both `OracleSpec` selectors and
+the comparator operate on. See `src/lib/common/spec/evidence/model.spl`.
+
+## Closed vs Open Oracle
+`oracle_spec(...)` is closed by default: any field the oracle never mentions fails the
+capture. `oracle_spec_open(...)` must be chosen deliberately to accept unmentioned fields.
+Prevents a new protocol/response field from silently entering the accepted contract
+because nobody decided to accept it. See `doc/07_guide/infra/sspec_typed_evidence.md`.
+
+## Evidence Manifest
+The receipt that makes a generated scenario manual falsifiable: schema, evidence/profile
+ids, spec path and SHA-256, provider id and version, run id, environment fingerprint,
+artifact SHA-256, and status. `evidence_manifest_is_complete` rejects a manifest missing
+its spec hash, provider identity, run id, or artifact hash, since without them a stale
+manual can't be told apart from a current one no matter how green its checks are. See
+`src/lib/common/spec/evidence/model.spl`.
+
+## Evidence Selector
+A path expression into `CanonicalEvidence` naming which part of an observation an
+`OracleSpec` check applies to (e.g. `response.headers.request-id`). A selector that
+resolves to nothing, or ambiguously to more than the declared cardinality, fails the
+capture rather than silently verifying nothing. See
+`src/lib/common/spec/evidence/evidence_comparator.spl`.
+
+## Manual Block
+A generic, provider-emitted record describing one unit of a generated manual (e.g. a
+comparison result rendered for a reader). Runtime code never renders Markdown itself —
+`spipe_docgen` is the sole renderer and can always fall back to a generic rendering of an
+unknown block, since capture and docgen run in separate processes sharing only files. See
+`doc/07_guide/infra/sspec_typed_evidence.md`.
+
+## Oracle Spec
+The typed, data-declared set of checks (`check_exact`, `check_full_pattern`,
+`check_ignore`, `check_multiset`, `check_ordered`, `check_numeric_tolerance`,
+`check_bind`/`check_same_as`, ...) that `compare_evidence` evaluates fail-closed against
+`CanonicalEvidence` to produce a `ComparisonResult`. Replaces "attach a capture to the
+manual" with an explicit, checkable verdict. See
+`src/lib/common/spec/evidence/model.spl`.
+
 ## SSpec (Modern SSpec)
 An SSpec is an executable specification (`*_spec.spl`) run by SPipe. **Modern
 SSpec** means the spec is written manual-first so `spipe-docgen` generates a
@@ -524,6 +573,25 @@ links. Quality bar: `doc/07_guide/app/spipe/scenario_manual_example.md` and
 `doc/07_guide/infra/sspec_antipatterns.md`. Requirements: FR-1..FR-6 in
 `doc/02_requirements/feature/sspec_scenario_manual.md`; capture extension
 design: `doc/05_design/sspec_capture_extension.md`.
+
+## Typed Evidence
+The Modern SSpec model that separates an *observation* (screenshot, terminal grid,
+protocol transcript, bytes, scene graph — proof something was captured) from an
+*oracle* (a data-declared `OracleSpec` that decides whether the observation was
+correct). Pipeline: `EvidenceRequest` → provider → `RawArtifact` → format adapter →
+`CanonicalEvidence` → `OracleSpec` + comparator → `ComparisonResult` → `ManualBlock[]`.
+Prevents the false green of a capture nobody actually checked. See
+`doc/07_guide/infra/sspec_typed_evidence.md`,
+`src/lib/common/spec/evidence/model.spl`,
+`src/lib/common/spec/evidence/evidence_comparator.spl`.
+
+## Vacuous Oracle
+An `OracleSpec` whose checks assert nothing about the system under test even though it
+reports PASS — e.g. every check is `check_ignore`, or every check is pattern-only
+(`check_full_pattern`) and resolves against zero actual nodes. `compare_evidence` fails
+these closed (all-ignore fails; zero positive resolutions fails) rather than reporting a
+clean pass over an empty or unexamined observation. See
+`doc/07_guide/infra/sspec_typed_evidence.md` §5.
 
 ## Simple RenderDoc
 

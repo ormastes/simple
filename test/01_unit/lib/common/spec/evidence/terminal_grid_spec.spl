@@ -1,0 +1,223 @@
+# @cover src/lib/common/spec/evidence/format/terminal_grid.spl 80%
+# @req REQ-SSPEC-TUI-001
+"""
+# Terminal grid evidence (E2)
+
+**Status:** Lane E2 of doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md
+
+## Purpose and Audience
+
+For QA authors building TUI scenario evidence: this spec documents the
+cell-accurate terminal snapshot model, its width policy, and the four
+fail-closed rules that keep a TUI capture from reporting a clean pass over a
+broken render.
+
+## Primary Workflow
+
+A provider builds a `TerminalSnapshot` from rendered rows, declares semantic
+regions over it, and projects it to `CanonicalEvidence` for
+`compare_evidence`. The same snapshot also yields a human-readable text
+projection for the manual and a cell-level diff for QA triage.
+"""
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    CanonicalEvidence, canonical_evidence_parse_error
+}
+use std.common.spec.evidence.format.terminal_grid.{
+    TerminalCell, TerminalCursor, TerminalRegion, TerminalSnapshot,
+    terminal_cell_default, terminal_snapshot_is_valid,
+    display_width_of, terminal_snapshot_from_rows,
+    terminal_snapshot_to_evidence, terminal_text_projection,
+    scoped_region_text, scoped_region_text_detailed, terminal_cell_diff
+}
+
+fn snapshot_with_region(rows: [text], columns: i64, node_id: text, row: i64, col: i64, width: i64, height: i64) -> TerminalSnapshot:
+    var snapshot = terminal_snapshot_from_rows(rows, columns)
+    snapshot.semantic_regions = [
+        TerminalRegion(node_id: node_id, row: row, col: col, width: width, height: height)
+    ]
+    snapshot
+
+
+describe "Terminal snapshot construction":
+    it "builds one cell per plain-ASCII grapheme":
+        step("Build a snapshot from a single plain row")
+        val snapshot = terminal_snapshot_from_rows(["hi"], 4)
+        step("Verify the projected text keeps the row content")
+        expect(terminal_text_projection(snapshot)[0]).to_equal("hi  ")
+
+    it "widens the grid for double-width graphemes and adds a continuation cell":
+        step("Build a snapshot from a row containing a wide CJK character")
+        val snapshot = terminal_snapshot_from_rows(["中文"], 4)
+        step("Verify the wide character round-trips through the text projection")
+        expect(terminal_text_projection(snapshot)[0]).to_equal("中文")
+
+    it "folds a combining mark onto the previous cell without advancing the column":
+        step("Build a snapshot from a base letter followed by a combining acute accent")
+        val snapshot = terminal_snapshot_from_rows(["éx"], 4)
+        step("Verify the combining mark did not consume its own column")
+        expect(terminal_text_projection(snapshot)[0]).to_equal("éx ")
+
+    it "keeps an emoji as a single double-width cell":
+        step("Build a snapshot from a row containing an emoji")
+        val snapshot = terminal_snapshot_from_rows(["\U0001F600!"], 4)
+        step("Verify the emoji and trailing glyph both round-trip")
+        expect(terminal_text_projection(snapshot)[0]).to_equal("\U0001F600!")
+
+    it "reports width 0/1/2 from the explicit width table":
+        step("Check a combining mark reports width 0")
+        expect(display_width_of("́")).to_equal(0)
+        step("Check plain ASCII reports width 1")
+        expect(display_width_of("a")).to_equal(1)
+        step("Check a wide CJK character reports width 2")
+        expect(display_width_of("中")).to_equal(2)
+
+
+describe "Rule: a snapshot with no width profile is invalid":
+    it "rejects a snapshot whose width_profile was never set":
+        step("Build a snapshot struct directly with an empty width_profile")
+        val snapshot = TerminalSnapshot(
+            columns: 4,
+            rows: 1,
+            cells: [terminal_cell_default()],
+            cursor: TerminalCursor(row: 0, col: 0, visible: false),
+            width_profile: "",
+            semantic_regions: []
+        )
+        step("Verify the snapshot is flagged invalid")
+        expect(terminal_snapshot_is_valid(snapshot)).to_equal(false)
+
+    it "fails evidence projection for an invalid snapshot instead of emitting empty nodes":
+        step("Build an invalid snapshot with an empty width_profile")
+        val snapshot = TerminalSnapshot(
+            columns: 4,
+            rows: 1,
+            cells: [terminal_cell_default()],
+            cursor: TerminalCursor(row: 0, col: 0, visible: false),
+            width_profile: "",
+            semantic_regions: []
+        )
+        step("Project the snapshot to evidence")
+        val evidence = terminal_snapshot_to_evidence(snapshot, "profile/1")
+        step("Verify the projection reports a parse failure, not an empty node set")
+        expect(evidence.parse_ok).to_equal(false)
+
+
+describe "Rule: a region that resolves to no cells is an error, not empty text":
+    it "fails when the declared region node_id does not exist on the snapshot":
+        step("Build a snapshot with no semantic regions declared")
+        val snapshot = terminal_snapshot_from_rows(["hello"], 6)
+        step("Resolve a region that was never declared")
+        val (text_value, clipped, ok) = scoped_region_text_detailed(snapshot, "main#missing")
+        step("Verify resolution is flagged as failed, not as empty text")
+        expect(ok).to_equal(false)
+
+    it "fails when the declared region has zero width or height":
+        step("Build a snapshot with a zero-height region")
+        val snapshot = snapshot_with_region(["hello"], 6, "main#empty", 0, 0, 3, 0)
+        step("Resolve the zero-height region")
+        val (text_value, clipped, ok) = scoped_region_text_detailed(snapshot, "main#empty")
+        step("Verify resolution is flagged as failed")
+        expect(ok).to_equal(false)
+
+    it "succeeds and returns the rendered text for a properly declared region":
+        step("Build a snapshot with a one-row region over 'hello'")
+        val snapshot = snapshot_with_region(["hello "], 6, "main#label", 0, 0, 5, 1)
+        step("Resolve the declared region")
+        val text_value = scoped_region_text(snapshot, "main#label")
+        step("Verify the region text matches the rendered content")
+        expect(text_value).to_equal("hello")
+
+
+describe "Rule: a double-width grapheme clipped at the right edge is reported":
+    it "flags clipping when a region's right edge splits a wide grapheme":
+        step("Build a snapshot with a wide character straddling the region boundary")
+        val snapshot = snapshot_with_region(["a中b"], 4, "main#clip", 0, 0, 2, 1)
+        step("Resolve the clipped region")
+        val (text_value, clipped, ok) = scoped_region_text_detailed(snapshot, "main#clip")
+        step("Verify the resolution reports the clip rather than silently truncating")
+        expect(clipped).to_equal(true)
+
+    it "does not flag clipping when the region boundary falls between cells":
+        step("Build a snapshot where the region boundary lands cleanly")
+        val snapshot = snapshot_with_region(["ab中"], 4, "main#clean", 0, 0, 2, 1)
+        step("Resolve the cleanly bounded region")
+        val (text_value, clipped, ok) = scoped_region_text_detailed(snapshot, "main#clean")
+        step("Verify no clip was reported")
+        expect(clipped).to_equal(false)
+
+
+describe "Rule: a continuation cell never contributes its own grapheme to region text":
+    it "renders a wide grapheme's region text without a duplicated character":
+        step("Build a snapshot with one wide grapheme filling a two-column region")
+        val snapshot = snapshot_with_region(["中"], 4, "main#wide", 0, 0, 2, 1)
+        step("Resolve the region")
+        val text_value = scoped_region_text(snapshot, "main#wide")
+        step("Verify the region text contains the grapheme exactly once")
+        expect(text_value).to_equal("中")
+
+    it "excludes continuation cells from the whole-grid text projection":
+        step("Build a snapshot mixing a wide grapheme with plain text")
+        val snapshot = terminal_snapshot_from_rows(["中ab"], 5)
+        step("Project the whole grid to text")
+        val line = terminal_text_projection(snapshot)[0]
+        step("Verify the continuation cell contributed no extra character")
+        expect(line).to_equal("中ab ")
+
+
+describe "Evidence projection":
+    it "emits grid metadata and region nodes for a valid snapshot":
+        step("Build a valid snapshot with one declared region")
+        val snapshot = snapshot_with_region(["ok    "], 6, "main#status", 0, 0, 2, 1)
+        step("Project the snapshot to canonical evidence")
+        val evidence = terminal_snapshot_to_evidence(snapshot, "tui/profile-1")
+        step("Verify the projection parsed successfully")
+        expect(evidence.parse_ok).to_equal(true)
+        step("Verify the region node carries the rendered region text")
+        expect(evidence.nodes[3].path).to_equal("main#status")
+        expect(evidence.nodes[3].value).to_equal("ok")
+
+    it "emits columns/rows/width_profile as metadata nodes":
+        step("Build a valid 6x1 snapshot")
+        val snapshot = terminal_snapshot_from_rows(["abcdef"], 6)
+        step("Project the snapshot to canonical evidence")
+        val evidence = terminal_snapshot_to_evidence(snapshot, "tui/profile-1")
+        step("Verify columns, rows, and width_profile are all present")
+        expect(evidence.nodes[0].path).to_equal("terminal.columns")
+        expect(evidence.nodes[0].value).to_equal("6")
+        expect(evidence.nodes[1].path).to_equal("terminal.rows")
+        expect(evidence.nodes[1].value).to_equal("1")
+        expect(evidence.nodes[2].path).to_equal("terminal.width_profile")
+
+
+describe "Cell-level diff":
+    it "reports no differences for two identical snapshots":
+        step("Build two identical snapshots")
+        val expected = terminal_snapshot_from_rows(["match"], 5)
+        val actual = terminal_snapshot_from_rows(["match"], 5)
+        step("Diff the snapshots")
+        val diff = terminal_cell_diff(expected, actual)
+        step("Verify the diff is empty")
+        expect(diff.len()).to_equal(0)
+
+    it "reports the row, column, and both graphemes for a differing cell":
+        step("Build two snapshots that differ in one cell")
+        val expected = terminal_snapshot_from_rows(["cat"], 3)
+        val actual = terminal_snapshot_from_rows(["car"], 3)
+        step("Diff the snapshots")
+        val diff = terminal_cell_diff(expected, actual)
+        step("Verify the single differing cell is reported with both graphemes")
+        expect(diff.len()).to_equal(1)
+        expect(diff[0]).to_contain("row 0 col 2")
+        expect(diff[0]).to_contain("t")
+        expect(diff[0]).to_contain("r")
+
+    it "reports a size mismatch line when grids differ in shape":
+        step("Build two snapshots of different column counts")
+        val expected = terminal_snapshot_from_rows(["ab"], 2)
+        val actual = terminal_snapshot_from_rows(["ab"], 4)
+        step("Diff the snapshots")
+        val diff = terminal_cell_diff(expected, actual)
+        step("Verify the size mismatch is reported")
+        expect(diff[0]).to_contain("grid size mismatch")

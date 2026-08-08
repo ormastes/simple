@@ -1,0 +1,249 @@
+# Generic Markdown renderer for typed-evidence ManualBlock records.
+#
+# @manual_section Typed evidence manual rendering
+# @req REQ-SSPEC-EVD-001
+
+use std.spec.*
+use std.common.spec.evidence.model.{
+    ManualBlock, ManualBlockKind, EvidenceAudience,
+    manual_block, manual_block_for,
+    EvidenceManifest, EvidenceStatus, evidence_manifest,
+    CanonicalEvidence, OracleSpec,
+    canonical_evidence, evidence_node,
+    oracle_spec, check_exact
+}
+use std.common.spec.evidence.evidence_comparator.{
+    compare_evidence, comparison_to_manual_blocks
+}
+use std.common.spec.evidence.manual_render.{
+    escape_cell, render_block, render_blocks, render_manual
+}
+
+fn sample_manifest() -> EvidenceManifest:
+    evidence_manifest(
+        "evd-001",
+        "simple-list/1",
+        "test/01_unit/lib/common/spec/evidence/manual_render_spec.spl",
+        "abc123",
+        "provider.list",
+        "1.0.0",
+        "run-42",
+        "ci-linux",
+        "def456",
+        EvidenceStatus.passed
+    )
+
+fn joined_lines(lines: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    out
+
+describe "Manual block rendering":
+    """
+    Every provider emits generic ManualBlock records; this module is the sole
+    place that turns them into Markdown, so a reader sees the same table and
+    heading shapes no matter which provider produced the evidence.
+    """
+
+    it "numbers an action_list block":
+        step("Render an action_list block with three steps")
+        val block = manual_block(ManualBlockKind.action_list, "Steps", ["Open the app", "Click Save", "Confirm the dialog"])
+        val lines = render_block(block)
+
+        step("Verify each line is numbered in order")
+        expect(lines[0]).to_equal("1. Open the app")
+        expect(lines[1]).to_equal("2. Click Save")
+        expect(lines[2]).to_equal("3. Confirm the dialog")
+
+    it "fences a code_block with no language tag":
+        step("Render a code_block")
+        val block = manual_block(ManualBlockKind.code_block, "Snippet", ["let x = 1"])
+        val lines = render_block(block)
+
+        step("Verify it is wrapped in a bare fence")
+        expect(lines[0]).to_equal("```")
+        expect(lines[1]).to_equal("let x = 1")
+        expect(lines[2]).to_equal("```")
+
+    it "fences a terminal_grid as a language-tagged text block":
+        step("Render a terminal_grid block")
+        val block = manual_block(ManualBlockKind.terminal_grid, "Screen", ["+---+", "| X |", "+---+"])
+        val lines = render_block(block)
+
+        step("Verify the fence is tagged text")
+        expect(lines[0]).to_equal("```text")
+        expect(lines[4]).to_equal("```")
+
+    it "renders an image block as a Markdown image link":
+        step("Render an image block")
+        val block = manual_block(ManualBlockKind.image, "Screenshot", ["artifacts/shot.png"])
+        val lines = render_block(block)
+
+        step("Verify the Markdown image syntax")
+        expect(lines[0]).to_equal("![Screenshot](artifacts/shot.png)")
+
+    it "renders a table block with a header separator row":
+        step("Render a two-row table block")
+        val block = manual_block(ManualBlockKind.table, "Fields", ["Name | Value", "status | 200"])
+        val lines = render_block(block)
+
+        step("Verify the header, separator, and data row")
+        expect(lines[0]).to_equal("| Name | Value |")
+        expect(lines[1]).to_equal("| --- | --- |")
+        expect(lines[2]).to_equal("| status | 200 |")
+
+    it "indents a field_tree block as a bullet list":
+        step("Render a field_tree block")
+        val block = manual_block(ManualBlockKind.field_tree, "Fields", ["request.command = LIST", "response.status = 200"])
+        val lines = render_block(block)
+
+        step("Verify each entry is a bullet")
+        expect(lines[0]).to_equal("- request.command = LIST")
+        expect(lines[1]).to_equal("- response.status = 200")
+
+    it "renders a byte_table block as a pipe table":
+        step("Render a byte_table block")
+        val block = manual_block(ManualBlockKind.byte_table, "Bytes", ["Offset | Value", "0 | FF"])
+        val lines = render_block(block)
+
+        step("Verify the pipe table shape")
+        expect(lines[0]).to_equal("| Offset | Value |")
+        expect(lines[1]).to_equal("| --- | --- |")
+
+    it "renders an expected_actual block as a pipe table":
+        step("Render an expected_actual block")
+        val block = manual_block(ManualBlockKind.expected_actual, "Check", ["Selector | Expected | Actual", "status | 200 | 200"])
+        val lines = render_block(block)
+
+        step("Verify the header separator is present")
+        expect(lines[1]).to_equal("| --- | --- | --- |")
+
+    it "quotes a warning block as a blockquote":
+        step("Render a warning block")
+        val block = manual_block(ManualBlockKind.warning, "Caution", ["Do not skip this step"])
+        val lines = render_block(block)
+
+        step("Verify the blockquote marker")
+        expect(lines[0]).to_equal("> Do not skip this step")
+
+    it "renders a troubleshooting block as a pipe table row":
+        step("Render a troubleshooting block")
+        val block = manual_block(ManualBlockKind.troubleshooting, "If it fails", ["Symptom | Fix", "blank screen | restart"])
+        val lines = render_block(block)
+
+        step("Verify the pipe table shape")
+        expect(lines[0]).to_equal("| Symptom | Fix |")
+
+    it "renders an artifact_link block as a Markdown link":
+        step("Render an artifact_link block")
+        val block = manual_block(ManualBlockKind.artifact_link, "Log", ["artifacts/run.log"])
+        val lines = render_block(block)
+
+        step("Verify the Markdown link syntax")
+        expect(lines[0]).to_equal("[Log](artifacts/run.log)")
+
+    it "falls back to a labeled code block for a paragraph-as-generic sanity check":
+        step("Render a paragraph block with no lines")
+        val block = manual_block(ManualBlockKind.paragraph, "Notes", [])
+        val lines = render_block(block)
+
+        step("Verify an empty block states it has no evidence rather than rendering blank")
+        expect(lines[0]).to_equal("_(no evidence recorded)_")
+
+    it "escapes a pipe character inside a cell so it cannot forge a table column":
+        step("Escape a value containing a pipe character")
+        val escaped = escape_cell("a | b")
+
+        step("Verify the pipe is backslash-escaped")
+        expect(escaped).to_equal("a \\| b")
+
+    it "keeps a forged pipe confined to its own cell when rendering a table row":
+        step("Render a table block whose second cell contains a raw pipe")
+        val block = manual_block(ManualBlockKind.table, "Injected", ["Name | Value", "note | a | b"])
+        val lines = render_block(block)
+
+        step("Verify the malicious cell still produces exactly the declared two columns")
+        expect(lines[2]).to_equal("| note | a \\| b |")
+
+describe "Audience filtering":
+    """
+    A user-facing manual must never leak QA-only evidence such as raw
+    protocol dumps or troubleshooting matrices. Filtering by audience is the
+    one place that rule is enforced, so no provider has to remember it.
+    """
+
+    fn mixed_blocks() -> [ManualBlock]:
+        [
+            manual_block_for(ManualBlockKind.paragraph, "Overview", EvidenceAudience.user, ["Open the app and press Save."]),
+            manual_block_for(ManualBlockKind.expected_actual, "Raw capture", EvidenceAudience.qa, ["Selector | Expected | Actual", "status | 200 | 200"])
+        ]
+
+    it "excludes QA-only blocks from a user-audience render":
+        step("Render the mixed block list for the user audience")
+        val lines = render_blocks(mixed_blocks(), EvidenceAudience.user)
+        val text_out = joined_lines(lines)
+
+        step("Verify the QA-only block title is absent")
+        expect(text_out).to_contain("Overview")
+        expect(text_out).to_not_contain("Raw capture")
+
+    it "includes only QA blocks in a qa-audience render":
+        step("Render the mixed block list for the QA audience")
+        val lines = render_blocks(mixed_blocks(), EvidenceAudience.qa)
+        val text_out = joined_lines(lines)
+
+        step("Verify the user-only block title is absent")
+        expect(text_out).to_contain("Raw capture")
+        expect(text_out).to_not_contain("Overview")
+
+    it "states no evidence recorded for an empty block list rather than rendering an empty section":
+        step("Render an empty block list")
+        val lines = render_blocks([], EvidenceAudience.user)
+
+        step("Verify the explicit no-evidence line")
+        expect(lines[0]).to_equal("_(no evidence recorded)_")
+
+describe "Whole-manual rendering":
+    """
+    render_manual assembles a title, the audience-filtered blocks, and — for
+    QA only — a provenance appendix built from the evidence manifest, so a
+    generated manual can be told apart from a stale one.
+    """
+
+    it "includes the provenance appendix for the QA audience but not the user audience":
+        step("Render the same blocks for both audiences")
+        val blocks = [manual_block_for(ManualBlockKind.paragraph, "Notes", EvidenceAudience.qa, ["captured value"])]
+        val manifest = sample_manifest()
+        val qa_lines = joined_lines(render_manual("Report", blocks, EvidenceAudience.qa, manifest))
+        val user_lines = joined_lines(render_manual("Report", blocks, EvidenceAudience.user, manifest))
+
+        step("Verify the provenance section and a manifest field appear only in the QA render")
+        expect(qa_lines).to_contain("## Provenance")
+        expect(qa_lines).to_contain("evidence_id: evd-001")
+        expect(user_lines).to_not_contain("## Provenance")
+        expect(user_lines).to_not_contain("evidence_id: evd-001")
+
+    it "renders an end-to-end comparator manual from typed evidence":
+        step("Build a small typed-evidence capture and its oracle")
+        val evidence = canonical_evidence(
+            "protocol_text",
+            "simple-list/1",
+            [evidence_node("response.status", "200")]
+        )
+        val spec = oracle_spec("simple-list/1", [check_exact("response.status", "200")])
+
+        step("Compare the evidence and project it into manual blocks")
+        val result = compare_evidence(evidence, spec)
+        val blocks = comparison_to_manual_blocks("List response check", result)
+
+        step("Render the QA manual and verify the comparison table and status line appear")
+        val manifest = sample_manifest()
+        val lines = joined_lines(render_manual("List response manual", blocks, EvidenceAudience.qa, manifest))
+        expect(lines).to_contain("| response.status | exact | 200 | 200 | PASS |")
+        expect(lines).to_contain("PASS — 1 check(s) passed")
+        expect(lines).to_contain("## Provenance")
