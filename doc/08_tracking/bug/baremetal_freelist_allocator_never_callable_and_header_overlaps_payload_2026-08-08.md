@@ -95,6 +95,34 @@ Regression spec: `test/01_unit/lib/baremetal/allocator_block_header_spec.spl`.
   intact): `executed=2 passed=1 failed=1 dropped=0`, the original
   `unknown static method` message returns. Restored afterwards.
 
+### 2026-08-08 follow-up — closed a tautology gap in the Defect 2 proof
+
+The example "reports a header size that covers the next-pointer field"
+(`allocator_block_header_spec.spl`) asserted `header_size().to_i64() ==
+12` — a literal compared to a literal, with no dependency on where `next`
+is actually read/written. Reverting `next` to offset `+5` while leaving
+`header_size()` at `12` (i.e. reintroducing the exact overlap this bug
+reports) would leave that example green.
+
+**Fix:** added `BlockHeader.next_offset() -> u32` (returns `8`) and routed
+`from_addr`/`write_to_addr` through it instead of the literal `+8`, then
+added a new example that derives the check from both static methods:
+`next_offset() + 4 <= header_size()`, plus `next_offset() == 8`.
+
+- **SABOTAGE** (`next_offset()` reverted to return `5`, everything else
+  intact, run via `bin/simple run
+  src/app/test_runner_new/test_runner_single.spl
+  test/01_unit/lib/baremetal/allocator_block_header_spec.spl
+  --no-session-daemon --sequential`): `Results: 4 total, 3 passed, 1
+  failed` — only the new "keeps the next-pointer field fully inside the
+  header (no payload overlap)" example fails; the old
+  header_size()==12 example stays green, confirming it alone would have
+  missed this regression. Restored afterwards.
+- **GREEN** (restored): `Results: 4 total, 4 passed, 0 failed`.
+
+This still proves the layout relationship structurally, not via an actual
+MMIO write/read round-trip — see "Not verified" below, unchanged.
+
 **Not verified.** Defects 2 and 3 are established by inspection only. They can
 only be exercised through `mem_read_u32`/`mem_write_u32`, which lower to
 `rt_mmio_*` — raw, unvalidated volatile pointer accesses
