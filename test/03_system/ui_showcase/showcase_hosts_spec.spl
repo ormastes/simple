@@ -55,7 +55,11 @@ use common.ui.host_input_event.{
 }
 use common.ui.draw_ir_v3.{
     draw_ir_v3_empty_scene, draw_ir_v3_command,
-    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE, DRAW_IR_V3_NO_ID
+    draw_ir_v3_empty_paint_table, draw_ir_v3_paint_append,
+    draw_ir_v3_empty_path_point_table, draw_ir_v3_path_point_append,
+    draw_ir_v3_path_span_append, draw_ir_v3_path_span_next_id,
+    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE, DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_VERB_MOVE, DRAW_IR_V3_VERB_LINE
 }
 use common.ui.wm_app_process_contract.{
     wm_fs_app_event, wm_fs_app_event_encode, wm_fs_app_event_seq_path
@@ -280,6 +284,47 @@ describe "web host — scene projection":
 
         expect(web_color_css(4280303712u32)).to_equal("rgba(32,64,96,1)")
         expect(web_color_css(2149597280u32)).to_equal("rgba(32,64,96,0.501)")
+
+    it "projects shared DrawIR text glyphs with pixel metrics and no unsupported receipt":
+        step("Project the showcase's canonical 5x7 text runs")
+        val st = showcase_build("spec_web_text")
+        val html = web_scene_to_html(showcase_scene(st, 200, 150), 200, 150)
+
+        expect(html.contains("data-glyph=")).to_equal(true)
+        expect(html.contains("background:rgba(")).to_equal(true)
+        expect(web_scene_unsupported_count(showcase_scene(st, 200, 150))).to_equal(0)
+
+    it "projects a valid line path through the web host boundary":
+        step("Build a canonical v3 path and emit SVG")
+        var scene = draw_ir_v3_empty_scene(10u32, 1u32)
+        scene.paint = draw_ir_v3_paint_append(
+            draw_ir_v3_empty_paint_table(), 4280303712u32, 4294967295u32,
+            1000, 1000, 0u16
+        )
+        var points = draw_ir_v3_empty_path_point_table()
+        points = draw_ir_v3_path_point_append(points, 5, 5, DRAW_IR_V3_VERB_MOVE)
+        points = draw_ir_v3_path_point_append(points, 35, 5, DRAW_IR_V3_VERB_LINE)
+        points = draw_ir_v3_path_point_append(points, 35, 25, DRAW_IR_V3_VERB_LINE)
+        scene.path_points = draw_ir_v3_path_span_append(
+            points, 0u32, 3u32, 0u16
+        )
+        val path_id = draw_ir_v3_path_span_next_id(
+            draw_ir_v3_empty_path_point_table()
+        )
+        scene.commands.push(draw_ir_v3_command(
+            DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE,
+            0u32, 0u32, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, 0u32, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, path_id, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID
+        ))
+
+        expect(web_scene_unsupported_count(scene)).to_equal(0)
+        expect(web_scene_to_html(scene, 40, 30).contains("<svg")).to_equal(true)
+        val host = ScreenWebHost.open(
+            40, 30, "/tmp/showcase_spec_web_path.html", ""
+        )!
+        expect(host.present_scene(scene)).to_equal(true)
 
     it "fails closed for a visible DrawIR command outside the web projection":
         step("Expose the partial-document receipt and reject presentation")
