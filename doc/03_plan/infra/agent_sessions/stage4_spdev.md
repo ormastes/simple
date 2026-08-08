@@ -64,3 +64,9 @@ Proposed provider-capsule direction (not yet implemented or admitted):
 - Bind the ordered provider-set hash into Stage4 candidate provenance and the
   link-profile fingerprint. Do not expose raw `runtime_legacy_core.o` through
   `SIMPLE_LINK_OBJECTS`.
+- Snapshot admitted providers, symbol contracts, and producer receipts into a
+  private immutable Stage4 input generation before linking. The logged build
+  command must name that exact receipt/hash, and provenance must replay it;
+  validating a caller-selected manifest only after the link is insufficient.
+- Replace colon-delimited provider transport before claiming Windows support;
+  drive-letter paths make that representation ambiguous.

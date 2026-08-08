@@ -74,6 +74,22 @@ Admission is deterministic:
 5. Write `BootstrapSdkManifest` and `BootstrapSdkProvenance` last, re-read
    them, recompute all listed hashes, and reject any extra unlisted artifact.
 
+External Stage4 SFFI providers follow the same immutable-input rule before the
+link starts. Admission copies each validated archive/shared library, symbol
+contract, provider receipt, and producer receipt into a private generation
+under the Stage4 output root. The linker consumes only those copied artifacts,
+never the caller's mutable paths. The logged Stage4 build command names the
+provider-set receipt and its hash; candidate provenance replays that exact
+receipt and verifies every copied artifact again. Selecting or rewriting a
+manifest after the link cannot bind providers to an already-built candidate.
+
+Provider receipts carry target, backend, runtime bundle, ABI, artifact format,
+source revision, producer identity, and strong-symbol ownership. Admission
+rejects symlinks, raw object formats regardless of filename, core-runtime or
+compiler-backfill identities, duplicate ids/paths/content/strong symbols, stale
+hashes, and foreign lane identities. Provider lists use receipt records rather
+than colon-delimited paths so Windows drive letters remain unambiguous.
+
 A source change invalidates its interface and body.  An interface-hash change
 also invalidates every reverse-dependent interface/body archive.  A body-only
 change may retain dependent SHBs, but it invalidates that module's body archive.
