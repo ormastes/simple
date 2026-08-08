@@ -135,15 +135,16 @@ impl CompilerDriver:
                 entry_sources)
             log_phase(
                 "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
-            # Physical key -> index into `parsed_entry_modules`. Built once here
-            # so the alias fan-out loop below is a Dict lookup instead of the
+            # Physical key -> canonical parsed module name. Built once here so
+            # the alias fan-out loop below is a Dict lookup instead of the
             # now-removed `_driver_text_list_index` linear scan, which was
             # O(entry_sources x unique_entry_sources) (~8.9e7 full-path text
-            # compares on a whole-tree closure). Value type is deliberately
-            # `i64` — see doc/07_guide/language/dict_native_pitfalls.md; a
-            # struct-valued dict would corrupt under native `.get()`.
-            var parsed_entry_index: Dict<text, i64> = {}
-            var parsed_entry_modules: [ParserModule] = []
+            # compares on a whole-tree closure). Keep ParserModule values in
+            # their final dictionary from the moment they are parsed. Holding
+            # them in a growable intermediate array allowed native array
+            # relocation plus later parser-pool resets to turn an earlier
+            # class reference into nil on large entry closures.
+            var parsed_entry_name: Dict<text, text> = {}
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
@@ -169,14 +170,14 @@ impl CompilerDriver:
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                 # Bracket assignment only — `.set()` silently fails on builtin
                 # Dicts under native codegen (see the NOTE below).
-                parsed_entry_index[physical_key] = parsed_entry_modules.len()
-                parsed_entry_modules = parsed_entry_modules.push(entry_module)
+                entry_modules[source.module_name] = entry_module
+                parsed_entry_name[physical_key] = source.module_name
             for source in entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
-                var parsed_idx: i64 = -1
-                if parsed_entry_index.contains_key(physical_key):
-                    parsed_idx = parsed_entry_index[physical_key]
-                if parsed_idx < 0:
+                var parsed_name = ""
+                if parsed_entry_name.contains_key(physical_key):
+                    parsed_name = parsed_entry_name[physical_key]
+                if parsed_name == "" or not entry_modules.contains_key(parsed_name):
                     self.ctx.errors.push(
                         "internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
@@ -188,7 +189,7 @@ impl CompilerDriver:
                 # site (e.g. module_surfaces_add_name, the SIMPLE_BOOTSTRAP
                 # branch just below) uses bracket assignment, which works.
                 # See doc/07_guide/language/dict_native_pitfalls.md.
-                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+                entry_modules[source.module_name] = entry_modules[parsed_name]
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources
