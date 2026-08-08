@@ -1,6 +1,6 @@
 # `array.remove(index)` returns the mutated array, not the removed element
 
-**Status:** OPEN — reconfirmed 2026-07-20 shape on 2026-08-08. The interpreter
+**Status:** OPEN — 2026-07-20 behaviour reconfirmed 2026-08-08. The interpreter
 still returns the mutated array. The seed JIT is WORSE and was not previously
 recorded: it returns `nil` **and does not mutate the array at all**. See
 "Re-triage 2026-08-08" below.

@@ -73,6 +73,21 @@ So the named-argument binder IS exercised, DOES validate names, and validates
 them against the field list rather than `new`'s parameter list. That is exactly
 the inverse of the filed defect.
 
+**Second control, for the JIT lane specifically.** The control above only covers
+the interpreter, because the JIT does not reject `bogus` (see the adjacent
+defect below). On the JIT, `Widget(id: 3, size: 4)` giving `id=3 size=4` would
+look identical if the JIT were ignoring the names and binding positionally — so
+that run alone proves nothing about this bug on that lane. The discriminator is
+a **reversed-order** call:
+
+    val w = Widget(size: 4, id: 3)      # arguments in the opposite order
+    JIT         -> id=3 size=4
+    interpreter -> id=3 size=4
+
+A positional binder would have produced `id=4 size=3`. Both lanes honour the
+names, so the RESOLVED verdict holds on the JIT as well as the interpreter, and
+not merely by coincidence of argument order.
+
 **Regression gate landed:** `test/03_system/feature/usage/named_ctor_with_static_new_spec.spl`
 
     SPEC FILE VERDICT: test/03_system/feature/usage/named_ctor_with_static_new_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
@@ -83,7 +98,9 @@ RED at `executed=3 passed=2 failed=1 dropped=0`, so the gate is not vacuous.
 ### Adjacent defect found while controlling (NOT this bug, not fixed here)
 
 The same `Widget(bogus: 3, size: 4)` that the interpreter rejects is **silently
-accepted by the seed JIT**, which prints `id=3 size=4` — the unknown field name
-is dropped and the arguments appear to bind positionally, with no diagnostic.
-An engine divergence on argument-name validation, filed separately as
+accepted by the seed JIT**, with no diagnostic. It is not positional binding
+(the reversed-order control above rules that out); the unknown name is absorbed
+into whichever field slot is still unfilled, and `Widget(id: 3, bogus: 4)` even
+lands `size=3` — corrupting a correctly-spelled field. An engine divergence on
+argument-name validation, filed separately as
 `jit_named_ctor_accepts_unknown_field_name_2026-08-08.md`.

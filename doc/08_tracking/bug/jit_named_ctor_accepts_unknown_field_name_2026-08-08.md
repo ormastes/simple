@@ -29,8 +29,30 @@ main()
 | seed JIT | `bin/simple run r.spl` (default) | `id=3 size=4` — WRONG, no diagnostic |
 
 `bogus` is not a field of `Widget`. The interpreter rejects it. The JIT accepts
-it and the `3` still reaches `id`, i.e. the name is discarded and the arguments
-appear to bind positionally.
+it silently.
+
+## What the JIT actually does (characterised 2026-08-08, seed JIT)
+
+An earlier draft of this report guessed "the arguments bind positionally". That
+guess is WRONG, and the discriminator is a reversed-order call:
+
+| call | JIT result | reading |
+|------|-----------|---------|
+| `Widget(id: 3, size: 4)` | `id=3 size=4` | correct |
+| `Widget(size: 4, id: 3)` | `id=3 size=4` | **names ARE honoured** — a positional binder would have given `id=4 size=3` |
+| `Widget(bogus: 3, size: 4)` | `id=3 size=4` | unknown name silently accepted; its value lands in the leftover field `id` |
+| `Widget(size: 4, bogus: 3)` | `id=3 size=4` | same, order-independent |
+| `Widget(id: 3, bogus: 4)` | `id=3 size=3` | unknown name accepted and `size` gets **3** — neither the supplied `4` nor a default |
+
+So the defect is narrower but stranger than "positional": known field names bind
+correctly by name in any order, and an **unknown** name is neither rejected nor
+dropped — it is silently absorbed into whichever field slot is still unfilled,
+and in the last row it corrupts that slot with an unrelated value (`3`, the
+value of the preceding argument) rather than the one written (`4`).
+
+That last row is the sharp edge: a single mistyped field name produces a
+constructed object in which a *correctly spelled* field also holds the wrong
+value, with no diagnostic on any line.
 
 ## Why this matters
 
@@ -41,9 +63,9 @@ programs run on (`bin/simple run` = JIT), while `bin/simple test` runs the
 interpreter and would catch it — a classic run/test divergence of the family
 already catalogued in `run_vs_test_harness_divergence_2026-07-28.md`.
 
-Because the JIT keeps the positional order, the failure is silent-wrong rather
-than merely permissive whenever the mistyped name would have bound to a
-different slot than its position implies.
+And per the table above the failure is silent-*wrong*, not merely permissive:
+`Widget(id: 3, bogus: 4)` yields `size=3`, so one typo corrupts a field the
+author spelled correctly.
 
 ## Not fixed here
 
