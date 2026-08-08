@@ -18,6 +18,13 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instructions.*
+# `eprint` is not an implicit builtin under the self-hosted HIR resolver: the
+# Rust seed happened to resolve it ambiently, so the three [mir-call-value]
+# probes below compiled under stage2 but failed Stage 3 with
+# `HIR lowering error in src/compiler/mir/mir_data.spl: unresolved name: eprint`.
+# Import it explicitly, exactly as the sibling lowering file does
+# (50.mir/_MirLowering/bootstrap_globals.spl:25). (2026-08-08 stage3)
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -465,14 +472,22 @@ impl MirBuilder:
 
     me emit_call_value(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
         """Emit a function call whose non-unit result is required."""
-        eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
+        # Level-gated behind this file's existing SIMPLE_MIRB_TRACE gate (see
+        # lines 113/186). These probes were unconditional, which on a hot path
+        # (every non-unit call emit) floods stderr for the whole build; they are
+        # retained, not deleted, per the log-retention policy. (2026-08-08)
+        val mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        if mirb_trace:
+            eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
         val dest = self.new_temp(return_type)
-        eprint("[mir-call-value] new-temp-after id={dest.id} next={self.next_local_id}\n")
+        if mirb_trace:
+            eprint("[mir-call-value] new-temp-after id={dest.id} next={self.next_local_id}\n")
         self.emit(MirInst(
             kind: MirInstKind.Call(dest, func, args),
             span: self.current_span
         ))
-        eprint("[mir-call-value] emit-after id={dest.id}\n")
+        if mirb_trace:
+            eprint("[mir-call-value] emit-after id={dest.id}\n")
         dest
 
     me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType) -> LocalId?:
