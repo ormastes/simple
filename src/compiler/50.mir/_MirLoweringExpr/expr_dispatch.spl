@@ -2586,6 +2586,72 @@ impl MirLowering:
                         # only operands proven to share one declared enum type
                         # before Named values can enter struct-dunder dispatch;
                         # all user enums currently share enum_id=0.
+                        # `opt == nil` / `opt != nil` (and the `if val v =
+                        # opt:` -> `v != nil` desugar that reaches here via
+                        # lower_cond_expr's `case _: self.lower_expr(cond)`
+                        # fallthrough, mir_lowering_stmts.spl:1773) against a
+                        # STATICALLY Optional-typed operand: route straight
+                        # through rt_is_some/rt_is_none instead of the
+                        # enum-equality machinery below. rt_is_none
+                        # (runtime_native.c) already discriminates BOTH
+                        # representations an Optional value can carry at this
+                        # point -- the boxed `rt_enum_new` handle every real
+                        # producer creates via ensure_option_handle (function
+                        # returns, Some()/None() literals, annotated var
+                        # decls), AND the flat sentinel-or-payload word `.?`
+                        # (HirExprKind.ExistsCheck) produces directly (its
+                        # condition-position lowering right above already
+                        # calls rt_is_some on that exact representation) --
+                        # so this needs no option_value_locals/nil_locals
+                        # bookkeeping and is correct regardless of whether
+                        # the compiler's own registration tracking followed
+                        # the value through every intervening copy. Checked
+                        # via the operands' STATIC HIR type (`left.type_` /
+                        # `right.type_`, populated by the type-checker on
+                        # every HirExpr), not local-id registration, so a
+                        # copy or an unregistered call result is still
+                        # detected correctly. Closes bug
+                        # pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08
+                        # (both `if val` always-Some and `== nil`
+                        # always-false were the SAME representation-blind raw
+                        # scalar compare fixed for Option<bool> literals in
+                        # ab773bb5d5e/ab3af6f728e, just never extended to a
+                        # nil-vs-Optional-typed-operand pairing).
+                        val op_is_eq_or_neq = match op:
+                            case Eq | NotEq: true
+                            case _: false
+                        val left_is_nil_lit = match left.kind:
+                            case NilLit: true
+                            case _: false
+                        val right_is_nil_lit = match right.kind:
+                            case NilLit: true
+                            case _: false
+                        var nil_check_operand = LocalId(id: -1)
+                        if op_is_eq_or_neq and right_is_nil_lit and not left_is_nil_lit and left.has_type_:
+                            match left.type_.kind:
+                                case HirTypeKind.Optional(_):
+                                    nil_check_operand = left_local
+                                case _:
+                                    ()
+                        elif op_is_eq_or_neq and left_is_nil_lit and not right_is_nil_lit and right.has_type_:
+                            match right.type_.kind:
+                                case HirTypeKind.Optional(_):
+                                    nil_check_operand = right_local
+                                case _:
+                                    ()
+                        if nil_check_operand.id >= 0:
+                            val nil_check_func_name = match op:
+                                case Eq: "rt_is_none"
+                                case _: "rt_is_some"
+                            val nil_check_func = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str(nil_check_func_name),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                    params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                                )))
+                            ))
+                            val nil_check_res = self.emit_resolved_direct_call(nil_check_func, [mir_operand_copy(nil_check_operand)], MirType.bool())
+                            if val nil_check_local = nil_check_res:
+                                return nil_check_local
                         var bin_is_enum_eq = false
                         var eq_left_local = left_local
                         var eq_right_local = right_local
