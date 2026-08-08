@@ -239,10 +239,32 @@ impl JitCompiler {
     /// emits no closure object at all, just a bare function-pointer value,
     /// and currently sails through undetected into a miscompile.
     fn first_named_fn_value_load(mir: &MirModule) -> Option<String> {
-        let global_names: std::collections::HashSet<&str> =
-            mir.globals.iter().map(|(name, _, _)| name.as_str()).collect();
-        let func_names: std::collections::HashSet<&str> =
-            mir.functions.iter().map(|f| f.name.as_str()).collect();
+        // `Node::Extern` handling (hir/lower/stmt_lowering.rs) inserts every
+        // extern fn's name into `hir.globals` (with the function's RETURN
+        // type, not a function-pointer type) specifically so the name is
+        // loadable via `GlobalLoad` when referenced as a value — that insert
+        // is what makes an extern fn nameable as a first-class value at all,
+        // and it flows straight through into `mir.globals` unfiltered. That
+        // means an extern fn's name is ALSO a `global_names` entry, so the
+        // original `!global_names.contains(name) && func_names.contains(name)`
+        // guard below always short-circuited false on `!global_names.contains`
+        // for extern fn names, regardless of whether `func_names` also listed
+        // them — the same closure-ABI miscompile this guard exists to catch
+        // (see the defined-fn case docs) reached compile_indirect_call
+        // silently for an extern fn name. Excluding extern fn names from the
+        // "safe global" set routes them into the `func_names` check instead.
+        let global_names: std::collections::HashSet<&str> = mir
+            .globals
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .filter(|name| !mir.extern_fn_names.contains(*name))
+            .collect();
+        let func_names: std::collections::HashSet<&str> = mir
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .chain(mir.extern_fn_names.iter().map(String::as_str))
+            .collect();
         for func in &mir.functions {
             for block in &func.blocks {
                 for inst in &block.instructions {

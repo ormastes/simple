@@ -120,8 +120,78 @@ impl<'a> MirLowerer<'a> {
             }
 
             // Non-coverage path or non-boolean operations
-            let left_reg = self.lower_expr(left)?;
-            let right_reg = self.lower_expr(right)?;
+            let mut left_reg = self.lower_expr(left)?;
+            let mut right_reg = self.lower_expr(right)?;
+
+            // Mixed ANY/concrete arithmetic operand: an ANY-typed operand
+            // (e.g. an element read off a `list`-typed parameter — its
+            // element type is genuinely unresolvable at `lower_index_expr`'s
+            // call site, so that site cannot emit UnboxInt/UnboxFloat itself)
+            // still carries the raw tag-boxed RuntimeValue bit pattern
+            // (`v << 3` for small ints). `compile_binop`'s native
+            // `iadd`/`isub`/`imul`/`idiv` assume both operands are already
+            // untagged, so `100 - data[3]` silently computed on the shifted
+            // tagged bits instead of the decoded value (no diagnostic, wrong
+            // result). Unbox the ANY side to match the concrete side before
+            // the native op is emitted. The ANY+ANY case is handled above
+            // (rt_any_add) and Eq/Is/NotEq above that; this covers the
+            // remaining arithmetic ops with exactly one ANY operand.
+            if matches!(
+                op,
+                BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::ShiftLeft
+                    | BinOp::ShiftRight
+                    | BinOp::Lt
+                    | BinOp::Gt
+                    | BinOp::LtEq
+                    | BinOp::GtEq
+            ) {
+                let left_is_any = left.ty == TypeId::ANY;
+                let right_is_any = right.ty == TypeId::ANY;
+                if left_is_any != right_is_any {
+                    let (any_reg, concrete_ty) = if left_is_any {
+                        (left_reg, right.ty)
+                    } else {
+                        (right_reg, left.ty)
+                    };
+                    let is_float_concrete = matches!(concrete_ty, TypeId::F32 | TypeId::F64);
+                    let is_int_concrete = matches!(
+                        concrete_ty,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                    );
+                    if is_int_concrete || is_float_concrete {
+                        let unboxed = self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            if is_float_concrete {
+                                block.instructions.push(MirInst::UnboxFloat { dest, value: any_reg });
+                            } else {
+                                block.instructions.push(MirInst::UnboxInt { dest, value: any_reg });
+                            }
+                            dest
+                        })?;
+                        if left_is_any {
+                            left_reg = unboxed;
+                        } else {
+                            right_reg = unboxed;
+                        }
+                    }
+                }
+            }
 
             // Equality involving ANY needs runtime dispatch because native/source
             // paths can carry mixed boxed/raw RuntimeValue-like representations

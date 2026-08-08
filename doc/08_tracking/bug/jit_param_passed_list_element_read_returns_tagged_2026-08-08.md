@@ -6,6 +6,31 @@ Rust **seed** binary `bin/release/x86_64-unknown-linux-gnu/simple`
 **Interpreter (`SIMPLE_EXECUTION_MODE=interpret`, `bin/simple test`): CORRECT on
 every variant below.**
 
+- **Status:** RESOLVED 2026-08-08 — root cause: `100 - data[3]` lowers
+  `data[3]` through `lower_index_expr`
+  (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`). When
+  the *expression's* static type is `ANY` (true for an untyped `list`
+  parameter — the front end genuinely cannot narrow a bare declared param the
+  way it can flow-narrow a locally built `var d = []; d.append(2)`),
+  `lower_index_expr` cannot determine `element_expr_ty` either, so it never
+  emits the `UnboxInt`/`UnboxFloat` that turns the raw tag-boxed
+  `rt_index_get`/`rt_array_get` result back into a native int. The resulting
+  ANY-typed, still-tagged VReg then reaches `compile_binop`
+  (`codegen/instr/core.rs`), whose native `isub`/`iadd`/etc. assume both
+  operands are already untagged — so `100 - data[3]` computed on the raw
+  `v << 3` bit pattern. This was NOT fixable at `lower_index_expr` alone (the
+  element type is genuinely unknowable there for a bare `list` param); the fix
+  is in the binary-op lowering instead: `lower_binary_expr`
+  (`mir/lower/lowering_expr_ops.rs`) now detects a binop with exactly ONE
+  `ANY`-typed operand and a concrete numeric operand on the other side, and
+  emits `UnboxInt`/`UnboxFloat` on the `ANY` side before the op reaches
+  codegen — covering `Add/Sub/Mul/Div/Mod` plus `BitAnd/BitOr/BitXor/
+  ShiftLeft/ShiftRight/Lt/Gt/LtEq/GtEq` (the ANY+ANY case was already handled
+  via `rt_any_add` for `Add`, and `Eq/Is/NotEq` already dispatch to
+  `rt_native_eq`/`rt_native_neq`). Verified: the doc's own `f_list` reproducer
+  now prints `98` (was `84`) on the rebuilt seed JIT, matching `f_i64` and the
+  inline form.
+
 ## Summary
 
 Inside a function whose parameter is declared with the **`list` container

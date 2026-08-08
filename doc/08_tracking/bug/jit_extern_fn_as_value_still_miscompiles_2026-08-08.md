@@ -1,10 +1,30 @@
 # JIT named-fn-as-value guard is narrower than its own doc claims: extern fn names still miscompile
 
 - **Filed:** 2026-08-08
-- **Status:** OPEN — gap in the guard landed by commit `45e0e8d6` (2026-08-07,
-  unit T7 per
-  `doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md`).
-  Not fixed by this doc; recording the gap only.
+- **Status:** RESOLVED 2026-08-08 — fixed in
+  `src/compiler_rust/compiler/src/codegen/jit.rs`,
+  `JitBackend::first_named_fn_value_load`. Two changes were needed, not one:
+  (1) `func_names` now chains `mir.extern_fn_names` as the doc's illustrative
+  fix suggested, but that alone was INERT — verified by reproducing the
+  segfault again after applying only that change. (2) The actual root cause:
+  `Node::Extern` handling (`hir/lower/stmt_lowering.rs`, `self.globals.insert
+  (e.name.clone(), ret_ty)`) inserts every extern fn's name into `hir.globals`
+  too — that's what makes an extern fn name loadable via `GlobalLoad` as a
+  value in the first place — and that insert flows unfiltered into
+  `mir.globals`. So an extern fn's name was ALWAYS also a `global_names` entry,
+  and the guard's `!global_names.contains(name) && func_names.contains(name)`
+  condition short-circuited false on the first half for every extern name,
+  regardless of `func_names`. Fix: `global_names` now filters out any name
+  present in `mir.extern_fn_names` before the guard's set-membership check.
+  Verified: `apply(rt_getpid)` / `apply(rt_string_new_literal)` (bare extern fn
+  passed as a value) went from a silent SIGSEGV / silent garbage `i64` result
+  to a loud `[INFO] JIT compilation failed ... deferring to interpreter`
+  refusal, matching the already-landed defined-fn case (`f06` fixture still
+  passes: `f06 marker result=42`). The interpreter fallback for the extern-fn
+  case itself then reports `variable 'rt_getpid' not found` — a separate,
+  pre-existing interpreter-side gap for this specific value class, not a
+  regression from this fix, and out of scope here (the goal was eliminating
+  the silent-wrong-answer/crash, which is done).
 - **Severity:** High — same silent-wrong-answer shape as the already-fixed
   Defect 2 (garbage pointer returned as an `i64`, process exits 0, no
   diagnostic), just reached through a different name class.
