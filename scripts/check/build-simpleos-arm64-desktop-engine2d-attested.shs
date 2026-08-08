@@ -22,7 +22,7 @@ BUILD_STAMP="${KERNEL}.build_stamp"
 BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLEOS_ATTESTED_DESKTOP_MEDIA_READY=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
@@ -167,7 +167,7 @@ resolve_compiler() {
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
-    BUILD_COMMAND="sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts && env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
+    BUILD_COMMAND="sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts && env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld"
 }
 
 resolve_compiler ||
@@ -244,13 +244,32 @@ if mdir -i "$DISK" ::/SYS/APPS >/dev/null 2>&1 ||
     fail_build "canonical-desktop-media-payload-isolation-failed"
 fi
 
+mkdir -p "$(dirname "$GENERATED_LOG_CONFIG")" ||
+    fail_build "generated-log-config-directory-failed"
+printf '%s\n' \
+    'val SIMPLEOS_LOG_COMPILED: bool = false' \
+    '' \
+    'fn simpleos_log_compile_enabled() -> bool:' \
+    '    SIMPLEOS_LOG_COMPILED' \
+    '' \
+    'fn simpleos_log_compile_mode_name() -> text:' \
+    '    if SIMPLEOS_LOG_COMPILED:' \
+    '        return "on"' \
+    '    "off"' \
+    >"$GENERATED_LOG_CONFIG" ||
+    fail_build "generated-log-config-write-failed"
+
 set +e
 env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 \
-    SIMPLEOS_ATTESTED_DESKTOP_MEDIA_READY=1 SIMPLE_OS_BUILD_BACKEND=llvm \
-    SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
-    "$COMPILER" os build --scenario=arm64-desktop-engine2d \
+    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off \
+    "$COMPILER" native-build \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os --backend llvm \
+    --opt-level=aggressive --log off --timeout 870 --entry-closure \
+    --entry "$ENTRY" --target aarch64-unknown-none -o "$KERNEL" \
+    --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld \
     >>"$BUILD_LOG" 2>&1
 BUILD_CODE=$?
 set -e
