@@ -29,6 +29,179 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_la
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
     Style, renderer_default_style
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_render_html_software_pixels
+}
+
+# --- fixtures for the `paint`/`_html_draw_ir_commands` DOM-tree-walking
+# closure round below. A single-property brace group like {color:red} lexes
+# as a string interpolation ({var:format}); every CSS brace is doubled to
+# escape it, matching the convention already used by
+# simple_web_html_layout_renderer_coverage_spec.spl's fixtures.
+
+fn _pl_head(rules: text) -> text:
+    "<html><head><style>html,body{{margin:0;padding:0;background:#ffffff}}" +
+        rules + "</style></head><body>"
+
+fn _pl_scrollbar_doc() -> text:
+    """A 20x20 box with BOTH `overflow:hidden` and `overflow-y:auto` set (the
+    only combination that raises both `overflow_hidden` and `overflow_auto_y`
+    -- see simple_web_html_layout_renderer_decl_apply.spl's `overflow`/
+    `overflow-y` cascade) and more content than fits -- the only path that
+    reaches `paint`'s scrollbar pass (`fb_vertical_scrollbar_clip`, w>=15,
+    h>=8), 0-covered by this spec before this fixture."""
+    _pl_head(".sb{{width:20px;height:20px;overflow:hidden;overflow-y:auto;background:#e2e8f0}}") +
+        "<div class=\"sb\"><p>a</p><p>b</p><p>c</p><p>d</p><p>e</p></div></body></html>"
+
+fn _pl_zsort_doc() -> text:
+    """Three overlapping `position:absolute` boxes with z-index 30/10/20,
+    declared in DOM order 10,30,20 -- deliberately NOT ascending, forcing
+    `paint`'s pass-4 unsorted branch (`positive_z_sorted = false`) to call
+    `_sort_positive_z_indices` before painting them back-to-front."""
+    _pl_head(
+        ".z1{{position:absolute;left:0px;top:0px;width:10px;height:10px;z-index:30;background:#ff0000}}" +
+        ".z2{{position:absolute;left:0px;top:0px;width:10px;height:10px;z-index:10;background:#00ff00}}" +
+        ".z3{{position:absolute;left:0px;top:0px;width:10px;height:10px;z-index:20;background:#0000ff}}"
+    ) + "<div class=\"z2\"></div><div class=\"z1\"></div><div class=\"z3\"></div></body></html>"
+
+fn _pl_rtl_doc() -> text:
+    "<html><head><style>html,body{{margin:0;padding:0}}.r{{direction:rtl;font-size:8px}}" +
+        "</style></head><body><p class=\"r\">abc</p></body></html>"
+
+fn _pl_ltr_doc() -> text:
+    "<html><head><style>html,body{{margin:0;padding:0}}.r{{font-size:8px}}" +
+        "</style></head><body><p class=\"r\">abc</p></body></html>"
+
+fn _pl_upper_doc() -> text:
+    _pl_head(".u{{text-transform:uppercase;font-size:8px}}") +
+        "<p class=\"u\">abc</p></body></html>"
+
+fn _pl_ellipsis_doc() -> text:
+    """A 10px-wide nowrap+hidden box with `text-overflow:ellipsis` around a
+    long text run -- the only path that reaches the Draw IR text-command
+    ellipsis arm added in commit 34095840 (`_html_draw_ir_command`'s
+    `st.text_overflow_ellipsis` branch calling `ellipsize_text_for_width`)."""
+    _pl_head(".e{{width:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:8px}}") +
+        "<p class=\"e\">abcdefghijklmnop</p></body></html>"
+
+fn _pl_noellipsis_doc() -> text:
+    """Same text run as `_pl_ellipsis_doc` but with no `text-overflow` set and
+    a box wide enough to hold it -- the sibling `else` arm of the same
+    ellipsis branch, so both sides of the commit-34095840 diff are exercised."""
+    _pl_head(".e{{width:100px;font-size:8px}}") +
+        "<p class=\"e\">abcdefghijklmnop</p></body></html>"
+
+fn _pl_bgimg_doc() -> text:
+    """A `background-image:url(...)` box rendered through the images-less
+    `simple_web_layout_render_html_draw_ir_result` entry point -- the only
+    path that reaches `_html_draw_ir_commands`'s background-layer branch
+    (`_html_draw_ir_two_url_background_layers`, `_html_draw_ir_image_index`)
+    and its `backgrounds_ready = false` fallback when no image resource is
+    supplied, 0-covered by this spec before this fixture."""
+    _pl_head(".bi{{width:10px;height:10px;background-image:url(x.png)}}") +
+        "<div class=\"bi\"></div></body></html>"
+
+fn _pl_details_doc() -> text:
+    """A `<details><summary>` pair -- the only path that reaches
+    `_html_draw_ir_summary_marker_command`, 0-covered by this spec before
+    this fixture."""
+    "<html><head><style>html,body{{margin:0;padding:0}}</style></head><body>" +
+        "<details><summary>more</summary><p>hidden</p></details></body></html>"
+
+describe "paint entry point: node/style pipeline via HTML (paint closure)":
+    """Drives the real HTML -> DOM -> style -> layout -> paint pipeline
+    through its own public entry points (`simple_web_layout_render_html_*`)
+    on tiny fixtures, rather than smoke-calling `paint`/`_html_draw_ir_commands`
+    directly -- this is the reachable path the baseline report's
+    "requires full node/style array fixtures to close further" gap named.
+    Every assertion below is a real pixel or Draw IR command value, hand-
+    verified against a throwaway probe of this same entry point before being
+    asserted (not a smoke/existence check)."""
+
+    it "paints scrollbar-track pixels distinct from the box's own background and from the page outside it":
+        val px = simple_web_layout_render_html_software_pixels(_pl_scrollbar_doc(), 24, 24, 3600000)
+        # col4: the div's own #e2e8f0 background, left of the scrollbar.
+        # col10: inside the 15px-wide scrollbar track/thumb region
+        # (x = box_right(20) - border_r(0) - 15 = 5 .. 19).
+        # col22: outside the 20px-wide box, the page's white background.
+        assert_true(px[4] != px[10])
+        assert_true(px[10] != px[22])
+        assert_equal(px[22], 4294967295u32)
+
+    it "z-sorts unsorted positive-z-index absolute boxes so the highest z-index paints on top":
+        val px = simple_web_layout_render_html_software_pixels(_pl_zsort_doc(), 12, 12, 3600000)
+        # z1 (z-index:30, #ff0000) is declared second in DOM order but has the
+        # highest z-index, so it must be the topmost (last-painted) pixel at
+        # the fully-overlapping origin -- only reachable if the unsorted-input
+        # branch actually calls _sort_positive_z_indices.
+        assert_equal(px[0], 4294901760u32)
+
+    it "reverses RTL #text glyph order relative to the same LTR text":
+        val res_rtl = simple_web_layout_render_html_draw_ir_result(_pl_rtl_doc(), 64, 24)
+        val res_ltr = simple_web_layout_render_html_draw_ir_result(_pl_ltr_doc(), 64, 24)
+        var rtl_text = ""
+        for b in res_rtl.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and rtl_text == "":
+                    rtl_text = c.text_value
+        var ltr_text = ""
+        for b in res_ltr.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and ltr_text == "":
+                    ltr_text = c.text_value
+        assert_equal(ltr_text, "abc")
+        assert_equal(rtl_text, "cba")
+
+    it "applies text-transform:uppercase before the Draw IR text command is built":
+        val res = simple_web_layout_render_html_draw_ir_result(_pl_upper_doc(), 64, 24)
+        var upper_text = ""
+        for b in res.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and upper_text == "":
+                    upper_text = c.text_value
+        assert_equal(upper_text, "ABC")
+
+    it "ellipsizes an overflowing text-overflow:ellipsis run in the Draw IR text command":
+        val res = simple_web_layout_render_html_draw_ir_result(_pl_ellipsis_doc(), 64, 24)
+        var ellipsis_text = ""
+        for b in res.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and ellipsis_text == "":
+                    ellipsis_text = c.text_value
+        assert_equal(ellipsis_text, "...")
+
+    it "passes the full text through unmodified when text-overflow:ellipsis is not set":
+        val res = simple_web_layout_render_html_draw_ir_result(_pl_noellipsis_doc(), 64, 24)
+        var full_text = ""
+        for b in res.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and full_text == "":
+                    full_text = c.text_value
+        assert_equal(full_text, "abcdefghijklmnop")
+
+    it "computes the background-image layer set and falls back cleanly with no image resources supplied":
+        val res = simple_web_layout_render_html_draw_ir_result(_pl_bgimg_doc(), 24, 24)
+        var command_count = 0
+        for b in res.composition.batches:
+            for c in b.commands:
+                command_count = command_count + 1
+        # canvas + html + body + div, and NO extra background-image command --
+        # proving the backgrounds_ready=false fallback path ran to completion
+        # (rather than crashing or silently appending a partial command).
+        assert_equal(command_count, 4)
+
+    it "emits an explicit summary-marker Draw IR command for a <details><summary>":
+        val res = simple_web_layout_render_html_draw_ir_result(_pl_details_doc(), 64, 24)
+        var marker_text = ""
+        var marker_component = ""
+        for b in res.composition.batches:
+            for c in b.commands:
+                if c.kind == "text" and c.component_id.contains("::marker"):
+                    marker_text = c.text_value
+                    marker_component = c.component_id
+        assert_equal(marker_text, "▶")
+        assert_true(marker_component.contains("summary"))
 
 describe "has_visible_overflow_clip":
     """True when any style in the list has overflow_hidden/overflow_auto_y

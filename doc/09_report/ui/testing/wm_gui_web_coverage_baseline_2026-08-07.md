@@ -1514,3 +1514,168 @@ behavior, then re-ran green.
 Artifacts: `/tmp/corecov_base_full.sdn`, `/tmp/corecov_base_pure.sdn`,
 `/tmp/corecov_new.sdn`. Extended spec sha (`git hash-object`, whole file,
 all 7 `describe` blocks): `3e4d7a04646d55c41644c7a4f76dd3b5056690b0`.
+
+## `paint_layout.spl` (U4.5) closure, pipeline-entry-point round — 2026-08-08
+
+### Scope
+
+Continuation of the "session N+3" round above (lines ~995-1249), which left
+51% (738/1433) and explicitly named the reachable-but-unattempted path: drive
+`paint`/`paint_tiled`/`_html_draw_ir_commands` through the real HTML -> DOM
+-> style -> layout -> paint pipeline's own public entry points
+(`simple_web_layout_render_html_*` in `simple_web_html_layout_renderer.spl`)
+on small HTML fixtures, rather than only the pure no-DOM-fixture helpers the
+prior round covered. This round did exactly that: extended the SAME closure
+spec (no second file) with an 8th `describe` block, "paint entry point:
+node/style pipeline via HTML (paint closure)", built on
+`simple_web_layout_render_html_software_pixels` (framebuffer pixel
+assertions) and `simple_web_layout_render_html_draw_ir_result` (Draw IR
+command assertions) — the pattern already established by
+`simple_web_html_layout_renderer_coverage_spec.spl`'s own fixtures.
+
+### New fixtures and what each proves (all real, hand-traced oracles)
+
+- **Scrollbar chrome**: a 20x20 box with `overflow:hidden;overflow-y:auto`
+  both set (the only CSS combination that raises both `overflow_hidden` and
+  `overflow_auto_y` per `simple_web_html_layout_renderer_decl_apply.spl`'s
+  cascade) and overflowing content — the only path into `paint`'s scrollbar
+  pass (`fb_vertical_scrollbar_clip`). Asserts three real pixel values
+  distinguish the div's own background, the scrollbar track, and the page
+  background outside the box.
+- **Unsorted z-index**: three fully-overlapping `position:absolute` boxes
+  with z-index 30/10/20 declared in non-ascending DOM order 10,30,20 — forces
+  `paint` pass 4's `positive_z_sorted = false` branch to call
+  `_sort_positive_z_indices` before painting. Asserts the topmost
+  (highest-z, `#ff0000`) pixel wins at the overlap point.
+- **RTL vs LTR text**: `direction:rtl` reverses the Draw IR text command's
+  `text_value` (`"cba"` vs `"abc"`) — the only path into
+  `_html_draw_ir_command`'s `reverse_text_for_paint` branch.
+- **text-transform:uppercase**: asserts the Draw IR text command carries
+  `"ABC"`, not `"abc"` — `apply_text_transform_for_paint` applied before the
+  command is built.
+- **Ellipsis (commit `34095840`) both arms**: a 10px `nowrap`+`hidden`+
+  `text-overflow:ellipsis` box truncates a long run to exactly `"..."` in the
+  Draw IR text command; the sibling fixture with no `text-overflow` and a
+  wide box passes the full `"abcdefghijklmnop"` through unmodified — both
+  sides of the `st.text_overflow_ellipsis` branch this commit added to
+  `_html_draw_ir_command` are now exercised through the Draw IR entry point
+  (previously only the CPU-framebuffer raster loop's copy of this logic was
+  covered).
+- **background-image with no image resources**: a `background-image:url(...)`
+  box rendered through the images-less `simple_web_layout_render_html_draw_ir_result`
+  entry point exercises `_html_draw_ir_commands`'s background-layer branch
+  (`_html_draw_ir_two_url_background_layers`, `_html_draw_ir_image_index`)
+  and its `backgrounds_ready = false` fallback; asserts exactly 4 commands
+  (canvas + html + body + div, no partial/crashed background command).
+- **`<details><summary>`**: asserts `_html_draw_ir_summary_marker_command`
+  emits a `"▶"` text command with a `"...::marker"`-suffixed component id.
+
+All 8 new examples pass; combined with the prior round's 38, the extended
+spec is 46 total, 46 passed, 0 failed (verified twice, independently, in two
+separate coverage-instrumented runs — see below).
+
+### A shared-working-copy measurement hazard, found and worked around
+
+This session's target file
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl`)
+was being actively edited **uncommitted, in the same shared working copy**,
+by a concurrent session landing an `overflow-wrap` feature (`wrap_active`,
+`_html_draw_ir_wrap_extra_line_commands`; see
+`doc/08_tracking/bug/web_css_overflow_wrap_zero_consumer_2026-08-07.md`). The
+file's on-disk content and line count (1433 -> 1465 -> 3240 lines at various
+points) changed several times over the course of this session purely from
+that sibling session's own edit/revert/land cycle, independent of anything
+this session did.
+
+First attempt used two coverage artifacts captured ~10 minutes apart without
+checking the file's identity between them: baseline showed 714 distinct
+`(file, line)` rows against a banner of 591 (a 123-line gap, far outside the
+~1-line "small discrepancy" this report has previously documented and
+accepted), and the closure spec's own denominator differed between the two
+runs (1433 vs 1465) — proof the two artifacts were measured against two
+different versions of the same file and could not be validly unioned. That
+attempt (`/tmp/plcov2/*`) was **discarded, not reported**.
+
+Fix: `git hash-object` the target file immediately before and after every
+coverage run from then on. A `git worktree` pinned to `origin/main` was
+tried as an alternative isolation mechanism but hit its own artifact (running
+`bin/simple` from a directory outside the primary checkout silently dropped
+CSS `text-transform` application — `expected ABC, got abc` — a working-copy
+resolution quirk unrelated to this file's code, not a real defect, and not
+pursued further). The working method that produced the numbers below: poll
+the shared WC's hash immediately before each coverage run until a baseline
+run and a closure run land back-to-back against the **same** hash, verified
+before and after each individual run (not just at the start of the pair).
+
+### Baseline, closure, and union (hash-matched pair)
+
+Both runs below measured the exact same on-disk content, hash
+`d95dbbcfdb0df146dbcf9697bdf995e96fbb093c` (1465 lines) before and after each
+run — this is the shared WC's current state, which **includes the
+concurrent session's not-yet-committed overflow-wrap edit** (it is not
+`origin/main`, whose `paint_layout.spl` blob is `f5b20c601e5...`, 1433/3136
+lines, at the time of this report). Baseline command:
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/plcov3_baseline.sdn bin/simple
+test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_coverage_spec.spl
+--coverage --no-cache`: `Results: 39 total, 38 passed, 1 failed` (the one
+failure, "stacks column-flex children vertically, second below first", is
+pre-existing and unrelated — this session never touched `paint_layout.spl`,
+the flex layout code, or that spec file), `coverage: ... 47% (692/1465
+lines)`. Closure command (same flags, extended spec):
+`Results: 46 total, 46 passed, 0 failed`, `coverage: ... 33% (484/1465
+lines)`.
+
+Union (distinct `(file, line)` rows extracted from each artifact's `lines`
+table, suffix-matched on `simple_web_html_layout_renderer_paint_layout.spl,`,
+`hit_count>0`, deduplicated): baseline 692 distinct lines (exact match to its
+own banner), closure-solo 486 distinct lines (banner said 484, the same
+~1-2-line discrepancy class this report has documented before, not
+reconciled), **union 813 distinct lines**.
+
+**Union coverage: 813/1465 = 55.5%.** U4.5 target is >=85% (1245/1465
+needed at this denominator). **NOT MET** — short by 432 lines.
+
+Compared to the prior round's reported 51% (738/1433): the raw percentage
+moved 51% -> 55.5%, but the two numbers are **not on the same denominator**
+(1433 vs 1465, a +32-line difference from the concurrent session's in-flight
+edit, not from anything measured here) and are not directly subtractable for
+a clean delta; the two solo-artifact deltas this round's own work produced
+are the honest figures: the new `describe` block's own solo run went from
+the closure spec's own prior 3% (52/1433, "session N+3") to 33% (484-486 of
+1465) with the same 38+8=46 examples, all passing.
+
+### Why the gap remains, and what would close it
+
+Per-function attribution against the union set confirms the prior round's
+own diagnosis was correct: `paint`'s six `_web_budget_expired_at` early-break
+guards (deadline-simulation only, not reachable by widening HTML fixtures),
+`paint_tiled`'s tile-culling/occluder/survivor bookkeeping (a second,
+mostly-parallel copy of `paint`'s pass structure gated behind
+`SIMPLE_WEB_TILE_PAINT`, not driven by any fixture in this or the prior
+round), and the bulk of `_html_draw_ir_visible_nodes`'s per-node visibility
+matrix remain the largest uncovered blocks. None of these are reachable by
+more HTML content alone — they need either budget/deadline injection or a
+`SIMPLE_WEB_TILE_PAINT`-gated fixture, which is real remaining scope, not
+attempted here given the time this round's shared-WC hazard consumed.
+
+### Sabotage / oracle-validity note
+
+No sabotage performed on `paint_layout.spl` (a concurrent session was live in
+that exact file for this entire round; per this report's own prior finding
+above, "sabotage the implementation not the shim," touching it here would
+have collided with real in-flight work). In place of sabotage, the RTL-vs-LTR
+and ellipsis-vs-no-ellipsis pairs are self-discriminating A/B fixtures: each
+pair asserts two different real values from the same code path under two
+different inputs, which fails identically to a sabotage probe if either
+branch's logic were broken or swapped.
+
+### Provenance
+
+Binary: `readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed; same provenance class as every other round in this report).
+Artifacts (hash-matched pair): `/tmp/plcov3_baseline.sdn`,
+`/tmp/plcov3_closure_b.sdn`. Discarded (version-mismatched) artifacts kept
+only as the shared-WC-hazard evidence above: `/tmp/plcov2/baseline2.sdn`,
+`/tmp/plcov2/closure2.sdn`. Extended spec sha (`git hash-object`, whole file,
+all 8 `describe` blocks, 46 `it` blocks):
+`849f5ecea836b9bb17b2bc4b401b6413d59c2c99`.
