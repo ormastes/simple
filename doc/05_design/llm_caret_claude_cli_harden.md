@@ -102,6 +102,95 @@ Real PTY evidence is a separate fail-closed system lane. It invokes the cached
 If the cached artifact, PTY utility, or qualified runtime is absent, the gate
 fails and records the missing prerequisite.
 
+### Typed terminal lifecycle contract (2026-08-08)
+
+<!-- codex-design -->
+
+The original `CaretIo` capability exposed `enter_alt`, `hide_cursor`,
+`show_cursor`, and `exit_alt` as void callbacks. That makes a failed terminal
+transition indistinguishable from success and leaves the caller unable to state
+which compensating cleanup is required. The next hardening slice replaces that
+implicit protocol with one typed, ordered lifecycle surface. This is a contract
+freeze: implementation and specs must use these names and signatures exactly.
+
+```simple
+struct CaretTerminalResult:
+    ok: bool
+    phase: text
+    error: text
+
+struct CaretIo:
+    is_tty: fn() -> bool
+    terminal_size: fn() -> TerminalSize
+    begin_tui: fn() -> CaretTerminalResult
+    end_tui: fn() -> CaretTerminalResult
+    clear_screen: fn()
+    draw_at: fn(i64, i64, text)
+    flush: fn()
+    read_byte: fn() -> i64
+    read_line: fn() -> text?
+    emit: fn(text)
+
+fn caret_terminal_ok(phase: text) -> CaretTerminalResult
+fn caret_terminal_error(phase: text, error: text) -> CaretTerminalResult
+fn production_caret_io() -> CaretIo
+
+fn run_chat_tui(
+    ui0: ChatTui,
+    policy: PermissionPolicy,
+    responder: fn([Message]) -> ModelResponse,
+    hooks: SessionHooks,
+    initial_conv: [Message],
+    io0: CaretIo? = nil
+) -> CaretLoopResult
+```
+
+`begin_tui` performs `enter_raw -> enter_alt -> hide_cursor`. It stops at the
+first failed phase and returns that phase (`raw-mode`, `alternate-screen`, or
+`cursor-hide`) with a nonempty error. It must not attempt a later phase.
+`end_tui` is compensating and idempotent: it attempts only the portions acquired
+by the matching `begin_tui`, in reverse order (`show_cursor -> exit_alt ->
+exit_raw`), records the first cleanup failure, and still attempts later cleanup.
+The production adapter owns the acquisition bookkeeping; `chat_tui.spl` never
+calls raw terminal primitives directly.
+
+The following boundary semantics are mandatory:
+
+| Caller state | Required result | Visible/output rule |
+|---|---|---|
+| `begin_tui.ok == false` | Return `CaretLoopResult(mode: "tui", ok: false, exit_reason: "terminal-setup-failed", error: result.error)` after one `end_tui` compensation call | No frame, ANSI draw, model call, or persistence |
+| TUI input exits normally | Call `end_tui` once | Emit `chat session ended\n` only when cleanup succeeds |
+| TUI command/model loop exits | Call `end_tui` once | Preserve the command/input exit reason unless cleanup fails |
+| `end_tui.ok == false` | Return `ok: false`, `exit_reason: "terminal-cleanup-failed"`, and the exact cleanup error | Do not emit a success footer |
+| Plain renderer selected | Do not call either lifecycle function | Continue using only `read_line` and `emit` |
+
+`CaretLoopResult` remains the stable application-facing result shape. Its
+`error` is empty only on success. `phase` is deliberately kept in the terminal
+result rather than added to the public loop result; callers retain the stable
+CLI contract while tests can assert precise lifecycle ownership through the
+injected capability.
+
+Migration is atomic across the owned TUI seam: delete the old individual
+lifecycle fields rather than retaining two competing protocols. The production
+adapter and every deterministic fixture construct the same ten-field `CaretIo`.
+`run_chat_plain`, `caret_chat`, renderer selection, submission dispatch, and
+all provider/session signatures remain unchanged. This prevents a CLI or hidden
+command change from being coupled to terminal cleanup work.
+
+Required focused scenarios, with no provider/network dependency:
+
+1. setup failure at each phase returns the typed failure, performs only valid
+   reverse cleanup, and produces no frame/model/persist effect;
+2. normal `/exit`, Ctrl-C, Ctrl-D, and EOF each call `end_tui` exactly once;
+3. cleanup failure reports `terminal-cleanup-failed`, attempts remaining
+   cleanup, and omits the success footer;
+4. plain/automatic non-TTY routing makes zero lifecycle calls;
+5. one-frame geometry remains a single `terminal_size` snapshot and one flush.
+
+This contract is intentionally limited to the terminal boundary. Signal/panic
+recovery still needs a runtime-owned atexit/signal facility and must not be
+simulated by a second Caret terminal adapter.
+
 ## Distributed Feature-Gate Cross-Map (2026-07-24)
 
 The bounded `claude_full` gate map contains 33 accepted gate dimensions. Each
