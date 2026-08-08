@@ -9,6 +9,7 @@ use compiler.frontend.frontend.{preprocess_conditionals}
 use compiler.frontend.core.cfg_platform.{cfg_detect_arch}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.core.parser.{parser_has_errors}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
 
 describe "Preprocessor @when/@cfg":
     describe "@when block directives":
@@ -71,6 +72,33 @@ describe "Preprocessor @when/@cfg":
             expect(out.contains("fn host_only():")).to_be(true)
 
     describe "line count preservation":
+        it "keeps trailing and adjacent blank lines as empty text":
+            val src = "@cfg(false)\nfn excluded():\n    1\n\n\nfn included():\n    2\n"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("nilnil")).to_equal(false)
+            expect(out.ends_with("\n")).to_equal(true)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "does not append text when conditional source has no final newline":
+            val src = "@cfg(false)\nfn excluded():\n    1\n\nfn included():\n    2"
+            val out = preprocess_conditionals(src)
+            expect(out.contains("nil")).to_equal(false)
+            expect(out.ends_with("\n")).to_equal(false)
+            expect(src.split("\n").len()).to_equal(out.split("\n").len())
+
+        it "preprocesses and parses the Stage 4 sync IO fixture without generated identifiers":
+            val fixture = file_read_text("test/fixtures/compiler/stage4_native_sync_io_facade.spl")
+            val out = preprocess_conditionals(fixture)
+            val module = parse_and_build_module(out, "stage4_native_sync_io_facade.spl")
+            expect(out.contains("nilnil")).to_equal(false)
+            expect(parser_has_errors()).to_equal(false)
+            expect(module.functions.contains("main")).to_equal(true)
+
+        it "sync IO facade does not route imports or exports through itself":
+            val facade = file_read_text("src/lib/nogc_sync_mut/io.spl")
+            expect(facade.contains("use std.nogc_sync_mut.io.*")).to_equal(false)
+            expect(facade.contains("export use std.nogc_sync_mut.io.{")).to_equal(false)
+
         it "blanked directives preserve line count":
             # All @when/@elif/@else/@end lines are replaced with empty lines
             # so that diagnostics line numbers remain correct
