@@ -8,7 +8,11 @@
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 22 | 22 | 0 | 0 | 0 |
+| 20 | 20 | 0 | 0 | 0 |
+
+**Provenance warning:** This manual is source-synchronized only. Its scenarios
+have not been executed by a provenance-qualified self-hosted runtime, so the
+zero executed count is not a passing result.
 
 **Executable source:** `test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl`
 
@@ -128,52 +132,59 @@ contains only the nine expected emits, proving no raw-mode, alternate-screen,
 or cursor mutation. This is injected component evidence only, not cached
 process or installed-wrapper evidence.
 
+## REQ-LLM-CARET-HIDDEN-008: plain hidden-command admission
+
+### should conceal hidden canonical and alias commands and reject disabled aliases
+
+**Step:** Queue `/debug-tool-call`, `/debug_tool_call`, `/remote_setup`, and
+`/exit` with the hidden gate disabled.
+
+**Step:** Dispatch the production plain loop through injected `CaretIo`.
+
+**Step:** Check concealed and disabled output has no side effects.
+
+**Expected:** Both hidden spellings are reported as unknown and never reach the
+hidden hook; disabled `/remote_setup` reports its disabled result. The responder
+and persistence hooks remain unused, and plain-mode processing makes no
+`begin_tui` or `end_tui` call. This is deterministic component evidence for
+non-TTY routing, not cached-wrapper process evidence.
+
 ## REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing
 
-### should fail raw entry before alternate screen or cursor mutation
+### should compensate setup failures without drawing model calls or persistence
 
-**Step:** Reject raw-mode acquisition through the production TUI loop.
+**Step:** Make the typed `begin_tui` boundary fail in each setup phase:
+`raw-mode`, `alternate-screen`, and `cursor-hide`.
 
-**Expected:** The typed result reports `raw-mode-unavailable`; no alternate
-screen, cursor, draw, cleanup, or success-output action occurs.
+**Expected:** `run_chat_tui` returns TUI mode with
+`exit_reason=terminal-setup-failed`, preserves the boundary error, invokes
+`begin_tui` once and compensating `end_tui` once, and performs no drawing,
+output, model call, or persistence.
 
-### should restore cursor screen and raw mode in lifecycle order
+### should end the TUI exactly once and emit the success footer
 
-**Step:** Exit by command after entering the full-screen production loop.
+**Step:** Exit the production TUI through `/exit` after successful typed setup.
 
-**Expected:** Acquisition is raw, alternate screen, cursor hide. Cleanup is
-cursor show, alternate-screen exit, raw restore, then the success message.
+**Expected:** The result is a successful `command_exit`; `begin_tui` and
+`end_tui` each run exactly once, the event trace starts with `begin_tui` and
+ends with `end_tui|emit|`, and the footer is `chat session ended\n`.
 
-### should report restore failure after all visible cleanup
+### should report cleanup failure without a success footer
 
-**Step:** Fail raw restoration after cursor and alternate-screen cleanup.
+**Step:** Make the typed `end_tui` cleanup boundary fail after `/exit`.
 
-**Expected:** The typed result preserves `command_exit`, reports the exact
-restore error, and emits no success message.
+**Expected:** The result is unsuccessful with
+`exit_reason=terminal-cleanup-failed`, preserves the cleanup error, calls both
+lifecycle boundaries once, and emits no success footer.
 
-### should restore after slash exit
+### should end exactly once for command control and EOF exits
 
-**Step:** Leave the production TUI with slash exit.
+**Step:** Exercise `/exit`, Ctrl-C, Ctrl-D, and byte-stream EOF through the
+production TUI loop.
 
-**Expected:** The loop reports `command_exit` and completes all cleanup actions.
-
-### should restore after Ctrl-C
-
-**Step:** Leave the production TUI with Ctrl-C.
-
-**Expected:** The loop reports `input_exit` and completes all cleanup actions.
-
-### should restore after Ctrl-D
-
-**Step:** Leave the production TUI with Ctrl-D.
-
-**Expected:** The loop reports `input_exit` and completes all cleanup actions.
-
-### should restore after byte-stream EOF
-
-**Step:** Leave the production TUI when byte input reaches EOF.
-
-**Expected:** The loop reports `input_exit` and completes all cleanup actions.
+**Expected:** Each normal exit completes with exactly one `begin_tui` and one
+`end_tui` call, and emits `chat session ended\n`. The shared typed lifecycle,
+not primitive raw/alternate-screen/cursor callbacks, owns setup and cleanup.
 
 ### should force TUI routing without a tty
 

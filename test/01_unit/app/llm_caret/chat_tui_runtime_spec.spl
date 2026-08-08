@@ -44,6 +44,9 @@ var IO_EVENTS = ""
 var IO_OUTPUT = ""
 
 var HOOK_MODEL = ""
+var HOOK_HIDDEN_CALLS = 0
+var HOOK_HIDDEN_NAME = ""
+var HOOK_HIDDEN_ARG = ""
 var HOOK_PERSIST_COUNT = 0
 var HOOK_PERSIST_SESSION = ""
 var HOOK_PERSIST_MESSAGES = 0
@@ -150,6 +153,9 @@ fn _reset_fakes():
     IO_EVENTS = ""
     IO_OUTPUT = ""
     HOOK_MODEL = ""
+    HOOK_HIDDEN_CALLS = 0
+    HOOK_HIDDEN_NAME = ""
+    HOOK_HIDDEN_ARG = ""
     HOOK_PERSIST_COUNT = 0
     HOOK_PERSIST_SESSION = ""
     HOOK_PERSIST_MESSAGES = 0
@@ -185,6 +191,9 @@ fn _hook_resume(id: text) -> SessionResumeResult:
     )
 
 fn _hook_hidden(name: text, arg: text) -> text:
+    HOOK_HIDDEN_CALLS = HOOK_HIDDEN_CALLS + 1
+    HOOK_HIDDEN_NAME = name
+    HOOK_HIDDEN_ARG = arg
     "hidden " + name + " " + arg
 
 fn _hook_persist(session_id: text, messages: [Message]):
@@ -430,6 +439,47 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
 
         step("Check canonical output and zero model submission")
         check_promptless_dispatch(cases, result)
+
+describe "REQ-LLM-CARET-HIDDEN-008: plain hidden-command admission":
+    it "should conceal hidden canonical and alias commands and reject disabled aliases":
+        step("Queue hidden and disabled command spellings with the hidden gate off")
+        _reset_fakes()
+        IO_LINES = [
+            "/debug-tool-call fixture-envelope",
+            "/debug_tool_call fixture-envelope",
+            "/remote_setup",
+            "/exit"
+        ]
+
+        step("Dispatch the production plain loop through injected CaretIo")
+        val result = run_chat_plain(
+            _policy(), _responder, _hooks(), [], _fake_io()
+        )
+
+        step("Check hidden membership stays concealed and no model or terminal work occurs")
+        expect(result.mode).to_equal("plain")
+        expect(result.ok).to_be(true)
+        expect(result.exit_reason).to_equal("command_exit")
+        expect(IO_OUTPUT).to_equal(
+            "> Unknown command: /debug-tool-call (try /help)\n" +
+            "> Unknown command: /debug_tool_call (try /help)\n" +
+            "> Command disabled: /remote_setup\n" +
+            "> "
+        )
+        expect(HOOK_HIDDEN_CALLS).to_equal(0)
+        expect(HOOK_HIDDEN_NAME).to_equal("")
+        expect(HOOK_HIDDEN_ARG).to_equal("")
+        expect(RESPONDER_CALLS).to_equal(0)
+        expect(HOOK_PERSIST_COUNT).to_equal(0)
+        expect(HOOK_PERSIST_SESSION).to_equal("")
+        expect(HOOK_PERSIST_MESSAGES).to_equal(0)
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
+        expect(IO_SIZE_CALLS).to_equal(0)
+        expect(IO_DRAW_CALLS).to_equal(0)
+        expect(IO_FLUSH_CALLS).to_equal(0)
+        expect(IO_BYTE_INDEX).to_equal(0)
+        expect(IO_LINE_INDEX).to_equal(IO_LINES.len())
 
 describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
     it "should compensate setup failures without drawing model calls or persistence":
