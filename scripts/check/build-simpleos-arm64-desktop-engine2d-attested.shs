@@ -20,6 +20,10 @@ BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
 FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 BUILD_STAMP="${KERNEL}.build_stamp"
 BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
+NATIVE_CACHE="build/native_cache"
+NATIVE_THREADS="8"
+BUILD_TIMEOUT_SECONDS="900"
+TIMEOUT_BIN=""
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
 BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_LOG_MODE=off"
@@ -167,9 +171,20 @@ resolve_compiler() {
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
-    BUILD_COMMAND="sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts && env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld"
+    BUILD_COMMAND="sh scripts/os/make_os_disk.shs 128 $DISK '' arm64 desktop-fonts && $TIMEOUT_BIN -k 5 $BUILD_TIMEOUT_SECONDS env $BUILD_ENVIRONMENT $COMPILER native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend llvm --opt-level=aggressive --log off --timeout 870 --threads $NATIVE_THREADS --cache-dir $NATIVE_CACHE --entry-closure --entry $ENTRY --target aarch64-unknown-none -o $KERNEL --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld"
 }
 
+resolve_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="$(command -v timeout)"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="$(command -v gtimeout)"
+    else
+        fail_build "timeout-tool-unavailable"
+    fi
+}
+
+resolve_timeout
 resolve_compiler ||
     fail_build "${COMPILER_REJECTION_REASON:-canonical-pure-simple-compiler-unavailable}"
 [ -x "$COMPILER" ] || fail_build "canonical-compiler-missing"
@@ -260,6 +275,7 @@ printf '%s\n' \
     fail_build "generated-log-config-write-failed"
 
 set +e
+"$TIMEOUT_BIN" -k 5 "$BUILD_TIMEOUT_SECONDS" \
 env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
     -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" \
     SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_NO_STUB_FALLBACK=1 \
@@ -267,7 +283,8 @@ env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
     "$COMPILER" native-build \
     --source build/os/generated --source src/os --source src/lib \
     --source examples/09_embedded/simple_os --backend llvm \
-    --opt-level=aggressive --log off --timeout 870 --entry-closure \
+    --opt-level=aggressive --log off --timeout 870 \
+    --threads "$NATIVE_THREADS" --cache-dir "$NATIVE_CACHE" --entry-closure \
     --entry "$ENTRY" --target aarch64-unknown-none -o "$KERNEL" \
     --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld \
     >>"$BUILD_LOG" 2>&1
