@@ -207,13 +207,92 @@ build-proven** work; a follow-up lane with more build-time budget should
 construct fixtures that definitively isolate each of the 5 fixed branches
 (and the still-open HIGH-confidence sites below).
 
+## Follow-up pass (2026-08-08, second lane)
+
+Fixed 2 of the 4 highest-priority candidates from the original "Recommended
+follow-up" list below. Both converted `self.error(` -> `self.error_fatal(`,
+no other logic change:
+
+1. `switch_operators_calls.spl:2863` (`lower_enum_lit`) — **[FIXED]**.
+   Confirmed by reading: when `enum_variant_discriminant` returns -1 here,
+   the `-1` value flows straight into `disc_local` and out to `rt_enum_new`
+   with **no recovery path below** — this is the textbook silent-wrong-value
+   shape, and it sits in the exact same function as the already-`error_fatal`
+   "enum construction: unregistered enum" guard three lines above it (line
+   2850/2854), i.e. this is that guard's obvious, previously-missed sibling.
+2. `switch_operators_calls.spl:2971` (`lower_enum_construct_named`) —
+   **[FIXED]**. Same shape as 2863 (method-call constructor form instead of
+   the literal form); comment at the site already says "this had no guard at
+   all" — no recovery path below, `-1` goes straight into `rt_enum_new`.
+
+### Verification
+
+Regression (clean program, no defect triggered): a 3-variant `enum Color`
+exercised via literal construction (`Color.Red`), `match`, and an `if/elif`
+constructor function, built and run through the oracle —
+`native-build` exited **rc=0**, the binary ran and exited **rc=0**. (The
+program's printed text was garbled — raw pointer values instead of "red" /
+"green" / "blue" — but that is the pre-existing, unrelated
+`reference_native_tuple_to_text_prints_raw_pointer` class of defect, not
+something this change introduced; the signal that matters here is that build
+and run both completed with no fatal MIR error, i.e. normal enum
+construction never reaches the -1 branch this pass made fatal.)
+
+No isolated positive repro (a program that actually drives `disc` to -1 at
+either site) was built. Both sites require an already-broken *registration*
+state (a bare-name-collision eviction, per `enum_variant_miss_detail`'s own
+docstring) to produce -1 for an otherwise-valid variant reference — normal
+user typos are caught earlier, at HIR/type-check. A concrete attempt to
+manufacture the eviction (two modules each declaring `enum Status` with
+disjoint variants, referenced together) did **not** reach MIR at all: HIR
+lowering already raises its own unrelated, independently-fatal error first —
+`enum payload dependency 'Status' conflicts: <mod_a>::Status::enum vs
+<mod_b>::Status::enum` — before either MIR site's guard would ever run for
+that particular construction. This mirrors the "Verification (honest
+results)" section above for the first pass: both fixes are correct-by-
+construction (identical call pattern to sibling `error_fatal` sites in the
+same functions, zero syntax/compile risk, and by construction a program that
+never drives `disc` negative is unaffected) but not repro-proven for the
+specific -1 branch. Treat as evidence-based, matching the first pass's
+standard.
+
+### The `?`-operator connection did NOT hold — important correction
+
+The original follow-up list (below) named line 2657 "directly adjacent to
+the known `?`-operator Ok/Err defect" as the top candidate, hypothesizing it
+might explain that bug's symptom. Reading
+`try_operator_early_return_matches_neither_ok_nor_err_2026-08-07.md` in full
+shows this connection does **not** hold, and that doc says so explicitly:
+that bug's root cause was isolated entirely to the **Rust seed**'s
+`lower_try` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2194`),
+which emitted a bare `rt_enum_payload(inner)` with **no discriminant test and
+no branch at all** — so `?` fell through unconditionally regardless of
+Ok/Err, and was fixed at the seed source on 2026-08-07. That same doc
+independently verifies (twice, in two different follow-up passes) that
+**this file's** `lower_try_expr` (`switch_operators_calls.spl:2553`, which
+contains line 2657) was **always correct**: it does emit the
+discriminant-test + branch + `terminate_return` shape the seed was missing.
+Line 2657 is therefore not a candidate explanation for that symptom — it is
+a narrower, independent edge case (the pure-Simple lowering's `Option.None`
+lookup losing to a bare-name collision) inside code whose overall control
+flow was never in question. **Not fixed this pass**: unlike 2863/2971, line
+2657 has an explicit, deliberate recovery path immediately below it
+(`none_disc = 1`, "Restore the reserved Some=0/None=1 default so the
+comparison stays meaningful, and say so loudly" — the code already chose
+graceful degradation over aborting), so converting it to fatal would be a
+behavior change beyond "make an already-silent corruption loud" and needs
+its own review of whether that recovery default is actually always safe.
+
 ## Recommended follow-up (not fixed this pass)
 
 Highest-confidence next candidates, in priority order:
-1. `switch_operators_calls.spl:2657,2863,2971` — the three "enum variant
-   lookup miss: ... resolved to discriminant -1" sites (enum construction
-   under a contested/unresolved bare name). Directly adjacent to the known
-   `?`-operator Ok/Err defect; likely to explain related symptoms.
+1. ~~`switch_operators_calls.spl:2863,2971`~~ — **FIXED**, see "Follow-up
+   pass (2026-08-08, second lane)" above.
+1b. `switch_operators_calls.spl:2657` — still open; has a deliberate
+   in-place recovery fallback (see correction above), so fixing it requires
+   deciding whether that fallback is actually always safe, not just flipping
+   `error` to `error_fatal`. **Not** the explanation for the `?`-operator
+   Ok/Err bug (that was seed-only, already fixed — see correction above).
 2. `switch_operators_calls.spl:2041` — contested bare-variant lookup in
    match arms (sibling of the already-`error_fatal` "enum match:" family,
    but this one's message prefix differs and slipped through).
