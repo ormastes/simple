@@ -528,19 +528,38 @@ impl CoreLexer:
             if second == "b":
                 # Binary literal
                 pos = pos + 2
+                # Consume the FULL decimal-digit run (not just 0/1), tracking
+                # the first out-of-range digit. Stopping the run at the first
+                # invalid digit (old behavior) split one literal into two
+                # adjacent INT tokens (`0b123` -> INT("0b1") + INT("23")) with
+                # no diagnostic anywhere -- see bug
+                # octal_literal_accepts_digits_8_9_silent_wrong_value_2026-08-08
+                # (binary sibling). Consuming the whole run lets us emit one
+                # real lex error instead.
+                var bad_bin_digit: text = ""
+                var bad_bin_seen: bool = false
                 while true:
                     if pos >= src_len:
                         break
                     val bc: text = self.source_chars[pos]
-                    val is_bin: bool = bc == "0"
-                    val is_bin1: bool = bc == "1"
+                    val is_dec: bool = is_digit(bc)
                     val is_under: bool = bc == "_"
-                    val is_bin_char: bool = is_bin or is_bin1
-                    val valid: bool = is_bin_char or is_under
-                    if valid:
+                    if is_dec:
+                        val in_range: bool = bc == "0" or bc == "1"
+                        if (not in_range) and (not bad_bin_seen):
+                            bad_bin_digit = bc
+                            bad_bin_seen = true
+                        pos = pos + 1
+                    elif is_under:
                         pos = pos + 1
                     else:
                         break
+                if bad_bin_seen:
+                    val bad_text: text = self.char_slice(start, pos)
+                    self.pos = pos
+                    self.col = self.col + (pos - start)
+                    self.make_token(191, "invalid digit " + bad_bin_digit + " in binary literal " + bad_text, start_line, start_col)
+                    return
                 var num_text: text = self.char_slice(start, pos)
                 # Type suffix: 0b1010u64 / 0b1010_u64. Without this the alpha
                 # run split off as a separate IDENT token and the suffix was
@@ -576,17 +595,41 @@ impl CoreLexer:
             if second == "o":
                 # Octal literal
                 pos = pos + 2
+                # Consume the FULL decimal-digit run (not just 0-7), tracking
+                # the first out-of-range digit. The old `is_digit` check
+                # accepted 8/9 into the run and `parse_int_literal_text` then
+                # accumulated `oct_val*8 + int(oc)` over them, so `0o789`
+                # silently evaluated to 521 with no diagnostic anywhere. See
+                # bug octal_literal_accepts_digits_8_9_silent_wrong_value_2026-08-08.
+                # Narrowing the digit predicate alone would instead SPLIT the
+                # literal into two adjacent INT tokens (untested parser path,
+                # and the same defect class b0f5308993 just eliminated for
+                # suffixes) -- so consume the whole run and emit one real lex
+                # error instead of either silently misparsing or splitting.
+                var bad_oct_digit: text = ""
+                var bad_oct_seen: bool = false
                 while true:
                     if pos >= src_len:
                         break
                     val oc: text = self.source_chars[pos]
-                    val is_oct: bool = is_digit(oc)
+                    val is_dec: bool = is_digit(oc)
                     val is_under: bool = oc == "_"
-                    val valid: bool = is_oct or is_under
-                    if valid:
+                    if is_dec:
+                        val in_range: bool = oc == "0" or oc == "1" or oc == "2" or oc == "3" or oc == "4" or oc == "5" or oc == "6" or oc == "7"
+                        if (not in_range) and (not bad_oct_seen):
+                            bad_oct_digit = oc
+                            bad_oct_seen = true
+                        pos = pos + 1
+                    elif is_under:
                         pos = pos + 1
                     else:
                         break
+                if bad_oct_seen:
+                    val bad_text: text = self.char_slice(start, pos)
+                    self.pos = pos
+                    self.col = self.col + (pos - start)
+                    self.make_token(191, "invalid digit " + bad_oct_digit + " in octal literal " + bad_text, start_line, start_col)
+                    return
                 var num_text: text = self.char_slice(start, pos)
                 # Type suffix: 0o644u32 / 0o755_u32 — same hole as binary
                 # above. `src/os/apps/coreutils/cp.spl:15` uses `0o644u32`.
