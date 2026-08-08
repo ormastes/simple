@@ -531,10 +531,53 @@ def require_simd_receipt(text):
         "scalar_parity": "bit-exact",
     }
 
+def require_fps_receipt(text):
+    receipt_lines = [
+        line.rstrip("\r") for line in text.splitlines()
+        if line.startswith("[engine2d-fps]")
+    ]
+    if len(receipt_lines) != 1:
+        raise RuntimeError(
+            "expected exactly one guest Engine2D FPS receipt, found %d"
+            % len(receipt_lines)
+        )
+    match = re.fullmatch(
+        r"\[engine2d-fps\] path=shared-wm-draw-ir-engine2d backend=baremetal "
+        r"warmup_frames=(\d+) sample_frames=(\d+) elapsed_us=(\d+) "
+        r"fps_x1000=(\d+) minimum_fps_x1000=(\d+) "
+        r"simd_fill_hits_delta=(\d+) simd_fill_chunks_delta=(\d+) status=pass",
+        receipt_lines[0],
+    )
+    if not match:
+        raise RuntimeError("guest Engine2D FPS receipt contract mismatch")
+    warmup_frames, sample_frames, elapsed_us, fps_x1000, minimum_fps_x1000, simd_hits_delta, simd_chunks_delta = (
+        int(value) for value in match.groups()
+    )
+    if warmup_frames != 4 or sample_frames != 64:
+        raise RuntimeError("guest Engine2D FPS sample window mismatch")
+    if elapsed_us <= 0 or elapsed_us > 10000000:
+        raise RuntimeError("guest Engine2D FPS elapsed time is invalid")
+    if minimum_fps_x1000 != 39000 or fps_x1000 < minimum_fps_x1000:
+        raise RuntimeError("guest Engine2D frame rate is below 39 FPS")
+    if simd_hits_delta <= 0 or simd_chunks_delta <= 0:
+        raise RuntimeError("guest Engine2D FPS interval lacks SIMD execution")
+    return {
+        "path": "shared-wm-draw-ir-engine2d",
+        "backend": "baremetal",
+        "warmup_frames": warmup_frames,
+        "sample_frames": sample_frames,
+        "elapsed_us": elapsed_us,
+        "fps_x1000": fps_x1000,
+        "minimum_fps_x1000": minimum_fps_x1000,
+        "simd_fill_hits_delta": simd_hits_delta,
+        "simd_fill_chunks_delta": simd_chunks_delta,
+    }
+
 # The freestanding ARM64 Engine2D desktop has one required target-native
 # kernel kind: fill. Reject missing, duplicate, fallback, wrong-ISA, or
 # non-vector receipts before any QMP input or capture can be admitted.
 simd_receipt = require_simd_receipt(serial_text())
+fps_receipt = require_fps_receipt(serial_text())
 wait_serial(
     r"^\[backend2d-event-blocker\] backend=simpleos-qemu-arm64 "
     r"event_backend=virtio-mmio keyboard=transport-ready "
@@ -868,6 +911,9 @@ if (
 final_simd_receipt = require_simd_receipt(serial_text())
 if final_simd_receipt != simd_receipt:
     raise RuntimeError("guest Engine2D SIMD receipt changed during run")
+final_fps_receipt = require_fps_receipt(serial_text())
+if final_fps_receipt != fps_receipt:
+    raise RuntimeError("guest Engine2D FPS receipt changed during run")
 
 print("qmp_transport=input-send-event")
 print("capture_origin=qemu-ramfb-screendump")
@@ -887,6 +933,15 @@ print(
 )
 print("simd_fallback=%s" % final_simd_receipt["fallback"])
 print("simd_scalar_parity=%s" % final_simd_receipt["scalar_parity"])
+print("fps_path=%s" % final_fps_receipt["path"])
+print("fps_backend=%s" % final_fps_receipt["backend"])
+print("fps_warmup_frames=%d" % final_fps_receipt["warmup_frames"])
+print("fps_sample_frames=%d" % final_fps_receipt["sample_frames"])
+print("fps_elapsed_us=%d" % final_fps_receipt["elapsed_us"])
+print("fps_x1000=%d" % final_fps_receipt["fps_x1000"])
+print("fps_minimum_x1000=%d" % final_fps_receipt["minimum_fps_x1000"])
+print("fps_simd_fill_hits_delta=%d" % final_fps_receipt["simd_fill_hits_delta"])
+print("fps_simd_fill_chunks_delta=%d" % final_fps_receipt["simd_fill_chunks_delta"])
 print("baseline_revision=%d" % baseline_revision)
 print("pointer_sequences=%d,%d,%d" % (move_seq, down_seq, up_seq))
 print("key_sequences=%d,%d" % (key_down_seq, key_up_seq))
@@ -978,6 +1033,15 @@ arm64_guest_source_snapshot ||
     echo "arm64_qmp_input_simd_executed_kernel_kinds=$(field simd_executed_kernel_kinds)"
     echo "arm64_qmp_input_simd_fallback=$(field simd_fallback)"
     echo "arm64_qmp_input_simd_scalar_parity=$(field simd_scalar_parity)"
+    echo "arm64_qmp_input_fps_path=$(field fps_path)"
+    echo "arm64_qmp_input_fps_backend=$(field fps_backend)"
+    echo "arm64_qmp_input_fps_warmup_frames=$(field fps_warmup_frames)"
+    echo "arm64_qmp_input_fps_sample_frames=$(field fps_sample_frames)"
+    echo "arm64_qmp_input_fps_elapsed_us=$(field fps_elapsed_us)"
+    echo "arm64_qmp_input_fps_x1000=$(field fps_x1000)"
+    echo "arm64_qmp_input_fps_minimum_x1000=$(field fps_minimum_x1000)"
+    echo "arm64_qmp_input_fps_simd_fill_hits_delta=$(field fps_simd_fill_hits_delta)"
+    echo "arm64_qmp_input_fps_simd_fill_chunks_delta=$(field fps_simd_fill_chunks_delta)"
     echo "arm64_qmp_input_guest_source_revision=$MANIFEST_SOURCE_REVISION"
     echo "arm64_qmp_input_host_source_revision=$HOST_SOURCE_REVISION"
     echo "arm64_qmp_input_guest_source_roots=$MANIFEST_SOURCE_ROOTS"
@@ -1036,6 +1100,10 @@ arm64_guest_source_snapshot ||
     echo "- SIMD executed kernel kinds: $(field simd_executed_kernel_kinds)"
     echo "- SIMD fallback: $(field simd_fallback)"
     echo "- SIMD scalar parity: $(field simd_scalar_parity)"
+    echo "- guest canonical WM FPS x1000: $(field fps_x1000)"
+    echo "- required FPS x1000: $(field fps_minimum_x1000)"
+    echo "- measured frames: $(field fps_sample_frames)"
+    echo "- measured elapsed us: $(field fps_elapsed_us)"
     echo "- baseline capture SHA-256: $BEFORE_SHA256"
     echo "- post-input capture SHA-256: $AFTER_SHA256"
     echo "- changed RGB bytes: $CHANGED_RGB_BYTES"

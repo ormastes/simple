@@ -48,7 +48,7 @@ use os.kernel.ipc.host_gpu_ivshmem_map.{
     map_qemu_host_gpu_ivshmem_bar2,
     qemu_host_gpu_ivshmem_window_base
 }
-use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us, boot_monotonic_prepare}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_elapsed_us, boot_monotonic_now_us, boot_monotonic_prepare}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_METAL,
     SIMPLEOS_HOST_GPU_ISA_AARCH64
@@ -238,6 +238,40 @@ pub fn gui_entry_desktop_start(file_backed_ram_tail_base: u64):
         uart_writeln("[engine2d-simd] fatal arch=aarch64 isa=neon reason=invalid-runtime-receipt")
         return
     uart_writeln("[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits={simd_hits} fill_chunks={simd_chunks} fill_tail_pixels={simd_tail_pixels} scalar_parity=bit-exact")
+
+    # Measure the canonical WM -> Draw IR -> Engine2D -> present path inside
+    # the guest. QMP polling, screendumps, and framebuffer checksums are not in
+    # this interval and therefore cannot inflate the admitted frame rate.
+    var warmup_frame: i64 = 0
+    while warmup_frame < 4:
+        if shell.render_baremetal_frame(wm_frame_executor) <= 0:
+            uart_writeln("[engine2d-fps] fatal reason=warmup-render-failed")
+            return
+        warmup_frame += 1
+    val measured_simd_hits_before = baremetal_simd_fill_hits()
+    val measured_simd_chunks_before = baremetal_simd_fill_chunks()
+    val measured_started_us = boot_monotonic_now_us()
+    var measured_frame: i64 = 0
+    while measured_frame < 64:
+        if shell.render_baremetal_frame(wm_frame_executor) <= 0:
+            uart_writeln("[engine2d-fps] fatal reason=measured-render-failed")
+            return
+        measured_frame += 1
+    val measured_finished_us = boot_monotonic_now_us()
+    val measured_elapsed_us = boot_monotonic_elapsed_us(measured_started_us, measured_finished_us)
+    val measured_simd_hits_after = baremetal_simd_fill_hits()
+    val measured_simd_chunks_after = baremetal_simd_fill_chunks()
+    if measured_elapsed_us <= 0 or measured_simd_hits_after <= measured_simd_hits_before or measured_simd_chunks_after <= measured_simd_chunks_before:
+        uart_writeln("[engine2d-fps] fatal reason=invalid-guest-measurement")
+        return
+    val measured_simd_hits_delta = measured_simd_hits_after - measured_simd_hits_before
+    val measured_simd_chunks_delta = measured_simd_chunks_after - measured_simd_chunks_before
+    val measured_fps_x1000 = 64000000000 / measured_elapsed_us
+    if measured_fps_x1000 < 39000:
+        uart_writeln("[engine2d-fps] fatal reason=below-minimum fps_x1000={measured_fps_x1000} minimum_fps_x1000=39000")
+        return
+    uart_writeln("[engine2d-fps] path=shared-wm-draw-ir-engine2d backend=baremetal warmup_frames=4 sample_frames=64 elapsed_us={measured_elapsed_us} fps_x1000={measured_fps_x1000} minimum_fps_x1000=39000 simd_fill_hits_delta={measured_simd_hits_delta} simd_fill_chunks_delta={measured_simd_chunks_delta} status=pass")
+
     val virtio_input_mask = arm64_virtio_input_init()
     val virtio_input_enabled = arm64_virtio_input_ready(virtio_input_mask)
     var backend2d_event_step: i64 = 0
