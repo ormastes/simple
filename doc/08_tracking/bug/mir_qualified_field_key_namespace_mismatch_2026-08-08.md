@@ -120,6 +120,34 @@ was.** The commit message's claim that this is the stage3 SIGSEGV root-cause
 fix is not supported. The commit is honest that "Full stage-3 SIGSEGV retest
 pending" — this finding predicts that retest will still be RED.
 
+### The consumer-symbol link is CONFIRMED, not inferred
+
+Step 2 above ("the imported symbol reaches `resolve_field_index`") was
+challenged in review as the one inferred link in an otherwise
+inspection-confirmed chain. It checks out:
+
+- `expr_type_symbol` (`50.mir/_MirLowering/function_lowering.spl:1097`) does
+  nothing but read the annotation: `match ty.kind: case Named(symbol, _): Some(symbol)`.
+  So the whole question is which symbol semantic lowering stamped into that
+  `Named`.
+- For an imported type, that is `imported_surface_type`
+  (`20.hir/hir_lowering/_Items/module_lowering.spl:451-457`):
+  `self.symbols.lookup_qualified_type_raw(imported_mod.module_name, source_name)`
+  -> `HirTypeKind.Named(SymbolId(id: raw_symbol_id), [])`.
+- That qualified binding is exactly the one established at `:745`,
+  `bind_qualified_type(imported_mod.module_name, imported_name, imported_type)`,
+  where `imported_type` is the symbol defined two lines earlier at `:743`
+  with `defining_module = Some(imported_mod.module_name)` -- the **dotted**
+  name.
+- `rename_symbol` (`20.hir/hir_types.spl:517`) preserves `defining_module`
+  verbatim, so the rename on the next line does not restore the path form.
+
+So the `Named` carried by an imported-type expression resolves to the
+CONSUMER's import symbol, whose `defining_module` is the dotted module name,
+never the defining module's file path. The alternative -- that `Named` carries
+the defining module's own symbol, which would have made the tier hit and
+collapsed this finding -- is ruled out.
+
 ### What would settle this
 
 A dynamic probe printing `qualified_key` and the `has()` result on the first
