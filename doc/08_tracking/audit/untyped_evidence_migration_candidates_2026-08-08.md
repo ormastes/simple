@@ -57,28 +57,28 @@ matching hit below is understood as DONE, not an outstanding candidate:
 | File | `it` block start line | Already migrated? |
 |---|---|---|
 | `test/01_unit/app/arch_check_spec.spl` | 524 | yes |
-| `test/01_unit/app/arch_check_spec.spl` | 528 | no |
+| `test/01_unit/app/arch_check_spec.spl` | 528 | reject: duplicate row inside `it` block already migrated at line 524-536 |
 | `test/01_unit/app/bug_add/bug_add_cli_spec.spl` | 16 | yes |
 | `test/01_unit/app/bug_resolve/bug_resolve_cli_spec.spl` | 25 | yes |
-| `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 4 | no |
-| `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 8 | no |
-| `test/01_unit/app/cli/bootstrap_focused_native_build_split_contract_spec.spl` | 5 | no |
-| `test/01_unit/app/cli/default_output_dir_spec.spl` | 54 | no |
-| `test/01_unit/app/cli/default_output_dir_spec.spl` | 60 | no |
-| `test/01_unit/app/cli/default_output_dir_spec.spl` | 71 | no |
-| `test/01_unit/app/cli/default_output_dir_spec.spl` | 76 | no |
-| `test/01_unit/app/cli/focused_native_build_env_owner_contract_spec.spl` | 5 | no |
-| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 4 | no |
-| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 8 | no |
-| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 17 | no |
-| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 22 | no |
-| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 34 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 5 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 23 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 44 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 52 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 104 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 115 | no |
+| `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 4 | reject: in-memory comparison on function return value, no external capture |
+| `test/01_unit/app/check/concurrency_lint_token_awareness_spec.spl` | 8 | reject: in-memory comparison on function return value, no external capture |
+| `test/01_unit/app/cli/bootstrap_focused_native_build_split_contract_spec.spl` | 5 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/default_output_dir_spec.spl` | 54 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/default_output_dir_spec.spl` | 60 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/default_output_dir_spec.spl` | 71 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/default_output_dir_spec.spl` | 76 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/focused_native_build_env_owner_contract_spec.spl` | 5 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 4 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 8 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 17 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 22 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/native_build_arg_source_spec.spl` | 34 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 5 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 23 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 44 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 52 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 104 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 115 | reject: static source-text file_read check, not a live observation |
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 138 | no |
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 146 | no |
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 160 | no |
@@ -111,11 +111,11 @@ matching hit below is understood as DONE, not an outstanding candidate:
 | `test/01_unit/app/io/cli_ops_handlers_spec.spl` | 42 | no |
 | `test/01_unit/app/io/file_ops_bytes_spec.spl` | 4 | no |
 | `test/01_unit/app/io/file_ops_rw_spec.spl` | 2 | no |
-| `test/01_unit/app/io/file_shell_exec_spec.spl` | 4 | no |
-| `test/01_unit/app/io/file_shell_exec_spec.spl` | 12 | no |
-| `test/01_unit/app/io/file_shell_exec_spec.spl` | 16 | no |
-| `test/01_unit/app/io/file_shell_exec_spec.spl` | 24 | no |
-| `test/01_unit/app/io/http_ffi_spec.spl` | 2 | no |
+| `test/01_unit/app/io/file_shell_exec_spec.spl` | 4 | yes — migrated this session |
+| `test/01_unit/app/io/file_shell_exec_spec.spl` | 12 | reject: numeric-only exit-code check, no capture to type |
+| `test/01_unit/app/io/file_shell_exec_spec.spl` | 16 | reject: genuine capture but a typed wrapper adds only ceremony over the existing substring check (design doc §4 leave-alone rule) |
+| `test/01_unit/app/io/file_shell_exec_spec.spl` | 24 | reject: genuine capture but a typed wrapper adds only ceremony over the existing exact-equality checks (design doc §4 leave-alone rule) |
+| `test/01_unit/app/io/http_ffi_spec.spl` | 2 | reject: entire body is commented-out scaffold, no live capture at all |
 | `test/01_unit/app/io/timeout_spec.spl` | 19 | yes — already migrated this session |
 | `test/01_unit/app/io/timeout_spec.spl` | 47 | yes — already migrated this session |
 | `test/01_unit/app/io/timeout_spec.spl` | 52 | yes — already migrated this session |
