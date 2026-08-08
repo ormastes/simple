@@ -173,6 +173,28 @@ exposure — always also search for `: {`-style dict declarations.
 > `7e83e92ce314` — it was first sighted as `scratchpad/dict_native_report.md` item 15
 > and never filed until now.
 
+> **NEW 2026-08-08 — class-field `d[k]` bracket-read SEGFAULTs for array
+> value types; `contains_key`/`keys().len()` on the same field do not.**
+> Investigated a lane report that `contains_key(self.local_tuple_types,
+> sym.id)` (a `Dict<i64,[HirType]>` **class field**) returned `false`
+> immediately after a same-scope `self.d[k] = v` insert. Minimal
+> `native-build` reproduction with a `class Holder: d: {i64: [i64]}` field:
+> `contains_key(k)` → `true` (correct) and `.keys().len()` → `1` (correct)
+> right after insert. But adding `val readback: [i64] = self.d[k]`
+> immediately after the same insert **SEGFAULTs** (rc 139, no crash when the
+> identical dict is a local/non-field variable — `contains_key` +
+> bracket-read both succeed there). So the documented-safe replacement
+> pattern (`contains_key(k)` then `d[k]`) is only half-safe for a
+> **class-field** dict whose value type is an array: the membership-check
+> half is fine, the index-read half crashes. Interpreter (`bin/simple test`)
+> is correct for all three operations on the same fixture — this is
+> native-codegen only. Spec:
+> `test/01_unit/compiler/dict_class_field_contains_key_after_insert_spec.spl`.
+> Full writeup: `doc/08_tracking/bug/dict_class_field_contains_key_after_insert_2026-08-08.md`.
+> The original lane's `contains_key` failure was NOT reproduced by this
+> investigation and remains unexplained — see that doc for what was ruled
+> out.
+
 ## Replacements
 
 - **Membership check** — use `contains_key(k)`, never infer it from `.get(k) != nil`.
