@@ -75,6 +75,75 @@ by comparing a literal against an identically-written literal):
 `test/01_unit/bugs/string_interp_css_brace_footgun_spec.spl`
 (`Results: 6 total, 6 passed, 0 failed`).
 
+## 2026-08-08 re-verification: still live; judged design-consequence + diagnostic gap, not a grammar defect
+
+Re-ran the spec (`test/01_unit/bugs/string_interp_css_brace_footgun_spec.spl`):
+`Results: 6 total, 6 passed, 0 failed`, rc=0 — unchanged, still correct, left
+as-is.
+
+Re-probed the two failure modes with fresh minimal repros:
+- `bin/simple run` on `"body {color:#fff}"`: **silent corruption, no
+  diagnostic at all**, rc=0. `print(s)` emits `body 0` instead of the source
+  text — the `{color:#fff}` span is swallowed and replaced by the evaluated
+  (and wrong) result of treating `color:#fff` as some kind of
+  identifier/format-spec parse, with no error surfaced anywhere.
+- `SIMPLE_EXECUTION_MODE=interpret` on the same literal: hard-fails, rc=1,
+  with only `error: semantic: variable `color` not found` printed — no
+  file:line, no mention that the offending token came from inside a string
+  literal.
+- A JSON-shaped literal (`"{\"key\": \"value\"}"`) and an unclosed single
+  brace (`"left { brace only"`) both pass through as literal text with no
+  error in `bin/simple run` — confirms the bug doc's original
+  "content-dependent" characterization; there is no reliable rule for which
+  `{...}` shapes survive unescaped.
+
+**An escape mechanism exists and works**: raw strings (`'...'`, `r"..."`)
+and the `{{`/`}}` doubled-brace escape are both confirmed correct (this is
+exactly what the passing spec pins). This makes Simple's design consistent
+with Python f-strings / Rust `format!` / C# interpolated strings, all of
+which treat `{}` specially in interpolating strings and require an escape —
+**this is a normal, defensible language design, not a grammar gap**. No
+grammar change is recommended.
+
+**The real defect is the diagnostic**, and it is worse than it looks. Traced
+the interpret-mode error to
+`src/compiler_rust/compiler/src/interpreter/expr/literals.rs:338-363`: the
+Rust seed's undefined-variable path already builds a rich `ErrorContext` —
+error code `codes::UNDEFINED_VARIABLE` (E1001), a `with_help("check that the
+variable is defined and in scope")`, a "did you mean `X`?" typo suggestion,
+and (when ≤5 names are in scope) a `with_note("available variables: ...")`
+listing. **None of that reaches the terminal** — the CLI print path for this
+error only ever emits `error: semantic: variable `color` not found`, no
+code, no help, no note, no location. So there are two independent gaps
+stacked: (1) the error has no way to say "this identifier came from inside a
+string literal, did you mean to escape `{`?", and (2) even the generic
+help/note/code payload it does construct is silently dropped before
+printing. This is Rust-seed interpreter code
+(`src/compiler_rust/compiler/src/interpreter/`), not reachable from `.spl`,
+so per repo rule ("Fix .spl not Rust") no code change was made here.
+
+**Recommendation:**
+1. Documentation fix, done in this pass: added a "Literal Braces in an
+   Interpolated String (CSS/JSON footgun)" subsection to
+   `doc/07_guide/quick_reference/syntax_quick_reference.md` (under
+   "Strings") covering both confirmed escapes and both failure modes, since
+   the existing "Raw Strings" section didn't call out the interpolation
+   collision at all and never mentioned the `{{`/`}}` escape.
+2. File a follow-up feature request (not implemented here — Rust-seed
+   interpreter/CLI error-formatting change, out of scope for a `.spl`-only
+   fix and for this lane's effort budget) to: (a) surface the existing
+   `ErrorContext` help/note/code at the CLI print site instead of dropping
+   it, and (b) special-case the string-interpolation undefined-variable path
+   to name the enclosing string literal and suggest the `{{`/raw-string
+   escape. That would turn a location-less, misleading "variable not found"
+   into an actionable message without any grammar change.
+3. The `bin/simple run` silent-corruption case (no diagnostic, no error, wrong
+   output) is the more severe of the two failure modes and is not touched by
+   the interpret-mode fix above, since it doesn't go through this error path
+   at all — it deserves its own investigation into why the JIT/native lane
+   swallows the span instead of erroring or interpolating consistently with
+   the interpreter. Left open, not investigated further in this pass.
+
 No occurrences of the broken unescaped `{ident:#hex}`-shaped pattern were
 found in `src/lib/common/ui` via
 `/usr/bin/grep -rn '"[^"]*{[a-zA-Z_][a-zA-Z0-9_]*:#' src/lib/common/ui`
