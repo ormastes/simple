@@ -440,3 +440,104 @@ during investigation were removed and their absence verified twice
      time (`interpreter_eval.rs:972-975` / the mirrored
      `evaluation_helpers.rs:271-348` path) — the actual fix that would
      prevent this whole defect class from recurring. Not started.
+
+## 10. `_execute_intrinsic` follow-up (2026-08-08, third pass) — reachability, registration proof, fix ported
+
+**`MirInterpreter` reachability, resolved:** it is not reachable from the
+default `run`/`native-build`/`test` compiler pipeline (confirmed again — no
+importer of `MirInterpreter` outside `95.interp/*` and test files), but it
+**is** reachable and directly exercised as a library class by several unit/
+system specs that construct it explicitly, most importantly
+`test/01_unit/compiler/interpreter/mir_ssa_phi_intrinsic_spec.spl` (also
+duplicated at `test/unit/compiler/interpreter/mir_ssa_phi_intrinsic_spec.spl`)
+— this spec's third case, "selects the incoming value for the recorded
+predecessor block", is a direct assertion on the exact `__simple_ssa_phi`
+predecessor-block-0 behaviour this bug doc flagged in §9. Other direct
+consumers: `mir_interp_bounds_check_spec.spl`, `strict_interp_spec.spl`,
+`resource_interp_drop_spec.spl`,
+`optimization_plugin_jit_hotspot_system_spec.spl`. So: dead in ordinary
+compiles, live and under test for this specific class.
+
+**Registration-order proof for `_execute_intrinsic`, completed for 2 of 3
+engines.** Markers were re-added (`MARKER_MIR_INTERP_INTRINSICS_SPL_EXECUTE_INTRINSIC`
+in the 270-line copy, `MARKER_MIR_INTERPRETER_SPL_EXECUTE_INTRINSIC` in the
+79-line copy) and two independent probes run:
+
+1. `bin/simple test test/01_unit/compiler/interpreter/mir_ssa_phi_intrinsic_spec.spl`
+   — `4 examples, 0 failures`. `mir_interpreter.spl`'s marker fired 3 times
+   (once per test case that dispatches an intrinsic); `mir_interp_intrinsics.spl`'s
+   marker fired **0** times.
+2. A fresh minimal driver (`main.spl`, not part of the spec suite) replicating
+   the "predecessor block 2 selected" case via `bin/simple run` — same
+   result: `mir_interpreter.spl`'s marker fired once, produced the fix-correct
+   `RESULT=99`; `mir_interp_intrinsics.spl`'s marker did not fire.
+
+**Verdict: `mir_interpreter.spl`'s `_execute_intrinsic` (the copy WITH the
+`__simple_ssa_phi` fix) is the one that wins under both the `bin/simple test`
+interpreter engine and the `bin/simple run` engine**, for every consumer
+found. This is consistent with — not necessarily proof of — ordinary
+first-registered-wins semantics: nothing in the repo imports
+`compiler.interp.mir_interp_intrinsics` by name (grep for
+`mir_interp_intrinsics\|mir_interp_ops` across `src/` and `test/` returns
+zero hits other than the files' own headers), so for any consumer that only
+imports `compiler.interp.mir_interpreter.{MirInterpreter}` directly (as every
+found consumer does), `mir_interp_intrinsics.spl`'s `impl MirInterpreter:`
+block may simply never enter that consumer's module graph at all — a
+different mechanism from a registration race, but with the same practical
+result: `mir_interp_intrinsics.spl`'s copy is unreached by every driver
+tested.
+
+**`native-build` (AOT) proof: attempted, inconclusive, NOT recorded as a
+negative result.** Two attempts both exceeded this session's usable
+foreground budget (the harness auto-backgrounds any command that runs past
+~590s, `native-build` on the compiler tree did not finish before that, and
+both attempts were stopped rather than left backgrounded per this session's
+foreground-only constraint). Per the coordinator's explicit warning, this is
+recorded as **unproven for native-build**, not as "did not fire" — a stopped
+build is not evidence of deadness. Whether `mir_interp_intrinsics.spl`'s copy
+could ever win registration in a full self-hosted compile (where every file
+under `src/compiler/95.interp/` is loaded regardless of the narrow test-spec
+import graph) remains the one genuinely open question about this pair.
+
+**Fix ported** (highest-value action, done regardless of the above
+uncertainty, since porting to both copies is correct no matter which one
+wins in a build config not yet tested): `mir_interp_intrinsics.spl`'s
+`_execute_intrinsic` previously had **no `"__simple_ssa_phi"` case at all**
+and fell through to `case _: 0` (unconditional 0, not even the "first
+incoming value" fallback the other copy has for the `args.len() < 4` shape).
+Added a `case "__simple_ssa_phi":` block to
+`src/compiler/95.interp/mir_interp_intrinsics.spl` (before its final
+`case _:`, now at line 283) that is a direct port of
+`mir_interpreter.spl:667-688`'s logic, predecessor-block-0 landmine comment
+included. File grew from 307 to 336 lines (`git hash-object` /
+`git rev-parse origin/main:<path>` confirm the change; `wc -l` confirms the
++29 line delta matches the inserted block). Verified after the port:
+`bin/simple run` on the minimal driver still returns the fix-correct
+`RESULT=99` (marker-confirmed dispatch unchanged, still via
+`mir_interpreter.spl`'s copy); `bin/simple test` on the spec passed 4/0
+before the port was made and was re-attempted after but hit an unrelated
+environment fault (`Module count limit (800) exceeded loading
+.../test_daemon/light_protocol.spl`) on repeated re-runs — a pre-existing
+test-daemon/module-budget issue orthogonal to this file, not a regression
+from the port (the `run`-engine check after the port passed cleanly on the
+same edited tree). Markers removed from both files after the probes;
+`/usr/bin/grep -rn "MARKER" src/compiler --include=*.spl` → 0 matches,
+`sh scripts/check/check-no-sabotage-residue.shs` → `PASS`.
+
+**`lower_array_lit` closer diff (closes an open item from §8):** the two
+79-line bodies differ by exactly one line —
+`literals.spl` calls `self.error_fatal(...)`, `method_calls_literals.spl`
+calls `self.error(...)`, same message, otherwise byte-identical. Not fixed
+in this pass (no marker/liveness proof done for this pair, and the
+`error_fatal` vs `error` severity choice looks like it could be either an
+intentional divergence or an unnoticed drift — flagged for a follow-up
+liveness check + human call on which severity is correct, not resolved
+here).
+
+**Still not done, explicitly:** registration-order tracing for the other 11
+twin-file pairs (only `MirLowering.lower_tuple_lit` from earlier passes and
+`MirInterpreter._execute_intrinsic` from this pass have engine-level proof);
+any deletions (none made — no pair has the full 3-engine-plus-content-
+subsumption bar this doc requires before deleting a loser copy);
+`lower_dict_lit`'s and `_call_function`'s closer diffs (still only
+whole-body-differs, not line-level, for those two).
