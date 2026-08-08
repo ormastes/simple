@@ -179,3 +179,132 @@ Follow-up work, in dependency order:
 4. Scope `build_cache.sdn` under `cache_scope_root` instead of the cache root.
 5. Add `target_features`, `SIMPLE_BOOTSTRAP_STAGE4`, and `is_release` to the key.
 6. Only then re-enable cache persistence in the bootstrap scripts.
+
+---
+
+## Resolution 2026-08-08 — measured correction, GC landed, no revert
+
+Re-measured `build/native_cache` directly before acting on the recommendation
+to revert. Three of this document's quantitative claims do not survive the
+measurement, and the corruption is **not current**.
+
+### Count correction: 86 scope dirs, not 186
+
+`build/native_cache` holds 186 *entries*, but only **86** are scope
+directories — the other 98 are loose `*.smf` files at the cache root. The
+"186 scope dirs" figure counted both.
+
+### Legality correction: 83 of 86 keys are legal, not 3
+
+Distribution over the 86 real scope dirs:
+
+| `opt=` value | dirs |
+|---|---|
+| `3` | 78 |
+| `2` | 5 |
+| garbage int (`81508897`, `526418881`, `1061101969`) | 3 |
+
+So **83 of 86 (97%) carry a legal `opt`**, and exactly **one** dir has the
+`compiler=<value:0x…>` pointer rendering. The "only 3 of 186 have a legal
+opt" reading inverted the tally (it read the `78 3` / `5 2` histogram rows as
+a count of 3). `cpu=` likewise renders correctly in 85 of 86: `native` ×63,
+`riscv32-unknown-none` ×20, `nil` ×2, empty ×1.
+
+### Currency correction: all corruption is confined to 2026-07-25
+
+Scope dirs by mtime date, split by key legality:
+
+```
+date        legal  garbage
+2026-07-22      3        0
+2026-07-24     18        0
+2026-07-25      5        3   <-- every corrupt dir, this day only
+2026-07-28      9        0
+2026-07-29      1        0
+2026-08-01     11        0
+2026-08-02      6        0
+2026-08-04      2        0
+2026-08-05     10        0
+2026-08-06      6        0
+2026-08-07     12        0
+```
+
+All 3 garbage-`opt` dirs and the single pointer-rendered `compiler=` dir are
+dated **2026-07-25**. Every one of the 83 dirs written on the eleven other
+dates — including all 12 written on 2026-08-07 — renders legally. The
+rendering defect was live for one day two weeks ago and is not reproducible
+in current output. Findings 2 and 3 are therefore **historical, already
+fixed**, not live defects. No shape assertion was added: it would guard a bug
+that no longer occurs, at the cost of editing compiler source (and its
+bootstrap-rebuild blast radius) for zero current benefit.
+
+### The key IS stable across runs — so the persistent cache does pay off
+
+Finding 2's load-bearing conclusion was that the key is nondeterministic for
+identical inputs, making cache hits impossible and commit `5b569e96986d` pure
+leak. Tested directly on the 12 scope dirs written on 2026-08-07: stripping
+the `+src<fp>n<count>` suffix collapses all 12 to a **single** distinct
+prefix —
+
+```
+backend=llvm;cpu=native;features=;opt=3;compiler=f5dd94dea5924d03…d21e7d
+```
+
+— identical backend, cpu, features, opt, and compiler sha across every run
+that day. Only the source fingerprint varies, and the module counts differ
+with it (`n3073`, `n3079`, `n3081`, `n3083`, `n3091`, `n3093`, `n3095`,
+`n3097`): those are genuinely different source closures from the many lanes
+editing this repo concurrently, which is exactly what the fingerprint is
+supposed to discriminate. The two dirs cited as proof of nondeterminism
+(identical compiler+src, differing `opt`) are both from the 2026-07-25
+corrupt batch and carry garbage `opt` values, so they evidence the historical
+rendering bug rather than a live instability.
+
+**Conclusion: the cache key is deterministic and the persistent cache does
+hit.** Commit `5b569e96986d` is not all-cost-no-benefit, and is not reverted.
+
+### Finding 1 stands and is now fixed
+
+The GC gap was real and is the one finding that survives unchanged: scope
+dirs are mint-once and nothing collected them once the unconditional wipe was
+made conditional. Fixed by an age-based reaper, `bootstrap_native_cache_prune`,
+defined inline in `scripts/bootstrap/bootstrap-from-scratch.sh` and
+`scripts/bootstrap/resume-stage3-from-admitted.sh`, invoked on the preserved
+path of each:
+
+- Removes only entries matching the `backend=*` scope-dir shape, so sibling
+  `build_cache.sdn` and `*.smf` files are never touched.
+- Age-based (default 7 days, `BOOTSTRAP_NATIVE_CACHE_TTL_DAYS` to override,
+  `0`/non-numeric disables). Age was chosen over LRU specifically so it needs
+  no bookkeeping sidecar and **no lock protocol**: several lanes build
+  concurrently on this host, and a scope dir untouched for 7 days cannot
+  belong to a live build, so the reaper cannot pull artifacts from under a
+  running lane.
+- Fixture-verified before landing: 3 stale scope dirs pruned, 2 fresh ones
+  kept, 3 old non-scope entries (`build_cache.sdn`, a plain dir, a `.smf`)
+  all preserved; TTL=0, non-numeric TTL, missing dir, and idempotent rerun
+  each exit 0 silently.
+
+It was **not** placed in `scripts/check/lib/bootstrap-stage3-provenance.shs`:
+that facade is byte-bound by the provenance manifest and documents "keep this
+file small", so appending a utility there risks the Stage 3 provenance gate.
+
+### Disk-pressure framing
+
+The urgency premise ("96% disk, 167G free and falling") is real but is not
+attributable to this cache. `build/native_cache` totals **12M**; the stage2/3
+provenance caches this commit made persistent are 21–48M each across 24 dirs,
+well under ~500M combined, against 167G free on a 3.7T volume. The reaper is
+still correct to add — unbounded growth with no collector is a defect on its
+own terms — but this cache was not a plausible ENOSPC vector, and no manual
+`rm` sweep was performed (other lanes are mid-build).
+
+### Not addressed
+
+The secondary design gaps above (hardcoded `target_features`, absent
+`SIMPLE_BOOTSTRAP_STAGE4` in the key, `is_release` invisible under explicit
+`opt_level`, unscoped `build_cache.sdn` at the cache root causing alternating
+scopes to `remove_entry` each other, non-atomic `BuildCache.save()`) are all
+real and all remain open. They are correctness/efficiency issues in the key
+and cache-index design, independent of both the GC gap and the persistence
+change, and none of them is a disk-growth vector.

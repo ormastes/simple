@@ -117,3 +117,40 @@ changes that the current coarse key protects against.
 3. Consider adding a content check (not just existence) on cache-object reuse
    at `driver_aot_native_output.spl:337` as defense-in-depth before narrowing
    Layer 2, independent of the AOP work.
+
+## Update 2026-08-08 — GC added; review findings measured and partly corrected
+
+An adversarial review of the commit above
+(`doc/08_tracking/bug/native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08.md`)
+raised three findings. Re-measuring `build/native_cache` directly resolved
+them as follows; full evidence is in the "Resolution 2026-08-08" section of
+that bug doc.
+
+- **GC gap (valid, fixed).** Making the wipe conditional removed the only
+  thing that collected mint-once scope dirs. Fixed with an age-based reaper,
+  `bootstrap_native_cache_prune`, defined inline in both bootstrap wrappers
+  and invoked on their preserved paths. Default TTL 7 days
+  (`BOOTSTRAP_NATIVE_CACHE_TTL_DAYS`, `0` disables). It matches only the
+  `backend=*` scope-dir shape, needs no lock protocol (a dir untouched for 7
+  days cannot belong to a live build on this concurrently-built host), and was
+  fixture-verified before landing.
+- **"Key renders corrupt" (historical, not current).** All 3 garbage-`opt`
+  dirs and the single `compiler=<value:0x…>` dir are dated 2026-07-25; the 83
+  dirs from eleven other dates, including all 12 from 2026-08-07, render
+  legally. 83 of 86 scope dirs (97%) carry a legal key. No shape assertion was
+  added — it would guard an already-fixed bug at the cost of touching compiler
+  source.
+- **"Cache never hits, so persistence is pure leak" (false).** The 12 scope
+  dirs from 2026-08-07 collapse to a single distinct prefix once the source
+  fingerprint is stripped: identical backend/cpu/features/opt/compiler-sha
+  across every run. The key is deterministic; only the source fingerprint
+  varies, tracking real edits from parallel lanes. The persistent cache does
+  hit, so the change was **not reverted**.
+
+Residual scope from the original plan (Layer 2 whole-closure fingerprint
+scoping, the A/B/C/D timing measurement) is unchanged and still open. The
+review's secondary design gaps — hardcoded `target_features`, absent
+`SIMPLE_BOOTSTRAP_STAGE4` in the key, `is_release` invisible under an explicit
+`opt_level`, `build_cache.sdn` unscoped at the cache root so alternating
+scopes mutually `remove_entry` each other, and non-atomic `BuildCache.save()`
+— are all real, all still open, and none is a disk-growth vector.

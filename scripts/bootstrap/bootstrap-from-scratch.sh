@@ -672,6 +672,40 @@ bootstrap_wide_inputs_hash() {
   } | hash_stream
 }
 
+# Prune native-build cache scope directories older than a TTL.
+#
+# Scope dirs are named
+# `backend=...;cpu=...;opt=...;compiler=<sha>+src<fingerprint>n<count>` and are
+# mint-once: as soon as any input in the closure changes, the source
+# fingerprint changes and a NEW scope dir is minted. The old one is never
+# consulted again, and nothing else ever collects it. That was harmless only
+# while the wrappers wiped the entire cache dir on every run; now that these
+# caches persist across runs (so an unchanged tree gets a real cache hit) the
+# wipe is gone and scope dirs would otherwise accumulate without bound.
+#
+# Age-based rather than LRU on purpose: it needs no bookkeeping sidecar and no
+# lock protocol. Several bootstrap lanes build concurrently on this host, and a
+# scope dir whose mtime is older than the TTL cannot belong to a live build, so
+# this can never pull artifacts out from under a running lane. Only entries
+# matching the `backend=*` scope-dir shape are ever removed, so sibling files
+# (build_cache.sdn, *.smf) are untouched. Override the window with
+# BOOTSTRAP_NATIVE_CACHE_TTL_DAYS; 0 or a non-numeric value disables pruning.
+bootstrap_native_cache_prune() {
+  bnc_dir=$1
+  bnc_ttl=${BOOTSTRAP_NATIVE_CACHE_TTL_DAYS:-7}
+  [ -d "${bnc_dir}" ] || return 0
+  case "${bnc_ttl}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "${bnc_ttl}" -gt 0 ] || return 0
+  bnc_n=$(find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
+    -mtime +"${bnc_ttl}" -print 2>/dev/null | wc -l)
+  [ "${bnc_n}" -gt 0 ] || return 0
+  find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
+    -mtime +"${bnc_ttl}" -exec rm -rf {} + 2>/dev/null || true
+  echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
+}
+
 prepare_native_cache() {
   label=$1
   if [ "${execution_profile}" = "clean-release" ]; then
@@ -705,6 +739,7 @@ prepare_native_cache() {
   else
     echo "  ${label}: reusing native cache (${bootstrap_mode} mode)"
   fi
+  bootstrap_native_cache_prune "${native_cache_dir}"
 }
 
 run_logged() {
@@ -1311,6 +1346,11 @@ else
   if [ "${fresh_cache}" -eq 1 ] || [ "${execution_profile}" = "clean-release" ]; then
     echo "  provenance: clearing stage2/stage3 native caches (--fresh-cache/--clean-release)"
     rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}"
+  else
+    # Preserved caches still need a reaper: scope dirs are mint-once and
+    # nothing else collects them now that the unconditional wipe is gone.
+    bootstrap_native_cache_prune "${stage2_provenance_cache}"
+    bootstrap_native_cache_prune "${stage3_provenance_cache}"
   fi
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
