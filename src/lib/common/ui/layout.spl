@@ -286,6 +286,18 @@ fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: 
     val cell_w = w / cols
     val cell_h = h / rows
 
+    # Integer division truncates, so `cell_w * cols` and `cell_h * rows` fall
+    # short of the container by up to cols-1 / rows-1 pixels. layout_hbox and
+    # layout_vbox both document the invariant that the remainder is awarded
+    # exactly once, to the LAST space-taking child, so children always sum to
+    # the container; grid used to drop it, leaving an unpainted strip on the
+    # right edge and along the bottom of every grid whose size is not an exact
+    # multiple of its track count. Track edges are therefore computed as
+    # absolute boundaries — base multiples for interior tracks, the container's
+    # own far edge for the last one — so the awarded remainder lands in the
+    # final column/row and every cell stays adjacent to its neighbour with no
+    # gap and no overflow. A cell that SPANS to the last column inherits that
+    # edge too, so a span never has to be widened separately.
     var idx = 0
     for child in children:
         val grid_row = place_row[idx]
@@ -293,9 +305,13 @@ fn layout_grid(children: [WidgetNode], x: i32, y: i32, w: i32, h: i32, columns: 
         val span = place_span[idx]
         val cell_x = x + (grid_col * cell_w)
         val cell_y = y + (grid_row * cell_h)
-        val cell_span_w = cell_w * span
+        val col_end = grid_col + span
+        val cell_right = if col_end >= cols: x + w else: x + (col_end * cell_w)
+        val cell_bottom = if grid_row + 1 >= rows: y + h else: y + ((grid_row + 1) * cell_h)
+        val cell_span_w = cell_right - cell_x
+        val cell_span_h = cell_bottom - cell_y
 
-        val child_rects = compute_layout(child, cell_x, cell_y, cell_span_w, cell_h)
+        val child_rects = compute_layout(child, cell_x, cell_y, cell_span_w, cell_span_h)
         for cr in child_rects:
             rects.push(cr)
         idx = idx + 1
