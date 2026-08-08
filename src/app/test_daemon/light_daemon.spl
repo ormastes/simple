@@ -15,6 +15,8 @@ extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_env_get(key: text) -> text
 
 # Atomic write: tmp + rename (see test_runner_client.spl for the race this
 # closes — #98: a plain rt_file_write_text response could be observed
@@ -33,8 +35,36 @@ val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+# Published so a client can see WHICH compiler this daemon will run every served
+# spec with. Without it the daemon lane is unobservable: the caller cannot tell
+# that its freshly built binary was replaced by whatever started the daemon.
+val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
+
+fn invoking_binary() -> text:
+    """Absolute path of the compiler binary running THIS process ("" if unknown).
+
+    Canonicalizes /proc/self/exe IN-PROCESS; never shells out (a spawned
+    helper's /proc/self describes the HELPER). The daemon is spawned as
+    `<binary> run light_daemon.spl`, so this is exactly the compiler the client
+    chose — inheriting it is what keeps a daemon-served spec honest. See
+    doc/08_tracking/bug/
+    simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
+    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+        return self_path
+    ""
 
 fn simple_binary() -> text:
+    val configured = (rt_env_get("SIMPLE_BINARY") ?? "")
+    if configured != "" and rt_file_exists(configured):
+        return configured
+    # The invoking binary outranks every guessed candidate below. argv[0] here
+    # is this script's own source path, so the raw[0] check never fires for the
+    # daemon and the old order fell straight through to bin/simple — pinning
+    # every served spec to the deployed binary regardless of who started us.
+    val invoker = invoking_binary()
+    if invoker != "":
+        return invoker
     val raw = cli_get_args()
     # Source-mode argv can begin with this file's own .spl path (when the seed
     # interprets light_daemon.spl directly via `simple run <this file>`). It
@@ -113,11 +143,15 @@ fn main() -> i64:
     ensure_dirs()
     rt_file_write_text(LIGHT_LOCK, "{rt_getpid()}")
     val binary = simple_binary()
+    # Publish the served binary BEFORE accepting any request, so a client that
+    # observes the lock also observes an accurate binary record.
+    atomic_write_text(LIGHT_BINARY, binary)
     var idle = 0
     while idle < 240:
         if rt_file_exists(LIGHT_STOP):
             rt_file_delete(LIGHT_STOP)
             rt_file_delete(LIGHT_LOCK)
+            rt_file_delete(LIGHT_BINARY)
             return 0
         val entries = rt_dir_list(LIGHT_REQ_DIR)
         if entries.len() == 0:
@@ -130,4 +164,5 @@ fn main() -> i64:
             handle_request(binary, entries[i])
             i = i + 1
     rt_file_delete(LIGHT_LOCK)
+    rt_file_delete(LIGHT_BINARY)
     0

@@ -18,6 +18,7 @@ extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_path_absolute(path: text) -> text
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
 # truncate) then write() as two separate steps, so a concurrent reader that
@@ -40,6 +41,11 @@ val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
+# The live daemon records here the absolute path of the binary it executes every
+# served spec with (written by light_daemon.spl at startup). Read below so this
+# client can tell whether the daemon lane would silently substitute a different
+# compiler for the one the caller invoked.
+val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
 
 struct ClientRun:
     # First requested path. Retained for error reporting only; execution
@@ -116,7 +122,40 @@ fn parse_client_run(args: [text]) -> ClientRun:
             return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "test file not found")
     ClientRun(path: paths[0], paths: paths, timeout_secs: timeout_secs, valid: true, error: "")
 
+fn invoking_binary() -> text:
+    """Absolute path of the compiler binary running THIS process ("" if unknown).
+
+    Canonicalizes /proc/self/exe IN-PROCESS. Never shell out: a spawned
+    helper's /proc/self describes the HELPER, which is how the CLI's guard
+    became a fork bomb on 2026-07-25.
+
+    This is the only answer that is not a guess. Every candidate list below it
+    is a guess, and a guess that lands on the DEPLOYED binary while the caller
+    invoked a freshly rebuilt one turns a verification run into a vacuous one
+    — see doc/08_tracking/bug/
+    simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
+    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+        return self_path
+    ""
+
 fn simple_binary() -> text:
+    # An explicit SIMPLE_BINARY is the ONE legitimate reason to execute a spec
+    # with a binary other than the invoking one (cross-binary parity specs);
+    # preserve it explicitly rather than by falling through to a fixed path.
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and rt_file_exists(configured):
+        return configured
+    # The invoking binary, resolved in-process. This MUST outrank the
+    # bin/simple / debug-seed candidate list below: cli_get_args()[0] here is
+    # the SUBCOMMAND ("test"), not argv0, so without this step every
+    # `<rebuilt-binary> test <spec>` run silently handed the spec to the stale
+    # deployed bin/simple. Measured 2026-08-08: invoking
+    # src/compiler_rust/target/release/simple printed
+    # `child binary: .../bin/release/x86_64-unknown-linux-gnu/simple`.
+    val invoker = invoking_binary()
+    if invoker != "":
+        return invoker
     val raw = cli_get_args()
     # Source-mode argv can begin with this file's own .spl path (when the seed
     # interprets test_runner_client.spl directly). It exists, but it is not
@@ -161,6 +200,23 @@ fn daemon_lock_alive() -> bool:
         1000
     )
     code == 0
+
+fn daemon_recorded_binary() -> text:
+    """Absolute path of the compiler a LIVE light daemon serves specs with.
+
+    Returns "" when no daemon is alive (nothing to mismatch against). A daemon
+    that is alive but predates the daemon.binary record was, by construction of
+    the pre-2026-08-08 resolver, always running bin/simple — resolve that so an
+    old daemon still produces an honest comparison rather than a free pass."""
+    if not daemon_lock_alive():
+        return ""
+    val recorded = (rt_file_read_text(LIGHT_BINARY) ?? "").trim()
+    if recorded != "" and rt_file_exists(recorded):
+        return recorded
+    val deployed = rt_path_absolute("bin/simple") ?? ""
+    if deployed != "" and rt_file_exists(deployed):
+        return deployed
+    ""
 
 fn ensure_daemon() -> bool:
     if daemon_lock_alive():
@@ -388,14 +444,29 @@ fn main() -> i64:
     # pass for the wrong reason. Fail-safe: any request that names one of these
     # overrides takes the direct lane, where the child really does inherit it.
     val binary_override_bypass = _has_binary_override()
+    # Same defect class again, and the reason the 2026-07-27 fix did not hold.
+    # The light daemon is pinned for its ENTIRE LIFETIME to whichever binary
+    # spawned it, and the v1 request carries only a path + expiry — no binary.
+    # So a daemon-served run executes the spec with the DAEMON's compiler while
+    # the caller reads the result as if its own compiler had produced it. A
+    # lane that rebuilds the compiler and runs `test` to verify the fix then
+    # measures the old binary and calls it green. Divert to the direct lane
+    # whenever the daemon's binary is not the one running this process. A
+    # daemon predating this record (no daemon.binary file) is treated as
+    # bin/simple, which is what every pre-fix daemon actually used.
+    val invoker = invoking_binary()
+    val daemon_binary = daemon_recorded_binary()
+    val invoker_bypass = invoker != "" and daemon_binary != "" and invoker != daemon_binary
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass: false else: ensure_daemon()
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
+        elif invoker_bypass:
+            print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
         elif binary_override_bypass:
             print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif long_timeout_bypass:
