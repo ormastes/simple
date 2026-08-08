@@ -375,7 +375,29 @@ the backend, not the flag form, and not the environment.
    A non-vacuous result would be the headline; it would still need
    `--entry-closure` isolated as a single-variable follow-up before any causal
    claim.
-3. The parallel `unresolved method call:` MIR-lowering lane (`to_u8`/`join`) is
+3. **A 60s per-file compile timeout exists in the pure-Simple pipeline and the
+   compiler's own source exceeds it — investigate whether it fails open.**
+   The Stage-2-recipe run in item 2 completed in 415s with
+   `STAGE3_CLOSURE_EXIT=1` and exactly one failure:
+
+   ```
+   FAILED FILES (1):
+     - src/compiler/10.frontend/core/__init__.spl: timeout (60s)
+   ```
+
+   Log: `build/cyc/S3CLOSURE/build.log`. This is a *per-file* budget, so it only
+   surfaces as a named failure in the multi-file (`--entry-closure` + `--source`)
+   form. The real Stage-3 recipe compiles the whole compiler as a **single**
+   unit ("1 compiled"), where no such per-file failure is ever reported — and
+   that run produced 5,767 stub functions with `STAGE3_EXIT=0`. If the same
+   budget is applied internally in single-unit mode and degrades to stubs
+   instead of erroring, that would produce exactly the observed artifact.
+   `driver_aot_native_output.spl:566` already points at a related known defect,
+   `doc/08_tracking/bug/native_build_cache_never_written_on_timeout_2026-07-26.md`.
+   This is now the most promising lead and should be checked before any
+   scale-vs-construct bisect.
+
+4. The parallel `unresolved method call:` MIR-lowering lane (`to_u8`/`join`) is
    plausibly the same defect seen from the other side — `[mir-method-call] …
    disc=… unresolved=true` is resolution failure over an enum-keyed table. With
    enum dispatch itself now eliminated, that lane's findings become the more
