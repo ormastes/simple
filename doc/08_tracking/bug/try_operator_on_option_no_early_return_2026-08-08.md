@@ -72,13 +72,18 @@ some_case START
 some_case=SOME:got:v
 ```
 
-Two distinct failures on the `None` path:
+Failures on the `None` path:
 
-1. **No early return.** `SIDE_EFFECT_RAN` fires after `?` on a `None`. The
-   function body continues as though the Option were present.
-2. **The result matches neither variant.** Both `case Some(v)` and `case None`
-   fail to match, so the `match` prints nothing at all — the same
-   "matches neither" shape as the original `Result` defect.
+1. **No early return — this is the load-bearing finding.** `SIDE_EFFECT_RAN`
+   fires after `?` on a `None`; the function body continues as though the Option
+   were present. Unambiguous and reproducible.
+2. **The caller gets no recognizable `None`.** The `match` produced a blank line
+   rather than `none_case=NONE`. NOT DISAMBIGUATED: that blank is consistent
+   with either (a) neither arm matching, so the `match` fell through and printed
+   nothing, or (b) `case Some(v)` matching with an empty/garbage `v`. Both are
+   wrong and neither changes the fix direction, but which one it is was not
+   determined. Do not cite this as "matches neither variant" without re-probing;
+   cite point 1, which stands on its own.
 
 The success path is correct.
 
@@ -131,3 +136,41 @@ A `describe`/`it`/`expect` spec **cannot** guard this: the spec DSL executes
 example bodies through a path that never reaches the JIT `lower_try` lowering,
 which is why `test/01_unit/try_operator_error_propagation_spec.spl` passes
 identically on broken and fixed seeds. Use the check script.
+
+## Related, also unguarded: `?` in a function that does not return Result
+
+Found in the same review. `lower_try` emits
+`HirStmt::Return(subject_ref)` typed `subject_ty` regardless of the enclosing
+function's declared return type, and nothing diagnoses the mismatch:
+
+```simple
+fn inner(bad: bool) -> Result<i64, text>:
+    if bad:
+        return Err("boom")
+    return Ok(42)
+
+fn not_result(bad: bool) -> i64:      # NOT a Result
+    val n = inner(bad)?
+    return n + 1
+
+fn main():
+    print("ok="  + not_result(false).to_text())
+    print("err=" + not_result(true).to_text())
+```
+
+Observed (post-fix seed, exit code 0, no diagnostic):
+
+```
+ok=43
+err=3012356214401
+```
+
+`3012356214401` is the raw `Err`-tagged enum handle escaping as an `i64` from a
+function declared `-> i64`.
+
+**Framing: pre-existing hole, not a regression.** Before `a59575dfde3` this
+returned the unwrapped payload — also wrong. The change swapped one silent wrong
+value for another and additionally made it a *type* violation. Either way `?` in
+a non-`Result` function should be a compile-time error; today it silently
+miscompiles. Filed here rather than separately because the fix belongs in the
+same `lower_try` type-dispatch work as the Option case above.
