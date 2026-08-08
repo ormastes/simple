@@ -32,8 +32,14 @@ involved, so any difference between lanes is a miscompile, not entropy:
 | `encode_salt([0..15], 10)` | `..CA.uOD/eaGAOmJB.yMBu` | `..eOEA.mKBf.QD/WWEfuc.` |
 | `bcrypt_decode_base64 ∘ bcrypt_encode_base64` | `0,1,2,…,15` (identity) | `0,8,16,24,…,120` (each ×8) |
 
-The roundtrip is **not an identity** under the JIT: every recovered byte is the original
-shifted left by 3.
+The roundtrip is **not an identity** under the JIT: the recovered bytes are
+`0,8,16,…,120`, i.e. the input scaled by 8.
+
+Note this last row describes *what was measured*, not a mechanism. It is the composition
+`decode ∘ encode` where **encode is already corrupted**, and `bcrypt_decode_base64` reads
+its own input via the same defective path — so the ×8 that lands at the end is the
+product of two affected stages, not a single clean shift applied to the input. Do not
+quote it as "decode shifts by 3".
 
 Source pin: `src/lib/common/bcrypt/salt.spl` blob
 `9aebf245c612c6e1865fb874aaad1b656306f752`, byte-identical to `origin/main` at the time
