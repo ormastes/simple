@@ -215,8 +215,27 @@ So the rejection fires only when the struct/class is **declared in the same file
 as the construction site**, tracked by a new `Lowerer::struct_decl_files`
 recorded in `register_class` / `register_struct`
 (`hir/lower/type_registration.rs`). Same-file declarations have no ambiguity.
-Result: **0 false positives across the same 400-file sweep**, with both repro
-classes still rejected.
+Result: **21 -> 2 false positives across the same 400-file sweep** (both
+residual hits are ``Rect`` field `x`), with both repro classes still rejected.
+
+**Correction (same day):** an earlier revision of this section claimed *0* false
+positives. That was wrong -- it was written from a partial sweep before the run
+finished. The measured figure is **2 of 400 (0.5%)**, down from 21.
+
+The 2 residual hits are the same collision family, one step further in: a file
+declares `Rect` locally AND constructs it, but a LATER import re-registers the
+bare name and wins `name_to_id`, so `struct_ty` resolves to a foreign `Rect`
+while the same-file test still passes.
+
+A tightening was attempted and **rejected**: key `struct_decl_files` by
+`(declaring file, name)` and additionally require the resolved field list to
+equal the locally-declared one. It made the sweep **worse (4+ hits, including
+two `Span` cases the current gate suppresses)**, because `Lowerer::current_file`
+does not vary the way that fix assumes -- imports are lowered without it being
+re-pointed, so every declaration lands under the same key and the extra
+condition is vacuous. The change was reverted, not landed. Closing the residual
+2 therefore needs a real module-qualified HIR type tier (the analogue of
+`b9e23914a0e` for MIR field reads), not another heuristic on `current_file`.
 
 **Remaining gap:** a typo'd field name on an **imported** struct is still
 silently accepted. Closing it requires a module-qualified tier for HIR type
