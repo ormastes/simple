@@ -937,7 +937,23 @@ impl MirLowering:
         # carries a resolvable per-declaration mutability bit here; trait/
         # free-function/static/unresolved resolutions are out of scope for
         # this check (same scoping the close-consume check above uses).
-        if self.mir_hir_type_is_shared_resource(Some(receiver.type_)):
+        # BUG FIX (native_slice_desugar_nil_kind_crash_2026-08-08): must pass
+        # `receiver.type_` directly, NOT `Some(receiver.type_)`. `type_` is an
+        # Option-desugared field (`has_type_: bool` companion, see
+        # hir_definitions.spl's HirExpr) that holds a bare `nil` when absent
+        # -- which is exactly the case on native-build's --entry fast path,
+        # which never runs the HIR type-inference pass (30.types) that would
+        # populate it (see the docstring above on `resolution.get_symbol_id()`
+        # for the same fast-path gap). Wrapping an absent `nil` in `Some(...)`
+        # produces `Some(nil)` instead of `None`, so
+        # `mir_hir_type_is_shared_resource`'s `match t: case Some(ht): match
+        # ht.kind` below runs with `ht == nil` and crashes on `ht.kind`
+        # instead of falling into its `case nil: false` arm. Every other call
+        # site of this sibling pair (`function_lowering.spl:217`,
+        # `method_calls_literals.spl:919`) passes the optional field straight
+        # through without the extra `Some(...)` wrap; this was the one site
+        # that didn't.
+        if self.mir_hir_type_is_shared_resource(receiver.type_):
             match resolution:
                 case InstanceMethod(_, shared_mut_method_id):
                     val shared_mut_sym = self.symbols.get_symbol_raw(shared_mut_method_id.id)
