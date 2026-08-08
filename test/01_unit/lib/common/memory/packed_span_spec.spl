@@ -11,7 +11,8 @@ use common.memory.packed_span.{
     PACKED_SPAN_BAD_SLOT,
     PACKED_SPAN_OUT_OF_BOUNDS,
     PACKED_SPAN_BAD_STRIDE,
-    PACKED_SPAN_EMPTY
+    PACKED_SPAN_EMPTY,
+    packed_span_backend_name
 }
 
 describe "packed span registry (F2)":
@@ -75,3 +76,58 @@ describe "packed span registry (F2)":
         val reg = PackedSpanRegistry.create(1)
         assert_true(reg.register(16) == 0)
         assert_true(reg.register(16) == -1)
+
+describe "packed span counted refusal gate (F2)":
+    it "counts a refusal instead of returning a silent zero":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 8, 4)
+        assert_true(reg.invalidate(slot))
+        val verdict = reg.resolve(r)
+        # A silent-zero failure would report OK (0) here.
+        assert_true(verdict == PACKED_SPAN_STALE_GENERATION)
+        assert_equal(reg.rejected_op_count, 1)
+        assert_equal(reg.last_rejection, PACKED_SPAN_STALE_GENERATION)
+        # A refused batch must admit ZERO elements.
+        assert_equal(reg.admitted_element_count, 0)
+
+    it "does not count a successful resolve as a rejection":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(4096)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 64, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        assert_equal(reg.rejected_op_count, 0)
+        assert_equal(reg.last_rejection, PACKED_SPAN_OK)
+        assert_equal(reg.admitted_element_count, 64)
+
+    it "accumulates each distinct refusal kind and keeps the latest":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        assert_true(reg.resolve(packed_span_make(9, 1, 0, 4, 4)) == PACKED_SPAN_BAD_SLOT)
+        assert_equal(reg.last_rejection, PACKED_SPAN_BAD_SLOT)
+        assert_true(reg.resolve(packed_span_make(slot, reg.generation_of(slot), 60, 2, 4)) == PACKED_SPAN_OUT_OF_BOUNDS)
+        assert_equal(reg.last_rejection, PACKED_SPAN_OUT_OF_BOUNDS)
+        assert_equal(reg.rejected_op_count, 2)
+        assert_equal(reg.resolve_call_count, 2)
+
+    it "performs exactly ONE check for a whole submitted batch":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(65536)
+        val r = packed_span_make(slot, reg.generation_of(slot), 0, 16384, 4)
+        assert_true(reg.resolve(r) == PACKED_SPAN_OK)
+        # 16384 elements admitted against 1 gate call — a per-element gate
+        # would make these two numbers equal.
+        assert_equal(reg.resolve_call_count, 1)
+        assert_equal(reg.admitted_element_count, 16384)
+
+    it "leaves the counters untouched when probing with check":
+        val reg = PackedSpanRegistry.create(2)
+        val slot = reg.register(64)
+        val bad = packed_span_make(slot, reg.generation_of(slot) + 5, 0, 4, 4)
+        assert_true(reg.check(bad) == PACKED_SPAN_STALE_GENERATION)
+        assert_equal(reg.resolve_call_count, 0)
+        assert_equal(reg.rejected_op_count, 0)
+
+    it "reports the scalar oracle, never a SIMD claim":
+        # No native SimplePackedSpanV1 resolve exists in src/runtime/.
+        assert_equal(packed_span_backend_name(), "scalar-oracle")

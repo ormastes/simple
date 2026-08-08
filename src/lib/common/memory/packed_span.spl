@@ -68,6 +68,15 @@ class PackedSpanRegistry:
     slot_generation: [u32]
     slot_live: [u32]
     slot_count: i64
+    # Counted honest gate (project standard: a refusal is COUNTED and TYPED,
+    # never a silent zero and never a fabricated success).
+    resolve_call_count: i64
+    rejected_op_count: i64
+    last_rejection: i64
+    # Elements admitted by an OK resolve. Divided by `resolve_call_count` this
+    # is the checks-per-element ratio the F2 "one check per batch" property
+    # claims — so the claim is measurable, not aspirational.
+    admitted_element_count: i64
 
     static fn create(capacity: i64) -> PackedSpanRegistry:
         var lens: [u32] = []
@@ -79,7 +88,15 @@ class PackedSpanRegistry:
             gens.push(0)
             live.push(0)
             i = i + 1
-        PackedSpanRegistry(slot_byte_len: lens, slot_generation: gens, slot_live: live, slot_count: capacity)
+        PackedSpanRegistry(
+            slot_byte_len: lens,
+            slot_generation: gens,
+            slot_live: live,
+            slot_count: capacity,
+            resolve_call_count: 0,
+            rejected_op_count: 0,
+            last_rejection: PACKED_SPAN_OK,
+            admitted_element_count: 0)
 
     # Register a backing object of `byte_length` bytes. Returns the slot, or
     # -1 when the registry is full (fail closed — never overwrite a live slot).
@@ -110,7 +127,21 @@ class PackedSpanRegistry:
         true
 
     # The single validation gate. One call per submitted batch, not per pixel.
+    # Records the verdict: OK admits `element_count` elements against ONE
+    # check; anything else is a counted, typed refusal.
     me resolve(r: BufferSpanRef) -> i64:
+        val verdict = self.check(r)
+        self.resolve_call_count = self.resolve_call_count + 1
+        if verdict == PACKED_SPAN_OK:
+            self.admitted_element_count = self.admitted_element_count + (r.element_count as i64)
+        else:
+            self.rejected_op_count = self.rejected_op_count + 1
+            self.last_rejection = verdict
+        verdict
+
+    # Pure verdict computation — no bookkeeping, so callers that need to probe
+    # without disturbing the counters can use it.
+    me check(r: BufferSpanRef) -> i64:
         val slot = r.object_slot as i64
         if slot < 0 or slot >= self.slot_count:
             return PACKED_SPAN_BAD_SLOT
@@ -138,6 +169,17 @@ fn packed_span_make(slot: i64, generation: u32, byte_offset: u32, element_count:
         element_count: element_count,
         element_stride: element_stride)
 
-export PackedSpanRegistry, BufferSpanRef, packed_span_make
+# Which backend an OK verdict actually authorises. There is NO native
+# `SimplePackedSpanV1` resolve in `src/runtime/` (verified absent repo-wide
+# 2026-08-08), so an OK verdict authorises checked indexed access via the
+# scalar oracle and NOTHING MORE. This function must keep returning
+# "scalar-oracle" until a real C resolve lands — it exists so no caller can
+# quietly start claiming SIMD execution the runtime cannot deliver.
+# Design for the missing C half:
+# doc/05_design/ui/perf/packed_span_v1_c_resolve_abi_2026-08-08.md
+fn packed_span_backend_name() -> text:
+    "scalar-oracle"
+
+export PackedSpanRegistry, BufferSpanRef, packed_span_make, packed_span_backend_name
 export PACKED_SPAN_OK, PACKED_SPAN_STALE_GENERATION, PACKED_SPAN_BAD_SLOT
 export PACKED_SPAN_OUT_OF_BOUNDS, PACKED_SPAN_BAD_STRIDE, PACKED_SPAN_EMPTY
