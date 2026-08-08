@@ -215,8 +215,36 @@ So the rejection fires only when the struct/class is **declared in the same file
 as the construction site**, tracked by a new `Lowerer::struct_decl_files`
 recorded in `register_class` / `register_struct`
 (`hir/lower/type_registration.rs`). Same-file declarations have no ambiguity.
-Result: **0 false positives across the same 400-file sweep**, with both repro
-classes still rejected.
+Result: **21 -> 5 residual false positives**, with both repro classes still
+rejected. Residual breakdown: 3x ``Rect`` field `x`, 1x ``Span`` field
+`end_pos`, 1x ``Diagnostic`` field `range`.
+
+Measurement caveat, stated precisely because the earlier figures in this section
+were not: the BEFORE run covered all 400 sampled files; the AFTER run completed
+267 of the same 400 before the sweep ended. So the honest comparison is 21 hits
+in 400 vs 5 hits in the first 267 (~1.9%), not a like-for-like 400-vs-400. The
+reduction is real and large, but the residual rate is approximate.
+
+**Correction (same day, twice):** an earlier revision claimed *0* false
+positives, then *2 of 400*. Both were wrong -- each was written from a sweep
+that had not finished. Only the figures above are from the completed run. The
+lesson is the one already in the repo's measurement-traps notes: do not quote a
+number off a still-running sweep.
+
+The residual hits are the same collision family, one step further in: a file
+declares `Rect` locally AND constructs it, but a LATER import re-registers the
+bare name and wins `name_to_id`, so `struct_ty` resolves to a foreign `Rect`
+while the same-file test still passes.
+
+A tightening was attempted and **rejected**: key `struct_decl_files` by
+`(declaring file, name)` and additionally require the resolved field list to
+equal the locally-declared one. It made the sweep **worse (4+ hits, including
+two `Span` cases the current gate suppresses)**, because `Lowerer::current_file`
+does not vary the way that fix assumes -- imports are lowered without it being
+re-pointed, so every declaration lands under the same key and the extra
+condition is vacuous. The change was reverted, not landed. Closing the residual
+2 therefore needs a real module-qualified HIR type tier (the analogue of
+`b9e23914a0e` for MIR field reads), not another heuristic on `current_file`.
 
 **Remaining gap:** a typo'd field name on an **imported** struct is still
 silently accepted. Closing it requires a module-qualified tier for HIR type
