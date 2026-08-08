@@ -198,9 +198,11 @@ describe "detect_virtio_gpu_device requires a real device node, not just an exis
     `true` for ANY existing path, including a plain regular file, which
     misrouted `unavailable_reason()`'s branch selection (see
     doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md).
-    The fix checks `stat` mode bits (`test -c`) so only a character device
-    -- the shape every DRM render node has -- passes. A plain file that
-    merely exists on disk must now report false."""
+    The fix checks `stat` mode bits so only a character device -- the shape
+    every DRM render node has -- passes. A plain file that merely exists on
+    disk must now report false. As of the 2026-08-08 shell-drop follow-up
+    this check is `rt_file_is_char_device` (stat(2) + S_ISCHR) called
+    directly, not a `/bin/sh -c "test -c ..."` shell-out."""
 
     it "reports false for a missing path":
         assert_false(detect_virtio_gpu_device("/nonexistent/render-node-for-spec"))
@@ -216,7 +218,7 @@ describe "detect_virtio_gpu_device requires a real device node, not just an exis
         step("/dev/null is a character device on every Linux/container host this suite runs on -- it exercises the positive branch without depending on real GPU hardware. A real DRM render node (e.g. /dev/dri/renderD128) is host-hardware-dependent and not asserted here.")
         assert_true(detect_virtio_gpu_device("/dev/null"))
 
-describe "security: render_node cannot break out of the shell command line (fixed 2026-08-08)":
+describe "security: render_node cannot break out of the shell command line (fixed 2026-08-08, shell dropped same day)":
     """`detect_virtio_gpu_device()` used to interpolate `render_node`
     unvalidated into `shell_bool("test -c '{render_node}'")`, a
     `/bin/sh -c` command line quoted with single quotes. A `render_node`
@@ -225,8 +227,14 @@ describe "security: render_node cannot break out of the shell command line (fixe
     the injected command's own exit code (see the "Security rework"
     section of
     doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md).
-    The fix validates the path with `is_safe_render_node_path()` before it
-    ever reaches the shell."""
+    The immediate fix validated the path with `is_safe_render_node_path()`
+    before it ever reached the shell. The same-day follow-up removed the
+    shell entirely: `detect_virtio_gpu_device()` now calls
+    `std.io_runtime.is_char_device()` -> the no-shell `rt_file_is_char_device`
+    stat(2)/S_ISCHR runtime primitive, so there is no command line left to
+    break out of. These assertions all still hold -- the allowlist stays as
+    defense-in-depth -- but the injection payloads below are now inert by
+    construction, not merely rejected."""
 
     it "rejects a render_node that attempts shell command injection, with no side effects":
         step("A single-quote breakout payload that would touch a marker file and spoof a true result if executed")

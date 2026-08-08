@@ -952,6 +952,24 @@ int rt_file_is_regular_no_follow(const char* path) {
 #endif
 }
 
+/* rt_file_is_char_device: no-shell stat(2) probe for whether `path` is a
+ * character device (e.g. a DRM render node). Added so callers like
+ * os.compositor.vulkan_compositor_backend's detect_virtio_gpu_device() can
+ * drop their `/bin/sh -c "test -c '...'"` shell-out entirely -- see
+ * doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
+ * Symlinks are followed (stat, not lstat): the caller wants to know whether
+ * the path ultimately resolves to a character device, not whether the leaf
+ * entry itself is one. */
+int rt_file_is_char_device(const char* path) {
+#if defined(_WIN32)
+    (void)path;
+    return 0;
+#else
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+#endif
+}
+
 int spl_file_delete(const char* path) {
     if (!path) return 0;
     return remove(path) == 0 ? 1 : 0;

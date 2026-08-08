@@ -1973,6 +1973,29 @@ pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileErro
     Ok(Value::Bool(regular))
 }
 
+/// No-shell stat(2)-backed char-device probe. Mirrors the C runtime's
+/// `rt_file_is_char_device` (src/runtime/runtime.c) for the interpreter path.
+/// Symlinks are followed (fs::metadata, not symlink_metadata) so a path that
+/// resolves to a character device reports true regardless of intermediate
+/// symlinks -- see doc/08_tracking/bug/
+/// vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
+pub fn rt_file_is_char_device(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let is_char = fs::metadata(path)
+            .map(|metadata| metadata.file_type().is_char_device())
+            .unwrap_or(false);
+        Ok(Value::Bool(is_char))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(Value::Bool(false))
+    }
+}
+
 pub fn rt_file_stat_readonly(args: &[Value]) -> Result<Value, CompileError> {
     let h = if let Value::Int(v) = &args[0] {
         (*v - 1) as usize

@@ -19575,6 +19575,22 @@ int64_t rt_metal_load_library_bytes_raw(int64_t device, int64_t data_ptr, int64_
     return 0; /* invalid/absent library handle */
 }
 
+/* rt_file_is_char_device: pulled into this freestanding x86_64 kernel link
+ * via os.compositor.vulkan_compositor_backend.detect_virtio_gpu_device(),
+ * which is in this kernel's build closure. Same device-absent-body
+ * reasoning as the CUDA/Metal block above (not the fabricated-stub pattern
+ * the link gate rejects): a baremetal kernel has no host filesystem to
+ * stat(2), so "false" (no character device at any path) is the TRUTHFUL
+ * answer, not a fabricated one -- and it is exactly the sentinel
+ * detect_virtio_gpu_device() already treats as "device absent", the same
+ * branch a real host without a render node takes. See
+ * doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md. */
+RuntimeValue rt_file_is_char_device(RuntimeValue path)
+{
+    (void)path;
+    return 0; /* raw bool convention: false, no filesystem on this target */
+}
+
 RuntimeValue rt_engine2d_simd_blend_const_span_u32(RuntimeValue dst, int64_t offset,
                                                    int64_t count, int64_t const_color)
 {

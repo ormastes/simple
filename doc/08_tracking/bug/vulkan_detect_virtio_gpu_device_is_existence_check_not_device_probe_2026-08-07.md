@@ -188,3 +188,127 @@ Results: 29 total, 29 passed, 0 failed
 
 (21 pre-existing examples plus 8 new security examples, all green; 0
 regressions.)
+
+## Follow-up: shell-drop via a new no-shell stat primitive (2026-08-08)
+
+The "Fix" section above investigated whether a no-shell char-device stat
+primitive already existed and found none (`rt_file_stat` returns mtime, not
+`st_mode`) — so the allowlist-guarded `shell_bool("test -c '{render_node}'")`
+was kept as the pragmatic fix rather than adding new FFI plumbing. This
+follow-up adds that plumbing and drops the shell entirely.
+
+### New runtime primitive: `rt_file_is_char_device(path) -> bool`
+
+Mirrors the existing `rt_file_is_regular_no_follow` in shape and wiring
+(single text arg, stat(2)-backed bool), using `S_ISCHR` instead of
+`S_ISREG`, and follows symlinks (`stat`, not `lstat` — the caller wants to
+know whether the path ultimately resolves to a character device, not
+whether the leaf entry itself is one). Wired at every site
+`rt_file_is_regular_no_follow` is wired, mirroring its ABI treatment
+end-to-end:
+
+- `src/runtime/runtime.h` — declaration
+- `src/runtime/runtime.c` — implementation (full runtime)
+- `src/runtime/runtime_native.c` — duplicate implementation for the
+  core-c-bootstrap build (native binaries linked without `runtime.c`)
+- `src/compiler_rust/compiler/src/interpreter_extern/file_io.rs` —
+  interpreter-path implementation (`fs::metadata` + `FileTypeExt::is_char_device`)
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` — dispatch
+  table registration (`insert_simple!`)
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs` — `RuntimeFuncSpec`
+  signature (`(ptr, len) -> bool`, single text arg)
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs` and
+  `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs` —
+  text-arg-index marking (`text_arg_indices`) so the codegen backends
+  marshal the text argument correctly
+- `src/compiler/50.mir/text_extern_abi.spl` — the pure-Simple MIR mirror
+  of the same text-arg-index marking, for the self-hosted pipeline
+
+### `.spl` wrapper: `std.io_runtime.is_char_device(path)`
+
+`src/lib/nogc_sync_mut/io_runtime.spl` gained `extern fn rt_file_is_char_device`
+and a `pub fn is_char_device(path: text) -> bool` wrapper (exported
+alongside `is_dir`/`is_file`), following the file's existing wrapper
+pattern.
+
+### `detect_virtio_gpu_device` refactor
+
+`src/os/compositor/vulkan_compositor_backend.spl`: the import changed from
+`std.io_runtime.{shell_bool}` to `std.io_runtime.{is_char_device}`, and the
+final line of `detect_virtio_gpu_device` changed from
+`shell_bool("test -c '{render_node}'")` to `is_char_device(render_node)`.
+`is_safe_render_node_path()` is unchanged and still runs first — it is now
+defense-in-depth (rejecting garbage input before it reaches stat(2)) rather
+than a shell-injection guard, since there is no shell left to inject into.
+File-level and function-level doc comments were updated to describe the new
+no-shell probe instead of the retired `test -c` shell-out.
+
+### Spec updates
+
+`test/01_unit/os/compositor/vulkan_compositor_backend_spec.spl` needed no
+new `it` blocks: the acceptance cases this follow-up cares about
+(`/dev/null` → true char device, `/etc/hostname` → false regular file, a
+missing path → false, plus all 8 injection-rejection cases) were already
+present from the prior fix and exercise `detect_virtio_gpu_device()`
+through its public signature, so they equally cover the no-shell
+implementation underneath. Two docstrings (in the "requires a real device
+node" and "security" `describe` blocks) were updated to stop describing a
+`/bin/sh -c "test -c ..."` shell-out that no longer exists.
+
+### Baremetal freestanding body (SimpleOS x86_64 kernel link)
+
+`detect_virtio_gpu_device()` is in the SimpleOS desktop-kernel's `-nostdlib`
+freestanding build closure (it's reachable via the compositor-backend
+selection path even though `VulkanCompositorBackend` is never actually
+selected at runtime today). Once `rt_file_is_char_device` is a real extern,
+the freestanding linker needs a concrete symbol for it same as every other
+runtime primitive that closure pulls in — a coordinating sibling session
+flagged this mid-landing (the same-day CUDA/Metal device-absent-body commit,
+`0d83c56`, hit an analogous gap for 6 GPU symbols and fixed it the same
+way).
+
+Added `RuntimeValue rt_file_is_char_device(RuntimeValue path)` to
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`,
+directly after the CUDA/Metal device-absent block, returning `0` (false):
+a baremetal kernel has no host filesystem to `stat(2)`, so "no character
+device at any path" is the truthful answer, not a fabricated one — and it
+is exactly the "device absent" branch `detect_virtio_gpu_device()` already
+handles correctly (same as a real host with no render node present).
+
+### Build-verify status: DEFERRED
+
+This session could not verify the Rust-side wiring (interpreter dispatch,
+JIT/AOT text-arg marshaling) by rebuilding, because the shared
+`src/compiler_rust` target dir was under contention from **5 concurrent
+`cargo build` processes** from other sessions for the full ~10-minute
+bounded wait attempted (`for i in 1..30; do pgrep -f 'cargo build' || break;
+sleep 30; done`, per the shared-target-dir coordination protocol — never run
+a second concurrent `cargo build --release` against the same target dir).
+No free slot opened in that window.
+
+**What IS verified:** the pure-Simple/spec-visible surface (the `.spl`
+wrapper, the `detect_virtio_gpu_device` refactor, and the spec docstrings)
+is internally consistent and every touched file's diff against
+`origin/main` was checked to be a clean, non-destructive addition (no
+reverted content). **What is NOT yet verified:** that the new Rust extern
+(`rt_file_is_char_device`) actually links, that `nm` shows the symbol in a
+freshly built binary, and that the spec's positive/negative branches
+(`/dev/null` → true, `/etc/hostname` → false) actually pass end-to-end
+through a rebuilt binary — none of that can be confirmed without a build.
+
+**Unblock condition:** once a `cargo build --release` slot is free (verify
+via `pgrep -af 'cargo build'` returning empty), from `src/compiler_rust/`
+run an INCREMENTAL `cargo build --release` (never clean), confirm
+`nm src/compiler_rust/target/release/simple | grep rt_file_is_char_device`
+finds the symbol, then run the spec via the freshly built binary:
+`src/compiler_rust/target/release/simple run
+src/app/test_runner_new/test_runner_single.spl
+test/01_unit/os/compositor/vulkan_compositor_backend_spec.spl
+--no-session-daemon --sequential` and confirm `Results: N total, N passed, 0
+failed`. Do not deploy `bin/simple`/`bin/release/**` from this change alone
+without that verification. Separately, re-run
+`scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (SIMPLE_BIN pinned
+to a stage2 binary, foreground, generous timeout) to confirm
+`rt_file_is_char_device` no longer appears in the freestanding
+fabricated-stub list and to see whichever symbol/blocker is next in that
+gate.

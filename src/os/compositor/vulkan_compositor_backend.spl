@@ -42,17 +42,24 @@
 #     quoting and inject arbitrary shell commands, e.g.
 #     `'; touch /tmp/pwned; echo '` -- which also spoofed the probe result
 #     to `true` via the trailing `echo`'s exit code. `render_node` is a
-#     `pub fn` parameter, i.e. untrusted input from any caller. The fix
-#     validates the path with `is_safe_render_node_path()` BEFORE it ever
-#     reaches the shell: only `[A-Za-z0-9/._-]`, must start with `/`.
-#     No no-shell stat primitive (char-device mode bits) is exposed via
-#     SFFI/`std.io_runtime`/`std.fs` today -- `rt_file_stat` returns mtime,
-#     not `st_mode` -- so the shell probe is kept, guarded by this
-#     allowlist, rather than adding new FFI plumbing for this fix.
+#     `pub fn` parameter, i.e. untrusted input from any caller. The
+#     immediate fix validated the path with `is_safe_render_node_path()`
+#     BEFORE it ever reached the shell: only `[A-Za-z0-9/._-]`, must start
+#     with `/`.
+#   * SHELL-DROP (2026-08-08, same-day follow-up, same bug doc): the shell
+#     probe above is now GONE. `detect_virtio_gpu_device()` calls
+#     `std.io_runtime.is_char_device()`, which wraps the new no-shell
+#     `rt_file_is_char_device` runtime primitive (stat(2) + S_ISCHR;
+#     `src/runtime/runtime.c`/`runtime_native.c`) -- no `/bin/sh` involved,
+#     so it works on baremetal where `/bin/sh` may not exist and it is
+#     immune to shell-metacharacter injection by construction (the path is
+#     never interpolated into a command string at all). `is_safe_render_node_path()`
+#     is KEPT as defense-in-depth allowlisting even though nothing shells
+#     out anymore -- it costs nothing and rejects garbage input early.
 #
 # MDSOC: feature dimension, compositor layer
 
-use std.io_runtime.{shell_bool}
+use std.io_runtime.{is_char_device}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 
 ## Default DRM render node checked for virtio-gpu/any-GPU device presence.
@@ -60,14 +67,12 @@ use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapabl
 pub val VULKAN_VENUS_DEFAULT_RENDER_NODE: text = "/dev/dri/renderD128"
 
 pub fn is_safe_render_node_path(render_node: text) -> bool:
-    """Allowlist a render-node path BEFORE it is ever interpolated into a
-    shell command line. `detect_virtio_gpu_device()` passes `render_node`
-    to `shell_bool()`, which runs it via `/bin/sh -c` with the value quoted
-    in single quotes -- so a value containing a single quote (or any other
-    shell metacharacter) can break out of that quoting and inject
-    commands. This function rejects anything that is not a plain absolute
-    path built only from `[A-Za-z0-9/._-]`, closing that off entirely
-    rather than trying to escape/blacklist dangerous characters."""
+    """Allowlist a render-node path. `detect_virtio_gpu_device()` no longer
+    shells out at all (see the file-level SHELL-DROP note), so this is now
+    defense-in-depth rather than a shell-injection fix: it still rejects
+    anything that is not a plain absolute path built only from
+    `[A-Za-z0-9/._-]`, closing off garbage/weird input early rather than
+    letting it reach the stat(2) syscall."""
     if render_node == "":
         return false
     if render_node.char_at(0) != "/":
@@ -89,24 +94,24 @@ pub fn is_safe_render_node_path(render_node: text) -> bool:
 pub fn detect_virtio_gpu_device(render_node: text) -> bool:
     """REAL, VERIFIABLE capability probe: does a character device exist at
     this path on disk? A DRM render node is always a character device, so
-    checking `stat` mode bits (via `test -c`) rejects plain files and
-    directories that merely happen to exist -- unlike a bare existence
-    check, which cannot tell a device node from `/etc/hostname`. This is
-    the only claim this file is willing to make about hardware. It does NOT
-    mean virtio-gpu specifically (any character device passes, e.g.
-    /dev/null), and it does NOT mean venus/Vulkan capset support -- those
-    require protocol negotiation this file does not implement. Callers must
-    not read a `true` result as "Vulkan works".
+    checking `stat` mode bits (via `rt_file_is_char_device`, a stat(2) +
+    S_ISCHR call) rejects plain files and directories that merely happen to
+    exist -- unlike a bare existence check, which cannot tell a device node
+    from `/etc/hostname`. This is the only claim this file is willing to
+    make about hardware. It does NOT mean virtio-gpu specifically (any
+    character device passes, e.g. /dev/null), and it does NOT mean
+    venus/Vulkan capset support -- those require protocol negotiation this
+    file does not implement. Callers must not read a `true` result as
+    "Vulkan works".
 
-    SECURITY: `render_node` is validated with `is_safe_render_node_path()`
-    before it reaches the shell -- see the file-level SECURITY note above.
-    Any path containing a shell metacharacter (quotes, `;`, whitespace,
-    etc.) is rejected and reported as absent, never executed."""
+    No shell involved: `is_safe_render_node_path()` allowlists the path as
+    defense-in-depth (see the file-level SHELL-DROP note above), then
+    `std.io_runtime.is_char_device()` calls stat(2) directly."""
     if render_node == "":
         return false
     if not is_safe_render_node_path(render_node):
         return false
-    shell_bool("test -c '{render_node}'")
+    is_char_device(render_node)
 
 pub class VulkanCompositorBackend:
     w: i32

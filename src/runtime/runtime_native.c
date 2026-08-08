@@ -7309,6 +7309,20 @@ int rt_file_is_regular_no_follow(const char* path) {
 #endif
 }
 
+/* rt_file_is_char_device: mirrors runtime.c's rt_file_is_char_device for the
+ * core-c-bootstrap build (native binaries linked without runtime.c). See
+ * that definition for rationale (no-shell char-device probe, symlinks
+ * followed). */
+int rt_file_is_char_device(const char* path) {
+#if defined(_WIN32)
+    (void)path;
+    return 0;
+#else
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+#endif
+}
+
 int rt_file_delete(const char* path) {
     if (!path) return 0;
     return remove(path) == 0 ? 1 : 0;
