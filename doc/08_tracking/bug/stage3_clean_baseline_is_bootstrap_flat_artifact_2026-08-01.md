@@ -1,8 +1,26 @@
 # Stage3 "728/0/0, 0 unresolved" is a bootstrap-flat artifact, not a clean tree
 
 - **Date:** 2026-08-01
-- **Status:** OPEN — measurement-validity defect. No product code is wrong; the
-  *evidence* circulating between lanes is.
+- **Status:** MITIGATED (2026-08-08) — the silent gap is closed: both
+  bootstrap-flat chokepoints (`driver_aot_pipeline.spl`'s
+  `bootstrap_flat_aot` borrow-check/flat-MIR-passes skip, and
+  `driver_pipeline_lowering.spl`'s MIR-lowering skip for all non-entry
+  modules) now call `log_bootstrap_flat_warning()`
+  (`src/compiler/80.driver/driver_log_helpers.spl`), which uses `log_warn`
+  (unconditional — unlike `log_phase`, which stayed silent unless
+  `SIMPLE_COMPILER_PHASE_PROFILE`/`SIMPLE_COMPILER_TRACE` happened to be set).
+  Any stage3 run now prints an explicit `[WARN]` banner stating that MIR
+  lowering/borrow-check/flat-MIR-passes were skipped and that a clean count
+  is not tree-clean evidence, with a pointer back to this file. Regression
+  proof: `test/01_unit/compiler/driver/stage3_bootstrap_flat_warning_spec.spl`
+  (5/5 passing; sabotage-verified — an earlier draft assertion that failed to
+  correctly scope the function body caught a real false-pass and had to be
+  fixed, proving the spec is sensitive to the defect shape). Remaining OPEN
+  item: this is a caveat/loud-warning fix, not a real non-flattened count —
+  the only way to get a true unresolved-symbol count is still a stage4 build
+  (`--entry src/app/cli/main.spl --mode one-binary`,
+  `SIMPLE_BOOTSTRAP_STAGE4=1`); no lane should cite a stage3 "0 unresolved"
+  as tree-clean evidence even with this warning present.
 - **Severity:** HIGH. Three lanes (HirType layer, residual unresolved names,
   duplicate type aliases) were told their targets may be closed on the strength
   of this number.
