@@ -53,6 +53,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
+use compiler.frontend.layer_eq_registry.{layer_field_pending_any, layer_field_pending_get}
 extern fn rt_env_get(key: text) -> text
 
 # ===== Helper Functions =====
@@ -797,7 +798,12 @@ fn parse_module_body():
                     val dec_end2: bool = par_kind_get() == 190
                     if dec_end1 or dec_end2:
                         break
-                    if decorator_name == "layer":
+                    if decorator_name == "layer" or decorator_name == "layer_eq":
+                        # Both take a single bare ident arg: `@layer(NAME)` (M1
+                        # module tag) and `@layer_eq(TargetType)` (C1 view-type
+                        # equivalence claim). Sharing this collection arm is
+                        # deliberate -- a second, divergent ident-arg parser is
+                        # exactly the drift the C0/C1 plan warns about.
                         if par_kind_get() == 6:
                             layer_tag_names.push(par_text_get())
                             parser_advance()
@@ -931,6 +937,48 @@ fn parse_module_body():
                 else:
                     parser_error("expected layer name in '@layer(NAME)'")
                 parser_reset_pending_vhdl_decorators()
+            elif decorator_name == "layer_eq":
+                # C1 `@layer_eq(Target) struct View:` (doc/03_plan/compiler/
+                # forwarding/
+                # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md;
+                # obligations in doc/05_design/language/forwarding/
+                # layer_forwarding_and_layer_eq_types.md §3).
+                #
+                # Structurally identical to the @packed / @derive arms: parse
+                # the decorated struct/class normally and emit it, then lower
+                # the CLAIM into the same inert `__..._decl(...)` marker trick
+                # `@layer(NAME)`/`layer NAME` already use, so module_assembly
+                # can record it and drop the marker (zero HIR/MIR/codegen
+                # output for the attribute itself). The struct itself is a
+                # completely ordinary decl -- `@layer_eq` adds a proof
+                # obligation, never a representation change.
+                val leq_is_class: bool = par_kind_get() == 31
+                val leq_is_struct: bool = par_kind_get() == 23
+                if leq_is_class or leq_is_struct:
+                    if layer_tag_names.len() == 0:
+                        parser_error("expected target type name in '@layer_eq(TYPE)'")
+                    val leq_d = parse_struct_decl(leq_is_class)
+                    module_add_decl(leq_d)
+                    if layer_tag_names.len() > 0:
+                        # Rename slots published by parse_struct_decl above,
+                        # parallel to the view's real field order. Encoded as
+                        # "" when the struct carried no @layer_field tag at all
+                        # so the marker payload stays honest (see
+                        # layer_eq_registry.spl).
+                        var leq_renames_csv = ""
+                        if layer_field_pending_any():
+                            leq_renames_csv = layer_field_pending_get().join(",")
+                        val leq_helper = expr_ident("__layer_eq_decl", 0)
+                        var leq_args: [i64] = []
+                        leq_args.push(expr_string_lit(decl_get_name(leq_d), 0))
+                        leq_args.push(expr_string_lit(layer_tag_names[0], 0))
+                        leq_args.push(expr_string_lit(leq_renames_csv, 0))
+                        val leq_marker = expr_call(leq_helper, leq_args, 0)
+                        val leq_decl = decl_val_binding("_expr_layer_eq_" + int_to_str(i), -1, leq_marker, -1)
+                        module_add_decl(leq_decl)
+                    parser_reset_pending_vhdl_decorators()
+                else:
+                    parser_error("`@layer_eq(TYPE)` must decorate a struct or class declaration")
             elif decorator_name == "unsafe":
                 # Args already collected into PENDING_UNSAFE_* above; the next
                 # parsed decl records itself via parser_record_unsafe_annotation.

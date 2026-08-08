@@ -25,6 +25,7 @@ use compiler.driver.driver_hir_pipeline_passes.{
 use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -63,6 +64,16 @@ pub fn driver_dict_entry_count(entries: Dict<SymbolId, HirFunction>) -> i64:
 fn _driver_validate_value_struct_layouts(ctx: CompileContext):
     for error in validate_value_struct_layouts(ctx.hir_modules):
         ctx.add_error(error)
+    # C1 (doc/03_plan/compiler/forwarding/
+    # zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md): prove
+    # every source-level `@layer_eq(Target)` claim against the compiler's own
+    # computed struct layouts. Runs here, in the same post-HIR-lowering hook as
+    # the by-value cycle check above, because both need lowered HIR and both
+    # must be able to stop the compile. Before this call existed, the C1
+    # checker only ever ran on hand-built fixtures -- a `@layer_eq` claim in
+    # real source could not fail a build.
+    for layer_eq_error in validate_layer_eq_types(ctx.hir_modules):
+        ctx.add_error(layer_eq_error)
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile) -> Result<HirModule, text>:

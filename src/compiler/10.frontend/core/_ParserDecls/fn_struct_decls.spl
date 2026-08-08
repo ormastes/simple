@@ -78,6 +78,7 @@ use compiler.frontend.core.parser_decls_use.*
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
 use compiler.frontend.core._Ast.decl_nodes.{decl_set_param_muts}
+use compiler.frontend.layer_eq_registry.{layer_field_pending_set}
 
 # ===== Helper Functions =====
 
@@ -875,6 +876,15 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var field_defaults: [i64] = []
     var field_bits: [i64] = []
     var class_method_ids: [i64] = []
+    # C1 (@layer_field): one slot per FIELD, in declaration order -- "" means
+    # "infer by same name", otherwise the `@layer_field(NAME)` target. Published
+    # to layer_eq_registry as this function returns; the `@layer_eq` decorator
+    # arm in enum_module_body.spl reads it there. Collected for EVERY struct
+    # (cost: one "" push per field) so the list is always parallel to the real
+    # field order rather than only being parallel when a tag happens to appear.
+    var layer_field_renames: [text] = []
+    var layer_field_saw_any = false
+    var layer_field_next = ""
 
     while true:
         parser_skip_newlines()
@@ -889,6 +899,34 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
+
+        # C1: `@layer_field(NAME)` -- a FIELD-position attribute naming the
+        # target-struct field this view field maps to (obligation 2 of
+        # doc/05_design/language/forwarding/
+        # layer_forwarding_and_layer_eq_types.md §3). Recognized at member-start
+        # position only; `@bits(N)` is the pre-existing 171 arm and sits AFTER
+        # the field type, so the two cannot be confused. Any other member-start
+        # decorator keeps the previous behavior (fall through to the
+        # "unexpected token in class body" report) rather than being silently
+        # swallowed.
+        if par_kind_get() == 171:
+            val (lf_snap_nums, lf_snap_txts) = lex_snapshot_save()
+            val (lf_tok_nums, lf_tok_text) = parser_tok_save()
+            parser_advance()
+            val lf_is_layer_field: bool = par_kind_get() == 6 and par_text_get() == "layer_field"
+            if lf_is_layer_field:
+                parser_advance()
+                parser_expect(140)
+                if par_kind_get() == 6:
+                    layer_field_next = par_text_get()
+                    parser_advance()
+                else:
+                    parser_error("expected target field name in '@layer_field(NAME)'")
+                parser_expect(141)
+                parser_skip_newlines_and_semicolons()
+                continue
+            lex_snapshot_restore(lf_snap_nums, lf_snap_txts)
+            parser_tok_restore(lf_tok_nums, lf_tok_text)
 
         # Associated types: type Item = T (skip for now, just parse and ignore).
         # `type: T` is instead a keyword-named field, as in the canonical Rust
@@ -978,6 +1016,13 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             ftype = parser_parse_type()
         field_names.push(fname)
         field_types.push(ftype)
+        # C1: one rename slot per real field, in declaration order. Consumed
+        # (and cleared) here so a `@layer_field` tag can never bind to more
+        # than the single field that immediately follows it.
+        layer_field_renames.push(layer_field_next)
+        if layer_field_next != "":
+            layer_field_saw_any = true
+        layer_field_next = ""
         var fbits: i64 = -1
         # T:N syntax — e.g. u32:16 (bit width after type)
         if par_kind_get() == 161:
@@ -1009,6 +1054,15 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         parser_skip_newlines_and_semicolons()
 
     named_type_update(struct_type_id, field_names, field_types)
+    # C1: a `@layer_field(NAME)` with no field after it binds to nothing; that
+    # is a source error, not a silently-dropped tag (a dropped tag would make a
+    # partial tag set look total and defeat obligation 2's all-or-none rule).
+    if layer_field_next != "":
+        parser_error("`@layer_field(" + layer_field_next + ")` is not followed by a field in '" + struct_name + "'")
+    # C1: publish THIS struct's rename slots (whole-list replace, see
+    # layer_eq_registry.spl) before returning, so the `@layer_eq` decorator arm
+    # that called us reads a list parallel to exactly these `field_names`.
+    layer_field_pending_set(layer_field_renames, layer_field_saw_any)
     val struct_d = decl_struct_def(struct_name, field_names, field_types, field_defaults, field_bits, 0)
     if is_class:
         decl_set_is_value_type(struct_d, 0)
