@@ -595,3 +595,55 @@ here, since it's explicitly out of scope for this measurement pass.
 (7 per-spec artifacts), `/tmp/c3_remeasure/rollup_full.txt` (raw unioned dump
 backing all ratios above), `/tmp/c3_remeasure/decisions_only.txt` (extracted
 decision-row section used for the hand-verification counts).
+
+## Addendum (2026-08-08): 0%-covered files closed out
+
+Two files remained at 0% covered lines with no dedicated spec after the
+above measurement pass: `engine2d_baremetal_rect_core.spl` and
+`display_backend_core.spl`. Both are now resolved.
+
+### `display_backend_core.spl` — trait-only, no spec written
+
+Confirmed still a pure trait declaration on origin/main: two traits
+(`CompositorGlassCapable`, `CompositorBackend`), 18 method signatures total,
+zero bodies. There is no logic to execute — any spec against this file would
+either be vacuous (asserting a trait exists) or would actually be testing a
+concrete implementer elsewhere (e.g. `Engine2dCompositorBackend`, which has
+its own coverage path). No spec was written, per the instruction not to
+write a vacuous spec for a file with no testable logic.
+
+### `engine2d_baremetal_rect_core.spl` — new spec, 0% → 100% line coverage
+
+New spec: `test/01_unit/os/compositor/engine2d_baremetal_rect_core_spec.spl`
+(13 examples, 0 failures). This narrow RV64-desktop-service rect core has no
+buffer-backed render target (unlike its full sibling
+`engine2d_baremetal_core.spl`) — `rect_core_draw_rect_filled`'s only paint
+path calls `extern fn rt_gui_fill4` directly, and that extern has no
+host-runtime implementation (`src/runtime/runtime_native.c` implements only
+`rt_gui_get_glyph_8x16`, not `rt_gui_fill4`), so the actual-paint branch
+cannot be safely reached from a hosted unit test.
+
+The spec instead hand-derives every clamp/exclusion branch that runs BEFORE
+the extern call, using rect geometries constructed so the post-clamp
+exclusion guard (`x1<=x0 or y1<=y0`) returns early: the `w<=0 or h<=0`
+guard (both operands), all four bounds-clamp `if`s (x0<0, y0<0, x1>width,
+y1>height — true AND false outcomes for each), `rect_core_clear`'s
+delegation through the same guard, and `rect_core_present`'s no-op body.
+
+Measured with `SIMPLE_COVERAGE=1` + distinct `SIMPLE_COVERAGE_OUTPUT`,
+foreground, `test_runner_single.spl --no-session-daemon --sequential`:
+
+- **Line coverage: 0% → 100% (17/17 executable lines)**
+- **Decision coverage: 11/12 branches (91.7%)** — 5 of 6 decision points
+  (the `w<=0 or h<=0` guard and all four clamp `if`s) have both true and
+  false outcomes hit. The 6th decision, `x1<=x0 or y1<=y0`, has only its
+  TRUE (early-return) outcome hit — its FALSE outcome (proceed to paint) is
+  exactly the `rt_gui_fill4` extern-call path documented above as
+  host-unreachable. This is an honest, correctly-labeled gap, not a hidden
+  one; no hardware/QEMU-only defect was found in the clamp arithmetic itself
+  (all 13 hand-derived assertions passed against the real clamping logic).
+
+No defect surfaced in either file. `_pack` (the file-private packing helper)
+has no visibility modifier (default = same-file-only, per the Visibility
+guide) and so cannot be imported into the spec directly; it is exercised
+transitively by every case above.
