@@ -133,5 +133,87 @@ faults the runner (observed: the whole spec file reports
 `u32`, so a hosted `rt_alloc` address cannot be substituted on x86_64. Proving
 these end-to-end needs a baremetal target with a real arena.
 
+## 2026-08-08 follow-up — address-width blocker fixed, real-memory verification added
+
+The "Not verified" gap above is closed. Widened every address-flavored field
+in `allocator.spl` (`BlockHeader.next`, `base`, `free_list`, `offset`,
+`allocated`, `num_blocks`, `capacity`, `block_size`, pool addresses, and the
+`mem_*`/`align_up`/`sat_sub` helper signatures) from `u32` to `u64`. Chose this
+over an mmap-backed extern or an injectable test backend because:
+
+- Every sibling module in the same directory (`interrupt.spl`, `syscall.spl`,
+  `vm_fault.spl`, `tss_syscall.spl`) and the real kernel heap code
+  (`os/kernel/memory/heap.spl`, `riscv_noalloc_heap_init`) already use `u64`
+  for addresses/base/size — `allocator.spl`'s `u32` was the outlier, not a
+  deliberate 32-bit-target convention.
+- `allocator.spl`'s public API (`heap_init`, `FreeListAllocator`, etc.) has
+  zero callers anywhere else in the tree, so the signature change is
+  zero-blast-radius.
+- `mmap` is not a registered extern (confirmed) and an injectable backend
+  would need to leak host FFI into the `nogc_async_mut_noalloc` tier, which
+  its own conventions forbid.
+
+`header_size()` is **unchanged at 16** and `next_offset()` unchanged at 8: with
+`next` now `u64` (8 bytes), it occupies bytes 8..16 exactly — what used to be
+4 bytes of tail padding is now the high word of the pointer. No new `extern`
+was added or Rust runtime code touched: `BlockHeader.next` and the raw
+free-list link words `FixedBlockAllocator`/`MultiPoolAllocator` write directly
+into memory are stored as two `u32` words via new `mem_read_u64`/
+`mem_write_u64` helpers (composed from the existing `rt_mmio_read_u32`/
+`rt_mmio_write_u32` externs), not a widened MMIO primitive.
+
+New spec `test/01_unit/lib/baremetal/allocator_real_memory_spec.spl` imports
+the real module and drives it with a real host address from `rt_alloc`
+(asserted `> 0xFFFFFFFF` to prove it's a genuine 64-bit pointer, not a small
+literal that would also have fit the old `u32` width). It re-verifies:
+
+- The free-list split fix (`73e99722000`) over real memory.
+- All 3 `sat_sub` sites inside `FreeListAllocator`
+  (`dealloc`'s `self.allocated`, `dealloc`'s coalesce-with-next
+  `self.num_blocks`, `coalesce_with_prev`'s `self.num_blocks`) — each example
+  directly forces the underflow condition (over-dealloc / `num_blocks` preset
+  to 0 before a real coalesce fires) rather than only the non-underflowing
+  path, and `1000000`-ceiling assertions catch a wraparound to a near-`u64::MAX`
+  value.
+- `FixedBlockAllocator`'s 2 `sat_sub` sites (`dealloc`, `available`) the same
+  way.
+
+Engine: `bin/simple test` (tree-walk interpreter; seed banner present — see
+Stage-3 self-host blocker note elsewhere in this repo). Evidence:
+
+- **GREEN** (module intact): `SPEC FILE VERDICT: ...allocator_real_memory_spec.spl
+  declared>=7 executed=7 passed=7 failed=0 dropped=0`.
+- **SABOTAGE 1** (reverted the split fix — `next_free = new_block_addr` ->
+  no-op): the split-path example fails and the runner aborts after 3/7
+  examples (`Results: 3 total, 2 passed, 1 failed`), proving the spec reaches
+  live module code, not a cached/stale binary.
+- **SABOTAGE 2** (`sat_sub` degraded to plain `a - b`): all 4 `sat_sub`-backed
+  examples fail (`Results: 7 total, 3 passed, 4 failed`) — including both
+  `FreeListAllocator` coalesce sites, which only fail once the test forces
+  `num_blocks` toward the actual underflow condition (an earlier draft that
+  only exercised the natural non-underflowing coalesce path passed under this
+  same sabotage and was strengthened).
+- **Restored, GREEN again**: `declared>=7 executed=7 passed=7 failed=0
+  dropped=0`.
+- Pre-existing regressions unaffected: `allocator_block_header_spec.spl`
+  (`Results: 5 total, 5 passed, 0 failed`) and
+  `noalloc_family_manifest_regression_spec.spl` (`Results: 4 total, 4 passed,
+  0 failed`), the latter confirming the manifest/checker integration (which
+  references `heap_init` only by module-path string, not by call) is
+  unaffected by the signature widening.
+
+**`test/03_system/feature/baremetal/allocator_spec.spl` (the 838-line
+transcription spec) is intentionally left untouched**, same rationale as the
+prior lane: rewriting it risks conflicting with whichever lane owns it, and
+the new real-memory spec above already satisfies the actual gap that spec's
+transcription left open (proving the REAL code against real memory). Not
+"the existing spec was upgraded" — a new spec was added alongside it.
+
+**Board-runnable:** unchanged from the original entry below — no QEMU-only
+mechanism, no host-only capability was introduced. `mem_read_u64`/
+`mem_write_u64` compose the existing `rt_mmio_read_u32`/`rt_mmio_write_u32`
+externs, which already round-trip on real MMIO/RAM targets, so the widened
+module remains runnable on the physical board, not just the host test harness.
+
 **Board-runnable:** no QEMU-only mechanism is involved; this is a pure
 `.spl` library change with no `-kernel` or `isa-debug-exit` dependency.
