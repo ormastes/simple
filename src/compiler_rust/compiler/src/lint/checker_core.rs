@@ -569,6 +569,21 @@ impl LintChecker {
         // Allocation-free marker consumed by
         // src/compiler/35.semantics/noalloc_checker.spl
         "noalloc",
+        // Allocation-tracking / mangling / GPU-kernel compiler directives --
+        // real in-tree usage (test/01_unit/compiler/parser/alloc_attr_spec.spl,
+        // src/os/runtime/baremetal/runtime_minimal.spl,
+        // src/compiler_rust/lib/std/examples/graphics/vulkan/image_blur.spl,
+        // src/compiler_rust/lib/std/src/gpu/kernel/__init__.spl) that was
+        // previously absent from this whitelist while also being skip-listed
+        // in the interpreter's decorator-application pass -- see
+        // doc/08_tracking/bug/unknown_function_annotation_evaluated_as_runtime_identifier_2026-08-08.md.
+        "alloc",
+        "no_alloc",
+        "no_mangle",
+        "gpu",
+        "gpu_kernel",
+        "gpu_device",
+        "gpu_shared",
         // GPU decorators
         "gpu_intrinsic",
         // Determinism guard (GAME-DET-LINT-001)

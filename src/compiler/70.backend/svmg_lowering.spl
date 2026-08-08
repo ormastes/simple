@@ -12,18 +12,37 @@
 # Supported v1 subset (design §4.4, this pass's coverage):
 #   - Integer arithmetic/comparison/bitwise: + - * / % (Div->DIV, Mod->REM),
 #     == != < <= > >= & | ^ << >>.
+#   - Float arithmetic/comparison: + - * / == != < <= > >= (FADD/FSUB/FMUL/
+#     FDIV, FEQ/FNE/FLT/FLE/FGT/FGE), dispatched whenever either Binary
+#     operand is a FloatLit or otherwise typed Float (`expr_is_float`) --
+#     float values live on the stack as their raw f32 bit pattern, matching
+#     ref_vm.spl's `pop_f32`/`push_f32`. REM/bitwise ops on a float operand
+#     have no VM opcode and fail fast rather than silently truncating.
 #   - `val`/`var` locals (HirStmtKind.Let) bound to fixed-size DATA slots.
 #   - Fixed-size integer arrays (ArrayLit) lowered into the DATA region.
 #   - Compound assignment (HirStmtKind.Assign with an arithmetic op) --
-#     Simple's `+=`/`-=`/etc, e.g. loop accumulators.
+#     Simple's `+=`/`-=`/etc, e.g. loop accumulators. Rejected (not silently
+#     mis-lowered) when either side is float-typed, since assign_opcode only
+#     maps to the integer opcodes.
 #   - Bounded `for i in a..b` (HirExprKind.Range) and `for x in <fixed array
 #     local>` loops (both compiled with an explicit index/counter and a
 #     structural exit jump -- never unrolled, never unbounded).
+#   - `while <cond>: <body>` -- the device/host step budget (already mandatory
+#     for every SVM-G program) is the sole termination backstop, exactly as
+#     design §4.4 specifies; no separate iteration cap is added here.
+#   - `if/elif/else` (HirExprKind.If) -- `elif` is ordinary nested `If` inside
+#     an `else_` block, handled structurally, not as a special case.
+#   - `print` of a string-literal argument (no interpolation), lowered to one
+#     SYS_PUTC per byte via `char_code_at`. `print` of any other argument
+#     (e.g. an integer, which needs runtime decimal-digit extraction) is
+#     in-subset per design §4.4 but not yet implemented -- fails fast naming
+#     the gap rather than mis-lowering.
 #   - Non-recursive `fn` calls: a small set of helper functions supplied
 #     alongside the main body, called via CALL/RET with arguments passed
 #     through fixed per-callee DATA slots (no operand-stack calling
 #     convention -- keeps codegen uniform with local-variable access).
-#   - `expect(actual).to_equal(expected)` lowered to SYS_RESULT.
+#   - `expect(actual).to_equal(expected)` lowered to SYS_RESULT (EQ or FEQ,
+#     chosen the same way Binary chooses ADD vs FADD).
 #
 # Explicitly rejected (design §4.4 exclusion list) with a diagnostic naming
 # the construct, never a silent fallback (VHDL-backend rule, same policy
@@ -35,19 +54,12 @@
 # Anything else outside the implemented subset also fails fast, naming the
 # HIR construct kind, rather than silently degrading.
 #
-# Design §4.4 also lists `if/elif/else`, `while` (step-budget backstop),
-# `print` of string literals/integers (SYS_PUTC), and float arithmetic/
-# comparisons as IN-SUBSET but this pass does not implement them yet -- their
-# diagnostics say so explicitly ("...is not yet implemented by this D4
-# lowering pass"), distinct from the six genuine design-doc exclusions above,
-# so a future reader does not mistake a scope cut for a design boundary.
-# Tracked: doc/08_tracking/bug/svmg_d4_lowering_deferred_subset_2026-08-07.md.
-# Note: HirBinOp is untyped (the same `Add` variant covers int and float
-# operands); since FloatLit itself fails fast and this pass introduces no
-# other way to produce a float value, no float operand can reach a Binary op
-# through this pass today -- but binop_opcode always emits the *integer*
-# opcode (OP_ADD, not OP_FADD), so this would need type-aware dispatch before
-# float support is added, not just wiring up FloatLit.
+# Still deferred (in the design §4.4 subset, diagnostic says "...is not yet
+# implemented by this D4 lowering pass", distinct from the exclusions above
+# so a future reader does not mistake a scope cut for a design boundary):
+# `print` of a non-string-literal argument, and float-typed compound
+# assignment. Tracked:
+# doc/08_tracking/bug/svmg_d4_lowering_deferred_subset_2026-08-07.md.
 
 use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
 use compiler.hir.hir_definitions.{
@@ -56,6 +68,7 @@ use compiler.hir.hir_definitions.{
 }
 use compiler.common.diagnostics.span.{Span}
 use std.common.svmg.opcodes.*
+use std.common.binary_io.{f32_to_bits}
 
 # ============================================================================
 # Public input / output shapes
@@ -224,25 +237,56 @@ impl _Lowerer:
 
     # -- binary operator mapping ---------------------------------------------
 
-    fn binop_opcode(op: HirBinOp) -> i64?:
-        match op:
-            case HirBinOp.Add: Some(OP_ADD)
-            case HirBinOp.Sub: Some(OP_SUB)
-            case HirBinOp.Mul: Some(OP_MUL)
-            case HirBinOp.Div: Some(OP_DIV)
-            case HirBinOp.Mod: Some(OP_REM)
-            case HirBinOp.Eq: Some(OP_EQ)
-            case HirBinOp.NotEq: Some(OP_NE)
-            case HirBinOp.Lt: Some(OP_LT)
-            case HirBinOp.LtEq: Some(OP_LE)
-            case HirBinOp.Gt: Some(OP_GT)
-            case HirBinOp.GtEq: Some(OP_GE)
-            case HirBinOp.BitAnd: Some(OP_AND)
-            case HirBinOp.BitOr: Some(OP_OR)
-            case HirBinOp.BitXor: Some(OP_XOR)
-            case HirBinOp.Shl: Some(OP_SHL)
-            case HirBinOp.Shr: Some(OP_SHR)
-            case _: nil
+    fn binop_opcode(op: HirBinOp, is_float: bool) -> i64?:
+        if is_float:
+            match op:
+                case HirBinOp.Add: Some(OP_FADD)
+                case HirBinOp.Sub: Some(OP_FSUB)
+                case HirBinOp.Mul: Some(OP_FMUL)
+                case HirBinOp.Div: Some(OP_FDIV)
+                case HirBinOp.Eq: Some(OP_FEQ)
+                case HirBinOp.NotEq: Some(OP_FNE)
+                case HirBinOp.Lt: Some(OP_FLT)
+                case HirBinOp.LtEq: Some(OP_FLE)
+                case HirBinOp.Gt: Some(OP_FGT)
+                case HirBinOp.GtEq: Some(OP_FGE)
+                case _: nil
+        else:
+            match op:
+                case HirBinOp.Add: Some(OP_ADD)
+                case HirBinOp.Sub: Some(OP_SUB)
+                case HirBinOp.Mul: Some(OP_MUL)
+                case HirBinOp.Div: Some(OP_DIV)
+                case HirBinOp.Mod: Some(OP_REM)
+                case HirBinOp.Eq: Some(OP_EQ)
+                case HirBinOp.NotEq: Some(OP_NE)
+                case HirBinOp.Lt: Some(OP_LT)
+                case HirBinOp.LtEq: Some(OP_LE)
+                case HirBinOp.Gt: Some(OP_GT)
+                case HirBinOp.GtEq: Some(OP_GE)
+                case HirBinOp.BitAnd: Some(OP_AND)
+                case HirBinOp.BitOr: Some(OP_OR)
+                case HirBinOp.BitXor: Some(OP_XOR)
+                case HirBinOp.Shl: Some(OP_SHL)
+                case HirBinOp.Shr: Some(OP_SHR)
+                case _: nil
+
+    # `e` is float-typed if it's a float literal, a Binary expr with a
+    # float-typed operand (transitively), or otherwise carries a checked
+    # Float type -- covers both literal-driven and variable-driven float
+    # expressions without requiring every intermediate node to be re-typed.
+    fn expr_is_float(e: HirExpr) -> bool:
+        match e.kind:
+            case HirExprKind.FloatLit(_, _): true
+            case HirExprKind.Binary(_, left, right):
+                self.expr_is_float(left) or self.expr_is_float(right)
+            case _:
+                if e.has_type_:
+                    match e.type_.kind:
+                        case HirTypeKind.Float(_): true
+                        case _: false
+                else:
+                    false
 
     fn assign_opcode(op: HirAssignOp) -> i64?:
         match op:

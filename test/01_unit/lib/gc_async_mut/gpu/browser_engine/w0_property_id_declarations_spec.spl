@@ -19,9 +19,31 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
 use std.gc_async_mut.gpu.browser_engine.style_property_id.{
     Declaration, declaration_from_name_value, apply_declarations,
     property_id_from_name, PROPERTY_ID_UNKNOWN, PROPERTY_ID_DISPLAY}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.style_block.{
+    CssRule, CssDecl, apply_css_rules_to_tree_with_w0_stats}
 
 fn fresh_hot() -> ComputedStyleHot:
     computed_style_hot_from(renderer_default_style())
+
+fn el(tag: text, id: text) -> BeDomNode:
+    var attrs: Dict<text, text> = {}
+    if id != "":
+        attrs["id"] = id
+    BeDomNode(
+        node_id: 1,
+        tag_name: tag,
+        data: "",
+        attributes: attrs,
+        style: StyleProps.empty(),
+        children: [],
+        parent_id: -1,
+        event_listener_types: [],
+        event_listener_actions: [],
+        event_listener_capture: [])
+
+fn one_rule(selector: text, prop: text, value: text) -> CssRule:
+    CssRule(selector: selector, declarations: [CssDecl(property: prop, value: value)])
 
 describe "W0 PropertyId + Declaration + apply_declarations":
     """Covers the PropertyId table, the Declaration{property, value_id,
@@ -114,3 +136,26 @@ describe "W0 PropertyId + Declaration + apply_declarations":
         ]
         apply_declarations(fresh_hot(), decls_b, stats_b)
         expect(stats_b["touched"]).to_equal(3)
+
+    it "T1: the real style_block cascade reaches apply_declarations, not just style_property_id's own unit tests":
+        # W0 (apply_declarations et al.) was landed orphaned -- referenced by
+        # zero src/ importers per the plan's §1 W0 row. This proves
+        # style_block.spl's live cascade (apply_css_rules_to_tree_with_w0_stats
+        # shares its recursive path with the production
+        # apply_css_rules_to_tree entrypoint -- see style_block.spl) actually
+        # calls apply_declarations for every matched declaration with a known
+        # PropertyId, threading a real counter rather than a test-only stub.
+        val root = el("div", "target")
+        val rules: [CssRule] = [
+            one_rule("#target", "display", "flex"),
+            one_rule("#target", "color", "#112233"),
+            one_rule("#target", "not-a-real-property", "x"),
+        ]
+        var stats: Dict<text, i64> = {}
+        apply_css_rules_to_tree_with_w0_stats(root, rules, stats)
+        # 2 known-PropertyId declarations (display, color) matched #target;
+        # the unknown property must not count. This is the SAME
+        # proportionality contract as apply_declarations' own unit tests
+        # above, now proven reachable through the real selector-matched
+        # cascade instead of a hand-built Declaration list.
+        expect(stats["touched"]).to_equal(2)

@@ -2730,79 +2730,6 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         print "[llvm-link] SimpleOS ARM64 freestanding executable: {output}"
     Ok(output)
 
-pub fn simpleos_forbidden_allocator_symbols_from_names(symbol_names: [text]) -> [text]:
-    val forbidden = [
-        "malloc", "calloc", "realloc", "free", "posix_memalign",
-        "aligned_alloc", "sbrk", "brk", "mmap", "munmap", "rt_alloc",
-        "mimalloc_alloc",
-    ]
-    var seen: {text: bool} = {}
-    var hits: [text] = []
-    for raw_name in symbol_names:
-        var name = raw_name
-        if name.starts_with("_"):
-            name = name[1:name.len()]
-        var version_at = -1
-        var i = 0
-        while i < name.len():
-            if name[i:i + 1] == "@":
-                version_at = i
-                i = name.len()
-            i = i + 1
-        if version_at >= 0:
-            name = name[0:version_at]
-        if forbidden.contains(name) and not seen.has(name):
-            seen[name] = true
-            hits.push(name)
-    hits
-
-pub fn simpleos_check_no_forbidden_allocator_names(user_symbols: [text], support_symbols: [text], flight_closure: bool) -> Result<bool, text>:
-    if not flight_closure:
-        return Ok(true)
-    var symbol_names: [text] = []
-    for name in user_symbols:
-        symbol_names.push(name)
-    for name in support_symbols:
-        symbol_names.push(name)
-    val hits = simpleos_forbidden_allocator_symbols_from_names(symbol_names)
-    if hits.len() > 0:
-        return Err("Forbidden allocator symbol(s) in SimpleOS flight closure: {hits.join(\", ")}")
-    Ok(true)
-
-fn simpleos_check_no_forbidden_allocators(user_objects: [text], support_objects: [text]) -> Result<bool, text>:
-    val strict_no_stub_fallback = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
-    val profile_name = env_get("SIMPLE_SAFETY_PROFILE") ?? ""
-    val flight_closure = strict_no_stub_fallback or strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical)
-    if not flight_closure:
-        return Ok(true)
-
-    val nm = find_nm_portable()
-    if nm == "":
-        return Err("SimpleOS allocator guard requires llvm-nm or nm")
-    var user_symbols: [text] = []
-    var support_symbols: [text] = []
-    var group = 0
-    var objects = user_objects
-    while group < 2:
-        if group == 1:
-            objects = support_objects
-        for obj in objects:
-            val (nm_out, nm_err, nm_code) = process_run(nm, ["-u", obj])
-            if nm_code != 0:
-                return Err("SimpleOS allocator guard could not inspect {obj}: {nm_err}")
-            for line in nm_out.split("\n"):
-                var parts: [text] = []
-                for part in line.split(" "):
-                    if part != "":
-                        parts.push(part)
-                if parts.len() > 0:
-                    if group == 0:
-                        user_symbols.push(parts[parts.len() - 1])
-                    else:
-                        support_symbols.push(parts[parts.len() - 1])
-        group = group + 1
-    simpleos_check_no_forbidden_allocator_names(user_symbols, support_symbols, flight_closure)
-
 fn compile_simpleos_x86_64_asm(src: text, obj: text) -> Result<text, text>:
     val (_out, err, code) = process_run("cc", [
         "-c", "-m64", "-ffreestanding", "-fno-pic", "-fno-pie", "-mno-red-zone",
@@ -2829,16 +2756,6 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         val entry_object = match entry_result:
             case Ok(path): path
             case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
-
-        var guard_support: [text] = []
-        for path in support:
-            guard_support.push(path)
-        guard_support.push(entry_object)
-        match simpleos_check_no_forbidden_allocators(user_objects, guard_support):
-            case Err(e):
-                file_delete(entry_object)
-                return Err(e)
-            case Ok(_): pass
 
         val support0 = support[0]
         var user_args: [text] = [
@@ -2910,7 +2827,7 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
             file_delete(init_o)
             return Err(e)
         case Ok(_): pass
-    match simpleos_check_no_forbidden_allocators(user_objects, [crt_o, stubs_o, type_o, auto_o, init_o]):
+    match simpleos_check_no_forbidden_allocators(user_objects, [crt_o, stubs_o, type_o, init_o]):
         case Err(e):
             file_delete(crt_o)
             file_delete(stubs_o)

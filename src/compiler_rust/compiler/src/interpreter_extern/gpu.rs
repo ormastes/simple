@@ -275,6 +275,7 @@ mod cuda_dlopen {
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuDeviceGetUuid = unsafe extern "C" fn(*mut CudaUuid, i32) -> i32;
+    type CuDeviceGetName = unsafe extern "C" fn(*mut i8, i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -307,6 +308,7 @@ mod cuda_dlopen {
         pub init: CuInit,
         pub device_get: CuDeviceGet,
         pub device_get_uuid: CuDeviceGetUuid,
+        pub device_get_name: CuDeviceGetName,
         pub device_get_count: CuDeviceGetCount,
         pub ctx_create: CuCtxCreate,
         pub ctx_set_current: CuCtxSetCurrent,
@@ -414,6 +416,7 @@ mod cuda_dlopen {
             init: sym!("cuInit"),
             device_get: sym!("cuDeviceGet"),
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
+            device_get_name: sym!("cuDeviceGetName"),
             device_get_count: sym!("cuDeviceGetCount"),
             ctx_create: sym!("cuCtxCreate_v2"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
@@ -1091,6 +1094,16 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut name_buf = [0i8; 256];
+            let r = unsafe { (fns.device_get_name)(name_buf.as_mut_ptr(), 256, device as i32) };
+            if r == 0 {
+                let name = unsafe { std::ffi::CStr::from_ptr(name_buf.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                return Ok(Value::text(name));
+            }
+        }
         Ok(Value::text(String::new()))
     }
 }
