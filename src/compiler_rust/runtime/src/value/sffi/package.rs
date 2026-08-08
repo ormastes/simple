@@ -2,26 +2,48 @@
 //! Provides SFFI functions for SPK package operations, checksums, and file operations
 
 use sha2::{Digest, Sha256};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::raw::c_char;
 use std::path::Path;
 
+/// Decode a Simple `text` argument passed as an explicit `(ptr, len)` pair.
+///
+/// The whole `rt_package_*` family used to take `*const c_char` and decode with
+/// `CStr::from_ptr`. That signature is unreachable from generated code: Simple
+/// heap strings are allocated by `alloc_runtime_string` as
+/// `size_of::<RuntimeString>() + len` with **no trailing NUL**, so
+/// `rt_string_data` never yields a null-terminated pointer and there is no sound
+/// way for codegen to satisfy a `*const c_char` parameter without copying. The
+/// repo's dominant, sound convention — used by every `rt_file_*` / `rt_dir_*`
+/// entry point — is an explicit `(ptr, len)` pair expanded by
+/// `expand_text_args` in `compiler/src/codegen/instr/calls.rs`. This family now
+/// follows it. See
+/// `doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md`.
+///
+/// # Safety
+/// - `ptr` must be null, or point to at least `len` initialized bytes.
+unsafe fn text_arg<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    if len == 0 {
+        return Some("");
+    }
+    std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
+}
+
 /// Calculate SHA256 checksum of a file
 ///
 /// # Safety
-/// - `file_path` must be a valid null-terminated C string
+/// - `file_path`/`file_path_len` must describe a valid UTF-8 byte range
 /// - Returns a heap-allocated C string that must be freed by the caller
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_sha256(file_path: *const c_char) -> *mut c_char {
-    if file_path.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let path_str = match CStr::from_ptr(file_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+pub unsafe extern "C" fn rt_package_sha256(file_path: *const u8, file_path_len: usize) -> *mut c_char {
+    let path_str = match text_arg(file_path, file_path_len) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
     };
 
     match calculate_sha256(path_str) {
@@ -64,33 +86,36 @@ fn package_compression_unavailable(name: &str) {
 /// Create a tarball from a directory
 ///
 /// # Safety
-/// - `source_dir` must be a valid null-terminated C string
-/// - `output_path` must be a valid null-terminated C string
+/// - `source_dir`/`source_dir_len` must describe a valid UTF-8 byte range
+/// - `output_path`/`output_path_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_create_tarball(source_dir: *const c_char, output_path: *const c_char) -> i32 {
+pub unsafe extern "C" fn rt_package_create_tarball(
+    source_dir: *const u8,
+    source_dir_len: usize,
+    output_path: *const u8,
+    output_path_len: usize,
+) -> i32 {
     #[cfg(not(feature = "packaging-compression"))]
     {
         let _ = source_dir;
+        let _ = source_dir_len;
         let _ = output_path;
+        let _ = output_path_len;
         package_compression_unavailable("rt_package_create_tarball");
         -1
     }
 
     #[cfg(feature = "packaging-compression")]
     {
-        if source_dir.is_null() || output_path.is_null() {
-            return -1;
-        }
-
-        let source = match CStr::from_ptr(source_dir).to_str() {
-            Ok(s) => s,
-            Err(_) => return -1,
+        let source = match text_arg(source_dir, source_dir_len) {
+            Some(s) => s,
+            None => return -1,
         };
 
-        let output = match CStr::from_ptr(output_path).to_str() {
-            Ok(s) => s,
-            Err(_) => return -1,
+        let output = match text_arg(output_path, output_path_len) {
+            Some(s) => s,
+            None => return -1,
         };
 
         match create_tarball(source, output) {
@@ -127,33 +152,36 @@ fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
 /// Extract a tarball to a directory
 ///
 /// # Safety
-/// - `tarball_path` must be a valid null-terminated C string
-/// - `dest_dir` must be a valid null-terminated C string
+/// - `tarball_path`/`tarball_path_len` must describe a valid UTF-8 byte range
+/// - `dest_dir`/`dest_dir_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_extract_tarball(tarball_path: *const c_char, dest_dir: *const c_char) -> i32 {
+pub unsafe extern "C" fn rt_package_extract_tarball(
+    tarball_path: *const u8,
+    tarball_path_len: usize,
+    dest_dir: *const u8,
+    dest_dir_len: usize,
+) -> i32 {
     #[cfg(not(feature = "packaging-compression"))]
     {
         let _ = tarball_path;
+        let _ = tarball_path_len;
         let _ = dest_dir;
+        let _ = dest_dir_len;
         package_compression_unavailable("rt_package_extract_tarball");
         -1
     }
 
     #[cfg(feature = "packaging-compression")]
     {
-        if tarball_path.is_null() || dest_dir.is_null() {
-            return -1;
-        }
-
-        let tarball = match CStr::from_ptr(tarball_path).to_str() {
-            Ok(s) => s,
-            Err(_) => return -1,
+        let tarball = match text_arg(tarball_path, tarball_path_len) {
+            Some(s) => s,
+            None => return -1,
         };
 
-        let dest = match CStr::from_ptr(dest_dir).to_str() {
-            Ok(s) => s,
-            Err(_) => return -1,
+        let dest = match text_arg(dest_dir, dest_dir_len) {
+            Some(s) => s,
+            None => return -1,
         };
 
         match extract_tarball(tarball, dest) {
@@ -188,17 +216,13 @@ fn extract_tarball(tarball_path: &str, dest_dir: &str) -> io::Result<()> {
 /// Get file size
 ///
 /// # Safety
-/// - `file_path` must be a valid null-terminated C string
+/// - `file_path`/`file_path_len` must describe a valid UTF-8 byte range
 /// - Returns file size in bytes, or -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_file_size(file_path: *const c_char) -> i64 {
-    if file_path.is_null() {
-        return -1;
-    }
-
-    let path = match CStr::from_ptr(file_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_file_size(file_path: *const u8, file_path_len: usize) -> i64 {
+    let path = match text_arg(file_path, file_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     match fs::metadata(path) {
@@ -210,23 +234,24 @@ pub unsafe extern "C" fn rt_package_file_size(file_path: *const c_char) -> i64 {
 /// Copy file
 ///
 /// # Safety
-/// - `src_path` must be a valid null-terminated C string
-/// - `dst_path` must be a valid null-terminated C string
+/// - `src_path`/`src_path_len` must describe a valid UTF-8 byte range
+/// - `dst_path`/`dst_path_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_copy_file(src_path: *const c_char, dst_path: *const c_char) -> i32 {
-    if src_path.is_null() || dst_path.is_null() {
-        return -1;
-    }
-
-    let src = match CStr::from_ptr(src_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_copy_file(
+    src_path: *const u8,
+    src_path_len: usize,
+    dst_path: *const u8,
+    dst_path_len: usize,
+) -> i32 {
+    let src = match text_arg(src_path, src_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
-    let dst = match CStr::from_ptr(dst_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let dst = match text_arg(dst_path, dst_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     match fs::copy(src, dst) {
@@ -238,17 +263,13 @@ pub unsafe extern "C" fn rt_package_copy_file(src_path: *const c_char, dst_path:
 /// Create directory (with parents)
 ///
 /// # Safety
-/// - `dir_path` must be a valid null-terminated C string
+/// - `dir_path`/`dir_path_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_mkdir_all(dir_path: *const c_char) -> i32 {
-    if dir_path.is_null() {
-        return -1;
-    }
-
-    let path = match CStr::from_ptr(dir_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_mkdir_all(dir_path: *const u8, dir_path_len: usize) -> i32 {
+    let path = match text_arg(dir_path, dir_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     match fs::create_dir_all(path) {
@@ -260,17 +281,13 @@ pub unsafe extern "C" fn rt_package_mkdir_all(dir_path: *const c_char) -> i32 {
 /// Remove directory (recursive)
 ///
 /// # Safety
-/// - `dir_path` must be a valid null-terminated C string
+/// - `dir_path`/`dir_path_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_remove_dir_all(dir_path: *const c_char) -> i32 {
-    if dir_path.is_null() {
-        return -1;
-    }
-
-    let path = match CStr::from_ptr(dir_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_remove_dir_all(dir_path: *const u8, dir_path_len: usize) -> i32 {
+    let path = match text_arg(dir_path, dir_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     match fs::remove_dir_all(path) {
@@ -282,23 +299,24 @@ pub unsafe extern "C" fn rt_package_remove_dir_all(dir_path: *const c_char) -> i
 /// Create symbolic link
 ///
 /// # Safety
-/// - `target` must be a valid null-terminated C string
-/// - `link_path` must be a valid null-terminated C string
+/// - `target`/`target_len` must describe a valid UTF-8 byte range
+/// - `link_path`/`link_path_len` must describe a valid UTF-8 byte range
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_create_symlink(target: *const c_char, link_path: *const c_char) -> i32 {
-    if target.is_null() || link_path.is_null() {
-        return -1;
-    }
-
-    let target_str = match CStr::from_ptr(target).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_create_symlink(
+    target: *const u8,
+    target_len: usize,
+    link_path: *const u8,
+    link_path_len: usize,
+) -> i32 {
+    let target_str = match text_arg(target, target_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
-    let link_str = match CStr::from_ptr(link_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+    let link_str = match text_arg(link_path, link_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     #[cfg(unix)]
@@ -323,18 +341,14 @@ pub unsafe extern "C" fn rt_package_create_symlink(target: *const c_char, link_p
 /// Set file permissions (Unix only)
 ///
 /// # Safety
-/// - `file_path` must be a valid null-terminated C string
+/// - `file_path`/`file_path_len` must describe a valid UTF-8 byte range
 /// - `mode` is Unix permission bits (e.g., 0o755)
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_chmod(file_path: *const c_char, mode: u32) -> i32 {
-    if file_path.is_null() {
-        return -1;
-    }
-
-    let path = match CStr::from_ptr(file_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_chmod(file_path: *const u8, file_path_len: usize, mode: u32) -> i32 {
+    let path = match text_arg(file_path, file_path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     #[cfg(unix)]
@@ -357,17 +371,13 @@ pub unsafe extern "C" fn rt_package_chmod(file_path: *const c_char, mode: u32) -
 /// Check if path exists
 ///
 /// # Safety
-/// - `path` must be a valid null-terminated C string
+/// - `path`/`path_len` must describe a valid UTF-8 byte range
 /// - Returns 1 if exists, 0 if not, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_exists(path: *const c_char) -> i32 {
-    if path.is_null() {
-        return -1;
-    }
-
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_exists(path: *const u8, path_len: usize) -> i32 {
+    let path_str = match text_arg(path, path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     if Path::new(path_str).exists() {
@@ -380,17 +390,13 @@ pub unsafe extern "C" fn rt_package_exists(path: *const c_char) -> i32 {
 /// Check if path is a directory
 ///
 /// # Safety
-/// - `path` must be a valid null-terminated C string
+/// - `path`/`path_len` must describe a valid UTF-8 byte range
 /// - Returns 1 if directory, 0 if not, -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_is_dir(path: *const c_char) -> i32 {
-    if path.is_null() {
-        return -1;
-    }
-
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
+pub unsafe extern "C" fn rt_package_is_dir(path: *const u8, path_len: usize) -> i32 {
+    let path_str = match text_arg(path, path_len) {
+        Some(s) => s,
+        None => return -1,
     };
 
     if Path::new(path_str).is_dir() {

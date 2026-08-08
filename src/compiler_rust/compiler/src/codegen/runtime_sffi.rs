@@ -1796,6 +1796,34 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // expansion entry that turns the Simple-level `text` argument into this
     // (ptr, len) pair.
     RuntimeFuncSpec::new("rt_mem_attr_set_owner", &[I64, I64], &[]),
+    // =========================================================================
+    // Package SFFI (runtime/src/value/sffi/package.rs)
+    // =========================================================================
+    // These were absent from RUNTIME_FUNCS entirely, so `compile_call` never
+    // took the `ctx.runtime_funcs.get(sffi_name)` branch and therefore never
+    // reached ANY text-argument expansion: the JIT handed the raw tagged
+    // RuntimeValue straight to the C symbol as if it were a pointer, and every
+    // member of the family failed closed (rt_package_exists answered 0 for an
+    // existing file, rt_package_chmod answered -1, leaving credential keys at
+    // 0664). Each text parameter is a (ptr, len) pair; see the matching
+    // text_arg_indices() entries in codegen/instr/calls.rs and
+    // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+    //
+    // rt_package_sha256 is deliberately NOT listed: it returns `*mut c_char`,
+    // a raw C string that this table cannot describe to the Simple value
+    // domain. Its argument ABI is normalized with the rest of the family, but
+    // its return side remains unfixed and is tracked in the bug doc above.
+    // rt_package_free_string takes a raw pointer (not text) and needs nothing.
+    RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]), // path_ptr, path_len -> i64
+    RuntimeFuncSpec::new("rt_package_mkdir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_remove_dir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_chmod", &[I64, I64, I32], &[I32]), // path_ptr, path_len, mode -> i32
+    RuntimeFuncSpec::new("rt_package_copy_file", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), dst(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_create_symlink", &[I64, I64, I64, I64], &[I32]), // target(ptr,len), link(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_create_tarball", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), out(ptr,len) -> i32
+    RuntimeFuncSpec::new("rt_package_extract_tarball", &[I64, I64, I64, I64], &[I32]), // tar(ptr,len), dest(ptr,len) -> i32
     RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_is_char_device", &[I64, I64], &[I8]), // path_ptr, path_len -> bool

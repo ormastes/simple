@@ -2546,6 +2546,28 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
         "rt_lexer_source_set" => Some(&[0]),
 
+        // Package SFFI (runtime/src/value/sffi/package.rs). Every text param is
+        // a (ptr, len) pair — the family was converted off `*const c_char`
+        // because Simple heap strings carry no trailing NUL, so no sound
+        // C-string expansion exists (see expand_text_cstr_args below). Paired
+        // with RuntimeFuncSpec entries in codegen/runtime_sffi.rs; without
+        // those the `runtime_funcs` branch is never taken and these entries
+        // would be dead. See
+        // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        "rt_package_exists"
+        | "rt_package_is_dir"
+        | "rt_package_file_size"
+        | "rt_package_mkdir_all"
+        | "rt_package_remove_dir_all"
+        // chmod's `mode` sits at Simple index 1 and stays there: expand_text_args
+        // inserts each length immediately after its own pointer, so trailing
+        // non-text args are not shifted out of position.
+        | "rt_package_chmod" => Some(&[0]),
+        "rt_package_copy_file"
+        | "rt_package_create_symlink"
+        | "rt_package_create_tarball"
+        | "rt_package_extract_tarball" => Some(&[0, 1]),
+
         // File I/O (single path)
         "rt_crc32_text"
         | "rt_file_exists"
@@ -2670,6 +2692,18 @@ pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 
 /// Text args that need only a null-terminated C pointer (no length).
 /// These functions accept `*const c_char` and the runtime guarantees null termination.
+// UNSOUND MECHANISM — do not add new entries here.
+//
+// expand_text_cstr_args passes `rt_string_data(v)` as a bare pointer, but
+// Simple heap strings are allocated by the runtime's `alloc_runtime_string` as
+// `size_of::<RuntimeString>() + len` with NO trailing NUL byte. Any callee that
+// does `CStr::from_ptr` on that pointer reads past the end of the allocation
+// and only appears to work when the adjacent heap bytes happen to be zero.
+// The sound convention is text_arg_indices above — an explicit (ptr, len) pair.
+// The rt_db_* entries below predate this finding and sit on the same unsound
+// footing; converting them is filed separately, not done here. The
+// rt_package_* family was moved to (ptr, len) rather than added here:
+// doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
 pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         // NOTE: rt_process_run/rt_process_spawn/rt_process_execute/rt_process_run_timeout

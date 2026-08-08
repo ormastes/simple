@@ -66,6 +66,19 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
         "rt_lexer_source_set" => Some(&[0]),
 
+        // Package SFFI — parity with the Cranelift table. See
+        // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
+        "rt_package_exists"
+        | "rt_package_is_dir"
+        | "rt_package_file_size"
+        | "rt_package_mkdir_all"
+        | "rt_package_remove_dir_all"
+        | "rt_package_chmod" => Some(&[0]),
+        "rt_package_copy_file"
+        | "rt_package_create_symlink"
+        | "rt_package_create_tarball"
+        | "rt_package_extract_tarball" => Some(&[0, 1]),
+
         // File I/O (single path)
         "rt_crc32_text"
         | "rt_file_exists"

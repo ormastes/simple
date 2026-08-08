@@ -2,9 +2,85 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (the only at-rest control on the AES key is absent; key lands 0664)
-- **Status:** runtime defect OPEN. Caller contract made honest in
-  `src/lib/nogc_sync_mut/terminal/credential/store.spl` (this doc).
-- **Area:** compiler seed JIT extern dispatch / `src/compiler_rust/runtime/src/value/sffi/package.rs`
+- **Status:** ROOT-CAUSED AND FIXED in the Rust seed (2026-08-08), except
+  `rt_package_sha256`'s return side (see below). Pure-Simple twin table landed
+  but unverifiable while Stage 3 self-host is blocked.
+- **Area:** compiler seed **codegen** — `compiler/src/codegen/runtime_sffi.rs`
+  (RUNTIME_FUNCS) + `compiler/src/codegen/instr/calls.rs` (text_arg_indices),
+  and the runtime signatures in `runtime/src/value/sffi/package.rs`
+
+## Root cause (corrects the "runtime defect" attribution above)
+
+**The runtime was never wrong.** Under `SIMPLE_EXECUTION_MODE=interpret` the
+identical probe answers correctly on the identical binary:
+
+| probe | JIT | interpreter |
+|---|---|---|
+| `rt_file_exists(p)` | `true` | `true` |
+| `rt_package_exists(p)` | **`0`** | `1` |
+| `rt_package_file_size(p)` (10-byte file) | **`-1`** | `10` |
+| `rt_package_chmod(p, 0o600)` | **`-1`** | `0` |
+
+The interpreter reaches `interpreter_extern/package.rs`, which decodes the
+`Value::Str` properly. The JIT does not, because **the whole `rt_package_*`
+family was absent from `RUNTIME_FUNCS`** (`codegen/runtime_sffi.rs`).
+`compile_call` gates all SFFI text handling on
+`ctx.runtime_funcs.get(sffi_name)`; with no entry, that branch is never taken,
+**no** text-argument expansion runs at all, and the raw tagged `RuntimeValue`
+is handed to the C symbol as if it were a pointer. Every member then failed
+closed. It is a codegen table omission, not a marshalling bug inside any
+existing expander.
+
+The obvious-looking repair — adding the family to `text_cstr_arg_indices` — is
+**wrong and was rejected**. That path passes `rt_string_data(v)` as a bare
+pointer, but the runtime's `alloc_runtime_string` allocates
+`size_of::<RuntimeString>() + len` with **no trailing NUL byte**, so
+`CStr::from_ptr` would read past the allocation and "work" only on allocator
+luck. The family was instead converted to the repo's sound, dominant
+`(ptr, len)` convention used by every `rt_file_*` / `rt_dir_*` entry point.
+
+## Enumerated family and disposition
+
+| symbol | text args | fixed |
+|---|---|---|
+| `rt_package_exists` | `[0]` | yes |
+| `rt_package_is_dir` | `[0]` | yes |
+| `rt_package_file_size` | `[0]` | yes |
+| `rt_package_mkdir_all` | `[0]` | yes |
+| `rt_package_remove_dir_all` | `[0]` | yes |
+| `rt_package_chmod` | `[0]` (mode stays at 1) | yes |
+| `rt_package_copy_file` | `[0,1]` | yes |
+| `rt_package_create_symlink` | `[0,1]` | yes |
+| `rt_package_create_tarball` | `[0,1]` | yes |
+| `rt_package_extract_tarball` | `[0,1]` | yes |
+| `rt_package_sha256` | `[0]` | **args only — `*mut c_char` RETURN still unfixed** |
+| `rt_package_free_string` | none (raw ptr) | N/A |
+
+`rt_package_sha256` has its argument ABI normalized with the rest of the family
+but is deliberately NOT registered in `RUNTIME_FUNCS`: its `*mut c_char` return
+cannot be described to the Simple value domain by that table, and registering it
+would hand callers a raw pointer typed as a value. Converting it to return a
+`RuntimeValue` (as `rt_file_hash_sha256` already does) is the follow-up; until
+then it remains broken from the JIT — same state as before this fix, now
+documented rather than silent.
+
+## Corrections to the original report
+
+- The `4294967295` row and its "the `-> i32` return is also mis-marshalled"
+  conclusion are **not reproducible**: measured directly, `rt_package_chmod`
+  returns `-1`, correctly signed. That figure was an artifact of the reporting
+  lane's own extern declaration, not a second defect. Nothing to chase.
+- `-z muldefs` is not in play: this change alters signatures only and introduces
+  **no new symbol names**, so no duplicate-symbol collision is possible.
+- No C twin exists or is needed — `src/runtime/**` contains no `rt_package_*`
+  definition or header.
+
+## Sibling defect found, filed not fixed
+
+The existing `rt_db_*` entries in `text_cstr_arg_indices` sit on exactly the
+same no-NUL mechanism and are latently unsound for the same reason. Different
+family, out of scope here; the table now carries a "do not add new entries"
+banner.
 
 ## REFUTED premise, stated plainly
 
