@@ -7,6 +7,12 @@
 
 use std.bcrypt.types.{BCRYPT_BASE64_ALPHABET, BCRYPT_SALT_LEN, u32_and, u32_or, u32_shl, u32_shr}
 
+# OS CSPRNG. Rust interpreter path: rand::rngs::OsRng (panics rather than
+# degrading on entropy failure). Native path: src/runtime/runtime.c reads
+# /dev/urandom. Declared as a direct extern -- do NOT route this through
+# std.common.random_pure, which is an LCG that mirrors the same names.
+extern fn rt_random_i64() -> i64
+
 # ============================================================================
 # BCRYPT BASE64 ENCODING
 # ============================================================================
@@ -93,15 +99,22 @@ fn bcrypt_decode_base64(encoded: text) -> list<i64>:
 # SALT GENERATION
 # ============================================================================
 
-# Generate random bytes (simplified - use proper CSPRNG in production)
+# Generate cryptographically secure random bytes.
+#
+# Backed by the OS CSPRNG via `rt_random_i64` (OsRng / /dev/urandom). This
+# MUST NOT be replaced by a seeded PRNG: the output feeds bcrypt salts
+# (hash.spl) and password-reset tokens (web_framework/password_reset.spl).
+# A previous revision used a constant-seeded LCG here, which made every
+# bcrypt salt and every reset token in the process identical.
 fn generate_random_bytes(count: i64) -> list<i64>:
     var bytes = []
     var i = 0
-    # Simple pseudo-random (NOT SECURE - for demonstration only)
-    var seed = 12345
     while i < count:
-        seed = (seed * 1103515245 + 12345) % 2147483648
-        var byte_val = seed % 256
+        # One CSPRNG draw per byte; take the low byte, normalising the
+        # sign so the result is exactly (value mod 256) with no bias.
+        var byte_val = rt_random_i64() % 256
+        if byte_val < 0:
+            byte_val = byte_val + 256
         bytes.push(byte_val)
         i = i + 1
     bytes

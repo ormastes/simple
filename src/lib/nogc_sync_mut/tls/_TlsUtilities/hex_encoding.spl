@@ -1,5 +1,16 @@
 # TLS hex/byte encoding, random generation, SHA-256, and byte primitives (split from tls/utilities.spl).
 use lib.nogc_sync_mut.tls.utilities.*
+
+# OS CSPRNG. Rust interpreter path: rand::rngs::OsRng (panics rather than
+# degrading on entropy failure). Native path: src/runtime/runtime.c reads
+# /dev/urandom. Declared as a direct extern -- do NOT route this through
+# std.common.random_pure, which is an LCG that mirrors the same names.
+#
+# This does not contradict the "no externs here" note below: that note is about
+# rt_wire_to_hex / rt_hex_to_wire, which move raw wire *text* that may contain
+# 0x00. rt_random_i64 returns an i64, never text, so the NUL-safety rationale
+# does not apply to it.
+extern fn rt_random_i64() -> i64
 # TLS Utilities Module
 #
 # Provides utility functions for byte operations, random generation,
@@ -200,26 +211,25 @@ fn constant_time_compare_hex(a: text, b: text) -> bool:
     val bytes_b = hex_to_bytes(b)
     constant_time_compare(bytes_a, bytes_b)
 
-# Generate pseudo-random bytes using a linear congruential generator
-# seeded from the length parameter. Not cryptographically secure but
-# produces proper byte-range values with good distribution.
+# Generate cryptographically secure random bytes from the OS CSPRNG.
+#
+# This MUST NOT be replaced by a seeded PRNG. The output feeds TLS
+# server_random (io/tls_handshake.spl) and generate_random_hex below.
+# A previous revision used an LCG seeded ONLY from `length`, so every
+# handshake of a given size produced a byte-for-byte identical
+# server_random -- fully predictable to any observer.
 # Parameters:
 #   length: Number of random bytes to generate
 # Returns: Random bytes as list of integers 0-255
 fn generate_random(length):
     var result = []
     var i = 0
-    # LCG state: seed with length * large prime + constant
-    var state = (length * 6364136223846793005) + 1442695040888963407
     while i < length:
-        # LCG step: state = state * a + c (mod 2^64 implicit in i64)
-        state = state * 6364136223846793005 + 1442695040888963407
-        # Extract byte from upper bits (better distribution)
-        var shifted = state >> 33
-        # Map to 0-255 range
-        if shifted < 0:
-            shifted = 0 - shifted
-        val random_byte = shifted % 256
+        # One CSPRNG draw per byte; take the low byte, normalising the
+        # sign so the result is exactly (value mod 256) with no bias.
+        var random_byte = rt_random_i64() % 256
+        if random_byte < 0:
+            random_byte = random_byte + 256
         result = append(result, random_byte)
         i = i + 1
     result
