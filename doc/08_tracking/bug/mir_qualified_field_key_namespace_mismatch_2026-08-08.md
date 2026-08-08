@@ -489,3 +489,114 @@ patch covering the normalizer, `composite_layout_key`,
 `canonical_mir_type_symbol`, and the warning exemption exists but is
 deliberately withheld, because on its own it is the read-path-only change
 that point 3 proves is worse than the status quo.
+
+---
+
+## SCOPE RE-DERIVATION (2026-08-08, second lane) — the re-namespacing is
+## NOT LANDABLE, and the reason is now two enumerated blockers, not an estimate
+
+A follow-up lane was tasked with landing the `struct_value_syms`
+re-namespacing in one commit. It re-derived the scope and the oracle from
+`origin/main` blobs (`git show origin/main:<path>`, `/usr/bin/grep`, never the
+working copy — the WC did not even contain this file, while `origin/main` did).
+**It landed no code.** Today's collided-but-CONSISTENT state is intact. The two
+blockers below are why, and both are corrections to the BLOCKER section above.
+
+### Blocker A — there is NO oracle for a `src/compiler` source change
+
+The BLOCKER section already noted this in passing; it is the decisive fact and
+is restated here as a gate. The `direct.gamma` probe validates the **deployed
+binary** (`bin/release/x86_64-unknown-linux-gnu/simple`), which is a compiled
+ELF. A `50.mir/**.spl` edit cannot affect it. Confirmed negatively: a sweep of
+`SIMPLE_*` env names across `src/app/build` and `src/compiler/80.driver` finds
+**no** source-root / compiler-root override — there is no flag that makes
+`native-build` consult compiler sources instead of its own compiled code.
+
+So RED->GREEN->RED on the probe requires a self-hosted rebuild from modified
+source. A stage-2-only build cannot serve: `SIMPLE_NATIVE_BUILD_RUST=1`
+(`scripts/bootstrap/bootstrap-from-scratch.sh:1513/1565`) makes it structurally
+blind to `src/compiler` changes. That leaves a full Stage 3 — which is exactly
+the bar this document's DYNAMIC CONFIRMATION section was celebrating having
+escaped. **The cheap oracle is an oracle for the defect, not for the fix.**
+That distinction was not drawn before and is the trap for the next lane.
+
+### Blocker B — the real surface is ~3x larger, and part of it carries no symbol
+
+Re-derived counts (`src/compiler`, `origin/main` blobs):
+
+| map | refs |
+|---|---|
+| `struct_value_syms` | **115** (13 files; 6 are prose-only in `20.hir`) |
+| `struct_field_order` | 67 |
+| `array_element_struct_syms` | 41 |
+| `struct_method_syms` | 31 |
+| `struct_field_type_name` | 27 |
+| `struct_field_hir_type` | 15 |
+| `struct_method_return_names` | 11 |
+| `struct_field_array_element_type_name` | 9 |
+| `struct_field_has_default` | 8 |
+| `struct_field_default_expr` | 7 |
+
+`struct_value_syms` alone: **24 writer sites** (not the "six other writers"
+stated above) and **~30 real reader sites**, across 7 files in `50.mir`
+(`_MirLowering/function_lowering.spl`, `_MirLowering/module_lowering.spl`,
+`_MirLoweringExpr/expr_dispatch.spl`, `_MirLoweringExpr/literals.spl`,
+`_MirLoweringExpr/method_calls_literals.spl`,
+`_MirLoweringExpr/switch_operators_calls.spl`, `mir_lowering_stmts.spl`,
+plus the field decl in `mir_lowering_types.spl:130`).
+
+**The blocking part is not the count — it is that many writers have no symbol
+to qualify FROM.** Spot-checked four:
+
+- `function_lowering.spl:296/328/330` — value is `parameter_type.name`, and
+  `parameter_type` IS `self.symbols.get_symbol_raw(type_symbol.id)`. **This one
+  is qualifiable.** (Correction: the BLOCKER section listed it among the
+  problem sites.)
+- `expr_dispatch.spl:390` — value is `nested_name`, read out of
+  `struct_field_type_name[name][field_idx]`: a plain field-type-name **string**
+  from another bare-keyed map. No symbol exists at this point.
+- `expr_dispatch.spl:1107` — value is `dict_struct_name`, which falls back to
+  `array_element_struct_syms.get(base_local.id)`: again a bare-keyed text map.
+  No symbol.
+- `switch_operators_calls.spl:2328` — value is `payload_struct`, from
+  `enum_payload_struct_names.get(payload_key)` (`:2264`), keyed
+  `"{enum_name}::{variant}"`. No symbol.
+
+So qualifying `struct_value_syms` is **not a mechanical rename**. Its values are
+sourced from, and flow back into, a lattice of other bare-name-keyed text maps
+(`struct_field_type_name`, `array_element_struct_syms`,
+`struct_field_array_element_type_name`, `enum_payload_struct_names`,
+`struct_method_syms`, `struct_method_return_names`). Qualifying one namespace
+while the others stay bare recreates the two-namespace bug one layer down —
+the precise failure mode this whole document is about. The transitive closure is
+**~340 references across 10+ interlocking maps**, and closing it requires
+*threading module provenance into paths that do not currently carry any*, which
+is a design change, not a re-keying.
+
+### Consequence for sequencing
+
+Blocker B says the change is a design-sized unit of work. Blocker A says that
+unit of work has no verification short of a full Stage 3. The task's own rule
+applies: a partial landing here is *actively harmful* (point 3 above proves it),
+so a change that cannot be completed AND verified in one commit must not be
+started. **Nothing was landed.**
+
+### The named-constructor Nil defect — DEFERRED, explicitly
+
+Point 4 above observed `gamma: 888` being silently dropped at construction
+(`lower_nil_expr` fills the slot with `ConstInt { value: 3 }`). Adding an
+`error_fatal` there was reconsidered on the premise that a build oracle now
+exists. It does not — see Blocker A: the oracle cannot observe a compiler-source
+change. The original reason for withholding therefore stands unchanged: an
+`error_fatal` on an unmatched named arg would convert a silent miscompile into
+an undiagnosable bootstrap failure, with no way to demonstrate RED->GREEN first.
+**Decision: not fixed, deliberately.** It should be landed together with the
+re-namespacing, behind a real Stage-3 oracle.
+
+### What the next lane actually needs first
+
+Not more static scoping — that is now done. It needs **a compiler-source oracle
+cheaper than a full Stage 3**. Until one exists, this bug stays OPEN by design,
+and the correct action on it is to land nothing.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
