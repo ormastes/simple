@@ -320,17 +320,23 @@ impl _Lowerer:
         match e.kind:
             case HirExprKind.IntLit(value, _):
                 self.emit_pushi(value)
+            case HirExprKind.FloatLit(value, _):
+                self.emit_op(OP_PUSHF)
+                self.emit_imm32(f32_to_bits(value as f32) as i64)
             case HirExprKind.Var(symbol):
                 self.load_local(symbol)
             case HirExprKind.NamedVar(symbol, _):
                 self.load_local(symbol)
             case HirExprKind.Binary(op, left, right):
-                val maybe_opcode = self.binop_opcode(op)
+                val is_float = self.expr_is_float(left) or self.expr_is_float(right)
+                val maybe_opcode = self.binop_opcode(op, is_float)
                 if val opcode = maybe_opcode:
                     self.lower_expr(left)
                     self.lower_expr(right)
                     if self.ok():
                         self.emit_op(opcode)
+                elif is_float:
+                    self.fail("unsupported binary operator on float operands (only + - * / == != < <= > >= lower to SVM-G v1 float opcodes; no float REM/bitwise opcode exists)")
                 else:
                     self.fail("unsupported binary operator (only arithmetic/comparison/bitwise ops lower to SVM-G v1)")
             case HirExprKind.Call(callee, args, _):
@@ -356,15 +362,13 @@ impl _Lowerer:
                     case Some(_):
                         self.fail("text manipulation beyond literals is not supported in the SVM-G v1 lowering subset (design doc §4.4 exclusion list)")
                     case nil:
-                        self.fail("`print` of string literals (SYS_PUTC) is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
+                        self.fail("a string literal used outside `print(...)` has no defined SVM-G v1 lowering (only `print` of a string-literal argument is supported)")
             case HirExprKind.MethodCall(_, _, _, _):
                 self.fail("method calls beyond expect(...).to_equal(...) are not supported in the SVM-G v1 lowering subset (design doc §4.4) -- if the receiver is text, this is the design §4.4 exclusion 'text manipulation beyond literals'")
-            case HirExprKind.If(_, _, _):
-                self.fail("if/elif/else is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
-            case HirExprKind.While(_, _, _):
-                self.fail("`while` (with the step-budget backstop) is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
-            case HirExprKind.FloatLit(_, _):
-                self.fail("float arithmetic/comparisons are in the design §4.4 subset but are not yet implemented by this D4 lowering pass")
+            case HirExprKind.If(cond, then_, else_):
+                self.lower_if(cond, then_, else_)
+            case HirExprKind.While(cond, body, _):
+                self.lower_while(cond, body)
             case _:
                 self.fail("unsupported expression construct outside the SVM-G v1 lowering subset implemented so far")
 
@@ -374,6 +378,9 @@ impl _Lowerer:
             case _: ""
         if name == "":
             self.fail("only direct named-function calls are supported in the SVM-G v1 lowering subset")
+            return
+        if name == "print":
+            self.lower_print(args)
             return
         if name == self.current_fn:
             self.fail("recursion is not supported in the SVM-G v1 lowering subset (design doc §4.4): fn '{name}' calls itself")
@@ -401,6 +408,68 @@ impl _Lowerer:
             self.emit_pushi(self.helper_retslot[idx])
             self.emit_op(OP_LOAD32)
 
+    # -- print(<string literal>) -> one SYS_PUTC per byte --------------------
+
+    me lower_print(args: [HirCallArg]):
+        if args.len() != 1:
+            self.fail("`print` with other than exactly one argument is not supported in the SVM-G v1 lowering subset")
+            return
+        val arg = args[0].value
+        match arg.kind:
+            case HirExprKind.StringLit(value, interpolations):
+                match interpolations:
+                    case Some(_):
+                        self.fail("`print` of an interpolated string is text manipulation beyond literals and is not supported in the SVM-G v1 lowering subset (design doc §4.4 exclusion list)")
+                    case nil:
+                        var i = 0
+                        while i < value.len():
+                            self.emit_pushi(value.char_code_at(i))
+                            self.emit_op(OP_SYS_PUTC)
+                            i = i + 1
+            case _:
+                self.fail("`print` of a non-string-literal argument (e.g. an integer) is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
+
+    # -- if/elif/else ----------------------------------------------------------
+    # `elif` arrives as an ordinary nested `HirExprKind.If` inside `else_`'s
+    # block (either as a statement or as the block's tail value); no special
+    # elif-chain case is needed beyond structural recursion through
+    # lower_block_stmts.
+
+    me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?):
+        self.lower_expr(cond)
+        if not self.ok():
+            return
+        val else_patch = self.emit_jump(OP_JZ)
+        self.lower_block_stmts(then_)
+        if not self.ok():
+            return
+        if val else_block = else_:
+            val end_patch = self.emit_jump(OP_JMP)
+            self.patch_rel16(else_patch, self.code.len())
+            self.lower_block_stmts(else_block)
+            if not self.ok():
+                return
+            self.patch_rel16(end_patch, self.code.len())
+        else:
+            self.patch_rel16(else_patch, self.code.len())
+
+    # -- while <cond>: <body> ---------------------------------------------------
+    # No separate iteration cap is added: the SGP step budget (already
+    # mandatory for every SVM-G program, design §4.2/§4.4) is the sole
+    # termination backstop for an unbounded `while`.
+
+    me lower_while(cond: HirExpr, body: HirBlock):
+        val loop_head = self.code.len()
+        self.lower_expr(cond)
+        if not self.ok():
+            return
+        val exit_patch = self.emit_jump(OP_JZ)
+        self.lower_block_stmts(body)
+        if not self.ok():
+            return
+        self.emit_jump_back(OP_JMP, loop_head)
+        self.patch_rel16(exit_patch, self.code.len())
+
     # -- expect(actual).to_equal(expected) -----------------------------------
 
     fn is_expect_to_equal(e: HirExpr) -> bool:
@@ -425,12 +494,13 @@ impl _Lowerer:
                     case HirExprKind.Call(_, cargs, _):
                         val actual = cargs[0].value
                         val expected = args[0].value
+                        val is_float = self.expr_is_float(actual) or self.expr_is_float(expected)
                         self.lower_expr(actual)
                         if self.ok():
                             self.emit_op(OP_DUP)
                             self.lower_expr(expected)
                         if self.ok():
-                            self.emit_op(OP_EQ)
+                            self.emit_op(if is_float: OP_FEQ else: OP_EQ)
                             self.emit_op(OP_SWAP)
                             self.emit_op(OP_SYS_RESULT)
                     case _: pass
@@ -455,11 +525,14 @@ impl _Lowerer:
                     case HirExprKind.NamedVar(symbol, _): Some(symbol)
                     case _: nil
                 if val sym = target_sym:
-                    val maybe_opcode = self.assign_opcode(op)
-                    if val opcode = maybe_opcode:
-                        self.compound_assign(sym, opcode, value)
+                    if self.expr_is_float(target) or self.expr_is_float(value):
+                        self.fail("compound assignment (+=/-=/etc) on a float local is in the design §4.4 subset but is not yet implemented by this D4 lowering pass (assign_opcode only maps to integer opcodes)")
                     else:
-                        self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
+                        val maybe_opcode = self.assign_opcode(op)
+                        if val opcode = maybe_opcode:
+                            self.compound_assign(sym, opcode, value)
+                        else:
+                            self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
                 else:
                     self.fail("assignment target must be a local variable in the SVM-G v1 lowering subset")
             case _:
@@ -487,11 +560,23 @@ impl _Lowerer:
             if self.ok():
                 self.lower_stmt(stmt)
         if self.ok() and block.has:
-            # Statement-context block with an unused tail value: evaluate
-            # for side effects (none exist in this subset) and discard.
-            self.lower_expr(block.value)
-            if self.ok():
-                self.emit_op(OP_DROP)
+            match block.value.kind:
+                case HirExprKind.If(_, _, _):
+                    # Control-flow-only construct in this subset (no value
+                    # lowering for `if` as an expression): lower it directly,
+                    # never DROP -- it never pushes a stack value, e.g. an
+                    # `elif` chain arriving as a block's tail expression
+                    # (rather than a plain statement).
+                    self.lower_expr(block.value)
+                case HirExprKind.While(_, _, _):
+                    self.lower_expr(block.value)
+                case _:
+                    # Statement-context block with an unused tail value:
+                    # evaluate for side effects (none exist in this subset)
+                    # and discard.
+                    self.lower_expr(block.value)
+                    if self.ok():
+                        self.emit_op(OP_DROP)
 
     me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock):
         match iter.kind:

@@ -21,7 +21,8 @@ use compiler.hir.hir_definitions.{
 }
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.svmg_lowering.{SvmgHelperFn, LoweredProgram, lower_svmg_program}
-use std.common.svmg.ref_vm.{assemble_and_run, read_records}
+use std.common.svmg.ref_vm.{assemble_and_run, read_records, read_log}
+use std.common.binary_io.{f32_to_bits}
 
 # ============================================================================
 # HIR construction helpers (span/type are irrelevant to lowering -- always
@@ -70,6 +71,25 @@ fn block_with_tail(stmts: [HirStmt], tail: HirExpr) -> HirBlock:
 
 fn param(sym: SymbolId, name: text) -> HirParam:
     HirParam(symbol: sym, name: name, type_: ty(), has_default: false, default: int_lit(0), span: Span.empty())
+
+fn float_ty() -> HirType:
+    HirType(kind: HirTypeKind.Float(bits: 32), span: Span.empty())
+
+fn float_lit(v: f64) -> HirExpr:
+    e(HirExprKind.FloatLit(value: v, suffix: nil))
+
+fn string_lit(v: text) -> HirExpr:
+    e(HirExprKind.StringLit(value: v, interpolations: nil))
+
+fn assign(target: HirExpr, op: HirAssignOp, value: HirExpr) -> HirStmt:
+    s(HirStmtKind.Assign(target: target, op: op, value: value))
+
+fn expected_signed_i32_bits(v: f64) -> i64:
+    """Independently reproduce ref_vm.spl's `record.value` signed-i32
+    decoding for an f32 bit pattern, so a float assertion checks the actual
+    executed value rather than only `passed == 1`."""
+    val bits = f32_to_bits(v as f32) as i64
+    if bits >= 0x80000000: bits - 0x100000000 else: bits
 
 # ============================================================================
 # Positive cases
@@ -142,6 +162,112 @@ describe "SVM-G Task D4 lowering — fixed-size array sum":
         assert_equal(records[0].value, 15)
 
 # ============================================================================
+# Positive cases — Task D4 extension (if/elif/else, while, print, float)
+# ============================================================================
+
+describe "SVM-G Task D4 lowering — if/elif/else":
+    it "picks the elif branch (nested If inside the else_ block) and executes the right accumulation on D2's VM":
+        val x_sym = SymbolId(id: 1)
+        val total_sym = SymbolId(id: 2)
+        # if x > 10: total += 100
+        # elif x > 5: total += 10   <- x == 7 takes this branch
+        # else: total += 1
+        val inner_if = e(HirExprKind.If(
+            cond: binop(HirBinOp.Gt, var_(x_sym), int_lit(5)),
+            then_: block_no_tail([assign(var_(total_sym), HirAssignOp.Add, int_lit(10))]),
+            else_: block_no_tail([assign(var_(total_sym), HirAssignOp.Add, int_lit(1))]),
+        ))
+        val outer_if = e(HirExprKind.If(
+            cond: binop(HirBinOp.Gt, var_(x_sym), int_lit(10)),
+            then_: block_no_tail([assign(var_(total_sym), HirAssignOp.Add, int_lit(100))]),
+            else_: block_no_tail([s(HirStmtKind.Expr(expr: inner_if))]),
+        ))
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: x_sym, type_: ty(), init: int_lit(7))),
+            s(HirStmtKind.Let(symbol: total_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Expr(expr: outer_if)),
+            s(HirStmtKind.Expr(expr: expect_to_equal(var_(total_sym), int_lit(10)))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 10)
+
+describe "SVM-G Task D4 lowering — bounded while loop":
+    it "sums 0..5 (exclusive) via a while loop (step-budget backstop) and checks the total with expect().to_equal()":
+        val i_sym = SymbolId(id: 1)
+        val sum_sym = SymbolId(id: 2)
+        val loop_body = block_no_tail([
+            assign(var_(sum_sym), HirAssignOp.Add, var_(i_sym)),
+            assign(var_(i_sym), HirAssignOp.Add, int_lit(1)),
+        ])
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: i_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Let(symbol: sum_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Expr(expr: e(HirExprKind.While(
+                cond: binop(HirBinOp.Lt, var_(i_sym), int_lit(5)),
+                body: loop_body,
+                label: nil,
+            )))),
+            s(HirStmtKind.Expr(expr: expect_to_equal(var_(sum_sym), int_lit(10)))),
+        ])
+        val prog = lower_svmg_program(body, [], 5000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 10)
+
+describe "SVM-G Task D4 lowering — print of a string literal":
+    it "lowers print(\"hi\") to one SYS_PUTC per byte and the LOG ring holds the executed bytes":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: call(named_var(SymbolId(id: 40), "print"), [string_lit("hi")]))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        assert_equal(read_log(result.arena, result.log_cap), "hi")
+
+describe "SVM-G Task D4 lowering — float arithmetic and comparison":
+    it "computes 1.5 + 2.5 via FADD and checks it against 4.0 via FEQ (expect().to_equal())":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: expect_to_equal(
+                binop(HirBinOp.Add, float_lit(1.5), float_lit(2.5)),
+                float_lit(4.0),
+            ))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(4.0))
+
+    it "takes the FGT branch of an if (3.5 > 2.0) and accumulates the correct total":
+        val r_sym = SymbolId(id: 1)
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: r_sym, type_: ty(), init: int_lit(0))),
+            s(HirStmtKind.Expr(expr: e(HirExprKind.If(
+                cond: binop(HirBinOp.Gt, float_lit(3.5), float_lit(2.0)),
+                then_: block_no_tail([assign(var_(r_sym), HirAssignOp.Add, int_lit(1))]),
+                else_: block_no_tail([assign(var_(r_sym), HirAssignOp.Add, int_lit(0))]),
+            )))),
+            s(HirStmtKind.Expr(expr: expect_to_equal(var_(r_sym), int_lit(1)))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_true(prog.ok)
+        val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, 1)
+
+# ============================================================================
 # Rejection cases — one per design §4.4 excluded construct
 # ============================================================================
 
@@ -201,3 +327,36 @@ describe "SVM-G Task D4 lowering — rejects excluded constructs (design doc §4
         val prog = lower_svmg_program(body, [bad_fn], 1000)
         assert_false(prog.ok)
         assert_contains(prog.error, "recursion")
+
+# ============================================================================
+# Rejection cases — still-deferred constructs (in the design §4.4 subset but
+# not yet implemented by this D4 lowering pass): must fail fast, never
+# silently mis-lower.
+# ============================================================================
+
+describe "SVM-G Task D4 lowering — rejects still-deferred constructs (not yet implemented)":
+    it "rejects print of a non-string-literal argument (e.g. an integer)":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: call(named_var(SymbolId(id: 41), "print"), [int_lit(7)]))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "not yet implemented")
+
+    it "rejects compound assignment on a float local instead of silently emitting the integer opcode":
+        val f_sym = SymbolId(id: 1)
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol: f_sym, type_: float_ty(), init: float_lit(1.0))),
+            assign(HirExpr(kind: HirExprKind.Var(symbol: f_sym), has_type_: true, type_: float_ty(), span: Span.empty()), HirAssignOp.Add, float_lit(1.0)),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "float local")
+
+    it "rejects REM on float operands instead of silently emitting the integer REM opcode":
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expr: expect_to_equal(binop(HirBinOp.Mod, float_lit(5.0), float_lit(2.0)), float_lit(1.0)))),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "float operands")

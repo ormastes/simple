@@ -11,7 +11,10 @@ static void check_digest(const uint8_t* input, size_t input_len,
                          const uint8_t expected[32]) {
     SplArray* bytes = rt_byte_array_new_len((uint64_t)input_len);
     for (size_t i = 0; i < input_len; i++) {
-        rt_array_set(bytes, (int64_t)i, (int64_t)input[i]);
+        if (!rt_bytes_u8_set(bytes, (int64_t)i, (int64_t)input[i])) {
+            failures++;
+            return;
+        }
     }
     int64_t digest_value = rt_tls13_sha256((int64_t)(uintptr_t)bytes);
     SplArray* digest = (SplArray*)(uintptr_t)digest_value;
@@ -38,7 +41,6 @@ int main(void) {
     };
     static const uint8_t abc[3] = {'a', 'b', 'c'};
 
-    __simple_runtime_init();
     check_digest(NULL, 0, empty_digest);
     check_digest(abc, sizeof(abc), abc_digest);
 
@@ -52,7 +54,6 @@ int main(void) {
         (int64_t)(after.tv_nsec - before.tv_nsec);
     if (elapsed_ns <= 0) failures++;
 
-    __simple_runtime_shutdown();
     printf("SELFCHECK %s (%d failures)\n",
            failures == 0 ? "PASSED" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

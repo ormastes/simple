@@ -1,7 +1,9 @@
 use std.spec.*
 use os.kernel.boot.mmio.{mmio_read32, mmio_reset_for_test, mmio_write16, mmio_write32}
 use os.services.audio.virtio_snd_service.{VirtioSndService}
-use os.drivers.virtio.virtio_snd_dma_resources.{VIRTIO_SND_EVENT_BUFFER_OFFSET}
+use os.drivers.virtio.virtio_snd_dma_resources.{
+    VIRTIO_SND_EVENT_BUFFER_OFFSET, VIRTIO_SND_RX_PCM_OFFSET, VIRTIO_SND_STATUS_OFFSET
+}
 
 fn configure_virtio_sound_transport(base: u64):
     mmio_reset_for_test()
@@ -76,4 +78,31 @@ describe "pure Simple VirtIO sound service contracts":
         expect(receipt.bytes).to_equal(8)
         expect(receipt.interrupts).to_equal(1u64)
         expect(mmio_read32(base + 0x064u64)).to_equal(1u32)
+        service.shutdown(0)
+
+    it "correlates a completed bounded capture with DMA-read session generation and hash":
+        val base = 0x0A104000u64
+        configure_virtio_sound_transport(base)
+        var service = VirtioSndService.start(base)
+        service.direction = "capture"
+        service.period_frames = 2
+        service.channels = 2
+        service.capture_session = 3u64
+        service.capture_generation = 5u64
+        val pcm = service.dma.cpu_base + VIRTIO_SND_RX_PCM_OFFSET.to_u64()
+        mmio_write32(pcm, 0xfffe0064u32)
+        mmio_write32(pcm + 4u64, 0x00010000u32)
+        mmio_write32(service.dma.cpu_base + VIRTIO_SND_STATUS_OFFSET.to_u64(), 0u32)
+        val used = service.transport.rx.used_cpu
+        mmio_write16(used + 2u64, 1u16)
+        mmio_write32(used + 4u64, 0u32)
+        mmio_write32(used + 8u64, 8u32)
+        val capture = service.poll_capture_receipt()
+        expect(capture.status).to_equal("completed")
+        expect(capture.session).to_equal(3u64)
+        expect(capture.generation).to_equal(5u64)
+        expect(capture.frames).to_equal(2)
+        expect(capture.samples).to_equal(4)
+        expect(capture.sample_hash).to_be_greater_than(0)
+        expect(capture.non_silent).to_be(true)
         service.shutdown(0)
