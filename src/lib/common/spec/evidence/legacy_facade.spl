@@ -1,0 +1,97 @@
+# Backward-compatible evidence facade (FR-14, sspec_scenario_manual).
+#
+# Existing specs build evidence with the OLD, frozen `ScenarioEvidenceArtifact`
+# API (scenario_evidence.spl — metadata-only: kind/title/mime/path/body/
+# scenario_id/step_id/redacted). That API is not being rewritten. This module
+# is the one-way adapter that lets an old-style capture flow into the NEW
+# typed-evidence pipeline (model.spl's CanonicalEvidence/EvidenceNode,
+# evidence_comparator.spl's ComparisonResult, manual_render.spl's
+# render_block) so old and new evidence can sit in the same generated manual
+# without every existing spec being rewritten.
+#
+# It is intentionally pure: no file I/O, no process boundary crossing.
+#
+# Design: doc/02_requirements/feature/sspec_scenario_manual.md (FR-14)
+
+use std.common.spec.scenario_evidence.{
+    ScenarioEvidenceArtifact, ScenarioCheckerEvidence,
+    scenario_capture_kind_name, scenario_evidence_manual_summary
+}
+use std.common.spec.evidence.model.{
+    CanonicalEvidence, EvidenceNode, canonical_evidence, evidence_node_at,
+    ComparisonResult, EvidenceCheckResult, EvidenceStatus, check_result,
+    ManualBlock, ManualBlockKind, manual_block
+}
+
+# ---------------------------------------------------------------------------
+# ScenarioEvidenceArtifact -> CanonicalEvidence
+# ---------------------------------------------------------------------------
+
+# Converts an old-style artifact into typed evidence so the new comparator can
+# assert against a capture an old-style spec already made. Every field the old
+# API defines becomes its own node, round-trippable back out for equality
+# checks — this facade must never silently drop information.
+#
+# A redacted artifact carries empty path/body in the old API already (the
+# constructors that produce `redacted: true` always pass `""` for both), so
+# this conversion never has a real value to leak — it simply mirrors the
+# artifact's own path/body fields unchanged and marks the node value
+# "(redacted)" instead of the (always-empty) body text.
+pub fn legacy_evidence_to_canonical(artifact: ScenarioEvidenceArtifact) -> CanonicalEvidence:
+    val kind_name = scenario_capture_kind_name(artifact.kind)
+    val redacted_marker = if artifact.redacted: "true" else: "false"
+    val body_value = if artifact.redacted: "(redacted)" else: artifact.body
+    val nodes: [EvidenceNode] = [
+        evidence_node_at("kind", kind_name, 0),
+        evidence_node_at("title", artifact.title, 1),
+        evidence_node_at("mime", artifact.mime, 2),
+        evidence_node_at("path", artifact.path, 3),
+        evidence_node_at("body", body_value, 4),
+        evidence_node_at("scenario_id", artifact.scenario_id, 5),
+        evidence_node_at("step_id", artifact.step_id, 6),
+        evidence_node_at("redacted", redacted_marker, 7)
+    ]
+    canonical_evidence("legacy_scenario_evidence", kind_name, nodes)
+
+# ---------------------------------------------------------------------------
+# ScenarioCheckerEvidence -> ComparisonResult
+# ---------------------------------------------------------------------------
+
+# An old checker already carries a verdict (`passed: bool`) and an assertion
+# string; it never went through an OracleSpec. This projects that verdict
+# directly into the new ComparisonResult/EvidenceCheckResult shape (one
+# synthetic check standing for the whole assertion) so it can be rendered
+# through manual_render alongside typed-evidence comparison blocks.
+pub fn legacy_checker_to_comparison(evidence: ScenarioCheckerEvidence) -> ComparisonResult:
+    val status = if evidence.passed: EvidenceStatus.passed else: EvidenceStatus.failed
+    val artifact_summary = scenario_evidence_manual_summary(evidence.artifact)
+    val check = check_result(
+        evidence.assertion,
+        "legacy_checker",
+        "passed",
+        if evidence.passed: "passed" else: "failed",
+        status,
+        artifact_summary
+    )
+    val summary_word = if evidence.passed: "PASS" else: "FAIL"
+    ComparisonResult(
+        status: status,
+        summary: summary_word + " — " + evidence.assertion,
+        checks: [check]
+    )
+
+# ---------------------------------------------------------------------------
+# ScenarioEvidenceArtifact -> ManualBlock
+# ---------------------------------------------------------------------------
+
+# Renders an old-style capture through the SAME render_block used for new
+# typed evidence, instead of a second bespoke renderer. Reuses
+# scenario_evidence_manual_summary (the old module's own text) so the two
+# modules never disagree about what an artifact's summary line says.
+#
+# A redacted artifact's block carries only that summary line — which already
+# states "(redacted)" and never embeds the (always-empty) path/body — so no
+# body/path value can leak through the block either.
+pub fn legacy_evidence_manual_block(artifact: ScenarioEvidenceArtifact) -> ManualBlock:
+    val summary = scenario_evidence_manual_summary(artifact)
+    manual_block(ManualBlockKind.paragraph, artifact.title, [summary])
