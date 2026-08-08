@@ -151,6 +151,19 @@ fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
     if m.constants.contains_key(name): return "const"
     ""
 
+# Keep cache mutation behind methods because the native semantic checker
+# rejects assignment through a nested field (`snapshot.reexport_cache.entries`)
+# even though the cache itself is reference-owned.
+impl ModuleSurfaceReexportCache:
+    me has(key: text) -> bool:
+        self.entries.contains_key(key)
+
+    me get(key: text) -> ModuleSurfaceReexportSource:
+        self.entries[key]
+
+    me put(key: text, value: ModuleSurfaceReexportSource):
+        self.entries[key] = value
+
 fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
     match kind:
         case SymbolKind.Class: "class"
@@ -830,18 +843,25 @@ impl HirLowering:
 
     me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
         # Memoize only roots. Recursive calls have a smaller remaining depth
-        # budget, so caching them as final answers would be unsound. The root
-        # key is stable for one immutable ModuleSurfacesByName instance.
+        # budget, so caching them as final answers would be unsound. Completed
+        # roots belong to the shared snapshot cache: each HIR lowering copies
+        # the surface view, and keeping this map on HIR would pay the full
+        # resolver walk again for every module.
         val memo_key = facade_name + "\t" + wanted
-        if depth == 0 and self.reexport_source_memo.contains_key(memo_key):
-            return self.reexport_source_memo[memo_key]
+        var snapshot_cache = self.module_surfaces.reexport_cache
+        if depth == 0 and snapshot_cache.has(memo_key):
+            val cached = snapshot_cache.get(memo_key)
+            return HirReexportSource(found: cached.found, module_name: cached.module_name, item_name: cached.item_name)
         if self.reexport_active.contains_key(memo_key):
             return HirReexportSource(found: false, module_name: "", item_name: "")
         self.reexport_active[memo_key] = true
         val resolved = self.find_reexport_source_inner(facade_mod, facade_name, wanted, depth)
         self.reexport_active = self.reexport_active.remove(memo_key)
         if depth == 0:
-            self.reexport_source_memo[memo_key] = resolved
+            snapshot_cache.put(memo_key, ModuleSurfaceReexportSource(
+                found: resolved.found,
+                module_name: resolved.module_name,
+                item_name: resolved.item_name))
         resolved
 
     me find_reexport_source_inner(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
