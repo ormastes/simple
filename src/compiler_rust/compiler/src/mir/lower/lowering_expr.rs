@@ -20,6 +20,25 @@ use crate::hir::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::instructions::VReg;
 
 impl<'a> MirLowerer<'a> {
+    /// Recover the nominal receiver identity used to classify method dispatch.
+    /// Named registry types cover inferred concrete values. Authored local
+    /// hints cover trait/interface annotations, whose runtime representation
+    /// deliberately uses `TypeId::ANY`.
+    pub(super) fn recover_receiver_type_name(&mut self, expr: &HirExpr) -> Option<String> {
+        if let Some(name) = self.type_registry.and_then(|registry| registry.get_type_name(expr.ty)) {
+            return Some(name.to_string());
+        }
+        if let HirExprKind::Local(idx) = &expr.kind {
+            if let Some(Some(name)) = self.current_local_type_name_hints.get(*idx) {
+                return Some(name.clone());
+            }
+        }
+        let ty = self.recover_receiver_type(expr)?;
+        self.type_registry
+            .and_then(|registry| registry.get_type_name(ty))
+            .map(str::to_string)
+    }
+
     /// Recover a named type for a method-call receiver whose own
     /// `receiver.ty` does not resolve to a named class via
     /// `TypeRegistry::get_type_name`.

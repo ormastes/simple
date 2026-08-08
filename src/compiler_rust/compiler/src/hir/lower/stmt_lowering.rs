@@ -270,7 +270,18 @@ impl Lowerer {
                 };
                 self.lifetime_context.register_variable(&name, origin);
 
-                let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                // Preserve the nominal identity independently of TypeId. Trait
+                // annotations intentionally resolve to ANY, while inferred
+                // imported class values can be re-registered under a different
+                // module-local TypeId. MIR dispatch must never infer a vtable
+                // solely from a colliding method name.
+                let type_name_hint = let_stmt
+                    .ty
+                    .as_ref()
+                    .or(pattern_type)
+                    .and_then(super::module_lowering::type_name_hint)
+                    .or_else(|| self.module.types.get_type_name(ty).map(str::to_string));
+                let local_index = ctx.add_local_full(name, ty, type_name_hint, let_stmt.mutability, false, false);
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
                 }

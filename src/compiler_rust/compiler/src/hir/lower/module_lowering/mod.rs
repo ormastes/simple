@@ -13,6 +13,7 @@
 mod aop;
 mod contract;
 mod function;
+pub(super) use function::type_name_hint;
 mod import;
 mod mock;
 mod module_pass;

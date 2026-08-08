@@ -22,6 +22,82 @@ fn method_call_static_dispatch() {
 }
 
 #[test]
+fn erased_imported_class_method_does_not_guess_colliding_trait_vtable() {
+    let source = r#"trait NativeLifecycle:
+    fn label() -> text
+    fn initialize() -> i64
+
+class NativeNoArgDispatchFixture:
+    value: i64
+
+    static fn create() -> NativeNoArgDispatchFixture:
+        NativeNoArgDispatchFixture(value: 0)
+
+    me initialize() -> i64:
+        self.value = 7
+        0
+
+class OtherBackend:
+    value: i64
+
+impl NativeLifecycle for OtherBackend:
+    fn label() -> text:
+        "other"
+
+    me initialize() -> i64:
+        self.value = 9
+        0
+
+fn test() -> i64:
+    val instance = NativeNoArgDispatchFixture.create()
+    return instance.initialize()
+
+fn trait_test(target: NativeLifecycle) -> i64:
+    return target.initialize()
+"#;
+    let ast = Parser::new(source).parse().expect("parse failed");
+    let mut hir_module = hir::lower(&ast).expect("hir lower failed");
+    let test = hir_module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "test")
+        .unwrap();
+    let instance = test.locals.iter_mut().find(|local| local.name == "instance").unwrap();
+    assert_eq!(instance.type_name_hint.as_deref(), Some("NativeNoArgDispatchFixture"));
+    // Model the cross-module erasure seen after an imported static factory.
+    instance.ty = hir::TypeId::ANY;
+    let hir::HirStmt::Return(Some(call)) = &mut test.body[1] else {
+        panic!("expected return call");
+    };
+    let hir::HirExprKind::MethodCall { receiver, .. } = &mut call.kind else {
+        panic!("expected method call");
+    };
+    receiver.ty = hir::TypeId::ANY;
+
+    let mir = lower_to_mir(&hir_module).expect("MIR lower failed");
+    let test = mir.functions.iter().find(|function| function.name == "test").unwrap();
+    assert!(func_has_inst(test, |inst| matches!(
+        inst,
+        MirInst::MethodCallStatic { func_name, .. }
+            if func_name == "NativeNoArgDispatchFixture.initialize"
+    )));
+    assert!(!func_has_inst(test, |inst| matches!(
+        inst,
+        MirInst::MethodCallVirtual { .. }
+    )));
+
+    let trait_test = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "trait_test")
+        .unwrap();
+    assert!(func_has_inst(trait_test, |inst| matches!(
+        inst,
+        MirInst::MethodCallVirtual { vtable_slot: 1, .. }
+    )));
+}
+
+#[test]
 fn string_ord_and_hash_lower_to_shared_runtime_calls() {
     let mir = compile_to_mir(
         "fn ord_probe(value: str) -> i64:\n    return value.ord()\n\nfn hash_probe(value: str) -> i64:\n    return value.hash()\n",

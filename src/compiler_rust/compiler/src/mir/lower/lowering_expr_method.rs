@@ -143,6 +143,7 @@ impl<'a> MirLowerer<'a> {
         dispatch: &DispatchMode,
     ) -> MirLowerResult<VReg> {
         let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
+        let receiver_type_name = self.recover_receiver_type_name(receiver);
 
         if args.is_empty() {
             let effective_ty = receiver_local_ty.unwrap_or(receiver.ty);
@@ -1845,6 +1846,8 @@ impl<'a> MirLowerer<'a> {
                 );
             }
             method.to_string()
+        } else if let Some(type_name) = receiver_type_name.as_deref() {
+            format!("{}.{}", type_name, method)
         } else if let Some(registry) = self.type_registry {
             if let Some(type_name) = registry.get_type_name(receiver.ty) {
                 format!("{}.{}", type_name, method)

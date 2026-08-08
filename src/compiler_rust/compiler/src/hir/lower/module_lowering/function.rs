@@ -47,7 +47,7 @@ fn is_stub_body(body: &ast::Block) -> bool {
     }
 }
 
-fn type_name_hint(ty: &ast::Type) -> Option<String> {
+pub(in crate::hir::lower) fn type_name_hint(ty: &ast::Type) -> Option<String> {
     match ty {
         ast::Type::Simple(name) => Some(name.clone()),
         ast::Type::Generic { name, .. } => Some(name.clone()),

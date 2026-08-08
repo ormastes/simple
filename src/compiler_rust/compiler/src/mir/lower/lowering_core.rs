@@ -343,6 +343,10 @@ pub struct MirLowerer<'a> {
     pub(super) active_array_data_ptrs: Vec<(usize, VReg)>,
     /// Array locals allocated only to receive ignored appends.
     pub(super) dead_append_array_locals: HashSet<usize>,
+    /// Authored receiver type names for the function currently being lowered.
+    /// Trait types intentionally erase to `Any`, so their name is the only
+    /// authoritative evidence that a method call may use a vtable.
+    pub(super) current_local_type_name_hints: Vec<Option<String>>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -383,6 +387,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
+            current_local_type_name_hints: Vec::new(),
         }
     }
 
@@ -418,6 +423,7 @@ impl<'a> MirLowerer<'a> {
             active_array_append_ptrs: Vec::new(),
             active_array_data_ptrs: Vec::new(),
             dead_append_array_locals: HashSet::new(),
+            current_local_type_name_hints: Vec::new(),
             decision_counter: 0,
             condition_counters: HashMap::new(),
             path_counter: 0,
@@ -943,7 +949,9 @@ impl<'a> MirLowerer<'a> {
     /// vtable, so slot dispatch loads field data as a function pointer and
     /// segfaults (engine3d Engine3D delegation, 2026-07-03). Take the virtual
     /// path only when the receiver is statically the trait itself, is of
-    /// unknown type, or actually implements a trait owning this method.
+    /// actually implements a trait owning this method. An unknown receiver is
+    /// never sufficient evidence for a vtable call: ordinary imported classes
+    /// may temporarily erase to `Any`, and their first field is not a vtable.
     /// Returns the sentinel slot [`crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT`]
     /// when the call would go virtual through a trait that has NO recorded
     /// `impl Trait for Type` anywhere in the unit (duck-typing only, e.g.
@@ -986,48 +994,11 @@ impl<'a> MirLowerer<'a> {
             }
         };
         let Some(recv) = receiver_type_name else {
-            // Unknown receiver type: name-based virtual dispatch.
-            //
-            // Do NOT take the first HashMap hit: iteration order is random per
-            // process, so when several traits declare a same-named method the
-            // winner used to be a coin flip. If an IMPL-LESS trait won, the
-            // call lowered to the duck-dispatch sentinel and trapped at
-            // runtime even though an implemented trait (whose vtable real
-            // objects actually carry — only implemented traits ever get their
-            // vtable written by a constructor) also declared the method.
-            // Measured 6/12 pass vs 6/12 SIGILL on the same engine2d probe
-            // before this fix (bug
-            // jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
-            // Prefer an implemented trait; tie-break lexicographically by
-            // trait name so lowering is deterministic run to run.
-            let mut best: Option<(&String, &crate::hir::HirMethodSignature)> = None;
-            for (trait_name, info) in infos {
-                if let Some(sig) = info.get_method(method_name) {
-                    let replace = match best {
-                        None => true,
-                        Some((best_name, _)) => {
-                            let cand_impl = trait_is_implemented(trait_name);
-                            let best_impl = trait_is_implemented(best_name);
-                            (cand_impl && !best_impl) || (cand_impl == best_impl && trait_name < best_name)
-                        }
-                    };
-                    if replace {
-                        best = Some((trait_name, sig));
-                    }
-                }
-            }
-            if let Some((trait_name, sig)) = best {
-                if duck_dbg {
-                    eprintln!(
-                        "[DUCK] path1 unknown-recv method={} matched_trait={} slot={} implemented={} SENTINEL={}",
-                        method_name,
-                        trait_name,
-                        sig.vtable_slot,
-                        trait_is_implemented(trait_name),
-                        !trait_is_implemented(trait_name)
-                    );
-                }
-                return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
+            if duck_dbg {
+                eprintln!(
+                    "[DUCK] unknown receiver for method={}; refusing name-only vtable dispatch",
+                    method_name
+                );
             }
             return None;
         };
@@ -1571,6 +1542,14 @@ impl<'a> MirLowerer<'a> {
     /// Lower a single HIR function to MIR function
     pub(super) fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
+
+        self.current_local_type_name_hints.clear();
+        self.current_local_type_name_hints.extend(
+            func.params
+                .iter()
+                .chain(func.locals.iter())
+                .map(|local| local.type_name_hint.clone()),
+        );
 
         // Populate metadata for AOP join point matching
         mir_func.module_path = self.current_module_path();
