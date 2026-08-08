@@ -43,6 +43,12 @@ impl Lowerer {
     /// inherits all invariants from the parent. This ensures Liskov Substitution
     /// Principle - a child class must maintain all parent invariants.
     pub(crate) fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
+        // See `register_struct` below: record the declaring file so
+        // `lower_struct_init_fields` can tell a typo from a bare-name collision.
+        // Classes need this as much as structs -- the reported bug's repro
+        // (`class Font { id, size }`, `Font(bogus: 111, size: 8)`) is a CLASS.
+        self.struct_decl_files.insert(c.name.clone(), self.current_file.clone());
+
         // Collect class's own fields
         let mut fields: Vec<_> = c
             .fields
@@ -131,6 +137,13 @@ impl Lowerer {
         if is_packed && has_bitwidth_fields {
             return self.register_packed_struct_as_bitfield(s);
         }
+
+        // Record which source file DECLARED this bare name. `lower_struct_init_fields`
+        // uses it to tell a genuine typo from a same-bare-name struct imported from
+        // another module -- it only hard-rejects an unknown named argument when the
+        // construction site is in this same file. See the SOUNDNESS GATE comment in
+        // hir/lower/expr/collections.rs.
+        self.struct_decl_files.insert(s.name.clone(), self.current_file.clone());
 
         let mut fields = Vec::new();
         for field in &s.fields {

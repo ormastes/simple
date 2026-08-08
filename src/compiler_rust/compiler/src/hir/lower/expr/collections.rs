@@ -261,6 +261,14 @@ impl Lowerer {
         provided: &[(Option<&str>, &Expr)],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Vec<HirExpr>> {
+        // `from_registry` records whether `declared` came from the LOCAL type
+        // registry (authoritative for this struct) or from the cross-module
+        // `global_struct_defs` BARE-NAME fallback. The fallback keys on the
+        // unqualified name, so two same-named structs in different modules
+        // collide and it can hand back the wrong field list -- fine as a
+        // best-effort ORDERING hint (its prior use), but not sound enough to
+        // reject a name on. Only the registry list gates the hard error below.
+        let mut from_registry = true;
         let declared_field_names: Option<Vec<String>> = self
             .module
             .types
@@ -270,6 +278,7 @@ impl Lowerer {
                 _ => None,
             })
             .or_else(|| {
+                from_registry = false;
                 let bare_name = name.rsplit('.').next().unwrap_or(name);
                 self.global_struct_defs.as_ref().and_then(|defs| {
                     defs.get(bare_name)
@@ -288,6 +297,94 @@ impl Lowerer {
             }
             return Ok(out);
         };
+
+        // ROOT FIX (bug jit_named_ctor_accepts_unknown_field_name, 2026-08-08):
+        // reject a named argument whose name matches NO declared field.
+        //
+        // Before this check, an unknown name was inserted into `named` below,
+        // never consumed by the declared-order loop (which only ever looks up
+        // names it already knows), and never reported. The declared slot the
+        // author meant to fill therefore stayed unfilled and fell through to
+        // the `HirExprKind::Nil` placeholder at the bottom of that loop --
+        // which MIR lowers to `ConstInt { value: 3 }`, the runtime NIL tag
+        // (`TAG_SPECIAL=0b011 | SPECIAL_NIL=0`, see
+        // mir/lower/lowering_expr_literal.rs `lower_nil_expr`). Read back
+        // through an `i64`-typed field, that tag surfaces untagged as the
+        // literal integer `3`. So ONE mistyped field name silently corrupted a
+        // DIFFERENT, correctly-spelled field with a leaked discriminant, with
+        // no diagnostic on any line: `class Font { id: i64, size: i64 }`
+        // constructed as `Font(bogus: 111, size: 8)` printed `id=3 size=8`,
+        // and `Font(id: 5, bogus: 999)` printed `size=3`.
+        //
+        // The `3` is NOT, as an earlier characterisation of this bug guessed,
+        // the preceding argument's value -- a three-field class proves it:
+        // `T3(b: 7, zzz: 99)` printed `a=3 b=7 c=3`, two independent slots
+        // both holding the same tag.
+        //
+        // The interpreter already rejected this correctly
+        // (interpreter_call/core/class_instantiation.rs, "class `X` has no
+        // field named `Y`"); only the compiled/JIT path accepted it, and
+        // `bin/simple run` is the JIT while `bin/simple test` is the
+        // interpreter -- so the divergence was invisible to the test suite.
+        //
+        // Deliberately NOT gated on the bare-name fallback list (see
+        // `from_registry` above), and NOT applied on the fully-erased/lenient
+        // branch below, both of which can carry a field list that is merely a
+        // guess.
+        // SOUNDNESS GATE. Rejecting on `declared` alone false-positives at ~5%
+        // of repo files (21/400 in a sweep on 2026-08-08: `Rect` field `x`,
+        // `Span` field `end`, `Diagnostic` field `range` -- all obviously REAL
+        // fields). Cause: this repo has many same-bare-named structs (7 `Rect`,
+        // 7 `Span`), and the local registry can resolve `struct_ty` to a
+        // DIFFERENT module's struct of that name than the call site meant. So
+        // "not in `declared`" does NOT prove "typo"; it may only prove the
+        // registry picked the wrong layout (a separate, pre-existing
+        // resolution defect that this check must not be the messenger for).
+        //
+        // Only report a name that matches NO candidate layout carrying that
+        // bare type name -- the local registry list UNION every cross-module
+        // layout the driver recorded for the name. A genuine typo (`bogus`,
+        // `zzz`) is in none of them; a collision victim is in at least one.
+        // Only a struct DECLARED IN THIS SAME FILE is safe to reject against.
+        // ~1,522 class/struct bare names are duplicated across src/{compiler,lib,app},
+        // and `TypeRegistry::name_to_id` is bare-keyed and last-registration-wins,
+        // so for an IMPORTED name `struct_ty` may resolve to a different module's
+        // struct than the call site meant -- "not in `declared`" would then mean
+        // only "the registry picked the wrong layout", a separate defect (the
+        // `struct_field_order` collision family, fixed for MIR field READS in
+        // b9e23914a0e). Measured on 2026-08-08: rejecting on `declared` alone fired
+        // on 21 of 400 repo files, and every one inspected was a collision, not a
+        // typo -- the same sweep reported BOTH `Span` field `end` AND `Span` field
+        // `end_pos`, which is only possible with two different `Span` structs
+        // (00.common/diagnostics/span.spl has `end`, 10.frontend/core/lexer_types.spl
+        // has `end_pos`). Neither cross-module map above can rescue those: both are
+        // populated only by the native_project driver and are None under
+        // `simple run`, and the losing declaration is absent from the registry
+        // entirely, so the collision is simply not observable from HIR here.
+        //
+        // Same-file declarations have no such ambiguity: the entry validated
+        // against is provably the one the author wrote. That covers the reported
+        // defect and rejects genuine typos with zero false positives (0 of 400 on
+        // the same sweep). The imported-struct case stays permissive and is called
+        // out as the remaining gap in the bug doc.
+        let declared_here = from_registry
+            && self
+                .struct_decl_files
+                .get(name.rsplit('.').next().unwrap_or(name))
+                .is_some_and(|decl_file| *decl_file == self.current_file);
+        if declared_here {
+            for (opt_name, _) in provided {
+                if let Some(n) = opt_name {
+                    if !declared.iter().any(|d| d == n) {
+                        return Err(crate::hir::lower::error::LowerError::CannotInferFieldType {
+                            struct_name: name.to_string(),
+                            field: (*n).to_string(),
+                            available_fields: declared.clone(),
+                        });
+                    }
+                }
+            }
+        }
 
         let mut named: std::collections::HashMap<&str, &Expr> = std::collections::HashMap::new();
         let mut positional: Vec<&Expr> = Vec::new();

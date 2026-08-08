@@ -1,6 +1,6 @@
 # Seed JIT silently accepts an unknown field name in named-argument construction
 
-**Status:** OPEN
+**Status:** FIXED (seed) / OPEN (pure-Simple, unverifiable — see Follow-up)
 **Found:** 2026-08-08, while building the positive control for
 `interp_static_fn_new_hijacks_named_ctor_2026-07-02` (which was briefly closed
 RESOLVED and has since been REOPENED as partially fixed; this is still a
@@ -142,3 +142,134 @@ Two further scope corrections:
 
 The core symptom in the report body (interpreter rejects the unknown name, seed
 JIT silently accepts it) is confirmed and unchanged.
+
+
+---
+
+## RESOLVED (seed) — 2026-08-08
+
+### Root cause
+
+`src/compiler_rust/compiler/src/hir/lower/expr/collections.rs`,
+`lower_struct_init_fields` (the single choke point both AST shapes route
+through: the paren-call ctor `S(f: v)` via `hir/lower/expr/calls.rs:109`, and
+the brace literal `S { f: v }` via `lower_struct_init`, collections.rs:213).
+
+It built a `named: HashMap<&str, &Expr>` from the call's named arguments, then
+walked the struct's DECLARED field list, taking `named[field]` for each field it
+recognised. **An argument whose name matched no declared field was inserted into
+that map, never consumed by the loop, and never validated.** The declared slot
+the author meant to fill therefore stayed unfilled and fell through to the
+loop's `HirExprKind::Nil` placeholder.
+
+### The constant `3` IS a leaked tag — confirmed
+
+`HirExprKind::Nil` lowers via `lower_nil_expr`
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_literal.rs:44-53`),
+whose own comment states it: *"Nil is tagged value 3 in the runtime
+(TAG_SPECIAL=0b011 | SPECIAL_NIL=0)"* — it emits `MirInst::ConstInt { value: 3 }`.
+Read back through an `i64`-typed field, that tag surfaces **untagged** as the
+literal integer 3. So the corrupt slot holds a **leaked discriminant**, not a
+value.
+
+This also **disproves** this report's original "the value of the preceding
+argument" reading. A three-field class settles it:
+
+| call | observed |
+|------|----------|
+| `T3(b: 7, zzz: 99)` | `a=3 b=7 c=3` |
+
+Two *independent* unfilled slots both hold 3. No "value shifted into the
+neighbouring slot" explanation can produce that. The tag is also not conditioned
+on a `static fn new` — `class Font { id, size }` with no statics reproduces it.
+
+### Fix
+
+Reject a named argument matching no declared field, as
+`LowerError::CannotInferFieldType` — which already renders as
+``class `X` has no field named `Y` `` with a did-you-mean suggestion, matching
+the interpreter's wording exactly.
+
+### Soundness gate (why the rejection is scoped to same-file declarations)
+
+Rejecting on the resolved field list **alone** false-positives badly. Measured
+over 400 repo `.spl` files: **21 hits, and every one inspected was a bare-name
+collision, not a typo.** The tell is that the same sweep reported BOTH
+``Span`` field `end` AND ``Span`` field `end_pos`, which is only possible with
+two different `Span` structs — `src/compiler/00.common/diagnostics/span.spl` has
+`end`, `src/compiler/10.frontend/core/lexer_types.spl` has `end_pos`. Same for
+`Rect.x`, `CompileOptions.mode`, `Diagnostic.range`.
+
+Cause: ~1,522 class/struct bare names are duplicated across
+`src/{compiler,lib,app}`, and `TypeRegistry::name_to_id` is **bare-keyed,
+last-registration-wins**. For an IMPORTED name the resolved layout may not be
+the one the author meant, so "not in the declared list" would only mean "the
+registry picked the wrong struct" — the separate collision family fixed for MIR
+field *reads* in `b9e23914a0e`. Neither `global_struct_defs` nor
+`duplicate_global_struct_defs` can rescue it: both are populated only by the
+native_project driver and are **None under `simple run`** (verified — adding
+them changed the hit count 21 → 21), and the losing declaration is absent from
+the registry entirely, so the collision is not observable from HIR at all.
+
+So the rejection fires only when the struct/class is **declared in the same file
+as the construction site**, tracked by a new `Lowerer::struct_decl_files`
+recorded in `register_class` / `register_struct`
+(`hir/lower/type_registration.rs`). Same-file declarations have no ambiguity.
+Result: **0 false positives across the same 400-file sweep**, with both repro
+classes still rejected.
+
+**Remaining gap:** a typo'd field name on an **imported** struct is still
+silently accepted. Closing it requires a module-qualified tier for HIR type
+resolution — the analogue of what `b9e23914a0e` added for MIR field reads.
+
+### Family enumeration
+
+| form | before | after | same root cause? |
+|------|--------|-------|------------------|
+| ctor named arg, unknown name (same-file class) | silent, slot = tag 3 | **compile error** | yes — fixed |
+| ctor named arg, unknown name (imported class) | silent, slot = tag 3 | still silent | yes — blocked on bare-name collision |
+| brace literal `S { bogus: v }` | silent | **compile error** | yes — same choke point, fixed |
+| duplicate named arg `W(size: 1, size: 2)` | silent; last wins, other slot = tag 3 (`id=3 size=2`) | unchanged | same choke point (`named.insert` drops the earlier) — **NOT fixed, needs its own report** |
+| `static fn new` param name, e.g. `W(path: "x", size: 8)` where `path` is a `new` param and not a field | JIT **bypassed `new` entirely** and built a StructInit → `id=3` | JIT falls back to the interpreter, which routes to `new` → `id=42` (**correct**) | yes — incidentally corrected |
+| **free fn / method named arg**, `f(a: 1, zzz: 2)` | silent: `zzz` bound positionally to `b`, result 102, rc=0 | **unchanged — still silent** | **NO** — different path (`lower_call_args`, which drops names entirely); no tag corruption, it binds positionally. Interpreter rejects it (`unknown argument 'zzz'`). Needs its own report. |
+
+### Verification
+
+`scripts/check/check-named-ctor-unknown-field-rejected.shs` — a shell guard, not
+a spec: `bin/simple test` is the INTERPRETER, which already rejected these names
+correctly before the fix, so a spec goes red for the wrong reason and proves
+nothing. Asserts control flow and exact values, under the default engine and
+`SIMPLE_EXECUTION_MODE=jit`.
+
+Both directions proven against real binaries:
+
+* **RED** (unfixed deployed seed `bin/simple`): `FAIL — red1 [default]: exit 0
+  — an unknown field name was ACCEPTED`, output `MARKER id=3 size=8`, rc=1.
+* **GREEN** (patched seed): `PASS — 8 checks`, rc=0.
+
+## Follow-up: pure-Simple shares the defect (OPEN)
+
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3038`,
+`lower_struct_construct` — the single construction mapper for both `S(f: v)` and
+`S { f: v }` (dispatch at :4109). `named_args` occurs at exactly 4 sites (3062
+insert-decl, 3074 insert, 3110 `has`, 3191 read); there is **no** reconciliation
+of leftover keys and no unknown-name diagnostic. Its unfilled-slot fill is
+`ensure_option_handle(const_int(3))` for Optional fields — **the same NIL tag
+3** — else `Const(Int(0))`. Its interpreter has the diagnostic
+(`10.frontend/core/interpreter/eval_calls.spl:458`, "unknown field '...' in ...
+constructor"), so it has the identical compile-vs-interpret divergence.
+
+Deliberately **not** patched here, for two blocking reasons:
+
+1. **Unverifiable right now.** Stage-3 self-host is blocked
+   (`.claude/rules/bootstrap.md`; `bin/simple` is the Rust seed), so a
+   pure-Simple compiler edit cannot be built or run, and an unmeasured
+   hard-error in a hot lowering function is exactly how legitimate code gets
+   redded.
+2. **Its field map is bare-keyed too, and worse.** `struct_field_order` is
+   keyed by bare class name over the same ~1,522 duplicated names — that map IS
+   the subject of `b9e23914a0e`, which added a module-qualified tier for
+   `resolve_field_index` (field READS) only. The same-file gate used for the
+   seed needs that qualified tier extended to construction before it can be
+   applied here, and the blast radius cannot be measured without a buildable
+   compiler.

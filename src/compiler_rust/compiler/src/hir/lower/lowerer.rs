@@ -144,6 +144,15 @@ pub struct Lowerer {
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
+    /// Source file each struct/class bare name was DECLARED in, recorded by
+    /// `register_struct`. A name that collides across modules maps to the file
+    /// of whichever declaration registered last -- which is exactly the signal
+    /// needed: `lower_struct_init_fields` only hard-rejects an unknown named
+    /// argument when the construction site sits in that same file, so the
+    /// registry entry it validates against is provably the local declaration
+    /// and not a same-bare-name struct from another module. See the SOUNDNESS
+    /// GATE comment in hir/lower/expr/collections.rs.
+    pub(super) struct_decl_files: HashMap<String, Option<PathBuf>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
@@ -198,6 +207,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             duplicate_global_struct_defs: None,
+            struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -248,6 +258,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             duplicate_global_struct_defs: None,
+            struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
@@ -321,6 +332,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             duplicate_global_struct_defs: None,
+            struct_decl_files: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
             untyped_empty_array_locals: HashSet::new(),
