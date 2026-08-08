@@ -1,7 +1,9 @@
 # Interpreter: `static fn new` hijacks named-argument class construction
 
 Date: 2026-07-02
-Status: open (workaround in place for Font)
+Status: RESOLVED 2026-08-08 (re-triage; no longer reproduces on the tree-walk
+interpreter or the seed JIT — see "Re-triage 2026-08-08" below). Gated by
+`test/03_system/feature/usage/named_ctor_with_static_new_spec.spl`.
 Severity: P1 (silent wrong-field construction)
 Found by: W8 lane agent while building game2d event replay specs
 
@@ -34,3 +36,54 @@ arrival until the workaround.
 → `static fn load` (2026-07-02). House style already prefers named
 constructors over `.new()` (see .claude/rules/language.md), so remaining
 `static fn new` declarations should be audited/renamed.
+
+## Re-triage 2026-08-08 — RESOLVED, does not reproduce
+
+Engine: `bin/simple` = `bin/release/x86_64-unknown-linux-gnu/simple`, which
+prints the **Rust bootstrap-seed** banner. Both of its lanes were exercised:
+seed JIT (`bin/simple run`, the default) and the tree-walk interpreter
+(`SIMPLE_EXECUTION_MODE=interpreter bin/simple run`, which is also the engine
+`bin/simple test` uses). No pure-Simple self-hosted binary is deployed at
+`bin/release/*/simple` for this host, so the self-hosted lane is untested.
+
+Documented repro, verbatim shape (`Widget` with fields `id, size` plus
+`static fn new(path, size)`):
+
+    val w = Widget(id: 3, size: 4)
+    print "id={w.id} size={w.size}"
+
+    JIT         -> id=3 size=4
+    interpreter -> id=3 size=4
+
+The "worse" overlapping-name case (`Font(path:…, size:…)` yielding
+`Font(id: nil, size: nil)`) also does not reproduce: with fields `id, size`
+and `static fn new(path, size)`, `FontLike(id: 1, size: 8)` gives
+`f.id=1 f.size=8`, and `FontLike.new("x", 9)` still reaches the static
+(`g.id=7 g.size=9`) on both lanes. Named args now bind against **class
+fields**, and the static is only reached via `.new(...)`.
+
+**Positive control** (required — a green probe here would otherwise prove
+nothing about whether the binder ran at all). On the interpreter, an argument
+name that is genuinely not a field still errors:
+
+    val w = Widget(bogus: 3, size: 4)
+    -> error: semantic: class `Widget` has no field named `bogus`
+
+So the named-argument binder IS exercised, DOES validate names, and validates
+them against the field list rather than `new`'s parameter list. That is exactly
+the inverse of the filed defect.
+
+**Regression gate landed:** `test/03_system/feature/usage/named_ctor_with_static_new_spec.spl`
+
+    SPEC FILE VERDICT: test/03_system/feature/usage/named_ctor_with_static_new_spec.spl declared>=3 executed=3 passed=3 failed=0 dropped=0
+
+Sabotage control on that spec (`expect w.id == 3` → `== 999`) correctly goes
+RED at `executed=3 passed=2 failed=1 dropped=0`, so the gate is not vacuous.
+
+### Adjacent defect found while controlling (NOT this bug, not fixed here)
+
+The same `Widget(bogus: 3, size: 4)` that the interpreter rejects is **silently
+accepted by the seed JIT**, which prints `id=3 size=4` — the unknown field name
+is dropped and the arguments appear to bind positionally, with no diagnostic.
+An engine divergence on argument-name validation, filed separately as
+`jit_named_ctor_accepts_unknown_field_name_2026-08-08.md`.
