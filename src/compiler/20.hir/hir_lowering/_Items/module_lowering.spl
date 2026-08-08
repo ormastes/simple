@@ -115,13 +115,13 @@ struct HirReexportSource:
     module_name: text
     item_name: text
 
-fn hir_module_surface_get(surfaces: ModuleSurfacesByName, name: text) -> ModuleSurface?:
+fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
     if not surfaces.index_by_name.contains_key(name):
-        return nil
+        return -1
     val index = surfaces.index_by_name[name]
     if index < 0 or index >= surfaces.surfaces.len():
-        return nil
-    Some(surfaces.surfaces[index])
+        return -1
+    index
 
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     """True when module `m` itself declares `name` as any importable decl
@@ -648,9 +648,9 @@ impl HirLowering:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callables.keys().len()}")
             if hop.found:
-                val source_mod = hir_module_surface_get(self.module_surfaces, hop.module_name)
-                if source_mod != nil:
-                    self.register_imported_symbol(source_mod.unwrap(), hop.module_name, hop.item_name, local_name, import_span)
+                val source_index = hir_module_surface_index(self.module_surfaces, hop.module_name)
+                if source_index >= 0:
+                    self.register_imported_symbol(self.module_surfaces.surfaces[source_index], hop.module_name, hop.item_name, local_name, import_span)
 
     me resolve_module_key(name: text) -> text:
         """Canonical modules_by_name key for an import path, or "".
@@ -772,11 +772,12 @@ impl HirLowering:
                 # the facade's own key, or the chase dead-ends on every
                 # package facade that re-exports its members that way.
                 val next_key = self.resolve_module_key_relative(imp.module, facade_name)
-                val next_mod = if next_key != "": hir_module_surface_get(self.module_surfaces, next_key) else: nil
-                if next_mod != nil:
-                    if hir_module_declares_item(next_mod.unwrap(), source_item):
+                val next_index = if next_key != "": hir_module_surface_index(self.module_surfaces, next_key) else: -1
+                if next_index >= 0:
+                    val next_mod = self.module_surfaces.surfaces[next_index]
+                    if hir_module_declares_item(next_mod, source_item):
                         return HirReexportSource(found: true, module_name: next_key, item_name: source_item)
-                    val deeper = self.find_reexport_source(next_mod.unwrap(), next_key, source_item, depth + 1)
+                    val deeper = self.find_reexport_source(next_mod, next_key, source_item, depth + 1)
                     if deeper.found:
                         return deeper
             import_idx = import_idx + 1
@@ -803,11 +804,12 @@ impl HirLowering:
                         exp_sib_name = self.resolve_module_key(facade_pkg + "." + exp_base)
                         if exp_sib_name == "":
                             exp_sib_name = self.resolve_module_key(exp_base)
-                    val exp_sib = if exp_sib_name != "": hir_module_surface_get(self.module_surfaces, exp_sib_name) else: nil
-                    if exp_sib != nil:
-                        if hir_module_declares_item(exp_sib.unwrap(), wanted):
+                    val exp_sib_index = if exp_sib_name != "": hir_module_surface_index(self.module_surfaces, exp_sib_name) else: -1
+                    if exp_sib_index >= 0:
+                        val exp_sib = self.module_surfaces.surfaces[exp_sib_index]
+                        if hir_module_declares_item(exp_sib, wanted):
                             return HirReexportSource(found: true, module_name: exp_sib_name, item_name: wanted)
-                        val exp_deeper = self.find_reexport_source(exp_sib.unwrap(), exp_sib_name, wanted, depth + 1)
+                        val exp_deeper = self.find_reexport_source(exp_sib, exp_sib_name, wanted, depth + 1)
                         if exp_deeper.found:
                             return exp_deeper
                 else:
@@ -861,21 +863,30 @@ impl HirLowering:
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
-                var trait_module: ModuleSurface? = Some(imported_mod)
                 var trait_source_name = trait_name
-                if not imported_mod.traits.contains_key(trait_source_name):
-                    val trait_source = self.find_reexport_source(imported_mod, imported_mod_name, trait_name, 0)
-                    if trait_source.found:
-                        trait_module = hir_module_surface_get(self.module_surfaces, trait_source.module_name)
-                        trait_source_name = trait_source.item_name
-                if trait_module != nil and trait_module.unwrap().traits.contains_key(trait_source_name):
-                    val trait_ = trait_module.unwrap().traits[trait_source_name]
+                if imported_mod.traits.contains_key(trait_source_name):
+                    val trait_ = imported_mod.traits[trait_source_name]
                     for trait_method in trait_.methods:
                         val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                         if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
                             val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
                             val method_type = self.declared_surface_callable_type(trait_method, Some(local_owner))
                             self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
+                else:
+                    val trait_source = self.find_reexport_source(imported_mod, imported_mod_name, trait_name, 0)
+                    if trait_source.found:
+                        trait_source_name = trait_source.item_name
+                        val trait_index = hir_module_surface_index(self.module_surfaces, trait_source.module_name)
+                        if trait_index >= 0:
+                            val trait_module = self.module_surfaces.surfaces[trait_index]
+                            if trait_module.traits.contains_key(trait_source_name):
+                                val trait_ = trait_module.traits[trait_source_name]
+                                for trait_method in trait_.methods:
+                                    val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
+                                    if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
+                                        val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
+                                        val method_type = self.declared_surface_callable_type(trait_method, Some(local_owner))
+                                        self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
 
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
         """Under a --entry-closure bootstrap build, rename a cross-module
@@ -977,9 +988,9 @@ impl HirLowering:
                         export_key = self.resolve_module_key(facade_pkg + "." + export_base)
                         if export_key == "":
                             export_key = self.resolve_module_key(export_base)
-                    val export_surface = if export_key != "": hir_module_surface_get(self.module_surfaces, export_key) else: nil
-                    if export_surface != nil and export_key != imported_mod_name:
-                        self.register_glob_imported_symbols_depth(export_surface.unwrap(), export_key, import_span, depth + 1)
+                    val export_index = if export_key != "": hir_module_surface_index(self.module_surfaces, export_key) else: -1
+                    if export_index >= 0 and export_key != imported_mod_name:
+                        self.register_glob_imported_symbols_depth(self.module_surfaces.surfaces[export_index], export_key, import_span, depth + 1)
                 else:
                     val export_parts = export_item.split(":")
                     val export_source = export_parts[0]
@@ -1036,9 +1047,9 @@ impl HirLowering:
             val glob_imp = imported_mod.imports[glob_imp_idx]
             if glob_imp.items.len() == 0:
                 val nested_key = self.resolve_module_key_relative(glob_imp.module, imported_mod_name)
-                val nested_surface = if nested_key != "": hir_module_surface_get(self.module_surfaces, nested_key) else: nil
-                if nested_surface != nil and nested_key != imported_mod_name:
-                    self.register_glob_imported_symbols_depth(nested_surface.unwrap(), nested_key, import_span, depth + 1)
+                val nested_index = if nested_key != "": hir_module_surface_index(self.module_surfaces, nested_key) else: -1
+                if nested_index >= 0 and nested_key != imported_mod_name:
+                    self.register_glob_imported_symbols_depth(self.module_surfaces.surfaces[nested_index], nested_key, import_span, depth + 1)
             var glob_it = 0
             while glob_it < glob_imp.items.len():
                 val glob_item = glob_imp.items[glob_it]
@@ -1201,9 +1212,9 @@ impl HirLowering:
                 continue
             seen_siblings[sibling_canon] = true
             canon_matched = canon_matched + 1
-            val sibling_surface = hir_module_surface_get(self.module_surfaces, sibling_name)
-            if sibling_surface != nil:
-                self.register_glob_imported_symbols(sibling_surface.unwrap(), sibling_name, sibling_span)
+            val sibling_index = hir_module_surface_index(self.module_surfaces, sibling_name)
+            if sibling_index >= 0:
+                self.register_glob_imported_symbols(self.module_surfaces.surfaces[sibling_index], sibling_name, sibling_span)
         if trace:
             eprint("[hir-siblings] module={module.name} self={self_name} pkg={pkg_prefix} canon_self={self_canon} canon_pkg={canon_prefix} literal_matched={literal_matched} canon_matched={canon_matched}")
 
