@@ -182,6 +182,13 @@ impl CompilerDriver:
                 parsed_entry_index_keys = parsed_entry_index_keys.push("")
                 parsed_entry_index_values = parsed_entry_index_values.push(-1)
             var parsed_entry_modules: [ParsedEntryModuleBox] = []
+            # Tracked by PHYSICAL KEY, not module_name: entry_sources (the
+            # second loop below) can carry alias module_names for the same
+            # physical file, which would make an is_module_poisoned(name)
+            # lookup miss the alias and fall through to a spurious "internal
+            # cache miss" error. The physical key is the identity both loops
+            # already use for the index table, so it can't alias.
+            var poisoned_physical_keys: [text] = []
             var progress_parse_done = 0
             log_build_progress("parse", "files", 0,
                 unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
@@ -201,9 +208,23 @@ impl CompilerDriver:
                 )
                 log_phase("phase2:parse:file:done {source.path}")
                 if par_had_error_get():
+                    # Collect-all default (see driver_hir_pipeline_lowering.spl):
+                    # poison this source and keep parsing the rest of the
+                    # entry closure so a syntax error in one file doesn't hide
+                    # every other file's diagnostics. `par_had_error` is reset
+                    # per-file inside parser_init_with_path (parser.spl:254),
+                    # so continuing the loop cannot leak a stale flag into the
+                    # next source. `--fail-fast` / SIMPLE_COMPILE_FAIL_FAST=1
+                    # reproduces the old stop-at-first behavior via the same
+                    # poison_budget() cap used by HIR lowering.
                     self.ctx.errors.push(
                         "parse error in {source.path} (see [parser_error] output above)")
-                    return (self.ctx, false)
+                    self.ctx.mark_module_poisoned(source.module_name)
+                    poisoned_physical_keys = poisoned_physical_keys.push(physical_key)
+                    if self.ctx.poison_budget_exhausted():
+                        return (self.ctx, false)
+                    progress_parse_done = progress_parse_done + 1
+                    continue
                 if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
                     (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
@@ -233,6 +254,19 @@ impl CompilerDriver:
                         break
                     parsed_slot = (parsed_slot + 1) % parsed_entry_index_capacity
                 if parsed_idx < 0:
+                    var is_poisoned_key = false
+                    var poisoned_key_idx = 0
+                    while poisoned_key_idx < poisoned_physical_keys.len():
+                        if poisoned_physical_keys[poisoned_key_idx] == physical_key:
+                            is_poisoned_key = true
+                            break
+                        poisoned_key_idx = poisoned_key_idx + 1
+                    if is_poisoned_key:
+                        # Expected: this source's parse was poisoned above and
+                        # deliberately never entered the index. Not a fresh
+                        # internal error -- skip it and let collect-all report
+                        # the parse error already recorded for it.
+                        continue
                     self.ctx.errors.push(
                         "internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
