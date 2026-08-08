@@ -143,20 +143,44 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   assert behavior. No kernel build. Cheapest; use it first whenever it can decide.
 - **T1 — incremental kernel build (fast path).** Small pure-Simple **lib** change
   (a leaf function body, a string constant) that feeds the freestanding kernel.
-  Build with `SIMPLE_NATIVE_INCREMENTAL=1` and a **stable** `--cache-dir` (do NOT
-  wipe it between runs; a fresh/wiped cache dir is a cold build). Only the changed
-  module(s) recompile; the build prints `[native-incremental] N reused / M rebuilt`.
-  Honest scope: this reuses per-module **objects only** — it skips the compile
-  phase for unchanged modules, but the **link and entry-closure discovery still run
-  every build**, so T1 is *substantially faster than a full rebuild, not instant*.
-  Reuse also requires the **same seed binary**: rebuilding the seed changes
-  `compiler_fingerprint` and invalidates every cached object (by design). Safety:
-  the `SIMPLE_NATIVE_INCREMENTAL` key folds in a global build fingerprint
-  (opt-level, entry-closure flag, target, linker-script, and the closure's
-  cross-module struct/enum/signature layout), so ANY cross-module structural change
-  auto-falls-back to a full rebuild and prints the reason — a leaf edit never
-  ships a stale wrong binary. Default is OFF; legacy content-only keying is
-  unchanged until this path has soaked.
+  Build with a **stable** `--cache-dir` (do NOT wipe it between runs; a
+  fresh/wiped cache dir is a cold build).
+  - **Two different `native-build` pipelines exist and print different receipts
+    — read the one you actually invoked.** Plain `bin/simple native-build`
+    (no special flags) dispatches to the **pure-Simple driver**
+    (`src/compiler/80.driver/driver_aot_native_output.spl`); its receipt is
+    `[NATIVE] cache hit: <module>` (one line per reused module, silent on a
+    miss). It is reached unconditionally — `SIMPLE_NATIVE_INCREMENTAL` is not
+    read anywhere in `src/compiler/**` or `src/app/**` and has **no effect**
+    on this path. Its cache key hashes the **entire loaded source closure**
+    into `cache_scope_root`, so an unchanged rebuild reuses every module but
+    editing **any one file** changes the whole scope directory and drops
+    reuse to **0** for every module, not just the changed one (confirmed by
+    direct fixture measurement 2026-08-08: 3/3 reused unchanged, 0/3 reused
+    after a one-line edit to one of three modules — see
+    `doc/03_plan/compiler/bootstrap/stage3_native_cache_incrementality_2026-08-07.md`
+    "Layer 2"). This is a **deliberate, sound-but-coarse** tradeoff, not a bug:
+    the scope directory always changes on any content change, so a stale
+    object is never served, but a one-file edit currently buys nothing.
+  - The Rust seed's **`native_project` pipeline**
+    (`src/compiler_rust/compiler/src/pipeline/native_project`) has real
+    per-module hardened-key reuse (folds opt-level, entry-closure flag,
+    target, linker-script, and the closure's cross-module struct/enum/
+    signature layout into the key — a leaf edit never ships a stale wrong
+    binary) and prints `[native-incremental] N reused / M rebuilt`. This
+    correctness key is **unconditional** whenever the object cache is live —
+    it is NOT gated by `SIMPLE_NATIVE_INCREMENTAL`; that env var (and
+    `NativeBuildConfig.incremental_hardening`) now controls only whether the
+    receipt line is printed. `incremental` itself defaults to `true`
+    (opt-out via `--no-incremental`). **But this pipeline is only reached via
+    `SIMPLE_NATIVE_BUILD_RUST=1` or a cross-target executable build**
+    (`native_build_wants_cross_target` in `driver/src/main.rs`) — routing
+    ordinary `native-build` through it would mean falling back to the Rust
+    handler, which conflicts with this repo's pure-Simple-default policy
+    above, so it is not a drop-in replacement for the default path.
+  - Reuse (either pipeline) requires the **same producer binary**: rebuilding
+    the seed/compiler changes the fingerprint and invalidates every cached
+    object (by design).
 - **T2 — full kernel rebuild.** Any big/structural change: new modules, trait/type
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when

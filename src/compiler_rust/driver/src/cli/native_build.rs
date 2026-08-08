@@ -542,7 +542,15 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         linker_script,
         opt_level,
         emit_archive,
-        // Opt-in safe incremental object reuse (default off): SIMPLE_NATIVE_INCREMENTAL=1.
+        // SIMPLE_NATIVE_INCREMENTAL=1 no longer gates cache-key correctness (the
+        // hardened per-module key is unconditional whenever the object cache is
+        // live, see native_project/mod.rs:836-841); it only enables the
+        // `[native-incremental] N reused / M rebuilt` receipt line. Also note this
+        // Rust handler is reached only via SIMPLE_NATIVE_BUILD_RUST=1 or a
+        // cross-target executable build (see dispatch_command in driver/src/main.rs)
+        // -- plain `bin/simple native-build` runs the pure-Simple driver instead
+        // (src/compiler/80.driver/driver_aot_native_output.spl), whose receipt is
+        // `[NATIVE] cache hit: <module>` and which this flag does not affect at all.
         incremental_hardening: std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1"),
         sanitize,
         memprof,

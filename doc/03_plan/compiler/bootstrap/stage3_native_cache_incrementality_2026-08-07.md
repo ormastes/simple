@@ -1,6 +1,10 @@
 # Stage 2/3 bootstrap native-build cache incrementality
 
 Status: partial fix landed 2026-08-07; residual scope below is NOT done.
+2026-08-08: Layer 2 confirmed to also apply to the default `bin/simple
+native-build` CLI entry point (not just stage2/3 bootstrap replay) via a
+direct fixture reproduction — see dated entry below. "Incremental by default"
+is not a flag flip; no opt-in gate exists on the exercised path today.
 
 ## Root cause of the 0-byte stage3 cache (two layers)
 
@@ -118,39 +122,64 @@ changes that the current coarse key protects against.
    at `driver_aot_native_output.spl:337` as defense-in-depth before narrowing
    Layer 2, independent of the AOP work.
 
-## Update 2026-08-08 — GC added; review findings measured and partly corrected
+## 2026-08-08: Layer 2 reproduced on the ordinary `native-build` CLI entry
+point, not just stage2/3 bootstrap replay
 
-An adversarial review of the commit above
-(`doc/08_tracking/bug/native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08.md`)
-raised three findings. Re-measuring `build/native_cache` directly resolved
-them as follows; full evidence is in the "Resolution 2026-08-08" section of
-that bug doc.
+Investigated whether "make native builds incremental by default" (dropping an
+assumed opt-in flag) is a safe change. Finding: **there is no opt-in gate to
+drop on the path real users hit, and flipping one elsewhere would be
+cosmetic.** Full trace of both pipelines:
 
-- **GC gap (valid, fixed).** Making the wipe conditional removed the only
-  thing that collected mint-once scope dirs. Fixed with an age-based reaper,
-  `bootstrap_native_cache_prune`, defined inline in both bootstrap wrappers
-  and invoked on their preserved paths. Default TTL 7 days
-  (`BOOTSTRAP_NATIVE_CACHE_TTL_DAYS`, `0` disables). It matches only the
-  `backend=*` scope-dir shape, needs no lock protocol (a dir untouched for 7
-  days cannot belong to a live build on this concurrently-built host), and was
-  fixture-verified before landing.
-- **"Key renders corrupt" (historical, not current).** All 3 garbage-`opt`
-  dirs and the single `compiler=<value:0x…>` dir are dated 2026-07-25; the 83
-  dirs from eleven other dates, including all 12 from 2026-08-07, render
-  legally. 83 of 86 scope dirs (97%) carry a legal key. No shape assertion was
-  added — it would guard an already-fixed bug at the cost of touching compiler
-  source.
-- **"Cache never hits, so persistence is pure leak" (false).** The 12 scope
-  dirs from 2026-08-07 collapse to a single distinct prefix once the source
-  fingerprint is stripped: identical backend/cpu/features/opt/compiler-sha
-  across every run. The key is deterministic; only the source fingerprint
-  varies, tracking real edits from parallel lanes. The persistent cache does
-  hit, so the change was **not reverted**.
+- **Dispatch.** `dispatch_command` in `src/compiler_rust/driver/src/main.rs`
+  lists `native-build` as a `pure_simple_tool`: plain `bin/simple native-build`
+  always runs the pure-Simple driver
+  (`src/compiler/80.driver/driver_aot_native_output.spl`, via
+  `dispatch_to_simple_app`) and **refuses to fall back to Rust** on failure.
+  The Rust `native_project` pipeline
+  (`src/compiler_rust/compiler/src/pipeline/native_project`) is reached only
+  via `SIMPLE_NATIVE_BUILD_RUST=1` or a cross-target executable build
+  (`native_build_wants_cross_target`), i.e. an escape hatch, not the default.
+- **Fixture.** 3-module fixture (`main.spl` importing `mod_a.spl`,
+  `mod_b.spl`, pure `i64` arithmetic, no stdlib), built via
+  `env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build
+  --source <dir> --entry-closure --entry <dir>/main.spl --cache-dir <stable>`.
+  `bin/simple` here is the Rust seed (`--version` prints the seed WARNING
+  banner); host load average 66-70 throughout, so the ~150-200s wall time per
+  run is not evidence of anything — only the printed receipt is.
+- **Run 1 (cold, `SIMPLE_NATIVE_INCREMENTAL` unset):** cache dir created,
+  6 `.o` files written, no `[native-incremental]` receipt (expected — that
+  format belongs to the other pipeline, which this invocation never reaches).
+- **Run 2 (unchanged sources, same `--cache-dir`, `SIMPLE_NATIVE_INCREMENTAL=1`
+  for good measure):** log shows `[NATIVE] cache hit: main`, `[NATIVE] cache
+  hit: mod_a`, `[NATIVE] cache hit: mod_b` — **3/3 reused**. `grep -rn
+  "NATIVE\] cache hit" src/compiler src/app` shows this string exists only in
+  `driver_aot_native_output.spl`; `grep -rn SIMPLE_NATIVE_INCREMENTAL
+  src/compiler/**/*.spl src/app/**/*.spl` finds zero hits — the env var has
+  no code path into this pipeline at all, confirming it did nothing in this
+  run.
+- **Run 3 (edited `mod_a.spl`'s return value only, same `--cache-dir`):**
+  **zero** `[NATIVE] cache hit` lines for any of the 3 modules — full
+  recompile. `find <cache-dir> -type d` shows a **new** `sources-<hash>`
+  directory (`sources-4056828264926578123n5`, vs. the prior run's
+  `sources-485645037303367227n5`) under a new `src=...` prefix — i.e. the
+  whole-closure fingerprint changed `cache_scope_root` exactly as
+  `driver_native_sources_fingerprint` (Layer 2, line 101) predicts, and every
+  module's cache lookup missed as a result, not just `mod_a`'s.
 
-Residual scope from the original plan (Layer 2 whole-closure fingerprint
-scoping, the A/B/C/D timing measurement) is unchanged and still open. The
-review's secondary design gaps — hardcoded `target_features`, absent
-`SIMPLE_BOOTSTRAP_STAGE4` in the key, `is_release` invisible under an explicit
-`opt_level`, `build_cache.sdn` unscoped at the cache root so alternating
-scopes mutually `remove_entry` each other, and non-atomic `BuildCache.save()`
-— are all real, all still open, and none is a disk-growth vector.
+This is a first-hand reproduction of Layer 2 on the actual command a user
+types, not only on stage2/3 self-hosting — the plan doc's original evidence
+was code-level tracing plus timing on the stage3 closure; this is a receipt-
+based A/B/C measurement (items 1's A/B/C from Residual #1 above) on a minimal
+fixture. Conclusion for "incremental by default": the pure-Simple driver
+**already** attempts cache reuse unconditionally (no flag gates it), and does
+so **soundly** (a stale object can never be served — the scope directory
+always changes on any content change, so a miss is the failure mode, never a
+wrong hit) but is **currently ineffective** for the common one-file-edit case
+because of the coarse whole-closure scope. There is nothing to default-flip;
+the fix is narrowing Layer 2 (residual #2 above), which remains correctly
+gated on the AOP/loader-ABI work per `.claude/rules/bootstrap.md`. Docs that
+described `SIMPLE_NATIVE_INCREMENTAL` as an "opt-in" gate on cache
+*correctness* (`.claude/rules/bootstrap.md` T1 bullet,
+`native_build.rs:545`) were stale relative to `native_project/mod.rs:836-841`
+(the hardened key is unconditional there too) and have been corrected in the
+same pass as this entry — see those files' current text.
