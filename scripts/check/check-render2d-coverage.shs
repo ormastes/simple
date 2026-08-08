@@ -168,7 +168,13 @@ fi
 if [ ! -s "$MIR_COV" ] || [ "$cov_probes" -eq 0 ]; then
     add_result "prereq1_real_source_spans" 1 "no DecisionProbe instruction available in $MIR_COV to inspect (prereq2 already unmet)"
 else
-    probe_id_line=$(sed -n 's/.*file: \\"\([^\\]*\)\\", line: \([0-9]*\).*/\1|\2/p' "$MIR_COV" | head -1)
+    # Anchor to lines that directly follow a `"kind": "DecisionProbe"` marker
+    # so a coincidental `file:`/`line:` pair on some OTHER instruction's debug
+    # string cannot satisfy this prerequisite -- only a debug string that is
+    # provably part of a DecisionProbe instruction (verified against real
+    # `--emit-mir` output: kind and debug are adjacent JSON object fields)
+    # counts.
+    probe_id_line=$(grep -A1 '"kind": "DecisionProbe"' "$MIR_COV" | sed -n 's/.*file: \\"\([^\\]*\)\\", line: \([0-9]*\).*/\1|\2/p' | head -1)
     probe_file=$(printf '%s\n' "$probe_id_line" | cut -d'|' -f1)
     probe_line=$(printf '%s\n' "$probe_id_line" | cut -d'|' -f2)
     if [ -z "$probe_id_line" ]; then
@@ -272,12 +278,15 @@ else
                                 ;;
                             *)
                                 expected=$((a_true + b_true))
+                                # Require a_true -gt 0 (nonzero input) in ALL
+                                # met branches, not just the labeled one -- a
+                                # degenerate 0+0=0 merge must never read MET,
+                                # even though it numerically satisfies
+                                # r_true -eq expected.
                                 if [ "$r_true" -eq "$expected" ] && [ "$a_true" -gt 0 ]; then
                                     add_result "prereq5_perfile_rollup" 0 "rollup of two runs sums per-decision hits for id=$id_field: $a_true + $b_true = $r_true, file identity preserved ('$r_file') (nonzero inputs, real merge, not dedup/passthrough)"
-                                elif [ "$r_true" -eq "$expected" ]; then
-                                    add_result "prereq5_perfile_rollup" 0 "rollup of two runs sums per-decision hits for id=$id_field: $a_true + $b_true = $r_true, file identity preserved ('$r_file')"
                                 else
-                                    add_result "prereq5_perfile_rollup" 1 "rollup for id=$id_field expected $a_true+$b_true=$expected but got $r_true -- merge is not summing"
+                                    add_result "prereq5_perfile_rollup" 1 "rollup for id=$id_field expected $a_true+$b_true=$expected but got $r_true, or inputs were degenerate (a_true=$a_true) -- merge is not summing or nonzero-input requirement unmet"
                                 fi
                                 ;;
                         esac

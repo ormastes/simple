@@ -251,7 +251,13 @@ total for `engine2d_baremetal_core.spl`).
 | file | before | after | delta |
 |---|---|---|---|
 | `dirty_rect.spl` | 0/38 lines (0% — no spec existed) | 35/38 lines (92.1%, single-spec printed value) | +92.1 pts |
-| `engine2d_baremetal_core.spl` | 25/209 lines (11.0%, parity spec alone, matches the C3 table above) | 29/209 lines (13.9%, rollup union of parity + new spec) | +2.9 pts |
+| `engine2d_baremetal_core.spl` | 25/209 lines (11.96%, parity spec alone, matches the C3 table above) | 29/209 lines (13.88%, rollup union of parity + new spec) | +1.9 pts |
+
+> **Correction (2026-08-08):** the `before`/`after` percentages in this row
+> were originally floor-truncated to one decimal (11.0% / 13.9%), which
+> silently understated `before` and made the delta read as +2.9 pts. The
+> true values are 25/209 = 11.96% and 29/209 = 13.88%, a delta of +1.9 pts;
+> corrected above rather than rewritten silently.
 
 Caveat on the `engine2d_baremetal_core.spl` delta: the union only picked up 3
 lines net-new beyond the parity spec's 26 (`72`, `74`, `75` — inside the
@@ -273,7 +279,7 @@ coverage of larger multi-statement function bodies. This matches the
 already-documented "DECISION-ONLY" caveat above (the runtime's coverage
 artifact under-reports relative to what the passing assertions prove was
 exercised) and is reported here as a measurement-methodology caveat, not
-re-litigated as a fresh defect — the +2.9pt delta is what the tool itself will
+re-litigated as a fresh defect — the +1.9pt delta is what the tool itself will
 report; the *real* increase in exercised, assertion-backed behavior is far
 larger (19 new `it`s across 4 previously-unspec'd/under-spec'd code paths).
 

@@ -317,3 +317,20 @@ with. **Unblock condition:** fix the Stage 3 defect (tracked separately at
 then land the two mechanical, pattern-matched additions above and verify with
 a real self-hosted build + a native-LLVM-backend call site exercising
 `rt_engine2d_simd_blend_span_u32`/`_blend_const_span_u32`.
+
+## Fragility note: the span-bridge spec couples to implementation source text
+
+`test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl`'s "cross-mode
+return-array span bridge" example does not only assert on span-bridge
+*behavior* — it also constrains exact identifiers inside
+`backend_software.spl`'s implementation. That coupling is what forced the
+unrelated `safe_count` → `count` rename of `sw_fill_raw_span`'s clipped local
+in `a399483d` (same commit that wired the span-bridge intrinsics into MIR
+lowering and LLVM decls) — a pure rename, not a behavior change, done solely
+to satisfy the spec's source-text expectation. A spec that fails on a
+same-behavior rename is testing implementation shape, not the contract it
+claims to cover, and will keep forcing incidental renames (or blocking
+legitimate ones) as this code evolves. Recommend migrating this example to
+behavioral assertions (actual span-fill/copy/blend output on representative
+inputs) rather than exact source-text matching, the next time this spec is
+touched.
