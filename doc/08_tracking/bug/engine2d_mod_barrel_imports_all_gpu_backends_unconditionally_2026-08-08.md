@@ -7,8 +7,16 @@ at exactly 6 unbaselined symbols: `rt_cuda_memset_d32`,
 `rt_metal_device_identity`, `rt_metal_device_supports_metal3`,
 `rt_metal_load_library_bytes`, `rt_metal_load_library_bytes_raw`,
 `rt_metal_load_library_file`.
-**Status:** OPEN — root cause corrected and traced to object-file evidence
-this pass; no source fix attempted (see "Why no fix was attempted" below).
+**Status:** FIXED (the 6-symbol blocker) — option 2 (device-absent bodies)
+landed 2026-08-08 in `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`.
+All 6 symbols confirmed gone from the freestanding-link fabricated-stub list
+via a re-run of `check-simpleos-wm-fullscreen-evidence.shs`
+(SIMPLE_BIN pinned to stage2). The gate still fails overall, but now on a
+DIFFERENT, unrelated, out-of-scope symbol (`rt_file_is_char_device`) that
+comes from uncommitted WIP elsewhere in the shared working copy, not from
+this fix or from `origin/main`. See
+`doc/09_report/os/simpleos_2d_render_qemu_evidence_2026-08-07.md`
+("2026-08-08: option 2 landed" section) for the full verification trace.
 
 ## Corrected root cause (traced via `nm -u`/`nm` on real build objects, not inference)
 

@@ -409,3 +409,106 @@ answer is semantically correct here). Neither was attempted this pass — see
 for the full trace and the two candidate fixes. No source was changed, so
 the evidence gate was not re-run; it would reproduce the same 6-symbol
 failure already recorded above.
+
+## 2026-08-08: option 2 landed — device-absent bodies for the 6 CUDA/Metal symbols
+
+Implemented option 2 from
+`doc/08_tracking/bug/engine2d_mod_barrel_imports_all_gpu_backends_unconditionally_2026-08-08.md`:
+real freestanding C bodies for the 6 symbols in
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`, each
+returning the truthful "no CUDA/Metal device present" answer rather than a
+fabricated success value.
+
+### Per-symbol absent-path contract verified before writing each body
+
+- `rt_cuda_memset_d32(ptr, pattern, count) -> i64`: mirrors
+  `src/compiler_rust/runtime/src/cuda_runtime.rs`'s own
+  `#[cfg(not(feature = "cuda"))]` body verbatim — returns `-3`. Sole .spl
+  caller is `cuda_memset_d32` (`src/lib/nogc_sync_mut/cuda/mod.spl:66-74`),
+  a bare passthrough that returns the i64 error code to its own caller —
+  no null-deref or misuse risk since it never inspects the value beyond
+  propagating it.
+- `rt_metal_device_identity(device: i64) -> text`: caller
+  `metal_sffi_device_registry_identity`
+  (`src/lib/nogc_sync_mut/io/metal_sffi.spl:327-330`) already returns `""`
+  itself whenever `device <= 0`; body returns `rt_string_from_cstr("")`,
+  matching that documented no-device answer exactly.
+- `rt_metal_device_supports_metal3(device: i64) -> bool`: sibling wrapper
+  `metal_sffi_device_supports_metal3` (:332-335) already short-circuits to
+  `false` for `device <= 0`; body returns raw `0` (the file's established
+  `-> bool` convention per the existing `rt_text_validate_utf8` precedent —
+  raw 0/1, not tagged).
+- `rt_metal_load_library_file` / `rt_metal_load_library_bytes` /
+  `rt_metal_load_library_bytes_raw` (all `-> i64` library handles):
+  sibling `metal_sffi_load_library_bytes` (:352-357) already returns `0`
+  for its own empty-buffer no-op case, establishing `0` as the
+  invalid/absent-handle sentinel every caller of these three checks for.
+  All three bodies return `0`.
+
+Runtime reachability check: every `Engine2D` constructed on this target
+goes through `create_with_baremetal_backend[_dims]` (engine.spl:744), which
+sets `baremetal_backend: Some(backend)` and `cuda_backend`/`metal_backend:
+nil`. Every method body that could reach these six symbols branches on
+`elif val Some(bm) = self.baremetal_backend` before ever reaching the
+cuda/metal arm, so none of these six bodies are reachable at kernel
+runtime — they exist purely to satisfy the freestanding linker's
+whole-closure symbol requirement. No caller was found that would misbehave
+on the absent-value contract; all six were safe to implement this way.
+
+### Gate re-run
+
+```
+SIMPLE_BIN=/home/ormastes/dev/pub/simple/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple \
+REPORT_PATH=<scratch>/simpleos_wm_fullscreen_evidence_run3.md \
+BUILD_DIR=build/simpleos_wm_fullscreen_evidence3 \
+SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS=900 \
+SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS=870 \
+timeout 850 sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+Result: `simpleos_wm_fullscreen_status=fail`,
+`simpleos_wm_fullscreen_reason=wm-simple-web-build-failed`. `native-build.out`
+confirms **all 6 target symbols are gone from the fabricated-stub list**
+(`grep -c` for all 6 names against `native-build.out` = 0):
+
+```
+Freestanding unresolved symbol check: 118 unexpected symbol(s)
+Fabricated freestanding stubs: 118 symbol(s) for entry
+'simpleos_wm_production_desktop.elf.candidate' -- weak bodies that RETURN 0
+(baseline config/freestanding_fabricated_stub_baseline.sdn: 117 known, 1 new)
+...
+Build failed: freestanding link would FABRICATE 1 symbol(s) not in the
+baseline for entry 'simpleos_wm_production_desktop.elf.candidate':
+rt_file_is_char_device.
+```
+
+### New blocker found is NOT caused by this fix — it is pre-existing uncommitted WIP from another session
+
+`rt_file_is_char_device` does not exist anywhere in `origin/main`
+(`git grep -n rt_file_is_char_device origin/main` — zero hits) but exists
+in the local shared working copy's **uncommitted** changes to
+`src/lib/nogc_sync_mut/io_runtime.spl` (extern decl + wrapper, added
+2026-08-07) and `src/os/compositor/vulkan_compositor_backend.spl` (new
+caller). This is unrelated in-flight work from a concurrent session in the
+shared WC, not a consequence of the `baremetal_stubs.c` change landed here
+— confirmed by `git diff --stat origin/main -- <those two files>` showing
+uncommitted local edits neither authored nor touched by this pass. Per
+repo VCS policy (never touch a file another session is mid-flight on), it
+was left untouched and not fixed here. Whoever lands that WIP will need
+either a freestanding `rt_file_is_char_device` body (same device-absent
+style: no controlling terminal exists in a baremetal kernel, so `false` is
+the honest "not a char device" answer for that stat probe) or a baseline
+entry, following the same evidence-gate re-run procedure used here.
+
+### Ladder progress
+
+6 CUDA/Metal symbols eliminated from the unbaselined set → freestanding
+link now blocked by exactly 1 different (and out-of-scope) symbol instead
+→ QEMU was not reached this pass (native build still fails, `serial.log`
+0 bytes) → no 2D render evidence collected yet. This is genuine forward
+progress on the target blocker; the mission goal ("primitive simple 2d on
+simple os/qemu") remains blocked by the newly-surfaced, unrelated
+`rt_file_is_char_device` gap once that WIP lands.
+
+Landed: `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+only (79 lines added, 6 functions). No other file changed by this pass.
