@@ -1,8 +1,10 @@
 # Credential store claims "AES-256-CBC" but `aes_cbc_encrypt`/`aes_cbc_decrypt` are undocumented CTR aliases, and the IV is deterministic — not random — so the mismatch is in the dangerous direction
 
 **Date:** 2026-08-07
-**Status:** OPEN — documentation only; no fix attempted this session (see
-"Why no fix here" below)
+**Status:** FIXED 2026-08-08 — real CBC + PKCS#7 implemented, OS-CSPRNG IV,
+versioned on-disk format with a legacy read path. See "Resolution" at the
+bottom. (The "Why no fix here" section below records the state as of
+2026-08-07 and its stated blocker, which did NOT reproduce.)
 **Severity:** High for the credential-at-rest encryption this actually
 protects (`~/.simple/credential_key`-derived secrets stored via
 `credential_encrypt`/`credential_decrypt`). Not a theoretical mislabeling —
@@ -195,3 +197,106 @@ fixed enough that a new AES decrypt-block/CBC implementation can be
 exercised and verified against FIPS-197/NIST KAT vectors on a working
 self-hosted `bin/simple`, and (b) `store.spl`'s IV generation is replaced
 with a real random/unique-per-encryption IV.
+
+## Resolution (2026-08-08)
+
+Fixed. Four parts:
+
+### 1. Real AES inverse cipher (FIPS 197 §5.3 / Figure 12)
+
+Added to `src/lib/common/crypto/aes_gcm.spl` — the typed (`[u8]`) AES that
+`modes.spl` already builds CTR and GCM on:
+`_aes_gcm_aes_inv_sbox_table`, `_aes_inv_sbox`, `_aes_inv_sub_bytes`,
+`_aes_inv_shift_rows`, `_aes_inv_mix_columns`, `_aes_decrypt_block`, and the
+exported `aes128_decrypt_block` / `aes256_decrypt_block`. It consumes the
+SAME forward round schedule from `aes128_key_expansion` /
+`aes256_key_expansion`, in reverse round order.
+
+**Correction to this doc's original premise:** an inverse cipher *did* already
+exist elsewhere — `src/lib/common/aes/cipher.spl` has
+`aes_decrypt_block`/`inv_mix_columns`/`inv_shift_rows`, and
+`src/lib/common/aes/sbox.spl` has `aes_inv_sbox`. It was not reused because it
+is **broken**: probed against FIPS-197 C.1 its *forward* `aes_encrypt_block`
+returns `a038909860609818008018a060a880f8` instead of
+`69c4e0d86a7b0430d8cdb78070b4c55a`, and its decrypt is correspondingly wrong.
+That is a separate, still-open defect in `cipher.spl` (nothing security-
+critical is known to call it, but it should be either fixed or deleted).
+
+### 2. Genuine CBC in `src/lib/common/aes/modes.spl`
+
+`aes_cbc_encrypt`/`aes_cbc_decrypt` no longer alias the CTR functions. They do
+real chaining plus PKCS#7 (`_pkcs7_pad_16`/`_pkcs7_unpad_16`, local to the
+module). `aes_ctr_encrypt`/`aes_ctr_decrypt` are untouched and still exported.
+
+Two deliberate behaviour changes callers must know about:
+
+- **Length is no longer preserved.** CBC output is the plaintext length
+  rounded up to the next multiple of 16, and a block-aligned plaintext still
+  gains a whole padding block. `store.spl` was the only caller in the tree.
+- **`aes_cbc_decrypt` now returns `[i64]?` and fails CLOSED** — `nil` on a bad
+  key size, bad IV size, non-block-multiple ciphertext, or invalid PKCS#7
+  padding. This is deliberately *unlike* the pre-existing
+  `std.common.aes.padding.pkcs7_unpad`, which returns its input unchanged when
+  validation fails and would therefore hand raw padding bytes back as
+  "plaintext" under a wrong key.
+
+The IV stays a caller-supplied parameter: `src/lib/common/**` is the pure tier
+and has no OS randomness, and a parameterised IV is what makes the NIST
+fixed-IV vectors testable.
+
+### 3. IV source and on-disk format migration in `store.spl`
+
+- IV now comes from `rt_random_hex(16)`, which is backed by the OS CSPRNG
+  (`rand::rngs::OsRng`, see `src/compiler_rust/compiler/src/interpreter_extern/
+  random.rs`). It is declared `-> text?` and `credential_encrypt` returns `""`
+  if the OS refuses — it never falls back to a predictable IV. The same
+  primitive is already used by `src/lib/nogc_sync_mut/security/types.spl`.
+  (Note: `rt_random_hex` is registered in the seed interpreter's extern table
+  and in `runtime_symbol_entries.rs`; no hand-written C implementation was
+  found under `src/runtime/`.)
+- **Format is now versioned:** `encrypted:v2:<hex_iv><hex_ciphertext>`.
+  Detection is unambiguous because a v1 payload is pure lowercase hex and
+  neither `v` nor `:` is a hex character, so neither version can be
+  misclassified as the other.
+- **Existing credential files are NOT corrupted.** `credential_decrypt`
+  branches on the marker *before* any layout-dependent slicing; a v1 record
+  takes an explicit, commented read-only path that calls `aes_ctr_decrypt` by
+  name, because those bytes really are CTR bytes. Records are not silently
+  re-encrypted on read; re-saving a credential upgrades it to v2. Users need
+  to do nothing.
+- Docstrings/labels in `store.spl` and `__init__.spl` now describe what the
+  code actually does, including the v1/v2 split.
+
+### 4. Verification
+
+New regression specs:
+
+- `test/01_unit/lib/crypto/aes_cbc_fips197_nist_spec.spl` — 18 specs, all
+  green: FIPS-197 C.1 (AES-128) and C.3 (AES-256) block KATs in **both**
+  directions; NIST SP 800-38A F.2.1 (AES-128-CBC) and F.2.5 (AES-256-CBC)
+  chaining vectors compared against the leading 64 bytes of the padded output;
+  a guard that CBC output differs from CTR output in both length and content;
+  PKCS#7 round-trips at 0/1/15/16/17/40/100 bytes; and fail-closed nil returns
+  for wrong key, unaligned ciphertext, empty ciphertext, and bad IV size.
+- `test/01_unit/lib/terminal/credential_store_cbc_migration_spec.spl` — v2
+  marker, round-trip, **two encryptions of the same plaintext differ** (the
+  security crux), and a real v1 CTR record still decrypting.
+
+RED→GREEN→SABOTAGE was performed: flipping one byte of the new inverse S-box
+(`0xd5` → `0xd6` at index 3) turned 7 of the 18 specs red, including the C.3
+AES-256 decrypt KAT, proving the published-vector assertions can actually
+fail. The file was restored and re-verified by blob hash.
+
+**Engine verified: interpreter only**, via `bin/simple test`, which on this box
+is the Rust bootstrap seed (it prints the "bootstrap seed only" banner). JIT,
+native, and a self-hosted `bin/simple` were **not** exercised. Given the known
+native/JIT divergences recorded for dict and list operations, the CBC path
+should be re-verified on the self-hosted binary when one is available.
+
+### 5. The blocker cited in "Why no fix here" did not reproduce
+
+Newly-added stdlib functions were immediately visible. `aes128_decrypt_block`
+and `aes256_decrypt_block` were added to `aes_gcm.spl` and called successfully
+from a scratch script on the first attempt, returning correct FIPS-197 values.
+Consistent with
+`doc/08_tracking/bug/new_stdlib_fn_not_found_could_not_reproduce_2026-08-07.md`.
