@@ -282,3 +282,166 @@ larger (19 new `it`s across 4 previously-unspec'd/under-spec'd code paths).
 `/tmp/c3_cov_new/{parity_before,ebc_new,dirty_rect,ebc_combined}.sdn` (per-spec
 coverage artifacts), `/tmp/c3_cov_new/rollup_ebc.txt` (raw unioned dump backing
 the `engine2d_baremetal_core.spl` before/after row above).
+
+## C3 decision-coverage closure (2026-08-08): re-measure with the 2 new specs + one targeted closure spec
+
+Task: raise C3 *decision* coverage past the 17.9% (37/207) baseline above by
+(1) re-measuring the full C3 spec set including `dirty_rect_spec.spl` (30 its)
+and `engine2d_baremetal_core_spec.spl` (19 its), landed `b851840a`, whose rows
+were never in the 37/207 artifact set, and (2) writing one new spec,
+`test/01_unit/os/compositor/compositor_decision_closure_spec.spl`, closing
+missing arms on reachable branches identified from the raw decision dump.
+
+### Method (same as the baseline: per-spec `SIMPLE_COVERAGE_OUTPUT`, union via `spl-coverage rollup`, hand-verified)
+
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<distinct>.sdn bin/simple run
+src/app/test_runner_new/test_runner_single.spl <one spec> --no-session-daemon
+--sequential`, one spec per invocation (confirmed again: a second spec path
+argument is silently ignored). `bin/simple spl-coverage rollup --file <a>.sdn
+--file <b>.sdn ...` unions the raw `decisions |id, file, line, column,
+true_count, false_count|` rows. Hand-verification: parsed every non-blank
+decision row directly and counted `covered = true_count>0 and false_count>0`
+per row (a row can be true-only from one spec and false-only from another —
+covered only in the union, so counts were summed by id across the unioned
+dump, not maxed per artifact); the manual parse reproduced the tool's
+`total_decisions`/`covered_decisions` summary exactly at every step below.
+
+**The denominator moves** once `dirty_rect_spec.spl` is added — `dirty_rect.spl`
+had zero specs before, so none of its decision rows existed in the original
+207-row artifact set (a row only exists once its file is loaded by some spec
+in the rollup's input). All three ratios are reported, plus the apples-to-apples
+figure computed by decision-id: of the original 207 baseline row *identities*,
+how many are covered by the new artifact set (decision ids are content
+hashes of the branch site, stable across artifact regeneration — confirmed by
+re-running the original 4-spec baseline standalone and reproducing 207/37
+exactly, hand-verified, matching the prior session's tool-reported numbers).
+
+| step | specs | total_decisions | covered_decisions | ratio | apples-to-apples on original 207 ids |
+|---|---|---|---|---|---|
+| baseline (reproduced) | 4 (surface, parity, vulkan, frame_pacer) | 207 | 37 | 17.9% | — |
+| +2 new specs (measurement only) | 6 | 223 | 58 | 26.0% | 45/207 = 21.7% |
+| +1 closure spec (this session) | 7 | 233 | 74 | **31.8%** | **57/207 = 27.5%** |
+
+Step 2 (adding the 2 already-landed specs) alone raised the apples-to-apples
+figure from 17.9% to 21.7% — real closure that had simply never been rolled
+into the artifact set. Step 3 (the new closure spec, below) added a further
++12 covered rows on the original 207 ids (45→57) and raised the raw union
+ratio to 31.8%.
+
+`49` of `233` rows (21.0%) in the final union still carry the `<entry>`
+placeholder path (untargetable, same caveat as the baseline) — unchanged in
+count from the baseline's 39/207 proportionally, since none of the newly
+loaded files added `<entry>`-path rows this round (checked: 49 in both the
+6-spec and 7-spec unions).
+
+### Spec verdicts (all 7 run individually, foreground, per the mandatory invocation)
+
+| spec | its | duration |
+|---|---|---|
+| `compositor_engine2d_surface_spec.spl` | 10/10 pass | 2.4s |
+| `engine2d_baremetal_core_parity_spec.spl` | 8/8 pass | 75ms |
+| `vulkan_compositor_backend_spec.spl` | 21/21 pass | 197ms |
+| `frame_pacer_spec.spl` | 6/6 pass | 65ms |
+| `dirty_rect_spec.spl` | 30/30 pass | 56ms |
+| `engine2d_baremetal_core_spec.spl` | 19/19 pass | 85ms |
+| `compositor_decision_closure_spec.spl` (new) | 6/6 pass | 2.3s |
+
+### New spec: `compositor_decision_closure_spec.spl` — 6 targeted `it`s, real assertions only
+
+Each `it` closes one specific decision row (file:line, missing arm),
+identified by reading the raw dump row's exact source line and confirming it
+holds a real branch before writing the case (per-file line numbers were
+verified to map to real source lines here, unlike the `engine2d_baremetal_core.spl`
+"lines:" caveat noted in the earlier follow-up section above — that caveat was
+about the `lines:` coverage kind, not `decisions:`; decision rows for this
+file did map to their stated source lines on inspection):
+
+- **`compositor_engine2d.spl:131` false arm** — `get_pixel_buffer()` falls
+  through to `self.engine.read_pixels()` when no pixel-buffer override was
+  ever set (previously only the override-present true arm was exercised).
+  Closed by asserting `get_pixel_buffer().len() == 16` on a fresh 4x4 backend
+  with `retained_pixel_buffer_override_count() == 0`.
+- **`compositor_engine2d.spl:190` true arm** (+ newly-exposed `:194` both
+  arms) — the `batch.source.style_key == "wm.content"` walk that counts
+  DrawIR image commands. Closed with a batch built via
+  `draw_ir_batch_with_source(..., draw_ir_source_gui_ast(id, "wm.content",
+  rev))` containing one image command and one rect command (mixed kinds, so
+  `:194`'s `kind == DRAW_IR_COMMAND_IMAGE` check hits both its true and false
+  arm). Asserted `result.selected_backend.len() > 0` — the one field
+  guaranteed populated regardless of whether the image URI itself resolves
+  (an unresolvable `test://image` URI triggers `fallback_required`, which
+  this test isn't targeting; `last_web_content_image_count` is gated behind
+  that success guard so wasn't used as the oracle here).
+- **`compositor_engine2d.spl:205` false arm** — the readback-completed guard
+  (`not fallback_required and skipped_command_count==0 and
+  rendered_command_count>0 and pixels.len()==w*h`). Closed with an
+  empty-commands batch (`rendered_command_count` stays 0), asserting
+  `frame_provenance()` still reports `completed=false`.
+- **`engine2d_baremetal_core.spl:75` true arm** — `_pixel_at`'s
+  `idx >= pixels.len()` fallback inside `draw_image`'s run-length scan.
+  Closed by calling `draw_image(0,0,4,1,[2 pixels])` — width 4 requested
+  against a 2-element source array — and hand-deriving the exact resulting
+  4-pixel row (`0xFF010101, 0xFF020202, 0xFF020202, 0xFF020202`, following
+  the real run-length + out-of-bounds-fallback logic through by hand) rather
+  than asserting a placeholder value.
+- **`engine2d_baremetal_core.spl:114` true arm** — `_bm_blend`'s `sa==0`
+  fully-transparent-source short-circuit. Closed via
+  `draw_rect_filled(...,0x00FFFFFFu32)` over a pre-cleared buffer, asserting
+  the destination pixels are unchanged.
+- **`frame_pacer.spl:134` true arm** — `warm_startup_ms()`'s
+  `frame_count==0` short-circuit, called directly (the existing spec only
+  ever reaches `warm_startup_ms()` indirectly through `contract()`, which
+  guards `frame_count > 0` before calling it). Closed by calling
+  `pacer.warm_startup_ms()` on a fresh `FramePacer.for_60hz()` and asserting
+  `0`.
+
+### Genuinely unreachable arms — documented, not forced (5 rows, all in `engine2d_baremetal_core.spl` + 1 in `compositor_engine2d.spl`)
+
+- **`engine2d_baremetal_core.spl:72`** (`_pixel_at`'s `x<0 or y<0 or
+  width<=0` guard) — its only call site, `draw_image`'s run-length scan,
+  passes loop indices `col`/`row` that start at 0 and never go negative, and
+  `draw_image` itself early-returns at line 367 (`if w<=0 or h<=0: return`)
+  before ever reaching `_pixel_at`. The guard is defensive dead code under
+  the current call graph, not a reachable branch.
+- **`engine2d_baremetal_core.spl:96` and `:98`** (`_bm_clamp`'s `v<0` /
+  `v>255` guards inside `_bm_rgba`) — both of `_bm_rgba`'s two call sites
+  (`gradient_rect`'s row interpolation at line 272, `_bm_blend`'s output
+  color at line 128) compute their `r/g/b/a` inputs as convex-combination
+  (weighted-average, weights summing to the divisor) interpolations between
+  two already-`[0,255]`-bounded channel values, which is mathematically
+  bounded to `[0,255]` by construction — clamping never fires for any input
+  those call sites can produce. Verified by reading both call sites; not an
+  argument that could be falsified by a test without bypassing those two
+  callers entirely (which would mean testing `_bm_clamp` as an isolated unit,
+  not as a reachable branch of this file's actual control flow).
+- **`engine2d_baremetal_core.spl:112`** (`_bm_blend`'s `sa==255` opaque-source
+  short-circuit) — both of `_bm_blend`'s call sites (`_fill_rect` line 211-212,
+  `_blend_pixel` line 231-232) guard `_bm_a(color) < 255` before ever calling
+  `_bm_blend`, so `sa==255` can never be true inside it under the current
+  call graph. Same class as the `:72` finding — a defensive branch made
+  unreachable by an upstream guard, not a missing test case.
+- **`compositor_engine2d.spl:290`** (`font_provenance()`'s
+  `identity == ""` guard, false/non-empty-identity arm) — `selected_font_identity()`
+  returns `FontRenderer.current_font_identity()`, which is `""` (bitmap-default)
+  until a real font asset is installed via `install_font_renderer`/font-file
+  loading. Forcing the non-empty arm would require standing up a real font
+  asset in the unit-test environment, which is host-font/filesystem-dependent
+  infrastructure out of scope for a decision-arm closure spec — left open,
+  matching the class of gap the C2 follow-up (kernel_registry section above)
+  called "would need its own harness, out of scope for a boundary-focused
+  spec."
+
+Accounting: `233 - 74(covered) - 49(<entry>) = 110` remaining real-path
+uncovered rows across the full transitive dependency graph pulled in by the 7
+specs (most outside `src/os/compositor/` proper — the same transitively-pulled
+`gpu/engine2d/` files the baseline noted). Restricted to files directly under
+`src/os/compositor/`: `23` real-path rows, `18` covered (78.3%), `5`
+documented-unreachable above (0 forced, 0 left silently uncounted).
+
+### Artifacts (this session, local scratch — not committed)
+
+`/tmp/c3_close_cov/{compositor_engine2d_surface,engine2d_baremetal_core_parity,
+vulkan_compositor_backend,frame_pacer,dirty_rect,engine2d_baremetal_core,
+closure}.sdn` (7 per-spec artifacts), `/tmp/c3_close_cov/rollup_4specs_baseline.txt`,
+`/tmp/c3_close_cov/rollup_6specs.txt`, `/tmp/c3_close_cov/rollup_7specs_final.txt`
+(raw unioned dumps backing the three ratios in the table above).
