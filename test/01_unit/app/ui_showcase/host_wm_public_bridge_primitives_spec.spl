@@ -9,6 +9,7 @@ web, or 2D implementation internals.
 use std.spec
 use std.io_runtime.{env_set, file_read, file_write, remove_file_if_exists}
 use common.ui.draw_ir_v3.{draw_ir_v3_empty_scene}
+use common.ui.layout.{compute_layout, find_rect}
 use common.ui.host_input_event.{
     HostInputEvent, HOST_BTN_LEFT, HOST_BTN_NONE, HOST_MOD_ALT, HOST_MOD_CTRL
 }
@@ -19,6 +20,11 @@ use common.ui.wm_app_process_contract.{
 }
 use app.ui_showcase.hosts.host_wm.{
     ScreenWmHost, WM_FRAME_EXPORT_ENV
+}
+use app.ui_showcase.showcase_core.{
+    SC_LINK_SRC, showcase_apply, showcase_build, showcase_click_count,
+    SC_PROBE_INPUT, showcase_drag_count, showcase_scene, showcase_scroll_offset,
+    showcase_typed_text
 }
 
 val FRAME_PATH: text = "/tmp/host_wm_public_bridge_primitives.frame.ppm"
@@ -66,6 +72,24 @@ fn _resize(ev: HostInputEvent) -> (i32, i32):
     match ev:
         HostInputEvent.Resize(w, h): (w, h)
         _: (0, 0)
+
+fn _scroll_point(st: common.ui.widget.UIState, prefix: text, width: i32, height: i32) -> (i32, i32):
+    val rects = compute_layout(st.tree.root_node(), 0, 0, width, height)
+    match find_rect(rects, "{prefix}{SC_LINK_SRC}"):
+        case Some(rect):
+            (rect.x + 2, rect.y + 2)
+        case None:
+            fail("showcase linked scroll panel has no layout box")
+            (0, 0)
+
+fn _action_point(st: common.ui.widget.UIState, prefix: text, width: i32, height: i32) -> (i32, i32):
+    val rects = compute_layout(st.tree.root_node(), 0, 0, width, height)
+    match find_rect(rects, "{prefix}{SC_PROBE_INPUT}"):
+        case Some(rect):
+            (rect.x + 2, rect.y + 2)
+        case None:
+            fail("showcase probe input has no layout box")
+            (0, 0)
 
 describe "WM host public numbered bridge primitives":
 
@@ -125,4 +149,62 @@ describe "WM host public numbered bridge primitives":
         expect(receipt.backend).to_equal("wm")
         expect(receipt.readback_source).to_equal("host-raster")
         expect(wm_fs_frame_receipt_valid(receipt, 0, 1, "wm", 80 * 60)).to_equal(true)
+        env_set(WM_FRAME_EXPORT_ENV, "")
+
+    it "correlates injected primitives, reducer state, resize, and changed exported pixels":
+        _clean_events()
+        env_set(WM_FRAME_EXPORT_ENV, "1")
+        var host = ScreenWmHost(
+            w: 480, h: 480,
+            frame_path: FRAME_PATH, seq_path: SEQ_PATH, event_path: EVENT_PATH,
+            frame_seq: 0, event_seq: 0, last_pixel_count: 0, last_checksum: 0,
+            ppm_file_writes: 0
+        )
+        val prefix = "host_wm_correlated_primitives"
+        var state = showcase_build(prefix)
+        val (x, y) = _action_point(state, prefix, host.w, host.h)
+        val (scroll_x, scroll_y) = _scroll_point(state, prefix, host.w, host.h)
+
+        # One numbered host interface sequence carries click, drag, wheel,
+        # Ctrl+Alt key, and resize.  The reducer sees exactly what the host
+        # accepted; no local synthetic event or separate renderer is used.
+        _write_event(1, 1, "down", x, y, HOST_BTN_LEFT, true, 0, 0)
+        _write_event(2, 2, "up", x, y, HOST_BTN_LEFT, false, 0, 0)
+        _write_event(3, 3, "down", x, y, HOST_BTN_LEFT, true, 0, 0)
+        _write_event(4, 4, "move", x + 18, y + 12, HOST_BTN_NONE, true, 0, 0)
+        _write_event(5, 5, "up", x + 18, y + 12, HOST_BTN_LEFT, false, 0, 0)
+        _write_event(6, 6, "wheel", scroll_x, scroll_y, HOST_BTN_NONE, false, 0, 1)
+        val ctrl_alt_a = wm_fs_app_event_full(
+            7, "key", 0, 0, 65, true, 65, "A", HOST_MOD_CTRL + HOST_MOD_ALT, 0
+        )
+        expect(file_write(_event_path(7), wm_fs_app_event_encode(ctrl_alt_a))).to_equal(true)
+        _write_event(8, 8, "resize", 512, 384, HOST_BTN_NONE, false, 0, 0)
+
+        expect(host.present_scene(showcase_scene(state, host.w, host.h))).to_equal(true)
+        val baseline_checksum = host.last_checksum
+        var seen: i64 = 0
+        while seen < 8:
+            val event = host.poll_input()
+            match event:
+                case None:
+                    fail("numbered host event was not delivered at sequence {seen + 1}")
+                case Some(value):
+                    state = showcase_apply(state, value, host.w, host.h)
+            seen = seen + 1
+
+        expect(host.event_seq).to_equal(8)
+        expect(host.size()).to_equal((512, 384))
+        expect(showcase_click_count(prefix)).to_equal(1)
+        expect(showcase_drag_count(prefix) > 0).to_equal(true)
+        expect(showcase_scroll_offset(prefix, SC_LINK_SRC) > 0).to_equal(true)
+        expect(showcase_typed_text(prefix)).to_equal("A")
+        expect(host.present_scene(showcase_scene(state, host.w, host.h))).to_equal(true)
+
+        val receipt = wm_fs_frame_receipt_decode(file_read(wm_fs_frame_receipt_path(FRAME_PATH)))
+        expect(receipt.event_seq).to_equal(8)
+        expect(receipt.frame_seq).to_equal(2)
+        expect(receipt.checksum).to_equal(host.last_checksum)
+        expect(receipt.checksum > 0).to_equal(true)
+        expect(receipt.checksum == baseline_checksum).to_equal(false)
+        expect(wm_fs_frame_receipt_valid(receipt, 8, 2, "wm", 512 * 384)).to_equal(true)
         env_set(WM_FRAME_EXPORT_ENV, "")

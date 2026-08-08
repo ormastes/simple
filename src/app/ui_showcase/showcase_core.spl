@@ -27,6 +27,7 @@ use common.ui.builder.{
 use common.ui.widget.{UIState, UIMode}
 use common.ui.widget_store_ops.{WidgetNode, get_internal_prop, set_internal_prop}
 use common.ui.widget_hit.{
+    widget_hit_test, widget_set_pressed, widget_clear_pressed,
     widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key,
     widget_scrollbar_pointer_down, widget_scrollbar_pointer_move,
     widget_scrollbar_pointer_up
@@ -219,6 +220,21 @@ fn _probe_drag(prefix: text, x: i32, y: i32):
     val n = _bump_counter(prefix, "drag_count")
     WidgetNode(id: "{prefix}{SC_PROBE_DRAG}").set_prop("label", "drag: {x},{y} ({n})")
 
+fn _pressed_target(prefix: text) -> text:
+    get_internal_prop("{prefix}{SC_PROBE}", "pressed_target")
+
+fn _set_pressed_target(prefix: text, target_id: text):
+    set_internal_prop("{prefix}{SC_PROBE}", "pressed_target", target_id)
+
+fn _actionable_target(root: WidgetNode, w: i32, h: i32, x: i32, y: i32) -> text:
+    val hit = widget_hit_test(root, w, h, x, y)
+    if not hit.found:
+        return ""
+    val kind = WidgetNode(id: hit.id).kind_name()
+    if kind == "button" or kind == "checkbox" or kind == "input" or kind == "textfield":
+        return hit.id
+    ""
+
 # =========================================================================
 # Reducer
 # =========================================================================
@@ -251,11 +267,14 @@ fn showcase_apply(st: UIState, ev: HostInputEvent, w: i32, h: i32) -> UIState:
                 _set_drag_anchor(prefix, x, y)
                 val bar = widget_scrollbar_pointer_down(root, w, h, x, y)
                 if bar == "":
-                    val hit = widget_dispatch_click(root, w, h, x, y)
-                    _bump_click(prefix)
-                    _probe(prefix, "click {hit} @{x},{y}")
-                    out = _focus(out, hit)
+                    widget_clear_pressed(root)
+                    val hit = _actionable_target(root, w, h, x, y)
+                    if hit != "":
+                        widget_set_pressed(root, w, h, x, y)
+                    _set_pressed_target(prefix, hit)
+                    _probe(prefix, "press {hit} @{x},{y}")
                 else:
+                    _set_pressed_target(prefix, "")
                     _probe(prefix, "scrollbar down {bar} @{x},{y}")
             else if pressed and button == HOST_BTN_NONE:
                 widget_scrollbar_pointer_move(root, w, h, y)
@@ -266,9 +285,22 @@ fn showcase_apply(st: UIState, ev: HostInputEvent, w: i32, h: i32) -> UIState:
                     _probe(prefix, "move @{x},{y}")
             else:
                 widget_scrollbar_pointer_up(root)
+                val armed = _pressed_target(prefix)
+                val released = _actionable_target(root, w, h, x, y)
+                widget_clear_pressed(root)
+                if button == HOST_BTN_LEFT and armed != "" and released == armed:
+                    val hit = widget_dispatch_click(root, w, h, x, y)
+                    if hit == armed:
+                        _bump_click(prefix)
+                        _probe(prefix, "click {hit} @{x},{y}")
+                        out = _focus(out, hit)
+                    else:
+                        _probe(prefix, "release rejected @{x},{y}")
+                else:
+                    _probe(prefix, "up @{x},{y}")
+                _set_pressed_target(prefix, "")
                 _sync_linked(prefix)
                 _clear_drag_anchor(prefix)
-                _probe(prefix, "up @{x},{y}")
         HostInputEvent.Key(code, ch, down, mods):
             if down:
                 val key = host_key_text(ev)

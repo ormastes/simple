@@ -251,12 +251,43 @@ SimpleOS does not let the WM map executable code on hover. Its equivalent fast
 path is VFS read-ahead plus app-registry byte caching. Kernel/process mmap
 remains owned by the loader and VM subsystems during actual launch.
 
+### Dedicated-host contract and providers
+
+Startup and toolchain consumers share one low-level contract rather than
+inventing startup-only or subsystem-local mmap APIs:
+
+- `src/lib/common/platform/dedicated_host.spl` owns POSIX-compatible
+  protection/map flags, request validation, mapping ownership, preload results,
+  and the `DedicatedHost` capability boundary.
+- `src/os/hosted/dedicated_host_posix.spl` implements that contract for hosted
+  POSIX/Linux. It preserves fd, offset, protection, mapping flags, explicit
+  `mprotect`/`munmap`, and error results; file preload uses the runtime's mmap
+  byte primitive. Its provider boundary translates the canonical anonymous-map
+  bit for Darwin/FreeBSD and Solaris-family libc without leaking native values
+  into consumers.
+- `src/os/startup/dedicated_host_simpleos.spl` is the non-POSIX provider.
+  Anonymous/private maps use SimpleOS syscalls and startup file preload uses
+  the canonical VFS prewarm/materialization owner. File-backed and shared maps
+  fail with `-95` instead of being emulated with different semantics.
+- `src/app/startup/host_startup.spl` is the manifest consumer. It parses only
+  declared arguments, performs only declared read-only preloads, and produces
+  either `ready-before-main` or `blocked-before-main`.
+
+The `startup_before_main(...)` ordering contract is implemented and unit
+tested. Automatic invocation from every generated native entry stub and both
+SimpleOS crt0 variants is a separate linker/crt0 integration gate and must not
+be claimed from the existence of this callable owner. Likewise, the provider
+contract is suitable for LLVM/Clang porting, but an in-guest compiled Clang
+hello-world remains a bootstrap/QEMU evidence requirement.
+
 ## Implementation Alignment Matrix
 
 | Requirement | Current implementation | Evidence |
 |-------------|------------------------|----------|
 | File arg parser in startup logic | `startup_normalize_program_args(...)` and `cli_run_file(...)` preserve one script `argv[0]` | `test/03_system/app/simple/feature/simple_app_startup_spec.spl`, `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` |
 | Mmap support for fast file loading | Host mmap smoke via `file_mmap_read_text`; SMF mmap/cache in loader; SimpleOS VFS prewarm strategy in startup plan | `test/02_integration/app/startup_argparse_mmap_perf_spec.spl`, `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
+| Dedicated host mapping contract | Common POSIX-shaped flags/validation with hosted POSIX and native SimpleOS providers; SimpleOS rejects unsupported file/shared maps | `test/01_unit/app/startup/dedicated_host_startup_spec.spl`, `test/01_unit/app/startup/dedicated_host_provider_contract_spec.spl` |
+| Manifest startup execution | Declared argv schema and read-only preloads are admitted before main through `startup_before_main(...)` | focused unit/provider specs; generated-entry/crt0 hook remains open |
 | Dynlib/SMF load on startup | Metadata carries `required_native_dynlibs` and `required_smf_dynlibs`; startup plan includes loader only when dependency lists are non-empty | `test/03_system/app/simple/feature/simple_app_startup_spec.spl` |
 | SimpleOS hover preload | Launcher hover asks VFS for executable bytes on cache miss, caches warmed bytes, and keeps process count unchanged | `test/03_system/app/simpleos/feature/simple_app_startup_spec.spl` |
 | Optimization guard | `launch_metadata.spl` stays pure; mechanism inclusion is capability-gated by `StartupLaunchPlan` | this document plus system specs |
@@ -304,3 +335,7 @@ Open evidence gaps:
   inside SimpleOS are claimed
 - final build/link gate proving unused parser/cache/dynlib code is excluded
 - embedded ELF/Mach-O/PE launch metadata sections for native binaries
+- generated native-entry and SimpleOS crt0 invocation of
+  `startup_before_main(...)`
+- live native POSIX anonymous map/protect/unmap and SimpleOS QEMU syscall/VFS
+  provider evidence

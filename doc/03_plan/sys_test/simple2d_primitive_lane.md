@@ -61,6 +61,28 @@ board TODO and requires physical enumeration plus a SimpleOS-native Adreno
 driver lifecycle. Linux/QEMU remains gated by compiler admission and its live
 receipt requirements.
 
+## Host container branch ledger
+
+This is an enumerated branch ledger, not a line-coverage percentage claim.
+Each row needs the named executable receipt before it is counted as passed.
+
+| Branch family | Positive path | Reject/cancel path | Canonical evidence surface |
+|---|---|---|---|
+| Click buttons | left down/up accepts one action | unknown button and mismatched/replayed release do not fabricate input | `host_primitive_adapters_spec.spl`, `host_wm_public_bridge_primitives_spec.spl` |
+| Drag | press arms, move mutates, release clears capture | release-away/cancel clears without action | `primitive_hosts_system_spec.spl`, `host_compositor_entry_spec.spl` |
+| Wheel | positive delta changes the hovered linked scroll owner | zero, negative, and empty-desktop routing remain separately required cases | `host_primitive_adapters_spec.spl`, `host_compositor_entry_spec.spl` |
+| Modifiers | Ctrl+Alt survives key-down and key-up | absent/partial modifiers must not be inferred | `host_primitive_adapters_spec.spl`, `host_wm_public_bridge_primitives_spec.spl` |
+| Resize | positive host resize updates `size()` before the next composition | non-positive dimensions fail closed at the host boundary | `host_wm_public_bridge_primitives_spec.spl` |
+| Wire integrity | ordered numbered event is delivered once | malformed/missing/replayed payload leaves the cursor unchanged | `host_wm_public_bridge_primitives_spec.spl` |
+| Layout and font | positive boxes and semantic text/font payload lower to Draw IR | missing layout/text is an explicit test failure | `primitive_hosts_system_spec.spl` |
+| Capture | event sequence, frame sequence, raster checksum, and pixel count correlate | disabled export or invalid receipt cannot count as a capture | `host_wm_public_bridge_primitives_spec.spl`, `host_wm_present_no_ppm_spec.spl` |
+
+The first host-container completion report must state the exact run verdict for
+each referenced spec. Rows with no executed receipt are `unverified`, not
+implicitly covered. The wheel zero/negative and non-positive resize rejection
+rows are explicit remaining checks until their focused assertions are present
+and executed.
+
 ## Ownership
 
 The merge owner is `/root`. Small sidecar lanes are Web/CSS, GUI/button/key,

@@ -10,11 +10,15 @@ use os.drivers.virtio.virtio_input_ops.{
     EV_REL,
     EV_SYN,
     KEY_LEFTALT,
+    KEY_LEFTCTRL,
+    KEY_RIGHTALT,
+    KEY_RIGHTCTRL,
     KEY_Q,
     KEY_VALUE_PRESS,
     KEY_VALUE_RELEASE,
     REL_X,
     REL_Y,
+    REL_WHEEL,
     SYN_REPORT
 }
 use os.kernel.arch.arm64.virtio_input.{
@@ -147,3 +151,69 @@ describe "ARM64 VirtIO InputBackend":
         val released = backend.poll_key()
         expect(released != nil).to_equal(true)
         expect(backend.alt_held()).to_equal(false)
+
+    it "preserves Ctrl plus Alt through press and release sequences":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_LEFTCTRL, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(true)
+        expect(backend.alt_held()).to_equal(false)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTALT, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(true)
+        expect(backend.alt_held()).to_equal(true)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_LEFTCTRL, KEY_VALUE_RELEASE
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(false)
+        expect(backend.alt_held()).to_equal(true)
+
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTALT, KEY_VALUE_RELEASE
+        )).to_equal(true)
+        expect(backend.poll_key() != nil).to_equal(true)
+        expect(backend.ctrl_held()).to_equal(false)
+        expect(backend.alt_held()).to_equal(false)
+
+    it "delivers signed wheel deltas only at SYN_REPORT":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL,
+            REL_WHEEL, 4294967294u32
+        )).to_equal(true)
+        expect(backend.poll_mouse() == nil).to_equal(true)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_SYN,
+            SYN_REPORT, 0u32
+        )).to_equal(true)
+        if val event = backend.poll_mouse():
+            expect(event.wheel).to_equal(-2)
+        else:
+            fail_test("expected wheel event after SYN_REPORT")
+
+    it "rejects invalid devices, keyboard record types, and occupied slots":
+        var backend = Arm64VirtioInputBackend.create(640, 480)
+        expect(backend.feed_raw_event(99u32, EV_KEY, KEY_LEFTALT, KEY_VALUE_PRESS)).to_equal(false)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_REL,
+            REL_X, 1u32
+        )).to_equal(false)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_KEYBOARD, EV_KEY,
+            KEY_RIGHTCTRL, KEY_VALUE_PRESS
+        )).to_equal(true)
+        expect(backend.feed_raw_event(
+            ARM64_VIRTIO_INPUT_DEVICE_POINTER, EV_REL,
+            REL_X, 1u32
+        )).to_equal(false)

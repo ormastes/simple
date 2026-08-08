@@ -12,6 +12,10 @@ not claim that the planned single dedicated-host facade has been implemented.
 | Concern | Canonical owner | Current meaning |
 |---|---|---|
 | Pure-Simple POSIX compatibility | `src/os/posix/mod.spl` and the sibling `*_compat.spl` / `*_async.spl` modules | Existing synchronous POSIX-shaped wrappers over SOSIX/IPC and kernel-owned facades. `posix_init()` is the initialization entry. |
+| Dedicated host mapping contract | `src/lib/common/platform/dedicated_host.spl` | Canonical POSIX-shaped mmap protection/flag validation, mapping ownership/error results, read-only preload result, and provider trait. |
+| Hosted POSIX provider | `src/os/hosted/dedicated_host_posix.spl` | Linux/POSIX runtime-ABI provider for fd/anonymous mmap, mprotect, munmap, and mmap-backed read-only preload. |
+| Native SimpleOS provider | `src/os/startup/dedicated_host_simpleos.spl` | Anonymous/private syscall mappings plus VFS read-ahead/materialization; file-backed/shared mmap is explicitly unsupported. |
+| Manifest pre-main admission | `src/app/startup/host_startup.spl` | Lightweight declared-argument parser and declared preload execution returning ready/blocked-before-main. |
 | POSIX facility inventory | `src/os/posix/posix_server_contract.spl` | Existing profile/facility inventory and honest backing/status descriptions. |
 | Startup policy and argv normalization | `src/app/startup/launch_metadata.spl` | Existing pure policy: launch kind, one `argv[0]`, parser/cache/dynlib inclusion, and host-mmap versus SimpleOS-prewarm strategy. It does not perform I/O. |
 | Host file mapping | `src/lib/gc_sync_mut/io/file_ops.spl` and the corresponding IO facade exports | Existing host file/mmap helpers used by startup and loader paths. Use the facade, not direct runtime calls. |
@@ -50,11 +54,12 @@ architecture. Existing policy and checks include:
   SimpleOS counterpart;
 - `scripts/check/check-startup-size-performance-audit.shs`.
 
-The missing/recovery target is a single dedicated-host file-map/startup
-facade with two providers: a POSIX/Linux implementation and a non-POSIX
-SimpleOS implementation. The provider split, pre-main execution wiring, and
-cross-platform live evidence are **planned/unverified** until implementation
-and tests explicitly establish them.
+The dedicated-host contract, POSIX/Linux provider, non-POSIX SimpleOS provider,
+and callable manifest startup admission owner are implemented. Focused unit
+tests establish pure validation, parser/preload policy, POSIX file preload, and
+the SimpleOS capability boundary. Automatic generated-entry/crt0 invocation,
+native POSIX anonymous mapping lifetime, live SimpleOS QEMU syscalls/VFS, and
+in-guest Clang hello-world are still **unverified** environment gates.
 
 ## Bootstrap and evidence lookup
 
@@ -71,10 +76,9 @@ and tests explicitly establish them.
 ## Search recipe for future agents
 
 ```text
-dedicated host / POSIX: src/os/posix, posix_server_contract, host interface
-startup map / argv: src/app/startup, launch_metadata, startup_argparse_mmap
+dedicated host / POSIX: common/platform/dedicated_host, os/hosted/dedicated_host_posix, src/os/posix
+startup map / argv: app/startup/host_startup, launch_metadata, startup_argparse_mmap
 SimpleOS map: vfs.preload_file_pages, app_registry, simpleos_libc mmap
 LLVM/Clang: src/os/port/llvm, simpleos_llvm_toolchain, llvm_toolchain_port
 bootstrap evidence: doc/06_spec/bootstrap_test_gate, doc/08_tracking/todo
 ```
-

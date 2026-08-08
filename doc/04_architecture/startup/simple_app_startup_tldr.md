@@ -23,6 +23,11 @@ loading.
 
 - startup: `src/app/startup/launch_metadata.spl` computes the include/load/cache
   startup plan.
+- dedicated host: `common.platform.dedicated_host` owns the shared POSIX-shaped
+  mapping contract; hosted POSIX and native SimpleOS providers implement it.
+- pre-main admission: `app.startup.host_startup.startup_before_main(...)` parses
+  only manifest-declared arguments and completes declared read-only preloads
+  before returning `ready-before-main`.
 - file args: `src/app/io/cli_commands_part1.spl` normalizes script `argv[0]`
   once before driver dispatch.
 - cache/index: host mmap uses mmap/prefetch; SimpleOS uses app-registry/VFS
@@ -34,6 +39,9 @@ loading.
 - verification: run
   `test/02_integration/app/startup_argparse_mmap_perf_spec.spl` for `simple run`
   startup changes.
+- evidence boundary: the callable pre-main owner is implemented, but generated
+  entry-stub/crt0 wiring and live SimpleOS QEMU provider execution remain open
+  gates.
 
 ## Open Next
 
