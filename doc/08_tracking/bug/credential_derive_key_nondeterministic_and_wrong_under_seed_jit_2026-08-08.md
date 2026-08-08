@@ -3,15 +3,118 @@
 - **Filed:** 2026-08-08
 - **Severity:** CRITICAL (the credential-store KDF is not a function of its
   inputs under the JIT; a key derived at generate time cannot be reproduced)
-- **Status:** OPEN. See the CORRECTION section: the container-spelling defect IS
-  real for cross-module params (an earlier claim in this doc that it was refuted
-  is withdrawn). The NON-DETERMINISM documented here is a separate, still-unroot-
-  caused compiler/JIT defect, not a `.spl` spelling
-  issue — see "What was tried, and what that ruled out" below. No source change
-  is shipped with this doc, because no candidate edit produced a positive
-  control for the non-determinism.
-- **Component:** `src/lib/nogc_sync_mut/terminal/credential/store.spl`
+- **Status:** FIXED 2026-08-08 (see RESOLUTION below). Root cause was a
+  bare-name symbol collision on `text_to_bytes` reached from *inside*
+  `eksblowfish_setup`, resolved differently depending on which modules the
+  CALLER pulled in. Fixed in `.spl` with a RED→GREEN→RED control against an
+  engine-independent reference oracle.
+- **Component:** `src/lib/common/bcrypt/types.spl` (`text_to_bytes`, the actual
+  root cause), `src/lib/nogc_sync_mut/terminal/credential/store.spl`
   (`credential_derive_key`), seed JIT (Cranelift path)
+
+## RESOLUTION (2026-08-08)
+
+### The "non-determinism" was mis-characterised
+
+Repeated calls to `credential_derive_key` in one process are **stable** — the
+within-process drift reported in the Symptom table did not reproduce. What is
+real, and what produced those varying numbers, is that the derived key depends
+on **which modules the calling program imports**, and (before this fix) on
+**which engine runs it**. A probe whose import list changes gets a different
+key from the same passphrase and salt. That is just as fatal for reproducibility
+as true non-determinism, and it is why successive probes in the earlier lanes
+disagreed with each other.
+
+### The oracle that made this tractable
+
+The earlier lanes used *self-consistency* (call twice, compare) as the oracle.
+That cannot distinguish "correct" from "consistently wrong", and it is why two
+candidate fixes moved the numbers without ever proving anything.
+
+The oracle used here is an **in-probe replica**: the exact `credential_derive_key`
+algorithm re-implemented inside the probe file over the same library primitives
+(`eksblowfish_setup`, `blowfish_encrypt_block`, `hkdf_sha256`). It scores
+**74807 in both engines and every module set** — it is engine-independent and
+caller-independent, so it is a trustworthy reference. Supporting known-answer
+checks: `hkdf_sha256` passes RFC 5869 Test Case 1 in both engines, and the
+stage-1 bcrypt `ikm` replica agrees byte-for-byte across engines.
+
+Against that reference, at the origin blobs:
+
+| module set | engine | `credential_derive_key` | reference |
+|---|---|---|---|
+| minimal caller | JIT | 81572 / 44766 | 74807 |
+| minimal caller | interpreter | 81572 | 74807 |
+| caller also imports bcrypt+hkdf+aes | JIT | 63367 | 74807 |
+| caller also imports bcrypt+hkdf+aes | interpreter | 73924 | 74807 |
+
+Every cell is wrong, and they disagree with each other by engine AND by caller.
+
+### Root cause
+
+`eksblowfish_setup` (`src/lib/common/bcrypt/key_derivation.spl:273`) calls
+`text_to_bytes(password)`. It imports that name via `use std.bcrypt.types.*` —
+a module path that **does not exist** (`src/lib/bcrypt/` is absent; the real
+tree is `src/lib/common/bcrypt/`). Unresolved `use` is warning-only, so the
+call falls back to bare-name resolution across the co-compiled set, where
+`text_to_bytes` has **three definitions with two different return types**
+(`[i64]` in `bcrypt/types.spl` and `crypto/types.spl`, bare `list` in
+`aes/utilities.spl`, `[u8]` in `base_encoding`). The compiler warns about
+exactly this and says the fallback "may still dispatch to the wrong one".
+
+Whether the *correct* `[i64]` definition wins depends on module ordering, which
+depends on the caller's imports. When the wrong one wins, the password bytes
+entering the bcrypt key schedule are wrong (a bare-`list` value read across a
+module boundary reads its elements shifted left by 3), so the whole key is wrong.
+
+The discriminating experiment: with the library unchanged, adding
+`use std.common.bcrypt.key_derivation…` **to the caller** flips the result from
+81572 to the correct 74807. Adding `hkdf` or `aes` imports instead does not.
+
+### The fix
+
+Applied the remedy the compiler warning itself prescribes — remove the
+ambiguity rather than hope the fallback picks correctly:
+
+1. `src/lib/common/bcrypt/types.spl` — `text_to_bytes` renamed to
+   `bcrypt_text_to_bytes` (unique name, no longer in the collision set).
+   Callers updated in `key_derivation.spl` and `hash.spl`. **This is the fix
+   that closes the defect**; the rest is hardening.
+2. `src/lib/common/aes/utilities.spl` — `text_to_bytes` return type bare
+   `list` → `[i64]`, matching the already-landed `bytes_to_hex`/`bytes_to_text`
+   fixes.
+3. `store.spl` — KDF path respelled to `[T]` (`salt`, return type,
+   `magic_words`, `ikm`, plus `credential_key_file_salt` and
+   `credential_load_key` return types); `use std.bcrypt.…` corrected to
+   `use std.common.bcrypt.…`; HKDF info bytes built by a uniquely-named local
+   `credential_kdf_info_bytes()` so the KDF never rides the shared
+   `text_to_bytes` dispatch at all.
+
+Fixes 2 and 3 alone do **not** close the defect (measured: values move, caller
+dependence persists). Fix 1 is load-bearing.
+
+### Control (RED → GREEN → RED)
+
+Marker-free ship blobs, probe run from inside the repo tree, blob SHAs verified
+before and after every arm:
+
+| arm | JIT | interpreter |
+|---|---|---|
+| RED (origin blobs) | 81572 | 81572 |
+| GREEN (fix applied) | **74807** | **74807** |
+| RED again (reverted to origin) | 81572 | — |
+
+And with the fix applied, all four cells of {minimal caller, rich caller} ×
+{JIT, interpreter} return **74807** — engine-independent and caller-independent,
+matching the reference. Repeated calls are stable. `credential_key_generate` →
+`credential_encrypt` → `credential_decrypt` round-trips exactly.
+
+### Note on the two defects
+
+The container-spelling corruption and this dispatch defect are **independent**.
+Respelling the whole KDF path to `[T]` (fix 3) left the caller dependence fully
+intact; renaming the colliding helper (fix 1) removed it. They were entangled
+only in the sense that both were corrupting the same key.
 
 ## Symptom
 
