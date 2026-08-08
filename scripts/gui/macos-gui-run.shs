@@ -90,10 +90,13 @@ is_rust_seed_simple() {
     */src/compiler_rust/*)
       return 0
       ;;
-    *)
-      return 1
-      ;;
   esac
+  # Deployment directories are not proof of compiler provenance. Reject a
+  # copied/renamed bootstrap seed by its embedded self-classification too.
+  LC_ALL=C grep -aq \
+    -e "Rust-built Simple binary" \
+    -e "bootstrap seed only" \
+    "$1"
 }
 
 strict_admitted_gui_driver=""
@@ -173,7 +176,8 @@ resolve_gui_binary() {
     "$repo_root/bin/release/"*"/simple" \
     "$repo_root/release/"*"/simple" \
     "$repo_root/build/bootstrap/stage3/simple"; do
-    if [ -e "$c" ] && [ -x "$c" ] && has_winit_marker "$c"; then
+    if [ -e "$c" ] && [ -x "$c" ] && has_winit_marker "$c" && \
+        ! is_rust_seed_simple "$c"; then
       echo "$c"
       return 0
     fi
@@ -266,7 +270,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <dict>
     <key>SIMPLE_GUI</key><string>1</string>
     <key>SIMPLE_NO_BOOTSTRAP_DELEGATE</key><string>$no_bootstrap_delegate</string>
-    <key>SIMPLE_EXECUTION_MODE</key><string>interpret</string>
+    <key>SIMPLE_EXECUTION_MODE</key><string>${SIMPLE_EXECUTION_MODE:-interpret}</string>
     <key>SIMPLE_NO_DEPRECATED_WARNINGS</key><string>${SIMPLE_NO_DEPRECATED_WARNINGS:-1}</string>
     <key>SIMPLE_LIB</key><string>${SIMPLE_LIB:-$repo_root/src}</string>
     <key>SIMPLE_ASSET_ROOT</key><string>${SIMPLE_ASSET_ROOT:-$repo_root}</string>
@@ -281,6 +285,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>SIMPLE_GUI_EVENT_EVIDENCE_PATH</key><string>${SIMPLE_GUI_EVENT_EVIDENCE_PATH:-}</string>
     <key>SIMPLE_GUI_BACKEND</key><string>${SIMPLE_GUI_BACKEND:-}</string>
     <key>SIMPLE_GUI_EXIT_AFTER_INTERACTION</key><string>${SIMPLE_GUI_EXIT_AFTER_INTERACTION:-}</string>
+    <key>SIMPLE_HOSTED_WM_NO_BROWSER</key><string>${SIMPLE_HOSTED_WM_NO_BROWSER:-}</string>
+    <key>SIMPLE_HOSTED_WM_LIVE_PROOF</key><string>${SIMPLE_HOSTED_WM_LIVE_PROOF:-}</string>
     <key>SIMPLE_ONE_CALL_UPLOAD</key><string>${SIMPLE_ONE_CALL_UPLOAD:-1}</string>
     <key>SIMPLE_ONE_CALL_READBACK</key><string>${SIMPLE_ONE_CALL_READBACK:-1}</string>
     <key>SHOWCASE_RESOLUTION</key><string>${SHOWCASE_RESOLUTION:-}</string>
@@ -304,7 +310,7 @@ fi
 # capture ownership.  Delegation/non-delegation evidence is established earlier
 # by the EndpointSecurity execution-history receipt, never by this ps query.
 find_exact_app_pid() {
-  ps -axo pid=,command= | awk -v executable="$app_executable" '
+  ps -axo pid=,command= 2>/dev/null | awk -v executable="$app_executable" '
     {
       pid = $1
       $1 = ""
@@ -314,7 +320,7 @@ find_exact_app_pid() {
         exit
       }
     }
-  '
+  ' || true
 }
 
 pid_executable() {
