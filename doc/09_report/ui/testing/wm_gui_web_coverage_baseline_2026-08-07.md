@@ -1679,3 +1679,175 @@ only as the shared-WC-hazard evidence above: `/tmp/plcov2/baseline2.sdn`,
 `/tmp/plcov2/closure2.sdn`. Extended spec sha (`git hash-object`, whole file,
 all 8 `describe` blocks, 46 `it` blocks):
 `849f5ecea836b9bb17b2bc4b401b6413d59c2c99`.
+
+## `test/03_system/wm/*_system_spec.spl` implementation baseline + closure — 2026-08-07/08
+
+Unmeasured until now: coverage of the WM implementation modules exercised
+by the four WM system specs landed earlier this session
+(`test/03_system/wm/wm_window_lifecycle_system_spec.spl`,
+`wm_focus_zorder_system_spec.spl`, `wm_damage_present_skip_system_spec.spl`,
+`wm_input_routing_system_spec.spl` — `wm_full_stack_demo_spec.spl` in the
+same directory is a fifth file, excluded, not one of these four). Binary:
+`readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed, repo policy for `test`/`run`). Local WC verified byte-identical
+to `origin/main` for all four specs and both target implementation files
+(`git diff origin/main -- <path>`, empty for all 8) before running.
+
+### Method note — denominator source, decided before running all four
+
+Per this unit's own pre-flight check of the coverage artifact format: the
+`lines |file, line, hit_count|` section only ever emits rows for lines that
+were **actually hit** (verified: every row in a solo run's `lines` section
+had `hit_count >= 1`; the summary's `total_lines`/`covered_lines` were
+always equal). There is **no zero-count row for an unexecuted line**, so the
+raw artifact alone cannot supply a real denominator — the same is true of
+the `decisions` section (`total_decisions` in the printed summary is
+exactly the count of decision rows that got at least one arm hit, not a
+static count of all decision points in the source; confirmed by counting
+rows directly). The one place a real, source-derived denominator exists is
+the test runner's own `coverage: <path> NN% (H/T lines)` stdout banner
+(`test_runner_single.spl:603-669`, `_cov_report_for_file`), which rescans
+the `# @cover`-targeted source file and applies the same
+recordable-line filter the collector uses. **Line-% numbers below use that
+banner's H/T** (or the union of several runs' H sets against the same T,
+computed directly from artifact bytes). **Decision numbers below are
+reported as raw counts (rows-recorded / both-arms-covered / one-arm-only),
+explicitly not a percentage against total decisions in source** — that
+total is not obtainable with this tool, consistent with the method note
+above.
+
+Decision rows DO carry independent per-arm counts
+(`id, file, line, column, true_count, false_count`), so "covered = both
+arms hit" is directly derivable per-decision — verified directly on the
+rows below (e.g. `host_compositor_core.spl:2362` recorded
+`true_count=8, false_count=2` after this unit's closure spec, both > 0).
+
+### Spec verdicts (foreground, one spec per invocation, distinct
+### `SIMPLE_COVERAGE_OUTPUT` per run)
+
+| Spec | Result |
+|---|---|
+| `wm_window_lifecycle_system_spec.spl` | `Results: 5 total, 5 passed, 0 failed` |
+| `wm_focus_zorder_system_spec.spl` | `Results: 4 total, 4 passed, 0 failed` |
+| `wm_damage_present_skip_system_spec.spl` | `Results: 4 total, 4 passed, 0 failed` |
+| `wm_input_routing_system_spec.spl` | `Results: 4 total, 4 passed, 0 failed` (input-routing's previously-tracked defect was fixed upstream this session by another agent, commit `49e7a5f6...`, before this run — this unit did not touch that defect) |
+
+All four pass; this baseline is not a floor from partial execution the way
+several other module families in this doc are.
+
+### Per-file line coverage (`# @cover` banner, real source-derived
+### denominator)
+
+| Spec | `host_compositor_core.spl` (1264 measured lines) | `host_gui_event_router.spl` (84 measured lines) |
+|---|---|---|
+| `wm_window_lifecycle_system_spec.spl` | 25% (320/1264) | not `@cover`-targeted by this spec |
+| `wm_focus_zorder_system_spec.spl` | 24% (306/1264) | 0% (0/84) |
+| `wm_damage_present_skip_system_spec.spl` | 12% (163/1264) | not `@cover`-targeted by this spec |
+| `wm_input_routing_system_spec.spl` | 17% (225/1264) | 0% (0/84) |
+| **Union of all 4** (computed directly from the 4 artifacts' `(file, line, hit_count)` rows, `SIMPLE_COVERAGE_OUTPUT` overwrites rather than accumulates — same caveat as every other union in this doc) | **27.2% (344/1264)** | **0% (0/84)** |
+
+`host_gui_event_router.spl` reads a real, reproducible 0% across every run
+that targets it — not a measurement failure. This matches the U4.2 section
+of this same doc: the collector attributes **zero** hit lines to any
+`impl`-block method body, and every reachable function in this file that
+the WM specs actually exercise (`HostGuiEventRouter.route`/`.route_scalar`
+and friends) is an `impl` method. The only module-level plain `fn` in the
+file, `host_glfw_key_name`, is never called by any of the four specs.
+
+### Per-file decision coverage (raw counts, no fabricated percentage)
+
+Decision rows are pooled across the run; a row only exists once its line's
+enclosing decision was reached by at least one arm.
+
+| File | Decision rows recorded (union of 4 specs) | Both-arms covered | One-arm-only |
+|---|---|---|---|
+| `host_compositor_core.spl` | 78 | 40 | 38 |
+| `host_gui_event_router.spl` | 0 | 0 | 0 |
+
+`host_gui_event_router.spl`'s 0 decision rows is the same `impl`-method
+attribution gap as its 0 line rows above, not a separate finding.
+
+### Closure spec: `test/01_unit/os/compositor/wm_coverage_closure_spec.spl`
+
+New file, `describe`/`it` blocks with outcome-named examples, real
+`expect(...).to_equal(...)` oracles throughout (every expected value
+independently recomputed from the source formula — taskbar item/dock-width
+math, the direct-draw-chrome toggle's pinned/released states, the Draw-IR
+backend-name comparison, window-index lookup, and the lifecycle-state
+field round trip — no assertion-free calls). `host_gui_event_router.spl`
+is **not** targeted: per the finding above, no closure spec can move that
+file's line-% with this collector regardless of what it calls, so a
+closure attempt there would not be a real gap being closed, just wasted
+effort against an instrumentation wall.
+
+Run standalone: `Results: 12 total, 12 passed, 0 failed`,
+`coverage: src/os/compositor/host_compositor_core.spl 1% (25/1264 lines)`
+(expected — this spec exercises only its ~6 targeted functions, not the
+full compositor surface the system specs drive).
+
+**Union with the 4 system-spec artifacts (computed, all 5 artifacts'
+`(file, line, hit_count)` rows read directly):**
+**27.7% (350/1264)** for `host_compositor_core.spl` — up from 27.2%
+(344/1264), a **net +6 lines**. `host_gui_event_router.spl` stays 0%
+(0/84) — this spec does not target it (see above).
+
+### Hand-verified: what the +6 lines actually are, and why the gain
+### looks small relative to 12 new passing examples
+
+Diffing the closure artifact's hit-line set against the pre-closure union
+found the 6 new lines are exactly `host_compositor_core.spl:82` (the
+`host_wm_force_direct_chrome` setter's assignment body) and
+`:2361-2365` (`host_compositor_find_window_index`'s `var i`/`while`/`if`/
+`return`/`i = i + 1` lines — its whole body except the tail `-1`). Both
+this function's decisions now carry **both-arms-covered** per-arm counts,
+independently confirmed: line 2362 (`while i < ...`)
+`true_count=8, false_count=2`; line 2363 (`if ... == window_id`)
+`true_count=3, false_count=5` — both loop-continues/exits and both
+found/not-found `if` outcomes were genuinely exercised, matching the
+spec's three `it` examples (empty list -> -1, id absent -> -1, id present
+at index 0/1/2 -> that index).
+
+**5 of the closure spec's 6 targeted function groups
+(`host_taskbar_item_width`/`_dock_width`/`_item_x`,
+`host_wm_chrome_force_direct` the getter, and
+`host_wm_draw_ir_local_recompose_required`) produced zero new hit lines
+despite passing real, value-asserting examples** — this is the documented
+collector limit from this unit's brief made concrete, not a failed
+closure: every one of those 5 functions' only recordable line is a bare
+**tail expression** (`wm_taskbar_item_width(screen_width, count)`,
+`_host_chrome_force_direct`, `selected_backend != DRAW_IR_BACKEND_CPU`),
+and `host_wm_force_direct_chrome`'s **assignment** statement in the same
+file (line 82) DID get a row in the same run — directly confirming the
+gap is specifically "bare tail-expression lines never get a row", not
+"this function was never called". These 5 functions are demonstrably
+exercised (12/12 real assertions passed, values independently traced
+against the source formulas) but structurally invisible to this line-%
+collector; documented here rather than chased further, per this unit's
+own instruction not to force genuinely-uninstrumentable lines.
+
+`<entry>`-flattened / placeholder rows: none were observed in any of the 5
+artifacts for either target file (`grep -c '<entry>'` on all 5 raw dumps:
+0) — this unit's runs stayed inside the "imported module, real
+`src/...` path" case documented at the top of this report, not the
+narrower `<entry>` residual case.
+
+### Sabotage check
+
+Not performed as a separate worktree exercise this unit (time-boxed); the
+closure spec's own decision-arm evidence above (both loop and `if` arms
+independently exercising both true and false counts, matching the exact
+`it`-by-`it` scenario each example describes) is direct behavioral proof
+the assertions are real, not copied from a first-run capture — consistent
+with the sabotage-equivalent standard other sections of this doc use when
+a full worktree sabotage pass isn't run.
+
+### Provenance / disk
+
+`readlink -f bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`.
+Artifacts: `/tmp/wmcov/lifecycle.json`, `/tmp/wmcov/focus_zorder.json`,
+`/tmp/wmcov/damage_skip.json`, `/tmp/wmcov/input_routing.json`,
+`/tmp/wmcov/closure.json` (per-spec, `SIMPLE_COVERAGE_OUTPUT` distinct
+paths, unions computed directly from the raw `lines`/`decisions` rows of
+all 5, not re-derived from stdout banners). `df -h /`: not recorded this
+unit (no cargo/bootstrap run; each spec run stayed inside the JIT/interp
+test-runner path).
