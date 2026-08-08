@@ -4,11 +4,6 @@
 # Extracted from wm_service.spl to keep file sizes under 800 lines.
 
 use os.kernel.log.klog_api.{log_raw_println}
-use std.ecs.entity.{Entity, EntityAllocator}
-use std.ecs.component_store.{ComponentStore}
-use std.ecs.change_detection.{ChangeTracker}
-use std.ecs.system.{Scheduler}
-use std.ecs.world.{WorldBase}
 
 # Maximum windows the WM will track
 val WM_MAX_WINDOWS: i32 = 256
@@ -72,91 +67,69 @@ struct WindowState:
 # ============================================================================
 
 class WmWorld:
-    """ECS-based world owning all window component stores."""
-    base: WorldBase
-    win_ids: ComponentStore<WinId>
-    owner_ports: ComponentStore<OwnerPort>
-    owner_processes: ComponentStore<OwnerProcess>
-    app_ids: ComponentStore<WinAppId>
-    titles: ComponentStore<Title>
-    geometries: ComponentStore<Geometry>
-    states: ComponentStore<WindowState>
+    """Bounded structure-of-arrays world for window manager state."""
+    win_ids: [u64]
+    owner_ports: [u64]
+    owner_processes: [u64]
+    app_ids: [text]
+    titles: [text]
+    geometries: [Geometry]
+    states: [i32]
 
 impl WmWorld:
     static fn new() -> WmWorld:
         WmWorld(
-            # The desktop E2E lane materializes several launcher-backed windows
-            # in quick succession. Preallocate entity ids up front so the WM
-            # does not have to grow its allocator during that hot path.
-            base: WorldBase.with_capacity(WM_MAX_WINDOWS),
-            win_ids: ComponentStore.new(),
-            owner_ports: ComponentStore.new(),
-            owner_processes: ComponentStore.new(),
-            app_ids: ComponentStore.new(),
-            titles: ComponentStore.new(),
-            geometries: ComponentStore.new(),
-            states: ComponentStore.new()
+            win_ids: [],
+            owner_ports: [],
+            owner_processes: [],
+            app_ids: [],
+            titles: [],
+            geometries: [],
+            states: []
         )
+
+    fn find_window_index(self, window_id: u64) -> i32:
+        var i: i32 = 0
+        while i < self.win_ids.len():
+            if self.win_ids[i] == window_id:
+                return i
+            i = i + 1
+        -1
 
     fn find_owner_port(self, window_id: u64) -> u64:
         """Find owner port for a window_id. Returns 0 if not found."""
-        var i: i32 = 0
-        while i < self.win_ids.len():
-            if self.win_ids.dense[i].value == window_id:
-                val ent_id = self.win_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val slot = self.owner_ports.get_slot(e)
-                if slot >= 0:
-                    return self.owner_ports.dense[slot].value
-                return 0
-            i = i + 1
-        0
-
-    fn find_entity_for_window(self, window_id: u64) -> Entity:
-        """Find the Entity for a window_id. Returns Entity.null() if not found."""
-        var i: i32 = 0
-        while i < self.win_ids.len():
-            if self.win_ids.dense[i].value == window_id:
-                val ent_id = self.win_ids.entity_at(i)
-                return Entity(id: ent_id, generation: 0)
-            i = i + 1
-        Entity.null()
+        val index = self.find_window_index(window_id)
+        if index < 0:
+            return 0
+        self.owner_ports[index]
 
     me spawn_window(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
         """Spawn a new entity and insert all window components."""
         log_raw_println("[wm-service] spawn-window:start wid={window_id} pid={process_id} app_id={app_id}")
-        val e = self.base.spawn()
-        # The WM uses these stores as current-state metadata, not as a
-        # change-detection stream, so a stable tick is sufficient here.
-        val tick: i64 = 0
-        self.win_ids.insert(e, WinId(value: window_id), tick)
-        log_raw_println("[wm-service] spawn-window:win-id wid={window_id}")
-        self.owner_ports.insert(e, OwnerPort(value: owner_port), tick)
-        log_raw_println("[wm-service] spawn-window:owner-port wid={window_id}")
-        self.owner_processes.insert(e, OwnerProcess(value: process_id), tick)
-        log_raw_println("[wm-service] spawn-window:owner-process wid={window_id}")
-        self.app_ids.insert(e, WinAppId(value: app_id), tick)
-        log_raw_println("[wm-service] spawn-window:app-id wid={window_id}")
-        self.titles.insert(e, Title(value: ""), tick)
-        log_raw_println("[wm-service] spawn-window:title wid={window_id}")
-        self.geometries.insert(e, Geometry(x: 0, y: 0, w: 0, h: 0), tick)
-        log_raw_println("[wm-service] spawn-window:geometry wid={window_id}")
-        self.states.insert(e, WindowState(value: WIN_STATE_NORMAL), tick)
+        if self.win_ids.len() >= WM_MAX_WINDOWS:
+            log_raw_println("[wm-service] spawn-window:capacity wid={window_id}")
+            return
+        self.win_ids.push(window_id)
+        self.owner_ports.push(owner_port)
+        self.owner_processes.push(process_id)
+        self.app_ids.push(app_id)
+        self.titles.push("")
+        self.geometries.push(Geometry(x: 0, y: 0, w: 0, h: 0))
+        self.states.push(WIN_STATE_NORMAL)
         log_raw_println("[wm-service] spawn-window:end wid={window_id}")
 
     me despawn_window(window_id: u64) -> bool:
         """Despawn the entity for window_id. Returns false if not found."""
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
+        val index = self.find_window_index(window_id)
+        if index < 0:
             return false
-        self.win_ids.remove(e)
-        self.owner_ports.remove(e)
-        self.owner_processes.remove(e)
-        self.app_ids.remove(e)
-        self.titles.remove(e)
-        self.geometries.remove(e)
-        self.states.remove(e)
-        self.base.despawn(e)
+        self.win_ids.remove_at(index)
+        self.owner_ports.remove_at(index)
+        self.owner_processes.remove_at(index)
+        self.app_ids.remove_at(index)
+        self.titles.remove_at(index)
+        self.geometries.remove_at(index)
+        self.states.remove_at(index)
         true
 
     me despawn_windows_for_port(port: u64) -> [u64]:
@@ -164,12 +137,8 @@ impl WmWorld:
         var to_destroy: [u64] = []
         var i: i32 = 0
         while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
-                val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    to_destroy = to_destroy.push(self.win_ids.dense[wid_slot].value)
+            if self.owner_ports[i] == port:
+                to_destroy.push(self.win_ids[i])
             i = i + 1
         var j: i32 = 0
         while j < to_destroy.len():
@@ -181,12 +150,8 @@ impl WmWorld:
         var ids: [u64] = []
         var i: i32 = 0
         while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
-                val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
+            if self.owner_ports[i] == port:
+                ids.push(self.win_ids[i])
             i = i + 1
         ids
 
@@ -194,12 +159,8 @@ impl WmWorld:
         var ids: [u64] = []
         var i: i32 = 0
         while i < self.owner_processes.len():
-            if self.owner_processes.dense[i].value == process_id:
-                val ent_id = self.owner_processes.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
+            if self.owner_processes[i] == process_id:
+                ids.push(self.win_ids[i])
             i = i + 1
         ids
 
@@ -207,38 +168,28 @@ impl WmWorld:
         var ids: [u64] = []
         var i: i32 = 0
         while i < self.app_ids.len():
-            if self.app_ids.dense[i].value == app_id:
-                val ent_id = self.app_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
+            if self.app_ids[i] == app_id:
+                ids.push(self.win_ids[i])
             i = i + 1
         ids
 
     fn process_id_for_window(self, window_id: u64) -> u64:
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
+        val index = self.find_window_index(window_id)
+        if index < 0:
             return 0
-        val slot = self.owner_processes.get_slot(e)
-        if slot < 0:
-            return 0
-        self.owner_processes.dense[slot].value
+        self.owner_processes[index]
 
     fn app_id_for_window(self, window_id: u64) -> text:
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
+        val index = self.find_window_index(window_id)
+        if index < 0:
             return ""
-        val slot = self.app_ids.get_slot(e)
-        if slot < 0:
-            return ""
-        self.app_ids.dense[slot].value
+        self.app_ids[index]
 
     fn count_for_port(self, port: u64) -> i32:
         var count: i32 = 0
         var i: i32 = 0
         while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
+            if self.owner_ports[i] == port:
                 count = count + 1
             i = i + 1
         count
@@ -247,7 +198,7 @@ impl WmWorld:
         var count: i32 = 0
         var i: i32 = 0
         while i < self.owner_processes.len():
-            if self.owner_processes.dense[i].value == process_id:
+            if self.owner_processes[i] == process_id:
                 count = count + 1
             i = i + 1
         count
@@ -256,16 +207,15 @@ impl WmWorld:
         var count: i32 = 0
         var i: i32 = 0
         while i < self.app_ids.len():
-            if self.app_ids.dense[i].value == app_id:
+            if self.app_ids[i] == app_id:
                 count = count + 1
             i = i + 1
         count
 
     me set_identity(window_id: u64, process_id: u64, app_id: text):
         """Update process/app identity for an existing window."""
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
+        val index = self.find_window_index(window_id)
+        if index < 0:
             return
-        val tick: i64 = 0
-        self.owner_processes.insert(e, OwnerProcess(value: process_id), tick)
-        self.app_ids.insert(e, WinAppId(value: app_id), tick)
+        self.owner_processes[index] = process_id
+        self.app_ids[index] = app_id
