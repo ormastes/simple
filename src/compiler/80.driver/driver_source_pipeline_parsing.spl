@@ -306,7 +306,22 @@ impl CompilerDriver:
                         source.module_name,
                         self.ctx.logger
                     )
-                    bootstrap_modules[source.module_name] = entry_module
+                    if par_had_error_get():
+                        # SIMPLE_BOOTSTRAP=1 (Stage 2/3) took the same
+                        # silent-swallow path as the plain loop: a syntax error
+                        # in a bootstrap entry source produced no ctx.errors
+                        # entry, so Stage-3 failures surfaced as downstream
+                        # unresolved-symbol noise instead of the parse error
+                        # that caused them. Collect-all applies here too.
+                        self.ctx.errors.push(
+                            "parse error in {source.path} (see [parser_error] output above)")
+                        self.ctx.mark_module_poisoned(source.module_name)
+                        if self.ctx.poison_budget_exhausted():
+                            var boot_poisoned_ctx: CompileContext = self.ctx
+                            boot_poisoned_ctx.modules = bootstrap_modules
+                            return (boot_poisoned_ctx, false)
+                    else:
+                        bootstrap_modules[source.module_name] = entry_module
                 boot_idx = boot_idx + 1
             boot_idx = 0
             while boot_idx < sources.len():
@@ -373,6 +388,29 @@ impl CompilerDriver:
                 source.module_name,
                 self.ctx.logger
             )
+            if par_had_error_get():
+                # Same collect-all default as the entry-closure loop above and
+                # as driver_hir_pipeline_lowering.spl. Before this check the
+                # plain loop never consulted par_had_error_get() at all, so a
+                # syntax error here was SILENTLY SWALLOWED: the parser flagged
+                # it, the loop stored the truncated/empty module anyway, and
+                # ctx.errors stayed empty -- the compile either "succeeded" or
+                # died later on an unrelated-looking undefined symbol. See
+                # doc/08_tracking/bug/
+                # plain_parse_loop_never_checks_par_had_error_silent_swallow_2026-08-08.md
+                # `par_had_error` is reset per-file in parser_init_with_path
+                # (parser.spl:254), so continuing cannot leak a stale flag into
+                # the next source. `--fail-fast` / SIMPLE_COMPILE_FAIL_FAST=1
+                # restores stop-at-first via the shared poison_budget cap.
+                self.ctx.errors.push(
+                    "parse error in {source.path} (see [parser_error] output above)")
+                self.ctx.mark_module_poisoned(source.module_name)
+                if self.ctx.poison_budget_exhausted():
+                    var poisoned_ctx: CompileContext = self.ctx
+                    poisoned_ctx.modules = parsed_modules
+                    return (poisoned_ctx, false)
+                src_idx = src_idx + 1
+                continue
             parsed_modules[source.module_name] = module
             layer_wiring_paths.push(source.path)
             layer_wiring_contents.push(source.content)
@@ -421,4 +459,12 @@ impl CompilerDriver:
             self.ctx.logger
         )
         print "[parse_source] done {source.path}"
+        if par_had_error_get():
+            # Single-module helper: record the diagnostic so a caller that only
+            # inspects ctx.errors cannot mistake a truncated AST for a clean
+            # parse. No poison_budget/continue here -- there is no loop to
+            # continue, and the caller decides what to do with the module.
+            self.ctx.errors.push(
+                "parse error in {source.path} (see [parser_error] output above)")
+            self.ctx.mark_module_poisoned(source.module_name)
         module

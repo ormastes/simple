@@ -2,7 +2,8 @@
 
 - **ID:** plain_parse_loop_never_checks_par_had_error_silent_swallow_2026-08-08
 - **Date:** 2026-08-08
-- **Status:** OPEN — confirmed by call-site enumeration; not fixed
+- **Status:** FIXED 2026-08-08 — see "Fix and control pair" at the bottom.
+  Originally filed OPEN after call-site enumeration.
 - **Severity:** high — a *silent-swallow* fail-open. Unlike a stop-at-first-error
   bug, which under-reports loudly, this one loses the diagnostic entirely.
 
@@ -73,6 +74,50 @@ success.
 
 Do not verify by asserting the CURRENT output — confirm the diagnostic is
 genuinely absent today first, or the test will pin the bug as expected behaviour.
+
+## Fix and control pair (2026-08-08)
+
+Fixed at **four** sites in `driver_source_pipeline_parsing.spl` — the doc's
+enumeration missed one: the `SIMPLE_BOOTSTRAP=1` entry-source loop (line 303)
+had the same silent swallow, and that is the loop Stage 2/3 actually runs. All
+four now check `par_had_error_get()` and push `parse error in {path}`:
+
+| site | path | shape |
+|------|------|-------|
+| ~303 | `SIMPLE_BOOTSTRAP=1` entry loop | push + poison + budget, module not stored |
+| ~370 | plain parse loop | push + poison + budget + `continue` |
+| ~453 | `parse_source` single-module helper | push + poison (no loop to continue) |
+| ~210 | entry-closure loop | already fixed by `1266a61d9a6` |
+
+Verified with `build/collect-all-probe/parse_probe.spl` (gitignored scratch
+harness, sibling of the `probe.spl` used by `52b19d55d86`), driving the
+pure-Simple driver over two modules with independent SYNTAX errors — syntax, not
+unresolved types, so the diagnostic can only originate from a
+`par_had_error_get()` check in this loop:
+
+```
+BEFORE (negative baseline, confirmed on the pre-fix tree)
+  [parser_error] ... mod_a.spl ... expected ), got EOF
+  [parser_error] ... mod_b.spl ... expected ], got EOF
+  errors=0  parse_errors=0        <- both diagnostics SWALLOWED
+
+AFTER (default)
+  errors=2  parse_errors=2        <- BOTH reported in one run
+
+AFTER (SIMPLE_COMPILE_FAIL_FAST=1)
+  errors=1  parse_errors=1        <- stop-at-first opt-out still works
+```
+
+Regression check: `probe.spl` (phase-3 lowering) unchanged — `multi` FAILURE,
+`one` FAILURE, `clean` SUCCESS with 0 errors.
+
+**Correction (same day, two lanes collided):** a parallel lane IMPLEMENTED
+`--fail-fast` (commit `c54fe653535`, `src/app/io/_CliCompile/compile_targets.spl`
+— the flag sets `SIMPLE_COMPILE_FAIL_FAST=1`, so both spellings work). This lane
+had meanwhile rewritten the `driver_types.spl` comment to assert that no such
+flag exists. That assertion was true when written and false an hour later; it has
+been corrected to describe both entry points. The "Related" bullet below is left
+in place as the historical record of why the flag was added.
 
 ## Related, found in the same pass
 
