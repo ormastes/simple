@@ -1,6 +1,8 @@
 # `native-build` is dead for EVERY input — nil-deref in the interpreted compiler
 
-- **Status:** OPEN (reproduced at pristine `origin/main`, not diagnosed to a line)
+- **Status:** **FIXED** — the outage was real at the measured commit and was
+  already fixed by `100a9aadcc4` *three minutes before this doc was filed*. This
+  report was **stale on arrival**; see "Resolution" below. No action needed.
 - **Date:** 2026-08-08
 - **Severity:** critical — the entire native/MIR lane is unusable, and every
   MIR-level verification loop in the repo is silently blocked behind it
@@ -96,3 +98,62 @@ trait dispatch recipe above is one — cannot produce a RED or a GREEN today. Th
 correct response to such a lane reporting "0 errors" right now is to treat it as
 UNVERIFIED, not as fixed: both the outage and the stderr truncation above
 produce a clean-looking zero.
+
+---
+
+## Resolution (2026-08-08, verification lane)
+
+**The outage was real, and it was already fixed before this doc landed.**
+
+Fixed by `100a9aadcc4` *fix(mir): stop wrapping an already-optional receiver
+type in Some()* (2026-08-08 01:21:40 UTC), which changed exactly the file this
+report pointed at — `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+— and shipped its own record,
+`doc/08_tracking/bug/..._method_call_some_wrap_nil_kind_crash_2026-08-08.md`.
+
+This doc was committed at 01:24:31, but was **measured at `6246f3104db`
+(01:05:47), which does not contain `100a9aadcc4`**. So it described a state
+that no longer existed on `origin/main` by the time it was written.
+
+### Current measurement (worktree pinned to `origin/main` `867c724e7bd`)
+
+| input | rc | result |
+|-------|----|--------|
+| two-line hello-world | **0** | 27KB executable produced; running it prints `hello = 3` |
+| `primitive_trait_impl_dispatch_native_min.spl` | 1 | `MIR lowering error: unresolved method call: mark` — the **pre-existing** 2026-08-07 state, not the nil-deref |
+
+A nil-deref abort cannot emit a working binary, so rc=0 plus a binary that runs
+is evidence no amount of output truncation can fake. (Do **not** use
+`grep -c "undefined field 'kind'" == 0` as evidence here — that is exactly the
+fail-open documented below.)
+
+### Causation proven by revert
+
+In the pinned worktree, restoring only `method_calls_literals.spl` to
+`100a9aadcc4^` and re-running the same hello-world reproduces the failure
+exactly — `rc=1`, `undefined field 'kind': cannot access field on value of type
+'nil'`, no output binary. Restoring the file returns it to rc=0. One file, one
+commit, both directions.
+
+This also settles a side question: the worker **does** read the pinned
+worktree's compiler sources, so a worktree pin is a valid isolation boundary
+for `.spl` compiler changes.
+
+### The deployed worker binary is EXONERATED
+
+`bin/release/x86_64-unknown-linux-gnu/simple` (redeployed 00:53) was the prime
+suspect. The *same* binary now produces rc=0. This was a **source defect, not
+deployment skew** — the worker interprets `.spl`, so compiler-source edits are
+live with no rebuild. **No redeploy is or was required.**
+
+### Why it looked like a hang
+
+A two-line hello-world native-build takes **~68s** in a clean worktree and
+**~144s** in the shared working copy. Reproduction attempts capped at 120s time
+out with no output and read as a total hang. Budget >300s.
+
+### Unrelated observation
+
+The fixture's log also carries `unsupported MIR type kind [infer-arm]:
+HirTypeKind::Infer((0, 0))`, which is not in the 2026-08-07 record. Possibly
+pre-existing and merely unlogged; flagged, not investigated.

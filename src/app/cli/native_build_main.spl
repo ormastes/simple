@@ -182,17 +182,57 @@ fn output_path_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+fn native_build_line_is_diagnostic(line: text) -> bool:
+    """True for lines a caller greps for when deciding why native-build failed.
+
+    Deliberately broad: a missed diagnostic is silently dropped evidence, while
+    an extra kept line only costs a few bytes in the preserved block."""
+    line.contains("error:") or line.contains("error :") or line.contains("[ERROR]")
+        or line.contains("warning:") or line.contains("[WARN]")
+        or line.contains("undefined field") or line.contains("type 'nil'")
+        or line.contains("MIR error") or line.contains("MIR lowering error")
+        or line.contains("panic") or line.contains("Traceback")
+        or line.contains("unresolved") or line.contains("unsupported")
+        or line.contains("Assertion") or line.contains("Segmentation fault")
+
+fn native_build_collect_diagnostics(output: text) -> [text]:
+    """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
+    var kept: [text] = []
+    for line in output.split("\n"):
+        if native_build_line_is_diagnostic(line):
+            kept = kept.push(line)
+    kept
+
 fn eprint_bounded(output: text):
     if output.len() == 0:
         return
     if output.len() <= OUTPUT_LIMIT:
         eprint output
         return
+    # OVER THE LIMIT. A plain head+tail print DISCARDS THE MIDDLE, so a
+    # `grep -c` over this output can report 0 for a diagnostic that actually
+    # fired -- that exact fail-open produced a bogus `0` for the lane that
+    # filed native_build_nil_deref_total_outage_2026-08-08.md. So before
+    # truncating we re-emit every diagnostic line found in the FULL text,
+    # and we make the truncation itself impossible to overlook.
+    val omitted = output.len() - OUTPUT_LIMIT
+    eprint "!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!"
+    eprint "[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE."
+    eprint "[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable."
+    val diags = native_build_collect_diagnostics(output)
+    if diags.len() > 0:
+        eprint "[native-build] BEGIN PRESERVED DIAGNOSTICS ({diags.len()} line(s), from the full stream)"
+        for line in diags:
+            eprint line
+        eprint "[native-build] END PRESERVED DIAGNOSTICS"
+    else:
+        eprint "[native-build] PRESERVED DIAGNOSTICS: none matched in the full stream."
     val head_len = OUTPUT_LIMIT / 2
     val tail_len = OUTPUT_LIMIT - head_len
     eprint output[0:head_len]
-    eprint "[stderr truncated by native-build entry]"
+    eprint "[stderr truncated by native-build entry: {omitted} bytes omitted from the middle]"
     eprint output[output.len() - tail_len:output.len()]
+    eprint "!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!"
 
 fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
     stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
