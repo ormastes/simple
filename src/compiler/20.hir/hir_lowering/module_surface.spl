@@ -120,14 +120,47 @@ struct ModuleSurface:
     constants: Dict<text, ModuleSurfaceConst>
     export_origins: Dict<text, ModuleSurfaceExportOrigin>
 
+struct ModuleSurfaceReexportSource:
+    """Lower-layer representation of one completed re-export lookup.
+
+    This deliberately lives with the module-surface snapshot rather than HIR
+    lowering.  HIR can adapt it to its own result type without making the
+    lower-layer surface model depend on HIR types.
+    """
+    found: bool
+    module_name: text
+    item_name: text
+
+class ModuleSurfaceReexportCache:
+    """Completed root re-export lookups owned by one surface snapshot."""
+    snapshot_generation: i64
+    entries: Dict<text, ModuleSurfaceReexportSource>
+
+    static fn new(snapshot_generation: i64) -> ModuleSurfaceReexportCache:
+        ModuleSurfaceReexportCache(snapshot_generation: snapshot_generation,
+                                   entries: {})
+
 struct ModuleSurfacesByName:
     surfaces: [ModuleSurface]
     index_by_name: Dict<text, i64>
+    snapshot_generation: i64
+    # A class is reference-owned when a snapshot is copied into another HIR
+    # lowering.  This is the only mutable part of the immutable surface view.
+    reexport_cache: ModuleSurfaceReexportCache
 
 struct ModuleSurfaceBuilder:
     surfaces: [ModuleSurface]
     index_by_name: Dict<text, i64>
     index_by_path: Dict<text, i64>
+
+impl ModuleSurfacesByName:
+    static fn empty() -> ModuleSurfacesByName:
+        val snapshot_generation = module_surfaces_snapshot_generation([])
+        ModuleSurfacesByName(
+            surfaces: [],
+            index_by_name: {},
+            snapshot_generation: snapshot_generation,
+            reexport_cache: ModuleSurfaceReexportCache.new(snapshot_generation))
 
 impl ModuleSurfaceBuilder:
     static fn new() -> ModuleSurfaceBuilder:
@@ -168,7 +201,12 @@ impl ModuleSurfaceBuilder:
         Ok(())
 
     me finish() -> ModuleSurfacesByName:
-        ModuleSurfacesByName(surfaces: self.surfaces, index_by_name: self.index_by_name)
+        val snapshot_generation = module_surfaces_snapshot_generation(self.surfaces)
+        ModuleSurfacesByName(
+            surfaces: self.surfaces,
+            index_by_name: self.index_by_name,
+            snapshot_generation: snapshot_generation,
+            reexport_cache: ModuleSurfaceReexportCache.new(snapshot_generation))
 
     me resolve_export_origins() -> Result<(), text>:
         # Build one package/name owner index up front. Stage4 carries thousands
@@ -964,6 +1002,20 @@ fn module_surface_declaration_matches(surface: ModuleSurface, module: ParserModu
     for name in module.constants.keys():
         if not surface.constants.contains_key(name): return false
     true
+
+fn module_surfaces_snapshot_generation(surfaces: [ModuleSurface]) -> i64:
+    # The cache is already owned by this snapshot, but retaining a stable
+    # generation makes accidental cross-snapshot reuse observable and gives
+    # callers a cheap identity check without retaining parser modules.
+    var generation: i64 = rt_hash_text("module-surfaces-v1")
+    var surface_index: i64 = 0
+    while surface_index < surfaces.len():
+        val surface = surfaces[surface_index]
+        val identity_hash = rt_hash_text(
+            "{surface_index}:{surface.canonical_path}:{surface.content_length}:{surface.content_hash}")
+        generation = rt_hash_text("{generation}:{identity_hash}")
+        surface_index = surface_index + 1
+    generation
 
 fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
     var builder = ModuleSurfaceBuilder.new()
