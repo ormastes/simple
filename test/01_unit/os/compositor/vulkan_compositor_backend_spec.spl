@@ -24,6 +24,7 @@ use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.vulkan_compositor_backend.{
     VulkanCompositorBackend,
     detect_virtio_gpu_device,
+    is_safe_render_node_path,
     VULKAN_VENUS_DEFAULT_RENDER_NODE
 }
 
@@ -213,6 +214,53 @@ describe "detect_virtio_gpu_device requires a real device node, not just an exis
 
     it "reports true for a real character device (environment-dependent path, /dev/null is portable)":
         step("/dev/null is a character device on every Linux/container host this suite runs on -- it exercises the positive branch without depending on real GPU hardware. A real DRM render node (e.g. /dev/dri/renderD128) is host-hardware-dependent and not asserted here.")
+        assert_true(detect_virtio_gpu_device("/dev/null"))
+
+describe "security: render_node cannot break out of the shell command line (fixed 2026-08-08)":
+    """`detect_virtio_gpu_device()` used to interpolate `render_node`
+    unvalidated into `shell_bool("test -c '{render_node}'")`, a
+    `/bin/sh -c` command line quoted with single quotes. A `render_node`
+    containing a single quote can break out of that quoting and inject
+    arbitrary shell commands, and also spoof the probe's return value via
+    the injected command's own exit code (see the "Security rework"
+    section of
+    doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md).
+    The fix validates the path with `is_safe_render_node_path()` before it
+    ever reaches the shell."""
+
+    it "rejects a render_node that attempts shell command injection, with no side effects":
+        step("A single-quote breakout payload that would touch a marker file and spoof a true result if executed")
+        val payload = "'; echo pwned; echo '"
+        assert_false(detect_virtio_gpu_device(payload))
+        step("The payload itself must be recognized as unsafe -- this is the load-bearing assertion, since a spoofed exit-code side effect cannot be observed from inside this process")
+        assert_false(is_safe_render_node_path(payload))
+
+    it "rejects a render_node containing a semicolon command separator":
+        assert_false(detect_virtio_gpu_device("/dev/null; echo pwned"))
+        assert_false(is_safe_render_node_path("/dev/null; echo pwned"))
+
+    it "rejects a render_node containing a backtick command substitution":
+        assert_false(detect_virtio_gpu_device("/dev/`echo pwned`"))
+        assert_false(is_safe_render_node_path("/dev/`echo pwned`"))
+
+    it "rejects a render_node containing a backslash":
+        assert_false(is_safe_render_node_path("/dev/null\\; echo pwned"))
+
+    it "rejects a render_node containing whitespace":
+        assert_false(detect_virtio_gpu_device("/dev/ null"))
+        assert_false(is_safe_render_node_path("/dev/ null"))
+
+    it "rejects a render_node that is not an absolute path":
+        assert_false(is_safe_render_node_path("dev/null"))
+        assert_false(is_safe_render_node_path("../dev/null"))
+
+    it "accepts plain absolute paths made only of [A-Za-z0-9/._-]":
+        assert_true(is_safe_render_node_path("/dev/null"))
+        assert_true(is_safe_render_node_path("/dev/dri/renderD128"))
+        assert_true(is_safe_render_node_path("/nonexistent/render-node-for-spec"))
+
+    it "still correctly detects a real character device after validation is added":
+        step("Regression guard: the allowlist must not break the legitimate /dev/null case exercised elsewhere in this spec")
         assert_true(detect_virtio_gpu_device("/dev/null"))
 
 describe "sabotage test: the honesty gate itself is verified":

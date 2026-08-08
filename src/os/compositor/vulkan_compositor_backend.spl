@@ -33,6 +33,22 @@
 #     2026-08-07 (`doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md`):
 #     it previously reported `true` for ANY existing path, including a plain
 #     regular file, which is not a device probe at all.
+#   * SECURITY (fixed 2026-08-08, see the "Security rework" section of the
+#     same bug doc): `detect_virtio_gpu_device()` used to interpolate
+#     `render_node` directly into a `/bin/sh -c "test -c '{render_node}'"`
+#     command line. Because `shell_bool()` (`std.io_runtime`) shells out via
+#     `/bin/sh -c` and the value is quoted with single quotes, a
+#     `render_node` containing a single quote could break out of the
+#     quoting and inject arbitrary shell commands, e.g.
+#     `'; touch /tmp/pwned; echo '` -- which also spoofed the probe result
+#     to `true` via the trailing `echo`'s exit code. `render_node` is a
+#     `pub fn` parameter, i.e. untrusted input from any caller. The fix
+#     validates the path with `is_safe_render_node_path()` BEFORE it ever
+#     reaches the shell: only `[A-Za-z0-9/._-]`, must start with `/`.
+#     No no-shell stat primitive (char-device mode bits) is exposed via
+#     SFFI/`std.io_runtime`/`std.fs` today -- `rt_file_stat` returns mtime,
+#     not `st_mode` -- so the shell probe is kept, guarded by this
+#     allowlist, rather than adding new FFI plumbing for this fix.
 #
 # MDSOC: feature dimension, compositor layer
 
@@ -42,6 +58,33 @@ use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapabl
 ## Default DRM render node checked for virtio-gpu/any-GPU device presence.
 ## Overridable via `create_from_env`'s `render_node` argument for tests.
 pub val VULKAN_VENUS_DEFAULT_RENDER_NODE: text = "/dev/dri/renderD128"
+
+pub fn is_safe_render_node_path(render_node: text) -> bool:
+    """Allowlist a render-node path BEFORE it is ever interpolated into a
+    shell command line. `detect_virtio_gpu_device()` passes `render_node`
+    to `shell_bool()`, which runs it via `/bin/sh -c` with the value quoted
+    in single quotes -- so a value containing a single quote (or any other
+    shell metacharacter) can break out of that quoting and inject
+    commands. This function rejects anything that is not a plain absolute
+    path built only from `[A-Za-z0-9/._-]`, closing that off entirely
+    rather than trying to escape/blacklist dangerous characters."""
+    if render_node == "":
+        return false
+    if render_node.char_at(0) != "/":
+        return false
+    val n = render_node.length()
+    var i = 0
+    while i < n:
+        val c = render_node.char_code_at(i)
+        val is_upper = c >= 65 and c <= 90
+        val is_lower = c >= 97 and c <= 122
+        val is_digit = c >= 48 and c <= 57
+        # '/' = 47, '.' = 46, '_' = 95, '-' = 45
+        val is_symbol = c == 47 or c == 46 or c == 95 or c == 45
+        if not (is_upper or is_lower or is_digit or is_symbol):
+            return false
+        i = i + 1
+    true
 
 pub fn detect_virtio_gpu_device(render_node: text) -> bool:
     """REAL, VERIFIABLE capability probe: does a character device exist at
@@ -53,8 +96,15 @@ pub fn detect_virtio_gpu_device(render_node: text) -> bool:
     mean virtio-gpu specifically (any character device passes, e.g.
     /dev/null), and it does NOT mean venus/Vulkan capset support -- those
     require protocol negotiation this file does not implement. Callers must
-    not read a `true` result as "Vulkan works"."""
+    not read a `true` result as "Vulkan works".
+
+    SECURITY: `render_node` is validated with `is_safe_render_node_path()`
+    before it reaches the shell -- see the file-level SECURITY note above.
+    Any path containing a shell metacharacter (quotes, `;`, whitespace,
+    etc.) is rejected and reported as absent, never executed."""
     if render_node == "":
+        return false
+    if not is_safe_render_node_path(render_node):
         return false
     shell_bool("test -c '{render_node}'")
 
