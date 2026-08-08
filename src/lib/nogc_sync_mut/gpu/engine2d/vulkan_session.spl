@@ -120,6 +120,9 @@ class VulkanSession:
     initialized: bool
     generation: i64
     device_name: text
+    transient_cmd_pools: [i64]
+    transient_cmd_pool_created_count: i64
+    transient_cmd_pool_destroyed_count: i64
 
     static fn create(mode: text, thread_policy: text) -> VulkanSession:
         VulkanSession(
@@ -136,7 +139,10 @@ class VulkanSession:
             thread_policy: thread_policy,
             initialized: false,
             generation: 0,
-            device_name: ""
+            device_name: "",
+            transient_cmd_pools: [],
+            transient_cmd_pool_created_count: 0,
+            transient_cmd_pool_destroyed_count: 0
         )
 
     me init_device() -> text:
@@ -197,7 +203,7 @@ class VulkanSession:
             self.shader_count = self.shader_count + 1
         handle
 
-    fn begin_frame(width: i64, height: i64) -> i64:
+    me begin_frame(width: i64, height: i64) -> i64:
         if self.initialized == false:
             return 0
         var pool = self.cmd_pool_handle
@@ -205,6 +211,8 @@ class VulkanSession:
             pool = vulkan_session_create_cmd_pool(self.device_handle, self.queue_family)
             if pool <= 0:
                 return 0
+            self.transient_cmd_pools.push(pool)
+            self.transient_cmd_pool_created_count = self.transient_cmd_pool_created_count + 1
         val cmd = vulkan_session_alloc_cmd_buffer(pool)
         if cmd <= 0:
             return 0
@@ -246,6 +254,12 @@ class VulkanSession:
     me release() -> text:
         if self.initialized == false:
             return "ok"
+        var i = 0
+        while i < self.transient_cmd_pools.len():
+            vulkan_session_destroy_cmd_pool(self.transient_cmd_pools[i])
+            self.transient_cmd_pool_destroyed_count = self.transient_cmd_pool_destroyed_count + 1
+            i = i + 1
+        self.transient_cmd_pools = []
         if self.cmd_pool_handle != 0:
             vulkan_session_destroy_cmd_pool(self.cmd_pool_handle)
             self.cmd_pool_handle = 0
@@ -258,6 +272,12 @@ class VulkanSession:
         self.initialized = false
         "ok"
 
+    fn transient_cmd_pool_created_count_get() -> i64:
+        self.transient_cmd_pool_created_count
+
+    fn transient_cmd_pool_destroyed_count_get() -> i64:
+        self.transient_cmd_pool_destroyed_count
+
     fn stats() -> text:
         "device=" + self.device_name
             + " mode=" + self.mode
@@ -265,3 +285,5 @@ class VulkanSession:
             + " shaders=" + self.shader_count.to_text()
             + " gen=" + self.generation.to_text()
             + " init=" + self.initialized.to_text()
+            + " transient_pools_created=" + self.transient_cmd_pool_created_count.to_text()
+            + " transient_pools_destroyed=" + self.transient_cmd_pool_destroyed_count.to_text()

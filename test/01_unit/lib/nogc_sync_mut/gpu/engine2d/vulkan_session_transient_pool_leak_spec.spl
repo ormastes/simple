@@ -1,0 +1,74 @@
+# @cover src/lib/nogc_sync_mut/gpu/engine2d/vulkan_session.spl 60%
+# @tag: unit, gpu, engine2d, vulkan, session, cmd_pool, leak
+#
+# DEFECT 3 (doc/08_tracking/bug/engine2d_simd_gpu_layer_audit_2026-08-08.md):
+# under `thread_policy == "multi"`, `begin_frame()` created a brand-new
+# native Vulkan command pool on every call and assigned it only to a local
+# `var pool` -- never stored on `self`, never destroyed by `release()`
+# (which only destroyed the single default `self.cmd_pool_handle`). One
+# native command-pool handle leaked per frame, unbounded over a session's
+# lifetime.
+#
+# Fix: `begin_frame()` (now `me`, since it mutates `self`) appends every
+# "multi"-policy transient pool to `self.transient_cmd_pools` and increments
+# `self.transient_cmd_pool_created_count`; `release()` destroys every
+# tracked transient pool and increments
+# `self.transient_cmd_pool_destroyed_count`. This spec drives real Vulkan
+# hardware and counts pool creation/destruction parity across N frames.
+
+use std.spec
+use std.nogc_sync_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+
+describe "VulkanSession transient command-pool parity under \"multi\" thread policy":
+
+    it "creates exactly one transient pool per begin_frame call and destroys all of them on release":
+        var session = VulkanSession.create("2d", "multi")
+        val init_result = session.init_device()
+        assert_equal(init_result, "ok")
+
+        assert_equal(session.transient_cmd_pool_created_count_get(), 0)
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 0)
+
+        var i = 0
+        while i < 5:
+            val cmd = session.begin_frame(64, 64)
+            assert_true(cmd > 0)
+            val submit_result = session.submit_frame(cmd)
+            assert_equal(submit_result, "ok")
+            i = i + 1
+
+        # Every "multi"-policy frame must have created its own transient
+        # pool -- none reused, none silently dropped.
+        assert_equal(session.transient_cmd_pool_created_count_get(), 5)
+        # None destroyed yet -- they are pending cleanup at release(), not
+        # freed per-frame (that is a valid alternate fix shape but this repo
+        # chose end-of-session cleanup to mirror `self.cmd_pool_handle`).
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 0)
+
+        val release_result = session.release()
+        assert_equal(release_result, "ok")
+
+        # release() must destroy every transient pool it created -- parity,
+        # not a partial sweep.
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 5)
+
+    it "does not create any transient pool under \"single\" thread policy":
+        var session = VulkanSession.create("2d", "single")
+        val init_result = session.init_device()
+        assert_equal(init_result, "ok")
+        val pool_result = session.create_command_pool()
+        assert_equal(pool_result, "ok")
+
+        var i = 0
+        while i < 3:
+            val cmd = session.begin_frame(64, 64)
+            assert_true(cmd > 0)
+            val submit_result = session.submit_frame(cmd)
+            assert_equal(submit_result, "ok")
+            i = i + 1
+
+        assert_equal(session.transient_cmd_pool_created_count_get(), 0)
+
+        val release_result = session.release()
+        assert_equal(release_result, "ok")
+        assert_equal(session.transient_cmd_pool_destroyed_count_get(), 0)

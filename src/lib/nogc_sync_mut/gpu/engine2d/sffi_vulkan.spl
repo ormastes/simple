@@ -106,28 +106,58 @@ fn _vulkan_read_buffer_bytes_abi(handle: i64, byte_count: i64, offset: i64) -> [
 class VulkanFfi:
     _mode: GpuFfiMode
     _dyn_lib: DynLib?
+    _dyn_rejected_ops: i64 = 0
+    _dyn_last_rejection: text = ""
 
 impl FfiDispatchBase for VulkanFfi:
 
     fn mode() -> GpuFfiMode:
         self._mode
 
+    fn rejected_op_count() -> i64:
+        """Count of Dynamic-mode operations honestly rejected because
+        real libvulkan.so exports no (struct-based) symbol this raw
+        call0..call4(i64...) FFI mechanism can invoke. Static mode never
+        increments this."""
+        self._dyn_rejected_ops
+
+    fn last_rejection() -> text:
+        """Name of the most recently rejected Dynamic-mode operation, or
+        empty text if none has been rejected yet."""
+        self._dyn_last_rejection
+
+    me _dyn_reject_bool(op: text) -> bool:
+        """Honest-gate primitive for bool-returning Dynamic-mode ops: no
+        real libvulkan symbol exists for these (they are Rust-runtime-side
+        rt_vulkan_* names, not vkCreateInstance/vkAllocateMemory/... driver
+        exports), so record the rejection instead of dlsym'ing a
+        nonexistent export and silently no-opping."""
+        self._dyn_rejected_ops = self._dyn_rejected_ops + 1
+        self._dyn_last_rejection = op
+        false
+
+    me _dyn_reject_i64(op: text) -> i64:
+        """Same as `_dyn_reject_bool` for i64-returning ops."""
+        self._dyn_rejected_ops = self._dyn_rejected_ops + 1
+        self._dyn_last_rejection = op
+        0
+
     # --- Constructors -------------------------------------------------------
 
     static fn create_static() -> VulkanFfi:
-        VulkanFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+        VulkanFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create_dynamic() -> VulkanFfi?:
         val lib = try_load_gpu_lib("vulkan")
         if lib == nil:
             return nil
-        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create_dynamic_from(path: text) -> VulkanFfi?:
         val lib = DynLib.load(path)
         if lib == nil:
             return nil
-        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create(sffi_mode: GpuFfiMode) -> VulkanFfi?:
         match sffi_mode:
@@ -142,8 +172,33 @@ impl FfiDispatchBase for VulkanFfi:
     # --- Dispatch methods ---------------------------------------------------
 
     fn is_available() -> bool:
+        """Static mode: real rt_vulkan_is_available() driver probe.
+        Dynamic mode: always false. The loader can resolve the real
+        `vkEnumerateInstanceVersion` export (see `loader_probe()` below
+        for that raw signal), but every operation this class dispatches
+        in Dynamic mode (init/alloc_buffer/dispatch/...) has no matching
+        libvulkan export reachable through the raw call0..call4(i64...)
+        FFI -- those are Rust-runtime-internal rt_vulkan_* names, not
+        driver entry points, and driver entry points that DO exist
+        (vkCreateInstance, vkAllocateMemory, ...) take struct pointers
+        this FFI cannot marshal. Reporting true here would be exactly
+        the fake-honesty-signal this class was audited for: a capability
+        gate that does not exercise the capability. See
+        `rejected_op_count()`/`last_rejection()` for the counted proof.
+        """
         match self._mode:
             case Static: rt_vulkan_is_available()
+            case Dynamic: false
+
+    fn loader_probe() -> bool:
+        """Raw signal only: does the dynamically-loaded library resolve
+        the real `vkEnumerateInstanceVersion` export? True here means
+        'a Vulkan loader is present', NOT 'this class can drive it' --
+        callers must use `is_available()` for the latter.
+        Static mode always reports false (no dynamic loader involved).
+        """
+        match self._mode:
+            case Static: false
             case Dynamic:
                 if self._dyn_lib != nil:
                     val result = self._dyn_lib.call0("vkEnumerateInstanceVersion")
@@ -151,63 +206,35 @@ impl FfiDispatchBase for VulkanFfi:
                 else:
                     false
 
-    fn init() -> bool:
+    me init() -> bool:
         match self._mode:
             case Static: rt_vulkan_init()
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call0("rt_vulkan_init")
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("init")
 
-    fn shutdown() -> bool:
+    me shutdown() -> bool:
         match self._mode:
             case Static: rt_vulkan_shutdown()
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call0("rt_vulkan_shutdown")
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("shutdown")
 
-    fn device_count() -> i64:
+    me device_count() -> i64:
         match self._mode:
             case Static: rt_vulkan_device_count()
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call0("rt_vulkan_device_count")
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("device_count")
 
-    fn select_device(id: i64) -> bool:
+    me select_device(id: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_select_device(id)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_select_device", id)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("select_device")
 
-    fn alloc_buffer(size: i64, usage: i64) -> i64:
+    me alloc_buffer(size: i64, usage: i64) -> i64:
         match self._mode:
             case Static: rt_vulkan_alloc_buffer(size, usage)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call2("rt_vulkan_alloc_buffer", size, usage)
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("alloc_buffer")
 
-    fn free_buffer(handle: i64) -> bool:
+    me free_buffer(handle: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_free_buffer(handle)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_free_buffer", handle)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("free_buffer")
 
     fn copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
         match self._mode:
@@ -223,154 +250,87 @@ impl FfiDispatchBase for VulkanFfi:
                     rt_array_data_ptr_u8(data), data.len().to_i64(), handle, offset)
             case Dynamic: false
 
-    fn compile_glsl(source: text) -> i64:
+    me compile_glsl(source: text) -> i64:
         match self._mode:
             case Static: rt_vulkan_compile_glsl(source)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call0("rt_vulkan_compile_glsl")
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("compile_glsl")
 
     fn compile_spirv(spirv_bytes: [u8]) -> i64:
         match self._mode:
             case Static: _vulkan_compile_spirv_abi(spirv_bytes)
             case Dynamic: 0
 
-    fn create_compute_pipeline(shader: i64, entry: text, pc_size: i64) -> i64:
+    me create_compute_pipeline(shader: i64, entry: text, pc_size: i64) -> i64:
         if entry == "" or entry.contains("\0"):
             return 0
         match self._mode:
             case Static: rt_vulkan_create_compute_pipeline(shader, entry, pc_size)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val entry_z = entry + "\0"
-                    self._dyn_lib.call3("rt_vulkan_create_compute_pipeline", shader, entry_z.ptr(), pc_size)
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("create_compute_pipeline")
 
-    fn create_descriptor_set(pipe: i64) -> i64:
+    me create_descriptor_set(pipe: i64) -> i64:
         match self._mode:
             case Static: rt_vulkan_create_descriptor_set(pipe)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call1("rt_vulkan_create_descriptor_set", pipe)
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("create_descriptor_set")
 
-    fn bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool:
+    me bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_bind_buffer(descriptor_set, binding, buf)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call3("rt_vulkan_bind_buffer", descriptor_set, binding, buf)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("bind_buffer")
 
-    fn destroy_descriptor_set(descriptor_set: i64) -> bool:
+    me destroy_descriptor_set(descriptor_set: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_destroy_descriptor_set(descriptor_set)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_destroy_descriptor_set", descriptor_set)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("destroy_descriptor_set")
 
-    fn begin_compute() -> i64:
+    me begin_compute() -> i64:
         match self._mode:
             case Static: rt_vulkan_begin_compute()
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call0("rt_vulkan_begin_compute")
-                else:
-                    0
+            case Dynamic: self._dyn_reject_i64("begin_compute")
 
-    fn bind_pipeline(cmd: i64, pipe: i64) -> bool:
+    me bind_pipeline(cmd: i64, pipe: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_bind_pipeline(cmd, pipe)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call2("rt_vulkan_bind_pipeline", cmd, pipe)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("bind_pipeline")
 
-    fn bind_descriptors(cmd: i64, ds: i64) -> bool:
+    me bind_descriptors(cmd: i64, ds: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_bind_descriptors(cmd, ds)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call2("rt_vulkan_bind_descriptors", cmd, ds)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("bind_descriptors")
 
     fn push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool:
         match self._mode:
             case Static: _vulkan_push_constants_abi(cmd, pipe, data)
             case Dynamic: false
 
-    fn dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
+    me dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_dispatch(cmd, x, y, z)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call4("rt_vulkan_dispatch", cmd, x, y, z)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("dispatch")
 
-    fn end_compute(cmd: i64) -> bool:
+    me end_compute(cmd: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_end_compute(cmd)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_end_compute", cmd)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("end_compute")
 
-    fn submit_and_wait(cmd: i64) -> bool:
+    me submit_and_wait(cmd: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_submit_and_wait(cmd)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_submit_and_wait", cmd)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("submit_and_wait")
 
-    fn wait_idle() -> bool:
+    me wait_idle() -> bool:
         match self._mode:
             case Static: rt_vulkan_wait_idle()
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call0("rt_vulkan_wait_idle")
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("wait_idle")
 
-    fn destroy_shader(module: i64) -> bool:
+    me destroy_shader(module: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_destroy_shader(module)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_destroy_shader", module)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("destroy_shader")
 
-    fn destroy_pipeline(pipe: i64) -> bool:
+    me destroy_pipeline(pipe: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_destroy_pipeline(pipe)
-            case Dynamic:
-                if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call1("rt_vulkan_destroy_pipeline", pipe)
-                    result != 0
-                else:
-                    false
+            case Dynamic: self._dyn_reject_bool("destroy_pipeline")
 
 fn vulkan_sffi_init() -> bool:
     rt_vulkan_init()

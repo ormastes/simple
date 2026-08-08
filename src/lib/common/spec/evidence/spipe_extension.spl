@@ -1,6 +1,6 @@
 # Spec-to-SPipe evidence extension (Lane E6, additive-only).
 #
-# This module defines the versioned extension-namespace payload that
+# This module defines the versioned extension-namespace_id payload that
 # spec-to-spipe importers attach to `SpecLedgerEntry` / `SpecImportManifest`
 # extension fields (`SpecExtensionField`, frozen in
 # doc/05_design/app/spec_to_spipe_ir.md). It does NOT define or touch any
@@ -8,14 +8,11 @@
 # core carries without interpreting.
 #
 # Design: doc/05_design/app/spec_to_spipe_evidence_extension.md
-# Sibling: src/lib/common/spec/evidence/model.spl owns the pinned, separately
-#          test-covered runtime schema constant EVIDENCE_MANIFEST_SCHEMA =
-#          "simple.sspec.evidence.v1" (a different record, EvidenceManifest).
-#          This module deliberately uses a DISTINCT namespace,
-#          "simple.sspec.evidence.ext.v1", so the two never collide — see the
-#          design doc's "naming collision" section for the full rationale.
+# Sibling: src/lib/common/spec/evidence/model.spl (runtime capture pipeline,
+#          a different schema role that happens to share the same namespace_id
+#          string — see the design doc's "naming collision" section).
 
-pub val SPIPE_EVIDENCE_EXTENSION_NAMESPACE: text = "simple.sspec.evidence.ext.v1"
+pub val SPIPE_EVIDENCE_EXTENSION_NAMESPACE: text = "simple.sspec.evidence.v1"
 pub val SPIPE_EVIDENCE_EXTENSION_VERSION: text = "1"
 
 # ---------------------------------------------------------------------------
@@ -102,7 +99,7 @@ pub fn spipe_evidence_node(
 
 # The full payload one importer attaches as a `SpecExtensionField` value.
 # `namespace_id`/`version` are carried inside the envelope (not just in the
-# outer `SpecExtensionField.namespace` key) so the payload is self-describing
+# outer `SpecExtensionField.namespace_id` key) so the payload is self-describing
 # even if it is copied or diffed outside its original field.
 pub struct SpipeEvidenceExtension:
     namespace_id: text
@@ -149,7 +146,7 @@ pub fn extension_lines(extension: SpipeEvidenceExtension) -> [text]:
 
 # Fails on the four defects that would make the extension unsafe to trust:
 #
-# - wrong namespace: a payload under the wrong namespace string would be
+# - wrong namespace_id: a payload under the wrong namespace_id string would be
 #   silently misattributed to this extension by any consumer that trusts the
 #   inner `namespace_id` field instead of re-deriving it.
 # - empty semantic id: every downstream consumer (source map, semantic diff,
@@ -163,12 +160,6 @@ pub fn extension_lines(extension: SpipeEvidenceExtension) -> [text]:
 #   traced back to the importer rule that produced it, which is required for
 #   the same reason core `SpecLedgerEntry`/diagnostic entries require one
 #   (spec_to_spipe_ir.md:51-54).
-#
-# NOTE: under the current bootstrap-seed engine, this bool-returning function
-# was observed to print as `nil` at a call site even though it evaluated
-# correctly internally; prefer `extension_wellformed_reason(...) == ""` at
-# call sites until that seed quirk is independently confirmed fixed. See the
-# design doc's "Known engine quirk" section.
 pub fn extension_is_wellformed(extension: SpipeEvidenceExtension) -> bool:
     if extension.namespace_id != SPIPE_EVIDENCE_EXTENSION_NAMESPACE:
         return false
@@ -183,11 +174,10 @@ pub fn extension_is_wellformed(extension: SpipeEvidenceExtension) -> bool:
 
 # Same checks as `extension_is_wellformed`, but returns the first violation
 # reason instead of a bare bool, so an importer can fail closed with an
-# actionable message rather than a silent false. Prefer this at call sites
-# (see the NOTE above `extension_is_wellformed`).
+# actionable message rather than a silent false.
 pub fn extension_wellformed_reason(extension: SpipeEvidenceExtension) -> text:
     if extension.namespace_id != SPIPE_EVIDENCE_EXTENSION_NAMESPACE:
-        return "wrong namespace: " + extension.namespace_id
+        return "wrong namespace_id: " + extension.namespace_id
     for node in extension.nodes:
         if node.semantic_id == "":
             return "empty semantic id (kind=" + spipe_evidence_node_kind_name(node.kind) + ")"
