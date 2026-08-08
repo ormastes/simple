@@ -75,22 +75,34 @@ RtValue rt_sqlite_open_memory(void) {
     return from_ptr(db);
 }
 
+/*
+ * Return-code contract for all boolean-status rt_sqlite_* functions below
+ * (close, execute, execute_batch, bind_*, reset, begin/commit/rollback):
+ * 1 = success, 0 = failure. This matches the Rust seed's convention
+ * (src/compiler_rust/compiler/src/interpreter_extern/sffi_db.rs) and the
+ * Simple-side wrapper (src/lib/nogc_sync_mut/io/sqlite_sffi.spl), which
+ * checks `result == 1` uniformly. Do NOT reintroduce sqlite3's native
+ * SQLITE_OK==0 polarity here — that was the source of a three-way
+ * contract mismatch (doc/08_tracking/bug, defect 2, 2026-08-08) where this
+ * file returned 0 for success while the seed and the Simple wrapper both
+ * expect 1 for success.
+ */
 RtValue rt_sqlite_close(RtValue handle) {
     if (is_nil(handle)) return from_int(1);
     sqlite3 *db = (sqlite3 *)as_ptr(handle);
     int rc = sqlite3_close(db);
-    return from_int(rc == SQLITE_OK ? 0 : 1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_execute(RtValue conn, RtValue sql) {
-    if (is_nil(conn)) return from_int(-1);
+    if (is_nil(conn)) return from_int(0);
     sqlite3 *db = (sqlite3 *)as_ptr(conn);
     const char *s = get_string(sql);
-    if (!s) return from_int(-1);
+    if (!s) return from_int(0);
     char *err = NULL;
     int rc = sqlite3_exec(db, s, NULL, NULL, &err);
     if (err) sqlite3_free(err);
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_execute_batch(RtValue conn, RtValue sql) {
@@ -178,39 +190,39 @@ RtValue rt_sqlite_prepare(RtValue conn, RtValue sql) {
 }
 
 RtValue rt_sqlite_bind_text(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(-1);
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     const char *s = get_string(value);
     int rc = sqlite3_bind_text(stmt, (int)as_int(idx), s ? s : "", -1, SQLITE_TRANSIENT);
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_bind_int(RtValue stmt_val, RtValue idx, RtValue value) {
-    if (is_nil(stmt_val)) return from_int(-1);
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_int64(stmt, (int)as_int(idx), as_int(value));
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_bind_float(RtValue stmt_val, RtValue idx, double value) {
-    if (is_nil(stmt_val)) return from_int(-1);
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_double(stmt, (int)as_int(idx), value);
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_bind_null(RtValue stmt_val, RtValue idx) {
-    if (is_nil(stmt_val)) return from_int(-1);
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_bind_null(stmt, (int)as_int(idx));
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 RtValue rt_sqlite_reset(RtValue stmt_val) {
-    if (is_nil(stmt_val)) return from_int(-1);
+    if (is_nil(stmt_val)) return from_int(0);
     sqlite3_stmt *stmt = (sqlite3_stmt *)as_ptr(stmt_val);
     int rc = sqlite3_reset(stmt);
-    return from_int(rc == SQLITE_OK ? 0 : -1);
+    return from_int(rc == SQLITE_OK ? 1 : 0);
 }
 
 void rt_sqlite_finalize(RtValue stmt_val) {
