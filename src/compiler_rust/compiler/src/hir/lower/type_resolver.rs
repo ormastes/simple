@@ -5,6 +5,32 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    /// Recover a canonical nominal owner from resolver-fed declaration
+    /// metadata. A bare spelling is accepted only when the import map proved
+    /// it has one owner in the compilation closure.
+    pub(super) fn global_struct_key_for_name(&self, name: &str) -> Option<String> {
+        if let Some(Some(declaration_path)) = self.struct_decl_files.get(name) {
+            if let Some(owners) = self.struct_module_owners.as_ref() {
+                if let Some(module_owner) = owners.get(declaration_path).or_else(|| {
+                    std::fs::canonicalize(declaration_path)
+                        .ok()
+                        .and_then(|canonical| owners.get(&canonical))
+                }) {
+                    return Some(format!("{}__{}", module_owner, name));
+                }
+            }
+        }
+        self.unique_global_struct_owners
+            .as_ref()
+            .and_then(|owners| owners.get(name))
+            .cloned()
+    }
+
+    pub(super) fn global_struct_fields_for_name(&self, name: &str) -> Option<&Vec<(String, Type)>> {
+        let owner = self.global_struct_key_for_name(name)?;
+        self.global_struct_defs.as_ref()?.get(&owner)
+    }
+
     fn resolve_self_type(&self) -> LowerResult<TypeId> {
         if let Some(class_ty) = self.current_class_type {
             Ok(class_ty)
@@ -165,7 +191,6 @@ impl Lowerer {
                         let id = self.module.types.register_named(name.to_string(), struct_ty);
                         return Ok(id);
                     }
-                }
                 // Bare type names from inference / cross-module signatures.
                 match name {
                     "unit" => return Ok(TypeId::VOID),
@@ -902,17 +927,19 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
-        let (field_index, field_type_spec) =
-            self.global_struct_defs
-                .as_ref()
-                .and_then(|defs| defs.get(struct_name))
-                .and_then(|fields| {
-                    fields
-                        .iter()
-                        .enumerate()
-                        .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
-                })
-                .or_else(|| {
+        let has_nominal_owner = self.global_struct_key_for_name(struct_name).is_some();
+        let (field_index, field_type_spec) = self
+            .global_struct_fields_for_name(struct_name)
+            .and_then(|fields| {
+                fields
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
+            })
+            .or_else(|| {
+                if has_nominal_owner {
+                    return None;
+                }
                     self.duplicate_global_struct_defs
                         .as_ref()
                         .and_then(|defs| defs.get(struct_name))
