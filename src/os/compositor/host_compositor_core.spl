@@ -1967,27 +1967,12 @@ class HostCompositor:
         self.pointer_x = x
         self.pointer_y = y
         val prior_windows = self.windows
+        # Passthrough-rect restoration lives inside host_compositor_pointer_move
+        # itself (not duplicated here) so every caller of that shared free
+        # function -- this method AND SimpleOsGuiAdapter.deliver_pointer_move --
+        # gets it, instead of only whichever caller remembers to copy the loop.
         val out = host_compositor_pointer_move(self, x, y)
         self.windows = out.windows
-        # host_compositor_pointer_move round-trips through
-        # host_windows_to/from_lifecycle_state, which -- like
-        # apply_wm_action's own `maximized`/`restore_*` fields -- doesn't
-        # carry passthrough_*, so every pointer move would otherwise silently
-        # erase a window's declared click-through region. Restore it from
-        # the pre-move snapshot, same pattern as apply_wm_action.
-        var wi = 0
-        while wi < self.windows.len():
-            var wj = 0
-            while wj < prior_windows.len():
-                if self.windows[wi].id == prior_windows[wj].id:
-                    var mw = self.windows[wi]
-                    mw.passthrough_x = prior_windows[wj].passthrough_x
-                    mw.passthrough_y = prior_windows[wj].passthrough_y
-                    mw.passthrough_w = prior_windows[wj].passthrough_w
-                    mw.passthrough_h = prior_windows[wj].passthrough_h
-                    self.windows[wi] = mw
-                wj = wj + 1
-            wi = wi + 1
         self.next_window_id = out.next_window_id
         self.dragging = out.dragging
         self.drag_window_id = out.drag_window_id
@@ -2427,9 +2412,32 @@ fn host_compositor_apply_lifecycle_action(comp: HostCompositor, action: WmAction
 
 fn host_compositor_pointer_move(comp: HostCompositor, x: i32, y: i32) -> HostCompositor:
     var out = comp
+    val prior_windows = comp.windows
     val interaction = WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h)
     val result = wm_lifecycle_pointer_move(host_windows_to_lifecycle_state(out.windows), out.next_window_id, out.width, out.height, interaction, x, y)
     out.windows = host_windows_from_lifecycle_state(result.windows)
+    # The host_windows_to/from_lifecycle_state round-trip above goes through
+    # WmLifecycleWindowState, which -- like apply_wm_action's own
+    # `maximized`/`restore_*` fields -- doesn't carry passthrough_*, so every
+    # pointer move would otherwise silently erase a window's declared
+    # click-through region. Restore it from the pre-move snapshot, same
+    # pattern as apply_wm_action. This lives here (not in each caller) so
+    # HostCompositor.pointer_move AND SimpleOsGuiAdapter.deliver_pointer_move
+    # -- both of which call this function directly -- share one fix instead
+    # of each needing its own copy of the restoration loop.
+    var wi = 0
+    while wi < out.windows.len():
+        var wj = 0
+        while wj < prior_windows.len():
+            if out.windows[wi].id == prior_windows[wj].id:
+                var mw = out.windows[wi]
+                mw.passthrough_x = prior_windows[wj].passthrough_x
+                mw.passthrough_y = prior_windows[wj].passthrough_y
+                mw.passthrough_w = prior_windows[wj].passthrough_w
+                mw.passthrough_h = prior_windows[wj].passthrough_h
+                out.windows[wi] = mw
+            wj = wj + 1
+        wi = wi + 1
     out.next_window_id = result.next_window_id
     out.dragging = result.interaction.dragging
     out.drag_window_id = result.interaction.drag_window_id

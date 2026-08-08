@@ -110,3 +110,48 @@ bin/simple run src/app/test_runner_new/test_runner_single.spl \
   (see Resolution above); if a future spec needs click-through during an
   active drag/capture, that's a deliberate design decision to revisit, not
   an oversight.
+
+## Rework 2026-08-08: incomplete family, sibling call site bypassed the fix
+
+The original fix (above) restored `passthrough_*` inside
+`HostCompositor.pointer_move`. Higher-model review of that change found it
+was applied at the wrong layer: `SimpleOsGuiAdapter.deliver_pointer_move`
+(`src/os/compositor/host_compositor_core.spl`, `SimpleOsGuiAdapter` class --
+the on-device SimpleOS GUI-adapter path a real pointer-move IPC event
+actually takes) calls the lower-level free function
+`host_compositor_pointer_move` **directly**, not through
+`HostCompositor.pointer_move`. The restoration loop lived only in the
+method, so the adapter path still silently erased a window's declared
+click-through region on the very first pointer move -- the exact defect
+this bug describes, at an un-enumerated sibling call site.
+
+**Family enumeration:** `git grep -n
+'host_compositor_pointer_move\|host_windows_from_lifecycle_state'` found
+exactly two callers of the lifecycle round-trip:
+`host_compositor_apply_lifecycle_action` (used only by `apply_wm_action`,
+which already restores both `maximized`/`restore_*` *and*
+`passthrough_*` -- not affected) and `host_compositor_pointer_move` (used
+by both `HostCompositor.pointer_move` and
+`SimpleOsGuiAdapter.deliver_pointer_move` -- the latter was the gap).
+
+**Fix (dedup, not copy-paste):** moved the `passthrough_*` restoration
+loop out of `HostCompositor.pointer_move` and into the shared free
+function `host_compositor_pointer_move` itself
+(`src/os/compositor/host_compositor_core.spl`), using the function's own
+`comp.windows` as the pre-move snapshot. Both callers now get the
+restoration automatically -- a third caller added later would too --
+instead of each needing its own copy of the loop. `HostCompositor.pointer_move`
+was simplified accordingly (drops its now-redundant inline loop).
+
+**Verification:** added a new example, `"a passthrough dead rect survives
+a pointer move delivered through the SimpleOS GUI adapter"`, to
+`test/03_system/wm/wm_input_routing_system_spec.spl`. It builds a
+`SimpleOsGuiAdapter` (not a bare `HostCompositor`), marks a dead rect,
+calls `adapter.deliver_pointer_move(...)` (the adapter path, not
+`HostCompositor.pointer_move` directly), and asserts routing still falls
+through afterward.
+
+```
+Results: 5 total, 5 passed, 0 failed
+```
+via the same command as above.

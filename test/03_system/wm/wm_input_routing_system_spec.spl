@@ -23,7 +23,7 @@ use common.io.window_event.{
 use common.ui.builder.{build_tree, column, text_field, with_height}
 use common.window_protocol.geometry.{Size}
 use nogc_sync_mut.ui.session.{UISession}
-use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.host_compositor_entry.{HostCompositor, HeadlessHostCompositorBackend, SimpleOsGuiAdapter}
 use os.compositor.host_gui_event_router.{HostGuiEventRouter}
 use os.compositor.wm_action_lifecycle.{wm_move_action}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
@@ -175,3 +175,52 @@ describe "WM input routing":
         assert_true(routed_to_a)
         assert_false(routed_to_b)
         print "wm_input_passthrough routed_to_a={routed_to_a} routed_to_b={routed_to_b}"
+
+    slow_it "a passthrough dead rect survives a pointer move delivered through the SimpleOS GUI adapter":
+        """`SimpleOsGuiAdapter.deliver_pointer_move` -- the on-device path a
+        real SimpleOS pointer-move IPC event takes -- calls the lower-level
+        `host_compositor_pointer_move` directly, bypassing
+        `HostCompositor.pointer_move`'s own call chain. That free function
+        round-trips window state through `WmLifecycleWindowState`, which
+        doesn't carry `passthrough_x/y/w/h`, so a naive implementation would
+        silently erase a window's declared click-through region on the very
+        first pointer move delivered through the adapter -- even though the
+        same erasure was already fixed for `HostCompositor.pointer_move`
+        directly. This example marks a dead rect, delivers a pointer move
+        through the adapter (not through `HostCompositor.pointer_move`
+        directly), and checks routing still falls through to the window
+        underneath afterward.
+        See doc/08_tracking/bug/wm_hit_test_pointer_events_missing_2026-08.md.
+        """
+        step("Two overlapping windows behind a SimpleOsGuiAdapter: A (bottom) and B (top)")
+        val backend = HeadlessHostCompositorBackend.new(640, 600)
+        var adapter = SimpleOsGuiAdapter.new(backend, Size.wh(640, 600))
+        adapter.compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Window A",
+            20, 20, 300, 300, "", 99, "wm.input.routing.adapter.passthrough.a"
+        )
+        val a_id = adapter.compositor.windows[0].id
+        adapter.compositor.apply_bridge_request(
+            2, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Window B",
+            160, 160, 300, 300, "", 99, "wm.input.routing.adapter.passthrough.b"
+        )
+        val b_id = adapter.compositor.windows[1].id
+        var router_a = HostGuiEventRouter.new(a_id)
+        var router_b = HostGuiEventRouter.new(b_id)
+        var session = _routing_session()
+        # Same overlap geometry as the direct-call example above.
+        val overlap_x = 220
+        val overlap_y = 230
+
+        step("Mark B's overlap corner (B-local (0,0)-(152,124)) as click-through")
+        adapter.compositor.set_window_pointer_passthrough(b_id, 0, 0, 152, 124)
+
+        step("Deliver a pointer move THROUGH THE ADAPTER (not HostCompositor.pointer_move directly)")
+        adapter.deliver_pointer_move(overlap_x, overlap_y)
+
+        step("The dead rect must still be honored after the adapter-path move: A claims the click, not B")
+        val routed_to_a = router_a.route(_move_event(1, overlap_x, overlap_y), adapter.compositor, session)
+        val routed_to_b = router_b.route(_move_event(2, overlap_x, overlap_y), adapter.compositor, session)
+        assert_true(routed_to_a)
+        assert_false(routed_to_b)
+        print "wm_input_adapter_passthrough routed_to_a={routed_to_a} routed_to_b={routed_to_b}"
