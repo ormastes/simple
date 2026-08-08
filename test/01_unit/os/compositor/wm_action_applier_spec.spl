@@ -39,6 +39,8 @@ impl CompositorBackend for ApplierBackend:
         pass_dn
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
+    me report_damage(x: i32, y: i32, w: i32, h: i32):
+        pass_dn
 
 fn _action(kind: text, window_id: u64) -> WmAction:
     WmAction(kind: kind, window_id: window_id, title: "Window", x: 10, y: 20, width: 80, height: 60, content: "tree", process_id: 7, app_id: "app.test", owner_port: 9, src_port: 0)
@@ -306,6 +308,53 @@ describe "shared WM action applier":
         expect(windows.len()).to_equal(1)
         expect(windows[0].id).to_equal(2)
         assert_true(windows[0].focused)
+
+    it "restores exact pre-maximize geometry via a directly-constructed WmAction":
+        # Regression spec for
+        # doc/08_tracking/bug/wm_lifecycle_restore_action_does_not_restore_geometry_2026-08-08.md.
+        # apply_bridge_request intercepts COMP_MAXIMIZE/COMP_RESTORE before they
+        # ever reach apply_wm_action_to_lifecycle_windows, so this constructs
+        # WmAction(kind: "maximize"/"restore", ...) directly to exercise the
+        # lifecycle path a future direct caller would hit.
+        var windows: [WmLifecycleWindowState] = []
+        var result = apply_wm_action_to_lifecycle_windows(windows, 1, 640, 480, _action("create_window", 0))
+        windows = result.windows
+        expect(windows[0].x).to_equal(10)
+        expect(windows[0].y).to_equal(20)
+        expect(windows[0].w).to_equal(80)
+        expect(windows[0].h).to_equal(60)
+        assert_false(windows[0].maximized)
+
+        # (b) restore when never maximized is a no-op on geometry/maximized.
+        result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, WmAction(kind: "restore", window_id: 1, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0))
+        windows = result.windows
+        expect(windows[0].x).to_equal(10)
+        expect(windows[0].y).to_equal(20)
+        expect(windows[0].w).to_equal(80)
+        expect(windows[0].h).to_equal(60)
+        assert_false(windows[0].maximized)
+
+        # (a) maximize snapshots pre-maximize geometry into restore_x/y/w/h.
+        result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, WmAction(kind: "maximize", window_id: 1, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0))
+        windows = result.windows
+        assert_true(windows[0].maximized)
+        expect(windows[0].x).to_equal(0)
+        expect(windows[0].y).to_equal(48)
+        expect(windows[0].w).to_equal(640)
+        expect(windows[0].h).to_equal(376)
+        expect(windows[0].restore_x).to_equal(10)
+        expect(windows[0].restore_y).to_equal(20)
+        expect(windows[0].restore_w).to_equal(80)
+        expect(windows[0].restore_h).to_equal(60)
+
+        # (a) restore returns the exact original geometry and clears maximized.
+        result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, WmAction(kind: "restore", window_id: 1, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0))
+        windows = result.windows
+        assert_false(windows[0].maximized)
+        expect(windows[0].x).to_equal(10)
+        expect(windows[0].y).to_equal(20)
+        expect(windows[0].w).to_equal(80)
+        expect(windows[0].h).to_equal(60)
 
     it "derives modern motion phases from lifecycle actions and window state":
         val window = WmLifecycleWindowState(id: 3, owner_port: 11, title: "Motion", x: 20, y: 60, w: 200, h: 140, content: "", process_id: 1, app_id: "/motion", minimized: false, focused: true)
