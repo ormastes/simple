@@ -78,6 +78,26 @@ identical `executed=7 passed=5 failed=2` on origin/main's unmodified lexer —
 **pre-existing, not caused by this change** (baselined by swapping the file and
 re-running).
 
+### Differential token-stream check on real in-tree sources
+
+A throwaway spec lexed four real files with CoreLexer and printed
+`tokens=<n> h=<digest-of-(kind,text,suffix)-stream>`, once with the fixed lexer
+and once with `origin/main`'s. This is both the impact evidence and the
+collateral-damage bound:
+
+| file | before | after |
+|---|---|---|
+| `src/os/apps/coreutils/cp.spl` (has `0o644u32`) | `tokens=252 h=672831186` | `tokens=251 h=911838769` |
+| `src/compiler/10.frontend/core/parser_expr.spl` | `tokens=9347 h=502690997` | identical |
+| `src/compiler/10.frontend/core/types.spl` | `tokens=9024 h=350861240` | identical |
+| `src/lib/common/text.spl` | `tokens=491 h=229556861` | identical |
+
+`cp.spl` loses exactly one token — the spurious `IDENT("u32")` the split used to
+produce — confirming a real in-tree file was mis-lexed. The three control files
+carry no radix-suffixed literal and are byte-identical in both token count and
+digest across 18,862 tokens, so the change is inert outside its intended input
+class.
+
 ## Not fixed (recorded, out of scope)
 
 The octal branch accepts `8` and `9` (`is_digit(oc)` rather than an octal-digit
