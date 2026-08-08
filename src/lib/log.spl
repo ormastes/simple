@@ -1003,13 +1003,21 @@ export RingBackend, ring_backend_new, ring_backend_clear, ring_backend_count
 # defines error/info/warn/debug/trace/fatal/verbose/is_enabled/set_level/
 # get_global_level/parse_level/level_name/log, which collide with this
 # facade's OWN same-named symbols above — a wildcard re-export would poison
-# those. Placed at the END of the file (not top) because nogc_sync_mut/log.spl
-# itself does `use lib.log.{LOG_DEBUG as _F_DEBUG, ...}` — a genuine circular
-# import — and importing it before this facade's own LOG_* constants are
-# defined left those aliases unresolved at runtime ("variable `_F_DEBUG` not
-# found"). The runtime fault that previously blocked this re-export entirely
-# (unguarded rt_env_get(...).len() on a nil env var) was fixed directly in
-# nogc_sync_mut/log.spl's _ensure_initialized().
+# those. nogc_sync_mut/log.spl does `use lib.log.{...}` (this file), so this
+# `export use` makes the two modules genuinely circular. File position of
+# this block does NOT matter (moving it to the top of the file reproduces
+# the same failure) — what mattered was that nogc_sync_mut/log.spl used to
+# import lib.log's LOG_TRACE..LOG_FATAL `val`s under an alias
+# (`LOG_DEBUG as _F_DEBUG`, etc.): a `val` import across a live circular
+# dependency binds against an empty pre-completion snapshot of the
+# still-loading module, failing at runtime with "variable `_F_DEBUG` not
+# found". Fixed by having nogc_sync_mut/log.spl define those six values as
+# local literals instead of importing them (see the comment there) — plain
+# function/class imports (log_dispatch_text, LogContextSnapshot, etc.) are
+# unaffected because they bind lazily at call time, after both modules have
+# finished loading. The OTHER runtime fault that previously blocked this
+# re-export entirely (unguarded rt_env_get(...).len() on a nil env var) was
+# fixed directly in nogc_sync_mut/log.spl's _ensure_initialized().
 # ---------------------------------------------------------------------------
 export use lib.nogc_sync_mut.log.{
     clear_scopes, get_level, get_log_level, log_debug, log_error, log_info,
