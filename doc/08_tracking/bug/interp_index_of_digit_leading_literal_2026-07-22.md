@@ -137,3 +137,74 @@ was PROVEN WRONG... do not re-attempt"); this is a status re-confirmation
 only. Regression spec (interpreter-lane only, does not exercise the JIT
 lane where the defect actually lives — see caveat in the spec docstring):
 `test/01_unit/language/option_i64_value3_sentinel_spec.spl`.
+
+## Re-verification 2026-08-08 — STILL OPEN; new tag-disjointness evidence does NOT apply here
+
+Triggered by a new finding elsewhere in the runtime (used to correct
+`doc/07_guide/language/dict_native_pitfalls.md`): `src/runtime/runtime_native.c`
+defines disjoint tag classes — `RT_VALUE_TAG_SPECIAL 0x3` (:98),
+`RT_VALUE_SPECIAL_NIL 0x0` (:99), `rt_core_nil() = (0<<3)|3 = 3` (:1553-1554,
+`rt_core_from_special` at :1550 does `(payload << 3) | tag`). Under that
+general/boxed/ANY tagged-value scheme, `raw == 3` IS a tag-safe nil check: a
+genuine payload can only collide if its own shifted+tagged encoding
+coincidentally equals 3, which cannot happen for a legitimately-tagged value
+(heap `TAG_HEAP=0x1`, float `TAG_FLOAT=0x2`, and a tagged int/special payload
+of exactly 0 shifted with tag 3). This raised the question of whether the
+i64? sentinel-3 defect was actually misdiagnosed the same way.
+
+It is not. Checked the representation directly rather than by analogy:
+
+- `src/compiler_rust/compiler/src/hir/lower/expr/control.rs:1845-1850` (comment
+  at the `??` lowering site) states explicitly: "the runtime nil sentinel IS
+  the raw integer 3 ... emitting a runtime `expr != nil` check on a raw scalar
+  turns the real value 3 into the default." This is the compiler's own
+  admission that the i64? lane does NOT go through the tag-encode step at all.
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_literal.rs:44-53`
+  (`lower_nil_expr`) confirms it structurally: MIR lowers the `nil` literal to
+  `MirInst::ConstInt { dest, value: 3 }` — a bare constant `3`, not a call
+  through `rt_core_from_special`/`rt_core_nil()` and not a `(payload<<3)|tag`
+  encode. Every `T?` (`HirType::Pointer{inner:T}`) equality/coalesce/if-val
+  check against `nil` is therefore comparing the RAW machine i64 against the
+  literal `3`, on a domain (full-range `i64`) that was never tagged in the
+  first place.
+
+So the two representations only *share a bit pattern*, not a scheme: the
+general/boxed value type reserves bit-pattern 3 inside a real 3-bit tag
+namespace where collisions are provably excluded; the flat `i64?` lane reuses
+the same numeral as a bare sentinel on an untagged domain, where a payload of
+exactly 3 is bit-for-bit indistinguishable from nil by construction. The new
+evidence that rescued the f64 dict case (`dict_native_pitfalls.md`) does not
+generalize here — it is a different lane with a different (absent) tagging
+step, confirmed from the lowering source, not inferred by analogy.
+
+Empirical re-confirmation (seed JIT, `bin/simple run`, banner-confirmed seed
+engine; probes kept one-per-file per the harness rule to avoid whole-program
+interpreter demotion), scratch files under
+`/tmp/claude-1000/-home-ormastes-dev-pub-simple/5b123a16-9921-4156-9711-79d7b39487c0/scratchpad/probe_{eqnil,coalesce,ifval}_{2,3,4}.spl`
+and `probe_eqnil_nil.spl`:
+
+| value | `a == nil` (JIT) | `a ?? -1` (JIT) | `if val x = a` (JIT) | interpret (`== nil`) |
+|---|---|---|---|---|
+| 2 | false (correct) | `0.0` (garbage, not nil-collision) | `IFVAL=0.0` (garbage) | false |
+| **3** | **true — WRONG** | `<value:0xffffffffffffffff>` (default branch taken, payload lost) | **IFVAL_NONE — WRONG** (unwrap skipped) | false (correct) |
+| 4 | false (correct) | `<value:0x4>` (garbage, not nil-collision) | `IFVAL=<value:0x4>` (garbage) | false |
+| nil | true (correct) | n/a | n/a | true |
+
+This exactly reproduces the 2026-08-07 matrix and the original 2026-07-22
+`make_opt` matrix: values 2/4 show the separate, already-documented tag-misread
+display defect (defect 2) but remain distinguishable from nil; only 3 collides
+with nil across all three consumer forms (`==`, `??`, `if val`). Interpreter
+lane (`SIMPLE_EXECUTION_MODE=interpret`) stays clean at all four values.
+
+Regression spec re-run: `bin/simple test
+test/01_unit/language/option_i64_value3_sentinel_spec.spl` → `Results: 5 total,
+5 passed, 0 failed` (interpreter lane only, as documented in the spec's own
+caveat — it does not exercise the JIT lane where the defect lives).
+
+**Verdict: STILL LIVE.** The recorded root cause (unsound in-band sentinel on
+an untagged flat `i64?`/`Pointer{inner:i64}` lane) is CONFIRMED CORRECT, now
+directly from the MIR lowering source (`lowering_expr_literal.rs:50`) rather
+than only from behavioral probing. The new tag-disjointness evidence from the
+runtime's boxed-value scheme is real but inapplicable — it describes a
+different, already-tagged representation that this lane never uses. No code
+changed, per the standing senior deferral against a narrow spot-fix.
