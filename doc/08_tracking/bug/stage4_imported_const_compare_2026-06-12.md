@@ -80,3 +80,17 @@ bug**, now filed separately as
   cross-module (imported) consts under a shared-prelude closure — still needs a
   minimal repro that reproduces outside the full stage4 build. Audit imported
   `EXPR_*`/`STMT_*`/`TOK_*` const comparisons in `src/compiler/10.frontend/`.
+
+## Reopened 2026-08-08 — imported fixed tag in optional-type suffix
+
+The Stage 4 x86 diagnostic loaded `src/compiler/90.tools/duplicate_check/cache.spl`
+then reported `fresh_tokens` and `cached_tokens` as untyped although both declare
+`-> [SimpleToken]?`. The parser's shared non-named postfix-suffix helper returned
+the imported `TYPE_OPTION` module value. This is the same compiled imported-fixed-
+tag failure family, but not the resolved comparison lowering defect above.
+
+Mitigation: return the fixed protocol tag `14` directly after consuming the postfix
+suffix. Regressions exercise both `[T]?` and `(T, T)?` and assert the raw return
+tag, without importing `TYPE_OPTION` into the assertion. This record remains open
+until a fresh source-fingerprinted Stage 2/3 admission and full x86 Stage 4 CLI
+pass show the duplicate-cache functions remain typed.
