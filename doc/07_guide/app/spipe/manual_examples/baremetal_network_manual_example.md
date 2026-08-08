@@ -3,6 +3,8 @@
 
 # NVMe RV32 Firmware — Wire-Level Verification Manual
 
+> **Status: design mockup — not generated from a runnable spec.** The source named below (`test/03_system/app/nvme_firmware/nvme_nand_capture_spec.spl`) exists but does not produce the evidence shown — it covers emulated NAND write/read and FTL block migration, not the NVMe CQE phase-bit, CC register bit-field, or NVMe/TCP capsule PDU scenarios described here. Do not cite this document as generated evidence. It becomes a generated manual when a runnable spec, retained artifacts, and an evidence manifest exist; tracked as lane E8 in `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`.
+
 > This checked-in generated artifact is pending post-admission docgen and is not
 > current evidence. The executable source is
 > `test/03_system/app/nvme_firmware/nvme_nand_capture_spec.spl`, which covers

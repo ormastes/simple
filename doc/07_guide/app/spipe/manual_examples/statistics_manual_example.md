@@ -1,5 +1,7 @@
 # Compiler Warm-Start & JIT Throughput — Verification Manual
 
+> **Status: design mockup — not generated from a runnable spec.** The source named below (`test/03_system/app/compiler_perf/warm_start_throughput_spec.spl`) does not exist. Do not cite this document as generated evidence. It becomes a generated manual when a runnable spec, retained artifacts, and an evidence manifest exist; tracked as lane E8 in `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`.
+
 > GENERATED — DO NOT EDIT. Produced by `simple spipe-docgen --audience=qa --stats`
 > from `test/03_system/app/compiler_perf/warm_start_throughput_spec.spl` on
 > 2026-07-05. Regenerate with:

@@ -7,6 +7,23 @@ Target outputs: `doc/07_guide/app/spipe/scenario_manual_example.md` +
 `doc/07_guide/app/spipe/manual_examples/{gui_web,baremetal_network,statistics}_manual_example.md`
 Scope: PLAN ONLY. No implementation in this document.
 
+## Superseded (2026-08-08)
+
+The single-`Capture`-trait design this plan was written against (design
+`doc/05_design/sspec_capture_extension.md`) assumed a runtime `Capture` object
+whose `render_md()` method spipe_docgen could call directly. That cannot work:
+capture runs inside the test-runner process at spec-execution time, and
+`spipe_docgen` runs later as a separate process reading only files off disk —
+there is no shared in-memory object to call `render_md()` on. This premise is
+now superseded by `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`
+(typed evidence contract, `spipe_docgen` as sole renderer over generic
+`ManualBlock` records) and its wave plan
+`doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`. Phases below
+are annotated in place rather than deleted — the audience/traceability work in
+Phase 1 and most acceptance criteria still hold; anything that assumed a
+runtime-rendered `Capture` object is marked superseded and re-pointed to the
+owning Wave/lane.
+
 ## Goal
 
 Turn today's QA-flavored `_spec.spl` → `doc/06_spec` docgen into a system that
@@ -22,6 +39,19 @@ Phase 1 (docgen/runner only) is independent of capture and ships first. Phase 2
 lays the capture core; Phases 3–4 add built-in kinds on top of it; Phase 5
 finishes user-facing kinds and drives the migration wave. 1 ∥ 2 can run in
 parallel (disjoint files). 3 depends on 2. 4 depends on 2+3. 5 depends on 1+4.
+
+**Superseded ordering note:** Phases 2–4 below assumed each capture kind
+carries its own `render_md()` and that docgen dispatches to it at render time.
+Under the typed-evidence design, providers (Phases 2–4's "kinds") instead
+emit generic `ManualBlock` records to sidecar files, and `spipe_docgen` alone
+renders them — no per-kind render method, no runtime object crossing the
+process boundary. Read every "Files to touch: … `generator.spl` — route
+their … into …" line below as "provider emits ManualBlock records consumed by
+the Wave-1 E5 docgen skeleton," not as a call into kind-owned render code.
+Wave ownership: Phase 2 core ≈ Wave 0 E0 (evidence contract) + Wave 1 E5
+(docgen skeleton); Phase 3 tui_grid/bit_table/statistics ≈ Wave 1 E2/E4 +
+Wave 2 reference profiles; Phase 4 protocol_json/protocol_binary/gui_image ≈
+Wave 1 E3/E4/E2; Phase 5 keymap + migration ≈ Wave 3 E8/E9.
 
 ---
 
@@ -78,7 +108,19 @@ Acceptance:
 
 ---
 
-## Phase 2 — Capture core: trait, registry, sidecars, goldens, policies (design §1–4)
+## Phase 2 — Capture core: trait, registry, sidecars, goldens, policies (design §1–4) — SUPERSEDED
+
+**Superseded:** this phase's `Capture` trait + `render_md()` dispatch is the
+premise called out above. Its replacement is landed: Wave-0 contract
+`src/lib/common/spec/evidence/model.spl` +
+`src/lib/common/spec/evidence/evidence_comparator.spl`, covered by
+`test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl`
+(landed 2026-08-08). The sidecar/golden/`pending-review` gate mechanics below
+are still directionally correct — a real gate is still needed — but must be
+re-specified against `ManualBlock`/evidence records, not a `Capture` trait;
+owning lane E1 (Wave 0 verification/red-team + Wave 3 final verification).
+This phase's built-in-kind work (Phases 3-4 below) remains OPEN under
+Wave-1/2 lanes E2-E7; nothing beyond the Wave-0 contract itself has landed.
 
 Goal: the `Capture` trait, spec-runtime `CaptureRegistry`, sidecar
 `<name>.capture.sdn`, golden storage layout, `ComparePolicy`, first-run auto-write +
@@ -115,7 +157,13 @@ Acceptance:
 
 ---
 
-## Phase 3 — Built-in kinds: tui_grid, component diff, bit_table, statistics (FR-1, FR-2)
+## Phase 3 — Built-in kinds: tui_grid, component diff, bit_table, statistics (FR-1, FR-2) — ANNOTATED, OPEN
+
+**Status:** OPEN. Owning lanes: TUI/GUI provider → Wave 1 E2; bit_table
+(binary layout) → Wave 1 E4; statistics → Wave 2 domain profile (E7). Each
+kind below emits `ManualBlock` evidence records rather than implementing its
+own `render_md()`; docgen rendering is solely Wave 1 E5's responsibility (see
+superseded note above). None of E2/E4/E7 has landed as of 2026-08-08.
 
 Goal: `tui_grid` char-grid capture (default TUI mode), component-scoped diff
 (`Scoped`/`Masked` regions), `bit_table` with `bits8|bits16|bits32` views,

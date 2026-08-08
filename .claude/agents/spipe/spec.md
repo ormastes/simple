@@ -137,6 +137,19 @@ manual needs an exact label. Bare `@step "..."` decorators are invalid current
 Simple syntax. Generated unresolved behavior must call
 `fail("TODO: replace generated placeholder with an executable assertion")`.
 
+## Typed Evidence Oracles (Modern SSpec)
+
+For protocol/binary/interactive captures, use typed evidence oracles from
+`src/lib/common/spec/evidence/model.spl` (`check_exact`, `check_full_pattern`,
+`check_ignore(reason)`, `check_multiset`, `check_bind`/`check_same_as`) plus
+`evidence_comparator.spl`'s `compare_evidence` — never substring-assert on a
+string built from the captured observation. Fail-closed: parse error,
+unresolved selector, ambiguous cardinality, `ignore` without a reason,
+all-ignore vacuity (no positive oracle), and closed-mode undeclared fields all
+fail the spec. Guide:
+`doc/07_guide/infra/sspec_typed_evidence.md`; skill reference card:
+`.claude/skills/spipe.md` § "Typed evidence (Modern SSpec)".
+
 ## Evidence Kinds by Spec Type
 
 | Spec Type | Capture Kind | What to Show |

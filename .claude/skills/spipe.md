@@ -360,6 +360,54 @@ impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_m
 authoritative feature set today:
 [`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
 
+## Typed evidence (Modern SSpec)
+
+An **observation** is what the capture recorded; an **oracle** is the typed
+check that decides pass/fail — never assert on a string built from the
+observation itself.
+
+| Surface | Primary oracle |
+|---|---|
+| Interactive (TUI/GUI) | `tui_text_exact`/`style`/`scoped`/`masked`/`semantic_and_grid` profile over `TerminalCell` grid |
+| Text protocol | `ProtocolTrace`/`ProtocolFrame` checks: exact / full_pattern / ignore(reason) / multiset / bind+same_as |
+| Binary layout | `BinaryLayoutIR` field/bit checks (round trip, one-hot, adjacent-preservation, reserved policy) |
+| Domain profile (scene/sim/audio/perf/ML/hw) | oracle bundle over the profile's canonical evidence |
+
+Module: `src/lib/common/spec/evidence/model.spl` (selectors, `OracleCheck`,
+`OracleSpec`), `evidence_comparator.spl` (`compare_evidence`).
+
+```simple
+val checks = [
+    check_exact("frame.type", "SYN"),
+    check_full_pattern("frame.nonce", "hex:16"),
+    check_ignore("frame.timestamp", "non-deterministic wall clock"),
+    check_multiset("frame.flags", ["ACK", "URG"]),
+]
+val spec = oracle_spec("protocol.v1", checks)
+```
+
+```simple
+# correlate a request id echoed back in the response
+val checks = [
+    check_bind("request.id", "req_id"),
+    check_same_as("response.id", "req_id"),
+]
+```
+
+```simple
+val result = compare_evidence(evidence, spec)
+expect(result.status).to_equal(EvidenceStatus.passed)
+```
+
+**Fail-closed rules:** parse error fails · unresolved selector fails ·
+ambiguous cardinality fails · `check_ignore` without a reason fails · a spec
+where every check is `ignore` (no positive oracle) fails · closed-mode
+(`oracle_spec`, not `oracle_spec_open`) rejects undeclared fields.
+
+Guide: [`doc/07_guide/infra/sspec_typed_evidence.md`](../../doc/07_guide/infra/sspec_typed_evidence.md);
+design: [`doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`](../../doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md);
+plan: [`doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`](../../doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md).
+
 ## Declare the entry layer
 
 A compiler-layer spec (parser, HIR, MIR, borrow-check, codegen, …) sometimes

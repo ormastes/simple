@@ -78,6 +78,140 @@ per test run.
   Same auto-update mechanism as `feature.md`.
 - Generated docs get bidirectional links: each manual/spec scenario section lists
   its requirement IDs; the matrix links back to the doc anchor. Links never hand-edited.
+
+## Typed evidence requirements (Modern SSpec completion)
+
+Source: `doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md`
+(§3 architecture, §9 tool plan, §10 acceptance gates) and
+`doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`.
+
+### FR-7: Typed evidence manifest and provenance
+
+Every captured artifact must carry a typed manifest recording schema version,
+selector, oracle mode, source path, and content hash, rather than an opaque
+blob a scenario merely embeds. The manifest schema
+`EVIDENCE_MANIFEST_SCHEMA = "simple.sspec.evidence.v1"` and the
+`EvidenceManifest`/`EvidenceSelector`/`OracleMode`/`ManualBlock` records are
+landed in `src/lib/common/spec/evidence/model.spl`. Fail-closed acceptance:
+a manifest with a missing or unrecognized schema version, an unresolved
+selector, or a stale source hash must fail the run rather than fall back to
+displaying the raw artifact. Without this rule, a captured screenshot or
+protocol dump can silently drift from the code path it claims to evidence and
+the generated manual keeps reporting the scenario green.
+
+### FR-8: Action trace and bounded settling
+
+Interactive scenarios must record an ordered action trace (click/type/press,
+target resolution before and after each step) and settle on an explicit
+bounded condition instead of a fixed sleep before capturing state. Acceptance
+is fail-closed: a capture taken without a preceding action-trace entry, or a
+capture that used an unbounded/fixed-delay wait instead of a declared
+settling predicate, must be rejected (`SSDOC-UI-102`). Without bounded
+settling, flaky timing produces both false failures that get "fixed" by
+lengthening the sleep and false passes where the capture races the real UI
+update, so the golden silently stops proving anything about the interaction.
+
+### FR-9: Structural textual comparator
+
+Textual evidence (JSON, protocol text, config dumps) needs a structural
+comparator supporting exact/subset/ordered/multiset/pattern/ignore/
+correlation checks and duplicate-field multiplicity, not the line-level
+trim-and-exact-equal comparison currently available. `compare_evidence` in
+`src/lib/common/spec/evidence/evidence_comparator.spl` implements the
+fail-closed gates the comparator must apply, exercised by
+`test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl`.
+Acceptance: closed-mode extra fields, an unresolved pattern selector, or an
+ignored value lacking a stated reason (`SSDOC-EVD-103`) must fail the
+comparison. The line-diff-only comparator at
+`src/compiler_rust/lib/std/src/spec/snapshot/comparison.spl:98-127` (a Myers
+diff over `Delete`/`Insert` line ops) treats field reordering or masked
+fields as a hard failure or, if pre-normalized, no failure at all — either
+way the check stops representing the field it was written to protect.
+
+### FR-10: Binary layout / production-type binding
+
+A binary-evidence table (offset | hex | field name | decoded value) must be
+generated from, and its comparator bound to, the same layout declaration the
+production encoder/decoder uses — not a documentation-only layout maintained
+by hand. Acceptance is fail-closed: byte endianness or bit numbering left
+unspecified, or a table whose layout hash doesn't match the production type's
+current layout (`SSDOC-BIN-101`/`SSDOC-BIN-102`), must fail rather than
+render a plausible-looking but stale table. Without this binding, the binary
+table can pass every run while the wire format has actually changed
+underneath it, because nothing ties the doc's field list back to the real
+struct layout.
+
+### FR-11: Generated-example integrity
+
+Every example claimed to be machine-generated (from a schema, a captured
+trace, or a production type) must carry a runnable source reference and
+reproducible hash chain: spec SHA-256, evidence manifest schema/version,
+provider/parser/comparator IDs and versions, run ID, and golden/artifact
+hashes. Acceptance is fail-closed: a generated example with no runnable
+source (`SSDOC-EVD-105`) or a stale source/profile/provider hash
+(`SSDOC-EVD-106`) must fail scan/verify. Without an integrity receipt, a
+hand-edited "generated" example can diverge from its claimed source
+indefinitely while still rendering into the manual as if it were freshly
+derived truth.
+
+### FR-12: Domain evidence profiles
+
+Each evidence domain (interactive TUI/GUI, text protocol, binary protocol)
+needs a declared profile that fixes its selector vocabulary, comparison
+mode, and capture requirements, so untyped free-form evidence is rejected
+where a profile exists (`SSDOC-EVD-101`) and a TUI golden without a
+width/terminal profile is rejected (`SSDOC-TUI-101`). Acceptance is
+fail-closed per profile: an evidence node presented against an unknown or
+absent profile must fail rather than pass through as ungoverned freeform
+text. Without profiles, every domain reinvents its own ad hoc comparison
+rules and a reviewer cannot tell whether a given check is asserting anything
+meaningful for that domain.
+
+### FR-13: spec-to-spipe semantic evidence integration
+
+Evidence nodes produced by the spec-to-spipe/spec-to-sspec pipeline must
+carry stable IDs and source spans, survive a deterministic round trip through
+generation, and cover 100% of source disposition (every parsed construct maps
+to a generated node or an explicit skip reason). Acceptance is fail-closed: a
+generated SSpec/manifest/manual/ledger set that disagrees with each other, or
+contains a tautological generated assertion, or leaves an oracle unresolved,
+must fail generation (`SSDOC-EVD-104`, §10 spec-to-spipe gate). Without this
+integration, the generated manual and the generated spec can drift apart
+silently because nothing checks that they were produced from the same typed
+evidence graph.
+
+### FR-14: Backward-compatible evidence facade
+
+Existing capture APIs (`Capture` trait implementations, `wm_compare` exact
+image gates, `ScenarioEvidenceArtifact`) must keep working unchanged through
+a compatibility adapter layered in front of the typed evidence model, so
+migrating a spec to typed evidence is opt-in per scenario, not a
+flag-day rewrite. Acceptance is fail-closed on the adapter boundary itself:
+an adapted legacy capture that cannot be mapped to a valid `EvidenceManifest`
+must fail loudly rather than pass through as untyped evidence with no
+selector. Without a facade, every legacy spec must be rewritten atomically
+before the typed model can land, which is exactly the kind of big-bang
+migration that stalls and leaves the codebase on two incompatible evidence
+models indefinitely.
+
+### Verified repository facts (2026-08-08)
+
+- `ScenarioEvidenceArtifact` is metadata-only — `kind`, `title`, `mime`,
+  `path`, `body`, `scenario_id`, `step_id`, `redacted`
+  (`src/lib/common/spec/scenario_evidence.spl:44-52`) — it carries no typed
+  selector, no oracle mode, and no provenance hash, so it cannot by itself
+  satisfy FR-7.
+- The current snapshot comparator only trims and exact-compares text, with a
+  line-level Myers diff producing `Delete`/`Insert` ops
+  (`src/compiler_rust/lib/std/src/spec/snapshot/comparison.spl:37`, `:98-127`);
+  it has no structural, subset, or multiset comparison mode, which is the gap
+  FR-9 closes.
+- The prior design put `render_md()` directly on the runtime `Capture` trait
+  (`doc/05_design/sspec_capture_extension.md:35-42`), which cannot work when
+  the capture and the docgen renderer run in different processes (docgen
+  reads generated artifacts after the fact) — the typed evidence model in
+  `src/lib/common/spec/evidence/model.spl` replaces this with data records
+  (`ManualBlock`) that a separate renderer consumes.
 - `check-req-traceability.shs` reads the structured DB instead of grepping;
   `--strict` (orphan requirement / dangling REQ ref / stale doc link) joins
   `bin/simple build check`.
