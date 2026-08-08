@@ -25,7 +25,11 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
   - unsupported board,
   - runner-not-yet-implemented,
   - board-not-connected when UNO Q is unattached.
-- Host GPU checker validates pass row contract (Linux row pass + render backend matrix).
+- Every expected board failure captures and validates its exit status while
+  retaining `set -e`; the unattached UNO Q row remains owned by TODO 658.
+- Host GPU checker validates pass row contract (Linux row pass + render backend matrix)
+  and reports inactive macOS rows only as `unsupported`,
+  `requires-macos-host`, and `emulator-only`.
 - Audio checker validates keyboard/pointer/controller receipts and playback/capture non-silent traces.
 - Host GPU metrics contract validates render sample count + p95 + RSS evidence (no hardcoded synthetic values).
 - RV64 checker validates font route, marker parsing, and keyboard/pointer correlation.
