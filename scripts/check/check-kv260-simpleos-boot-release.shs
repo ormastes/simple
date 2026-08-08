@@ -5,9 +5,15 @@
 #
 # Verdict contract (release semantics):
 #   STATUS: PASS  -- board present, silicon liveness AND full boot green
-#   STATUS: SKIP  -- board/toolchain absent on this host; lane NOT executed.
-#                    exit 0 so a release machine without the board is not
-#                    blocked, but the lane is visibly reported as not-run.
+#   STATUS: BLOCKED -- board/toolchain absent on this host; lane NOT executed
+#                    and NOTHING was checked. exit 2, never 0: a vacuous exit 0
+#                    is indistinguishable from a real pass to any caller (see
+#                    .claude/rules/vcs.md on pre-push guards, and
+#                    check-native-option-bool-llvm-verify.shs "exit 2, NOT 0").
+#                    A release host without the board is still not *failed* --
+#                    the aggregator (check-simpleos-mission-critical-release.shs)
+#                    decides that boardless is acceptable, explicitly, instead
+#                    of this gate lying about it.
 #   STATUS: FAIL  -- board present and either the silicon-liveness tier
 #                    regressed (program/psu_init/DDR/AXI path) or the full
 #                    boot chain (.bss zero-fill, boot OK, FS mount, SMF FS
@@ -27,17 +33,17 @@ KERNEL_ELF="build/os/simpleos_riscv32_smf_fs.elf"
 FAT32_IMG="build/os/fat32-riscv32.img"
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 
-skip_lane() {
-    echo "STATUS: SKIP kv260-simpleos-boot-release reason=$1 (board lane not executed on this host)"
-    exit 0
+blocked_lane() {
+    echo "STATUS: BLOCKED kv260-simpleos-boot-release reason=$1 (board lane not executed on this host; NOTHING was checked)" >&2
+    exit 2
 }
 
 # ---- precondition probe (mirrors spec tier 1; cheap, no Vivado launch) ----
-[ -f "$VIVADO_SETTINGS" ] || skip_lane "vivado-settings-missing:$VIVADO_SETTINGS"
-[ -f "$BITSTREAM" ]       || skip_lane "bitstream-missing:$BITSTREAM"
-[ -f "$KERNEL_ELF" ]      || skip_lane "kernel-elf-missing:$KERNEL_ELF"
-[ -f "$FAT32_IMG" ]       || skip_lane "fat32-image-missing:$FAT32_IMG"
-lsusb -d 0403:6011 >/dev/null 2>&1 || skip_lane "kv260-jtag-usb-absent"
+[ -f "$VIVADO_SETTINGS" ] || blocked_lane "vivado-settings-missing:$VIVADO_SETTINGS"
+[ -f "$BITSTREAM" ]       || blocked_lane "bitstream-missing:$BITSTREAM"
+[ -f "$KERNEL_ELF" ]      || blocked_lane "kernel-elf-missing:$KERNEL_ELF"
+[ -f "$FAT32_IMG" ]       || blocked_lane "fat32-image-missing:$FAT32_IMG"
+lsusb -d 0403:6011 >/dev/null 2>&1 || blocked_lane "kv260-jtag-usb-absent"
 
 # ---- board present: fresh bring-up OUTSIDE the test runner ---------------
 # A real board run takes ~5-7 min, longer than test-runner child timeouts

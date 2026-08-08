@@ -60,6 +60,73 @@ browser_demo_disk_status=not-checked
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+# ---- per-run evidence retention (additive; canonical paths unchanged) -----
+# The unconditional clear below used to DESTROY the previous run's artifacts,
+# so a PASSING run's serial log (the whole point of this lane) vanished the
+# moment anyone re-ran the script. Archive the previous run first.
+#
+# Retention policy (bounded, never unbounded growth):
+#   * every invocation archives the PREVIOUS run's artifacts into
+#     $BUILD_DIR/runs/<UTC-timestamp>-<verdict>/ (verdict read from that run's
+#     own evidence.env), together with a RUN_INFO.env provenance stamp;
+#   * at most SIMPLEOS_WM_EVIDENCE_RETAIN (default 8) archived runs are kept,
+#     oldest pruned first;
+#   * the newest archived PASSING run is never pruned, so the last green boot
+#     evidence always survives, however many red runs follow it.
+# Canonical output paths ($BUILD_DIR/serial.log, evidence.env, ...) are NOT
+# moved or aliased: they always hold THIS run only, and are cleared below, so
+# a retained log can never be misread as the current run's.
+EVIDENCE_RUNS_DIR="$BUILD_DIR/runs"
+EVIDENCE_RETAIN="${SIMPLEOS_WM_EVIDENCE_RETAIN:-8}"
+
+archive_previous_run() {
+    [ -f "$BUILD_DIR/evidence.env" ] || return 0
+    prev_status="$(sed -n 's/^simpleos_wm_fullscreen_status=//p' "$BUILD_DIR/evidence.env" | head -n 1)"
+    [ -n "$prev_status" ] || prev_status=unknown
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status"
+    dup=0
+    while [ -e "$dest" ]; do
+        dup=$((dup + 1))
+        dest="$EVIDENCE_RUNS_DIR/$stamp-$prev_status.$dup"
+    done
+    mkdir -p "$dest" || return 0
+    for retained in "$BUILD_DIR/evidence.env" "$LAUNCH_OUT" "$SERIAL_LOG" \
+        "$CAPTURE_OUT" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
+        "$BROWSER_EVENT_PPM" "$FONT_REGION_RGB"
+    do
+        if [ -f "$retained" ]; then
+            cp -p "$retained" "$dest/" 2>/dev/null || true
+        fi
+    done
+    {
+        echo "archived_at_utc=$stamp"
+        echo "archived_from=$BUILD_DIR"
+        echo "archived_run_status=$prev_status"
+        echo "archived_by_wrapper=$WRAPPER"
+        echo "note=retained copy of a PREVIOUS run; the current run writes only the canonical \$BUILD_DIR paths"
+    } >"$dest/RUN_INFO.env"
+    echo "simpleos_wm_fullscreen_retained_previous_run=$dest status=$prev_status"
+}
+
+prune_archived_runs() {
+    [ -d "$EVIDENCE_RUNS_DIR" ] || return 0
+    keep_pass="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | grep -E -- '-pass(\.[0-9]+)?$' | sort | tail -n 1)"
+    total="$(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$total" -gt "$EVIDENCE_RETAIN" ] || return 0
+    excess=$((total - EVIDENCE_RETAIN))
+    for stale in $(ls -1 "$EVIDENCE_RUNS_DIR" 2>/dev/null | sort); do
+        [ "$excess" -gt 0 ] || break
+        [ "$stale" = "$keep_pass" ] && continue
+        rm -rf "$EVIDENCE_RUNS_DIR/$stale"
+        excess=$((excess - 1))
+    done
+}
+
+archive_previous_run
+prune_archived_runs
+
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
     "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
     "$BROWSER_EVENT_PPM" "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
