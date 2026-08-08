@@ -471,7 +471,11 @@ impl CoreLexer:
             if second == "x":
                 # Hex literal
                 pos = pos + 2
-                for i in 0..64:
+                # `while true`, not `for i in 0..64`: a 64-bit literal written
+                # with underscore separators is longer than 64 chars, and the
+                # bounded loop truncated it mid-digit-run, splitting one
+                # literal into two INT tokens.
+                while true:
                     if pos >= src_len:
                         break
                     val hc: text = self.source_chars[pos]
@@ -524,7 +528,7 @@ impl CoreLexer:
             if second == "b":
                 # Binary literal
                 pos = pos + 2
-                for i in 0..64:
+                while true:
                     if pos >= src_len:
                         break
                     val bc: text = self.source_chars[pos]
@@ -537,17 +541,42 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.char_slice(start, pos)
+                var num_text: text = self.char_slice(start, pos)
+                # Type suffix: 0b1010u64 / 0b1010_u64. Without this the alpha
+                # run split off as a separate IDENT token and the suffix was
+                # lost entirely — `0b1010u64` lexed as INT + IDENT. Mirrors
+                # the hex branch above; see the make_token/suffix-save ordering
+                # note there (core_token_capture resets the suffix slot, so the
+                # save must come AFTER make_token).
+                var bin_suffix: text = ""
+                val bnlen: i64 = num_text.len()
+                val after_bin: text = if pos < src_len then self.source_chars[pos] else ""
+                if is_alpha(after_bin):
+                    if bnlen > 0 and num_text[bnlen - 1:bnlen] == "_":
+                        num_text = num_text[0:bnlen - 1]
+                    var bsuf_start: i64 = pos
+                    while true:
+                        if pos >= src_len:
+                            break
+                        if is_ident_char(self.source_chars[pos]):
+                            pos = pos + 1
+                        else:
+                            break
+                    bin_suffix = self.char_slice(bsuf_start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
-                self.make_token(1, num_text, start_line, start_col)
+                if bin_suffix != "":
+                    self.make_token(7, num_text, start_line, start_col)
+                else:
+                    self.make_token(1, num_text, start_line, start_col)
+                core_token_suffix_save(bin_suffix)
                 self.cur_text = num_text
                 core_token_text_save(num_text)
                 return
             if second == "o":
                 # Octal literal
                 pos = pos + 2
-                for i in 0..64:
+                while true:
                     if pos >= src_len:
                         break
                     val oc: text = self.source_chars[pos]
@@ -558,10 +587,31 @@ impl CoreLexer:
                         pos = pos + 1
                     else:
                         break
-                val num_text: text = self.char_slice(start, pos)
+                var num_text: text = self.char_slice(start, pos)
+                # Type suffix: 0o644u32 / 0o755_u32 — same hole as binary
+                # above. `src/os/apps/coreutils/cp.spl:15` uses `0o644u32`.
+                var oct_suffix: text = ""
+                val onlen: i64 = num_text.len()
+                val after_oct: text = if pos < src_len then self.source_chars[pos] else ""
+                if is_alpha(after_oct):
+                    if onlen > 0 and num_text[onlen - 1:onlen] == "_":
+                        num_text = num_text[0:onlen - 1]
+                    var osuf_start: i64 = pos
+                    while true:
+                        if pos >= src_len:
+                            break
+                        if is_ident_char(self.source_chars[pos]):
+                            pos = pos + 1
+                        else:
+                            break
+                    oct_suffix = self.char_slice(osuf_start, pos)
                 self.pos = pos
                 self.col = self.col + (pos - start)
-                self.make_token(1, num_text, start_line, start_col)
+                if oct_suffix != "":
+                    self.make_token(7, num_text, start_line, start_col)
+                else:
+                    self.make_token(1, num_text, start_line, start_col)
+                core_token_suffix_save(oct_suffix)
                 self.cur_text = num_text
                 core_token_text_save(num_text)
                 return
