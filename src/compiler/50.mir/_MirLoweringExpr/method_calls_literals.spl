@@ -2833,26 +2833,45 @@ impl MirLowering:
                 # everything into this Unresolved arm. Same error string,
                 # different root cause; do not "fix" Stage-3 by adding arms.
                 #
-                # `contains` and `index_of` route to the receiver-polymorphic
-                # runtime accessors (rt_contains / rt_index_of in
-                # runtime_native.c), the same unified-accessor shape `len`
-                # already uses via rt_len: rt_contains dispatches array/dict/
-                # string off the tagged handle, and rt_index_of tries
-                # rt_array_index_of first then falls back to rt_string_find.
-                # Guarded on the receiver actually being a runtime handle
-                # (array/dict/tagged string) -- a plain untagged i64 receiver
-                # would be misread as a pointer, so it keeps falling through to
-                # the loud failure below rather than being silently mis-lowered.
-                # `slice` is deliberately NOT handled here: rt_slice returns a
-                # fresh collection HANDLE that would also need registering in
-                # the lowering's runtime-value bookkeeping for a downstream
-                # `.len()`/index read to work, which is a larger change than
-                # these two one-call methods. It stays loud-failing, filed.
-                val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local) or self.local_is_runtime_dict(unresolved_receiver_local) or self.local_is_str(unresolved_receiver_local)
-                if poly_recv_is_handle and args.len() == 1 and (method == "contains" or method == "index_of"):
+                # `contains` on a runtime-ARRAY receiver routes to the
+                # receiver-polymorphic runtime accessor `rt_contains`
+                # (runtime_native.c), the same unified-accessor shape `len`
+                # already uses via rt_len.
+                #
+                # SCOPE IS DELIBERATELY NARROW, and the narrowing is empirical,
+                # not cautious-by-default. A first cut of this arm also routed
+                # `index_of` to `rt_index_of` and accepted text/dict receivers
+                # via local_is_str/local_is_runtime_dict. A native binary built
+                # from that version returned `"hello world".index_of("world")`
+                # == **-1** where the interpreter oracle says **6** -- a
+                # WRONG-VALUE (fail-open) defect, strictly worse than the loud
+                # build failure it replaced. Root cause: `rt_index_of` first
+                # calls `rt_array_index_of` on the raw receiver word and then
+                # falls back to `rt_string_find`, and at this point in lowering
+                # the text receiver and/or the literal needle are NOT in the
+                # tagged representation those two helpers expect (a bootstrap
+                # string literal lowers to a RAW char*, see the starts_with note
+                # further down, which has to call rt_string_new to tag it).
+                # So the receiver-polymorphic runtime accessors are NOT
+                # uniformly safe to call from this arm: rt_contains on a tagged
+                # runtime array is verified correct against the oracle
+                # (contains(2)==true, contains(99)==false), rt_index_of on a
+                # text receiver is verified WRONG. Only the verified case ships;
+                # `index_of`, and `contains` on text/dict receivers, keep
+                # falling through to the loud failure below -- fail CLOSED.
+                #
+                # `slice` is likewise NOT handled: rt_slice returns a fresh
+                # collection HANDLE that would also need registering in the
+                # lowering's runtime-value bookkeeping for a downstream
+                # `.len()`/index read to work. `merge` (the single remaining
+                # unresolved name in the whole AES native build) is declined for
+                # the same reason. Both stay loud-failing and are filed in
+                # native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md.
+                val poly_recv_is_handle = self.local_is_runtime_array(unresolved_receiver_local)
+                if poly_recv_is_handle and args.len() == 1 and method == "contains":
                     if (rt_env_get("SIMPLE_MIR_LOG_CONV") ?? "") == "1":
                         eprint("[conv-lower] polymorphic accessor arm hit method={method}\n")
-                    val poly_symbol = if method == "contains": "rt_contains" else: "rt_index_of"
+                    val poly_symbol = "rt_contains"
                     val poly_arg_local = self.lower_expr(args[0].value)
                     val poly_arg_boxed = self.box_runtime_value(poly_arg_local)
                     val poly_op = MirOperand(kind: MirOperandKind.Const(
@@ -2862,9 +2881,6 @@ impl MirLowering:
                     var b_poly = self.builder
                     val poly_call = b_poly.emit_call(poly_op, [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(poly_arg_boxed)], MirType.i64())
                     val poly_raw = poly_call ?? b_poly.new_temp(MirType.i64())
-                    if method == "index_of":
-                        self.builder = b_poly
-                        return poly_raw
                     # `contains` is a predicate: rt_contains returns int8_t 0/1,
                     # normalized to a real Bool exactly like the rt_dict_contains
                     # arm above does, so `if xs.contains(x):` tests a bool and
