@@ -364,3 +364,48 @@ never reach at runtime.
 Board-runnable caveat unchanged from the section above: this remains a QEMU
 real-firmware-proxy (OVMF pflash) evidence path; no physical-board attempt
 was made or claimed in this pass either.
+
+## Root-cause correction: the fix site above is wrong — `mod.spl` is not in the closure — 2026-08-08
+
+Traced the 6 remaining symbols to the actual build objects still on disk
+(`build/simpleos_wm_fullscreen_evidence2/native-objects-K0fOB0/`, 774
+objects) via `nm -u`/`nm`, rather than inferring from source text:
+
+```
+mod_183.o: V lib__gc_async_mut__gpu__engine2d__backend_cuda__CudaBackend
+mod_194.o: V lib__gc_async_mut__gpu__engine2d__backend_metal__MetalBackend
+mod_223.o: U lib__gc_async_mut__gpu__engine2d__backend_cuda__CudaBackend
+mod_158/160/171/219/220/261/262/492/497/498.o:
+    U lib__gc_async_mut__gpu__engine2d__engine__Engine2D
+```
+
+**No object in this closure contains any `engine2d__mod__` symbol.** The
+package barrel `src/lib/gc_async_mut/gpu/engine2d/mod.spl` is not part of
+the compiled closure for this kernel entry at all — the prior "Next
+blocker" section above, which attributed the 6 symbols to `mod.spl` lines
+108-121, is corrected: the real culprit is
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`. Its `Engine2D` facade class
+unconditionally imports `backend_cuda`/`backend_metal` (lines 38, 52) and,
+more importantly, declares `cuda_backend: CudaBackend?` /
+`metal_backend: MetalBackend?` as **struct fields** (lines 230, 234) with
+six method-body call sites (435, 533, 552, 611, 770, 812). The kernel's
+actual import chain — `gui_entry_desktop.spl` →
+`os.compositor.compositor_engine2d.{Engine2dCompositorBackend}` →
+`use std.gpu.engine2d.engine.{Engine2D}` — already bypasses `mod.spl`
+entirely (as does `engine2d_display.spl`); it pulls in the full `Engine2D`
+type directly.
+
+This also means a target-conditional `use`-import gate — even if the
+compiler had one, and it confirmed it does not (`@cfg(x86_64/arm64/riscv64)`
+is the only mechanism found, and it is arch-dispatch for top-level function
+bodies only, not applicable to `use` statements or struct fields) — would
+not have fixed this: struct fields on a shared class can't be removed by
+gating an import. A real fix needs either (a) splitting `Engine2D` into a
+lean baremetal variant without the two GPU-backend fields, or (b) real
+freestanding bodies for the 6 symbols that correctly report "device absent"
+on this target (unlike a fabricated 0-returning stub, a real absent-device
+answer is semantically correct here). Neither was attempted this pass — see
+`doc/08_tracking/bug/engine2d_mod_barrel_imports_all_gpu_backends_unconditionally_2026-08-08.md`
+for the full trace and the two candidate fixes. No source was changed, so
+the evidence gate was not re-run; it would reproduce the same 6-symbol
+failure already recorded above.
