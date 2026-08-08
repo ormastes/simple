@@ -365,10 +365,18 @@ the backend, not the flag form, and not the environment.
 
 ### 6. Next actions (replacing the list above)
 
-1. Determine whether the pure-Simple `native-build` pipeline fails by **scale**
-   or by **construct**: bisect the input between a 3-module closure (known good)
-   and the full compiler (known vacuous). A mid-size real target — one compiler
-   layer — is the cheapest next point.
+1. **(Primary.)** Determine whether the pure-Simple `native-build` pipeline
+   fails by **scale** or by **construct**: bisect the input between a 3-module
+   closure (known good) and the full compiler (known vacuous). A mid-size real
+   target — one compiler layer — is the cheapest next point.
+
+   Start at **`src/compiler/10.frontend/core/`**. That subtree is implicated by
+   two independent measurements: it holds the single file that blew the 60s
+   per-file budget (item 3), and it contains the largest surviving `.text`
+   section in the vacuous object's census,
+   `compiler.10.frontend.core.tokens.tok_kind_name` (3,200 B). Whatever is
+   expensive-or-broken there shows up in both runs. This is a firmer starting
+   point than the timeout conditional in item 3.
 2. A Stage-3 run using the *Stage-2 recipe* (`--entry-closure` + explicit
    `--source src/compiler --source src/app --source src/lib` + `--entry`) was
    launched but is **a multi-variable flip** (it also changes `--threads` 2→8).
@@ -391,11 +399,19 @@ the backend, not the flag form, and not the environment.
    unit ("1 compiled"), where no such per-file failure is ever reported — and
    that run produced 5,767 stub functions with `STAGE3_EXIT=0`. If the same
    budget is applied internally in single-unit mode and degrades to stubs
-   instead of erroring, that would produce exactly the observed artifact.
+   instead of erroring, that would produce the observed artifact.
    `driver_aot_native_output.spl:566` already points at a related known defect,
    `doc/08_tracking/bug/native_build_cache_never_written_on_timeout_2026-07-26.md`.
-   This is now the most promising lead and should be checked before any
-   scale-vs-construct bisect.
+
+   **But weight this lead honestly: as observed, the timeout fails CLOSED.**
+   The S3CLOSURE run exited **1** and produced **no binary**. The same is true
+   of the earlier whole-tree run (`build/cyc/EP2`), where four `src/lib` files
+   failed LLVM verification: exit 1, no binary. Two independent per-file
+   failures, both fail-closed. The real Stage-3 run produced a 1.16 MB object at
+   `STAGE3_EXIT=0`, so a per-file timeout of the kind actually measured does
+   **not** by itself explain the observed artifact. The fail-open variant is an
+   untested conditional about the single-unit path only — treat it as a lead to
+   confirm or kill, not as the leading hypothesis.
 
 4. The parallel `unresolved method call:` MIR-lowering lane (`to_u8`/`join`) is
    plausibly the same defect seen from the other side — `[mir-method-call] …
