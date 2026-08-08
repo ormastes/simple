@@ -1105,13 +1105,18 @@ impl HirLowering:
             if imported_key == "" and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[import-miss] importer={module.name} module={imp.module}")
             if imported_key != "":
-                val imported_mod = hir_module_surface_get(self.module_surfaces, imported_key)
-                if imported_mod == nil:
+                val imported_index = self.module_surfaces.index_by_name[imported_key]
+                if imported_index < 0 or imported_index >= self.module_surfaces.surfaces.len():
                     self.error("missing module surface for {imported_key}", imp.span)
                     import_idx = import_idx + 1
                     continue
+                # Do not route this large value struct through
+                # `ModuleSurface?`. Cranelift's native aggregate optional
+                # return/unwrap path can lose the payload and pass a nil value
+                # into `register_imported_symbol` on large entry closures.
+                val imported_mod = self.module_surfaces.surfaces[imported_index]
                 if imp.items.len() == 0:
-                    self.register_glob_imported_symbols(imported_mod.unwrap(), resolved_module_name, imp.span)
+                    self.register_glob_imported_symbols(imported_mod, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`.
                     val import_path_parts = imp.module.split(".")
@@ -1124,7 +1129,7 @@ impl HirLowering:
                     while item_idx < imp.items.len():
                         val item = imp.items[item_idx]
                         val local_name = if item.has_alias: item.alias else: item.name
-                        self.register_imported_symbol(imported_mod.unwrap(), resolved_module_name, item.name, local_name, imp.span)
+                        self.register_imported_symbol(imported_mod, resolved_module_name, item.name, local_name, imp.span)
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
