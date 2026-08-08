@@ -79,31 +79,31 @@ matching hit below is understood as DONE, not an outstanding candidate:
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 52 | reject: static source-text file_read check, not a live observation |
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 104 | reject: static source-text file_read check, not a live observation |
 | `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 115 | reject: static source-text file_read check, not a live observation |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 138 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 146 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 160 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 168 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 179 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 192 | no |
-| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 198 | no |
-| `test/01_unit/app/cli/query_outline_domain_blocks_spec.spl` | 6 | no |
-| `test/01_unit/app/compile/cli_native_build_spec.spl` | 28 | no |
-| `test/01_unit/app/compile/cli_native_build_spec.spl` | 59 | no |
-| `test/01_unit/app/compile/cli_native_build_spec.spl` | 68 | no |
-| `test/01_unit/app/compile_targets_env_facade_source_spec.spl` | 5 | no |
-| `test/01_unit/app/compile_targets_env_facade_source_spec.spl` | 13 | no |
-| `test/01_unit/app/devhub/email_cmd_spec.spl` | 147 | no |
-| `test/01_unit/app/devhub/email_cmd_spec.spl` | 312 | no |
-| `test/01_unit/app/devhub/email_cmd_spec.spl` | 322 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 12 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 30 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 72 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 108 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 128 | no |
-| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 144 | no |
-| `test/01_unit/app/duplicate_check/phase2_integration_spec.spl` | 76 | no |
-| `test/01_unit/app/env/env_spec.spl` | 57 | no |
-| `test/01_unit/app/env/env_spec.spl` | 66 | no |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 138 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 146 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 160 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 168 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 179 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 192 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli_native_build_main_contract_spec.spl` | 198 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/cli/query_outline_domain_blocks_spec.spl` | 6 | yes |
+| `test/01_unit/app/compile/cli_native_build_spec.spl` | 28 | reject: in-memory fixture round-trip (file_write/file_read of a synthetic sentinel value), not an external system observation |
+| `test/01_unit/app/compile/cli_native_build_spec.spl` | 59 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/compile/cli_native_build_spec.spl` | 68 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/compile_targets_env_facade_source_spec.spl` | 5 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/compile_targets_env_facade_source_spec.spl` | 13 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/devhub/email_cmd_spec.spl` | 147 | reject: numeric-only comparison (exit code), no substring/exact text assertion |
+| `test/01_unit/app/devhub/email_cmd_spec.spl` | 312 | yes |
+| `test/01_unit/app/devhub/email_cmd_spec.spl` | 322 | reject: exact-empty-string check on trivial value, typed wrapper adds no precision |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 12 | reject: numeric-only comparison (warnings.len()), no substring/exact text assertion |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 30 | reject: numeric-only comparison (warnings.len()), no substring/exact text assertion |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 72 | reject: numeric-only comparison (warnings.len()), no substring/exact text assertion |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 108 | reject: in-memory value (function return), not an external capture |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 128 | reject: numeric-only comparison (warnings.len()), no substring/exact text assertion |
+| `test/01_unit/app/doc_coverage/compiler_integration_spec.spl` | 144 | reject: numeric-only comparison (warnings.len()), no substring/exact text assertion |
+| `test/01_unit/app/duplicate_check/phase2_integration_spec.spl` | 76 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/env/env_spec.spl` | 57 | reject: multi-value OR set-membership check on captured value, not a single substring/exact assertion |
+| `test/01_unit/app/env/env_spec.spl` | 66 | reject: numeric-only comparison (arch.len() > 0), no substring/exact text assertion |
 | `test/01_unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl` | 281 | no |
 | `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 39 | no |
 | `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 47 | no |
