@@ -2,7 +2,16 @@
 
 - **ID:** iso_mir_lowering_erasure_fixes_two_cases_regresses_non_iso_control_2026-08-08
 - **Date:** 2026-08-08
-- **Status:** OPEN — patch identified and measured, deliberately NOT landed (it
+> **RETRACTED 2026-08-08 — THIS DOC'S CENTRAL MEASUREMENT IS WRONG.** The patch
+> below is CORRECT and landed in `7a8115c6091`. The spec is **4/4**, not 2/4, and
+> the non-`iso` control never regressed. The 2/4 table was a harness artifact:
+> `bin/simple test` degrades silently near its 800-module ceiling and still prints
+> a well-formed `Results:` line with wrong verdicts. Re-measured with
+> `SIMPLE_MODULE_LIMIT=0` (`src/compiler_rust/compiler/src/memory_guard.rs:55`):
+> baseline 1/4, patched **4/4**. Read the "Retraction" section at the end before
+> anything else here.
+
+- **Status:** RETRACTED — see the banner above. Originally filed OPEN — patch identified and measured, deliberately NOT landed (it
   trades one passing test for two; see the table)
 - **Severity:** medium — blocks
   `borrow_check_bypassed_on_interpret_path_2026-08-08`, which names this as its
@@ -112,3 +121,44 @@ defect into a hidden one.
   module-level-global `HirTypeKind::Infer` crash, which fires identically on a
   non-`iso` control. Use the in-process spec path, not `native-build`, as the
   oracle for `iso`.
+
+
+---
+
+## Retraction (2026-08-08)
+
+**What this doc got wrong:** it reported the `Isolated` erasure patch scoring 2/4
+and *regressing* the non-`iso` control, and concluded the borrow checker
+over-fires on bindings with no reuse. All of that is false.
+
+**The cause of the false reading:** `bin/simple test` was silently degrading near
+its 800-module ceiling. This spec's transitive module load exceeds that limit, and
+the runner **still emitted a well-formed `Results:` line while producing wrong
+verdicts.** That is a false RED that looks exactly like a real regression — there
+is no crash, no warning, and the output is structurally perfect.
+
+**Re-measured with `SIMPLE_MODULE_LIMIT=0`:**
+
+| run | result |
+|-----|--------|
+| baseline (no patch), limit lifted | `4 total, 1 passed, 3 failed` |
+| patched, limit lifted | `4 total, 4 passed, 0 failed` |
+
+Baseline still reproduces at 1/4, so the defect and the fix were both real. Only
+the intermediate 2/4 was noise.
+
+**Why the non-`iso` control could never have regressed:** `case
+HirTypeKind.Isolated` is structurally unreachable for `val x: i64 = 5` — a
+non-`iso` binding cannot produce an `Isolated` HIR type, so the arm cannot affect
+it. Code inspection alone should have refuted the measurement; I trusted the
+number over the structure.
+
+Regressions, all with the limit lifted: `borrow_check_spec` 11/11,
+`iso_move_pipeline_spec` 4/4, `iso_move_sites_spec` 2/2.
+
+**The transferable lesson, which outlives this bug:** any in-process
+compiler-spec oracle in this tree needs `SIMPLE_MODULE_LIMIT=0`. Without it the
+runner can return a confident, well-formed, WRONG verdict rather than failing
+loudly. The repro command originally given in this doc is unsound as written for
+exactly that reason. When a measurement contradicts the structure of the code,
+suspect the harness first.
