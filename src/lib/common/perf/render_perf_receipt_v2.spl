@@ -53,7 +53,9 @@ pub val PERF_CTR_PIPELINE_CREATIONS: i64 = 16
 pub val PERF_CTR_FORWARD_PHYSICAL_HOPS: i64 = 17
 pub val PERF_CTR_LAYER_VIEW_COPY_BYTES: i64 = 18
 pub val PERF_CTR_EVENT_ALLOCATIONS: i64 = 19
-pub val PERF_CTR_COUNT: i64 = 20
+pub val PERF_CTR_UNCHANGED_RASTER_PIXELS: i64 = 20
+pub val PERF_CTR_FULL_READBACK_BYTES: i64 = 21
+pub val PERF_CTR_COUNT: i64 = 22
 
 pub struct RenderPerfReceiptV2:
     engine: text            # one of the ENGINE_* constants, validated
@@ -64,6 +66,7 @@ pub struct RenderPerfReceiptV2:
     cpu_features: text
     fallback_status: text   # "none" | description of any fallback observed
     counters: [i64]
+    measured: [i64]         # 1 iff the counter was actually written by a probe
     notes: text
 
 fn perf_engine_id_known(id: text) -> bool:
@@ -91,9 +94,11 @@ pub fn render_perf_receipt_new(engine: text, binary_md5: text) -> RenderPerfRece
     if binary_md5.len() == 0:
         return nil
     var ctrs: [i64] = []
+    var meas: [i64] = []
     var i = 0
     while i < PERF_CTR_COUNT.to_i32():
         ctrs.push(0)
+        meas.push(0)
         i = i + 1
     RenderPerfReceiptV2(
         engine: engine,
@@ -104,18 +109,53 @@ pub fn render_perf_receipt_new(engine: text, binary_md5: text) -> RenderPerfRece
         cpu_features: "",
         fallback_status: "none",
         counters: ctrs,
+        measured: meas,
         notes: "")
 
-fn perf_ctr_set(r: RenderPerfReceiptV2, idx: i64, value: i64) -> RenderPerfReceiptV2:
+pub fn perf_ctr_set(r: RenderPerfReceiptV2, idx: i64, value: i64) -> RenderPerfReceiptV2:
+    """Writing a counter is what MARKS it measured. A counter nobody wrote
+    stays unmeasured and reads 0 — that 0 is NOT evidence of anything, and
+    `perf_milestone_gate` refuses it rather than treating it as a zero."""
     var out = r
     if idx >= 0 and idx < PERF_CTR_COUNT:
         out.counters[idx.to_i32()] = value
+        out.measured[idx.to_i32()] = 1
     out
 
-fn perf_ctr_get(r: RenderPerfReceiptV2, idx: i64) -> i64:
+pub fn perf_ctr_get(r: RenderPerfReceiptV2, idx: i64) -> i64:
     if idx >= 0 and idx < PERF_CTR_COUNT:
         return r.counters[idx.to_i32()]
     -1
+
+pub fn perf_ctr_measured(r: RenderPerfReceiptV2, idx: i64) -> bool:
+    """False for an out-of-range index too: an index that cannot exist was
+    certainly never measured."""
+    if idx >= 0 and idx < PERF_CTR_COUNT:
+        return r.measured[idx.to_i32()] == 1
+    false
+
+pub fn perf_ctr_name(idx: i64) -> text:
+    """Names only the five §0 milestone counters plus a fallback; used for
+    reason strings so a refusal always says WHICH counter blocked it."""
+    if idx == PERF_CTR_ALLOCATIONS:
+        return "allocations"
+    if idx == PERF_CTR_SCENE_COPY_BYTES:
+        return "scene_copy_bytes"
+    if idx == PERF_CTR_FULL_READBACK_BYTES:
+        return "full_readback_bytes"
+    if idx == PERF_CTR_UNCHANGED_RASTER_PIXELS:
+        return "unchanged_raster_pixels"
+    if idx == PERF_CTR_FORWARD_PHYSICAL_HOPS:
+        return "forward_physical_hops"
+    "ctr" + idx.to_text()
+
+pub fn perf_milestone_counters() -> [i64]:
+    """The five counters of the plan's §0 decisive milestone, in report order.
+    Deliberately a function, not a literal at each call site, so no caller can
+    quietly gate on four of them."""
+    [PERF_CTR_ALLOCATIONS, PERF_CTR_SCENE_COPY_BYTES,
+     PERF_CTR_FULL_READBACK_BYTES, PERF_CTR_UNCHANGED_RASTER_PIXELS,
+     PERF_CTR_FORWARD_PHYSICAL_HOPS]
 
 pub fn perf_receipt_gate(r: RenderPerfReceiptV2, required_engine: text) -> text:
     """Fail-closed gate for benchmark scripts: a wrong-engine or
@@ -132,6 +172,111 @@ pub fn perf_receipt_gate(r: RenderPerfReceiptV2, required_engine: text) -> text:
         return "refuse:fallback:" + r.fallback_status
     "pass"
 
+pub fn perf_milestone_gate(r: RenderPerfReceiptV2, required_engine: text) -> text:
+    """Fail-closed gate for the plan's §0 decisive milestone (allocations,
+    scene copy bytes, full readback bytes, unchanged raster pixels, physical
+    forward hops — all zero on a warm frame).
+
+    Three distinct verdicts, never merged:
+      "pass"                     — all five MEASURED and all five zero.
+      "blocked:unmeasured:<n>"   — a counter nobody wrote. An unwritten
+                                   counter reads 0; reporting that as a zero
+                                   would be a fabricated zero, which is how
+                                   this repo has produced false greens before
+                                   ("0 mismatches" over 0 compared items).
+      "fail:nonzero:<n>=<v>"     — measured and not zero.
+    Engine identity is checked FIRST: a right-looking number from the wrong
+    engine is not a lesser problem than a wrong number."""
+    val base = perf_receipt_gate(r, required_engine)
+    if base != "pass":
+        return base
+    val ctrs = perf_milestone_counters()
+    var i = 0
+    while i < ctrs.len():
+        val idx = ctrs[i]
+        if not perf_ctr_measured(r, idx):
+            return "blocked:unmeasured:" + perf_ctr_name(idx)
+        i = i + 1
+    i = 0
+    while i < ctrs.len():
+        val idx = ctrs[i]
+        val v = perf_ctr_get(r, idx)
+        if v != 0:
+            return "fail:nonzero:" + perf_ctr_name(idx) + "=" + v.to_text()
+        i = i + 1
+    "pass"
+
+# ============================================================================
+# RenderPerfGateLedger — counted, non-vacuous verdicts
+# ============================================================================
+
+pub class RenderPerfGateLedger:
+    """Accumulates milestone-gate outcomes so the final verdict can state HOW
+    MANY receipts it actually examined. A ledger that admitted nothing reports
+    ERROR, never PASS: a gate that compared zero items has proven nothing."""
+    _required_engine: text
+    _checked: i64 = 0
+    _rejected: i64 = 0
+    _blocked: i64 = 0
+    _last_rejection: text = ""
+
+impl RenderPerfGateLedger:
+
+    static fn create(required_engine: text) -> RenderPerfGateLedger:
+        RenderPerfGateLedger(_required_engine: required_engine, _checked: 0,
+            _rejected: 0, _blocked: 0, _last_rejection: "")
+
+    fn checked_count() -> i64:
+        """Receipts actually run through the gate. PASS requires this > 0."""
+        self._checked
+
+    fn rejected_op_count() -> i64:
+        """Receipts the gate refused — both `fail:` (measured, nonzero) and
+        `blocked:` (unmeasurable). Both are refusals; neither is a pass."""
+        self._rejected
+
+    fn blocked_count() -> i64:
+        """Subset of rejections caused by MISSING measurement rather than a
+        bad number — the ones that need a probe, not an optimization."""
+        self._blocked
+
+    fn last_rejection() -> text:
+        """Reason string of the most recent refusal, empty if none."""
+        self._last_rejection
+
+    me admit(r: RenderPerfReceiptV2) -> bool:
+        val v = perf_milestone_gate(r, self._required_engine)
+        self._checked = self._checked + 1
+        if v == "pass":
+            return true
+        self._rejected = self._rejected + 1
+        self._last_rejection = v
+        if v.starts_with("blocked:"):
+            self._blocked = self._blocked + 1
+        false
+
+    fn verdict() -> text:
+        """Canonical scripts/check verdict line. ERROR when nothing was
+        checked — the vacuous-pass rule — so an empty run can never read as
+        green."""
+        if self._checked == 0:
+            return "ERROR — nothing was checked (0 receipts admitted to the milestone gate)"
+        if self._rejected > 0:
+            return "FAIL — " + self._checked.to_text() + " receipt(s) checked, "
+                + self._rejected.to_text() + " rejected ("
+                + self._blocked.to_text() + " unmeasurable), last: "
+                + self._last_rejection
+        "PASS — " + self._checked.to_text()
+            + " receipt(s) checked against the 5 milestone counters, 0 rejected"
+
+    fn exit_code() -> i64:
+        """0 PASS / 1 FAIL / 2 ERROR, matching scripts/check convention."""
+        if self._checked == 0:
+            return 2
+        if self._rejected > 0:
+            return 1
+        0
+
 pub fn perf_receipt_line(r: RenderPerfReceiptV2) -> text:
     var line = "perf_receipt_v2 engine=" + r.engine
         + " md5=" + r.binary_md5
@@ -144,4 +289,21 @@ pub fn perf_receipt_line(r: RenderPerfReceiptV2) -> text:
         + " readback_bytes=" + perf_ctr_get(r, PERF_CTR_READBACK_BYTES).to_text()
     if r.notes.len() > 0:
         line = line + " notes=" + r.notes
+    line
+
+pub fn perf_milestone_line(r: RenderPerfReceiptV2) -> text:
+    """Machine-checkable one-liner for the §0 milestone. Every counter prints
+    its value AND whether it was measured (`=0` vs `=unmeasured`), so a shell
+    gate reading this line cannot mistake a never-probed counter for a zero."""
+    var line = "perf_milestone_v2 engine=" + r.engine + " md5=" + r.binary_md5
+    val ctrs = perf_milestone_counters()
+    var i = 0
+    while i < ctrs.len():
+        val idx = ctrs[i]
+        line = line + " " + perf_ctr_name(idx) + "="
+        if perf_ctr_measured(r, idx):
+            line = line + perf_ctr_get(r, idx).to_text()
+        else:
+            line = line + "unmeasured"
+        i = i + 1
     line
