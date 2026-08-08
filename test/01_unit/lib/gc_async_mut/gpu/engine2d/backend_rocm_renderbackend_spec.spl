@@ -154,6 +154,39 @@ describe "RocmBackend draw-method init guards (GPU-less)":
         expect(source).to_contain("// kernel_clear:")
         expect(_has_invalid_hip_hash_comment(source)).to_equal(false)
 
+    it "kernel_draw_gradient_rect interpolates channels as signed int, not unsigned (descending-channel gradients must not wrap)":
+        # Regression: the channel locals used in the top/bottom interpolation
+        # MUST be signed. When a channel value decreases top-to-bottom (e.g.
+        # a light-to-dark gradient), `unsigned int` arithmetic wraps the
+        # negative delta to a huge positive value and integer division does
+        # not recover the correct signed result — corrupting every interior
+        # row on real ROCm hardware. The sibling CUDA PTX kernel
+        # (cuda_2d_gradient_ptx_source) explicitly converts to signed
+        # registers (`cvt.s32.u32`) before this arithmetic for exactly this
+        # reason; the HIP source here must match that behavior.
+        val source = _engine2d_hip_source()
+        val gradient_start = source.index_of("kernel_draw_gradient_rect")
+        expect(gradient_start >= 0).to_equal(true)
+        val gradient_end = source.index_of("kernel_blit_image", gradient_start)
+        expect(gradient_end > gradient_start).to_equal(true)
+        val gradient_body = source.slice(gradient_start, gradient_end)
+        expect(gradient_body).to_contain("int t_a =")
+        expect(gradient_body).to_contain("int t_r =")
+        expect(gradient_body).to_contain("int t_g =")
+        expect(gradient_body).to_contain("int t_b =")
+        expect(gradient_body).to_contain("int b_a =")
+        expect(gradient_body).to_contain("int b_r =")
+        expect(gradient_body).to_contain("int b_g =")
+        expect(gradient_body).to_contain("int b_b =")
+        expect(gradient_body.contains("unsigned int t_a")).to_equal(false)
+        expect(gradient_body.contains("unsigned int t_r")).to_equal(false)
+        expect(gradient_body.contains("unsigned int t_g")).to_equal(false)
+        expect(gradient_body.contains("unsigned int t_b")).to_equal(false)
+        expect(gradient_body.contains("unsigned int b_a")).to_equal(false)
+        expect(gradient_body.contains("unsigned int b_r")).to_equal(false)
+        expect(gradient_body.contains("unsigned int b_g")).to_equal(false)
+        expect(gradient_body.contains("unsigned int b_b")).to_equal(false)
+
     it "rejects unsupported and current font batches before an uninitialized backend mutates":
         var b = RocmBackend.create()
         expect(b.draw_font_batch(0, 0, _rocm_font_batch(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1))).to_equal(0)

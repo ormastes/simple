@@ -311,22 +311,31 @@ extern "C" __global__ void kernel_draw_gradient_rect(
 
     if (px < 0 || px >= fb_w || py < 0 || py >= fb_h) return;
 
-    // Linearly interpolate between top and bottom colors
-    unsigned int t_a = (top_color >> 24) & 0xFF;
-    unsigned int t_r = (top_color >> 16) & 0xFF;
-    unsigned int t_g = (top_color >> 8) & 0xFF;
-    unsigned int t_b = top_color & 0xFF;
+    // Linearly interpolate between top and bottom colors.
+    // NOTE: channel locals and the interpolation itself MUST be signed —
+    // when a channel decreases top-to-bottom (the common case, e.g. a
+    // light-to-dark gradient), the (b - t) delta is negative. Doing this
+    // arithmetic in `unsigned int` wraps the delta to a huge positive value
+    // and integer division does not recover the correct signed result,
+    // corrupting every interior row. The CUDA PTX version of this same
+    // kernel (cuda_2d_gradient_ptx_source in backend_cuda_kernels.spl)
+    // explicitly `cvt.s32.u32`s the channels to signed registers before
+    // sub/mul/div for exactly this reason — mirror that here.
+    int t_a = (top_color >> 24) & 0xFF;
+    int t_r = (top_color >> 16) & 0xFF;
+    int t_g = (top_color >> 8) & 0xFF;
+    int t_b = top_color & 0xFF;
 
-    unsigned int b_a = (bottom_color >> 24) & 0xFF;
-    unsigned int b_r = (bottom_color >> 16) & 0xFF;
-    unsigned int b_g = (bottom_color >> 8) & 0xFF;
-    unsigned int b_b = bottom_color & 0xFF;
+    int b_a = (bottom_color >> 24) & 0xFF;
+    int b_r = (bottom_color >> 16) & 0xFF;
+    int b_g = (bottom_color >> 8) & 0xFF;
+    int b_b = bottom_color & 0xFF;
 
     int h = rh > 1 ? rh - 1 : 1;
-    unsigned int a = t_a + (b_a - t_a) * ly / h;
-    unsigned int r = t_r + (b_r - t_r) * ly / h;
-    unsigned int g = t_g + (b_g - t_g) * ly / h;
-    unsigned int b = t_b + (b_b - t_b) * ly / h;
+    unsigned int a = (unsigned int)(t_a + (b_a - t_a) * ly / h);
+    unsigned int r = (unsigned int)(t_r + (b_r - t_r) * ly / h);
+    unsigned int g = (unsigned int)(t_g + (b_g - t_g) * ly / h);
+    unsigned int b = (unsigned int)(t_b + (b_b - t_b) * ly / h);
 
     fb[py * fb_w + px] = (a << 24) | (r << 16) | (g << 8) | b;
 }
