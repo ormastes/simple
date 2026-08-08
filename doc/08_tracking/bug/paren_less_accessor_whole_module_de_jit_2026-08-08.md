@@ -1,7 +1,8 @@
 # Paren-less container accessors silently drop the whole module out of JIT
 
 - **Filed:** 2026-08-08
-- **Status:** OPEN (fence landed; upstream fix not done)
+- **Status:** FIXED in the `run`/JIT lane 2026-08-08 (Rust seed driver). Fence
+  remains for the `compile` lane. See "Upstream fix (landed)" below.
 - **Severity:** High — silent ~100-1000x slowdown, correct output, no diagnostic
 - **Fence:** `scripts/check/check-no-jit-module-drop.shs`
 
@@ -55,7 +56,44 @@ property or method 'size' on Array`), so they self-report the moment anyone runs
 the code. `.length` prints the right number and says nothing. That asymmetry is
 why it is the dominant member of the class.
 
-## Finding 1 (premise correction): `SIMPLE_JIT_STRICT=1` does NOT harden this
+## Finding 1 is WRONG — RETRACTED 2026-08-08 (re-measured)
+
+> **Do not re-derive from Finding 1 below. It was refuted by direct A/B on
+> 2026-08-08 and is kept only so the next lane does not re-refute it.**
+
+`SIMPLE_JIT_STRICT=1` **does** escalate this family. Every member probed goes
+rc=0 → rc=1 with the tag, on the deployed `bin/simple`:
+
+| probe | strict=0 | strict=1 |
+|-------|----------|----------|
+| `[i64].length` | rc=0, prints `3`, `[INFO] … falling back` | **rc=1** `error: SIMPLE_JIT_STRICT: HIR lowering error … refusing to fall back` |
+| `[i64].first` | rc=0, prints `1` | **rc=1** tagged |
+| `"hello".length` | rc=0, prints `5` | **rc=1** tagged |
+| `[i64].empty` | rc=1 (interpreter dies) | **rc=1** tagged |
+| `[i64].size` | rc=1 (interpreter dies) | **rc=1** tagged |
+
+The accessor family is **not** caught at an untagged semantic gate. It is
+`LowerError::Unsupported` raised at `hir/lower/expr/access.rs:400`, returned by
+`hir::lower_with_context_lenient_and_project_hint`, and routed straight through
+`jit_strict_fallback_error("HIR lowering error", …)` at `exec_core.rs:1032` —
+i.e. the tagged arm. Two-source confirmed: the seed source at
+`exec_core.rs:1263-1267` and the binary's own observed output.
+
+**How the original claim went wrong:** the quoted evidence
+(`[INFO] JIT compilation failed, falling back to interpreter: semantic:
+undefined field: unknown property or method 'empty' on Array`) is a **splice of
+two non-adjacent lines**. The real `[INFO]` line says `HIR lowering error: …`;
+the `error: semantic: undefined field …` line is emitted *later*, by the
+**interpreter** dying at runtime after the fallback already happened. Reading
+them as one line made an untagged gate appear where there is none.
+
+Consequences: (a) `SIMPLE_JIT_STRICT` needed no new routing for this class;
+(b) the remaining real defect was that it is **off by default**, which the
+upstream fix below closes.
+
+---
+
+## Finding 1 (ORIGINAL, RETRACTED): `SIMPLE_JIT_STRICT=1` does NOT harden this
 
 This was believed to be an existing mitigation that merely nothing invoked. It
 is not. `SIMPLE_JIT_STRICT=1` only turns a fallback into a hard error for errors
@@ -134,6 +172,47 @@ sugar, and do not try to reject them in the parser.**
    it stands, strict mode advertises coverage it does not have — the same
    "advertised coverage that does not exist" pattern called out in
    `scripts/check/check-aot-lane-fences.shs`.
+
+## Upstream fix (landed 2026-08-08)
+
+`src/compiler_rust/driver/src/exec_core.rs` — **Rust seed only**.
+
+**What changed.** `jit_strict_fallback_error` became
+`jit_strict_fallback_error_for(kind, err, path)`, and when the HIR lowering
+error is recognised as this class it returns a **hard error unconditionally**,
+whether or not `SIMPLE_JIT_STRICT` is set. Recognition is deliberately narrow:
+the message must contain `cannot infer field type while lowering` **and** name
+one of `struct 'Array' | 'String' | 'Dict'` **and** name a field in
+`length len size empty chars first last capacity`.
+
+**Why this is safe (blast radius).** Every file in this class *already* fails
+`bin/simple compile` with the identical diagnostic, so no build that works
+today can regress — the change only makes `run` agree with `compile` instead of
+silently degrading ~100-1000x. Measured negative controls on the rebuilt seed:
+
+- genuine cross-file struct field — `class SvimPiece: var length: i64` in one
+  file, `p.length` read in another — prints `42`, rc=0, byte-identical to the
+  pre-fix binary. These never reach the error at all: they *resolve*.
+- `"hi".ty` (builtin struct, field NOT in the family) and `[1,2,3].prefix`
+  (ditto) still fall back **leniently**, rc unchanged from the pre-fix binary.
+  This is what keeps the wider `struct 'ANY'` de-JIT cause — a different cause
+  that *can* occur in code which compiles — out of the escalation.
+- `Dict` receivers are matched but **not rewritten** anywhere; the fix is a
+  rejection, never a sugar into `Dict.len()` (which returns −1 under native
+  codegen, `doc/07_guide/language/dict_native_pitfalls.md`).
+
+**Also landed:** the fallback message now carries the source path
+(`[in <path>]`), closing Finding 2. Both the HIR and MIR arms pass it.
+
+**No pure-Simple twin is needed.** `src/compiler/**` has **no JIT→interpreter
+whole-module fallback machinery at all** — a positive-controlled grep over the
+numbered dirs (`80.driver`, `95.interp`, `70.backend`) finds no `[jit-fallback]`,
+no `SIMPLE_JIT_STRICT`, and no de-JIT path. The silent-degradation defect is
+**seed-driver-only**; the pure-Simple compiler simply errors, like `compile`.
+
+**Not done deliberately:** the JIT **panic** arm (`exec_core.rs:964`) is still
+untagged and still falls back under strict. That is a different class with no
+probe here, and tagging it is a policy change on a shared tree.
 
 ## Class size: bounds, not a number
 
