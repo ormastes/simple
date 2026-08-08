@@ -1669,3 +1669,29 @@ The crucial implementation ordering is therefore:
 > Build the versioned, typed, no-reallocation DrawIR v3 foundation first; develop the GPU-safe Simple event compiler and event transaction model alongside it; only then connect full GPU DOM/style/layout/media stages.
 
 That ordering preserves every existing Simple rendering and event path, gives all agent groups disjoint ownership, and makes each promoted GPU feature independently measurable and reversible.
+
+---
+
+## 2026-08 Host baseline and v2 event-boundary integration
+
+The hosted WM event path is implemented and remains the baseline: winit input
+in `src/os/hosted/hosted_entry.spl` invokes the four canonical
+`HostCompositor.dispatch_gui_*` reducers in
+`src/os/compositor/host_compositor_core.spl`. Those reducers own content-owner
+gating, pointer capture, focus, client-coordinate conversion, `UISession`
+mutation, and dirtying. The GLFW-only `HostGuiEventRouter` is not a substitute
+and must not become a second production route.
+
+`common.ui.simple2d_gpu_event_boundary` adds v2 request/receipt/decision
+contracts. The integration adapter belongs inside those reducers before
+`UISession.dispatch`: CPU ownership calls the existing body exactly once;
+stale input is rejected; GPU ownership is reserved for a committed semantic
+delta backed by an executor receipt. The current host GPU queue is transport
+telemetry only and must report no device completion, therefore it selects the
+CPU path. A backend promotion needs an `Simple2dGpuEventExecutorPort`
+implementation that writes the correlated result buffer on device and builds
+the receipt only after fence/timeline/readback completion.
+
+This does not claim full WM GPU ownership. Browser registry/session dispatch,
+privileged effects, and OS input stay within their current owners; GPU event
+execution is promoted only for bounded eligible epochs.

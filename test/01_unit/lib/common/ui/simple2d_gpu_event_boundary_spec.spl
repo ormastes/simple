@@ -1,0 +1,62 @@
+# codex-system-test
+use std.spec.*
+use common.ui.simple2d_gpu_event_boundary.*
+
+fn device_receipt(completed: bool, lost: bool, seq: u64, scene: u64, boundary: u64, hash: u64, marker: u64) -> Simple2dGpuEventDeviceReceipt:
+    Simple2dGpuEventDeviceReceipt(
+        completed: completed, device_lost: lost, event_sequence: seq,
+        scene_generation: scene, boundary_generation: boundary,
+        epoch_hash: hash, commit_marker: marker,
+    )
+
+fn decide(receipt: Simple2dGpuEventDeviceReceipt) -> Simple2dGpuEventBoundaryDecision:
+    simple2d_gpu_event_boundary_decide(
+        41u64, 7u64, 7u64, 3u64, 99u64, 1234u64,
+        true, true, false, receipt,
+    )
+
+describe "Simple2D GPU event boundary":
+    it "selects GPU only for an exact completed device receipt":
+        step("Complete the matching GPU event epoch")
+        val result = decide(device_receipt(true, false, 41u64, 7u64, 3u64, 99u64, 1234u64))
+        expect(result.owner).to_equal(SIMPLE2D_EVENT_OWNER_GPU)
+        expect(result.reason).to_equal(SIMPLE2D_EVENT_REASON_NONE)
+
+    it "selects CPU when GPU is unavailable":
+        step("Fall back with the unavailable reason")
+        val receipt = device_receipt(false, false, 41u64, 7u64, 3u64, 99u64, 1234u64)
+        val result = simple2d_gpu_event_boundary_decide(
+            41u64, 7u64, 7u64, 3u64, 99u64, 1234u64,
+            true, false, false, receipt,
+        )
+        expect(result.owner).to_equal(SIMPLE2D_EVENT_OWNER_CPU)
+        expect(result.reason).to_equal(SIMPLE2D_EVENT_REASON_GPU_UNAVAILABLE)
+
+    it "rejects a stale input rather than replaying it":
+        step("Reject input authored for an old scene")
+        val receipt = device_receipt(true, false, 41u64, 6u64, 3u64, 99u64, 1234u64)
+        val result = simple2d_gpu_event_boundary_decide(
+            41u64, 6u64, 7u64, 3u64, 99u64, 1234u64,
+            true, true, false, receipt,
+        )
+        expect(result.owner).to_equal(SIMPLE2D_EVENT_OWNER_NONE)
+        expect(result.reason).to_equal(SIMPLE2D_EVENT_REASON_STALE_SCENE)
+
+    it "does not treat a submitted but incomplete packet as GPU execution":
+        step("Reject queue telemetry without device completion")
+        val result = decide(device_receipt(false, false, 41u64, 7u64, 3u64, 99u64, 1234u64))
+        expect(result.owner).to_equal(SIMPLE2D_EVENT_OWNER_CPU)
+        expect(result.reason).to_equal(SIMPLE2D_EVENT_REASON_TIMEOUT)
+
+    it "falls back on mismatched generation hash and marker receipts":
+        step("Check generation mismatch")
+        val stale = decide(device_receipt(true, false, 41u64, 7u64, 2u64, 99u64, 1234u64))
+        expect(stale.reason).to_equal(SIMPLE2D_EVENT_REASON_STALE_BOUNDARY)
+
+        step("Check epoch hash mismatch")
+        val wrong_hash = decide(device_receipt(true, false, 41u64, 7u64, 3u64, 98u64, 1234u64))
+        expect(wrong_hash.reason).to_equal(SIMPLE2D_EVENT_REASON_HASH_MISMATCH)
+
+        step("Check commit marker mismatch")
+        val wrong_marker = decide(device_receipt(true, false, 41u64, 7u64, 3u64, 99u64, 1235u64))
+        expect(wrong_marker.reason).to_equal(SIMPLE2D_EVENT_REASON_INVALID_COMMIT)

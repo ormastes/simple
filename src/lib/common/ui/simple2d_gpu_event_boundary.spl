@@ -1,0 +1,157 @@
+# Simple2D GPU event boundary contract.
+#
+# This module does not claim that queue submission is device execution.  It
+# selects exactly one commit owner only after validating a device-written
+# completion receipt.  Every other eligible failure selects the existing CPU
+# event oracle with an explicit reason.  A stale scene is rejected rather than
+# replayed against a different generation.
+
+pub val SIMPLE2D_GPU_EVENT_BOUNDARY_SCHEMA_VERSION: text = "simple2d-gpu-event-boundary-v2"
+pub val SIMPLE2D_GPU_EVENT_BOUNDARY_SCHEMA_ID: u32 = 2u32
+
+pub val SIMPLE2D_EVENT_OWNER_NONE: u16 = 0u16
+pub val SIMPLE2D_EVENT_OWNER_GPU: u16 = 1u16
+pub val SIMPLE2D_EVENT_OWNER_CPU: u16 = 2u16
+
+pub val SIMPLE2D_EVENT_REASON_NONE: u16 = 0u16
+pub val SIMPLE2D_EVENT_REASON_GPU_UNAVAILABLE: u16 = 1u16
+pub val SIMPLE2D_EVENT_REASON_UNSUPPORTED: u16 = 2u16
+pub val SIMPLE2D_EVENT_REASON_TIMEOUT: u16 = 3u16
+pub val SIMPLE2D_EVENT_REASON_DEVICE_LOST: u16 = 4u16
+pub val SIMPLE2D_EVENT_REASON_STALE_SCENE: u16 = 5u16
+pub val SIMPLE2D_EVENT_REASON_STALE_BOUNDARY: u16 = 6u16
+pub val SIMPLE2D_EVENT_REASON_SEQUENCE_MISMATCH: u16 = 7u16
+pub val SIMPLE2D_EVENT_REASON_HASH_MISMATCH: u16 = 8u16
+pub val SIMPLE2D_EVENT_REASON_INVALID_COMMIT: u16 = 9u16
+
+# Written by the backend after its fence/timeline dependency completes.
+# `commit_marker` is supplied by the host submission and echoed by the device;
+# a queue-side or fabricated default receipt therefore cannot commit.
+struct Simple2dGpuEventDeviceReceipt:
+    completed: bool
+    device_lost: bool
+    event_sequence: u64
+    scene_generation: u64
+    boundary_generation: u64
+    epoch_hash: u64
+    commit_marker: u64
+
+# The CPU forwarder constructs this request from normalized input and the
+# current scene epoch. Backends may optimize transport, but must preserve every
+# field and may not choose ownership themselves.
+struct Simple2dGpuEventBoundaryRequest:
+    event_sequence: u64
+    event_scene_generation: u64
+    current_scene_generation: u64
+    boundary_generation: u64
+    expected_epoch_hash: u64
+    expected_commit_marker: u64
+    gpu_eligible: bool
+    gpu_available: bool
+    timed_out: bool
+
+struct Simple2dGpuEventBoundaryDecision:
+    owner: u16
+    reason: u16
+    event_sequence: u64
+    scene_generation: u64
+    boundary_generation: u64
+    epoch_hash: u64
+
+fn simple2d_gpu_event_boundary_decide(event_sequence: u64,
+                                      event_scene_generation: u64,
+                                      current_scene_generation: u64,
+                                      boundary_generation: u64,
+                                      expected_epoch_hash: u64,
+                                      expected_commit_marker: u64,
+                                      gpu_eligible: bool,
+                                      gpu_available: bool,
+                                      timed_out: bool,
+                                      receipt: Simple2dGpuEventDeviceReceipt) -> Simple2dGpuEventBoundaryDecision:
+    var owner = SIMPLE2D_EVENT_OWNER_CPU
+    var reason = SIMPLE2D_EVENT_REASON_NONE
+
+    if event_scene_generation != current_scene_generation:
+        owner = SIMPLE2D_EVENT_OWNER_NONE
+        reason = SIMPLE2D_EVENT_REASON_STALE_SCENE
+    elif not gpu_eligible:
+        reason = SIMPLE2D_EVENT_REASON_UNSUPPORTED
+    elif not gpu_available:
+        reason = SIMPLE2D_EVENT_REASON_GPU_UNAVAILABLE
+    elif timed_out:
+        reason = SIMPLE2D_EVENT_REASON_TIMEOUT
+    elif receipt.device_lost:
+        reason = SIMPLE2D_EVENT_REASON_DEVICE_LOST
+    elif not receipt.completed:
+        reason = SIMPLE2D_EVENT_REASON_TIMEOUT
+    elif receipt.event_sequence != event_sequence:
+        reason = SIMPLE2D_EVENT_REASON_SEQUENCE_MISMATCH
+    elif receipt.scene_generation != current_scene_generation:
+        reason = SIMPLE2D_EVENT_REASON_STALE_SCENE
+    elif receipt.boundary_generation != boundary_generation:
+        reason = SIMPLE2D_EVENT_REASON_STALE_BOUNDARY
+    elif receipt.epoch_hash != expected_epoch_hash:
+        reason = SIMPLE2D_EVENT_REASON_HASH_MISMATCH
+    elif receipt.commit_marker != expected_commit_marker or expected_commit_marker == 0u64:
+        reason = SIMPLE2D_EVENT_REASON_INVALID_COMMIT
+    else:
+        owner = SIMPLE2D_EVENT_OWNER_GPU
+
+    Simple2dGpuEventBoundaryDecision(
+        owner: owner,
+        reason: reason,
+        event_sequence: event_sequence,
+        scene_generation: current_scene_generation,
+        boundary_generation: boundary_generation,
+        epoch_hash: expected_epoch_hash,
+    )
+
+trait Simple2dGpuEventBoundaryPort:
+    """Boundary adapter contract; only this decision chooses the epoch owner."""
+    fn decide(request: Simple2dGpuEventBoundaryRequest,
+              receipt: Simple2dGpuEventDeviceReceipt) -> Simple2dGpuEventBoundaryDecision
+
+trait Simple2dGpuEventExecutorPort:
+    """Backend port: return completed=true only after a device fence/readback."""
+    fn execute(request: Simple2dGpuEventBoundaryRequest) -> Simple2dGpuEventDeviceReceipt
+
+fn simple2d_gpu_event_boundary_decide_request(request: Simple2dGpuEventBoundaryRequest,
+                                               receipt: Simple2dGpuEventDeviceReceipt) -> Simple2dGpuEventBoundaryDecision:
+    simple2d_gpu_event_boundary_decide(
+        request.event_sequence,
+        request.event_scene_generation,
+        request.current_scene_generation,
+        request.boundary_generation,
+        request.expected_epoch_hash,
+        request.expected_commit_marker,
+        request.gpu_eligible,
+        request.gpu_available,
+        request.timed_out,
+        receipt,
+    )
+
+fn simple2d_gpu_event_boundary_reason(reason: u16) -> text:
+    if reason == SIMPLE2D_EVENT_REASON_NONE: return "none"
+    if reason == SIMPLE2D_EVENT_REASON_GPU_UNAVAILABLE: return "gpu_unavailable"
+    if reason == SIMPLE2D_EVENT_REASON_UNSUPPORTED: return "unsupported"
+    if reason == SIMPLE2D_EVENT_REASON_TIMEOUT: return "timeout"
+    if reason == SIMPLE2D_EVENT_REASON_DEVICE_LOST: return "device_lost"
+    if reason == SIMPLE2D_EVENT_REASON_STALE_SCENE: return "stale_scene"
+    if reason == SIMPLE2D_EVENT_REASON_STALE_BOUNDARY: return "stale_boundary"
+    if reason == SIMPLE2D_EVENT_REASON_SEQUENCE_MISMATCH: return "sequence_mismatch"
+    if reason == SIMPLE2D_EVENT_REASON_HASH_MISMATCH: return "hash_mismatch"
+    if reason == SIMPLE2D_EVENT_REASON_INVALID_COMMIT: return "invalid_commit"
+    "unknown"
+
+export SIMPLE2D_GPU_EVENT_BOUNDARY_SCHEMA_VERSION, SIMPLE2D_GPU_EVENT_BOUNDARY_SCHEMA_ID,
+    SIMPLE2D_EVENT_OWNER_NONE, SIMPLE2D_EVENT_OWNER_GPU, SIMPLE2D_EVENT_OWNER_CPU,
+    SIMPLE2D_EVENT_REASON_NONE, SIMPLE2D_EVENT_REASON_GPU_UNAVAILABLE,
+    SIMPLE2D_EVENT_REASON_UNSUPPORTED, SIMPLE2D_EVENT_REASON_TIMEOUT,
+    SIMPLE2D_EVENT_REASON_DEVICE_LOST, SIMPLE2D_EVENT_REASON_STALE_SCENE,
+    SIMPLE2D_EVENT_REASON_STALE_BOUNDARY, SIMPLE2D_EVENT_REASON_SEQUENCE_MISMATCH,
+    SIMPLE2D_EVENT_REASON_HASH_MISMATCH, SIMPLE2D_EVENT_REASON_INVALID_COMMIT,
+    Simple2dGpuEventDeviceReceipt, Simple2dGpuEventBoundaryRequest,
+    Simple2dGpuEventBoundaryDecision, Simple2dGpuEventBoundaryPort,
+    Simple2dGpuEventExecutorPort,
+    simple2d_gpu_event_boundary_decide, simple2d_gpu_event_boundary_decide_request,
+    simple2d_gpu_event_boundary_reason
