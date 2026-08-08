@@ -12,8 +12,8 @@
 A reader wants to know whether the headless web/HTML-CSS renderer computes
 CSS Grid layout correctly: fixed pixel track sizing, `fr` (flexible) track
 sizing, `grid-column` spans across tracks, gap separating tracks on both
-axes, and — as documented known gaps — `grid-template-areas` and
-`grid-auto-flow: column`.
+axes, named-area placement via `grid-template-areas`/`grid-area`, and
+column-first auto-placement via `grid-auto-flow: column`.
 
 ## Scope and Preconditions
 
@@ -32,8 +32,8 @@ Render small fixed HTML/CSS fixtures at a fixed viewport, look up the command
 for a named element by `component_id`, and assert exact computed pixel
 geometry.
 
-## Known Renderer Gaps (verified by direct probe against the real renderer,
-not assumed from the CSS spec)
+## Resolved Renderer Gaps (verified by direct probe against the real
+renderer, not assumed from the CSS spec)
 
 `normalized_grid_track_list` (`simple_web_html_layout_renderer_declarations.spl`)
 now parses `<n>fr` tokens alongside `<n>px` tokens, and `grid_track_sizes`
@@ -46,10 +46,18 @@ height isn't generally known ahead of layout). See
 `doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md`
 for the resolved bug record and noted simplifications.
 
-`grid-template-areas` and `grid-auto-flow` have zero occurrences anywhere in
-`simple_web_html_layout_renderer_*.spl` (`grep` confirmed) — unimplemented,
-per plan §Grid row gaps; filed at
-`doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md`.
+`grid-template-areas`/`grid-area` and `grid-auto-flow: column` are now
+implemented: `normalized_grid_template_areas`/`normalized_grid_area`/
+`normalized_grid_auto_flow` (`simple_web_html_layout_renderer_declarations.spl`)
+parse the declarations, and `grid_template_area_rects` plus a flow-mode
+branch in the auto-placement candidate walk
+(`simple_web_html_layout_renderer_layout.spl`) resolve named-area placement
+and column-first auto-placement respectively — simplified: only rectangular
+areas (CSS Grid SS7.1), no `.` dot-cell handling beyond treating it as an
+empty cell, no implicit-track creation beyond what the template implies,
+and no `grid-auto-flow: dense`. See
+`doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md`
+for the resolved bug record and noted simplifications.
 
 ## Evidence and Provenance
 
@@ -86,10 +94,9 @@ describe "Web CSS grid layout":
     """
     Readers of this manual section can trust that the headless HTML/CSS
     renderer's Draw IR carries correct computed Grid geometry for fixed
-    pixel tracks, `fr` flexible tracks, `grid-column` spans, and gap on both
-    axes — and can see, documented rather than silently passing, exactly
-    where `grid-template-areas` and `grid-auto-flow:column` remain
-    unimplemented.
+    pixel tracks, `fr` flexible tracks, `grid-column` spans, gap on both
+    axes, `grid-template-areas` named-area placement, and
+    `grid-auto-flow:column` column-first auto-placement.
     """
 
     # @manual_section "Grid layout geometry"
@@ -221,7 +228,7 @@ describe "Web CSS grid layout":
         expect(c.y).to_equal(13)
         expect(c.x).to_equal(0)
 
-    it "grid-template-areas places named cells (RED-by-design)":
+    it "grid-template-areas places named cells":
         step("Render a grid using a named-area template")
         val html = (
             "<html><head><style>" +
@@ -237,15 +244,15 @@ describe "Web CSS grid layout":
         val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
         val commands = composition.batches[0].commands
 
-        step("Assert the named-area cell was placed in the 'right' column (x=20) — " +
-             "expected RED: grid-template-areas has zero occurrences anywhere in " +
-             "simple_web_html_layout_renderer_*.spl (unimplemented). See " +
+        step("Assert the named-area cell was placed in the 'right' column (x=20), " +
+             "resolved via grid_template_area_rects against the parsed " +
+             "grid-template-areas template. See " +
              "doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md")
         assert_true(_draw_ir_index_by_id(commands, "a") >= 0)
         val a = _draw_ir_command_by_id(commands, "a")
         expect(a.x).to_equal(20)
 
-    it "grid-auto-flow: column fills column-first (RED-by-design)":
+    it "grid-auto-flow: column fills column-first":
         step("Render a 2x2 grid with grid-auto-flow:column and three auto-placed cells")
         val html = (
             "<html><head><style>" +
@@ -265,9 +272,8 @@ describe "Web CSS grid layout":
 
         step("Assert the third auto-placed cell fills column-first into column 2, row 1 " +
              "(x=10,y=0) rather than row-first into row 2, column 1 (x=0,y=10) — " +
-             "expected RED: grid-auto-flow has zero occurrences anywhere in " +
-             "simple_web_html_layout_renderer_*.spl (auto-placement is row-major only, " +
-             "unimplemented). See " +
+             "the auto-placement candidate walk now branches on the parsed " +
+             "grid-auto-flow flow mode. See " +
              "doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md")
         assert_true(_draw_ir_index_by_id(commands, "c") >= 0)
         val c = _draw_ir_command_by_id(commands, "c")

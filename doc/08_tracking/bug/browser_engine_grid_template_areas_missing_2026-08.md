@@ -51,8 +51,48 @@ qualifier from their names.
 
 ## Status
 
-OPEN — unimplemented, not merely surprising per CSS spec. Left RED per
-testing-rules RED protocol; do not weaken the assertions.
+RESOLVED (2026-08-08) — with noted simplifications.
+
+Both properties are now parsed and consulted by the placement code:
+
+- `normalized_grid_template_areas`, `normalized_grid_area`, and
+  `normalized_grid_auto_flow`
+  (`simple_web_html_layout_renderer_declarations.spl`) parse
+  `grid-template-areas` (quoted row strings, rejecting non-rectangular row
+  shapes outright), `grid-area` (named-reference form only — the numeric
+  `row/col/row-end/col-end` shorthand is out of scope), and `grid-auto-flow`
+  (`column` flow only — no `dense` modifier).
+- `grid_template_area_rects` (`simple_web_html_layout_renderer_layout.spl`)
+  resolves the parsed template into per-area-name rectangles, validating
+  that each name's occupied cells form a solid rectangle (CSS Grid SS7.1) —
+  a non-rectangular name is dropped silently, per this renderer's existing
+  lenient-CSS convention, and a `grid-area` reference to a dropped name
+  falls through to numeric/auto placement. A child with `grid-area:<name>`
+  matching a resolved rectangle has its column/row start and span set from
+  that rectangle before the existing clamp/auto-placement logic runs.
+- The auto-placement candidate-cell walk now branches on
+  `st.grid_auto_flow_column`: column-major (`candidate_column` before
+  `candidate_row`), bounded by the explicit row-track count from
+  `grid-template-rows` when one is declared (matching browser behavior for
+  a grid with a fixed row count), rather than the row-major capacity buffer
+  sized for implicit-row growth.
+
+**Noted simplifications** (left as-is; not required by the unblocking spec
+examples):
+- No `.` dot-cell handling beyond treating it as an empty/unnamed cell.
+- No implicit-track creation beyond what the template's own row/column
+  count implies.
+- No `grid-auto-flow: dense` (packing back to fill earlier gaps).
+- No numeric `grid-area` shorthand (`grid-area: 1 / 1 / 2 / 2`) — only the
+  named-area reference form.
+- When `grid-auto-flow: column` is set but no `grid-template-rows` is
+  declared, column-major placement falls back to the row-major capacity
+  buffer as its row bound (no spec example exercises this combination).
+
+`test/03_system/gui/web_css/web_css_grid_spec.spl`'s
+`"grid-template-areas places named cells"` and `"grid-auto-flow: column
+fills column-first"` examples (previously `"...(RED-by-design)"`) now
+assert the real named-area / column-first geometry and pass.
 
 ## 2026-08-07 triage note (web_css RED sweep)
 

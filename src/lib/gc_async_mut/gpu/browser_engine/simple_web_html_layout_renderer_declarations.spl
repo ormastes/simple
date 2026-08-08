@@ -884,6 +884,79 @@ fn normalized_grid_placement(raw: text) -> text:
         return "{start} / {end_line}"
     ""
 
+fn normalized_grid_area(raw: text) -> text:
+    val value = raw.trim().lower()
+    if value == "" or value == "auto":
+        return ""
+    if find_from(value, "/", 0) >= 0:
+        # The numeric/multi-value `grid-area` shorthand (row-start /
+        # column-start / row-end / column-end) is out of scope for this
+        # simplification -- only the named-area reference form (`grid-area:
+        # <name>`) is supported. See doc/08_tracking/bug/
+        # browser_engine_grid_template_areas_missing_2026-08.md.
+        return ""
+    value
+
+fn normalized_grid_auto_flow(raw: text) -> bool:
+    # Only the `column` flow mode is recognized (no `dense` modifier
+    # support) -- see doc/08_tracking/bug/
+    # browser_engine_grid_template_areas_missing_2026-08.md for scope notes.
+    val value = raw.trim().lower()
+    for token in value.split(" "):
+        if token.trim() == "column":
+            return true
+    false
+
+fn normalized_grid_template_areas(raw: text) -> text:
+    # Parses the quoted-strings `grid-template-areas` value into rows
+    # joined by "|", cells within a row joined by a single space, e.g.
+    # `"left right"` -> "left right", or `"a a" "b c"` -> "a a|b c". Only
+    # rectangular templates are supported: rows whose cell count disagrees
+    # with the first row are rejected outright (whole declaration ignored,
+    # per this renderer's lenient-CSS convention). Per-area rectangle
+    # validation (a single area name must occupy a solid rectangle of
+    # cells, not merely a consistent column count) happens later, at
+    # placement time, in grid_template_area_rects
+    # (simple_web_html_layout_renderer_layout.spl) -- see
+    # doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md.
+    val value = raw.trim()
+    if value == "":
+        return ""
+    var result = ""
+    var col_count = -1
+    var pos = 0
+    val n = value.len()
+    while pos < n:
+        val ch = value.char_at(pos)
+        if ch == "\"" or ch == "'":
+            val close = find_from(value, ch, pos + 1)
+            if close < 0:
+                return ""
+            val row_raw = value.substring(pos + 1, close).trim()
+            if row_raw == "":
+                return ""
+            var row_normalized = ""
+            var cols_in_row = 0
+            for tok in row_raw.split(" "):
+                val cell = tok.trim()
+                if cell == "":
+                    continue
+                if row_normalized != "":
+                    row_normalized = row_normalized + " "
+                row_normalized = row_normalized + cell
+                cols_in_row = cols_in_row + 1
+            if col_count < 0:
+                col_count = cols_in_row
+            elif cols_in_row != col_count:
+                return ""
+            if result != "":
+                result = result + "|"
+            result = result + row_normalized
+            pos = close + 1
+        else:
+            pos = pos + 1
+    result
+
 fn apply_grid_decls(mut st: Style, table: [text]):
     val columns = normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-columns")
@@ -903,6 +976,16 @@ fn apply_grid_decls(mut st: Style, table: [text]):
     val row = normalized_grid_placement(decl_tbl_get(table, "grid-row"))
     if row != "":
         st.grid_row = row
+    val areas = normalized_grid_template_areas(
+        decl_tbl_get(table, "grid-template-areas")
+    )
+    if areas != "":
+        st.grid_template_areas = areas
+    if normalized_grid_auto_flow(decl_tbl_get(table, "grid-auto-flow")):
+        st.grid_auto_flow_column = true
+    val area = normalized_grid_area(decl_tbl_get(table, "grid-area"))
+    if area != "":
+        st.grid_area = area
 
 fn apply_authored_style_metadata(
     mut st: Style, previous: Style, table: [text],
@@ -960,7 +1043,10 @@ fn _apply_decls_on_writing_mode(
         decl_tbl_last_index(table, "grid-template-columns") >= 0 or
         decl_tbl_last_index(table, "grid-template-rows") >= 0 or
         decl_tbl_last_index(table, "grid-column") >= 0 or
-        decl_tbl_last_index(table, "grid-row") >= 0
+        decl_tbl_last_index(table, "grid-row") >= 0 or
+        decl_tbl_last_index(table, "grid-template-areas") >= 0 or
+        decl_tbl_last_index(table, "grid-auto-flow") >= 0 or
+        decl_tbl_last_index(table, "grid-area") >= 0
     )
     if not has_grid_declaration:
         val ordinary = _apply_decls_without_grid(
@@ -973,6 +1059,9 @@ fn _apply_decls_on_writing_mode(
     val rows = st.grid_template_rows
     val column = st.grid_column
     val row = st.grid_row
+    val areas = st.grid_template_areas
+    val area = st.grid_area
+    val auto_flow_column = st.grid_auto_flow_column
     var result = _apply_decls_without_grid(
         st, decls, table, em_base, logical_writing_mode, apply_display
     )
@@ -980,6 +1069,9 @@ fn _apply_decls_on_writing_mode(
     result.grid_template_rows = rows
     result.grid_column = column
     result.grid_row = row
+    result.grid_template_areas = areas
+    result.grid_area = area
+    result.grid_auto_flow_column = auto_flow_column
     apply_grid_decls(result, table)
     apply_authored_style_metadata(result, st, table, logical_writing_mode)
 

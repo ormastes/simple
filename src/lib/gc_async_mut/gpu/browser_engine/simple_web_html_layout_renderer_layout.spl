@@ -438,6 +438,9 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.grid_template_rows = st.grid_template_rows
     out.grid_column = st.grid_column
     out.grid_row = st.grid_row
+    out.grid_template_areas = st.grid_template_areas
+    out.grid_area = st.grid_area
+    out.grid_auto_flow_column = st.grid_auto_flow_column
     out.height_auto = false
     out.align_items_authored = st.align_items_authored
     out.scrollbar_width_none = st.scrollbar_width_none
@@ -1018,6 +1021,88 @@ fn grid_track_span_size(
         index = index + 1
     size
 
+# A single `grid-template-areas` named area resolved to its (0-based)
+# track range, e.g. "right" in `"left right"` -> row_start:0, col_start:1,
+# row_span:1, col_span:1.
+class GridAreaRect:
+    area: text
+    row_start: i32
+    col_start: i32
+    row_span: i32
+    col_span: i32
+
+# Parses a normalized `grid-template-areas` string (rows joined by "|",
+# cells within a row space-separated -- see normalized_grid_template_areas
+# in simple_web_html_layout_renderer_declarations.spl) into the list of
+# named area rectangles it declares. Only rectangular areas are recognized
+# (CSS Grid SS7.1 "Named Areas"): a name whose occupied cells don't form a
+# solid rectangle is dropped -- silently, per this renderer's existing
+# lenient-CSS convention -- and a `grid-area` reference to a dropped name
+# falls through to numeric/auto placement. No dot-cell (`.`) handling beyond
+# treating it as an empty/unnamed cell, and no implicit-track creation
+# beyond what the template's own row/column count implies. See
+# doc/08_tracking/bug/browser_engine_grid_template_areas_missing_2026-08.md.
+fn grid_template_area_rects(raw: text) -> [GridAreaRect]:
+    var result: [GridAreaRect] = []
+    if raw == "":
+        return result
+    val rows = raw.split("|")
+    var names: [text] = []
+    var min_rows: [i32] = []
+    var max_rows: [i32] = []
+    var min_cols: [i32] = []
+    var max_cols: [i32] = []
+    var row_idx = 0
+    while row_idx < rows.len():
+        val cols = rows[row_idx].split(" ")
+        var col_idx = 0
+        while col_idx < cols.len():
+            val name = cols[col_idx].trim()
+            if name != "" and name != ".":
+                var found = -1
+                var k = 0
+                while k < names.len():
+                    if names[k] == name:
+                        found = k
+                    k = k + 1
+                if found < 0:
+                    names.push(name)
+                    min_rows.push(row_idx as i32)
+                    max_rows.push(row_idx as i32)
+                    min_cols.push(col_idx as i32)
+                    max_cols.push(col_idx as i32)
+                else:
+                    if (row_idx as i32) < min_rows[found]:
+                        min_rows[found] = row_idx as i32
+                    if (row_idx as i32) > max_rows[found]:
+                        max_rows[found] = row_idx as i32
+                    if (col_idx as i32) < min_cols[found]:
+                        min_cols[found] = col_idx as i32
+                    if (col_idx as i32) > max_cols[found]:
+                        max_cols[found] = col_idx as i32
+            col_idx = col_idx + 1
+        row_idx = row_idx + 1
+    var i = 0
+    while i < names.len():
+        var valid = true
+        var rr = min_rows[i]
+        while rr <= max_rows[i] and valid:
+            val cols = rows[rr].split(" ")
+            var cc = min_cols[i]
+            while cc <= max_cols[i] and valid:
+                if (cc as i64) >= cols.len() or cols[cc].trim() != names[i]:
+                    valid = false
+                cc = cc + 1
+            rr = rr + 1
+        if valid:
+            result.push(GridAreaRect(
+                area: names[i], row_start: min_rows[i], col_start: min_cols[i],
+                row_span: max_rows[i] - min_rows[i] + 1,
+                col_span: max_cols[i] - min_cols[i] + 1
+            ))
+        i = i + 1
+    result
+
 fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
 
@@ -1513,6 +1598,11 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         val grid_row_capacity = (
             grid_child_count + explicit_rows.len() as i32 + 1
         )
+        # `grid-template-areas` named-area rectangles, resolved against
+        # `grid-area:<name>` references below (CSS Grid SS7.1); see
+        # grid_template_area_rects for the rectangularity-validation and
+        # scope notes.
+        val area_rects = grid_template_area_rects(st.grid_template_areas)
         var grid_rows: [i32] = [0; grid_row_capacity]
         var explicit_row_index = 0
         while explicit_row_index < explicit_rows.len():
@@ -1532,7 +1622,19 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             var grid_column_span = grid_placement_span(
                 grid_child_style.grid_column
             )
-            val grid_row_span = grid_placement_span(grid_child_style.grid_row)
+            var grid_row_span = grid_placement_span(grid_child_style.grid_row)
+            if grid_child_style.grid_area != "":
+                var area_idx = 0
+                var area_found = -1
+                while area_idx < area_rects.len():
+                    if area_rects[area_idx].area == grid_child_style.grid_area:
+                        area_found = area_idx as i32
+                    area_idx = area_idx + 1
+                if area_found >= 0:
+                    grid_column = area_rects[area_found].col_start
+                    grid_row = area_rects[area_found].row_start
+                    grid_column_span = area_rects[area_found].col_span
+                    grid_row_span = area_rects[area_found].row_span
             if grid_column_span > grid_column_count:
                 grid_column_span = grid_column_count
             # A declared line beyond this bounded layout pass cannot index the
@@ -1546,13 +1648,38 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             ):
                 grid_column = -1
             if grid_column < 0 or grid_row < 0:
+                # `grid-auto-flow: column` walks column-major: fill down
+                # each column (bounded by the explicit row-track count, CSS
+                # Grid SS8.5) before advancing to the next column, instead of
+                # the default row-major walk. Bounding by the explicit row
+                # count (rather than the row-major capacity buffer sized for
+                # implicit-row growth) matches browser behavior for a grid
+                # with a declared `grid-template-rows`; see
+                # doc/08_tracking/bug/
+                # browser_engine_grid_template_areas_missing_2026-08.md.
+                val flow_row_bound = if (
+                    st.grid_auto_flow_column and explicit_rows.len() as i32 > 0
+                ):
+                    explicit_rows.len() as i32
+                else:
+                    grid_row_capacity
+                val candidate_limit = if st.grid_auto_flow_column:
+                    flow_row_bound * grid_column_count
+                else:
+                    grid_row_capacity * grid_column_count
                 var candidate = 0
                 var placed = false
                 while (
-                    candidate < occupied.len() and not placed
+                    candidate < candidate_limit and not placed
                 ):
-                    val candidate_row = candidate / grid_column_count
-                    val candidate_column = candidate % grid_column_count
+                    val candidate_row = if st.grid_auto_flow_column:
+                        candidate % flow_row_bound
+                    else:
+                        candidate / grid_column_count
+                    val candidate_column = if st.grid_auto_flow_column:
+                        candidate / flow_row_bound
+                    else:
+                        candidate % grid_column_count
                     var admitted = (
                         (grid_row < 0 or candidate_row == grid_row) and
                         (grid_column < 0 or candidate_column == grid_column) and

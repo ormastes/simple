@@ -96,8 +96,8 @@ example):
 `"grid-template-columns: fr tracks split remaining space proportionally"`
 example (previously `"...(RED-by-design)"`) now asserts the real 20px/40px
 split and passes. The other two documented RED examples in that file
-(`grid-template-areas`, `grid-auto-flow: column`) are untouched and remain
-RED — see `browser_engine_grid_template_areas_missing_2026-08.md`.
+(`grid-template-areas`, `grid-auto-flow: column`) have since also been
+resolved — see `browser_engine_grid_template_areas_missing_2026-08.md`.
 
 ## 2026-08-07 triage note (web_css RED sweep)
 
