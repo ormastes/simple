@@ -80,9 +80,18 @@ $ SIMPLE_JIT_STRICT=1 bin/simple run scratch/t4.spl     # xs.empty
 ```
 
 Strict was set and it still fell back. Same for a struct with a genuinely absent
-field (`class P has no field named y`). In every probe attempted, the
-`[jit-fallback]` marker was **never** emitted — every observed drop went through
-the untagged `[INFO]` path instead.
+field (`class P has no field named y`).
+
+**Scope of this claim, precisely.** What is proven is that the **`run`/JIT lane**
+routes this class through the untagged semantic gate, so `SIMPLE_JIT_STRICT=1`
+does not stop the fallback *for it*. It is NOT proven that `[jit-fallback]` is
+unreachable in general — it was simply never emitted in any `run`-lane probe
+attempted here. The `compile` lane does reach
+`LowerError::CannotInferFieldType` (`access.rs:400`) for this exact family, and
+the tree scan also produced `MIR lowering: Unsupported HIR constr` failures,
+which is the other arm of `jit_strict_fallback_error`. Both arms are therefore
+live; the defect is that the accessor family does not travel through them on the
+`run` path.
 
 **Consequence:** a `run`-based fence for this class would be vacuous. That is why
 the landed fence drives `compile`.
@@ -125,6 +134,46 @@ sugar, and do not try to reject them in the parser.**
    it stands, strict mode advertises coverage it does not have — the same
    "advertised coverage that does not exist" pattern called out in
    `scripts/check/check-aot-lane-fences.shs`.
+
+## Class size: bounds, not a number
+
+One pass over the 418 textual candidates in `src/lib src/app src/os src/compiler`
+flagged **17 files**. That is a **lower bound**, not the class size:
+
+- **The compiler reports only the FIRST error per file.** `package/list.spl` was
+  reported as `struct 'ANY' field 'prefix'` while *also* containing
+  `manifest.stdlib_files.length` — a real accessor site the fence never named.
+  After the fixes below, 4 files moved DROP -> UNMEASURABLE because a
+  previously-masked second error surfaced. **The fence is not fixed-point: run it
+  again after every round of fixes.**
+- **Coverage denominator:** of the 418 compiled, **286 were UNMEASURABLE** (they
+  fail to compile for unrelated reasons). The fence has an opinion about **115
+  files**. That is the real coverage.
+- Grep's 758 candidate files is the **upper** bound and over-reports ~44x,
+  because genuine `length` struct fields are declared in other files.
+
+Neither bound is the answer. Only repeated fence passes converge on one.
+
+### Fixed in this pass (25 files, `.length` -> `.len()`)
+
+All had container or string receivers. The rewrite is proven
+**compilation-non-regressing** rather than semantics-preserving: every rewritten
+site already failed to compile, so the change cannot have broken a working build,
+and a compile pass confirmed 0 parse errors afterwards. Dict receivers were left
+alone (`Dict.len()` returns -1 under native codegen).
+
+### NOT fixed
+
+- `src/compiler/10.frontend/c_import/c_import_resolve.spl` — `struct 'String'
+  field 'length'`. It was edited in this lane, but a parallel session clobbered
+  the working-copy edit before it could be landed. **Still an open DROP site.**
+- `src/compiler/35.semantics/lint/primitive_api.spl` (`struct 'String' field
+  'ty'`) and `src/lib/*/package/list.spl` (`struct 'ANY' field 'prefix'`) are
+  drops from a RELATED but DIFFERENT cause — field access on an erased/ANY
+  receiver — not the paren-less accessor family. Same ~100-1000x consequence.
+- `src/lib/nogc_async_mut_noalloc/path/baremetal_path.spl` — `struct 'Array'
+  field 'last'`. Not rewritten: unlike `.length`, it was not confirmed that a
+  `.last()` method exists with matching semantics.
 
 ## Fence
 
