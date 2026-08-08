@@ -342,13 +342,21 @@ fn _join_args(args: [text], from_idx: i64, to_idx: i64) -> text:
         i = i + 1
     s
 
-# Split a range string like "1..n" on ".." returning [from, to].
-# If no ".." found, returns [range, ""].
+# Split a range string like "1..n" on the TOP-LEVEL ".." returning [from, to].
+# Paren/bracket aware: a ".." nested inside (...) or [...] is not a split point,
+# so "f(a..b)..n" splits into ["f(a..b)", "n"] rather than ["f(a", "b)..n"].
+# If no top-level ".." found, returns [range, ""].
 fn _split_range(range: text) -> [text]:
     val n = range.len()
+    var depth = 0
     var i = 0
     while i < n - 1:
-        if range[i] == "." and range[i + 1] == ".":
+        val ch = range[i]
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+        elif ch == ")" or ch == "]":
+            depth = depth - 1
+        elif depth == 0 and ch == "." and range[i + 1] == ".":
             var from_str = ""
             var j = 0
             while j < i:
@@ -557,6 +565,12 @@ fn _expr_latex(tokens: [text], pos: i64) -> [text]:
             p = _to_int(right[1])
         else:
             cont = false
+    # Range production (lowest precedence). Without this, ".." is a token the
+    # expression grammar does not recognise, so parsing silently stops after the
+    # "from" half and the "to" bound is dropped.
+    if _peek(tokens, p) == "..":
+        val rhs = _expr_latex(tokens, p + 1)
+        return [ls + " \\ldots " + rhs[0], rhs[1]]
     [ls, "" + p]
 
 # ============================================================================
@@ -731,6 +745,10 @@ fn _expr_pretty(tokens: [text], pos: i64) -> [text]:
             p = _to_int(right[1])
         else:
             cont = false
+    # Range production (lowest precedence) -- see _expr_latex.
+    if _peek(tokens, p) == "..":
+        val rhs = _expr_pretty(tokens, p + 1)
+        return [ls + ".." + rhs[0], rhs[1]]
     [ls, "" + p]
 
 # ============================================================================
@@ -917,6 +935,10 @@ fn _expr_text(tokens: [text], pos: i64) -> [text]:
             p = _to_int(right[1])
         else:
             cont = false
+    # Range production (lowest precedence) -- see _expr_latex.
+    if _peek(tokens, p) == "..":
+        val rhs = _expr_text(tokens, p + 1)
+        return [ls + ".." + rhs[0], rhs[1]]
     [ls, "" + p]
 
 # ============================================================================
@@ -1091,6 +1113,10 @@ fn _expr_debug(tokens: [text], pos: i64) -> [text]:
             p = _to_int(right[1])
         else:
             cont = false
+    # Range production (lowest precedence) -- see _expr_latex.
+    if _peek(tokens, p) == "..":
+        val rhs = _expr_debug(tokens, p + 1)
+        return ["Range(" + ls + ", " + rhs[0] + ")", rhs[1]]
     [ls, "" + p]
 
 # ============================================================================
