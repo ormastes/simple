@@ -3,6 +3,13 @@
 
 use std.spec.*
 use std.io_runtime.{process_run}
+use common.spec.environment_profile.{
+    UiEnvironmentAdmissionStatus,
+    UiEnvironmentEvidenceClass,
+    simpleos_qemu_2d_environment_profiles,
+    ui_environment_evidence,
+    validate_ui_environment_evidence
+}
 
 fn run_io_audio_qemu_check(mode: text) -> (text, text, i64):
     process_run("/bin/sh", ["scripts/check/check-simpleos-io-audio-qemu.shs", mode])
@@ -15,12 +22,28 @@ describe "SimpleOS QEMU input and audio":
         expect(code).to_equal(0)
         expect(err).to_equal("")
         expect(out).to_contain("simpleos_io_audio_qemu_preflight=pass")
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        val admission = validate_ui_environment_evidence(
+            profile,
+            ui_environment_evidence(
+                profile.id,
+                UiEnvironmentEvidenceClass.HostReadiness,
+                configured: true,
+                runtime_available: true,
+                qemu_arguments_bound: true
+            )
+        )
+        expect(admission.status).to_equal(UiEnvironmentAdmissionStatus.Ready)
+        expect(admission.reason).to_equal("live-guest-proof-required")
+        expect(admission.promotion_eligible).to_be(false)
 
     # @prev("prepares admitted guest artifacts and virtual devices")
     # @capture(log)
     it "delivers guest input and non-silent playback and capture":
         step("Open the event and audio endpoints")
         val (out, err, code) = run_io_audio_qemu_check("--live")
+        val profile = simpleos_qemu_2d_environment_profiles()[0]
+        expect(profile.required_evidence).to_equal(UiEnvironmentEvidenceClass.LiveGuest)
         expect(code).to_equal(0)
         expect(err).to_equal("")
         step("Inject keyboard pointer and controller events")
