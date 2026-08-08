@@ -43,23 +43,50 @@ A callee with **zero** definitions is a surviving damage site. Use `/usr/bin/gre
 
 ### In files the two reviewed commits edited (missed line-by-line)
 
-| file:line | call | correct form |
+**The "candidate restore" column is UNVERIFIED and must be confirmed per row
+before use.** The oracle proves only that the *called* name has zero
+definitions; it says nothing about what the correct target is. This repo's
+free-function convention is `<lowercased-type>_<method>(self, ...)`, so the
+right restore is often a *differently-prefixed free function*, not a dotted
+call — e.g. `hygiene.spl:337`'s `ident_add_mark(ident, ...)` restores to
+`markedident_add_mark(ident, ...)` (defined at `hygiene.spl:64`), NOT to
+`ident.add_mark(...)`. Likewise `HygieneScope`'s helpers are named
+`hygienescope_*` (`hygiene.spl:116,127`), so `scope_bind`/`scope_lookup`
+probably restore to `hygienescope_bind`/`hygienescope_lookup` — confirm the
+target exists before editing.
+
+| file:line | dead call (zero definitions tree-wide) | candidate restore (UNVERIFIED) |
 |---|---|---|
-| `src/compiler/35.semantics/macro_check/hygiene.spl:222` | `scope_bind(scope, name, ident)` | `scope.bind(name, ident)` |
-| `src/compiler/35.semantics/macro_check/hygiene.spl:239` | `scope_lookup(scope, ident.name)` | `scope.lookup(ident.name)` |
-| `src/compiler/35.semantics/macro_check/hygiene.spl:290` | `scope_lookup(scope, name)` | `scope.lookup(name)` |
-| `src/compiler/35.semantics/macro_check/hygiene.spl:337` | `ident_add_mark(ident, self.current_mark)` | `ident.add_mark(self.current_mark)` |
-| `src/compiler/35.semantics/macro_check/template.spl:165` | `kind_can_follow(kind, prev_kind)` | `kind.can_follow(prev_kind)` |
-| `src/compiler/35.semantics/macro_check/template.spl:277` | `param.kind_to_text(kind)` | `param.kind.to_text()` |
-| `src/compiler/35.semantics/macro_check/template.spl:300` | `kind_to_text(kind)` | `kind.to_text()` |
-| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:117` | `pattern_get_severity(pattern)` | `pattern.get_severity()` |
-| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:405` | `pattern_is_error(pattern)` | `pattern.is_error()` |
-| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:474` | `std.sys_exit(sys, 1)` | `std.sys.exit(1)` |
+| `src/compiler/35.semantics/macro_check/hygiene.spl:222` | `scope_bind(scope, name, ident)` | `hygienescope_bind(scope, name, ident)`? |
+| `src/compiler/35.semantics/macro_check/hygiene.spl:239` | `scope_lookup(scope, ident.name)` | `hygienescope_lookup(scope, ident.name)`? |
+| `src/compiler/35.semantics/macro_check/hygiene.spl:290` | `scope_lookup(scope, name)` | `hygienescope_lookup(scope, name)`? |
+| `src/compiler/35.semantics/macro_check/hygiene.spl:337` | `ident_add_mark(ident, self.current_mark)` | `markedident_add_mark(ident, self.current_mark)` (target CONFIRMED at `hygiene.spl:64`) |
+| `src/compiler/35.semantics/macro_check/template.spl:165` | `kind_can_follow(kind, prev_kind)` | ? |
+| `src/compiler/35.semantics/macro_check/template.spl:277` | `param.kind_to_text(kind)` | ? |
+| `src/compiler/35.semantics/macro_check/template.spl:300` | `kind_to_text(kind)` | ? |
+| `src/compiler/35.semantics/macro_check/mod.spl:207` | `args_len(args)` — sole tree-wide definition is `src/app/ui.tauri/tauri_entry.spl:15` (`[text] -> i64`), an unrelated app module. Under the flat bare-name function table this can resolve to the WRONG function rather than fail (see `9918298a7240`). | ? |
+| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:117` | `pattern_get_severity(pattern)` | ? |
+| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:405` | `pattern_is_error(pattern)` | ? |
+| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:474` | `std.sys_exit(sys, 1)` | ? |
+
+`macro_check/mod.spl:206`'s `validator.params.keys().len()` — the one place
+`b0c98541d2a` deliberately changed semantics — is **CORRECT**: `params` is
+`Dict<text, TemplateParam>` (`template.spl:124`), so `Dict.len()` would have
+returned -1 under native codegen.
 
 ### Elsewhere (never swept)
 
 `src/compiler/55.borrow/gc_analysis/mod.spl:119,120,124` — `gc_types_contains`
 / `gc_types_push` (**fixed in the commit that adds this doc**).
+
+**Same file, DIFFERENT damage shape, still open:**
+`src/compiler/55.borrow/gc_analysis/mod.spl:129` and `:132` pass a bare `_1`
+placeholder — `RootAnalysis.create(self.is_gc_type(_1))`. `_1` is not bound in
+either scope; this looks like a lambda/closure argument mangled by the same
+refactor (`\x -> self.is_gc_type(x)` collapsed to a positional placeholder that
+the language does not support here). Not covered by either regex shape above,
+so a sweep that only chases `<X>_<Y>(<X>)` will not surface it. Deliberately
+left unfixed here because the intended closure form is a guess.
 
 Still open:
 
