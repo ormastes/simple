@@ -34,6 +34,35 @@ fn qemu_gpu_checker_source() -> text:
 fn qemu_audio_checker_source() -> text:
     file_read_text("scripts/check/check-simpleos-io-audio-qemu.shs")
 
+struct SimpleOsQemuProfile:
+    host_os: text
+    guest_arch: text
+    qemu_mode: text
+    expected_2d: text
+    expected_gpu: text
+    expected_input: text
+    expected_audio: text
+    required_evidence_class: text
+
+fn simpleos_qemu_profiles() -> [SimpleOsQemuProfile]:
+    [
+        SimpleOsQemuProfile(host_os: "linux", guest_arch: "x86_64", qemu_mode: "native-or-tcg", expected_2d: "drawir", expected_gpu: "vulkan", expected_input: "virtio-input", expected_audio: "virtio-snd", required_evidence_class: "guest-receipt-required"),
+        SimpleOsQemuProfile(host_os: "linux", guest_arch: "aarch64", qemu_mode: "tcg", expected_2d: "drawir", expected_gpu: "vulkan", expected_input: "virtio-input", expected_audio: "virtio-snd", required_evidence_class: "guest-receipt-required"),
+        SimpleOsQemuProfile(host_os: "linux", guest_arch: "riscv64", qemu_mode: "tcg", expected_2d: "drawir", expected_gpu: "vulkan", expected_input: "virtio-input", expected_audio: "virtio-snd", required_evidence_class: "guest-receipt-required"),
+        SimpleOsQemuProfile(host_os: "macos", guest_arch: "aarch64", qemu_mode: "hvf-deferred", expected_2d: "drawir", expected_gpu: "vulkan-deferred", expected_input: "virtio-input-deferred", expected_audio: "virtio-snd-deferred", required_evidence_class: "host-readiness-only")
+    ]
+
+fn simpleos_qemu_profile_valid(profile: SimpleOsQemuProfile) -> bool:
+    val known_host = profile.host_os == "linux" or profile.host_os == "macos"
+    val known_arch = profile.guest_arch == "x86_64" or profile.guest_arch == "aarch64" or profile.guest_arch == "riscv64"
+    val known_mode = profile.qemu_mode == "native-or-tcg" or profile.qemu_mode == "tcg" or profile.qemu_mode == "hvf-deferred"
+    val known_2d = profile.expected_2d == "drawir"
+    val known_gpu = profile.expected_gpu == "vulkan" or profile.expected_gpu == "vulkan-deferred"
+    val known_input = profile.expected_input == "virtio-input" or profile.expected_input == "virtio-input-deferred"
+    val known_audio = profile.expected_audio == "virtio-snd" or profile.expected_audio == "virtio-snd-deferred"
+    val known_evidence = profile.required_evidence_class == "guest-receipt-required" or profile.required_evidence_class == "host-readiness-only"
+    known_host and known_arch and known_mode and known_2d and known_gpu and known_input and known_audio and known_evidence
+
 
 describe "SimpleOS Vulkan and VirtIO device interfaces":
     it "should select Vulkan and expose the canonical DrawIR executor":
@@ -146,3 +175,12 @@ describe "SimpleOS Vulkan and VirtIO device interfaces":
         expect(audio).to_contain("simpleos_io_audio_qemu_preflight=pass")
         expect(audio).to_contain("guest_execution=1")
         expect(audio).to_contain("seed_rejected=1")
+
+    it "should validate reusable host and guest profiles without promoting readiness to PASS":
+        val profiles = simpleos_qemu_profiles()
+        expect(profiles.len()).to_equal(4)
+        for profile in profiles:
+            expect(simpleos_qemu_profile_valid(profile)).to_be(true)
+        expect(profiles[0].required_evidence_class).to_equal("guest-receipt-required")
+        expect(profiles[3].required_evidence_class).to_equal("host-readiness-only")
+        expect(profiles[3].expected_gpu).to_equal("vulkan-deferred")
