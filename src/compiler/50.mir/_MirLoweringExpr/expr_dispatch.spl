@@ -1610,6 +1610,7 @@ impl MirLowering:
         elif self.current_gpu_kernel_target == "vulkan":
             index_local = self.vulkan_u32_local(index_local)
         var is_tuple_base = false
+        var tuple_field_mir_types: [MirType] = []
         if has_base_mir_type:
             match base_mir_type.kind:
                 case MirTypeKind.Array(element_type, _):
@@ -1624,29 +1625,33 @@ impl MirLowering:
                 case MirTypeKind.Dict(_, value_type):
                     result_type = value_type
                     result_type_from_base = true
-                case MirTypeKind.Tuple(_):
+                case MirTypeKind.Tuple(field_types):
                     # Bug (native_pushed_tuple_into_empty_literal_list_
                     # unboxed_2026-08-02, gap (a) follow-up): `t.0`/`t.1`
                     # desugars to Index(base, IntLit(i)) at HIR-lowering time
                     # (20.hir/hir_lowering/expressions.spl,
-                    # is_tuple_positional_field). Deliberately does NOT set
-                    # result_type here from the tuple's own MIR field_types:
-                    # those are derived from each element's raw HIR
-                    # `.type_` annotation in lower_tuple_lit
-                    # (_MirLoweringExpr/literals.spl), which gap (b) above
-                    # already proved unreliable for non-i64/mixed-type
-                    # tuples (`(1, "x")` renders its text field as a raw
-                    # pointer). HIR lowering's own
-                    # `field_tuple_element_type` (20.hir/hir_lowering/
-                    # expressions.spl, keyed off `local_tuple_types`) is the
-                    # MORE reliable source for a plain tuple-local field
-                    # read and already flows into `index_result_hir_type`
-                    # below via `has_index_result_hir_type` -- this arm only
-                    # needs to flag "tuple base" so the SIMPLE_BOOTSTRAP
-                    # forced-text default two blocks down defers to that
-                    # HIR-sourced type instead of clobbering it, closing
-                    # gap (a) without inheriting gap (b)'s unreliability.
+                    # is_tuple_positional_field). Originally this arm
+                    # deliberately did NOT set result_type from the tuple's
+                    # own MIR field_types because, at the time, those were
+                    # derived from each element's raw HIR `.type_`
+                    # annotation in lower_tuple_lit (_MirLoweringExpr/
+                    # literals.spl) -- unreliable for non-i64/mixed-type
+                    # tuples. That source was fixed 2026-08-07
+                    # (lower_tuple_lit now prefers
+                    # `self.local_mir_type_of(local)`, the lowered
+                    # element's own MIR-registered type, over the
+                    # unreliable HIR annotation) -- field_types is now a
+                    # trustworthy per-index type source and is kept here
+                    # (gap (c) fix) as the tuple-index fallback below when
+                    # HIR-sourced `index_result_hir_type` is unavailable
+                    # (observed: `field_tuple_element_type`'s
+                    # `local_tuple_types` lookup does not fire on every
+                    # lowering path that reaches this function, e.g. a
+                    # plain non-interpolated `val s = m.1`, leaving
+                    # `has_index_result_hir_type` false and result_type
+                    # stuck at the untyped i64 default).
                     is_tuple_base = true
+                    tuple_field_mir_types = field_types
                 case _: ()
         if not result_type_from_base and self.find_local_hir_type(base_local.id) != nil:
             val base_hir_type = self.find_local_hir_type(base_local.id) ?? HirType(kind: HirTypeKind.Error, span: base.span)
@@ -1659,6 +1664,15 @@ impl MirLowering:
             result_type = self.bootstrap_text_type()
         elif not result_type_from_base and has_index_result_hir_type:
             result_type = self.lower_type(index_result_hir_type)
+        if is_tuple_base and not result_type_from_base and not has_index_result_hir_type:
+            # gap (c) fallback (see the Tuple(field_types) arm above): no
+            # HIR-sourced element type reached this call, so fall back to
+            # the tuple's own MIR-registered field type at the literal
+            # index instead of leaving result_type at the untyped i64
+            # default.
+            val lit_field_idx = self.tuple_index_literal(index)
+            if lit_field_idx >= 0 and lit_field_idx < tuple_field_mir_types.len():
+                result_type = tuple_field_mir_types[lit_field_idx]
         # Store-side refinement (mirror of the dict read above): an
         # empty `[]` literal fixes the element type at the i64 default;
         # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
@@ -1777,6 +1791,32 @@ impl MirLowering:
                 decoded_elem
             else:
                 base_local
+        elif is_tuple_base and self.tuple_index_literal(index) >= 0:
+            # Bug (native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02,
+            # gap (c), mixed-type tuple field READS): the plain
+            # emit_gep/emit_load pair below loads the field's raw 8-byte
+            # storage word straight into `result_type` with NO
+            # storage-vs-logical reconciliation -- correct only when
+            # `result_type` happens to already be a native-int-shaped type.
+            # A str/bool/f64 tuple field's physical storage is still one
+            # native-int word (same "every field is one word" layout
+            # `translate_get_field` documents), so loading it directly as
+            # "ptr"/"i1"/"double" is an `llc` type mismatch or a silent
+            # bit-reinterpretation bug -- observed as `(1, "x").1` printing
+            # a raw pointer-as-decimal instead of "x". `emit_get_field` +
+            # its LLVM translation `translate_get_field`
+            # (`70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl`)
+            # already implement exactly this dest_ty-keyed reconciliation
+            # (ptr: load-then-inttoptr; float: load-then-bitcast; narrow
+            # int/bool: load-then-trunc) for struct/tuple field reads
+            # elsewhere in this file (e.g. line ~2108, ~3606) -- route the
+            # tuple-index-desugared read through the same helper instead of
+            # the raw GEP+load pair, rather than reinventing the
+            # reconciliation here.
+            var bf = self.builder
+            val field_local = bf.emit_get_field(mir_operand_copy(base_local), self.tuple_index_literal(index), result_type)
+            self.builder = bf
+            field_local
         else:
             var b = self.builder
             val ptr = b.emit_gep(
@@ -1788,6 +1828,16 @@ impl MirLowering:
             self.builder = b
             loaded
 
+    me tuple_index_literal(index: HirExpr) -> i64:
+        """Recover the literal field index from a `t.N` desugared Index
+        expression (HirExprKind.IntLit), or -1 if `index` is not a literal
+        int (e.g. a genuinely dynamic index on a tuple, which this lane does
+        not support -- falls back to the plain GEP+load path)."""
+        match index.kind:
+            case IntLit(value, _):
+                return value
+            case _: ()
+        -1
 
     me lower_cast_expr(operand: HirExpr, target: HirType, span: Span) -> LocalId:
         """Lower casts, extracting a runtime enum's resolved discriminant."""
@@ -2507,6 +2557,7 @@ impl MirLowering:
                         self.builder = b_rhs_done
                         logic_result
                     case _:
+                        eprint("MARKER-OPTBOOLEQ-9f31\n")
                         val left_local = self.lower_expr(left)
                         val right_local = self.lower_expr(right)
                         # Custom enum values are tagged runtime handles, so a

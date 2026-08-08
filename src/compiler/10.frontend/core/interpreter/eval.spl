@@ -24,6 +24,27 @@ fn record_decision(file: text, line: i64, taken: bool):
         coverage_counter = coverage_counter + 1
         rt_coverage_decision_probe(file, line, coverage_counter, taken)
 
+# Resolve the file that should own a coverage decision/line probe fired RIGHT
+# NOW — the pure-Simple counterpart of the seed's RC1 (impl-method owner
+# tagging, b6a43042) / RC2 (entry-script owner fallback, 40fa02ee). Prefers
+# the currently-executing function/method's registered owner file
+# (eval_current_decl_id, set by eval_function_call / eval_method_call around
+# every call — see decl_owner_file_set, populated by
+# module_loader_core.register_module_functions()); falls back to whichever
+# module is currently being parsed/evaluated at the top level
+# (module_get_path()) for entry-script top-level code, which executes
+# immediately as its own module is loaded; falls back to a "<entry>"
+# sentinel only if neither signal is available.
+fn coverage_owner_file() -> text:
+    if eval_current_decl_id >= 0:
+        val owned = decl_owner_file_get(eval_current_decl_id)
+        if owned != "":
+            return owned
+    val mp = module_get_path()
+    if mp != "":
+        return mp
+    "<entry>"
+
 # ===== Type Checking Integration =====
 # Basic runtime type checking for function parameters
 
@@ -489,7 +510,7 @@ fn eval_if_expr(eid: i64) -> i64:
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    record_decision("eval", eid, taken)
+    record_decision(coverage_owner_file(), eid, taken)
 
     if taken:
         return eval_expr(then_id)

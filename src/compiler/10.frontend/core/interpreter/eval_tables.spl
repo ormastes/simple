@@ -30,6 +30,36 @@ var frt_vals: [i64] = []
 var frt_buckets: [i64] = []
 var frt_nexts: [i64] = []
 
+# ===== Decl Owner File Tracking (coverage attribution) =====
+#
+# Maps decl_id -> the source file that DEFINED it, captured at registration
+# time. module_get_path() alone is only correct for whichever module is
+# CURRENTLY being parsed/loaded; once module_loader_core flattens every
+# file's functions and impl-methods into the bare-name func_table, a call
+# into another module's function needs ITS OWN file, not whatever module
+# happens to be parsing right now. Populated by
+# module_loader_core.register_module_functions() for DECL_FN and DECL_IMPL
+# methods — the pure-Simple counterpart of the seed's RC1 (impl-method owner
+# tagging, b6a43042) / RC2 (entry-script owner fallback, 40fa02ee) fixes.
+#
+# decl_id is a dense, monotonically-increasing global arena index (see
+# decl_alloc in _Ast/decl_nodes.spl), so a direct-indexed array with
+# "" padding gives O(1) get/set without a hash map.
+var dof_files: [text] = []
+
+fn decl_owner_file_reset():
+    dof_files = []
+
+fn decl_owner_file_set(decl_id: i64, file: text):
+    if decl_id < 0: return
+    while dof_files.len() <= decl_id:
+        dof_files.push("")
+    dof_files[decl_id] = file
+
+fn decl_owner_file_get(decl_id: i64) -> text:
+    if decl_id < 0 or decl_id >= dof_files.len(): return ""
+    dof_files[decl_id]
+
 # ===== Must-Use Function Registry (Hash Map, R9) =====
 var mu_keys: [text] = []
 var mu_reasons: [text] = []
@@ -120,6 +150,7 @@ fn func_table_reset():
     mu_buckets = hm_make_global_buckets()
     mu_nexts = []
     must_use_critical_mode = false
+    decl_owner_file_reset()
 
 # Co-compiled signature-collision detection.
 #
