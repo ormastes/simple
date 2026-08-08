@@ -5,6 +5,9 @@ use std.spec.*
 use std.io_runtime.{file_exists, file_read, file_write, file_delete, getpid}
 use app.llm_caret.messaging.adapter.plugin.manifest.*
 use app.llm_caret.messaging.adapter.plugin.installer.*
+use std.common.spec.evidence.untyped_capture.{UntypedCapture, untyped_capture_to_canonical}
+use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec, check_exact}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 fn manifest_text() -> text:
     "integration:\n  schema: simple.integration/v1\n  name: llm-caret-messaging\n  version: 0.1.0\n  kind: agent_chat_bridge\n  runtime:\n    command: simple\n    args: [caret, messaging, bridge]\n  agents:\n    claude:\n      hooks: hooks/claude/hooks.json\n      transport: local_http_or_unix\n    codex:\n      hooks: hooks/codex/hooks.json\n      app_server: true\n      transport: stdio_or_unix\n    gemini:\n      settings_fragment: hooks/gemini/settings.fragment.json\n      transport: local_command\n  mcp:\n    manifest: mcp/manifest.sdn\n  configuration:\n    schema: config/schema.sdn\n    defaults: config/defaults.sdn\n  migrations: [migrations/001_initial.sdn]\n  install_policy:\n    merge_settings: true\n    backup_before_write: true\n    record_owned_paths: true\n    record_before_after_hashes: true\n    preserve_user_entries_on_uninstall: true\n    credentials_in_hook_files: false\n"
@@ -26,6 +29,14 @@ describe "LLM Caret composite plugin installer":
         expect(result.applied).to_equal(1)
         expect(file_read(path)).to_contain("plugin fragment")
         expect(file_read(backup)).to_equal("user settings")
+
+        val capture = UntypedCapture(label: "plugin-executor-owned-write-readback", raw_value: file_read(path), source_kind: "log_line")
+        val evidence = untyped_capture_to_canonical(capture, "plugin_installer_spec/owned-write-readback")
+        val comparison = compare_evidence(evidence, oracle_spec("plugin_installer_spec/owned-write-readback", [
+            check_exact("value", "user settings\nplugin fragment")
+        ]))
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+
         file_delete(path)
         file_delete(backup)
 
@@ -41,6 +52,14 @@ describe "LLM Caret composite plugin installer":
         expect(result.status).to_equal("blocked")
         expect(result.error).to_contain("concurrent_change")
         expect(file_read(path)).to_equal("changed by user")
+
+        val stale_capture = UntypedCapture(label: "plugin-executor-stale-target-preserved", raw_value: file_read(path), source_kind: "log_line")
+        val stale_evidence = untyped_capture_to_canonical(stale_capture, "plugin_installer_spec/stale-target-preserved")
+        val stale_comparison = compare_evidence(stale_evidence, oracle_spec("plugin_installer_spec/stale-target-preserved", [
+            check_exact("value", "changed by user")
+        ]))
+        expect(stale_comparison.status).to_equal(EvidenceStatus.passed)
+
         file_delete(path)
 
     it "decodes the versioned integration manifest into typed agent declarations":

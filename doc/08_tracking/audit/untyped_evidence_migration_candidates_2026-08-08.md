@@ -104,13 +104,13 @@ matching hit below is understood as DONE, not an outstanding candidate:
 | `test/01_unit/app/duplicate_check/phase2_integration_spec.spl` | 76 | reject: static source-text file_read check, not a live observation |
 | `test/01_unit/app/env/env_spec.spl` | 57 | reject: multi-value OR set-membership check on captured value, not a single substring/exact assertion |
 | `test/01_unit/app/env/env_spec.spl` | 66 | reject: numeric-only comparison (arch.len() > 0), no substring/exact text assertion |
-| `test/01_unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl` | 281 | no |
-| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 39 | no |
-| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 47 | no |
-| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 55 | no |
-| `test/01_unit/app/io/cli_ops_handlers_spec.spl` | 42 | no |
-| `test/01_unit/app/io/file_ops_bytes_spec.spl` | 4 | no |
-| `test/01_unit/app/io/file_ops_rw_spec.spl` | 2 | no |
+| `test/01_unit/app/gui_perf/macos_smf_dynlib_evidence_spec.spl` | 281 | reject: in-memory boolean checks on function return value, no external capture |
+| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 39 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 47 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/io/cli_argv0_resolution_spec.spl` | 55 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/io/cli_ops_handlers_spec.spl` | 42 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/io/file_ops_bytes_spec.spl` | 4 | yes |
+| `test/01_unit/app/io/file_ops_rw_spec.spl` | 2 | reject: skipped/pending placeholder test, no real capture |
 | `test/01_unit/app/io/file_shell_exec_spec.spl` | 4 | yes — migrated this session |
 | `test/01_unit/app/io/file_shell_exec_spec.spl` | 12 | reject: numeric-only exit-code check, no capture to type |
 | `test/01_unit/app/io/file_shell_exec_spec.spl` | 16 | reject: genuine capture but a typed wrapper adds only ceremony over the existing substring check (design doc §4 leave-alone rule) |
@@ -123,24 +123,24 @@ matching hit below is understood as DONE, not an outstanding candidate:
 | `test/01_unit/app/io/timeout_spec.spl` | 70 | yes — already migrated this session |
 | `test/01_unit/app/io/timeout_spec.spl` | 74 | yes — already migrated this session |
 | `test/01_unit/app/io/timeout_spec.spl` | 79 | yes — already migrated this session |
-| `test/01_unit/app/llm_caret/claude_cli_spec.spl` | 621 | no |
-| `test/01_unit/app/llm_caret/messaging/database_execution_spec.spl` | 32 | no |
-| `test/01_unit/app/llm_caret/messaging/database_execution_spec.spl` | 45 | no |
-| `test/01_unit/app/llm_caret/messaging/plugin_installer_spec.spl` | 13 | no |
-| `test/01_unit/app/llm_caret/messaging/plugin_installer_spec.spl` | 32 | no |
-| `test/01_unit/app/llm_caret/tools_spec.spl` | 217 | no |
-| `test/01_unit/app/mcp/fileio_main_spec.spl` | 75 | no |
-| `test/01_unit/app/mcp/fileio_simple_spec.spl` | 46 | no |
-| `test/01_unit/app/mcp_shell_injection_migration_guard_spec.spl` | 6 | no |
-| `test/01_unit/app/mcp_unit/editor_spec.spl` | 2 | no |
-| `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` | 184 | no |
-| `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` | 240 | no |
-| `test/01_unit/app/mcp_unit/mcp_argv_query_contract_spec.spl` | 35 | no |
-| `test/01_unit/app/mcp_unit/mcp_cli_argv_passthrough_contract_spec.spl` | 43 | no |
-| `test/01_unit/app/mcp_unit/mcp_diag_argv_contract_spec.spl` | 22 | no |
-| `test/01_unit/app/mcp_unit/mcp_diag_argv_contract_spec.spl` | 28 | no |
-| `test/01_unit/app/native_build_worker_minimal_runtime_import_contract_spec.spl` | 5 | no |
-| `test/01_unit/app/office/erp_bridge_spec.spl` | 172 | no |
+| `test/01_unit/app/llm_caret/claude_cli_spec.spl` | 621 | yes |
+| `test/01_unit/app/llm_caret/messaging/database_execution_spec.spl` | 32 | reject: in-memory struct-field comparison on computed plan/build/run values, no external capture |
+| `test/01_unit/app/llm_caret/messaging/database_execution_spec.spl` | 45 | reject: in-memory struct-field comparison on computed plan/build/run values, no external capture |
+| `test/01_unit/app/llm_caret/messaging/plugin_installer_spec.spl` | 13 | yes |
+| `test/01_unit/app/llm_caret/messaging/plugin_installer_spec.spl` | 32 | yes |
+| `test/01_unit/app/llm_caret/tools_spec.spl` | 217 | yes |
+| `test/01_unit/app/mcp/fileio_main_spec.spl` | 75 | yes |
+| `test/01_unit/app/mcp/fileio_simple_spec.spl` | 46 | yes |
+| `test/01_unit/app/mcp_shell_injection_migration_guard_spec.spl` | 6 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/editor_spec.spl` | 2 | reject: skipped/pending placeholder test, no real capture |
+| `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` | 184 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` | 240 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/mcp_argv_query_contract_spec.spl` | 35 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/mcp_cli_argv_passthrough_contract_spec.spl` | 43 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/mcp_diag_argv_contract_spec.spl` | 22 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/mcp_unit/mcp_diag_argv_contract_spec.spl` | 28 | reject: duplicate row inside same it block already covered at line 22, static source-text file_read check |
+| `test/01_unit/app/native_build_worker_minimal_runtime_import_contract_spec.spl` | 5 | reject: static source-text file_read check, not a live observation |
+| `test/01_unit/app/office/erp_bridge_spec.spl` | 172 | yes |
 | `test/01_unit/app/office/erp_bridge_spec.spl` | 184 | no |
 | `test/01_unit/app/office/office_api_spec.spl` | 190 | no |
 | `test/01_unit/app/play/wm_access_cli_spec.spl` | 51 | no |
