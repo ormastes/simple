@@ -75,9 +75,12 @@ The filing folded `.at(3)` into the same root cause. It is not the same:
   lowering defect; needs its own filing.
 - `100 - data.get(3)` → the **interpreter rejects this outright**
   (`semantic: type mismatch: cannot convert enum to int`, because `.get` returns
-  an Option) while the **JIT silently accepts it and yields 84**. That is a
-  type-safety hole in the JIT independent of the tag bug: the JIT is doing
-  arithmetic on an unwrapped `Option` with no diagnostic.
+  an Option) while the **JIT silently accepts it and yields 84**. The verified
+  claim is the *divergence*: one engine treats this as a type error, the other
+  compiles it and returns a value. The mechanism is not established — since 84
+  is identical to plain indexing, the JIT may simply be lowering `.get` to an
+  index rather than doing arithmetic on an Option. Either way it is a
+  front-end/type-safety divergence separate from the tag bug.
 
 So "the boundary" is **three** defects sharing one symptom surface, not one.
 
@@ -89,6 +92,19 @@ Against `origin/main`, `.spl` only, via `/usr/bin/grep`:
   **180** files.
 - Narrowing to those that **index or iterate that parameter AND do arithmetic on
   the element, or compare it against a variable**: **49 sites**.
+
+  *Methodology note, because the first version of this sweep was wrong.* The
+  scanner initially skipped any function that never wrote `param[`, which would
+  have discarded every **iterate-only** function — exactly the A09 idiom proved
+  corrupt above. That gate was removed and the sweep re-run. The count did
+  **not** move: still 49. A positive control confirms this is a real negative
+  and not a dead detector — a synthetic `for x in data: s = s + x` body is
+  correctly flagged by the iteration matcher. The kind distribution over the 49
+  is **46 arithmetic-on-index, 3 compare-against-variable, 0 iterate-only**:
+  in this corpus, functions that iterate a `list` parameter essentially always
+  index it as well. So 49 is a real count for this shape, not a floor —
+  though it remains a *lower* bound in the sense that any purely textual
+  scanner under-counts dynamic and aliased uses.
 - Those 49 are **not** evenly spread. By area: **37 in `src/os/`, 12 in
   `src/lib/`** — and they are overwhelmingly **cryptographic bignum arithmetic**:
   - `src/lib/common/crypto/rsa_pkcs1.spl` — `_p_add`, `_p_sub`, `_p_mul`,
@@ -149,11 +165,28 @@ Two falsification checks, both required before believing this:
    `src/compiler_rust/**` — occurs **0** times in the output binary. This is not
    Rust-seed codegen.
 
-**Conclusion: the defect is JIT-only (the seed's Cranelift lowering). The
-pure-Simple compiler does not share it.** This NARROWS the impact materially:
-production native builds are not affected. The exposure is the JIT lane —
-`bin/simple run` and anything defaulting to it — which is still the lane most
-interactive and script use goes through.
+**Conclusion, stated no wider than the evidence.** This experiment varied *two*
+things at once — compiler (seed vs pure-Simple) and lane (JIT vs AOT) — so the
+precise result is:
+
+| | JIT lane | AOT / native-build | interpreter |
+|---|---|---|---|
+| **seed** (`bin/simple`) | **CORRUPT** | n/a | correct |
+| **pure-Simple** | **UNTESTED** | **correct** | correct |
+
+- The **seed's Cranelift JIT is corrupt**.
+- The **pure-Simple AOT/native-build path is clean**.
+- The **pure-Simple JIT path is UNTESTED**, and cannot be tested here: the only
+  deployed binary is the seed (`bin/release/x86_64-unknown-linux-gnu/simple`
+  prints the bootstrap-seed banner), and no pure-Simple `simple` binary exists in
+  this tree to run the probe through its own default non-`interpret` path.
+
+So **do not** read this as "production is safe" in general. What is established
+is that native-build output is safe. Whether the self-hosted compiler's JIT
+shares the seed's lowering bug is an open question, and it is the question that
+matters once the pure-Simple binary becomes the default tool. Re-run
+`build/jitprobe/srcE/main.spl` through a deployed pure-Simple binary when one
+exists; unblock condition is exit code 148.
 
 ## Two fail-open defects in `native-build` found while doing this
 
