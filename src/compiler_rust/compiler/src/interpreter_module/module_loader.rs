@@ -312,7 +312,8 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
             // `[use-warning]` oracle report a providing module as not providing.
             // Only the extern class NAME is surface here, matching `Node::Class`
             // above, which likewise does not contribute its method names.
-            // SABOTAGE-TEMP: reverted to prove the FP guard goes RED. RESTORE.
+            Node::Extern(e) => names.push(e.name.clone()),
+            Node::ExternClass(c) => names.push(c.name.clone()),
 
             Node::Let(stmt) => {
                 if let simple_parser::ast::Pattern::Identifier(name) = &stmt.pattern {
