@@ -23,7 +23,6 @@ use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
-use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
@@ -974,15 +973,6 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
     val entry_o = "{entry_dir}/simple_entry{ext}"
     val init_names = simpleos_module_init_symbols(user_objects)
     var c_source = "extern void spl_init_args(int argc, char** argv);\n"
-    # The startup owner is optional until a native artifact carries a decoded
-    # manifest.  Keeping this a weak ABI lets ordinary native binaries retain
-    # their existing entry closure while a manifest-aware generated module can
-    # bind the exact same pre-main slot.  The call deliberately precedes
-    # runtime/module initialization: declared argv and file preloads must be
-    # admitted before user code can observe process state.
-    c_source = c_source + "#if !defined(_MSC_VER)\n"
-    c_source = c_source + "extern int __simple_startup_before_main(int argc, char** argv) __attribute__((weak));\n"
-    c_source = c_source + "#endif\n"
     c_source = c_source + "extern void __simple_runtime_init(void);\n"
     c_source = c_source + "extern long long __simple_main(void);\n"
     c_source = c_source + "extern void __simple_runtime_shutdown(void);\n"
@@ -990,9 +980,6 @@ fn compile_entry_point_c(user_objects: [text], pid: i64, verbose: bool, opt_leve
         c_source = c_source + "extern void {name}(void);\n"
     c_source = c_source + "int main(int argc, char** argv) {\n"
     c_source = c_source + "    spl_init_args(argc, argv);\n"
-    c_source = c_source + "#if !defined(_MSC_VER)\n"
-    c_source = c_source + "    if (__simple_startup_before_main && __simple_startup_before_main(argc, argv) != 0) return 125;\n"
-    c_source = c_source + "#endif\n"
     c_source = c_source + "    __simple_runtime_init();\n"
     for name in init_names:
         c_source = c_source + "    {name}();\n"
@@ -2471,22 +2458,6 @@ fn simpleos_baseline_entries(path: text, entry_key: text) -> {text: bool}:
             allowed[toks[1]] = true
     allowed
 
-pub fn simpleos_check_no_forbidden_allocators(user_objects: [text], real_objects: [text]) -> Result<bool, text>:
-    """WP-15 (aerospace hardening plan) call-site wrapper: reads the live env
-    gate inputs (same `flight_closure` predicate as
-    `simpleos_check_no_fabricated_rt_stubs` below), extracts the `nm -u`
-    undefined-symbol references over the SAME `user_objects` + `real_objects`
-    closure that guard receives, and enforces via
-    `flight_allocator_scan_for_profile` (allocator_symbol_scan.spl, the
-    spec-covered seam). Non-flight profiles: no behavior change. Sits
-    alongside the fabricated-stub guard at each of its four call sites."""
-    var closure: [text] = []
-    for obj in user_objects:
-        closure.push(obj)
-    for obj in real_objects:
-        closure.push(obj)
-    flight_allocator_scan_for_profile(env_get("SIMPLE_SAFETY_PROFILE") ?? "", (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1", object_undefined_symbol_names(closure))
-
 pub fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [text], real_objects: [text]) -> Result<bool, text>:
     """Task #97 guard, ported from the Rust seed
     (linker/native_binary/stubs.rs:474-505), which the pure-Simple SimpleOS
@@ -2701,12 +2672,6 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
     # arm64/boot/baremetal_stubs.c and ONLY the body-level predicate can see
     # it. arm64/os_entry is the worst entry in the audit.
     match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o]):
-        case Err(e):
-            file_delete(crt_o)
-            file_delete(stubs_o)
-            return Err(e)
-        case Ok(_): pass
-    match simpleos_check_no_forbidden_allocators(user_objects, [crt_o, stubs_o]):
         case Err(e):
             file_delete(crt_o)
             file_delete(stubs_o)

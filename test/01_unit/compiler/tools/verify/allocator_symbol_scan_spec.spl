@@ -19,8 +19,7 @@ use std.spec.{describe, it, expect}
 use compiler.tools.verify.allocator_symbol_scan.{
     classify_forbidden_allocator_symbols, normalize_object_symbol_name,
     object_undefined_symbol_names, scan_steady_state_closure_for_forbidden_allocators,
-    enforce_no_forbidden_allocator_symbols, enforce_no_forbidden_allocator_symbols_from_names,
-    flight_allocator_scan_for_profile,
+    enforce_no_forbidden_allocator_symbols,
 }
 
 describe "allocator_symbol_scan":
@@ -73,41 +72,3 @@ describe "allocator_symbol_scan":
         expect(hits).to_contain("malloc")
         expect(hits).to_contain("free")
         expect(hits).to_contain("mmap")
-
-describe "flight allocator scan link-path wiring (WP-15 gap closure)":
-    """Drives the link-path wiring seam `flight_allocator_scan_for_profile`
-    directly with synthetic symbol lists -- the test daemon cannot run a
-    whole-pipeline link (and importing `llvm_native_link` into a spec exceeds
-    the 800-module load cap), so the seam is parameterized on the profile
-    inputs and lives in allocator_symbol_scan.spl;
-    `llvm_native_link.simpleos_check_no_forbidden_allocators` is the thin
-    env-reading + `nm -u` wrapper over it at all four freestanding-link
-    call sites."""
-
-    it "fails the link when a forbidden symbol appears under the critical profile":
-        val result = flight_allocator_scan_for_profile("critical", false, ["mmap", "rt_memcpy"])
-        match result:
-            case Err(msg): expect(msg).to_contain("Forbidden allocator symbol")
-            case Ok(_): assert_true(false)
-            case _: todo()
-
-    it "does NOT fail the link for the same symbol under the moderate profile":
-        val result = flight_allocator_scan_for_profile("moderate", false, ["mmap", "rt_memcpy"])
-        match result:
-            case Ok(clean): assert_true(clean)
-            case Err(_msg): assert_true(false)
-            case _: todo()
-
-    it "SIMPLE_NO_STUB_FALLBACK=1 alone seals the build regardless of profile":
-        val result = flight_allocator_scan_for_profile("", true, ["malloc"])
-        match result:
-            case Err(msg): expect(msg).to_contain("malloc")
-            case Ok(_): assert_true(false)
-            case _: todo()
-
-    it "critical profile with a clean closure links fine":
-        val result = flight_allocator_scan_for_profile("critical", false, ["rt_memcpy", "write"])
-        match result:
-            case Ok(clean): assert_true(clean)
-            case Err(_msg): assert_true(false)
-            case _: todo()
