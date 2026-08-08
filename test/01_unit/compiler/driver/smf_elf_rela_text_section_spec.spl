@@ -1,13 +1,20 @@
-"""Relocations embedded in an SMF module must come from `.rela.text` only.
+"""Relocations embedded in an SMF module must belong to the code section that
+was actually extracted.
 
-`extract_elf_relocations` is documented to extract `.rela.text`, and its
-callers (`build_smf_with_relocations`) apply the returned entries to the
-`.text` bytes at load time. A synthetic ELF64 object that carries
-`.rela.rodata` *before* `.rela.text` proves whether the section is matched by
-its full name or merely by a `.rela` prefix.
+`extract_code_from_object` returns the bytes of the first `.text*` PROGBITS
+section; `extract_elf_relocations` returns the entries that
+`build_smf_with_relocations` then applies to exactly those bytes at load time.
+Relocation offsets are section-relative, so the two must name the *same*
+section. ELF already records that link: a SHT_RELA section's `sh_info` holds
+the index of the section it relocates.
+
+These synthetic ELF64 objects probe the pairing from both sides:
+ * `.rela.rodata` listed ahead of `.rela.text`
+ * `-ffunction-sections` layout where `.rela.text.b` is listed ahead of
+   `.rela.text.a`, but `.text.a` is the section whose bytes get extracted
 """
 
-use compiler.driver.smf_elf_parser.{extract_elf_relocations}
+use compiler.driver.smf_elf_parser.{extract_code_from_object, extract_elf_relocations}
 
 fn u16b(v: i64) -> [u8]:
     [(v & 0xFF) as u8, ((v >> 8) & 0xFF) as u8]
@@ -27,7 +34,7 @@ fn zeros(n: i64) -> [u8]:
     out
 
 # ELF64 section header: 64 bytes.
-fn sec_hdr(name_idx: i64, sh_type: i64, off: i64, size: i64) -> [u8]:
+fn sec_hdr(name_idx: i64, sh_type: i64, off: i64, size: i64, info: i64) -> [u8]:
     var h: [u8] = []
     h = h + u32b(name_idx)   # sh_name
     h = h + u32b(sh_type)    # sh_type
@@ -36,17 +43,13 @@ fn sec_hdr(name_idx: i64, sh_type: i64, off: i64, size: i64) -> [u8]:
     h = h + u64b(off)        # sh_offset
     h = h + u64b(size)       # sh_size
     h = h + u32b(0)          # sh_link
-    h = h + u32b(0)          # sh_info
+    h = h + u32b(info)       # sh_info
     h = h + u64b(1)          # sh_addralign
     h = h + u64b(24)         # sh_entsize
     h
 
-fn rela(off: i64, info: i64, addend: i64) -> [u8]:
-    u64b(off) + u64b(info) + u64b(addend)
-
-# Layout: ehdr @0 (64) | 3 section headers @64 (192) | shstrtab @256 (25)
-#         | pad to 288 | .rela.rodata @288 (24) | .rela.text @312 (24)
-fn build_object_with_rodata_relocs_first() -> [u8]:
+# ELF64 header: 64 bytes. Section headers always follow at offset 64.
+fn elf_hdr(shnum: i64) -> [u8]:
     var b: [u8] = []
     b = b + [0x7F as u8, 0x45 as u8, 0x4C as u8, 0x46 as u8, 2 as u8, 1 as u8, 1 as u8, 0 as u8]
     b = b + zeros(8)
@@ -61,29 +64,75 @@ fn build_object_with_rodata_relocs_first() -> [u8]:
     b = b + u16b(0)          # e_phentsize
     b = b + u16b(0)          # e_phnum
     b = b + u16b(64)         # e_shentsize
-    b = b + u16b(3)          # e_shnum
+    b = b + u16b(shnum)      # e_shnum
     b = b + u16b(0)          # e_shstrndx -> section 0
+    b
 
-    b = b + sec_hdr(0, 3, 256, 25)    # .shstrtab   (SHT_STRTAB)
-    b = b + sec_hdr(1, 4, 288, 24)    # .rela.rodata (SHT_RELA) -- decoy, listed first
-    b = b + sec_hdr(14, 4, 312, 24)   # .rela.text   (SHT_RELA) -- the real one
+fn rela(off: i64, info: i64, addend: i64) -> [u8]:
+    u64b(off) + u64b(info) + u64b(addend)
 
-    # ".shstrtab" contents: NUL + ".rela.rodata" + NUL + ".rela.text" + NUL
-    b.push(0)
-    b = b + [0x2E as u8, 0x72 as u8, 0x65 as u8, 0x6C as u8, 0x61 as u8, 0x2E as u8,
-             0x72 as u8, 0x6F as u8, 0x64 as u8, 0x61 as u8, 0x74 as u8, 0x61 as u8]
-    b.push(0)
-    b = b + [0x2E as u8, 0x72 as u8, 0x65 as u8, 0x6C as u8, 0x61 as u8, 0x2E as u8,
-             0x74 as u8, 0x65 as u8, 0x78 as u8, 0x74 as u8]
-    b.push(0)
-    b = b + zeros(288 - 281)
+val DOT_TEXT: [u8] = [0x2E as u8, 0x74 as u8, 0x65 as u8, 0x78 as u8, 0x74 as u8]
+val DOT_RELA: [u8] = [0x2E as u8, 0x72 as u8, 0x65 as u8, 0x6C as u8, 0x61 as u8]
+val DOT_RODATA: [u8] = [0x2E as u8, 0x72 as u8, 0x6F as u8, 0x64 as u8, 0x61 as u8, 0x74 as u8, 0x61 as u8]
+val DOT_A: [u8] = [0x2E as u8, 0x61 as u8]
+val DOT_B: [u8] = [0x2E as u8, 0x62 as u8]
 
-    b = b + rela(0xAAAA, 0, 0)                # .rela.rodata entry
-    b = b + rela(0xBBBB, (1 << 32) | 2, 7)    # .rela.text entry
+# Object A: one `.text`, plus `.rela.rodata` listed BEFORE `.rela.text`.
+# Layout: ehdr @0 | 4 section headers @64 | shstrtab @320 (31) | pad
+#         | .text @352 (4) | .rela.rodata @356 (24) | .rela.text @380 (24)
+fn build_object_with_rodata_relocs_first() -> [u8]:
+    var b = elf_hdr(4)
+    b = b + sec_hdr(0, 3, 320, 31, 0)     # .shstrtab
+    b = b + sec_hdr(1, 1, 352, 4, 0)      # .text          -> section index 1
+    b = b + sec_hdr(7, 4, 356, 24, 0)     # .rela.rodata   -> decoy, relocates nothing
+    b = b + sec_hdr(20, 4, 380, 24, 1)    # .rela.text     -> relocates section 1
+
+    b.push(0)                                  # shstrtab @320
+    b = b + DOT_TEXT                           # name 1  ".text"
+    b.push(0)
+    b = b + DOT_RELA + DOT_RODATA              # name 7  ".rela.rodata"
+    b.push(0)
+    b = b + DOT_RELA + DOT_TEXT                # name 20 ".rela.text"
+    b.push(0)
+    b = b + zeros(352 - 351)
+
+    b = b + [0x90 as u8, 0x90 as u8, 0x90 as u8, 0xC3 as u8]   # .text @352
+    b = b + rela(0xAAAA, 0, 0)                                  # .rela.rodata @356
+    b = b + rela(0xBBBB, (1 << 32) | 2, 7)                      # .rela.text @380
+    b
+
+# Object B: `-ffunction-sections` layout. `.text.a` is the section whose bytes
+# extract_code_from_object() returns, but `.rela.text.b` is listed first.
+# Layout: ehdr @0 | 5 section headers @64 | shstrtab @384 (43) | pad
+#         | .text.a @432 (4) | .text.b @436 (4)
+#         | .rela.text.b @440 (24) | .rela.text.a @464 (24)
+fn build_function_sections_object() -> [u8]:
+    var b = elf_hdr(5)
+    b = b + sec_hdr(0, 3, 384, 43, 0)     # .shstrtab
+    b = b + sec_hdr(1, 1, 432, 4, 0)      # .text.a       -> section index 1
+    b = b + sec_hdr(9, 1, 436, 4, 0)      # .text.b       -> section index 2
+    b = b + sec_hdr(17, 4, 440, 24, 2)    # .rela.text.b  -> relocates section 2
+    b = b + sec_hdr(30, 4, 464, 24, 1)    # .rela.text.a  -> relocates section 1
+
+    b.push(0)                                  # shstrtab @384
+    b = b + DOT_TEXT + DOT_A                   # name 1  ".text.a"
+    b.push(0)
+    b = b + DOT_TEXT + DOT_B                   # name 9  ".text.b"
+    b.push(0)
+    b = b + DOT_RELA + DOT_TEXT + DOT_B        # name 17 ".rela.text.b"
+    b.push(0)
+    b = b + DOT_RELA + DOT_TEXT + DOT_A        # name 30 ".rela.text.a"
+    b.push(0)
+    b = b + zeros(432 - 427)
+
+    b = b + [0xB8 as u8, 0x01 as u8, 0x00 as u8, 0x00 as u8]   # .text.a @432
+    b = b + [0xB8 as u8, 0x02 as u8, 0x00 as u8, 0x00 as u8]   # .text.b @436
+    b = b + rela(0xCCCC, 0, 0)                                  # .rela.text.b @440
+    b = b + rela(0xDDDD, (1 << 32) | 2, 7)                      # .rela.text.a @464
     b
 
 describe "SMF ELF relocation extraction":
-    it "returns exactly one entry":
+    it "returns exactly one entry for an object with a decoy .rela.rodata":
         val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
         assert_equal(relocs.len(), 1)
 
@@ -99,3 +148,14 @@ describe "SMF ELF relocation extraction":
     it "returns the .rela.text addend":
         val relocs = extract_elf_relocations(build_object_with_rodata_relocs_first())
         assert_equal(relocs[0].addend, 7)
+
+describe "SMF ELF relocations pair with the extracted code section":
+    it "extracts .text.a under a -ffunction-sections layout":
+        val code = extract_code_from_object(build_function_sections_object())
+        assert_equal(code.len(), 4)
+        assert_equal(code[1] as i64, 1)
+
+    it "returns the relocations of .text.a, not of the first-listed .rela.text.*":
+        val relocs = extract_elf_relocations(build_function_sections_object())
+        assert_equal(relocs.len(), 1)
+        assert_equal(relocs[0].offset, 0xDDDD)
