@@ -273,7 +273,7 @@ pub(crate) fn build_import_map(
     let mut seen_canonical = HashSet::new();
     for (path, source) in file_sources {
         let canonical_path = safe_canonicalize(path);
-        if !seen_canonical.insert(canonical_path) {
+        if !seen_canonical.insert(canonical_path.clone()) {
             continue;
         }
         let per_file_root = source_root_for_file(path, source_dirs, fallback_root);
