@@ -1657,6 +1657,42 @@ fn is_simpleos_arm64_link(output: text) -> bool:
 fn is_simpleos_arm64_target(target: text) -> bool:
     target == "aarch64-simpleos" or target == "aarch64-unknown-simpleos" or target == "aarch64-unknown-simpleos-elf" or target == "aarch64-unknown-none" or target == "aarch64-unknown-none-elf"
 
+fn simpleos_arm64_core_runtime_candidates(configured_simple: text, configured_core: text, runtime_path: text) -> [text]:
+    """Ordered, target-correct pure-Simple runtime archive candidates.
+
+    An override may name either the archive or its containing directory. The
+    generic runtime path is only searched in its explicit simple-core lane, so
+    a bootstrap directory can never leak `libsimple_native_all.a` into a
+    freestanding kernel."""
+    var candidates: [text] = []
+    for configured in [configured_simple, configured_core]:
+        if configured == "":
+            continue
+        val archive = if configured.ends_with(".a"): configured else: configured + "/libsimple_runtime.a"
+        if not candidates.contains(archive):
+            candidates.push(archive)
+    if runtime_path != "":
+        for lane in ["simple-core", "simple_core"]:
+            val archive = runtime_path + "/" + lane + "/libsimple_runtime.a"
+            if not candidates.contains(archive):
+                candidates.push(archive)
+    candidates.push("build/os/simple-core-simpleos-aarch64/libsimple_runtime.a")
+    candidates
+
+fn simpleos_arm64_core_runtime_provider() -> Result<text, text>:
+    val bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    if bundle != "simple-core" and bundle != "simple_core":
+        return Ok("")
+    val candidates = simpleos_arm64_core_runtime_candidates(
+        env_get("SIMPLE_SIMPLE_CORE_PATH") ?? "",
+        env_get("SIMPLE_CORE_RUNTIME_PATH") ?? "",
+        env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    )
+    for candidate in candidates:
+        if file_exists(candidate) and file_size_raw(candidate) > 0:
+            return Ok(candidate)
+    Err("SimpleOS ARM64 native-build requested runtime bundle 'simple-core', but no non-empty aarch64 libsimple_runtime.a was found; build it with scripts/os/simpleos-core-archive.shs --target aarch64-unknown-simpleos or set SIMPLE_SIMPLE_CORE_PATH")
+
 fn is_simpleos_x86_64_link(user_objects: [text], output: text) -> bool:
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if is_simpleos_x86_64_target(target):
@@ -2728,11 +2764,22 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         case Err(e): return Err(e)
         case Ok(_): pass
 
+    val core_runtime = match simpleos_arm64_core_runtime_provider():
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            return Err(e)
+        case Ok(provider): provider
+
+    var real_objects = [crt_o, stubs_o]
+    if core_runtime != "":
+        real_objects.push(core_runtime)
+
     # GAP 3: this path previously never called the guard at all, and it links
     # no auto_stubs.c -- so every fake here is a real body in
     # arm64/boot/baremetal_stubs.c and ONLY the body-level predicate can see
     # it. arm64/os_entry is the worst entry in the audit.
-    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o]):
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, real_objects):
         case Err(e):
             file_delete(crt_o)
             file_delete(stubs_o)
@@ -2741,12 +2788,20 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
 
     val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "examples/09_embedded/simple_os/arch/arm64/linker.ld"
-    var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-o", output, crt_o, stubs_o]
+    # simple-core is archived by source module, while the boot runtime owns a
+    # small target-specific subset of the same ABI. Preserve the earlier boot
+    # definitions and admit later archive duplicates, matching the seed
+    # freestanding linker's established `-z muldefs` ordering contract.
+    var args: [text] = ["-T", linker_script, "-nostdlib", "--gc-sections", "-z", "muldefs", "-o", output, crt_o, stubs_o]
     val spl_start = simpleos_spl_start_symbol(user_objects)
     if spl_start != "":
         args.push("--defsym=spl_start={spl_start}")
     for obj in user_objects:
         args.push(obj)
+    if core_runtime != "":
+        # Static archives must follow their consumers so lld extracts only the
+        # live pure-Simple runtime members requested by this kernel.
+        args.push(core_runtime)
     val (_out, err, code) = process_run("ld.lld", args)
     file_delete(crt_o)
     file_delete(stubs_o)

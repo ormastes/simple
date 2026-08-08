@@ -1,7 +1,7 @@
 use std.spec.*
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.backend_helpers.{backend_helper_native_target_for}
-use compiler.backend.backend.llvm_native_link.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs}
+use compiler.backend.backend.llvm_native_link.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, simpleos_arm64_core_runtime_candidates}
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.backend.llvm_cross_target.{toolchain_for_target}
 use std.io_runtime.{rt_file_read_text}
@@ -33,6 +33,23 @@ describe "SimpleOS native target flow":
         expect(is_simpleos_riscv32_target("riscv32imac-simpleos")).to_be(true)
         expect(is_simpleos_riscv32_target("riscv32imac-unknown-simpleos")).to_be(true)
         expect(is_simpleos_riscv32_target("riscv32imac-unknown-none-elf")).to_be(true)
+
+    it "keeps the ARM64 simple-core provider target-local and after its consumers":
+        val candidates = simpleos_arm64_core_runtime_candidates(
+            "/runtime/aarch64/libsimple_runtime.a", "", "/bootstrap"
+        )
+        expect(candidates[0]).to_equal("/runtime/aarch64/libsimple_runtime.a")
+        expect(candidates).to_contain("/bootstrap/simple-core/libsimple_runtime.a")
+        expect(candidates).to_contain("build/os/simple-core-simpleos-aarch64/libsimple_runtime.a")
+        expect(candidates.contains("/bootstrap/libsimple_native_all.a")).to_be(false)
+
+        val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val consumer_position = linker.index_of("for obj in user_objects:\n        args.push(obj)")
+        val provider_position = linker.index_of("args.push(core_runtime)")
+        expect(consumer_position).to_be_greater_than(-1)
+        expect(provider_position).to_be_greater_than(consumer_position)
+        expect(linker).to_contain("simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, real_objects)")
+        expect(linker).to_contain("\"--gc-sections\", \"-z\", \"muldefs\"")
 
     it "does not infer SimpleOS from an RV32 filename when a hosted target is explicit":
         expect(is_simpleos_riscv32_link_for_target("riscv32-unknown-linux-gnu", [], "build/rv32-app")).to_be(false)
