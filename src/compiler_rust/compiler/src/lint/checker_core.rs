@@ -566,6 +566,9 @@ impl LintChecker {
         "interrupt",
         "entry",
         "align",
+        // Allocation-free marker consumed by
+        // src/compiler/35.semantics/noalloc_checker.spl
+        "noalloc",
         // GPU decorators
         "gpu_intrinsic",
         // Determinism guard (GAME-DET-LINT-001)

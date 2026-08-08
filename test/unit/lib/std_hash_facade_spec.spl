@@ -50,19 +50,38 @@ describe "std.hash facade — function half must not be dropped":
     # nogc_async_mut_noalloc/hash package (fnv1a_hash_bytes, fnv1a_hash_i64,
     # crc32_byte, crc32_bytes) are not asserted here yet.
     #
-    # CORRECTION 2026-08-08: the previous version of this comment said they were
-    # "unreachable" because importing them by full path "fails with `semantic:
-    # variable `noalloc` not found`", and told the reader to wait for an
-    # `@noalloc` import defect to be fixed. That is FALSE and was refuted by
-    # measurement in e321ab17c69 (see
-    # doc/08_tracking/bug/noalloc_annotations_do_not_survive_import_false_alarm_2026-08-08.md),
-    # which landed 109 minutes after this spec. Re-measured against origin/main:
-    # `use std.nogc_async_mut_noalloc.hash.{fnv1a_hash_i64}` SUCCEEDS, and the
-    # "variable `noalloc` not found" error does not reproduce in any form.
+    # CORRECTION 2026-08-08 (tiebreaker, supersedes BOTH earlier notes):
     #
-    # There is no compiler defect to wait on. The only reason the four symbols
-    # are not reachable via `use std.hash` is ordinary facade shadowing:
-    # src/std is a symlink to lib, so src/lib/hash.spl wins the `std.hash` name
-    # and simply does not re-export them. The fix is a one-line `export use` in
-    # src/lib/hash.spl plus assertions here — not a wait on a phantom defect.
-    # Do not cite the old claim as evidence; it never held.
+    # The first note said the four symbols were unreachable because of an
+    # `@noalloc` import defect. The second note (e321ab17c69) said that was a
+    # false alarm and "the error does not reproduce in any form". BOTH are
+    # wrong, and both were measured correctly on DIFFERENT execution paths:
+    #
+    #   `bin/simple run`  — `use std.nogc_async_mut_noalloc.hash.{fnv1a_hash_i64}`
+    #                       SUCCEEDS (prints a real hash). This is what the
+    #                       false-alarm lane measured. It is true.
+    #   `bin/simple test` — the SAME import fails at module load with
+    #                       `error: semantic: variable noalloc not found`,
+    #                       `no examples executed`, 0 passed. This is what the
+    #                       defect lane measured. It is also true.
+    #
+    # `bin/simple test` vs `bin/simple run` is the discriminating condition —
+    # NOT the facade, and NOT the `export use` re-export: a spec that imports
+    # the noalloc package by its full path with no facade involvement fails
+    # identically.
+    #
+    # ROOT CAUSE: `@noalloc` was never registered as a known annotation in any
+    # parser. The Rust seed interpreter treats an unrecognised `@X` on a
+    # function as a Python-style runtime decorator and evaluates the bare
+    # identifier `X` in the module env — hence "variable noalloc not found".
+    # `@inline`/`@pure`/`@unsafe`/`@hardware` are on its skip-list and pass;
+    # `@noalloc` and `@zzbogus` were not and fail. The JIT path (`run`) never
+    # evaluates decorator expressions, so it never saw it.
+    #
+    # FIXED IN SOURCE 2026-08-08 (interpreter_eval.rs skip-list). With a
+    # locally rebuilt seed this spec passes 5/5 WITH the noalloc re-export
+    # added to src/lib/hash.spl. The re-export and the assertions below are
+    # deliberately NOT landed yet: on the currently DEPLOYED seed they would
+    # poison `std.hash` for every consumer, including map.spl (Map/Dict).
+    # Add them in the same change as, or after, a seed redeploy.
+    # See doc/08_tracking/bug/noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md

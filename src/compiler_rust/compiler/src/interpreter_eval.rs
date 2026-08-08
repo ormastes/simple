@@ -683,6 +683,15 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // @hardware/@clocked/@generic/@flatten_struct_output are VHDL
                         // backend directives consumed by parse_vhdl_hardware_attrs; they
                         // have no runtime binding and must not be looked up in env.
+                        // @noalloc is a semantic marker consumed by
+                        // src/compiler/35.semantics/noalloc_checker.spl; it likewise has
+                        // no runtime binding. Before 2026-08-08 it was missing from this
+                        // list, so ANY module carrying `@noalloc` (e.g.
+                        // src/lib/nogc_async_mut_noalloc/hash/mod.spl) failed to LOAD
+                        // under the interpreter with "variable `noalloc` not found" --
+                        // reproducible via `bin/simple test`, invisible via `bin/simple
+                        // run` (the JIT path never evaluates decorator expressions). See
+                        // doc/08_tracking/bug/noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md
                         if let Expr::Identifier(name) = &decorator.name {
                             if name == "extern"
                                 || name == "deprecated"
@@ -693,6 +702,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "clocked"
                                 || name == "generic"
                                 || name == "flatten_struct_output"
+                                || name == "noalloc"
                             {
                                 continue;
                             }

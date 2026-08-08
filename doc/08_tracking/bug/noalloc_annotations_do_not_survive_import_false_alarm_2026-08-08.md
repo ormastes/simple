@@ -1,3 +1,26 @@
+> # REOPENED 2026-08-08 — this doc's verdict is WRONG (its measurement is not)
+>
+> A tiebreaker lane re-ran both probes with proven edit-visibility. The defect
+> is **REAL**. This doc measured only the `bin/simple run` path, where the
+> import genuinely succeeds. On the `bin/simple test` (interpreter) path the
+> same full-path import fails at module load with
+> `error: semantic: variable noalloc not found`, `no examples executed`.
+>
+> - **Discriminator:** `bin/simple run` vs `bin/simple test`. NOT the facade,
+>   NOT the `export use` re-export — a spec importing the noalloc package by
+>   full path with no facade involved fails identically.
+> - **Root cause:** `@noalloc` was never registered in any parser. The Rust
+>   seed interpreter evaluates an unrecognised `@X` as a runtime decorator, so
+>   it looked up the bare identifier `noalloc` and failed.
+> - **Keep from this doc:** the `run`-path result below is correct and
+>   reproducible. **Discard:** the title, the "closed, not a defect" status,
+>   and every statement that the error "does not reproduce in any form".
+> - **Fixed in source** 2026-08-08 (`interpreter_eval.rs` decorator skip-list);
+>   not yet deployed.
+>
+> Superseded by
+> `doc/08_tracking/bug/noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md`.
+
 # FALSE ALARM: "`@noalloc` annotations don't survive import" — the cause was ordinary facade shadowing
 
 **Status: closed, not a defect.** No compiler change was needed or made.
