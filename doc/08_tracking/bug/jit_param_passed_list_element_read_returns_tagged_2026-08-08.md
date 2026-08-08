@@ -1,4 +1,4 @@
-# JIT: element read from a parameter-passed untyped `list` returns the TAGGED value (`v << 3`)
+# JIT: element read from a parameter-passed `list`-spelled param returns the TAGGED value (`v << 3`)
 
 **Filed:** 2026-08-08 · **Severity:** critical (silent wrong data, no diagnostic,
 source reads correct) · **Engine:** JIT (Cranelift) via `bin/simple run` on the
@@ -8,11 +8,20 @@ every variant below.**
 
 ## Summary
 
-Inside a function whose parameter is declared as an untyped `list` (or is
-untyped entirely), an element read `data[i]` yields the value **still carrying
-its small-int tag** — numerically `v << 3`, i.e. `v * 8`. The same expression
+Inside a function whose parameter is declared with the **`list` container
+spelling**, an element read `data[i]` yields the value **still carrying its
+small-int tag** — numerically `v << 3`, i.e. `v * 8`. The same expression
 written inline in `main`, or reading a list *constructed locally inside the same
 function*, is correct. A parameter typed `[i64]` is correct.
+
+> **Correction 2026-08-08 (re-verification lane).** This was originally scoped as
+> an *untyped* `list` defect. That is wrong, and the mis-scoping understates the
+> blast radius: **`list<i64>` is fully typed and miscompiles identically.** The
+> element-type annotation is irrelevant — what decides is the container spelling,
+> `list`/`list<T>` (broken) versus `[T]` (correct). The defective lowering is
+> therefore on the `list<T>`-spelled parameter path, not in type erasure. Since
+> `list<T>` is an idiomatic stdlib spelling, this reaches shipped code — see the
+> bcrypt sighting below.
 
 The value prints correctly (`to_text` / interpolation untag it) and compares
 correctly against small literals, so it survives both source review and casual
@@ -54,8 +63,54 @@ fn main():
 | param `data: list` passed on to another fn | **84** | tagged, propagates |
 | param `data: [i64]` | 98 | correct |
 | param `data: list`, `data.at(3)` | **-4379365875421** | unrelated garbage (raw word) |
+| param `data: list<i64>` | **84** | **tagged — typed, and still broken** |
 
 Every row is correct under the interpreter.
+
+### Container-spelling rows added 2026-08-08 (`.nvprobe/scope_id.spl`)
+
+Same value `8` read through three parameter annotations, `bin/simple run`:
+
+| param annotation | JIT | interpreter | verdict |
+|------------------|-----|-------------|---------|
+| `data: list` | 64 | 8 | BROKEN |
+| `data: list<i64>` | **64** | 8 | **BROKEN — fully typed** |
+| `data: [i64]` | 8 | 8 | correct |
+
+### Native (pure-Simple codegen) is CLEAN — measured 2026-08-08
+
+Built with a **bare positional** `native-build` (the only form reaching the pure-Simple
+`CompilerDriver`; an explicit `--entry` delegates back to the Rust runtime):
+
+| param annotation | interpreter | **native (pure-Simple)** | seed JIT |
+|------------------|-------------|--------------------------|----------|
+| `data: list` | 8 | **8 — correct** | 64 |
+| `data: list<i64>` | 8 | **8 — correct** | 64 |
+| `data: [i64]` | 8 | **8 — correct** | 8 |
+
+**This defect is confined to the Rust seed's JIT codegen.** The pure-Simple native
+codegen is correct on every container spelling. Under "rust is seed; pure-Simple must
+be implemented, verified and used" that makes this a **disposable-seed** defect —
+recorded, not chased. It remains operationally significant only because `bin/simple` is
+the seed and `bin/simple run` is what most sessions actually execute.
+
+### Mechanism, measured (`.nvprobe/mech_id.spl`)
+
+A single data point cannot separate "shifted left 3" from "shift with tag bits
+OR'd in". Reading several values through a `list<i64>` param, JIT lane:
+
+| input | JIT reads | interpreter |
+|-------|-----------|-------------|
+| 1 | 8 | 1 |
+| 3 | **24** (not 25/26/27) | 3 |
+| 7 | 56 | 7 |
+| 0 | 0 | 0 |
+| −1 | **−8** | −1 |
+
+Low three bits are always `000` and the negative case is arithmetic, so this is a
+**pure arithmetic left-shift-by-3 with no tag bits set** — the tagged word is
+returned *without the untagging right-shift*, rather than a tag being OR'd in.
+Prefer that phrasing over "`v * 8`", which asserts less than has been measured.
 
 ## Why it hides from review — the generalizable lesson
 
@@ -72,6 +127,32 @@ With the true value 2 held as 16:
 **Comparison against a literal can be accidentally correct; arithmetic against
 another variable is not.** That asymmetry is exactly why source review passed
 and why a `print` of the variable reinforced the wrong conclusion.
+
+## Sighting C (2026-08-08) — it reaches SHIPPED CRYPTO via `list<i64>`
+
+The two sightings below both used the bare `list` spelling, which is what kept the
+"untyped" framing alive. This one uses `list<i64>` and lands in production security
+code. `src/lib/common/bcrypt/salt.spl` (blob `9aebf245c612…`, identical to
+`origin/main`) declares:
+
+```simple
+fn bcrypt_encode_base64(bytes: list<i64>) -> text
+fn encode_salt(salt_bytes: list<i64>, cost: i64) -> text
+```
+
+Both index their `list<i64>` parameter. Feeding the FIXED input `[0..15]` — no
+randomness, so any difference is a miscompile (`.nvprobe/bcrypt_reach.spl`):
+
+| check | interpreter | JIT |
+|-------|-------------|-----|
+| `bcrypt_encode_base64` | `..CA.uOD/eaGAOmJB.yMBu` | `..eOEA.mKBf.QD/WWEfuc.` |
+| `encode_salt(., 10)` | `..CA.uOD/eaGAOmJB.yMBu` | `..eOEA.mKBf.QD/WWEfuc.` |
+| `decode ∘ encode` roundtrip | `0,1,2,…,15` (identity) | `0,8,16,24,…,120` (**each ×8**) |
+
+So bcrypt **salt encoding is corrupted on the JIT lane and the base64 roundtrip is
+not an identity.** Note this is a *distinct* defect from the CSPRNG fix
+`c4f186314c4`, which holds: the salt bytes are now genuinely random, but the
+encoding of those bytes is wrong under JIT. Do not merge the two entries.
 
 ## The two field sightings — SAME root cause (demonstrated, not inferred)
 

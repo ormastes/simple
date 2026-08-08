@@ -300,6 +300,46 @@ native, and a self-hosted `bin/simple` were **not** exercised. Given the known
 native/JIT divergences recorded for dict and list operations, the CBC path
 should be re-verified on the self-hosted binary when one is available.
 
+> **Update 2026-08-08 — JIT half of this caveat is DISCHARGED; self-hosted half STANDS.**
+>
+> Re-verified on the **JIT lane** (`bin/simple run`, no `SIMPLE_EXECUTION_MODE`)
+> with `.nvprobe/gate_c.spl`, against `src/lib/common/aes/modes.spl` blob
+> `756469d6900d70a38bc713d78cc1b9fe360fb14f` (byte-identical to `origin/main`):
+>
+> | check | interpreter | JIT | verdict |
+> |-------|-------------|-----|---------|
+> | CBC ct block 1 vs **NIST SP 800-38A F.2.1** | matches KAT | matches KAT | HOLDS |
+> | `aes_cbc_encrypt` vs `aes_ctr_encrypt`, same input | distinct | distinct | alias defect gone |
+> | `cbc_len` / `ctr_len` | 32 / 16 | 32 / 16 | PKCS#7 padding present |
+> | `aes_cbc_decrypt ∘ aes_cbc_encrypt` | exact plaintext | exact plaintext | HOLDS |
+>
+> The KAT match is self-discriminating: had a stale or pre-fix `modes.spl` been
+> served, CBC would still be the CTR alias and the probe would print
+> `cbc_is_ctr_alias=YES_DEFECT` with `cbc_len=16`. It printed `NO_DISTINCT`.
+>
+> The engine was identified by **positive capability probe**, not by mtime or
+> size (both provably lie here): `.nvprobe/engine_id.spl` reproduces the open
+> defect `jit_param_passed_list_element_read_returns_tagged_2026-08-08`
+> (`via_param=64` on the default lane vs `8` under `interpret`), confirming the
+> default lane really is the JIT and not a silent interpreter fallback.
+>
+> **Still NOT discharged:** the AES probe itself was not run through native
+> codegen — its `native-build` was still compiling when the session window
+> closed (load average ~60–92 from ~21 concurrent `native-build` processes
+> across parallel agent sessions). Treat the **native/self-hosted half of this
+> caveat as open for AES specifically**.
+>
+> That said, native-build is **working, merely slow**: a sibling probe
+> (`.nvprobe/scope_id.spl`) built and ran successfully in the same window
+> (`RC=0`) and showed pure-Simple codegen to be correct where the seed JIT is
+> not. So the remaining gap here is queue time, not a broken lane — do not
+> re-file this as a native-build outage (see `a9c8effc054`).
+>
+> Note these AES functions take `[i64]` parameters, which is the *safe* container
+> spelling for the tagged-element defect; the `list<T>` spelling is the broken one.
+> That is why this crypto path survives JIT while bcrypt's `list<i64>` salt
+> encoding does not.
+
 ### 5. The blocker cited in "Why no fix here" did not reproduce
 
 Newly-added stdlib functions were immediately visible. `aes128_decrypt_block`
