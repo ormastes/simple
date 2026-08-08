@@ -934,8 +934,8 @@ static void mlkem_inverse_scale_rvv(int32_t* coefficients) {
 int64_t rt_mlkem_ntt_simd_backend(void) {
 #if defined(__x86_64__) || defined(_M_X64)
     return simd_detect_avx2() ? 1 : 0;
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return 2;
+#elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64)
+    return simd_detect_neon() ? 2 : 0;
 #elif defined(__riscv) && defined(__riscv_vector)
     return rt_simd_has_rvv() ? 3 : 0;
 #else
