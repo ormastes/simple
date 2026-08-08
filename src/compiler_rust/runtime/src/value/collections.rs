@@ -1553,6 +1553,111 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Remove the element at `index` from an array IN PLACE and return THAT ELEMENT.
+///
+/// This function did not exist until 2026-08-08, even though
+/// `method_registry/builtins.rs` had declared array `remove` as
+/// `RuntimeFn::Simple("rt_array_remove")` all along — the symbol was referenced
+/// by the registry and implemented nowhere. Codegen's name-keyed method table
+/// therefore mapped a bare `.remove(i)` to `rt_dict_remove` for EVERY receiver,
+/// and `rt_dict_remove` type-checks its receiver as a Dict: on an Array it took
+/// the `as_typed_ptr!` early-out, returned NIL, and mutated nothing. So
+/// `arr.remove(1)` was a complete no-op on the compiled lane that also discarded
+/// the element it was supposed to return.
+/// See doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+///
+/// CONTRACT — returns the REMOVED ELEMENT, mutates the receiver in place. This
+/// matches the sibling `rt_array_pop` directly above (in-place, returns the
+/// element, declared `is_mutating: true`) and `rt_dict_remove` (removes the
+/// entry, returns the VALUE). Returning the mutated array — what the AST
+/// interpreter used to do — had no runtime implementation, no HIR type, and no
+/// spec behind it.
+///
+/// An out-of-range index is a NO-OP returning NIL, mirroring `rt_array_pop` on
+/// an empty array. It must never panic: this is `extern "C"` and unwinding
+/// across the FFI boundary from JIT-compiled code is undefined behaviour.
+///
+/// All three storage layouts are handled, exactly as `rt_array_pop` does. Byte-
+/// and u64-packed arrays store raw scalars rather than tagged `RuntimeValue`s,
+/// so their element must be read through the correctly-sized pointer and
+/// re-tagged with `from_int`; reading a packed array as `RuntimeValue` would
+/// hand back a raw, untagged integer that the caller then misdecodes.
+#[no_mangle]
+pub extern "C" fn rt_array_remove(array: RuntimeValue, index: i64) -> RuntimeValue {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    unsafe {
+        let len = (*arr).len;
+        if (*arr).data.is_null() || index < 0 || (index as u64) >= len {
+            return RuntimeValue::NIL;
+        }
+        let idx = index as usize;
+        let last = (len - 1) as usize;
+
+        if (*arr).is_byte_packed() {
+            let base = (*arr).data as *mut u8;
+            let removed = *base.add(idx) as i64;
+            // Shift the tail down one slot. `copy` (memmove) is required, not
+            // `copy_nonoverlapping`: source and destination overlap by design.
+            std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
+            (*arr).len -= 1;
+            return RuntimeValue::from_int(removed);
+        }
+        if (*arr).is_u64_packed() {
+            let base = (*arr).data as *mut u64;
+            let removed = *base.add(idx) as i64;
+            std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
+            (*arr).len -= 1;
+            return RuntimeValue::from_int(removed);
+        }
+
+        let base = (*arr).data;
+        let removed = *base.add(idx);
+        std::ptr::copy(base.add(idx + 1), base.add(idx), last - idx);
+        (*arr).len -= 1;
+        removed
+    }
+}
+
+/// `remove`: receiver-dispatched, so a bare `.remove(k)` is safe on an untyped
+/// receiver.
+///
+/// Codegen's method table is keyed on the METHOD NAME ALONE and carries no
+/// receiver type (see `is_bare_builtin_collection_method` in
+/// codegen/instr/closures_structs.rs, where `("remove", 1)` is already listed
+/// as an erased-receiver hazard). Routing that name straight to
+/// `rt_dict_remove` is what silently broke every array `.remove(i)` on the
+/// compiled lane. This dispatcher inspects the receiver's heap type at runtime
+/// and picks the right implementation, the same shape already used by
+/// `rt_pop`, `rt_reverse` and `rt_index_of`.
+///
+/// A non-Array, non-Dict receiver falls through to `rt_dict_remove`, preserving
+/// the previous behaviour for every receiver that is not an array — this change
+/// only ever ADDS the array case.
+///
+/// NAMED `rt_collection_remove`, NOT `rt_remove`. `rt_remove` is already taken,
+/// by the POSIX file-deletion wrapper `int64_t rt_remove(const char *path)` in
+/// `src/runtime/runtime_hosted_fs.c` (and `src/runtime/runtime.c`). Defining a
+/// second `rt_remove` produced a hard `rust-lld: error: duplicate symbol` —
+/// which is the GOOD outcome. The repo builds some link steps with `-z muldefs`
+/// (see reference: "muldefs makes duplicate symbols silent, not fatal"), and
+/// under that flag the linker would silently pick one definition: every
+/// `arr.remove(i)` would have called `unlink()` on a pointer-shaped index, or
+/// every file delete would have gone to the collection helper.
+#[no_mangle]
+pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        // Array indices arrive as TAGGED ints; `as_int` untags (an arithmetic
+        // shift). It is explicitly documented as UNDEFINED on a non-int, so the
+        // `is_int` test is required, not defensive padding — calling it on, say,
+        // a heap pointer would yield a garbage index. A non-integer index on an
+        // array is out of range by definition, and `rt_array_remove` treats a
+        // negative index as a no-op.
+        let index = if key.is_int() { key.as_int() } else { -1 };
+        return rt_array_remove(receiver, index);
+    }
+    crate::value::dict::rt_dict_remove(receiver, key)
+}
+
 /// Clear all elements from an array
 #[no_mangle]
 pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {

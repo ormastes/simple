@@ -129,10 +129,11 @@ const ARRAY_MUTATING_METHODS: &[&str] = &["append", "push", "pop", "insert", "re
 /// identical in semantics; only *where* the `Vec` lives differs. The behaviour of each
 /// arm mirrors `interpreter_method/collections.rs::handle_array_methods` exactly.
 ///
-/// Returns `Ok(Some(elem))` for `pop` (the popped element to yield as the expression
-/// result; the pre-existing lvalue path already special-cased this), and `Ok(None)` for
-/// every other method (whose expression result is the array itself). `extend` with a
-/// non-array argument returns the same `TYPE_MISMATCH` error `handle_array_methods` does.
+/// Returns `Ok(Some(elem))` for the two methods whose expression result is an ELEMENT
+/// rather than the receiver — `pop` (the popped element) and `remove` (the removed
+/// element, per the 2026-08-08 contract fix) — and `Ok(None)` for every other method
+/// (whose expression result is the array itself). `extend` with a non-array argument
+/// returns the same `TYPE_MISMATCH` error `handle_array_methods` does.
 fn apply_array_mutation_in_place(
     method: &str,
     vec: &mut Vec<Value>,
@@ -153,12 +154,19 @@ fn apply_array_mutation_in_place(
             }
             Ok(None)
         }
+        // Returns the REMOVED ELEMENT, like `pop` above — not the array. Both
+        // this in-place fast path and the clone-then-mutate slow path go through
+        // this one kernel, so the two lanes stay provably identical. An
+        // out-of-range index is a no-op yielding Nil (never a panic: `Vec::remove`
+        // would abort the interpreter).
+        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
         "remove" => {
             let i = idx.unwrap_or(0);
             if i < vec.len() {
-                vec.remove(i);
+                Ok(Some(vec.remove(i)))
+            } else {
+                Ok(Some(Value::Nil))
             }
-            Ok(None)
         }
         "extend" => {
             match item {

@@ -320,6 +320,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_insert", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_contains", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_remove", &[I64, I64], &[I8]),
+    // Array `remove(index)`: removes IN PLACE, returns the REMOVED ELEMENT.
+    // `rt_remove` is the receiver-dispatching entry point that a bare,
+    // type-erased `.remove(k)` must go through — codegen's method table is keyed
+    // on the name alone, and routing every `.remove` to `rt_dict_remove` made
+    // array removal a silent no-op returning nil.
+    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+    RuntimeFuncSpec::new("rt_array_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
     // =========================================================================
     // Fast DB operations (runtime_db.c)
     // =========================================================================

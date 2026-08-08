@@ -1878,6 +1878,42 @@ pub(crate) fn evaluate_method_call_with_self_update(
         }
     }
 
+    // `remove(index)` on an ARRAY is the second such mutator, for exactly the
+    // same reason and with exactly the same hazard. As of the 2026-08-08 contract
+    // fix its expression result is the REMOVED ELEMENT, not the mutated array, so
+    // the same-discriminant test below computes `updated_self = None` (`Int` vs
+    // `Array` never matches) and would SILENTLY DROP the removal for every
+    // field/index/deep place — e.g. `self.queue.remove(0)` would return the right
+    // element while leaving `self.queue` untouched. That is the identical failure
+    // mode the `pop` block above exists to prevent, so derive the shortened
+    // receiver from `recv_val` directly here too.
+    //
+    // Dict `remove(key)` is deliberately NOT handled here: its result is the
+    // removed VALUE and its receiver is a Dict, so the discriminant test misses
+    // it as well — but that is pre-existing behaviour this contract fix does not
+    // touch, and changing it belongs to its own lane with its own evidence.
+    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+    if method == "remove" {
+        if let Value::Array(arr) = &recv_val {
+            // Re-evaluate the index argument. Cheap (an index expression) and it
+            // keeps this block independent of the arm that produced `result`.
+            let idx = match args.first() {
+                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                    .as_int()
+                    .unwrap_or(-1),
+                None => -1,
+            };
+            // Out of range is a no-op, so there is nothing to write back. This
+            // also covers the negative/non-integer cases via the -1 default.
+            if idx < 0 || idx as usize >= arr.len() {
+                return Ok((result, None));
+            }
+            let mut shortened = arr.as_ref().clone();
+            shortened.remove(idx as usize);
+            return Ok((result, Some(Value::array(shortened))));
+        }
+    }
+
     // TEXT IS A VALUE TYPE: never rebind a text receiver, for ANY method.
     //
     // The list above is an ARRAY/DICT mutator list. Four of its entries —

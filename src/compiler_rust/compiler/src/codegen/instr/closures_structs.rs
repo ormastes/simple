@@ -1776,7 +1776,15 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods
         "get" => "rt_index_get",
-        "remove" => "rt_dict_remove",
+        // Receiver-dispatched. This table is keyed on the METHOD NAME ALONE and
+        // carries no receiver type, so mapping `remove` straight to
+        // `rt_dict_remove` made EVERY array `.remove(i)` a silent no-op that
+        // returned nil (rt_dict_remove type-checks its receiver as a Dict and
+        // takes an early-out on an Array). `rt_remove` inspects the receiver at
+        // runtime, same as the `rt_pop` / `rt_reverse` / `rt_index_of` arms
+        // above, and falls through to `rt_dict_remove` for non-arrays.
+        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+        "remove" => "rt_collection_remove",
         "set" => {
             if args.len() >= 2 {
                 let key_val = get_vreg_or_default(ctx, builder, &args[0]);
@@ -1847,7 +1855,18 @@ fn try_compile_builtin_method_call<M: Module>(
     // (otherwise `d.has(1)` misses every int key). Boxing is also correct for
     // Array.contains(int) and String.contains(int_char), whose runtime paths
     // compare against tagged RuntimeValues / call `.is_int()`.
-    let box_dict_key = matches!(runtime_func, "rt_index_get" | "rt_dict_remove" | "rt_contains");
+    // `rt_collection_remove` replaced `rt_dict_remove` as the target for the
+    // `remove` method name, and it MUST stay in this list. Bare collection-method
+    // args arrive UNBOXED (raw native int) here, and `rt_collection_remove` takes
+    // its key/index as a tagged `RuntimeValue` — dropping it from this allowlist
+    // made `arr.remove(1)` and `arr.remove(2)` return nil while `arr.remove(0)`
+    // worked, because the INT tag is 0 and so a raw 0 is indistinguishable from a
+    // tagged 0. That "index 0 works, every other index silently fails" signature
+    // is the tell for a missing tag on this path.
+    let box_dict_key = matches!(
+        runtime_func,
+        "rt_index_get" | "rt_dict_remove" | "rt_collection_remove" | "rt_contains"
+    );
     let key_is_int = matches!(
         ctx.vreg_types.get(args.first().unwrap_or(&receiver)).copied(),
         Some(

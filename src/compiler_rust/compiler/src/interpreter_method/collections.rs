@@ -158,13 +158,25 @@ pub fn handle_array_methods(
             }
             Value::array(new_arr)
         }
+        // Returns the REMOVED ELEMENT, not the mutated array. The mutation is
+        // written back to the receiver binding by the `MUTATING_METHODS` path in
+        // interpreter_helpers/patterns.rs, exactly as it is for `pop`; this arm
+        // only decides the EXPRESSION VALUE. Returning the post-mutation array
+        // here (the previous behaviour) contradicted the sibling `pop`, the
+        // sibling `Dict.remove(key)`, and mutable_by_default_spec.spl's
+        // `expect removed == 2`.
+        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
         "remove" => {
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let mut new_arr = arr.to_vec();
+            // Out of range is a no-op yielding Nil, mirroring `pop` on an empty
+            // array. Never a panic: `remove` on an out-of-range index would
+            // abort the whole interpreter.
             if idx < new_arr.len() {
-                new_arr.remove(idx);
+                new_arr.remove(idx)
+            } else {
+                Value::Nil
             }
-            Value::array(new_arr)
         }
         "rev" | "reverse" => {
             let mut new_arr = arr.to_vec();

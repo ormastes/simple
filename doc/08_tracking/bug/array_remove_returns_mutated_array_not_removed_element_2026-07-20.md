@@ -1,9 +1,10 @@
 # `array.remove(index)` returns the mutated array, not the removed element
 
-**Status:** OPEN — 2026-07-20 behaviour reconfirmed 2026-08-08. The interpreter
-still returns the mutated array. The seed JIT is WORSE and was not previously
-recorded: it returns `nil` **and does not mutate the array at all**. See
-"Re-triage 2026-08-08" below.
+**Status:** FIXED IN SOURCE 2026-08-08 — both lanes. `.remove(index)` now returns
+the removed element and mutates in place on the interpreter AND the compiled
+lanes. `mutable_by_default_spec.spl` went 21/24 -> **24/24** (both copies).
+Guard: `scripts/check/check-array-remove-returns-element.shs`. Red against the
+stale deployed `bin/simple` until the next seed redeploy. See "Fix 2026-08-08".
 **Date:** 2026-07-20
 **Component:** Array `.remove(index)` builtin method (interpreter),
 exercised via `test/feature/usage/mutable_by_default_spec.spl`.
@@ -136,3 +137,106 @@ right assertion and must not be weakened. Closing this needs a decision on the
 contract (return the removed element, as the spec and the `Vec::remove` /
 `list.pop(index)` convention say) applied to BOTH lanes, plus the JIT mutation
 fix which is a separate, larger problem.
+
+## Fix 2026-08-08 — contract settled, both lanes corrected
+
+### The contract, and why
+
+**`array.remove(index)` removes the element at `index` IN PLACE and RETURNS THAT
+ELEMENT.** There is no prose spec for it anywhere in `doc/`, so the contract was
+settled from the tree's own primary sources, which converge:
+
+- sibling `pop()` — `rt_array_pop` mutates in place and returns the ELEMENT;
+  `method_registry/builtins.rs` declares it `is_mutating: true`; HIR types
+  `[T].pop()` as `T`.
+- sibling `Dict.remove(key)` — `rt_dict_remove` removes the entry and returns the
+  VALUE; HIR types it as the dict's value type.
+- `method_registry/builtins.rs` already declared array `remove` as
+  `is_mutating: true`, "removes element at index".
+- `mutable_by_default_spec.spl` asserts exactly `removed == 2` and
+  `arr.len() == 2`.
+
+The rejected alternative — "return the mutated array", what the AST interpreter
+did — had no runtime implementation, no HIR type, and no spec behind it, and
+contradicts both siblings. It was a defect, not a design.
+
+### Root causes — FIVE, not one
+
+1. **Interpreter returned the receiver.** `interpreter_method/collections.rs`
+   `"remove"` returned `Value::array(new_arr)` instead of the spliced element.
+2. **`rt_array_remove` DID NOT EXIST.** The method registry had referenced the
+   symbol all along; nothing implemented it. Codegen's name-keyed table mapped
+   `remove` to `rt_dict_remove` for EVERY receiver, and that function type-checks
+   its receiver as a Dict — on an Array it early-outs, returns NIL, mutates
+   nothing. That is the whole "JIT is worse" half: a total no-op.
+3. **Write-back would have been dropped.** The interpreter propagates a mutation
+   only when the result's discriminant MATCHES the receiver's. Changing `remove`
+   to return an element makes `Int` vs `Array` never match, so the removal would
+   have been silently discarded for every field/index place — the exact trap
+   `pop` already had a special case for. `remove` needed the same.
+4. **Missing HIR return type.** Array `remove` was absent from the HIR
+   method-return-type table, so it fell through to `TypeId::ANY` and no unboxing
+   was selected: the element came back still TAGGED. Measured through a typed
+   field: **56 instead of 7** (7 << 3).
+5. **Missing MIR unbox.** Typing it in HIR is necessary but NOT sufficient — the
+   HIR type only SELECTS the unbox. Without adding `remove` to the
+   slot-yielding-accessor family in `mir/lower/lowering_expr_method.rs`, locals
+   showed **160 instead of 20** (20 << 3).
+
+Causes 4 and 5 are the same class already documented in that table for
+`index_of` and `sum`. `pop` was correct only because it was listed in both places.
+
+### Files
+
+- `src/compiler_rust/runtime/src/value/collections.rs` — new `rt_array_remove`
+  (all three storage layouts: tagged, byte-packed, u64-packed; out-of-range is a
+  no-op returning NIL, never a panic — unwinding across `extern "C"` from JIT
+  code is UB) and `rt_collection_remove`, the receiver-dispatching entry point.
+- `src/compiler_rust/compiler/src/codegen/runtime_sffi.rs` — register both.
+- `codegen/instr/closures_structs.rs` + `codegen/llvm/functions.rs` — route the
+  `remove` METHOD to `rt_collection_remove` on both compiled backends.
+- `interpreter_method/collections.rs`, `interpreter_method/mod.rs`,
+  `interpreter_helpers/patterns.rs` — element return + write-back on both the
+  in-place fast path and the clone-then-mutate slow path.
+- `hir/lower/expr/mod.rs`, `mir/lower/lowering_expr_method.rs` — typing + unbox.
+
+### Near-miss worth recording: `rt_remove` was already taken
+
+The dispatcher was first named `rt_remove`. That collides with
+`int64_t rt_remove(const char *path)` — the POSIX **file-deletion** wrapper in
+`src/runtime/runtime_hosted_fs.c`. The link failed loudly
+(`rust-lld: error: duplicate symbol`), which is the good outcome: this repo
+builds some link steps with `-z muldefs`, under which the linker would have
+silently picked one definition and either sent `arr.remove(i)` into `unlink()`
+or sent file deletions into the collection helper. Renamed to
+`rt_collection_remove`.
+
+### Evidence, both directions
+
+`scripts/check/check-array-remove-returns-element.shs`, per engine: the return
+value is the removed ELEMENT; the receiver SHRANK (catches the JIT no-op, which
+left `len` at 3); the CORRECT element went (an off-by-one that pops the tail
+would satisfy the first two otherwise); first/last index; out-of-range is a
+no-op and not a crash; and a TYPED FIELD receiver returned through a declared
+`-> i64`, which is a different code path that caught cause 4 after all the
+local-variable cases already passed.
+
+    # RED — stale deployed bin/simple:
+    FAIL — engine 'interpreter': ... expected 'mid=20', got: mid=[10, 30]
+    # (JIT half of the same run: mid=nil, mid_len=3)
+
+    # GREEN — freshly built seed:
+    PASS — 2 engine setting(s) checked: interpreter,jit — array.remove(index)
+    returns the removed element and shrinks the receiver in place
+
+Intermediate RED states are themselves evidence the guard discriminates: `mid=nil`
+(no dispatcher), then `mid=nil` for indices 1,2 while `mid_0` worked (missing
+tag on the index — index 0 works because the INT tag is 0, the signature of that
+bug), then `field_got=56`, then `mid=160`. Each was a real build.
+
+Spec: `mutable_by_default_spec.spl` **21/24 -> 24/24** on both copies
+(`test/03_system/feature/usage/`, `test/feature/usage/`), `dropped=0`. The three
+originally-RED examples were correct all along and were never weakened.
+
+**Not yet closed:** `bin/release/<triple>/simple` predates this fix, so the guard
+is red until the next seed redeploy.

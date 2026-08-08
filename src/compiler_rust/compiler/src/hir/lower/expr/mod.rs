@@ -1267,8 +1267,18 @@ impl Lowerer {
                 "len" | "length" => Some(TypeId::I64),
                 "push" => Some(receiver.ty), // Returns the new array (same type)
                 "clear" => Some(TypeId::VOID),
-                "pop" => {
-                    // pop returns the element type
+                // `pop` and `remove(index)` both yield the ELEMENT, so both take
+                // the element type. `remove` was MISSING from this table, which
+                // is the same gap class documented for `index_of` and `sum`
+                // below: the call fell through to generic dynamic dispatch typed
+                // `TypeId::ANY`, so no unboxing was emitted on the result and the
+                // still-TAGGED element reached the caller. Measured on
+                // `self.items.remove(0)` over `[7, 8, 9]` typed `[i64]`: `56`,
+                // i.e. 7 << 3 — the element's value multiplied by 8, the
+                // signature of a tag that was never stripped. `pop` was correct
+                // purely because it is listed here.
+                // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+                "pop" | "remove" => {
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
                         Some(*element)
                     } else {

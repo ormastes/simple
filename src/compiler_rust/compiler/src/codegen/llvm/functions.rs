@@ -2494,7 +2494,12 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
-                    "remove" => Some("rt_dict_remove"),
+                    // Receiver-dispatched — see the matching arm in
+                    // codegen/instr/closures_structs.rs. Name-keyed table with
+                    // no receiver type, so `rt_dict_remove` here silently
+                    // no-opped every array `.remove(i)` on the native lane too.
+                    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+                    "remove" => Some("rt_collection_remove"),
                     "filter" => Some("rt_array_filter"),
                     "sort" => Some("rt_array_sort"),
                     "reverse" => Some("rt_array_reverse"),

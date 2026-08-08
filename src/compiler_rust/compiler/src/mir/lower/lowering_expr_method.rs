@@ -1383,7 +1383,19 @@ impl<'a> MirLowerer<'a> {
         // and leaves type-specific unboxing to MIR). Restore that pairing here.
         // Only native scalar element types unbox; text/struct/array elements are
         // already valid RuntimeValue pointers and must pass through untouched.
-        if args.is_empty() && matches!(method, "first" | "last" | "pop") {
+        // `remove(index)` joins this family: it hands back an array SLOT verbatim
+        // (the removed element), so it needs the identical UnboxInt/UnboxFloat
+        // pairing. It differs only in taking ONE argument, hence the arity test
+        // below is per-method rather than a blanket `args.is_empty()`.
+        // Symptom when this is missing, measured on `[10,20,30].remove(1)` typed
+        // `[i64]`: `160` instead of `20` — exactly 8x, the `v << 3` int tag still
+        // attached. Typing `remove` in the HIR table alone is NOT sufficient; the
+        // HIR type is what SELECTS this unbox, and without the unbox the tagged
+        // word flows into an int-typed VReg.
+        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+        let is_slot_yielding_accessor = (args.is_empty() && matches!(method, "first" | "last" | "pop"))
+            || (args.len() == 1 && method == "remove");
+        if is_slot_yielding_accessor {
             let element_ty = self
                 .type_registry
                 .and_then(|tr| {
@@ -1398,6 +1410,7 @@ impl<'a> MirLowerer<'a> {
                 let rt_name = match method {
                     "first" => "rt_array_first",
                     "last" => "rt_array_last",
+                    "remove" => "rt_array_remove",
                     _ => "rt_array_pop",
                 };
                 let needs_int_unbox = matches!(
@@ -1414,6 +1427,18 @@ impl<'a> MirLowerer<'a> {
                 );
                 let needs_float_unbox = matches!(element_ty, TypeId::F32 | TypeId::F64);
                 if needs_int_unbox || needs_float_unbox {
+                    // `remove` passes its index through; the others are nullary.
+                    // NOTE the ABI difference: this calls `rt_array_remove`
+                    // DIRECTLY, whose index parameter is a RAW native i64 — not
+                    // the tag-boxed `RuntimeValue` that the erased-receiver
+                    // `rt_collection_remove` dispatcher takes. So no shift is
+                    // applied here, and none must be: `arg_regs[0]` is already
+                    // an unboxed int in this typed path.
+                    let call_args = if method == "remove" {
+                        vec![receiver_reg, arg_regs[0]]
+                    } else {
+                        vec![receiver_reg]
+                    };
                     return self.with_func(|func, current_block| {
                         let raw_result = func.new_vreg();
                         let unboxed = func.new_vreg();
@@ -1421,7 +1446,7 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::Call {
                             dest: Some(raw_result),
                             target: crate::mir::effects::CallTarget::from_name(rt_name),
-                            args: vec![receiver_reg],
+                            args: call_args,
                         });
                         if needs_int_unbox {
                             block.instructions.push(MirInst::UnboxInt {
