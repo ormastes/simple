@@ -2,8 +2,9 @@
 
 **Status:** OPEN
 **Found:** 2026-08-08, while building the positive control for
-`interp_static_fn_new_hijacks_named_ctor_2026-07-02` (that bug is RESOLVED; this
-is a different defect found by the control)
+`interp_static_fn_new_hijacks_named_ctor_2026-07-02` (which was briefly closed
+RESOLVED and has since been REOPENED as partially fixed; this is still a
+distinct defect)
 **Severity:** medium — a typo'd field name compiles and runs with no diagnostic,
 and the value lands in the wrong slot rather than being rejected
 **Engine:** seed JIT only. Interpreter is CORRECT.
@@ -82,3 +83,52 @@ both engines inherit it. Recorded rather than guessed.
 "Rust-built Simple binary is a bootstrap seed only" banner. No pure-Simple
 self-hosted binary is deployed on this host, so the self-hosted lane is
 untested — the divergence above is seed-JIT vs seed-interpreter.
+
+## Correction 2026-08-08 (adversarial re-review) — the mechanism above is WRONG
+
+The table's reading — "the unknown name is silently absorbed into whichever
+field slot is still unfilled ... it corrupts that slot with an unrelated value
+(`3`, the value of the preceding argument)" — is not what happens. It was
+inferred from probes in which the literal `3` happened to be present.
+
+Vary the values and `3` does not move:
+
+    class Font:
+        id: i64
+        size: i64
+        static fn new(path: text, size: i64) -> Font:
+            Font(id: 77, size: size)
+
+    Font(bogus: 111, size: 8)   seed JIT -> id=3 size=8
+    Font(bogus: 222, size: 9)   seed JIT -> id=3 size=9
+    Font(id: 5, bogus: 999)     seed JIT -> id=5 size=3
+
+The leftover slot is filled with the **constant 3** regardless of the supplied
+argument (`111`, `222`, `999` all vanish). The unknown argument's value is not
+absorbed anywhere; it is dropped, and the unfilled field is initialised from
+garbage that happens to read as `3` on this build. Treat `3` as an artifact, not
+as a rule.
+
+Two further scope corrections:
+
+- **It is not conditioned on `static fn new`.** The same class with no static at
+  all reproduces identically:
+
+        class Plain:
+            id: i64
+            size: i64
+
+        Plain(bogus: 111, size: 8)  seed JIT -> id=3 size=8   (interpreter: error)
+        Plain(id: 5, bogus: 999)    seed JIT -> id=5 size=3
+
+  So this is a plain named-argument-validation hole in the JIT lowering, not
+  anything to do with static-constructor dispatch.
+- **Severity is understated at "medium".** The sibling report
+  `interp_static_fn_new_hijacks_named_ctor_2026-07-02` rates the same class of
+  failure — silent wrong-field construction on the default `run` engine — at P1.
+  A typo'd field name yields an object with a garbage value in a field the
+  author never named, with no diagnostic on any line, on the engine ordinary
+  programs use. Read this as **high**.
+
+The core symptom in the report body (interpreter rejects the unknown name, seed
+JIT silently accepts it) is confirmed and unchanged.
