@@ -536,3 +536,97 @@ FIPS-197, and CBC *encrypt* runs on `aes_gcm.spl`'s schedule layout, so moving
 only decrypt would straddle CBC across two implementations with incompatible
 schedules. Consolidation becomes available once `expand_key` is fixed and
 KAT-gated, at which point CTR and GCM must move with it.
+
+## Addendum 2026-08-08 (later session): native-lane attempt — caveat STILL STANDS
+
+Attempted to discharge the remaining native-codegen half of the caveat above
+(the JIT half was already discharged in the "Update 2026-08-08" block).
+**Result: not discharged.** Two independent probes, run from inside the repo
+tree (`.nvprobe_aes/`, a subdirectory of this checkout — not a scratch path
+outside it, which is required for `use std.…` to resolve against the real,
+current stdlib rather than a stale bundled copy):
+
+1. **General MIR-lowering gap re-confirmed fresh, fast, and unambiguous.**
+   `.nvprobe_aes/mir_gap.spl` (zero stdlib imports — `(255 & 0xFF).to_u8()`
+   plus `[text].join(",")`) was run through `bin/simple native-build` today.
+   It failed in under two minutes with:
+   ```
+   [ERROR] MIR error: MIR lowering error: unresolved method call: to_u8
+   [ERROR] MIR error: MIR lowering error: unresolved method call: join
+   error: MIR lowering error: unresolved method call: to_u8
+   error: native-build worker exited with code 1.
+   ```
+   `RC=1`, no binary produced. This is the same defect already filed as
+   `doc/08_tracking/bug/native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md`,
+   independently reproduced in this session rather than assumed from that doc.
+
+2. **Direct relevance to this fix: `aes_cbc_encrypt`/`aes_cbc_decrypt` cannot avoid
+   `.to_u8()`.** `src/lib/common/aes/modes.spl:31` (`_i64_to_u8`) is the
+   `[i64]`→`[u8]` bridge every CTR/CBC entry point calls (lines 60, 74, 167,
+   189, 214, 231 per the existing gap doc's line count against the current
+   file), and `src/lib/common/crypto/aes_gcm.spl` (the block-cipher module
+   CBC is built on) calls `.to_u8()` 28 more times. There is no code path
+   through the landed CBC fix that avoids the unresolved lowering.
+
+3. **Two direct attempts to native-build the actual CBC KAT probe did not
+   produce a verdict either way — this is recorded honestly, not read as a
+   pass.** Two probes were written (both `[i64]`-typed throughout, no `list`
+   params, arithmetic `sum_abs_diff` comparisons against the published
+   FIPS‑197 C.1/C.3 and NIST SP 800‑38A F.2.1 vectors — no print-and-eyeball
+   checks):
+   - `.nvprobe_aes/aes_cbc_native_kat.spl` — full probe (FIPS block KATs +
+     F.2.1 CBC chaining + CTR-vs-CBC distinctness + round-trip).
+   - `.nvprobe_aes/aes_modes_import_only.spl` — reduced to a single
+     `use std.common.aes.modes.{aes_cbc_encrypt}` plus one call, to isolate
+     whether the AES path specifically was the source of any slowness.
+
+   Both were run via `bin/simple native-build <entry> -o <out>` **from inside
+   the repo root**, budgeted generously (550s foreground wait per attempt, one
+   attempt's underlying worker process was independently confirmed still
+   consuming ~95% CPU under `ps` 25+ minutes in — not hung, not swapped, no
+   OOM/kill signal found in available logs). Across roughly 50 minutes of
+   combined worker run time, under measured system load (`uptime` load
+   average 37–45), **neither attempt produced a binary, an `[ERROR]`/`error:`
+   line, nor any diagnostic output past the standard front-end warning dump**
+   — the log simply stops mid-warnings and the worker process later exits
+   with no further log lines and no artifact at the `-o` path. This is
+   distinct from, and less informative than, the fast/clean `RC=1` in probe
+   (1) above: it is neither a reproduction of the `to_u8` error nor a pass. It
+   is consistent with either (a) the same MIR-lowering wall being hit further
+   into a much larger compile (AES's `use` chain pulls in enough of the
+   dependency graph that front-end warnings for the whole `src/compiler`
+   tree appear in the log, matching the pattern noted in
+   `native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md` about
+   truncated/incomplete stderr capture) or (b) resource contention under the
+   documented ~20-concurrent-build load silently terminating the worker.
+   Neither hypothesis was resolved and neither one is a pass — no artifact was
+   produced, so nothing was executed, so nothing was verified.
+
+**Verdict:** given (1) and (2), a native pass was never a live possibility for
+this code as written — the unresolved `to_u8` lowering is upstream of
+`aes_cbc_encrypt`/`aes_cbc_decrypt` on every call, confirmed by an
+independent, fast, dependency-free repro run in this same session. (3) adds
+no new information beyond that but is recorded so a future attempt does not
+re-spend the same ~50 minutes rediscovering that the direct probe alone
+doesn't resolve cleanly under current load.
+
+**The native half of this caveat remains explicitly OPEN.** It should stay
+open until `native_mir_lowering_unresolved_to_u8_and_join_2026-08-08.md` (the
+`to_u8`/`join` MIR-lowering gap) is fixed. Discharging it before then would be
+exactly the failure mode this doc's own "Update 2026-08-08" section already
+warned against.
+
+**AES inverse cipher (part of the KAT set above): not independently
+re-verified natively either, for the same reason** — `aes128_decrypt_block`/
+`aes256_decrypt_block` in `src/lib/common/crypto/aes_gcm.spl` are reached
+through the same `.to_u8()`-bearing call chain, so they are blocked by the
+identical defect, not a new one. The FIPS‑197 C.1/C.3 KAT coverage for this
+cipher (18/18 interpreter-verified, RED→GREEN→SABOTAGE'd per the "Resolution"
+section above) still stands only on the interpreter/JIT lanes. No claim is
+made about `src/lib/common/aes/cipher.spl` (the separate, already-filed-broken
+duplicate implementation in
+`doc/08_tracking/bug/aes_cipher_spl_block_functions_fail_fips197_c1_2026-08-08.md`)
+— that finding is not reopened and was out of scope here.
+
+Probe files left in place at `.nvprobe_aes/` (untracked, not part of this
+change) for anyone re-attempting this once the lowering gap is fixed.
