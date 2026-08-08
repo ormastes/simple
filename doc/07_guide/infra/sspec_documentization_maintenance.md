@@ -46,6 +46,19 @@ simple sspec-maintain scan test/path/feature_spec.spl --baseline reviewed.txt \
   --suppressions reviewed-suppressions.txt --debug-timings
 ```
 
+**Running it:** the subcommand lives in the self-hosted pure-Simple CLI
+(`src/app/sspec_maintain/`). If `bin/simple` is the Rust **seed** (it prints
+the seed banner and reports `file not found: sspec-maintain`), either rebuild
+and redeploy (`bin/simple build bootstrap`) or run straight from source — one
+stdlib load scans a whole tree:
+`bin/simple src/app/sspec_maintain/main.spl scan <path> 2>/dev/null`.
+
+**Ranking a legacy tree:** any blocker clamps the effective score to 49, so
+nearly every legacy spec reads `49/100` and the headline cannot rank them.
+Sort by the `raw=` line (lower = more findings) and triage by blocker type
+(`SSDOC-ORA-001` scaffold > `ORA-003` unexplained numerics > `NAR-001` >
+`TRC-001`).
+
 `--min-score` and `--deny-severity` are independent failure policies. Human
 output is for review. JSON and SARIF stdout must contain only the selected
 serialization. An empty directory scope, unreadable source, or invalid format

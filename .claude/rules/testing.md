@@ -42,6 +42,31 @@ anti-patterns: `doc/07_guide/infra/sspec_antipatterns.md`, example manuals:
 `doc/07_guide/app/spipe/manual_examples/`, requirements:
 `doc/02_requirements/feature/sspec_scenario_manual.md`.
 
+### Scoring & modernization triage — `sspec-maintain scan`
+Score a spec/dir for modernness: `simple sspec-maintain scan <spec|dir>` (7
+weighted dimensions → `SSpec documentization score: N/100`). Operator manual:
+`doc/07_guide/infra/sspec_documentization_maintenance.md`.
+
+- **Deployed-binary gotcha (2026-08-08):** `bin/release/<triple>/simple` is
+  currently the Rust **seed**, whose CLI lacks `sspec-maintain` (it prints the
+  seed banner and falls through to "file not found"). Verify with
+  `bin/simple --version` (seed warning) / `readlink -f bin/simple`. Until the
+  self-hosted binary is rebuilt (`scripts/setup/setup.shs && bin/simple build
+  bootstrap` then redeploy), run the scorer **from source** — one stdlib load
+  scans a whole tree in ~90s:
+  `bin/simple src/app/sspec_maintain/main.spl scan <path> 2>/dev/null`.
+- **Rank by `raw=`, not the headline score.** Any blocker clamps the effective
+  score to 49 (`score.spl`), so across a legacy tree nearly every spec reads
+  `49/100` and the headline can't rank them. Parse the `raw=` line instead
+  (lower = more findings) and triage by blocker type.
+- **Modernization signals, strongest first:** `blocker SSDOC-ORA-001`
+  (unconditional pending / fail-fast scaffold — the spec asserts nothing real;
+  the `core/core_integration_N`, `e2e/*_integration_N`, `lib/database_*`,
+  `io/native_ops_*` families are synthetic filler) → `SSDOC-ORA-003`
+  (unexplained numeric expected values) → `SSDOC-NAR-001` (no authored
+  purpose/audience) → `SSDOC-TRC-001` (no `# @req REQ-*` traceability). Fix
+  ORA-001 first: replace the scaffold with a real oracle or delete the spec.
+
 ## Commands
 ```bash
 bin/simple test                     # All tests
