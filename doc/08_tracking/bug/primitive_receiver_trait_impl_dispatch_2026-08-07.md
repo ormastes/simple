@@ -1,7 +1,12 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
 - **Status:** OPEN (diagnosed, root cause located, not fixed) — re-verified
-  2026-08-07 (same day, follow-up probe), matrix unchanged
+  2026-08-07 (same day, follow-up probe), matrix unchanged.
+  2026-08-08: the `use std.hash` export half is FIXED (30697f688ed,
+  b73597bfd03). Defect A (seed JIT) still unfixed. Defect B now has a
+  MEASURED fix recipe (see "Defect B fix recipe" below) that reached
+  0 `unresolved method call` on the native-min repro but was lost to a
+  concurrent-session working-copy clobber before it could be landed.
 - **Date:** 2026-08-07
 - **Spec (RED by design, locks in the interpret column):**
   `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl` —
@@ -410,6 +415,67 @@ receiver's static type, or drop the arm so it fails closed like every other
 un-implemented primitive method). Filed rather than applied because the seed is
 explicitly not the deliverable — but note that until it is fixed, **every
 `.hash()` call on a primitive in JIT-compiled code silently returns 0**.
+
+## Defect B fix recipe — MEASURED to remove `unresolved method call`, NOT LANDED (2026-08-08)
+
+A fix lane built and traced this end-to-end on the native-min repro. The
+resolver fall-through alone is **not** sufficient; four coordinated edits were
+needed, and the trace below is the evidence for each. **The working tree
+carrying these edits was reverted by a concurrent session before it could be
+landed — the code is gone, this recipe is what survives.** Re-apply and re-verify
+before trusting it.
+
+1. `35.semantics/resolve_strategies.spl` `try_trait_method`: when
+   `get_type_symbol` yields no valid symbol, `return
+   self.try_trait_method_with_solver(receiver_type, method)` instead of `nil`.
+2. Same file, `try_trait_method_with_solver`: its success path constructed
+   `MethodResolution(trait_name:…, impl_block:…, method_name:…, is_generic:…)`
+   — a **field-bag that does not match the enum** in `hir_types.spl:129`. MIR
+   lowering can only consume the variant, so build
+   `MethodResolution.TraitMethod(trait_name.id, method_sym)` via
+   `lookup_trait_method_raw`. This is a second latent defect, independent of
+   primitives: *every* solver-resolved trait method was returning an
+   unconsumable resolution.
+3. Primitive impls carry no type symbol, so `50.mir` keys them on a canonical
+   name. Add `hir_primitive_impl_owner_name(kind) -> text` to
+   `mir_lowering_types.spl` (`Int(bits,signed)` → `i{bits}`/`u{bits}`,
+   `Float(bits)` → `f{bits}`, `Bool`/`Char`/`Str` → `bool`/`char`/`text`, else
+   `""`); register under it in `_MirLowering/module_lowering.spl`'s impl loop
+   (the `case _:` arm of the `impl_def.type_.kind` match, which previously left
+   `impl_type_name` empty and skipped registration entirely); and add a
+   primitive-owner recovery block in `_MirLoweringExpr/method_calls_literals.spl`'s
+   `case Unresolved:` arm, placed AFTER struct-owner recovery and BEFORE the
+   builtin `push`/`char_code_at`/`to_text` special cases.
+4. Receiver-type recovery needs three sources, in this order: `receiver.type_`,
+   then `receiver_declared_type(receiver)`, then — for `(1.5 as f32).mark()` —
+   the **cast target** from `case Cast(_, target)`. With only the first two the
+   trace printed `prim-owner method=mark owner=` (empty) and the f32 row still
+   failed; adding the cast arm produced `owner=f32`.
+
+Measured progression on
+`test/fixtures/repro/compiler/primitive_trait_impl_dispatch_native_min.spl`:
+
+| state | `unresolved method call: mark` |
+|-------|-------------------------------|
+| origin/main | 2 (f32 + text) |
+| after edits 1+2 only | 2 — solver reached, resolution unconsumable |
+| after edits 1+2+3 | 1 (text resolved: `prim-key key=text::mark found=true`) |
+| after edits 1+2+3+4 | **0** — both `f32::mark` and `text::mark` found |
+
+**Residual, unfixed:** the build still fails, now on a *different* and
+pre-existing error — `unsupported MIR type kind [infer-arm]:
+HirTypeKind::Infer((0,0))` at the repro's line 25 col 40. Impl-method symbols on
+the flat lane can carry an unresolved `Infer` return type, and
+`resolved_call_return_type` → `lower_type` treats `Infer` as fatal. Guarding the
+primitive call site (default `i64`, `bootstrap_text_type()` for `Str`) removed
+the primitive-path instances but a third remains from elsewhere. So Defect B's
+*dispatch* half is solved by the recipe above; the native build of this fixture
+is still blocked by the infer-arm defect, which deserves its own entry.
+
+**Verification gap.** No self-hosted binary exists (stage 3 blocked), so this was
+verified only by MIR-lowering trace on the toy fixture. A resolver-level unit
+spec calling `try_trait_method` with primitive `HirType`s was written and also
+lost in the same clobber.
 
 ## Reproduce
 
