@@ -170,6 +170,47 @@ grep -Eq '^SIMPLEOS_AUDIO_PLAYBACK non_silent=1 frames=[1-9][0-9]* ' "$serial" |
     echo "simpleos_virtio_snd_qemu_status=fail reason=playback-receipt-missing arch=$arch" >&2
     exit 1
 }
+capture=$(grep -E '^SIMPLEOS_AUDIO_CAPTURE status=completed ' "$serial" | tail -n 1 || true)
+test -n "$capture" || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-receipt-missing arch=$arch" >&2
+    exit 1
+}
+capture_field() {
+    key=$1
+    printf '%s\n' "$capture" | tr ' ' '\n' | sed -n "s/^${key}=//p" | head -n 1
+}
+capture_session=$(capture_field session)
+capture_generation=$(capture_field generation)
+capture_frames=$(capture_field frames)
+capture_samples=$(capture_field samples)
+capture_hash=$(capture_field hash)
+test -n "$capture_session" && test "$capture_session" -gt 0 || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-session-missing arch=$arch" >&2
+    exit 1
+}
+test -n "$capture_generation" && test "$capture_generation" -gt 0 || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-generation-missing arch=$arch" >&2
+    exit 1
+}
+test -n "$capture_frames" && test "$capture_frames" -gt 0 && test "$capture_frames" -le 256 || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-frame-bounds arch=$arch" >&2
+    exit 1
+}
+test -n "$capture_samples" && test "$capture_samples" -ge "$capture_frames" && test "$capture_samples" -le 4096 || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-sample-bounds arch=$arch" >&2
+    exit 1
+}
+test -n "$capture_hash" && test "$capture_hash" -gt 0 || {
+    echo "simpleos_virtio_snd_qemu_status=fail reason=capture-hash-missing arch=$arch" >&2
+    exit 1
+}
+case " $capture " in
+    *' bounded=1 '*) ;;
+    *)
+        echo "simpleos_virtio_snd_qemu_status=fail reason=capture-unbounded arch=$arch" >&2
+        exit 1
+        ;;
+esac
 grep -Fq 'SIMPLEOS_AUDIO_SHUTDOWN live_dma_resources=0 receipts=1' "$serial" || {
     echo "simpleos_virtio_snd_qemu_status=fail reason=shutdown-receipt-missing arch=$arch" >&2
     exit 1

@@ -29,6 +29,20 @@ struct VirtioSndServiceReceipt:
     bytes: i64
     interrupts: u64
 
+# A capture receipt is created only after the RX used ring confirms completion.
+# Its hash is calculated from the DMA buffer after CPU synchronization, so it
+# correlates a bounded device-written period rather than a host-side fixture.
+struct VirtioSndCaptureReceipt:
+    status: text
+    reason: text
+    session: u64
+    generation: u64
+    frames: i64
+    samples: i64
+    sample_hash: i64
+    non_silent: bool
+    interrupts: u64
+
 class VirtioSndService:
     transport: VirtioSndMmioTransport
     dma: VirtioSndDmaResources
@@ -42,6 +56,8 @@ class VirtioSndService:
     rx_used: u16
     event_used: u16
     interrupt_count: u64
+    capture_session: u64
+    capture_generation: u64
 
 impl VirtioSndService:
     static fn start(base: u64) -> VirtioSndService:
@@ -66,7 +82,8 @@ impl VirtioSndService:
         var service = VirtioSndService(
             transport: transport, dma: dma, ready: transport_ready, start_reason: start_reason,
             stream_id: 0u32, period_frames: 0, channels: 0, direction: "closed",
-            tx_used: 0u16, rx_used: 0u16, event_used: 0u16, interrupt_count: 0u64
+            tx_used: 0u16, rx_used: 0u16, event_used: 0u16, interrupt_count: 0u64,
+            capture_session: 0u64, capture_generation: 0u64
         )
         if service.ready:
             val posted = service.transport.post_event(
@@ -118,6 +135,9 @@ impl VirtioSndService:
         val period_bytes = period_frames * channels * 2
         if (direction != "playback" and direction != "capture") or period_frames < 16 or channels < 1 or channels > 16 or period_bytes > VIRTIO_SND_PERIOD_BYTES_MAX:
             return self.receipt("invalid", "PCM geometry rejected", 0, 0)
+        if self.direction != "closed":
+            val closed = self.close_stream(spin_limit)
+            if closed.status != "completed": return closed
         val request_base = VIRTIO_SND_CONTROL_REQUEST_OFFSET
         val format_word = channels.to_u32() |
             (VIRTIO_SND_PCM_FMT_S16.to_u32() << 8u32) |
@@ -149,6 +169,9 @@ impl VirtioSndService:
             self.period_frames = period_frames
             self.channels = channels
             self.direction = direction
+            if direction == "capture":
+                self.capture_session = self.capture_session + 1u64
+                self.capture_generation = 0u64
         started
 
     me configure_playback(stream_id: u32, period_frames: i64, channels: i64, spin_limit: i64) -> VirtioSndServiceReceipt:
@@ -192,6 +215,7 @@ impl VirtioSndService:
             virtio_snd_dma_device_address(self.dma, VIRTIO_SND_STATUS_OFFSET), true
         )
         if not submitted: return self.receipt("failed", "capture queue submission failed", 0, 0)
+        self.capture_generation = self.capture_generation + 1u64
         self.receipt("submitted", "capture period queued", self.period_frames, sample_count * 2)
 
     me poll_playback() -> VirtioSndServiceReceipt:
@@ -212,12 +236,46 @@ impl VirtioSndService:
         if status != VIRTIO_SND_S_OK: return self.receipt("rejected", virtio_snd_status_name(status), 0, used.bytes.to_i64())
         self.receipt("completed", "capture period", self.period_frames, used.bytes.to_i64())
 
+    me poll_capture_receipt() -> VirtioSndCaptureReceipt:
+        val completion = self.poll_capture()
+        if completion.status != "completed":
+            return self.capture_receipt(completion.status, completion.reason, 0, 0, 0, false)
+        self.capture_snapshot()
+
+    fn capture_snapshot() -> VirtioSndCaptureReceipt:
+        val sample_count = self.period_frames * self.channels
+        if not self.ready or self.direction != "capture" or self.capture_session == 0u64 or self.capture_generation == 0u64 or sample_count <= 0:
+            return self.capture_receipt("invalid", "capture receipt unavailable", 0, 0, 0, false)
+        var index: i64 = 0
+        var sample_hash: i64 = 17
+        var non_silent = false
+        while index < sample_count:
+            val sample = self.capture_sample(index)
+            if sample != 0: non_silent = true
+            # Keep the receipt hash bounded and stable across targets while
+            # folding every signed PCM sample from the synchronized RX region.
+            sample_hash = (sample_hash * 65599 + sample + 32768) % 2147483647
+            index = index + 1
+        self.capture_receipt("completed", "capture period", self.period_frames, sample_count, sample_hash, non_silent)
+
     fn capture_sample(index: i64) -> i64:
         if not self.ready or self.direction != "capture" or self.period_frames <= 0:
             return 0
         virtio_snd_dma_read_pcm_sample_i16(
             self.dma, VIRTIO_SND_RX_PCM_OFFSET, index, self.period_frames * self.channels
         )
+
+    me close_stream(spin_limit: i64) -> VirtioSndServiceReceipt:
+        if not self.ready or self.period_frames <= 0 or self.direction == "closed":
+            return self.receipt("completed", "stream already closed", 0, 0)
+        val stopped = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_STOP, self.stream_id), 4u32, spin_limit)
+        if stopped.status != "completed": return stopped
+        val released = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_RELEASE, self.stream_id), 4u32, spin_limit)
+        if released.status == "completed":
+            self.period_frames = 0
+            self.channels = 0
+            self.direction = "closed"
+        released
 
     me acknowledge_interrupt() -> u32:
         val pending = self.transport.acknowledge_interrupt()
@@ -250,10 +308,8 @@ impl VirtioSndService:
 
     me shutdown(spin_limit: i64) -> VirtioSndServiceReceipt:
         var result = self.receipt("completed", "already stopped", 0, 0)
-        if self.ready and self.period_frames > 0:
-            result = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_STOP, self.stream_id), 4u32, spin_limit)
-            if result.status == "completed":
-                result = self.control(virtio_snd_pcm_command(VIRTIO_SND_R_PCM_RELEASE, self.stream_id), 4u32, spin_limit)
+        if self.ready:
+            result = self.close_stream(spin_limit)
         self.ready = false
         self.direction = "closed"
         self.transport.reset()
@@ -264,4 +320,11 @@ impl VirtioSndService:
     fn receipt(status: text, reason: text, frames: i64, bytes: i64) -> VirtioSndServiceReceipt:
         VirtioSndServiceReceipt(status: status, reason: reason, frames: frames, bytes: bytes, interrupts: self.interrupt_count)
 
-export VirtioSndServiceReceipt, VirtioSndService
+    fn capture_receipt(status: text, reason: text, frames: i64, samples: i64, sample_hash: i64, non_silent: bool) -> VirtioSndCaptureReceipt:
+        VirtioSndCaptureReceipt(
+            status: status, reason: reason, session: self.capture_session,
+            generation: self.capture_generation, frames: frames, samples: samples,
+            sample_hash: sample_hash, non_silent: non_silent, interrupts: self.interrupt_count
+        )
+
+export VirtioSndServiceReceipt, VirtioSndCaptureReceipt, VirtioSndService

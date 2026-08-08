@@ -39,6 +39,62 @@ was itself lost to shared-working-copy churn during this session and later
 recovered, that is noted in the section (see D1-D4 "Recovered, not
 rewritten").
 
+## 2026-08-08 — generic composite-runner GPU-lane dispatch wired to real executors
+
+Closed `gpu_lane_generic_routing_not_wired_to_real_executors_2026-08-07.md`.
+`route_gpu_lane` in `gpu_lane_common.spl` stays a pure skip:/blocked: decision
+(unchanged — matrix_status_spec and its existing "not yet implemented"
+assertions keep passing exactly as before). Two additions:
+
+- `gpu_lane_common.gpu_lane_id_for(base_runtime, remote_backend) -> text`: a
+  new pure mapping from `(base, backend)` to `cuda_jit`/`cuda_vm`/
+  `vulkan_jit`/`vulkan_vm`/`""`. Kept in `gpu_lane_common.spl` (nogc_sync_mut
+  tier) rather than importing the concrete executor classes directly, because
+  each of B2/B3/C2/C3 already imports `gpu_lane_common` for the
+  `GpuLaneExecutor` trait — importing them back would be circular.
+- `test_executor_composite.run_test_file_gpu_lane_dispatch(...)` (replaces
+  the old direct call to `run_test_file_gpu_lane`): runs the same host-aware
+  symbol/driver probes as before, and once driver+symbols are ready,
+  constructs and drives the matching executor —
+  `CudaJitLaneExecutor.prepare/run_program/teardown`,
+  `VulkanJitLaneExecutor.prepare/run_program/teardown`, or
+  `CudaVmExecutor`/`VulkanVmExecutor.init(checked-in PTX/SPIR-V
+  artifact)/run_source("HALT 7", ...)/shutdown` for the vm lanes — instead of
+  the static "not yet implemented" FAIL. Lane ids with no concrete executor
+  yet (`cuda_vm_resident`, `cudagdb`) still fall through to
+  `route_gpu_lane`'s honest not-yet-implemented FAIL. This module (also
+  nogc_sync_mut) importing the gc_async_mut executor classes directly is
+  precedented (`notebook/vulkan_exec.spl` already does it for
+  `VulkanLaneSession`/`VulkanVmExecutor`).
+- New tests in `test/03_system/compiler/gpu_lane_common_spec.spl` cover
+  `gpu_lane_id_for` for all four lane ids plus the two "no executor yet"
+  fall-through cases (19/19 total in that file). Regressions verified:
+  `gpu_lane_matrix_status_spec.spl` 12/12, `remote_interpreter_backend_spec.spl`
+  19/19 — both unaffected since neither exercises the new dispatch path
+  directly (matrix spec calls `route_gpu_lane` directly with pinned
+  `driver_present`; backend spec only checks the pure `extract_*` parsers).
+- Verified live on this host: Vulkan driver/ICD is present and both
+  `vulkan_jit_hello_spec.spl` (2/2) and `vulkan_vm_executor_conformance_spec.spl`
+  (2/2) pass independently, so the executors this dispatch wires to are real,
+  working code — not fabricated. CUDA lanes could not be end-to-end verified
+  through the new dispatch path on this host: this host's CUDA path fails at
+  runtime with `cuda-lane-device-identity-unavailable`
+  (`cuda_lane_probe_misses_device_unavailable_2026-08-08.md`), a separate,
+  already-filed, pre-existing defect in `CudaLaneSession.init` unrelated to
+  this routing change — the new dispatch surfaces it as an honest FAIL
+  (`cuda_jit lane failed: cuda-lane-device-identity-unavailable`) rather than
+  masking it, which is the correct behavior per this task's contract.
+- **Separate pre-existing bug noticed, not fixed (out of scope):**
+  `run_test_file_composite` checks `if base == "jit": return
+  run_test_file_jit(...)` (line ~40) *before* the `platform == "remote"`
+  check, so a `jit(remote(cuda(...)))`/`jit(remote(vulkan(...)))` spec never
+  actually reaches `run_test_file_remote`/the new GPU-lane dispatch through
+  the composite entry point at all — only `interpreter(remote(cuda/vulkan(...)))`
+  specs do. This routing-precedence issue is orthogonal to the "not wired to
+  executors" gap this change closes (which is about what happens *once* the
+  GPU lane dispatch is reached) and was not touched here to keep the diff
+  minimal and avoid risking the JIT dispatch path for every other backend.
+
 ### A3 — landed
 - Runner routing: `route_gpu_lane`/`run_test_file_gpu_lane` (in
   `std.test_runner.gpu_lane_common`) wired into
@@ -621,6 +677,59 @@ rewritten").
   --oneline -- <path>` first -- it is often faster and more faithful to
   recover a verified-working past version than to rewrite from the design
   doc.
+
+### D4 update 2026-08-08 — deferred subset (if/while/print/float) implemented
+
+- **Pre-flight repo-integrity check:** confirmed `ref_vm.spl` +
+  `ref_vm_spec.spl` present and green (`19 total, 19 passed, 0 failed`) and
+  the D3 conformance suite green (`61 total, 61 passed, 0 failed`) before
+  making any D4 edit -- consistent with this section's own note above about
+  `fb8f796903f`'s sibling-commit deletion of those two files.
+- **Implemented in `svmg_lowering.spl`** (previously fail-fast "not yet
+  implemented" stubs, per the file's own header comment): `if/elif/else`
+  (`lower_if`, structural -- `elif` is just a nested `If` inside `else_`, no
+  special-cased chain), `while <cond>: <body>` (`lower_while`, step-budget is
+  the sole termination backstop, no added iteration cap), `print` of a
+  string-literal argument (`lower_print`, one `SYS_PUTC` per `char_code_at`
+  byte), and float arithmetic/comparison (`expr_is_float` +
+  `binop_opcode(op, is_float)` dispatching to `OP_FADD/FSUB/FMUL/FDIV` and
+  `OP_FEQ/FNE/FLT/FLE/FGT/FGE`, `FloatLit` -> `OP_PUSHF` with the f32 bit
+  pattern via `f32_to_bits`; `expect(...).to_equal(...)` now picks `FEQ` vs
+  `EQ` the same way).
+- **Correctness fix required to make If/While safe as a block tail value:**
+  `lower_block_stmts` previously assumed every tail expression pushes exactly
+  one stack value and unconditionally emitted `OP_DROP` after it. `If`/`While`
+  are control-flow-only in this subset and push nothing, so an `elif` chain
+  reachable via a tail-value `If` (rather than a bare statement) would have
+  silently corrupted the operand stack via a phantom `DROP`. Both kinds are
+  now special-cased to skip the `DROP`.
+- **Deliberately still rejected, not silently mis-lowered** (each has its own
+  spec case proving the honest `RED`, not just "no crash"): `print` of a
+  non-string-literal argument (e.g. an integer -- needs runtime decimal-digit
+  extraction, out of scope here), compound assignment (`+=`/etc) on a
+  float-typed local (`assign_opcode` only maps to integer opcodes -- silently
+  using it on a float local's raw bit pattern would corrupt the value), and
+  any float-operand binary op without a float opcode (e.g. `%`/bitwise --
+  `binop_opcode` returns `nil` for those under `is_float`, so it fails fast
+  instead of falling through to the integer opcode).
+- **Verify:**
+  `bin/simple test test/01_unit/compiler/backend/svmg_lowering_spec.spl` ->
+  `Results: 17 total, 17 passed, 0 failed` (9 original + 8 new: if/elif/else,
+  while, print, float-arithmetic, float-if-comparison, plus 3 new
+  still-deferred rejection cases). Conformance regression:
+  `test/02_integration/svmg/conformance/conformance_suite_spec.spl` ->
+  `Results: 61 total, 61 passed, 0 failed` (unchanged).
+- **Sabotage probe:** cross-wired the float `HirBinOp.Add` arm in
+  `binop_opcode` to `OP_ADD` (the integer opcode) instead of `OP_FADD` ->
+  RED (`17 total, 16 passed, 1 failed`, the float-arithmetic spec caught it);
+  reverted -> GREEN (`17 total, 17 passed, 0 failed`). Run twice (the file
+  was independently reverted mid-session by unrelated shared-working-copy
+  churn -- see `.claude/rules/vcs.md` §"Sync must never clobber" -- and
+  re-applied from a `git hash-object -w` snapshot before the second, final
+  probe round trip).
+- **Bug doc:** `doc/08_tracking/bug/svmg_d4_lowering_deferred_subset_2026-08-07.md`
+  now exists (an earlier audit reported it missing) and lists the two
+  remaining deferred items with file:line and unblock conditions.
 
 ## Status: B4 (CUDA resident/interactive session) -- landed 2026-08-07 (host-independent protocol logic fully green; live single-kernel resident dispatch blocked by 3 missing SFFI bindings, filed)
 

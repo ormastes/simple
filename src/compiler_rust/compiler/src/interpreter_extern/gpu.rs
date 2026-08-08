@@ -1094,16 +1094,6 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(not(feature = "cuda"))]
     {
-        if let Some(fns) = get_cuda_dl() {
-            let mut name_buf = [0i8; 256];
-            let r = unsafe { (fns.device_get_name)(name_buf.as_mut_ptr(), 256, device as i32) };
-            if r == 0 {
-                let name = unsafe { std::ffi::CStr::from_ptr(name_buf.as_ptr()) }
-                    .to_string_lossy()
-                    .into_owned();
-                return Ok(Value::text(name));
-            }
-        }
         Ok(Value::text(String::new()))
     }
 }
