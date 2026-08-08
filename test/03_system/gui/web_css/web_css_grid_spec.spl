@@ -10,10 +10,10 @@
 ## Purpose and Audience
 
 A reader wants to know whether the headless web/HTML-CSS renderer computes
-CSS Grid layout correctly: fixed pixel track sizing, `grid-column` spans
-across tracks, gap separating tracks on both axes, and — as documented
-known gaps — `fr` tracks, `grid-template-areas`, and `grid-auto-flow:
-column`.
+CSS Grid layout correctly: fixed pixel track sizing, `fr` (flexible) track
+sizing, `grid-column` spans across tracks, gap separating tracks on both
+axes, and — as documented known gaps — `grid-template-areas` and
+`grid-auto-flow: column`.
 
 ## Scope and Preconditions
 
@@ -35,15 +35,16 @@ geometry.
 ## Known Renderer Gaps (verified by direct probe against the real renderer,
 not assumed from the CSS spec)
 
-`normalized_grid_track_list` (`simple_web_html_layout_renderer_declarations.spl:828-836`)
-requires every track-list token to end with the literal `"px"` suffix — a
-token like `1fr` fails that check, the whole track list normalizes to `""`,
-`grid_template_columns` never gets set, and `layout.spl:1463`'s
-`grid_columns.len() > 0` guard then skips the Grid code path entirely, so a
-`display:grid` container with only `fr` tracks silently falls back to
-plain block flow (probed: both children land at `x=0`, full container
-width, `y=0`). `fr` tracks are unimplemented, not merely surprising — see
-`doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md`.
+`normalized_grid_track_list` (`simple_web_html_layout_renderer_declarations.spl`)
+now parses `<n>fr` tokens alongside `<n>px` tokens, and `grid_track_sizes`
+(`simple_web_html_layout_renderer_layout.spl`) resolves them at layout time:
+fixed `px` tracks are subtracted from the container's content-box width,
+and the remaining free space is distributed across `fr` tracks proportional
+to their flex factor (CSS Grid SS11.5, simplified — no `minmax()`, no
+min-content clamping, and row-axis `fr` resolves to 0px since auto row
+height isn't generally known ahead of layout). See
+`doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md`
+for the resolved bug record and noted simplifications.
 
 `grid-template-areas` and `grid-auto-flow` have zero occurrences anywhere in
 `simple_web_html_layout_renderer_*.spl` (`grep` confirmed) — unimplemented,
@@ -85,9 +86,10 @@ describe "Web CSS grid layout":
     """
     Readers of this manual section can trust that the headless HTML/CSS
     renderer's Draw IR carries correct computed Grid geometry for fixed
-    pixel tracks, `grid-column` spans, and gap on both axes — and can see,
-    documented rather than silently passing, exactly where `fr` tracks,
-    `grid-template-areas`, and `grid-auto-flow:column` remain unimplemented.
+    pixel tracks, `fr` flexible tracks, `grid-column` spans, and gap on both
+    axes — and can see, documented rather than silently passing, exactly
+    where `grid-template-areas` and `grid-auto-flow:column` remain
+    unimplemented.
     """
 
     # @manual_section "Grid layout geometry"
@@ -123,7 +125,7 @@ describe "Web CSS grid layout":
         expect(b.x).to_equal(a.x + 20)
         expect(b.width).to_equal(30)
 
-    it "grid-template-columns: fr tracks are unimplemented (RED-by-design)":
+    it "grid-template-columns: fr tracks split remaining space proportionally":
         step("Render a grid container with two fr column tracks over a 60px container")
         val html = (
             "<html><head><style>" +
@@ -147,12 +149,8 @@ describe "Web CSS grid layout":
         val b = _draw_ir_command_by_id(commands, "b")
 
         step("Assert the 60px remaining space splits 1:2 (20px/40px) per CSS Grid " +
-             "fr-unit semantics — expected RED: `normalized_grid_track_list` " +
-             "(simple_web_html_layout_renderer_declarations.spl:835) rejects any " +
-             "track token that doesn't end with the literal \"px\" suffix, so " +
-             "`1fr 2fr` normalizes to \"\", the Grid path never activates, and " +
-             "layout falls back to plain block flow instead. See " +
-             "doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md")
+             "fr-unit semantics (CSS Grid SS11.5, simplified — no minmax(), no " +
+             "min-content clamping)")
         expect(a.width).to_equal(20)
         expect(b.x).to_equal(20)
         expect(b.width).to_equal(40)

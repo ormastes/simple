@@ -70,8 +70,34 @@ fr tracks are unimplemented (RED-by-design)"`) to assert the real
 
 ## Status
 
-OPEN — unimplemented, not merely surprising per CSS spec. Left RED per
-testing-rules RED protocol; do not weaken the assertion.
+RESOLVED (2026-08-08) — with noted simplifications.
+
+`normalized_grid_track_list`
+(`simple_web_html_layout_renderer_declarations.spl`) now accepts `<n>fr`
+tokens alongside `<n>px` tokens instead of rejecting the whole track list.
+`grid_track_sizes` (`simple_web_html_layout_renderer_layout.spl`) now takes
+the container's available content width and the track gap, subtracts fixed
+`px` track sizes and inter-track gaps from that width, and distributes the
+remaining free space across `fr` tracks proportional to their flex factor
+(CSS Grid SS11.5 "Resolving Flexible Track Sizes").
+
+**Noted simplifications** (left as-is; not required by the unblocking spec
+example):
+- No `minmax()` support.
+- No min-content/max-content clamping of flexible tracks.
+- Row-axis `fr` tracks resolve to `0px`: the column axis has the
+  container's resolved content width available before row layout, but the
+  row axis would need the container's resolved content *height*, which
+  generally isn't known ahead of auto-height row sizing. Out of scope for
+  this fix; row-axis `fr` support would need to be revisited alongside
+  auto-height row sizing if a future spec example exercises it.
+
+`test/03_system/gui/web_css/web_css_grid_spec.spl`'s
+`"grid-template-columns: fr tracks split remaining space proportionally"`
+example (previously `"...(RED-by-design)"`) now asserts the real 20px/40px
+split and passes. The other two documented RED examples in that file
+(`grid-template-areas`, `grid-auto-flow: column`) are untouched and remain
+RED — see `browser_engine_grid_template_areas_missing_2026-08.md`.
 
 ## 2026-08-07 triage note (web_css RED sweep)
 

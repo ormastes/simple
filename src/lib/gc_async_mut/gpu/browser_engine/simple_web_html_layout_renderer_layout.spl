@@ -923,15 +923,54 @@ fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containi
         resolved_child = style_with_height(resolved_child, child_height_px)
     resolved_child
 
-fn grid_track_sizes(raw: text) -> [i32]:
-    var sizes: [i32] = []
+# Resolves a normalized track list (space-separated "Npx" / "Nfr" tokens,
+# see normalized_grid_track_list in
+# simple_web_html_layout_renderer_declarations.spl) into concrete pixel
+# sizes. Fixed (px) tracks keep their declared size; the space remaining in
+# `available_w` after subtracting fixed track sizes and inter-track gaps is
+# distributed across `fr` tracks proportional to their flex factor — CSS
+# Grid SS11.5 "Resolving Flexible Track Sizes", simplified: no min-content
+# clamping and no `minmax()` support (see
+# doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md).
+fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
+    var tokens: [text] = []
+    var is_fr: [bool] = []
+    var fixed_sum = 0
+    var fr_total = 0
     for part in raw.split(" "):
         val token = part.trim()
-        if token != "":
+        if token == "":
+            continue
+        if token.ends_with("fr") and token.len() > 2:
+            val factor = parse_int(token)
+            if factor <= 0:
+                return []
+            tokens.push(token)
+            is_fr.push(true)
+            fr_total = fr_total + factor
+        else:
             val size = parse_int(token)
             if size <= 0:
                 return []
-            sizes.push(size)
+            tokens.push(token)
+            is_fr.push(false)
+            fixed_sum = fixed_sum + size
+    val track_count = tokens.len() as i32
+    if track_count == 0:
+        return []
+    var free_space = available_w - fixed_sum - gap * (track_count - 1)
+    if free_space < 0:
+        free_space = 0
+    var sizes: [i32] = []
+    var idx = 0
+    while idx < tokens.len():
+        if is_fr[idx]:
+            val factor = parse_int(tokens[idx])
+            val fr_size = if fr_total > 0: free_space * factor / fr_total else: 0
+            sizes.push(fr_size)
+        else:
+            sizes.push(parse_int(tokens[idx]))
+        idx = idx + 1
     sizes
 
 fn grid_placement_start(raw: text) -> i32:
@@ -1459,9 +1498,16 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
             table_h
         )
-    val grid_columns = grid_track_sizes(st.grid_template_columns)
+    val grid_columns = grid_track_sizes(
+        st.grid_template_columns, iw, st.column_gap_px
+    )
     if st.display == "grid" and grid_columns.len() > 0:
-        val explicit_rows = grid_track_sizes(st.grid_template_rows)
+        # Row `fr` tracks would need the container's resolved content height,
+        # which isn't generally known ahead of auto-height row sizing;
+        # available_w=0 here means an `fr` row track resolves to 0px rather
+        # than participating in flexible sizing (row-axis fr is out of scope
+        # for this simplification — see the bug doc above).
+        val explicit_rows = grid_track_sizes(st.grid_template_rows, 0, st.row_gap_px)
         val grid_column_count = grid_columns.len() as i32
         val grid_child_count = child_index.child_count[i]
         val grid_row_capacity = (
