@@ -52,10 +52,15 @@ one exact readback, not a general Vulkan ICD or compositor replacement.
 4. The generated Venus wire format is source/version coupled.  No guessed
    command enum, field layout, or capset-id test may transition availability.
 
-## Proposed artifact ownership
+## Canonical artifact ownership
 
-The new capsule belongs under `src/os/drivers/virtio/venus/`; common immutable
-protocol records live in `src/os/drivers/virtio/venus/contracts.spl`, while
-only the `venus/transport` subtree may touch `VirtioGpuDriver` DMA/queue state.
-`src/os/compositor` receives only a narrow `VenusRenderProvider` facade and
-never sees PCI BARs, capset bytes, or raw command data.
+The later interface freeze in
+`doc/04_architecture/simpleos_venus_gpu_stack.md` is canonical and supersedes
+any alternate names proposed by this research draft.  The common facade is
+`GpuAccelerationProvider`; the transport owner is
+`VirtioGpuDiscoveryProvider`/`VirtioGpuDiscoveryReceipt`; and the private
+Venus subtree is `src/os/drivers/virtio/_Venus/` with `VenusCapsetTuple`,
+`VenusProtocolProbe`, `VenusSession`, `VenusCommandQueue`,
+`VenusFenceReceipt`, and `VenusDeviceReadbackReceipt`.  Only immutable receipts
+cross to the existing `VulkanCompositorBackend`; it never sees PCI BARs,
+capset bytes, or raw command data.

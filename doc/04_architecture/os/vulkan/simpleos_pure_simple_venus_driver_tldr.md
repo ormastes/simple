@@ -1,10 +1,10 @@
 <!-- codex-architecture -->
 # SimpleOS pure-Simple Venus driver — TL;DR
 
-Proposed QEMU-only MDSOC capsule, not a live implementation.  `venus` lives
-under `src/os/drivers/virtio`; it uniquely owns controlq access, capset bytes,
-shared-memory map, ring, and fence sequence.  Only immutable contracts and a
-`VenusRenderProvider` facade cross to the compositor.
+Supplemental QEMU-only protocol review, not a live implementation.  The
+canonical MDSOC capsule is frozen in `doc/04_architecture/simpleos_venus_gpu_stack.md`:
+`GpuAccelerationProvider` → `VirtioGpuDiscoveryProvider` → private `_Venus`
+→ existing compositor.  Only immutable receipts cross to the compositor.
 
 Readiness requires real negotiated VIRGL+RESOURCE_BLOB+CONTEXT_INIT, discovered
 and bounded Venus capset, PCI host-visible SHM id 1, generated version-matched

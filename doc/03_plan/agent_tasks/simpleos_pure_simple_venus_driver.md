@@ -1,32 +1,19 @@
-# Parallel implementation plan: SimpleOS pure-Simple Venus driver
+# Supplemental parallel lanes: SimpleOS pure-Simple Venus protocol
 
-Status: implementation is not yet authorized by this plan.  Merge owner:
-root Vulkan lead.  Final reviewer: highest-capability Codex review plus live
-QEMU evidence.  Sidecar lanes: N/A while all available slots are occupied;
-when slots free, use focused implementation agents below after interfaces are
-accepted.
+This supplements the canonical file-ownership plan at
+`doc/03_plan/agent_tasks/simpleos_venus_gpu_stack.md`.  Its interface names,
+helper names, merge owner (`/root`), and final highest-capability review are
+binding; this document does not create alternate contracts.
 
-## Shared contract freeze
-
-Before parallel edits, the merge owner adds only
-`src/os/drivers/virtio/venus/contracts.spl` with the exact names from
-`doc/04_architecture/os/vulkan/simpleos_pure_simple_venus_driver.md`:
-`VenusSessionState`, `VenusInitError`, `VenusCapsetSelection`,
-`VirtioGpuSharedMemoryRegion`, `VenusRing`, `VenusSubmission`,
-`VenusFenceReceipt`, `VenusReadbackReceipt`, and `VenusRenderProvider`.
-No lane may rename or duplicate them.  Shared system-test helper names are
-`setup_venus_fixture`, `step_open_venus_session`, `step_submit_device_draw`,
-and `check_device_readback_receipt`; unavailable helpers fail fast.
-
-| Lane | Non-overlapping owned files | Scope and focused tests |
+| Parallel lane | Canonical non-overlapping scope | Acceptance focus |
 |---|---|---|
-| A: PCI/SHM + capset | `virtio_gpu_types.spl`, `virtio_gpu_capset.spl`, `venus/capset_selection.spl`, `venus/shared_memory.spl`, matching `test/01_unit/os/drivers/virtio/*` | Correct header `ring_idx`; bounded capset payload; enumerate not hardcode; PCI SHM id 1 and overflow/bounds tests. |
-| B: control/ring/session | `venus/transport/control.spl`, `venus/transport/ring.spl`, `venus/session.spl`, matching unit tests | Typed context/blob/map, generated-protocol boundary, 3-in-flight limit, fence/ring matching, close cleanup. |
-| C: provider/compositor | `venus/provider.spl`, `vulkan_compositor_backend.spl`, `backend_factory.spl`, matching compositor unit tests | Fail-closed provider selection, no CPU delegation, DrawIR submission receipt, device-only readback provenance. |
-| D: QEMU evidence | `test/03_system/os/venus/*`, `scripts/check/check-simpleos-venus-qemu.shs`, mirrored manuals/evidence plan | Host feature preflight; guest capset transcript; fence + exact pixel readback; explicit QEMU-only scope and unavailable outcome. |
+| A | `virtio_gpu_discovery.spl`, `virtio_gpu_regs.spl`, focused unit specs | cap visits ≤48, DEVICE_CFG, SHM id 1, BAR arithmetic/containment |
+| B | `virtio_gpu_capset.spl`, `virtio_gpu_init.spl`, focused specs | capsets ≤64, payload ≤4072, complete/partial tuples, no id-only pass |
+| C | `_Venus/protocol.spl`, then `blob.spl`/`ring.spl` | upstream-generated handshake, host-visible blob, guest-authored ring |
+| D | `_Venus/queue.spl`, `fence.spl`, `readback.spl` | three in-flight max, correctly indexed fence, provenance-carrying readback |
+| E | existing compositor backend and QEMU system wrapper/spec/manual | receipt-gated selection, exact pixels/checksum, `qemu_only`, no CPU fallback |
 
-Lane A does not edit B's new tree, B does not edit existing capset/types, C
-does not edit raw transport, and D never patches production code.  Each lane
-runs its focused test once; merge owner resolves interfaces then runs one
-combined integration evidence pass.  No lane can mark Vulkan available before
-lane D proves a genuine device-origin receipt.
+Dependency order is A/B → C → D → E, but A and B are independent once the
+frozen receipt types land.  Lanes C–E retain explicit fail-fast tests until
+their lower layer is implemented; no agent may convert an unavailable fixture
+into a pass.
