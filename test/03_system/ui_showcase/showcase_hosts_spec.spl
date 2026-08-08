@@ -53,7 +53,10 @@ use std.io_runtime.{write_file, mkdir_p}
 use common.ui.host_input_event.{
     HostInputEvent, HOST_BTN_LEFT, HOST_BTN_RIGHT, HOST_BTN_NONE
 }
-use common.ui.draw_ir_v3.{draw_ir_v3_empty_scene}
+use common.ui.draw_ir_v3.{
+    draw_ir_v3_empty_scene, draw_ir_v3_command,
+    DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE, DRAW_IR_V3_NO_ID
+}
 use common.ui.wm_app_process_contract.{
     wm_fs_app_event, wm_fs_app_event_encode, wm_fs_app_event_seq_path
 }
@@ -65,7 +68,8 @@ use app.ui_showcase.showcase_core.{showcase_build, showcase_scene, showcase_run}
 use app.ui_showcase.hosts.host_2d.{Screen2dHost, screen_2d_parse_script}
 use app.ui_showcase.hosts.host_gui.{gui_event_to_host, gui_button_to_host}
 use app.ui_showcase.hosts.host_web.{
-    ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at
+    ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at,
+    web_scene_unsupported_count
 }
 use app.ui_showcase.hosts.scene_raster.{
     RasterSurface, RASTER_BG, raster_scene_into, raster_scene_argb,
@@ -83,6 +87,11 @@ fn ev_tag(ev: HostInputEvent) -> text:
 fn ev_x(ev: HostInputEvent) -> i32:
     match ev:
         HostInputEvent.Pointer(x, y, button, pressed, wheel): x
+        _: -999
+
+fn ev_y(ev: HostInputEvent) -> i32:
+    match ev:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel): y
         _: -999
 
 fn ev_button(ev: HostInputEvent) -> i64:
@@ -209,6 +218,28 @@ describe "gui host — event translation":
         expect(ev_button(ev!)).to_equal(HOST_BTN_LEFT)
         expect(ev_pressed(ev!)).to_equal(true)
 
+    it "preserves a GUI drag sequence as move and release events":
+        step("Translate press, move, and release without losing coordinates")
+        val down = gui_event_to_host(gui_ev(
+            GUI_EVT_MOUSE_BUTTON, 0, 0, true, 12.9, 7.1
+        ))
+        val move = gui_event_to_host(gui_ev(
+            GUI_EVT_MOUSE_MOVED, 0, 0, false, 31.8, 19.2
+        ))
+        val up = gui_event_to_host(gui_ev(
+            GUI_EVT_MOUSE_BUTTON, 0, 0, false, 31.8, 19.2
+        ))
+
+        expect(ev_button(down!)).to_equal(HOST_BTN_LEFT)
+        expect(ev_pressed(down!)).to_equal(true)
+        expect(ev_x(move!)).to_equal(31)
+        expect(ev_y(move!)).to_equal(19)
+        expect(ev_button(move!)).to_equal(HOST_BTN_NONE)
+        expect(ev_pressed(up!)).to_equal(false)
+        expect(ev_x(up!)).to_equal(31)
+        expect(ev_y(up!)).to_equal(19)
+        expect(ev_button(up!)).to_equal(HOST_BTN_LEFT)
+
     it "carries the keycode on a key press and the wheel delta on a wheel":
         step("Translate a keyboard press and a wheel notch")
         val key = gui_event_to_host(gui_ev(GUI_EVT_KEYBOARD, 65, 0, true, 0.0, 0.0))
@@ -249,6 +280,24 @@ describe "web host — scene projection":
 
         expect(web_color_css(4280303712u32)).to_equal("rgba(32,64,96,1)")
         expect(web_color_css(2149597280u32)).to_equal("rgba(32,64,96,0.501)")
+
+    it "fails closed for a visible DrawIR command outside the web projection":
+        step("Expose the partial-document receipt and reject presentation")
+        var scene = draw_ir_v3_empty_scene(9u32, 1u32)
+        scene.commands.push(draw_ir_v3_command(
+            DRAW_IR_V3_KIND_PATH, DRAW_IR_V3_FLAG_NONE,
+            0u32, 0u32, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID,
+            DRAW_IR_V3_NO_ID, DRAW_IR_V3_NO_ID
+        ))
+        expect(web_scene_unsupported_count(scene)).to_equal(1)
+        expect(web_scene_to_html(scene, 40, 30).contains(
+            "drawir-unsupported-count=1")).to_equal(true)
+        val host = ScreenWebHost.open(
+            40, 30, "/tmp/showcase_spec_web_unsupported.html", "")!
+        expect(host.present_scene(scene)).to_equal(false)
+        expect(host.last_unsupported_count).to_equal(1)
 
     it "reads a posted event off the shared WmFsAppEvent wire form":
         step("Post an encoded click into a temp event dir and read it back")

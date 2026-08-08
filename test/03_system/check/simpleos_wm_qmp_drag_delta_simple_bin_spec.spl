@@ -20,6 +20,16 @@ Rust seed overrides must fail before launch artifacts are produced.
   `simple-bin-forbidden` before SimpleOS/QMP launch.
 - REQ-SIMPLEOS-QMP-BIN-003: Evidence output records selected Simple binary,
   source, and status fields.
+- REQ-SIMPLEOS-QMP-DRAG-004: The x86 guest decodes signed PS/2 dx/dy bytes
+  with bounded waits and routes the live pointer through the shared WM
+  lifecycle window state.
+- REQ-SIMPLEOS-QMP-DRAG-005: A drag receipt is emitted only from the lifecycle
+  window's observed before/after geometry after a decoded button release.
+- REQ-SIMPLEOS-QMP-DRAG-006: The QMP gate injects a relative 360,132 move to
+  the Editor title bar followed by a -200,-52 drag and requires the resulting
+  276,120 -> 76,68 geometry receipt.
+- REQ-SIMPLEOS-QMP-DRAG-007: Rendering is committed once on release from the
+  lifecycle window array rather than once per split PS/2 motion packet.
 
 ## Plan
 
@@ -56,6 +66,33 @@ use app.io.mod.{process_run_timeout}
 use std.spec.*
 
 describe "SimpleOS WM QMP drag-delta Simple binary contract":
+
+    it "routes decoded PS2 drag packets through real lifecycle geometry":
+        val entry = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl")
+        expect(entry).to_contain("class QemuPs2MousePacket:")
+        expect(entry).to_contain("fn _poll_qemu_mouse_packet() -> QemuPs2MousePacket:")
+        expect(entry).to_contain("if (flags & 0x10) != 0:")
+        expect(entry).to_contain("if (flags & 0x20) != 0:")
+        expect(entry).to_contain("dx = dx - 256")
+        expect(entry).to_contain("dy = dy - 256")
+        expect(entry).to_contain("windows = moved.windows")
+        expect(entry).to_contain("interaction = moved.interaction")
+        expect(entry).to_contain("wm_lifecycle_pointer_move(")
+        expect(entry).to_contain("wm_lifecycle_left_button(interaction, false)")
+        expect(entry).to_contain("_present_mdi_lifecycle_scene_input_fb(scanout, windows, pointer_x, pointer_y)")
+        expect(entry).to_contain("from={drag_origin_x},{drag_origin_y} to={dragged.x},{dragged.y}")
+        expect(entry).to_contain("geometry_changed={geometry_changed}")
+        expect(entry.contains("fn _shared_mdi_event_scene")).to_equal(false)
+        expect(entry.contains("window=2 from=276,120 to=76,68 focused=true")).to_equal(false)
+
+        val script = file_read("scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs")
+        expect(script).to_contain("hmp(f, \"mouse_move 360 132\")")
+        expect(script).to_contain("hmp(f, \"mouse_move -200 -52\")")
+        expect(script).to_contain("wait_drag_receipt")
+        expect(script).to_contain("qemu_wm_drag_delta_guest_geometry_receipt_status=")
+        expect(script).to_contain("qemu_wm_drag_delta_guest_drag_from_x=")
+        expect(script).to_contain("qemu_wm_drag_delta_guest_drag_to_x=")
+        expect(script).to_contain("unexpected-or-unchanged-drag-geometry")
 
     it "selects self hosted Simple and records launcher provenance":
         val script = file_read("scripts/check/check-simpleos-wm-qmp-drag-delta-evidence.shs")

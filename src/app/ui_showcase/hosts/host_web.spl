@@ -50,6 +50,23 @@ fn web_color_css(argb: u32) -> text:
         alpha = "0." + digits
     "rgba({r},{g},{b},{alpha})"
 
+fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
+    """Count visible DrawIR commands not owned by this projection.
+
+    This host currently projects RECT only.  Keeping the count explicit
+    prevents a partial HTML document from being mistaken for a complete
+    scene when a producer emits text, paths, images, or groups.
+    """
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < scene.commands.len().to_i64():
+        val cmd = scene.commands[i]
+        if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN) and
+                cmd.kind != DRAW_IR_V3_KIND_RECT:
+            count = count + 1
+        i = i + 1
+    count
+
 fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
     """Scene -> a standalone document. One absolutely positioned div per RECT
     command, in command order, so painter's-algorithm ordering is preserved."""
@@ -71,8 +88,12 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
                         style = style + "border-radius:{geom.corner_radius}px;"
                 body = body + "<div data-cmd=\"{i}\" style=\"" + style + "\"></div>\n"
         i = i + 1
+    val unsupported = web_scene_unsupported_count(scene)
+    var receipt = ""
+    if unsupported > 0:
+        receipt = "<!-- drawir-unsupported-count={unsupported} -->\n"
     "<div id=\"showcase-root\" style=\"position:relative;width:{width}px;height:{height}px\">\n" +
-        body + "</div>\n"
+        body + "</div>\n" + receipt
 
 fn web_read_event_at(event_dir: text, seq: i64) -> HostInputEvent?:
     """Next browser-posted event, or nil when it has not arrived."""
@@ -91,6 +112,7 @@ class ScreenWebHost:
     var event_dir: text
     var event_seq: i64
     var last_html_len: i64
+    var last_unsupported_count: i64
 
     static fn open(w: i32, h: i32, doc_path: text, event_dir: text) -> ScreenWebHost?:
         """nil when there is no document path to publish to -- with nowhere to
@@ -99,7 +121,8 @@ class ScreenWebHost:
             return nil
         ScreenWebHost(
             w: w, h: h, doc_path: doc_path.trim(),
-            event_dir: event_dir.trim(), event_seq: 0, last_html_len: 0
+            event_dir: event_dir.trim(), event_seq: 0, last_html_len: 0,
+            last_unsupported_count: 0
         )
 
     static fn open_from_env(w: i32, h: i32) -> ScreenWebHost?:
@@ -117,6 +140,9 @@ impl ScreenHost for ScreenWebHost:
         (self.w, self.h)
 
     me present_scene(scene: DrawIrV3Scene) -> bool:
+        self.last_unsupported_count = web_scene_unsupported_count(scene)
+        if self.last_unsupported_count > 0:
+            return false
         val html = web_scene_to_html(scene, self.w, self.h)
         self.last_html_len = html.len().to_i64()
         if self.last_html_len == 0:
@@ -136,4 +162,5 @@ impl ScreenHost for ScreenWebHost:
     me shutdown():
         self.doc_path = ""
 
-export ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at
+export ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at,
+    web_scene_unsupported_count
