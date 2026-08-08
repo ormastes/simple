@@ -250,3 +250,101 @@ describe "GpuCapset predicates":
     it "flags an advertised-but-unservable capset (max_size 0)":
         expect(GpuCapset(id: 4, max_version: 1, max_size: 0).is_empty()).to_equal(true)
         expect(GpuCapset(id: 4, max_version: 1, max_size: 2048).is_empty()).to_equal(false)
+
+# ============================================================================
+# Test Group 6: closure additions (Unit V2, 2026-08-08)
+# ============================================================================
+
+describe "gpu_le32 helpers — edge values":
+    it "le32 write/read roundtrips 0, 1, 0x7fffffff, 0xffffffff":
+        var buf = gpu_zero_buffer(4)
+        buf = gpu_le32_write(buf, 0, 0)
+        expect(gpu_le32_read(buf, 0)).to_equal(0)
+        buf = gpu_le32_write(buf, 0, 1)
+        expect(gpu_le32_read(buf, 0)).to_equal(1)
+        buf = gpu_le32_write(buf, 0, 0x7FFFFFFF)
+        expect(gpu_le32_read(buf, 0)).to_equal(0x7FFFFFFF)
+        buf = gpu_le32_write(buf, 0, 0xFFFFFFFF)
+        expect(gpu_le32_read(buf, 0)).to_equal(0xFFFFFFFF)
+
+describe "gpu_encode_get_capset_info / gpu_encode_get_capset — full byte-vector pin":
+    it "encode_get_capset_info(3) bytes pinned against the virtio spec layout":
+        """Computed once via a live probe run and hard-coded here, per the
+        landed scalar_oracle pattern — never fabricated. Confirms the FULL
+        32-byte ctrl-hdr + capset_index + padding layout, not just the
+        individual fields the earlier its check in isolation."""
+        val buf = gpu_encode_get_capset_info(3)
+        val expected: List<u8> = [
+            8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0
+        ]
+        expect(buf.len()).to_equal(expected.len())
+        var i: i64 = 0
+        while i < expected.len():
+            expect(buf[i.to_i32()]).to_equal(expected[i.to_i32()])
+            i = i + 1
+
+    it "encode_get_capset(venus, 7) bytes pinned against the virtio spec layout":
+        val buf = gpu_encode_get_capset(VIRTIO_GPU_CAPSET_VENUS, 7)
+        val expected: List<u8> = [
+            9, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 7, 0, 0, 0
+        ]
+        expect(buf.len()).to_equal(expected.len())
+        var j: i64 = 0
+        while j < expected.len():
+            expect(buf[j.to_i32()]).to_equal(expected[j.to_i32()])
+            j = j + 1
+
+describe "gpu_decode_capset_info — truncation":
+    it "decode rejects truncated capset_info without reading past end":
+        # One byte short of RESP_CAPSET_INFO_SIZE (40): must reject, not crash
+        # or read out of bounds.
+        val buf = gpu_zero_buffer(39)
+        val r = gpu_decode_capset_info(buf)
+        expect(r.is_err()).to_equal(true)
+
+    it "decode rejects a zero-length buffer":
+        val buf: List<u8> = []
+        val r = gpu_decode_capset_info(buf)
+        expect(r.is_err()).to_equal(true)
+
+    it "decode accepts a buffer exactly at the 40-byte boundary":
+        var buf = gpu_zero_buffer(RESP_CAPSET_INFO_SIZE)
+        buf = gpu_le32_write(buf, 0, VIRTIO_GPU_RESP_OK_CAPSET_INFO)
+        expect(gpu_decode_capset_info(buf).is_ok()).to_equal(true)
+
+describe "gpu_negotiate_features — offered∩wanted bit matrix":
+    it "negotiate_features sets exactly the offered intersect wanted bits":
+        # Wanted = VIRGL(0x01) | RESOURCE_BLOB(0x08) | CONTEXT_INIT(0x10) = 0x19.
+        # Every combination below pairs an offer with the expected ack mask,
+        # covering each wanted bit alone, each unwanted bit alone (masked to
+        # 0), and mixed offers.
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_VIRGL)).to_equal(VIRTIO_GPU_F_VIRGL)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_RESOURCE_BLOB)).to_equal(VIRTIO_GPU_F_RESOURCE_BLOB)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_CONTEXT_INIT)).to_equal(VIRTIO_GPU_F_CONTEXT_INIT)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_EDID)).to_equal(0)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_RESOURCE_UUID)).to_equal(0)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_EDID)).to_equal(VIRTIO_GPU_F_VIRGL)
+        expect(gpu_negotiate_features(VIRTIO_GPU_F_RESOURCE_BLOB | VIRTIO_GPU_F_CONTEXT_INIT | VIRTIO_GPU_F_RESOURCE_UUID)).to_equal(VIRTIO_GPU_F_RESOURCE_BLOB | VIRTIO_GPU_F_CONTEXT_INIT)
+        expect(gpu_negotiate_features(0xFFFFFFFF)).to_equal(VIRTIO_GPU_F_VIRGL | VIRTIO_GPU_F_RESOURCE_BLOB | VIRTIO_GPU_F_CONTEXT_INIT)
+
+describe "gpu_find_venus — position independence":
+    it "finds venus honestly regardless of its position in the table (not just last)":
+        val caps_first = [
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VENUS, max_version: 1, max_size: 4096),
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VIRGL, max_version: 1, max_size: 512),
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VIRGL2, max_version: 2, max_size: 1024)
+        ]
+        val found_first = gpu_find_venus(caps_first)
+        expect(found_first == nil).to_equal(false)
+        expect(found_first!.max_size).to_equal(4096)
+
+        val caps_middle = [
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VIRGL, max_version: 1, max_size: 512),
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VENUS, max_version: 1, max_size: 8192),
+            GpuCapset(id: VIRTIO_GPU_CAPSET_VIRGL2, max_version: 2, max_size: 1024)
+        ]
+        val found_middle = gpu_find_venus(caps_middle)
+        expect(found_middle == nil).to_equal(false)
+        expect(found_middle!.max_size).to_equal(8192)
