@@ -2,7 +2,7 @@
 
 - **ID:** native_pushed_tuple_into_empty_literal_list_unboxed_2026-08-02
 - **Date:** 2026-08-02
-- **Status:** OPEN — root-cause *localized*, not fixed (fix is in Rust seed codegen; seed rebuild was out of scope for the lane that found it)
+- **Status:** CLOSED (2026-08-08) — all three follow-on gaps in the native-build tuple-to-text/field-read family fixed in pure-Simple MIR lowering (no Rust seed change, no bootstrap rebuild): gap (a) `t.0`/`t.1` field-index access under `SIMPLE_BOOTSTRAP=1`, gap (b) whole-tuple interpolation rendering, gap (c) mixed-type tuple field READS. See the dated sections below for each. The *original* empty-literal-list unboxed-storage SEGV this doc opened with was the seed-codegen finding that kicked off the investigation; the family it led to is what closed.
 - **Severity:** high (deterministic SIGSEGV, and a silent wrong value on the read-without-field path)
 - **Lane:** `native-build` only. The interpreter is correct.
 - **Engine evidence caveat:** every result below was produced by the **Rust
@@ -941,3 +941,143 @@ here and was NOT touched by this change — it needs the
 reconciliation described above, not a `field_types`-source swap (the
 previous section already ruled that fix out for the `.0`/`.1` path
 specifically, head-to-head).
+
+## Gap (c) — mixed-type tuple field READS (`t.0`/`t.1`), fixed 2026-08-08
+
+Closed the last remaining gap in this family: `(1, "abc", true)`'s `.1`/`.2`
+field reads (both bare `val s = m.1` and interpolated `"{m.1}"`) printed a
+raw ASLR-varying pointer-as-decimal (e.g. `98519600270576`) instead of
+`"abc"`, and a bit-pattern integer instead of `true`.
+
+**Root cause, two independent defects, both in `lower_index_expr`**
+(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, `t.0`/`t.1`
+desugars to `HirExprKind.Index(base, IntLit(i))` per
+`20.hir/hir_lowering/expressions.spl`'s `is_tuple_positional_field`):
+
+1. **No storage/logical-type reconciliation on the tuple GEP+load path.**
+   The plain `emit_gep`/`emit_load` pair the tuple-base `else` branch routed
+   through has no `dest_ty`-keyed dispatch, unlike `translate_get_field`
+   (`70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl`), which
+   load-then-`inttoptr`s a ptr-typed field, load-then-`bitcast`s a
+   float-typed field, and load-then-`trunc`s a narrow int/bool field — all
+   because every tuple/struct field physically stores one native-int word
+   regardless of its logical type. `emit_get_field` (`50.mir/mir_data.spl`)
+   already exists and lowers straight to `translate_get_field`, giving the
+   same reconciliation for free.
+2. **`result_type` itself resolved to the untyped `i64` default**, so even
+   after routing through `emit_get_field`, `dest_ty` came out `i64` (`==
+   nit`) and the plain-load `else` arm of `translate_get_field` fired,
+   reproducing the exact same symptom. The `MirTypeKind.Tuple(_)` arm in
+   `lower_index_expr` deliberately discarded the tuple's own MIR
+   `field_types` (comment: unreliable, derived from `lower_tuple_lit`'s old
+   `elem.type_`-sourced path — true when gap (b) above was still open) and
+   relied entirely on HIR-sourced `index_result_hir_type`
+   (`field_tuple_element_type`, keyed off `local_tuple_types`). That HIR
+   source does not reach this function on every lowering path — reproduced
+   with a bare non-interpolated `val s = m.1; print(s)`, no interpolation
+   involved — leaving `has_index_result_hir_type` false and `result_type`
+   stuck at `i64`.
+
+Gap (b)'s 2026-08-07 fix (`lower_tuple_lit` now prefers
+`self.local_mir_type_of(local)` over `elem.type_`) already made the MIR
+`field_types` source reliable, which retired the reason gap (a)'s comment
+gave for discarding it. Confirmed empirically: after the fix below, a tuple
+constructed from mixed-type literals correctly threads `Opaque("str")` /
+`MirType.bool()` per-index through `field_types`.
+
+**Fix**, both still gated on `is_tuple_base` so plain runtime-array indexing
+is untouched:
+- `MirTypeKind.Tuple(field_types)` arm now binds and keeps `field_types` (as
+  `tuple_field_mir_types`) instead of discarding it.
+- After the existing HIR-sourced `result_type` resolution, a new fallback:
+  when `is_tuple_base` and neither `result_type_from_base` nor
+  `has_index_result_hir_type`, look up the literal field index (helper
+  `tuple_index_literal`, matches `HirExprKind.IntLit` on `index`) in
+  `tuple_field_mir_types` and use that as `result_type`.
+- The tuple-base `else`-branch GEP+load is now gated behind
+  `is_tuple_base and self.tuple_index_literal(index) >= 0`: a new `elif`
+  arm calls `emit_get_field(base_local, literal_index, result_type)`
+  instead, so the read gets `translate_get_field`'s `dest_ty` reconciliation.
+  A tuple index that is somehow not a literal int (shouldn't occur given the
+  `t.0`/`t.1` desugar, but defensive) falls through to the original raw
+  GEP+load path unchanged.
+
+Gate extended (`scripts/check/check-native-tuple-to-text.shs`,
+`test/fixtures/native_tuple_to_text/main.spl` adds `m.1`/`m.2` field reads
+of the existing mixed-type tuple) and re-run clean:
+
+```
+PASS — native-build tuple-to-text: mixed-type tuple renders correctly
+PASS — native-build tuple-to-text: mixed-type tuple field reads render correctly
+PASS — native-build tuple-to-text: all-i64 tuple renders correctly
+```
+
+Sabotage-verified: mutating the fixture's expected `m1` string
+(`"abc"` -> `"xyz"`) reproduces `FAIL — mixed-type tuple field read (m.1,
+str) regressed under native-build` with the real actual value (`abc`)
+printed alongside the mutated expectation, confirming the assertion is
+load-bearing. Script restored; gate re-run clean.
+
+**Files changed:**
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
+(`lower_index_expr`, new helper `tuple_index_literal`),
+`scripts/check/check-native-tuple-to-text.shs` and
+`test/fixtures/native_tuple_to_text/main.spl` (extended with mixed-type
+field-read assertions). No Rust seed changes; no bootstrap rebuild performed
+or required.
+
+**This closes the family** opened by this bug doc: whole-tuple
+stringification (all-i64 and mixed-type) and tuple field reads (all-i64 and
+mixed-type) are all now correct under `native-build`.
+
+## 2026-08-08 — Opus review of `ec9ff78876c`: regression risk checked, REFUTED
+
+An Opus review of the already-landed `lower_tuple_lit` fix (`ec9ff78876c`,
+`literals.spl:~588-595` and its twin `method_calls_literals.spl:~3675-3682`)
+raised a concern (S1): since `local_mir_type_of`
+(`src/compiler/50.mir/mir_lowering_stmts.spl:186-194`) returns whatever type
+is registered for a local and never returns `nil` for a registered local, a
+*present-but-wrong* MIR type (e.g. a call result defaulted to `MirType.i64()`
+by one of the ~100 `emit_call` sites in `switch_operators_calls.spl`, or by
+`resolved_call_hir_return_type`'s "erased to all-i64" params) would now
+unconditionally beat the correct HIR annotation — reproducing the exact
+ASLR-varying-decimal symptom this commit fixed, but for call-result tuple
+elements instead of literal elements.
+
+Checked empirically (no code change needed first — direct probes with
+`env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build`),
+each binary run twice to catch ASLR-varying garbage:
+
+- **Primary probe** (function-call result element, the exact predicted
+  failure mode):
+  ```
+  fn g(s: text) -> text: return s
+  fn main() -> i64:
+      val t = (1, g("abc"))
+      print("call: {t}\n")
+      return 0
+  ```
+  Run 1: `call: (1, abc)`. Run 2: `call: (1, abc)`. Healthy both times —
+  **no ASLR-varying decimal.**
+- **Second axis** (array-index-read element, `val a=[1,2,3]; val t=(1,
+  a[0])`): `idx: (1, 1)` twice under normal build, and `idx: (1, 1)` twice
+  again rebuilt with `SIMPLE_BOOTSTRAP=1` (the `bootstrap_text_type()`
+  clobber path the review also flagged). Healthy in both modes.
+- **Extra coverage** (method-call result, arithmetic expr, plain variable,
+  nested tuple, all in one tuple): `(1, "hello", 3+4, x, (1,"outer"))` →
+  `misc: (1, hello, 7, 3, (1, outer))`, identical on both runs. Healthy.
+- Regression gate `sh scripts/check/check-native-tuple-to-text.shs`: all 4
+  PASS lines, unaffected.
+
+**Verdict: S1's predicted regression does NOT reproduce.** `local_mir_type_of`
+returns the correct type for call-result locals in practice — the
+`MirType.i64()` defaults the review cited from `switch_operators_calls.spl`'s
+`emit_call` sites are for *unresolved/erased* call sites, not for the
+`g(...)` call-result local itself, which correctly picks up `text`
+(`Opaque("str")`) from wherever the call's return value gets registered. No
+code change made; no fix needed. The second axis (`SIMPLE_BOOTSTRAP=1` +
+index-read element) also came back healthy, so that concern is refuted too.
+Note: `expr_dispatch.spl` may be drifted vs `origin/main` from other agents'
+in-flight work — this verification exercised the on-disk state at probe time,
+not necessarily origin's exact `expr_dispatch.spl`, but `lower_tuple_lit`
+itself (the code under review) was unmodified from the landed commit.
