@@ -21,7 +21,8 @@
 #     mem_print_report(report)
 #     mem_disable()
 
-use types.{MemSnapshot, MemLeakEntry, MemDiff, MemPhaseSnapshot, MemTagGroup, MemLeakReport}
+use std.nogc_sync_mut.mem_tracker.types.{MemSnapshot, MemLeakEntry, MemDiff, MemPhaseSnapshot, MemTagGroup, MemLeakReport}
+use std.io_runtime.{file_read}
 
 # SFFI declarations — map to C functions in runtime_memtrack.c
 extern fn spl_memtrack_enable()
@@ -222,9 +223,8 @@ fn mem_print_report(report: MemLeakReport):
 # =========================================================================
 
 fn parse_leak_dump(path: text) -> [MemLeakEntry]:
-    extern fn rt_file_read_text(p: text) -> text
     var entries: [MemLeakEntry] = []
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read(path)
     if content == "":
         return entries
     val lines = content.split("\n")
@@ -234,11 +234,15 @@ fn parse_leak_dump(path: text) -> [MemLeakEntry]:
             continue
         val parts = trimmed.split(" ")
         if parts.len() >= 3:
-            val alloc_id = to_int(parts[0])
-            val size = to_int(parts[1])
+            val alloc_id = mem_tracker_parse_i64(parts[0])
+            val size = mem_tracker_parse_i64(parts[1])
             val tag = parts[2]
             entries.push(MemLeakEntry(alloc_id: alloc_id, size: size, tag: tag))
     entries
+
+fn mem_tracker_parse_i64(value: text) -> i64:
+    val parsed = value.parse_i64()
+    if val Some(number) = parsed: number else: 0
 
 # =========================================================================
 # Allocation listener
@@ -249,4 +253,3 @@ fn mem_set_listener(callback: i64, user_data: i64):
 
 fn mem_clear_listener():
     spl_memtrack_clear_listener()
-
