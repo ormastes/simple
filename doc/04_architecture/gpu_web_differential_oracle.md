@@ -32,6 +32,18 @@ test-injected sink, but neither imports the comparator, another renderer, or a
 foreign provider. `std.test` owns semantic projection and comparison. This
 keeps the value contract reusable while making test-oracle dependency one-way.
 
+### 2026-08-08 Chromium primitive bridge addendum
+
+`doc/04_architecture/chromium_web_renderer_primitive_differential.md` freezes
+the planned test-only Chromium bridge. It extends this capsule rather than
+adding a Chrome production dependency, a WebIR/GuiIR, or a second trace schema.
+The existing `web_layout` and `web_paint` IDs remain unchanged; `web_dom`,
+`web_style`, `web_input`, and `web_gpu` are canonical adapter values. A pinned
+owned C-ABI bridge is dynamically loaded from the no-GC test SFFI owner; direct
+Blink/Viz component loading is forbidden because component exports are not a
+stable public renderer ABI. The bridge's Chromium receipt never substitutes for
+the existing Simple Vulkan device-fence/readback/no-fallback gate.
+
 ### Frozen schema and layer IDs
 
 `TraceEvent` contains only `schema_version`, run/run-relative sequence and
@@ -113,6 +125,7 @@ before any comparison. Initial profiles:
 | `simpleos-qemu-aarch64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
 | `simpleos-qemu-riscv64-vulkan-virtio` | `virtio-gpu-mmio`; same required feature conjunction | same device/oracle/readback/fallback evidence |
 | `host-vulkan-oracle` | loader ABI/symbols, selected ICD, queue/extension facts | independent reference readback and normalized trace |
+| `macos-emulator-vulkan-drawir` | HVF/MoltenVK, DrawIR animation, Ctrl+Alt input, font, audio, fence/readback/no-fallback and a measured performance receipt | prepared macOS-host trace normalized through the test-only dynamic oracle; unavailable evidence remains blocked, never synthetic |
 | `chrome-web-oracle` | browser build/viewport/fixture and renderer-stage capture | semantic layout/paint trace plus reviewed exact bitmap artifact |
 
 Initial unit profile bounds are <=16 events and <=1 microsecond of normalized
