@@ -6,6 +6,7 @@
 
 use std.spec.*
 use app.io.mod.{file_read_text}
+use std.io_runtime.{process_run}
 use os.drivers.virtio.virtio_input_ops.{KEY_LEFTALT, KEY_LEFTCTRL, KEY_RIGHTALT, KEY_RIGHTCTRL, evdev_key_to_key}
 use os.drivers.input.ps2_keyboard.{Key, key_to_canon}
 use os.drivers.virtio.virtio_snd_protocol.{VIRTIO_SND_F_PCM_INFO, virtio_snd_negotiate, virtio_snd_validate_pcm, VirtioSndPcmRequest, virtio_snd_completion}
@@ -27,6 +28,15 @@ fn input_backend_source() -> text:
 
 fn audio_source() -> text:
     file_read_text("src/os/services/audio/virtio_snd_service.spl")
+
+fn qemu_gpu_checker_source() -> text:
+    file_read_text("scripts/check/check-simpleos-qemu-host-gpu-2d.shs")
+
+fn qemu_audio_checker_source() -> text:
+    file_read_text("scripts/check/check-simpleos-io-audio-qemu.shs")
+
+fn run_qemu_capability_contract() -> (text, text, i64):
+    process_run("/bin/sh", ["scripts/check/check-simpleos-qemu-host-gpu-2d.shs", "--self-test-qemu-accel"])
 
 describe "SimpleOS Vulkan and VirtIO device interfaces":
     it "should select Vulkan and expose the canonical DrawIR executor":
@@ -115,3 +125,31 @@ describe "SimpleOS Vulkan and VirtIO device interfaces":
         expect(protocol).to_contain("kind = if direction == \"capture\": \"capture-period\"")
         val malformed = virtio_snd_validate_pcm(VirtioSndPcmRequest(stream_id: 1, direction: "capture", sample_rate: 48000, channels: 2, period_frames: 8, periods: 1, buffer_frames: 8))
         expect(malformed.status).to_equal("invalid-buffer")
+
+    it "should distinguish QEMU readiness from live guest Vulkan and IO evidence":
+        val qemu = qemu_gpu_checker_source()
+        val audio = qemu_audio_checker_source()
+        expect(qemu).to_contain("qemu-system-x86_64")
+        expect(qemu).to_contain("qemu-system-aarch64")
+        expect(qemu).to_contain("qemu-system-riscv64")
+        expect(qemu).to_contain("qemu_accel_for_isa")
+        expect(qemu).to_contain("virtio-(gpu|vga)")
+        expect(qemu).to_contain("ivshmem-plain")
+        expect(qemu).to_contain("qemu-host-offload-transport-available")
+        expect(qemu).to_contain("qemu-host-offload-transport-missing")
+        expect(qemu).to_contain("guest-artifact-missing")
+        expect(qemu).to_contain("pure-simple-compiler-missing")
+        expect(qemu).to_contain("HOST_GPU_FIXTURE_OK")
+        expect(qemu).to_contain("render_backend=vulkan")
+        expect(qemu).to_contain("render_readback_p95_us=")
+        expect(qemu).to_contain("device_identity")
+        expect(qemu).to_contain("HOST_GPU_RENDER_OK")
+        expect(audio).to_contain("virtio-sound-(device|pci)")
+        expect(audio).to_contain("virtio-input-host-(device|pci)")
+        expect(audio).to_contain("simpleos_io_audio_qemu_preflight=pass")
+        expect(audio).to_contain("guest_execution=1")
+        expect(audio).to_contain("seed_rejected=1")
+        val (out, err, code) = run_qemu_capability_contract()
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("simpleos_qemu_host_gpu_2d_qemu_accel_self_test=pass")

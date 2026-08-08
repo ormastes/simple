@@ -157,9 +157,15 @@ describe "host/container primitive ingress — no display claim":
 
         expect(gui_button_to_host(0)).to_equal(HOST_BTN_LEFT)
         expect(gui_button_to_host(99)).to_equal(HOST_BTN_NONE)
-        expect(down == nil).to_equal(false)
-        expect(move == nil).to_equal(false)
-        expect(up == nil).to_equal(false)
+        match down:
+            case Some(value): expect(value).to_be(value)
+            case None: fail("GUI press was dropped")
+        match move:
+            case Some(value): expect(value).to_be(value)
+            case None: fail("GUI move was dropped")
+        match up:
+            case Some(value): expect(value).to_be(value)
+            case None: fail("GUI release was dropped")
 
     it "should preserve web wheel and modifier-bearing key bridge events":
         step("Write encoded events and read them through the web file bridge")
@@ -180,8 +186,12 @@ describe "host/container primitive ingress — no display claim":
         val key = web_read_event_at(dir + "/event", 1)
         val wheel = web_read_event_at(dir + "/event", 2)
 
-        expect(key == nil).to_equal(false)
-        expect(wheel == nil).to_equal(false)
+        match key:
+            case None: fail("web key bridge returned nil")
+            case Some(value): expect(value).to_be(value)
+        match wheel:
+            case None: fail("web wheel bridge returned nil")
+            case Some(value): expect(value).to_be(value)
         match key!:
             HostInputEvent.Key(code, ch, down, mods):
                 expect(code).to_equal(65)
@@ -213,8 +223,12 @@ describe "host/container primitive ingress — no display claim":
         val down = wm_read_event_at(dir + "/event", 1)
         val key = wm_read_event_at(dir + "/event", 2)
 
-        expect(down == nil).to_equal(false)
-        expect(key == nil).to_equal(false)
+        match down:
+            case None: fail("WM pointer bridge returned nil")
+            case Some(value): expect(value).to_be(value)
+        match key:
+            case None: fail("WM key bridge returned nil")
+            case Some(value): expect(value).to_be(value)
         match down!:
             HostInputEvent.Pointer(x, y, button, pressed, wheel):
                 expect([x, y, button]).to_equal([9, 10, HOST_BTN_LEFT])
@@ -231,15 +245,16 @@ describe "host/container primitive ingress — no display claim":
         val host = Screen2dHost.open(64, 48, "click 5,5;wheel 2,2,1")
         var count = 0
         var ev = host.poll_input()
-        while true:
-            if ev == nil:
-                break
-            count = count + 1
-            ev = host.poll_input()
+        while count < 4:
+            match ev:
+                case None: break
+                case Some(value):
+                    count = count + 1
+                    ev = host.poll_input()
 
         expect(host.host_name()).to_equal("2d")
         expect(count).to_equal(3)
-        expect(host.poll_input() == nil).to_equal(true)
+        expect(host.poll_input()).to_be_nil()
 
 describe "semantic layout and font DrawIR — host evidence":
 
@@ -251,11 +266,15 @@ describe "semantic layout and font DrawIR — host evidence":
         val panel = find_rect(rects, "{prefix}{SC_LINK_SRC}")
         val probe = find_rect(rects, "{prefix}{SC_PROBE}")
 
-        expect(panel == nil).to_equal(false)
-        expect(probe == nil).to_equal(false)
-        expect(panel!.w > 0).to_equal(true)
-        expect(panel!.h > 0).to_equal(true)
-        expect(probe!.y >= panel!.y).to_equal(true)
+        match panel:
+            case None: fail("linked panel has no layout box")
+            case Some(panel_box):
+                expect(panel_box.w > 0).to_equal(true)
+                expect(panel_box.h > 0).to_equal(true)
+                match probe:
+                    case None: fail("probe has no layout box")
+                    case Some(probe_box):
+                        expect(probe_box.y >= panel_box.y).to_equal(true)
 
     it "should emit rect and text commands from the same semantic tree":
         step("Lower the shared tree to CPU-targeted DrawIR for observation")
@@ -275,13 +294,16 @@ describe "semantic layout and font DrawIR — host evidence":
         val composition = widget_tree_to_draw_ir_cpu(st.tree.root_node(), PRIM_W, PRIM_H)
         val text_command = _first_text(composition)
 
-        expect(text_command == nil).to_equal(false)
-        expect(text_command!.text_value.len() > 0).to_equal(true)
-        # Resolved-font commands carry the identity/style; the glyph payload is
-        # the fallback-proof representation consumed by every renderer.
-        expect(text_command!.computed_style.len() > 0).to_equal(true)
-        expect(_style_value(text_command!, "font-identity").len() > 0).to_equal(true)
-        expect(text_command!.advance_widths.len() > 0).to_equal(true)
+        match text_command:
+            case None: fail("semantic tree emitted no text command")
+            case Some(command):
+                expect(command.text_value.len() > 0).to_equal(true)
+                # Resolved-font commands carry the identity/style; the glyph
+                # payload is the fallback-proof representation consumed by
+                # every renderer.
+                expect(command.computed_style.len() > 0).to_equal(true)
+                expect(_style_value(command, "font-identity").len() > 0).to_equal(true)
+                expect(command.advance_widths.len() > 0).to_equal(true)
 
 describe "live evidence boundary":
 
@@ -290,7 +312,10 @@ describe "live evidence boundary":
         val web = ScreenWebHost.open(40, 30, "/tmp/primitive_hosts_boundary.html", "")
         # An absent browser/server is not inferred from this spec. The web host
         # only proves its projection contract; QEMU must provide its own receipt.
-        expect(web == nil).to_equal(false)
-        expect(web_scene_to_html(
-            common.ui.draw_ir_v3.draw_ir_v3_empty_scene(1u32, 1u32), 40, 30
-        ).contains("showcase-root")).to_equal(true)
+        match web:
+            case None: fail("web host projection did not open")
+            case Some(host):
+                expect(host.host_name()).to_equal("web")
+                expect(web_scene_to_html(
+                    common.ui.draw_ir_v3.draw_ir_v3_empty_scene(1u32, 1u32), 40, 30
+                ).contains("showcase-root")).to_equal(true)
