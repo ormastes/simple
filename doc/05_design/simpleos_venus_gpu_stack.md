@@ -59,3 +59,47 @@ Discovery occurs once. Log bounded counts, tuple values, retry count, selected
 shmid, elapsed microseconds, and final state. Do not log arbitrary payloads in
 production; a bounded first-16-byte diagnostic capture is permitted only in a
 debug evidence artifact. No discovery work is allowed in per-frame execution.
+
+## Differential trace detail (2026-08-08 addendum)
+
+Each layer projects its native input/result into `TraceEvent` at its public
+next-layer seam through an injected test sink. Object IDs are assigned per run
+by first semantic creation and then resolved through an explicit map; a
+missing/double mapping is a comparator error. Byte payloads are represented by
+length plus a stable digest, with selected protocol scalars retained by name.
+Error results use stable `result_class`/`error_class`; diagnostic strings are
+context only.
+
+`NormalizedTrace` contains one schema version, environment profile ID, run ID,
+ordered events, drop count, and completion flag. A trace with drops, duplicate
+sequence, unknown layer, profile mismatch, or incomplete completion is
+comparison-ineligible. `TraceComparator` selects a layer/operation projection,
+maps oracle/object identities, and returns equal, divergent, or ineligible with
+the first differing event and bounded preceding context.
+
+The GPU oracle adapter dynamically opens Mesa/Vulkan only in a compiled host
+test, resolves an exact symbol manifest, queries driver/device identity, runs
+the matched operation, waits its own fence, reads its own result, emits the
+same semantic projection, and tears down every owned opaque handle in reverse
+order. Missing library/symbol/extension, nonzero foreign result, invalid
+ownership, timeout, and readback-source ambiguity are typed rejections. No
+oracle pointer or Vulkan handle is stored in a trace or production receipt.
+
+The three SimpleOS profiles bind the existing canonical environment IDs. They
+add expectations for PCI versus MMIO transport, VIRGL + CAPSET_QUERY +
+RESOURCE_BLOB + HOST_VISIBLE + CONTEXT_INIT, Venus protocol range, device and
+driver identity patterns, device-origin readback, and no fallback. Tests must
+print actual and expected identities and cannot substitute llvmpipe, another
+architecture, or a host-only profile without an explicit profile that permits
+it.
+
+Frozen ownership after differential-sidecar review:
+
+| Owner | File |
+|---|---|
+| generic immutable trace schema/injected sink | `src/lib/common/spec/differential_trace.spl` |
+| generic comparator/profiles | `test/helpers/differential_conformance.spl` |
+| canonical dynload extern owner | `src/lib/nogc_sync_mut/gpu/reference_oracle_sffi.spl` |
+| safe GPU oracle adapter | `test/helpers/gpu_reference_oracle.spl` |
+| GPU differential specs | `test/03_system/os/qemu/simpleos_venus_differential_spec.spl` |
+| Web/Chrome projection consumer | existing `test/05_perf/web_render_chrome/`, importing only generic test support |

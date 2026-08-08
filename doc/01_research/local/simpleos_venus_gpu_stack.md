@@ -62,3 +62,19 @@ Related documents:
 - `doc/04_architecture/os/vulkan/simpleos_vulkan_render_backend_plan.md`
 - `doc/04_architecture/simple2d_primitive_lane.md`
 - `doc/08_tracking/bug/simpleos_vulkan_board_gap_venus_is_qemu_only.md`
+
+## Differential-conformance inventory (2026-08-08 addendum)
+
+The tree has Chrome/Web performance trace normalization in
+`test/05_perf/web_render_chrome/trace_normalizer.spl`, but it is a private,
+fixture-specific JSON merger and declares runtime file/time externs locally.
+It is not a reusable conformance schema or a canonical SFFI owner. Existing
+replay traces describe application replay, not VirtIO/Venus/Vulkan protocol
+semantics. A new generic trace schema/comparator must therefore be shared by
+tests rather than adapting either format into production GPU code.
+
+No `VUDA` source, dependency, document, or historical tracked reference was
+found by a case-insensitive current-tree scan and an all-history Git pickaxe.
+The repository has no VUDA implementation to migrate. Any downstream VUDA
+fixture must be treated as an external compute reference, not a hidden owner of
+Vulkan or Venus behavior.

@@ -78,3 +78,58 @@ adapters provide equivalent typed device-config facts through the same
 transport interface. They cannot expose architecture-specific provider,
 Venus, queue, or compositor types. Physical boards without virtio-gpu require
 a separate native GPU provider under the same common capability contract.
+
+## Differential-conformance capsule (2026-08-08 addendum)
+
+The shared surface is semantic trace data, never a renderer or GPU API:
+
+```text
+common immutable NormalizedTrace / TraceEvent schema
+  -> GPU trace projection ---------> TraceComparator <--------- Mesa/Vulkan ReferenceOracleAdapter (test only)
+  -> Web trace projection ---------> TraceComparator <--------- Chrome ReferenceOracleAdapter (test only)
+```
+
+`TraceEvent` fields are frozen as `schema_version`, `run_id`, monotonically
+increasing `sequence`, normalized/relative `monotonic_ns`, `layer_id`,
+`operation`, normalized `object_id` and `parent_id`, `result_class`,
+`error_class`, stable scalar fields/payload digest, and
+`environment_profile_id`. Layer IDs are `virtio_transport`, `venus_protocol`,
+`vulkan_api`, `draw_ir`, `web_layout`, and `web_paint`. Raw addresses, native
+handles, host timestamps, allocator details, and incidental call order never
+cross the projection boundary.
+
+The generic schema and injected sink are the only common nodes production
+instrumentation may import; the sink is a no-op outside conformance builds.
+`TraceComparator`, `GpuEnvironmentProfile`, handle maps, and
+`ReferenceOracleAdapter` live in test support. GPU and Web adapters import the
+generic comparator separately and cannot import each other. Oracle output can
+fail a test but cannot produce `GpuProviderCapabilityReceipt`,
+`GpuExecutionReceipt`, compositor availability, or CPU fallback.
+
+The SFFI boundary is a compiled-host test leaf. Dynamic Mesa/Vulkan discovery,
+opaque handles, calls, and release functions have exactly one extern owner in
+the canonical no-GC synchronous backend. The safe test adapter owns each
+instance/device/queue/resource handle, closes in reverse order, rejects use or
+double close after release, converts every foreign result into a typed error,
+and records normalized IDs before comparison. Compatibility families re-export
+that owner; no test file declares duplicate externs.
+
+### GPU expectation profiles
+
+`GpuEnvironmentProfile` references, rather than duplicates, the canonical IDs
+`simpleos-qemu-x86_64-vulkan-virtio`,
+`simpleos-qemu-aarch64-vulkan-virtio`, and
+`simpleos-qemu-riscv64-vulkan-virtio`. Each adds expected transport, required
+VirtIO feature conjunction, Venus protocol/version range, Vulkan API/device
+identity predicates, oracle library/driver identity, device-origin-readback
+requirement, and `fallback_used=false`. A mismatched or unavailable environment
+is Blocked/Fail according to the canonical profile; it is never silently
+reclassified or compared against a different oracle.
+
+### VUDA decision
+
+VUDA is not in the repository and its CUDA-compatible C++ Vulkan ownership
+does not align with any frozen layer. It is deprecated as a production or
+migration candidate and must not be vendored. If an external VUDA compute
+fixture is retained, it stays outside the provider/transport/Venus capsule and
+is labelled `external_compute_reference`; it cannot serve as render evidence.

@@ -1,0 +1,49 @@
+<!-- codex-design -->
+# GPU/Web Differential Oracle Detail Design
+
+## Implemented shared slice
+
+- `src/lib/common/spec/differential_trace.spl`: immutable schema validation.
+- `test/helpers/differential_conformance.spl`: `GpuEnvironmentProfile`,
+  `ReferenceOracleAdapter`, semantic policy/result, comparison and profile
+  admission.
+- `test/01_unit/lib/nogc_sync_mut/gpu/differential_oracle_spec.spl`: mapped
+  handles, pixel/layer mutation, malformed sequence, environment/fence/readback,
+  budget, and test-only adapter contract.
+
+## Adapter algorithm
+
+1. The fixture receives a deterministic run ID and environment profile.
+2. Candidate and independent reference adapter each emit `TraceEvent`s at their
+   own layer boundary.
+3. Adapter replaces transient handles with deterministic IDs and records only
+   operation-specific semantic digest/scalar facts.
+4. Test supplies a paired candidate/reference ID mapping. The comparator checks
+   ordered events and mapped parent lineage; it never maps an unknown ID.
+5. The environment profile gates required operations and live evidence before a
+   trace comparison can be promoted.
+6. Mutation suite changes exactly one property at a time and asserts rejection.
+
+## Next implementation lanes
+
+| Lane | Files | Contract |
+|---|---|---|
+| Dynamic oracle owner | `src/lib/nogc_sync_mut/gpu/reference_oracle_sffi.spl` | versioned `libvulkan`/Mesa symbol probe, ABI/ownership/error values; test-only importers |
+| Vulkan/Venus adapter | `test/helpers/gpu_reference_oracle.spl` | discovery/capset/submit/fence/readback semantic events |
+| Web/Chrome adapter | `test/helpers/web_reference_oracle.spl` | DOM/style/layout/paint/composite semantic projection plus artifact pointer |
+| GPU live profile suite | `test/03_system/os/qemu/*` | no fallback, actual device identity, exact pixels, environment facts |
+| Browser profile suite | `test/02_integration/rendering/*` | fixed viewport, stage projection, reviewed bitmap and negative mutations |
+
+Each lane owns only the listed new file(s). Merge owner: `/root`. Lower-model
+sidecars: N/A (interfaces were frozen by the coordinating highest-capability
+agents). Final reviewer: normal/highest-capability root agent.
+
+## SFFI acceptance tests
+
+Compiled-mode tests must cover missing library, missing symbol, ABI/version
+mismatch, null result, failed call, rejected ownership release, and successful
+load/unload. The adapter must also prove it does not cause a production import
+and does not claim an unavailable provider as a pass. Reference output is
+evidence only; CPU scalar exact oracle and device-origin pixels remain separate
+requirements.
+

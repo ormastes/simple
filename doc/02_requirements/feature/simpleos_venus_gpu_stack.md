@@ -25,3 +25,25 @@ slice on 2026-08-08; no alternative renderer or transport was selected.
 - REQ-SVG-009: Later queue work shall preserve the order context -> blob/map ->
   ring -> command -> fence -> readback and shall remain unavailable until each
   preceding receipt is valid.
+- REQ-SVG-010: Pure-Simple transport, Venus, Vulkan API, and DrawIR seams shall
+  emit versioned `NormalizedTrace`/`TraceEvent` semantic records through an
+  injected test sink, without raw pointers, unstable handles, or wall-clock
+  equality fields.
+- REQ-SVG-011: `TraceComparator` shall compare explicit semantic projections,
+  map implementation-local object handles, report the first divergence plus
+  context, and reject schema/profile mismatch rather than silently normalize it.
+- REQ-SVG-012: Mesa/Vulkan `ReferenceOracleAdapter` shall be test-only,
+  dynamically loaded, unavailable when its exact library/symbol set is absent,
+  and unable to alter provider admission, rendering, or fallback.
+- REQ-SVG-013: All oracle externs shall have one canonical
+  `nogc_sync_mut` owner and compiled ABI, error propagation, acquisition,
+  release, double-release rejection, and missing-library tests.
+- REQ-SVG-014: GPU expectation profiles shall bind the canonical UI environment
+  profile, architecture/transport, required VirtIO/Venus/Vulkan features,
+  allowed oracle identity, readback provenance, and no-fallback policy.
+- REQ-SVG-015: GPU and Chrome/Web differential tests may share the generic
+  trace schema and comparator only; their production layers, domain adapters,
+  object vocabularies, and acceptance policies shall remain independent.
+- REQ-SVG-016: VUDA shall not be migrated or vendored because its CUDA-like
+  Vulkan owner bypasses the provider/VirtIO/Venus boundaries. It may be retained
+  only as a separately labelled external compute-test reference.

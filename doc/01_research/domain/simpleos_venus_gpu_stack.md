@@ -52,3 +52,22 @@ Configuration and tuple discovery are Ready-class facts. A Vulkan Pass needs
 an actual device identity, successful command submission, known fence
 completion, a positive backend handle, device-origin readback, a correlated
 frame identity/checksum, exact CPU-oracle parity, and `fallback_used=false`.
+
+## Differential oracle and VUDA review (2026-08-08 addendum)
+
+Mesa's Venus implementation and virglrenderer are protocol references and may
+be executed through a dynamically loaded, test-only Vulkan/Mesa adapter as a
+differential oracle. The adapter compares normalized semantic events; it is
+not linked into SimpleOS, is not a production fallback, and cannot confer
+availability on the pure-Simple provider. Vulkan handles, addresses, raw
+timestamps, allocator choices, and implementation-private command ordering are
+not equality fields.
+
+[VUDA](https://github.com/jgbit/vuda) is a header-only C++ CUDA Runtime-style
+facade that owns Vulkan devices, allocation, copying, and SPIR-V kernel launch.
+That application API does not implement VirtIO DEVICE_CFG/capset discovery,
+the Venus wire protocol, guest rings/fences, or the frozen provider receipts.
+Decision: do not migrate or vendor it; deprecate it as a proposed production
+route. A separately obtained VUDA binary may only remain an explicitly
+external compute-test reference, never the Mesa/Vulkan conformance oracle or
+the SimpleOS render path. No upstream source is copied.

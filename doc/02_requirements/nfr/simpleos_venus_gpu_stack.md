@@ -19,3 +19,12 @@
   duplicate, stale-generation, absent-Venus, oversized-payload, fallback, and
   device-readback rejection paths. No 80% claim is allowed without measured
   coverage or an accepted branch ledger.
+- NFR-SVG-008: Trace emission is bounded, allocation-free on the warm submit
+  path after initialization, and disabled or drained without blocking the
+  device queue; dropped records are counted and make a conformance run invalid.
+- NFR-SVG-009: Differential traces use a versioned canonical order and stable
+  digests. Comparison must be deterministic across process-local addresses,
+  handle values, and timestamp origins.
+- NFR-SVG-010: The dynloaded reference oracle runs only in a compiled host test
+  artifact. Interpreter success, library presence, or symbol lookup alone is
+  not ABI/execution evidence.
