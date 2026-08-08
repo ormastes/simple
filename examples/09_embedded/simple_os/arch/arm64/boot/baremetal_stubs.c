@@ -729,6 +729,20 @@ RuntimeValue rt_time_now_unix_micros(void)
     return ENCODE_INT((int64_t)(micros & 0x7FFFFFFFFFFFFFFFULL));
 }
 
+/* The shared UI/frame scheduler uses these canonical monotonic clock names.
+ * QEMU virt exposes no RTC, so both truthfully derive from the ARM generic
+ * counter above rather than fabricating wall-clock time. */
+RuntimeValue rt_time_now_micros(void)
+{
+    return rt_time_now_unix_micros();
+}
+
+RuntimeValue rt_time_now_monotonic_ms(void)
+{
+    RuntimeValue micros = rt_time_now_unix_micros();
+    return ENCODE_INT(DECODE_INT(micros) / 1000);
+}
+
 /* --- value-as-int (from x86_64 rt_extras.c) --- */
 RuntimeValue rt_value_as_int(RuntimeValue v)
 {
