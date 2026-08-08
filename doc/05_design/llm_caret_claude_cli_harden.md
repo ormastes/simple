@@ -177,6 +177,15 @@ adapter and every deterministic fixture construct the same ten-field `CaretIo`.
 all provider/session signatures remain unchanged. This prevents a CLI or hidden
 command change from being coupled to terminal cleanup work.
 
+Current terminal-owner limitation: the canonical raw-mode functions return a
+Boolean, but alternate-screen and cursor primitives currently return unit after
+writing ANSI. Therefore the production adapter can presently report an observed
+setup failure only for `raw-mode`; `alternate-screen` and `cursor-hide` remain
+reserved typed phases exercised by deterministic capability fixtures. A future
+terminal-owner upgrade may make those phases observable, but this Caret tranche
+must not claim that ANSI write success is verified merely because the capability
+has phase names for it.
+
 Required focused scenarios, with no provider/network dependency:
 
 1. setup failure at each phase returns the typed failure, performs only valid

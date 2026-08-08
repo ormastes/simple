@@ -600,3 +600,33 @@ Remaining, in rank order:
 
 No provenance-qualified self-hosted Caret artifact exists, and no real PTY
 scenario has executed; static TUI and checker hardening is not a TUI PASS.
+
+### 2026-08-08 typed terminal lifecycle implementation tranche
+
+The interface is frozen first in
+`doc/05_design/llm_caret_claude_cli_harden.md` under **Typed terminal lifecycle
+contract**. This tranche is deliberately narrower than PTY execution: it makes
+terminal setup and cleanup failures observable through the injected production
+boundary without changing provider, command, session, or plain-renderer
+contracts.
+
+| Lane | Owned paths | Contract | Completion evidence |
+|---|---|---|---|
+| A — terminal adapter | `src/app/llm_caret/tui_io.spl` | `CaretTerminalResult`; `CaretIo.begin_tui/end_tui`; production reverse cleanup bookkeeping | adapter has no old lifecycle fields and reports ordered phase/error results |
+| B — TUI caller | `src/app/llm_caret/chat_tui.spl` | `run_chat_tui` maps setup/cleanup failures to fixed `CaretLoopResult` reasons and emits success only after cleanup | exactly one begin/end lifecycle invocation per modeled TUI run; plain path makes none |
+| C — deterministic proof | `test/01_unit/app/llm_caret/chat_tui_runtime_spec.spl` | fake capability uses the same signature | setup, cleanup, normal exit, and plain routing assertions use no network/provider |
+| Merge owner | primary Caret lane | resolve only these three paths plus this plan/manual parity if needed | inspect scoped diff, run focused test once, then update blocker record |
+| Final reviewer | highest-capability fresh review | interface adherence and failure-path coverage | reject old-field compatibility shims, duplicated terminal primitives, placeholder assertions, or unrelated changes |
+
+No lower-model sidecar owns shared interfaces: names, field order, result
+reasons, and required test cases were frozen by the design commit before the
+lanes started. The merge must preserve unrelated shared-worktree changes and
+must not claim live PTY execution until the qualified cached artifact exists.
+
+Verification note: the focused runner reported 19 outcomes while the current
+runtime spec defines 18 `it` blocks, and the mirrored manual still documents
+the old lifecycle contract. Treat that result as stale-runner/source identity
+evidence, not as an assertion-level verdict. Before a re-run, record the
+resolved spec path/hash and regenerate the mirrored manual from the qualified
+runtime; do not mark this lane executable-PASS until both identify the new
+`begin_tui/end_tui` contract.

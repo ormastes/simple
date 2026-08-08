@@ -11,7 +11,7 @@ use app.llm_caret.types.{Message}
 use app.llm_caret.tools.{
     ModelResponse, PermissionPolicy, default_policy, new_model_text
 }
-use app.llm_caret.tui_io.{CaretIo, CaretLoopResult}
+use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, CaretTerminalResult}
 use app.llm_caret.chat_tui.{
     ChatTui, ProviderSwitchResult, SessionResumeResult, SessionHooks,
     make_chat_tui, tui_transcript_reset, render_turn, is_scrolled,
@@ -22,8 +22,14 @@ use app.llm_caret.chat_tui.{
 val RUNTIME_WS = "build/tmp/llm_caret_tui_runtime_spec"
 
 var IO_TTY = true
-var IO_ENTER_RAW_OK = true
-var IO_EXIT_RAW_OK = true
+var IO_BEGIN_OK = true
+var IO_BEGIN_PHASE = ""
+var IO_BEGIN_ERROR = ""
+var IO_END_OK = true
+var IO_END_PHASE = ""
+var IO_END_ERROR = ""
+var IO_BEGIN_CALLS = 0
+var IO_END_CALLS = 0
 var IO_COLS = 80
 var IO_ROWS = 24
 var IO_SIZE_CALLS = 0
@@ -60,25 +66,23 @@ fn _fake_terminal_size() -> TerminalSize:
     _record("size")
     TerminalSize(cols: IO_COLS, rows: IO_ROWS)
 
-fn _fake_enter_raw() -> bool:
-    _record("enter_raw")
-    IO_ENTER_RAW_OK
+fn _fake_begin_tui() -> CaretTerminalResult:
+    IO_BEGIN_CALLS = IO_BEGIN_CALLS + 1
+    _record("begin_tui")
+    CaretTerminalResult(
+        ok: IO_BEGIN_OK,
+        phase: IO_BEGIN_PHASE,
+        error: IO_BEGIN_ERROR
+    )
 
-fn _fake_exit_raw() -> bool:
-    _record("exit_raw")
-    IO_EXIT_RAW_OK
-
-fn _fake_enter_alt():
-    _record("enter_alt")
-
-fn _fake_exit_alt():
-    _record("exit_alt")
-
-fn _fake_hide_cursor():
-    _record("hide")
-
-fn _fake_show_cursor():
-    _record("show")
+fn _fake_end_tui() -> CaretTerminalResult:
+    IO_END_CALLS = IO_END_CALLS + 1
+    _record("end_tui")
+    CaretTerminalResult(
+        ok: IO_END_OK,
+        phase: IO_END_PHASE,
+        error: IO_END_ERROR
+    )
 
 fn _fake_clear_screen():
     _record("clear")
@@ -113,12 +117,8 @@ fn _fake_io() -> CaretIo:
     CaretIo(
         is_tty: _fake_is_tty,
         terminal_size: _fake_terminal_size,
-        enter_raw: _fake_enter_raw,
-        exit_raw: _fake_exit_raw,
-        enter_alt: _fake_enter_alt,
-        exit_alt: _fake_exit_alt,
-        hide_cursor: _fake_hide_cursor,
-        show_cursor: _fake_show_cursor,
+        begin_tui: _fake_begin_tui,
+        end_tui: _fake_end_tui,
         clear_screen: _fake_clear_screen,
         draw_at: _fake_draw_at,
         flush: _fake_flush,
@@ -129,8 +129,14 @@ fn _fake_io() -> CaretIo:
 
 fn _reset_fakes():
     IO_TTY = true
-    IO_ENTER_RAW_OK = true
-    IO_EXIT_RAW_OK = true
+    IO_BEGIN_OK = true
+    IO_BEGIN_PHASE = ""
+    IO_BEGIN_ERROR = ""
+    IO_END_OK = true
+    IO_END_PHASE = ""
+    IO_END_ERROR = ""
+    IO_BEGIN_CALLS = 0
+    IO_END_CALLS = 0
     IO_COLS = 80
     IO_ROWS = 24
     IO_SIZE_CALLS = 0
@@ -362,7 +368,8 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(result.mode).to_equal("plain")
         expect(result.ok).to_be(true)
         expect(result.exit_reason).to_equal("eof")
-        expect(IO_EVENTS.contains("enter_raw")).to_be(false)
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
 
     it "should ignore blank plain input without discarding later commands":
         step("Queue blank input before a valid plain turn")
@@ -385,7 +392,8 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         expect(HOOK_PERSIST_SESSION).to_equal("fixture-session")
         expect(HOOK_PERSIST_MESSAGES).to_equal(2)
         expect(IO_OUTPUT).to_contain("Assistant: fixture reply")
-        expect(IO_EVENTS.contains("enter_raw")).to_be(false)
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
 
     it "should process plain model commands and persist model turns":
         step("Switch model, submit one turn, and exit the production plain loop")
@@ -424,21 +432,29 @@ describe "REQ-LLM-CARET-TUI-HARDEN-009: frame and input behavior":
         check_promptless_dispatch(cases, result)
 
 describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
-    it "should fail raw entry before alternate screen or cursor mutation":
-        step("Reject raw mode acquisition through the production TUI loop")
-        _reset_fakes()
-        IO_ENTER_RAW_OK = false
-        val result = run_chat_tui(
-            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
-            _fake_io()
-        )
-        expect(result.mode).to_equal("tui")
-        expect(result.ok).to_be(false)
-        expect(result.exit_reason).to_equal("raw-mode-unavailable")
-        expect(result.error).to_equal("terminal raw mode unavailable")
-        expect(IO_EVENTS).to_equal("enter_raw|")
+    it "should compensate setup failures without drawing model calls or persistence":
+        step("Reject each typed setup failure through the production TUI loop")
+        for phase in ["raw-mode", "alternate-screen", "cursor-hide"]:
+            _reset_fakes()
+            IO_BEGIN_OK = false
+            IO_BEGIN_PHASE = phase
+            IO_BEGIN_ERROR = "failed " + phase
+            val result = run_chat_tui(
+                make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+                _fake_io()
+            )
+            expect(result.mode).to_equal("tui")
+            expect(result.ok).to_be(false)
+            expect(result.exit_reason).to_equal("terminal-setup-failed")
+            expect(result.error).to_equal("failed " + phase)
+            expect(IO_BEGIN_CALLS).to_equal(1)
+            expect(IO_END_CALLS).to_equal(1)
+            expect(IO_DRAW_CALLS).to_equal(0)
+            expect(IO_OUTPUT).to_equal("")
+            expect(RESPONDER_CALLS).to_equal(0)
+            expect(HOOK_PERSIST_COUNT).to_equal(0)
 
-    it "should restore cursor screen and raw mode in lifecycle order":
+    it "should end the TUI exactly once and emit the success footer":
         step("Exit by command after entering the full-screen production loop")
         _reset_fakes()
         IO_BYTES = _exit_command_bytes()
@@ -448,68 +464,43 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
         )
         expect(result.ok).to_be(true)
         expect(result.exit_reason).to_equal("command_exit")
-        expect(IO_EVENTS).to_start_with("enter_raw|enter_alt|hide|")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|emit|")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
+        expect(IO_EVENTS).to_start_with("begin_tui|")
+        expect(IO_EVENTS).to_end_with("end_tui|emit|")
         expect(IO_OUTPUT).to_equal("chat session ended\n")
 
-    it "should report restore failure after all visible cleanup":
-        step("Fail raw restoration after cursor and alternate-screen cleanup")
+    it "should report cleanup failure without a success footer":
+        step("Fail compensating terminal cleanup after a command exit")
         _reset_fakes()
-        IO_EXIT_RAW_OK = false
+        IO_END_OK = false
+        IO_END_PHASE = "raw-mode"
+        IO_END_ERROR = "failed to restore terminal raw mode"
         IO_BYTES = _exit_command_bytes()
         val result = run_chat_tui(
             make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
             _fake_io()
         )
         expect(result.ok).to_be(false)
-        expect(result.exit_reason).to_equal("command_exit")
+        expect(result.exit_reason).to_equal("terminal-cleanup-failed")
         expect(result.error).to_equal("failed to restore terminal raw mode")
-        expect(IO_EVENTS).to_end_with("show|exit_alt|exit_raw|")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
         expect(IO_OUTPUT).to_equal("")
 
-    it "should restore after slash exit":
-        step("Leave the production TUI with slash exit")
-        _reset_fakes()
-        IO_BYTES = _exit_command_bytes()
-        val result = run_chat_tui(
-            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
-            _fake_io()
-        )
-        expect(result.exit_reason).to_equal("command_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
-
-    it "should restore after Ctrl-C":
-        step("Leave the production TUI with Ctrl-C")
-        _reset_fakes()
-        IO_BYTES = [3]
-        val result = run_chat_tui(
-            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
-            _fake_io()
-        )
-        expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
-
-    it "should restore after Ctrl-D":
-        step("Leave the production TUI with Ctrl-D")
-        _reset_fakes()
-        IO_BYTES = [4]
-        val result = run_chat_tui(
-            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
-            _fake_io()
-        )
-        expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
-
-    it "should restore after byte-stream EOF":
-        step("Leave the production TUI when byte input reaches EOF")
-        _reset_fakes()
-        IO_BYTES = [-1]
-        val result = run_chat_tui(
-            make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
-            _fake_io()
-        )
-        expect(result.exit_reason).to_equal("input_exit")
-        expect(IO_EVENTS).to_contain("show|exit_alt|exit_raw|")
+    it "should end exactly once for command control and EOF exits":
+        step("Exercise every normal TUI exit through the shared lifecycle")
+        for input in [_exit_command_bytes(), [3], [4], [-1]]:
+            _reset_fakes()
+            IO_BYTES = input
+            val result = run_chat_tui(
+                make_chat_tui("Caret"), _policy(), _responder, _hooks(), [],
+                _fake_io()
+            )
+            expect(result.ok).to_be(true)
+            expect(IO_BEGIN_CALLS).to_equal(1)
+            expect(IO_END_CALLS).to_equal(1)
+            expect(IO_OUTPUT).to_equal("chat session ended\n")
 
     it "should force TUI routing without a tty":
         step("Request TUI mode while the injected tty probe is false")
@@ -521,7 +512,8 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _hooks(), [], _fake_io()
         )
         expect(result.mode).to_equal("tui")
-        expect(IO_EVENTS).to_contain("enter_raw")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
 
     it "should force plain routing on a tty":
         step("Request plain mode while the injected tty probe is true")
@@ -533,7 +525,8 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _hooks(), [], _fake_io()
         )
         expect(result.mode).to_equal("plain")
-        expect(IO_EVENTS.contains("enter_raw")).to_be(false)
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)
 
     it "should automatically route tty input to TUI":
         step("Select automatic mode with an injected tty")
@@ -545,7 +538,9 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
             _hooks(), [], _fake_io()
         )
         expect(result.mode).to_equal("tui")
-        expect(IO_EVENTS).to_start_with("is_tty|enter_raw|")
+        expect(IO_EVENTS).to_start_with("is_tty|begin_tui|")
+        expect(IO_BEGIN_CALLS).to_equal(1)
+        expect(IO_END_CALLS).to_equal(1)
 
     it "should automatically route non-tty input to plain mode":
         step("Select automatic mode without an injected tty")
@@ -558,3 +553,5 @@ describe "REQ-LLM-CARET-TUI-HARDEN-007: lifecycle and routing":
         )
         expect(result.mode).to_equal("plain")
         expect(IO_EVENTS).to_start_with("is_tty|emit|")
+        expect(IO_BEGIN_CALLS).to_equal(0)
+        expect(IO_END_CALLS).to_equal(0)

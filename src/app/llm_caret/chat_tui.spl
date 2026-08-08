@@ -660,9 +660,10 @@ fn run_chat_tui_submission(
         submitted_to_model: submitted_to_model
     )
 
-# Full-screen lifecycle. Raw mode is acquired before any visible mutation and
-# every modeled exit restores cursor, alternate screen, then raw mode. Hard
-# runtime panics still require a future runtime atexit/signal cleanup hook.
+# Full-screen lifecycle is owned by CaretIo's typed begin/end contract. The
+# adapter acquires and compensates terminal phases; this caller owns exactly one
+# begin/end pair for every modeled TUI invocation. Hard runtime panics still
+# require a future runtime atexit/signal cleanup hook.
 fn run_chat_tui(
     ui0: ChatTui,
     policy: PermissionPolicy,
@@ -672,19 +673,22 @@ fn run_chat_tui(
     io0: CaretIo? = nil
 ) -> CaretLoopResult:
     val io = io0 ?? production_caret_io()
+    val terminal_setup = io.begin_tui()
+    if not terminal_setup.ok:
+        # begin_tui may have acquired a prefix of the terminal phases. Its
+        # idempotent companion compensates that prefix without exposing a
+        # partially initialized screen to this loop.
+        io.end_tui()
+        return CaretLoopResult(
+            mode: "tui",
+            ok: false,
+            exit_reason: "terminal-setup-failed",
+            error: terminal_setup.error
+        )
     tui_transcript_reset()
     var conv = initial_conv
     var session_id = hooks.session_id
     _render_history(conv)
-    if not io.enter_raw():
-        return CaretLoopResult(
-            mode: "tui",
-            ok: false,
-            exit_reason: "raw-mode-unavailable",
-            error: "terminal raw mode unavailable"
-        )
-    io.enter_alt()
-    io.hide_cursor()
     var ui = ui0
     var running = true
     var exit_reason = "input_exit"
@@ -714,15 +718,13 @@ fn run_chat_tui(
             running = transition.running
             if not running:
                 exit_reason = "command_exit"
-    io.show_cursor()
-    io.exit_alt()
-    val restored = io.exit_raw()
-    if not restored:
+    val terminal_cleanup = io.end_tui()
+    if not terminal_cleanup.ok:
         return CaretLoopResult(
             mode: "tui",
             ok: false,
-            exit_reason: exit_reason,
-            error: "failed to restore terminal raw mode"
+            exit_reason: "terminal-cleanup-failed",
+            error: terminal_cleanup.error
         )
     io.emit("chat session ended\n")
     CaretLoopResult(mode: "tui", ok: true, exit_reason: exit_reason, error: "")
