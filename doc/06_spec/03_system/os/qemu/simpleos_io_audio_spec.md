@@ -1,6 +1,6 @@
 # SimpleOS QEMU input and audio
 
-> This operator-facing system check proves that prepared SimpleOS QEMU guests
+> Prepared SimpleOS QEMU guests receive ordered VirtIO input and complete non-silent PCM playback and capture through pure-Simple guest drivers. Typed environment admission keeps preflight readiness separate from live proof.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # SimpleOS QEMU input and audio
 
-This operator-facing system check proves that prepared SimpleOS QEMU guests
+Prepared SimpleOS QEMU guests receive ordered VirtIO input and complete non-silent PCM playback and capture through pure-Simple guest drivers. Typed environment admission keeps preflight readiness separate from live proof.
 
 ## At a Glance
 
@@ -19,13 +19,19 @@ This operator-facing system check proves that prepared SimpleOS QEMU guests
 |-------|-------|
 | Category | Hardware & OS |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md |
+| Requirements | doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md |
 | Plan | doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md |
 | Design | doc/05_design/simpleos_qemu_host_gpu_2d.md |
-| Research | doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md |
+| Research | doc/01_research/local/simpleos_qemu_host_gpu_2d.md |
 | Source | `test/03_system/os/qemu/simpleos_io_audio_spec.spl` |
 | Updated | 2026-08-08 |
 | Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Prepared SimpleOS QEMU guests receive ordered VirtIO input and complete
+non-silent PCM playback and capture through pure-Simple guest drivers. Typed
+environment admission keeps preflight readiness separate from live proof.
 
 ## Purpose and Audience
 
@@ -42,11 +48,19 @@ pure-Simple compiler and the QEMU binaries/devices named by the selected
 environment profile must be available. Host substitutes and Rust bootstrap
 seed artifacts are rejected.
 
-**Requirements:** doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md
+**Requirements:** doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md
+**NFR:** doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md
 **Plan:** doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md
 **Architecture:** doc/04_architecture/simpleos_qemu_host_gpu_2d.md
 **Design:** doc/05_design/simpleos_qemu_host_gpu_2d.md
-**Research:** doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md
+**Research:** doc/01_research/local/simpleos_qemu_host_gpu_2d.md
+**Domain research:** doc/01_research/domain/simpleos_qemu_host_gpu_2d.md
+
+## Syntax
+
+Run this SSpec through the pure-Simple test runner. The scenario invokes the
+canonical checker with `--preflight`, `--live`, and `--self-test`; operators do
+not assemble QEMU arguments or evidence rows manually.
 
 ## Primary Workflow and Evidence
 
@@ -189,10 +203,10 @@ expect(out).to_contain("simpleos_io_audio_qemu_self_test=pass")
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md and doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md`
+- **Requirements:** `doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md`
 - **Plan:** `doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md`
 - **Design:** `doc/05_design/simpleos_qemu_host_gpu_2d.md`
-- **Research:** `doc/01_research/local/simpleos_qemu_host_gpu_2d.md and doc/01_research/domain/simpleos_qemu_host_gpu_2d.md`
+- **Research:** `doc/01_research/local/simpleos_qemu_host_gpu_2d.md`
 
 
 </details>
