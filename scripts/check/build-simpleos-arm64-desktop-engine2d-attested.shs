@@ -19,9 +19,10 @@ DISK_PRODUCER="build/os/make_os_disk"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
 FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 BUILD_STAMP="${KERNEL}.build_stamp"
+BUILD_LOG="build/os/simpleos_arm64_desktop_engine2d.build.log"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
-BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
+BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
 SELF_TEST_DIR=""
@@ -31,7 +32,8 @@ cleanup() {
     if [ -n "$SELF_TEST_DIR" ]; then
         rm -f "$SELF_TEST_DIR/clean-simple" \
             "$SELF_TEST_DIR/seed-simple" \
-            "$SELF_TEST_DIR/debug-simple"
+            "$SELF_TEST_DIR/debug-simple" \
+            "$SELF_TEST_DIR/fabrication-receipt.log"
         rmdir "$SELF_TEST_DIR" >/dev/null 2>&1 || true
     fi
 }
@@ -51,6 +53,10 @@ sha256_file() {
     esac
     [ "${#sha256_value}" -eq 64 ] || return 1
     printf '%s\n' "$sha256_value"
+}
+
+arm64_fabrication_receipt_clean() {
+    ! grep -Eq 'FABRICATED-NEW|fabricated unmeasured|baseline has NO rows' "$1"
 }
 
 write_self_test_native_header() {
@@ -89,17 +95,17 @@ run_compiler_admission_self_test() {
         >>"$seed_fixture"
     printf '%s\n' 'debug build' >>"$debug_fixture"
 
-    arm64_guest_validate_native_compiler "$clean_fixture" ||
+    arm64_guest_validate_native_compiler "$clean_fixture" fixture ||
         fail_build "compiler-admission-self-test-clean-rejected"
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = pass ] ||
         fail_build "compiler-admission-self-test-clean-reason-invalid"
-    if arm64_guest_validate_native_compiler "$seed_fixture"; then
+    if arm64_guest_validate_native_compiler "$seed_fixture" fixture; then
         fail_build "compiler-admission-self-test-seed-accepted"
     fi
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
         rust-seed-or-debug-forbidden ] ||
         fail_build "compiler-admission-self-test-seed-reason-invalid"
-    if arm64_guest_validate_native_compiler "$debug_fixture"; then
+    if arm64_guest_validate_native_compiler "$debug_fixture" fixture; then
         fail_build "compiler-admission-self-test-debug-accepted"
     fi
     [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
@@ -110,6 +116,20 @@ run_compiler_admission_self_test() {
     echo "arm64_compiler_admission_seed_rejection_status=pass"
     echo "arm64_compiler_admission_debug_rejection_status=pass"
     echo "arm64_compiler_admission_self_test_status=pass"
+
+    receipt_fixture="$SELF_TEST_DIR/fabrication-receipt.log"
+    printf '%s\n' 'Fabricated freestanding stubs: 0 symbol(s)' >"$receipt_fixture"
+    arm64_fabrication_receipt_clean "$receipt_fixture" ||
+        fail_build "fabrication-receipt-self-test-clean-rejected"
+    printf '%s\n' '  FABRICATED-NEW arm64.elf missing_body' >"$receipt_fixture"
+    if arm64_fabrication_receipt_clean "$receipt_fixture"; then
+        fail_build "fabrication-receipt-self-test-new-accepted"
+    fi
+    printf '%s\n' "fabricated-stub baseline has NO rows for entry 'arm64.elf'; 2 symbol(s) fabricated unmeasured." >"$receipt_fixture"
+    if arm64_fabrication_receipt_clean "$receipt_fixture"; then
+        fail_build "fabrication-receipt-self-test-unmeasured-accepted"
+    fi
+    echo "arm64_fabrication_receipt_self_test_status=pass"
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -202,18 +222,24 @@ rm -f "$BUILD_MANIFEST" ||
     fail_build "stale-build-manifest-remove-failed"
 # A provenance-producing invocation must execute both native-build and the disk
 # producer. Existing kernel/disk/writer artifacts cannot serve as fresh proof.
-rm -f "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" ||
+rm -f "$KERNEL" "$BUILD_STAMP" "$DISK" "$DISK_PRODUCER" "$BUILD_LOG" ||
     fail_build "persistent-artifact-cache-invalidation-failed"
 
 set +e
 env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE \
-    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm \
+    -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_STRICT_FABRICATED_STUB_RATCHET=1 SIMPLE_OS_BUILD_BACKEND=llvm \
     SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 \
-    "$COMPILER" os build --scenario=arm64-desktop-engine2d
+    "$COMPILER" os build --scenario=arm64-desktop-engine2d \
+    >"$BUILD_LOG" 2>&1
 BUILD_CODE=$?
 set -e
+sed -n '1,240p' "$BUILD_LOG"
 [ "$BUILD_CODE" -eq 0 ] ||
     fail_build "canonical-scenario-build-failed"
+if ! arm64_fabrication_receipt_clean "$BUILD_LOG"; then
+    fail_build "fabricated-stub-attestation-rejected"
+fi
 # The runner creates this source before native-build but does not remove it on
 # its success path. Restore the same normalized state used by the pre-snapshot.
 rm -f "$GENERATED_LOG_CONFIG" ||
@@ -266,6 +292,8 @@ DISK_SHA256="$(sha256_file "$DISK")" ||
     fail_build "canonical-disk-sha256-failed"
 DISK_PRODUCER_SHA256="$(sha256_file "$DISK_PRODUCER")" ||
     fail_build "canonical-disk-producer-sha256-failed"
+BUILD_LOG_SHA256="$(sha256_file "$BUILD_LOG")" ||
+    fail_build "canonical-build-log-sha256-failed"
 printf '%s\n' "$PRE_COMPILER_VERSION" | grep -q '[[:cntrl:]]' &&
     fail_build "compiler-version-not-manifest-safe"
 
@@ -284,6 +312,8 @@ umask 077
     echo "disk_sha256=$DISK_SHA256"
     echo "disk_producer_path=$DISK_PRODUCER"
     echo "disk_producer_sha256=$DISK_PRODUCER_SHA256"
+    echo "build_log_path=$BUILD_LOG"
+    echo "build_log_sha256=$BUILD_LOG_SHA256"
     echo "compiler_path=$COMPILER"
     echo "compiler_sha256=$PRE_COMPILER_SHA256"
     echo "compiler_version=$PRE_COMPILER_VERSION"
