@@ -1,6 +1,130 @@
 # Stage 4 SPipe agent tasks
 
-## Live authoritative state (2026-08-03)
+## Current status after `f47e3916` (2026-08-08)
+
+This is the current status. The historical snapshot below is retained for
+diagnostic context and is explicitly stale; it must not be used as current
+admission evidence.
+
+- SDK contract preparation is implemented, frontier-reviewed, and statically
+  gated. It defines `BootstrapSdkManifest`, `BootstrapSdkModuleInterface`,
+  `BootstrapSdkBodyArchive`, and `BootstrapSdkProvenance`, but it is preparation
+  only and is not binary-reproducibility or Stage 4 evidence.
+- FreeBSD QEMU tooling is implemented, frontier-reviewed, and statically gated.
+  The preflight contract, bounded operations, deterministic receipt, scoped
+  PASS text, and full-run provenance rules are in place, but no FreeBSD QEMU
+  bootstrap has been executed or accepted here.
+- SimpleOS AArch64 evidence tooling is implemented, frontier-reviewed, and
+  statically gated. Producer/consumer provenance, stale-artifact invalidation,
+  symlink rejection, receipt revalidation, atomic publication, serial
+  watermarks, RAMFB checksum correlation, and signal exit behavior are covered,
+  but no image, QMP, hosted bootstrap, or board PASS is claimed.
+- Stage 3 remains excluded and unadmitted. It is the hard gate for every x86
+  Stage 4 and downstream platform acceptance claim. The SDK, FreeBSD, and
+  SimpleOS preparation changes do not waive that gate.
+- Linux AArch64 and macOS require their respective external native hosts.
+  Cross-compilation or an x86 QEMU result cannot be reported as native-host
+  PASS.
+- SimpleOS x86_64 follows admitted deployment and is not a substitute for x86
+  Stage 4 admission.
+
+### Mandatory gate sequence and canonical commands
+
+Every platform lane, including QEMU, cross-target, and external-native-host
+lanes, is blocked until this exact sequence completes on x86_64 Linux:
+
+`Stage 3 admission -> x86 Stage 4 -> candidate sanity/hash -> all four essential smoke markers -> deployment and rollback evidence -> platform acceptance`
+
+Preparation, static gates, frontier review, cross compilation, and retained
+historical artifacts cannot skip or reorder a gate. Run a platform command only
+after the merge owner records completion of gates 1 through 5 against the same
+source and candidate lineage.
+
+| Order | Gate / lane | Canonical command or authoritative owner evidence | Required result |
+|---|---|---|---|
+| 1 | Stage 3 admission | Start the single canonical Gate 1-through-5 transaction with `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`. The session plan publishes no separate Stage 3 command. The wrapper must build `src/app/cli/bootstrap_main.spl` with the canonical authority; merge owner retains `SIMPLE_NO_STUB_FALLBACK=1`, admitted Stage 2/runtime authority, Stage 3 build log, exact `simple-bootstrap 1.0.0-beta` identity, the verbatim rejection probe `run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl`, frontend admission, and stable SHA-256. | Admitted pure-Simple Stage 3; executable existence or zero failed files alone is insufficient |
+| 2 | x86_64 Linux Stage 4 | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. The session plan publishes no separate Stage 4 command. Merge owner retains `stage4-native-build.log`, `progress-bitcode.log`, `bootstrap-build-progress.events`, progress/RSS receipt, source identity, cache identity, and candidate lineage. | Fresh non-stub pure-Simple Stage 4 candidate from the Gate 1 Stage 3 lineage |
+| 3 | Candidate sanity and hash | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. The session plan states that this wrapper runs candidate sanity and provenance checks but publishes no standalone sanity/hash command. Merge owner records exact path and SHA-256, pure-Simple identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
+| 4 | Essential-tools smoke | `sh scripts/check/check-bootstrap-essential-tools-smoke.shs /absolute/path/to/stage4/simple` | The same candidate emits all four required markers: `essential_test_runner_smoke=true`, `essential_lint_smoke=true`, `essential_duplicate_checker_smoke=true`, and `bootstrap_essential_tools_smoke=true` |
+| 5 | Deployment | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output |
+| 5R | Explicit rollback execution | The session plan publishes no standalone rollback command. Do not invent one. Merge owner must record the exact reviewed restore command before execution, prove `bin/release/<platform>/simple.pre_deploy` still exists, run the same arithmetic smoke, and retain rollback command/output plus restored SHA-256. | Distinct executable rollback receipt is mandatory before Gate 5 is accepted; automatic restoration on failed post-swap smoke is retained separately |
+| 6 | Linux AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on native AArch64 Linux | Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, hashes, logs, sanity, and all essential markers |
+| 6 | macOS x86_64/AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Retain matching `stage3/<triple>/simple` and `full/<triple>/simple`, hashes, logs, sanity, and all essential markers |
+| 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
+| 6 | FreeBSD x86_64 QEMU acceptance | `sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download` | Scoped FreeBSD x86_64 QEMU bootstrap PASS with preflight/full receipts, VM and guest logs, guest Stage 3 hash, source/base-image identities, and smoke markers |
+| 6 | SimpleOS x86_64 target acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --target=simpleos-x86_64 --output=build/bootstrap --jobs=2` | Retain staged artifacts, manifest, hashes, and logs; target evidence only, not a hosted full CLI |
+| 6a | SimpleOS AArch64 attested image | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` | Retain image, producer manifest, compiler/source/kernel/disk/build-log hashes, and logs; image evidence only |
+| 6b | SimpleOS AArch64 QMP input | `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` after 6a | Retain atomic evidence manifest, QMP/serial logs, watermarks, captures, and guest/capture checksum equality; QEMU input evidence only |
+| 6 | RISC-V64 scoped cross/QEMU acceptance | `sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Retain matrix evidence; scoped cross execution/SIMD evidence only, not hosted bootstrap PASS |
+| 6 | RISC-V32 bare-metal object acceptance | No exact command is published in the session plan. Platform sidecar owns the repository architecture-gate receipt for `riscv32-unknown-none-elf`, including ELF32/RISC-V attributes, toolchain identity, command transcript, hashes, and logs. | Bare-metal object acceptance only; never claim `riscv32-unknown-linux-gnu` or hosted bootstrap PASS |
+
+### Required evidence and provenance
+
+- x86 Stage 4: source revision and source-tree identity, exact command
+  transcript, admitted Stage 2 authority and runtime authority, Stage 3 path
+  and SHA-256, Stage 4 candidate path and SHA-256, pure-Simple compiler
+  identity/version/hash, native-build log, progress events, elapsed time and
+  peak RSS log, no-stub/no-failure scan, exact-binary sanity output, and
+  retained cache identity.
+- Essential tools: one fresh candidate must produce exactly these markers in
+  the retained smoke log: `essential_test_runner_smoke=true`,
+  `essential_lint_smoke=true`,
+  `essential_duplicate_checker_smoke=true`, and
+  `bootstrap_essential_tools_smoke=true`.
+- Deployment: candidate path/hash, deployment command, pre-swap identity,
+  post-swap identity, rollback command/path, rollback result, and post-swap
+  arithmetic smoke output. Deployment is forbidden before candidate sanity and
+  all four essential-tool markers pass.
+- FreeBSD: preflight receipt, FreeBSD version/architecture, base-image
+  identity/hash, source identity, exact command, VM and guest logs, guest Stage 3
+  artifact hash, bootstrap logs, smoke markers, and an atomic full-run
+  provenance receipt. Missing or empty guest logs fail the claim.
+- SimpleOS AArch64: producer manifest containing schema, source/entry identity,
+  compiler receipt/version/hash, producer script/hash, host identity, kernel and
+  disk hashes, build-log hash, command, and retained logs; consumer evidence
+  must additionally contain QMP/serial logs, pre-injection watermarks, captures,
+  guest/capture checksum equality, and atomic evidence publication.
+- Native external hosts: host identity, toolchain versions, source and compiler
+  hashes, exact command, stage/full artifact hashes, logs, sanity output, and
+  essential-tool markers. Host unavailable means open, never PASS.
+
+### Sidecar lanes and ownership
+
+- SDK sidecar: capsule contracts, SDK-001 through SDK-010 assertions, eleven
+  synchronized `CAPSULE-*` labels, manual, and test plan. Status: complete and
+  frontier-reviewed.
+- FreeBSD sidecar: preflight, bounded host/VM operations, deterministic receipt,
+  guest-log failure handling, and the preflight spec. Status: implemented and
+  frontier-reviewed; execution evidence pending.
+- SimpleOS AArch64 sidecar: attested producer, QMP consumer, provenance and
+  regression spec. Status: implemented and frontier-reviewed; execution
+  evidence pending.
+- x86 Stage 4 sidecar: after Stage 3 admission, own the first fatal pure-Simple
+  compiler boundary and one adjacent reproducer; preserve the incremental
+  cache and stop after three distinct fix/verify cycles.
+- External-host sidecar: obtain native Linux AArch64 and macOS evidence and
+  attach the required receipts; no local cross-build substitution.
+- Merge owner: primary Codex agent in the main integration workspace; only the
+  merge owner may combine these lanes or publish a claim.
+- Final frontier reviewer: normal/highest-capability Codex, reviewing the
+  frozen owned-file diff and every evidence receipt after the exact candidate
+  passes its gates and before commit/push.
+
+### Explicit not-claimed boundaries
+
+- No Stage 3 admission or Stage 4 PASS is claimed.
+- No x86 candidate, exact-binary sanity PASS, essential-tools smoke PASS,
+  deployment, or rollback evidence exists in this status.
+- No FreeBSD, Linux AArch64, macOS, SimpleOS x86_64, SimpleOS AArch64, QMP, or
+  physical-board platform PASS is claimed.
+- SDK preparation does not claim source reproducibility, binary
+  reproducibility, Stage 4 admission, deployment, or platform acceptance.
+- QEMU image or QMP evidence does not claim hosted native bootstrap or physical
+  hardware completion.
+- Rust-seed builds, stale artifacts, cross-builds, static source checks, and
+  frontier review are not production bootstrap evidence.
+
+## Historical baseline (stale after `f47e3916`; 2026-08-03)
 
 - Exact source revision: `4505aec902a7d58012476bee57202006731ea129`.
 - Canonical command: full bootstrap, one-binary, full CLI,
