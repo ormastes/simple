@@ -20,40 +20,69 @@ pub struct ResourceWrapperConfig:
     release_fn: text?
     retain_fn: text?
 
-# Generate a Simple wrapper class for a resource family
+# Generate a Simple wrapper class for a resource family.
+# All extern names come from the classification (ClassifiedExtern entries) —
+# nothing about a specific family (rt_file, rt_image, ...) is hardcoded here.
 pub fn generate_wrapper_class(config: ResourceWrapperConfig, classification: FamilyClassificationResult) -> text:
+    # Locate the classified acquire/release entries and the borrow methods
+    var acquire_name = ""
+    var acquire_verb = ""
+    var release_name = ""
+    var method_names: [text] = []
+    var method_verbs: [text] = []
+    for f in classification.functions:
+        if f.category == "acquire":
+            acquire_name = f.name
+            acquire_verb = f.verb
+        elif f.category == "release":
+            release_name = f.name
+        elif f.category == "method":
+            method_names.push(f.name)
+            method_verbs.push(f.verb)
+
     var out = ""
 
-    # Generate the raw extern declarations (private)
-    out = out + "extern fn rt_file_open(...) -> ...\n"
-    out = out + "extern fn rt_file_close(...) -> ...\n"
-    out = out + "extern fn rt_file_read(...) -> ...\n"
+    # Raw extern declarations (private to the generated module), in classification order
+    for f in classification.functions:
+        out = out + "extern fn {f.name}(...) -> ...\n"
     out = out + "\n"
 
-    # Generate the wrapper class
+    # Wrapper class with owned handle
     out = out + "class {config.class_name}:\n"
     out = out + "    handle: {config.handle_type}\n"
     out = out + "\n"
 
-    # Generate static factory method
-    out = out + "    static fn open(...) -> {config.class_name}?:\n"
-    out = out + "        val h = rt_file_open(...)\n"
-    out = out + "        if h == {config.invalid_value}:\n"
-    out = out + "            nil\n"
-    out = out + "        else:\n"
-    out = out + "            {config.class_name}(handle: h)\n"
+    # Validity sentinel check (WP-J wrapper shape)
+    out = out + "    fn is_valid(self) -> bool:\n"
+    out = out + "        self.handle != {config.invalid_value}\n"
     out = out + "\n"
 
-    # Generate borrow methods
-    out = out + "    fn read(...) -> ...:\n"
-    out = out + "        rt_file_read(self.handle, ...)\n"
-    out = out + "\n"
+    # Static factory named after the family's acquire verb, returning T? (nil on invalid sentinel)
+    if acquire_name != "":
+        out = out + "    static fn {acquire_verb}(...) -> {config.class_name}?:\n"
+        out = out + "        val h = {acquire_name}(...)\n"
+        out = out + "        if h == {config.invalid_value}:\n"
+        out = out + "            nil\n"
+        out = out + "        else:\n"
+        out = out + "            {config.class_name}(handle: h)\n"
+        out = out + "\n"
 
-    # Generate consuming close method
-    out = out + "    fn close():\n"
-    out = out + "        # Consuming drop: one-shot guard against double-close\n"
-    out = out + "        if self.handle != {config.invalid_value}:\n"
-    out = out + "            rt_file_close(self.handle)\n"
-    out = out + "            self.handle = {config.invalid_value}\n"
+    # Borrow methods — one per classified "method" extern
+    var i = 0
+    while i < method_names.len():
+        val method_verb = method_verbs[i]
+        val method_extern = method_names[i]
+        out = out + "    fn {method_verb}(...) -> ...:\n"
+        out = out + "        {method_extern}(self.handle, ...)\n"
+        out = out + "\n"
+        i = i + 1
+
+    # Consuming close with one-shot double-close guard
+    if release_name != "":
+        out = out + "    fn close():\n"
+        out = out + "        # Consuming drop: one-shot guard against double-close\n"
+        out = out + "        if self.handle != {config.invalid_value}:\n"
+        out = out + "            {release_name}(self.handle)\n"
+        out = out + "            self.handle = {config.invalid_value}\n"
 
     out
