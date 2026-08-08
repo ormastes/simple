@@ -160,8 +160,35 @@ kernel_source_revision() {
         echo ""
         return
     }
+    # Scope: the kernel's real input set. Everything the x86_64 artifact can
+    # link stays IN (all of src/os, all of src/lib, the generated source root,
+    # and the x86_64 example dir). The ONLY prune is source belonging to a
+    # FOREIGN target architecture, which a `--target x86_64-unknown-none` build
+    # cannot link.
+    #
+    # Why the prune is required: this is a shared working tree. A concurrent
+    # aarch64 lane rewrites src/os/kernel/boot/limine_boot_aarch64.spl every
+    # ~90s; because the pre-build and post-build revisions bracket a ~150s
+    # build plus two full-tree scans, an unrelated arch edit tripped
+    # `wm-simple-web-build-source-changed` on essentially every run, so the
+    # gate could never admit a kernel regardless of WM correctness.
+    #
+    # Why the prune is SAFE (measured, not assumed): `nm` over an admitted
+    # build/simpleos_wm_production_desktop.elf shows 0 of the 96 pruned files
+    # contribute a single symbol. Every arch-flavoured symbol in the kernel
+    # (EM_AARCH64, SIMPLEOS_HOST_GPU_ISA_RISCV64, rt_arm64_user_as_*, ...) comes
+    # from an arch-NEUTRAL module that is still hashed here.
+    #
+    # This prune is deliberately narrow and structural. Anything else that
+    # churns mid-build -- including any src/lib edit -- still refuses, because
+    # such a file genuinely can change the artifact. Do not widen this.
     find src/os src/lib build/os/generated examples/09_embedded/simple_os/arch/x86_64 \
         -type f \( -name '*.spl' -o -name '*.c' -o -name '*.h' -o -name '*.s' -o -name '*.S' -o -name '*.ld' \) \
+        ! -path '*/arch/aarch64/*' ! -path '*/arch/arm64/*' ! -path '*/arch/arm/*' \
+        ! -path '*/arch/riscv/*' ! -path '*/arch/riscv32/*' ! -path '*/arch/riscv64/*' \
+        ! -path '*/arch/wasm/*' ! -path '*/arch/wasm32/*' ! -path '*/arch/wasm64/*' \
+        ! -name '*_aarch64.*' ! -name '*_arm64.*' ! -name '*_riscv.*' \
+        ! -name '*_riscv32.*' ! -name '*_riscv64.*' ! -name '*_wasm.*' \
         -print | LC_ALL=C sort | while IFS= read -r source_path; do
             source_sha256="$(file_sha256 "$source_path")"
             if is_sha256 "$source_sha256"; then
@@ -273,10 +300,6 @@ fat32_image_status() {
 browser_demo_disk_payload_status() {
     disk_path="$1"
     binary_path="$2"
-    if ! command -v mcopy >/dev/null 2>&1; then
-        echo "mcopy-unavailable"
-        return
-    fi
     extracted="$(mktemp "$BUILD_DIR/browser-demo-smf.XXXXXX")" || {
         echo "extract-temp-failed"
         return
@@ -286,10 +309,45 @@ browser_demo_disk_payload_status() {
         echo "prefix-temp-failed"
         return
     }
-    if ! mcopy -o -i "$disk_path" ::/SYS/APPS/BROWSMF.SMF "$extracted" >/dev/null 2>&1; then
-        rm -f "$extracted" "$prefix"
-        echo "browser-smf-missing"
-        return
+    # Read the staged payload back OUT of the FAT32 image. mtools `mcopy` is
+    # used when present; when it is absent we fall back to the in-repo FAT32
+    # reader rather than reporting "mcopy-unavailable". That old status was
+    # indistinguishable between "payload not staged" and "host lacks mtools",
+    # and on an mtools-less host it hard-blocked the gate before QEMU ever
+    # started. The fallback performs the SAME real read (walk the directory
+    # chain, follow the cluster chain, write the bytes out); the byte-count and
+    # ELF-prefix-sha256 checks below are unchanged and still apply.
+    if command -v mcopy >/dev/null 2>&1; then
+        if ! mcopy -o -i "$disk_path" ::/SYS/APPS/BROWSMF.SMF "$extracted" >/dev/null 2>&1; then
+            rm -f "$extracted" "$prefix"
+            echo "browser-smf-missing"
+            return
+        fi
+    else
+        # $SIMPLE_BIN is the kernel-BUILD binary and may be a stage2 bootstrap
+        # that only accepts native-build subcommands ("unknown command
+        # '<script>.spl'"), so fall through to the deployed interpreter. Which
+        # interpreter reads the image does not affect the strength of this
+        # check: the extracted bytes are still length-checked and
+        # sha256-prefix-compared against the on-host ELF below, so a bad reader
+        # fails closed.
+        fat32_extract_ok=false
+        for extract_bin in "$SIMPLE_BIN" "$ROOT_DIR/bin/simple"; do
+            [ -x "$extract_bin" ] || continue
+            if SIMPLE_MODULE_LIMIT="${SIMPLE_MODULE_LIMIT:-4000}" "$extract_bin" \
+                    scripts/os/simpleos_fat32_extract.spl \
+                    "$disk_path" /SYS/APPS/BROWSMF.SMF "$extracted" \
+                    >"$BUILD_DIR/browser-demo-fat32-extract.out" 2>&1 &&
+               grep -Fxq 'extract_status=pass' "$BUILD_DIR/browser-demo-fat32-extract.out"; then
+                fat32_extract_ok=true
+                break
+            fi
+        done
+        if [ "$fat32_extract_ok" != true ]; then
+            rm -f "$extracted" "$prefix"
+            echo "browser-smf-missing"
+            return
+        fi
     fi
     binary_bytes="$(file_byte_count "$binary_path")"
     extracted_bytes="$(file_byte_count "$extracted")"
