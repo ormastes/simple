@@ -425,6 +425,96 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
             val probe = _default_text(node, "{rect.id}-right-metrics", 0, 0, right_text, theme.text_primary)
             val right_w = if probe.computed_style.len() > 0: probe.width else: right_text.len() * GLYPH_ADVANCE
             result.push(_default_text_centered(node, "{rect.id}-right", x + rect.w - right_w - 6, mid_y, y, rect.h, right_text, theme.text_primary))
+    elif kind == "switch":
+        # Track + thumb. ON = accent track with the thumb parked right.
+        val track_w = 36
+        val track_h = 20
+        val track_y = y + (rect.h - track_h) / 2
+        val is_on = node.get_prop("checked") == "true"
+        result.push(draw_ir_rect(rect.id, x, track_y, track_w, track_h, if is_on: theme.accent else: theme.track))
+        val thumb = 16
+        val thumb_x = if is_on: x + track_w - thumb - 2 else: x + 2
+        result.push(draw_ir_rect("{rect.id}-thumb", thumb_x, track_y + 2, thumb, thumb, theme.text_primary))
+    elif kind == "radio":
+        val box = 18
+        val box_y = y + (rect.h - box) / 2
+        result.push(draw_ir_rect("{rect.id}-ring", x, box_y, box, box, theme.border))
+        if node.get_prop("checked") == "true":
+            result.push(draw_ir_rect("{rect.id}-dot", x + 4, box_y + 4, box - 8, box - 8, theme.accent))
+        val lbl = _label_text(node)
+        if lbl != "":
+            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, theme.text_primary))
+    elif kind == "dropdown":
+        # Closed control: field box, current value (value prop, else first
+        # item), and a "v" affordance at the right edge.
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.border))
+        result.push(draw_ir_rect("{rect.id}-field", x + 1, y + 1, rect.w - 2, rect.h - 2, theme.field))
+        var current = node.get_prop("value")
+        if current == "":
+            val items = node.children()
+            if items.len() > 0:
+                current = items[0].get_prop("label")
+        if current != "":
+            result.push(_default_text_centered(node, "{rect.id}-value", x + 6, mid_y, y, rect.h, current, theme.text_primary))
+        result.push(_default_text_centered(node, "{rect.id}-chevron", x + rect.w - 16, mid_y, y, rect.h, "v", theme.text_secondary))
+    elif kind == "tabs":
+        # Bar fill; the selected tab (prop "selected", default first) gets an
+        # accent underline. Children text is emitted by the walk.
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.track))
+        val sel = _prop_int(node, "selected")
+        val kids = node.children()
+        if kids.len() > 0:
+            var sel_idx = if sel < kids.len(): sel else: 0
+            val sel_rect_idx = find_rect_index(rects, kids[sel_idx].id)
+            if sel_rect_idx >= 0:
+                val sr = rects[sel_rect_idx]
+                result.push(draw_ir_rect("{rect.id}-sel", sr.x, y + rect.h - 3, sr.w, 3, theme.accent))
+    elif kind == "segmented_control":
+        # Selected segment (prop "selected") gets the accent fill; children
+        # text is emitted by the walk.
+        val seg_sel = _prop_int(node, "selected")
+        val seg_kids = node.children()
+        var seg_i = 0
+        while seg_i < seg_kids.len():
+            val child_rect_idx = find_rect_index(rects, seg_kids[seg_i].id)
+            if child_rect_idx >= 0:
+                val cr = rects[child_rect_idx]
+                result.push(draw_ir_rect("{rect.id}-seg{seg_i}", cr.x, cr.y, cr.w, cr.h, if seg_i == seg_sel: theme.accent else: theme.track))
+            seg_i = seg_i + 1
+    elif kind == "list":
+        # Row banding under the item text the walk emits.
+        val list_kids = node.children()
+        var band_i = 0
+        while band_i < list_kids.len():
+            val band_rect_idx = find_rect_index(rects, list_kids[band_i].id)
+            if band_rect_idx >= 0:
+                val br = rects[band_rect_idx]
+                if band_i % 2 == 0:
+                    result.push(draw_ir_rect("{rect.id}-band{band_i}", x, br.y, rect.w, br.h, theme.track))
+            band_i = band_i + 1
+    elif kind == "table":
+        # Header band with the "H1|H2" prop text; data rows are text children
+        # emitted by the walk.
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
+        val headers = node.get_prop("headers")
+        if headers != "":
+            val first_row = if node.children().len() > 0:
+                val fr_idx = find_rect_index(rects, node.children()[0].id)
+                if fr_idx >= 0: rects[fr_idx].y - y else: 20
+            else:
+                20
+            result.push(draw_ir_rect("{rect.id}-header", x, y, rect.w, first_row, theme.track))
+            result.push(_default_text_centered(node, "{rect.id}-header-text", x + 4, y + first_row / 2, y, first_row, headers, theme.text_primary))
+    elif kind == "tree" or kind == "treenode":
+        # Expansion marker + label text, top-anchored so nested children
+        # (laid out over the node's remaining area) do not overlap the label.
+        val label_text = _label_text(node)
+        if label_text != "":
+            result.push(_default_text(node, "{rect.id}-mark", x + 2, y + 2, ">", theme.text_secondary))
+            result.push(_default_text(node, rect.id, x + 14, y + 2, label_text, theme.text_primary))
+    elif kind == "divider":
+        val line_y = y + rect.h / 2
+        result.push(draw_ir_rect(rect.id, x, line_y, rect.w, 1, theme.border))
     else:
         # container / panel / unknown -> background surface
         result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
@@ -444,6 +534,11 @@ fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand], them
         return result
     result = _emit_widget(node, rects, rect_index, 0, 0, result, theme)
     if node.kind_name() == "scroll":
+        return result
+    if node.kind_name() == "dropdown":
+        # A closed dropdown's items are its option list, not visible content:
+        # the emitter draws the current value, and the items only belong on
+        # screen while the popup is open (not modeled here yet).
         return result
     for child in node.children():
         result = _walk_main(child, rects, result, theme)
