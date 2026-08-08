@@ -52,28 +52,19 @@ while the others did not accumulate at all.
 ## Scope (measured on origin/main)
 
 384 field-style `.length` sites across `src/**/*.spl` (comment-stripped).
+254 of them live in files that declare no `length` struct field at all:
 
-**How many are defects is NOT statically decidable, and that is itself the
-finding.** Two successive filters give upper bounds of 254 and then 165 sites,
-but both still over-report: `piece.length` in `src/app/svim/_SvimCore/text_ops.spl`
-and `ref.length` in `src/app/interpreter/memory/refc_binary_spec.spl` are
-genuine struct fields whose struct is *declared in a different file*. Deciding a
-site needs the receiver's resolved type, i.e. it needs the compiler.
-
-**Only the compiler's own `[jit-fallback]` diagnostic can enumerate this family
-correctly** — a grep-based sweep will either miss sites or rewrite genuine field
-accesses. Upper-bound distribution (165-filter), for sizing only:
-
-| tree | upper-bound sites |
+| tree | suspect sites |
 |---|---|
-| src/lib/nogc_sync_mut | 28 |
-| src/lib/gc_async_mut | 26 |
+| src/os/port | 61 |
+| src/lib/nogc_sync_mut | 33 |
+| src/lib/nogc_async_mut | 28 |
+| src/lib/gc_async_mut | 27 |
 | src/unit/simple-lang | 24 |
-| src/lib/nogc_async_mut | 22 |
 | src/lib/skia | 11 |
+| src/app/svim | 11 |
 | src/lib/common | 10 |
-| src/app/interpreter | 8 |
-| others | ~36 |
+| others | ~49 |
 
 In `src/compiler` exactly **2** real sites remained after the earlier sweep
 (both text receivers, both now fixed): `c_import_resolve.spl:36,38`. The other 6
@@ -86,7 +77,7 @@ Nothing gates on it. `SIMPLE_JIT_STRICT=1` already exists and already turns the
 fallback into a hard error, but no build or check invokes it, and no spec can
 catch a perf-only defect. **Recommended fence:** a `scripts/check/*.shs` that
 greps build/run stderr for `[jit-fallback]`, or that builds the tree under
-`SIMPLE_JIT_STRICT=1`. Whack-a-mole by grep cannot close the family -- see Scope above.
+`SIMPLE_JIT_STRICT=1`. Whack-a-mole across 254 sites will not close the family.
 
 ## Do NOT mechanically rewrite Dict receivers
 
