@@ -10,8 +10,12 @@
 #   - an ignore without a reason is indistinguishable from "we never looked"
 #   - an all-ignore oracle asserts nothing about the production system
 #   - an open document absorbs new fields without anyone deciding to
+#   - a bind-only oracle captures values and compares none of them
+#   - a tolerance over non-numbers reads two unrelated words as equal zeroes
 #
 # Guide: doc/07_guide/infra/sspec_typed_evidence.md
+# Red-team findings this module answers:
+#   doc/08_tracking/audit/modern_sspec_evidence_contract_redteam_2026-08-08.md
 
 use std.common.spec.evidence.model.{
     EvidenceSelector, EvidenceSelectorKind, selector_display,
@@ -144,10 +148,53 @@ fn join_values(items: [text]) -> text:
         i = i + 1
     out
 
+pub val I64_MIN_SENTINEL: i64 = -9223372036854775807 - 1
+
 fn abs_i64(v: i64) -> i64:
     if v < 0:
         return 0 - v
     v
+
+# A value is numeric only if every character is a digit, after an optional
+# leading sign. `.to_i64()` maps garbage to 0, so without this check a
+# tolerance oracle comparing "elephant" against "banana" reports PASS — two
+# unrelated words agreeing because neither is a number.
+fn is_numeric_text(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    val first = value.slice(0, 1)
+    if first == "-" or first == "+":
+        if value.len() == 1:
+            return false
+        i = 1
+    while i < value.len():
+        if not is_decimal_digit(value.slice(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+# `|got - want| <= tolerance`, computed without a wrapping subtraction. A plain
+# `got - want` overflows for far-apart operands and wraps into a small value,
+# reporting PASS for the widest possible disagreement.
+fn within_tolerance(got: i64, want: i64, tolerance: i64) -> bool:
+    if tolerance < 0:
+        return false
+    # Negating the most negative value overflows, so it is only ever equal to
+    # itself here rather than being compared through a magnitude.
+    if got == I64_MIN_SENTINEL or want == I64_MIN_SENTINEL:
+        return got == want
+    if (got < 0) == (want < 0):
+        if got >= want:
+            return (got - want) <= tolerance
+        return (want - got) <= tolerance
+    # Opposite signs: the distance is exactly |got| + |want|, so spend the
+    # budget one magnitude at a time instead of adding them and overflowing.
+    val ag = abs_i64(got)
+    val aw = abs_i64(want)
+    if ag > tolerance:
+        return false
+    aw <= (tolerance - ag)
 
 # ---------------------------------------------------------------------------
 # Bindings (correlation)
@@ -173,11 +220,23 @@ fn binding_exists(bindings: [EvidenceBinding], name: text) -> bool:
 # Vacuity gates
 # ---------------------------------------------------------------------------
 
+# Neither ignores NOR binds are positive checks. A bind only captures a value
+# for a later correlation; on its own it compares nothing, so an oracle of
+# binds and ignores would otherwise report "1 check passed" over a document
+# nobody examined. A bind earns its keep through the `check_same_as` that
+# consumes it, and that check counts on its own.
+fn check_is_positive(check: OracleCheck) -> bool:
+    if check.mode == OracleMode.ignore:
+        return false
+    if check.bind_name != "":
+        return false
+    true
+
 # A capture with no positive oracle observes the production system without
-# asserting anything about it. Ignore checks do not count.
+# asserting anything about it.
 pub fn has_positive_oracle(spec: OracleSpec) -> bool:
     for check in spec.checks:
-        if check.mode != OracleMode.ignore:
+        if check_is_positive(check):
             return true
     false
 
@@ -245,9 +304,13 @@ fn evaluate_check(
             else:
                 check_result(label, mode_name, join_values(check.expected_items), join_values(ordered), EvidenceStatus.failed, "sequence mismatch")
         case OracleMode.numeric_tolerance:
+            if not is_numeric_text(check.expected):
+                return check_result(label, mode_name, check.expected, actual, EvidenceStatus.failed, "expected value is not numeric")
+            if not is_numeric_text(actual):
+                return check_result(label, mode_name, check.expected, actual, EvidenceStatus.failed, "observed value is not numeric")
             val want = check.expected.to_i64()
             val got = actual.to_i64()
-            if abs_i64(got - want) <= check.tolerance:
+            if within_tolerance(got, want, check.tolerance):
                 check_result(label, mode_name, check.expected, actual, EvidenceStatus.passed, check.reason)
             else:
                 check_result(label, mode_name, check.expected, actual, EvidenceStatus.failed, "outside tolerance " + "{check.tolerance}")
@@ -300,7 +363,7 @@ pub fn compare_evidence(evidence: CanonicalEvidence, spec: OracleSpec) -> Compar
     if not has_positive_oracle(spec):
         return failed_result(
             "oracle has no positive production check",
-            [check_result("<oracle>", "vacuity", "at least one non-ignore check", "all ignored", EvidenceStatus.failed, "a capture that ignores everything verifies nothing")]
+            [check_result("<oracle>", "vacuity", "at least one comparing check", "only ignores and binds", EvidenceStatus.failed, "a capture that only ignores or captures values verifies nothing")]
         )
 
     var results: [EvidenceCheckResult] = []
@@ -314,7 +377,7 @@ pub fn compare_evidence(evidence: CanonicalEvidence, spec: OracleSpec) -> Compar
             bindings.push(EvidenceBinding(name: check.bind_name, value: result.actual))
         if result.status == EvidenceStatus.failed:
             failures = failures + 1
-        elif result.status == EvidenceStatus.passed and check.mode != OracleMode.ignore:
+        elif result.status == EvidenceStatus.passed and check_is_positive(check):
             positives = positives + 1
         results.push(result)
 

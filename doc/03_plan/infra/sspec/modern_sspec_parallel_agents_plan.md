@@ -15,34 +15,46 @@ Ownership mirrors the spec-to-spipe agent rules: one shared-contract owner, one 
 
 ### Wave 0 — contract + red-team gates (blocks everything)
 
-| Lane | Exclusive ownership | Deliverable |
-|---|---|---|
-| E0 Evidence contract | `src/lib/common/spec/evidence/**`, manifest schema, compatibility facade | frozen v1 evidence model + golden serialization |
-| E1 Verification/red team | evidence acceptance policy, release checks | deliberate-red, stale-hash, unresolved-selector, vacuity, example-integrity gates |
+| Lane | Exclusive ownership | Deliverable | Status |
+|---|---|---|---|
+| E0 Evidence contract | `src/lib/common/spec/evidence/**`, manifest schema, compatibility facade | frozen v1 evidence model + golden serialization | **LANDED** 2026-08-08 — `model.spl`, `evidence_comparator.spl`, spec `test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl` (24 examples) |
+| E1 Verification/red team | evidence acceptance policy, release checks | deliberate-red, stale-hash, unresolved-selector, vacuity, example-integrity gates | Red-team pass run 2026-08-08 (`doc/08_tracking/audit/modern_sspec_evidence_contract_redteam_2026-08-08.md`); found 4 open defects (F1-F4: bind-only vacuity, non-numeric tolerance, tolerance overflow, unchecked manifest hex length) **not yet fixed** in `evidence_comparator.spl`/`model.spl` — gates E2-E7 adoption per the audit's own recommendation |
 
 Merge gate: E0+E1 agree on schema, failure semantics, deliberate-red fixtures. No other lane edits shared records.
 
 ### Wave 1 — independent domain foundations (parallel, dep: E0)
 
-| Lane | Exclusive ownership |
-|---|---|
-| E2 TUI/GUI provider | ui_access/SGTTI/Draw IR/wm_compare adapters, TUI cell grid |
-| E3 Text protocol | text parser, grammar adapter, selectors, structural comparator |
-| E4 Binary layout | BinaryLayoutIR, PTE accessor adapter, RegisterIR/struct bridges |
-| E5 Docgen skeleton | SOLE `spipe_docgen` owner: evidence loader + generic ManualBlock renderer |
-| E6 Spec-to-SPipe bridge | `simple.sspec.evidence.v1` extension namespace + emitter integration (frozen Phase-0 core untouched) |
+| Lane | Exclusive ownership | Status |
+|---|---|---|
+| E2 TUI provider | ui_access/SGTTI/Draw IR/wm_compare adapters, TUI cell grid | **LANDED** — `src/lib/common/spec/evidence/format/terminal_grid.spl`, spec `terminal_grid_spec.spl` (19 examples) |
+| E2b GUI action trace | interaction sequence, bounded settling | **LANDED** — `src/lib/common/spec/evidence/action_trace.spl`, spec `action_trace_spec.spl` (14 examples) |
+| E3 Text protocol | text parser, grammar adapter, selectors, structural comparator | **LANDED** — `src/lib/common/spec/evidence/format/text_protocol.spl`, spec `text_protocol_spec.spl` (7 examples) |
+| E4 Binary layout | BinaryLayoutIR, PTE accessor adapter, RegisterIR/struct bridges | **LANDED** — `src/lib/common/spec/evidence/format/binary_layout.spl`, spec `binary_layout_spec.spl` (9 examples), mirrors `src/os/kernel/types/bitfield.spl` |
+| E5 Docgen skeleton | SOLE `spipe_docgen` owner: evidence loader + generic ManualBlock renderer | **OPEN** — the renderer half landed as `src/lib/common/spec/evidence/manual_render.spl` (spec `manual_render_spec.spl`, 19 examples), but `src/app/spipe_docgen/**` does not import or call it; no evidence loader/wiring exists in `spipe_docgen` |
+| E6 Spec-to-SPipe bridge | `simple.sspec.evidence.v1` extension namespace + emitter integration (frozen Phase-0 core untouched) | **LANDED** (namespace only) — `src/lib/common/spec/evidence/spipe_extension.spl` defines `SPIPE_EVIDENCE_EXTENSION_NAMESPACE`; no spec file found under this exact name, verify emitter-integration coverage before citing it as fully done |
 
 ### Wave 2 — reference profiles + examples
 
-E2/E3/E4 each land their reference profile + generated manual (deps: own lane + E5). E7 (domain profiles: 2D, 3D, simulation, audio, stats, ML) deps E0 + relevant adapters. E6 lands generated SSpec/evidence/manual fixtures.
+E2/E3/E4 each land their reference profile + generated manual (deps: own lane + E5) — the
+profile modules themselves are landed (see Wave 1 rows above); the "generated manual" half
+is blocked on E5, which is still open. E7 (domain profiles: 2D, 3D, simulation, audio,
+stats, ML) deps E0 + relevant adapters — **partially landed**:
+
+| Lane | Exclusive ownership | Status |
+|---|---|---|
+| E7a 2D/3D scene | draw-node trees, 3D scene-graph assets | **LANDED** — `src/lib/common/spec/evidence/format/scene_profile.spl`, spec `scene_profile_spec.spl` (19 examples) |
+| E7b Simulation/stats | timeline, invariants, KPI tolerances, sample distributions | **LANDED** — `src/lib/common/spec/evidence/format/simulation_profile.spl`, spec `simulation_profile_spec.spl` (13 examples) |
+| E7 audio / ML profiles | — | **OPEN** — no `audio_profile.spl` / `ml_profile.spl` or equivalent found under `src/lib/common/spec/evidence/format/` |
+
+E6 lands generated SSpec/evidence/manual fixtures — **OPEN**, no such generated fixtures found.
 
 ### Wave 3 — migration, docs, final review
 
-| Lane | Deliverable |
-|---|---|
-| E8 Migration/examples | three runnable reference specs, byte-identical regeneration, legacy adapter migration; never hand-edits generated manuals |
-| E9 Docs/skills | requirements/design/plan/guide/skills/templates refresh (list below) in the SAME change as the executable workflow |
-| E1 Final verification | independent deliberate-red + freshness review; no stale/missing/aspirational example accepted |
+| Lane | Deliverable | Status |
+|---|---|---|
+| E8 Migration/examples | three runnable reference specs, byte-identical regeneration, legacy adapter migration; never hand-edits generated manuals | **OPEN** — not implemented |
+| E9 Docs/skills | requirements/design/plan/guide/skills/templates refresh (list below) in the SAME change as the executable workflow | **OPEN** — this plan and the guide were refreshed 2026-08-08, but the requirements/design/skills/template documents listed below were not audited as part of this pass |
+| E1 Final verification | independent deliberate-red + freshness review; no stale/missing/aspirational example accepted | **IN PROGRESS** — the 2026-08-08 red-team pass (see E1 above) is one such review and found 4 open defects; final sign-off still pending a fix + re-verify cycle |
 
 ### Contention rules
 - E0 alone changes shared evidence records; E1 alone changes acceptance policy; E5 alone changes `spipe_docgen`; E6 alone changes shared spec-to-spipe emitter integration.

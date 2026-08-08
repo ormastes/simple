@@ -71,3 +71,23 @@ the shared executor, not be re-derived by every caller.
 - `src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl` (`run_source`, `build_svmg_arena`)
 - `src/lib/gc_async_mut/gpu_lane/cuda_resident_session.spl` (`ResidentSession.run_program`)
 - `src/lib/nogc_sync_mut/notebook/cuda_exec.spl` (workaround: `run_program_with_persistence`)
+
+## 2026-08-08 follow-up: root-cause fix landed
+
+The suggested fix above landed: `cuda_vm_executor.spl` now exposes
+`run_source_persisting_data(source, step_budget, entry_pc, prior_arena,
+prior_data_off)`, backed by a `build_svmg_arena_persisting_data` helper.
+`cuda_exec.spl`'s `run_program_with_persistence` now calls this executor
+method directly instead of re-deriving the splice at the call site.
+
+An intermediate version of `build_svmg_arena_persisting_data` copied the
+persisted region **relative to `data_off`** and was a real regression
+(broke this file's own previously-passing spec: the persistence check
+started returning false). Corrected to the same absolute-offset copy this
+doc's original workaround section already documented as correct
+(`copy_start = max(data_off, prior_data_off)`, no relative shift).
+
+Verified: `test/02_integration/app/tools/notebook/cuda_exec_spec.spl` —
+4/4 PASS on live dual-GPU hardware (RTX A6000 + TITAN RTX,
+`SIMPLE_MODULE_LIMIT=4000` workaround for the unrelated pre-existing
+module-count-limit infra issue), lint clean.
