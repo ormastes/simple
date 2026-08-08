@@ -626,3 +626,61 @@ native-build marker probes (too expensive to run 14 times in one session):
   found in the working tree (`lower_array_lit`'s `error`→`error_fatal`
   promotion) was made by a different, concurrent session and was
   deliberately left untouched.
+
+## 12. `AssocTypeProjection.set_resolved` co-loading question resolved — FALSE ALARM (2026-08-08, fifth pass)
+
+Two `class AssocTypeProjection:` definitions confirmed at:
+- `src/compiler/25.traits/associated_types.spl:17` — field
+  `resolved: HirType?`, `set_resolved` does `self.resolved = Some(ty)`,
+  `is_resolved()` is `self.resolved.?`.
+- `src/compiler/30.types/associated_types_solvers.spl:291` — field
+  `resolved: text`, `set_resolved` does `self.resolved = ty` (assigning a
+  `HirType` into a `text`-typed field — itself independently suspicious,
+  looks like a stubbed-out/never-typechecked variant), `is_resolved()` is
+  `self.resolved != "None"`.
+
+The field-type incompatibility (`HirType?` vs `text`) is real, confirming
+§11's classification. The open question was co-loading.
+
+**Reachability trace (same method as §9/§10/§11):**
+- `25.traits/associated_types.spl` is exported from
+  `25.traits/__init__.spl` and pulled in broadly: `35.semantics/resolve.spl`,
+  `35.semantics/resolve_strategies.spl`, `80.driver/driver_helpers.spl`,
+  `80.driver/driver_source_loading.spl`, all of `30.types/type_infer*` —
+  i.e. it is live in the default driver/`native-build`/`test` pipeline.
+- `30.types/associated_types_solvers.spl` (and its sibling
+  `associated_types.spl`, `associated_types_defs.spl`) is imported **only**
+  from within the same three-file cluster plus its own two test files
+  (`associated_types_tests_def_impl.spl`,
+  `associated_types_tests_resolve.spl`). `/usr/bin/grep -rln` for any of
+  `associated_types_defs`, `associated_types_tests_def_impl`,
+  `associated_types_tests_resolve`, or `compiler.types.associated_types`
+  outside that cluster across all of `src/compiler` returns **zero** hits
+  (exit 1). `30.types/__init__.spl` does not reference `associated_types` at
+  all, and nothing imports `compiler.types.*` as a wildcard/barrel that
+  would pull it in transitively.
+- The cluster carries its own `fn main()` (`associated_types_tests_resolve.spl:314`)
+  — it is a standalone demo/test script runnable only by direct invocation
+  (`bin/simple run src/compiler/30.types/associated_types_tests_resolve.spl`),
+  never through the compiler's own module graph. It also lives under
+  `src/compiler/30.types/`, not `test/`, so it is outside the directory tree
+  the default `bin/simple test` spec-discovery walks, and its test functions
+  are plain `fn test_*()` (not modern-SSpec `it`/`describe` blocks), so
+  nothing globs them in either.
+
+**Verdict: confirmed-safe (never co-load).** The `30.types` variant of
+`AssocTypeProjection` is orphaned dead code — unreachable from `run`,
+`native-build`, `test`, or `lint`'s default pipeline. Only the
+`25.traits` variant (`HirType?`-typed, the well-formed one) is ever live.
+This is the same shape as the `QuantifierContext`/`ScopeTracker`/
+`MirToLlvm.emit_runtime_declarations` reachability-cleared pairs in §11,
+not a new type-confusion hazard. No rename performed — renaming dead code
+serves no purpose and the task's own guidance is to prefer filing/leaving
+over unnecessary invasive action. Recommend a follow-up cleanup bug (not
+filed as urgent) to either delete the orphaned `30.types/associated_types*`
+cluster or wire it in if it was meant to replace/extend the `25.traits`
+version — as-is it is unreachable duplicate source, which is a maintenance
+hazard (a future edit to the live 25.traits class could be "verified" by a
+developer accidentally running the orphaned cluster's tests and getting a
+false green) even though it is not a runtime type-confusion hazard today.
+No source files edited; no build/rebuild performed.
