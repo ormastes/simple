@@ -286,6 +286,7 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 - [`.claude/skills/lib/spipe_phases.md`](lib/spipe_phases.md) — phase map
 - [`.claude/skills/lib/spipe_diagrams.md`](lib/spipe_diagrams.md) — diagram & concision rules (≤30 lines + ≥1 SDN diagram)
 - [`.claude/skills/lib/spipe_ui.md`](lib/spipe_ui.md) — **UI skill**: the 3 main GUI check apps + framebuffer capture/verify & backend-parity gates
+- [`.claude/skills/lib/spipe_notebook.md`](lib/spipe_notebook.md) — **Notebook skill**: Jupyter/Codex session testing, SKIP-clean lane gating, magics and lifecycle specs
 - [`doc/07_guide/app/spipe/mission_critical_robust_sw.md`](../../doc/07_guide/app/spipe/mission_critical_robust_sw.md) — flight-level / mission-critical robust-software gate contract
 - [`doc/07_guide/infra/sspec_scenario_manual.md`](../../doc/07_guide/infra/sspec_scenario_manual.md) — SSpec scenario manual, capture, inline/previous scenario, and environmental-test guidance
 - [`doc/07_guide/platform/simpleos/qemu_system_tests.md`](../../doc/07_guide/platform/simpleos/qemu_system_tests.md) — **System tests over QEMU**: per-arch live-boot SSpec specs (`test/03_system/os/qemu/`), `qemu_systest_contract.spl` descriptors, pass/missing-media/boot-fail classification (fail-closed, never `skip()`), and `scripts/check/qemu-storage-audit.shs`
@@ -810,7 +811,7 @@ Lane-gated specs use the composite spec grammar verbatim (`test_executor_composi
 reuse probing wording (skip: / blocked:) with the test runner. Test tiers:
 - `test/01_unit/lib/notebook/` — unit tests for session lifecycle, cell-delta
   execution, magics parsing, and lane locks
-- `test/03_system/jupyter/` — system specs for live Jupyter sessions
+- `test/03_system/tools/jupyter/` — system specs for live Jupyter sessions
 
 Write SKIP-clean specs: lanes must gracefully skip when hardware is absent
 (no host GPU, no QEMU boot). Link `doc/00_llm_process/feature_expert/notebook_lanes/skill.md`

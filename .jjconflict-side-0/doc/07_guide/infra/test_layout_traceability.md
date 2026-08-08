@@ -17,6 +17,7 @@ All executable tests should live under one of these top-level buckets:
 | `test/01_unit/` | Single module, function, parser, model, or command behavior. |
 | `test/02_integration/` | Cross-module workflows that still run inside the normal host test runner. |
 | `test/03_system/feature/` | User-visible language, app, browser, compatibility, or product feature behavior. |
+| `test/03_system/tools/jupyter/` | Jupyter notebook execution, kernel session manager, lane probing, and interrupt contract (SKIP-clean without QEMU/GPU). |
 | `test/03_system/` | End-to-end, QEMU, hardware-gated, process, OS, or multi-component workflows. |
 | `test/shared/` | Import-free cross-platform specs marked `# @platform: all`. |
 
@@ -70,11 +71,17 @@ screenshots.
 ## Placement Rules
 
 - Put direct source-module coverage under `test/01_unit/<source-area>/...`.
+  - Notebook lane specs (unit tests for `session_manager`, `lane_locks`, magics
+    parsing) go in `test/01_unit/lib/notebook/...`.
 - Put app or library workflows under `test/02_integration/<area>/...` when they
   exercise multiple modules but do not require a full system environment.
+  - Notebook executor integration specs (`remote_exec`, `lsp_bridge`,
+    `cuda_exec`, `vulkan_exec`) go in `test/02_integration/app/tools/notebook/...`.
 - Put compatibility and feature acceptance coverage under `test/03_system/feature/...`.
 - Put QEMU, FPGA, OS boot, disk-image, process, and hardware-gated checks under
   `test/03_system/...`.
+  - Notebook kernel session manager, Jupyter protocol completeness, and remote
+    lane integration specs go in `test/03_system/tools/jupyter/...`.
 - Put reusable helper modules, harness fragments, and scripts under
   `test/fixtures/...`.
 - Keep `test/shared/` import-free except for built-in BDD helpers such as

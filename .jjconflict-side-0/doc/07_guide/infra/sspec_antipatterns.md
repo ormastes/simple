@@ -182,6 +182,107 @@ it "operator signs in with valid credentials":
     expect(session.status).to_equal("authenticated")
 ```
 
+## 13. Asserting cross-lane state in `%%mode` cells
+
+A `%%mode` cell runs on a single lane in isolation. Cross-lane state sharing is
+**not provided** by design (see `doc/05_design/app/tools/notebook_lanes_architecture.md`
+§3). Asserting that state from a previous lane persists into the `%%mode` cell
+fails silently because the cell cannot see the other lane's session.
+
+```simple
+# BAD — cross-lane state assertion
+it "CUDA and Vulkan lanes share memory":
+    step("Initialize state on CUDA lane")
+    cuda_executor.execute_cell("shared_val = 42")
+    
+    step("Switch to Vulkan and read shared state")
+    # @capture
+    vulkan_result = vulkan_executor.execute_cell("%%mode interpreter(remote(vulkan(...))) \n shared_val")
+    # This assertion fails silently: Vulkan sees only its own session state, not CUDA's
+    expect(vulkan_result.output).to_contain("42")
+    
+# GOOD — test per-lane state and arena persistence, not cross-lane sharing
+it "CUDA lane maintains state across cells":
+    step("Initialize state on CUDA lane")
+    cuda_executor.execute_cell("shared_val = 42")
+    
+    step("Verify state persists in the same lane")
+    result = cuda_executor.execute_cell("shared_val")
+    expect(result.output).to_contain("42")
+
+# GOOD — if testing inter-lane communication, use explicit mechanism
+it "lanes exchange state through arena memory":
+    step("Write to arena from CUDA")
+    cuda_executor.execute_cell("arena.write_i64(0, 42)")
+    
+    step("Read from arena via Vulkan")
+    vulkan_result = vulkan_executor.execute_cell("arena.read_i64(0)")
+    expect(vulkan_result.output).to_contain("42")
+```
+
+## 14. Hard-failing when a lane is absent instead of SKIP-clean
+
+A lane may be unavailable on a host (no GPU, QEMU not installed, cross-platform
+incompatibility). Specs that require a lane must **always** probe first and exit
+cleanly with skip status when the lane is not available — they must never fail
+the build or test run.
+
+```simple
+# BAD — unconditional lane execution, fails when hardware absent
+it "CUDA kernel compiles":
+    # No probe; this fails hard when no GPU is present
+    val executor = CudaExecutor.start(opts)
+    executor.execute_cell("kernel_code()")
+
+# GOOD — probe and skip cleanly when absent
+it "CUDA kernel compiles":
+    val status = CudaExecutor.probe()
+    case status:
+        when "available":
+            step("Verify CUDA kernel compiles and runs")
+            val executor = CudaExecutor.start(opts)
+            executor.execute_cell("kernel_code()")
+        when "skip: <reason>":
+            step("CUDA lane unavailable on this host ({reason}), skipping")
+        when "blocked: <reason>":
+            step("CUDA lane temporarily blocked ({reason}), skipping")
+```
+
+## 15. Testing accumulation-model internals instead of the `NotebookExecutor` contract
+
+Notebook specs should assert observable behavior through the public
+`NotebookExecutor` trait, not dig into the accumulation model or session
+manager internals. The trait is the integration boundary; testing its
+implementation details creates brittle specs that break when the executor
+strategy changes.
+
+```simple
+# BAD — testing internal accumulation state
+it "local lane accumulates function state":
+    # This asserts internal notebook._local_accumulation_state, not public behavior
+    expect(notebook._local_accumulation_state.symbol_table.len()).to_equal(1)
+    notebook._local_accumulation_state.add_symbol("x", 42)
+    expect(notebook._local_accumulation_state.symbol_table.len()).to_equal(2)
+
+# GOOD — test the contract: state persists across executor cells
+it "local lane maintains state across cells":
+    step("Define a variable in the first cell")
+    result1 = executor.execute_cell("x = 42")
+    expect(result1.status).to_equal("completed")
+    
+    step("Read the variable in the second cell")
+    result2 = executor.execute_cell("x")
+    expect(result2.output).to_contain("42")
+    
+    step("Modify the variable in the third cell")
+    result3 = executor.execute_cell("x = x + 1")
+    expect(result3.status).to_equal("completed")
+    
+    step("Verify the modified value persists")
+    result4 = executor.execute_cell("x")
+    expect(result4.output).to_contain("43")
+```
+
 ## Modern SSpec checklist
 
 Confirm every item; `spipe-docgen` must report `0 stubs` and read cleanly.

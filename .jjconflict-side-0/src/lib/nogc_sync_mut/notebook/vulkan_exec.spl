@@ -13,32 +13,30 @@
 #   - session (device/pipeline/arena, created once): `VulkanLaneSession.init`
 #     with the checked-in `svmg_vulkan_kernel.spv` artifact — identical to
 #     what `VulkanVmExecutor.init` does internally.
-#   - per-cell dispatch: NOT `VulkanVmExecutor.run_source` — that call builds
-#     a freshly zeroed 128 KiB arena on every invocation
-#     (`build_svmg_arena`'s `_zero_bytes(ARENA_TOTAL_SIZE)`), which is correct
-#     for its own stateless one-shot conformance-vector contract but
-#     incompatible with design §4.5's "Arena DATA persists across dispatches"
-#     requirement. Filed:
+#   - per-cell dispatch: `VulkanVmExecutor.run_source_persisting_data`
+#     (added to `vulkan_vm_executor.spl` to fix, at the root,
 #     doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md
-#     Instead this file composes the same already-exported pure building
-#     blocks `vulkan_vm_executor.spl` itself uses (`svmg_asm`,
-#     `sgp_header_new`/`encode_sgp_header`, `VulkanLaneSession` directly) and
-#     keeps its own `last_arena: [u8]` copy across `execute_cell()` calls: each
-#     cell overlays a freshly assembled header+code onto a COPY of the
-#     previous readback (not a freshly zeroed buffer) — same self-modifying-
+#     -- `run_source`'s own fresh-every-call `build_svmg_arena` is unchanged
+#     and remains correct for its stateless one-shot conformance-vector
+#     contract). This file keeps its own `last_arena: [u8]` copy across
+#     `execute_cell()` calls and passes it as `prior_arena` on each call; the
+#     executor overlays the freshly assembled header+code onto a COPY of that
+#     prior readback (not a freshly zeroed buffer) -- same self-modifying-
 #     code semantics `build_svmg_arena` already has for header/code, but the
 #     DATA region beyond `data_off` (and anything the previous run wrote via
-#     STORE8/STORE32) survives into the next dispatch. Only the transient,
-#     per-run output channels (RAM sentinel word, REG block, LOG head/cap,
-#     RECORD ring) are reset before each dispatch, so a cell's `CellResult`
-#     reflects only that cell's own dispatch, not a cumulative log across
-#     the whole session. The REG block (CMD/ARG0/ARG1/STATUS/RESULT/SEQ_ID/
-#     TRIGGER) reset is defensive hygiene for the *separate* A2 interactive-
-#     mailbox register file this "buffered mailbox only" design does not use
-#     (confirmed: `src/lib/common/svmg/ref_vm.spl`'s per-record `seq` field
-#     is a plain VM-instance counter that starts at 0 and is never read from
-#     or written to that arena region at all) — it does not affect
-#     `record.seq` semantics one way or the other.
+#     STORE8/STORE32) survives into the next dispatch. The executor also
+#     resets the transient, per-run output channels (RAM sentinel word, REG
+#     block, LOG head/cap, RECORD ring) before each dispatch, so a cell's
+#     `CellResult` reflects only that cell's own dispatch, not a cumulative
+#     log across the whole session. The REG block (CMD/ARG0/ARG1/STATUS/
+#     RESULT/SEQ_ID/TRIGGER) reset is defensive hygiene for the *separate* A2
+#     interactive-mailbox register file this "buffered mailbox only" design
+#     does not use (confirmed: `src/lib/common/svmg/ref_vm.spl`'s per-record
+#     `seq` field is a plain VM-instance counter that starts at 0 and is
+#     never read from or written to that arena region at all) -- it does not
+#     affect `record.seq` semantics one way or the other. This file no longer
+#     reimplements the header/code overlay or the transient-channel reset
+#     itself.
 #
 # Interrupt / DEVICE_LOST (design §4.5): `VulkanLaneSession.dispatch_once`
 # already folds both a plain fence timeout and an unrecoverable

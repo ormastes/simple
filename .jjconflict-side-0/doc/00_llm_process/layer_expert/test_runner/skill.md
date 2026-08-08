@@ -184,7 +184,7 @@ detail: `.claude/skills/spipe.md` §"Shared working tree: blob-first landing".
   `doc/05_design/runtime/gpu_remote_interpreter_architecture.md`.
 - [notebook_lanes](../../feature_expert/notebook_lanes/skill.md) — notebook
   executors validate mode specs through this layer's extractor helpers and
-  share the planned lane_locks module with the GPU lanes.
+  share lane locks (`src/lib/nogc_sync_mut/notebook/lane_locks.spl`, landed) with the GPU lanes for board/GPU exclusivity.
 - [prevention_mocks](../../feature_expert/prevention_mocks/skill.md) — its
   directory-wide scope is blocked specifically by this layer's lack of a
   per-directory config/fixture hook (`find_config_file`,

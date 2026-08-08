@@ -1,1 +1,0 @@
-../skills/mdsoc-architecture-writing/SKILL.md

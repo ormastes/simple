@@ -684,11 +684,12 @@ simple test --prune-runs=100
 
 Tests are classified by platform compatibility:
 
-| Tier | Tag | Directory | Runs On |
-|------|-----|-----------|---------|
-| **Shared/Core** | `# @platform: all` | `test/shared/` | Host + Baremetal |
-| **Host-only** | *(no tag)* | `test/01_unit/`, `test/02_integration/` | Host only |
-| **Baremetal-only** | `# @platform: baremetal` | `test/baremetal/` | Baremetal only |
+| Tier | Tag | Directory | Runs On | Skip Condition |
+|------|-----|-----------|---------|---|
+| **Shared/Core** | `# @platform: all` | `test/shared/` | Host + Baremetal | — |
+| **Host-only** | *(no tag)* | `test/01_unit/`, `test/02_integration/` | Host only | — |
+| **Notebook lanes** | `# @notebook_lane: cuda\|vulkan\|remote` | `test/01_unit/lib/notebook/`, `test/02_integration/app/tools/notebook/`, `test/03_system/tools/jupyter/` | Host (SKIP-clean without lane) | Lane unavailable or blocked |
+| **Baremetal-only** | `# @platform: baremetal` | `test/baremetal/` | Baremetal only | — |
 
 ### Shared Test Requirements
 

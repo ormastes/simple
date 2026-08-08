@@ -31,8 +31,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result,
-    simple_web_layout_render_html_software_pixels,
-    simple_web_layout_render_html_software_pixels_tile_lane
+    simple_web_layout_render_html_software_pixels
 }
 
 # --- fixtures for the `paint`/`_html_draw_ir_commands` DOM-tree-walking
@@ -388,50 +387,3 @@ describe "_text_decoration_line_text":
         st.text_decoration_overline = true
         st.text_decoration_line_through = true
         assert_equal(_text_decoration_line_text(st), "underline overline line-through")
-
-# --- `paint_tiled`'s `widget_mode` early-return branch (paint_layout.spl
-# ~1320: `if widget_mode: return paint(...)`) -- 0-covered by every existing
-# spec. `paint_tiled` is called from exactly two sites
-# (simple_web_html_layout_renderer.spl): the production render entry guards
-# the call with `and not widget_mode`, so widget_mode is NEVER true there;
-# only `simple_web_layout_render_html_software_pixels_tile_lane` (the
-# tile-lane test/bench entry) passes widget_mode through unconditionally.
-# Every existing caller of that entry (tile_paint_parity_spec.spl,
-# simple_web_html_layout_renderer_coverage_spec.spl's tile-lane-parity
-# example) uses plain non-widget-chrome fixtures, so the branch was never
-# taken from any reachable path until this example.
-fn _pl_tiled_widget_doc() -> text:
-    """No `<style>` tag anywhere and the literal class name `widget-panel`
-    present -- the only combination `simple_web_layout_uses_legacy_widget_chrome`
-    accepts. Passed through `simple_web_layout_render_html_software_pixels_tile_lane`
-    with tiled=true, this forces `paint_tiled`'s widget_mode branch, which
-    short-circuits straight to the classic `paint()` and never builds a
-    clip cache, tile grid, or survivor set."""
-    "<html><body><div class=\"widget-panel wp\">x</div></body></html>"
-
-describe "paint_tiled: widget_mode early-return branch":
-
-    it "routes a legacy-widget-chrome document straight to the classic painter (tiled == classic)":
-        val html = _pl_tiled_widget_doc()
-        val tiled = simple_web_layout_render_html_software_pixels_tile_lane(
-            html, 32, 24, 0, 24, true)
-        val classic = simple_web_layout_render_html_software_pixels_tile_lane(
-            html, 32, 24, 0, 24, false)
-        # widget_mode short-circuits paint_tiled to `paint(...)` unconditionally,
-        # so the tiled and classic lanes must be byte-identical -- any tile
-        # culling/survivor-set involvement would risk a divergence here since
-        # the widget-chrome background base color differs from the normal
-        # canvas background path.
-        assert_equal(tiled.len(), 768)
-        assert_equal(classic.len(), 768)
-        assert_equal(tiled, classic)
-        # The top-left pixel falls inside the widget-panel div's own fallback
-        # fill (fb_rect's widget-panel branch in paint_layout.spl, the same
-        # 0-covered-before-round-2 fallback closed by
-        # simple_web_html_layout_renderer_coverage_spec.spl's
-        # `_widget_panel_button_doc`), not the plain-page white background --
-        # confirming widget_mode actually routed through the widget-chrome
-        # paint path rather than silently reading false. Measured via this
-        # same entry point (not the argb(245,245,245) canvas base, since the
-        # unstyled div covers the whole 32x24 frame here).
-        assert_equal(tiled[0], 0xFF0066CCu32)

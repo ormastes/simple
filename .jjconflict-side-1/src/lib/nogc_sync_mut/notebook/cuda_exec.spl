@@ -18,29 +18,23 @@
 #     design §4.4 ("Per-launch (default when resident is refused/watchdog
 #     device)"), this executor falls back to per-launch for the rest of the
 #     session rather than failing the session outright.
-#   - cell dispatch: `CudaVmExecutor.session` (the live `CudaLaneSession`),
-#     `build_svmg_arena`/`read_sentinel`/`read_log`/`read_records`
-#     (B3, exported plain fns) and `svmg_asm` (D1) — the SAME upload/
-#     launch/sync/drain sequence `CudaVmExecutor.run_source` uses, with one
-#     addition documented below.
+#   - cell dispatch: `CudaVmExecutor.run_source_persisting_data` (B3, added to
+#     fix the arena-persistence bug documented below) — this file no longer
+#     reimplements the upload/launch/sync/drain sequence itself.
 #
-# ARENA-PERSISTENCE GAP (discovered here, not routed around — filed):
-# `CudaVmExecutor.run_source` (and therefore `ResidentSession.run_program`,
-# which calls it internally) rebuilds the WHOLE arena from a zeroed buffer on
-# every call (`build_svmg_arena` -> `zero_bytes(ARENA_TOTAL_SIZE)`), so a
-# naive per-cell call to either loses every byte a previous cell's program
-# wrote into the DATA region (SVM-G globals via STORE32/STORE8) or into the
-# LOG/RECORD rings — directly contradicting design §4.4's "state persists via
-# the arena" / "VM globals in the DATA region carry state between cells".
-# Neither `run_program_with_persistence` below reaches around
-# `CudaLaneSession`'s device calls: it only adds a host-side byte splice
-# between `build_svmg_arena` and `session.arena_write`, copying the PREVIOUS
-# cell's output arena into the freshly-built one at the same LOGICAL
-# DATA-region address (`SGP_HEADER_SIZE + code.len()`, which shifts release
-# to release as code length changes — the splice tracks that shift instead
-# of assuming a fixed byte offset) and verbatim for the fixed-offset LOG/
-# RECORD ring region beyond `ARENA_DATA_SIZE`. See
-# doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md.
+# ARENA-PERSISTENCE (fixed at the root — was a gap, not routed around):
+# `CudaVmExecutor.run_source_persisting_data` (added to
+# `cuda_vm_executor.spl` to fix
+# doc/08_tracking/bug/cuda_resident_session_run_program_discards_arena_data_region_state_2026-08-08.md)
+# now owns the host-side splice `run_program_with_persistence` below used to
+# implement itself: it carries the PREVIOUS cell's output arena's DATA-region
+# bytes (at the same LOGICAL address, `SGP_HEADER_SIZE + code.len()`, which
+# shifts release to release as code length changes) and LOG/RECORD ring
+# region forward into each new call, so a naive per-cell call no longer loses
+# state — satisfying design §4.4's "state persists via the arena" / "VM
+# globals in the DATA region carry state between cells". This file now only
+# tracks `last_arena`/`last_data_off` across cells and forwards them to the
+# executor; it no longer reimplements the upload/launch/sync/drain sequence.
 #
 # `jit(remote(cuda(...)))` (design §4.4 "each cell body must be a complete
 # kernel program") needs a per-cell arbitrary-source Simple->PTX compile
@@ -51,19 +45,14 @@
 # no-op'ing. See
 # doc/08_tracking/bug/notebook_cuda_exec_jit_lane_not_implemented_2026-08-08.md.
 
-extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
-
 use std.notebook.types.{LaneStatus, CellResult, DisplayItem, SessionOpts, cell_result_ok, cell_result_error}
 use std.notebook.executor.{NotebookExecutor, NotebookExecutorFactory}
 use std.test_runner.test_executor_composite_parse.{extract_base_runtime, extract_gpu_submode}
-use std.common.svmg.assembler.{svmg_asm}
-use std.common.svmg.sgp.{SGP_HEADER_SIZE}
-use std.common.svmg.mailbox_const.{ARENA_DATA_SIZE, ARENA_TOTAL_SIZE, SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT}
+use std.common.svmg.mailbox_const.{ARENA_TOTAL_SIZE, SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.sffi.io.{file_read_bytes}
-use std.gc_async_mut.gpu_lane.cuda_vm_executor.{CudaVmExecutor, SvmgRunOutcome, build_svmg_arena, read_sentinel, read_log, read_records, step_budget_from_env}
-use std.gc_async_mut.gpu_lane.cuda_lane_session.{lane_scratch_alloc, lane_scratch_free}
+use std.gc_async_mut.gpu_lane.cuda_vm_executor.{CudaVmExecutor, SvmgRunOutcome, step_budget_from_env}
 use std.gc_async_mut.gpu_lane.cuda_resident_session.{resident_refusal_gate, unknown_watchdog_attr}
 
 # Checked-in device kernel artifact (B3's `svmg_interpret` PTX, the same one
@@ -129,63 +118,12 @@ class CudaExec:
     # ------------------------------------------------------------------
 
     me run_program_with_persistence(source: text, entry_pc: i64) -> SvmgRunOutcome:
-        val code = svmg_asm(source)
-        var arena = build_svmg_arena(code, step_budget_from_env(), entry_pc)
-        val data_off = SGP_HEADER_SIZE + code.len()
-
-        if self.last_arena.len() == ARENA_TOTAL_SIZE:
-            # Logical DATA-region bytes (globals a program STORE32/STORE8'd)
-            # move with data_off as code length changes cell to cell; copy
-            # by logical offset, not raw byte offset, so a shorter/longer
-            # cell body doesn't corrupt or lose prior globals.
-            val copy_len = ARENA_DATA_SIZE - (if data_off > self.last_data_off: data_off else: self.last_data_off)
-            var k = 0
-            while k < copy_len:
-                arena[data_off + k] = self.last_arena[self.last_data_off + k]
-                k = k + 1
-            # LOG/RECORD ring region lives at FIXED absolute offsets
-            # (>= ARENA_DATA_SIZE, see mailbox_const) -- carried forward
-            # verbatim so a program's SYS_PUTC/SYS_RESULT output accumulates
-            # across cells instead of being wiped by the next rebuild.
-            var j = ARENA_DATA_SIZE
-            while j < ARENA_TOTAL_SIZE:
-                arena[j] = self.last_arena[j]
-                j = j + 1
-
-        self.last_data_off = data_off
-
-        if not self.executor.session.arena_write(arena):
-            return SvmgRunOutcome(ok: false, error: self.executor.session.last_error,
-                sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
-
-        val value_ptr = lane_scratch_alloc(8)
-        val args_ptr = lane_scratch_alloc(8)
-        rt_ptr_write_i64(value_ptr, 0, self.executor.session.arena_ptr)
-        rt_ptr_write_i64(args_ptr, 0, value_ptr)
-        val launch_err = self.executor.session.launch_once(1, 1, args_ptr)
-        lane_scratch_free(value_ptr)
-        lane_scratch_free(args_ptr)
-        if launch_err != "":
-            return SvmgRunOutcome(ok: false, error: launch_err,
-                sentinel: self.executor.session.last_dispatch_sentinel,
-                trapped: false, timed_out: launch_err == "cuda-lane-device-timeout-sentinel",
-                exit_code: 0, log_text: "", records: [])
-
-        val out_arena = self.executor.session.arena_read(ARENA_TOTAL_SIZE)
-        if out_arena.len() == 0:
-            return SvmgRunOutcome(ok: false, error: self.executor.session.last_error,
-                sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
-
-        self.last_arena = out_arena
-        val sentinel = read_sentinel(out_arena)
-        val (trapped, timed_out, exit_code) = cuda_exec_decode_sentinel(sentinel)
-        SvmgRunOutcome(
-            ok: true, error: "", sentinel: sentinel,
-            trapped: trapped, timed_out: timed_out, exit_code: exit_code,
-            log_text: read_log(out_arena),
-            records: read_records(out_arena, 64))
+        val outcome = self.executor.run_source_persisting_data(
+            source, step_budget_from_env(), entry_pc, self.last_arena, self.last_data_off)
+        if outcome.out_arena.len() == ARENA_TOTAL_SIZE:
+            self.last_arena = outcome.out_arena
+            self.last_data_off = outcome.data_off
+        outcome
 
 impl NotebookExecutor for CudaExec:
     fn mode_spec() -> text:

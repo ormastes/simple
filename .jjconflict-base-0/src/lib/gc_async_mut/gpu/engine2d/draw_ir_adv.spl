@@ -310,6 +310,42 @@ fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
             return prop_value
     ""
 
+struct Engine2dDrawIrLinearStroke:
+    valid: bool
+    color: u32
+    points: [DrawIrPoint]
+
+fn _engine2d_draw_ir_linear_stroke(command: DrawIrCommand, offset_x: i32, offset_y: i32) -> Engine2dDrawIrLinearStroke:
+    var points: [DrawIrPoint] = command.points
+    if command.kind == DRAW_IR_COMMAND_EDGE:
+        if val edge = command.edge:
+            if edge.routing != DRAW_IR_EDGE_STRAIGHT:
+                return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+            points = edge.points
+        else:
+            return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+    if points.len() < 2:
+        return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+    val stroke_text = _engine2d_draw_ir_style_value(command.computed_style, "stroke-color")
+    val color_text = if stroke_text != "": stroke_text else: _engine2d_draw_ir_style_value(command.computed_style, "color")
+    val color_i64 = _engine2d_draw_ir_nth_int(color_text, 0, -1)
+    if color_i64 < 0 or color_i64 > 4294967295:
+        return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+    val color = color_i64 as u32
+    if ((color >> 24) & 0xFFu32) != 255u32:
+        return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+    val width_text = _engine2d_draw_ir_style_value(command.computed_style, "stroke-width")
+    if width_text != "" and _engine2d_draw_ir_nth_int(width_text, 0, -1) != 1:
+        return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+    var shifted: [DrawIrPoint] = []
+    for point in points:
+        val sx = (point.x as i64) + (offset_x as i64)
+        val sy = (point.y as i64) + (offset_y as i64)
+        if sx < -2147483648 or sx > 2147483647 or sy < -2147483648 or sy > 2147483647:
+            return Engine2dDrawIrLinearStroke(valid: false, color: 0u32, points: [])
+        shifted.push(DrawIrPoint(x: sx as i32, y: sy as i32))
+    Engine2dDrawIrLinearStroke(valid: true, color: color, points: shifted)
+
 # GAP-2: how many N-stop gradient stops (if any) `paint_layout.spl` encoded
 # for this style, via the "background-gradient-stop-count" prop. 0 means no
 # N-stop gradient was parsed at CSS-apply time and the legacy 2-stop
@@ -1475,6 +1511,19 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             else:
                 skipped = skipped + 1
                 unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+        elif command_kind == DRAW_IR_COMMAND_EDGE or command_kind == DRAW_IR_COMMAND_PATH:
+            val stroke = _engine2d_draw_ir_linear_stroke(command, offset_x, offset_y)
+            if not stroke.valid:
+                skipped = skipped + 1
+                unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+            else:
+                var segment = 0
+                while segment < stroke.points.len() - 1:
+                    val first = stroke.points[segment]
+                    val second = stroke.points[segment + 1]
+                    eng.draw_line(first.x, first.y, second.x, second.y, stroke.color, 1)
+                    segment = segment + 1
+                rendered = rendered + 1
         else:
             skipped = skipped + 1
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
