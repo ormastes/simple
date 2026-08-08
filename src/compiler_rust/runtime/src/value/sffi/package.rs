@@ -1,6 +1,8 @@
 //! Package Management SFFI
 //! Provides SFFI functions for SPK package operations, checksums, and file operations
 
+use crate::value::collections::rt_string_new;
+use crate::value::RuntimeValue;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -34,24 +36,40 @@ unsafe fn text_arg<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
     std::str::from_utf8(std::slice::from_raw_parts(ptr, len)).ok()
 }
 
-/// Calculate SHA256 checksum of a file
+/// Calculate SHA256 checksum of a file, returning a Simple `text`.
+///
+/// This returns a runtime-owned `RuntimeValue` string, NOT a `*mut c_char`.
+/// The previous `*mut c_char` return is why this one member of the family had
+/// to be left unregistered when the rest was fixed: an arg-index table can
+/// normalise ARGUMENTS, but codegen has no lowering that turns a raw C pointer
+/// back into a tagged Simple `text`, so registering the old signature in
+/// RUNTIME_FUNCS would have handed the raw pointer straight to Simple code as
+/// if it were a value. The repo's sound convention for a text RESULT — the one
+/// every `rt_file_read_text`-class entry point already uses — is to return a
+/// `RuntimeValue` built by the runtime's own string allocator.
+///
+/// This also dissolves, rather than manages, the ownership question: the result
+/// is owned by the runtime like any other Simple string, so
+/// `rt_package_free_string` must never be applied to it. With this change that
+/// symbol has no producer left anywhere in the tree, so it can neither leak nor
+/// double-free.
 ///
 /// # Safety
 /// - `file_path`/`file_path_len` must describe a valid UTF-8 byte range
-/// - Returns a heap-allocated C string that must be freed by the caller
+/// Returns `RuntimeValue::NIL` when the path is undecodable or hashing fails.
 #[no_mangle]
-pub unsafe extern "C" fn rt_package_sha256(file_path: *const u8, file_path_len: usize) -> *mut c_char {
+pub unsafe extern "C" fn rt_package_sha256(file_path: *const u8, file_path_len: usize) -> RuntimeValue {
     let path_str = match text_arg(file_path, file_path_len) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => return RuntimeValue::NIL,
     };
 
     match calculate_sha256(path_str) {
         Ok(hash) => {
             let result = format!("sha256:{}", hash);
-            CString::new(result).unwrap().into_raw()
+            rt_string_new(result.as_ptr(), result.len() as u64)
         }
-        Err(_) => std::ptr::null_mut(),
+        Err(_) => RuntimeValue::NIL,
     }
 }
 

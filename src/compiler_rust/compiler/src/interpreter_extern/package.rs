@@ -14,7 +14,9 @@ use std::os::raw::c_char;
 // JIT had no sound way to pass one and the whole family failed closed. See
 // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
 extern "C" {
-    fn rt_package_sha256(file_path: *const u8, file_path_len: usize) -> *mut c_char;
+    // Returns a runtime-owned Simple `text` (RuntimeValue), not a C string.
+    // See runtime/src/value/sffi/package.rs::rt_package_sha256.
+    fn rt_package_sha256(file_path: *const u8, file_path_len: usize) -> simple_runtime::value::RuntimeValue;
     fn rt_package_create_tarball(
         source_dir: *const u8,
         source_dir_len: usize,
@@ -46,6 +48,11 @@ extern "C" {
     fn rt_package_exists(path: *const u8, path_len: usize) -> i32;
     fn rt_package_is_dir(path: *const u8, path_len: usize) -> i32;
     fn rt_package_free_string(ptr: *mut c_char);
+    // Runtime string accessors, used to read the RuntimeValue text that
+    // rt_package_sha256 now returns. Declared as C symbols rather than via
+    // `simple_runtime::value::collections::*` because that module is private.
+    fn rt_string_data(value: simple_runtime::value::RuntimeValue) -> *const u8;
+    fn rt_string_len(value: simple_runtime::value::RuntimeValue) -> u64;
 }
 
 /// Borrow a Simple `text` Value as a `&str` for the (ptr, len) runtime ABI.
@@ -78,14 +85,22 @@ pub fn sha256(args: &[Value]) -> Result<Value, CompileError> {
     let path = value_to_text(&args[0])?;
 
     unsafe {
-        let result_ptr = rt_package_sha256(path.as_ptr(), path.len());
-        if result_ptr.is_null() {
+        let rv = rt_package_sha256(path.as_ptr(), path.len());
+        if rv == simple_runtime::value::RuntimeValue::NIL {
             return Err(CompileError::semantic("Failed to calculate checksum".to_string()));
         }
 
-        let c_str = std::ffi::CStr::from_ptr(result_ptr);
-        let result = c_str.to_string_lossy().to_string();
-        rt_package_free_string(result_ptr);
+        // The result is a runtime-owned Simple string: read it through the
+        // runtime's own (data, len) accessors. There is deliberately no free
+        // call here — the runtime owns the allocation (see the rt_package_sha256
+        // doc comment), so freeing it would be a double-free.
+        let data = rt_string_data(rv);
+        let len = rt_string_len(rv) as usize;
+        if data.is_null() {
+            return Err(CompileError::semantic("Failed to calculate checksum".to_string()));
+        }
+        let bytes = std::slice::from_raw_parts(data, len);
+        let result = String::from_utf8_lossy(bytes).to_string();
 
         Ok(Value::text(result))
     }

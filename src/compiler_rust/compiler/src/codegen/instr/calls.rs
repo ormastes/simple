@@ -2554,7 +2554,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // those the `runtime_funcs` branch is never taken and these entries
         // would be dead. See
         // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
-        "rt_package_exists"
+        // rt_package_sha256 joined the family once its `*mut c_char` RETURN was
+        // changed to a RuntimeValue text (an arg table cannot fix a return type).
+        "rt_package_sha256"
+        | "rt_package_exists"
         | "rt_package_is_dir"
         | "rt_package_file_size"
         | "rt_package_mkdir_all"

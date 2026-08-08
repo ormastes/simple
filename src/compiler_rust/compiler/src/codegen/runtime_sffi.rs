@@ -1809,11 +1809,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // text_arg_indices() entries in codegen/instr/calls.rs and
     // doc/08_tracking/bug/rt_package_chmod_family_fails_from_jit_key_left_world_readable_2026-08-08.md
     //
-    // rt_package_sha256 is deliberately NOT listed: it returns `*mut c_char`,
-    // a raw C string that this table cannot describe to the Simple value
-    // domain. Its argument ABI is normalized with the rest of the family, but
-    // its return side remains unfixed and is tracked in the bug doc above.
-    // rt_package_free_string takes a raw pointer (not text) and needs nothing.
+    // rt_package_sha256 IS listed now. It used to be excluded because its
+    // `*mut c_char` RETURN cannot be repaired by an argument-index table --
+    // codegen has no lowering from a raw C pointer back to a Simple `text`.
+    // The runtime function now returns a RuntimeValue text instead (see
+    // runtime/src/value/sffi/package.rs), which is the same convention every
+    // rt_file_read_text-class entry point uses, so a plain &[I64] result is
+    // correct here.
+    // rt_package_free_string takes a raw pointer (not text) and needs nothing;
+    // after the rt_package_sha256 return-type fix below it has no producer left.
+    RuntimeFuncSpec::new("rt_package_sha256", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
     RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
     RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]), // path_ptr, path_len -> i64
