@@ -18,7 +18,7 @@ use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_por
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
-use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
+use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_webgpu_provider_exports, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
@@ -358,6 +358,32 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
         if not remove_file_if_exists(path):
             return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive temporary cleanup failed")
     Ok((capsule_path, stage_dir))
+
+fn llvm_stage4_build_webgpu_provider(runtime_path: text, target_os_name: text, hosted_cc: text, pid: i64, output_path: text, compiler_stage_dir: text) -> Result<text, text>:
+    """Project the real hosted WebGPU ABI from native-all into a strict provider."""
+    val source_archive = runtime_path + "/libsimple_native_all.a"
+    if not file_exists(source_archive):
+        return Err("Stage4 WebGPU source archive is missing at '" + source_archive + "'")
+    val source_alias = compiler_stage_dir + "/libsimple_stage4_webgpu_source.a"
+    val provider_archive = compiler_stage_dir + "/libsimple_stage4_webgpu.a"
+    if not file_copy(source_archive, source_alias):
+        return Err("Stage4 WebGPU source staging failed")
+    val projection = llvm_stage4_project_selected_archives(
+        ["hosted_webgpu_source"], [source_alias], [0],
+        stage4_webgpu_provider_exports(), target_os_name, hosted_cc, pid,
+        output_path + ".webgpu_provider"
+    )
+    val (projected_archive, projected_dir) = match projection:
+        case Ok(value): value
+        case Err(err):
+            remove_file_if_exists(source_alias)
+            return Err(err)
+    val copied = file_copy(projected_archive, provider_archive)
+    val cleaned = remove_file_if_exists(source_alias) and dir_remove_all(projected_dir)
+    if not copied or not cleaned:
+        remove_file_if_exists(provider_archive)
+        return Err("Stage4 WebGPU provider transaction cleanup failed")
+    Ok(provider_archive)
 
 fn llvm_stage4_cleanup_compiler_backfill_capsule(stage_dir: text, output_path: text, remove_output: bool) -> bool:
     var clean = true
@@ -1300,6 +1326,14 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                     file_delete(bootstrap_support_obj)
                 return Err("Stage4 compiler backfill capsule failed: " + err)
         val compiler_backfill_stage_dir = "{_get_temp_dir()}/simple_stage4_compiler_backfill_{pid}_{output.hash()}"
+        val webgpu_provider_archive = match llvm_stage4_build_webgpu_provider(runtime_path, hosted_os, hosted_cc, pid, output, compiler_backfill_stage_dir):
+            case Ok(path): path
+            case Err(err):
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                if bootstrap_support_obj != "":
+                    file_delete(bootstrap_support_obj)
+                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 hosted WebGPU provider failed: " + err)
         val runtime_native_archive = match llvm_stage4_build_runtime_native_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid):
             case Ok(path): path
             case Err(err):
@@ -1395,8 +1429,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 runtime legacy compatibility failed: " + err)
-        var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
-        var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
+        var candidate_labels = ["compiler_backfill", "hosted_webgpu", "runtime_native", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
+        var candidate_paths = [compiler_backfill_capsule, webgpu_provider_archive, runtime_native_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
         if fork_provider_archive != "":
             candidate_labels = candidate_labels.push("runtime_fork")
             candidate_paths = candidate_paths.push(fork_provider_archive)
