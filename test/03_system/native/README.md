@@ -22,6 +22,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `stage4_cli_util_owner_contract.spl` | Stage4 CLI utility physical cwd/file owners and CSV behavior | — | **30** | **PASS** | facade-only cwd/file imports fail HIR or CSV field handling changes |
 | `stage4_access_cli_type_alias_contract.spl` | Stage4 access CLI semantic alias exports/imports | — | **30** | **PASS** | `AccessOperation`/`AccessOutputMode` remain module-private or lose text behavior |
 | `stage4_easy_fix_types_contract.spl` | Stage4 EasyFix canonical scalars plus static/receiver method ownership | — | **30** | **RED: exit 132** / nil receiver | legacy `Int`/`Bool`, misplaced FixReport methods, or native field corruption fails |
+| `stage4_mem_tracker_parse_contract.spl` | Stage4 memory-tracker file facade and fail-closed dump parsing | — | **30** | SOURCE FIX / execution pending | raw runtime IO ownership resurfaces or malformed IDs/sizes become fabricated zero-valued leaks |
 | `key3_struct_spread_paren.spl` | KEY3 native struct-spread (paren form) | f907796e57e | **103** | PASS | spread base dropped → wrong number |
 | `w2_array_index_rw.spl` | W2 `local_mir_type_of` Option in `lower_array_lit` | e7c445145a7 | **72** | PASS | build-fail `unknown static method ptr on class MirType` |
 | `c5_char_from_code.spl` | C5 integer builtin/owner precedence + Unicode runtime backing | source update | **42** | SOURCE FIX / execution pending | UFCS/custom dispatch, missing symbol, or ASCII-only result |
