@@ -293,6 +293,7 @@ serial_has_pass() {
     [ "$(grep -aEc "^TEST PASSED[[:space:]]*$" "$log")" -eq 1 ] &&
     serial_qemu_execution_valid "$log" "$_serial_qemu_args" &&
     serial_receipts_valid "$log" "$isa" &&
+    { [ "$BACKEND" != vulkan ] || simple2d_vulkan_no_fallback_receipt_valid "$log"; } &&
     render_latency_evidence_valid "$log" "$isa" "$_serial_qemu_args" "$BACKEND" &&
     negotiation_timing_evidence_valid "$log" "$isa" probe "$(negotiation_applicability "$isa" "$_serial_qemu_args")" "$BACKEND" &&
     serial_processing_pair_valid "$log" "$isa" &&
@@ -358,6 +359,41 @@ serial_render_fixture_valid() {
     [ "$(grep -aEc "^HOST_GPU_RENDER_OK isa=$isa backend=$BACKEND .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_DRAW_IR_OK isa=$isa backend=$BACKEND .*[[:space:]]*$" "$log")" -eq 1 ] &&
     [ "$(grep -aEc "^HOST_GPU_FIXTURE_OK isa=$isa backend=$BACKEND generation=[1-9][0-9]* run=[1-9][0-9]* frame=[1-9][0-9]* protocol=$EXPECTED_PROTOCOL_VERSION width=$HOST_GPU_FIXTURE_WIDTH height=$HOST_GPU_FIXTURE_HEIGHT elapsed_us=[1-9][0-9]* handle=[1-9][0-9]* identity=[1-9][0-9]* checksum=$HOST_GPU_FIXTURE_CHECKSUM bg=$HOST_GPU_FIXTURE_BACKGROUND_PIXELS rect=$HOST_GPU_FIXTURE_RECT_PIXELS mismatches=0[[:space:]]*$" "$log")" -eq 1 ]
+}
+
+simple2d_vulkan_source_contract_valid() {
+    session_source=${1:-src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl}
+    backend_source=${2:-src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl}
+    platform_source=${3:-src/app/simpleos_gpu_host/platform_all.spl}
+    probe_source=${4:-examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl}
+    [ -f "$session_source" ] && [ -f "$backend_source" ] &&
+    [ -f "$platform_source" ] && [ -f "$probe_source" ] || return 1
+    for primitive in clear rect_filled rect_outline circle_filled circle_outline line rounded_rect triangle gradient blit
+    do
+        grep -Fq "pipe_$primitive" "$session_source" || return 1
+        grep -Fq "pipe_$primitive" "$backend_source" || return 1
+    done
+    # A descriptor-compatible no-op shader or CPU emulation is not full
+    # primitive coverage and must block strict Linux Vulkan promotion.
+    ! grep -Fq 'compile_spirv(noop_spirv)' "$session_source" || return 1
+    ! grep -Eq 'emu_draw_(line|circle|rounded_rect|gradient|triangle|image)' "$backend_source" || return 1
+    grep -Fq 'vulkan_sffi_runtime_acquire' "$platform_source" || return 1
+    grep -Fq 'vulkan_sffi_runtime_release' "$platform_source" || return 1
+    grep -Fq 'host_gpu_ivshmem_device_receipt_valid' "$probe_source" || return 1
+    grep -Fq 'HOST_GPU_WARM_SAMPLE_COUNT: i64 = 20' "$probe_source" || return 1
+}
+
+simple2d_vulkan_no_fallback_receipt_valid() {
+    log=$1
+    hello_line=$(grep -anE '^HOST_GPU_HELLO_OK .*render_mask=1 ' "$log" | tail -n 1 | cut -d: -f1)
+    [ -n "$hello_line" ] || return 1
+    awk -v hello="$hello_line" '
+        NR >= hello &&
+        (/^HOST_GPU_(RENDER|DRAW_IR|FIXTURE)_(FALLBACK|CPU)/ ||
+         /^HOST_GPU_DAEMON_(RENDER|DRAW_IR)_.*(fallback|software|cpu)/ ||
+         /^HOST_GPU_(RENDER|DRAW_IR|FIXTURE)_OK .*readback_source=(cpu|fallback)/) { bad = 1 }
+        END { exit bad ? 1 : 0 }
+    ' "$log"
 }
 
 serial_receipts_valid() {
@@ -1113,6 +1149,19 @@ self_test_metal_guest_contract() {
     if metal_guest_negotiation_two_hop_available "$fixture_root/missing_helper_hop.spl"; then return 1; fi
     if metal_guest_negotiation_two_hop_available "$fixture_root/misrouted_caller_hop.spl"; then return 1; fi
     echo simpleos_qemu_host_gpu_metal_contract_self_test=pass
+}
+
+self_test_simple2d_vulkan_contract() {
+    # This is intentionally a blocked contract on the current branch: the
+    # source still contains no-op/CPU-emulation primitive paths. The self-test
+    # proves the strict gate notices that gap instead of promoting it.
+    if simple2d_vulkan_source_contract_valid; then
+        echo simple2d_vulkan_strict_contract_self_test=fail
+        return 1
+    fi
+    echo simple2d_vulkan_strict_contract_self_test=pass
+    echo simple2d_vulkan_strict_contract_status=blocked
+    echo simple2d_vulkan_strict_contract_reason=primitive-coverage-or-fallback-gap
 }
 
 core_c_bootstrap_runtime_available() {
@@ -2642,6 +2691,11 @@ if [ "${1:-}" = --self-test-metal-guest-contract ]; then
     self_test_metal_guest_contract
     exit $?
 fi
+if [ "${1:-}" = --self-test-simple2d-vulkan-contract ]; then
+    [ "$#" -eq 1 ] || exit 2
+    self_test_simple2d_vulkan_contract
+    exit $?
+fi
 if [ "${1:-}" = --validate-report ]; then
     [ "$#" -eq 2 ] || exit 2
     validate_report "$2"
@@ -2651,6 +2705,13 @@ if [ "${1:-}" = --preflight ]; then
     [ "$#" -eq 1 ] || exit 2
     preflight
     exit $?
+fi
+
+if [ "$ACTIVE_HOST" = linux ] && ! simple2d_vulkan_source_contract_valid; then
+    echo simpleos_qemu_host_gpu_2d_status=blocked
+    echo simpleos_qemu_host_gpu_2d_reason=primitive-coverage-or-fallback-gap
+    echo simpleos_qemu_host_gpu_2d_evidence_class=source-contract-only
+    exit 2
 fi
 
 cleanup_active_guest() {
