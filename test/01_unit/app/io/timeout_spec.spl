@@ -7,10 +7,13 @@
 # immediately must not make process_run_timeout block past the direct
 # child's own exit.
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{file_read}
 use app.io.process_ops.{process_run_timeout}
 use app.io.time_ops.{current_time_ms}
+use std.common.spec.evidence.untyped_capture.{UntypedCapture, untyped_capture_to_canonical}
+use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec, check_exact}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 
 describe "process_run_timeout":
     it "routes the native-build Unix wrapper through guarded process ownership":
@@ -55,6 +58,14 @@ describe "process_run_timeout":
         val (stdout, stderr, code) = process_run_timeout("echo", ["output test"], 5000)
         expect(code).to_equal(0)
         expect(stdout).to_contain("output")
+
+        step("Verify the real captured stdout through the typed-evidence comparator")
+        val capture = UntypedCapture(label: "echo-output-test-stdout", raw_value: stdout, source_kind: "stdout")
+        val evidence = untyped_capture_to_canonical(capture, "timeout_spec/stdout-capture")
+        val comparison = compare_evidence(evidence, oracle_spec("timeout_spec/stdout-capture", [
+            check_exact("value", "output test\n")
+        ]))
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
 
     it "returns the child's non-zero exit code promptly":
         val (stdout, stderr, code) = process_run_timeout("sh", ["-c", "exit 7"], 5000)
