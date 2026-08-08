@@ -1,7 +1,7 @@
 # Coverage `<entry>` placeholder attribution — two root causes, not one; B collapses into A
 
-Status: root-caused, one fix landed (Node::Impl owner-tagging gap), one fix
-deferred (entry-script top-level owner registration — out of scope this pass).
+Status: root-caused, both fixes landed (Node::Impl owner-tagging gap; entry-script
+`<entry>`-sentinel coverage fallback).
 
 ## Background
 
@@ -114,36 +114,80 @@ removes an inconsistency rather than introducing new behavior, but it is a
 real surface and is covered by the full `cargo test` run before landing (see
 report doc for pass/fail summary).
 
-## Root cause 2 (documented, not fixed this pass): entry-script top-level functions never get an owner at all
+## Root cause 2 (fixed 2026-08-08): entry-script top-level functions are tagged with the literal `"<entry>"` sentinel, not a real path
 
-The entry script (the file passed to `bin/simple run <path>`, e.g. a spec
-file under `test/`) is not evaluated through
-`interpreter_module::module_evaluator::register_definitions` /
-`evaluate_module_exports` — that path is only reached for `use`-imported
-modules (call sites: `interpreter_module/module_loader.rs:1127,1175`). The
-entry script's own top-level `Node::Function` items are registered through a
-different top-level-program path that was not located this pass and never
-calls `record_function_owner`/`tag_function_module_owner`. Consequently
-`function_module_owner()` always returns `None` for a function defined
-directly in the entry file, `CURRENT_EXEC_MODULE` is never set to the entry
-file's own path, and `current_coverage_file()` falls back to `<entry>` for
-every top-level statement and function body belonging to the entry file
-itself — matching the C2/C3 reports' "7/68" and "39/207" `<entry>`-row counts
-(a mix of this cause and root cause 1, since those specs also exercise
-impl-block methods in imported modules).
+**Correction to the original diagnosis below:** the registration site is not
+missing — it was mislocated. The entry script's own top-level `Node::Function`
+items ARE registered, in `evaluate_module_impl()`
+(`src/compiler_rust/compiler/src/interpreter_eval.rs`, the `Node::Function`
+arm, ~line 505 pre-fix). This is the single registration pass
+`bin/simple run`/`-c` actually exercises for the root script (imports are
+already flattened into `items` by then). It reads back a
+`FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute for functions that were flattened
+in from an imported module, and **falls back to the literal string
+`Arc::from("<entry>")`** — not `None` — for functions genuinely defined in the
+entry script itself, inserting that into `FUNCTION_MODULE_OWNER`. This is
+deliberate: it keeps entry-script functions in a distinct tie-break bucket
+from any imported module's same-named functions for `module_global_target`
+and `select_overload`. So `function_module_owner()` does NOT return `None` for
+an entry-script function — it returns `Some("<entry>")`, and calling such a
+function sets `CURRENT_EXEC_MODULE` to `Some("<entry>")` via the existing
+save/restore in `execute_function_body`
+(`interpreter_call/core/function_exec.rs:576-583,642`). `current_coverage_file()`
+then returns that literal string verbatim — the `<entry>` sentinel was always
+reaching coverage through the "owner is known" path, not the "owner is
+`None`" path the original diagnosis (immediately below) assumed.
 
-**Deferred rather than fixed in this pass** because the natural fix (set
-`CURRENT_EXEC_MODULE` to the entry path at program start) changes
-`module_global_target` and `select_overload` behavior for *all* entry-file
-code, not just coverage attribution — a strictly larger blast radius than
-root cause 1, and the actual top-level registration call site was not
-located within this session's scope. A coverage-only fix (a dedicated
-`CURRENT_COVERAGE_MODULE` thread-local, read only by
-`current_coverage_file()`, set/restored beside the existing
-`CURRENT_EXEC_MODULE` save/restore in
-`interpreter_call/core/function_exec.rs:576-583,642`, plus a matching set at
-whatever entry-point owns top-level script execution) is the safer shape but
-needs that entry point identified first. Filed here so it isn't lost.
+Entry-script top-level *statements* (module body code outside any function)
+are the other, `None`, case: they execute before any `execute_function_body`
+call, so `CURRENT_EXEC_MODULE` is genuinely never set for them.
+
+Both cases are matched by the C2/C3 reports' "7/68" and "39/207" `<entry>`-row
+counts (mixed with root cause 1, since those specs also exercise impl-block
+methods in imported modules).
+
+### Fix
+
+Coverage-only, in `current_coverage_file()`
+(`src/compiler_rust/compiler/src/interpreter/coverage_helpers.rs`): when
+`CURRENT_EXEC_MODULE` is `None` **or** equals the literal `"<entry>"` string,
+fall back to `CURRENT_FILE` — a thread-local the driver already sets to the
+entry file's own real path around `evaluate_module`
+(`run_file_interpreted_with_args`, `driver/src/exec_core.rs`) and clears
+after — normalized through the same `normalize_path_key` used for every other
+real-path owner string, so the format matches. Falls through to the `"<entry>"`
+string only when `CURRENT_FILE` is also unset (in-memory `-c` source with no
+backing file).
+
+This does not write `CURRENT_EXEC_MODULE` or `FUNCTION_MODULE_OWNER` at all —
+it only reads them, downstream, for display. `module_global_target`'s
+Legacy/Owned dispatch and `select_overload`'s same-name tie-break both key off
+the literal `"<entry>"` string in `CURRENT_EXEC_MODULE` directly, not off
+`current_coverage_file()`'s return value, so both are byte-for-byte
+unaffected — this was the deferred fix's "safer shape," located and landed.
+
+### Verification
+
+A/B probe (`/tmp/cov_probe_rc2/tiny_spec.spl`, a spec with a module-level
+`compute()` function containing an `if`, run through
+`src/app/test_runner_new/test_runner_single.spl --no-session-daemon
+--sequential` under `SIMPLE_COVERAGE=1`):
+
+- OLD (deployed `bin/simple`, itself currently the Rust seed per the Stage-3
+  self-host blocker): every `lines`/`decisions` row keyed `<entry>`.
+- NEW (`src/compiler_rust/target/release/simple`, this fix): every row keyed
+  to the real temp-file path — zero `<entry>` rows.
+
+Regression: `cargo test --release -p simple-compiler --lib coverage` — 513
+passed, 53 failed, all 53 in `mir::lower::tests::branch_coverage` (pre-existing,
+unrelated to owner-tagging). `cargo test --release -p simple-compiler --lib
+overload` — 1 passed, 0 failed (same as RC1 landing). `... --lib entry` shows
+5 failures, but they are `pipeline::native_project::tests::*` cases guarded by
+a shared `runtime_bundle_env_lock()` mutex unrelated to coverage/interpreter
+owner tagging — one test in that family panics (pre-existing, matches the
+"one native_project test" noted in the RC1 landing) and poisons the mutex for
+the rest of that lock's tests; reproduces identically with `--test-threads=1`,
+so it is not new flakiness introduced by this change.
 
 ## Evidence retained
 

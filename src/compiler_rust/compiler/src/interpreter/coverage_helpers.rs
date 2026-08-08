@@ -61,9 +61,12 @@ pub fn extract_expr_location(_expr: &Expr) -> Option<(String, usize, usize)> {
 /// (`DebugState::should_stop`) consumed the same placeholder and was equally
 /// broken by it.
 ///
-/// `None` (module top-level statements, lambdas with no known owner) maps to
-/// the `"<entry>"` sentinel already used by `FUNCTION_MODULE_OWNER` for the
-/// root script, rather than to a name that could collide with a real file.
+/// `None`, or the literal `"<entry>"` sentinel (module top-level statements,
+/// entry-script-defined functions, lambdas with no known owner), falls back
+/// to the entry script's own real path when one is known (see
+/// `current_coverage_file`), and only to the `"<entry>"` string itself when
+/// no real path is available (e.g. an in-memory `-c` source string with no
+/// backing file).
 fn span_to_location(span: &Span) -> (String, usize, usize) {
     let file = current_coverage_file();
     let line = span.line;
@@ -78,10 +81,45 @@ fn span_to_location(span: &Span) -> (String, usize, usize) {
 /// Shares the same `CURRENT_EXEC_MODULE` thread-local as `span_to_location`
 /// (see its doc comment for why file can't come from `Span` itself and why
 /// pooling every file under one placeholder previously inflated coverage).
+///
+/// `CURRENT_EXEC_MODULE` resolves to something other than a real path for two
+/// very different situations that must not be conflated:
+///   1. Top-level statements of the *entry script itself*, executed directly
+///      at module-evaluation time before any function call — these never run
+///      through `execute_function_body`'s owner-tag save/restore at all, so
+///      `CURRENT_EXEC_MODULE` is simply `None`.
+///   1b. Functions *defined* in the entry script: `evaluate_module_impl`
+///      (interpreter_eval.rs) DOES tag these in `FUNCTION_MODULE_OWNER`, but
+///      deliberately with the literal string `"<entry>"` rather than a real
+///      path — it needs a stable, distinct tie-break bucket for entry-script
+///      functions (see its doc comment), not a coverage-accurate one. Calling
+///      such a function sets `CURRENT_EXEC_MODULE` to `Some("<entry>")`.
+///   2. A function whose `FUNCTION_MODULE_OWNER` lookup came back empty
+///      (e.g. a lambda) — those inherit whatever the *caller's* frame left in
+///      `CURRENT_EXEC_MODULE`, which is a separate, correct mechanism and is
+///      not touched here.
+/// Falling back to `CURRENT_FILE` (set by the driver to the entry file's own
+/// path around `evaluate_module`, e.g. `run_file_interpreted_with_args` in
+/// `driver/src/exec_core.rs`) resolves cases 1 and 1b to a real path instead
+/// of the `<entry>` placeholder. This is coverage-display-only: it reads
+/// `CURRENT_EXEC_MODULE`/`FUNCTION_MODULE_OWNER` but never writes them, so
+/// `module_global_target`'s Legacy/Owned dispatch and `select_overload`'s
+/// same-name tie-break — both of which key off the literal `"<entry>"` owner
+/// string, not off this function's return value — are byte-for-byte
+/// unaffected. `CURRENT_FILE` is unset for in-memory source (`-c`,
+/// `run_source_in_memory_native`), which correctly leaves the final fallback
+/// at `"<entry>"`.
 pub fn current_coverage_file() -> String {
-    crate::interpreter::CURRENT_EXEC_MODULE
-        .with(|cell| cell.borrow().clone())
-        .map(|owner| owner.to_string())
+    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    let needs_entry_fallback = match &owner {
+        None => true,
+        Some(o) => o.as_ref() == "<entry>",
+    };
+    if !needs_entry_fallback {
+        return owner.unwrap().to_string();
+    }
+    crate::interpreter::get_current_file()
+        .map(|p| crate::interpreter::normalize_path_key(&p).to_string_lossy().to_string())
         .unwrap_or_else(|| "<entry>".to_string())
 }
 
