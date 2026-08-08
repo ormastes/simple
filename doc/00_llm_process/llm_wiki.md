@@ -355,6 +355,21 @@ build green. Require the positive marker, `nm` for `T` (not `W`), and a
 - **Development fallback:** direct source/interpreter mode must be explicit and
   is not production evidence.
 
+### CLI/TUI hardening status (bootstrap-gated)
+
+- The typed terminal lifecycle boundary, cached Claude PTY fixture, and plain
+  hidden-command admission coverage are committed source/test changes; their
+  contract is recorded in `doc/05_design/llm_caret_claude_cli_harden.md`.
+- Runtime-required Caret verification is **postponed**, not passed, until a
+  provenance-qualified pure-Simple bootstrap deploys an executable containing
+  the canonical SSpec colon-block parser. The deployment defect is tracked in
+  `doc/08_tracking/bug/self_hosted_sspec_describe_colon_parser_2026-08-08.md`.
+- After bootstrap success, execute the focused runtime unit spec first, then
+  the CLI/default-alias-disabled and plain-hidden scenarios, then the cached
+  offline-Claude PTY scenario; retain the resulting evidence in the task plan
+  at `doc/03_plan/agent_tasks/llm_caret_claude_cli_harden.md` before making a
+  success claim.
+
 ## GLM and Kimi coding agents
 
 - **GLM through Claude Code:** run `bin/glm`; flagship/main and subagents use

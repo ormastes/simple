@@ -577,7 +577,7 @@ Completed statically:
   blank/whitespace input without discarding later commands;
 - `_draw_if_visible` owns row admission for every `_draw_frame` write, with a
   captured five-row terminal fixture;
-- the runtime spec/manual are synchronized at 22 scenarios with zero executed;
+- the runtime spec/manual are synchronized at 20 scenarios with zero executed;
 - the seven PTY scenario labels and frozen steps remain unchanged; the outer
   timeout is 240 seconds for `hidden`/`promptless` and 120 seconds otherwise;
 - piped automatic `/exit` requires byte-exact `> ` stdout, empty stderr, zero
@@ -623,17 +623,17 @@ reasons, and required test cases were frozen by the design commit before the
 lanes started. The merge must preserve unrelated shared-worktree changes and
 must not claim live PTY execution until the qualified cached artifact exists.
 
-Verification note: the focused runtime spec defines 19 top-level `it` blocks
-and the runner reported 19 outcomes, so its count is source-consistent. The
-mirrored manual is nevertheless stale: it reports 22 conceptual scenarios and
-the old primitive lifecycle API. A direct run under the qualified macOS arm64
+Verification note: the focused runtime spec and its manually synchronized
+mirror each define 20 top-level scenarios, including typed terminal lifecycle
+and plain hidden-command admission. This is static documentation alignment,
+not docgen or executable evidence. A direct run under the available macOS arm64
 self-hosted runtime instead fails before all examples: its parser rejects the
 canonical `describe "...":`/`it "...":` SSpec grammar. See
 `doc/08_tracking/bug/self_hosted_sspec_describe_colon_parser_2026-08-08.md`.
-Before an execution claim, repair that parser divergence, record the resolved
-spec path/hash, then regenerate the mirrored manual from the repaired qualified
-runtime. Do not mark this lane executable-PASS until the manual identifies the
-new `begin_tui/end_tui` contract and all assertions pass.
+Before an execution claim, deploy the current parser source, record the
+resolved spec path/hash, then regenerate the mirrored manual from the repaired
+qualified runtime. Do not mark this lane executable-PASS until all assertions
+pass.
 
 ### Next executable CLI-to-TUI proof: offline Claude cached wrapper
 
