@@ -8,14 +8,14 @@ struct ValueStructLayoutWalk:
     node_key: text
     path: text
 
-fn value_layout_named_symbol(type_: HirType) -> SymbolId?:
+fn value_layout_named_symbol_id(type_: HirType) -> i64:
     match type_.kind:
         case HirTypeKind.Named(symbol, args):
             if args.len() == 0:
-                return Some(symbol)
+                return symbol.id
         case _:
             pass
-    nil
+    -1
 
 fn value_layout_symbol_is_struct(symbol: HirSymbol) -> bool:
     match symbol.kind:
@@ -27,10 +27,17 @@ fn value_layout_node_key(module_name: text, struct_name: text) -> text:
 
 fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
     """Return the first resolved direct by-value struct cycle, if any."""
-    var structs: Dict<text, HirStruct> = {}
-    var owners: Dict<text, HirModule> = {}
-    var canonical_by_alias: Dict<text, text> = {}
-    var roots: [text] = []
+    # Native codegen cannot reliably round-trip large value structs through
+    # Dict values or Optional payloads. Keep only primitive indices in maps;
+    # retain the field arrays and owner SymbolTable class references in
+    # parallel arrays.
+    var node_index: Dict<text, i64> = {}
+    var canonical_by_alias: Dict<text, i64> = {}
+    var node_keys: [text] = []
+    var struct_names: [text] = []
+    var struct_fields: [[HirField]] = []
+    var owner_names: [text] = []
+    var owner_symbols: [SymbolTable] = []
 
     for module_key in modules.keys():
         val module: HirModule = modules[module_key]
@@ -38,51 +45,60 @@ fn validate_value_struct_layouts(modules: Dict<text, HirModule>) -> [text]:
             if struct_.type_params.len() > 0 or struct_.is_generic_template:
                 continue
             val canonical = value_layout_node_key(module.name, struct_.name)
-            structs[canonical] = struct_
-            owners[canonical] = module
-            canonical_by_alias[canonical] = canonical
-            canonical_by_alias[value_layout_node_key(module_key, struct_.name)] = canonical
-            if not roots.contains(canonical):
-                roots.push(canonical)
+            if node_index.contains_key(canonical):
+                continue
+            val index = node_keys.len()
+            node_index[canonical] = index
+            canonical_by_alias[canonical] = index
+            canonical_by_alias[value_layout_node_key(module_key, struct_.name)] = index
+            node_keys.push(canonical)
+            struct_names.push(struct_.name)
+            struct_fields.push(struct_.fields)
+            owner_names.push(module.name)
+            owner_symbols.push(module.symbols)
 
     # ponytail: per-root walks are simplest for today's sparse type graphs;
     # replace with a color-map DFS only if dense graphs make this measurable.
-    for root in roots:
-        var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: root, path: "")]
-        var visited: [text] = []
+    var root_index = 0
+    while root_index < node_keys.len():
+        var pending: [ValueStructLayoutWalk] = [ValueStructLayoutWalk(node_key: node_keys[root_index], path: "")]
+        var visited: Dict<text, bool> = {}
         var pending_idx = 0
         while pending_idx < pending.len():
             val walk = pending[pending_idx]
             pending_idx = pending_idx + 1
-            if visited.contains(walk.node_key):
+            if visited.contains_key(walk.node_key):
                 continue
-            visited.push(walk.node_key)
+            visited[walk.node_key] = true
 
-            val struct_ = structs[walk.node_key]
-            val owner = owners[walk.node_key]
-            for field in struct_.fields:
-                val named_symbol = value_layout_named_symbol(field.type_)
-                if not named_symbol.?:
+            if not node_index.contains_key(walk.node_key):
+                continue
+            val current_index = node_index[walk.node_key]
+            val symbols = owner_symbols[current_index]
+            for field in struct_fields[current_index]:
+                val named_symbol_id = value_layout_named_symbol_id(field.type_)
+                if named_symbol_id < 0:
                     continue
-                val symbol: HirSymbol? = owner.symbols.symbols.get(named_symbol.unwrap().id)
-                if not symbol.?:
+                if not symbols.symbols.contains_key(named_symbol_id):
                     continue
-                val resolved = symbol.unwrap()
+                val resolved = symbols.symbols[named_symbol_id]
                 if not value_layout_symbol_is_struct(resolved):
                     continue
 
-                val defining_module = resolved.defining_module ?? owner.name
+                val defining_module = resolved.defining_module ?? owner_names[current_index]
                 val unresolved_key = value_layout_node_key(defining_module, resolved.name)
-                val target = (if canonical_by_alias.contains_key(unresolved_key): canonical_by_alias[unresolved_key] else: unresolved_key)
-                if not structs.has(target):
+                if not canonical_by_alias.contains_key(unresolved_key):
                     continue
+                val target_index = canonical_by_alias[unresolved_key]
+                val target = node_keys[target_index]
 
-                val edge = struct_.name + "." + field.name
+                val edge = struct_names[current_index] + "." + field.name
                 val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
-                if target == root:
-                    return ["recursive by-value struct layout: " + next_path + " -> " + structs[root].name]
-                if not visited.contains(target):
+                if target_index == root_index:
+                    return ["recursive by-value struct layout: " + next_path + " -> " + struct_names[root_index]]
+                if not visited.contains_key(target):
                     pending.push(ValueStructLayoutWalk(node_key: target, path: next_path))
+        root_index = root_index + 1
     []
 
 export validate_value_struct_layouts
