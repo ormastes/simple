@@ -162,7 +162,7 @@ void rt_print_value(RuntimeValue val);
 static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
-static void *_heap_alloc(size_t sz)
+static void *_heap_alloc(size_t sz, uintptr_t caller)
 {
     sz = (sz + 15) & ~(size_t)15;
     if (_heap_off + sz > sizeof(_heap)) {
@@ -172,6 +172,8 @@ static void *_heap_alloc(size_t sz)
         serial_put_dec((int64_t)_heap_off);
         serial_puts(" total=");
         serial_put_dec((int64_t)sizeof(_heap));
+        serial_puts(" caller=");
+        serial_put_hex((uint64_t)caller);
         serial_puts("\r\n");
         for(;;) __asm__ volatile("wfe");
     }
@@ -190,7 +192,7 @@ static int arm64_heap_contains(const void *p, size_t min_size)
 
 void *malloc(size_t sz)
 {
-    return _heap_alloc(sz);
+    return _heap_alloc(sz, (uintptr_t)__builtin_return_address(0));
 }
 
 void free(void *p)
@@ -1101,7 +1103,10 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 83: /* MapBar — identity map on baremetal */
             return (int64_t)a0;
         case 84: { /* AllocDma */
-            void *p = _heap_alloc(a0 > 0 ? a0 : 4096);
+            void *p = _heap_alloc(
+                a0 > 0 ? a0 : 4096,
+                (uintptr_t)__builtin_return_address(0)
+            );
             return ENCODE_INT((int64_t)(uintptr_t)p);
         }
         default:
