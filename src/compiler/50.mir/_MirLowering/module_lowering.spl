@@ -803,6 +803,30 @@ impl MirLowering:
                         prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                 case Array(_, _) | Slice(_):
                     prescan_return_shape = "__runtime_array__"
+                case Result(prescan_ok_type, _):
+                    # Ok-payload struct/class layout key, resolved HERE while
+                    # `module.symbols` is still the DEFINING module's own
+                    # self-consistent table (see bootstrap_fn_ret_ok_shape_
+                    # register's doc comment in mir_data.spl for why this
+                    # can't be deferred to the consumer).
+                    match prescan_ok_type.kind:
+                        case Named(prescan_ok_symbol_id, _):
+                            val prescan_ok_symbol = module.symbols.get_symbol_raw(prescan_ok_symbol_id.id)
+                            if prescan_ok_symbol != nil:
+                                match prescan_ok_symbol.kind:
+                                    case Class | Struct:
+                                        # Bare name, matching the spelling
+                                        # `struct_value_syms`/`lookup_or_invalid`
+                                        # consumers expect downstream
+                                        # (method_calls_literals.spl's
+                                        # unresolved-owner recovery) -- NOT
+                                        # composite_layout_key's module-
+                                        # qualified form, which those bare
+                                        # name-keyed lookups never match.
+                                        bootstrap_fn_ret_ok_shape_register(
+                                            prescan_call_name, prescan_ok_symbol.name)
+                                    case _: ()
+                        case _: ()
                 case _: ()
             bootstrap_fn_ret_shape_register(prescan_call_name, prescan_return_shape)
             # Trailing-default pad registry. Registered for EVERY function

@@ -839,7 +839,6 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
-                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:
@@ -973,7 +972,6 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
-                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:
@@ -1701,13 +1699,10 @@ impl MirLowering:
                     case Var(recv_sym): Some(recv_sym)
                     case NamedVar(recv_sym, _): Some(recv_sym)
                     case _: nil
-                eprint("[L6DBG] enum_match_expr_type static-fallback method={method} has_recv_sym={static_recv_sym != nil}\n")
                 if val recv_type_sym = static_recv_sym:
                     val fb = self.symbols.lookup_method_in_type(recv_type_sym, method)
-                    eprint("[L6DBG] lookup_method_in_type(recv={recv_type_sym.id}, method={method}) found={fb != nil}\n")
                     if val fallback_method_id = fb:
                         val rt = self.resolved_call_hir_return_type(fallback_method_id)
-                        eprint("[L6DBG] resolved_call_hir_return_type found={rt != nil}\n")
                         return rt
             case _: ()
         nil
@@ -1752,26 +1747,58 @@ impl MirLowering:
     me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
         """Recover the selected payload from an instantiated Result type."""
         val scrutinee_type = self.enum_match_expr_type(scrutinee)
-        eprint("[L6DBG] result_variant_payload_type scrutinee_type_present={scrutinee_type != nil}\n")
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
             match found_type.kind:
                 case HirTypeKind.Result(ok_type, err_type):
-                    eprint("[L6DBG] result_variant_payload_type kind=Result\n")
                     if variant == "Ok":
                         return Some(ok_type)
                     if variant == "Err":
                         return Some(err_type)
-                case HirTypeKind.Generic(gname, gargs):
-                    eprint("[L6DBG] result_variant_payload_type kind=Generic name={gname} argc={gargs.len()}\n")
-                case HirTypeKind.Named(nsym, _):
-                    eprint("[L6DBG] result_variant_payload_type kind=Named symid={nsym.id}\n")
-                case HirTypeKind.Error:
-                    eprint("[L6DBG] result_variant_payload_type kind=Error\n")
-                case HirTypeKind.Infer(_, _):
-                    eprint("[L6DBG] result_variant_payload_type kind=Infer\n")
-                case _:
-                    eprint("[L6DBG] result_variant_payload_type kind=other\n")
+                case HirTypeKind.Generic(_, _): ()
+                case HirTypeKind.Named(_, _): ()
+                case HirTypeKind.Error: ()
+                case HirTypeKind.Infer(_, _): ()
+                case _: ()
+        nil
+
+    me result_variant_payload_struct_name(scrutinee: HirExpr, variant: text) -> text?:
+        """Cross-module-safe struct/class NAME for a Result<T,E>'s Ok payload,
+        resolved via the name-keyed `bootstrap_fn_ret_ok_shape_*` registry
+        instead of dereferencing the `Named(SymbolId)` inside the HirType
+        `result_variant_payload_type` returns -- that SymbolId may have been
+        minted in a DIFFERENT module's per-module SymbolTable id-space (see
+        native_build_cross_module_result_payload_struct_name_collision_
+        2026-08-09, 6th/7th layer). Mirrors enum_match_expr_type's MethodCall
+        resolution chain, but ends at `resolved_call_result_ok_shape` (a NAME)
+        instead of `resolved_call_hir_return_type` (a possibly-foreign-id-
+        bearing HirType)."""
+        if variant != "Ok":
+            return nil
+        match scrutinee.kind:
+            case MethodCall(receiver, method, _, resolution):
+                if val method_id = resolution.get_symbol_id():
+                    return self.resolved_call_result_ok_shape(method_id)
+                val receiver_type = self.receiver_declared_type(receiver)
+                if receiver_type != nil:
+                    val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                    val struct_name = match found_receiver_type.kind:
+                        case Named(symbol, _):
+                            val s = self.symbols.get_symbol_raw(symbol.id)
+                            if s.?: s.name else: ""
+                        case _: ""
+                    if struct_name != "":
+                        val method_key = "{struct_name}::{method}"
+                        if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
+                            return self.resolved_call_result_ok_shape(self.struct_method_syms[method_key])
+                val static_recv_sym: SymbolId? = match receiver.kind:
+                    case Var(recv_sym): Some(recv_sym)
+                    case NamedVar(recv_sym, _): Some(recv_sym)
+                    case _: nil
+                if val recv_type_sym = static_recv_sym:
+                    if val fallback_method_id = self.symbols.lookup_method_in_type(recv_type_sym, method):
+                        return self.resolved_call_result_ok_shape(fallback_method_id)
+            case _: ()
         nil
 
     me resolve_enum_pattern_owner(etype: HirType, variant: text, span: Span) -> text:
@@ -2396,26 +2423,21 @@ impl MirLowering:
                     # struct/class, that name is authoritative and takes
                     # precedence over the global map below.
                     var scrutinee_payload_struct = ""
-                    if val known_rpt = result_payload_type:
+                    if val safe_payload_name = self.result_variant_payload_struct_name(scrutinee, enum_variants[ci]):
+                        # Cross-module-safe: resolved by NAME
+                        # (bootstrap_fn_ret_ok_shape_*), never by dereferencing
+                        # a possibly-foreign-module SymbolId. See
+                        # result_variant_payload_struct_name's doc comment.
+                        scrutinee_payload_struct = safe_payload_name
+                    elif val known_rpt = result_payload_type:
                         match known_rpt.kind:
                             case HirTypeKind.Named(rpt_sym, _):
                                 if val rpt_symbol = self.symbols.get_symbol_raw(rpt_sym.id):
-                                    val l6dbg_kind_txt = match rpt_symbol.kind:
-                                        case Class: "Class"
-                                        case Struct: "Struct"
-                                        case Function: "Function"
-                                        case Method: "Method"
-                                        case Enum: "Enum"
-                                        case _: "other"
-                                    eprint("[L6DBG] ok_type Named symid={rpt_sym.id} symname={rpt_symbol.name} symkind={l6dbg_kind_txt}\n")
                                     match rpt_symbol.kind:
                                         case Class | Struct:
                                             scrutinee_payload_struct = rpt_symbol.name
                                         case _: ()
-                                else:
-                                    eprint("[L6DBG] ok_type Named symid={rpt_sym.id} get_symbol_raw=NONE\n")
-                            case _:
-                                eprint("[L6DBG] ok_type not-Named\n")
+                            case _: ()
                     val payload_hir_type: HirType? = match result_payload_type:
                         case Some(known_payload_type): known_payload_type
                         case _:
@@ -2480,13 +2502,9 @@ impl MirLowering:
                     elif scrutinee_payload_struct != "":
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
-                        eprint("[L6DBG] bind-payload-struct via scrutinee id={bound_payload.id} name={scrutinee_payload_struct}\n")
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif payload_struct != nil and payload_struct != "":
-                        eprint("[L6DBG] bind-payload-struct via global-map id={bound_payload.id} name={payload_struct ?? \"\"}\n")
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
-                    else:
-                        eprint("[L6DBG] bind-payload-struct NONE id={bound_payload.id} scrutinee_payload_struct={scrutinee_payload_struct} payload_struct={payload_struct ?? \"<nil>\"}\n")
             elif bind_syms.len() >= 1:
                 # #164 multi-field payload: the scalar payload slot holds a
                 # boxed rt_tuple (see box_tuple_payload); unbox each field by
@@ -2567,7 +2585,6 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
-                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:

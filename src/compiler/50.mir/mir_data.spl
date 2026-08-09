@@ -782,6 +782,36 @@ fn bootstrap_fn_ret_shape_lookup(name: text) -> text?:
         return Some(_bootstrap_fn_ret_shapes[name])
     nil
 
+# Result<T, E>'s Ok-payload struct/class layout key, name-keyed like the plain
+# return-shape registry above. Needed because a Result<T,E> return type's
+# inner `ok_type` is an HirTypeKind.Named(SymbolId) whose SymbolId was minted
+# in the DEFINING module's own per-module SymbolTable id-space
+# (native_build_cross_module_result_payload_struct_name_collision_2026-08-09,
+# 6th/7th layer): re-deferencing that id against a DIFFERENT module's
+# `self.symbols` (entry-closure lowering replaces the active SymbolTable per
+# module) can coincidentally land on an unrelated symbol with the same
+# numeric id (e.g. a sibling Method), silently mis-resolving the payload's
+# struct name. Registered here, name-keyed, at prescan time — while
+# `module.symbols` is still the DEFINING module's own, self-consistent table —
+# so consumers never need to dereference the foreign id at all.
+var _bootstrap_fn_ret_ok_shapes: Dict<text, text> = {}
+var _bootstrap_fn_ret_ok_shape_ambig: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_ok_shape_register(name: text, shape: text):
+    if shape == "" or _bootstrap_fn_ret_ok_shape_ambig.contains_key(name):
+        return
+    if _bootstrap_fn_ret_ok_shapes.contains_key(name):
+        if _bootstrap_fn_ret_ok_shapes[name] != shape:
+            _bootstrap_fn_ret_ok_shape_ambig[name] = true
+            _bootstrap_fn_ret_ok_shapes = _bootstrap_fn_ret_ok_shapes.remove(name)
+        return
+    _bootstrap_fn_ret_ok_shapes[name] = shape
+
+fn bootstrap_fn_ret_ok_shape_lookup(name: text) -> text?:
+    if _bootstrap_fn_ret_ok_shapes.contains_key(name):
+        return Some(_bootstrap_fn_ret_ok_shapes[name])
+    nil
+
 # Companion PARAM-type registry (same ambiguity set as returns): without it a
 # cross-module call to `fn f(a: i32, b: i64)` erased both params to i64 — on
 # rv32 ilp32 the caller then marshaled the i64 into the wrong (unaligned)
