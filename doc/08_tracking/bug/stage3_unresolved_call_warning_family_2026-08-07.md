@@ -2,8 +2,10 @@
 
 - **Date:** 2026-08-07
 - **Status:** OPEN (two members fixed; `runtime_args` and `kind_to_text`
-  confirmed non-bugs/stale in current source; `run_check` unconfirmed pending
-  a completed live repro; rest classified as out-of-scope or non-code
+  confirmed non-bugs/stale in current source; `run_check` static analysis
+  clean, live repro attempted 2026-08-09 but did not complete (host resource
+  contention, not a defect signal — see updated bullet below); rest
+  classified as out-of-scope or non-code
   build-config issues).
   - **FIXED** `d328200332e` — `target_is_float` (mechanism B,
     `src/compiler/35.semantics/semantics/cast_rules.spl`).
@@ -89,6 +91,34 @@
     unconfirmed** — re-run the repro to completion before deciding whether
     this is a real bug or a third stale/non-repro log line alongside its two
     siblings above.
+  - **2026-08-09 follow-up:** rebuilt the `simple-s3red` scratch worktree to
+    current `origin/main` (`5b415080f6e2`, `git fetch` + `git reset --hard`)
+    and re-ran the same `run_stage3.shs` repro fresh (`build/probe2`) to
+    settle the open item above. The process ran for **1h25m59s** wall time
+    (`Rl` state throughout, steady ~34.8GB RSS, CPU consistently pegged —
+    not hung/zombied, genuinely still computing) without ever writing
+    `stage3.log` content or a `stage3.rc` marker, on a host that was
+    simultaneously running at least one other concurrent full-tree
+    `native-build` (a pre-existing `build/probe` process, unrelated to this
+    task) and where free disk fell from 83G to 48G over the same window from
+    other concurrent sessions' activity — i.e. heavy shared-host contention.
+    Per an explicit time-and-resource budget decision, the process was
+    killed (`kill 721957`, confirmed dead) before producing a verdict rather
+    than let it run indefinitely or risk the ENOSPC failure mode this repo's
+    memory notes record twice at this fill level. **Result: inconclusive —
+    live confirmation did not complete within budget, due to resource
+    contention, not any observed defect signal (no crash, no error, no
+    partial-failure output was ever captured from this run).** This is not a
+    negative result and does not by itself confirm or refute the warning.
+    Combined with the unchanged static analysis (both call sites resolve
+    correctly via qualified `use app.cli.check.{run_check}`; the only open
+    lead is the non-unique bare name shared with `check_dbs.spl`,
+    `check_tier.spl`, `src/os/port/initramfs_pack.spl`, whose relationship to
+    mechanism A remains unconfirmed either way), `run_check` remains **OPEN,
+    unconfirmed** — same disposition as before this pass, now with one more
+    documented non-completing repro attempt. A future pass should retry the
+    repro on a quieter host, or independently under `run_check`'s own
+    stage-3 log-line context to shortcut the full-tree build.
   - The §1 finding (diagnostic is a partial sample) and §5 recommendation
     (promote to error once coverage is fixed) both still hold; not addressed
     here.
