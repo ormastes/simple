@@ -1,7 +1,21 @@
 # Stage-3 self-host blocked by nil-receiver SIGILL in the caller of `lower_expr`
 
 Date: 2026-08-05
-Status: **STILL UNVERIFIED (2026-08-09, THIRD campaign)** — blockers 9/10/11 are
+Status: **STILL UNVERIFIED (2026-08-09, FIFTH campaign)** — but the chain moved
+substantially. Blocker 12 (the dead Stage-2 lexer) is now **fixed and verified
+end-to-end**; Stage 3 lexes and parses its own entry file and reaches phase-1
+module assembly, where it dies of a **SIGSEGV (exit 139)** in
+`FlatAstBridge.flat_ast_to_module` — the **first Stage-3 fault site ever named
+by a backtrace**, filed as
+`stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`. That is blocker 14.
+Blocker 13 sits in front of it: pristine `origin/main` cannot even **link**
+Stage 2 (`stage2_native_build_link_undefined_method_symbols_2026-08-09.md`).
+This SIGILL fault site has **still never executed** — `[mir-stmt-caller]` = 0,
+`[mir-garbage-expr]` = 0, `field access on nil receiver` = 0, SIGILL/exit 132 =
+0 across the whole campaign, because execution never reaches MIR. See the
+"2026-08-09 (fifth campaign)" section at the BOTTOM. Prior status follows.
+
+Prior status (2026-08-09, THIRD campaign) — blockers 9/10/11 are
 all confirmed genuinely fixed on `origin/main` and the run got further than ever
 before (Rust seed clean in 4m23s, **Stage 2 806/806 green**, Stage 3 launched),
 but a **new blocker 12** stopped it before lexing even finished: the Stage-2
@@ -930,3 +944,73 @@ re-measured against a live fault.
 **Status: STILL UNVERIFIED.** Not resolved, not disproven. Next lane: fix
 blocker 12 (the lexer, and independently the unbounded parser loop), then re-run
 this exact recipe using the `git archive` + alternates checkout above.
+
+## 2026-08-09 (fifth campaign) — closest approach yet; two blockers behind, fault site still not executed
+
+One genuine complete bootstrap-from-scratch was run at `51115402161`
+(`origin/main`, contains the lexer fix `d37b5e578b4`), from a clean
+`git archive` + alternates checkout, both MIR probes enabled, with a
+PID-tree-scoped watchdog sampling log growth and RSS every 15 s.
+
+**Verdict for this bug: STILL UNVERIFIED.** Across the entire campaign —
+run A, run B, and a standalone repro — the counts are:
+
+| probe / signal | count |
+|---|---|
+| `[mir-stmt-caller]` | **0** |
+| `[mir-garbage-expr]` | **0** |
+| `field access on nil receiver` | **0** |
+| SIGILL / exit 132 | **0** |
+
+The reason is unchanged in kind but different in location: execution now stops
+in **phase 1 (frontend module assembly)**, which is upstream of HIR and far
+upstream of the `50.mir` lowering where this SIGILL lives. Rank 1-5 remain
+neither confirmed nor refuted; the Rank 2 fix and Rank 4 probe remain landed but
+unexercised.
+
+### What actually happened (two new blockers, both characterised)
+
+**Blocker 13 — pristine `origin/main` cannot link Stage 2.** Run A failed at the
+link step in ~3 min, exit 1, with 9 undefined symbols, six of which are Simple
+`text` methods emitted as *unmangled* bare external calls. Causally isolated by
+a single-variable revert to `36673b6b6a3` ("guard imported method dispatch and
+arrays"), which rewrote the LLVM backend's call-target selection. Filed:
+`stage2_native_build_link_undefined_method_symbols_2026-08-09.md`. Until this is
+fixed, **no Stage 3 result on a pristine tree is obtainable at all.**
+
+**Blocker 14 — Stage 3 SIGSEGVs in `flat_ast_to_module`.** With `36673b6b6a3`
+reverted, Stage 2 linked clean (809 compiled, 0 failed, 126,002 KB) and passed
+both sanity and capability gates, and Stage 3 ran — then segfaulted, exit 139,
+with a **0-byte** stage3 log. A core dump finally gave a real backtrace:
+
+```
+#0  compiler__frontend___FlatAstBridge__module_assembly__flat_ast_to_module ()
+#1  ...__parse_and_build_module_scoped ()
+#2  compiler.frontend.frontend.parse_full_frontend_with_scope ()
+#3  ...CompilerDriver.parse_all_impl ()
+#4  ...CompilerDriver.compile ()
+#5  app.cli.bootstrap_main.run_native_build_bootstrap ()
+```
+
+Filed: `stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`. It reproduces
+in a single command in under a second, which makes it far more tractable than
+anything in front of it so far.
+
+### Genuine progress, stated precisely
+
+Blocker 12 is **gone**, and this is the first campaign that can prove it rather
+than assume it: `flat_ast_to_module` is only reachable after the lexer and
+parser have built a flat AST for `bootstrap_main.spl`, and `lexer_fatal` count
+is 0 everywhere. Five campaigns have now been stopped short of this SIGILL by
+five *different* blockers — but the stopping point has moved from "cannot lex
+the first byte" to "parsed the whole entry file, died assembling the module",
+which is materially closer to MIR.
+
+### Note on the sanity gate
+
+The gate reported `Stage 2: running bootstrap compiler sanity` and
+`Stage 2 native-build capability passed` for a binary that segfaults on the very
+next step. The documented `--entry` fail-open weakness was therefore treated as
+real and the gate's verdict was **not** relied on; Stage 3's own behaviour was
+observed directly, and the crash was independently reproduced outside the
+wrapper. That decision is what produced the backtrace.

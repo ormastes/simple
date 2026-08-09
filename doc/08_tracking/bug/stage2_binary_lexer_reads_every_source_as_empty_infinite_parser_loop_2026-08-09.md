@@ -1,12 +1,24 @@
 # Stage-2 binary lexes EVERY source file as empty → unbounded parser-error loop
 
 Date: 2026-08-09
-Status: **ROOT CAUSE FOUND AND FIXED — end-to-end bootstrap verification still
-outstanding.** See "2026-08-09 run 5" (the last section) FIRST: the run-4
-native-codegen hypothesis below is **disproven**, and the real defect is a
-no-token return path in `CoreLexer.handle_indentation()` that reproduces in the
-interpreter with no bootstrap at all. The rest of this document is preserved as
-the investigation record; read it knowing run 4's conclusion was wrong.
+Status: **FIXED AND VERIFIED END-TO-END (2026-08-09, run 6).** The
+`CoreLexer.handle_indentation()` fix (`d37b5e578b4`) is confirmed by a real
+bootstrap: a Stage-2 binary built from it lexed *and parsed* the full
+`bootstrap_main.spl` (21,918 bytes) and ran on into module assembly, with
+`lexer_fatal` count **0** across the entire run. Stage 3 now fails **further
+downstream**, in `FlatAstBridge.flat_ast_to_module` (SIGSEGV/139) — a different,
+newly-revealed blocker tracked in
+`stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`. See "2026-08-09
+run 6" at the BOTTOM for the evidence and the one caveat (the verifying run
+needed `36673b6b6a3` reverted, because pristine `origin/main` cannot link
+Stage 2 — see `stage2_native_build_link_undefined_method_symbols_2026-08-09.md`).
+
+Earlier status (run 5): root cause found and fixed, end-to-end verification
+outstanding. The run-4 native-codegen hypothesis below is **disproven**, and the
+real defect is a no-token return path in `CoreLexer.handle_indentation()` that
+reproduces in the interpreter with no bootstrap at all. The rest of this
+document is preserved as the investigation record; read it knowing run 4's
+conclusion was wrong.
 
 Earlier status (run 4): **REOPENED — NOT FIXED.** The 2026-08-09 fix (bfd9284618a) was verified
 only through the interpreter path. A full bootstrap at that exact commit
@@ -540,3 +552,59 @@ Termination is guaranteed: `at_line_start` is false on re-entry, and
   the `core_lexer_last_*_get()` mirrors is cosmetic, not load-bearing.
 - The strengthened admission gate is **still fail-open** via `--entry`. Unchanged
   from run 4 and still the highest-value remaining fix.
+
+## 2026-08-09 run 6 (SIXTH campaign) — FIX VERIFIED END-TO-END
+
+Assigned action: one genuine complete bootstrap-from-scratch at a tree
+containing `d37b5e578b4`, to decide whether the interpreter-only proof holds in
+a real Stage-2/Stage-3 chain.
+
+Checkout: `git archive 51115402161 | tar -x` + alternates + `update-ref` +
+`read-tree` (112,297 files). Host at launch: load 7.7, 1.2 T free on `/`, 71 G
+RAM available. Both MIR probes enabled. Watchdog sampling log growth **and**
+process-tree RSS every 15 s, scoped to this run's PID tree only (two sibling
+sessions were running their own bootstraps concurrently).
+
+### Run A — pristine `origin/main`: blocked before the lexer could be tested
+
+Stage 2 failed at **link**, exit 1, ~3 min, 9 undefined symbols, no binary
+produced. Root-caused and causally isolated to `36673b6b6a3` in
+`stage2_native_build_link_undefined_method_symbols_2026-08-09.md`. This run
+could say nothing about the lexer.
+
+### Run B — same tree, `36673b6b6a3` reverted: the lexer fix HOLDS
+
+```
+Linked: .../stage2/x86_64-unknown-linux-gnu/simple (126002 KB) via clang++
+Build complete: 809 compiled, 0 cached, 0 failed
+  Stage 2: running bootstrap compiler sanity
+  Stage 2 native-build capability passed
+Stage 3: stage2 → bootstrap_main.spl (self-host)
+Segmentation fault (core dumped)
+```
+
+**The dead-lexer signature is gone.** Evidence, not inference:
+
+1. `grep -c lexer_fatal` over the whole run log **and** every per-stage log:
+   **0**. Run 4's `[lexer_fatal] dead lexer: next_token() produced kind 0 ...
+   for path 'src/app/cli/bootstrap_main.spl'` does not appear.
+2. The Stage-3 crash backtrace (from the core dump) is
+   `flat_ast_to_module` ← `parse_and_build_module_scoped` ←
+   `parse_full_frontend_with_scope` ← `CompilerDriver.parse_all_impl`. That
+   frame is reached **only after** the lexer and parser have produced a flat AST
+   for the file. A binary that "reads every source as empty" cannot get there.
+3. No unbounded parser-error loop, no exploding log (whole run log: 1,421 bytes
+   — run 4's runaway was 444 MB), no runaway RSS (peak 2.6 GB for the entire
+   process tree, versus 44 GB climbing in the earlier runaway).
+
+The fail-closed guard and forward-progress invariant landed earlier are still in
+place and still correct; nothing regressed.
+
+### Caveat
+
+Run B's Stage-2 binary was built with `36673b6b6a3` reverted, since pristine
+`origin/main` cannot link Stage 2 at all. The lexer fix is verified on the
+nearest buildable tree, not on a pristine one. That caveat disappears once the
+Stage-2 link regression is fixed, and it does not weaken the conclusion here:
+the reverted commit is a Rust-seed LLVM codegen change with no relationship to
+`CoreLexer.handle_indentation()`.
