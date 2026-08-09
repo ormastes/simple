@@ -78,3 +78,100 @@ native-build runs of `rt_io_file_roundtrip/main.spl`, both ~18 minutes,
 both stopping at this exact error set after the `File`-symbol fix landed.
 Not attached (large trace logs); reproducible via the recipe in the
 resolved doc above.
+
+## RESOLVED 2026-08-09b — the `undefined variable: h`/`c`/`n` half of this
+## doc — root cause was a seed-interpreter bare-value-to-Option coercion bug,
+## NOT a `struct_value_syms`/provenance gap
+
+The "Likely mechanism" section above (guessing at `struct_value_syms`/
+`Ok(h)` match-binding provenance) is **falsified**. Root-caused instead with
+a fast, fully self-contained repro (no stdlib import, seconds not minutes):
+a minimal `class FileHandle: ... static fn open(...) -> Result<FileHandle,
+text>: ...` fixture reproduced `undefined variable: hh` for `case Ok(hh):
+hh.fd` in ~5s under the exact same `native_build_worker.spl
+--entry-closure` recipe.
+
+Bisecting via marker-liveness `print` diagnostics through the whole
+HIR->MIR pipeline (HIR pattern construction -> `HirMatchArm` push ->
+`build_match_expr` -> `flatten_enum_match_arm` -> MIR's
+`lower_enum_match`/`enum_pat_binding_syms`) traced the loss to a single
+line in `src/compiler/20.hir/hir_lowering/expressions.spl`,
+`lower_pattern`'s `Enum` arm: assigning a **bare** enum-variant value into a
+`var hir_payload: HirPatternPayload? = nil` slot —
+`hir_payload = HirPatternPayload.Tuple(hir_patterns)` — relies on implicit
+bare-to-`Some` coercion. Under the seed interpreter
+(`SIMPLE_EXECUTION_MODE=interpret`, the engine `native-build`'s own MIR
+lowering runs under), that implicit coercion silently drops the payload for
+an enum variant carrying an **array**-typed field: `hir_payload.?` reads
+`false`/nil on the very next line, immediately after the assignment that
+just built it.
+
+**Fully isolated with a standalone, compiler-free repro** (no MIR/HIR code
+involved at all):
+```
+enum Payload:
+    Tuple(items: [i64])
+fn build() -> Payload?:
+    var hir_payload: Payload? = nil
+    hir_payload = Payload.Tuple([1, 2, 3])
+    print "{hir_payload.?}"   # prints nil/false -- WRONG, value was just set
+    hir_payload
+```
+Replacing the assignment with an explicit `Some(...)` wrapper
+(`hir_payload = Some(Payload.Tuple([1, 2, 3]))`) makes `.?` read `true`
+correctly. This is a genuine seed-interpreter defect (implicit
+bare-enum-to-Option coercion for an array-payload variant); per the
+project's `src/compiler_rust/**` edit ban this session did not touch the
+interpreter itself, only worked around it at the `.spl` call site.
+
+**Fix**: `lower_pattern`'s `Enum` arm now wraps both payload-construction
+assignments in explicit `Some(...)`:
+`hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))` and
+`hir_payload = Some(HirPatternPayload.Struct(hir_fields))`.
+
+**Verification**:
+- Minimal fixture (`case Ok(hh): hh.fd`) now compiles clean (`EXIT=0`)
+  through the full `native_build_worker.spl --entry-closure` pipeline.
+- A combined regression fixture exercising BOTH this fix and the sibling
+  `f33ed64bddba645c0ac0e027bfecc405e4944c5a` Dict-collision fix in the same
+  program (`Thing.delete(path)` static call colliding with a real
+  `Dict.delete(k)` call, plus a `match Thing.open(...): case Ok(t): t`
+  instance binding) shows zero `undefined variable` errors — both fixes
+  coexist without regressing each other.
+- Full 18-minute `rt_io_file_roundtrip/main.spl` closure re-run (real
+  `src/compiler`+`src/app`+`src/lib` source, `--entry-closure`): **zero**
+  `undefined variable` errors anywhere in the log (previously the failure
+  mode this whole doc is about). The build now progresses to a distinct,
+  later blocker — see below.
+
+## Progressed further, not fully resolved — the `unresolved method call`
+## half is a SEPARATE, still-open issue
+
+With the binding bug fixed, the same full 18-minute closure run now reaches
+a new failure set, one layer past pattern-binding: instance-method
+dispatch is still unresolved for the `FileHandle` locals the (now-working)
+pattern bindings produce:
+```
+[ERROR] MIR error: MIR lowering error: unresolved method call: write_text (x3)
+[ERROR] MIR error: MIR lowering error: unresolved method call: close (x7)
+[ERROR] MIR error: MIR lowering error: unresolved method call: read_text (x2)
+[ERROR] MIR error: MIR lowering error: unresolved method call: size (x1)
+[ERROR] MIR error: MIR lowering error: unresolved method call: read_all (x1)
+[ERROR] MIR error: MIR lowering error: unresolved method call: write_all (x1)
+[ERROR] MIR error: MIR lowering error: unresolved method call: merge (x3)
+error: MIR lowering error: unresolved method call: write_text
+```
+This matches the doc's own minimal repro too (`h.write_text(...)` /
+`h.close()` on a match-bound `FileHandle` local, once binding itself
+works). This is a genuinely different mechanism from the payload-binding
+bug fixed above (that one was "the local doesn't exist at all"; this one is
+"the local exists but its declared/erased type can't be resolved to an
+`impl` owner for instance-method dispatch") and is **not fixed by this
+session's change**. Filed as a fresh, narrower follow-up:
+`doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md`.
+
+## Why this matters for the `rt_io_file_*` AOT stub question
+
+Still genuinely UNDETERMINED under true AOT/LLVM codegen. The build
+progressed one layer further (past pattern-binding, into instance-method
+dispatch) but still never reaches codegen for this fixture.

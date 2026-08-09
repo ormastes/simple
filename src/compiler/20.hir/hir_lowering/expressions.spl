@@ -1274,6 +1274,29 @@ impl HirLowering:
                     # reassignment (`xs = xs.push(..)`) rather than a bare
                     # `xs.push(..)` whose result is discarded, so the result
                     # does not depend on `.push` happening to mutate in place.
+                    # Bare-to-Option assignment landmine (seed interpreter,
+                    # SIMPLE_EXECUTION_MODE=interpret -- the engine
+                    # native-build's own MIR lowering runs under): assigning a
+                    # BARE enum-variant value (`HirPatternPayload.Tuple(...)`)
+                    # directly into a `var x: HirPatternPayload? = nil` slot
+                    # relies on implicit bare->Some coercion, which the seed
+                    # silently drops for an enum payload carrying an array
+                    # field -- `hir_payload.?` reads false/nil immediately
+                    # after the assignment, and that stale "absent" state
+                    # then propagates into every downstream consumer (MIR's
+                    # `enum_pat_binding_syms`/`enum_pat_arity` in
+                    # switch_operators_calls.spl silently return empty/0 for
+                    # a payload that is `.?`-false, so `case Ok(h): h` compiled
+                    # under native-build with `undefined variable: h` even
+                    # though HIR genuinely built the Tuple([Binding(h)])
+                    # payload one statement earlier -- see bug doc
+                    # native_build_filehandle_instance_method_unresolved_2026-08-09.md).
+                    # Fully isolated with a standalone, compiler-free repro:
+                    # `val x: T? = EnumVariant(...)` reads `.?` false;
+                    # `val x: T? = Some(EnumVariant(...))` reads it true.
+                    # Explicit `Some(...)` is the fix -- never leave the
+                    # bare-value coercion to do the wrapping for an
+                    # array-payload enum assigned into an Option slot.
                     var hir_payload: HirPatternPayload? = nil
                     if val pl = payload:
                         match pl:
@@ -1281,12 +1304,12 @@ impl HirLowering:
                                 var hir_patterns: [HirPattern] = []
                                 for pat in patterns:
                                     hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                                hir_payload = HirPatternPayload.Tuple(hir_patterns)
+                                hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
                             case Struct(fields):
                                 var hir_fields: [(text, HirPattern)] = []
                                 for (fname, fpat) in fields:
                                     hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
-                                hir_payload = HirPatternPayload.Struct(hir_fields)
+                                hir_payload = Some(HirPatternPayload.Struct(hir_fields))
                     HirPatternKind.Enum(hir_type, variant, hir_payload)
 
             case Or(patterns):

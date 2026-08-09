@@ -128,6 +128,29 @@
 #   characterized and filed for someone else. The AOT leg below fails CLOSED
 #   by default (fast) and points at the filed bug; set RUN_AOT_LEG=1 to
 #   actually re-run the ~18-minute repro and get a live status line.
+#
+# 2026-08-09 -- `undefined variable: File` RESOLVED (Dict-method-name
+#   collision in lower_method_call's dict-probe, not the ordering bug
+#   hypothesized above -- see the RESOLVED update appended to that doc).
+#
+# 2026-08-09b -- the follow-on `undefined variable: h`/`c`/`n` failure (a
+#   match-bound FileHandle local reading as undefined -- filed as
+#   doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md)
+#   is ALSO RESOLVED: root cause was a seed-interpreter bare-enum-to-Option
+#   coercion bug (assigning a bare array-payload enum variant into a `var x:
+#   T? = nil` slot silently drops the payload; `.?` reads false immediately
+#   after the assignment that just set it), isolated with a standalone
+#   compiler-free repro and fixed by wrapping the affected assignment in
+#   `lower_pattern` (src/compiler/20.hir/hir_lowering/expressions.spl) in an
+#   explicit `Some(...)`. Verified via a fast (~seconds) minimal repro and a
+#   full 18-minute closure re-run of this exact fixture: zero `undefined
+#   variable` errors remain. The build now progresses one layer further and
+#   fails on instance-method DISPATCH instead (unresolved write_text/close/
+#   read_text/size/read_all/write_all/merge on the now-correctly-bound
+#   FileHandle locals) -- filed as
+#   doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md.
+#   The AOT rt_io_file_* stub question remains UNDETERMINED -- still never
+#   reaches codegen for this fixture, now for a third, narrower reason.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -252,19 +275,27 @@ fi
 # --- AOT (native-build, true LLVM codegen): fails-closed by default --------
 # Full status and evidence:
 #   doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md (RESOLVED 2026-08-09)
-#   doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md (current blocker)
+#   doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md (RESOLVED 2026-08-09b, its `undefined variable: h/c/n` half)
+#   doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md (current blocker)
 # 2026-08-09 update: the `undefined variable: File` MIR-lowering failure is
 # FIXED (was a Dict-method-name collision in lower_method_call's dict-probe,
-# not a cross-module lowering-order bug -- see the RESOLVED doc above). The
-# fixture now compiles PAST every `File`-class call and fails one layer
-# later, on `FileHandle` INSTANCE methods (`undefined variable: h` plus
-# unresolved-method-call errors for write_text/close/read_text/size/etc --
-# see the current-blocker doc above). Still a guaranteed-fail with a known
-# cause, so this leg stays fail-closed-by-default for the same reason as
-# before: an ~18-minute build attempt on every invocation is disproportionate
-# while the outcome is already known. Set RUN_AOT_LEG=1 to actually re-run
-# the repro (takes ~18 minutes) and get a live status line instead of the
-# canned one.
+# not a cross-module lowering-order bug -- see the first RESOLVED doc above).
+# 2026-08-09b update: the FOLLOW-ON `undefined variable: h`/`c`/`n` failure
+# (a match-bound FileHandle local reading as undefined) is ALSO FIXED (was a
+# seed-interpreter bare-enum-to-Option coercion bug in `lower_pattern`,
+# `src/compiler/20.hir/hir_lowering/expressions.spl` -- fixed by wrapping the
+# `hir_payload` assignment in explicit `Some(...)`; see the second RESOLVED
+# doc above). Verified via a fast (~seconds) compiler-free repro AND a full
+# 18-minute closure re-run of this exact fixture: zero `undefined variable`
+# errors remain. The fixture now compiles PAST all pattern-binding and fails
+# one layer later still, on `FileHandle` INSTANCE-METHOD DISPATCH
+# (unresolved-method-call errors for write_text/close/read_text/size/
+# read_all/write_all/merge -- see the current-blocker doc above). Still a
+# guaranteed-fail with a known cause, so this leg stays fail-closed-by-default
+# for the same reason as before: an ~18-minute build attempt on every
+# invocation is disproportionate while the outcome is already known. Set
+# RUN_AOT_LEG=1 to actually re-run the repro (takes ~18 minutes) and get a
+# live status line instead of the canned one.
 if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
     rm -f "$FIXED_PATH"
     aot_log="$WORK_DIR/aot.log"
@@ -291,17 +322,25 @@ if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
         echo "        collision in lower_method_call's dict-probe) -- a REGRESSION if seen"
         echo "        again. See doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
         exit 2
-    elif grep -q 'undefined variable: h' "$aot_log" || grep -q 'unresolved method call: write_text' "$aot_log"; then
+    elif grep -qE 'undefined variable: h$|undefined variable: hh$|undefined variable: c$|undefined variable: n$' "$aot_log"; then
+        echo "ERROR — AOT native-build reproduced the OLD 'undefined variable: h/c/n'"
+        echo "        pattern-binding failure. That bug was fixed 2026-08-09b (seed-interpreter"
+        echo "        bare-enum-to-Option coercion bug in lower_pattern, worked around with an"
+        echo "        explicit Some(...) wrapper) -- a REGRESSION if seen again. See"
+        echo "        doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
+        exit 2
+    elif grep -q 'unresolved method call: write_text' "$aot_log"; then
         echo "KNOWN-OPEN — AOT native-build reproduced the known FileHandle instance-method"
-        echo "             resolution failure ('undefined variable: h' / unresolved"
-        echo "             write_text/close/read_text/size/etc). Consistent with"
-        echo "             doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md."
+        echo "             DISPATCH failure (unresolved write_text/close/read_text/size/"
+        echo "             read_all/write_all/merge on a match-bound FileHandle local)."
+        echo "             Consistent with"
+        echo "             doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md."
         echo "             The rt_io_file_* stub question remains UNDETERMINED under AOT --"
         echo "             the build cannot reach codegen until that bug is fixed."
     elif [ -f "$WORK_DIR/aot_out.o" ] || [ "$aot_rc" -eq 0 ]; then
         echo "NOTE — AOT native-build did NOT reproduce either known MIR-lowering failure this"
-        echo "       time (rc=$aot_rc). The FileHandle instance-method bug in"
-        echo "       doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
+        echo "       time (rc=$aot_rc). The instance-method dispatch bug in"
+        echo "       doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md"
         echo "       may have been fixed -- if so, promote this branch to actually link+run"
         echo "       the binary and strace it for openat/open against \$FIXED_PATH, exactly"
         echo "       like the JIT leg above, to finally answer the stub question."
@@ -316,13 +355,16 @@ if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
 else
     echo "KNOWN-OPEN — AOT (native-build) leg skipped by default (RUN_AOT_LEG=1 to run the"
     echo "             ~18-minute repro). Known status: the fixture compiles PAST all"
-    echo "             \`File\`-class calls (fixed 2026-08-09) but still fails to compile"
-    echo "             under native-build, now on FileHandle INSTANCE methods"
-    echo "             ('undefined variable: h' etc) -- not a stub verdict, a prerequisite"
-    echo "             compile failure. See"
+    echo "             \`File\`-class calls (fixed 2026-08-09) and all pattern-binding"
+    echo "             (fixed 2026-08-09b) but still fails to compile under native-build, now"
+    echo "             on FileHandle INSTANCE-METHOD DISPATCH (unresolved write_text/close/"
+    echo "             read_text/size/etc) -- not a stub verdict, a prerequisite compile"
+    echo "             failure. See"
     echo "             doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
-    echo "             (resolved) and"
+    echo "             (resolved),"
     echo "             doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
+    echo "             (resolved, its undefined-variable half), and"
+    echo "             doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md"
     echo "             (current blocker)."
 fi
 
