@@ -3,6 +3,23 @@
 **Found:** 2026-08-07, during notebook-lanes L4 verification
 (`test/03_system/tools/simple_lab/lab_shared_ui_contract_spec.spl`).
 
+**FIXED:** 2026-08-08, in `f8e9a1e5ddf2253385eea40e831063cee9c36a82` ("fix(lab):
+reject truncated oversized header lines (431) + route test-API clicks to real
+app actions"). `lab_test_api_inject_event` in `src/app/simple_lab/lab_server.spl`
+now dispatches the event to the generic `LAB_UI_SESSION` layer as before, but
+for `Action`/`InputChange` events it additionally resolves the semantic
+`click_<widget_id>` action name back to the widget's own declared `action` prop
+(`_lab_test_api_app_event`) and forwards it to `LAB_UI_APP.handle_event(...)`
+(real `SimpleLabApp` business logic), then rebuilds and re-syncs the widget
+tree via `LAB_UI_SESSION.update_tree(LAB_UI_APP.build_ui())`. Re-verified
+2026-08-09 on a fresh worktree at this commit:
+`SIMPLE_MODULE_LIMIT=4000 bin/simple test
+test/03_system/tools/simple_lab/lab_shared_ui_contract_spec.spl` →
+`Results: 5 total, 5 passed, 0 failed`, including
+`✓ POST /api/test/click on lab_add_cell adds a cell — read-after-write via
+GET /api/test/elements`. No further code change needed; sections below are
+kept as the original diagnosis record.
+
 ## Symptom
 
 `POST /api/test/click {"id":"lab_add_cell"}` against `lab_server.spl`'s L4-added
