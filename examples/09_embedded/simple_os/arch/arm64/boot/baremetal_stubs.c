@@ -385,13 +385,36 @@ RuntimeValue rt_string_len(RuntimeValue str)
     return (RuntimeValue)s->len;
 }
 
+/* Immutable one-byte texts are shared. The HTML/CSS parser performs millions
+ * of byte-oriented char_at/slice probes during the first desktop frame; the
+ * old implementation allocated a new heap string for every probe and filled
+ * the 160 MiB bump heap before producing one frame. This cache preserves the
+ * existing byte-index semantics while bounding that hot path to 256 objects. */
+static RuntimeValue _single_byte_text_cache[256];
+
+static RuntimeValue arm64_single_byte_text(uint8_t byte)
+{
+    RuntimeValue cached = _single_byte_text_cache[byte];
+    if (cached != 0 && cached != NIL_VALUE) return cached;
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + 2);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + 2);
+    s->len = 1;
+    s->data[0] = (char)byte;
+    s->data[1] = '\0';
+    cached = ENCODE_PTR(s);
+    _single_byte_text_cache[byte] = cached;
+    return cached;
+}
+
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
     if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     int64_t i = (int64_t)idx;
     if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
-    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+    return arm64_single_byte_text((uint8_t)s->data[i]);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -451,6 +474,9 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
         r->len = 0;
         r->data[0] = '\0';
         return ENCODE_PTR(r);
+    }
+    if (b == a + 1) {
+        return arm64_single_byte_text((uint8_t)s->data[a]);
     }
     uint32_t len = (uint32_t)(b - a);
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
