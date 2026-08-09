@@ -3548,6 +3548,8 @@ int32_t rt_arm64_virtio_input_semantic_x_raw(void) { return g_arm64_virtio_input
 int32_t rt_arm64_virtio_input_semantic_y_raw(void) { return g_arm64_virtio_input_semantic_y; }
 int32_t rt_arm64_virtio_input_semantic_kind_raw(void) { return g_arm64_virtio_input_semantic_kind; }
 int32_t rt_arm64_virtio_input_semantic_button_raw(void) { return g_arm64_virtio_input_semantic_button; }
+int32_t rt_arm64_virtio_input_semantic_dx_raw(void) { return g_arm64_virtio_input_semantic_dx; }
+int32_t rt_arm64_virtio_input_semantic_dy_raw(void) { return g_arm64_virtio_input_semantic_dy; }
 
 void rt_gui_draw_input_cursor(int32_t x, int32_t y, int32_t kind)
 {
