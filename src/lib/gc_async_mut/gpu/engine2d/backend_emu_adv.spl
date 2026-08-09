@@ -100,39 +100,64 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
 # ============================================================================
 
 fn _emu_blur_rect_pixels(fb: [u32], fb_w: i32, fb_h: i32, x: i32, y: i32, w: i32, h: i32, radius: i32) -> [u32]:
-    if w <= 0 or h <= 0 or radius <= 0:
+    if (w <= 0 or h <= 0 or radius <= 0 or fb_w <= 0 or fb_h <= 0 or
+        fb.len().to_i64() != fb_w.to_i64() * fb_h.to_i64()):
         return []
+    val sample_left = _emu_max(0, x - radius)
+    val sample_top = _emu_max(0, y - radius)
+    val sample_right = _emu_min(fb_w, x + w + radius)
+    val sample_bottom = _emu_min(fb_h, y + h + radius)
+    val sample_w = sample_right - sample_left
+    val sample_h = sample_bottom - sample_top
+    if sample_w <= 0 or sample_h <= 0:
+        return [0u32; w * h]
+    val prefix_stride = sample_w + 1
+    val prefix_count = prefix_stride.to_i64() * (sample_h + 1).to_i64()
+    var prefix_r: [i64] = [0; prefix_count]
+    var prefix_g: [i64] = [0; prefix_count]
+    var prefix_b: [i64] = [0; prefix_count]
+    var prefix_a: [i64] = [0; prefix_count]
+    var sy: i32 = 0
+    while sy < sample_h:
+        var row_r: i64 = 0
+        var row_g: i64 = 0
+        var row_b: i64 = 0
+        var row_a: i64 = 0
+        var sx: i32 = 0
+        while sx < sample_w:
+            val p = fb[(sample_top + sy) * fb_w + sample_left + sx]
+            row_r = row_r + (((p >> 16) & 0xFFu32) as i64)
+            row_g = row_g + (((p >> 8) & 0xFFu32) as i64)
+            row_b = row_b + ((p & 0xFFu32) as i64)
+            row_a = row_a + (((p >> 24) & 0xFFu32) as i64)
+            val pi = (sy + 1) * prefix_stride + sx + 1
+            val above = sy * prefix_stride + sx + 1
+            prefix_r[pi] = prefix_r[above] + row_r
+            prefix_g[pi] = prefix_g[above] + row_g
+            prefix_b[pi] = prefix_b[above] + row_b
+            prefix_a[pi] = prefix_a[above] + row_a
+            sx = sx + 1
+        sy = sy + 1
     var temp: [u32] = [0u32; w * h]
     var py: i32 = 0
     while py < h:
         var px: i32 = 0
         while px < w:
-            var sr: i32 = 0
-            var sg: i32 = 0
-            var sb: i32 = 0
-            var sa: i32 = 0
-            var cnt: i32 = 0
-            var ky = -radius
-            while ky <= radius:
-                var kx = -radius
-                while kx <= radius:
-                    val fx = x + px + kx
-                    val fy = y + py + ky
-                    if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
-                        val p = fb[fy * fb_w + fx]
-                        # Inlined color_r/g/b/a (2D-1 perf fix): the tap loop runs
-                        # O((2r+1)^2) times per call, so 4 free-fn dispatches per
-                        # tap add up fast in the interpreter. Same bit math as
-                        # color_r/g/b/a in color.spl, output-identical.
-                        sr = sr + (((p >> 16) & 0xFFu32) as i32)
-                        sg = sg + (((p >> 8) & 0xFFu32) as i32)
-                        sb = sb + ((p & 0xFFu32) as i32)
-                        sa = sa + (((p >> 24) & 0xFFu32) as i32)
-                        cnt = cnt + 1
-                    kx = kx + 1
-                ky = ky + 1
+            val left = _emu_max(sample_left, x + px - radius) - sample_left
+            val top = _emu_max(sample_top, y + py - radius) - sample_top
+            val right = _emu_min(sample_right, x + px + radius + 1) - sample_left
+            val bottom = _emu_min(sample_bottom, y + py + radius + 1) - sample_top
+            val i00 = top * prefix_stride + left
+            val i10 = top * prefix_stride + right
+            val i01 = bottom * prefix_stride + left
+            val i11 = bottom * prefix_stride + right
+            val cnt = (right - left).to_i64() * (bottom - top).to_i64()
             if cnt > 0:
-                temp[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+                val sr = prefix_r[i11] - prefix_r[i10] - prefix_r[i01] + prefix_r[i00]
+                val sg = prefix_g[i11] - prefix_g[i10] - prefix_g[i01] + prefix_g[i00]
+                val sb = prefix_b[i11] - prefix_b[i10] - prefix_b[i01] + prefix_b[i00]
+                val sa = prefix_a[i11] - prefix_a[i10] - prefix_a[i01] + prefix_a[i00]
+                temp[py * w + px] = rgba((sr / cnt).to_i32(), (sg / cnt).to_i32(), (sb / cnt).to_i32(), (sa / cnt).to_i32())
             px = px + 1
         py = py + 1
     temp
