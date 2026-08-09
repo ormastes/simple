@@ -159,6 +159,31 @@ class _TokenSink:
             self_closing: self_closing_id == 1, data: data_value))
         true
 
+    me push_start_flat(tag: text, flat_attr_names: [text], flat_attr_values: [text], self_closing_id: i32) -> bool:
+        if self.tokens.len() >= self.limit:
+            self.truncated = true
+            return false
+        if self.attr_offsets.len() == 0:
+            self.attr_offsets.push(0)
+        self.kind_ids.push(1)
+        self.tags.push(tag)
+        self.data_out.push("")
+        self.self_closing_ids.push(self_closing_id)
+        var legacy_attrs: [HtmlAttr] = []
+        var flat_i = 0
+        while flat_i < flat_attr_names.len():
+            self.attr_names.push(flat_attr_names[flat_i])
+            self.attr_values.push(flat_attr_values[flat_i])
+            legacy_attrs.push(HtmlAttr(
+                name: flat_attr_names[flat_i],
+                value: flat_attr_values[flat_i]))
+            flat_i = flat_i + 1
+        self.attr_offsets.push(self.attr_names.len())
+        self.tokens.push(HtmlToken(
+            token_kind: HtmlTokenKind.StartTag, tag_name: tag,
+            attrs: legacy_attrs, self_closing: self_closing_id == 1, data: ""))
+        true
+
 pub fn html_tokenizer_new(html: text) -> HtmlTokenizer:
     """Create a new tokenizer for the given HTML string."""
     HtmlTokenizer(html: html, pos: 0, length: html.len())
@@ -360,18 +385,25 @@ fn _html_tokenizer_tokenize_with_limits_into_impl(
                             gt4 > 0 and html.slice(gt4 - 1, gt4) == "/"
                         )
                         val inner = html.slice(pos + 1, if self_closing: gt4 - 1 else: gt4).trim()
-                        val parsed = _parse_start_tag(
-                            inner, attr_limit - retained_attrs
+                        var parsed_tag: [text] = [""]
+                        var parsed_attr_names: [text] = []
+                        var parsed_attr_values: [text] = []
+                        var parsed_status: [i32] = [0]
+                        _parse_start_tag_flat(
+                            inner, attr_limit - retained_attrs,
+                            parsed_tag, parsed_attr_names,
+                            parsed_attr_values, parsed_status
                         )
-                        val tag_name2 = parsed.tag_name
-                        val attrs2 = parsed.attrs
-                        if parsed.truncated:
+                        val tag_name2 = parsed_tag[0]
+                        if parsed_status[0] == 1:
                             sink.truncated = true
                         else:
-                            retained_attrs = retained_attrs + attrs2.len()
-                            val _ = sink.push_values(
-                                1, tag_name2, attrs2,
-                                if self_closing: 1 else: 0, "")
+                            retained_attrs = (
+                                retained_attrs + parsed_attr_names.len())
+                            val _ = sink.push_start_flat(
+                                tag_name2, parsed_attr_names,
+                                parsed_attr_values,
+                                if self_closing: 1 else: 0)
                         pos = gt4 + 1
                         if (tag_name2 == "script" or tag_name2 == "style" or
                             tag_name2 == "title" or tag_name2 == "textarea"):
@@ -537,6 +569,75 @@ fn _parse_attrs(s: text, attr_limit: i32) -> _ParsedAttrs:
                 attrs.push(HtmlAttr(name: attr_name, value: ""))
         pos = _skip_ws(s, pos)
     _ParsedAttrs(attrs: attrs, truncated: false)
+
+# Native/freestanding-safe start-tag projection. All semantic fields are
+# written before either `_ParsedTag` or `_ParsedAttrs` can cross an aggregate
+# return boundary.
+fn _parse_start_tag_flat(
+    inner: text, attr_limit: i32, tag_out: [text], names_out: [text],
+    values_out: [text], status: [i32]
+):
+    if tag_out.len() == 0 or status.len() == 0:
+        return
+    val n = inner.len()
+    var tag_end = 0
+    var found_ws = false
+    while tag_end < n and not found_ws:
+        val cc = inner.slice(tag_end, tag_end + 1)
+        if cc == " " or cc == "\t" or cc == "\n" or cc == "\r":
+            found_ws = true
+        else:
+            tag_end = tag_end + 1
+    tag_out[0] = inner.slice(0, tag_end).lower()
+    val attrs_source = if tag_end < n:
+        inner.slice(tag_end, n).trim()
+    else:
+        ""
+    var seen: Dict<text, bool> = {}
+    var pos = _skip_ws(attrs_source, 0)
+    while pos < attrs_source.len():
+        var name_end = pos
+        var name_done = false
+        while name_end < attrs_source.len() and not name_done:
+            val nc = attrs_source.slice(name_end, name_end + 1)
+            if nc == "=" or _is_ws(nc):
+                name_done = true
+            else:
+                name_end = name_end + 1
+        val attr_name = attrs_source.slice(pos, name_end).lower()
+        val keep_attr = attr_name.len() > 0 and not seen.has(attr_name)
+        if keep_attr:
+            if names_out.len() >= attr_limit:
+                status[0] = 1
+                return
+            seen[attr_name] = true
+        pos = _skip_ws(attrs_source, name_end)
+        var attr_value = ""
+        if pos < attrs_source.len() and attrs_source.slice(pos, pos + 1) == "=":
+            pos = _skip_ws(attrs_source, pos + 1)
+            if pos < attrs_source.len():
+                val quote = attrs_source.slice(pos, pos + 1)
+                if quote == "\"" or quote == "'":
+                    pos = pos + 1
+                    val value_end = _find_char(attrs_source, quote, pos)
+                    if value_end < 0:
+                        attr_value = attrs_source.slice(pos, attrs_source.len())
+                        pos = attrs_source.len()
+                    else:
+                        attr_value = attrs_source.slice(pos, value_end)
+                        pos = value_end + 1
+                else:
+                    var value_end = pos
+                    while value_end < attrs_source.len() and not _is_ws(
+                        attrs_source.slice(value_end, value_end + 1)):
+                        value_end = value_end + 1
+                    attr_value = attrs_source.slice(pos, value_end)
+                    pos = value_end
+        if keep_attr:
+            names_out.push(attr_name)
+            values_out.push(_decode_character_references(attr_value))
+        pos = _skip_ws(attrs_source, pos)
+    status[0] = 0
 
 # =========================================================================
 # Entity parsing
