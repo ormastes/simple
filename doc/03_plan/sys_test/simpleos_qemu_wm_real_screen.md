@@ -840,6 +840,28 @@ SIMPLEOS_ARM64_COMPILER_RECEIPT=/absolute/path/to/compiler-receipt.env \
     sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 ```
 
+2026-08-08 bounded status: the producer self-test passed its clean/seed/debug
+and fabricated-stub rejection checks, while the single real producer invocation
+rejected the canonical deployed compiler as `rust-seed-or-debug-forbidden`.
+The shared root and the available current-origin worktree are dirty, so neither
+can mint a frozen-source receipt. No ARM64 kernel, disk, manifest, QEMU launch,
+or capture was produced by that attempt; do not retry until a new clean
+current-origin worktree has a provenance-qualified self-hosted deployment.
+
+Do not substitute `build/bootstrap/stage2`, `build/bootstrap/stage3`, or
+`build/native_probe` merely because they are native ARM64 executables. The
+available Stage 3 provenance is pinned to its original source root and does
+not verify against the current shared root; it is historical diagnostic
+evidence, not a transferable producer admission. A marker-only detector must
+also not be relaxed to accept it without a current SHA-bound provenance check.
+
+2026-08-08 clean-worktree check: `origin/main` resolved to
+`e5617b6b1f22ec58df0f31250e2a5c7850279143`, but its fresh checkout contains
+no deployed or Stage 3 compiler. An interrupted checkout is unusable and did
+not start a build. The admission/launch row remains blocked until an external
+bootstrap produces the current qualified compiler in a fully clean isolated
+worktree.
+
 ### Q-NIL source mitigation (2026-08-01)
 
 The Engine2D owner-helper consumers that returned `FontRenderer` through the
