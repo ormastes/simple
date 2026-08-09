@@ -1,6 +1,7 @@
 # BUG: `for X in arr` after an earlier `val/var X` in the same fn — loop var binding lost
 
-Status: PARTIALLY FIXED (native/MIR fixed; interpreter still open)
+Status: RESOLVED (re-verified 2026-08-09) — native/MIR fixed 2026-06-11; interpreter
+side re-tested 2026-08-09 and no longer reproduces (see "Re-verification" below).
 
 **Date:** 2026-06-11
 **Severity:** High (silent wrong values; root cause of stage4 10th-site (b) `check` "1 of 0 file(s)")
@@ -79,3 +80,28 @@ bin/simple /tmp/v7.spl          # prints 0,0 — expected p,q
 
 Related: `array_push_loop_in_main_len_coredump_2026-06-11.md` (separate
 in-`fn main` array crash family hit while minimizing this repro).
+
+## Re-verification (2026-08-09)
+
+Re-ran the exact repro from this doc against current `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`, the Rust seed — same engine
+the original "interpreter: prints 0" finding was measured against):
+
+```bash
+bin/simple /tmp/v7.spl                              # default (JIT->interp fallback)
+SIMPLE_EXECUTION_MODE=interpreter bin/simple /tmp/v7.spl   # explicit interpreter
+```
+
+Both now print `p` then `q` — the correct iterated elements — instead of the
+originally-reported `0` twice. The interpreter-side root cause described above
+("Mechanism not yet isolated") is no longer reproducible; it was evidently
+fixed as a side effect of unrelated interpreter/env work between 2026-06-11
+and 2026-08-09 (no dedicated commit identified — this doc's own root-cause
+section never named a specific fix location to check against `git log`).
+
+Added a permanent regression spec:
+`test/01_unit/language/for_loop_var_shadows_prior_local_binding_spec.spl` —
+`bin/simple test` on that file reports
+`SPEC FILE VERDICT: ... executed=1 passed=1 failed=0`.
+
+**Status: RESOLVED.**
