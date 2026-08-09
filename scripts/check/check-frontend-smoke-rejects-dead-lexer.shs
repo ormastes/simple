@@ -1,0 +1,128 @@
+#!/bin/sh
+# Regression: candidate_frontend_smoke must REJECT a deliberately-broken
+# compiler candidate.
+#
+# On 2026-08-09 the bootstrap "Stage 2: running bootstrap compiler sanity" gate
+# admitted a Stage-2 binary that could not lex a two-line file. The failure then
+# ran unbounded: 444 MB of log / 6,299,344 lines / 32 GB RSS. The gate provided
+# no signal at all. See doc/08_tracking/bug/
+# stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+#
+# This proves the three fail-closed properties the hardened gate now has, using
+# fake "compiler" shell scripts as candidates — no real bootstrap required:
+#   A. a candidate whose native-build fails is rejected
+#   B. a candidate that emits an unbounded diagnostic stream is rejected EVEN IF
+#      its native-build exits 0 and it produces a working binary
+#   C. a candidate that prints the dead-lexer signature is rejected on the same
+#      terms
+#   D. a well-behaved candidate is ACCEPTED (so the checks above are not
+#      vacuously rejecting everything)
+#
+# Verdict line is the last line of stdout: PASS / FAIL / ERROR.
+
+set -u
+
+ROOT_DIR=$(cd "$(dirname "$0")/../.." && pwd)
+. "$ROOT_DIR/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+
+CANDIDATE_FRONTEND_ROOT=$ROOT_DIR
+export CANDIDATE_FRONTEND_ROOT
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/frontend-smoke-selftest.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"
+    exit 2
+}
+trap 'rm -rf "$work"' 0
+
+checked=0
+failures=0
+
+# Build a fake candidate. $1=name, $2=extra stdout emitted during native-build,
+# $3=native-build exit status.
+make_candidate() {
+    _name=$1
+    _noise=$2
+    _status=$3
+    _path=$work/$_name
+    cat >"$_path" <<EOF
+#!/bin/sh
+# Fake compiler candidate for the frontend-smoke self-test.
+case "\$1" in
+  --version) echo "simple-bootstrap 1.0.0-beta"; exit 0 ;;
+  native-build)
+    out=""
+    prev=""
+    for a in "\$@"; do
+      if [ "\$prev" = "--output" ]; then out=\$a; fi
+      prev=\$a
+    done
+    $_noise
+    if [ "$_status" -ne 0 ]; then exit $_status; fi
+    printf '#!/bin/sh\nprintf "5\\\\n"\n' >"\$out"
+    chmod +x "\$out"
+    exit 0
+    ;;
+esac
+exit 1
+EOF
+    chmod +x "$_path"
+    echo "$_path"
+}
+
+expect_gate() {
+    _label=$1
+    _candidate=$2
+    _want=$3   # "reject" or "accept"
+    checked=$((checked + 1))
+    if candidate_frontend_smoke "$_candidate" >"$work/out.$checked" 2>&1; then
+        _got=accept
+    else
+        _got=reject
+    fi
+    if [ "$_got" = "$_want" ]; then
+        echo "  ok   $_label (gate=$_got)"
+    else
+        echo "  BAD  $_label: expected gate to $_want, got $_got"
+        failures=$((failures + 1))
+    fi
+}
+
+# D — control: a well-behaved candidate must be ACCEPTED. If this fails, every
+# rejection below is vacuous.
+good=$(make_candidate good ':' 0)
+expect_gate "well-behaved candidate is admitted" "$good" accept
+
+# A — native-build failure.
+broken=$(make_candidate broken 'echo "boom" >&2' 3)
+expect_gate "failing native-build is rejected" "$broken" reject
+
+# B — runaway diagnostic stream with a SUCCESSFUL build and a working binary.
+# This is the exact 2026-08-09 shape: every signal the old gate checked was
+# green. 8 MiB exceeds the 4 MiB cap.
+runaway=$(make_candidate runaway \
+    'i=0; while [ $i -lt 8192 ]; do printf "%01023d\n" 0; i=$((i+1)); done' 0)
+expect_gate "runaway diagnostic stream is rejected despite a green build" \
+    "$runaway" reject
+
+# C — dead-lexer signature with a SUCCESSFUL build and a working binary.
+deadlex=$(make_candidate deadlex \
+    "printf \"[parser_error] line 1:1: unexpected token in expression: Unknown(0) ''\\n\"" 0)
+expect_gate "dead-lexer token signature is rejected despite a green build" \
+    "$deadlex" reject
+
+# C2 — the lexer's own fail-closed diagnostic.
+deadlex2=$(make_candidate deadlex2 \
+    'printf "[lexer_fatal] dead lexer: next_token() produced kind 0\n"' 0)
+expect_gate "[lexer_fatal] diagnostic is rejected despite a green build" \
+    "$deadlex2" reject
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "$failures" -ne 0 ]; then
+    echo "FAIL — $failures of $checked gate case(s) behaved wrongly"
+    exit 1
+fi
+echo "PASS — $checked gate case(s) checked (1 admit, 4 reject)"
+exit 0

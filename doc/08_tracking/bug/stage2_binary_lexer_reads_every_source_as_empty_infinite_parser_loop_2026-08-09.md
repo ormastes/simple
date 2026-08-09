@@ -1,7 +1,8 @@
 # Stage-2 binary lexes EVERY source file as empty → unbounded parser-error loop
 
 Date: 2026-08-09
-Status: **OPEN — reproduced, root symptom isolated, not fixed**
+Status: **FIXED in source (interpreter-verified) — awaiting a full bootstrap to
+confirm on a freshly-built Stage-2 binary**
 Area: bootstrap / stage-2 native-build / 10.frontend lexer / parser error recovery
 
 ## Summary
@@ -127,3 +128,124 @@ the SIGILL fault site **still has never executed**. Measured over the full
 444 MB Stage-3 log: `field access on nil receiver` = 0, `SIGILL`/exit 132 = 0,
 `[mir-stmt-caller]` = 0, `garbage-expr` = 0. Both probes were enabled and both
 produced nothing.
+
+---
+
+## Root cause (2026-08-09, found)
+
+`core/lexer.spl:lex_next()` threw away the token kind **returned** by
+`CoreLexer.next_token()` and instead read `loaded.cur_kind` back off the struct:
+
+```
+    var _scan_kind: i64 = 0
+    ...
+    _scan_kind = loaded.next_token()      # correct value, discarded
+    val kind = loaded.cur_kind            # <-- read-back, returned 0
+```
+
+`CoreLexer` is a **value-type `struct`** (`lexer_struct.spl:135`) held in a
+module-level array slot (`current_core_lexer_slot`). In the Stage-2 native
+binary the `me`-method mutation of `self.cur_kind` was not visible to this
+caller, so the read-back yielded the **constructor default `cur_kind: 0`**
+(`make_core_lexer`, `lexer_struct.spl:167`) for every token.
+
+Three observations from the bug report all fall out of this exactly:
+
+- `Unknown(0)` — 0 is not a token kind at all; it is only the struct's
+  zero-initialiser. `scan_token()` always routes through `make_token()`, which
+  is never called with 0.
+- `text ''` at `line 1:1` — those came from the module-level `core_last_token_*`
+  slots that `make_token()` **does** write. `1:1` is `self.line`/`self.col` on
+  an unadvanced lexer, and `''` is `make_token(190, "", …)`. So the scan really
+  did run and really did reach EOF; only the kind read-back was lost. The token
+  stream was therefore **not** "empty because the file was unread" — the file
+  read is fine.
+- the infinite loop — `parse_module_body()`'s `while true` has exactly ONE exit,
+  `par_kind_get() == 190`. A kind permanently stuck at 0 makes that exit
+  unreachable, and the module-level fallback arm re-runs `parse_expr()` at the
+  same position forever.
+
+Corrected diagnosis of the report's §"Where to look": there is **one** root
+defect, not "a dead lexer plus a recovery bug". The lexer's file reading and
+tokenizer are both correct.
+
+## Fixes
+
+1. **`src/compiler/10.frontend/core/lexer.spl`** — `lex_next()` now uses
+   `_scan_kind`, the value `next_token()` returns by value (computed while
+   `self` is live), eliminating the struct read-back. It additionally fails
+   **closed** on the impossible kind 0: one bounded `[lexer_fatal]` diagnostic
+   naming path/line/col/source-length, then the stream terminates at EOF (190)
+   instead of handing the parser an unconsumable token forever.
+   `lex_init_with_path()` also reports once when a **named** source file reaches
+   the lexer as empty text.
+2. **`src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl`** —
+   forward-progress invariant on `parse_module_body()`'s loop. The
+   `(kind, line, col)` triple at the top of each iteration must differ from the
+   previous iteration's; if it repeats, one error is emitted and the loop
+   breaks. Any future lexer/parser defect of this shape now yields a bounded
+   diagnosis instead of a 444 MB disk/OOM event.
+3. **Gate fail-open (see below).**
+
+## Gate defect — root cause and fix
+
+The gate was **not** weak in the way the original write-up assumed: it already
+native-builds `p2_add.spl` end-to-end and asserts `stdout == 5`
+(`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs:
+candidate_frontend_smoke`). The real hole is a **configuration mismatch**:
+
+- the gate runs the candidate with **`SIMPLE_BOOTSTRAP=0`**
+  (`candidate_frontend_admission.shs`),
+- Stage 3 runs the same admitted binary with **`SIMPLE_BOOTSTRAP=1`**
+  (`bootstrap-from-scratch.sh`, Stage-3 `env` block).
+
+`SIMPLE_BOOTSTRAP=1` is documented in this repo to change compiler behaviour
+drastically (vacuous `--native` emit; the `?` operator dropped). The gate was
+certifying a configuration Stage 3 never uses.
+
+Fixes in `candidate_frontend_admission.shs` + `bootstrap-from-scratch.sh`:
+
+- `candidate_frontend_smoke` takes `CANDIDATE_FRONTEND_BOOTSTRAP`, and
+  `bootstrap_stage_sanity` now runs it **twice — once per `SIMPLE_BOOTSTRAP`
+  value** — recording `frontend_smoke_bootstrap_mode_status` in the evidence
+  file.
+- Runaway-output cap (`CANDIDATE_FRONTEND_MAX_LOG_BYTES`, default 4 MiB): a
+  candidate that emits more than that for a two-line fixture is rejected **even
+  when its build exits 0 and its binary prints 5** — precisely the 2026-08-09
+  shape, where every signal the gate checked was green.
+- Dead-lexer signature rejection: `Unknown(0) ''` or `[lexer_fatal]` anywhere in
+  the candidate's build output is fatal.
+- The failure path now `head -c 65536`s the candidate log instead of `cat`ing
+  it, so a runaway candidate cannot flood the bootstrap log through the gate.
+
+## Regression evidence
+
+- `test/01_unit/compiler/frontend/lexer_dead_stream_forward_progress_spec.spl`
+  — **5 examples, 0 failures** (`Results: 5 total, 5 passed, 0 failed`).
+  Covers: the exact two-line probe from §Evidence 2 parsing to one `DECL_FN`
+  named `main`; a three-declaration module reaching EOF; bounded termination on
+  a single and on repeated unconsumable module-level tokens; and an empty
+  module parsing to zero decls.
+- `scripts/check/check-frontend-smoke-rejects-dead-lexer.shs` — **PASS — 5 gate
+  case(s) checked (1 admit, 4 reject)**. Uses fake candidate binaries, so it
+  needs no bootstrap. The admit case is the non-vacuity control; the reject
+  cases include two that exit 0 and produce a *working* binary and are rejected
+  purely on the runaway-output and dead-lexer signatures.
+- No regressions: `lexer_position_unification_spec.spl` 4/4,
+  `lexer_comprehensive_spec.spl` 2/2.
+
+## Not yet done
+
+- **No full bootstrap was run after the fix.** The fix is verified through the
+  interpreter path only. Confirming it on a freshly-built Stage-2 binary — and
+  thereby finally reaching the nil-receiver SIGILL fault site in
+  `stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md` — is
+  the outstanding step.
+- **Sibling audit not done.** `lex_next()` was one instance of "mutate a
+  value-type struct through a `me` method, then read a field back off it". Other
+  `me`-mutation-then-field-read-back sites in `src/compiler/**` may carry the
+  same defect and should be swept; prefer returning the value.
+- The pure-Simple parser accepts a bare `@@@` module body without error
+  (`parse_module_silent_checked` returns false) while the Rust seed rejects it.
+  Found incidentally while writing the regression spec; unrelated to this bug
+  and not tracked elsewhere yet.

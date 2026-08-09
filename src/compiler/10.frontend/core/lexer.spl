@@ -56,6 +56,10 @@ var lex_source_codes: [i64] = []
 var current_core_lexer_slot: [CoreLexer] = []
 var lex_env_save_enabled: [bool] = [false]
 var lex_generic_close_pending: [bool] = [false]
+# One-shot latch so the dead-lexer diagnostic in lex_next() is reported once
+# per process instead of once per token (the failure mode being guarded is
+# precisely an unbounded per-token print).
+var lex_dead_reported: [bool] = [false]
 var lex_cur_kind_direct: [i64] = [0]
 var lex_cur_text_direct: [text] = [""]
 # Module-global slot mirror of the active lexer source. current_core_source_get
@@ -136,6 +140,14 @@ fn lex_init_with_path(source: text, source_path: text):
     var core_source = source
     if core_source == "" and source_path != "":
         core_source = rt_file_read_text(source_path) ?? ""
+        # Fail-closed: a NAMED source file that reaches the lexer as empty text
+        # is the "reads every source as empty" failure. Silently lexing "" then
+        # yields an immediate EOF (or, with the pre-2026-08-09 kind-0 read-back
+        # bug, an unbounded parser-error loop) and the compile reports a
+        # meaningless location. Say so once, loudly, naming the path.
+        if core_source == "":
+            eprint("[lexer_fatal] empty source handed to lexer for path '{source_path}' (in-memory source was empty and the file re-read produced no bytes)")
+    lex_dead_reported = [false]
     if lexer_array_len(lex_inline_source_slot) == 0:
         lex_inline_source_slot = [""]
     lex_inline_source_slot[0] = core_source
@@ -549,7 +561,35 @@ fn lex_next() -> i64:
         _scan_kind = loaded.next_token_after_generic_close()
     else:
         _scan_kind = loaded.next_token()
-    val kind = loaded.cur_kind
+    # Use the value RETURNED by next_token(), not a read-back of
+    # `loaded.cur_kind`. CoreLexer is a value-type struct held in a module-level
+    # array slot; in the Stage-2 native binary the `me`-method mutation of
+    # `self.cur_kind` was NOT visible to this caller, so the read-back yielded
+    # the constructor default 0 for EVERY token. Kind 0 is not a real token
+    # kind, so the parser never saw EOF (190) and parse_module_body's
+    # `while true` loop re-reported "unexpected token: Unknown(0) ''" at 1:1
+    # forever -- 444 MB of log / 32 GB RSS before the run was killed. See
+    # doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+    # `next_token()` computes the kind while `self` is still live and returns it
+    # by value, which is reliable across the struct/method boundary.
+    var kind = _scan_kind
+    # Fail-closed invariant: scan_token()/next_token() ALWAYS route through
+    # make_token(), which never emits kind 0 (0 is only the CoreLexer
+    # constructor default). Observing 0 here means the lexer state was lost or
+    # the scan never ran -- a dead lexer. Terminate the token stream with EOF
+    # and a loud one-shot diagnostic instead of handing the parser an
+    # unconsumable token forever.
+    if kind == 0:
+        if lexer_array_len(lex_dead_reported) == 0:
+            lex_dead_reported = [false]
+        if not lex_dead_reported[0]:
+            lex_dead_reported[0] = true
+            val dead_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
+            val dead_line = core_lexer_last_line_get()
+            val dead_col = core_lexer_last_col_get()
+            val dead_len = current_core_source_get().len()
+            eprint("[lexer_fatal] dead lexer: next_token() produced kind 0 (never a valid token kind) for path '{dead_path}' at line {dead_line} col {dead_col}; source length {dead_len}. Terminating token stream at EOF.")
+        kind = 190
     current_core_lexer_slot[0] = loaded
     current_core_lexer_save(loaded)
     val env_save = lex_env_save_enabled[0]

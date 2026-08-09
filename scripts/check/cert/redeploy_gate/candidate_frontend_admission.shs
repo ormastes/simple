@@ -15,9 +15,28 @@ candidate_frontend_timeout_bin() {
     fi
 }
 
+# Cap on the candidate's own build-log size. A dead lexer combined with a
+# parser error-recovery loop that makes no forward progress emits the SAME line
+# forever: on 2026-08-09 an admitted Stage-2 binary produced a 444 MB /
+# 6,299,344-line log at 32 GB RSS before the run was killed by hand. Any
+# candidate that emits more than this from a 2-line fixture is non-functional
+# regardless of its exit status.
+CANDIDATE_FRONTEND_MAX_LOG_BYTES=${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}
+
+# candidate_frontend_smoke <candidate>
+#
+# CANDIDATE_FRONTEND_BOOTSTRAP selects the SIMPLE_BOOTSTRAP value the candidate
+# is exercised under. This must be swept, not fixed: Stage 3 invokes the
+# admitted Stage-2 binary with SIMPLE_BOOTSTRAP=1, but this gate only ever ran
+# it with SIMPLE_BOOTSTRAP=0 -- and SIMPLE_BOOTSTRAP=1 is documented in this repo
+# to change compiler behaviour drastically (vacuous `--native` emit; the `?`
+# operator dropped entirely). So the gate certified a configuration Stage 3
+# never uses. See
+# doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
 candidate_frontend_smoke() (
     candidate=$1
     candidate_backend=${CANDIDATE_FRONTEND_BACKEND:-cranelift}
+    candidate_bootstrap=${CANDIDATE_FRONTEND_BOOTSTRAP:-0}
     timeout_bin=$(candidate_frontend_timeout_bin || true)
     [ -n "$timeout_bin" ] || exit 1
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
@@ -32,7 +51,7 @@ candidate_frontend_smoke() (
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_EXECUTION_MODE= \
     SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
-    SIMPLE_BOOTSTRAP=0 \
+    SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
         "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
         "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
@@ -43,9 +62,24 @@ candidate_frontend_smoke() (
         --cache-dir "$probe_dir/cache" \
         --mode one-binary \
         --output "$probe_output" >"$probe_dir/build.log" 2>&1 || {
-            cat "$probe_dir/build.log" >&2
+            head -c 65536 "$probe_dir/build.log" >&2
             exit 1
         }
+    # Runaway-diagnostic gate: even a build that reports success must not have
+    # spewed an unbounded diagnostic stream at a two-line fixture.
+    build_log_bytes=$(wc -c <"$probe_dir/build.log" 2>/dev/null || echo 0)
+    if [ "$build_log_bytes" -gt "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" ]; then
+        echo "candidate_frontend_smoke: candidate emitted ${build_log_bytes} bytes of output for a two-line fixture (cap ${CANDIDATE_FRONTEND_MAX_LOG_BYTES}); treating as a runaway error loop" >&2
+        head -c 4096 "$probe_dir/build.log" >&2
+        exit 1
+    fi
+    # Dead-lexer signature: kind 0 / empty token text is never a real token.
+    if grep -q "Unknown(0) ''" "$probe_dir/build.log" 2>/dev/null ||
+        grep -q '\[lexer_fatal\]' "$probe_dir/build.log" 2>/dev/null; then
+        echo "candidate_frontend_smoke: candidate reported a dead lexer while compiling the fixture" >&2
+        head -c 4096 "$probe_dir/build.log" >&2
+        exit 1
+    fi
     probe_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
         "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || exit 1
     [ "$probe_stdout" = 5 ]

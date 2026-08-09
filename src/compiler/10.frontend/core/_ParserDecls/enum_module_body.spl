@@ -563,11 +563,34 @@ fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
     UNSAFE_ANNOTATIONS = []
     var i: i64 = 0 - 1
+    # Forward-progress invariant (defense in depth).
+    #
+    # This loop's ONLY exit is EOF (190). Every arm is expected to consume at
+    # least one token, so the (kind, line, col) triple at the top of the loop
+    # must differ from the previous iteration's. When it does not, the parser is
+    # re-reporting the same error at the same position forever: on 2026-08-09 a
+    # dead Stage-2 lexer handed back `Unknown(0) ''` at 1:1 indefinitely and this
+    # loop produced a 444 MB / 6.3M-line log and 32 GB RSS before being killed
+    # (see doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_
+    # infinite_parser_loop_2026-08-09.md). Fail CLOSED with one bounded
+    # diagnostic instead of looping.
+    var pm_prev_kind: i64 = 0 - 1
+    var pm_prev_line: i64 = 0 - 1
+    var pm_prev_col: i64 = 0 - 1
     while true:
         i = i + 1
         parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
             break
+        val pm_kind = par_kind_get()
+        val pm_line = par_line_get()
+        val pm_col = par_col_get()
+        if pm_kind == pm_prev_kind and pm_line == pm_prev_line and pm_col == pm_prev_col:
+            parser_error("parser made no forward progress at this token (" + tok_kind_name(pm_kind) + " '" + par_text_get() + "'); aborting module parse to avoid an unbounded error loop")
+            break
+        pm_prev_kind = pm_kind
+        pm_prev_line = pm_line
+        pm_prev_col = pm_col
         if parser_module_trace_enabled():
             eprint("[parser-module] decl:start i={i} kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
         val parsed_visibility = parse_top_level_visibility()

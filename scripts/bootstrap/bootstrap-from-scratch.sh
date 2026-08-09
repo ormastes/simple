@@ -811,8 +811,23 @@ bootstrap_stage_sanity() (
   fi
   frontend_status=0
   CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    CANDIDATE_FRONTEND_BOOTSTRAP=0 \
     candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||
     frontend_status=$?
+  # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
+  # invokes this candidate in. The single-pass (SIMPLE_BOOTSTRAP=0) gate
+  # certified a configuration Stage 3 never uses, and on 2026-08-09 it admitted
+  # a Stage-2 binary that could not lex a two-line file, whose failure then ran
+  # unbounded (444 MB log / 32 GB RSS). See doc/08_tracking/bug/
+  # stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md
+  frontend_bootstrap_status=0
+  if [ "${frontend_status}" -eq 0 ]; then
+    CANDIDATE_FRONTEND_BACKEND="${backend}" \
+      CANDIDATE_FRONTEND_BOOTSTRAP=1 \
+      candidate_frontend_smoke "${candidate}" >>"${frontend_log}" 2>&1 ||
+      frontend_bootstrap_status=$?
+    frontend_status=${frontend_bootstrap_status}
+  fi
   candidate_sha_after=$(bootstrap_stage3_hash_file "${candidate}") || return 1
   sanity_status=fail
   if [ "${version_status}" -eq 0 ] &&
@@ -834,6 +849,7 @@ bootstrap_stage_sanity() (
       printf 'unsupported_output_sha256=%s\n' \
         "$(printf '%s' "${unsupported}" | bootstrap_stage3_hash_stream)"
       echo "frontend_smoke_status=${frontend_status}"
+      echo "frontend_smoke_bootstrap_mode_status=${frontend_bootstrap_status}"
       echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file "${frontend_log}")"
       echo "candidate_sha256_after=${candidate_sha_after}"
     } >"${evidence_tmp}" || return 1
