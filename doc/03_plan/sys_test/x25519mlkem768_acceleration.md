@@ -39,7 +39,7 @@ Manual: `doc/06_spec/02_integration/os/crypto/x25519mlkem768_backend_matrix_spec
 
 Coverage:
 
-- one immutable fixture digest/config across scalar, AVX2, NEON, RVV, CUDA, Vulkan, and Metal;
+- one immutable **NTT-probe** fixture digest/config across scalar, AVX2, NEON, RVV, CUDA, Vulkan, and Metal;
 - exact fixture id `ntt-v1-p97-i29-c17-q3329` in Simple, C, CUDA, Vulkan,
   and Metal receipts, with all 768 coefficients derived from the same formula;
 - scalar/SIMD/CUDA/Metal keygen, encapsulation, and decapsulation evidence
@@ -52,6 +52,15 @@ Coverage:
 - cache hit, miss, profile/source/artifact/device/config invalidation;
 - native execution receipt or explicit blocked row;
 - QEMU ARM/RVV correctness cannot set native-performance PASS.
+
+The NTT fixture above is not the full-exchange workload. Full-operation source
+paths separately bind the typed v3 workload
+`mlkem-native-fd58+rfc7748-abc-v1` and SHA-256
+`2c5c93e8120ce4c2f927340819935a005d5c8ebf06fc65c531b8165c5fac22d0`,
+including public Set A (ML-KEM), Set B (X25519), and Set C (hybrid) receipts.
+That wiring is a contract and test-design fact, not native-execution evidence:
+no source-matched Stage-4 run or measured branch-coverage receipt currently
+proves any specialized full-operation row.
 
 Requirements: REQ-007–015; NFR-001–005, NFR-009–017.
 
@@ -233,6 +242,10 @@ path: a self-hosted `simple` compiler with adjacent `.provenance.env`, and a
 native artifact compiled from `src/app/test/x25519mlkem768_evidence.spl`.
 The deployed `bin/simple` identifies itself as the Rust bootstrap seed and has
 no adjacent provenance receipt, so it is intentionally not substituted.
+
+Metal remains fail-closed even though the typed full-workload helper exists:
+the public GPU dispatcher blocks it before artifact admission because no pinned
+fixture-manifest metallib digest and no live macOS device receipt are available.
 
 `scripts/check/build-x25519mlkem768-gpu-evidence-runner.shs` is the only
 admitted producer for the future full-operation runner. It accepts an admitted
