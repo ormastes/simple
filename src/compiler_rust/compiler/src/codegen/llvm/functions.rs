@@ -3513,13 +3513,22 @@ mod tests {
                 "Path.substring".to_string(),
                 "lib__common__string_core__str_dot_substring".to_string(),
             ),
+            (
+                "Path.substring_range".to_string(),
+                "lib__common__string_core__str_dot_substring".to_string(),
+            ),
             ("UserText.replace".to_string(), "UserText_dot_replace".to_string()),
+            (
+                "NamespacedStr.replace".to_string(),
+                "user__model__str_dot_replace".to_string(),
+            ),
         ]));
 
         for name in [
             "lib__common__string_core__str_dot_replace",
             "lib__common__string_core__str_dot_substring",
             "UserText_dot_replace",
+            "user__model__str_dot_replace",
         ] {
             let mut declaration = MirFunction::new(
                 name.to_string(),
@@ -3535,28 +3544,31 @@ mod tests {
             crate::hir::TypeId::I64,
             simple_parser::ast::Visibility::Public,
         );
-        for (dest, value) in [(VReg(0), 3), (VReg(1), 1)] {
+        for (dest, value) in [(VReg(0), 3), (VReg(1), 1), (VReg(2), 2)] {
             caller.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
         }
-        for (dest, name) in [
-            (VReg(2), "Path.replace"),
-            (VReg(3), "Path.substring"),
-            (VReg(4), "UserText.replace"),
+        for (dest, name, args) in [
+            (VReg(3), "Path.replace", vec![VReg(1), VReg(2)]),
+            (VReg(4), "Path.substring", vec![VReg(1)]),
+            (VReg(5), "Path.substring_range", vec![VReg(1), VReg(2)]),
+            (VReg(6), "UserText.replace", vec![VReg(1)]),
+            (VReg(7), "NamespacedStr.replace", vec![VReg(1)]),
         ] {
             caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
                 dest: Some(dest),
                 receiver: VReg(0),
                 func_name: name.to_string(),
-                args: vec![VReg(1)],
+                args,
             });
         }
-        caller.blocks[0].terminator = Terminator::Return(Some(VReg(4)));
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(7)));
         backend.compile_function(&caller).unwrap();
 
         let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("call i64 @rt_string_replace"), "{ir}");
-        assert!(ir.contains("call i64 @rt_slice"), "{ir}");
+        assert!(ir.contains("call i64 @rt_string_replace(i64 3, i64 1, i64 2)"), "{ir}");
+        assert_eq!(ir.matches("call i64 @rt_slice(i64 3, i64 1, i64").count(), 2, "{ir}");
         assert!(ir.contains("call i64 @UserText_dot_replace"), "{ir}");
+        assert!(ir.contains("call i64 @user__model__str_dot_replace"), "{ir}");
         assert!(
             !ir.contains("call i64 @lib__common__string_core__str_dot_replace"),
             "{ir}"

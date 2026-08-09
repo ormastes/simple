@@ -1031,6 +1031,10 @@ int main(int argc, char** argv) {
             && selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| *is_native_all)
+            // The exact archive projection uses GNU ld/objcopy or Apple ld
+            // semantics. Preserve the existing native-all path on other hosts
+            // until that projection has a native implementation there.
+            && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))
         {
             let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
                 .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;

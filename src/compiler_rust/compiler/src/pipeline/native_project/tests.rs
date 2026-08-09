@@ -3679,7 +3679,6 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
     let actual = defined
         .keys()
         .map(|symbol| symbol.trim_start_matches('_').to_string())
-        .filter(|symbol| symbol != "rust_eh_personality")
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(actual, expected);
     assert!(!defined.contains_key("rt_native_build"));

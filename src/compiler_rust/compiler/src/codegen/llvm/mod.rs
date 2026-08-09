@@ -80,9 +80,11 @@ pub(crate) fn qualified_runtime_method_owner_is_builtin(func_name: &str) -> bool
 pub(crate) fn resolved_text_runtime_method(func_name: &str) -> Option<&'static str> {
     let dotted = func_name.replace("_dot_", ".");
     let (owner, method) = dotted.rsplit_once('.')?;
-    let owner = owner.rsplit("__").next().unwrap_or(owner);
-    let owner = owner.rsplit('.').next().unwrap_or(owner);
-    if !matches!(owner, "str" | "text" | "String" | "string") {
+    let canonical_string_core = owner == "lib__common__string_core__str";
+    let unqualified_builtin = !owner.contains("__")
+        && !owner.contains('.')
+        && matches!(owner, "str" | "text" | "String" | "string");
+    if !canonical_string_core && !unqualified_builtin {
         return None;
     }
     match method {
@@ -139,6 +141,7 @@ mod qualified_runtime_method_tests {
             assert_eq!(resolved_text_runtime_method(resolved), Some(intrinsic));
         }
         assert_eq!(resolved_text_runtime_method("UserText_dot_replace"), None);
+        assert_eq!(resolved_text_runtime_method("user__model__str_dot_replace"), None);
         assert_eq!(resolved_text_runtime_method("replace"), None);
     }
 }
