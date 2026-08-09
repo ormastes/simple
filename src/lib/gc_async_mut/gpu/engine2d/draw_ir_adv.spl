@@ -1301,6 +1301,83 @@ var _engine2d_embed_pool_w: i32 = 0
 var _engine2d_embed_pool_h: i32 = 0
 var _engine2d_embed_pool_backend: text = ""
 
+# Two-entry retained parent-material cache. Current WM composition has at most
+# two inactive glass windows; a larger scene remains correct and simply
+# thrashes this bounded cache. Entries are admitted by exact parent pixels plus
+# the producer's style revision and full embedding contract.
+var _engine2d_parent_material_key_a: text = ""
+var _engine2d_parent_material_key_b: text = ""
+var _engine2d_parent_material_pixels_a: [u32] = []
+var _engine2d_parent_material_pixels_b: [u32] = []
+var _engine2d_parent_material_rendered_a: i32 = 0
+var _engine2d_parent_material_rendered_b: i32 = 0
+var _engine2d_parent_material_cpu_a: i32 = 0
+var _engine2d_parent_material_cpu_b: i32 = 0
+var _engine2d_parent_material_css_a: i64 = 0
+var _engine2d_parent_material_css_b: i64 = 0
+var _engine2d_parent_material_next: i32 = 0
+
+fn _engine2d_parent_material_pixels_checksum(pixels: [u32]) -> u64:
+    var checksum = 0x9E3779B97F4A7C15u64
+    var i = 0
+    while i < pixels.len():
+        checksum = checksum ^ (
+            pixels[i].to_u64() + (i + 1).to_u64() * 0x100000001B3u64)
+        i = i + 1
+    checksum & 0x7FFFFFFFFFFFFFFFu64
+
+fn _engine2d_parent_material_cache_key(
+    batch: DrawIrBatch, seed: [u32], padding: i32
+) -> text:
+    val e: DrawIrEmbeddingConfig = batch.embedding
+    val parent_checksum = _engine2d_parent_material_pixels_checksum(seed)
+    "{batch.backend_target}|{batch.source.style_revision}|{e.surface_id}|{e.x},{e.y},{e.width},{e.height},{e.opacity_milli}|{padding}|{batch.commands.len()}|{parent_checksum}"
+
+fn _engine2d_parent_material_cache_slot(key: text) -> i32:
+    if key != "" and key == _engine2d_parent_material_key_a:
+        return 0
+    if key != "" and key == _engine2d_parent_material_key_b:
+        return 1
+    -1
+
+fn _engine2d_parent_material_cache_pixels(slot: i32) -> [u32]:
+    if slot == 0: return _engine2d_parent_material_pixels_a
+    if slot == 1: return _engine2d_parent_material_pixels_b
+    []
+
+fn _engine2d_parent_material_cache_rendered(slot: i32) -> i32:
+    if slot == 0: return _engine2d_parent_material_rendered_a
+    if slot == 1: return _engine2d_parent_material_rendered_b
+    0
+
+fn _engine2d_parent_material_cache_cpu(slot: i32) -> i32:
+    if slot == 0: return _engine2d_parent_material_cpu_a
+    if slot == 1: return _engine2d_parent_material_cpu_b
+    0
+
+fn _engine2d_parent_material_cache_css(slot: i32) -> i64:
+    if slot == 0: return _engine2d_parent_material_css_a
+    if slot == 1: return _engine2d_parent_material_css_b
+    0
+
+fn _engine2d_parent_material_cache_store(
+    key: text, pixels: [u32], rendered: i32, cpu: i32, css_remaining: i64
+):
+    if _engine2d_parent_material_next == 0:
+        _engine2d_parent_material_key_a = key
+        _engine2d_parent_material_pixels_a = pixels
+        _engine2d_parent_material_rendered_a = rendered
+        _engine2d_parent_material_cpu_a = cpu
+        _engine2d_parent_material_css_a = css_remaining
+        _engine2d_parent_material_next = 1
+    else:
+        _engine2d_parent_material_key_b = key
+        _engine2d_parent_material_pixels_b = pixels
+        _engine2d_parent_material_rendered_b = rendered
+        _engine2d_parent_material_cpu_b = cpu
+        _engine2d_parent_material_css_b = css_remaining
+        _engine2d_parent_material_next = 0
+
 fn _engine2d_embed_offscreen_acquire(
     owner: Engine2D, w: i32, h: i32, failure_reason: [text]
 ) -> Engine2D:
@@ -1843,6 +1920,37 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             return _engine2d_draw_ir_render_outcome(
                 eng, 0, batch.commands.len().to_i32(),
                 "parent-material-seed-unavailable", 0)
+        val material_cache_key = _engine2d_parent_material_cache_key(
+            batch, seed, parent_padding)
+        val material_cache_slot = _engine2d_parent_material_cache_slot(
+            material_cache_key)
+        if material_cache_slot >= 0:
+            val cached_pixels = _engine2d_parent_material_cache_pixels(
+                material_cache_slot)
+            if cached_pixels.len() == embedding.width.to_i64() * embedding.height.to_i64():
+                val cached_readback = engine2d_readback(
+                    cached_pixels, "software")
+                val cached_composited = eng.draw_ir_composite_readback(
+                    embedding.x, embedding.y, embedding.width,
+                    embedding.height, cached_readback, embedding_opacity)
+                if cached_composited:
+                    val cached_rendered = _engine2d_parent_material_cache_rendered(
+                        material_cache_slot)
+                    val cached_cpu = _engine2d_parent_material_cache_cpu(
+                        material_cache_slot)
+                    val cached_css = _engine2d_parent_material_cache_css(
+                        material_cache_slot)
+                    if batch_execution_counts.len() >= 6:
+                        batch_execution_counts[0] = cached_cpu.to_i64()
+                        batch_execution_counts[1] = 0
+                        batch_execution_counts[2] = 0
+                        batch_execution_counts[3] = 0
+                        batch_execution_counts[4] = cached_rendered.to_i64()
+                        batch_execution_counts[5] = 0
+                    return _engine2d_draw_ir_render_outcome(
+                        eng, cached_rendered, 0, "", cached_cpu,
+                        0, 0, 0, [], "cpu-composited-material",
+                        0, 0, cached_css)
         val seeded_surface = eng.draw_ir_create_offscreen_engine(
             delta_width, delta_height)
         match seeded_surface:
@@ -1884,6 +1992,10 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                         "parent-material-delta-composite-not-proven", 0,
                         0, 0, 0, [], "", 0, 0,
                         inner.css_background_pixel_work_remaining)
+                _engine2d_parent_material_cache_store(
+                    material_cache_key, child_core, inner.rendered,
+                    inner_material_counts[0].to_i32(),
+                    inner.css_background_pixel_work_remaining)
                 return _engine2d_draw_ir_render_outcome(
                     eng, inner.rendered, inner.skipped,
                     inner.unsupported_kinds,
