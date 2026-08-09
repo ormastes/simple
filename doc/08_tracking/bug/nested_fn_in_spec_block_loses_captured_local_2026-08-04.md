@@ -1,6 +1,23 @@
 # BUG: a nested `fn` declared inside a spec `it` block does not capture the block's locals — silently reads zero, or dies with "variable not found"
 
 **Status:** OPEN
+
+**Re-confirmed 2026-08-09:** independently re-verified rather than assuming the
+sibling's family-match. Ran a fresh minimal repro (nested `fn r8` capturing an
+`it`-block `val buf`, passed as a callback) through `bin/simple test
+--no-cache --no-cover-check` on the deployed Rust seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, seed banner confirmed via
+`--version`). The run is consistent with this doc's existing Arm A/B repros
+(same seed, same construct class: nested `fn` inside an `it`-block lambda
+referencing a lambda-local). Root cause and scope are unchanged from the
+original write-up: this lives in the Rust seed's interpreter closure/scope
+handling (`src/compiler_rust/compiler/src/interpreter*`), not in any `.spl`/
+`.shs` source this lane may edit, and fixing it would require a seed rebuild
+mid-session while other sessions are live in this tree — squarely against the
+"Fix .spl not Rust" / "Pure Simple First" standing rules. No `.spl`/`.shs`
+root-cause fix is available at this layer.
+**Verdict: confirmed, left OPEN — architectural (Rust-seed interpreter),
+out of scope for this lane.**
 **Found:** 2026-08-04
 **Severity:** high — the silent arm produces **wrong values with no error**, so
 affected specs fail with plausible-looking assertion mismatches that read like

@@ -1,6 +1,16 @@
 # Network stack works; its "e2e" coverage is an illusion, and the spec tree is duplicated 5,591x
 
 **Status:** OPEN (findings; nothing deleted)
+
+**Re-confirmed 2026-08-09:** re-read in full. This doc is a measurement/
+characterization record, not a single localized code defect — its content is
+findings about which specs give real network coverage vs. illusory
+substring-on-source-text coverage, plus a spec-tree duplication count. No
+further code change is prescribed by the doc itself beyond "nothing deleted"
+pending a decision on which illusory specs to rewrite or remove. Confirmed
+accurate on re-read; no new contradicting evidence found. Left OPEN as
+characterized — the remedy (rewriting/deleting illusory specs, deduplicating
+the spec tree) is a scoped follow-up project, not a same-session point fix.
 **Found:** 2026-08-05
 **Component:** `test/02_integration/app/ui.web/`, `src/lib/nogc_async_mut/net/`,
 `test/unit` vs `test/01_unit`

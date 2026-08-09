@@ -1,6 +1,14 @@
 # No general `.spl` → SVM-G path: DAP GPU attach is routing-only
 
 **Status:** OPEN — architectural gap, not a defect in any landed stream
+
+**Re-confirmed 2026-08-09:** verified by reading this doc in full. It already
+states plainly that this is an architectural gap, not a defect in any landed
+stream, with `lower_svmg_program` existing but scoped to test bodies only and
+having no callers outside `70.backend`. Confirmed accurate; no contradicting
+evidence found. Left OPEN as characterized — decision on (a) widen + wire vs.
+(b) drop the `.spl`-attach expectation is still pending and out of scope for a
+point fix.
 **Found:** 2026-08-09 by stream P9 (target-neutral DAP session); scope corrected
 by the coordinator on inspection
 **Component:** `src/compiler/70.backend/svmg_lowering.spl`, `src/app/dap/target_session.spl`
