@@ -1575,23 +1575,27 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             return Ok(());
         }
 
-        if let Some(rt_name) = Self::runtime_method_name(method) {
-            let recv = self.get(receiver)?;
-            let mut rt_args = vec![recv];
-            for arg in args {
-                rt_args.push(self.get(*arg)?);
+        let runtime_method_allowed = !func_name.contains('.') && !func_name.contains("_dot_")
+            || super::qualified_runtime_method_owner_is_builtin(func_name);
+        if runtime_method_allowed {
+            if let Some(rt_name) = Self::runtime_method_name(method) {
+                let recv = self.get(receiver)?;
+                let mut rt_args = vec![recv];
+                for arg in args {
+                    rt_args.push(self.get(*arg)?);
+                }
+                let result = if matches!(method, "unwrap_or") && rt_args.len() > 1 {
+                    // Keep the ABI simple here: unresolved lowering should not emit a fake
+                    // method symbol, and the runtime helper still uses the first arg payload.
+                    self.call_runtime(rt_name, &rt_args[..1])?
+                } else {
+                    self.call_runtime(rt_name, &rt_args)?
+                };
+                if let Some(d) = dest {
+                    self.set(*d, result);
+                }
+                return Ok(());
             }
-            let result = if matches!(method, "unwrap_or") && rt_args.len() > 1 {
-                // Keep the ABI simple here: unresolved lowering should not emit a fake
-                // method symbol, and the runtime helper still uses the first arg payload.
-                self.call_runtime(rt_name, &rt_args[..1])?
-            } else {
-                self.call_runtime(rt_name, &rt_args)?
-            };
-            if let Some(d) = dest {
-                self.set(*d, result);
-            }
-            return Ok(());
         }
 
         // Static method call: prepend receiver to args and call function.

@@ -1,7 +1,7 @@
 # LLM Caret database carrier native probe SIGSEGV
 
 Date: 2026-08-04
-Status: Open — claimed by Codex `llm_caret_messaging` goal
+Status: Resolved — compiler call-target fix and native crash guards verified 2026-08-09
 
 ## Exact reproduction
 
@@ -159,3 +159,28 @@ Rust candidate, relink only the retained Phase 2/3 compiler capsule against
 that archive, then run the direct imported-enum probe once with a fresh cache.
 Do not run a full bootstrap. This session reached the mandatory three-cycle
 cap, so no further candidate or probe was attempted.
+
+## Resolution evidence (2026-08-09)
+
+The retained-object diagnosis was correct. LLVM's `Call`,
+`MethodCallStatic`, and emitter paths redirected qualified imported user
+methods by leaf name, so `DbValue.to_text` became `rt_to_string` even though
+the provider object defined the correct canonical method body. Runtime method
+shortcuts now require a built-in receiver owner; qualified user owners retain
+their canonical call target.
+
+Focused Rust contracts pass for built-in/custom owner classification and for
+both direct and static imported calls. The targeted provider archive is
+`libsimple_native_all.a` SHA-256
+`85b0a2ecc74e6561a6af91b3a62c3c1e26105289ad6622cd739f02bf10fc14db`.
+A retained pure-Simple Phase-2-derived capsule was relinked against it without
+a full bootstrap; the resulting compiler SHA-256 is
+`675aea587fecd764411390a303627c2017dc1f6a92bf45ecca68d670af4b977e`.
+
+With fresh caches and `SIMPLE_NO_STUB_FALLBACK=1`, both
+`native_imported_enum_text_payload_probe.spl` and
+`native_imported_struct_array_argument_probe.spl` compile and print their
+exact PASS markers. Neither emits the runtime ABI guard or SIGSEGV. The C
+runtime additionally proves array registry ownership before dereferencing a
+header and emits at most one bounded `[simple-runtime][error]` record for a
+heap-tag-colliding scalar; its direct contract passes for `9`, `17`, and `-7`.

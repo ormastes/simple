@@ -2452,76 +2452,80 @@ impl LlvmBackend {
 
                 // Map well-known methods to runtime functions
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
-                let runtime_func = match method {
-                    // Copied verbatim from Cranelift lines 3163-3200
-                    "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
-                    "len" | "length" => Some("rt_len"),
-                    "starts_with" => Some("rt_string_starts_with"),
-                    "ends_with" => Some("rt_string_ends_with"),
-                    "concat" => Some("rt_string_concat"),
-                    "char_at" => Some("rt_string_char_at"),
-                    // Receiver-polymorphic; see emitter.rs. `at` on an array
-                    // receiver must reach `rt_array_at` (a real `Option`), not
-                    // the string-only `rt_string_char_at`, which answers `nil`
-                    // for every index of every array. Cranelift already routes
-                    // `at` to `rt_at` (codegen/instr/calls.rs); this keeps the
-                    // two backends from disagreeing on the same source.
-                    "at" => Some("rt_at"),
-                    "char_code_at" => Some("rt_string_char_code_at"),
-                    "byte_at" => Some("rt_string_byte_at"),
-                    "push" => Some("rt_array_push"),
-                    "pop" => Some("rt_array_pop"),
-                    "clear" => Some("rt_array_clear"),
-                    "join" => Some("rt_string_join"),
-                    "trim" => Some("rt_string_trim"),
-                    "trim_start" => Some("rt_string_trim_start"),
-                    "trim_end" => Some("rt_string_trim_end"),
-                    "split" => Some("rt_string_split"),
-                    "bytes" => Some("rt_string_bytes"),
-                    "chars" => Some("rt_string_chars"),
-                    "replace" => Some("rt_string_replace"),
-                    "to_upper" | "upper" => Some("rt_string_to_upper"),
-                    "to_lower" | "lower" => Some("rt_string_to_lower"),
-                    "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
-                    "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
-                        Some("rt_string_to_float")
+                let runtime_func = if super::qualified_runtime_method_owner_is_builtin(func_name) {
+                    match method {
+                        // Copied verbatim from Cranelift lines 3163-3200
+                        "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
+                        "len" | "length" => Some("rt_len"),
+                        "starts_with" => Some("rt_string_starts_with"),
+                        "ends_with" => Some("rt_string_ends_with"),
+                        "concat" => Some("rt_string_concat"),
+                        "char_at" => Some("rt_string_char_at"),
+                        // Receiver-polymorphic; see emitter.rs. `at` on an array
+                        // receiver must reach `rt_array_at` (a real `Option`), not
+                        // the string-only `rt_string_char_at`, which answers `nil`
+                        // for every index of every array. Cranelift already routes
+                        // `at` to `rt_at` (codegen/instr/calls.rs); this keeps the
+                        // two backends from disagreeing on the same source.
+                        "at" => Some("rt_at"),
+                        "char_code_at" => Some("rt_string_char_code_at"),
+                        "byte_at" => Some("rt_string_byte_at"),
+                        "push" => Some("rt_array_push"),
+                        "pop" => Some("rt_array_pop"),
+                        "clear" => Some("rt_array_clear"),
+                        "join" => Some("rt_string_join"),
+                        "trim" => Some("rt_string_trim"),
+                        "trim_start" => Some("rt_string_trim_start"),
+                        "trim_end" => Some("rt_string_trim_end"),
+                        "split" => Some("rt_string_split"),
+                        "bytes" => Some("rt_string_bytes"),
+                        "chars" => Some("rt_string_chars"),
+                        "replace" => Some("rt_string_replace"),
+                        "to_upper" | "upper" => Some("rt_string_to_upper"),
+                        "to_lower" | "lower" => Some("rt_string_to_lower"),
+                        "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                        "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
+                            Some("rt_string_to_float")
+                        }
+                        // Receiver-polymorphic: see the matching note in
+                        // llvm/emitter.rs. Routing `index_of` to the string-only
+                        // `rt_string_find` made every array `index_of` return the
+                        // -1 receiver-mismatch sentinel under LLVM while the
+                        // Cranelift/JIT path returned the true index.
+                        "index_of" => Some("rt_index_of"),
+                        "find" | "find_str" => Some("rt_string_find"),
+                        "rfind" | "last_index_of" => Some("rt_string_rfind"),
+                        "to_string" | "to_text" | "str" => Some("rt_to_string"),
+                        "slice" | "substring" => Some("rt_slice"),
+                        "get" => Some("rt_index_get"),
+                        "keys" => Some("rt_dict_keys"),
+                        "values" => Some("rt_dict_values"),
+                        // Receiver-dispatched — see the matching arm in
+                        // codegen/instr/closures_structs.rs. Name-keyed table with
+                        // no receiver type, so `rt_dict_remove` here silently
+                        // no-opped every array `.remove(i)` on the native lane too.
+                        // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
+                        "remove" => Some("rt_collection_remove"),
+                        "filter" => Some("rt_array_filter"),
+                        "sort" => Some("rt_array_sort"),
+                        "reverse" => Some("rt_array_reverse"),
+                        "first" => Some("rt_array_first"),
+                        "last" => Some("rt_array_last"),
+                        "find" => Some("rt_array_find"),
+                        "any" => Some("rt_array_any"),
+                        "all" => Some("rt_array_all"),
+                        // LLVM-specific mappings (not in Cranelift, verified to exist)
+                        "repeat" => Some("lib__common__string_core__str_repeat"),
+                        "map" => Some("rt_option_map"),
+                        // Option/Result methods (LLVM-specific)
+                        "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                        "is_none" => Some("rt_is_none"),
+                        "is_some" => Some("rt_is_some"),
+                        "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                        _ => None,
                     }
-                    // Receiver-polymorphic: see the matching note in
-                    // llvm/emitter.rs. Routing `index_of` to the string-only
-                    // `rt_string_find` made every array `index_of` return the
-                    // -1 receiver-mismatch sentinel under LLVM while the
-                    // Cranelift/JIT path returned the true index.
-                    "index_of" => Some("rt_index_of"),
-                    "find" | "find_str" => Some("rt_string_find"),
-                    "rfind" | "last_index_of" => Some("rt_string_rfind"),
-                    "to_string" | "to_text" | "str" => Some("rt_to_string"),
-                    "slice" | "substring" => Some("rt_slice"),
-                    "get" => Some("rt_index_get"),
-                    "keys" => Some("rt_dict_keys"),
-                    "values" => Some("rt_dict_values"),
-                    // Receiver-dispatched — see the matching arm in
-                    // codegen/instr/closures_structs.rs. Name-keyed table with
-                    // no receiver type, so `rt_dict_remove` here silently
-                    // no-opped every array `.remove(i)` on the native lane too.
-                    // doc/08_tracking/bug/array_remove_returns_mutated_array_not_removed_element_2026-07-20.md
-                    "remove" => Some("rt_collection_remove"),
-                    "filter" => Some("rt_array_filter"),
-                    "sort" => Some("rt_array_sort"),
-                    "reverse" => Some("rt_array_reverse"),
-                    "first" => Some("rt_array_first"),
-                    "last" => Some("rt_array_last"),
-                    "find" => Some("rt_array_find"),
-                    "any" => Some("rt_array_any"),
-                    "all" => Some("rt_array_all"),
-                    // LLVM-specific mappings (not in Cranelift, verified to exist)
-                    "repeat" => Some("lib__common__string_core__str_repeat"),
-                    "map" => Some("rt_option_map"),
-                    // Option/Result methods (LLVM-specific)
-                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
-                    "is_none" => Some("rt_is_none"),
-                    "is_some" => Some("rt_is_some"),
-                    "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
-                    _ => None,
+                } else {
+                    None
                 };
 
                 if let Some(rt_name) = runtime_func {
@@ -3380,6 +3384,55 @@ mod tests {
 
         let ir = backend.get_ir().unwrap();
         assert!(ir.contains("mcall_direct"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn imported_user_method_leaf_collision_keeps_user_call_target() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("imported_user_method_leaf_collision").unwrap();
+
+        let mut direct_caller = MirFunction::new(
+            "direct_caller".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        direct_caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 3,
+        });
+        direct_caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("lib__database__DbValue_dot_to_text"),
+            args: vec![VReg(0)],
+        });
+        direct_caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let mut method_caller = MirFunction::new(
+            "method_caller".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        method_caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 3,
+        });
+        method_caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "DbValue.to_text".to_string(),
+            args: vec![],
+        });
+        method_caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&direct_caller).unwrap();
+        backend.compile_function(&method_caller).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("lib__database__DbValue.to_text"), "{ir}");
+        assert!(ir.contains("@DbValue.to_text"), "{ir}");
+        assert!(!ir.contains("@rt_to_string"), "{ir}");
         backend.verify().unwrap();
     }
 

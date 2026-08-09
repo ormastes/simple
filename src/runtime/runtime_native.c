@@ -1652,15 +1652,42 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     return s;
 }
 
+static atomic_bool rt_core_invalid_array_reported = ATOMIC_VAR_INIT(false);
+
+static void rt_core_report_invalid_array_once(int64_t value) {
+    if (atomic_exchange_explicit(
+            &rt_core_invalid_array_reported, true, memory_order_relaxed)) {
+        return;
+    }
+    fprintf(stderr,
+            "[simple-runtime][error] rejected invalid array handle before "
+            "dereference; probable compiler/FFI ABI mismatch "
+            "(value_bits=0x%016llx)\n",
+            (unsigned long long)(uint64_t)value);
+}
+
 static inline RtCoreArray* rt_core_as_array(int64_t value) {
     uintptr_t raw = (uintptr_t)value;
-    if (raw < 4096) return NULL;
+    if (raw < 4096) {
+        if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+            rt_core_report_invalid_array_once(value);
+        }
+        return NULL;
+    }
     if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
         raw &= ~RT_VALUE_TAG_MASK;
     } else if ((raw & RT_VALUE_TAG_MASK) != 0) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)raw;
+    /* Low tag bits alone do not prove this is a heap object.  Flat scalar
+     * payloads such as 9, 17, and -7 have the same bit shape.  Prove registry
+     * ownership before reading the header so a compiler/ABI defect is logged
+     * and rejected instead of becoming a wild-pointer SIGSEGV. */
+    if (!rt_core_is_registered_immortal_ptr(a)) {
+        rt_core_report_invalid_array_once(value);
+        return NULL;
+    }
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
     if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
     return a;
