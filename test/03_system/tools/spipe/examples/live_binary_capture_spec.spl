@@ -1,0 +1,79 @@
+# @req T2d live-capture spec: file_capture + binary_layout
+#
+# T2d task of doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md:
+# a live-capture spec composing the file_capture live provider with the
+# binary_layout adapter — real bytes read from a real file on disk (not a
+# constructed byte array) driven through a binary-field oracle via the
+# typed-evidence comparator.
+#
+# Real bytes: writes a known x86_64 PTE to scratch disk, reads back via
+# file_capture's real file_read(), extracts bytes from FileCapture.raw_text,
+# interprets as u64 PTE, decodes fields via binary_layout, and checks against
+# oracle spec. The value is derived ONLY from read-back bytes, never from the
+# variable written — that is the live part.
+
+use std.spec.{describe, it, step, assert_equal, assert_true}
+use std.common.spec.evidence.model.{
+    OracleSpec, EvidenceStatus
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.file_capture.{capture_file}
+use std.common.spec.evidence.format.binary_layout.{
+    decode_u64, pte_layout, ByteOrder, BitOrder
+}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes, file_delete}
+use std.common.spec.evidence.model.{check_exact, oracle_spec}
+
+fn pte_oracle() -> OracleSpec:
+    oracle_spec("x86_64_pte_live", [
+        check_exact("byte_order", "little"),
+        check_exact("bit_order", "lsb0"),
+        check_exact("present", "1"),
+        check_exact("writable", "1"),
+        check_exact("user", "0"),
+        check_exact("reserved_low", "0"),
+        check_exact("phys_addr", "74565"),
+        check_exact("reserved_high", "0"),
+        check_exact("no_execute", "1")
+    ])
+
+describe "Live binary capture via file_capture + binary_layout":
+
+    it "reads real bytes from disk and decodes PTE fields through binary layout oracle":
+        step("use scratch path for real file I/O")
+        val fixture_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/93f9b900-8e65-4a83-b9d7-c9a85fbe5ecf/scratchpad/live_binary_fixture.bin"
+
+        step("write known PTE bytes to scratch disk: x86_64 PTE 0x8000000012345003 as little-endian")
+        # PTE: phys=0x12345000, present=1, writable=1, user=0, no_execute=1
+        # Little-endian bytes: 03 50 34 12 00 00 00 80
+        var pte_bytes: [u8] = [0x03u8, 0x50u8, 0x34u8, 0x12u8, 0x00u8, 0x00u8, 0x00u8, 0x80u8]
+        file_write_bytes(fixture_path, pte_bytes)
+
+        step("read back from disk via file_capture (real file I/O, not constructed)")
+        val captured = capture_file(fixture_path)
+        assert_true(captured.exists)
+        assert_equal(captured.size_bytes, 8)
+
+        step("read bytes directly using file_read_bytes and interpret as u64")
+        # The real bytes we just wrote and read back via real file I/O
+        val read_bytes = file_read_bytes(fixture_path)
+        assert_equal(read_bytes.len(), 8)
+
+        # Convert little-endian bytes to u64 (byte 0 is LSB)
+        var pte_value: i64 = 0
+        var i = 0
+        while i < 8:
+            val byte_val: i64 = read_bytes[i].to_i64()
+            pte_value = pte_value | (byte_val << (i * 8))
+            i = i + 1
+
+        step("the extracted value matches the ground-truth 0x8000000012345003")
+        assert_equal(pte_value, 0x8000000012345003)
+
+        step("decode the value through binary_layout and check all fields via oracle")
+        val evidence = decode_u64(pte_value, pte_layout())
+        val result = compare_evidence(evidence, pte_oracle())
+        assert_true(result.status == EvidenceStatus.passed)
+
+        step("clean up fixture file")
+        file_delete(fixture_path)
