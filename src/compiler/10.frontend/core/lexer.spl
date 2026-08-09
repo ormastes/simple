@@ -200,6 +200,24 @@ fn lex_source_len() -> i64:
     current_core_source_get().len()
 
 fn lex_source_char_at(pos: i64) -> text:
+    # Bug: cur_start/pos (CoreLexer, lexer_struct.spl) are CODEPOINT indices
+    # into source.chars() (self.source_chars), but this used to slice the
+    # raw `text` value directly (`source[pos:pos+1]`). Simple's `text[a:b]`
+    # slicing on this engine is BYTE-indexed, so any multi-byte UTF-8
+    # character (e.g. an em-dash "-" in a comment) preceding `pos` made every
+    # subsequent codepoint-index read land on the WRONG character -- silently
+    # misclassifying a normal double-quoted interpolating string as
+    # no-interpolation (str_first read as some mid-token letter instead of
+    # the opening quote), which suppressed string-interpolation lowering
+    # entirely for that literal. Route through the CoreLexer's own
+    # codepoint-indexed source_chars array (same basis as cur_start/pos)
+    # instead of re-slicing the raw byte-indexed text.
+    if lexer_array_len(current_core_lexer_slot) > 0:
+        val lx = current_core_lexer_slot[0]
+        val chars = lx.source_chars
+        if pos < 0 or pos >= chars.len():
+            return ""
+        return chars[pos]
     val source = current_core_source_get()
     val source_len = source.len()
     if pos < 0 or pos >= source_len:
@@ -207,6 +225,25 @@ fn lex_source_char_at(pos: i64) -> text:
     source[pos:pos + 1]
 
 fn lex_source_slice(start: i64, end: i64) -> text:
+    # See lex_source_char_at: keep the same codepoint-indexed basis as
+    # cur_start/pos when a CoreLexer is active.
+    if lexer_array_len(current_core_lexer_slot) > 0:
+        val lx = current_core_lexer_slot[0]
+        val chars = lx.source_chars
+        var s = start
+        var e = end
+        if s < 0:
+            s = 0
+        if e > chars.len():
+            e = chars.len()
+        if e <= s:
+            return ""
+        var result = ""
+        var i = s
+        while i < e:
+            result = result + chars[i]
+            i = i + 1
+        return result
     val source = current_core_source_get()
     if start < 0:
         start = 0
