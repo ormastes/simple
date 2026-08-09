@@ -1,8 +1,10 @@
 # Stage-3 `warning: unresolved call` family — incomplete diagnostic + cross-module static-method resolution hole
 
 - **Date:** 2026-08-07
-- **Status:** OPEN (two members fixed, rest classified as out-of-scope or
-  non-code build-config issues).
+- **Status:** OPEN (two members fixed; `runtime_args` and `kind_to_text`
+  confirmed non-bugs/stale in current source; `run_check` unconfirmed pending
+  a completed live repro; rest classified as out-of-scope or non-code
+  build-config issues).
   - **FIXED** `d328200332e` — `target_is_float` (mechanism B,
     `src/compiler/35.semantics/semantics/cast_rules.spl`).
   - **FIXED** (this pass) — `kind_can_follow` (mechanism B,
@@ -41,12 +43,52 @@
     exists in `types.spl`). Left open: no clear single correct restoration
     without knowing the intended config-loading API, and the call site risks
     overlapping other in-flight baremetal/config lanes.
-  - `run_check`, `runtime_args` — left open: not touched this pass because
-    resolving them (a caller-scope/import-failure question for `run_check`,
-    and a rename to `get_args()` for `runtime_args`) sits in `src/app/cli` and
-    `src/app/io`, areas this pass did not have budget to safely cross-check
-    against the excluded parallel lanes (nil-coalesce/vacuous-binary/SIGILL/
-    Symbol-alias/ByteOrder/measurement-baseline work).
+  - `runtime_args` — **confirmed non-bug, already resolved in current
+    source**: the sole 2026-08-06 warning site,
+    `app__cli__api_surface_snapshot__main`, now reads
+    `src/app/cli/api_surface_snapshot.spl:30,272`
+    (`use app.io.args_ops.{get_args}` / `val args: [text] = get_args()`) —
+    exactly the `get_args()` rename this doc already recommended. There is
+    no remaining `runtime_args(` call site anywhere in `src/` (full-tree
+    grep). No fix needed; the family member is stale.
+  - `kind_to_text` — re-checked at higher resolution. The 2026-08-06 warning
+    site was
+    `compiler__semantics__macro_check__template__TemplateTypeChecker.infer_expansion_type`
+    (`src/compiler/35.semantics/macro_check/template.spl:304-332`). Read the
+    full method body: the only fragment-kind-to-text call in it is
+    `kind.to_text()` at line 319 (method form, resolves fine); there is no
+    bare `kind_to_text(...)` anywhere in that function or file. Sharpens the
+    earlier "not reproduced" finding to a specific, checked function — clean
+    in current source. `macro_check/` remains dead code (zero importers), so
+    even if this were stale it isn't runtime-reachable. No fix needed.
+  - `run_check` — investigated, **no code defect found in current source**.
+    Both 2026-08-06 call sites (`src/app/build/cli_entry.spl:60` inside
+    `handle_build`, `src/app/cli/_CliMain/main_and_help.spl:346` inside
+    `main`) correctly `use app.cli.check.{run_check}` and call
+    `run_check(args)` / `run_check(check_args)`; `run_check` is defined at
+    `src/app/cli/check.spl:297`, and every transitive import of `check.spl`
+    (`app.cli.query_rich_common`, `app.cli.repo_hygiene_gate`,
+    `app.cli.check_options`, `app.check.sspec_source`,
+    `app.check.concurrency_lint`) resolves to an existing file. The
+    `app.build.quality` / `lib.database.*` import failures visible in the
+    2026-08-06 log come from unrelated files elsewhere in the source set
+    (`src/app/ui.render/core.spl`, `src/lib/*/database/mod.spl`) — not from
+    `check.spl` or either caller — so they don't explain the warning. One
+    lead surfaced but **not confirmed**: `run_check` is not a unique bare
+    name — `src/app/cli/check_dbs.spl`, `src/app/cli/check_tier.spl`, and
+    `src/os/port/initramfs_pack.spl` each define their own free function
+    also named `run_check` (all non-`pub`). This duplicate-name shape is
+    superficially similar to the documented mechanism-A ambiguity, but
+    unlike mechanism A this is a direct qualified `use module.{run_check}`
+    import, not a suffix-heuristic method call, so the same root cause
+    doesn't obviously apply. A same-worktree live stage3 repro
+    (`run_stage3.shs <worktree> probe`) was started to confirm one way or
+    the other but did not finish inside this pass's time budget (stage2
+    native-build was still running against `--source src/compiler --source
+    src/lib --source src/app` after 15+ minutes of wall time). **Left open,
+    unconfirmed** — re-run the repro to completion before deciding whether
+    this is a real bug or a third stale/non-repro log line alongside its two
+    siblings above.
   - The §1 finding (diagnostic is a partial sample) and §5 recommendation
     (promote to error once coverage is fixed) both still hold; not addressed
     here.
@@ -166,8 +208,8 @@ undefined names. Line 168 of `template.spl` uses the correct form
 | `rsa_sig_valid` (`src/os/crypto/rsa.spl`), `handle_os` (`src/os/cli.spl`) | definitions exist but `src/os` is **not in the `--source` set** (`--source src/compiler src/lib src/app`). Build-config/source-set question, not a code bug. |
 | `t32_cli_main` | defined `pub fn` at `src/app/t32_cli/mod.spl:25`, but `src/app/t32_cli` is a **symlink out of the tree** (`../../examples/10_tooling/trace32_tools/t32_cli`). Signature is `-> i32` while the caller returns it as `i64`. |
 | `parse_hostcomm_config` | `use std.nogc_sync_mut.baremetal.config...` names a module that **does not exist** (`src/lib/nogc_sync_mut/baremetal/` has no `config.spl`), and the function is defined nowhere. Only `default_hostcomm_config()` exists, in `types.spl`. |
-| `run_check` | defined `src/app/cli/check.spl:297`, in scope, yet unresolved from two callers — one preceded by a failed `app.build.quality` import. |
-| `runtime_args` | no definition; `src/app/io/args_ops.spl:6` defines `fn get_args()`. |
+| `run_check` | defined `src/app/cli/check.spl:297`, imports/callers all resolve in current source; unconfirmed whether the warning still reproduces live (repro started, didn't finish in-pass) — see 2026-08-09 update above. |
+| `runtime_args` | **stale/non-bug (2026-08-09):** no remaining call site; `src/app/cli/api_surface_snapshot.spl` already calls `get_args()` from `src/app/io/args_ops.spl:6`. |
 
 `macro_check/` is dead but **must not be blind-deleted**: `MacroDef`,
 `MacroRule` and `MacroCall` are referenced outside it (`src/compiler/30.types/`,
