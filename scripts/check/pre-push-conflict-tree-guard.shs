@@ -160,6 +160,8 @@ simpleos_virtio_snd_qemu_selftest_guard="$repo_root/scripts/check/check-simpleos
 render_perf_milestone_gate_guard="$repo_root/scripts/check/check-render-perf-milestone-gate.shs"
 wm_lane_boundary_guard="$repo_root/scripts/check/check-wm-lane-boundary.shs"
 class_identity_matrix_guard="$repo_root/scripts/check/check-class-identity-engine-matrix.shs"
+native_inprocess_positional_guard="$repo_root/scripts/check/check-native-inprocess-positional-nonvacuous.shs"
+predicate_parser_native_build_guard="$repo_root/scripts/check/check-predicate-parser-native-build.shs"
 
 for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
@@ -183,7 +185,8 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$mlkem_simd_c_lane_guard" "$mlkem_cpu_simd_guard" "$mlkem_metal_ntt_guard" \
          "$simpleos_io_audio_qemu_preflight_guard" "$simpleos_virtio_snd_qemu_selftest_guard" \
          "$render_perf_milestone_gate_guard" "$wm_lane_boundary_guard" \
-         "$class_identity_matrix_guard"; do
+         "$class_identity_matrix_guard" \
+         "$native_inprocess_positional_guard" "$predicate_parser_native_build_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -604,5 +607,27 @@ run_guard "$wm_lane_boundary_guard" "WM/GUI/web/2D portable-lane boundary ratche
 # loaded box" warning describes worst-case host contention, not the typical
 # runtime. Full scan, not range-bound, same as the probes above.
 run_guard "$class_identity_matrix_guard" "class-identity engine-matrix divergence probe (full scan, not range-bound)"
+
+# check-native-inprocess-positional-nonvacuous.shs: fences the pure-Simple
+# IN-PROCESS native-build lane (`native-build <one.spl> --output X` with NO
+# `--source` and NO `--entry`) -- the only invocation shape that goes through
+# native_build_single_spl_positional instead of delegating to the Rust seed
+# FFI. Every other native-build guard in this file uses the --source/--entry
+# shape, so until this guard existed the in-process lane had zero coverage;
+# that gap let a MIR-lowering defect and a vacuous stub binary both go
+# undetected for days (doc/08_tracking/bug/stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md).
+# Verified standalone 2026-08-09: exits 0 in ~2m15s. Full scan, not
+# range-bound, same convention as the other compiler-probe guards above.
+run_guard "$native_inprocess_positional_guard" "in-process positional native-build nonvacuous probe (full scan, not range-bound)"
+
+# check-predicate-parser-native-build.shs: narrow native-build regression
+# check scoped to src/compiler/00.common/predicate_parser.spl, guarding
+# against undeclared-symbol codegen errors like the has_paren_idx bug where a
+# typo'd local variable passed the interpreter silently (unresolved variable
+# references are only a warning there) but broke LLVM codegen
+# (doc/08_tracking/bug/stage2_native_build_has_paren_idx_undeclared_global_2026-08-09.md).
+# Verified standalone 2026-08-09: exits 0 in ~1m22s. Full scan, not
+# range-bound, same convention as the other compiler-probe guards above.
+run_guard "$predicate_parser_native_build_guard" "predicate-parser native-build regression probe (full scan, not range-bound)"
 
 exit $status
