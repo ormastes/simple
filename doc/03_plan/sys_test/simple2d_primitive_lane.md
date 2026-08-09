@@ -18,6 +18,7 @@ compiler-admission and QEMU GPU gates remain authoritative in
 | Scroll | wheel/key/scrollbar route, clamp, nested-chain consumption, clip | guest offset mutation and correlated rerender |
 | Font | semantic text/style, resolved font identity, glyph metrics, CPU parity | device font batch/readback/checksum and exact parity |
 | Vulkan 2D showcase | animation/drawing/events/font capture, device readback if Vulkan selected | guest/daemon receipt, exact readback, 20 warm p95/RSS |
+| Strict DrawIR primitive fixture | clear, opaque rect, straight EDGE, multi-segment linear PATH; dedicated line pipeline; exact explicit device/oracle equality | same bounded fixture through the admitted guest/host Vulkan session |
 
 ## Host-first order
 

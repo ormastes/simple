@@ -49,6 +49,17 @@ uploads are transient executor material. A device receipt must identify the
 font execution target, batch, atlas payload, device readback checksum, and
 semantic CPU parity. Missing or stale font material rejects Vulkan promotion.
 
+### Strict Vulkan line qualification
+
+The promoted clear/opaque-rect/width-1 `EDGE`/linear-`PATH` slice executes only
+through the persistent `VulkanSession` framebuffer. Lines bind `pipe_line`,
+dispatch one LocalSize-1 workgroup, and run canonical integer Bresenham on the
+device. The focused qualification fixture performs an explicit full-frame
+readback and compares it with a first-principles clear/rect/line oracle. The
+normal render path does not build that CPU frame: it admits pixels only after
+fenced device readback with positive backend/device identities and clears the
+result receipt on any evidence failure.
+
 ## Host and QEMU lifecycle
 
 Host adapters create one cached target session, submit bounded immutable

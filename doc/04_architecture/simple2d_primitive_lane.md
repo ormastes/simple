@@ -67,6 +67,12 @@ state.
   positive device identity/handle, device-origin readback, exact CPU oracle
   parity, and complete font receipt where text is present. A screenshot,
   scanout, CPU mirror, or QEMU flag is not promotion evidence.
+- Strict opaque `EDGE` and linear `PATH` strokes bind
+  `VulkanSession.pipe_line` to the dedicated line SPIR-V artifact. One GPU
+  invocation owns the ordered integer-Bresenham state and both endpoints.
+  Exact full-frame oracle comparison belongs to the bounded qualification
+  fixture, never the production render loop; production fails closed on
+  dispatch, fence, provenance, handle, identity, or readback-length failure.
 
 ## Platform boundaries and current state
 

@@ -58,7 +58,7 @@ use std.common.ui.draw_ir.{
     draw_ir_style_prop,
     draw_ir_text_resolved_font
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.text_layout.font_renderer.{resolve_font_metrics}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_count}
@@ -85,6 +85,10 @@ fn oracle_pixel(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32, bg: u32, fg:
 # Independent integer Bresenham oracle for the promoted opaque width-1 line.
 fn line_oracle(w: i32, h: i32, x1: i32, y1: i32, x2: i32, y2: i32, bg: u32, fg: u32) -> [u32]:
     var pixels: [u32] = [bg; w * h]
+    oracle_line_into(pixels, w, h, x1, y1, x2, y2, fg)
+
+fn oracle_line_into(base: [u32], w: i32, h: i32, x1: i32, y1: i32, x2: i32, y2: i32, fg: u32) -> [u32]:
+    var pixels = base
     var dx = x2 - x1
     var dy = y2 - y1
     if dx < 0: dx = -dx
@@ -269,7 +273,7 @@ describe "Engine2D Vulkan backend compute matches the reference":
         expect(pixel_mismatches(readback.pixels, expected)).to_equal(0)
         vk.shutdown()
 
-    it "DrawIR straight EDGE and linear PATH use one Vulkan session with exact device-readback parity":
+    it "strict DrawIR clear, rect, EDGE and PATH require exact device-readback oracle parity":
         val w: i32 = 16
         val h: i32 = 12
         val bg: u32 = 0xFF101018u32
@@ -283,7 +287,6 @@ describe "Engine2D Vulkan backend compute matches the reference":
             expect(vulkan_sffi_device_count()).to_equal(0)
             return
         var engine = created.unwrap()
-        engine.clear(bg)
 
         # EDGE is a single shared-line primitive; PATH is deliberately
         # multi-segment to prove the batch executes every linear segment on
@@ -303,28 +306,39 @@ describe "Engine2D Vulkan backend compute matches the reference":
         val batch = draw_ir_batch(
             "vulkan-linear-primitives", DRAW_IR_BACKEND_GPU,
             draw_ir_embedding_config("surface", "scene", 0, 0, w, h, 0, 1000, false),
-            [edge, path]
+            [draw_ir_rect("clear", 0, 0, w, h, bg),
+             draw_ir_rect("rect", 2, 7, 4, 3, 0xFF4060E0u32),
+             edge, path]
         )
+        val composition = draw_ir_composition(
+            "vulkan-linear-primitives", "scene", DRAW_IR_BACKEND_GPU,
+            [batch])
 
-        # SoftwareBackend is the exact independent CPU oracle for the shared
-        # width-1 Bresenham primitive, not a second DrawIR/raster path.
-        var cpu = SoftwareBackend.create()
-        cpu.init(w, h)
-        cpu.clear(bg)
-        cpu.draw_line(1, 1, 5, 3, red, 1)
-        cpu.draw_line(8, 2, 8, 5, green, 1)
-        cpu.draw_line(8, 5, 12, 5, green, 1)
+        # Build the oracle directly from primitive semantics; no renderer or
+        # fallback backend contributes pixels to the accepted result.
+        var expected: [u32] = [bg; w * h]
+        var ry = 7
+        while ry < 10:
+            var rx = 2
+            while rx < 6:
+                expected[ry * w + rx] = 0xFF4060E0u32
+                rx = rx + 1
+            ry = ry + 1
+        expected = oracle_line_into(expected, w, h, 1, 1, 5, 3, red)
+        expected = oracle_line_into(expected, w, h, 8, 2, 8, 5, green)
+        expected = oracle_line_into(expected, w, h, 8, 5, 12, 5, green)
 
-        val result = engine2d_draw_ir_adv_batch(engine, batch, true)
+        val result = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            engine, composition, [])
         expect(engine.backend_name()).to_equal("vulkan")
         expect(result.selected_backend).to_equal(DRAW_IR_BACKEND_GPU)
-        expect(result.rendered_command_count).to_equal(2)
+        expect(result.rendered_command_count).to_equal(4)
         expect(result.skipped_command_count).to_equal(0)
         expect(result.fallback_required).to_be(false)
         expect(result.readback_source).to_equal("device_readback")
         expect(result.backend_handle).to_be_greater_than(0)
         expect(result.device_identity).to_be_greater_than(0)
-        expect(pixel_mismatches(result.pixels, cpu.read_pixels())).to_equal(0)
+        expect(pixel_mismatches(result.pixels, expected)).to_equal(0)
         engine.shutdown()
 
     it "Simple2D showcase animation reuses one Vulkan font batch/session and produces distinct device frames":

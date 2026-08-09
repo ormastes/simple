@@ -295,14 +295,16 @@ void main() {
 """
 
 fn _glsl_line() -> text:
-    """Line kernel (Bresenham-style on GPU, 1 thread per step).
+    """Line kernel (canonical integer Bresenham on one GPU invocation).
 
     Push constants: x1, y1, x2, y2 (int), color (u32), thickness, fb_w, fb_h (int),
                     clip_x, clip_y, clip_w, clip_h (int), clip_enabled (int)
-    Dispatch: 1D, ceil(line_length / 256) workgroups
+    Dispatch: exactly one workgroup with one invocation.  A single invocation
+    owns the ordered Bresenham state, avoiding both DDA rounding drift and
+    unordered storage-buffer writes for thick self-overlapping lines.
     """
     r"""#version 450
-layout(local_size_x = 256) in;
+layout(local_size_x = 1) in;
 
 layout(set = 0, binding = 0) buffer Framebuffer {
     uint data[];
@@ -325,34 +327,33 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 void main() {
-    int step = int(gl_GlobalInvocationID.x);
-
-    int dx = pc.x2 - pc.x1;
-    int dy = pc.y2 - pc.y1;
-    int adx = abs(dx);
-    int ady = abs(dy);
-    int steps = max(adx, ady);
-    if (steps == 0) steps = 1;
-    if (step >= steps) return;
-
-    # Interpolate position along line
-    int px = pc.x1 + (dx * step) / steps;
-    int py = pc.y1 + (dy * step) / steps;
-
-    # Draw thickness by expanding around center pixel
+    if (gl_GlobalInvocationID.x != 0) return;
+    int dx = abs(pc.x2 - pc.x1);
+    int dy = abs(pc.y2 - pc.y1);
+    int sx = pc.x1 < pc.x2 ? 1 : -1;
+    int sy = pc.y1 < pc.y2 ? 1 : -1;
+    int err = dx - dy;
+    int px = pc.x1;
+    int py = pc.y1;
     int half_t = pc.thickness / 2;
-    for (int ty = -half_t; ty <= half_t; ty++) {
-        for (int tx = -half_t; tx <= half_t; tx++) {
-            int fx = px + tx;
-            int fy = py + ty;
-            if (fx < 0 || fx >= pc.fb_w || fy < 0 || fy >= pc.fb_h) continue;
-            if (pc.clip_enabled != 0) {
-                if (fx < pc.clip_x || fx >= pc.clip_x + pc.clip_w ||
-                    fy < pc.clip_y || fy >= pc.clip_y + pc.clip_h) continue;
+
+    for (;;) {
+        for (int ty = -half_t; ty <= half_t; ty++) {
+            for (int tx = -half_t; tx <= half_t; tx++) {
+                int fx = px + tx;
+                int fy = py + ty;
+                if (fx < 0 || fx >= pc.fb_w || fy < 0 || fy >= pc.fb_h) continue;
+                if (pc.clip_enabled != 0 &&
+                    (fx < pc.clip_x || fx >= pc.clip_x + pc.clip_w ||
+                     fy < pc.clip_y || fy >= pc.clip_y + pc.clip_h)) continue;
+                uint idx = uint(fy) * uint(pc.fb_w) + uint(fx);
+                fb.data[idx] = pc.color;
             }
-            uint idx = uint(fy) * uint(pc.fb_w) + uint(fx);
-            fb.data[idx] = pc.color;
         }
+        if (px == pc.x2 && py == pc.y2) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; px += sx; }
+        if (e2 < dx) { err += dx; py += sy; }
     }
 }
 """
