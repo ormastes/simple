@@ -38,6 +38,10 @@ fn vulkan_font_gpu_resource_bytes(atlas_bytes: i64, framebuffer_bytes: i64, para
     if atlas_bytes < 0 or framebuffer_bytes < 0: return 0
     atlas_bytes + framebuffer_bytes + (if params_allocated: VULKAN_FONT_PARAMS_BYTES else: 0)
 
+fn vulkan_font_frame_batch_contract(text_count: i64, command_count: i64,
+                                    submission_count: i64, fence_count: i64) -> bool:
+    text_count > 0 and command_count == 1 and submission_count == 1 and fence_count == 1
+
 fn _vulkan_font_pack_i32_le(mut buf: [u8], offset: i32, value: i32) -> i32:
     val offset_1 = offset + 1
     val offset_2 = offset + 2
@@ -284,7 +288,7 @@ fn _vulkan_font_evidence(pipeline: VulkanFontPipelineEvidence, status: text, rea
                          quads: i64, dispatches: i64, submitted: bool, waited: bool,
                          framebuffer: i64, readback_bytes: i64, device_checksum: i64,
                          oracle_checksum: i64, parity: bool) -> VulkanFontCompositeEvidence:
-    val executed = submitted and waited and readback_bytes > 0
+    val executed = submitted and waited
     VulkanFontCompositeEvidence(status: status, reason: reason, artifact_mode: pipeline.artifact_mode,
         shader_handle: pipeline.shader_handle, pipeline_handle: pipeline.pipeline_handle,
         atlas_buffer_handle: atlas, params_buffer_handle: params,
@@ -331,6 +335,11 @@ fn _vulkan_font_with_fallback(evidence: VulkanFontCompositeEvidence,
     replayable
 
 impl VulkanBackend:
+    me set_font_oracle_mode(enabled: bool):
+        # Production rendering never reads the full surface or runs the CPU
+        # renderer. Tests and evidence collectors opt in explicitly.
+        self.font_oracle_mode = enabled
+
     me composite_font_batch(origin_x: i32, origin_y: i32,
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
         val clock = default_frame_clock()
@@ -345,14 +354,15 @@ impl VulkanBackend:
 
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
                                   batch: FontRenderBatch, clock: FrameClock) -> VulkanFontCompositeEvidence:
-        val pending_status = self._flush_pending_compute()
-        if pending_status <= 0:
-            return _vulkan_font_evidence(
-                self.font_atlas_pipeline_evidence(), "failed",
-                if pending_status < 0: "primitive-batch-completion-unknown" else: "primitive-batch-submit-failed",
-                self.d_font_atlas, self.d_font_params, 0, 0,
-                batch.quads.len(), 0, false, false, self.d_framebuffer,
-                0, 0, 0, false)
+        if self.font_oracle_mode:
+            val evidence_flush = self._flush_pending_compute()
+            if evidence_flush <= 0:
+                return _vulkan_font_evidence(
+                    self.font_atlas_pipeline_evidence(), "failed",
+                    if evidence_flush < 0: "primitive-batch-completion-unknown" else: "primitive-batch-submit-failed",
+                    self.d_font_atlas, self.d_font_params, 0, 0,
+                    batch.quads.len(), 0, false, false, self.d_framebuffer,
+                    0, 0, 0, false)
         val pipeline = self.font_atlas_pipeline_evidence()
         val framebuffer = self.d_framebuffer
         val width = self.w
@@ -453,142 +463,160 @@ impl VulkanBackend:
             self.font_gpu_resource_high_water_bytes = resource_bytes
 
         val byte_count = dst_count * 4
-        val initial_evidence_started = clock.now_micros() * 1000
-        val before_bytes = _vulkan_font_download(framebuffer, byte_count)
-        vulkan_order_trace("font-snapshot fb={framebuffer} bytes={before_bytes.len()} want={byte_count} quads={batch.quads.len()}")
-        val before = _vulkan_font_bytes_to_pixels(before_bytes, dst_count)
-        if before.len() != dst_count:
-            return _vulkan_font_evidence(pipeline, "failed", "initial-device-readback-failed", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        var before_bytes: [u8] = []
+        var before: [u32] = []
         var oracle = SoftwareBackend.create()
-        oracle.init(width, height)
-        oracle.buf = before
-        evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(initial_evidence_started, clock.now_micros() * 1000)
+        if self.font_oracle_mode:
+            val initial_evidence_started = clock.now_micros() * 1000
+            before_bytes = _vulkan_font_download(framebuffer, byte_count)
+            before = _vulkan_font_bytes_to_pixels(before_bytes, dst_count)
+            if before.len() != dst_count:
+                return _vulkan_font_evidence(pipeline, "failed", "initial-device-readback-failed", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            oracle.init(width, height)
+            oracle.buf = before
+            evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(initial_evidence_started, clock.now_micros() * 1000)
 
         var done: i64 = 0
         var last_params: i64 = 0
         var last_descriptor: i64 = 0
-        var last_command: i64 = 0
+        val command = if self.frame_batching_enabled and self.pending_compute_command > 0:
+            self.pending_compute_command
+        else:
+            vulkan_sffi_begin_compute()
+        if command <= 0:
+            return _vulkan_font_evidence(pipeline, "failed", "font-command-allocation-failed", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        var descriptors: [i64] = []
+        var params_handles: [i64] = []
         var last_fence: i64 = 0
         var last_fence_available = false
         var last_fence_destroyed = false
         var queue_device_ns: i64 = 0
         var sync_wait_ns: i64 = 0
         var cpu_oracle_ns: i64 = 0
+        var prepared = true
         while done < batch.quads.len():
-            last_fence = 0
-            last_fence_available = false
-            last_fence_destroyed = false
             val q = batch.quads[done]
-            val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                q.atlas_x, q.atlas_y, q.width, q.height, q.color)
             val total = q.width.to_i64() * q.height.to_i64()
             val groups = vulkan_font_dispatch_groups(total)
             val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
             val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
                 q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)
-            val params = self.d_font_params
+            val params = if not self.frame_batching_enabled and done == 0: self.d_font_params else: vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
             val descriptor = vulkan_sffi_create_descriptor_set(pipeline.pipeline_handle)
             val descriptors_ready = (params > 0 and descriptor > 0 and
                 vulkan_sffi_copy_to_buffer(params, packed, 0) and
                 vulkan_sffi_bind_buffer(descriptor, 0, self.d_font_atlas) and
                 vulkan_sffi_bind_buffer(descriptor, 1, framebuffer) and
                 vulkan_sffi_bind_buffer(descriptor, 2, params))
-            var command: i64 = 0
-            if descriptors_ready:
-                command = vulkan_sffi_begin_compute()
             last_params = params
             last_descriptor = descriptor
-            last_command = command
-            val prepared = (descriptors_ready and command > 0 and
+            if params > 0: params_handles.push(params)
+            if descriptor > 0: descriptors.push(descriptor)
+            prepared = (prepared and descriptors_ready and
                 vulkan_sffi_bind_pipeline(command, pipeline.pipeline_handle) and
                 vulkan_sffi_bind_descriptors(command, descriptor) and
-                vulkan_sffi_dispatch(command, groups, 1, 1) and
-                vulkan_sffi_end_compute(command))
-            var submitted = false
-            var completion_waited = false
-            var fence_completion_unknown = false
-            var fence_failure_reason = "fence-completion-unknown"
-            if prepared:
-                val queue_device_started = clock.now_micros() * 1000
-                val fence_result = vulkan_sffi_submit_and_wait_fence(command)
-                queue_device_ns = queue_device_ns + vulkan_font_elapsed_ns(queue_device_started, clock.now_micros() * 1000)
-                if fence_result > 0:
-                    last_fence = fence_result
-                    last_fence_available = true
-                    submitted = true
-                    val sync_wait_started = clock.now_micros() * 1000
-                    completion_waited = vulkan_sffi_wait_fence(fence_result, 0)
-                    sync_wait_ns = sync_wait_ns + vulkan_font_elapsed_ns(sync_wait_started, clock.now_micros() * 1000)
-                    last_fence_destroyed = vulkan_sffi_destroy_fence(fence_result)
-                elif fence_result < 0:
-                    fence_completion_unknown = true
-                    if vulkan_classify_error(vulkan_sffi_last_error()) == VulkanErrorKind.DeviceLost:
-                        fence_failure_reason = "device-lost"
-            if fence_completion_unknown:
-                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
-                val unknown = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", fence_failure_reason, self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(unknown, -1, false, false)
-            if not prepared and command > 0:
-                vulkan_sffi_quarantine_unsubmitted_command(command, descriptor, 0)
-                val orphaned = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", "missing-command-cleanup-capability", self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(orphaned, last_fence, last_fence_available, last_fence_destroyed)
-            var descriptor_destroyed = false
-            if descriptor > 0:
-                descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(descriptor)
-            if descriptor_destroyed:
-                last_descriptor = -descriptor
-            if descriptor > 0 and not descriptor_destroyed:
-                val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-                vulkan_order_trace("font-restore site=descriptor-cleanup fb={framebuffer} ok={restored} quad={done}")
-                val failed = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", if restored: "descriptor-cleanup-failed" else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, submitted, completion_waited, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(failed, last_fence, last_fence_available, last_fence_destroyed)
-            if last_fence_available and not completion_waited:
-                val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-                vulkan_order_trace("font-restore site=fence-wait-evidence fb={framebuffer} ok={restored} quad={done}")
-                val failed = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", if restored: "fence-wait-evidence-failed" else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, submitted, false, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(failed, last_fence, true, last_fence_destroyed)
-            if last_fence_available and not last_fence_destroyed:
-                val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-                vulkan_order_trace("font-restore site=fence-cleanup fb={framebuffer} ok={restored} quad={done}")
-                val failed = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", if restored: "fence-cleanup-failed" else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, submitted, completion_waited, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(failed, last_fence, true, false)
-            if not submitted:
-                val reason = if command > 0: "missing-command-cleanup-capability" else: "font-dispatch-failed"
-                val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-                vulkan_order_trace("font-restore site=not-submitted fb={framebuffer} ok={restored} quad={done} reason={reason}")
-                val failed = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", if restored: reason else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, done > 0, done > 0, framebuffer, 0, 0, 0, false), before)
-                return _vulkan_font_completion(failed, last_fence, last_fence_available, last_fence_destroyed)
-            val oracle_started = clock.now_micros() * 1000
-            oracle.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
-            val oracle_elapsed = vulkan_font_elapsed_ns(oracle_started, clock.now_micros() * 1000)
-            cpu_oracle_ns = cpu_oracle_ns + oracle_elapsed
-            evidence_overhead_ns = evidence_overhead_ns + oracle_elapsed
+                vulkan_sffi_dispatch(command, groups, 1, 1))
+            if not prepared: break
+            if self.font_oracle_mode:
+                val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                    q.atlas_x, q.atlas_y, q.width, q.height, q.color)
+                val oracle_started = clock.now_micros() * 1000
+                oracle.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
+                val oracle_elapsed = vulkan_font_elapsed_ns(oracle_started, clock.now_micros() * 1000)
+                cpu_oracle_ns = cpu_oracle_ns + oracle_elapsed
+                evidence_overhead_ns = evidence_overhead_ns + oracle_elapsed
             done = done + 1
 
+        if self.frame_batching_enabled and not self.font_oracle_mode and prepared and done == batch.quads.len():
+            if self.pending_compute_command == 0:
+                self.pending_compute_command = command
+                self.font_frame_command_count = self.font_frame_command_count + 1
+            for descriptor in descriptors: self.pending_font_descriptors.push(descriptor)
+            for params in params_handles: self.pending_font_params.push(params)
+            var recorded = _vulkan_font_evidence(pipeline, "recorded", "queued-in-frame-command",
+                self.d_font_atlas, last_params, last_descriptor, command, batch.quads.len(), done,
+                false, false, framebuffer, 0, 0, 0, false)
+            recorded.batch_identity = font_render_batch_atlas_cache_identity(batch)
+            recorded.atlas_payload_sha256 = self.font_atlas_payload_sha256
+            recorded.dirty_upload_ns = dirty_upload_ns
+            recorded.command_buffer_count = 1
+            recorded.submission_count = 0
+            recorded.fence_count = 0
+            recorded.descriptor_count = descriptors.len()
+            recorded.oracle_mode = false
+            self.dirty = true
+            return recorded
+
+        prepared = prepared and done == batch.quads.len() and vulkan_sffi_end_compute(command)
+        if not prepared:
+            vulkan_sffi_quarantine_unsubmitted_command(command, last_descriptor, 0)
+            for descriptor in descriptors: vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+            for params in params_handles:
+                vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
+                if params == self.d_font_params: self.d_font_params = 0
+            if self.frame_batching_enabled:
+                self._quarantine_pending_compute_descriptors()
+                self._clear_pending_compute_state()
+                self.completion_unknown = true
+            return _vulkan_font_with_fallback(
+                _vulkan_font_evidence(pipeline, "failed", "font-batch-record-failed", self.d_font_atlas, last_params, last_descriptor, command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false), before)
+
+        val queue_device_started = clock.now_micros() * 1000
+        val fence_result = vulkan_sffi_submit_and_wait_fence(command)
+        queue_device_ns = vulkan_font_elapsed_ns(queue_device_started, clock.now_micros() * 1000)
+        var submitted = fence_result > 0
+        var completion_waited = false
+        if submitted:
+            last_fence = fence_result
+            last_fence_available = true
+            val sync_wait_started = clock.now_micros() * 1000
+            completion_waited = vulkan_sffi_wait_fence(fence_result, 0)
+            sync_wait_ns = vulkan_font_elapsed_ns(sync_wait_started, clock.now_micros() * 1000)
+            last_fence_destroyed = vulkan_sffi_destroy_fence(fence_result)
+        elif fence_result < 0:
+            for descriptor in descriptors: vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+            for params in params_handles:
+                vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
+                if params == self.d_font_params: self.d_font_params = 0
+            val reason = if vulkan_classify_error(vulkan_sffi_last_error()) == VulkanErrorKind.DeviceLost: "device-lost" else: "fence-completion-unknown"
+            return _vulkan_font_completion(_vulkan_font_with_fallback(
+                _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, last_params, last_descriptor, command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false), before), -1, false, false)
+
+        var cleanup_ok = true
+        for descriptor in descriptors:
+            cleanup_ok = vulkan_sffi_destroy_descriptor_set(descriptor) and cleanup_ok
+        var params_index: i64 = 1
+        while params_index < params_handles.len():
+            cleanup_ok = vulkan_sffi_free_buffer(params_handles[params_index]) and cleanup_ok
+            params_index = params_index + 1
+        if not submitted or not completion_waited or not last_fence_destroyed or not cleanup_ok:
+            val reason = if not submitted: "font-batch-submit-failed" elif not completion_waited: "fence-wait-evidence-failed" elif not last_fence_destroyed: "fence-cleanup-failed" else: "descriptor-cleanup-failed"
+            return _vulkan_font_completion(_vulkan_font_with_fallback(
+                _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, last_params, -last_descriptor, command, batch.quads.len(), done, submitted, completion_waited, framebuffer, 0, 0, 0, false), before), last_fence, last_fence_available, last_fence_destroyed)
+
         val final_evidence_started = clock.now_micros() * 1000
-        val present_readback_started = clock.now_micros() * 1000
-        val after_bytes = _vulkan_font_download(framebuffer, byte_count)
-        val present_readback_ns = vulkan_font_elapsed_ns(present_readback_started, clock.now_micros() * 1000)
-        val after = _vulkan_font_bytes_to_pixels(after_bytes, dst_count)
-        val device_checksum = vulkan_font_pixels_checksum(after)
-        val oracle_checksum = vulkan_font_pixels_checksum(oracle.buf)
-        val parity = after.len() == dst_count and vulkan_font_pixels_equal(after, oracle.buf)
+        var after: [u32] = []
+        var present_readback_ns: i64 = 0
+        var device_checksum: i64 = 0
+        var oracle_checksum: i64 = 0
+        var parity = false
+        if self.font_oracle_mode:
+            val present_readback_started = clock.now_micros() * 1000
+            after = _vulkan_font_bytes_to_pixels(_vulkan_font_download(framebuffer, byte_count), dst_count)
+            present_readback_ns = vulkan_font_elapsed_ns(present_readback_started, clock.now_micros() * 1000)
+            device_checksum = vulkan_font_pixels_checksum(after)
+            oracle_checksum = vulkan_font_pixels_checksum(oracle.buf)
+            parity = after.len() == dst_count and vulkan_font_pixels_equal(after, oracle.buf)
         var restored = true
-        if not parity:
+        if self.font_oracle_mode and not parity:
             restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-            vulkan_order_trace("font-restore site=readback-mismatch fb={framebuffer} ok={restored} quad={done} device_sum={device_checksum} oracle_sum={oracle_checksum}")
-        var completed = _vulkan_font_evidence(pipeline, if parity: "executed-unpromoted" else: "readback-mismatch",
-            if parity: "fence-and-device-identity-evidence-unavailable" elif restored: "device-readback-does-not-match-cpu-oracle" else: "partial-framebuffer-restore-failed",
-            self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done,
-            done == batch.quads.len(), done == batch.quads.len(), framebuffer,
-            if after.len() == dst_count: byte_count else: 0, device_checksum, oracle_checksum, parity)
+        var completed = _vulkan_font_evidence(pipeline,
+            if self.font_oracle_mode and parity: "executed-unpromoted" elif self.font_oracle_mode: "readback-mismatch" else: "executed",
+            if self.font_oracle_mode and parity: "fence-and-device-identity-evidence-unavailable" elif self.font_oracle_mode and restored: "device-readback-does-not-match-cpu-oracle" elif self.font_oracle_mode: "partial-framebuffer-restore-failed" else: "single-submit-production-frame",
+            self.d_font_atlas, last_params, -last_descriptor, command, batch.quads.len(), done,
+            true, true, framebuffer,
+            if self.font_oracle_mode and after.len() == dst_count: byte_count else: 0, device_checksum, oracle_checksum, parity)
         completed.batch_identity = font_render_batch_atlas_cache_identity(batch)
         completed.atlas_payload_sha256 = self.font_atlas_payload_sha256
         completed.dirty_upload_ns = dirty_upload_ns
@@ -597,20 +625,17 @@ impl VulkanBackend:
         completed.present_readback_ns = present_readback_ns
         completed.cpu_oracle_ns = cpu_oracle_ns
         completed.readback_nonblank_pixels = vulkan_font_changed_pixel_count(before, after)
+        completed.command_buffer_count = 1
+        completed.submission_count = 1
+        completed.fence_count = 1
+        completed.descriptor_count = descriptors.len()
+        completed.oracle_mode = self.font_oracle_mode
         var result = _vulkan_font_completion(completed, last_fence, last_fence_available, last_fence_destroyed)
         evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(final_evidence_started, clock.now_micros() * 1000)
         result.evidence_overhead_ns = evidence_overhead_ns
         vulkan_order_trace("font-done status={result.status} reason={result.reason} parity={parity} promotion_ready={result.promotion_ready} dispatched={done}/{batch.quads.len()}")
-        if result.promotion_ready:
+        if result.device_executed:
             self.dirty = true
-        elif parity:
-            val replay_restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
-            vulkan_order_trace("font-restore site=unpromoted-replay fb={framebuffer} ok={replay_restored} quad={done}")
-            if not replay_restored:
-                result.status = "failed"
-                result.reason = "partial-framebuffer-restore-failed"
-                result.parity = false
-                result.device_executed = false
         result
 
 export VULKAN_FONT_PARAMS_BYTES
@@ -620,4 +645,5 @@ export vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_runtim
 export vulkan_font_promotion_ready
 export vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
 export vulkan_font_timed_ns
+export vulkan_font_frame_batch_contract
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}

@@ -165,6 +165,16 @@ impl VulkanBackend:
                     self.pending_compute_descriptors[i], 0, 0, 0)
                 released = false
             i = i + 1
+        for descriptor in self.pending_font_descriptors:
+            if not vulkan_sffi_destroy_descriptor_set(descriptor):
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+                released = false
+        for params in self.pending_font_params:
+            if not vulkan_sffi_free_buffer(params):
+                vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
+                released = false
+        self.pending_font_descriptors = []
+        self.pending_font_params = []
         released
 
     me _quarantine_pending_compute_descriptors():
@@ -173,6 +183,12 @@ impl VulkanBackend:
             vulkan_sffi_quarantine_dependencies(
                 self.pending_compute_descriptors[i], 0, 0, 0)
             i = i + 1
+        for descriptor in self.pending_font_descriptors:
+            vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+        for params in self.pending_font_params:
+            vulkan_sffi_quarantine_dependencies(0, params, 0, 0)
+        self.pending_font_descriptors = []
+        self.pending_font_params = []
 
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
@@ -184,19 +200,18 @@ impl VulkanBackend:
         val cmd = self.pending_compute_command
         if cmd <= 0:
             return 1
+        val has_font_work = self.pending_font_descriptors.len() > 0
         if not vulkan_sffi_end_compute(cmd):
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
                 val first_desc = if self.pending_compute_count > 0:
                     self.pending_compute_descriptors[0]
+                elif self.pending_font_descriptors.len() > 0:
+                    self.pending_font_descriptors[0]
                 else:
                     0
                 vulkan_sffi_quarantine_unsubmitted_command(cmd, first_desc, 0)
-                var i: i64 = 1
-                while i < self.pending_compute_count:
-                    vulkan_sffi_quarantine_dependencies(
-                        self.pending_compute_descriptors[i], 0, 0, 0)
-                    i = i + 1
+                self._quarantine_pending_compute_descriptors()
                 self._clear_pending_compute_state()
                 return -1
             self._release_pending_compute_descriptors()
@@ -204,6 +219,8 @@ impl VulkanBackend:
             return 0
 
         val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        if has_font_work:
+            self.font_frame_submission_count = self.font_frame_submission_count + 1
         if fence < 0:
             if not vulkan_sffi_wait_idle():
                 self._quarantine_pending_compute_descriptors()
@@ -216,6 +233,8 @@ impl VulkanBackend:
             self._release_pending_compute_descriptors()
             self._clear_pending_compute_state()
             return 0
+        if has_font_work:
+            self.font_frame_fence_count = self.font_frame_fence_count + 1
 
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
         if not completion_waited and not vulkan_sffi_wait_idle():
