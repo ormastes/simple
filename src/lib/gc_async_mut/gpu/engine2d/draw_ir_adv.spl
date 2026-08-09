@@ -182,12 +182,6 @@ struct Engine2dDrawIrGlassOutcome:
     composited: bool
     execution: Engine2dGlassExecutionResult
 
-class Engine2dDrawIrMaterialExecutionEvidence:
-    composited: bool
-    execution_target: text
-    backend_handle: i64
-    device_identity: i64
-
 fn _engine2d_draw_ir_render_outcome(
     engine: Engine2D,
     rendered: i32,
@@ -472,7 +466,7 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
 fn _engine2d_draw_ir_render_glass_material(
     engine: Engine2D, command: DrawIrCommand,
     x: i32, y: i32, w: i32, h: i32, radius: i32,
-    mut execution_evidence: Engine2dDrawIrMaterialExecutionEvidence
+    mut execution_i64: [i64], mut execution_text: [text]
 ) -> Engine2dDrawIrGlassOutcome:
     var eng = engine
     val unavailable = engine2d_glass_execution_unavailable(
@@ -576,10 +570,10 @@ fn _engine2d_draw_ir_render_glass_material(
     )
     val device_execution = eng.draw_ir_apply_glass_material(config)
     if device_execution.applied:
-        execution_evidence.composited = true
-        execution_evidence.execution_target = device_execution.execution_target
-        execution_evidence.backend_handle = device_execution.backend_handle
-        execution_evidence.device_identity = device_execution.device_identity
+        execution_i64[0] = 1
+        execution_i64[1] = device_execution.backend_handle
+        execution_i64[2] = device_execution.device_identity
+        execution_text[0] = device_execution.execution_target
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: true, execution: device_execution)
     if device_execution.failure_reason == "device-glass-state-unknown":
@@ -594,10 +588,10 @@ fn _engine2d_draw_ir_render_glass_material(
             engine: eng, composited: false, execution: unavailable)
     eng.draw_image(
         material_x, material_y, material_width, material_height, pixels)
-    execution_evidence.composited = true
-    execution_evidence.execution_target = "cpu-scalar-glass-v1"
-    execution_evidence.backend_handle = 0
-    execution_evidence.device_identity = 0
+    execution_i64[0] = 1
+    execution_i64[1] = 0
+    execution_i64[2] = 0
+    execution_text[0] = "cpu-scalar-glass-v1"
     Engine2dDrawIrGlassOutcome(
         engine: eng,
         composited: true,
@@ -614,7 +608,7 @@ fn _engine2d_draw_ir_render_glass_material(
 fn _engine2d_draw_ir_render_box(
     engine: Engine2D, command: DrawIrCommand,
     x: i32, y: i32, w: i32, h: i32,
-    mut execution_evidence: Engine2dDrawIrMaterialExecutionEvidence
+    mut execution_i64: [i64], mut execution_text: [text]
 ) -> Engine2dDrawIrBoxOutcome:
     var eng = engine
     # This free-function boundary projects Engine2D once more. Reset the exact
@@ -676,8 +670,9 @@ fn _engine2d_draw_ir_render_box(
         )
     else:
         _engine2d_draw_ir_render_glass_material(
-            eng, command, x, y, w, h, radius, execution_evidence)
-    if execution_evidence.composited:
+            eng, command, x, y, w, h, radius,
+            execution_i64, execution_text)
+    if execution_i64[0] == 1:
         if shadow_admitted:
             val inset_shadow_engine_ignored = engine2d_draw_ir_render_typed_inset_shadows(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
@@ -1343,9 +1338,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
     var css_background_pixel_work_remaining = css_background_pixel_work_budget
-    val material_execution = Engine2dDrawIrMaterialExecutionEvidence(
-        composited: false, execution_target: "",
-        backend_handle: 0, device_identity: 0)
+    var material_execution_i64: [i64] = [0, 0, 0]
+    var material_execution_text: [text] = [""]
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -1377,43 +1371,43 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             if metal_requested:
                 metal_device_glass_requested_count = (
                     metal_device_glass_requested_count + 1)
-            material_execution.composited = false
-            material_execution.execution_target = ""
-            material_execution.backend_handle = 0
-            material_execution.device_identity = 0
+            material_execution_i64[0] = 0
+            material_execution_i64[1] = 0
+            material_execution_i64[2] = 0
+            material_execution_text[0] = ""
             val box_ignored = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height,
-                material_execution)
-            if material_execution.execution_target == "cpu-scalar-glass-v1":
+                material_execution_i64, material_execution_text)
+            if material_execution_text[0] == "cpu-scalar-glass-v1":
                 cpu_composited_material_count = cpu_composited_material_count + 1
-                glass_execution_target = material_execution.execution_target
-            elif material_execution.execution_target == "metal-device-glass-v1":
-                if (material_execution.backend_handle > 0 and
-                    material_execution.device_identity > 0):
+                glass_execution_target = material_execution_text[0]
+            elif material_execution_text[0] == "metal-device-glass-v1":
+                if (material_execution_i64[1] > 0 and
+                    material_execution_i64[2] > 0):
                     metal_device_glass_material_count = (
                         metal_device_glass_material_count + 1)
-                    glass_execution_target = material_execution.execution_target
-                    glass_backend_handle = material_execution.backend_handle
-                    glass_device_identity = material_execution.device_identity
+                    glass_execution_target = material_execution_text[0]
+                    glass_backend_handle = material_execution_i64[1]
+                    glass_device_identity = material_execution_i64[2]
             if metal_requested and not (
-                material_execution.execution_target ==
+                material_execution_text[0] ==
                     "metal-device-glass-v1" and
-                material_execution.backend_handle > 0 and
-                material_execution.device_identity > 0):
+                material_execution_i64[1] > 0 and
+                material_execution_i64[2] > 0):
                 metal_device_glass_unfulfilled_count = (
                     metal_device_glass_unfulfilled_count + 1)
             if metal_requested:
-                val fulfilled = (material_execution.execution_target ==
+                val fulfilled = (material_execution_text[0] ==
                     "metal-device-glass-v1" and
-                    material_execution.backend_handle > 0 and
-                    material_execution.device_identity > 0)
+                    material_execution_i64[1] > 0 and
+                    material_execution_i64[2] > 0)
                 metal_device_glass_receipts.push(
                     Engine2dMetalGlassReceipt(
                         material_id: command.component_id,
                         fulfilled: fulfilled,
-                        execution_target: material_execution.execution_target,
-                        backend_handle: material_execution.backend_handle,
-                        device_identity: material_execution.device_identity,
+                        execution_target: material_execution_text[0],
+                        backend_handle: material_execution_i64[1],
+                        device_identity: material_execution_i64[2],
                         readback_source: "",
                         readback_checksum: 0
                     )
