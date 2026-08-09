@@ -1,0 +1,246 @@
+# Host-only unit spec for MetalVmExecutor's pure arena builders/decoders.
+#
+# Runs on ANY host including this Linux one -- nothing here touches a Metal
+# device, a session, or the FFI. These are the parts of
+# src/lib/gc_async_mut/gpu_lane/metal_vm_executor.spl that CAN be proven
+# without a Mac; the device behavior cannot, and is tracked in
+# doc/08_tracking/bug/metal_gpu_lane_device_verification_pending_2026-08-09.md.
+#
+# THE POINT OF THIS FILE is the first describe block: the
+# ABSOLUTE-vs-RELATIVE offset bug in `build_svmg_arena_persisting_data`.
+# SVM-G STORE/LOAD address the arena by ABSOLUTE byte offset, so the
+# carry-forward copy must start at `max(data_off, prior_data_off)` and walk
+# ABSOLUTE indices. That bug has been reintroduced three times across the
+# CUDA and Vulkan lanes, and the existing debug/conformance vectors CANNOT
+# catch it: every launch there re-assembles the SAME source, so
+# `data_off == prior_data_off` and the absolute and relative forms are
+# arithmetically IDENTICAL. Only a chain whose successive cells have
+# DIFFERING CODE LENGTHS separates them. Both directions are covered below
+# (code grows, then code shrinks), because `max()` picks a different operand
+# in each and a one-sided test would leave half the bug live.
+
+use std.spipe.*
+use std.common.svmg.assembler.{svmg_asm}
+use std.common.svmg.sgp.{SGP_HEADER_SIZE}
+use std.common.svmg.mailbox_const.{
+    ARENA_DATA_SIZE, ARENA_TOTAL_SIZE, RAM_SENTINEL_OFFSET,
+    LOG_HEAD_OFFSET, LOG_CAP_OFFSET, LOG_DATA_OFFSET, DEFAULT_LOG_CAP,
+    RECORD_SIZE, SENTINEL_EXIT_MASK, SENTINEL_TIMEOUT, SENTINEL_DEBUG_BREAK,
+    DBG_BASE_OFFSET, DBG_SAVED_SEQ_OFFSET, DBG_SAVED_RECORD_COUNT_OFFSET,
+    DBG_SAVED_PC_OFFSET, DBG_FLAGS_OFFSET}
+use std.gc_async_mut.gpu_lane.metal_vm_executor.{
+    build_svmg_arena, build_svmg_arena_persisting_data,
+    read_sentinel, read_log, read_records, debug_break_of,
+    step_budget_from_env, DEFAULT_STEP_BUDGET, SVMG_ENTRY}
+
+# A SHORT program (2 bytes of code) and a LONG one (13 bytes), so the two
+# arenas they produce have DIFFERENT data_off values (38 vs 49) -- which is
+# the whole reason this file exists.
+val _SHORT_SRC: text = "HALT 0"
+val _LONG_SRC: text = "PUSHI 1\nPUSHI 2\nADD\nHALT 0"
+
+# An absolute DATA-region offset comfortably past BOTH programs' code
+# footprints, and past the SGP header. A device STORE32 to this offset is
+# exactly what a notebook cell's "global variable" looks like on the wire.
+val _MARK_A: i64 = 1000
+val _MARK_B: i64 = 2048
+
+fn _write_u32(arena: [u8], off: i64, v: i64) -> [u8]:
+    var out = arena
+    out[off + 0] = (v & 0xFF) as u8
+    out[off + 1] = ((v >> 8) & 0xFF) as u8
+    out[off + 2] = ((v >> 16) & 0xFF) as u8
+    out[off + 3] = ((v >> 24) & 0xFF) as u8
+    out
+
+fn _read_u32(arena: [u8], off: i64) -> i64:
+    (arena[off] as i64) | ((arena[off + 1] as i64) << 8) | ((arena[off + 2] as i64) << 16) | ((arena[off + 3] as i64) << 24)
+
+# Build a "previous launch's output arena": a real arena for `src`, with
+# device-written state stamped into it at ABSOLUTE offsets, the way a real
+# kernel run would leave it.
+fn _prior_arena_for(src: text) -> [u8]:
+    var a = build_svmg_arena(svmg_asm(src), 10000, 0)
+    a = _write_u32(a, _MARK_A, 0x11223344)
+    a = _write_u32(a, _MARK_B, 0x55667788)
+    # LOG ring: one byte 'X' already emitted.
+    a[LOG_DATA_OFFSET] = 88 as u8
+    a = _write_u32(a, LOG_HEAD_OFFSET, 1)
+    # RECORD ring: one record already written.
+    val rec_base = LOG_DATA_OFFSET + DEFAULT_LOG_CAP
+    a = _write_u32(a, rec_base + 0, 7)
+    a = _write_u32(a, rec_base + 4, 1)
+    a = _write_u32(a, rec_base + 8, 42)
+    # DBG-1 saved state, including the two fields the design's field list
+    # omits and mailbox_const.spl deliberately adds.
+    a = _write_u32(a, DBG_SAVED_SEQ_OFFSET, 9)
+    a = _write_u32(a, DBG_SAVED_RECORD_COUNT_OFFSET, 1)
+    a = _write_u32(a, DBG_SAVED_PC_OFFSET, 5)
+    a
+
+describe "MetalVmExecutor arena carry-forward uses ABSOLUTE offsets":
+    """
+    Proves `build_svmg_arena_persisting_data` copies prior DATA by absolute
+    arena index, not relative to data_off, across cells whose code lengths
+    DIFFER -- the only configuration in which the correct and the buggy form
+    produce different bytes.
+    """
+
+    it "should preserve absolute DATA offsets when the next cell's code is LONGER":
+        step("Prior launch ran the SHORT program; its data_off is 36+2=38")
+        val short_code = svmg_asm(_SHORT_SRC)
+        val prior_data_off = SGP_HEADER_SIZE + short_code.len()
+        assert_equal(prior_data_off, 38)
+        val prior = _prior_arena_for(_SHORT_SRC)
+
+        step("Next cell is the LONGER program; its data_off is 36+13=49")
+        val long_code = svmg_asm(_LONG_SRC)
+        val next_data_off = SGP_HEADER_SIZE + long_code.len()
+        assert_equal(next_data_off, 49)
+        assert_true(next_data_off != prior_data_off)
+
+        step("Carry the prior arena forward")
+        val next = build_svmg_arena_persisting_data(long_code, 10000, 0, prior, prior_data_off)
+        assert_equal(next.len(), ARENA_TOTAL_SIZE)
+
+        step("Values written by the prior launch keep their ABSOLUTE offsets")
+        # A relative copy would have written prior[prior_data_off + (1000 -
+        # next_data_off)] = prior[989] here, which is zero -- so this
+        # assertion is exactly the regression fence.
+        assert_equal(_read_u32(next, _MARK_A), 0x11223344)
+        assert_equal(_read_u32(next, _MARK_B), 0x55667788)
+
+        step("The NEW cell's code is installed, not overwritten by prior DATA")
+        var i = 0
+        while i < long_code.len():
+            assert_equal(next[SGP_HEADER_SIZE + i] as i64, long_code[i] as i64)
+            i = i + 1
+
+        step("LOG and RECORD rings ride forward verbatim")
+        assert_equal(_read_u32(next, LOG_HEAD_OFFSET), 1)
+        assert_equal(next[LOG_DATA_OFFSET] as i64, 88)
+        val rec_base = LOG_DATA_OFFSET + DEFAULT_LOG_CAP
+        assert_equal(_read_u32(next, rec_base + 8), 42)
+
+        step("DBG-1 saved state rides forward, INCLUDING seq and record_count")
+        assert_equal(_read_u32(next, DBG_SAVED_PC_OFFSET), 5)
+        assert_equal(_read_u32(next, DBG_SAVED_SEQ_OFFSET), 9)
+        assert_equal(_read_u32(next, DBG_SAVED_RECORD_COUNT_OFFSET), 1)
+
+    it "should preserve absolute DATA offsets when the next cell's code is SHORTER":
+        step("Prior launch ran the LONG program (data_off 49); next cell is SHORT (38)")
+        val long_code = svmg_asm(_LONG_SRC)
+        val prior_data_off = SGP_HEADER_SIZE + long_code.len()
+        val prior = _prior_arena_for(_LONG_SRC)
+        val short_code = svmg_asm(_SHORT_SRC)
+        val next_data_off = SGP_HEADER_SIZE + short_code.len()
+        assert_true(next_data_off < prior_data_off)
+
+        step("Carry forward; copy_start must be max(38, 49) = 49")
+        val next = build_svmg_arena_persisting_data(short_code, 10000, 0, prior, prior_data_off)
+
+        step("Absolute offsets preserved in the shrink direction too")
+        assert_equal(_read_u32(next, _MARK_A), 0x11223344)
+        assert_equal(_read_u32(next, _MARK_B), 0x55667788)
+
+        step("The prior (longer) program's tail code bytes are NOT resurrected " +
+            "into the new cell's code region")
+        # Bytes [38, 49) belong to the prior program's code. copy_start=49
+        # means they are NOT copied, so they stay whatever the fresh build
+        # left them: zero, because the short program's code ends at 38.
+        var i = next_data_off
+        while i < prior_data_off:
+            assert_equal(next[i] as i64, 0)
+            i = i + 1
+
+    it "should degrade to a fresh build when there is no prior arena":
+        step("An empty prior arena means 'no prior state'")
+        val code = svmg_asm(_LONG_SRC)
+        val fresh = build_svmg_arena(code, 10000, 0)
+        val degraded = build_svmg_arena_persisting_data(code, 10000, 0, [], 0)
+        assert_equal(degraded.len(), fresh.len())
+        assert_equal(_read_u32(degraded, _MARK_A), 0)
+        assert_equal(_read_u32(degraded, LOG_CAP_OFFSET), DEFAULT_LOG_CAP)
+
+        step("A wrong-sized prior arena is also treated as 'no prior state', " +
+            "never partially applied")
+        val truncated: [u8] = [1 as u8, 2 as u8, 3 as u8]
+        val degraded2 = build_svmg_arena_persisting_data(code, 10000, 0, truncated, 38)
+        assert_equal(degraded2.len(), ARENA_TOTAL_SIZE)
+        assert_equal(_read_u32(degraded2, _MARK_A), 0)
+
+describe "MetalVmExecutor DBG-1 block placement and sentinel decoding":
+    """
+    The DBG-1 block must stay unreachable from bytecode, and a debug break
+    must be detected by its sentinel identity -- never by the exit code,
+    which it aliases.
+    """
+
+    it "should place the DBG-1 block above ARENA_DATA_SIZE so bounds_ok hides it":
+        step("bounds_ok(offset,width) requires offset+width <= ARENA_DATA_SIZE")
+        # Therefore no LOAD32/STORE32/LOAD8/STORE8 can reach DBG_BASE_OFFSET:
+        # a program cannot scribble on its own debugger state.
+        assert_true(DBG_BASE_OFFSET >= ARENA_DATA_SIZE)
+        assert_equal(DBG_BASE_OFFSET, 0x1F000)
+        step("...and the block ends exactly at the top of the arena")
+        assert_equal(DBG_BASE_OFFSET + 0x1000, ARENA_TOTAL_SIZE)
+
+    it "should detect a debug break by SENTINEL identity, never by exit code":
+        step("SENTINEL_DEBUG_BREAK aliases a clean exit with code 0xDB")
+        # This is the trap: 0xCAFE00DB is BOTH the debug-break sentinel and
+        # what `SENTINEL_EXIT_MASK | 0xDB` produces. Exit code 0xDB is
+        # therefore reserved, and only exact sentinel equality is sound.
+        assert_equal(SENTINEL_DEBUG_BREAK, SENTINEL_EXIT_MASK | 0xDB)
+        assert_true(debug_break_of(SENTINEL_DEBUG_BREAK))
+
+        step("A clean exit with a different code is NOT a debug break")
+        assert_false(debug_break_of(SENTINEL_EXIT_MASK | 0x00))
+        assert_false(debug_break_of(SENTINEL_EXIT_MASK | 0x7F))
+        assert_false(debug_break_of(SENTINEL_TIMEOUT))
+        assert_false(debug_break_of(0))
+
+describe "MetalVmExecutor readback decoders":
+    """
+    Decodes a synthetic device-shaped arena -- the exact byte layout a real
+    Metal readback would produce -- with no device involved.
+    """
+
+    it "should decode sentinel, LOG text and RECORD ring from a synthetic arena":
+        step("Stamp a synthetic post-launch arena")
+        var a = build_svmg_arena(svmg_asm(_SHORT_SRC), 10000, 0)
+        a = _write_u32(a, RAM_SENTINEL_OFFSET, SENTINEL_EXIT_MASK | 0x07)
+        # LOG: "Hi\n"
+        a[LOG_DATA_OFFSET + 0] = 72 as u8
+        a[LOG_DATA_OFFSET + 1] = 105 as u8
+        a[LOG_DATA_OFFSET + 2] = 10 as u8
+        a = _write_u32(a, LOG_HEAD_OFFSET, 3)
+        val rec_base = LOG_DATA_OFFSET + DEFAULT_LOG_CAP
+        a = _write_u32(a, rec_base + 0, 1)
+        a = _write_u32(a, rec_base + 4, 1)
+        a = _write_u32(a, rec_base + 8, 123)
+        # Second record carries a NEGATIVE value (raw u32 wire pattern).
+        a = _write_u32(a, rec_base + RECORD_SIZE + 0, 2)
+        a = _write_u32(a, rec_base + RECORD_SIZE + 4, 0)
+        a = _write_u32(a, rec_base + RECORD_SIZE + 8, 0xFFFFFFFF)
+
+        step("Sentinel decodes to a clean exit with code 7")
+        assert_equal(read_sentinel(a), SENTINEL_EXIT_MASK | 0x07)
+        assert_false(debug_break_of(read_sentinel(a)))
+
+        step("LOG decodes to printable text with the newline preserved")
+        assert_equal(read_log(a), "Hi\n")
+
+        step("RECORD ring stops at the first all-zero record")
+        val recs = read_records(a, 64)
+        assert_equal(recs.len(), 2)
+        assert_equal(recs[0].passed, 1)
+        assert_equal(recs[0].value, 123)
+        step("...and a negative record value decodes as SIGNED i32, not 4294967295")
+        assert_equal(recs[1].passed, 0)
+        assert_equal(recs[1].value, -1)
+
+    it "should expose the Metal kernel entry point name the pipeline is built against":
+        step("MetalLaneSession.init passes this to rt_metal_create_compute_pipeline")
+        assert_equal(SVMG_ENTRY, "svmg_interpret")
+        step("Step budget default is shared with the CUDA/Vulkan lanes")
+        assert_equal(DEFAULT_STEP_BUDGET, 100000)
