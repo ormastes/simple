@@ -172,12 +172,17 @@ fn _simd_binding(backend: X25519MlKem768EvidenceBackend,
         scalar_source_receipt_sha256: "c" * 64,
         candidate_source_receipt_sha256: "d" * 64,
         scalar_sample_set_sha256: "e" * 64, candidate_sample_set_sha256: "f" * 64,
-        host_os: "linux", host_arch: "native-test", session_id: "generic-simd-test",
+        host_os: "linux", host_arch: _simd_host_arch(backend), session_id: "generic-simd-test",
         monotonic_clock_id: "monotonic-raw-nanoseconds",
         expected_keygen_digest: sha256_text(keygen_output),
         expected_encapsulate_digest: sha256_text(encapsulate_output),
         expected_decapsulate_digest: sha256_text(decapsulate_output),
         rvv_minimum_vlen_bits: 128, batch_size: 1)
+
+fn _simd_host_arch(backend: X25519MlKem768EvidenceBackend) -> text:
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return "x86_64"
+    if backend == X25519MlKem768EvidenceBackend.Neon: return "aarch64"
+    "riscv64"
 
 fn _generic_roundtrip(backend: X25519MlKem768EvidenceBackend,
         rvv_vlen_bits: i64) -> (X25519MlKem768KeyPair,
@@ -223,7 +228,7 @@ fn _generic_roundtrip(backend: X25519MlKem768EvidenceBackend,
 fn _generic_performance(backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768PerformanceAttestation:
     var performance = _performance_attestation()
     performance.candidate_backend = backend
-    performance.host_arch = "native-test"
+    performance.host_arch = _simd_host_arch(backend)
     performance.session_id = "generic-simd-test"
     performance
 
@@ -338,3 +343,14 @@ describe "X25519MLKEM768 native AVX2 full-operation receipt":
                 rvv_key.evidence.output_digest, rvv_encapsulation.evidence.output_digest,
                 rvv_decapsulation.evidence.output_digest), rvv_key, rvv_encapsulation,
             rvv_decapsulation, Some(_generic_performance(X25519MlKem768EvidenceBackend.Rvv))).is_err()).to_be(true)
+
+    it "rejects a SIMD receipt whose host architecture cannot execute its backend":
+        val (key_pair, encapsulation, decapsulation) = _generic_roundtrip(
+            X25519MlKem768EvidenceBackend.Neon, 0)
+        var wrong_arch = _simd_binding(X25519MlKem768EvidenceBackend.Neon,
+            key_pair.evidence.output_digest, encapsulation.evidence.output_digest,
+            decapsulation.evidence.output_digest)
+        wrong_arch.host_arch = "x86_64"
+        expect(x25519_mlkem768_compose_simd_full_operation_receipt(
+            wrong_arch, key_pair, encapsulation, decapsulation,
+            Some(_generic_performance(X25519MlKem768EvidenceBackend.Neon))).is_err()).to_be(true)
