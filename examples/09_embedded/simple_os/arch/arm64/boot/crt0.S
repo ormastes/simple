@@ -627,6 +627,40 @@ _fault_handler:
     mov     w0, #'\n'
     str     w0, [x1]
 
+    /* Print the interrupted link register so native faults identify the
+     * exact call site instead of only the shared runtime helper. */
+    mov     w0, #'L'
+    str     w0, [x1]
+    mov     w0, #'R'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+
+    mov     x2, x30
+    mov     x3, #60
+.Llr_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Llr_digit
+    add     w4, w4, #('a' - 10)
+    b       .Llr_emit
+.Llr_digit:
+    add     w4, w4, #'0'
+.Llr_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Llr_loop
+
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
 .Lfault_halt:
     wfe
     b       .Lfault_halt
