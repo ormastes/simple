@@ -1,66 +1,99 @@
-# `dap_breakpoint_system_spec` never terminates, respawns orphans, blocks 5 specs
+# `dap_breakpoint_system_spec` never terminates — CAUSE ESTABLISHED
 
-**Status:** OPEN — cause NOT established
-**Found:** 2026-08-09 by stream P3 (host `DebugTarget` adapter), across ~2h of attempts
-**Severity:** blocks measurement of 5 DAP system specs
-**Component:** `test/03_system/tools/dap/dap_breakpoint_system_spec.spl` + the test runner's retry path
+**Status:** FIXED 2026-08-09 (stream G3) — cause established by direct measurement
+**Found:** 2026-08-09 by stream P3 (host `DebugTarget` adapter)
+**Component:** `test/03_system/tools/dap/*_system_spec.spl` (family of four)
 
-## Symptom
+## Cause
 
-`test/03_system/tools/dap/dap_breakpoint_system_spec.spl` never completes. The
-runner retries it **indefinitely**, spawning processes that outlive their parent
-and reparent to init. Because the system-spec loop is sequential, it never
-advances, so four sibling specs are never reached either:
+There is no signal, no lock, and no deadlock. **The spec is simply asked to do
+about 70 hours of work.**
 
-- `test/03_system/tools/dap/breakpoint_system_spec.spl`
-- `test/03_system/tools/dap/stack_trace_system_spec.spl`
-- `test/03_system/tools/dap/stepping_system_spec.spl`
-- `test/03_system/tools/dap/variables_system_spec.spl`
-- `test/03_system/tools/dap/dap_protocol_live_spec.spl`
+`simple check` costs **~100 seconds of CPU per file**, and `simple check <dir>`
+spawns **one worker process per file** (`src/app/cli/check_entry.spl:184-189`
+loops `expand_check_targets()` and runs `simple run src/app/check/main.spl
+<one-file>` for each). The per-file spawn is deliberate — see the comment at
+`check_entry.spl:14-19` — so the cost is linear in file count with no
+amortization.
 
-Observed exit code on the repeated attempts: **144**.
+Measured on `x86_64-unknown-linux-gnu`, 2026-08-09:
 
-## What has been ruled out
+| command | result |
+|---|---|
+| `bin/release/x86_64-unknown-linux-gnu/simple run src/app/check/main.spl <1 file>` | **1m41.8s**, exit 0 |
+| `bin/simple check <1 file>` (no `SIMPLE_TIMEOUT_SECONDS`) | killed at 68s by `kill_simple_monitor`, exit 255 |
+| `bin/simple check src/lib/nogc_sync_mut/dap` (19 files) | still running at 5m, per-file kills |
+| `... main.spl <2 dirs, 35 files>` in ONE process | still running at 10m — batching does not help |
 
-- **Not the `kill_simple_monitor` watchdog.** Its log was checked and contains
-  only RSS warnings for unrelated bootstrap / `git fsck` processes — nothing
-  naming this spec. The documented "SIGTERMs any run >=60s at high CPU" behavior
-  is therefore not the mechanism here.
-- **Not caused by the P3 change.** Reproduced before any of P3's files entered a
-  system run, and P3's tracked diff against `origin/main` was empty (purely
-  additive new files), which makes a regression impossible in principle.
+The spec's second example targeted **`src/app` = 2,544 `.spl` files**, i.e.
+2,544 × ~100s ≈ **70 hours**. That is the "never terminates".
 
-## What is NOT established
+The whole family had the same defect, just with smaller (still unbounded)
+targets, so fixing only the breakpoint spec would have moved the block to the
+next one:
 
-The cause. Exit 144 is unexplained. Two candidate leads, neither confirmed:
+| spec | old target | files | est. runtime |
+|---|---|---|---|
+| `dap_breakpoint_system_spec` | `src/app` | 2544 | ~70 h |
+| `dap_stack_trace_system_spec` | `99.loader` + `95.interp` + `80.driver` | 174 | ~4.8 h |
+| `dap_variables_system_spec` | `30.types` + `35.semantics` | 176 | ~4.9 h |
+| `dap_stepping_system_spec` | `95.interp` + 1-in-5 of `10.frontend` | ~40 | ~1 h |
 
-1. **144 = 128 + 16** would be a signal-16 termination. Worth checking what, if
-   anything, raises it.
-2. A sibling stream independently found that **`pkill -f <pattern>` matches its
-   own wrapper command string** and kills the shell chain, also yielding exit
-   144. If any cleanup path in the runner or the spec uses `pkill -f`, it may be
-   killing itself. This is a hypothesis, not a finding.
+## Leads that were WRONG
 
-## Why it matters beyond the five specs
+- **Not signal 16.** Exit 144 is not reproducible from the spec itself. Observed
+  exit codes are 255 (worker SIGTERMed by `kill_simple_monitor` at the 60s CPU
+  budget) and 143/124 from an outer wrapper timeout. 144 was most likely the
+  reporting harness's own wrapper, not anything the spec or the runner raises.
+- **Not `pkill -f` self-match.** There is no `pkill` anywhere in
+  `src/app/test_runner_new/`, `src/app/test_daemon/`, or the DAP specs. The only
+  `pkill -f` uses in `scripts/check/` are unrelated WM/QEMU gates.
+- **Not an unbounded retry in the runner.** `src/app/test_runner_new/` and
+  `src/app/test_daemon/` contain no retry loop for a spec file. The observed
+  "retries indefinitely" was a wrapper outside the runner. No retry cap was
+  therefore added — there is nothing to cap.
+- `kill_simple_monitor` **is** involved, contrary to the earlier note: its log
+  names the *worker child* (`simple run src/app/check/main.spl <file>`), never
+  the spec, which is why a grep for the spec name found nothing.
 
-A spec that never terminates and is retried forever is worse than a failing one:
-it consumes a sequential runner indefinitely and produces no verdict line, so it
-reads as "not yet run" rather than "broken". This is the same class of hazard as
-the `lab_http_api_spec` un-sleeping poll loop fixed earlier on 2026-08-09 (a
-one-digit typo made a guard unsatisfiable) — check the spec's own wait/poll
-constants before assuming the defect is in the DAP server.
+## Fix
 
-## Next step to settle it
+Each of the four specs now checks a **capped file list** (`MAX_CHECK_FILES = 2`)
+instead of a directory, so worst-case runtime is stated up front. The breakpoint
+spec's out-of-scope `src/app` whole-tree target was replaced with `src/app/dap`,
+which is what its own `@cover` header names.
 
-Run the spec directly (not via the sequential system loop) under `strace -f`,
-capture what raises the signal, and check whether the runner's retry is bounded.
-A retry cap would at least convert an infinite hang into a reported failure.
+The cap is per-spec, sized against a hard ceiling discovered while verifying:
+**the test daemon kills a spec at 600s** with `Process timed out`, exit 255, and
+**no verdict line** — the same "reads as not-yet-run" failure mode in miniature.
+`dap_variables_system_spec` hit it at 2 files (>630s), so its cap is 1. Measured
+wall times after the fix: breakpoint 7m21s (4 files), stack_trace 8m45s (2),
+stepping 1m19s (2).
+
+Sampling was reduced, not removed: a directory-wide parse gate at ~100 s/file is
+not something a spec can carry. If tree-wide parse coverage is wanted it belongs
+in a dedicated gate, and it needs `simple check` to stop paying full interpreter
+startup per file first.
+
+## Follow-on defect (separate, not fixed here)
+
+`simple check` costs ~100 s of CPU for a single file — dominated by loading the
+checker itself from source (`simple run src/app/check/main.spl`), and batching
+35 files into one process did not amortize it. Until that is addressed, no gate
+can parse-check a directory of any size, and `bin/simple check <anything>` is
+unusable under the default 60s `kill_simple_monitor` CPU budget without
+`SIMPLE_TIMEOUT_SECONDS`.
+
+## Corrections to the original report
+
+Two of the five "blocked" specs do not exist:
+`test/03_system/tools/dap/breakpoint_system_spec.spl` and
+`test/03_system/tools/dap/dap_protocol_live_spec.spl`. The directory holds five
+spec files, of which four are the affected family plus `dap_spec.spl`.
 
 ## Related
 
 - `doc/08_tracking/bug/lab_http_api_spec_never_completes_via_test_daemon_2026-08-08.md`
-  (same shape, different spec; root cause was a poll-guard constant)
-- Environment trap found alongside this one: a stale
-  `.build/test_daemon_light/daemon.lock` makes EVERY spec exit 1 with
-  `ERROR: test daemon timed out` and no verdict line, faking RED baselines.
-  Fix: `rm -rf .build/test_daemon_light`.
+- Environment trap confirmed again: a stale `.build/test_daemon_light/daemon.lock`
+  makes EVERY spec exit 1 with `ERROR: test daemon timed out` and no verdict
+  line. Fix: `rm -rf .build/test_daemon_light`.
