@@ -1,7 +1,7 @@
 # Vulkan lane has no persisted-arena launch path, so DBG-1 resume is unreachable on Vulkan
 
 - **Date:** 2026-08-09
-- **Status:** OPEN
+- **Status:** FIXED 2026-08-09 (P6b) — see "Resolution" at the bottom.
 - **Component:** `src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl`
 - **Found by:** P6, while writing `vulkan_debug_session.spl` as the mirror of
   the (landed, device-verified) `cuda_debug_session.spl`.
@@ -64,3 +64,59 @@ block address the arena by ABSOLUTE byte offset, never relative to
 most recently in this very file's persisted-arena copy. `copy_start` must be
 `max(data_off, prior_data_off)` and the copy must run to `ARENA_TOTAL_SIZE`
 so the DBG-1 block at `0x1F000` is included.
+
+## Resolution (P6b, 2026-08-09)
+
+`run_source_persisting_data` added to `VulkanVmExecutor`; `run_source`
+redefined as that method with `prior_arena: []`, exactly mirroring the CUDA
+shape. New `vulkan_debug_session.spl` + `vulkan_debug_session_conformance_spec.spl`.
+
+### Two of this doc's three "gap" claims were WRONG — corrected for the record
+
+Verified against `7d53bf0a83b` (the very commit that filed this doc) and
+against `bfd9284618a`:
+
+- **Claim "Vulkan's `SvmgRunOutcome` has no `out_arena` / `data_off` fields"
+  is FALSE.** Both fields were already declared at `:66`/`:67`, with the
+  docstring at `:60-65`, at the time of filing. What was true is that no
+  construction site in `run_source` ever *populated* them — every one of the
+  five `SvmgRunOutcome(...)` literals omitted both fields and the module
+  still compiled and passed its gate. So fix step (1) was a no-op; the real
+  work was populating the fields, not adding them.
+- **Claim the copy "must run to `ARENA_TOTAL_SIZE`" implies the Vulkan code
+  was wrong — it was not.** `build_svmg_arena_persisting_data` already used
+  the correct absolute-offset form: `copy_start = max(data_off,
+  prior_data_off)`, a first loop to `ARENA_DATA_SIZE` (0x10000) and a second
+  loop `ARENA_DATA_SIZE..ARENA_TOTAL_SIZE` (0x20000). Those two loops are
+  contiguous — `copy_start <= ARENA_DATA_SIZE` always, since
+  `build_svmg_arena` panics otherwise — so together they cover
+  `copy_start..ARENA_TOTAL_SIZE` and DO include the DBG-1 block at
+  `0x1F000`. **This function was left byte-identical.** The two-loop form is
+  not a bug to "simplify" into CUDA's single loop; it is equivalent and
+  carries the LOG/RECORD-region rationale in its own comment.
+
+Only claim (2) — `run_source_persisting_data` does not exist — was accurate.
+
+### Device evidence
+
+`test/03_system/gpu_lane/vulkan_debug_session_conformance_spec.spl` runs on a
+live NVIDIA Vulkan device (`VulkanLaneSession.probe()` returns `""`) and
+diffs **20 launches** across 9 of the 10 debug vectors field-for-field
+against BOTH the declared table and `ref_vm`. The 10th
+(`budget_expiry_while_debugging`) asserts the known lane-layer limitation
+rather than skipping, exactly as the CUDA twin does.
+
+### Oracle limits found while sabotage-testing (important)
+
+Reintroducing the absolute-vs-relative trap (`prior_arena[k - data_off +
+prior_data_off]`) **does NOT turn this new debug spec red.** Every launch in
+a debug-vector session re-assembles the SAME source, so `data_off ==
+prior_data_off` and the relative form is arithmetically identical to the
+absolute one. The debug vector table therefore CANNOT guard this trap.
+
+The trap IS guarded — by
+`test/02_integration/app/tools/notebook/vulkan_exec_spec.spl`'s cross-cell
+test, where cell 1 and cell 2 have different code lengths. That test was
+confirmed to go RED under the same sabotage and GREEN once reverted. Anyone
+re-verifying the absolute-offset invariant must use the cross-cell spec, not
+the debug vectors.

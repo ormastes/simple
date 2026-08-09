@@ -236,16 +236,39 @@ class VulkanVmExecutor:
     # Assemble `source` (SVM-G assembly text, D1's mnemonic syntax), build
     # an SGP-blob arena, upload, dispatch 1x1x1, fence, and drain.
     me run_source(source: text, step_budget: i64, entry_pc: i64) -> SvmgRunOutcome:
+        self.run_source_persisting_data(source, step_budget, entry_pc, [], 0)
+
+    # Same upload/dispatch/fence/drain sequence as `run_source`, but the arena
+    # is built with `build_svmg_arena_persisting_data` instead of
+    # `build_svmg_arena` -- i.e. it carries `prior_arena`'s DATA/LOG/RECORD
+    # state forward into this call's arena before dispatch, and returns this
+    # call's own output arena (`SvmgRunOutcome.out_arena`) plus the logical
+    # DATA-region offset it was built at (`SvmgRunOutcome.data_off`) so a
+    # caller can chain calls: pass this outcome's `out_arena`/`data_off` back
+    # in as the NEXT call's `prior_arena`/`prior_data_off`. `run_source`
+    # itself calls this with `prior_arena: []`, which
+    # `build_svmg_arena_persisting_data` treats as "no prior state" and
+    # degrades to a plain fresh build -- so `run_source`'s existing
+    # stateless-per-call contract (relied on by
+    # `vulkan_vm_executor_conformance_spec.spl`'s independent per-vector
+    # runs) is unchanged.
+    #
+    # This is also what makes DBG-1 "break, inspect, resume" reachable on the
+    # Vulkan lane: the DBG-1 block at 0x1F000..0x20000 sits inside the copied
+    # region, so the debug state rides forward across dispatches for free.
+    # Fixes doc/08_tracking/bug/vulkan_vm_executor_missing_run_source_persisting_data_blocks_dbg1_resume_2026-08-09.md
+    me run_source_persisting_data(source: text, step_budget: i64, entry_pc: i64, prior_arena: [u8], prior_data_off: i64) -> SvmgRunOutcome:
         if not self.entry_loaded:
             return SvmgRunOutcome(ok: false, error: "vulkan-vm-entry-not-loaded",
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
         val code = svmg_asm(source)
-        val arena = build_svmg_arena(code, step_budget, entry_pc)
+        val data_off = SGP_HEADER_SIZE + code.len()
+        val arena = build_svmg_arena_persisting_data(code, step_budget, entry_pc, prior_arena, prior_data_off)
         if not self.session.arena_write(arena):
             return SvmgRunOutcome(ok: false, error: "vulkan-vm-arena-write-failed",
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
 
         val dispatch_err = self.session.dispatch_once(1)
         if dispatch_err != "":
@@ -253,13 +276,14 @@ class VulkanVmExecutor:
             return SvmgRunOutcome(ok: not forced_timeout, error: dispatch_err,
                 sentinel: self.session.last_dispatch_sentinel,
                 trapped: false, timed_out: forced_timeout,
-                exit_code: 0, log_text: "", records: [])
+                exit_code: 0, log_text: "", records: [],
+                out_arena: [], data_off: 0)
 
         val out_arena = self.session.arena_read(ARENA_TOTAL_SIZE)
         if out_arena.len() != ARENA_TOTAL_SIZE:
             return SvmgRunOutcome(ok: false, error: "vulkan-vm-arena-readback-short",
                 sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
-                log_text: "", records: [])
+                log_text: "", records: [], out_arena: [], data_off: 0)
 
         val sentinel = read_sentinel(out_arena)
         val (trapped, timed_out, exit_code) = _decode_sentinel(sentinel)
@@ -268,6 +292,7 @@ class VulkanVmExecutor:
             trapped: trapped, timed_out: timed_out, exit_code: exit_code,
             log_text: read_log(out_arena),
             records: read_records(out_arena, 64),
+            out_arena: out_arena, data_off: data_off,
         )
 
     me shutdown() -> text:
