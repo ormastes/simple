@@ -55,7 +55,17 @@
 #         engine_verdict_passes / engine_probe), or
 #     (b) carry an explicit acknowledgement marker:
 #           # @engine-reach: interpreter-only — <reason>
-#         which records that the author KNOWS the claim is interpreter-scoped.
+#         which records that the author KNOWS the claim is interpreter-scoped, or
+#     (c) carry the compiled-lane marker:
+#           # @engine-reach: native-by-compile — <reason>
+#         for a spec that reaches a compiled lane through a DIFFERENT concrete
+#         mechanism than engine_probe: it shells out to a real
+#         `compile --native` / `native-build`, then RUNS the produced binary and
+#         scores its output. That is strictly stronger evidence than the probe
+#         API, so calling such a spec "interpreter-only" would be a lie. The
+#         marker is NOT taken on faith: the body must also show both halves of
+#         the pattern (a native-compile invocation AND a process-execution call),
+#         the same shape-level check applied to engine_probe usage.
 #
 #   It is a RATCHET, not a retrofit: 228 pre-existing offenders are listed in the
 #   baseline file and are NOT failures. Only a spec that is engine-claiming,
@@ -107,6 +117,12 @@ done
 CLAIM_RE='^[[:space:]]*(describe|it|context|scenario)[[:space:]]+"[^"]*(jit|JIT|[Cc]ranelift|native codegen|natively|native lane|AOT|aot lane)'
 PROBE_RE='engine_probe|run_under_engine|engine_stdout|engine_verdict_passes'
 ACK_RE='@engine-reach:[[:space:]]*interpreter-only'
+# (c) compiled-lane-by-real-compile marker + its plausibility evidence. Both
+# halves must be present: something that actually asks for a native compile, and
+# something that actually runs a process (to execute the produced binary).
+NATIVE_ACK_RE='@engine-reach:[[:space:]]*native-by-compile'
+NATIVE_COMPILE_RE='compile[^"]*--native|--native[^"]*-o|native-build|--mode=native'
+NATIVE_EXEC_RE='rt_process_run|process_run|process_run_timeout|run_command|shell_exec|shell\('
 
 # is_engine_claiming FILE -> 0 when the file needs a probe or an ack
 is_engine_claiming() {
@@ -116,7 +132,18 @@ is_engine_claiming() {
 is_exempt() {
     $GREP -qE "$PROBE_RE" "$1" 2>/dev/null && return 0
     $GREP -qE "$ACK_RE" "$1" 2>/dev/null && return 0
+    has_native_by_compile "$1" && return 0
     return 1
+}
+
+# has_native_by_compile FILE -> 0 when the file carries the native-by-compile
+# marker AND its body backs the claim with a real compile+execute pattern.
+# A marker with no evidence is NOT an escape hatch: it stays an offender.
+has_native_by_compile() {
+    $GREP -qE "$NATIVE_ACK_RE" "$1" 2>/dev/null || return 1
+    $GREP -qE "$NATIVE_COMPILE_RE" "$1" 2>/dev/null || return 1
+    $GREP -qE "$NATIVE_EXEC_RE" "$1" 2>/dev/null || return 1
+    return 0
 }
 
 # ---------------------------------------------------------------- selftest ---
@@ -173,6 +200,35 @@ selftest() {
     echo "test/x/new_spec.spl" > "$tmp/repo/scripts/check/engine_claiming_specs_baseline.txt"
     ENGINE_PROBE_GUARD_NESTED=1 sh "$0" --root "$tmp/repo" >"$tmp/out2" 2>&1 || fail "baselined offender still failed"
 
+    # 11. native-by-compile: marker BACKED by a real compile+execute exempts
+    printf '# @engine-reach: native-by-compile — shells out to `compile --native` and runs the ELF\ndescribe "g":\n    it "is green under native codegen":\n        val (o, c) = shell(SIMPLE_BIN + " compile p.spl --native -o /tmp/p")\n        val (o2, c2) = shell("/tmp/p")\n        expect(o2).to_contain("ALL_OK")\n' > "$tmp/h_spec.spl"
+    is_engine_claiming "$tmp/h_spec.spl" || fail "missed a 'native codegen' claim in a native-by-compile spec"
+    is_exempt "$tmp/h_spec.spl" || fail "backed native-by-compile marker did not exempt"
+
+    # 12. native-by-compile: the marker ALONE, with no compile+execute evidence,
+    #     must NOT exempt — otherwise the new shape is an unverified escape hatch
+    printf '# @engine-reach: native-by-compile — trust me\ndescribe "g":\n    it "is green under native codegen":\n        expect(1).to_equal(1)\n' > "$tmp/i_spec.spl"
+    is_exempt "$tmp/i_spec.spl" && fail "bare native-by-compile marker exempted with no compile+execute evidence"
+
+    # 13. half the evidence is not evidence: a compile call with no execution
+    printf '# @engine-reach: native-by-compile — half\ndescribe "g":\n    it "is green under native codegen":\n        expect(src).to_contain("native-build")\n' > "$tmp/j_spec.spl"
+    is_exempt "$tmp/j_spec.spl" && fail "native-by-compile exempted on a compile mention with no execution"
+
+    # 14. end-to-end: an unbaselined native-by-compile offender with a BARE
+    #     marker must still make a full scan FAIL
+    cp "$tmp/i_spec.spl" "$tmp/repo/test/x/bare_marker_spec.spl"
+    : > "$tmp/repo/scripts/check/engine_claiming_specs_baseline.txt"
+    if ENGINE_PROBE_GUARD_NESTED=1 sh "$0" --root "$tmp/repo" >"$tmp/out4" 2>&1; then
+        fail "end-to-end scan passed with a bare native-by-compile marker"
+    fi
+    rm -f "$tmp/repo/test/x/bare_marker_spec.spl"
+
+    # 15. end-to-end: the BACKED marker needs no baseline entry at all
+    rm -f "$tmp/repo/test/x/new_spec.spl"
+    cp "$tmp/h_spec.spl" "$tmp/repo/test/x/backed_spec.spl"
+    : > "$tmp/repo/scripts/check/engine_claiming_specs_baseline.txt"
+    ENGINE_PROBE_GUARD_NESTED=1 sh "$0" --root "$tmp/repo" >"$tmp/out5" 2>&1 || fail "backed native-by-compile spec failed an end-to-end scan"
+
     # 10. fail-closed: an empty tree is an ERROR, not a PASS
     mkdir -p "$tmp/empty/scripts/check"
     : > "$tmp/empty/scripts/check/engine_claiming_specs_baseline.txt"
@@ -185,7 +241,7 @@ selftest() {
 
 if [ "$MODE" = selftest ]; then
     if selftest; then
-        echo "PASS — 10 selftest fixtures checked"
+        echo "PASS — 15 selftest fixtures checked"
         exit 0
     fi
     echo "FAIL — selftest fixtures failed"
@@ -287,6 +343,12 @@ if [ "$nnew" -gt 0 ]; then
     echo "  3. If the spec deliberately asserts a lowering TABLE or a data"
     echo "     structure rather than compiled EXECUTION, record that:"
     echo "       # @engine-reach: interpreter-only — <why this is sufficient>"
+    echo "  4. If the spec ALREADY reaches a compiled lane by shelling out to a"
+    echo "     real \`compile --native\` / \`native-build\` and running the produced"
+    echo "     binary, record that instead:"
+    echo "       # @engine-reach: native-by-compile — <the compile+run it performs>"
+    echo "     The guard verifies the claim: the body must contain BOTH a native"
+    echo "     compile invocation AND a process-execution call."
     echo ""
     echo "FAIL — $nnew new engine-claiming spec(s) with no engine probe ($scanned scanned, $claiming engine-claiming)"
     exit 1
