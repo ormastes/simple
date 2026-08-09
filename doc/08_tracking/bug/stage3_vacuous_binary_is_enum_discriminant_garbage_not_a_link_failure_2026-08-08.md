@@ -1,13 +1,153 @@
 # Stage 3 "vacuous binary" is enum-discriminant garbage in stage2, NOT a link failure
 
 Date: 2026-08-08
-Status: OPEN — root question **RESOLVED as a confirmed scale artifact** (see
-  "2026-08-09 bisection resolved" below); the underlying MIR-lowering
-  wildcard-arm defect that triggers at project scale is still unfixed and is
-  the next concrete blocker.
-Severity: BLOCKER (critical path to self-host)
+Status: **RESOLVED / FIXED-BY-SIBLING (2026-08-09)** — the `[wildcard-arm]`
+  symptom was a real defect in the *stale* `S3FIX1/stage2-simple` binary
+  (built 08-08 02:40) and is **gone** in the current compiler: the identical
+  reproducer now exits 0 and produces a working, non-vacuous binary that prints
+  `RESULT=42`. It was **NOT a scale artifact** — see "2026-08-09 FINAL:
+  reconciliation" below, which retracts both the earlier "CONFIRMED SCALE
+  ARTIFACT" verdict and the later "does not reproduce" verdict. Independently
+  confirmed by a clean full bootstrap on 2026-08-09 in which **Stage 2 compiled
+  all 803 files with 0 failures** and produced a 125 MB (not vacuous) binary.
+  Regression fence landed:
+  `scripts/check/check-native-inprocess-positional-nonvacuous.shs`
+  (commit `5ca9822b17ee1a1b0ad3f7d8e052267f412c77ba`).
+Severity: BLOCKER (critical path to self-host) — no longer blocking
+
+## 2026-08-09 FINAL: reconciliation of the two contradictory 08-09 updates
+
+Two sessions on 2026-08-09 reached opposite conclusions below. **Both were
+wrong, in different ways, and neither's mechanism survives.** This section
+supersedes both.
+
+### What was actually measured
+
+All against the same preserved `build/cyc/S3FIX1/stage2-simple`
+(128,111,944 B, unchanged), with **all six** of 08-08's fixes on `origin/main`
+in the source tree — including `has_paren_idx`
+(`85eb03aebad1e127de97ecb32b71034548b82262`, confirmed ancestor of
+`origin/main`):
+
+| # | configuration | result |
+|---|---|---|
+| 1 | positional, no `--source`, from the `simple-s3bisect` repo root | exit 1, `[wildcard-arm] disc=-1: <value:0x1800000007>`, **0.20 s** |
+| 2 | same, repeated ×2 | exit 1, byte-identical probe values — deterministic, not ASLR |
+| 3 | same, **from a bare scratchpad dir holding only the 7-line file — no `src/`, no project at all** | exit 1, same error, same 0.20 s |
+| 4 | `--entry` + `--source <that same 1-file dir>` | **exit 0**, working binary, 7.6 s |
+
+### Finding A — the "scale artifact" verdict is REFUTED
+
+Row 3 is decisive: the failure fires in **0.20 seconds from a directory with no
+project tree in it whatsoever**. No ~728-module closure is ever loaded — there
+is nothing to load. The trigger cannot be the size of the resolved module graph.
+
+The real variable separating row 4 (pass) from rows 1–3 (fail) is **which
+compiler runs**, and it is plain in `src/app/cli/bootstrap_main.spl`:
+
+- `run_native_build_bootstrap` sees a non-empty `--entry` and, with `--source`
+  also present, returns `run_rt_native_build(args)` — the **Rust seed FFI lane**
+  (lines 271–276).
+- A bare single positional `.spl` with **no** `--source` and **no** `--entry`
+  falls through to `native_build_single_spl_positional` and compiles through the
+  **pure-Simple in-process pipeline** (lines 255–259, 287+). The error text says
+  so outright: `error: in-process native-build: ...`.
+
+So the prior session's "scoped vs default" A/B table was never a closure-size
+comparison. It was seed-compiler-vs-pure-Simple-compiler. **This is exactly the
+confound this document's own 2026-08-08 "Control runs" §3 had already identified
+and named** ("the SEED-vs-stage2 comparison is CONFOUNDED by a pipeline
+switch"); the 08-09 session re-derived the same confounded comparison and read
+it as a scale threshold.
+
+### Finding B — the second session's non-reproduction was also wrong, and `has_paren_idx` was NOT the masker
+
+The question put to this session was whether the `has_paren_idx` bug had masked
+the wildcard-arm signal in the second attempt. **It had not, in the lane that
+matters.** `has_paren_idx` surfaced only in that session's
+`--source src/compiler/00.common`-scoped run — a *third* configuration that is
+neither of the two being compared. Its unscoped run, the one that matters,
+reported a 90 s timeout with no MIR error reached.
+
+That timeout does not reproduce: the same unscoped shape fails here in **0.20 s**,
+4/4, from two different working directories. The second session's conclusion
+("the symptom could not be reproduced, so there is nothing to bisect") was
+incorrect when written — the symptom was fully reproducible and deterministic
+against exactly the binary it named. Its recommendation to demand an exact
+command line + binary identity + captured log from any wildcard-arm report was
+nevertheless the right instinct, and is what made this reconciliation possible.
+
+**So: not flaky, not order-dependent, not masked by `has_paren_idx`.** One
+session measured a real defect and explained it with the wrong mechanism; the
+other failed to measure it at all and concluded it was unreal.
+
+### Finding C — the defect was real, construct-level, and is now FIXED
+
+Minimized against the stale binary from a bare directory (0.2 s per run), the
+in-process lane was broadly broken, not marginally so:
+
+| fixture | stale `S3FIX1` binary | current compiler |
+|---|---|---|
+| `fn main() -> i64: return 0` | **SIGSEGV** (core dumped) | exit 0 |
+| `val x = 42; print "RESULT={x}"` | **SIGSEGV** | exit 0 |
+| the 7-line `p2_add.spl` (calls a user fn) | exit 1, `[wildcard-arm]` | exit 0 |
+
+Re-run with the **current deployed compiler**
+(`bin/release/x86_64-unknown-linux-gnu/simple`) from the repo root, all three
+fixtures exit 0, and the p2_add binary is **28,976 B and actually runs, printing
+`RESULT=42`** — non-vacuous. Both the vacuous-binary and wildcard-arm symptoms
+are gone, cured by one of the fixes that landed on 08-08 after the pinned binary
+was built. No new `.spl` fix was required here; the defect had already been
+fixed by a sibling lane and nobody had re-measured with a current binary.
+
+**Root lesson for this document's whole history:** every session from 08-08
+onward kept re-running a *preserved, pinned, stale* stage2 binary in the name of
+byte-stable comparison. That pinning is what kept an already-fixed defect looking
+open for two days, and it is what let a pipeline switch masquerade as a scale
+threshold. Pin the binary for A/B *within* a session; re-measure against a
+current binary before declaring anything open.
+
+### Independent confirmation from a clean full bootstrap
+
+A full `--full-bootstrap --deploy` run on 2026-08-09, launched from a clean
+`origin/main` checkout, produced:
+
+```
+Build complete: 803 compiled, 0 cached, 0 failed
+  Binary: .../stage2/x86_64-unknown-linux-gnu/simple (125204 KB)
+  Time: 376.8s compile + 132.9s link = 509.7s total
+```
+
+803/803 files, zero failures, and a 125 MB binary — the polar opposite of the
+22,896-byte vacuous stub this document was opened about. Stage 2 is healthy.
+
+### Regression fence landed
+
+`scripts/check/check-native-inprocess-positional-nonvacuous.shs` +
+`test/fixtures/native_inprocess_positional/main.spl`
+(commit `5ca9822b17ee1a1b0ad3f7d8e052267f412c77ba`).
+
+The in-process positional lane had **zero** coverage before this: every existing
+`scripts/check/*` native fence passes `--source`/`--entry` and therefore silently
+exercised the Rust seed lane instead. The check asserts exit 0, absence of
+`wildcard-arm` in the log, a binary-size floor above the 22,896 B stub shape,
+and — the load-bearing assertion, since a vacuous binary satisfies the first
+three — that the produced binary **runs and prints `RESULT=42`**.
+
+Proven bidirectionally, not fail-open:
+
+- current binary → `PASS — ... exit 0, 28912 B binary, ran and printed 'RESULT=42'`
+- `SIMPLE_BINARY=<stale S3FIX1/stage2-simple>` → `FAIL`, reproducing the exact
+  historical `[wildcard-arm] disc=-1: <value:0x1800000007>` signature.
 
 ## 2026-08-09 bisection resolved: CONFIRMED SCALE ARTIFACT
+
+> **RETRACTED 2026-08-09 by "FINAL: reconciliation" above.** The failure fires in
+> 0.20 s from a directory containing no project tree at all, so closure size
+> cannot be the trigger. The A/B table below compares the Rust seed FFI lane
+> (`--entry` + `--source`) against the pure-Simple in-process lane (bare
+> positional) — two different compilers, not two closure sizes. Its observations
+> are sound; its mechanism is not.
 
 Once the type-mapper `unresolved name: error` blocker cleared (fix on
 `origin/main` at `ccef50cd443383a64024de060210cc82deab868b`, verified
@@ -593,6 +733,14 @@ single session's time budget, and compare vacuity there against the known-good
 1–3 module probes in §1 and the known-vacuous whole-compiler run.
 
 ## 2026-08-09: assigned bisection task's premise does not reproduce; layer-by-layer bisection not performed
+
+> **SUPERSEDED 2026-08-09 by "FINAL: reconciliation" at the top.** The premise
+> DID reproduce: the same binary, same unscoped shape, fails deterministically in
+> 0.20 s (4/4, two different working directories). The 90 s timeout recorded
+> below is not reproducible. `has_paren_idx` was not masking this — it appeared
+> only in the `00.common`-scoped run, a third configuration outside the
+> comparison. The conclusion "there is nothing to fix" was wrong; the defect was
+> real and has since been fixed by a sibling lane.
 
 This session was assigned to bisect the `--source` allowlist by compiler layer
 (`00.common` .. `90.tools`) to find the specific module/construct that flips

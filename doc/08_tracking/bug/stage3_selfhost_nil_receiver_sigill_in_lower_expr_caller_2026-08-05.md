@@ -1,11 +1,119 @@
 # Stage-3 self-host blocked by nil-receiver SIGILL in the caller of `lower_expr`
 
 Date: 2026-08-05
-Status: PARTIALLY ADDRESSED — Rank 2 fix landed + Rank 4 diagnostic probe landed,
-NOT YET VERIFIED against a real stage3 SIGILL repro (see 2026-08-08 update at
-bottom). Full-bootstrap re-run against the crashing input is still required to
-close this out.
+Status: **STILL UNVERIFIED (2026-08-09)** — not resolved, and not disproven
+either. Rank 2 fix + Rank 4 probe remain landed-but-unexercised. A dedicated
+instrumented full-bootstrap campaign on 2026-08-09 (three runs) got **closer
+than any previous attempt** — Stage 2 now builds cleanly, 803/803 files, and
+Stage 3 self-host was reached and running with **no SIGILL and no
+`field access on nil receiver`** in its log — but the campaign did not run to a
+Stage-3 verdict within the session's budget. **No run has yet executed this
+bug's fault site**, so its Rank-1..5 shortlist is still neither confirmed nor
+refuted. See the 2026-08-09 section below.
 Area: bootstrap / stage-3 self-host / 50.mir lowering
+
+## 2026-08-09 — closest approach yet; Stage 2 clean, Stage 3 reached, verdict still open
+
+Assigned action: one clean, instrumented full bootstrap
+(`SIMPLE_MIR_STMT_CALLER_DEBUG=1 SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1
+scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+--output=<outside repo> --progress`) to find out whether Stage 3 clears the six
+blockers fixed on 2026-08-08 and finally reaches this SIGILL. Three runs were
+needed; the first two were stopped by new, unrelated obstacles.
+
+### Blocker 7 (run 1) — three more unqualified enum-variant match arms
+
+Run 1 cleared the Rust seed and reached Stage 2, which failed on 3 files:
+
+- `src/compiler/30.types/type_infer/inference_expr.spl` — `case Str:`
+- `src/compiler/70.backend/backend/cuda/ptx_builder.spl` — `case Bool:`
+- `src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl` — `case Struct:`
+
+each `hir: Unsupported feature: 'case X:' is not a variant of the matched enum,
+so it is an irrefutable BINDING ... makes every later arm unreachable`.
+
+Same **family** as the "unqualified enum-variant match arms ×2" fixed on 08-08 —
+that sweep did not enumerate its family, exactly the failure mode
+`.claude/rules` warns about. Fixed by a *concurrent* session at `a6f0814f38d`
+(confirmed ancestor of `origin/main`) while run 1 was still executing, so no fix
+was needed from this session.
+
+### Blocker 8 (run 2) — shared working copy contaminated by an in-flight untracked Rust file
+
+Run 2 died even earlier, inside the Rust seed build:
+
+```
+error[E0308]: mismatched types
+  --> compiler/src/interpreter_extern/counterpart.rs:94:28
+     return Value::from(String::new());
+                        ^^^^^^^^^^^^^ expected `Value`, found `String`
+... error: could not compile `simple-compiler` (lib) due to 3 previous errors
+```
+
+`counterpart.rs` is **untracked** (`git status` → `??`) and absent from
+`origin/main`: a new, not-yet-compiling file another concurrent session was
+mid-flight on. Not a repo defect and not this session's to touch — but it means
+*any* bootstrap launched from the shared `/home/ormastes/dev/pub/simple` working
+copy measures that session's in-progress edits, not `origin/main`.
+
+### Run 3 — clean checkout, Stage 2 GREEN, Stage 3 reached
+
+Relaunched from a clean `origin/main` checkout
+(`/home/ormastes/dev/simple-s3bisect`, verified clean apart from CRLF noise in
+four `.cmd` files). Result:
+
+```
+Stage 2: seed → bootstrap_main.spl
+  Build complete: 803 compiled, 0 cached, 0 failed
+  Binary: .../stage2/x86_64-unknown-linux-gnu/simple (125204 KB)
+  Time: 376.8s compile + 132.9s link = 509.7s total
+  Stage 2: running bootstrap compiler sanity
+Stage 3: stage2 → bootstrap_main.spl (self-host)
+```
+
+**Stage 2 is now fully green** — 803/803, zero failures, a 125 MB binary — and
+Stage 3 self-host started and was progressing, its log carrying only benign
+`[hir-field-type]` probe lines:
+
+```
+[hir-field-type] struct=CompiledUnit field=entry_point actual=2589120870 ...
+[hir-field-type] struct=BackendError field=span  actual=2589120870 ...
+```
+
+**Critically: no `runtime error: field access on nil receiver`, no SIGILL, no
+exit 132** had appeared in Stage 3 at the point the session's budget expired.
+That is materially further than every prior attempt, all of which died before
+Stage 3 began. It is **not** yet grounds to close this bug — Stage 3 had not
+completed, and this bug's crash historically occurs deep in a 32,534-line log —
+but it removes the last recorded blocker in front of the fault site.
+
+### What the next session should do (short and concrete)
+
+Re-run exactly run 3's recipe from a **clean `origin/main` checkout** and let
+Stage 3 run to completion, then read the verdict:
+
+- Stage 3 completes → **this bug is RESOLVED**; record the log size + exit code.
+- Stage 3 dies with `field access on nil receiver` / exit 132 → this bug is
+  **finally reproduced**, and the Rank-1..5 shortlist below becomes actionable
+  for the first time. Keep `SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` set: this
+  document's "REFUTED lead" section notes the `0x1800000007` decode was never
+  measured with that probe enabled, so this is the run that would settle it.
+
+### Standing recommendation
+
+**Bootstrap verification of this bug must run from a pinned clean checkout of
+`origin/main`, never from the shared working copy.** On a host carrying 6+
+concurrent sessions the shared tree is not a definable revision; three of the
+eight blockers logged against this bug turned out to be contamination or
+already-fixed-elsewhere rather than real Stage-3 defects.
+
+Related, now closed out: the sibling
+`stage3_vacuous_binary_is_enum_discriminant_garbage_not_a_link_failure_2026-08-08.md`
+reached a **RESOLVED** verdict on 2026-08-09 — its `[wildcard-arm]`/vacuous-binary
+symptom was a real defect in a *stale pinned* stage2 binary, already fixed in the
+current compiler, and was never the "scale artifact" it had been recorded as.
+Run 3's 803/803 green Stage 2 independently confirms that. It is no longer an
+obstacle to reaching this SIGILL.
 
 ## Symptom
 
