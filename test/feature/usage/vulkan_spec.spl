@@ -7,60 +7,65 @@
 
 ## Overview
 
-Tests Vulkan compute backend functionality including initialization and shutdown,
-device selection and info retrieval, storage buffer allocation and data transfers,
-GLSL compute shader compilation and pipeline creation, descriptor set management,
-command recording and submission, synchronization, error handling, and the
-gpu_vulkan device wrapper. Requires Vulkan SDK to be available.
+As a runtime maintainer I need the Vulkan loader to report availability
+truthfully on any host, so that code paths gated on Vulkan neither crash on a
+machine with no ICD nor silently pretend a device exists.
+
+`vulkan_loader_init()` is a *host-independent* probe: it returns a structured
+`VulkanLoaderResult` on both outcomes rather than panicking. That contract is
+assertable without any GPU, and it is what this spec pins down. Device-touching
+work stays behind `SIMPLE_GPU_TEST=1` and reports a VISIBLE skip when closed —
+it is never asserted as if it had run.
 
 ## Syntax
 
 ```simple
-vulkan_init()
-vulkan_select_device(0)
-val buf = vulkan_alloc_storage(1024)
-val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+val probe = vulkan_loader_init()
+if probe.is_ok:
+    vulkan_loader_destroy(probe.handle)
 ```
-Vulkan Compute Backend Tests
-
-Tests specific to Vulkan compute functionality.
-These tests require Vulkan SDK to be available.
 """
 
-use std.common.test_env_gate.{test_env_require}
+use std.spec
+use std.common.test_env_gate.{test_env_require, test_env_gpu_available, test_env_gate_reason}
+use std.nogc_async_mut.gpu.vulkan_loader.{vulkan_loader_init, vulkan_loader_destroy}
 
-describe "Vulkan Availability":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+describe "Vulkan loader availability contract":
 
-describe "Vulkan Initialization":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+    it "reports a decided, self-consistent probe result on any host":
+        step("probe the loader — this must not panic with or without an ICD")
+        val probe = vulkan_loader_init()
 
-describe "Vulkan Device Selection":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+        step("the two outcomes are mutually exclusive and each carries its evidence")
+        if probe.is_ok:
+            # Success must hand back a usable handle, not a zero sentinel.
+            expect(probe.handle).to_be_greater_than(0)
+            vulkan_loader_destroy(probe.handle)
+        else:
+            # Failure must explain itself and must NOT leak a live handle.
+            expect(probe.handle).to_equal(0)
+            expect(probe.error.len()).to_be_greater_than(0)
 
-describe "Vulkan Buffer Operations":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+    it "probes deterministically — a second probe agrees with the first":
+        step("two consecutive probes on an unchanged host must not disagree")
+        val first = vulkan_loader_init()
+        if first.is_ok:
+            vulkan_loader_destroy(first.handle)
+        val second = vulkan_loader_init()
+        if second.is_ok:
+            vulkan_loader_destroy(second.handle)
+        expect(second.is_ok).to_equal(first.is_ok)
 
-describe "Vulkan Shader Compilation":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+describe "Vulkan device-backed compute":
 
-describe "Vulkan Descriptor Sets":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
-
-describe "Vulkan Command Execution":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
-
-describe "Vulkan Error Handling":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
-
-describe "Vulkan GPU Wrapper":
-    it "env_skip: requires SIMPLE_GPU_TEST":
-        expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+    it "runs device work only when SIMPLE_GPU_TEST is open, and skips visibly otherwise":
+        if not test_env_gpu_available():
+            step("gate CLOSED — no device assertion is made, and this is stated aloud")
+            print("SKIP (no device assertion made): " + test_env_gate_reason("SIMPLE_GPU_TEST"))
+            expect(test_env_require("SIMPLE_GPU_TEST")).to_equal("blocked:SIMPLE_GPU_TEST")
+        else:
+            step("gate OPEN — the operator asserts a real device is present, so demand one")
+            val probe = vulkan_loader_init()
+            expect(probe.is_ok).to_equal(true)
+            expect(probe.handle).to_be_greater_than(0)
+            vulkan_loader_destroy(probe.handle)

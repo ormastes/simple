@@ -39,7 +39,7 @@ class SimpleAudioCudaQ15Result:
             self.readback_bytes = 0
 
 fn _simple_audio_cuda_q15_ptx() -> text:
-    ".version 7.0\n.target sm_75\n.address_size 64\n\n.visible .entry simple_audio_q15_convolve(\n    .param .u64 input,\n    .param .u64 kernel,\n    .param .u64 output,\n    .param .u32 input_count,\n    .param .u32 kernel_count\n) {\n    .reg .pred %p<5>;\n    .reg .b32 %r<12>;\n    .reg .b64 %rd<15>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [input_count];\n    ld.param.u32 %r5, [kernel_count];\n    add.u32 %r6, %r4, %r5;\n    sub.u32 %r6, %r6, 1;\n    setp.ge.u32 %p0, %r3, %r6;\n    @%p0 bra done;\n    mov.u32 %r7, 0;\n    mov.s64 %rd0, 0;\nloop:\n    setp.ge.u32 %p1, %r7, %r5;\n    @%p1 bra store;\n    setp.lt.u32 %p2, %r3, %r7;\n    @%p2 bra next;\n    sub.u32 %r8, %r3, %r7;\n    setp.ge.u32 %p3, %r8, %r4;\n    @%p3 bra next;\n    ld.param.u64 %rd1, [input];\n    mul.wide.u32 %rd2, %r8, 4;\n    add.u64 %rd3, %rd1, %rd2;\n    ld.global.s32 %r9, [%rd3];\n    ld.param.u64 %rd4, [kernel];\n    mul.wide.u32 %rd5, %r7, 4;\n    add.u64 %rd6, %rd4, %rd5;\n    ld.global.s32 %r10, [%rd6];\n    mul.wide.s32 %rd7, %r9, %r10;\n    add.s64 %rd0, %rd0, %rd7;\nnext:\n    add.u32 %r7, %r7, 1;\n    bra loop;\nstore:\n    div.s64 %rd0, %rd0, 32768;\n    cvt.sat.s32.s64 %r11, %rd0;\n    ld.param.u64 %rd8, [output];\n    mul.wide.u32 %rd9, %r3, 4;\n    add.u64 %rd10, %rd8, %rd9;\n    st.global.u32 [%rd10], %r11;\ndone:\n    ret;\n}\n"
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry simple_audio_q15_convolve(\n    .param .u64 input,\n    .param .u64 kernel,\n    .param .u64 output,\n    .param .u32 input_count,\n    .param .u32 kernel_count\n) {\n    .reg .pred %p<5>;\n    .reg .b32 %r<12>;\n    .reg .b64 %rd<15>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [input_count];\n    ld.param.u32 %r5, [kernel_count];\n    add.u32 %r6, %r4, %r5;\n    sub.u32 %r6, %r6, 1;\n    setp.ge.u32 %p0, %r3, %r6;\n    @%p0 bra done;\n    mov.u32 %r7, 0;\n    mov.s64 %rd0, 0;\nloop:\n    setp.ge.u32 %p1, %r7, %r5;\n    @%p1 bra store;\n    setp.lt.u32 %p2, %r3, %r7;\n    @%p2 bra next;\n    sub.u32 %r8, %r3, %r7;\n    setp.ge.u32 %p3, %r8, %r4;\n    @%p3 bra next;\n    ld.param.u64 %rd1, [input];\n    mul.wide.u32 %rd2, %r8, 4;\n    add.u64 %rd3, %rd1, %rd2;\n    ld.global.s32 %r9, [%rd3];\n    ld.param.u64 %rd4, [kernel];\n    mul.wide.u32 %rd5, %r7, 4;\n    add.u64 %rd6, %rd4, %rd5;\n    ld.global.s32 %r10, [%rd6];\n    mul.wide.s32 %rd7, %r9, %r10;\n    add.s64 %rd0, %rd0, %rd7;\nnext:\n    add.u32 %r7, %r7, 1;\n    bra loop;\nstore:\n    div.s64 %rd0, %rd0, 32768;\n    cvt.sat.s32.s64 %r11, %rd0;\n    ld.param.u64 %rd8, [output];\n    mul.wide.u32 %rd9, %r3, 4;\n    add.u64 %rd10, %rd8, %rd9;\n    st.global.u32 [%rd10], %r11;\ndone:\n    ret;\n}\n"
 
 class SimpleAudioCudaQ15Executor:
     driver: SimpleAudioCudaDriver
@@ -127,13 +127,30 @@ fn _audio_raw_equal(left: i64, right: i64, count: i64) -> bool:
         pair = pair + 1
     true
 
-fn _audio_write_u32s(ptr: i64, values: [u32]):
+# Packed staging buffers are written one i64 (== two u32 lanes) at a time, so an
+# odd-length payload still touches a whole trailing 8-byte word. A `count * 4`
+# allocation is therefore NOT large enough: writing 2n+1 lanes runs 4 bytes past
+# its end. Every staging allocation must be sized with this helper instead.
+pub fn simple_audio_q15_packed_bytes(count: i64) -> i64:
+    if count <= 0:
+        return 0
+    ((count + 1) / 2) * 8
+
+# Returns false (writing nothing) when `capacity_bytes` cannot hold the packed
+# form. This bound is load-bearing: it is the only thing standing between an
+# undersized caller allocation and an out-of-bounds heap write.
+pub fn simple_audio_q15_write_packed(ptr: i64, values: [u32], capacity_bytes: i64) -> bool:
+    val count = values.len().to_i64()
+    val needed = simple_audio_q15_packed_bytes(count)
+    if ptr == 0 or capacity_bytes < needed:
+        return false
     var index = 0
-    while index < values.len():
+    while index < count:
         val low = simple_audio_q15_at(values, index) & 4294967295
-        val high = if index + 1 < values.len(): simple_audio_q15_at(values, index + 1) & 4294967295 else: 0
+        val high = if index + 1 < count: simple_audio_q15_at(values, index + 1) & 4294967295 else: 0
         raw_write_i64(ptr, (index / 2) * 8, low | (high << 32))
         index = index + 2
+    true
 
 fn _audio_read_u32s(ptr: i64, count: i64) -> [u32]:
     var values: [u32] = []
@@ -234,9 +251,11 @@ fn simple_audio_q15_execute_cuda(executor: SimpleAudioCudaQ15Executor, input: [u
     val input_bytes = input.len().to_i64() * 4
     val kernel_bytes = kernel.len().to_i64() * 4
     val output_bytes = output_count * 4
-    val host_output_bytes = ((output_count + 1) / 2) * 8
-    val host_input = raw_alloc(input_bytes)
-    val host_kernel = raw_alloc(kernel_bytes)
+    val host_output_bytes = simple_audio_q15_packed_bytes(output_count)
+    val host_input_bytes = simple_audio_q15_packed_bytes(input.len().to_i64())
+    val host_kernel_bytes = simple_audio_q15_packed_bytes(kernel.len().to_i64())
+    val host_input = raw_alloc(host_input_bytes)
+    val host_kernel = raw_alloc(host_kernel_bytes)
     val host_output = raw_alloc(host_output_bytes)
     val values_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
     val args_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
@@ -244,10 +263,12 @@ fn simple_audio_q15_execute_cuda(executor: SimpleAudioCudaQ15Executor, input: [u
     val device_kernel = executor.driver.alloc(kernel_bytes)
     val device_output = executor.driver.alloc(output_bytes)
     if host_input == 0 or host_kernel == 0 or host_output == 0 or values_ptr == 0 or args_ptr == 0 or device_input <= 0 or device_kernel <= 0 or device_output <= 0:
-        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, host_output, values_ptr, args_ptr, input_bytes, kernel_bytes, host_output_bytes)
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, host_output, values_ptr, args_ptr, host_input_bytes, host_kernel_bytes, host_output_bytes)
         return _audio_cuda_failed("cuda-audio-allocation-failed")
-    _audio_write_u32s(host_input, input)
-    _audio_write_u32s(host_kernel, kernel)
+    val staged = simple_audio_q15_write_packed(host_input, input, host_input_bytes) and simple_audio_q15_write_packed(host_kernel, kernel, host_kernel_bytes)
+    if not staged:
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, host_output, values_ptr, args_ptr, host_input_bytes, host_kernel_bytes, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-staging-capacity-failed")
     val uploaded = executor.driver.upload(device_input, host_input, input_bytes) and executor.driver.upload(device_kernel, host_kernel, kernel_bytes)
     raw_write_i64(values_ptr, 0, device_input)
     raw_write_i64(values_ptr, 8, device_kernel)
@@ -278,7 +299,7 @@ fn simple_audio_q15_execute_cuda(executor: SimpleAudioCudaQ15Executor, input: [u
     val handle = executor.driver.handle
     # host_output transfers to the result and is released explicitly by its
     # consumer; all other staging/device allocations end here.
-    _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, 0, values_ptr, args_ptr, input_bytes, kernel_bytes, output_bytes)
+    _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, 0, values_ptr, args_ptr, host_input_bytes, host_kernel_bytes, output_bytes)
     if not copied:
         raw_free(host_output, host_output_bytes)
         return _audio_cuda_failed("cuda-audio-readback-failed")
@@ -293,3 +314,4 @@ fn simple_audio_q15_execute_cuda(executor: SimpleAudioCudaQ15Executor, input: [u
 export SimpleAudioCudaQ15Result, SimpleAudioCudaQ15Executor
 export simple_audio_q15_execute_cuda, simple_audio_q15_execute_cuda_raw
 export simple_audio_q15_raw_sample, simple_audio_q15_raw_checksum
+export simple_audio_q15_packed_bytes, simple_audio_q15_write_packed

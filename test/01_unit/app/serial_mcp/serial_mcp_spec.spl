@@ -10,6 +10,20 @@
 # tmux session on 2026-05-30.  Hardware-touching tests require SIMPLE_HW_TEST=1.
 # Set SIMPLE_HW_TEST=1 only when a SIGSEGV guard is in place.
 # (see bug serial_usb_sigsegv_cascade)
+#
+# GATE DISPOSITION (reviewed 2026-08-09): the four `BLOCKED:` examples below
+# assert only that their own gate is closed, which asserts nothing about the
+# code under test. They are KEPT as-is anyway, deliberately:
+#   * The capability genuinely cannot be exercised on this host — it needs a
+#     physical /dev/ttyUSB* device that is not present.
+#   * Opening the gate is not merely unavailable but UNSAFE until the SIGSEGV
+#     guard lands: a USB replug took down an entire tmux session via
+#     systemd exit.target teardown on 2026-05-30.
+#   * Unlike the other tautology shells in this family, these do NOT starve
+#     the module of coverage: the eight examples below them are real
+#     assertions against real dispatch and protocol code.
+# The honest fix here is the SIGSEGV guard plus a loopback/pty fixture, not a
+# rewritten assertion. Do NOT "fix" these by expecting "ready".
 
 use app.serial_mcp.tools.{detect_tool_name, get_arg, get_arg_int}
 use app.serial_mcp.protocol.{make_tool_serial_open, make_tool_ssh_serial_exec}
@@ -46,9 +60,14 @@ describe "MCP Tool Dispatch":
 
     describe "get_arg":
         it "AC-5: extracts string argument from simple body":
+            # Was `expect(found or not found).to_equal(true)` — a tautology that
+            # held for every possible return value, including the wrong ones.
             val result = get_arg("{\"params\":{\"name\":\"t\",\"arguments\":{\"key\":\"val\"}}}", "key")
-            val found = result.len() > 0
-            expect(found or not found).to_equal(true)
+            expect(result).to_equal("val")
+
+        it "AC-5: returns empty text when the argument is absent":
+            val result = get_arg("{\"params\":{\"name\":\"t\",\"arguments\":{}}}", "key")
+            expect(result).to_equal("")
 
     describe "get_arg_int":
         it "AC-5: returns default when argument missing":
