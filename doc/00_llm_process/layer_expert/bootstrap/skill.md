@@ -333,6 +333,41 @@ resuming Stage 3 self-host work should re-check for a doc under
 `stage3_monomorphize` or `method_len` naming before starting a fresh
 diagnosis, since the fix may have landed since this note was written.
 
+## Lint cost + binary provenance, measured 2026-08-09
+
+Confirms and quantifies the WP-3.5 staleness note above. `bin/simple` →
+`bin/release/x86_64-unknown-linux-gnu/simple` **is a Rust seed**; probe it
+positively, since size and banner both lie:
+
+```bash
+bin/simple --version 2>&1 | head -2
+# WARNING: this Rust-built Simple binary is a bootstrap seed only; ...
+```
+
+The staged pure-Simple binaries `bootstrap/stage{1,2,3}/simple` (3.4 MB,
+identical) expose only `compile` and `native-build` — `stage3 lint` is
+`unknown command`, exit 1 (fails closed). So **no pure-Simple binary can lint
+today**, and `simple test` GREEN cannot prove anything self-hosted.
+
+**The symlink target changes under you.** Three distinct release binaries in
+one session: 29,573,408 B (Aug 8 12:14) → 58,940,120 B (Aug 9 04:30) →
+29,577,536 B (Aug 9 04:50). Fixed lint startup moved 11.70s → 42.97s across
+one of those swaps. Record `stat -c '%s %y' "$(readlink -f bin/simple)"` with
+every timing, or the number is not reproducible.
+
+**Lint cost model** (the circulating "4.4s/run" is stale; RSS ~350 MB still
+matches): `≈ 11.7s startup + ~3.3–4.0s per function declaration`, superlinear
+in declaration count (~n^1.25), driven by declaration count not bytes. A
+120-line file costs ~119s. **Batching is worse** (2 files >600s vs 119s for
+1). Phase split via `lint` vs `fmt --check` vs a 24-byte file: startup 10%,
+parse 20%, **lint rules 70%**.
+
+Fast path: `sh scripts/check/lint-cached.shs <files>` — 152.00s cold → 0.03s
+warm, clean verdicts only. Note it invalidates on every rebuild, so in a busy
+shared WC the payoff window is minutes. Full numbers, safety proofs, and
+profiler dead ends (perf paranoid=4; gdb ptrace_scope=1 returns zero stacks
+while exiting 0): `doc/07_guide/tooling/build_fast_path.md`.
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill

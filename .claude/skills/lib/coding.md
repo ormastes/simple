@@ -8,6 +8,11 @@ Reference: See `ref_coding` memory for syntax rules, type names, lambda shorthan
 bin/simple build                    # Debug build
 bin/simple build --release          # Release build
 bin/simple lint <changed .spl files> # Simple source lint — fix all denies before committing
+sh scripts/check/lint-cached.shs <changed .spl files>  # same lint, 0.03s on unchanged files
+# ^ lint costs ~11.7s startup + ~3.3-4.0s PER FUNCTION (~119s for a 120-line file).
+#   Lint one file at a time: batching is superlinear (2 files >600s vs 119s for 1).
+#   Caches clean verdicts only — findings and edits always re-lint.
+#   See doc/07_guide/tooling/build_fast_path.md
 bin/simple fix file.spl --dry-run   # Preview auto-fixes
 bin/simple fix file.spl             # Apply fixes
 bin/simple lint file.spl --fix      # Lint with auto-fix
