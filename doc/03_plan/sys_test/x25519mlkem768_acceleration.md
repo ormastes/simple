@@ -276,10 +276,10 @@ build/evidence/x25519mlkem768/cuda/x25519mlkem768_evidence_runner \
 
 Vulkan uses its two pinned SPIR-V paths and the equivalent Vulkan binding. The
 owner is the GPU full-operation evidence operator; the final reviewer is root
-Codex. A compiled runner artifact is currently only hash-bound to the binding,
-not provenance-bound to its declared runner source; therefore even a successful
-run remains development correctness evidence until that artifact-to-source
-provenance boundary is implemented.
+Codex. The builder publishes the adjacent runner provenance sidecar only after
+capturing the native artifact and declared full-operation runner-source hashes;
+NTT-only probes have no access to that envelope. A live native run still needs
+its separate device lifecycle and oracle evidence before promotion.
 
 ## Fixture and oracle manifest
 

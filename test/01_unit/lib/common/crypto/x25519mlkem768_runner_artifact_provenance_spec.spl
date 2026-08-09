@@ -6,7 +6,9 @@ use lib.common.crypto.x25519_mlkem768.evidence_contract.{
     X25519MlKem768EvidenceBackend}
 use lib.common.crypto.x25519_mlkem768.runner_artifact_provenance.{
     X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA,
+    X25519MlKem768RunnerArtifactProvenance,
     x25519_mlkem768_parse_runner_artifact_provenance,
+    x25519_mlkem768_render_runner_artifact_provenance,
     x25519_mlkem768_runner_artifact_provenance_reason}
 
 val _SHA_A = "a" * 64
@@ -32,7 +34,38 @@ fn _parsed(encoded: text):
         case Ok(value): value
         case Err(reason): fail(reason)
 
+fn _provenance(backend: X25519MlKem768EvidenceBackend
+        ) -> X25519MlKem768RunnerArtifactProvenance:
+    X25519MlKem768RunnerArtifactProvenance(
+        backend: backend,
+        artifact_path: "build/evidence/x25519mlkem768/runner",
+        artifact_sha256: _SHA_A,
+        source_path: "src/app/test/x25519mlkem768_evidence.spl",
+        source_sha256: _SHA_B,
+        compiler_artifact_sha256: _SHA_C,
+        compiler_provenance_sha256: _SHA_D,
+        build_command_sha256: _SHA_E)
+
 describe "X25519MLKEM768 runner artifact provenance":
+    it "should render the canonical full-operation runner envelope":
+        step("Render the only sidecar format accepted by GPU admission")
+        val rendered = match x25519_mlkem768_render_runner_artifact_provenance(
+                _provenance(X25519MlKem768EvidenceBackend.Cuda)):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(rendered).to_equal(_encoded("cuda"))
+        expect(rendered).to_contain(
+            "source_path=src/app/test/x25519mlkem768_evidence.spl\n")
+
+    it "should fail closed rather than render an invalid runner sidecar":
+        step("Reject an invalid artifact identity before publication")
+        var provenance = _provenance(X25519MlKem768EvidenceBackend.Vulkan)
+        provenance.artifact_sha256 = "invalid"
+        match x25519_mlkem768_render_runner_artifact_provenance(provenance):
+            case Ok(_): fail("invalid provenance rendered")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-sha256-invalid")
+
     it "should parse an exact CUDA provenance envelope":
         step("Parse all fixed fields without allowing implicit defaults")
         val provenance = _parsed(_encoded("cuda"))
