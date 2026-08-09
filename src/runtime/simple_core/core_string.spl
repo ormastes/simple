@@ -7,7 +7,6 @@ extern fn free(ptr: i64)
 extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
 extern fn memcmp(left: i64, right: i64, n: i64) -> i64
 extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
-extern fn strtod(ptr: i64, endptr: i64) -> f64
 extern fn strlen(ptr: i64) -> i64
 extern fn spl_f64_to_bits(value: f64) -> i64
 extern fn write(fd: i64, ptr: i64, count: i64) -> i64
@@ -1374,20 +1373,75 @@ pub fn rt_string_to_float(value: i64) -> i64:
     if len < 1:
         return 3
     val data = string_data_ptr_value(ptr)
-    val end_slot = malloc(8)
-    if end_slot < 1:
-        return 3
-    val parsed = strtod(data, end_slot)
-    val end_ptr = spl_load_i64(end_slot, 0)
-    free(end_slot)
-    if end_ptr <= data:
-        return 3
-    val finish = data + len
-    var cursor = end_ptr
-    while cursor < finish:
-        if is_space_byte(spl_load_u8(cursor, 0)) < 1:
-            return 3
+    var cursor = 0
+    while cursor < len and is_space_byte(spl_load_u8(data, cursor)) > 0:
         cursor = cursor + 1
+    var negative = false
+    if cursor < len:
+        val sign = spl_load_u8(data, cursor)
+        if sign == 43 or sign == 45:
+            negative = sign == 45
+            cursor = cursor + 1
+
+    var parsed = 0.0
+    var digit_count = 0
+    while cursor < len:
+        val ch = spl_load_u8(data, cursor)
+        if ch < 48 or ch > 57:
+            break
+        parsed = parsed * 10.0 + (ch - 48).to_f64()
+        digit_count = digit_count + 1
+        cursor = cursor + 1
+
+    if cursor < len and spl_load_u8(data, cursor) == 46:
+        cursor = cursor + 1
+        var fraction_scale = 0.1
+        while cursor < len:
+            val ch = spl_load_u8(data, cursor)
+            if ch < 48 or ch > 57:
+                break
+            parsed = parsed + (ch - 48).to_f64() * fraction_scale
+            fraction_scale = fraction_scale * 0.1
+            digit_count = digit_count + 1
+            cursor = cursor + 1
+    if digit_count == 0:
+        return 3
+
+    if cursor < len:
+        val exponent_marker = spl_load_u8(data, cursor)
+        if exponent_marker == 69 or exponent_marker == 101:
+            cursor = cursor + 1
+            var exponent_negative = false
+            if cursor < len:
+                val exponent_sign = spl_load_u8(data, cursor)
+                if exponent_sign == 43 or exponent_sign == 45:
+                    exponent_negative = exponent_sign == 45
+                    cursor = cursor + 1
+            var exponent = 0
+            var exponent_digits = 0
+            while cursor < len:
+                val ch = spl_load_u8(data, cursor)
+                if ch < 48 or ch > 57:
+                    break
+                if exponent < 1000:
+                    exponent = exponent * 10 + (ch - 48)
+                exponent_digits = exponent_digits + 1
+                cursor = cursor + 1
+            if exponent_digits == 0:
+                return 3
+            while exponent > 0:
+                if exponent_negative:
+                    parsed = parsed / 10.0
+                else:
+                    parsed = parsed * 10.0
+                exponent = exponent - 1
+
+    while cursor < len and is_space_byte(spl_load_u8(data, cursor)) > 0:
+        cursor = cursor + 1
+    if cursor != len:
+        return 3
+    if negative:
+        parsed = 0.0 - parsed
     return rt_value_float(spl_f64_to_bits(parsed))
 
 # -- Lexer source cache (mirrors src/runtime/runtime_native.c
