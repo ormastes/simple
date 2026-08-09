@@ -1864,3 +1864,23 @@ Terminated
 
 Keep this split as total parse-load reduction, but do not count this probe as
 forward RV64 direct-build evidence.
+
+## Re-confirmed 2026-08-09 — ARCHITECTURAL-OPEN, not attempted this session
+
+This bug's own history (10+ update rounds above) shows the failure boundary is
+a moving parse-throughput wall: each source-splitting round pushes the
+`Terminated` point further into the file list without ever reaching ELF
+output, and prior probes explicitly note the splits are throughput mitigation,
+not evidence of forward progress toward completion. A fresh repro requires the
+RV64 cross toolchain plus a `native-build` run that has never completed in
+under 120s across the whole history of this doc — i.e. it structurally exceeds
+this session's ~2-minute repro budget, and this task's instructions direct
+against QEMU/hardware boots or long builds. No source change was attempted.
+
+Root cause remains `native-build`/parse throughput on a large multi-module
+RV64-target source tree, not a correctness defect in any one `.spl` file — the
+scalar host logic gate (`logic_check.spl`, interpreter mode) stays green
+throughout every round, confirming the FW logic itself is not at fault.
+Classifying as **ARCHITECTURAL-OPEN**: the fix is a compiler/build throughput
+improvement (or a longer allotted build budget for this target), out of scope
+for a bug-doc-only pass. Leaving OPEN.
