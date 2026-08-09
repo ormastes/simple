@@ -24,6 +24,9 @@ it is that live capture exists for only a sliver of the system:
 | `exec_capture.spl` | real process (`process_run`) | LIVE, 6 examples |
 | `file_capture.spl` | real file I/O + sha256 | LIVE, 7 examples |
 | `live_terminal_capture_spec.spl` | real subprocess stdout → `TerminalSnapshot` | LIVE (first slice, 2026-08-09) |
+| `live_json_capture_spec.spl` | real subprocess stdout → `json_document` (closed JSON-pointer oracle) | LIVE (T2c, landed 2026-08-09) |
+| `live_text_protocol_capture_spec.spl` | real subprocess stdout → `text_protocol` frame parse | LIVE (T2c, landed 2026-08-09) |
+| `live_binary_capture_spec.spl` | real file round-trip bytes → `binary_layout` PTE decode | LIVE (T2d, landed 2026-08-09) |
 | 30 migrated legacy specs | real captures via `untyped_capture.spl` | LIVE |
 | `terminal_grid` (interactive), `action_trace`, `scene_profile`, `simulation_profile`, `audio_profile`, `ml_profile`, `json_document`, `text_protocol`, `binary_layout` | constructed fixtures only | FIXTURE |
 | 3 E8 reference manuals | hand-built fixtures (labeled) | FIXTURE |
@@ -75,13 +78,13 @@ plus a sabotage/revert proof.
 |---|---|---|---|---|
 | 2a | TUI interactive | in-process `Compositor`/`UIState` via `SgttiTestDriver.from_tui_state` | `TerminalSnapshot` | SGTTI is NOT a process launcher (verified); use it for the in-process interactive case: drive a real UIState, snapshot per step. Keystroke dispatch + settle per `action_trace.spl`'s `SettleCondition`. |
 | 2b | GUI action trace | same SGTTI in-process dispatch | `ActionTrace` | Record real dispatched steps instead of hand-built `UiActionStep`s; 2a and 2b share one lane. |
-| 2c | JSON/text protocol | real process stdout via `capture_exec` | `json_document`/`text_protocol` input | Cheapest: compose existing live provider with existing pure adapter; one spec each. |
-| 2d | Binary layout | real bytes from a real file via `file_capture.spl` | `binary_layout` input | e.g. read a real ELF header; compose file_capture + binary_layout. |
+| 2c | JSON/text protocol | real process stdout via `capture_exec` | `json_document`/`text_protocol` input | **LANDED 2026-08-09** — `live_json_capture_spec.spl` + `live_text_protocol_capture_spec.spl`, both green/red/green sabotage-proven. |
+| 2d | Binary layout | real bytes from a real file via `file_capture.spl` | `binary_layout` input | **LANDED 2026-08-09** — `live_binary_capture_spec.spl`: real file round-trip, PTE value derived only from read-back bytes, sabotage-proven. |
 | 2e | 2D/3D scene | Engine2D/Draw IR readback through `doc/07_guide/ui/rendering/backend_isolation_guide.md` facade | `DrawScene` | Needs its own research pass — headless backend availability decides feasibility. |
 | 2f | Simulation | a real run of an existing sim harness emitting `TimelineEvent`s | `simulation_profile` input | Research pass first (which harness exists). |
 | 2g | Audio / ML | file-based: real decoded samples / real model-run metrics | `audio_profile` / `ml_profile` input | Blocked on decoder / ML-runtime facade existence; research first, may defer with explicit blocker docs. |
 
-Sequencing: 2c and 2d are one-session wins (compose two already-live pieces).
+Sequencing: 2c and 2d landed 2026-08-09 (written by three small guided agents, independently re-verified).
 2a/2b is one focused lane. 2e–2g each start with a bounded research report
 before any design/impl (per the TODO's "do not skip straight to
 implementation" rule).
