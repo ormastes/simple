@@ -171,6 +171,14 @@ predicate_parser_native_build_guard="$repo_root/scripts/check/check-predicate-pa
 gui_web_2d_completion_criteria_guard="$repo_root/scripts/check/check-gui-web-2d-completion-criteria-placeholders.shs"
 gui_web_2d_parallel_review_guard="$repo_root/scripts/check/check-gui-web-2d-parallel-agent-review-evidence.shs"
 
+# 2026-08-09 batch-4 (guard-wiring hardening campaign): four more guards found
+# unwired by check-guard-wiring.shs. Each verified standalone before wiring —
+# see the header comment near each run_guard call below for what was measured.
+class_identity_seed_matrix_guard="$repo_root/scripts/check/check-class-identity-seed-matrix.shs"
+engine_claiming_specs_guard="$repo_root/scripts/check/check-engine-claiming-specs-use-probe.shs"
+engine_differential_guard="$repo_root/scripts/check/check-engine-differential.shs"
+lint_cached_guard="$repo_root/scripts/check/lint-cached.shs"
+
 for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
          "$cuda_ntt_guard" "$vulkan_ntt_guard" \
@@ -195,7 +203,9 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$render_perf_milestone_gate_guard" "$wm_lane_boundary_guard" \
          "$class_identity_matrix_guard" \
          "$native_inprocess_positional_guard" "$predicate_parser_native_build_guard" \
-         "$gui_web_2d_completion_criteria_guard" "$gui_web_2d_parallel_review_guard"; do
+         "$gui_web_2d_completion_criteria_guard" "$gui_web_2d_parallel_review_guard" \
+         "$class_identity_seed_matrix_guard" "$engine_claiming_specs_guard" \
+         "$engine_differential_guard" "$lint_cached_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -286,6 +296,20 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
         status=1
     else
         run_guard "$markers_guard" "$markers_range" "$markers_range"
+
+        # lint-cached.shs: content-addressed fast path for `bin/simple lint`
+        # (scripts/check/lint-cached.shs header: ~11.7s fixed startup + ~3-4s
+        # per function under the uncached linter, so re-linting an unchanged
+        # tree every push is wasteful; a CLEAN result is cached by exact
+        # binary+config+content hash and a dirty one is never cached). Lints
+        # only the .spl files this ref's range actually touches, same range
+        # discipline as markers_guard above. Verified standalone 2026-08-09:
+        # a clean file PASSes and a repeat run hits the cache (0 linted).
+        changed_spl=$(git diff --name-only --diff-filter=ACMR "$markers_range" -- '*.spl' 2>/dev/null | tr '\n' ' ')
+        if [ -n "$changed_spl" ]; then
+            # shellcheck disable=SC2086
+            run_guard "$lint_cached_guard" "$markers_range (changed .spl files)" $changed_spl
+        fi
     fi
 done
 
@@ -647,5 +671,45 @@ run_guard "$predicate_parser_native_build_guard" "predicate-parser native-build 
 # host. Full scan, not range-bound, same convention as the probes above.
 run_guard "$gui_web_2d_completion_criteria_guard" "gui-web-2d completion-criteria placeholder gate (full scan, not range-bound)"
 run_guard "$gui_web_2d_parallel_review_guard" "gui-web-2d parallel-agent-review evidence gate (full scan, not range-bound)"
+
+# check-class-identity-seed-matrix.shs: fast-lane companion to
+# class_identity_matrix_guard above -- the two-column SEED-only (seedJIT vs
+# seedINTERP) class/struct identity corpus, meant to run once per seed
+# rebuild rather than the tens-of-minutes three-engine matrix. Its own header
+# states it MEASURES rather than asserts a correctness contract (both seed
+# engines are known-wrong in opposite directions as of 2026-08-09); what it
+# DOES gate is completeness -- a truncated run (an engine came up short) is a
+# real FAIL, not a decorative one. Verified standalone 2026-08-09: PASS,
+# complete 11/11 readings on both engines, well under a minute.
+run_guard "$class_identity_seed_matrix_guard" "class-identity SEED-only matrix completeness probe (full scan, not range-bound)"
+
+# check-engine-claiming-specs-use-probe.shs: ratchet guard against a spec
+# whose describe/it TITLE claims JIT/native/codegen/AOT coverage while its
+# body physically executes on the tree-walking interpreter (the only engine a
+# *_spec.spl can ever reach -- see the script's own header for the 4 stacked
+# layers that force this). Baseline-relative: only a NEW unbaselined offender
+# fails it. --selftest gates every scan and is fatal. Verified standalone
+# 2026-08-09: PASS, well under a minute (25024 spec files scanned, 197
+# engine-claiming, 192 already baselined).
+run_guard "$engine_claiming_specs_guard" "engine-claiming-spec-without-probe ratchet meta-guard (full scan, not range-bound)"
+
+# check-engine-differential.shs: multi-engine differential harness comparing
+# interpret/jit/native readings against a fixed fixture corpus, baseline-
+# relative (only a NEW unbaselined divergence fails it). DIFF_LANES=interpret,jit
+# is this script's own documented "fast pre-push configuration" -- the native
+# lane drives a full native-build per fixture and costs several minutes, and
+# on this host it additionally reports LANE_ERROR (native-build produced no
+# artifact), which the harness fails closed on rather than counting as a
+# divergence. EXPECTED RED as of 2026-08-09: even the fast two-lane config
+# surfaces one genuine NEW unbaselined divergence (i64_boundary_values: JIT
+# wraps large p60/p62/i64-max constants to negative/zero while the
+# interpreter does not) alongside the one already-baselined UTF-8-slice
+# divergence. Wired in RED on purpose, same convention as
+# lint_binary_staleness_guard and native_object_cache_granularity_guard
+# above: this is a live, previously-unfenced correctness gap, and silencing
+# the guard to force a clean wire-in would hide it again. File the
+# i64_boundary_values divergence and baseline it (or fix it) to turn this
+# green; do not weaken the guard.
+DIFF_LANES=interpret,jit run_guard "$engine_differential_guard" "interpret-vs-jit engine differential probe (full scan, not range-bound)"
 
 exit $status
