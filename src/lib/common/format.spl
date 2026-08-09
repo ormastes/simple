@@ -60,27 +60,43 @@ fn format_zero_pad(s: text, width: i64) -> text:
     str_repeat("0", width - len) + s
 
 # Format integer as hex (lowercase)
+#
+# Negative values are formatted as their two's-complement 64-bit unsigned
+# representation (`-1` -> "ffffffffffffffff"), which is what callers printing
+# pointers/addresses need: any address at or above 0x8000000000000000 is a
+# negative i64. The previous `while num > 0` loop returned "" for every
+# negative input, silently printing nothing in exactly those diagnostics.
 fn format_hex(n: i64) -> text:
     if n == 0: return "0"
-    val digits = "0123456789abcdef"
-    var result = ""
-    var num = n
-    while num > 0:
-        val digit = num % 16
-        result = digits[digit:digit+1] + result
-        num = num / 16
-    result
+    format_hex_digits(n, "0123456789abcdef")
 
 # Format integer as hex (uppercase)
 fn format_hex_upper(n: i64) -> text:
     if n == 0: return "0"
-    val digits = "0123456789ABCDEF"
+    format_hex_digits(n, "0123456789ABCDEF")
+
+# Shared nibble extraction for hex formatting.
+# Uses masked shifts so negative (two's-complement) inputs format correctly
+# instead of falling out of a `> 0` loop guard as an empty string.
+fn format_hex_digits(n: i64, digits: text) -> text:
+    if n > 0:
+        var result = ""
+        var num = n
+        while num > 0:
+            val digit = num % 16
+            result = digits[digit:digit+1] + result
+            num = num / 16
+        return result
+    # Negative: emit all 16 nibbles of the two's-complement value,
+    # skipping leading zeros (there are none for a negative value, whose
+    # top nibble always has the sign bit set).
     var result = ""
-    var num = n
-    while num > 0:
-        val digit = num % 16
-        result = digits[digit:digit+1] + result
-        num = num / 16
+    var i = 0
+    while i < 16:
+        val shift = (15 - i) * 4
+        val digit = (n >> shift) & 15
+        result = result + digits[digit:digit+1]
+        i = i + 1
     result
 
 # Format integer as binary
