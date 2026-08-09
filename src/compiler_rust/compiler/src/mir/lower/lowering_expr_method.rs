@@ -1878,7 +1878,7 @@ impl<'a> MirLowerer<'a> {
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
                 if let Some((vtable_slot, param_types, return_type)) =
-                    self.find_trait_for_method_on_receiver(method, recv_type_name)
+                    self.find_trait_for_method_on_receiver(method, recv_type_name, arg_regs.len())
                 {
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(

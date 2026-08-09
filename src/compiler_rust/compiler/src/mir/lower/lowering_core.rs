@@ -947,6 +947,7 @@ impl<'a> MirLowerer<'a> {
         &self,
         method_name: &str,
         receiver_type_name: Option<&str>,
+        authored_arg_count: usize,
     ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         let infos = self.trait_infos?;
         let trait_is_implemented = |trait_name: &str| {
@@ -965,7 +966,14 @@ impl<'a> MirLowerer<'a> {
             // Unknown receiver type: legacy name-based virtual dispatch.
             for (trait_name, info) in infos {
                 if let Some(sig) = info.get_method(method_name) {
-                    return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
+                    // A name-only match is necessarily ambiguous.  Reject a
+                    // candidate whose authored arity differs from the call;
+                    // otherwise codegen declares receiver+trait-params but
+                    // passes receiver+call-args, producing invalid LLVM (and,
+                    // if papered over there, a wrong-vtable-slot ABI call).
+                    if sig.param_types.len() == authored_arg_count {
+                        return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
+                    }
                 }
             }
             return None;

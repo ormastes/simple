@@ -322,6 +322,24 @@ fn lowerer_get_trait_method_sig_none() {
 }
 
 #[test]
+fn unknown_receiver_trait_lookup_requires_matching_authored_arity() {
+    use std::collections::HashMap;
+
+    let mut filesystem = hir::HirTraitInfo::new("Filesystem".to_string());
+    filesystem.add_method(
+        "write".to_string(),
+        vec![hir::TypeId::U64, hir::TypeId::ANY],
+        hir::TypeId::U64,
+    );
+    let mut trait_infos = HashMap::new();
+    trait_infos.insert("Filesystem".to_string(), filesystem);
+    let lowerer = MirLowerer::new().with_trait_infos(&trait_infos);
+
+    assert!(lowerer.find_trait_for_method_on_receiver("write", None, 3).is_none());
+    assert!(lowerer.find_trait_for_method_on_receiver("write", None, 2).is_some());
+}
+
+#[test]
 fn lowerer_contract_mode() {
     let lowerer = MirLowerer::new();
     assert_eq!(lowerer.contract_mode(), ContractMode::All);
