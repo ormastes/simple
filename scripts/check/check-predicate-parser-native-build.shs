@@ -1,0 +1,50 @@
+#!/bin/sh
+# Narrow native-build regression check for src/compiler/00.common/predicate_parser.spl.
+#
+# Guards against undeclared-symbol codegen errors like the has_paren_idx bug
+# (doc/08_tracking/bug/stage2_native_build_has_paren_idx_undeclared_global_2026-08-09.md):
+# a typo'd local-variable name (declared as `paren_idx`, referenced as
+# `has_paren_idx` / `paren_idx_value`) passed the interpreter path silently
+# (unresolved variable references are a warning there, not a hard error) but
+# broke LLVM codegen with "llvm global load referenced undeclared symbol".
+#
+# Scoped to src/compiler/00.common only, so this is a ~10s check, not a full
+# bootstrap. Requires a built stage2 `simple` binary — pass its path as $1,
+# or set SIMPLE_STAGE2_BIN. Falls back to bin/simple if neither is set.
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BIN="${1:-${SIMPLE_STAGE2_BIN:-$REPO_ROOT/bin/simple}}"
+
+if [ ! -x "$BIN" ]; then
+    echo "ERROR — stage2 binary not found/executable: $BIN" >&2
+    exit 2
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+cat > "$WORK/main.spl" <<'EOF'
+fn main():
+    print("hi")
+EOF
+
+OUT="$WORK/out"
+LOG="$WORK/build.log"
+
+if ! "$BIN" native-build --backend llvm --mode dynload \
+        --entry "$WORK/main.spl" \
+        --source "$REPO_ROOT/src/compiler/00.common" \
+        --output "$OUT" > "$LOG" 2>&1; then
+    echo "FAIL — native-build of src/compiler/00.common failed" >&2
+    tail -n 40 "$LOG" >&2
+    exit 1
+fi
+
+if grep -q "llvm global load referenced undeclared symbol" "$LOG"; then
+    echo "FAIL — undeclared-symbol codegen error detected" >&2
+    grep "llvm global load referenced undeclared symbol" "$LOG" >&2
+    exit 1
+fi
+
+echo "PASS — src/compiler/00.common native-build clean, 1 file checked"
