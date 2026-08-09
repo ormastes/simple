@@ -3486,6 +3486,11 @@ uint64_t rt_arm64_virtio_input_poll_packed(void)
            (uint64_t)g_arm64_virtio_input_value;
 }
 
+int64_t rt_arm64_virtio_input_sign_extend_i32(uint64_t raw)
+{
+    return (int64_t)(int32_t)(uint32_t)raw;
+}
+
 RuntimeValue rt_arm64_virtio_input_event_type(void) { return (RuntimeValue)g_arm64_virtio_input_type; }
 RuntimeValue rt_arm64_virtio_input_event_code(void) { return (RuntimeValue)g_arm64_virtio_input_code; }
 RuntimeValue rt_arm64_virtio_input_event_value(void) { return (RuntimeValue)g_arm64_virtio_input_value; }
