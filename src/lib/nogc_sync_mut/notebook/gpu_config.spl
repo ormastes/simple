@@ -1,0 +1,108 @@
+# gpu_config — the `gpu:` section of the EXISTING project config.
+#
+# Design: doc/05_design/app/tools/gpu_debugger_common_interface_architecture_2026-08-09.md §7b
+#
+# The config file is `simple.sdn`, the project manifest the toolchain ALREADY
+# reads — no new config file is invented. Existing readers, for the record:
+#   src/lib/nogc_sync_mut/cli/cli_util.spl:70   find_manifest() -> "{cwd}/simple.sdn"
+#   src/lib/gc_async_mut/cli/cli_util.spl:62    (same, gc family)
+#   src/lib/nogc_async_mut/cli/cli_util.spl:71  (same, async family)
+#   src/app/info/main.spl:116                   val sdn_path = "simple.sdn"
+#   src/lib/nogc_async_mut/mcp/resources.spl:569
+#   src/lib/lint/ui/__init__.spl:14             `[lints]` already lives here
+# `gpu:` is a sibling section of `project:` and `lints:`, same indented SDN
+# shape the file already uses:
+#
+#   gpu:
+#     backend: auto        # auto | cuda | vulkan | metal
+#     submode: interpreter # interpreter | jit
+#     arch: auto           # auto -> sm80 / spv15 / msl2 per backend default
+#
+# Parsing is a small line reader over that one section rather than a full
+# SDN document load, so the resolver stays importable from any tier without
+# dragging in src/lib/common/sdn/. Unknown keys inside `gpu:` are ignored
+# (forward compatible); a missing file or missing section yields the
+# documented defaults, never an error — absence of config is not a fault.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct GpuConfig:
+    backend: text     # "auto" | "cuda" | "vulkan" | "metal"
+    submode: text     # "interpreter" | "jit"
+    arch: text        # "auto" | backend-specific token (sm80 / spv15 / msl2)
+
+fn default_gpu_config() -> GpuConfig:
+    """Defaults per design §7b: probe for a backend, interpreter submode,
+    backend-default arch. These are what a project with no `gpu:` section
+    gets, and they are what makes a bare `gpu` tag work out of the box."""
+    GpuConfig(backend: "auto", submode: "interpreter", arch: "auto")
+
+fn _strip_comment(line: text) -> text:
+    val idx = line.index_of("#")
+    if idx < 0:
+        return line
+    line[0:idx]
+
+fn _leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len():
+        if line[i:i + 1] != " ":
+            return i
+        i = i + 1
+    i
+
+pub fn parse_gpu_config(sdn_text: text) -> GpuConfig:
+    """Read the `gpu:` section out of a simple.sdn document's text.
+
+    Section ends at the next line whose indentation is <= the `gpu:` line's
+    (i.e. the next top-level section), exactly like the file's other
+    sections. Absent section -> defaults."""
+    var config = default_gpu_config()
+    var in_section = false
+    var section_indent = 0
+    for raw in sdn_text.split("\n"):
+        val line = _strip_comment(raw)
+        if line.trim() == "":
+            continue
+        val indent = _leading_spaces(line)
+        val body = line.trim()
+        if not in_section:
+            if body == "gpu:":
+                in_section = true
+                section_indent = indent
+            continue
+        if indent <= section_indent:
+            # Next top-level section begins; the gpu block is complete.
+            return config
+        val colon = body.index_of(":")
+        if colon < 0:
+            continue
+        val key = body[0:colon].trim()
+        val value = body[colon + 1:].trim()
+        if value == "":
+            continue
+        if key == "backend":
+            config = GpuConfig(backend: value, submode: config.submode, arch: config.arch)
+        elif key == "submode":
+            config = GpuConfig(backend: config.backend, submode: value, arch: config.arch)
+        elif key == "arch":
+            config = GpuConfig(backend: config.backend, submode: config.submode, arch: value)
+    config
+
+pub fn load_gpu_config(manifest_path: text) -> GpuConfig:
+    """Load `gpu:` from a simple.sdn path. Missing file -> defaults."""
+    if not rt_file_exists(manifest_path):
+        return default_gpu_config()
+    val text_content = rt_file_read_text(manifest_path) ?? ""
+    if text_content == "":
+        return default_gpu_config()
+    parse_gpu_config(text_content)
+
+pub fn load_project_gpu_config() -> GpuConfig:
+    """Load `gpu:` from the project manifest in the current directory — the
+    same `simple.sdn` lookup `find_manifest()` and `simple info` perform."""
+    load_gpu_config("simple.sdn")
+
+export GpuConfig, default_gpu_config, parse_gpu_config
+export load_gpu_config, load_project_gpu_config

@@ -1,0 +1,74 @@
+# debug-doctor — print the REAL per-target debug/profile capability matrix.
+#
+#   bin/simple run src/app/debug_doctor/main.spl
+#   bin/simple run src/app/debug_doctor/main.spl -- <program.spl>
+#
+# Design: doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §1.5, §5
+# Plan:   doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md (P11)
+#
+# Run-script form rather than a `bin/simple <subcommand>`: the plan leaves the
+# choice to the implementer and this is the lighter path — a new subcommand
+# would have to be threaded through src/app/cli/_CliMain/main_and_help.spl,
+# dispatch/table.spl, surface_alignment.spl and bootstrap_check.spl (four
+# contested files, plus a bootstrap before the deployed binary would answer
+# to the name at all). The script needs none of that and runs today.
+#
+# Every row is produced by constructing the real thing and calling it:
+# the GPU rows are live *LaneSession.probe() results from THIS machine, and
+# the host profile cell is an elapsed time actually measured while the doctor
+# runs. Nothing here is a static table. A target with no landed DebugTarget
+# says so, and names the stream that will provide it, rather than claiming a
+# capability that nothing implements.
+
+use std.debug_doctor.matrix.{
+    CapabilityRegistry, doctor_rows, render_doctor_matrix, row_is_attachable
+}
+use std.notebook.gpu_mode_probe_live.{LiveGpuBackendProbe}
+use std.notebook.gpu_config.{load_project_gpu_config}
+use std.notebook.gpu_mode_resolver.{resolve_gpu_mode_spec}
+use std.cli.cli_util (get_cli_args)
+
+fn debug_doctor_main(program: text):
+    print("simple debug-doctor — debug/profile capability matrix")
+    print("")
+
+    # The registry starts empty; P3/P6/P8 register their targets as they land.
+    # An empty registry is not an error, it is the truthful state of the tree.
+    var registry = CapabilityRegistry.create()
+    var probe = LiveGpuBackendProbe.create()
+
+    val rows = doctor_rows(registry, probe, program)
+    print(render_doctor_matrix(rows))
+    print("")
+
+    var attachable = 0
+    for row in rows:
+        if row_is_attachable(row):
+            attachable = attachable + 1
+    print("attachable targets: {attachable} of {rows.len()}")
+
+    # What a bare `gpu` tag resolves to on this host, right now, using the
+    # project's own `gpu:` config section and the same live probe.
+    val config = load_project_gpu_config()
+    print("")
+    print("gpu config: backend={config.backend} submode={config.submode} arch={config.arch}  (simple.sdn `gpu:` section)")
+    val resolved = resolve_gpu_mode_spec("gpu", config, probe)
+    if resolved.error != "":
+        print("bare `gpu` tag resolves to: <error>")
+        print(resolved.error)
+    else:
+        print("bare `gpu` tag resolves to: {resolved.spec}  (target {resolved.target})")
+    val host = resolve_gpu_mode_spec("", config, probe)
+    print("no tag resolves to: host lane (spec \"{host.spec}\")")
+
+fn _doctor_program_arg() -> text:
+    val args = get_cli_args()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.ends_with(".spl") and not arg.contains("debug_doctor/main.spl"):
+            return arg
+        i = i + 1
+    ""
+
+debug_doctor_main(_doctor_program_arg())
