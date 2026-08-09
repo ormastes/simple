@@ -1,0 +1,293 @@
+# Multi-engine differential harness for array / list / buffer / text defects.
+#
+# ## Why this exists
+#
+# Example-based specs in this repo are STRUCTURALLY incapable of catching the
+# defect family this harness targets. Three layers stack:
+#
+#   1. The test runner pins the child engine to `interpret` before every spec
+#      run (test_runner_execute.spl:86, test_runner_single.spl:330-331).
+#   2. The seed honours that pin (exec_core.rs:37-38).
+#   3. A module with no `fn main` de-JITs regardless (exec_core.rs:774-781) --
+#      and a spec file is top-level describe/it with no main.
+#
+# Layer 3 alone is decisive, and it cannot be lifted: describe/it/expect are
+# Rust INTERPRETER INTRINSICS with no codegen lowering at all. So every
+# array/list/buffer bug that lives in the JIT or native lane is invisible to
+# `bin/simple test`, permanently.
+#
+# The technique that DOES work was performed by hand to find
+# doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md:
+# run the same small program under several engines and diff the outputs.
+# This script mechanizes exactly that.
+#
+# ## What it does
+#
+# For every `.spl` in test/fixtures/engine_differential/ it runs the program
+# under each available lane, captures stdout, and compares. Divergence between
+# lanes IS the finding -- no lane is trusted as ground truth, because all of
+# them have independently been found wrong in different ways. A fixture needs
+# no `expected` value to be useful; agreement is the property under test.
+#
+# ## Lanes
+#
+#   interpret  SIMPLE_EXECUTION_MODE=interpret  (tree-walking interpreter)
+#   jit        SIMPLE_EXECUTION_MODE=jit        (Cranelift)
+#   native     bin/simple native-build -o <art> && ./<art>  (LLVM AOT)
+#
+# `SIMPLE_EXECUTION_MODE` recognises ONLY `interpret`/`interpreter`/`jit`.
+# Every other value -- including `native` -- SILENTLY selects the JIT, so the
+# native lane must go through a real `native-build`, never an env var. That
+# distinction is load-bearing: prior findings that named `native` via the env
+# var were actually measuring the JIT.
+#
+# ## Comparison is whitespace-normalized, deliberately
+#
+# The native lane does not emit trailing newlines from `print`, so a raw
+# byte-compare would flag all 10 fixtures for one formatting quirk and bury
+# every real signal. Tokens are compared after whitespace collapsing; the
+# newline difference is reported ONCE as a lane-level note instead.
+#
+# ## Reading the result
+#
+#   AGREE       every available lane produced identical normalized output
+#   DIVERGENCE  lanes disagreed -- the finding
+#   LANE_ERROR  a lane produced no verdict (build failure / codegen panic).
+#               Reported SEPARATELY and never counted as a divergence: a lane
+#               that fails CLOSED is materially different from one that
+#               returns a silent wrong answer.
+#
+# Known divergences are listed in `baselined_divergence()` so that a NEW one
+# stands out instead of drowning in the expected ones. Exit code is the count
+# of UNBASELINED divergences.
+#
+# ## Usage
+#
+#   bin/simple run scripts/check/check_engine_differential.spl
+#   SIMPLE_BIN=<path> ...        target a specific compiler binary
+#   DIFF_LANES=interpret,jit     restrict the lane set (native is the slow one)
+#   DIFF_FILTER=utf8             run only fixtures whose name contains this
+#
+# NOTE: `native-build` resolves its source root from the tree it is invoked
+# in, so this script must be run from the REPO ROOT and the fixtures must live
+# inside the repo. A fixture copied to /tmp fails to build for that reason
+# alone, which would read as a false LANE_ERROR.
+
+use std.io.{process_run, env_get}
+
+val FIXTURE_DIR: text = "test/fixtures/engine_differential"
+val ARTIFACT_DIR: text = "build/engine_differential"
+
+struct LaneResult:
+    lane: text
+    output: text
+    normalized: text
+    ok: bool
+    note: text
+
+# A divergence that is already documented. Listing it here keeps the exit code
+# meaningful: the harness fails only on divergences nobody has triaged yet.
+# `fixture` is matched exactly; `doc` must point at a real tracking file.
+struct Baseline:
+    fixture: text
+    doc: text
+
+fn baselines() -> [Baseline]:
+    [
+        Baseline(
+            fixture: "utf8_slice_boundary",
+            doc: "doc/08_tracking/bug/native_slice_splits_utf8_three_divergent_policies_2026-08-01.md",
+        ),
+    ]
+
+fn baselined_divergence(fixture: text) -> text:
+    for b in baselines():
+        if b.fixture == fixture:
+            return b.doc
+    ""
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn selected_lanes() -> [text]:
+    val configured = env_get("DIFF_LANES") ?? ""
+    if configured.len() == 0:
+        return ["interpret", "jit", "native"]
+    var out: [text] = []
+    for part in configured.split(","):
+        val cleaned = part.trim()
+        if cleaned.len() > 0:
+            out.push(cleaned)
+    out
+
+# Collapse all runs of whitespace to a single space so the native lane's
+# missing newlines do not masquerade as a semantic difference. Everything
+# else -- digits, ordering, punctuation -- is preserved exactly.
+fn normalize(raw: text) -> text:
+    var out = ""
+    var pending_space = false
+    for ch in raw.chars():
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
+            if out.len() > 0:
+                pending_space = true
+        else:
+            if pending_space:
+                out = out + " "
+                pending_space = false
+            out = out + ch
+    out.trim()
+
+# Compiler warnings and gc-warnings are emitted on stderr and are not part of
+# the program's answer; only stdout is compared. A lane that printed nothing
+# to stdout is an ERROR lane, not an empty-but-valid answer.
+fn run_interpreted(binary: text, path: text, engine: text) -> LaneResult:
+    val command = "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " " + binary + " run " + path + " 2>/dev/null"
+    val (stdout, _stderr, _code) = process_run("/bin/sh", ["-c", command])
+    val norm = normalize(stdout)
+    if norm.len() == 0:
+        return LaneResult(lane: engine, output: stdout, normalized: norm, ok: false, note: "no stdout (build or codegen failure)")
+    LaneResult(lane: engine, output: stdout, normalized: norm, ok: true, note: "")
+
+fn run_native(binary: text, path: text, name: text) -> LaneResult:
+    val artifact = ARTIFACT_DIR + "/" + name + ".bin"
+    process_run("/bin/sh", ["-c", "mkdir -p " + ARTIFACT_DIR + " && rm -f " + artifact])
+    # native-build can print warnings and still exit 0 while producing NO
+    # artifact, so the artifact's existence -- not the exit code -- is the
+    # test for whether the build succeeded.
+    val build_cmd = binary + " native-build " + path + " -o " + artifact + " >/dev/null 2>&1"
+    process_run("/bin/sh", ["-c", build_cmd])
+    val (exists, _e, _c) = process_run("/bin/sh", ["-c", "test -s " + artifact + " && echo YES || echo NO"])
+    if not exists.trim().contains("YES"):
+        return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact")
+    val (stdout, _s2, _c2) = process_run("/bin/sh", ["-c", "./" + artifact + " 2>/dev/null"])
+    val norm = normalize(stdout)
+    if norm.len() == 0:
+        return LaneResult(lane: "native", output: stdout, normalized: norm, ok: false, note: "artifact ran but printed nothing")
+    LaneResult(lane: "native", output: stdout, normalized: norm, ok: true, note: "")
+
+fn run_lane(binary: text, path: text, name: text, lane: text) -> LaneResult:
+    if lane == "native":
+        return run_native(binary, path, name)
+    run_interpreted(binary, path, lane)
+
+fn list_fixtures() -> [text]:
+    val (out, _e, _c) = process_run("/bin/sh", ["-c", "ls " + FIXTURE_DIR + "/*.spl 2>/dev/null | sort"])
+    var paths: [text] = []
+    val filter = env_get("DIFF_FILTER") ?? ""
+    for line in out.split("\n"):
+        val cleaned = line.trim()
+        if cleaned.len() > 0:
+            if filter.len() == 0 or cleaned.contains(filter):
+                paths.push(cleaned)
+    paths
+
+fn basename_no_ext(path: text) -> text:
+    var last = path
+    for part in path.split("/"):
+        if part.len() > 0:
+            last = part
+    if last.contains("."):
+        var head = ""
+        var first = true
+        for seg in last.split("."):
+            if first:
+                head = seg
+                first = false
+        return head
+    last
+
+# Prints the exact binary identity under test. `bin/simple` is a moving target
+# in a shared multi-lane checkout, and a result is only reconcilable later if
+# the hash it ran against was recorded at the time.
+fn print_binary_identity(binary: text):
+    val (resolved, _e1, _c1) = process_run("/bin/sh", ["-c", "readlink -f " + binary])
+    val (hash_line, _e2, _c2) = process_run("/bin/sh", ["-c", "sha256sum " + binary + " 2>/dev/null | cut -c1-16"])
+    print("binary:  {binary}")
+    print("resolved: {resolved.trim()}")
+    print("sha256:  {hash_line.trim()}")
+
+fn main() -> i64:
+    val binary = simple_binary()
+    val lanes = selected_lanes()
+    val fixtures = list_fixtures()
+
+    print("=== multi-engine differential harness ===")
+    print_binary_identity(binary)
+    print("lanes:   {lanes.len()} -> {lanes}")
+    print("fixtures: {fixtures.len()}")
+    print("")
+
+    var divergences = 0
+    var new_divergences = 0
+    var agreements = 0
+    var lane_errors = 0
+
+    for path in fixtures:
+        val name = basename_no_ext(path)
+        var results: [LaneResult] = []
+        for lane in lanes:
+            results.push(run_lane(binary, path, name, lane))
+
+        # Compare only lanes that produced an answer; a failed-closed lane
+        # cannot disagree with anything.
+        var reference = ""
+        var have_reference = false
+        var disagree = false
+        var available = 0
+        for r in results:
+            if r.ok:
+                available = available + 1
+                if not have_reference:
+                    reference = r.normalized
+                    have_reference = true
+                else:
+                    if r.normalized != reference:
+                        disagree = true
+
+        var errors_here = 0
+        for r in results:
+            if not r.ok:
+                errors_here = errors_here + 1
+
+        val doc = baselined_divergence(name)
+        var verdict = "AGREE"
+        if disagree:
+            if doc.len() > 0:
+                verdict = "DIVERGENCE (baselined)"
+            else:
+                verdict = "DIVERGENCE (NEW)"
+        else:
+            if available < 2:
+                verdict = "INCONCLUSIVE (fewer than 2 lanes answered)"
+
+        print("[{name}] {verdict}")
+        for r in results:
+            if r.ok:
+                print("  {r.lane}: {r.normalized}")
+            else:
+                print("  {r.lane}: LANE_ERROR -- {r.note}")
+        if doc.len() > 0 and disagree:
+            print("  known: {doc}")
+        print("")
+
+        if disagree:
+            divergences = divergences + 1
+            if doc.len() == 0:
+                new_divergences = new_divergences + 1
+        else:
+            if available >= 2:
+                agreements = agreements + 1
+        lane_errors = lane_errors + errors_here
+
+    print("---")
+    print("agreements:        {agreements}")
+    print("divergences:       {divergences} ({new_divergences} NEW, unbaselined)")
+    print("lane errors:       {lane_errors} (failed closed -- not counted as divergence)")
+    print("")
+    print("NOTE: the native lane does not emit trailing newlines from print();")
+    print("comparison is whitespace-normalized so that quirk alone cannot mask")
+    print("or manufacture a divergence.")
+    new_divergences
