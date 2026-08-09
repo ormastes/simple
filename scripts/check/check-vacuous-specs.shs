@@ -204,6 +204,7 @@ function process_file(   i, s, raw, ind, in_doc, n, itstart, itindent, itname,
                          cconst, nconst, cfirst, cline, has_ctrl, csub) {
     if (CUR == "") return
     FILES_SCANNED++
+    print "#FILE\t" CUR
 
     # ---- pass 0: strip docstrings and comments into code_lines[] ----
     in_doc = 0
@@ -518,8 +519,13 @@ describe "parenless":
 EOF
 
     st_fail=0
-    st_out=$(find "$st_dir" -name '*_spec.spl' | sort | xargs awk "$AWK_PROG" 2>/dev/null)
-    st_scanned=$(echo "$st_out" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
+    st_raw=$(find "$st_dir" -name '*_spec.spl' | sort | xargs awk "$AWK_PROG" 2>/dev/null)
+    st_scanned=$(echo "$st_raw" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
+    # Strip the bookkeeping lines (#SCANNED count, #FILE-per-file markers) before
+    # matching fixture names below — a #FILE marker line for e.g. f8's path
+    # contains that same substring and would otherwise false-positive every
+    # "was flagged" check regardless of whether V-codes were actually emitted.
+    st_out=$(echo "$st_raw" | /usr/bin/grep -av '^#SCANNED' | /usr/bin/grep -av '^#FILE')
 
     [ "$st_scanned" = "8" ] || { echo "selftest: expected 8 files scanned, got '$st_scanned'"; st_fail=1; }
     if echo "$st_out" | /usr/bin/grep -aq "f8/parenless_spec.spl"; then
@@ -568,10 +574,29 @@ if [ ! -d "$ROOT" ]; then
     exit 2
 fi
 
-list=$(find "$ROOT" -name '*_spec.spl' -type f | sort)
+# Prune build/ before naming candidates: this repo's build/ tree (gitignored
+# — see .gitignore and the CLAUDE.md "Owned-Code Scope" rule) holds
+# parallel-session scratch checkouts, e.g. build/worktrees/<snapshot>/, which
+# are FULL mirrors of test/ and therefore of every *_spec.spl in the real
+# corpus. An unpruned `find .` picked those up too: on 2026-08-09 that alone
+# was 81,833 of 107,169 files "scanned" — 76% of the corpus was gitignored
+# scratch, not source, which both quadrupled runtime AND was the actual cause
+# of every prior "inconclusive" run — those worktrees are LIVE (another agent
+# creates/removes/rewrites them mid-scan), so a sweep that walked into them
+# could never observe a stable file list.
+#
+# (`git ls-files` was tried as a fix here first and reverted: in this
+# actively-mutating shared working copy, the git INDEX itself lists files
+# that are not currently present on disk — e.g. a concurrent session's `rm`
+# without `git rm`, or a WC mid-rebase — so `git ls-files --cached` produced
+# ~3,100 "tracked" paths that plain `[ -f ]` says don't exist, a worse
+# staleness problem than the one being fixed. Pruning the one directory that
+# is actually the ephemeral-scratch offender is more targeted and doesn't
+# trade one race for another.)
+list=$(find "$ROOT" \( -path '*/build/*' -o -path '*/.git/*' \) -prune -o -name '*_spec.spl' -type f -print | sort)
 nfiles=$(printf '%s\n' "$list" | /usr/bin/grep -ac . || true)
 if [ "${nfiles:-0}" -eq 0 ]; then
-    echo "no *_spec.spl files found under $ROOT — a zero-candidate sweep is not a pass"
+    echo "no *_spec.spl files found under $ROOT (build/ and .git/ excluded) — a zero-candidate sweep is not a pass"
     echo "ERROR — nothing was checked"
     exit 2
 fi
@@ -580,12 +605,61 @@ fi
 # its own #SCANNED line. Summing them (rather than reading one) is what keeps
 # the scanned-vs-listed reconciliation below honest; reading a single line would
 # under-count and turn a partial sweep into a silent pass.
+#
+# This repo's corpus is mutated continuously by concurrent agent sessions while
+# a full sweep is running (a full sweep now takes several minutes — see the
+# perf note in the header). A file present in the initial `find` snapshot can
+# be renamed/deleted before its xargs/awk batch reaches it; awk then silently
+# skips the argument (no FNR==1 fires), which used to show up ONLY as an
+# aggregate "scanned=N-1 but N listed" mismatch — indistinguishable from a real
+# partial-sweep bug, and the guard refused (ERROR) on every run. That is a
+# false ERROR, not evidence of a broken sweep: the file the guard "missed" no
+# longer existed to be checked. Distinguish the two per-file rather than by
+# count alone: emit a #FILE marker for every file actually opened, diff that
+# against the snapshot list, and only treat a missing file as a real gap
+# (ERROR) if it STILL EXISTS on disk — i.e. awk had it available and skipped
+# it anyway, which is the genuine failure mode this reconciliation exists to
+# catch. A file that no longer exists was legitimately dropped by the moving
+# target, not missed by the scan; it lowers the required count instead of
+# erroring. This does not weaken detection: every file that still exists gets
+# scanned, exactly as before.
 rawout=$(printf '%s\n' "$list" | xargs awk "$AWK_PROG")
 scanned=$(printf '%s\n' "$rawout" | sed -n 's/^#SCANNED\t//p' | awk '{t+=$1} END{print t+0}')
-findings=$(printf '%s\n' "$rawout" | /usr/bin/grep -av '^#SCANNED')
+findings=$(printf '%s\n' "$rawout" | /usr/bin/grep -av '^#SCANNED' | /usr/bin/grep -av '^#FILE')
 
-if [ "${scanned:-0}" -ne "$nfiles" ]; then
-    echo "scanned=$scanned but $nfiles files were listed — refusing to report a partial sweep"
+# comm needs real files, not process substitution — this script targets
+# POSIX /bin/sh (dash on this host), which has no <(...).
+recon_dir=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked"; exit 2; }
+trap 'rm -rf "$recon_dir"' EXIT
+printf '%s\n' "$rawout" | sed -n 's/^#FILE\t//p' | sort -u > "$recon_dir/scanned_files"
+printf '%s\n' "$list" | sort -u > "$recon_dir/listed_files"
+missing_files=$(comm -23 "$recon_dir/listed_files" "$recon_dir/scanned_files")
+
+dropped=0
+real_gap=0
+if [ -n "$missing_files" ]; then
+    while IFS= read -r mf; do
+        [ -n "$mf" ] || continue
+        if [ -f "$mf" ]; then
+            real_gap=$((real_gap + 1))
+            echo "genuinely unscanned (still exists on disk): $mf" >&2
+        else
+            dropped=$((dropped + 1))
+        fi
+    done <<EOF
+$missing_files
+EOF
+fi
+
+effective_nfiles=$((nfiles - dropped))
+
+if [ "$real_gap" -ne 0 ]; then
+    echo "scanned=$scanned but $nfiles files were listed ($real_gap still exist and were never scanned) — refusing to report a partial sweep"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ "${scanned:-0}" -ne "$effective_nfiles" ]; then
+    echo "scanned=$scanned but $effective_nfiles files remained checkable ($dropped dropped mid-scan, $nfiles originally listed) — refusing to report a partial sweep"
     echo "ERROR — nothing was checked"
     exit 2
 fi
@@ -604,5 +678,8 @@ else
     printf '%s\n' "$findings" | cut -f1 | sort | uniq -c | sort -rn
 fi
 
+if [ "$dropped" -ne 0 ]; then
+    echo "note: $dropped file(s) were deleted/renamed by concurrent activity during the scan and were excluded, not skipped-and-ignored"
+fi
 echo "PASS — $scanned files scanned, ${nflag:-0} flagged"
 exit 0

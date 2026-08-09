@@ -1,7 +1,10 @@
 # Non-discriminating (vacuous) spec family — enumerated sweep
 
 **Date:** 2026-08-08
-**Status:** Open — detector landed, top findings proven, remediation outstanding
+**Status:** Open — detector landed, top findings proven, remediation outstanding.
+Pre-push sweep reliability fixed 2026-08-09 (see update below): full sweep now
+completes in ~1m35s with a real PASS verdict (was ERRORing every run, ~6-9min,
+due to scanning gitignored `build/` scratch worktrees).
 **Pinned base:** `f6397d726afde9f899cbfbc2dc8aa642bf764b21`
 **Corpus:** 19,499 `*_spec.spl` files at that sha
 **Detector:** `scripts/check/check-vacuous-specs.shs`
@@ -270,3 +273,91 @@ strengthened version → 0 flagged.
    `expect true` placeholders cannot land silently.
 3. Work the remaining 900 high-risk `V2` files by descending block count.
 4. Apply the Tier-B manual checklist to the high-risk shortlist.
+
+## 2026-08-09 update — pre-push run was never actually completing; root cause + fix
+
+The guard is wired into the pre-push hook
+(`scripts/check/pre-push-conflict-tree-guard.shs` → `run_guard
+"$vacuous_specs_guard" ...`, "full scan, not range-bound"). A prior session
+reported it "too slow to finish within budget; selftest passed, full sweep
+inconclusive" — i.e. no one had actually gotten a completed verdict from a
+full sweep since it landed the day before.
+
+**Root cause was not raw slowness — it was scan scope.** `find "$ROOT" -name
+'*_spec.spl'` with `ROOT=.` walked into `build/`, which is gitignored (see
+`.gitignore`, CLAUDE.md "Owned-Code Scope") and holds parallel-agent-session
+scratch checkouts such as `build/worktrees/simpleos-engine2d-stage4-snapshot/`
+— a **full mirror of `test/`**, and therefore of every `*_spec.spl` in the
+real corpus. Before the fix: **107,169** files "listed", of which **81,833
+(76%)** were under `build/`. Two consequences:
+
+- **~4-6x inflated runtime.** Two timed full runs before the fix: 6m30s and
+  9m01s wall-clock (363–415s user CPU either way — the wall-clock spread is
+  this shared host's concurrent load, not the script).
+- **Every run ERRORed, never PASSed or FAILed.** The `build/worktrees/*`
+  scratch tree is *live* — another agent session creates/deletes/rewrites
+  files in it while the sweep runs — so the guard's existing (correct)
+  fail-closed reconciliation (`scanned` count vs files `find` originally
+  listed) tripped on real races in genuinely-ephemeral files, every time:
+  `scanned=107168 but 107169 files were listed`, `scanned=107165 but 107166 …`.
+  These were legitimate ERRORs by the code as written — the bug was scanning
+  gitignored scratch as if it were the corpus, not the reconciliation logic
+  itself.
+
+**Fix (`scripts/check/check-vacuous-specs.shs`):**
+
+1. `find` now prunes `build/` and `.git/`:
+   `find "$ROOT" \( -path '*/build/*' -o -path '*/.git/*' \) -prune -o -name
+   '*_spec.spl' -type f -print`. (`git ls-files` was tried first as a more
+   "principled" fix and reverted: in this actively-mutating shared working
+   copy the git **index** itself lists ~3,100 paths that are not currently on
+   disk — e.g. a concurrent session's `rm` without `git rm` — which traded one
+   staleness problem for a worse one. Pruning the one directory that is
+   actually the scratch offender is more targeted.)
+2. The scanned-vs-listed reconciliation is now per-file, not count-only: the
+   awk program emits a `#FILE\t<path>` marker for every file it actually
+   opens, the shell diffs that against the snapshot list, and a missing file
+   is only a real `ERROR` (ungenuinely-unscanned, i.e. it still exists on disk
+   but the scan skipped it) — a file that no longer exists at reconciliation
+   time was legitimately dropped by a moving target and is excluded from the
+   required count instead. This is strictly more precise than before, not
+   weaker: every file that still exists still gets scanned and still counts.
+
+**Verified after the fix** (today, live corpus, `sh
+scripts/check/check-vacuous-specs.shs`, no `--root`):
+
+- `--selftest`: 8/8 fixtures still behave correctly (unchanged).
+- Two consecutive full runs: **25,312** then **25,313** files scanned (the
+  +1 is a real concurrent edit between runs, not drift/error), **45,486**
+  flagged both times, wall-clock **1m35s** and **1m41s**, exit 0.
+- Verdict: **`PASS — 25313 files scanned, 45486 flagged`.**
+- By code (today, unpruned mirrors — `test/unit` vs `test/01_unit` etc. still
+  double-count as documented above):
+
+  | Code | Rows |
+  |------|-----:|
+  | `V2_CONST_ASSERT` | 37,059 |
+  | `V5_SHAPE_ONLY` | 2,301 |
+  | `V4_WEAK_CONTAIN` | 2,230 |
+  | `V1_ZERO_ASSERT` | 2,164 |
+  | `V3_TAUTOLOGY` | 1,463 |
+  | `V0_NO_ASSERT_FILE` | 239 |
+  | `V6_STUB_HELPER` | 30 |
+
+  Row counts are higher than the 2026-08-08 pinned-sha table (33,568 total)
+  because the corpus has grown since `f6397d72` (19,499 → 25,313 files) — not
+  a detector regression; `--root . --expect-files 19499` against a pinned
+  archive of that sha would reproduce the original count exactly, as
+  documented above.
+
+**Not fixed / explicitly out of scope for this pass:** the guard has **no
+fail-on-findings gate at all** — `exit 0` with a `PASS —` line is
+unconditional once the sweep completes cleanly, regardless of how many
+`V0`–`V6` findings it reports. Its fail-closed contract (per its own header)
+is about the *sweep's own reliability* (did it actually examine the claimed
+corpus), not about blocking a push over pre-existing vacuous specs — turning
+45,486 pre-existing findings into a hard gate would brick every push and is a
+separate, much larger remediation decision (tracked above under
+"Remediation"), not a silent side effect of a perf/scoping fix. Left
+unchanged, per instructions not to weaken *or* strengthen detection semantics
+as a side effect of a reliability fix.
