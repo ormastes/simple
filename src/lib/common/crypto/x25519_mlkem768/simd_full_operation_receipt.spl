@@ -1,0 +1,232 @@
+# Backend-neutral, fail-closed native SIMD full-operation receipt composer.
+#
+# This is deliberately a leaf evidence assembler: runners remain responsible
+# for producing the three operation records and final matrix admission stays
+# in matrix_receipt.  The composer accepts only a Stage-4-bound, native SIMD
+# execution whose public outputs are pinned to the workload oracle.
+
+mod lib.common.crypto.x25519_mlkem768.simd_full_operation_receipt
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768Evidence,
+    X25519MlKem768KeyPair, X25519MlKem768Encapsulation,
+    X25519MlKem768Decapsulation,
+    X25519_MLKEM768_IMPLEMENTATION_VERSION,
+    X25519_MLKEM768_PROFILE_VERSION,
+    X25519_MLKEM768_CLIENT_SHARE_BYTES,
+    X25519_MLKEM768_SERVER_SHARE_BYTES,
+    X25519_MLKEM768_SHARED_SECRET_BYTES}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768RunReceipt,
+    x25519_mlkem768_constant_time_list_equal}
+use lib.common.crypto.x25519_mlkem768.performance_attestation.{
+    X25519MlKem768PerformanceAttestation,
+    X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA,
+    X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI}
+
+struct X25519MlKem768SimdReceiptBinding:
+    backend: X25519MlKem768EvidenceBackend
+    fixture_id: text
+    fixture_manifest_sha256: text
+    fixture_source_sha256: text
+    pinned_workload_sha256: text
+    runner_source_sha256: text
+    runner_artifact_sha256: text
+    crypto_source_sha256: text
+    stage4_source_revision: text
+    stage4_binary_sha256: text
+    stage4_provenance_sha256: text
+    measurement_qualification_sha256: text
+    qualified_timing_sha256: text
+    matrix_row_set_sha256: text
+    scalar_source_receipt_sha256: text
+    candidate_source_receipt_sha256: text
+    scalar_sample_set_sha256: text
+    candidate_sample_set_sha256: text
+    host_os: text
+    host_arch: text
+    session_id: text
+    monotonic_clock_id: text
+    expected_keygen_digest: text
+    expected_encapsulate_digest: text
+    expected_decapsulate_digest: text
+    rvv_minimum_vlen_bits: i64
+    batch_size: i64
+
+fn _simd_name(backend: X25519MlKem768EvidenceBackend) -> text:
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return "avx2"
+    if backend == X25519MlKem768EvidenceBackend.Neon: return "neon"
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return "rvv"
+    "unsupported"
+
+fn _simd_contract_backend(backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768Backend:
+    if backend == X25519MlKem768EvidenceBackend.Avx2: return X25519MlKem768Backend.Avx2
+    if backend == X25519MlKem768EvidenceBackend.Neon: return X25519MlKem768Backend.Neon
+    if backend == X25519MlKem768EvidenceBackend.Rvv: return X25519MlKem768Backend.Rvv
+    X25519MlKem768Backend.Automatic
+
+fn _simd_binding_valid(binding: X25519MlKem768SimdReceiptBinding) -> bool:
+    _simd_name(binding.backend) != "unsupported" and
+    binding.fixture_id != "" and binding.host_os != "" and
+    binding.host_arch != "" and binding.session_id != "" and
+    binding.monotonic_clock_id != "" and binding.batch_size == 1 and
+    binding.rvv_minimum_vlen_bits >= 0 and
+    sha256_lower_hex_valid(binding.fixture_manifest_sha256) and
+    sha256_lower_hex_valid(binding.fixture_source_sha256) and
+    sha256_lower_hex_valid(binding.pinned_workload_sha256) and
+    sha256_lower_hex_valid(binding.runner_source_sha256) and
+    sha256_lower_hex_valid(binding.runner_artifact_sha256) and
+    sha256_lower_hex_valid(binding.crypto_source_sha256) and
+    sha256_lower_hex_valid(binding.stage4_source_revision) and
+    sha256_lower_hex_valid(binding.stage4_binary_sha256) and
+    sha256_lower_hex_valid(binding.stage4_provenance_sha256) and
+    sha256_lower_hex_valid(binding.measurement_qualification_sha256) and
+    sha256_lower_hex_valid(binding.qualified_timing_sha256) and
+    sha256_lower_hex_valid(binding.matrix_row_set_sha256) and
+    sha256_lower_hex_valid(binding.scalar_source_receipt_sha256) and
+    sha256_lower_hex_valid(binding.candidate_source_receipt_sha256) and
+    sha256_lower_hex_valid(binding.scalar_sample_set_sha256) and
+    sha256_lower_hex_valid(binding.candidate_sample_set_sha256) and
+    sha256_lower_hex_valid(binding.expected_keygen_digest) and
+    sha256_lower_hex_valid(binding.expected_encapsulate_digest) and
+    sha256_lower_hex_valid(binding.expected_decapsulate_digest)
+
+fn _simd_evidence_reason(evidence: X25519MlKem768Evidence,
+        operation: text, binding: X25519MlKem768SimdReceiptBinding) -> text:
+    val name = _simd_name(binding.backend)
+    val expected = _simd_contract_backend(binding.backend)
+    if evidence.requested_backend != expected or evidence.selected_backend != expected:
+        return name + "-" + operation + "-backend-mismatch"
+    if evidence.operation != operation or evidence.fallback_used or
+            evidence.fallback_reason != "" or not evidence.oracle_match:
+        return name + "-" + operation + "-operation-or-oracle-invalid"
+    if evidence.simd_chunk_hits < 1:
+        return name + "-" + operation + "-simd-hit-missing"
+    if binding.backend == X25519MlKem768EvidenceBackend.Rvv:
+        if evidence.observed_rvv_vlen_bits < binding.rvv_minimum_vlen_bits or
+                evidence.observed_rvv_vlen_bits <= 0:
+            return "rvv-" + operation + "-vlen-invalid"
+    elif evidence.observed_rvv_vlen_bits != 0:
+        return name + "-" + operation + "-unexpected-rvv-vlen"
+    if evidence.kernel_invocations != 0 or evidence.compiled or evidence.submitted or
+            evidence.fence_completed or evidence.device_readback:
+        return name + "-" + operation + "-gpu-lifecycle-observed"
+    if evidence.executor_identity != "native-" + name + "-candidate":
+        return name + "-" + operation + "-executor-identity-mismatch"
+    if evidence.source_digest != binding.stage4_source_revision or
+            evidence.artifact_digest != binding.stage4_binary_sha256 or
+            evidence.execution_proof_digest != binding.stage4_binary_sha256:
+        return name + "-" + operation + "-stage4-identity-mismatch"
+    if evidence.implementation_version != X25519_MLKEM768_IMPLEMENTATION_VERSION or
+            evidence.profile_version != X25519_MLKEM768_PROFILE_VERSION or
+            evidence.batch_size != binding.batch_size or
+            not sha256_lower_hex_valid(evidence.configuration_digest) or
+            not sha256_lower_hex_valid(evidence.input_fixture_digest) or
+            not sha256_lower_hex_valid(evidence.output_digest):
+        return name + "-" + operation + "-public-output-invalid"
+    ""
+
+fn _simd_performance_valid(perf: X25519MlKem768PerformanceAttestation,
+        binding: X25519MlKem768SimdReceiptBinding,
+        configuration_digest: text) -> bool:
+    perf.schema == X25519_MLKEM768_PERFORMANCE_ATTESTATION_SCHEMA and
+    perf.status == X25519MlKem768EvidenceStatus.Pass and
+    perf.reason == "native-full-operation-performance-admitted" and
+    perf.candidate_backend == binding.backend and
+    perf.speedup_milli >= X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI and
+    perf.minimum_speedup_milli == X25519_MLKEM768_SIMD_MINIMUM_SPEEDUP_MILLI and
+    sha256_lower_hex_valid(perf.receipt_sha256) and
+    perf.implementation_version == X25519_MLKEM768_IMPLEMENTATION_VERSION and
+    perf.profile_version == X25519_MLKEM768_PROFILE_VERSION and
+    perf.fixture_id == binding.fixture_id and
+    perf.fixture_manifest_sha256 == binding.fixture_manifest_sha256 and
+    perf.fixture_source_sha256 == binding.fixture_source_sha256 and
+    sha256_lower_hex_valid(perf.workload_configuration_sha256) and
+    perf.backend_configuration_sha256 == configuration_digest and
+    perf.compiler_source_revision == binding.stage4_source_revision and
+    perf.compiler_artifact_sha256 == binding.stage4_binary_sha256 and
+    perf.compiler_provenance_sha256 == binding.stage4_provenance_sha256 and
+    perf.runner_source_sha256 == binding.runner_source_sha256 and
+    perf.runner_artifact_sha256 == binding.runner_artifact_sha256 and
+    perf.qualification_sha256 == binding.measurement_qualification_sha256 and
+    perf.qualified_timing_sha256 == binding.qualified_timing_sha256 and
+    perf.matrix_row_set_sha256 == binding.matrix_row_set_sha256 and
+    perf.scalar_source_receipt_sha256 == binding.scalar_source_receipt_sha256 and
+    perf.candidate_source_receipt_sha256 == binding.candidate_source_receipt_sha256 and
+    perf.scalar_sample_set_sha256 == binding.scalar_sample_set_sha256 and
+    perf.candidate_sample_set_sha256 == binding.candidate_sample_set_sha256 and
+    perf.host_os == binding.host_os and perf.host_arch == binding.host_arch and
+    perf.session_id == binding.session_id and
+    perf.monotonic_clock_id == binding.monotonic_clock_id and
+    perf.crypto_source_sha256 == binding.crypto_source_sha256 and
+    perf.accelerator_source_sha256 == "" and perf.accelerator_artifact_sha256 == "" and
+    perf.accelerator_build_binding_sha256 == "" and perf.batch_size == binding.batch_size
+
+fn x25519_mlkem768_compose_simd_full_operation_receipt(
+        binding: X25519MlKem768SimdReceiptBinding,
+        key_pair: X25519MlKem768KeyPair,
+        encapsulation: X25519MlKem768Encapsulation,
+        decapsulation: X25519MlKem768Decapsulation,
+        performance: X25519MlKem768PerformanceAttestation? = nil
+) -> Result<X25519MlKem768RunReceipt, text>:
+    val name = _simd_name(binding.backend)
+    if not _simd_binding_valid(binding): return Err(name + "-receipt-binding-invalid")
+    val keygen_reason = _simd_evidence_reason(key_pair.evidence, "keygen", binding)
+    if keygen_reason != "": return Err(keygen_reason)
+    val encapsulate_reason = _simd_evidence_reason(encapsulation.evidence, "encapsulate", binding)
+    if encapsulate_reason != "": return Err(encapsulate_reason)
+    val decapsulate_reason = _simd_evidence_reason(decapsulation.evidence, "decapsulate", binding)
+    if decapsulate_reason != "": return Err(decapsulate_reason)
+    if key_pair.client_key_share.len() != X25519_MLKEM768_CLIENT_SHARE_BYTES or
+            key_pair.decapsulation_key.len() != 2400 or key_pair.x25519_private_key.len() != 32 or
+            encapsulation.server_key_share.len() != X25519_MLKEM768_SERVER_SHARE_BYTES or
+            encapsulation.shared_secret.len() != X25519_MLKEM768_SHARED_SECRET_BYTES or
+            decapsulation.shared_secret.len() != X25519_MLKEM768_SHARED_SECRET_BYTES:
+        return Err(name + "-public-output-size-mismatch")
+    if not x25519_mlkem768_constant_time_list_equal(encapsulation.shared_secret, decapsulation.shared_secret):
+        return Err(name + "-roundtrip-secret-mismatch")
+    if key_pair.evidence.configuration_digest != encapsulation.evidence.configuration_digest or
+            key_pair.evidence.configuration_digest != decapsulation.evidence.configuration_digest:
+        return Err(name + "-configuration-digest-mismatch")
+    val keygen_digest = sha256_text(key_pair.evidence.output_digest)
+    val encapsulate_digest = sha256_text(encapsulation.evidence.output_digest)
+    val decapsulate_digest = sha256_text(decapsulation.evidence.output_digest)
+    if keygen_digest != binding.expected_keygen_digest or
+            encapsulate_digest != binding.expected_encapsulate_digest or
+            decapsulate_digest != binding.expected_decapsulate_digest:
+        return Err(name + "-absolute-oracle-mismatch")
+    if performance == nil or not _simd_performance_valid(performance.unwrap(), binding,
+            key_pair.evidence.configuration_digest):
+        return Err(name + "-performance-attestation-invalid")
+    var rvv_vlen: i64 = 0
+    if binding.backend == X25519MlKem768EvidenceBackend.Rvv:
+        rvv_vlen = key_pair.evidence.observed_rvv_vlen_bits
+    Ok(X25519MlKem768RunReceipt(
+        schema: "x25519mlkem768-evidence-v1", status: X25519MlKem768EvidenceStatus.Pass,
+        reason: "native-" + name + "-full-operation-performance-admitted",
+        scope: X25519MlKem768EvidenceScope.FullOperation, requested_backend: binding.backend,
+        selected_backend: Some(binding.backend), mode: X25519MlKem768EvidenceMode.Native,
+        emulated: false, promotion_eligible: true,
+        implementation_version: X25519_MLKEM768_IMPLEMENTATION_VERSION,
+        profile_version: X25519_MLKEM768_PROFILE_VERSION, fixture_id: binding.fixture_id,
+        fixture_manifest_sha256: binding.fixture_manifest_sha256,
+        fixture_source_sha256: binding.fixture_source_sha256,
+        pinned_workload_sha256: binding.pinned_workload_sha256,
+        runner_source_sha256: binding.runner_source_sha256, batch_size: binding.batch_size,
+        client_share_bytes: key_pair.client_key_share.len(),
+        server_share_bytes: encapsulation.server_key_share.len(),
+        shared_secret_bytes: encapsulation.shared_secret.len(),
+        keygen_output_digest: keygen_digest, encapsulate_output_digest: encapsulate_digest,
+        decapsulate_output_digest: decapsulate_digest, scalar_roundtrip_match: true,
+        fallback_used: false, absolute_oracle_match: true,
+        simd_chunk_hits: key_pair.evidence.simd_chunk_hits + encapsulation.evidence.simd_chunk_hits + decapsulation.evidence.simd_chunk_hits,
+        observed_rvv_vlen_bits: rvv_vlen, kernel_invocations: 0, compiled: false,
+        submitted: false, fence_completed: false, device_readback: false,
+        artifact_sha256: binding.stage4_binary_sha256, device_identity: performance.unwrap().backend_identity))
+
+export X25519MlKem768SimdReceiptBinding
+export x25519_mlkem768_compose_simd_full_operation_receipt

@@ -17,6 +17,9 @@ use lib.common.crypto.x25519_mlkem768.performance_attestation.{
 use lib.common.crypto.x25519_mlkem768.avx2_full_operation_receipt.{
     X25519MlKem768Avx2ReceiptBinding,
     x25519_mlkem768_compose_avx2_full_operation_receipt}
+use lib.common.crypto.x25519_mlkem768.simd_full_operation_receipt.{
+    X25519MlKem768SimdReceiptBinding,
+    x25519_mlkem768_compose_simd_full_operation_receipt}
 
 val _AVX2_SOURCE = "a" * 64
 val _AVX2_BINARY = "b" * 64
@@ -153,6 +156,77 @@ fn _performance_attestation() -> X25519MlKem768PerformanceAttestation:
         accelerator_build_binding_sha256: "",
         batch_size: 1)
 
+fn _simd_binding(backend: X25519MlKem768EvidenceBackend,
+        keygen_output: text, encapsulate_output: text,
+        decapsulate_output: text) -> X25519MlKem768SimdReceiptBinding:
+    X25519MlKem768SimdReceiptBinding(
+        backend: backend, fixture_id: "x25519mlkem768-v1",
+        fixture_manifest_sha256: "1" * 64, fixture_source_sha256: "2" * 64,
+        pinned_workload_sha256: "3" * 64, runner_source_sha256: "3" * 64,
+        runner_artifact_sha256: _AVX2_RUNNER_ARTIFACT,
+        crypto_source_sha256: _AVX2_CRYPTO_SOURCE,
+        stage4_source_revision: _AVX2_SOURCE, stage4_binary_sha256: _AVX2_BINARY,
+        stage4_provenance_sha256: _AVX2_PROVENANCE,
+        measurement_qualification_sha256: "a" * 64,
+        qualified_timing_sha256: "0" * 64, matrix_row_set_sha256: "b" * 64,
+        scalar_source_receipt_sha256: "c" * 64,
+        candidate_source_receipt_sha256: "d" * 64,
+        scalar_sample_set_sha256: "e" * 64, candidate_sample_set_sha256: "f" * 64,
+        host_os: "linux", host_arch: "native-test", session_id: "generic-simd-test",
+        monotonic_clock_id: "monotonic-raw-nanoseconds",
+        expected_keygen_digest: sha256_text(keygen_output),
+        expected_encapsulate_digest: sha256_text(encapsulate_output),
+        expected_decapsulate_digest: sha256_text(decapsulate_output),
+        rvv_minimum_vlen_bits: 128, batch_size: 1)
+
+fn _generic_roundtrip(backend: X25519MlKem768EvidenceBackend,
+        rvv_vlen_bits: i64) -> (X25519MlKem768KeyPair,
+        X25519MlKem768Encapsulation, X25519MlKem768Decapsulation):
+    val (base_key_pair, base_encapsulation, base_decapsulation) = _roundtrip()
+    var key_pair = base_key_pair
+    var encapsulation = base_encapsulation
+    var decapsulation = base_decapsulation
+    if backend == X25519MlKem768EvidenceBackend.Avx2:
+        key_pair.evidence.requested_backend = X25519MlKem768Backend.Avx2
+        key_pair.evidence.selected_backend = X25519MlKem768Backend.Avx2
+        encapsulation.evidence.requested_backend = X25519MlKem768Backend.Avx2
+        encapsulation.evidence.selected_backend = X25519MlKem768Backend.Avx2
+        decapsulation.evidence.requested_backend = X25519MlKem768Backend.Avx2
+        decapsulation.evidence.selected_backend = X25519MlKem768Backend.Avx2
+    elif backend == X25519MlKem768EvidenceBackend.Neon:
+        key_pair.evidence.requested_backend = X25519MlKem768Backend.Neon
+        key_pair.evidence.selected_backend = X25519MlKem768Backend.Neon
+        encapsulation.evidence.requested_backend = X25519MlKem768Backend.Neon
+        encapsulation.evidence.selected_backend = X25519MlKem768Backend.Neon
+        decapsulation.evidence.requested_backend = X25519MlKem768Backend.Neon
+        decapsulation.evidence.selected_backend = X25519MlKem768Backend.Neon
+    else:
+        key_pair.evidence.requested_backend = X25519MlKem768Backend.Rvv
+        key_pair.evidence.selected_backend = X25519MlKem768Backend.Rvv
+        encapsulation.evidence.requested_backend = X25519MlKem768Backend.Rvv
+        encapsulation.evidence.selected_backend = X25519MlKem768Backend.Rvv
+        decapsulation.evidence.requested_backend = X25519MlKem768Backend.Rvv
+        decapsulation.evidence.selected_backend = X25519MlKem768Backend.Rvv
+    var name = "rvv"
+    if backend == X25519MlKem768EvidenceBackend.Avx2:
+        name = "avx2"
+    elif backend == X25519MlKem768EvidenceBackend.Neon:
+        name = "neon"
+    key_pair.evidence.executor_identity = "native-" + name + "-candidate"
+    encapsulation.evidence.executor_identity = "native-" + name + "-candidate"
+    decapsulation.evidence.executor_identity = "native-" + name + "-candidate"
+    key_pair.evidence.observed_rvv_vlen_bits = rvv_vlen_bits
+    encapsulation.evidence.observed_rvv_vlen_bits = rvv_vlen_bits
+    decapsulation.evidence.observed_rvv_vlen_bits = rvv_vlen_bits
+    (key_pair, encapsulation, decapsulation)
+
+fn _generic_performance(backend: X25519MlKem768EvidenceBackend) -> X25519MlKem768PerformanceAttestation:
+    var performance = _performance_attestation()
+    performance.candidate_backend = backend
+    performance.host_arch = "native-test"
+    performance.session_id = "generic-simd-test"
+    performance
+
 describe "X25519MLKEM768 native AVX2 full-operation receipt":
     it "emits a promotable receipt only with a matching typed performance attestation":
         val (key_pair, encapsulation, decapsulation) = _roundtrip()
@@ -229,3 +303,38 @@ describe "X25519MLKEM768 native AVX2 full-operation receipt":
         val oracle_result = x25519_mlkem768_compose_avx2_full_operation_receipt(
             wrong_oracle, key_pair, encapsulation, decapsulation)
         expect(oracle_result.is_err()).to_be(true)
+
+    it "admits AVX2 NEON and RVV only as matching native Stage-4 SIMD receipts":
+        val backends = [X25519MlKem768EvidenceBackend.Avx2,
+            X25519MlKem768EvidenceBackend.Neon, X25519MlKem768EvidenceBackend.Rvv]
+        var index: i64 = 0
+        while index < backends.len():
+            val backend = backends[index]
+            var vlen: i64 = 0
+            if backend == X25519MlKem768EvidenceBackend.Rvv:
+                vlen = 128
+            val (key_pair, encapsulation, decapsulation) = _generic_roundtrip(backend, vlen)
+            val result = x25519_mlkem768_compose_simd_full_operation_receipt(
+                _simd_binding(backend, key_pair.evidence.output_digest,
+                    encapsulation.evidence.output_digest, decapsulation.evidence.output_digest),
+                key_pair, encapsulation, decapsulation, Some(_generic_performance(backend)))
+            expect(result.is_ok()).to_be(true)
+            index = index + 1
+
+    it "rejects missing SIMD hits and an RVV VLEN below the binding minimum":
+        val (key_pair, encapsulation, decapsulation) = _generic_roundtrip(
+            X25519MlKem768EvidenceBackend.Neon, 0)
+        var no_hits = encapsulation
+        no_hits.evidence.simd_chunk_hits = 0
+        expect(x25519_mlkem768_compose_simd_full_operation_receipt(
+            _simd_binding(X25519MlKem768EvidenceBackend.Neon,
+                key_pair.evidence.output_digest, encapsulation.evidence.output_digest,
+                decapsulation.evidence.output_digest), key_pair, no_hits, decapsulation,
+            Some(_generic_performance(X25519MlKem768EvidenceBackend.Neon))).is_err()).to_be(true)
+        val (rvv_key, rvv_encapsulation, rvv_decapsulation) = _generic_roundtrip(
+            X25519MlKem768EvidenceBackend.Rvv, 64)
+        expect(x25519_mlkem768_compose_simd_full_operation_receipt(
+            _simd_binding(X25519MlKem768EvidenceBackend.Rvv,
+                rvv_key.evidence.output_digest, rvv_encapsulation.evidence.output_digest,
+                rvv_decapsulation.evidence.output_digest), rvv_key, rvv_encapsulation,
+            rvv_decapsulation, Some(_generic_performance(X25519MlKem768EvidenceBackend.Rvv))).is_err()).to_be(true)
