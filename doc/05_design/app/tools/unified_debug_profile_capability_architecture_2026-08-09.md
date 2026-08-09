@@ -123,6 +123,37 @@ a truthful runtime absence, never an unimplemented hole.
 > `session_core.spl`: `step_budget`, `entry_pc`, `log_cap`, `profile: bool` —
 > and profiling must be **armed at attach**, since GPU PROF-1 cannot be enabled
 > after upload.
+>
+> **Landed contract details this document does not specify** (verified by P3
+> while adapting the host DAP session; every implementer must match them, and
+> §2's signatures above are silent on all five):
+> - `set_breakpoint` returns **false when the breakpoint is already present** —
+>   it is not idempotent-true.
+> - `breakpoints()` returns **ascending** order.
+> - `read_mem` returns an **empty** array on overrun, not a short buffer.
+> - `cap_level_name` is **lowercase** (`"native"`, not `"Native"`).
+> - `PROFILE_ABSENT = -1` is the only honest "not measured" value. Reporting `0`
+>   is a contract violation — P7 found and fixed exactly that in a landed
+>   `profile_end`.
+>
+> **A third value-semantics trap, beyond the two above:** a capability handle
+> **stops aliasing its target unless the acquisition is a function's TAIL
+> expression**. Bind it to a local, or inline it into a constructor, and the
+> handle half-dies — `step`/`resume` keep working via the target's class-typed
+> sub-object while `set_breakpoint` and `profile_begin` are silently discarded,
+> so it reads as "this backend cannot profile". Isolated by P10 with a 12-shape
+> probe matrix; the container is irrelevant, only syntactic position matters,
+> and write-back does not fix it. Filed as
+> `doc/08_tracking/bug/ref_debug_profiler_handle_stops_aliasing_unless_tail_expression_2026-08-09.md`.
+> Holding a **class-typed** session field directly does NOT trigger it (P3
+> verified); driving `launch()` without binding a handle also avoids it (P6).
+>
+> Taken together these three — pairing diverges copies, `fn` discards mutation,
+> acquisition position decides aliasing — are one hazard, not three: **assume any
+> handle you hold is a copy until proven otherwise.** The `.from()` sugar is
+> meant to hide this, but it is landed and INERT (`desugar_traits` has no caller
+> in any compile path, and the deployed seed predates the parser change), so
+> every implementation today must handle it manually.
 
 **Group definition** reuses the existing `with` clause (already parsed on
 `struct X with Mixin:`; the trait-header production is extended to accept
