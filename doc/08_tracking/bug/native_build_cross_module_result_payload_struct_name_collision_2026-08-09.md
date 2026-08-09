@@ -1,4 +1,4 @@
-# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th layer RESOLVED, 5th layer RESOLVED 2026-08-09, 6th layer surfaced (still open)
+# `native-build` MIR lowering: cross-module `Result<T, E>` payload struct-name recovery collides/misses across modules — 4th/5th layer RESOLVED, 6th/7th layer surfaced (still open, root cause narrowed to a SymbolTable id-divergence between HIR- and MIR-lowering-time views)
 
 ## Summary
 
@@ -351,3 +351,147 @@ Next step for a follow-up session: bisect the full closure's actual
 `Result<T, E>` instantiation graph (not another hand-written repro) to find
 what specifically defeats the layer-4 fix at scale — likely a global-map
 key collision or an ordering case the small repros do not exercise.
+
+## 7th layer (this session, 2026-08-09): the fast repro does NOT actually
+pass clean — corrects the 6th-layer note above
+
+The 6th-layer note above states "this session's isolated regression repros
+(the exact 2-file cross-module case from layer 4's own 'Reproduction'
+section) still pass clean." Re-running that EXACT repro shape this session
+(fresh 2-file `fh_mod.spl`/`main.spl`, plain class, no traits, hyphen-free
+scratch path to avoid the unrelated `_hir_symbol_owner_module` vs.
+`hir_module_logical_name_from_path` sanitization confound) reproduces
+`unresolved method call: write_text` / `close` — it does NOT pass clean.
+This session's task began from a hypothesis (inline `with Trait:` shape is
+the missing piece) that is also FALSIFIED: a plain class with no trait
+mixin reproduces the identical failure, so traits are not the
+differentiator.
+
+Root-caused via targeted `eprint` instrumentation (added, and fully reverted
+before landing — no functional change shipped this session):
+
+1. `FileHandle.open(...)`'s static call resolves fine end to end
+   (`enum_match_expr_type`'s static-receiver fallback works).
+2. Its declared return type correctly lowers to `HirTypeKind.Result(ok_type,
+   err_type)` (layer-4's mechanism-#1 fix works).
+3. But `ok_type`'s `HirTypeKind.Named(SymbolId)` — built via
+   `declared_imported_surface_callable_type` ->
+   `imported_surface_type_projected` -> `self.lower_type` ->
+   `lower_named_kind("FileHandle", ...)` — resolves to the WRONG symbol at
+   MIR-lowering time: instrumentation showed `self.symbols.get_symbol_raw(
+   rpt_sym.id)` (in `switch_operators_calls.spl`, MIR layer) returning a
+   `Method` symbol (`FileHandle::close`) at the exact numeric id that, when
+   checked LIVE during HIR lowering of the SAME module moments earlier (6
+   repeated `lower_named_kind("FileHandle")` calls, all agreeing), correctly
+   named the `FileHandle` Class.
+4. This is a **snapshot-timing / instance-divergence** bug, not a simple
+   lookup-priority bug: `self.symbols` as mutated live during HIR lowering
+   and `HirModule.symbols` as read at the START of MIR lowering
+   (`_MirLowering/module_lowering.spl:863`, `self.symbols = module.symbols`)
+   disagree about what the SAME numeric id names, for the SAME module.
+   Printing `module.symbols.get_symbol_raw(1)` at MIR's `lower_module` entry
+   for both closure modules confirmed each module's SymbolTable carries its
+   OWN independent id sequence (expected — module-scoped tables), but
+   `main.spl`'s (the importing module's) own sequence differs between the
+   live HIR-time view and the MIR-time view of what should be the identical
+   object (`SymbolTable` is a `class`, i.e. reference type, in this
+   language, so this is not ordinary value-copy divergence).
+5. Three targeted fixes were written and verified NOT to change the
+   outcome (all reverted, not landed):
+   - Extending `SymbolTable.define()`'s existing type-symbol first-write-wins
+     check to also consult the global `exact_symbols` index (not just the
+     scope-local `scope.symbols` map).
+   - Extending that same global dedup to qualified (`"::"`-containing)
+     Method/Function names, matching `register_imported_type_methods`'s own
+     (apparently equally scope-chain-blind) `lookup_or_invalid(...)
+     .is_valid()` idempotency guard.
+   - Making `lower_named_kind`'s type-position lookup prefer the
+     kind-checked global `lookup_exact_type` over the scope-walking
+     `lookup_or_invalid`.
+
+   All three measurably stabilized the LIVE HIR-lowering-time view (6/6
+   consistent, verified via instrumentation) but the final `HirModule.
+   symbols` MIR consumes still diverged — meaning the real defect is
+   upstream of `SymbolTable.define()`'s dedup logic: either (a) a
+   surface/import "prescan" pass and the "real" HIR-lowering pass are
+   separate `HirLowering`/`SymbolTable` instances, and the real pass
+   independently re-derives its own numbering from scratch, discarding
+   whatever my instrumentation observed on the (possibly throwaway)
+   instance; or (b) `HirModule.symbols` is captured (in the `HirModule(...)`
+   constructor — two call sites in `module_lowering.spl`, an early
+   bootstrap-mode return around line 2247 and the normal-path construction
+   around line 2375) at a point that PRECEDES a later, repeat invocation of
+   `register_imported_type_methods` whose id-minting still lands in the
+   live object. Distinguishing (a) from (b) needs tracing exact call
+   ordering against `HirModule` construction, which this session did not
+   have remaining budget to complete.
+
+**Root question still open**: WHY does `register_imported_type_methods` run
+more than once for the same imported type? `register_imported_symbol`'s
+composite branch calls it unconditionally regardless of `already_bound`
+(the guard only gates the `rename_symbol`/`bind_qualified_type` calls, not
+the `register_imported_type_methods` call) — by design, per the comment at
+`module_lowering.spl:786-791` about directory-sibling ENUM prebinding
+needing methods registered "on both paths". Whether an analogous
+directory-sibling prebinding path exists for CLASSES, and whether its
+idempotency assumption is what actually breaks under this repro's plain
+`use fh_mod.FileHandle` 2-module shape (no directory-sibling relationship at
+all in this minimal repro — worth checking whether that mechanism fires
+even so, or whether a THIRD, distinct trigger is responsible), is the
+concrete next thing to check.
+
+**Fast repro** (cross-module, no traits, seconds not 18 minutes — use a
+source directory with NO hyphens in its path to avoid the unrelated
+`_hir_symbol_owner_module`/`hir_module_logical_name_from_path` sanitization
+mismatch, which independently produces a DIFFERENT failure — an undefined-
+symbol LINK error rather than "unresolved method call"):
+```
+# fh_mod.spl
+class FileHandle:
+    fd: i64
+    static fn open(path: text) -> Result<FileHandle, text>:
+        Ok(FileHandle(fd: 1))
+    fn write_text(s: text) -> Result<i64, text>:
+        Ok(0)
+    fn close() -> Result<i64, text>:
+        Ok(0)
+
+# main.spl
+use fh_mod.FileHandle
+
+fn main() -> i64:
+    val h = match FileHandle.open("x"):
+        case Ok(hh): hh
+        case Err(e): return 1
+    match h.write_text("hi"):
+        case Ok(_): pass
+        case Err(e): return 1
+    match h.close():
+        case Ok(_): pass
+        case Err(e): return 1
+    print("ok")
+    return 0
+```
+
+**AOT `rt_io_file_*` stub verdict: still UNDETERMINED.** This session did not
+re-run the full 18-minute `rt_io_file_roundtrip` closure — the fast repro
+above still fails identically to the full closure's own failure signature,
+so a full-closure run would only reconfirm the same still-open blocker at
+much higher cost with no new information.
+
+### Next steps (supersedes the 6th layer's "bisect the full closure" note —
+the failure IS already isolated to the fast repro above, no further
+bisection needed; what remains is the id-divergence root cause, not scale)
+
+1. Determine whether HIR lowering runs a separate, discarded "prescan"
+   `HirLowering`/`SymbolTable` instance distinct from the one whose state
+   becomes `HirModule.symbols` — or whether `HirModule.symbols` is captured
+   before a later repeat `register_imported_type_methods` invocation lands.
+2. Find and eliminate (or correctly guard) the repeat invocation of
+   `register_imported_type_methods` for the same imported type within one
+   module's lowering — check whether the directory-sibling-prebinding path
+   documented for enums (`module_lowering.spl:786-791`) also applies to
+   classes and is what's firing here.
+3. Once the true duplicate-invocation source is fixed at its root, re-run
+   the fast repro above, then the full 18-minute `rt_io_file_roundtrip`
+   closure, to finally get the `rt_io_file_*` AOT stub/no-stub verdict.
