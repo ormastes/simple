@@ -1384,6 +1384,11 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
  * Platform Detection
  * ================================================================ */
 
+/* The core-C capsule already gets this compatibility ABI from
+ * runtime_legacy_core.c.  Keep one owner when runtime_thread.c is added to
+ * that archive; regular hosted runtime builds still use this implementation.
+ */
+#if !defined(SIMPLE_CORE_C_STANDALONE)
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)
@@ -1404,6 +1409,7 @@ int64_t spl_thread_cpu_count(void) {
     return (int64_t)sysinfo.dwNumberOfProcessors;
 #endif
 }
+#endif
 
 /* ================================================================
  * Thread Pool Worker Spawn Helper

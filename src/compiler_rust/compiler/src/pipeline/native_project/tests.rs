@@ -2064,6 +2064,20 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("spl_thread_cpu_count"),
         "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
+    let nm = std::process::Command::new("nm")
+        .args(["-g", "--defined-only"])
+        .arg(&core_c)
+        .output()
+        .expect("nm must inspect the core-c runtime archive");
+    assert!(nm.status.success(), "nm failed to inspect the core-c runtime archive");
+    let cpu_count_owners = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter(|line| line.split_whitespace().last() == Some("spl_thread_cpu_count"))
+        .count();
+    assert_eq!(
+        cpu_count_owners, 1,
+        "core-c runtime archive must have exactly one spl_thread_cpu_count owner"
+    );
     for symbol in [
         "rt_thread_spawn_isolated",
         "rt_thread_spawn_isolated_with_args",
