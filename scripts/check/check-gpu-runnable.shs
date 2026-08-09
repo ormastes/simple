@@ -3,10 +3,22 @@
 #
 # Runs src/app/gpu_lint/gpu_runnable_scan.spl in --summary WARNING mode:
 # it reports blocked names / blocked roots but ALWAYS exits 0, so it never
-# fails a commit yet. To make it a hard CI gate later, add --strict to the
-# scanner invocation below (the scanner then exits 1 when any ROOT is
-# BLOCKED) and propagate scan_rc instead of forcing exit 0.
+# fails a commit yet.
+#
+# DEFAULT remains warning-only (never fails the commit) -- callers that
+# already depend on this always passing must not break. Pass `--strict` as
+# an argument, or set GPU_RUNNABLE_STRICT=1, to opt in to real gating: the
+# scanner then exits 1 when any ROOT is BLOCKED, and this wrapper propagates
+# that exit code instead of forcing 0.
 set -eu
+
+strict=0
+for _a in "$@"; do
+    case "$_a" in
+        --strict) strict=1 ;;
+    esac
+done
+[ "${GPU_RUNNABLE_STRICT:-0}" = "1" ] && strict=1
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 SIMPLE_BINARY=${SIMPLE_BINARY:-"$repo_root/bin/simple"}
@@ -34,10 +46,14 @@ run_with_timeout() {
     fi
 }
 
+scanner_args="--summary --report=$report_path"
+[ "$strict" -eq 1 ] && scanner_args="$scanner_args --strict"
+
 set +e
+# shellcheck disable=SC2086
 scan_output=$(cd "$repo_root" && run_with_timeout env SIMPLE_TIMEOUT_SECONDS=3600 \
     "$SIMPLE_BINARY" run src/app/gpu_lint/gpu_runnable_scan.spl \
-    --summary "--report=$report_path" 2>&1)
+    $scanner_args 2>&1)
 scan_rc=$?
 set -e
 
@@ -49,6 +65,12 @@ echo "gpu_runnable_scan_rc=$scan_rc"
 if [ "$scan_rc" -ne 0 ]; then
     echo "warning=gpu_runnable_scan_failed_rc_$scan_rc"
 fi
-# WARNING MODE: never fail the commit (see header for --strict upgrade path).
+
+if [ "$strict" -eq 1 ]; then
+    echo "gpu_runnable_gate=strict"
+    exit "$scan_rc"
+fi
+
+# WARNING MODE (default): never fail the commit. Pass --strict to gate for real.
 echo "gpu_runnable_gate=warn_only_pass"
 exit 0
