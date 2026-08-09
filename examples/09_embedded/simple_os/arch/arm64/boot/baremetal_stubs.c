@@ -2014,13 +2014,22 @@ RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) {
     int64_t count = (int64_t)n;
     if (count < 0) count = 0;
     if (count > 0x100000) count = 0x100000;
-    RuntimeValue result = rt_array_new((RuntimeValue)count);
-    if (!IS_HEAP(result)) return result;
-    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(result);
-    if (!array || array->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    /* Do not route the raw count through rt_array_new: its compatibility
+     * decoder treats raw multiples of eight as tagged integers. A 92,288-pixel
+     * repeat was therefore allocated at one-eighth capacity and overwrote the
+     * following dirty-tile array. Allocate the exact MIR raw count here. */
+    uint64_t capacity = count > 0 ? (uint64_t)count : 1ULL;
+    size_t bytes = sizeof(RuntimeArray) + (size_t)capacity * sizeof(RuntimeValue);
+    _heap_array_new_count++;
+    RuntimeArray *array = (RuntimeArray *)malloc(bytes);
+    if (!array) return NIL_VALUE;
+    array->hdr.type = HEAP_ARRAY;
+    array->hdr.size = (uint32_t)bytes;
     array->len = (uint64_t)count;
+    array->cap = capacity;
+    array->items = (RuntimeValue *)(array + 1);
     for (int64_t i = 0; i < count; i++) array->items[i] = v;
-    return result;
+    return ENCODE_PTR(array);
 }
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return ENCODE_INT(-1); }
