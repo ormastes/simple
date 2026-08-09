@@ -1548,8 +1548,13 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr_rv, R
 
 RuntimeValue rt_array_new(RuntimeValue cap_val) {
     int64_t cap = (int64_t)simpleos_raw_or_encoded_int(cap_val);
-    if (cap <= 0) cap = 64;
-    if (cap < 64) cap = 64;
+    /* Match the proven x86_64 freestanding growth contract. A 64-slot floor
+     * made every tiny Draw IR/style scratch array reserve 512 bytes on the
+     * non-reclaiming ARM heap; a first-frame + 68-frame evidence run consumed
+     * the full 160 MiB. Sixteen retains amortized growth while cutting empty
+     * array footprint by 4x without changing logical length or contents. */
+    if (cap <= 0) cap = 16;
+    if (cap < 16) cap = 16;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
