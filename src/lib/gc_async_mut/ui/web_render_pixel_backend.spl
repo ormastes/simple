@@ -31,6 +31,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend,
     simple_web_render_html_to_readback_result_with_engine2d_backend,
     simple_web_render_html_to_readback_result_with_engine2d_backend_at_time,
+    simple_web_render_html_to_pixels_with_engine2d_backend_at_time,
     simple_web_render_url_to_pixels,
     simple_web_resolved_engine2d_backend_name
 }
@@ -274,12 +275,12 @@ impl WebRenderPixelArtifactCache:
     fn hits() -> i32:
         self.pixel_cache.hits
 
-    # Render/bind the pixel buffer BEFORE producing WebRenderArtifact metadata.
-    # The first static call is a cache miss and returns the producer's live
-    # handle directly; the subsequent metadata request is a cache hit but never
-    # owns that handle on SimpleOS. Animated content is rendered at the same
-    # elapsed timestamp used by request_to_pixel_artifact_at_time.
-    fn prepare_pixels_for_request_at_time(
+    # Produce the live pixel array only AFTER all large WebRenderArtifact
+    # metadata returns have completed. Native freestanding aggregate lowering
+    # can overwrite an array referenced by that metadata path even when the
+    # final SimpleOS artifact payload is empty. This direct renderer has no
+    # subsequent artifact boundary; WM consumes/checksums it immediately.
+    fn render_pixels_after_metadata_at_time(
         req: WebRenderRequest, content_revision: i64, now_ms: i64
     ) -> [u32]:
         if req.viewport_w != self.width or req.viewport_h != self.height:
@@ -288,32 +289,21 @@ impl WebRenderPixelArtifactCache:
             return []
         val full_html = web_render_full_html(req)
         if now_ms < 0:
-            val rendered = self.pixel_cache.result_for_html(
-                full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_UNTIMED_STATIC,
-                content_revision
-            )
-            return rendered.readback.pixels
-        if self.animation_revision != content_revision:
-            self.animation_revision = content_revision
-            self.animation_epoch_ms = now_ms
-            self.animation_end_ms = simple_web_layout_animation_end_ms(
-                full_html, req.viewport_w
+            return simple_web_render_html_to_pixels_with_engine2d_backend(
+                full_html, req.viewport_w, req.viewport_h, self.backend_name
             )
         if self.animation_end_ms == -1:
-            val rendered = self.pixel_cache.result_for_html(
-                full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_UNTIMED_STATIC,
-                content_revision
+            return simple_web_render_html_to_pixels_with_engine2d_backend(
+                full_html, req.viewport_w, req.viewport_h, self.backend_name
             )
-            return rendered.readback.pixels
         val elapsed = if now_ms > self.animation_epoch_ms:
             now_ms - self.animation_epoch_ms
         else:
             0
-        val rendered = simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(
+        simple_web_render_html_to_pixels_with_engine2d_backend_at_time(
             full_html, req.viewport_w, req.viewport_h,
             self.backend_name, elapsed
         )
-        rendered.readback.pixels
 
     fn stores() -> i32:
         self.pixel_cache.stores
