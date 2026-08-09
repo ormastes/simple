@@ -5,11 +5,14 @@ Status: **STILL UNVERIFIED (2026-08-09)** — not resolved, and not disproven
 either. Rank 2 fix + Rank 4 probe remain landed-but-unexercised. A dedicated
 instrumented full-bootstrap campaign on 2026-08-09 (three runs) got **closer
 than any previous attempt** — Stage 2 now builds cleanly, 803/803 files, and
-Stage 3 self-host was reached and running with **no SIGILL and no
-`field access on nil receiver`** in its log — but the campaign did not run to a
-Stage-3 verdict within the session's budget. **No run has yet executed this
-bug's fault site**, so its Rank-1..5 shortlist is still neither confirmed nor
-refuted. See the 2026-08-09 section below.
+Stage 3 self-host ran to a **verdict for the first time** and failed closed at
+phase 3 on a *different*, newly-identified blocker (blocker 9: implicit lambda
+placeholders `_`/`_1` unsupported in pure-Simple HIR lowering) with **no SIGILL,
+no `field access on nil receiver`, no exit 132 anywhere in the run**. That is
+weak evidence this bug may already be gone, but not proof: phase 3 aborts before
+the MIR lowering where this crash lives, so **the fault site has still never
+executed** and the Rank-1..5 shortlist is neither confirmed nor refuted. See the
+2026-08-09 section below.
 Area: bootstrap / stage-3 self-host / 50.mir lowering
 
 ## 2026-08-09 — closest approach yet; Stage 2 clean, Stage 3 reached, verdict still open
@@ -80,19 +83,59 @@ Stage 3 self-host started and was progressing, its log carrying only benign
 [hir-field-type] struct=BackendError field=span  actual=2589120870 ...
 ```
 
+### Blocker 9 (run 3, Stage 3) — implicit lambda placeholders `_` / `_1` unsupported in pure-Simple HIR lowering
+
+Run 3's Stage 3 ran to a **verdict**, and it is **not this bug**. It failed
+closed at phase 3 with a clean diagnosis, no crash:
+
+```
+[collect-all] 0.0 module(s) poisoned, 8 error(s) collected across 562 source(s) in phase 3 (HIR lowering).
+[collect-all]   poisoned: src/compiler/70.backend/backend/lean_backend.spl
+[collect-all]   poisoned: src/compiler/70.backend/backend/cuda_type_mapper.spl
+[ERROR] phase 3 FAILED
+error: in-process native-build: HIR lowering error in .../lean_backend.spl: unresolved name: _
+error: in-process native-build: HIR lowering error in .../cuda_type_mapper.spl: unresolved name: _1
+```
+
 **Critically: no `runtime error: field access on nil receiver`, no SIGILL, no
-exit 132** had appeared in Stage 3 at the point the session's budget expired.
-That is materially further than every prior attempt, all of which died before
-Stage 3 began. It is **not** yet grounds to close this bug — Stage 3 had not
-completed, and this bug's crash historically occurs deep in a 32,534-line log —
-but it removes the last recorded blocker in front of the fault site.
+exit 132 — anywhere in the run.** Stage 3 processed all 562 sources and stopped
+on a diagnosed feature gap, exit 1.
+
+The offending construct is the **implicit lambda-parameter shorthand**:
+
+| file:line | expression |
+|---|---|
+| `cuda_type_mapper.spl:159` | `elements.enumerate().map("{self.map_type(_1.1)} _{_1.0}")` |
+| `cuda_type_mapper.spl:177`, `:187` | `params.enumerate().map("{self.map_type(_1.1)} p{_1.0}")` |
+| `lean_backend.spl:136` | `params.map("({_.0} : {_.1})")` |
+| `lean_backend.spl:205` | `params.map(_.0)` |
+| `lean_backend.spl:390` | `params.map(_.1)` |
+
+`_` / `_1` as implicit lambda parameters are accepted by the **Rust seed** —
+which is why Stage 2 (seed-compiled) builds all 803 files green — but the
+**pure-Simple HIR lowering** in `src/compiler/20.hir` does not bind them, so it
+reports `unresolved name: _`. This is a genuine seed-vs-pure-Simple feature gap,
+not a miscompile, and it is the current Stage-3 blocker. It needs either
+implicit-placeholder support in pure-Simple HIR lowering or explicit lambda
+parameters at these 6 sites; it was **not** fixed here because it is a language
+feature gap rather than a one-line defect, and blind-patching the call sites
+would hide the gap rather than close it. It deserves its own bug entry.
+
+### Consequence for THIS bug
+
+Nine blockers have now been logged in front of this SIGILL, and the fault site
+has **still** never executed. The run that gets furthest — run 3 — shows Stage 3
+failing *closed and cleanly*, with no nil-receiver fault of any kind. That is
+weak evidence that this bug may already be gone (the Rank 2 fix did land), but
+it is **not proof**: phase 3 aborts before the MIR lowering where this crash
+lives, so the code path is still unexecuted. Status stays **UNVERIFIED**.
 
 ### What the next session should do (short and concrete)
 
-Re-run exactly run 3's recipe from a **clean `origin/main` checkout** and let
-Stage 3 run to completion, then read the verdict:
+Clear blocker 9 first, then re-run run 3's recipe from a **clean `origin/main`
+checkout** and read the verdict:
 
-- Stage 3 completes → **this bug is RESOLVED**; record the log size + exit code.
+- Stage 3 completes → **this bug is RESOLVED**; record log size + exit code.
 - Stage 3 dies with `field access on nil receiver` / exit 132 → this bug is
   **finally reproduced**, and the Rank-1..5 shortlist below becomes actionable
   for the first time. Keep `SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1` set: this
