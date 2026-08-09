@@ -100,10 +100,9 @@ only reached the seed (`bin/simple run` = seed JIT;
 is now a `run`-script driver over the frontend interpreter, as anticipated here.
 S1 is unblocked.
 
-**S3 — seed HIR carries the kind.** Stop hardcoding at
-`module_pass.rs:548` and `node_exec.rs:438`; propagate
-`StructDef/ClassDef::is_value_type` from `types_def/mod.rs:109/232`. Pure
-plumbing, no behaviour change on its own — it only unblocks S4.
+**S3 — seed HIR carries the kind. DONE 2026-08-09 — see §7.** The loss point
+named below was WRONG; §7a has the corrected one. Pure plumbing, no behaviour
+change on its own — it only unblocks S4 and S5.
 
 **S4 — seed value representation (the real cost).** Class instances need an
 identity cell rather than `Arc<HashMap>` COW: either a store handle (mirroring
@@ -252,3 +251,129 @@ pure-Simple column while leaving A, C, D, E at REF and J at VAL. Nothing here
 justifies touching a `TODO(class-identity-contract)` marker — those pin SEED
 behaviour and no seed behaviour changed in this pass. This lane delivered a
 measurement capability and a baseline; it changed no compiler semantics.
+
+## 7. S3 result — the seed now carries the kind (measured 2026-08-09)
+
+### 7a. §1a's loss point was wrong; here is the real one
+
+§1a named `hir/lower/module_lowering/module_pass.rs:548` and
+`interpreter/node_exec.rs:438` / `:520` as the places that "hardcode" the kind
+and discard the parser's value. **All three are correct as written**, and
+changing any of them would have introduced a defect rather than fixed one:
+
+| site | what it actually is | correct value |
+|---|---|---|
+| `module_pass.rs:548` | synthesizes a `ClassDef` for an **`actor`** declaration | `false` — actors are message-passing identity types |
+| `node_exec.rs:438` | AST-interpreter registering a `Node::Struct(StructDef)` | `true` — this arm only ever sees `struct` |
+| `node_exec.rs:520` | AST-interpreter synthesizing a **newtype** wrapper | `false` |
+
+`Node::Struct(StructDef)` and `Node::Class(ClassDef)` are separate AST variants
+(`parser/src/ast/nodes/core.rs:18,20`), so nothing in the interpreter path ever
+had to guess. The parser was already right at
+`parser/src/types_def/mod.rs:109` (`struct … with Mixin` routed through
+`ClassDef` but kept `is_value_type: true`) and `:232` (`class`).
+
+**The actual loss point is `hir/lower/type_registration.rs`.** `register_class`
+and `register_struct` BOTH end in `HirType::Struct { … }` — there is no
+`HirType::Class` in the seed's HIR at all — and neither function recorded which
+declaration it came from. That, not the interpreter, is where the kind died and
+why MIR/codegen had nothing to branch on.
+
+§1a's other claim also no longer holds: **`is_value_type` is no longer read
+zero times.** `interpreter_call/core/arg_binding.rs:122,428` and
+`interpreter_call/core/function_exec.rs:953` (`is_value_type_struct`) read it
+today. That is the positive control explaining why the seed interpreter gets
+case J (struct parameter binding) right while the seed JIT gets it wrong.
+
+### 7b. What S3 landed
+
+A side table carrying the declaration kind, deliberately NOT a change to
+`HirType` (that would touch every `HirType::Struct` match site in the seed):
+
+- `hir/types/module.rs` — `HirModule::type_value_kinds: HashMap<String, bool>`
+  plus `type_is_value_kind(name) -> Option<bool>`.
+- `hir/lower/type_registration.rs` — `register_struct` records `true` (before
+  the `@packed` bitfield early return, so a packed struct is not left
+  kindless); `register_class` records `c.is_value_type` (NOT a constant `false`
+  — a `struct … with Mixin` arrives through this function as a value type).
+- `mir/function.rs` — `MirModule::type_value_kinds` + `type_is_value_kind`.
+- `mir/lower/lowering_core.rs` — copies the table HIR → MIR alongside
+  `local_globals`.
+
+**`None` means UNKNOWN, never "value type".** Builtins, imported-but-unlowered
+aggregates and synthesized pseudo-structs get no entry, and every consumer must
+make `None` a no-op. A `None`-defaults-to-true consumer would start copying
+identity types and would convert the class defect into its struct sibling —
+precisely the trap §4 exists to avoid.
+
+Mirrors `class_type_names` in the pure-Simple lowering
+(`src/compiler/50.mir/mir_lowering_types.spl:85`).
+
+### 7c. Oracle and sabotage test
+
+`src/compiler_rust/compiler/tests/class_identity_kind_propagation.rs`, 4 tests:
+struct/class distinct in HIR, absent name reads `None`, kind survives MIR
+lowering, actor is an identity type.
+
+Sabotage cycle run in full (isolated worktree, `cargo test --profile
+bootstrap`): **green 4/4 → replace `c.is_value_type` with a constant `true` in
+`register_class` → 3/4 FAILED → restore → green 4/4.** The one test that stayed
+green under sabotage is the `None`-means-unknown test, which does not depend on
+that line. The oracle measures.
+
+### 7d. A–K matrix: unchanged, as designed
+
+S3 is pure plumbing, so the corpus MUST read identically before and after. It
+does — 11/11 cases on both seed engines, before and after, via
+`scripts/check/check-class-identity-seed-matrix.shs` (new; the seed-only fast
+lane, since the three-engine matrix's pure-Simple column costs tens of minutes
+per run and S3/S4/S5 change only the seed).
+
+| case | seedJIT before → after | seedINTERP before → after |
+|---|---|---|
+| A class in trait field | REF → REF | COPY(100) → COPY(100) |
+| B class in optional field | *SIGILL, then* `runtime error: field access on nil receiver` → same | COPY(110) → COPY(110) |
+| C class in array elem | REF → REF | COPY(130) → COPY(130) |
+| D class param → field | REF → REF | COPY(140) → COPY(140) |
+| E class returned | REF → REF | COPY(90) → COPY(90) |
+| F struct literal field init | ALIAS(151) → ALIAS(151) | VAL → VAL |
+| G struct local binding | ALIAS(11) → ALIAS(11) | VAL → VAL |
+| H struct field store | ALIAS(21) → ALIAS(21) | VAL → VAL |
+| I struct returned | ALIAS(31) → ALIAS(31) | VAL → VAL |
+| J struct param binding | ALIAS(99) → ALIAS(99) | VAL → VAL |
+| K struct method returned | ALIAS(71) → ALIAS(71) | VAL → VAL |
+
+Provenance: both columns come from a seed built in an isolated worktree at
+`HEAD` + the four S3 files. The **deployed `bin/simple` is itself a Rust seed**
+(it prints the bootstrap-seed banner), so this table is SEED-ONLY and makes no
+seed-vs-self-hosted claim; the cross-engine claim lives in §6 and needs the
+pure-Simple driver lane, not this one.
+
+### 7e. S4 and S5 remain blocked — with sharper reasons
+
+**S5 is bigger than §2 assumed.** §2 described S5 as "branch the aggregate
+field-store lowering". There is nothing to branch: **the seed MIR has no
+aggregate-copy operation at all.** A sweep of `src/compiler_rust/**` for
+`struct_copy` / `copy_struct` / `deep_copy` / `StructCopy` finds only
+`runtime/src/value/core.rs:426` `Value::deep_copy`, used by
+`runtime/src/executor.rs` for parallel-executor data, and nothing anywhere in
+`mir/` or `codegen/`. So S5 must FIRST introduce a copy primitive (a
+`MirInst`, its `inst_effects`/`inst_helpers` arms, and a lowering in **both**
+the cranelift and LLVM backends) and only then insert it at the six sites the
+corpus names (F–K: literal field init, local binding, field store, free-function
+return, parameter binding, method return). The kind S3 landed is the input that
+work needs; it is no longer the missing piece.
+
+**S4 is unchanged and still the deep blocker.** `Value::Object { class,
+fields: Arc<HashMap<String, Value>> }` (`compiler/src/value.rs:1190-1193`) has
+no identity cell, and every field read-for-write and store goes through
+`Arc::make_mut` (`interpreter/place.rs:132,177`), i.e. copy-on-write. That COW
+is what makes the seed interpreter's A–E read COPY, and it is also what makes
+its F–K read VAL by accident. Giving classes an identity cell touches the 210
+`Value::Object` sites. `Deref`-based tricks do not rescue it: a shared-mutable
+backing (`RwLock`/`RefCell`) cannot hand out a plain `&HashMap` the way the
+existing sites require.
+
+**Order still matters.** Fixing one seed engine and not the other converts the
+defect into its sibling, so the `draw_ir_v3_native_writer` workaround
+(§4) stays load-bearing until S4 AND S5 both land.

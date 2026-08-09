@@ -1365,6 +1365,12 @@ impl<'a> MirLowerer<'a> {
         // Copy local globals set from HIR to MIR for codegen linkage decisions
         module.local_globals = hir.local_globals.clone();
 
+        // F1/S3 — carry the struct-vs-class declaration kind into MIR so the
+        // backends have something to branch on. Before this, HIR collapsed both
+        // declarations into `HirType::Struct` and MIR/codegen could not tell a
+        // value type from an identity type at all.
+        module.type_value_kinds = hir.type_value_kinds.clone();
+
         // Copy global variables from HIR to MIR
         // IMPORTANT: HIR globals HashMap is used for name resolution and contains:
         // 1. Actual global variables (let/var at module scope)

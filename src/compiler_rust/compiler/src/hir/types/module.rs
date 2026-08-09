@@ -242,6 +242,25 @@ pub struct HirModule {
     /// instantiations are registered.  Consumers (diagnostics, doc-gen) read
     /// this log to surface original names alongside resolved TypeIds.
     pub type_bindings_log: Vec<TypeBinding>,
+    /// Declaration KIND for every named aggregate registered in this module:
+    /// `true` = declared with `struct` (VALUE semantics — assigning it copies),
+    /// `false` = declared with `class`/`actor` (IDENTITY semantics — assigning
+    /// it shares the referent).
+    ///
+    /// F1/S3. Both `register_struct` and `register_class` collapse into the
+    /// same `HirType::Struct` (there is no `HirType::Class`), so the kind the
+    /// parser knew — `ast::ClassDef::is_value_type`, set at
+    /// `parser/src/types_def/mod.rs:109` (struct) and `:232` (class) — was
+    /// discarded the moment HIR lowering ran, leaving MIR and both backends
+    /// with nothing to branch on. This side table is the kind's carrier; it
+    /// mirrors `class_type_names` in the pure-Simple lowering
+    /// (`src/compiler/50.mir/mir_lowering_types.spl:85`).
+    ///
+    /// A name ABSENT from this map is unknown, NOT "value type": builtins,
+    /// imported-but-unlowered aggregates, and synthesized pseudo-structs never
+    /// get an entry. Consumers must treat `None` as "do not change behaviour"
+    /// so a missing entry can never silently convert identity into copy.
+    pub type_value_kinds: HashMap<String, bool>,
 }
 
 impl HirModule {
@@ -279,7 +298,18 @@ impl HirModule {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             type_bindings_log: Vec::new(),
+            type_value_kinds: HashMap::new(),
         }
+    }
+
+    /// Declaration kind of a named aggregate, or `None` when this module never
+    /// registered that name (builtin, imported-but-unlowered, synthesized).
+    ///
+    /// `Some(true)` = `struct` (value semantics), `Some(false)` = `class`/actor
+    /// (identity semantics). Callers MUST make `None` a no-op: see the field
+    /// doc on `type_value_kinds` for why absence is not "value type".
+    pub fn type_is_value_kind(&self, name: &str) -> Option<bool> {
+        self.type_value_kinds.get(name).copied()
     }
 
     /// Get trait info by name

@@ -352,6 +352,14 @@ pub struct MirModule {
     /// slots {0, 2} produced a 2-slot/16-byte blob that dispatch's slot-2
     /// (16-byte-offset) load read one slot past the end of).
     pub vtable_impls: Vec<(crate::hir::TypeId, String, String, Vec<Option<String>>, bool)>,
+    /// F1/S3 — declaration kind per named aggregate, carried through from
+    /// `HirModule::type_value_kinds`. `true` = `struct` (value semantics),
+    /// `false` = `class`/`actor` (identity semantics), ABSENT = unknown.
+    ///
+    /// MIR and the backends previously had no kind to branch on because HIR
+    /// lowering collapsed both declarations into `HirType::Struct`. Absence
+    /// must stay a no-op for every consumer — see the HIR field's doc.
+    pub type_value_kinds: std::collections::HashMap<String, bool>,
 }
 
 impl MirModule {
@@ -370,7 +378,14 @@ impl MirModule {
             local_globals: std::collections::HashSet::new(),
             extern_fn_names: std::collections::HashSet::new(),
             vtable_impls: Vec::new(),
+            type_value_kinds: std::collections::HashMap::new(),
         }
+    }
+
+    /// Declaration kind of a named aggregate, or `None` when the name was never
+    /// registered. Callers MUST treat `None` as "leave behaviour unchanged".
+    pub fn type_is_value_kind(&self, name: &str) -> Option<bool> {
+        self.type_value_kinds.get(name).copied()
     }
 }
 

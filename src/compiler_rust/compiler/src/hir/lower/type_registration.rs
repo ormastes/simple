@@ -49,6 +49,13 @@ impl Lowerer {
         // (`class Font { id, size }`, `Font(bogus: 111, size: 8)`) is a CLASS.
         self.struct_decl_files.insert(c.name.clone(), self.current_file.clone());
 
+        // F1/S3 — carry the declaration KIND the parser knew into HIR. `class`
+        // decls arrive with `is_value_type == false`; a `struct … with Mixin`
+        // is also routed through this function as a ClassDef but keeps
+        // `is_value_type == true` (parser/src/types_def/mod.rs:109), so read
+        // the flag rather than assuming this path means "class".
+        self.module.type_value_kinds.insert(c.name.clone(), c.is_value_type);
+
         // Collect class's own fields
         let mut fields: Vec<_> = c
             .fields
@@ -133,6 +140,10 @@ impl Lowerer {
         // regular struct (dense layout, no bitfield packing).
         let is_packed = s.attributes.iter().any(|a| a.name == "packed");
         let has_bitwidth_fields = s.fields.iter().any(|f| f.bit_width.is_some());
+
+        // F1/S3 — recorded BEFORE the packed-bitfield early return below, so a
+        // `@packed` struct is not silently left kindless.
+        self.module.type_value_kinds.insert(s.name.clone(), true);
 
         if is_packed && has_bitwidth_fields {
             return self.register_packed_struct_as_bitfield(s);
