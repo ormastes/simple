@@ -440,9 +440,16 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
 {
-    if (!IS_HEAP(a) && !IS_HEAP(b)) return NIL_VALUE;
-    RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : (RuntimeString *)0;
-    RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : (RuntimeString *)0;
+    /* Native aggregate/collection projection can expose the concrete
+     * RuntimeString pointer without its heap tag. Text-typed concat must not
+     * silently turn that valid operand into an empty string. */
+    RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) :
+        ((uintptr_t)a > 4096U ? (RuntimeString *)(uintptr_t)a : (RuntimeString *)0);
+    RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) :
+        ((uintptr_t)b > 4096U ? (RuntimeString *)(uintptr_t)b : (RuntimeString *)0);
+    if (sa && sa->hdr.type != HEAP_STRING) sa = (RuntimeString *)0;
+    if (sb && sb->hdr.type != HEAP_STRING) sb = (RuntimeString *)0;
+    if (!sa && !sb) return NIL_VALUE;
     uint32_t la = sa ? sa->len : 0;
     uint32_t lb = sb ? sb->len : 0;
     uint32_t total = la + lb;
