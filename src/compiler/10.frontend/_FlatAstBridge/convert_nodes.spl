@@ -1599,6 +1599,16 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
     # here so it reaches HirParam (declaration_lowering.spl's lower_param)
     # and, from there, MIR function_lowering.spl's by-reference bind.
     val p_muts = decl_get_param_muts(idx)
+    # Per-parameter default-value expr indices (-1 = no default). This bridge
+    # used to hardcode `has_default: false` for EVERY parameter, so resolve.spl's
+    # default-argument fill pass never fired on the flat-AST path. A call that
+    # omitted a trailing default then reached MIR/LLVM with fewer arguments than
+    # the callee has parameters, and the callee read an UNINITIALIZED register or
+    # stack slot for each missing one -- silently yielding garbage (frequently
+    # `true` for a trailing `bool = false`). The interpreter was unaffected
+    # because it binds defaults directly from HirFunction.params, which is why
+    # this only ever showed up under native codegen.
+    val p_defaults = decl_get_param_defaults(idx)
     val span = decl_span_for(idx)
     var params: [Param] = []
     var pi = 0
@@ -1606,12 +1616,14 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         val p_type = if pi < p_types.len(): p_types[pi] else: 0
         val has_t = p_type > 0
         val p_is_mut = pi < p_muts.len() and p_muts[pi] != 0
+        val p_default_idx = if pi < p_defaults.len(): p_defaults[pi] else: -1
+        val p_has_default = p_default_idx >= 0
         params.push(Param(
             name: p_names[pi],
             has_type_: has_t,
             type_: if has_t: convert_flat_type(p_type) else: Type(kind: TypeKind.Infer, span: span),
-            has_default: false,
-            default: Expr(kind: ExprKind.NilLit, span: span),
+            has_default: p_has_default,
+            default: if p_has_default: convert_flat_expr(p_default_idx) else: Expr(kind: ExprKind.NilLit, span: span),
             span: span,
             is_mutable: p_is_mut
         ))

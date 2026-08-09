@@ -309,6 +309,14 @@ var decl_is_value_type: [i64] = []   # 1 = struct (value semantics, copy on bind
 # assign the real value later in a separate call with no preceding push in
 # that same call -- does.
 var decl_param_mut_text: [text] = []
+# Per-parameter default-value expr indices. Uses this same arena-pool pattern
+# (NOT the ast_decl_text_set "PARAM_DEFAULTS" store) because that store never
+# round-trips under arena mode -- see decl_set_param_defaults below. Without a
+# pool that actually persists, the flat bridge could not see `has_default`, the
+# resolve.spl default-argument fill never fired, and a call that omitted a
+# trailing default reached codegen with fewer args than params: the callee then
+# read an UNINITIALIZED register/stack slot for the missing parameter.
+var decl_param_default_text: [text] = []
 var decl_empty_i64: [i64] = []
 var decl_empty_text: [text] = []
 var decl_empty_text_lists: [[text]] = []
@@ -359,6 +367,7 @@ fn decl_push_default_slot(tag: i64, span_id: i64):
     decl_flatten_struct_output.push(0)
     decl_is_value_type.push(1)
     decl_param_mut_text.push("")
+    decl_param_default_text.push("")
 
 fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     if decl_empty_i64 == nil:
@@ -405,6 +414,7 @@ fn decl_ensure_slot(idx: i64, tag: i64, span_id: i64):
     decl_flatten_struct_output[idx] = 0
     decl_is_value_type[idx] = 1
     decl_param_mut_text[idx] = ""
+    decl_param_default_text[idx] = ""
 
 fn decl_alloc(tag: i64, span_id: i64) -> i64:
     if decl_tag == nil:
@@ -950,10 +960,19 @@ fn decl_get_field_defaults(idx: i64) -> [i64]:
 # default). Stored via the same decl text-field store the flat bridge reads
 # through flat_decl_field_text("PARAM_DEFAULTS").
 fn decl_set_param_defaults(idx: i64, defaults: [i64]):
+    # Arena pool first (the only store that persists under arena mode); the
+    # legacy text-field store is still written in non-arena mode so any reader
+    # that goes through ast_decl_text_get keeps working.
+    if idx >= 0 and idx < decl_param_default_text.len():
+        decl_param_default_text[idx] = ast_i64_list_join(defaults)
     if not ast_decl_prefer_arena():
         ast_decl_text_set(idx, "PARAM_DEFAULTS", ast_i64_list_join(defaults))
 
 fn decl_get_param_defaults(idx: i64) -> [i64]:
+    if idx >= 0 and idx < decl_param_default_text.len():
+        val pooled = decl_param_default_text[idx]
+        if pooled != "":
+            return ast_i64_list_split(pooled)
     val env_value = ast_decl_text_get(idx, "PARAM_DEFAULTS")
     if env_value != "":
         return ast_i64_list_split(env_value)
