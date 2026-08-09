@@ -308,3 +308,85 @@ the rationale inline (60 / 60 / 0).
 - `doc/08_tracking/bug/wm_window_bg_layers_reject_cpu_composited_material_2026-08-08.md`
   (root cause superseded by this record)
 - `doc/08_tracking/bug/2026-08-05_wm_content_frame_web_provenance_unreachable_via_widget_panel.md`
+
+## 2026-08-09 SETTLED BY THE GUEST — hypothesis REFUTED, candidate `props=0` is live
+
+Lane re-run on the fix-carrying kernel
+(`kernel_sha256=655ffbddc363fdda581f03a0477b3e0ddfa66bba0a1a6773117e843d20d53d58`,
+`kernel_build_status=current-source-built`, `SIMPLEOS_WM_READINESS_TIMEOUT_MS=420000`).
+Exactly **one** distinct `css-var-unresolved` line in the whole serial log,
+verbatim:
+
+```
+[web-style-producer] css-var-unresolved count=49 first=--border-width-hairline idx=-1 props=0 sw_raw=1 sw_portable=1 css_len=4748
+```
+
+Reading against the decision table:
+
+- **`props=0` → row 1 is live.** `_css_collect_custom_props` collected
+  **nothing**. All 49 `var()` references are unresolved for one reason: the
+  property table is empty.
+- **`sw_raw=1 sw_portable=1` → the `starts_with` hypothesis is REFUTED.** The
+  raw `starts_with` and `text_starts_with_portable` agree, and both are
+  **true**, in the guest, at that depth. Residual item 3 of
+  `x64_freestanding_text_char_at_starts_with.md` is not what is breaking this
+  path. The `text_starts_with_portable` swap was correct hygiene but is not the
+  fix; `valid_var_name` was never the failing term.
+- **`css-var-pass-bailed`: 0 occurrences.** No wholesale bail — the sheet is not
+  being used raw. Also `budget-break`: 0 occurrences, so the style pass ran to
+  completion (unchanged from 2026-08-08).
+
+### Truncation is ruled out too
+
+`css_len=4748` is essentially the whole theme sheet:
+`src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl` is 6,708 bytes
+*including* all `.spl` scaffolding, and contains exactly one `:root` block plus
+`--app-surface`, `--blur-surface` and `--border-width-hairline`. A 4,748-char
+`composed_css` is the full sheet, not a truncated prefix. So the `:root` block
+**does** reach the guest inside the sheet that `_css_resolve_vars` is handed,
+and `_css_collect_custom_props` still returns zero entries from it.
+
+**That narrows the defect to `_css_collect_custom_props` itself operating on an
+intact sheet in the guest** — not delivery, not truncation, not budget, not
+`starts_with`, not the substitution half. The bug doc's proposed next probe
+(`_extract_css_vw_with_rule_limit`'s `<style>` pre-pass) is now the *only*
+remaining lead on the collection side, alongside a native-lowering divergence in
+that function's byte-slicing/`find_from` code.
+
+### Downstream state (unchanged, and correctly fail-closed)
+
+```
+[web-style-producer] entry-rejected index=4 mode=engine2d-cpu-composited-material-v1 bg=352321535 gf=0 gt=0 layers_len=92 backdrop_len=40 animation=none
+[wm-frame] content-provenance-rejected window_id=1 status=engine2d_rendered backend=software fallback=none material= theme=aetheric_dark
+```
+
+`layers_len` moved 73 → 92 and `backdrop_len` 21 → 40 because the landed
+fail-closed semantics now preserve the `var(...)` source text verbatim instead
+of splicing it to empty. That is the intended behaviour: the declaration now
+fails loudly as a rejection witness rather than attesting `bg=0x14FFFFFF`, a
+colour it never had. `bg=352321535` persists only because `parse_color_alpha`
+still scans the gradient's first stop out of the shorthand.
+
+Gate verdict: `status=fail reason=guest-render-fault`; all four PPM captures
+`missing`. **Rung (d) is NOT reached — the lane remains at rung (c).**
+
+### Environment regression found while running this (fixed, not a code defect)
+
+The lane aborted three times before reaching the guest, for two reasons worth
+recording:
+
+1. `wm-simple-web-build-source-changed` ×3. The gate hashes every
+   `src/os` + `src/lib` + `build/os/generated` + arch source before and after
+   the kernel build and refuses if any changed. A concurrent session was writing
+   `src/lib/{common,nogc_sync_mut}/spec/evidence/counterpart/*.spl` — files with
+   nothing to do with this lane — inside the 151 s build window. The check is
+   correct, but it makes the lane hostage to any unrelated `src/lib` edit; a
+   scoped manifest would make it usable under parallel sessions.
+2. `browser-demo-real-elf-not-staged` with `browser_demo_disk_status=mcopy-unavailable`.
+   `~/.local/bin/mcopy` is a symlink into `/tmp/simple-mtools/`, which a disk
+   cleanup had wiped, leaving a dangling symlink. Restored by re-extracting the
+   `mtools` package to that path. **`/tmp` is not a durable location for a lane
+   prerequisite** — this will recur on the next `/tmp` clear.
+
+Retained evidence: `build/wm_lane_evidence/run_2026-08-09_0324_cssvar_receipt/`
+(`serial.log`, `gate-stdout.log`, `native-build.out`).
