@@ -12,8 +12,8 @@ use super::tools::{
     archive_create_command, build_compiler_backfill_archive, build_core_c_runtime_library,
     build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
     build_stage4_rust_runtime_projection_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins,
-    find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool, is_system_symbol, nm_command,
-    strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    find_abi_complete_simple_core_runtime_library, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
 
@@ -1633,6 +1633,16 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
+        let simple_core_runtime = if cross_target.arch == simple_common::target::TargetArch::Aarch64
+            && self.runtime_bundle_is_explicit_simple_core()
+        {
+            Some(find_abi_complete_simple_core_runtime_library().ok_or_else(|| {
+                "freestanding aarch64 link requested `simple-core`, but no ABI-complete pure-Simple runtime archive was found; provide SIMPLE_SIMPLE_CORE_PATH or SIMPLE_CORE_RUNTIME_PATH"
+                    .to_string()
+            })?)
+        } else {
+            None
+        };
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
         let effective_linker_script = Self::resolve_freestanding_linker_script(
             self.config.linker_script.as_deref(),
@@ -1950,17 +1960,17 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             ordered
         };
 
-        let freestanding_stub_obj =
-            generate_stub_object_freestanding(
-                temp_dir,
-                object_paths,
-                &boot_objects,
-                triple,
-                march,
-                mabi,
-                &self.project_root,
-                &self.output,
-            )?;
+        let freestanding_stub_obj = generate_stub_object_freestanding(
+            temp_dir,
+            object_paths,
+            &boot_objects,
+            simple_core_runtime.as_deref(),
+            triple,
+            march,
+            mabi,
+            &self.project_root,
+            &self.output,
+        )?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(
@@ -2016,6 +2026,12 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             if let Some(ref init) = init_o {
                 c.arg(init);
             }
+            // ELF archives are resolved left-to-right: keep the explicit
+            // pure-Simple provider after every generated/user consumer and
+            // before compiler-rt builtins in both freestanding linker paths.
+            if let Some(ref runtime) = simple_core_runtime {
+                c.arg(runtime);
+            }
             if let Some(ref builtins) = compiler_rt_builtins {
                 c.arg(builtins);
             }
@@ -2061,6 +2077,9 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             }
             if let Some(ref init) = init_o {
                 c.arg(init);
+            }
+            if let Some(ref runtime) = simple_core_runtime {
+                c.arg(runtime);
             }
             if let Some(ref builtins) = compiler_rt_builtins {
                 c.arg(builtins);

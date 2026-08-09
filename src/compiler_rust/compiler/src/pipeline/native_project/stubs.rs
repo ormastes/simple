@@ -440,6 +440,7 @@ pub(crate) fn generate_stub_object_freestanding(
     temp_dir: &Path,
     object_paths: &[PathBuf],
     boot_objects: &[PathBuf],
+    runtime_provider: Option<&Path>,
     triple: &str,
     march: &str,
     mabi: &str,
@@ -474,9 +475,14 @@ pub(crate) fn generate_stub_object_freestanding(
     let mut defined: HashSet<String> = HashSet::new();
     let mut undefined: BTreeSet<String> = BTreeSet::new();
 
-    // Scan both Simple object_paths AND any boot_objects (boot .c/.s may define
-    // or reference symbols that must not be stubbed over).
-    let scan_paths: Vec<PathBuf> = object_paths.iter().chain(boot_objects.iter()).cloned().collect();
+    // Scan Simple objects, boot objects, and the selected runtime provider so
+    // strict precheck does not reject symbols the final archive will define.
+    let scan_paths: Vec<PathBuf> = object_paths
+        .iter()
+        .chain(boot_objects.iter())
+        .cloned()
+        .chain(runtime_provider.map(Path::to_path_buf))
+        .collect();
     let worker_count = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     if worker_count <= 1 || scan_paths.len() < 16 {
         for path in &scan_paths {
