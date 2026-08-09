@@ -637,8 +637,11 @@ esac
 if [ -z "${jobs}" ]; then
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     jobs=2
-  elif [ "${execution_profile}" = "incremental-unlimited" ] ||
-    [ "${execution_profile}" = "clean-release" ]; then
+  elif [ "${execution_profile}" = "clean-release" ]; then
+    # A release proof is intentionally full-resource: it must not inherit the
+    # conservative incremental scheduler used for developer iteration.
+    jobs="${host_cpus}"
+  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
     jobs="${host_cpus}"
   else
     jobs=$((host_cpus / 2))
