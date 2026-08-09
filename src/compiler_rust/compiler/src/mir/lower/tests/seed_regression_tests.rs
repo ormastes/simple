@@ -58,13 +58,17 @@ fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
             !has_call(function, "rt_string_bytes"),
             "{function_name} must retain custom bytes dispatch"
         );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|b| b.instructions.iter())
+                .any(|inst| { matches!(inst, MirInst::Call { target, .. } if target.name().contains("bytes")) }),
+            "{function_name} must emit its declared custom bytes callee"
+        );
     }
 
-    let array_len = mir
-        .functions
-        .iter()
-        .find(|f| f.name == "array_len")
-        .expect("array_len");
+    let array_len = mir.functions.iter().find(|f| f.name == "array_len").expect("array_len");
     assert!(
         !has_call(array_len, "ArrayOwner__len"),
         "typed array.len must not bind the same-leaf custom owner"
