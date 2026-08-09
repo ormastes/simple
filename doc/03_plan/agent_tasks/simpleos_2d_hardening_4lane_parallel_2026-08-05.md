@@ -125,7 +125,7 @@ All four lanes must use the same evidence fields and helper names:
 - Add explicit UNO Q board runner gating to this session handoff (TODO658): requires physical ABX00162/ABX00173 availability, a native-board pass contract, and retained artifacts under `build/test-artifacts/simpleos-native-board-gpu-2d/uno-q/`.
 - Resume command template once admitted:
   - `SIMPLE_BIN=<admitted-simple> sh scripts/check/check-simpleos-native-board-gpu-2d.shs --board uno-q --strict`
-- Keep `simpleos_native_board_gpu_status` and `simpleos_native_board_gpu_reason` explicit (`blocked`, `runner-not-yet-implemented`, `board-not-connected`, then `pass` when real evidence exists) and never infer pass from cached rows.
+- Keep `simpleos_native_board_gpu_status` and `simpleos_native_board_gpu_reason` explicit (`blocked` with `board-not-connected` when unattached; `blocked` with `live-qrb2210-simpleos-runner-required-offline-preflight-only` when attachment is asserted at the offline dispatcher; `runner-not-yet-implemented` for boards without runners; then `pass` only when real runner-owned evidence exists) and never infer pass from cached rows.
 
 ## Work output files
 - [scripts/check/check-simpleos-native-board-gpu-2d.shs](/home/ormastes/dev/pub/simple/scripts/check/check-simpleos-native-board-gpu-2d.shs)

@@ -23,8 +23,10 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
 - Board checker matrix validates:
   - missing board,
   - unsupported board,
-  - runner-not-yet-implemented,
-  - board-not-connected when UNO Q is unattached.
+  - runner-not-yet-implemented for boards without a runner,
+  - board-not-connected when UNO Q is unattached, and
+  - live-qrb2210-simpleos-runner-required-offline-preflight-only when UNO Q
+    attachment is asserted at the dispatcher without live runner-owned evidence.
 - The board self-test forces `SIMPLEOS_UNOQ_BOARD_ATTACHED` absent and emits an
   explicit `unattached_status=blocked`/`board-not-connected` row; it never
   flashes, probes, or claims a physical board.
@@ -53,9 +55,15 @@ Harden and validate the cross-platform SimpleOS 2D flow with shared DrawIR rende
   - Fresh native PASS on this host for Linux/QEMU/ARM64 rows because pure-Simple compiler admission/runtime still needs to be installed end-to-end.
   - macOS/uno-q native row execution cannot be completed on this host; macOS remains emulator-only here, and UNO Q is not attached.
     - On this host, macOS row must stay `unsupported` or `blocked` and must only be promoted after a prepared-macOS host run with native contracts.
-    - TODO 660 owns prepared-macOS native Metal/GPU proof; TODO 658 owns the
-      eventual board-attached UNO Q identity, download, fence, device-readback,
-      and DrawIR parity proof. Neither row is complete from this self-test.
+    - TODO 658 owns the eventual board-attached UNO Q identity, download,
+      fence, device-readback, and DrawIR parity proof. TODO 660 owns the
+      source-matched prepared-macOS DrawIR-to-Engine2D-to-Vulkan receipt; this
+      Linux host supplies static/unit evidence only. TODO 661 owns the complete
+      animation/input/font/sound four-lane proof and keeps this host's macOS row
+      parser/tests-only. TODO 664 keeps final session closure blocked until a
+      fresh attached UNO Q run supplies native DrawIR+ProcessingIR and physical
+      event, font, sound, frame-progress, identity, and artifact receipts.
+      None of those TODOs is closed by this self-test.
   - No live animation frame counter proof yet in this environment (existing animation fixtures are contract-level only in this lane).
 
 ## TODO handoff once environment is runnable
