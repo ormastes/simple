@@ -19,3 +19,12 @@ runner must acquire both streams itself without adding another renderer. The
 admission also consumes `uno_q_desktop_contract`; because that canonical owner
 still reports the QRB2210 SimpleOS port unavailable, synthetic complete evidence
 cannot bypass it and remains blocked.
+
+The canonical target entry now exists at
+`examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. It is an
+admission boundary, not a renderer: it checks display, window-event, and audio
+through `uno_q_desktop_contract` and terminates before renderer construction
+while any owner is unavailable. It deliberately does not import the ARM QEMU
+RAMFB, virtio, ivshmem, or audio adapters. When physical drivers and a board
+composition root are implemented, that root must reuse WM → DrawIR → Engine2D
+→ Qualcomm Vulkan and feed live correlated receipts to the existing admission.

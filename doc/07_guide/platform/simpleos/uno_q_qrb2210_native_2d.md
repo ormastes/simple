@@ -22,6 +22,15 @@ display/input/audio port unavailable, so even a semantically complete offline
 receipt is blocked before readiness promotion. Do not change the admission to
 bypass that owner; the port implementation must update the canonical contract.
 
+The QRB2210 boot target is
+`examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. At present
+it intentionally terminates with `UNO_Q_QRB2210_DESKTOP_BLOCKED` after querying
+the canonical display, window-event, and audio capabilities. It must not be
+replaced with the ARM QEMU desktop entry: RAMFB, virtio-input, ivshmem host GPU,
+and virtio-snd are QEMU transports, not Uno Q hardware. The entry also refuses
+to manufacture an `UnoQNative2dEvidence` record; PASS evidence must originate
+from the eventual physical composition root and live-board runner.
+
 This host had no authorized ADB device on 2026-08-09, so no live board claim is
 made. Remaining external work is the QRB2210 SimpleOS boot/display/Adreno
 firmware, MMU/cache, queue and fence bring-up, followed by a real transcript and
