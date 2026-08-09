@@ -277,6 +277,17 @@ pub fn html_tree_builder_build_with_parse_limits(
     html_text: text, requested_node_limit: i64,
     requested_token_limit: i32, requested_attr_limit: i32
 ) -> TreeBuilderResult:
+    var unused_projection = HtmlFlatProjection(nodes: [], truncated: false)
+    _html_tree_builder_build_with_parse_limits_and_projection(
+        html_text, requested_node_limit, requested_token_limit,
+        requested_attr_limit, unused_projection, false
+    )
+
+fn _html_tree_builder_build_with_parse_limits_and_projection(
+    html_text: text, requested_node_limit: i64,
+    requested_token_limit: i32, requested_attr_limit: i32,
+    projection_output: HtmlFlatProjection, populate_projection: bool
+) -> TreeBuilderResult:
     """Build a BeDomNode tree and collect <script> content.
 
     Returns a TreeBuilderResult with the DOM tree and any inline script
@@ -535,6 +546,38 @@ pub fn html_tree_builder_build_with_parse_limits(
         stack.close_top()
 
     val final_doc = stack.root_or(doc_node)
+    if populate_projection:
+        var projection_nodes: [HtmlFlatNode] = []
+        var node_stack: [BeDomNode] = [final_doc]
+        var parent_stack: [i32] = [-1]
+        var depth_stack: [i32] = [0]
+        var projection_truncated = truncated
+        while node_stack.len() > 0:
+            val node = node_stack.pop()
+            val parent = parent_stack.pop()
+            val depth = depth_stack.pop()
+            if projection_nodes.len() >= node_limit:
+                projection_truncated = true
+                node_stack = []
+                parent_stack = []
+                depth_stack = []
+                continue
+            val projected_index = projection_nodes.len() as i32
+            projection_nodes.push(HtmlFlatNode(
+                tag: node.tag_name,
+                text_data: node.data,
+                normalized_attrs: _flat_projection_attrs(node),
+                parent: parent,
+                depth: depth
+            ))
+            var child_i = node.children.len()
+            while child_i > 0:
+                child_i = child_i - 1
+                node_stack.push(node.children[child_i])
+                parent_stack.push(projected_index)
+                depth_stack.push(depth + 1)
+        projection_output.nodes = projection_nodes
+        projection_output.truncated = projection_truncated
     TreeBuilderResult(
         doc: final_doc, scripts: script_bodies,
         src_paths: script_src_paths, truncated: truncated
@@ -561,44 +604,10 @@ pub fn html_tree_builder_flat_projection_with_limits(
     html_text: text, requested_node_limit: i64,
     requested_token_limit: i32, requested_attr_limit: i32
 ) -> HtmlFlatProjection:
-    """Build once canonically, then flatten in authoritative child order."""
-    val built = html_tree_builder_build_with_parse_limits(
+    """Build and flatten while the canonical DOM owner is still live."""
+    var projection = HtmlFlatProjection(nodes: [], truncated: false)
+    _html_tree_builder_build_with_parse_limits_and_projection(
         html_text, requested_node_limit,
-        requested_token_limit, requested_attr_limit
+        requested_token_limit, requested_attr_limit, projection, true
     )
-    val projection_limit = if requested_node_limit < 4:
-        4
-    elif requested_node_limit > HTML_MAX_NODES:
-        HTML_MAX_NODES
-    else:
-        requested_node_limit
-    var nodes: [HtmlFlatNode] = []
-    var node_stack: [BeDomNode] = [built.doc]
-    var parent_stack: [i32] = [-1]
-    var depth_stack: [i32] = [0]
-    var truncated = built.truncated
-    while node_stack.len() > 0:
-        val node = node_stack.pop()
-        val parent = parent_stack.pop()
-        val depth = depth_stack.pop()
-        if nodes.len() >= projection_limit:
-            truncated = true
-            node_stack = []
-            parent_stack = []
-            depth_stack = []
-            continue
-        val projected_index = nodes.len() as i32
-        nodes.push(HtmlFlatNode(
-            tag: node.tag_name,
-            text_data: node.data,
-            normalized_attrs: _flat_projection_attrs(node),
-            parent: parent,
-            depth: depth
-        ))
-        var child_i = node.children.len()
-        while child_i > 0:
-            child_i = child_i - 1
-            node_stack.push(node.children[child_i])
-            parent_stack.push(projected_index)
-            depth_stack.push(depth + 1)
-    HtmlFlatProjection(nodes: nodes, truncated: truncated)
+    projection
