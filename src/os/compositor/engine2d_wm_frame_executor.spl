@@ -259,51 +259,34 @@ class Engine2dWmFrameExecutor:
             var prepared_evidence_i64: [i64] = [0, 0, 0, 0, 0, 0, 0]
             var prepared_evidence_text: [text] = ["", "", ""]
             val prepared_execute_started_us = boot_monotonic_now_us()
-            var replay_image_xy: [i64] = [
-                self.prepared_image_x0, self.prepared_image_y0,
-                self.prepared_image_x1, self.prepared_image_y1,
-                self.prepared_image_x2, self.prepared_image_y2]
-            var execute_composition = self.prepared_composition
-            var execute_images = self.prepared_images
             if self.prepared_scanout_valid:
-                val scanout_w = self.fb_w.to_i32()
-                val scanout_h = self.fb_h.to_i32()
-                val scanout_uri = "wm-prepared-scanout://immutable"
-                val scanout_batch = draw_ir_batch_with_source(
-                    "wm-prepared-scanout", self.local_draw_ir_backend_target,
-                    draw_ir_embedding_config_geometry(
-                        "", "wm-prepared-scanout",
-                        [0, 0, scanout_w, scanout_h, 0, 1000], false),
-                    [draw_ir_image_command(
-                        "wm-prepared-scanout", 0, 0, scanout_w, scanout_h,
-                        scanout_uri, [])],
-                    draw_ir_source_manual())
-                execute_composition = DrawIrComposition(
-                    schema: "draw-ir-v1",
-                    composition_id: "wm-prepared-scanout",
-                    scene_key: "wm-prepared-scanout",
-                    backend_target: self.local_draw_ir_backend_target,
-                    batches: [scanout_batch])
-                execute_images = [engine2d_resolved_draw_ir_image(
-                    scanout_uri, scanout_w, scanout_h,
-                    self.prepared_scanout_pixels)]
-                replay_image_xy = [0, 0]
-            var prepared_scanout_rendered = 0
-            if self.prepared_scanout_valid:
-                prepared_scanout_rendered = engine2d_draw_ir_adv_present_prepared_scanout_evidence(
+                val prepared_scanout_rendered = engine2d_draw_ir_adv_present_prepared_scanout_evidence(
                     self.engine, self.fb_w.to_i32(), self.fb_h.to_i32(),
                     self.prepared_scanout_pixels, prepared_evidence_i64,
                     prepared_evidence_text)
-            else:
-                engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(
-                    self.engine, execute_composition, false,
-                    execute_images, replay_image_xy,
-                    prepared_evidence_i64,
-                    prepared_evidence_text)
-            # The freestanding aggregate/array sidecar can lose writes made
-            # across this call boundary.  The scalar return is the canonical
-            # success receipt for the retained scanout path.
-            val prepared_rendered = if prepared_scanout_rendered > 0: prepared_scanout_rendered else: prepared_evidence_i64[5].to_i32()
+                if not self.profile_emitted:
+                    self.profile_emitted = true
+                    val prepared_finished_us = boot_monotonic_now_us()
+                    val prepared_execute_us = boot_monotonic_elapsed_us(
+                        prepared_execute_started_us, prepared_finished_us)
+                    val prepared_total_us = boot_monotonic_elapsed_us(
+                        profile_started_us, prepared_finished_us)
+                    serial_println("[wm-exec-profile] prepare_us={prepared_total_us - prepared_execute_us} execute_us={prepared_execute_us} images={self.prepared_images.len()} batches={self.prepared_composition.batches.len()} rendered={prepared_scanout_rendered} skipped=0")
+                if prepared_scanout_rendered <= 0:
+                    self.prepared_valid = false
+                    return 0
+                return scene_revision
+
+            val replay_image_xy: [i64] = [
+                self.prepared_image_x0, self.prepared_image_y0,
+                self.prepared_image_x1, self.prepared_image_y1,
+                self.prepared_image_x2, self.prepared_image_y2]
+            engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(
+                self.engine, self.prepared_composition, false,
+                self.prepared_images, replay_image_xy,
+                prepared_evidence_i64,
+                prepared_evidence_text)
+            val prepared_rendered = prepared_evidence_i64[5].to_i32()
             val prepared_skipped = prepared_evidence_i64[0].to_i32()
             if not self.profile_emitted:
                 self.profile_emitted = true
