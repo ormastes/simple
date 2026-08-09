@@ -15,7 +15,28 @@
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_bytes, sha256_u8_hex}
 use std.common.crypto.types.{bytes_to_hex}
+@cfg(macos or linux or windows or freebsd or openbsd or netbsd or android)
 use std.io_runtime.{env_get}
+
+# Selected assets are staged at fixed guest paths on SimpleOS. The guest has
+# no process environment, so host path/runtime-mode overrides do not exist in
+# this target lane. Keeping this decision here avoids acquiring a fabricated
+# global rt_env_get ABI during module initialization.
+@cfg("os", "simpleos")
+fn _font_registry_asset_root() -> text:
+    ""
+
+@cfg("os", "simpleos")
+fn _font_registry_runtime_mode() -> text:
+    ""
+
+@cfg(macos or linux or windows or freebsd or openbsd or netbsd or android)
+fn _font_registry_asset_root() -> text:
+    env_get("SIMPLE_ASSET_ROOT")
+
+@cfg(macos or linux or windows or freebsd or openbsd or netbsd or android)
+fn _font_registry_runtime_mode() -> text:
+    env_get("SIMPLE_RUNTIME_MODE")
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
@@ -426,7 +447,7 @@ fn _selected_font_asset_candidate_for_path_with_root(path: text, root: text) -> 
     candidates[index]
 
 fn selected_font_asset_candidate_for_path(path: text) -> FontAssetCandidate?:
-    _selected_font_asset_candidate_for_path_with_root(path, env_get("SIMPLE_ASSET_ROOT"))
+    _selected_font_asset_candidate_for_path_with_root(path, _font_registry_asset_root())
 
 fn _selected_font_asset_physical_path_from_root(path: text, root: text) -> text:
     val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
@@ -443,7 +464,7 @@ fn _selected_font_asset_physical_path_from_root(path: text, root: text) -> text:
 
 fn selected_font_asset_physical_path(path: text) -> text:
     """Resolve a selected asset beneath the installed Simple share root."""
-    _selected_font_asset_physical_path_from_root(path, env_get("SIMPLE_ASSET_ROOT"))
+    _selected_font_asset_physical_path_from_root(path, _font_registry_asset_root())
 
 fn _selected_font_bundle_asset_physical_path_from_root(path: text, root: text) -> text:
     val base = _font_asset_normalized_root(root)
@@ -460,7 +481,7 @@ fn _selected_font_bundle_asset_physical_path_from_root(path: text, root: text) -
 
 fn selected_font_bundle_asset_physical_path(path: text) -> text:
     """Resolve an immutable font resource or root notice below the package root."""
-    _selected_font_bundle_asset_physical_path_from_root(path, env_get("SIMPLE_ASSET_ROOT"))
+    _selected_font_bundle_asset_physical_path_from_root(path, _font_registry_asset_root())
 
 fn simpleos_default_font_asset_candidate() -> FontAssetCandidate:
     """Pinned monospace face staged into SimpleOS images."""
@@ -515,7 +536,7 @@ fn selected_font_asset_identity_for_path(path: text) -> text:
     baremetal lane must NOT unwrap the Option-returning candidate lookup and
     touch fields themselves (`opt.?` then `.field` faults, cr2=0x0,
     2026-07-18 FontRasterizer._load_selected_bytes)."""
-    val root = env_get("SIMPLE_ASSET_ROOT")
+    val root = _font_registry_asset_root()
     val candidates = selected_font_asset_candidates()
     val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
     if candidate_index < 0: return ""
@@ -584,7 +605,7 @@ fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeVali
 # here, so a broken or absent fast path can never turn into an accepted asset.
 fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
                                              precomputed_sha256_hex: text) -> FontAssetRuntimeValidation:
-    val root = env_get("SIMPLE_ASSET_ROOT")
+    val root = _font_registry_asset_root()
     val candidates = selected_font_asset_candidates()
     val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
     if candidate_index < 0:
@@ -592,7 +613,7 @@ fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
     val candidate = candidates[candidate_index]
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
-    val runtime_mode = env_get("SIMPLE_RUNTIME_MODE")
+    val runtime_mode = _font_registry_runtime_mode()
     # PERF (2026-07-26): hashing the blob here is ~99% of Engine2D.load_font on
     # the interpreter lane — measured 43.4s of a 41.6s load for the 119KB Bungee
     # face (~2.9 KB/s), and the pinned default is the 17.8MB NotoSansSC, i.e.
@@ -646,7 +667,7 @@ fn font_registry_debug_expected_names(path: text) -> text:
     matching path, computed in the RUNNING lane (so builtin mis-lowerings in
     the expected-value construction surface in serial evidence rather than
     silently failing the name matcher). '<no-candidate>' when unmatched."""
-    val root = env_get("SIMPLE_ASSET_ROOT")
+    val root = _font_registry_asset_root()
     val candidates = selected_font_asset_candidates()
     val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
     if candidate_index < 0: return "<no-candidate>"
