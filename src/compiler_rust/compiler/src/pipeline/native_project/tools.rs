@@ -298,7 +298,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         // failed with undefined _simple_contract_check (2026-07-30).
         "runtime_contracts.c",
         "runtime_font.c",
-        "runtime_pool.c",
+        // Canonical OS-thread and closure-pool provider. runtime_thread.c owns
+        // both rt_thread_* and rt_pool_*; compiling runtime_pool.c beside it
+        // would create duplicate pool definitions.
+        "runtime_thread.c",
         "runtime_simd_utf8.c",
         // engine2d SIMD row kernels (C/NEON) backing rt_engine2d_simd_*_row_u32;
         // replaces the Rust-seed engine2d_simd_ops backing for native builds.

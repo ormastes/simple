@@ -2064,6 +2064,20 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("spl_thread_cpu_count"),
         "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
+    for symbol in [
+        "rt_thread_spawn_isolated",
+        "rt_thread_spawn_isolated_with_args",
+        "rt_thread_join",
+        "rt_thread_is_done",
+        "rt_thread_free",
+        "rt_pool_submit",
+        "rt_pool_join",
+    ] {
+        assert!(
+            core_c_symbols.contains(symbol),
+            "core-c runtime archive must include runtime_thread.c provider `{symbol}`"
+        );
+    }
     assert!(
         core_c_symbols.contains("rt_is_interpreter_runtime"),
         "core-c runtime archive must expose its native/interpreter identity ABI"
