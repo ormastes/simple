@@ -574,25 +574,20 @@ fn attr_value_by_key(inner: text, key: text) -> text:
     var i = kpos + key_len
     if i >= inner.len():
         return ""
-    # Materialize the owner text once. Repeated dynamic byte_at calls across
-    # the freestanding text/runtime boundary can retain the prior index while
-    # advancing a loop; typed [u8] indexing has the canonical decoded ABI.
-    val inner_bytes = inner.bytes()
-    val quote_byte = inner_bytes[i]
+    val quote_byte = inner.byte_at(i)
     if trace_contract:
         print "[web-attr-scalar] stage=quote i={i} byte={quote_byte}"
     if quote_byte == 34 or quote_byte == 39:
-        # Do not transport a one-byte nonzero-offset text slice as the search
-        # needle. Its byte_at(0) can read from the original owner's wrong
-        # offset on freestanding native, extending values into the next attr.
-        var end = i + 1
-        while end < inner.len():
-            if inner_bytes[end] == quote_byte:
-                if trace_contract:
-                    print "[web-attr-scalar] stage=end start={i + 1} end={end} value_len={end - i - 1}"
-                return decode_html_entities(
-                    inner.substring(i + 1, end))
-            end = end + 1
+        # Search with an owned literal. A one-byte slice of `inner` can lose
+        # its nonzero source offset on freestanding native, while repeated
+        # typed-array indexing can retain the opening quote element.
+        val delimiter = if quote_byte == 34: "\"" else: "'"
+        val end = find_from(inner, delimiter, i + 1)
+        if end >= 0:
+            if trace_contract:
+                print "[web-attr-scalar] stage=end start={i + 1} end={end} value_len={end - i - 1}"
+            return decode_html_entities(
+                inner.substring(i + 1, end))
         return ""
     # unquoted: read to whitespace
     var j = i
