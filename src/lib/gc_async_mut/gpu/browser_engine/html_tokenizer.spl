@@ -134,11 +134,42 @@ class _TokenSink:
     tokens: [HtmlToken]
     limit: i32
     truncated: bool
+    kind_ids: [i32]
+    tags: [text]
+    data_out: [text]
+    self_closing_ids: [i32]
+    attr_offsets: [i32]
+    attr_names: [text]
+    attr_values: [text]
+
+    me record_flat(token: HtmlToken):
+        if self.attr_offsets.len() == 0:
+            self.attr_offsets.push(0)
+        var kind_id = 5
+        if token.token_kind == HtmlTokenKind.Doctype:
+            kind_id = 0
+        elif token.token_kind == HtmlTokenKind.StartTag:
+            kind_id = 1
+        elif token.token_kind == HtmlTokenKind.EndTag:
+            kind_id = 2
+        elif token.token_kind == HtmlTokenKind.Character:
+            kind_id = 3
+        elif token.token_kind == HtmlTokenKind.Comment:
+            kind_id = 4
+        self.kind_ids.push(kind_id)
+        self.tags.push(token.tag_name)
+        self.data_out.push(token.data)
+        self.self_closing_ids.push(if token.self_closing: 1 else: 0)
+        for delivered_attr in token.attrs:
+            self.attr_names.push(delivered_attr.name)
+            self.attr_values.push(delivered_attr.value)
+        self.attr_offsets.push(self.attr_names.len())
 
     me push(token: HtmlToken) -> bool:
         if self.tokens.len() >= self.limit:
             self.truncated = true
             return false
+        self.record_flat(token)
         self.tokens.push(token)
         true
 
@@ -206,7 +237,12 @@ fn _html_tokenizer_tokenize_with_limits_into_impl(
         html_max_attributes()
     else:
         requested_attr_limit
-    val sink = _TokenSink(tokens: [], limit: token_limit, truncated: false)
+    val sink = _TokenSink(
+        tokens: [], limit: token_limit, truncated: false,
+        kind_ids: kind_ids, tags: tags, data_out: data_out,
+        self_closing_ids: self_closing_ids, attr_offsets: attr_offsets,
+        attr_names: attr_names, attr_values: attr_values
+    )
     var pos = 0
     val html = t.html
     val n = html.len()
@@ -371,34 +407,14 @@ fn _html_tokenizer_tokenize_with_limits_into_impl(
             if char_data.len() > 0:
                 val _ = sink.push(_tok_char(char_data))
             pos = end_pos
-    sink.tokens.push(_tok_eof())
+    val eof_token = _tok_eof()
+    sink.tokens.push(eof_token)
+    sink.record_flat(eof_token)
     if destination.len() == 0:
         for delivered_token in sink.tokens:
             destination.push(delivered_token)
     if status.len() > 0:
         status[0] = if sink.truncated: 1 else: 0
-    if kind_ids.len() == 0:
-        attr_offsets.push(0)
-        for delivered in sink.tokens:
-            var kind_id = 5
-            if delivered.token_kind == HtmlTokenKind.Doctype:
-                kind_id = 0
-            elif delivered.token_kind == HtmlTokenKind.StartTag:
-                kind_id = 1
-            elif delivered.token_kind == HtmlTokenKind.EndTag:
-                kind_id = 2
-            elif delivered.token_kind == HtmlTokenKind.Character:
-                kind_id = 3
-            elif delivered.token_kind == HtmlTokenKind.Comment:
-                kind_id = 4
-            kind_ids.push(kind_id)
-            tags.push(delivered.tag_name)
-            data_out.push(delivered.data)
-            self_closing_ids.push(if delivered.self_closing: 1 else: 0)
-            for delivered_attr in delivered.attrs:
-                attr_names.push(delivered_attr.name)
-                attr_values.push(delivered_attr.value)
-            attr_offsets.push(attr_names.len())
     HtmlTokenizeResult(tokens: sink.tokens, truncated: sink.truncated)
 
 # =========================================================================
