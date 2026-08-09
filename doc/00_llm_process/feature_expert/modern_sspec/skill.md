@@ -62,21 +62,41 @@ separate processes that share only files.
   currently-green in a parallel session, this tree may be stale relative to
   origin).
 
-## What is design-only (not implemented)
+## Implementation status (audit-verified 2026-08-09 against origin/main)
 
-Per the wave plan, the following are designed but not built as of
-2026-08-08 — do not assume any of these exist without checking the plan's
-current wave status first:
+The "E2-E9 design-only" claim this section previously carried was STALE — it
+described the E0-era state and was never updated when the later waves landed,
+violating this file's own Update Rule. Corrected, verified status:
 
-- **E2-E9** (see
-  [modern_sspec_parallel_agents_plan.md](../../../03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md)
-  for the authoritative wave list and dependencies): TUI cell capture, GUI
-  action trace, format adapters (the layer that turns a `RawArtifact` into
-  `CanonicalEvidence`), docgen projection (rendering `ManualBlock` into the
-  generated spec manual), and the spec-to-spipe evidence extension (wiring
-  `OracleSpec` checks into the `it`/`describe` DSL spec-writers actually use).
-- Only E0 (this skill's "landed" section) is implemented; treat every other
-  wave as a plan, not a fact, until its own commit lands.
+- **Implemented (all verified present on origin/main and spec-proven):**
+  E0 contract (`model.spl`, `evidence_comparator.spl`), E1 red-team gates,
+  E2/E2b/E3/E4/E7a-e format adapters
+  (`src/lib/common/spec/evidence/format/{terminal_grid,text_protocol,
+  binary_layout,scene_profile,simulation_profile,audio_profile,ml_profile,
+  json_document}.spl` + `action_trace.spl`), E5 docgen evidence loader
+  (`src/app/spipe_docgen/spipe_docgen/evidence_loader.spl`, wired into
+  `generator.spl`, live regeneration gate green:
+  `scripts/check/check-spipe-docgen-regeneration-live.shs`), E6 spec-to-SPipe
+  bridge (`spipe_extension.spl`), E8 migration adapters (`legacy_facade.spl`,
+  `untyped_capture.spl`), E9 docs/skills refresh. Core proof specs re-run
+  green 2026-08-09: `typed_evidence_oracle_spec` 28/28,
+  `terminal_grid_spec` 21/21, `exec_capture_spec` 6/6 (real processes).
+- **Live vs fixture (the honest "mocking" ledger):** genuinely LIVE input
+  paths are `exec_capture.spl` (real process), `file_capture.spl` (real file
+  I/O), and `test/03_system/tools/spipe/examples/live_terminal_capture_spec.spl`
+  (real subprocess stdout -> `TerminalSnapshot`, landed 2026-08-09). Every
+  OTHER format adapter is proven only against CONSTRUCTED fixture input, and
+  the three E8 reference manuals are hand-built fixtures carrying explicit
+  honesty notes. None of this is hidden mocking — every fixture is labeled —
+  but live capture exists for only 1 of the ~6 evidence domains.
+- **Open work:** (a) untyped-evidence migration backlog — 37 migrated + 143
+  rejected of 1119 rows as of batch 9
+  (`doc/08_tracking/todo/untyped_evidence_migration_backlog_2026-08-08.md`);
+  (b) live-capture infrastructure for the remaining domains
+  (`doc/08_tracking/todo/sspec_live_capture_infrastructure_2026-08-08.md`);
+  (c) all 2026-08-08/09 verification ran on the disclosed Rust SEED binary —
+  a self-hosted redeploy + re-run gate is still owed. Plan for all three:
+  `doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md`.
 
 ## Load-bearing traps (from the comparator's own header, verify before trusting a new oracle)
 
