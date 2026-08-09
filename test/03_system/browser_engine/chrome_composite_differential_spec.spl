@@ -1,0 +1,165 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl 0%
+"""
+# Chrome <-> Simple Component-Level Compositing Differential
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+Stage (6) of the per-component Chrome<->Simple renderer differential, one
+level below `tools/paint_diff`. Both engines are fed the SAME HTML fixture and
+the SAME intermediate artifact is extracted from each -- the engine's
+**layerization decision**, not the paint ops inside a layer and not a
+screenshot. Chrome's side is `LayerTree.layerTreeDidChange` (layer structure)
+plus `LayerTree.compositingReasons` (the named reason each layer was
+promoted). Simple's side is `simple_web_layout_render_html_draw_ir` ->
+`DrawIrComposition.batches`, Simple's only unit of independently-submitted
+backend work.
+
+Audience: anyone building layerization/compositing support for the Simple web
+renderer, or investigating why a `will-change`/`transform`/`position: fixed`
+element does not get its own composited unit.
+
+## Scope and Preconditions
+
+Requires a Chrome/Chromium executable and `node`. Both extractors and the
+differ live in `tools/composite_diff/`. Extraction is done by the driver
+`sh tools/composite_diff/run_composite_diff.shs` (about 15 minutes; it runs 18
+separate `bin/simple run` extractions, which cannot be nested inside
+`bin/simple test`). This spec gates on the driver's retained evidence and is
+fail-closed on it: missing evidence, evidence older than any fixture or
+extractor source, or a chrome side that does not carry a real
+`Chrome/<version>` string all FAIL. There is deliberately no "chrome absent,
+therefore pass" path.
+
+## Primary Workflow
+
+1. Run the driver.
+2. Read `tools/composite_diff/out/summary.txt`.
+3. Assert a NONZERO compared-layer/unit count on BOTH sides. A run that
+   compared nothing is a failure, never a pass.
+4. Assert no fixture was BLOCKED.
+5. Assert Chrome actually promoted elements (`chrome_element_layers > 0`) --
+   otherwise the promotion oracle would be vacuous.
+6. Hold the known finding count at or below the recorded baseline (ratchet).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Element layer | a Chrome layer NOT classified as root scaffolding -- see `tools/composite_diff/CONTRACT.md` `classifyLayer` |
+| Compositing unit | a Simple `DrawIrBatch` -- the closest existing counterpart to a composited layer |
+| Trigger property | the CSS property behind a Chrome compositing reason (`will-change` -> `WillChangeTransform`, etc.); absent vs. present-but-inert are two different findings |
+
+## Related Specifications
+
+- [Compositing differential I/O contract](../../../tools/composite_diff/CONTRACT.md)
+- [Measured divergences and tool overview](../../../tools/composite_diff/README.md)
+- [Paint differential (stage 5)](chrome_paint_differential_spec.spl)
+
+## Evidence and Provenance
+
+Measured against Google Chrome for Testing 151.0.7922.34, viewport 800x600,
+deviceScaleFactor 1. Retained evidence:
+`tools/composite_diff/out/composite_report.json` and
+`tools/composite_diff/out/summary.txt`. Baseline: 18 fixtures, 95 Chrome
+layers (23 element promotions) vs 19 Simple compositing units (88
+components), 10 distinct compositing reasons, 60 recorded divergences.
+
+## Recovery and Troubleshooting
+
+`UNAVAILABLE: no chrome executable found` -- pass `--chrome <path>` or set
+`COMPOSITE_DIFF_CHROME`.
+
+`chrome produced 0 layers` -- compositing is off. Chrome must be launched
+WITHOUT `--disable-gpu`, and `LayerTree.enable` must be sent once after a
+first real paint with the layer list read from the persistent
+`LayerTree.layerTreeDidChange` event.
+
+`chrome promoted 0 elements` -- the fixture set exists specifically to
+exercise the compositor; a run-wide total of 0 element promotions means the
+launch flags regressed, not that Simple is passing.
+
+## Compatibility and Limitations
+
+Simple has no layerization pass at all (`src/lib/cc/entity/layer.spl` is
+defined but never constructed from the browser engine), so every fixture
+currently reports a `no-layerization` / `promotion-missing` finding by
+construction. This is a known, tracked gap in `src/lib`, reported here and not
+fixed under this tool-only lane. `Overlap`-only promotions (geometric, not
+property-driven) are excluded from the trigger-property check by design --
+see `REASON_TRIGGER` in `composite_diff.js`.
+"""
+
+use std.spec.*
+use std.io_runtime.{shell_output, file_exists}
+
+val TOOL_DIR: text = "tools/composite_diff"
+val SUMMARY: text = "tools/composite_diff/out/summary.txt"
+
+fn summary_value(key: text) -> text:
+    shell_output(
+        "sed -n 's/^" + key + "=//p' " + SUMMARY + " | head -1 | tr -d '\\n'"
+    )
+
+fn summary_i64(key: text) -> i64:
+    val raw = summary_value(key)
+    if raw == "":
+        return -1
+    raw.to_i64()
+
+fn evidence_is_stale() -> bool:
+    # Fail-closed freshness gate. The summary must exist AND be newer than every
+    # fixture and every extractor/differ source; otherwise the evidence does not
+    # describe the current code and the run is treated as a failure, not a pass.
+    if not file_exists(SUMMARY):
+        return true
+    val newer = shell_output(
+        "find " + TOOL_DIR + "/fixtures " + TOOL_DIR + "/simple_composite_dump.spl " +
+        TOOL_DIR + "/chrome_composite_dump.js " + TOOL_DIR + "/composite_diff.js " +
+        "-newer " + SUMMARY + " 2>/dev/null | head -1 | tr -d '\\n'"
+    )
+    newer != ""
+
+fn chrome_version() -> text:
+    shell_output(
+        "sed -n 's/.*\"chrome_version\": \"\\([^\"]*\\)\".*/\\1/p' " +
+        TOOL_DIR + "/out/chrome/01_no_promotion.chrome.json | head -1 | tr -d '\\n'"
+    )
+
+describe "Chrome to Simple compositing differential":
+    it "has fresh compositing-stage evidence produced against a real Chrome":
+        step("The summary must exist and be newer than every fixture and extractor source")
+        expect(evidence_is_stale()).to_equal(false)  # oracle: missing or stale evidence FAILS; run sh tools/composite_diff/run_composite_diff.shs
+        step("A real Chrome must have produced the chrome side")
+        val version = chrome_version()
+        expect(version.contains("Chrome/")).to_equal(true)  # oracle: chrome absent or extraction failed is a FAILURE, never a vacuous pass
+        step("Assert a nonzero compared-layer count on the CHROME side")
+        expect(summary_i64("chrome_layers_compared") > 0).to_equal(true)  # oracle: an empty layer list reads exactly like agreement
+        step("Assert Chrome actually promoted elements, else the promotion oracle is vacuous")
+        expect(summary_i64("chrome_element_layers") > 0).to_equal(true)  # oracle: zero promotions means the fixture set tested nothing
+        step("Assert a nonzero compared-unit count on the SIMPLE side")
+        expect(summary_i64("simple_units_compared") > 0).to_equal(true)
+        expect(summary_i64("simple_components_compared") > 0).to_equal(true)
+        step("Assert no fixture was blocked")
+        expect(summary_i64("fixtures_blocked")).to_equal(0)
+        step("Assert every fixture was compared")
+        expect(summary_i64("fixtures_compared")).to_equal(18)
+
+    # @prev("has fresh compositing-stage evidence produced against a real Chrome")
+    it "exercises more than one distinct compositing reason":
+        step("A fixture set that only ever hit one promotion reason would be weak evidence")
+        expect(summary_i64("distinct_compositing_reasons") > 1).to_equal(true)  # oracle: must exercise multiple named reasons, not just one
+
+    # @prev("has fresh compositing-stage evidence produced against a real Chrome")
+    it "holds the known compositing divergences at or below the recorded baseline":
+        step("Read the current finding count")
+        val findings = summary_i64("findings_total")
+        step("Absent evidence reads as -1 and must FAIL rather than satisfy the ratchet")
+        expect(findings >= 0).to_equal(true)  # oracle: missing summary is not a pass
+        step("Nonzero layers/units must have been compared for the ratchet to mean anything")
+        expect(summary_i64("chrome_layers_compared") > 0).to_equal(true)  # oracle: no vacuous ratchet
+        expect(summary_i64("simple_units_compared") > 0).to_equal(true)
+        step("The baseline measured against Chrome 151.0.7922.34 is 60 findings; this may shrink but must not grow")
+        expect(findings <= 60).to_equal(true)  # oracle: ratchet, see tools/composite_diff/README.md
