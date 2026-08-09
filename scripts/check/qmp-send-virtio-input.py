@@ -35,12 +35,22 @@ def main():
         receive(sock)
         execute(sock, "qmp_capabilities")
         execute(sock, "input-send-event", {"events": [
-            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "a"}}},
-            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "a"}}},
             {"type": "rel", "data": {"axis": "x", "value": 7}},
             {"type": "rel", "data": {"axis": "y", "value": 5}},
             {"type": "btn", "data": {"down": True, "button": "left"}},
+            {"type": "rel", "data": {"axis": "x", "value": 11}},
+            {"type": "rel", "data": {"axis": "y", "value": 3}},
             {"type": "btn", "data": {"down": False, "button": "left"}},
+            {"type": "btn", "data": {"down": True, "button": "wheel-up"}},
+            {"type": "btn", "data": {"down": False, "button": "wheel-up"}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "ctrl"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "ctrl"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "ctrl_r"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "ctrl_r"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "alt"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "alt_r"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt_r"}}},
         ]})
 
 
