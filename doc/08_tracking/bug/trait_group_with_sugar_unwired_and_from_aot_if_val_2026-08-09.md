@@ -19,8 +19,34 @@ $ /usr/bin/grep -rn "desugar_traits" src/ --include=*.spl | grep -v app/desugar/
 (no output)
 ```
 
-It is a standalone source-text rewrite that nothing invokes. The parser
-therefore never sees the desugared form, and rejects the sugar outright:
+It is a standalone source-text rewrite that nothing invokes.
+
+> **CORRECTION 2026-08-09 (coordinator).** The transcript below is real, but its
+> stated cause is wrong, and the fix it implies is already done.
+>
+> **The parser is NOT missing the production.** P0 landed the trait-header `with`
+> clause in `50f06dcdd56`
+> (`src/compiler_rust/parser/src/types_def/trait_impl_parsing.rs`), proven by
+> `cargo test -p simple-parser` — which compiles the parser from source.
+>
+> The `bin/simple run` below failed because the **deployed seed binary is stale**:
+> its mtime is `2026-08-09 04:50:31`, while P0 landed at `2026-08-09 11:43:04` —
+> the binary predates the parser change by about seven hours. It is a
+> stale-binary measurement artifact, not a grammar gap. Rebuilding the seed makes
+> this transcript stop reproducing.
+>
+> Therefore strike the remedy "or the parser learns the trait-header `with`
+> production directly" further down — that work is complete. The genuine
+> remaining blockers are exactly two: **(a)** `desugar_traits` has no caller in
+> any compile path (the finding above, which stands on its own evidence), and
+> **(b)** the seed must be rebuilt for P0's parser change to reach any
+> `bin/simple` invocation.
+>
+> This is the repo's standing binary-provenance trap: a `bin/simple` result is
+> only evidence about the binary that produced it. Record binary identity
+> alongside any claim that a language feature "does not work".
+
+The stale-binary transcript, kept for the record:
 
 ```
 $ cat tmp_tg.spl
