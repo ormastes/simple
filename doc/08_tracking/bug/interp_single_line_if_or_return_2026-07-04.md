@@ -1,7 +1,7 @@
 # Interpreter: single-line `if A or B: return X` matches everything and swallows the function tail
 
 - id: interp_single_line_if_or_return_2026-07-04
-- status: open
+- status: RESOLVED (2026-08-09, not reproducible — see Re-verification below)
 - severity: high (silent wrong result — no error, wrong value returned)
 - component: interpreter (single-line if-suite parsing with `or` + `return`)
 - found: 2026-07-04, building the WM/GUI theme-sharing hex parser
@@ -42,3 +42,27 @@ the same shape as hand-written lookup tables (hex digits, keyword maps).
 Workaround: always use block-form if-suites when the condition contains `or`
 and the body is a `return`. First hit: `_wm_hex_val` in
 `src/lib/common/ui/wm_chrome_theme.spl` (fixed to block form).
+
+## Re-verification 2026-08-09 — NOT REPRODUCIBLE, marking RESOLVED
+
+Reproduced the exact repro from this doc on the currently deployed seed
+binary (`bin/release/x86_64-unknown-linux-gnu/simple`, seed-warning banner
+confirmed) under both default `bin/simple run` and
+`SIMPLE_EXECUTION_MODE=interpret`:
+
+```
+single_line("e") = 14   (expected 14)
+single_line("E") = 14   (expected 14)
+single_line("f") = 15   (expected 15, NOT 14)
+single_line("F") = 15   (expected 15)
+single_line("z") = -1   (expected -1, NOT nil)
+```
+
+All five cases match the documented block-form behaviour on both engines —
+the originally-reported misdispatch (`single_line("f")` returning 14, or
+`single_line("z")` returning nil) does not reproduce. No source change was
+needed. Regression gate landed:
+`test/01_unit/language/single_line_if_or_return_spec.spl` (`3 examples, 0
+failures`).
+
+**Status: RESOLVED** (verified fixed upstream, no code change required).
