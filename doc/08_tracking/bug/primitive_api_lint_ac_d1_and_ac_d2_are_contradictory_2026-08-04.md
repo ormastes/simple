@@ -1,7 +1,36 @@
 # primitive_api lint: AC-D1 and AC-D2 assert opposite verdicts on the same signature shape
 
-**Status:** OPEN
+**Status:** OPEN — confirmed genuine spec/rule-design contradiction, not a
+code bug (re-verified 2026-08-09)
 **Found:** 2026-08-04
+
+## Re-verification (2026-08-09)
+
+Re-read `check_primitive_api` in
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` (current lines
+94-140): it is still the same single-line text scan described below —
+`_all_same_primitive(all_types)` is computed over `params + return_type`
+combined, with no distinction between "single primitive param mirroring
+return" (AC-D1, must NOT flag) and "single primitive param mirroring an
+extern's primitive signature" (AC-D2, must flag). `test/system/code_quality/
+primitive_api_lint_spec.spl` still has both `AC-D1` (line 72) and `AC-D2`
+(line 116) examples asserting opposite verdicts on textually-identical
+declaration shapes (`fn(x: i64) -> i64`), differing only in the function
+body, which the text-scan rule structurally cannot see.
+
+This is confirmed as a genuine specification contradiction, not an
+implementation defect: no line-oriented predicate over the declaration line
+alone can satisfy both examples, because their declaration lines are
+identical modulo the function name. Making the rule AST/body-aware (checking
+whether the body is a pass-through call to an `extern fn` with a matching
+signature, as AC-D2's own comment implies) would resolve it, but that is a
+`primitive_api` lint **semantics change** at `deny` level
+(`src/compiler/90.tools/lint/_LintMain/config_and_model.spl:148`), which would
+immediately alter fail/pass status tree-wide — a lint-design decision for an
+owner to make deliberately, not a safe drive-by fix. Left OPEN and
+unmodified; no code or spec change made in this pass, per the standing
+guidance not to force a code change when the real issue is a spec/rule
+inconsistency.
 
 ## Symptom
 

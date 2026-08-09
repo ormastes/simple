@@ -1,7 +1,24 @@
 # A `T?` value bound to a `bool` parameter is neither presence-coerced nor rejected — it arrives as the raw payload (2026-08-04)
 
-**Status:** OPEN
+**Status:** ALREADY-FIXED (re-verified 2026-08-09)
 **Found:** 2026-08-04
+
+## Re-verification (2026-08-09)
+
+Confirmed the fix from the "RETRACTION" section below is landed on `main`
+(commit `aff29a24dfe` and ancestors carry it — `git log -S` on
+`present_value_as_bool_arg` shows the symbol present since well before this
+check). `present_value_as_bool_arg()` in
+`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs` is
+called from both `coerce_param` closures (`bind_args_with_injected` and
+`bind_args_with_values`, confirmed by `grep -n` at lines 161 and 477) and
+implements presence-coercion (`nil -> false`, any other present value ->
+`true`), matching the documented fix and the pinned-worktree measurement in
+the RETRACTION section (`edge_case_11_system_spec.spl`: 28/28 pass with the
+fix vs. 3 failures without). No further code change made — this is a
+confirmed-already-fixed re-verification, not a new fix. The corpus-wide
+extrapolated count (~1,200) remains an unverified estimate per the doc below;
+that does not change the fix status, only the blast-radius claim.
 **Related — SAME root cause, found independently by parallel lanes the same day.
 Fix once, close all four:**
 - `bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04.md`

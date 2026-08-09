@@ -2,7 +2,9 @@
 
 **Date:** 2026-07-05
 **Area:** compiler/native-build, SimpleOS rv32, NVMe firmware evidence
-**Status:** OPEN
+**Status:** OPEN — architectural (self-hosted native-build parse/front-end
+throughput), re-confirmed 2026-08-09 by evidence review, not re-run (see note
+at file end)
 
 ## Symptom
 
@@ -1679,3 +1681,35 @@ build/parse path for the generated RV32 firmware entry.
   the 2026-07-05 run parsed the whole set in 5.2s total.
 - Evidence logs: session scratchpad `wave3/L6/smp_build_orch2.log`,
   `default_build_orch2.log` (not committed).
+
+## Re-verification (2026-08-09)
+
+Reviewed the full history above (1,600+ lines across ~30 investigation
+passes) without re-running the multi-minute-to-hours firmware build, per
+standing guidance to characterize via existing evidence rather than block on
+a long reproduction. Findings hold up:
+
+- Root cause is architectural and consistently localized across many
+  independent probes: `simple native-build` dispatches through the
+  **interpreter** (`cli_run_file` → `cli_native_build`), so every invocation
+  re-parses the entire self-hosted compiler backend (frontend, typecheck,
+  MIR, LLVM codegen, lint — hundreds of thousands of lines) from source before
+  compiling a single firmware line. The Rust seed avoids this because its
+  compiler is compiled into the binary; the self-hosted binary's cold-load
+  throughput on this path is measured at >30x slower, and later data points
+  (2026-07-19) show the regression reproduces even on the seed's own
+  bootstrap binary at larger closures (~2.6s/file parse overhead), suggesting
+  the underlying per-file parse cost, not just interpreter dispatch, is now
+  also implicated.
+- The concrete production fix identified in the doc — route `native-build` to
+  a compiled dispatch path instead of interpreting the compiler graph on every
+  invocation, or cache a compiled compiler-graph artifact — has **not** been
+  implemented. `grep -n "cli_native_build" src/app/cli/dispatch.spl` still
+  shows no compiled-path bypass of `try_simple_app`/`cli_run_file` for this
+  command as of this review.
+- This remains correctly scoped as OPEN and architectural: it requires a
+  dispatch/execution-model change (compiled-in `native-build` entry point or a
+  cached compiled worker artifact) that needs its own session and bootstrap
+  re-verification, exactly as the doc's "Concrete next step" section already
+  states. No code change made in this pass; not re-run to avoid a
+  multi-minute-to-hour blocking build per task scoping.

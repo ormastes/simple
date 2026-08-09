@@ -2,7 +2,11 @@
 
 **Date:** 2026-08-07
 **Area:** `src/lib/nogc_sync_mut/spec.spl` (Unit U2, `sspec_prevention_mock_plan_2026-08-07.md`)
-**Status:** OPEN — scoped around, not fixed. `prevent`/`prevent_at_most`/`prevent_file`
+**Status:** OPEN (re-confirmed 2026-08-09) — architectural, not a local bug:
+the interpreter's cross-scope class-instance value semantics (Defect 1) and
+lack of persistent module-level state across `it` examples (Defect 2) are the
+root causes, both out of scope for a local patch in this file. `prevent`/
+`prevent_at_most`/`prevent_file`
 ship with immediate-check semantics instead of the plan's originally intended
 "arm early, auto-check at end of `_execute_it`" design.
 
@@ -125,3 +129,16 @@ test has run, same as the pre-existing manual idiom
 `prevent_file` is a documented alias for `prevent` — it does not provide
 automatic cross-example checking; callers must invoke it in every example (or
 from `before_each`/`after_each`) to approximate file-wide coverage.
+
+## Re-verification (2026-08-09)
+
+`src/lib/nogc_sync_mut/spec.spl` still defines `prevent` (line 615),
+`prevent_at_most` (line 622), and `prevent_file` (line 628) with the
+immediate-check shape described above — no deferred-arming implementation has
+landed, and none of the three unblock conditions (mutable cross-scope
+class-instance storage, persistent module-level state across `it` examples,
+or wildcard-import symbol resolution) have been addressed. The scope-around
+documented here remains correct and current. No code change made: a genuine
+fix requires interpreter-level semantic changes (mutable-reference storage
+semantics and/or persistent per-file spec state) that are out of scope for a
+local patch, exactly as the original report concluded.
