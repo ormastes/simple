@@ -19,6 +19,11 @@ case "${1:-}" in
         grep -Fq -- '-device virtio-mouse-device' "$0"
         grep -Fq -- '-device virtio-sound-device,audiodev=audio0' "$0"
         grep -Fq 'host-gpu-device-evidence' "$0"
+        grep -Fq 'showcase-device-frame.ppm' "$0"
+        grep -Fq 'showcase-device-sample-count' "$0"
+        grep -Fq 'transient-vulkan-font-receipt-missing' "$0"
+        grep -Fq 'showcase-animation-static' "$0"
+        grep -Fq 'showcase_max_rss_kib' "$0"
         grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
         echo simpleos_arm64_unified_live_self_test=pass
         exit 0
@@ -38,6 +43,7 @@ qemu_log=$out_dir/qemu.log
 qmp=$out_dir/qmp.sock
 shm=$out_dir/hostgpu.shm
 receipt=$out_dir/evidence.env
+capture=$out_dir/showcase-device-frame.ppm
 validator=scripts/check/validate-simpleos-arm64-unified-live-receipt.spl
 entry=examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl
 mkdir -p "$out_dir" build/os/generated/generated
@@ -99,7 +105,7 @@ fi
 test -s "$kernel" || fail unified-kernel-missing
 test -x "$daemon" || fail canonical-gpu-host-daemon-missing
 
-rm -f "$serial" "$daemon_log" "$qemu_log" "$qmp" "$receipt" "$shm"
+rm -f "$serial" "$daemon_log" "$qemu_log" "$qmp" "$receipt" "$shm" "$capture"
 truncate -s 8M "$shm"
 "$daemon" --shm="$shm" --processing-backend=vulkan --processing-verify-cpu \
     >"$daemon_log" 2>&1 &
@@ -140,12 +146,15 @@ python3 scripts/check/qmp-send-virtio-input.py "$qmp" || fail qmp-input-injectio
 attempt=0
 while test "$attempt" -lt 300; do
     if grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
-       grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null; then
+       grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" 2>/dev/null &&
+       grep -Fq 'sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true' "$serial" 2>/dev/null &&
+       test "$(grep -Ec '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" 2>/dev/null || true)" -ge 20; then
         break
     fi
     sleep 0.05
     attempt=$((attempt + 1))
 done
+python3 scripts/check/qmp-send-virtio-input.py "$qmp" --capture-only "$capture" || fail qmp-capture-failed
 
 grep -Fq 'SIMPLEOS_VIRTIO_SND status=driver_ok arch=aarch64' "$serial" || fail audio-queue-proof-missing
 grep -Eq '^SIMPLEOS_AUDIO_PLAYBACK non_silent=1 frames=[1-9][0-9]* ' "$serial" || fail audio-playback-proof-missing
@@ -155,6 +164,16 @@ grep -Eq '^\[wm-key-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail keyboard-de
 grep -Eq '^\[wm-pointer-poll\].*input_seq=[1-9][0-9]*' "$serial" || fail pointer-delivery-proof-missing
 grep -Fq '[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=virtio-mmio event_count=' "$serial" || fail input-semantic-receipt-missing
 grep -Fq 'sequence=pointer_move,pointer_down,pointer_drag,pointer_up,pointer_wheel,left_ctrl_down,left_ctrl_up,right_ctrl_down,right_ctrl_up,left_alt_down,left_alt_up,right_alt_down,right_alt_up delivered=true' "$serial" || fail input-semantic-sequence-incomplete
+grep -Fq '[desktop-gui-arm64] font registered source=virtio-fat32' "$serial" || fail transient-font-source-missing
+if grep -Fq '[desktop-gui-arm64] font unavailable fallback=bitmap' "$serial"; then
+    fail bitmap-font-fallback-used
+fi
+font_line=$(grep -E '^HOST_GPU_DAEMON_DRAWIR backend=vulkan .*font_target=vulkan .*font_readback=device_readback .*font_device_executed=true .*font_promotion_ready=true .*font_atlas_upload_bytes=[1-9][0-9]*$' "$daemon_log" | tail -n 1 || true)
+test -n "$font_line" || fail transient-vulkan-font-receipt-missing
+case "$font_line" in *' font_batch= '*) fail transient-font-batch-identity-missing ;; esac
+test -s "$capture" || fail showcase-capture-missing
+capture_sha=$(sha256sum "$capture" | awk '{print $1}')
+printf '%s\n' "$capture_sha" | grep -Eq '^[0-9a-f]{64}$' || fail showcase-capture-sha-invalid
 device_line=$(grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" | tail -n 1 || true)
 test -n "$device_line" || fail vulkan-device-readback-proof-missing
 case "$device_line" in *' readback=device '*) ;; *) fail non-device-readback ;; esac
@@ -165,6 +184,28 @@ device_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^identity=//p
 frame_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^frame=//p')
 printf '%s\n' "$device_id" | grep -Eq '^[1-9][0-9]*$' || fail device-identity-missing
 printf '%s\n' "$frame_id" | grep -Eq '^[1-9][0-9]*$' || fail frame-identity-missing
+
+# Use the last twenty completed device frames. The 95th percentile is the
+# 19th sorted sample for N=20 (nearest-rank), never a single best-case frame.
+samples=$out_dir/showcase-device-elapsed-us.txt
+grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" |
+    tail -n 20 | tr ' ' '\n' | sed -n 's/^elapsed_us=//p' >"$samples"
+sample_count=$(wc -l <"$samples" | tr -d ' ')
+test "$sample_count" -eq 20 || fail showcase-device-sample-count
+if grep -Ev '^[1-9][0-9]*$' "$samples" | grep -q .; then
+    fail showcase-device-sample-invalid
+fi
+p95_us=$(sort -n "$samples" | sed -n '19p')
+test "$p95_us" -gt 0 || fail showcase-device-p95-invalid
+distinct_checksums=$(grep -E '^\[wm-frame\] host-gpu-device-evidence backend=vulkan ' "$serial" |
+    tail -n 20 | tr ' ' '\n' | sed -n 's/^checksum=//p' | sort -u | wc -l | tr -d ' ')
+test "$distinct_checksums" -ge 2 || fail showcase-animation-static
+
+qemu_rss_kib=$(sed -n 's/^VmRSS:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$qemu_pid/status" | head -n 1)
+daemon_rss_kib=$(sed -n 's/^VmRSS:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' "/proc/$daemon_pid/status" | head -n 1)
+printf '%s\n' "$qemu_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-qemu-rss-unavailable
+printf '%s\n' "$daemon_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-daemon-rss-unavailable
+max_rss_kib=$((qemu_rss_kib + daemon_rss_kib))
 
 set +e
 admission=$($simple run "$validator" 1 1 1 1 1 0 1 1 1 1 "$device_id" "$frame_id" 2>&1)
@@ -190,6 +231,16 @@ printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_environment_admiss
     echo virtio_pointer_delivery=pass
     echo virtio_snd_completion=pass
     echo fallback_used=false
+    echo showcase_animation_device_frames=20
+    echo showcase_animation_distinct_checksums="$distinct_checksums"
+    echo showcase_transient_font=pass
+    echo showcase_capture_path="$capture"
+    echo showcase_capture_sha256="$capture_sha"
+    echo showcase_device_samples=20
+    echo showcase_device_p95_us="$p95_us"
+    echo showcase_qemu_rss_kib="$qemu_rss_kib"
+    echo showcase_daemon_rss_kib="$daemon_rss_kib"
+    echo showcase_max_rss_kib="$max_rss_kib"
     echo serial_log="$serial"
     echo daemon_log="$daemon_log"
     printf '%s\n' "$admission"

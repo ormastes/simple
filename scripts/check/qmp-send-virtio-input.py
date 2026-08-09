@@ -28,12 +28,17 @@ def execute(sock, command, arguments=None):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: qmp-send-virtio-input.py SOCKET")
+    if len(sys.argv) not in (2, 4):
+        raise SystemExit("usage: qmp-send-virtio-input.py SOCKET [--capture-only CAPTURE.ppm]")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.connect(sys.argv[1])
         receive(sock)
         execute(sock, "qmp_capabilities")
+        if len(sys.argv) == 4:
+            if sys.argv[2] != "--capture-only":
+                raise RuntimeError("unknown mode")
+            execute(sock, "screendump", {"filename": sys.argv[3]})
+            return
         execute(sock, "input-send-event", {"events": [
             {"type": "rel", "data": {"axis": "x", "value": 7}},
             {"type": "rel", "data": {"axis": "y", "value": 5}},
@@ -51,6 +56,24 @@ def main():
             {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt"}}},
             {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "alt_r"}}},
             {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "alt_r"}}},
+            # Seven real focus transitions (press + release) provide enough
+            # changed device frames for a 20-sample performance distribution.
+            # They are deliberately sent only after the frozen primitive
+            # sequence above, so they cannot manufacture its admission.
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": "tab"}}},
+            {"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": "tab"}}},
         ]})
 
 
