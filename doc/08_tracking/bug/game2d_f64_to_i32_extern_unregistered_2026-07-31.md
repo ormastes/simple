@@ -1,8 +1,30 @@
 # game2d `_f64_to_i32`/`_i32_to_f64`/`_i32_to_u32` externs return `nil` under the tree-walk interpreter (2026-07-31)
 
-**Status:** OPEN — workaround applied only in the one file touched by this
-lane (`tilemap.spl`). The same defect is still latent in `camera.spl`,
-`scene.spl`, `batch.spl`, `__init__.spl` (all in
+> **ALREADY-FIXED, reverified 2026-08-09.** Commit `b9ae3d91c077` ("fix(game2d):
+> replace unregistered _f64_to_i32/_i32_to_f64/_i32_to_u32 externs with real
+> methods") replaced all 14 call sites across all five affected modules
+> (`camera.spl`, `scene.spl`, `batch.spl`, `tilemap.spl`, `__init__.spl`) with
+> `.to_i32()`/`.to_f64()`/`.to_u32()` and deleted the six dead `@extern`
+> declarations. Re-verified fresh today: `git grep` for
+> `_f64_to_i32|_i32_to_f64|_i32_to_u32` across `src/lib/gc_async_mut/game2d/`
+> on `origin/main` returns zero hits (only a code comment referencing the fix
+> commit); `git show origin/main:.../camera.spl` etc. confirm the `.to_i32()`
+> replacements are present in the content actually on `origin/main`. The
+> regression spec `test/01_unit/lib/gc_async_mut/game2d/batch_flush_position_spec.spl`
+> (asserts a sprite flushed at world (30,20) lands at screen (30,20), not the
+> origin — the exact assertion this bug needed) and
+> `texture_registry_spec.spl` are both present on `origin/main`. Executing
+> either via `bin/simple test` in this session hit the known
+> `kill_monitor.shs` 60s-CPU-guard trap (exit 143, no verdict line — see
+> `reference_kill_monitor_60s_cpu_guard_sigterms_long_runs.md`) on every
+> attempt, so a fresh live run could not be completed in this environment; the
+> landing commit records a sentinel-verified 2/2 pass with the fix vs 0/2
+> without it, from before the local toolchain broke. No source-level evidence
+> of a regression was found. Status changed from OPEN to FIXED.
+
+**Status:** FIXED (was OPEN — workaround applied only in the one file touched by this
+lane (`tilemap.spl`); now fixed everywhere, see resolution above). The same defect is no longer
+present in `camera.spl`, `scene.spl`, `batch.spl`, `__init__.spl` (all in
 `src/lib/gc_async_mut/game2d/`).
 
 **Impact:** every `@extern fn _f64_to_i32(x: f64) -> i32` /
