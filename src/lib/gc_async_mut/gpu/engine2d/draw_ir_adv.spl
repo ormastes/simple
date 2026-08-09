@@ -1421,7 +1421,7 @@ fn _engine2d_embed_offscreen_acquire(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offsets: [i32], images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, material_execution_counts: [i64], reset_surface: bool = false) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offsets: [i32], images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, material_execution_counts: [i64], reset_surface: bool = false, image_xy: [i64] = []) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     var offset_x: i32 = 0
     var offset_y: i32 = 0
@@ -1638,16 +1638,22 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                     var packed_exact_status: i32 = 0
                     var packed_x = x
                     var packed_y = y
-                    # command.image_uri is the exact key that resolved
-                    # image_index above.  Keep coordinate ownership on that
-                    # proven scalar text instead of projecting image_uri back
-                    # out of the large resolved-image aggregate.
-                    if command.image_uri.starts_with("wmabs:"):
+                    var sidecar_position = false
+                    val image_xy_index = image_index * 2
+                    if image_xy_index >= 0 and image_xy_index + 1 < image_xy.len():
+                        val sidecar_x = image_xy[image_xy_index]
+                        val sidecar_y = image_xy[image_xy_index + 1]
+                        if sidecar_x >= -2147483648 and sidecar_x <= 2147483647:
+                            if sidecar_y >= -2147483648 and sidecar_y <= 2147483647:
+                                packed_x = sidecar_x.to_i32()
+                                packed_y = sidecar_y.to_i32()
+                                sidecar_position = true
+                    if not sidecar_position and command.image_uri.starts_with("wmabs:"):
                         packed_x = _engine2d_draw_ir_nth_int(
                             command.image_uri, 0, x).to_i32()
                         packed_y = _engine2d_draw_ir_nth_int(
                             command.image_uri, 1, y).to_i32()
-                    if not command.image_uri.starts_with("wmabs:"):
+                    if not sidecar_position and not command.image_uri.starts_with("wmabs:"):
                         if command.component_id.starts_with("wmabs:"):
                             packed_x = _engine2d_draw_ir_nth_int(
                                 command.component_id, 0, x).to_i32()
@@ -1657,7 +1663,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                         command.computed_style, "wm-absolute-x")
                     val wm_absolute_y = _engine2d_draw_ir_style_value(
                         command.computed_style, "wm-absolute-y")
-                    if not command.image_uri.starts_with("wmabs:"):
+                    if not sidecar_position and not command.image_uri.starts_with("wmabs:"):
                         if not command.component_id.starts_with("wmabs:"):
                             if wm_absolute_x != "":
                                 if wm_absolute_y != "":
@@ -1874,7 +1880,7 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64], visual_key: text, batch_offsets: [i32]) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64, batch_execution_counts: [i64], visual_key: text, batch_offsets: [i32], image_xy: [i64] = []) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
     # free-function boundary. Native inference has historically treated an
@@ -2024,7 +2030,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 val inner = _engine2d_draw_ir_render_commands(
                     delta, batch.commands, inner_offsets, images, true,
                     batch.backend_target == "metal", draw_ir_no_rect(),
-                    css_background_pixel_work_budget, inner_material_counts, false)
+                    css_background_pixel_work_budget, inner_material_counts, false,
+                    image_xy)
                 if batch_execution_counts.len() >= 6:
                     batch_execution_counts[0] = inner_material_counts[0]
                     batch_execution_counts[1] = inner_material_counts[1]
@@ -2086,7 +2093,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 )
             else:
                 draw_ir_no_rect(),
-            css_background_pixel_work_budget, direct_material_counts, false)
+            css_background_pixel_work_budget, direct_material_counts, false,
+            image_xy)
         if batch_execution_counts.len() >= 6:
             batch_execution_counts[0] = direct_material_counts[0]
             batch_execution_counts[1] = direct_material_counts[1]
@@ -2163,7 +2171,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     val inner = _engine2d_draw_ir_render_commands(
         offscreen, commands, offscreen_offsets, images, true,
         batch.backend_target == "metal", draw_ir_no_rect(),
-        css_background_pixel_work_budget, inner_material_counts, true)
+        css_background_pixel_work_budget, inner_material_counts, true,
+        image_xy)
     if batch_execution_counts.len() >= 6:
         batch_execution_counts[0] = inner_material_counts[0]
         batch_execution_counts[1] = inner_material_counts[1]
@@ -2296,6 +2305,13 @@ fn engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence(engine
         engine, composition, gpu_available, images, false, true, false,
         transport, composition.scene_key)
 
+fn engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], image_xy: [i64], evidence_i64: [i64], evidence_text: [text]) -> Engine2dDrawIrAdvResult:
+    """Replay prepared Draw IR with caller-owned resolved-image positions."""
+    val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: evidence_i64, evidence_text: evidence_text)
+    _engine2d_draw_ir_adv_composition_with_images(
+        engine, composition, gpu_available, images, false, true, false,
+        transport, composition.scene_key, image_xy)
+
 fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Render/read back an exhaustively preflighted fresh device composition."""
     val reason = _engine2d_draw_ir_fresh_device_reason(composition, images, engine.width(), engine.height())
@@ -2309,7 +2325,7 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
     val transport = Engine2dDrawIrTransport(destination: [], status: [], evidence_i64: [], evidence_text: [])
     _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true, transport, "")
 
-fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, transport: Engine2dDrawIrTransport, prepared_visual_key: text) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool, transport: Engine2dDrawIrTransport, prepared_visual_key: text, image_xy: [i64] = []) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
     # Preserve the public fallback invariant from the original inputs. The
     # native cross-module aggregate path can lose this bool from `plan`.
@@ -2373,7 +2389,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         val outcome = _engine2d_draw_ir_render_batch_embedded(
             eng, batch, images, 0, allow_parent_image,
             css_background_pixel_work_remaining, batch_execution_counts,
-            prepared_visual_key, batch_offsets)
+            prepared_visual_key, batch_offsets, image_xy)
         _e2d_wm_command_profile_active = false
         if profile_wm_batches:
             val profile_batch_finished_us = rt_time_now_micros()
@@ -2517,5 +2533,6 @@ export engine2d_draw_ir_adv_composition_with_images_into_evidence
 export engine2d_draw_ir_adv_composition_present_with_images
 export engine2d_draw_ir_adv_composition_present_with_images_evidence
 export engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence
+export engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
 export engine2d_resolved_draw_ir_image

@@ -34,6 +34,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_present_with_images_evidence,
     engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence,
+    engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence,
     engine2d_resolved_draw_ir_image
 }
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
@@ -98,6 +99,7 @@ class Engine2dWmFrameExecutor:
     profile_emitted: bool
     prepared_composition: DrawIrComposition
     prepared_images: [Engine2dResolvedDrawIrImage]
+    prepared_image_xy: [i64]
     prepared_scene_revision: i64
     prepared_taskbar_revision: i64
     prepared_clock_label: text
@@ -106,7 +108,7 @@ class Engine2dWmFrameExecutor:
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false, prepared_composition: DrawIrComposition(schema: "", composition_id: "", scene_key: "", backend_target: "", batches: []), prepared_images: [], prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_valid: false)
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], emit_repeated_evidence: true, profile_emitted: false, prepared_composition: DrawIrComposition(schema: "", composition_id: "", scene_key: "", backend_target: "", batches: []), prepared_images: [], prepared_image_xy: [], prepared_scene_revision: 0, prepared_taskbar_revision: 0, prepared_clock_label: "", prepared_backend_target: "", prepared_valid: false)
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -244,9 +246,10 @@ class Engine2dWmFrameExecutor:
             var prepared_evidence_i64: [i64] = [0, 0, 0, 0, 0, 0, 0]
             var prepared_evidence_text: [text] = ["", "", ""]
             val prepared_execute_started_us = boot_monotonic_now_us()
-            val prepared_result = engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence(
+            val prepared_result = engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(
                 self.engine, self.prepared_composition, false,
-                self.prepared_images, prepared_evidence_i64,
+                self.prepared_images, self.prepared_image_xy,
+                prepared_evidence_i64,
                 prepared_evidence_text)
             val prepared_rendered = prepared_evidence_i64[5].to_i32()
             val prepared_skipped = prepared_evidence_i64[0].to_i32()
@@ -270,6 +273,7 @@ class Engine2dWmFrameExecutor:
         # We hand the composition builder a scene + content_frames filtered to
         # only the resolvable windows so no unresolvable image command is emitted.
         var images: [Engine2dResolvedDrawIrImage] = []
+        var image_xy: [i64] = []
         var host_images: [SimpleOsHostGpuImageResource] = []
         var good_windows: [SharedWmWindow] = []
         var good_content_frames: [WmContentFrame] = []
@@ -313,6 +317,8 @@ class Engine2dWmFrameExecutor:
                                 duplicate_uri = true
                         if not duplicate_uri:
                             images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                            image_xy.push(content.x.to_i64())
+                            image_xy.push(content.y.to_i64())
                             if self.host_gpu_base != 0u64:
                                 host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
                             good_windows.push(window)
@@ -332,6 +338,8 @@ class Engine2dWmFrameExecutor:
         for frame in nested_content_frames:
             val image_uri = shared_wm_content_frame_image_uri(frame)
             images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+            image_xy.push(9223372036854775807)
+            image_xy.push(9223372036854775807)
             if self.host_gpu_base != 0u64:
                 host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
             good_content_frames.push(frame)
@@ -362,8 +370,9 @@ class Engine2dWmFrameExecutor:
                 self.engine, local_composition, false, images,
                 render_evidence_i64, render_evidence_text)
         else:
-            engine2d_draw_ir_adv_composition_present_prepared_with_images_evidence(
+            engine2d_draw_ir_adv_composition_present_prepared_with_images_xy_evidence(
                 self.engine, local_composition, false, images,
+                image_xy,
                 render_evidence_i64, render_evidence_text)
         val rendered_count = render_evidence_i64[5].to_i32()
         val skipped_count = render_evidence_i64[0].to_i32()
@@ -390,6 +399,7 @@ class Engine2dWmFrameExecutor:
         if self.emit_repeated_evidence:
             self.prepared_composition = local_composition
             self.prepared_images = images
+            self.prepared_image_xy = image_xy
             self.prepared_scene_revision = scene_revision
             self.prepared_taskbar_revision = taskbar_revision
             self.prepared_clock_label = clock_label
