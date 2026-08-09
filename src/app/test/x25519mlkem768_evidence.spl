@@ -21,7 +21,8 @@ use lib.common.crypto.x25519_mlkem768.contract.{
     x25519_mlkem768_default_config}
 use lib.common.crypto.x25519_mlkem768.evidence_contract.{
     X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
-    X25519MlKem768EvidenceStatus, X25519MlKem768EvidenceCli,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceStatus,
+    X25519MlKem768EvidenceCli,
     X25519MlKem768RunReceipt,
     x25519_mlkem768_parse_evidence_cli,
     x25519_mlkem768_evidence_backend_name,
@@ -38,6 +39,11 @@ use os.crypto.x25519_mlkem768.hybrid.{
 use app.test.x25519mlkem768_gpu_dispatch.{
     X25519MlKem768GpuDispatchRequest,
     x25519_mlkem768_dispatch_gpu}
+use app.test.x25519mlkem768_pinned_workload.{
+    X25519MlKem768PinnedPublicOutputs,
+    x25519_mlkem768_pinned_scalar_config,
+    x25519_mlkem768_run_pinned_workload,
+    x25519_mlkem768_run_pinned_simd_workload}
 
 val X25519_MLKEM768_EVIDENCE_SCHEMA = "x25519mlkem768-evidence-v1"
 val X25519_MLKEM768_EVIDENCE_FIXTURE_ID = "x25519mlkem768-v1"
@@ -351,6 +357,14 @@ fn _scalar_roundtrip(cli: X25519MlKem768EvidenceCli,
         runner_sha256: text) -> Result<X25519MlKem768RunReceipt, text>:
     if cli.mode != X25519MlKem768EvidenceMode.Native:
         return Err("scalar-qemu-execution-requires-wrapper-observation")
+    if cli.scope == X25519MlKem768EvidenceScope.FullOperation:
+        if cli.batch_size != 1:
+            return Err("scalar-pinned-full-operation-requires-batch-one")
+        val outputs = x25519_mlkem768_run_pinned_workload(
+            x25519_mlkem768_pinned_scalar_config())?
+        return Ok(x25519_mlkem768_pinned_full_operation_receipt(
+            cli, manifest_sha256, fixture_sha256, runner_sha256,
+            "scalar-pinned-full-operation-admitted", outputs))
     var keygen_digest_chain = ""
     var encapsulate_digest_chain = ""
     var decapsulate_digest_chain = ""
@@ -425,6 +439,16 @@ fn _simd_roundtrip(cli: X25519MlKem768EvidenceRunnerCli,
     if cli.evidence.mode != X25519MlKem768EvidenceMode.Native:
         return Err("simd-qemu-execution-requires-wrapper-observation")
     val backend = _simd_backend(cli.evidence.backend)?
+    if cli.evidence.scope == X25519MlKem768EvidenceScope.FullOperation:
+        if cli.evidence.batch_size != 1:
+            return Err("simd-pinned-full-operation-requires-batch-one")
+        var config = x25519_mlkem768_pinned_scalar_config()
+        config.requested_backend = backend
+        val outputs = x25519_mlkem768_run_pinned_simd_workload(
+            config, admission.simd)?
+        return Ok(x25519_mlkem768_pinned_full_operation_receipt(
+            cli.evidence, manifest_sha256, fixture_sha256, runner_sha256,
+            "native-simd-pinned-full-operation-admitted", outputs))
     var keygen_digest_chain = ""
     var encapsulate_digest_chain = ""
     var decapsulate_digest_chain = ""
@@ -511,6 +535,35 @@ fn _simd_roundtrip(cli: X25519MlKem768EvidenceRunnerCli,
     receipt.artifact_sha256 = admission.runner_artifact_sha256
     Ok(receipt)
 
+fn x25519_mlkem768_pinned_full_operation_receipt(
+        cli: X25519MlKem768EvidenceCli,
+        manifest_sha256: text, fixture_sha256: text, runner_sha256: text,
+        reason: text, outputs: X25519MlKem768PinnedPublicOutputs
+        ) -> X25519MlKem768RunReceipt:
+    var receipt = _empty_receipt(
+        cli, X25519MlKem768EvidenceStatus.Pass, reason,
+        manifest_sha256, fixture_sha256, runner_sha256)
+    receipt.fixture_id = outputs.fixture_id
+    receipt.selected_backend = Some(cli.backend)
+    receipt.client_share_bytes = outputs.client_share_bytes
+    receipt.server_share_bytes = outputs.server_share_bytes
+    receipt.shared_secret_bytes = outputs.shared_secret_bytes
+    receipt.keygen_output_digest = outputs.keygen_output_digest
+    receipt.encapsulate_output_digest = outputs.encapsulate_output_digest
+    receipt.decapsulate_output_digest = outputs.decapsulate_output_digest
+    receipt.scalar_roundtrip_match = true
+    receipt.absolute_oracle_match = true
+    receipt.simd_chunk_hits = outputs.simd_chunk_hits
+    receipt.observed_rvv_vlen_bits = outputs.observed_rvv_vlen_bits
+    receipt.kernel_invocations = outputs.kernel_invocations
+    receipt.compiled = outputs.compiled
+    receipt.submitted = outputs.submitted
+    receipt.fence_completed = outputs.fence_completed
+    receipt.device_readback = outputs.device_readback
+    receipt.artifact_sha256 = outputs.artifact_digest
+    receipt.device_identity = outputs.executor_identity
+    receipt
+
 fn _is_simd_backend(backend: X25519MlKem768EvidenceBackend) -> bool:
     backend == X25519MlKem768EvidenceBackend.Avx2 or
     backend == X25519MlKem768EvidenceBackend.Neon or
@@ -589,3 +642,4 @@ fn main() -> i64:
     0
 
 export x25519_mlkem768_scalar_observation_reason
+export x25519_mlkem768_pinned_full_operation_receipt

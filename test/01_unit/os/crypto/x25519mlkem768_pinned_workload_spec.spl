@@ -8,6 +8,9 @@ use lib.common.crypto.x25519_mlkem768.contract.{
     X25519MlKem768SimdAdmission,
     X25519_MLKEM768_IMPLEMENTATION_VERSION,
     X25519_MLKEM768_PROFILE_VERSION}
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend, X25519MlKem768EvidenceMode,
+    X25519MlKem768EvidenceScope, X25519MlKem768EvidenceCli}
 use app.test.x25519mlkem768_pinned_workload.{
     X25519MlKem768PinnedSet, X25519MlKem768PinnedSetChecks,
     X25519MlKem768PinnedSetReceipt,
@@ -24,6 +27,8 @@ use app.test.x25519mlkem768_pinned_workload.{
     x25519_mlkem768_validate_pinned_set_c,
     x25519_mlkem768_run_pinned_workload,
     x25519_mlkem768_run_pinned_simd_workload}
+use app.test.x25519mlkem768_evidence.{
+    x25519_mlkem768_pinned_full_operation_receipt}
 
 fn _set_a_checks() -> X25519MlKem768PinnedSetChecks:
     X25519MlKem768PinnedSetChecks(
@@ -160,6 +165,46 @@ describe "X25519MLKEM768 canonical pinned A/B/C workload":
                 expect(outputs.fence_completed).to_be(false)
                 expect(outputs.device_readback).to_be(false)
             case Err(reason): fail(reason)
+
+    it "propagates pinned identity and digests into scalar and AVX2 full receipts":
+        step("Run the pinned scalar workload once for public receipt values")
+        val outputs = match x25519_mlkem768_run_pinned_workload(
+                x25519_mlkem768_pinned_scalar_config()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val scalar_cli = X25519MlKem768EvidenceCli(
+            fixture_manifest: "manifest.sdn", fixture_source: "fixture.spl",
+            runner_source: "runner.spl",
+            backend: X25519MlKem768EvidenceBackend.ScalarCpu,
+            mode: X25519MlKem768EvidenceMode.Native,
+            scope: X25519MlKem768EvidenceScope.FullOperation,
+            batch_size: 1)
+        step("Bind pinned values into the scalar full-operation receipt")
+        val scalar = x25519_mlkem768_pinned_full_operation_receipt(
+            scalar_cli, "a" * 64, "b" * 64, "c" * 64,
+            "scalar-pinned-full-operation-admitted", outputs)
+        expect(scalar.fixture_id).to_equal(X25519_MLKEM768_PINNED_FIXTURE_ID)
+        expect(scalar.keygen_output_digest).to_equal(outputs.keygen_output_digest)
+        expect(scalar.encapsulate_output_digest).to_equal(
+            outputs.encapsulate_output_digest)
+        expect(scalar.decapsulate_output_digest).to_equal(
+            outputs.decapsulate_output_digest)
+        expect(scalar.absolute_oracle_match).to_be(true)
+        step("Bind those same pinned public values into the AVX2 receipt")
+        val avx2_cli = X25519MlKem768EvidenceCli(
+            fixture_manifest: "manifest.sdn", fixture_source: "fixture.spl",
+            runner_source: "runner.spl",
+            backend: X25519MlKem768EvidenceBackend.Avx2,
+            mode: X25519MlKem768EvidenceMode.Native,
+            scope: X25519MlKem768EvidenceScope.FullOperation,
+            batch_size: 1)
+        val avx2 = x25519_mlkem768_pinned_full_operation_receipt(
+            avx2_cli, "a" * 64, "b" * 64, "c" * 64,
+            "native-simd-pinned-full-operation-admitted", outputs)
+        expect(avx2.fixture_id).to_equal(X25519_MLKEM768_PINNED_FIXTURE_ID)
+        expect(avx2.keygen_output_digest).to_equal(outputs.keygen_output_digest)
+        expect(avx2.selected_backend).to_equal(
+            Some(X25519MlKem768EvidenceBackend.Avx2))
 
 describe "X25519MLKEM768 pinned Set A ML-KEM receipt":
     it "constructs the exact independently validated ML-KEM receipt":
