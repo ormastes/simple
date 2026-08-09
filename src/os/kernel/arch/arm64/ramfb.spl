@@ -19,13 +19,12 @@ val ARM64_RAMFB_WIDTH: u32 = 1024
 val ARM64_RAMFB_HEIGHT: u32 = 768
 val ARM64_RAMFB_SCRATCH_BYTES: i64 = 48
 
-val _FW_CFG_BASE: u64 = 0x09020000
-val _FW_CFG_DATA: u64 = _FW_CFG_BASE
-val _FW_CFG_SELECTOR: u64 = _FW_CFG_BASE + 0x08
-val _FW_CFG_DMA: u64 = _FW_CFG_BASE + 0x10
-val _FW_CFG_FILE_DIR: u16 = 0x0019
-val _RAMFB_FOURCC: u32 = 0x34325258
-val _DMA_SELECT_WRITE: u32 = 0x18
+fn _fw_cfg_data() -> u64: 0x09020000u64
+fn _fw_cfg_selector() -> u64: 0x09020008u64
+fn _fw_cfg_dma() -> u64: 0x09020010u64
+fn _fw_cfg_file_dir() -> u16: 0x0019u16
+fn _ramfb_fourcc() -> u32: 0x34325258u32
+fn _dma_select_write() -> u32: 0x18u32
 
 fn arm64_ramfb_framebuffer_bytes(width: u32, height: u32) -> i64:
     width.to_i64() * height.to_i64() * 4
@@ -77,7 +76,7 @@ fn _be32_byte(value: u32, index: u32) -> u8:
     (value & 0xFF).to_u8()
 
 fn _ramfb_dma_control(selector: u16) -> u32:
-    (selector.to_u32() << 16) | _DMA_SELECT_WRITE
+    (selector.to_u32() << 16) | _dma_select_write()
 
 fn _ramfb_dma_status(status: u32) -> i64:
     if status == 0: return 1
@@ -85,10 +84,10 @@ fn _ramfb_dma_status(status: u32) -> i64:
     0
 
 fn _select(selector: u16):
-    mmio_write16(_FW_CFG_SELECTOR, _swap16(selector))
+    mmio_write16(_fw_cfg_selector(), _swap16(selector))
 
 fn _read_byte() -> u8:
-    mmio_read8(_FW_CFG_DATA)
+    mmio_read8(_fw_cfg_data())
 
 fn _read_be32_stream() -> u32:
     (_read_byte().to_u32() << 24) |
@@ -128,7 +127,7 @@ fn _ramfb_name_byte(index: u32) -> u8:
     0u8
 
 fn _find_ramfb_selector() -> u16:
-    _select(_FW_CFG_FILE_DIR)
+    _select(_fw_cfg_file_dir())
     val count = _read_be32_stream()
     if count == 0 or count > 1000:
         return 0u16
@@ -163,10 +162,10 @@ fn arm64_ramfb_setup(fb_addr: u64, width: u32, height: u32, scratch_addr: u64) -
     if stride > 0xFFFFFFFFu64:
         uart_writeln("[WM] ramfb preflight failed reason=stride-overflow stride={stride}")
         return false
-    if height.to_u64() > 0xFFFFFFFFFFFFFFFFu64 / stride:
+    val framebuffer_bytes = stride * height.to_u64()
+    if height != 0u32 and framebuffer_bytes / height.to_u64() != stride:
         uart_writeln("[WM] ramfb preflight failed reason=framebuffer-size-overflow height={height} stride={stride}")
         return false
-    val framebuffer_bytes = stride * height.to_u64()
     if scratch_addr < fb_addr:
         uart_writeln("[WM] ramfb preflight failed reason=scratch-before-framebuffer fb={fb_addr} scratch={scratch_addr}")
         return false
@@ -174,7 +173,7 @@ fn arm64_ramfb_setup(fb_addr: u64, width: u32, height: u32, scratch_addr: u64) -
     if scratch_delta < framebuffer_bytes:
         uart_writeln("[WM] ramfb preflight failed reason=scratch-overlap bytes={framebuffer_bytes} delta={scratch_delta}")
         return false
-    if scratch_addr > 0xFFFFFFFFFFFFFFFFu64 - ARM64_RAMFB_SCRATCH_BYTES.to_u64():
+    if scratch_addr + ARM64_RAMFB_SCRATCH_BYTES.to_u64() < scratch_addr:
         uart_writeln("[WM] ramfb preflight failed reason=scratch-overflow scratch={scratch_addr}")
         return false
     if (scratch_addr & 7u64) != 0:
@@ -200,7 +199,7 @@ fn arm64_ramfb_setup(fb_addr: u64, width: u32, height: u32, scratch_addr: u64) -
     val config_addr = scratch_addr
     val descriptor_addr = scratch_addr + 32
     _write_be64(config_addr, fb_addr)
-    _write_be32(config_addr + 8, _RAMFB_FOURCC)
+    _write_be32(config_addr + 8, _ramfb_fourcc())
     _write_be32(config_addr + 12, 0u32)
     _write_be32(config_addr + 16, width)
     _write_be32(config_addr + 20, height)
@@ -213,8 +212,8 @@ fn arm64_ramfb_setup(fb_addr: u64, width: u32, height: u32, scratch_addr: u64) -
 
     _select(selector)
     mmio_memory_barrier()
-    mmio_write32(_FW_CFG_DMA, _swap32(((descriptor_addr >> 32) & 0xFFFFFFFF).to_u32()))
-    mmio_write32(_FW_CFG_DMA + 4, _swap32((descriptor_addr & 0xFFFFFFFF).to_u32()))
+    mmio_write32(_fw_cfg_dma(), _swap32(((descriptor_addr >> 32) & 0xFFFFFFFF).to_u32()))
+    mmio_write32(_fw_cfg_dma() + 4u64, _swap32((descriptor_addr & 0xFFFFFFFF).to_u32()))
 
     var attempts: u32 = 0
     while attempts < 1000000:

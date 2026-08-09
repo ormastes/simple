@@ -4888,7 +4888,8 @@ int64_t rt_pool_safepoint(void)
  * Cache immutable literal values by that address and length so parser/render
  * loops do not allocate the same property names millions of times. The table
  * is bounded and open-addressed; saturation only loses the optimization. */
-#define ARM64_LITERAL_CACHE_CAPACITY 2048U
+#define ARM64_LITERAL_CACHE_CAPACITY 32768U
+#define ARM64_LITERAL_CACHE_MAX_PROBES 128U
 typedef struct {
     uintptr_t data;
     uint32_t len;
@@ -4903,7 +4904,7 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
     uint32_t len = len_val > (RuntimeValue)UINT32_MAX ? UINT32_MAX : (uint32_t)len_val;
     uintptr_t mixed = (ptr >> 3) ^ (ptr >> 17) ^ ((uintptr_t)len * 2654435761U);
     uint32_t slot = (uint32_t)mixed & (ARM64_LITERAL_CACHE_CAPACITY - 1U);
-    for (uint32_t probe = 0; probe < ARM64_LITERAL_CACHE_CAPACITY; probe++) {
+    for (uint32_t probe = 0; probe < ARM64_LITERAL_CACHE_MAX_PROBES; probe++) {
         Arm64LiteralCacheEntry *entry = &_arm64_literal_cache[slot];
         if (entry->value != 0 && entry->value != NIL_VALUE) {
             if (entry->data == ptr && entry->len == len) return entry->value;
