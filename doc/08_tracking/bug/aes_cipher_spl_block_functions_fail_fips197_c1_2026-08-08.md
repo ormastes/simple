@@ -1,7 +1,7 @@
 # `src/lib/common/aes/` scalar AES is non-functional: `expand_key` produces a wrong schedule from word 4 on, and `aes_encrypt_block`/`aes_decrypt_block` fail FIPS-197 C.1 — while the only specs covering them are round-trip-only and pass anyway
 
 **Date:** 2026-08-08
-**Status:** OPEN
+**Status:** RESOLVED (not reproduced) — see "Re-verification 2026-08-09" section below.
 **Severity:** Medium. No production crypto path consumes these (enumerated
 below), but they are exported stdlib functions with the obvious names, they
 are wrong, and the four specs covering them are structurally incapable of
@@ -178,3 +178,35 @@ observed. Whatever the defect is, it is NOT "the word-derivation loop computes
 wrong words" — the loop appears not to append anything. Re-derive this finding
 under the interpreter before acting on it, and note that the `nil`-vs-error
 divergence on out-of-range list reads is itself worth filing.
+
+## Re-verification 2026-08-09 (RESOLVED — not reproduced under a clean lane)
+
+Following this doc's own suggestion above ("re-derive this finding under the
+interpreter before acting on it"), re-measured fresh via `bin/simple run`
+(default JIT+interpreter-fallback engine) with a standalone probe printing raw
+decimal bytes only (no hex-formatting helper anywhere in the path, avoiding
+the exact corruption class already documented in the correction notice at the
+top of this file):
+
+```
+key = 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+pt  = 00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff
+aes_encrypt_block(pt, key) ->
+  [105,196,224,216,106,123,4,48,216,205,183,128,112,180,197,90]
+  = 69 c4 e0 d8 6a 7b 04 30 d8 cd b7 80 70 b4 c5 5a
+```
+
+This is the exact FIPS-197 Appendix C.1 expected ciphertext, byte for byte.
+`expand_key`/`aes_encrypt_block` round-trip correctly. **Not reproduced** —
+this doc's headline claim does not hold on the current tree. Consistent with
+the doc's own final note above: the earlier "broken" readings were an
+artifact of the JIT tagged-list-element defect
+(`jit_param_passed_list_element_read_returns_tagged_2026-08-08.md`), not a
+real AES logic bug, and that JIT defect (or something covering the same
+symptom) appears to have been fixed or no longer applies to this code path —
+`expand_key`'s untyped `list` params no longer produce `nil`/OOB reads.
+
+**Status: RESOLVED (not reproduced).** A KAT assertion for this exact vector
+already exists at `test/01_unit/lib/common/simd_dispatch_facade_spec.spl:22`
+(added in `aff29a24dfe`, after this bug was originally filed) and is green.
+No source change was needed.
