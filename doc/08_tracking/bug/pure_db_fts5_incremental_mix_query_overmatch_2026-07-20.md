@@ -1,9 +1,50 @@
 # PureDatabase.fts5_search over-matches after mixed DELETE+INSERT (incremental FTS index)
 
 **Date:** 2026-07-20
-**Status:** OPEN
+**Status:** FIXED (2026-08-09)
 **Area:** `src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl` (`search`,
 `_ensure_fts_index` / `_ensure_fts_index_typed`, `_fts_valid` incremental-index path)
+
+## Resolution (2026-08-09)
+
+**Status: FIXED.** Root cause was different from the doc's original
+hypothesis: it is **not** the incremental DELETE+INSERT index-maintenance
+path (`_fts_valid` / `_ensure_fts_index*`), which was re-audited line-by-line
+and found to correctly evict tombstoned rows and rebuild from a fresh
+`FtsEngine` whenever `_fts_valid[ti]` is false (every `DELETE` calls
+`_invalidate_fts(ti)`, and the subsequent `INSERT`s correctly skip the
+incremental-add fast path while the index is invalid).
+
+The real defect is in the **tokenizer + BM25 OR-matching combination**:
+`_is_alnum` (`src/lib/nogc_sync_mut/db/dbfs_engine/fts/tokenizer.spl`) did
+not treat `_` as a word character, so a compound identifier like
+`"fresh_12"` tokenized to two separate terms `["fresh", "12"]`.
+`fts_bm25_search` (`bm25.spl`) matches a document if it contains **any**
+query term (OR semantics, no AND-across-terms requirement) — so a query for
+`"fresh_12"` matched every row containing the token `"fresh"` (all 5
+`fresh_10`..`fresh_14` rows), not just the row whose body also contains the
+token `"12"`. This is unrelated to insert/delete ordering: the two adjacent
+"insert-only" / "delete-only" tests in the same spec file only ever query
+single-word terms (`"echo"`, `"golf"`, `"kilo"`), which never exercises the
+split.
+
+**Fix:** `_is_alnum` now treats `_` as a word character, so `"fresh_12"`
+tokenizes as one token again and stops sharing a prefix token with its
+siblings. Scoped, single-file change:
+`src/lib/nogc_sync_mut/db/dbfs_engine/fts/tokenizer.spl`.
+
+**Verification:**
+- `test/05_perf/bench/pure_db_optimization_spec.spl` — was 4/5 passing (the
+  "mixed INSERT+DELETE maintains FTS correctness" example failing with
+  `expected 5 to equal 1`); now 5/5 passing.
+- `test/02_integration/storage/dbfs/fts_engine_spec.spl` (tokenizer's own
+  spec) — 28/28 passing, no regression from treating `_` as alnum.
+- `test/02_integration/storage/dbfs/pure_db_spec.spl` — 69/69 passing.
+- `test/02_integration/storage/dbfs/pure_db_sql_extended_spec.spl` — 10/10
+  passing.
+- Swept the repo for other FTS queries containing `_` besides this spec
+  file; none found, so no other spec depended on the old split-on-underscore
+  behavior.
 
 ## Symptom
 
