@@ -112,3 +112,35 @@ Full 18-minute closure-source native-build run of
 captured this session; error tally above is a direct grep of that log. Not
 attached (large trace log) — reproducible via the recipe above (full repro)
 or the minimal fixture (fast iteration).
+
+## RESOLVED (single-module case) 2026-08-09
+
+Root cause: `lower_enum_match`'s arm-merge copy (`b_arm2.emit_copy(result,
+arm_result_local)`, `switch_operators_calls.spl`) copies the arm body's
+result local into the match expression's own shared `result` local but never
+propagated `struct_value_syms`. So `case Ok(hh): hh` correctly registered
+`struct_value_syms[bound_payload.id] = "FileHandle"` (the mechanism this
+doc's "Likely mechanism" section already suspected), but `val h = match ...`
+bound `h` to the MERGED `result` local, which had no entry — the exact gap
+predicted. Fixed by propagating `struct_value_syms` at the merge-copy site
+(3 occurrences of the same pattern in this file: `lower_enum_match`,
+`emit_switch_dispatch`, `emit_if_chain_dispatch`).
+
+Verified via the minimal repro above (single file, single struct): exit 0,
+zero `unresolved method call` / `undefined variable` / MIR errors, and the
+emitted object file contains direct calls to
+`...FileHandle.write_text`/`...FileHandle.close`. Regression-checked against
+both prior layers (Dict-method-name-collision fixture and a combined
+Dict+static-collision+match-bind fixture): both still pass clean.
+
+**However, the real `rt_io_file_roundtrip` fixture (cross-module, via `use
+std.nogc_sync_mut.io.file.{FileHandle, File}`) still fails identically** —
+this fix only closes the single-module case. A DISTINCT, deeper cross-module
+bug (two contributing mechanisms: a global unqualified
+`enum_payload_struct_names` map that collides across `Result<T,E>`
+instantiations, and `struct_method_syms`/`module.impls` never being populated
+for inline `class` methods at all, only explicit `impl` blocks) remains open,
+filed separately:
+`doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md`.
+The `rt_io_file_*` AOT stub question is STILL UNDETERMINED — the real
+fixture never reaches codegen.

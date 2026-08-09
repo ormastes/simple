@@ -151,6 +151,29 @@
 #   doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md.
 #   The AOT rt_io_file_* stub question remains UNDETERMINED -- still never
 #   reaches codegen for this fixture, now for a third, narrower reason.
+#
+# 2026-08-09c -- the instance-method-dispatch bug above is RESOLVED for the
+#   SINGLE-MODULE case (a match-arm merge-copy in `lower_enum_match` /
+#   `emit_switch_dispatch` / `emit_if_chain_dispatch`, `switch_operators_calls.
+#   spl`, dropped `struct_value_syms` when merging an arm's bound-payload
+#   result into the match expression's own shared result local -- fixed by
+#   propagating it at the merge-copy site, all 3 occurrences). Verified via a
+#   fast minimal repro (exit 0, zero unresolved-method-call errors, direct
+#   calls to FileHandle.write_text/close present in the emitted object) and a
+#   combined Dict + static-name-collision + match-bind regression fixture
+#   (still exit 0 after the fix). HOWEVER the real `rt_io_file_roundtrip`
+#   fixture is inherently CROSS-MODULE (`use std.nogc_sync_mut.io.file.
+#   {FileHandle, File}`) and still fails IDENTICALLY after this fix -- a
+#   distinct, deeper bug (two mechanisms: a global unqualified
+#   `enum_payload_struct_names` map that collides across different
+#   `Result<T,E>` instantiations, and `struct_method_syms`/`module.impls`
+#   never being populated for inline `class` methods, only explicit `impl`
+#   blocks) -- filed as
+#   doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md.
+#   The AOT rt_io_file_* stub question remains UNDETERMINED -- still never
+#   reaches codegen for this fixture, now for a fourth, cross-module-specific
+#   reason. Full 18-minute closure re-run after the merge-copy fix: identical
+#   17-error tally to before -- confirmed NOT a residual of the same bug.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -333,8 +356,10 @@ if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
         echo "KNOWN-OPEN — AOT native-build reproduced the known FileHandle instance-method"
         echo "             DISPATCH failure (unresolved write_text/close/read_text/size/"
         echo "             read_all/write_all/merge on a match-bound FileHandle local)."
-        echo "             Consistent with"
-        echo "             doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md."
+        echo "             The single-module half of this (arm-merge struct_value_syms"
+        echo "             propagation) was fixed 2026-08-09c -- this fixture is CROSS-MODULE"
+        echo "             and hits a distinct, still-open bug. Consistent with"
+        echo "             doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md."
         echo "             The rt_io_file_* stub question remains UNDETERMINED under AOT --"
         echo "             the build cannot reach codegen until that bug is fixed."
     elif [ -f "$WORK_DIR/aot_out.o" ] || [ "$aot_rc" -eq 0 ]; then
@@ -355,16 +380,19 @@ if [ "${RUN_AOT_LEG:-0}" = "1" ]; then
 else
     echo "KNOWN-OPEN — AOT (native-build) leg skipped by default (RUN_AOT_LEG=1 to run the"
     echo "             ~18-minute repro). Known status: the fixture compiles PAST all"
-    echo "             \`File\`-class calls (fixed 2026-08-09) and all pattern-binding"
-    echo "             (fixed 2026-08-09b) but still fails to compile under native-build, now"
-    echo "             on FileHandle INSTANCE-METHOD DISPATCH (unresolved write_text/close/"
-    echo "             read_text/size/etc) -- not a stub verdict, a prerequisite compile"
-    echo "             failure. See"
+    echo "             \`File\`-class calls (fixed 2026-08-09), all pattern-binding (fixed"
+    echo "             2026-08-09b), and single-module instance-method dispatch (fixed"
+    echo "             2026-08-09c) but still fails to compile under native-build, now on a"
+    echo "             CROSS-MODULE Result<T,E> payload struct-name recovery gap (same"
+    echo "             observable errors: unresolved write_text/close/read_text/size/etc) --"
+    echo "             not a stub verdict, a prerequisite compile failure. See"
     echo "             doc/08_tracking/bug/native_build_mir_lowering_undefined_file_symbol_2026-08-08.md"
     echo "             (resolved),"
     echo "             doc/08_tracking/bug/native_build_filehandle_instance_method_unresolved_2026-08-09.md"
-    echo "             (resolved, its undefined-variable half), and"
+    echo "             (resolved, its undefined-variable half),"
     echo "             doc/08_tracking/bug/native_build_instance_method_dispatch_unresolved_after_match_bind_2026-08-09.md"
+    echo "             (resolved, its single-module half), and"
+    echo "             doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md"
     echo "             (current blocker)."
 fi
 
