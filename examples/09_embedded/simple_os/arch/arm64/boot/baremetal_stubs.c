@@ -2916,6 +2916,30 @@ RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset
     return 1;
 }
 
+RuntimeValue rt_gui_blit_rect4(RuntimeValue pixels_value, RuntimeValue source_value,
+                               RuntimeValue xy, RuntimeValue wh)
+{
+    uint64_t source = (uint64_t)source_value;
+    uint64_t src_offset = source >> 32;
+    uint32_t src_stride = (uint32_t)((source >> 16) & 0xffffu);
+    uint32_t opacity_milli = (uint32_t)(source & 0xffffu);
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xffffffffu);
+    uint32_t width = (uint32_t)((uint64_t)wh >> 32);
+    uint32_t height = (uint32_t)((uint64_t)wh & 0xffffffffu);
+    if (src_stride == 0u || width == 0u || height == 0u ||
+        opacity_milli == 0u || opacity_milli > 1000u) return 0;
+    for (uint32_t row = 0; row < height; row++) {
+        uint64_t row_offset = src_offset + (uint64_t)row * src_stride;
+        uint64_t row_xy = ((uint64_t)x << 32) | (uint64_t)(y + row);
+        uint64_t count_opacity = ((uint64_t)width << 32) | opacity_milli;
+        if (rt_gui_blit_row4(pixels_value, (RuntimeValue)row_offset,
+                             (RuntimeValue)row_xy,
+                             (RuntimeValue)count_opacity) == 0) return 0;
+    }
+    return 1;
+}
+
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
 
 /*

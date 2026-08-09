@@ -436,36 +436,32 @@ impl RenderBackend for BaremetalBackend:
             return 0
         if self.mask_w > 0 and self.mask_h > 0:
             return 0
-        val pixel_count = pixels.len()
-        var row = 0
-        while row < h:
-            val py = y + row
-            var dst_x0 = x
-            var dst_x1 = x + w
-            if self.clip_enabled:
-                if dst_x0 < self.clip_x: dst_x0 = self.clip_x
-                val clip_x1 = self.clip_x + self.clip_w
-                if dst_x1 > clip_x1: dst_x1 = clip_x1
-            if dst_x0 < 0: dst_x0 = 0
-            if dst_x1 > self.w: dst_x1 = self.w
-            var visible = false
-            if py >= 0:
-                if py < self.h: visible = true
-            if self.clip_enabled:
-                if py < self.clip_y or py >= self.clip_y + self.clip_h:
-                    visible = false
-            if visible and dst_x1 > dst_x0:
-                val src_offset = row * w + (dst_x0 - x)
-                val available = pixel_count - src_offset
-                var count = dst_x1 - dst_x0
-                if count.to_i64() > available: count = available.to_i32()
-                if count > 0:
-                    if self.fb.framebuffer_blit_row_argb(
-                        pixels, src_offset.to_i64(), dst_x0.to_u32(),
-                        py.to_u32(), count.to_u32(), opacity_milli) == 0:
-                        return 0
-            row = row + 1
-        1
+        var dst_x0 = x
+        var dst_y0 = y
+        var dst_x1 = x + w
+        var dst_y1 = y + h
+        if self.clip_enabled:
+            if dst_x0 < self.clip_x: dst_x0 = self.clip_x
+            if dst_y0 < self.clip_y: dst_y0 = self.clip_y
+            val clip_x1 = self.clip_x + self.clip_w
+            val clip_y1 = self.clip_y + self.clip_h
+            if dst_x1 > clip_x1: dst_x1 = clip_x1
+            if dst_y1 > clip_y1: dst_y1 = clip_y1
+        if dst_x0 < 0: dst_x0 = 0
+        if dst_y0 < 0: dst_y0 = 0
+        if dst_x1 > self.w: dst_x1 = self.w
+        if dst_y1 > self.h: dst_y1 = self.h
+        val visible_w = dst_x1 - dst_x0
+        val visible_h = dst_y1 - dst_y0
+        if visible_w <= 0 or visible_h <= 0:
+            return 1
+        val src_offset = (dst_y0 - y) * w + (dst_x0 - x)
+        if src_offset < 0 or src_offset.to_i64() >= pixels.len():
+            return 0
+        val source = (src_offset.to_i64() << 32) | (w.to_i64() << 16) | opacity_milli.to_i64()
+        val xy = (dst_x0.to_i64() << 32) | dst_y0.to_i64()
+        val wh = (visible_w.to_i64() << 32) | visible_h.to_i64()
+        self.fb.framebuffer_blit_rect_argb(pixels, source, xy, wh)
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         self.clip_x = x
