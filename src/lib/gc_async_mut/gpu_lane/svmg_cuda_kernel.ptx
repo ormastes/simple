@@ -77,6 +77,86 @@
     mov.u64 %rd10, opstack;
     mov.u64 %rd11, callstack;
 
+    // ------------------------------------------------------------------
+    // DBG-1 launch-time restore (mailbox_const.spl DBG_* offsets; mirrors
+    // ref_vm.SvmgVm.new's dbg block instruction-for-instruction).
+    //
+    // Register map added by DBG-1/PROF-1:
+    //   %r110 = dbg_flags   %r111 = dbg_on      %r112 = single_step
+    //   %r113 = first_instruction (1/0)         %r114 = resumed (1/0)
+    //   %r115 = step_count (PROF-1, accumulates ACROSS resumes)
+    //   %r116 = dbg_break_count
+    //   %r117..%r120 scratch, %rd20..%rd22 scratch
+    //
+    // The DBG-1 block lives at 0x1F000..0x20000, i.e. ABOVE ARENA_DATA_SIZE
+    // (0x10000). Every access below is an ABSOLUTE arena byte offset from
+    // %rd2, exactly like the REG/LOG/RECORD accesses above -- SVM-G never
+    // addresses the arena relative to data_off. Because 0x1F000 is past
+    // ARENA_DATA_SIZE, the VM's own bounds_ok (OP_LOAD*/OP_STORE*) can never
+    // reach this block, so a program cannot forge its own breakpoints.
+    //
+    // When DBG_FLAGS == 0 this is one global load + one predicated branch,
+    // and nothing else is touched.
+    // ------------------------------------------------------------------
+    ld.global.u32 %r110, [%rd2+0x1F000];   // DBG_FLAGS_OFFSET
+    and.b32 %r111, %r110, 1;               // DBG_FLAG_ENABLED
+    mov.u32 %r112, 0;                      // single_step = false
+    mov.u32 %r113, 1;                      // first_instruction = true
+    mov.u32 %r114, 0;                      // resumed = false
+    mov.u32 %r115, 0;                      // step_count = 0
+    mov.u32 %r116, 0;                      // dbg_break_count = 0
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_DBG_INIT_DONE;
+
+    and.b32 %r117, %r110, 4;               // DBG_FLAG_SINGLE_STEP
+    setp.ne.u32 %p5, %r117, 0;
+    selp.u32 %r112, 1, 0, %p5;
+    ld.global.u32 %r116, [%rd2+0x1F004];   // DBG_BREAK_COUNT_OFFSET
+    // ref_vm PANICS when break_count > DBG_MAX_BREAKPOINTS. A device kernel
+    // has no panic channel, so surface it as a TRAP with a distinguishing
+    // value (4) rather than silently truncating -- a dropped breakpoint is a
+    // debugger that lies about where it stopped.
+    setp.gt.u32 %p5, %r116, 16;
+    @%p5 bra L_DBG_BAD_BREAK_COUNT;
+    ld.global.u32 %r115, [%rd2+0x1F054];   // DBG_STEP_COUNT_OFFSET (accumulated)
+    and.b32 %r117, %r110, 2;               // DBG_FLAG_RESUME
+    setp.eq.u32 %p5, %r117, 0;
+    @%p5 bra L_DBG_INIT_DONE;
+
+    mov.u32 %r114, 1;                      // resumed = true
+    ld.global.u32 %r24, [%rd2+0x1F4D8];    // DBG_SAVED_SEQ_OFFSET
+    ld.global.u32 %r25, [%rd2+0x1F4DC];    // DBG_SAVED_RECORD_COUNT_OFFSET
+    ld.global.u32 %r20, [%rd2+0x1F048];    // DBG_SAVED_PC_OFFSET
+    ld.global.u32 %r22, [%rd2+0x1F04C];    // DBG_SAVED_SP_OFFSET
+    ld.global.u32 %r23, [%rd2+0x1F050];    // DBG_SAVED_CSP_OFFSET
+    // Operand stack: the saved words are the same i32 bit patterns this
+    // kernel already keeps in local memory, so no sign conversion is needed
+    // here (ref_vm converts only because its stack holds i64).
+    mov.u32 %r118, 0;
+L_DBG_RESTORE_STACK:
+    setp.ge.u32 %p5, %r118, 256;
+    @%p5 bra L_DBG_RESTORE_CALLS;
+    mul.wide.u32 %rd20, %r118, 4;
+    add.s64 %rd21, %rd2, %rd20;
+    ld.global.u32 %r119, [%rd21+0x1F058];  // DBG_SAVED_STACK_OFFSET
+    add.s64 %rd22, %rd10, %rd20;
+    st.local.u32 [%rd22], %r119;
+    add.u32 %r118, %r118, 1;
+    bra L_DBG_RESTORE_STACK;
+L_DBG_RESTORE_CALLS:
+    mov.u32 %r118, 0;
+L_DBG_RESTORE_CALLS_LOOP:
+    setp.ge.u32 %p5, %r118, 32;
+    @%p5 bra L_DBG_INIT_DONE;
+    mul.wide.u32 %rd20, %r118, 4;
+    add.s64 %rd21, %rd2, %rd20;
+    ld.global.u32 %r119, [%rd21+0x1F458];  // DBG_SAVED_CALLS_OFFSET
+    add.s64 %rd22, %rd11, %rd20;
+    st.local.u32 [%rd22], %r119;
+    add.u32 %r118, %r118, 1;
+    bra L_DBG_RESTORE_CALLS_LOOP;
+L_DBG_INIT_DONE:
+
 // ==========================================================================
 // Helpers realized inline per use (PTX has no reusable-callable macros
 // without a real subroutine call, and SVM-G's own CALL/RET must not be
@@ -92,6 +172,30 @@ L_LOOP:
     // pc >= code_len -> clean exit(0), same as ref_vm falling off the code array
     setp.ge.u32 %p3, %r20, %r11;
     @%p3 bra L_EXIT0;
+
+    // ---- DBG-1 breakpoint check, BEFORE executing (ref_vm.run) ----
+    // Leaves pc ON the breakpoint so a resume re-executes that instruction
+    // exactly once. The (first_instruction and resumed) suppression is what
+    // makes that true: without it a resume would immediately re-break on the
+    // same pc and the debugger could never make progress.
+    // Inert path when DBG_FLAGS == 0: one setp + one predicated branch.
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_DBG_NO_BREAK;
+    and.b32 %r117, %r113, %r114;           // first_instruction and resumed
+    setp.ne.u32 %p4, %r117, 0;
+    @%p4 bra L_DBG_NO_BREAK;
+    mov.u32 %r118, 0;
+L_DBG_BP_SCAN:
+    setp.ge.u32 %p4, %r118, %r116;
+    @%p4 bra L_DBG_NO_BREAK;
+    mul.wide.u32 %rd20, %r118, 4;
+    add.s64 %rd21, %rd2, %rd20;
+    ld.global.u32 %r119, [%rd21+0x1F008];  // DBG_BREAK_PCS_OFFSET
+    setp.eq.u32 %p4, %r119, %r20;
+    @%p4 bra L_DEBUG_BREAK;
+    add.u32 %r118, %r118, 1;
+    bra L_DBG_BP_SCAN;
+L_DBG_NO_BREAK:
 
     sub.u32 %r21, %r21, 1;                 // steps_remaining -= 1
 
@@ -165,7 +269,7 @@ L_LOOP:
 // --------------------------------------------------------------------
 OP_NOP:
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_HALT:
     // operand: 1 byte code at pc+1
@@ -206,7 +310,7 @@ OP_PUSHF:
     st.local.u32 [%rd15], %r50;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 5;                 // pc_next = pc + 1 + 4
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_DUP:
     sub.u32 %r60, %r22, 1;
@@ -216,12 +320,12 @@ OP_DUP:
     st.local.u32 [%rd15], %r61;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_DROP:
     sub.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_SWAP:
     sub.u32 %r60, %r22, 1;
@@ -233,7 +337,7 @@ OP_SWAP:
     st.local.u32 [%rd15], %r63;
     st.local.u32 [%rd16], %r62;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Integer arithmetic (pop b, pop a, push a OP b)
@@ -245,7 +349,7 @@ OP_ADD:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_SUB:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -254,7 +358,7 @@ OP_SUB:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_MUL:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -263,7 +367,7 @@ OP_MUL:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_DIV:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -274,7 +378,7 @@ OP_DIV:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_REM:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -285,7 +389,7 @@ OP_REM:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Float arithmetic -- stack values are raw f32 bit patterns in .b32 slots;
@@ -302,7 +406,7 @@ OP_FADD:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_FSUB:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -313,7 +417,7 @@ OP_FSUB:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_FMUL:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -324,7 +428,7 @@ OP_FMUL:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_FDIV:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -335,7 +439,7 @@ OP_FDIV:
     st.local.u32 [%rd16], %r72;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Bitwise
@@ -345,21 +449,21 @@ OP_AND:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     and.b32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_OR:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     or.b32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_XOR:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     xor.b32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_SHL:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -367,7 +471,7 @@ OP_SHL:
     and.b32 %r71, %r71, 31;
     shl.b32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_SHR:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -375,7 +479,7 @@ OP_SHR:
     and.b32 %r71, %r71, 31;
     shr.u32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_SAR:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -383,7 +487,7 @@ OP_SAR:
     and.b32 %r71, %r71, 31;
     shr.s32 %r72, %r70, %r71;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Integer comparisons (push 1/0)
@@ -393,42 +497,42 @@ OP_EQ:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.eq.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_NE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.ne.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_LT:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.lt.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_LE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.le.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_GT:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.gt.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_GE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd16, %r22, 4; add.s64 %rd16, %rd10, %rd16; ld.local.u32 %r70, [%rd16];
     setp.ge.s32 %p5, %r70, %r71; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Float comparisons (push 1/0)
@@ -439,7 +543,7 @@ OP_FEQ:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.eq.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_FNE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -447,7 +551,7 @@ OP_FNE:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.ne.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_FLT:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -455,7 +559,7 @@ OP_FLT:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.lt.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_FLE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -463,7 +567,7 @@ OP_FLE:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.le.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_FGT:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -471,7 +575,7 @@ OP_FGT:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.gt.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_FGE:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r71, [%rd15];
@@ -479,7 +583,7 @@ OP_FGE:
     mov.b32 %f1, %r70; mov.b32 %f2, %r71;
     setp.ge.f32 %p5, %f1, %f2; selp.b32 %r72, 1, 0, %p5;
     st.local.u32 [%rd16], %r72;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Memory (DATA region, bounds-checked against ARENA_DATA_SIZE=0x10000,
@@ -505,7 +609,7 @@ OP_LOAD32:
     st.local.u32 [%rd15], %r82;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_STORE32:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r86, [%rd15];   // value
@@ -521,7 +625,7 @@ OP_STORE32:
     shr.u32 %r87, %r86, 16; st.global.u8 [%rd17+2], %r87;
     shr.u32 %r87, %r86, 24; st.global.u8 [%rd17+3], %r87;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_LOAD8:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r80, [%rd15];   // offset
@@ -536,7 +640,7 @@ OP_LOAD8:
     st.local.u32 [%rd15], %r82;
     add.u32 %r22, %r22, 1;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_STORE8:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r86, [%rd15];   // value
@@ -549,7 +653,7 @@ OP_STORE8:
     cvt.s64.s32 %rd17, %r80; add.s64 %rd17, %rd2, %rd17;
     st.global.u8 [%rd17], %r86;
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // Control flow -- operand is a 2-byte value at pc+1; pc_next = pc+3 for
@@ -569,7 +673,7 @@ OP_JMP:
     selp.b32 %r90, %r92, %r90, %p7;        // sign-extend to i16 range
     add.u32 %r93, %r20, 3;                 // pc_next base
     add.s32 %r20, %r93, %r90;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_JZ:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r95, [%rd15]; // cond
@@ -587,7 +691,7 @@ OP_JZ:
     setp.eq.s32 %p8, %r95, 0;
     add.s32 %r94, %r93, %r90;
     selp.b32 %r20, %r94, %r93, %p8;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_JNZ:
     sub.u32 %r22, %r22, 1; mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15; ld.local.u32 %r95, [%rd15]; // cond
@@ -605,7 +709,7 @@ OP_JNZ:
     setp.ne.s32 %p8, %r95, 0;
     add.s32 %r94, %r93, %r90;
     selp.b32 %r20, %r94, %r93, %p8;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // operand: 2-byte UNSIGNED target pc at pc+1 (CALL) -- pc_next (pc+3) is
 // pushed to the call stack, matching ref_vm's OP_CALL exactly.
@@ -623,7 +727,7 @@ OP_CALL:
     st.local.u32 [%rd18], %r93;
     add.u32 %r23, %r23, 1;
     mov.u32 %r20, %r90;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_RET:
     setp.eq.u32 %p10, %r23, 0;
@@ -631,7 +735,7 @@ OP_RET:
     sub.u32 %r23, %r23, 1;
     mul.wide.u32 %rd18, %r23, 4; add.s64 %rd18, %rd11, %rd18;
     ld.local.u32 %r20, [%rd18];
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // --------------------------------------------------------------------
 // SYS_* / thread-id
@@ -657,19 +761,19 @@ OP_SYS_RESULT:
     add.u32 %r25, %r25, 1;                 // record_count += 1
     add.u32 %r24, %r24, 1;                 // seq += 1
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 OP_TID:
     mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15;
     mov.u32 %r100, 0;
     st.local.u32 [%rd15], %r100;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_NTID:
     mul.wide.u32 %rd15, %r22, 4; add.s64 %rd15, %rd10, %rd15;
     mov.u32 %r100, 1;
     st.local.u32 [%rd15], %r100;
-    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_LOOP;
+    add.u32 %r22, %r22, 1; add.u32 %r20, %r20, 1; bra L_STEP_DONE;
 
 OP_PARFOR:
     // Single-thread host: PARFOR degenerates to a fall-through (design
@@ -677,7 +781,7 @@ OP_PARFOR:
     // in place, as thread 0. Operand (2-byte len) is consumed but unused,
     // exactly like ref_vm.
     add.u32 %r20, %r20, 3;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 // ==========================================================================
 // Shared tail helpers
@@ -693,7 +797,7 @@ L_APPEND_LOG_AND_CONTINUE:
     st.global.u32 [%rd2+0x10020], %r27;    // persist LOG_HEAD_OFFSET
     add.u32 %r24, %r24, 1;                 // seq += 1 (ref_vm.append_log_byte)
     add.u32 %r20, %r20, 1;
-    bra L_LOOP;
+    bra L_STEP_DONE;
 
 L_TRAP_OOB:
     mov.u32 %r40, 1;                       // TRAP_OOB
@@ -713,6 +817,42 @@ L_CALLSTACK_OVERFLOW:
     mov.u32 %r40, 3;
     bra L_TRAP;
 
+// ==========================================================================
+// DBG-1 / PROF-1 tail
+// ==========================================================================
+
+L_STEP_DONE:
+    // Post-step hook every FALL-THROUGH opcode returns through (ref_vm.run's
+    // "step_count += 1; if single_step and not halted: halt_debug_break").
+    // Halting opcodes (HALT / TRAP / SYS_EXIT) do NOT come through here --
+    // they branch straight to L_EXIT_CODE / L_TRAP, which do their own
+    // step_count += 1. That split is exactly ref_vm's "not self.halted"
+    // guard: an instruction that ENDED the program is not a single-step
+    // stop, and reporting it as one would make resume-to-completion loop
+    // forever.
+    // Inert path when DBG_FLAGS == 0: one setp + one predicated branch.
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_STEP_DONE_NODBG;
+    add.u32 %r115, %r115, 1;               // PROF-1 step_count += 1
+    setp.ne.u32 %p4, %r112, 0;
+    @%p4 bra L_DEBUG_BREAK;                // single-step stop
+L_STEP_DONE_NODBG:
+    mov.u32 %r113, 0;                      // first_instruction = false
+    bra L_LOOP;
+
+L_DEBUG_BREAK:
+    // Stopped for a DEBUG reason. NOTE: SENTINEL_DEBUG_BREAK (0xCAFE00DB)
+    // deliberately aliases a clean exit with code 0xDB, so exit code 0xDB is
+    // RESERVED and host code must use VmRunResult.debug_break -- never an
+    // exit-code comparison -- to tell a breakpoint from a program exit.
+    mov.u32 %r120, 0xCAFE00DB;
+    st.global.u32 [%rd2+0x8000], %r120;
+    bra L_DBG_SAVE_AND_RETURN;
+
+L_DBG_BAD_BREAK_COUNT:
+    mov.u32 %r40, 4;
+    bra L_TRAP;
+
 L_TRAP:
     // write_record(0, trap_value) then EXIT sentinel with TRAP_OOB_EXIT_CODE(0x7F)
     mul.lo.u32 %r99, %r25, 12;
@@ -722,26 +862,79 @@ L_TRAP:
     mov.u32 %r102, 0;
     st.global.u32 [%rd19+4], %r102;
     st.global.u32 [%rd19+8], %r40;
+    // ref_vm.write_record bumps BOTH counters; the pre-DBG-1 kernel skipped
+    // them because they die with the launch. Under DBG-1 they are PERSISTED,
+    // so they must now be exact or a resume would rewind the record ring.
+    add.u32 %r25, %r25, 1;                 // record_count += 1
+    add.u32 %r24, %r24, 1;                 // seq += 1
     mov.u32 %r103, 0xCAFE007F;             // SENTINEL_EXIT_MASK | 0x7F
     st.global.u32 [%rd2+0x8000], %r103;
-    bra L_RETURN;
+    // A trapping instruction still RETIRED (ref_vm bumps step_count after
+    // step() regardless of whether step() halted).
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_DBG_SAVE_AND_RETURN;
+    add.u32 %r115, %r115, 1;
+    bra L_DBG_SAVE_AND_RETURN;
 
 L_EXIT_CODE:
     // exit_clean(code): sentinel = 0xCAFE0000 | (code & 0xFFFF)
     and.b32 %r40, %r40, 0xFFFF;
     or.b32 %r104, %r40, 0xCAFE0000;
     st.global.u32 [%rd2+0x8000], %r104;
-    bra L_RETURN;
+    add.u32 %r24, %r24, 1;                 // ref_vm.exit_clean: seq += 1
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_DBG_SAVE_AND_RETURN;
+    add.u32 %r115, %r115, 1;               // HALT / SYS_EXIT retired
+    bra L_DBG_SAVE_AND_RETURN;
 
 L_EXIT0:
+    // pc ran off the end of the code array: NO instruction retired, so
+    // step_count is deliberately not bumped here.
     mov.u32 %r105, 0xCAFE0000;
     st.global.u32 [%rd2+0x8000], %r105;
-    bra L_RETURN;
+    add.u32 %r24, %r24, 1;                 // ref_vm.exit_clean: seq += 1
+    bra L_DBG_SAVE_AND_RETURN;
 
 L_TIMEOUT:
     mov.u32 %r106, 0xDEAD0000;
     st.global.u32 [%rd2+0x8000], %r106;
-    bra L_RETURN;
+    bra L_DBG_SAVE_AND_RETURN;
+
+L_DBG_SAVE_AND_RETURN:
+    // ref_vm.save_debug_state: on EVERY halt with bit0 set, park the full
+    // execution state so "why did it stop" is inspectable and the next
+    // launch can resume. Entirely skipped when DBG_FLAGS == 0.
+    setp.eq.u32 %p4, %r111, 0;
+    @%p4 bra L_RETURN;
+    st.global.u32 [%rd2+0x1F048], %r20;    // DBG_SAVED_PC_OFFSET
+    st.global.u32 [%rd2+0x1F04C], %r22;    // DBG_SAVED_SP_OFFSET
+    st.global.u32 [%rd2+0x1F050], %r23;    // DBG_SAVED_CSP_OFFSET
+    st.global.u32 [%rd2+0x1F054], %r115;   // DBG_STEP_COUNT_OFFSET
+    st.global.u32 [%rd2+0x1F4D8], %r24;    // DBG_SAVED_SEQ_OFFSET
+    st.global.u32 [%rd2+0x1F4DC], %r25;    // DBG_SAVED_RECORD_COUNT_OFFSET
+    mov.u32 %r118, 0;
+L_DBG_SAVE_STACK:
+    setp.ge.u32 %p4, %r118, 256;
+    @%p4 bra L_DBG_SAVE_CALLS;
+    mul.wide.u32 %rd20, %r118, 4;
+    add.s64 %rd22, %rd10, %rd20;
+    ld.local.u32 %r119, [%rd22];
+    add.s64 %rd21, %rd2, %rd20;
+    st.global.u32 [%rd21+0x1F058], %r119;  // DBG_SAVED_STACK_OFFSET
+    add.u32 %r118, %r118, 1;
+    bra L_DBG_SAVE_STACK;
+L_DBG_SAVE_CALLS:
+    mov.u32 %r118, 0;
+L_DBG_SAVE_CALLS_LOOP:
+    setp.ge.u32 %p4, %r118, 32;
+    @%p4 bra L_RETURN;
+    mul.wide.u32 %rd20, %r118, 4;
+    add.s64 %rd22, %rd11, %rd20;
+    ld.local.u32 %r119, [%rd22];
+    add.s64 %rd21, %rd2, %rd20;
+    st.global.u32 [%rd21+0x1F458], %r119;  // DBG_SAVED_CALLS_OFFSET
+    add.u32 %r118, %r118, 1;
+    bra L_DBG_SAVE_CALLS_LOOP;
 
 L_RETURN:
     ret;

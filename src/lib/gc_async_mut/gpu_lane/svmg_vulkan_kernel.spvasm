@@ -83,6 +83,17 @@
  %g_codelen = OpVariable %uint_ptr_priv Private
   %g_logcap = OpVariable %uint_ptr_priv Private
  %g_recbase = OpVariable %uint_ptr_priv Private
+; DBG-1 / PROF-1 state (mirrors ref_vm.SvmgVm's dbg_* fields and run()'s
+; hoisted dbg_on / single_step / first_instruction locals). All of these are
+; 0 and never re-read when DBG_FLAGS == 0.
+     %g_dbgon = OpVariable %uint_ptr_priv Private
+%g_singlestep = OpVariable %uint_ptr_priv Private
+  %g_firstinsn = OpVariable %uint_ptr_priv Private
+    %g_resumed = OpVariable %uint_ptr_priv Private
+  %g_stepcount = OpVariable %uint_ptr_priv Private
+ %g_breakcount = OpVariable %uint_ptr_priv Private
+       %g_dbgi = OpVariable %uint_ptr_priv Private
+     %g_dbgres = OpVariable %uint_ptr_priv Private
 
 %uint_256 = OpConstant %uint 256
 %uint_32c = OpConstant %uint 32
@@ -125,6 +136,30 @@
 %c_ARENA_DATA_SIZE = OpConstant %uint 65536
       %c_28 = OpConstant %uint 28
    %c_32768 = OpConstant %uint 32768
+
+; ---- DBG-1 block (mailbox_const.spl). These are ABSOLUTE arena byte
+; offsets -- SVM-G addresses the arena by absolute offset ONLY, never
+; relative to the SGP data_off, and the u32-word index used by the read_u32 /
+; write_u32 helpers below is therefore derived purely as (offset >> 2). The
+; block sits at 0x1F000, ABOVE ARENA_DATA_SIZE (0x10000), so the VM's own
+; OP_LOAD*/OP_STORE* bounds check can never reach it and a guest program
+; cannot forge its own breakpoints.
+%c_DBG_FLAGS       = OpConstant %uint 126976     ; 0x1F000
+%c_DBG_BREAK_COUNT = OpConstant %uint 126980     ; 0x1F004
+%c_DBG_BREAK_PCS   = OpConstant %uint 126984     ; 0x1F008  u32[16]
+%c_DBG_SAVED_PC    = OpConstant %uint 127048     ; 0x1F048
+%c_DBG_SAVED_SP    = OpConstant %uint 127052     ; 0x1F04C
+%c_DBG_SAVED_CSP   = OpConstant %uint 127056     ; 0x1F050
+%c_DBG_STEP_COUNT  = OpConstant %uint 127060     ; 0x1F054
+%c_DBG_SAVED_STACK = OpConstant %uint 127064     ; 0x1F058  u32[256]
+%c_DBG_SAVED_CALLS = OpConstant %uint 128088     ; 0x1F458  u32[32]
+%c_DBG_SAVED_SEQ   = OpConstant %uint 128216     ; 0x1F4D8
+%c_DBG_SAVED_RECCOUNT = OpConstant %uint 128220  ; 0x1F4DC
+; SENTINEL_DEBUG_BREAK. NOTE: 0xCAFE00DB deliberately aliases a clean exit
+; with code 0xDB, so exit code 0xDB is RESERVED -- host code must use
+; VmRunResult.debug_break, never an exit-code comparison, to tell a
+; breakpoint stop from a program exit.
+%c_SENT_DBGBRK = OpConstant %uint 3405643995     ; 0xCAFE00DB
 
 ; ============================================================================
 ; read_u8(off) -> uint : arena[off], byte-addressed against the uint32 SSBO.
@@ -384,6 +419,13 @@
 %de_sentinel = OpBitwiseOr %uint %c_CAFE0000 %de_masked
    %de_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
                OpStore %de_ptr %de_sentinel Volatile
+; ref_vm.exit_clean bumps seq. The pre-DBG-1 kernel skipped this because seq
+; died with the launch; under DBG-1 seq is PERSISTED into the DBG block and a
+; resume that started from a rewound seq would overwrite records written
+; before the breakpoint, so it must now be exact.
+    %de_seq = OpLoad %uint %g_seq
+   %de_seq2 = OpIAdd %uint %de_seq %c_1
+               OpStore %g_seq %de_seq2
                OpReturn
                OpFunctionEnd
 
@@ -408,6 +450,302 @@
                OpFunctionEnd
 
 ; ============================================================================
+; DBG-1 / PROF-1 -- mirrors ref_vm.SvmgVm.new's dbg block, save_debug_state,
+; halt_debug_break and run()'s dbg_on/single_step/first_instruction handling,
+; and the CUDA sibling's L_DBG_* / L_STEP_DONE tail.
+;
+; FULLY INERT when DBG_FLAGS == 0: dbg_init performs exactly one arena read
+; (the flags word) and then returns; every other helper's first act is to
+; test the already-hoisted %g_dbgon and return, so there is no extra arena
+; read, no extra write, and no breakpoint-table scan.
+; ============================================================================
+
+; save_debug_state(): park pc/sp/csp/step_count/seq/record_count plus the
+; full 256-word operand stack and 32-word call stack into the DBG-1 block.
+; Skipped entirely when %g_dbgon is 0. The saved words are the same raw i32
+; bit patterns this kernel already keeps in %g_opstack/%g_callstack, so no
+; sign conversion is needed (ref_vm converts only because its stack is i64).
+  %dbg_save = OpFunction %void None %void_fn_t
+%dbgs_entry = OpLabel
+   %dbgs_on = OpLoad %uint %g_dbgon
+  %dbgs_onb = OpINotEqual %bool %dbgs_on %c_0
+               OpSelectionMerge %dbgs_ret None
+               OpBranchConditional %dbgs_onb %dbgs_do %dbgs_ret
+  %dbgs_do = OpLabel
+   %dbgs_pc = OpLoad %uint %g_pc
+   %dbgs_c0 = OpFunctionCall %void %write_u32 %c_DBG_SAVED_PC %dbgs_pc
+   %dbgs_sp = OpLoad %uint %g_sp
+   %dbgs_c1 = OpFunctionCall %void %write_u32 %c_DBG_SAVED_SP %dbgs_sp
+  %dbgs_csp = OpLoad %uint %g_csp
+   %dbgs_c2 = OpFunctionCall %void %write_u32 %c_DBG_SAVED_CSP %dbgs_csp
+   %dbgs_sc = OpLoad %uint %g_stepcount
+   %dbgs_c3 = OpFunctionCall %void %write_u32 %c_DBG_STEP_COUNT %dbgs_sc
+  %dbgs_seq = OpLoad %uint %g_seq
+   %dbgs_c4 = OpFunctionCall %void %write_u32 %c_DBG_SAVED_SEQ %dbgs_seq
+   %dbgs_rc = OpLoad %uint %g_reccount
+   %dbgs_c5 = OpFunctionCall %void %write_u32 %c_DBG_SAVED_RECCOUNT %dbgs_rc
+               OpStore %g_dbgi %c_0
+               OpBranch %dbgs_lh
+  %dbgs_lh = OpLabel
+               OpLoopMerge %dbgs_lm %dbgs_lc None
+               OpBranch %dbgs_lb
+  %dbgs_lb = OpLabel
+    %dbgs_i = OpLoad %uint %g_dbgi
+  %dbgs_cmp = OpULessThan %bool %dbgs_i %uint_256
+               OpBranchConditional %dbgs_cmp %dbgs_body %dbgs_lm
+%dbgs_body = OpLabel
+ %dbgs_sptr = OpAccessChain %uint_ptr_priv %g_opstack %dbgs_i
+   %dbgs_sv = OpLoad %uint %dbgs_sptr
+ %dbgs_boff = OpIMul %uint %dbgs_i %c_4
+ %dbgs_addr = OpIAdd %uint %dbgs_boff %c_DBG_SAVED_STACK
+   %dbgs_c6 = OpFunctionCall %void %write_u32 %dbgs_addr %dbgs_sv
+               OpBranch %dbgs_lc
+  %dbgs_lc = OpLabel
+   %dbgs_i2 = OpLoad %uint %g_dbgi
+   %dbgs_i3 = OpIAdd %uint %dbgs_i2 %c_1
+               OpStore %g_dbgi %dbgs_i3
+               OpBranch %dbgs_lh
+  %dbgs_lm = OpLabel
+               OpStore %g_dbgi %c_0
+               OpBranch %dbgs_kh
+  %dbgs_kh = OpLabel
+               OpLoopMerge %dbgs_km %dbgs_kc None
+               OpBranch %dbgs_kb
+  %dbgs_kb = OpLabel
+    %dbgs_j = OpLoad %uint %g_dbgi
+ %dbgs_kcmp = OpULessThan %bool %dbgs_j %uint_32c
+               OpBranchConditional %dbgs_kcmp %dbgs_kbody %dbgs_km
+%dbgs_kbody = OpLabel
+ %dbgs_cptr = OpAccessChain %uint_ptr_priv %g_callstack %dbgs_j
+   %dbgs_cv = OpLoad %uint %dbgs_cptr
+ %dbgs_koff = OpIMul %uint %dbgs_j %c_4
+ %dbgs_kaddr = OpIAdd %uint %dbgs_koff %c_DBG_SAVED_CALLS
+   %dbgs_c7 = OpFunctionCall %void %write_u32 %dbgs_kaddr %dbgs_cv
+               OpBranch %dbgs_kc
+  %dbgs_kc = OpLabel
+   %dbgs_j2 = OpLoad %uint %g_dbgi
+   %dbgs_j3 = OpIAdd %uint %dbgs_j2 %c_1
+               OpStore %g_dbgi %dbgs_j3
+               OpBranch %dbgs_kh
+  %dbgs_km = OpLabel
+               OpBranch %dbgs_ret
+ %dbgs_ret = OpLabel
+               OpReturn
+               OpFunctionEnd
+
+; halt_debug_break(): sentinel = SENTINEL_DEBUG_BREAK, then save_debug_state.
+; Only ever reached with %g_dbgon != 0.
+ %dbg_break = OpFunction %void None %void_fn_t
+%dbgb_entry = OpLabel
+   %dbgb_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
+               OpStore %dbgb_ptr %c_SENT_DBGBRK Volatile
+    %dbgb_c0 = OpFunctionCall %void %dbg_save
+               OpReturn
+               OpFunctionEnd
+
+; retire_and_save(): the halting-opcode tail (HALT / TRAP / SYS_EXIT /
+; top-level RET / any trap). ref_vm bumps step_count AFTER step() regardless
+; of whether step() halted, so a halting instruction still RETIRED and must
+; bump the counter -- but it must NOT take the single-step break (ref_vm's
+; "not self.halted" guard), since a program that ended is not "stopped at a
+; breakpoint" and reporting it as one would make resume-to-completion loop
+; forever. Falling off the end of the code array retires no instruction and
+; therefore uses %dbg_save directly, not this.
+%dbg_retire_save = OpFunction %void None %void_fn_t
+%dbgr_entry = OpLabel
+   %dbgr_on = OpLoad %uint %g_dbgon
+  %dbgr_onb = OpINotEqual %bool %dbgr_on %c_0
+               OpSelectionMerge %dbgr_after None
+               OpBranchConditional %dbgr_onb %dbgr_do %dbgr_after
+  %dbgr_do = OpLabel
+   %dbgr_sc = OpLoad %uint %g_stepcount
+  %dbgr_sc2 = OpIAdd %uint %dbgr_sc %c_1
+               OpStore %g_stepcount %dbgr_sc2
+               OpBranch %dbgr_after
+%dbgr_after = OpLabel
+   %dbgr_c0 = OpFunctionCall %void %dbg_save
+               OpReturn
+               OpFunctionEnd
+
+; check_breakpoint() -> 1 if the loop must stop BEFORE executing arena pc.
+; Breaking before execution leaves pc ON the breakpoint so a resume
+; re-executes it exactly once; the (first_instruction and resumed)
+; suppression is what stops a resume from immediately re-breaking on the
+; same pc forever.
+ %dbg_check = OpFunction %uint None %uint_fn_void_t
+%dbgc_entry = OpLabel
+               OpStore %g_dbgres %c_0
+   %dbgc_on = OpLoad %uint %g_dbgon
+   %dbgc_fi = OpLoad %uint %g_firstinsn
+   %dbgc_rs = OpLoad %uint %g_resumed
+  %dbgc_sup = OpBitwiseAnd %uint %dbgc_fi %dbgc_rs
+ %dbgc_nsup = OpISub %uint %c_1 %dbgc_sup
+  %dbgc_act = OpBitwiseAnd %uint %dbgc_on %dbgc_nsup
+ %dbgc_actb = OpINotEqual %bool %dbgc_act %c_0
+               OpSelectionMerge %dbgc_done None
+               OpBranchConditional %dbgc_actb %dbgc_scan %dbgc_done
+ %dbgc_scan = OpLabel
+               OpStore %g_dbgi %c_0
+               OpBranch %dbgc_lh
+   %dbgc_lh = OpLabel
+               OpLoopMerge %dbgc_lm %dbgc_lc None
+               OpBranch %dbgc_lb
+   %dbgc_lb = OpLabel
+    %dbgc_i = OpLoad %uint %g_dbgi
+   %dbgc_bc = OpLoad %uint %g_breakcount
+  %dbgc_cmp = OpULessThan %bool %dbgc_i %dbgc_bc
+               OpBranchConditional %dbgc_cmp %dbgc_body %dbgc_lm
+ %dbgc_body = OpLabel
+ %dbgc_boff = OpIMul %uint %dbgc_i %c_4
+ %dbgc_addr = OpIAdd %uint %dbgc_boff %c_DBG_BREAK_PCS
+   %dbgc_bp = OpFunctionCall %uint %read_u32 %dbgc_addr
+   %dbgc_pc = OpLoad %uint %g_pc
+  %dbgc_hit = OpIEqual %bool %dbgc_bp %dbgc_pc
+ %dbgc_curr = OpLoad %uint %g_dbgres
+ %dbgc_newr = OpSelect %uint %dbgc_hit %c_1 %dbgc_curr
+               OpStore %g_dbgres %dbgc_newr
+               OpBranch %dbgc_lc
+   %dbgc_lc = OpLabel
+   %dbgc_i2 = OpLoad %uint %g_dbgi
+   %dbgc_i3 = OpIAdd %uint %dbgc_i2 %c_1
+               OpStore %g_dbgi %dbgc_i3
+               OpBranch %dbgc_lh
+   %dbgc_lm = OpLabel
+               OpBranch %dbgc_done
+ %dbgc_done = OpLabel
+    %dbgc_r = OpLoad %uint %g_dbgres
+               OpReturnValue %dbgc_r
+               OpFunctionEnd
+
+; post_step() -> 1 if the loop must stop AFTER this fall-through instruction.
+; PROF-1 step_count += 1 here; every fall-through opcode routes through this.
+  %dbg_post = OpFunction %uint None %uint_fn_void_t
+%dbgp_entry = OpLabel
+               OpStore %g_dbgres %c_0
+   %dbgp_on = OpLoad %uint %g_dbgon
+  %dbgp_onb = OpINotEqual %bool %dbgp_on %c_0
+               OpSelectionMerge %dbgp_done None
+               OpBranchConditional %dbgp_onb %dbgp_do %dbgp_done
+  %dbgp_do = OpLabel
+   %dbgp_sc = OpLoad %uint %g_stepcount
+  %dbgp_sc2 = OpIAdd %uint %dbgp_sc %c_1
+               OpStore %g_stepcount %dbgp_sc2
+   %dbgp_ss = OpLoad %uint %g_singlestep
+               OpStore %g_dbgres %dbgp_ss
+               OpBranch %dbgp_done
+ %dbgp_done = OpLabel
+               OpStore %g_firstinsn %c_0
+    %dbgp_r = OpLoad %uint %g_dbgres
+               OpReturnValue %dbgp_r
+               OpFunctionEnd
+
+; dbg_init() -> 1 if the launch is FATALLY misconfigured (break_count >
+; DBG_MAX_BREAKPOINTS; ref_vm panics there, a device kernel has no panic
+; channel so it surfaces as a TRAP with the distinguishing value 4 -- a
+; silently truncated breakpoint table is a debugger that lies about where it
+; stopped). Called from main AFTER the ordinary header init, so the resume
+; path's pc/sp/csp/seq/record_count overwrite those defaults.
+  %dbg_init = OpFunction %uint None %uint_fn_void_t
+%dbgi_entry = OpLabel
+%dbgi_flags = OpFunctionCall %uint %read_u32 %c_DBG_FLAGS
+   %dbgi_en = OpBitwiseAnd %uint %dbgi_flags %c_1
+   %dbgi_on = OpINotEqual %bool %dbgi_en %c_0
+  %dbgi_onu = OpSelect %uint %dbgi_on %c_1 %c_0
+               OpStore %g_dbgon %dbgi_onu
+               OpStore %g_singlestep %c_0
+               OpStore %g_firstinsn %c_1
+               OpStore %g_resumed %c_0
+               OpStore %g_stepcount %c_0
+               OpStore %g_breakcount %c_0
+               OpStore %g_dbgres %c_0
+               OpSelectionMerge %dbgi_done None
+               OpBranchConditional %dbgi_on %dbgi_en_blk %dbgi_done
+%dbgi_en_blk = OpLabel
+  %dbgi_ssb = OpBitwiseAnd %uint %dbgi_flags %c_4
+ %dbgi_ssbb = OpINotEqual %bool %dbgi_ssb %c_0
+  %dbgi_ssu = OpSelect %uint %dbgi_ssbb %c_1 %c_0
+               OpStore %g_singlestep %dbgi_ssu
+   %dbgi_bc = OpFunctionCall %uint %read_u32 %c_DBG_BREAK_COUNT
+               OpStore %g_breakcount %dbgi_bc
+  %dbgi_bad = OpUGreaterThan %bool %dbgi_bc %c_16
+               OpSelectionMerge %dbgi_bcok None
+               OpBranchConditional %dbgi_bad %dbgi_badbc %dbgi_bcok
+%dbgi_badbc = OpLabel
+   %dbgi_t0 = OpFunctionCall %void %do_trap %c_4
+   %dbgi_t1 = OpFunctionCall %void %dbg_retire_save
+               OpReturnValue %c_1
+ %dbgi_bcok = OpLabel
+   %dbgi_sc = OpFunctionCall %uint %read_u32 %c_DBG_STEP_COUNT
+               OpStore %g_stepcount %dbgi_sc
+  %dbgi_rsb = OpBitwiseAnd %uint %dbgi_flags %c_2
+ %dbgi_rsbb = OpINotEqual %bool %dbgi_rsb %c_0
+               OpSelectionMerge %dbgi_rdone None
+               OpBranchConditional %dbgi_rsbb %dbgi_resume %dbgi_rdone
+%dbgi_resume = OpLabel
+               OpStore %g_resumed %c_1
+  %dbgi_seq = OpFunctionCall %uint %read_u32 %c_DBG_SAVED_SEQ
+               OpStore %g_seq %dbgi_seq
+   %dbgi_rc = OpFunctionCall %uint %read_u32 %c_DBG_SAVED_RECCOUNT
+               OpStore %g_reccount %dbgi_rc
+   %dbgi_pc = OpFunctionCall %uint %read_u32 %c_DBG_SAVED_PC
+               OpStore %g_pc %dbgi_pc
+   %dbgi_sp = OpFunctionCall %uint %read_u32 %c_DBG_SAVED_SP
+               OpStore %g_sp %dbgi_sp
+  %dbgi_csp = OpFunctionCall %uint %read_u32 %c_DBG_SAVED_CSP
+               OpStore %g_csp %dbgi_csp
+               OpStore %g_dbgi %c_0
+               OpBranch %dbgi_lh
+   %dbgi_lh = OpLabel
+               OpLoopMerge %dbgi_lm %dbgi_lc None
+               OpBranch %dbgi_lb
+   %dbgi_lb = OpLabel
+    %dbgi_i = OpLoad %uint %g_dbgi
+  %dbgi_cmp = OpULessThan %bool %dbgi_i %uint_256
+               OpBranchConditional %dbgi_cmp %dbgi_body %dbgi_lm
+ %dbgi_body = OpLabel
+ %dbgi_boff = OpIMul %uint %dbgi_i %c_4
+ %dbgi_addr = OpIAdd %uint %dbgi_boff %c_DBG_SAVED_STACK
+    %dbgi_v = OpFunctionCall %uint %read_u32 %dbgi_addr
+ %dbgi_sptr = OpAccessChain %uint_ptr_priv %g_opstack %dbgi_i
+               OpStore %dbgi_sptr %dbgi_v
+               OpBranch %dbgi_lc
+   %dbgi_lc = OpLabel
+   %dbgi_i2 = OpLoad %uint %g_dbgi
+   %dbgi_i3 = OpIAdd %uint %dbgi_i2 %c_1
+               OpStore %g_dbgi %dbgi_i3
+               OpBranch %dbgi_lh
+   %dbgi_lm = OpLabel
+               OpStore %g_dbgi %c_0
+               OpBranch %dbgi_kh
+   %dbgi_kh = OpLabel
+               OpLoopMerge %dbgi_km %dbgi_kc None
+               OpBranch %dbgi_kb
+   %dbgi_kb = OpLabel
+    %dbgi_j = OpLoad %uint %g_dbgi
+ %dbgi_kcmp = OpULessThan %bool %dbgi_j %uint_32c
+               OpBranchConditional %dbgi_kcmp %dbgi_kbody %dbgi_km
+%dbgi_kbody = OpLabel
+ %dbgi_koff = OpIMul %uint %dbgi_j %c_4
+%dbgi_kaddr = OpIAdd %uint %dbgi_koff %c_DBG_SAVED_CALLS
+   %dbgi_kv = OpFunctionCall %uint %read_u32 %dbgi_kaddr
+ %dbgi_cptr = OpAccessChain %uint_ptr_priv %g_callstack %dbgi_j
+               OpStore %dbgi_cptr %dbgi_kv
+               OpBranch %dbgi_kc
+   %dbgi_kc = OpLabel
+   %dbgi_j2 = OpLoad %uint %g_dbgi
+   %dbgi_j3 = OpIAdd %uint %dbgi_j2 %c_1
+               OpStore %g_dbgi %dbgi_j3
+               OpBranch %dbgi_kh
+   %dbgi_km = OpLabel
+               OpBranch %dbgi_rdone
+%dbgi_rdone = OpLabel
+               OpBranch %dbgi_done
+ %dbgi_done = OpLabel
+    %dbgi_r = OpLoad %uint %g_dbgres
+               OpReturnValue %dbgi_r
+               OpFunctionEnd
+
+; ============================================================================
 ; main() -- header decode, then the flat fetch-decode-execute loop.
 ; ============================================================================
       %main = OpFunction %void None %void_fn_t
@@ -428,6 +766,15 @@
                OpStore %g_logcap %m_logcap
 %m_recbase = OpIAdd %uint %m_logcap %c_LOG_DATA_OFFSET
                OpStore %g_recbase %m_recbase
+; DBG-1 launch-time restore. Must run AFTER the header defaults above so the
+; resume path overwrites pc/sp/csp/seq/record_count.
+%m_dbgfatal = OpFunctionCall %uint %dbg_init
+%m_dbgfatalb = OpINotEqual %bool %m_dbgfatal %c_0
+               OpSelectionMerge %m_dbg_ok None
+               OpBranchConditional %m_dbgfatalb %m_dbg_bad %m_dbg_ok
+%m_dbg_bad = OpLabel
+               OpReturn
+ %m_dbg_ok = OpLabel
                OpBranch %loop_header
 
 %loop_header = OpLabel
@@ -443,6 +790,9 @@
 %timeout_block = OpLabel
     %tb_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
                OpStore %tb_ptr %c_DEAD0000 Volatile
+; Budget exhaustion retires NO instruction, so step_count is deliberately
+; not bumped here -- save only.
+     %tb_c0 = OpFunctionCall %void %dbg_save
                OpReturn
 
   %lc_after_to = OpLabel
@@ -453,11 +803,24 @@
                OpBranchConditional %lc_atend %exit0_block %fetch_block
 
 %exit0_block = OpLabel
-    %e0_ptr = OpAccessChain %arena_word_ptr %arena %c_0 %c_sentinel_widx
-               OpStore %e0_ptr %c_CAFE0000 Volatile
+; pc ran off the end of the code array: ref_vm calls exit_clean(0) (which
+; bumps seq) and retires NO instruction, so step_count is deliberately not
+; bumped here -- save only.
+     %e0_c0 = OpFunctionCall %void %do_exit %c_0
+     %e0_c1 = OpFunctionCall %void %dbg_save
                OpReturn
 
 %fetch_block = OpLabel
+; DBG-1 breakpoint check: after the timeout and end-of-code checks and
+; BEFORE the steps_remaining decrement / execution, exactly as ref_vm.run.
+     %fb_bp = OpFunctionCall %uint %dbg_check
+    %fb_bpb = OpINotEqual %bool %fb_bp %c_0
+               OpSelectionMerge %fb_go None
+               OpBranchConditional %fb_bpb %fb_break %fb_go
+ %fb_break = OpLabel
+    %fb_bk0 = OpFunctionCall %void %dbg_break
+               OpReturn
+    %fb_go = OpLabel
    %fb_steps = OpLoad %uint %g_steps
   %fb_steps2 = OpISub %uint %fb_steps %c_1
                OpStore %g_steps %fb_steps2
@@ -482,6 +845,7 @@
 
 %case_default = OpLabel
     %cd_c0 = OpFunctionCall %void %do_trap %c_BADBAD
+    %cd_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
 
 ; ---- control ---------------------------------------------------------
@@ -498,6 +862,7 @@
  %halt_immoff = OpIAdd %uint %halt_base %c_1
  %halt_code = OpFunctionCall %uint %read_u8 %halt_immoff
      %h_c0 = OpFunctionCall %void %do_exit %halt_code
+     %h_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
 
  %case_trap = OpLabel
@@ -507,6 +872,7 @@
  %trap_immoff = OpIAdd %uint %trap_base %c_1
  %trap_code = OpFunctionCall %uint %read_u8 %trap_immoff
      %t_c0 = OpFunctionCall %void %do_trap %trap_code
+     %t_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
 
 ; ---- stack ops ---------------------------------------------------------
@@ -601,6 +967,7 @@
                OpBranchConditional %div_iszero %div_trap %div_ok
 %div_trap = OpLabel
    %div_t0 = OpFunctionCall %void %do_trap %c_TRAP_DIV0
+   %div_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
   %div_ok = OpLabel
    %div_r = OpSDiv %uint %div_a %div_b
@@ -618,6 +985,7 @@
                OpBranchConditional %rem_iszero %rem_trap %rem_ok
 %rem_trap = OpLabel
    %rem_t0 = OpFunctionCall %void %do_trap %c_TRAP_DIV0
+   %rem_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
   %rem_ok = OpLabel
    %rem_r = OpSRem %uint %rem_a %rem_b
@@ -902,6 +1270,7 @@
                OpBranchConditional %l32_over %l32_trap %l32_ok
 %l32_trap = OpLabel
    %l32_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+   %l32_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
  %l32_ok = OpLabel
    %l32_val = OpFunctionCall %uint %read_u32 %l32_off
@@ -923,6 +1292,7 @@
                OpBranchConditional %s32_over %s32_trap %s32_ok
 %s32_trap = OpLabel
    %s32_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+   %s32_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
  %s32_ok = OpLabel
    %s32_c0 = OpFunctionCall %void %write_u32 %s32_off %s32_val
@@ -942,6 +1312,7 @@
                OpBranchConditional %l8_over %l8_trap %l8_ok
  %l8_trap = OpLabel
     %l8_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+    %l8_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
    %l8_ok = OpLabel
    %l8_val = OpFunctionCall %uint %read_u8 %l8_off
@@ -963,6 +1334,7 @@
                OpBranchConditional %s8_over %s8_trap %s8_ok
  %s8_trap = OpLabel
     %s8_t0 = OpFunctionCall %void %do_trap %c_TRAP_OOB
+    %s8_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
    %s8_ok = OpLabel
     %s8_c0 = OpFunctionCall %void %write_u8 %s8_off %s8_val
@@ -1027,6 +1399,7 @@
                OpBranchConditional %cl_overflow %cl_trap %cl_ok
  %cl_trap = OpLabel
     %cl_t0 = OpFunctionCall %void %do_trap %c_TRAP_CALLOF
+    %cl_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
   %cl_ok = OpLabel
 %cl_codeoff = OpLoad %uint %g_codeoff
@@ -1049,6 +1422,7 @@
                OpBranchConditional %rt_iszero %rt_topexit %rt_pop
 %rt_topexit = OpLabel
     %rt_e0 = OpFunctionCall %void %do_exit %c_0
+    %rt_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
   %rt_pop = OpLabel
   %rt_csp2 = OpISub %uint %rt_csp %c_1
@@ -1070,6 +1444,7 @@
 %case_sys_exit = OpLabel
    %se_code = OpFunctionCall %uint %vm_pop
     %se_c0 = OpFunctionCall %void %do_exit %se_code
+    %se_ds = OpFunctionCall %void %dbg_retire_save
                OpReturn
 
 %case_sys_result = OpLabel
@@ -1102,6 +1477,17 @@
                OpBranch %switch_merge
 
 %switch_merge = OpLabel
+; Post-step hook every FALL-THROUGH opcode returns through: PROF-1
+; step_count += 1, then the single-step stop. Halting opcodes never reach
+; here -- they OpReturn from their own case block after %dbg_retire_save.
+    %sm_stop = OpFunctionCall %uint %dbg_post
+   %sm_stopb = OpINotEqual %bool %sm_stop %c_0
+               OpSelectionMerge %sm_cont None
+               OpBranchConditional %sm_stopb %sm_break %sm_cont
+ %sm_break = OpLabel
+    %sm_bk0 = OpFunctionCall %void %dbg_break
+               OpReturn
+  %sm_cont = OpLabel
                OpBranch %loop_continue
 
 %loop_continue = OpLabel
