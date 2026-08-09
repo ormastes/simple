@@ -50,6 +50,46 @@ test/03_system/tools/spipe/examples/     interactive_surface / text_protocol / b
 
 One canonical implementation; tiers re-export, never copy comparator logic.
 
+**As-built deviation (recorded 2026-08-09):** the planned
+`src/lib/nogc_sync_mut/spec/evidence/` runtime tree (registry, artifact_store,
+providers/, comparators/) was never created. The live providers landed inside
+`src/lib/common/spec/evidence/format/` instead (`exec_capture.spl`,
+`file_capture.spl`), importing the nogc facades (`std.nogc_sync_mut.sffi.system.
+process_run`, `std.io_runtime`) directly from the common tier; the spec-to-spipe
+emitter landed as `src/app/spec_to_sspec/spipe_evidence_emit.spl`. Downstream
+contracts are unaffected, but any future lane citing the proposed runtime tree
+must create it deliberately, not assume it exists.
+
+## Live-capture provider design (added 2026-08-09)
+
+Audit finding: the pipeline above is fully implemented, but most format
+adapters have only ever consumed CONSTRUCTED fixture input. The proven design
+for closing that gap, validated by three landed live paths (`exec_capture.spl`,
+`file_capture.spl`, `test/03_system/tools/spipe/examples/
+live_terminal_capture_spec.spl`):
+
+1. **Real source through an existing facade, never `rt_*` directly** —
+   `process_run` for processes, `std.io_runtime` for files, `SgttiTestDriver.
+   from_tui_state` for in-process interactive TUI/GUI state, the rendering
+   backend-isolation facade for scene readback.
+2. **Populate the SAME struct the fixture path builds** (`TerminalSnapshot`
+   via `terminal_snapshot_from_rows`, `ActionTrace`, `DrawScene`, ...). Nothing
+   downstream — evidence projection, comparator, docgen — changes. This is the
+   design's core invariant: live vs fixture is purely an input-provenance
+   distinction, invisible to the contract.
+3. **Every live slice lands with a spec whose assertion path contains no
+   fixture literal, plus a sabotage/revert proof** — otherwise the "live" claim
+   is itself unverified.
+
+**Correction to earlier assumptions:** `SgttiTestDriver`
+(`src/lib/nogc_sync_mut/ui_test/sgtti.spl`) is NOT a process launcher and
+cannot capture from a separate OS process — it snapshots an already-built
+in-process `Compositor`/`WinTextSnapshot`. Use it for the in-process
+interactive lane (2a/2b); use `process_run` for out-of-process capture.
+
+Per-domain lane table, ordering, and acceptance criteria:
+`doc/03_plan/infra/sspec/modern_sspec_completion_plan_2026-08-09.md` §T2.
+
 ## Verified-claim ledger
 
 Repo claims underpinning this design were checked by independent read-only agents on 2026-08-08; results recorded in the research doc's audit section (§2) — treat any REFUTED/PARTIAL item there as a design input to re-check before the owning lane starts.
