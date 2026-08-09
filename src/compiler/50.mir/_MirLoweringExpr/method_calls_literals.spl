@@ -1186,17 +1186,22 @@ impl MirLowering:
                 match found_bytes_receiver_type.kind:
                     case HirTypeKind.Str: bytes_receiver_is_text = true
                     case _: ()
-            # Inference is only a fallback when no declaration exists. A
-            # declared UserType.bytes/PointerSize.bytes must never be
-            # hijacked by a stale inferred Str, just as a declared text must
-            # not be redirected to an unrelated same-leaf owner.
-            if not bytes_receiver_has_declaration and maybe_receiver_type_for_call != nil:
-                val found_bytes_receiver_type = maybe_receiver_type_for_call ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                match found_bytes_receiver_type.kind:
-                    case HirTypeKind.Str: bytes_receiver_is_text = true
-                    case _: ()
+            # The lowered MIR local is authoritative when an expression has
+            # no declaration (concat/call receivers commonly have nil or
+            # stale HIR inference on the full-entry path). Lower exactly once
+            # and retain the local for both the primitive and normal custom
+            # dispatch paths. A declared UserType.bytes/PointerSize.bytes
+            # never reaches this fallback, even if inference says Str.
+            if not bytes_receiver_has_declaration:
+                if not has_prelowered_method_receiver:
+                    prelowered_method_receiver = self.lower_expr(receiver)
+                    has_prelowered_method_receiver = true
+                bytes_receiver_is_text = self.local_is_str(prelowered_method_receiver)
             if bytes_receiver_is_text:
-                val bytes_receiver_local = self.lower_expr(receiver)
+                val bytes_receiver_local = if has_prelowered_method_receiver:
+                    prelowered_method_receiver
+                else:
+                    self.lower_expr(receiver)
                 val bytes_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_string_bytes"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(

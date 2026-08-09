@@ -48,6 +48,24 @@ fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
         "text.bytes must have zero user-owner MIR callees"
     );
 
+    for function_name in ["concatenated_text_bytes_len", "returned_text_bytes_len"] {
+        let function = mir
+            .functions
+            .iter()
+            .find(|f| f.name == function_name)
+            .expect(function_name);
+        assert!(
+            has_call(function, "rt_string_bytes"),
+            "{function_name} expression receiver must route to rt_string_bytes"
+        );
+        assert!(
+            !function.blocks.iter().flat_map(|b| b.instructions.iter()).any(|inst| {
+                matches!(inst, MirInst::Call { target, .. } if target.name().contains("PointerSize") || target.name().contains("UserType"))
+            }),
+            "{function_name} must have zero user-owner MIR callees"
+        );
+    }
+
     for function_name in ["user_bytes", "pointer_bytes"] {
         let function = mir
             .functions
