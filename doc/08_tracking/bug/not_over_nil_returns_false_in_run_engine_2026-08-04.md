@@ -1,6 +1,11 @@
 # `not nil` yields `false` in the `run` engine but `true` under the test runner
 
-**Status:** OPEN (engine divergence — unary `not` over `nil` / `T?`).
+**Status:** RESOLVED — re-verified 2026-08-09. All cases (`not nil`, `not e.?`,
+`not Some(nil).?`, `not Some(42).?`, `not 3`, `not 0`) now agree between `run`
+and the test runner, INCLUDING the previously-documented residual bare
+`val n = nil; not n` case (line 107-132 below), which was believed still wrong
+as of 2026-08-04 but is now `true` as expected. Repro commands below still work
+for regression probing; see re-verification note at bottom of file.
 **Found:** 2026-08-04, while fixing the `Some(nil)` spec assertions.
 **Impact:** silent wrong answer. `not` is correct on real bools, so the defect
 only surfaces on nil/optional operands — and it disagrees between engines, so a
@@ -145,3 +150,35 @@ class of defect — unspecified truthiness coercion resolved differently per
 engine — and are probably worth one ruling rather than two fixes.
 
 Related: `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`.
+
+## Re-verification 2026-08-09 — residual also fixed, closing
+
+Fresh probe on `bin/simple run` (seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`):
+
+```
+fn main():
+    val n = nil
+    print "not nil  -> {not n}"      # true  (was false)
+    print "not true -> {not true}"   # false
+    print "not false -> {not false}" # true
+
+    var e: i64? = nil
+    print "not e.? -> {not e.?}"             # true
+    val s: i64? = Some(nil)
+    print "not Some(nil).? -> {not s.?}"     # true
+    val s2: i64? = Some(42)
+    print "not Some(42).? -> {not s2.?}"     # false
+    print "not 3 -> {not 3}"                 # false
+    print "not 0 -> {not 0}"                 # true
+```
+
+All eight results match the interpreter/test-runner semantics documented above,
+including the bare `val n = nil` case flagged as an unresolved residual on
+2026-08-04. No code change was needed here — a prior landed fix (the
+`operand_may_be_nil` sentinel-compare gate in `compile_unary_op`) evidently
+covers this case too, or type inference for nil-initialised bindings changed
+since. Closing as RESOLVED; no regression coverage added beyond this probe
+since the fix already lives in `src/compiler_rust` (out of `.spl`/`.shs`
+scope for this pass) and the spec corpus already exercises `not opt.?` broadly
+per the original report.
