@@ -58,6 +58,11 @@ def main():
         if len(sys.argv) == 6:
             if sys.argv[2] != "--capture-only":
                 raise RuntimeError("unknown mode")
+            # Freeze the guest before screendump so the PPM is the exact ramfb
+            # state belonging to the final serial/device receipt. Leaving it
+            # stopped also prevents a newer animation frame from racing the
+            # wrapper's subsequent receipt lookup and checksum correlation.
+            execute(sock, "stop")
             execute(sock, "screendump", {"filename": sys.argv[3]})
             validate_ppm_capture(sys.argv[3], int(sys.argv[4]), int(sys.argv[5]))
             return
