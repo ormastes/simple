@@ -75,6 +75,26 @@ fn guard_state() -> &'static Mutex<GuardState> {
 /// (GWP-ASan default — catches overflow, not underflow). Returns the
 /// user-visible pointer, or `None` on mmap/mprotect failure (caller should
 /// fall back to the normal allocator).
+///
+/// Windows has no `mmap`/`mprotect`/`munmap` (the `libc` crate does not
+/// export those symbols for `windows-msvc` at all — an unconditional call
+/// fails to even LINK, not merely to run: "unresolved module or unlinked
+/// crate `libc`", found blocking the whole seed build 2026-08-09). A real
+/// guard-page implementation there needs `VirtualAlloc`/`VirtualProtect` plus
+/// a vectored exception handler to catch the guard-page fault — an
+/// architecturally different mechanism from POSIX SIGSEGV, not a mechanical
+/// swap, and out of scope for unblocking the build. `None` is already this
+/// function's documented "fall back to the normal allocator" contract for
+/// any allocation failure, so returning it unconditionally on Windows is a
+/// real, already-supported code path — sampling is simply always a miss
+/// there (`SIMPLE_MEM_GUARD_RATE` remains a Unix-only opt-in debugging aid)
+/// rather than a new failure mode.
+#[cfg(not(unix))]
+pub fn guard_alloc_sampled(_size: usize, _owner: u32) -> Option<usize> {
+    None
+}
+
+#[cfg(unix)]
 pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
     if size == 0 {
         return None;
@@ -124,6 +144,8 @@ pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
 }
 
 /// True if `ptr` is a tracked guard slot (live or already freed-and-quarantined).
+/// On Windows this is always `false`: `guard_alloc_sampled` never actually
+/// hands out a slot there, so nothing is ever tracked — see its doc comment.
 pub fn guard_is_slot(ptr: usize) -> bool {
     guard_state().lock().unwrap_or_else(|e| e.into_inner()).slots.contains_key(&ptr)
 }
@@ -133,6 +155,12 @@ pub fn guard_is_slot(ptr: usize) -> bool {
 /// real `munmap` once the ring evicts it. Returns `false` for an unknown
 /// pointer or a double free (slot already marked freed) — caller must refuse
 /// to treat those as a normal free.
+#[cfg(not(unix))]
+pub fn guard_free_sampled(_ptr: usize) -> bool {
+    false
+}
+
+#[cfg(unix)]
 pub fn guard_free_sampled(ptr: usize) -> bool {
     let mut st = guard_state().lock().unwrap_or_else(|e| e.into_inner());
     let Some(slot) = st.slots.get_mut(&ptr) else {
@@ -165,7 +193,12 @@ pub fn guard_sampled_count() -> i64 {
     SAMPLED_TOTAL.load(Ordering::Relaxed) as i64
 }
 
-#[cfg(test)]
+// Every test here exercises the real mmap/mprotect-backed implementation
+// (`.expect("mmap guard slot must succeed")` etc.), which only exists under
+// `#[cfg(unix)]` above — on Windows `guard_alloc_sampled` always returns
+// `None` by design (see its doc comment), so these would universally panic
+// there rather than testing anything real.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
