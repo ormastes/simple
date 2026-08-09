@@ -10,6 +10,22 @@ typedef unsigned int spl_u32;
 typedef unsigned short spl_u16;
 typedef unsigned char spl_u8;
 
+spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
+                           spl_u64 arg2, spl_u64 arg3, spl_u64 arg4)
+{
+    register spl_u64 a0 __asm__("a0") = arg0;
+    register spl_u64 a1 __asm__("a1") = arg1;
+    register spl_u64 a2 __asm__("a2") = arg2;
+    register spl_u64 a3 __asm__("a3") = arg3;
+    register spl_u64 a4 __asm__("a4") = arg4;
+    register spl_u64 a7 __asm__("a7") = id;
+    __asm__ volatile("ecall"
+                     : "+r"(a0)
+                     : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a7)
+                     : "memory");
+    return (spl_i64)a0;
+}
+
 #define RT_VALUE_TAG_MASK 0x7ULL
 #define RT_VALUE_TAG_INT 0x0ULL
 #define RT_VALUE_TAG_HEAP 0x1ULL

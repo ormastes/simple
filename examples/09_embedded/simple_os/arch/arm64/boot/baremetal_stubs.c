@@ -4,6 +4,22 @@
 
 typedef int64_t RuntimeValue;
 
+int64_t rt_arm64_syscall(uint64_t id, uint64_t arg0, uint64_t arg1,
+                         uint64_t arg2, uint64_t arg3, uint64_t arg4)
+{
+    register uint64_t x0 __asm__("x0") = arg0;
+    register uint64_t x1 __asm__("x1") = arg1;
+    register uint64_t x2 __asm__("x2") = arg2;
+    register uint64_t x3 __asm__("x3") = arg3;
+    register uint64_t x4 __asm__("x4") = arg4;
+    register uint64_t x8 __asm__("x8") = id;
+    __asm__ volatile("svc #0"
+                     : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+                     : "memory", "cc");
+    return (int64_t)x0;
+}
+
 #define PL011_BASE   0x09000000ULL
 #define BAREMETAL_PL011_ENABLE_DIRECT_PUTS 1
 #include "../../common/baremetal_pl011_serial.h"
