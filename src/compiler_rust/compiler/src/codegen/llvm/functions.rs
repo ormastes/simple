@@ -2782,11 +2782,39 @@ impl LlvmBackend {
                     } else {
                         i64_type.fn_type(&fallback_param_types, false)
                     };
+                    // LAST RESORT. `called_func` is None and no SFFI spec matched,
+                    // so `fallback_name` names nothing: minting it yields an
+                    // unmangled external (`@char_code_at`, `@substring`, `@rfind`,
+                    // `@split`, `@replace`, `@starts_with`) that is undefined at
+                    // link time — or, before 36673b6b6a3's guard made the failure
+                    // loud, silently bound to absolute address 0 and segfaulted.
+                    // See doc/08_tracking/bug/stage2_native_build_link_undefined_method_symbols_2026-08-09.md
+                    //
+                    // Route to the C-runtime intrinsic that actually implements
+                    // the method. This does NOT weaken 36673b6b6a3's guard: that
+                    // guard sits on the shortcut paths, which run while a real
+                    // user symbol may still resolve. Here every strategy has
+                    // already failed, so the choice is intrinsic-or-garbage.
+                    let last_resort_rt: Option<&'static str> = if called_func.is_none() && runtime_spec.is_none() {
+                        super::last_resort_runtime_method(&fallback_name)
+                    } else {
+                        None
+                    };
                     let func = if let Some(spec) = runtime_spec {
                         module
                             .get_function(spec.name)
                             .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
+                    } else if let Some(rt_name) = last_resort_rt {
+                        super::log_last_resort_intrinsic(&fallback_name, rt_name);
+                        let want = super::last_resort_runtime_arity(rt_name);
+                        let rt_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                            (0..want).map(|_| i64_type.into()).collect();
+                        let rt_fn_type = i64_type.fn_type(&rt_param_types, false);
+                        module
+                            .get_function(rt_name)
+                            .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None))
                     } else {
+                        super::log_unresolved_call_symbol(&fallback_name);
                         called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None))
                     };
                     let declared_param_types = func.get_type().get_param_types();
@@ -2796,6 +2824,18 @@ impl LlvmBackend {
                         let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
+                    }
+                    // A last-resort intrinsic has a fixed arity that the source
+                    // call site need not match (`substring(i)` vs `rt_slice`'s
+                    // four parameters). Pad with the intrinsic's own defaults.
+                    if let Some(rt_name) = last_resort_rt {
+                        let want = super::last_resort_runtime_arity(rt_name);
+                        while raw_arg_vals.len() < want {
+                            let idx = raw_arg_vals.len();
+                            let default = super::last_resort_runtime_arg_default(rt_name, idx);
+                            raw_arg_vals.push(i64_type.const_int(default as u64, false));
+                        }
+                        raw_arg_vals.truncate(want);
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     let runtime_name = runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name);

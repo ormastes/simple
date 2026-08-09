@@ -1,7 +1,11 @@
 # Stage-2 native-build fails at LINK: 9 undefined symbols (unmangled Simple methods)
 
 Date: 2026-08-09
-Status: **OPEN — cause causally isolated to `36673b6b6a3` by a single-variable revert experiment.**
+Status: **FIXED 2026-08-09 — Stage 2 links clean (0 undefined refs) on
+`origin/main` `9bb19d8c913` + the last-resort intrinsic hardening. Root cause was
+RE-DIAGNOSED first: `36673b6b6a3` is NOT the defect; it is the fix that made a
+pre-existing SILENT miscompile fail loudly. See "Corrected root cause" below.
+Do NOT revert `36673b6b6a3`, wholly or partially.**
 Area: bootstrap / stage-2 native-build / Rust seed LLVM codegen (method dispatch symbol emission)
 
 ## Symptom
@@ -83,7 +87,152 @@ Everything else held constant. `36673b6b6a3` is the cause.
 severed at the Stage-2 link. Any claim about Stage 3 behaviour on pristine
 `origin/main` is presently untestable.
 
-## Suggested fix direction
+## Corrected root cause (2026-08-09, supersedes the revert experiment above)
+
+The revert experiment is reproducible but its **conclusion was wrong**. Reverting
+`36673b6b6a3` does not restore a working compiler — it restores a compiler that
+**silently emits the same broken calls** and lets the linker bind them to
+absolute address `0` instead of refusing them. The companion investigation
+(`stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`) found 169 direct
+`call 0` sites baked into the reverted binary; the "SIGSEGV in
+`flat_ast_to_module`" was a **symbolization artifact** (gdb attributing address 0
+to the nearest symbol, there being no frame info at 0).
+
+So the two states are:
+
+| tree | what happens to the bad call |
+|---|---|
+| with `36673b6b6a3` | undefined symbol → **link fails loudly, fail-closed** |
+| without `36673b6b6a3` | binds to address `0` → **binary builds, then SIGSEGVs at runtime** |
+
+`36673b6b6a3` is a correctness fix. The real defect is older and independent of
+it: the seed's LLVM backend **mints an unmangled external for a call target it
+could not resolve**, at the terminal fall-through in
+`src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`:
+
+```rust
+// last resort, after every get_function()/suffix-match strategy failed
+module.add_function(&resolved_dotted, fn_type, None)
+```
+
+`resolved_dotted` here is a bare leaf (`char_code_at`, `substring`, `rfind`,
+`split`, `replace`, `starts_with`) or a user-qualified name
+(`TaskState.is_terminal`). Nothing defines those symbols, so the emitted call is
+garbage by construction — the guard merely determines whether the garbage is
+caught at link time or at runtime.
+
+### Fix landed
+
+At that terminal fall-through only — where every resolution strategy has already
+failed and the alternative is provably a bad symbol — route the six `text` leaves
+to the C-runtime intrinsic that actually implements them
+(`last_resort_runtime_method` in `codegen/llvm/mod.rs`), arity-checked against
+`qualified_runtime_arity`. `36673b6b6a3`'s guard on the *shortcut* paths is
+untouched, because those paths run while a real user symbol may still resolve.
+
+### Re-measured on current `origin/main` `9bb19d8c913` (2026-08-09, after the parallel-lane fixes)
+
+Two commits from a parallel session landed on the same two files while this fix
+was building — `3dfd2445d78` "harden text and mutex projections" (tightened
+`resolved_text_runtime_method` to accept only the canonical
+`lib__common__string_core__str` owner or a bare builtin owner) and
+`f295b66d955` "link exact canonical mutex provider" (fixed the
+`spl_mutex_lock`/`spl_mutex_unlock` build-composition gap). **They did not close
+this defect.** The bare-leaf call targets (`starts_with`, `split`, …) have no
+owner at all, and `resolved_text_runtime_method("replace")` returns `None` by
+design, so nothing reaches them before the terminal fall-through.
+
+Both trees built from scratch on the same host, same flags
+(`bootstrap-from-scratch.sh --full-bootstrap --jobs=half`), differing only by
+this fix:
+
+| tree | Stage-2 link | undefined refs | binary |
+|---|---|---|---|
+| pristine `origin/main` `9bb19d8c913` | **FAILED** | **34** — `starts_with`×11, `split`×7, `replace`×7, `substring`×3, `rfind`×3, `char_code_at`×2 | none; "Stage 3 unavailable" |
+| `9bb19d8c913` + this fix | **Linked OK** | **0** | 126,031 KB, 809 compiled / 0 cached / 0 failed, 232.3s |
+
+The `#[cfg(test)]` regressions in `codegen/llvm/mod.rs` could **not** be executed
+on this tree: `cargo test -p simple-compiler --lib` does not compile on pristine
+`origin/main` `9bb19d8c913` either — 9 × `E0063: missing fields
+struct_module_owners and unique_struct_owners`, all in
+`pipeline/native_project/tests.rs` and `interpreter_call/block_execution.rs`,
+none in any file touched here. That is a separate pre-existing breakage of the
+lib-test target. The end-to-end Stage-2 link is the operative evidence.
+
+With Stage 2 linking, **Stage 3 is reachable again for the first time** — it now
+runs and fails with `exit 139` (SIGSEGV), which is the separate, pre-existing
+self-host defect tracked in
+`stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md`, not a
+regression from this fix. Before this fix Stage 3 could not be started at all.
+
+`spl_mutex_lock`/`spl_mutex_unlock` and `TaskState.is_terminal` no longer appear
+in either column — the mutex pair was fixed by `f295b66d955`, so the 36 of the
+earlier run is now 34 and the residual-2 row below is closed.
+
+### Measured result (earlier run on `5df72fefb49`, same host, same flags, only the fix differs)
+
+| tree | Stage-2 link | undefined refs |
+|---|---|---|
+| pristine `origin/main` `5df72fefb49` | FAILED | **36** — `starts_with`×11, `replace`×7, `split`×7, `rfind`×3, `substring`×3, `char_code_at`×2, `spl_mutex_lock`×1, `spl_mutex_unlock`×1 |
+| + this fix | FAILED | **2** — `spl_mutex_lock`, `spl_mutex_unlock` only |
+
+All 34 references in the six `text`-method classes are gone; the log shrank from
+8,886 to 987 bytes. The two survivors are the separate build-composition gap
+below, and they are *supposed* to still fail until that lane is fixed.
+
+Note the emission site was NOT the terminal fall-through in
+`functions/calls.rs`: patching that one first produced a rebuild with the
+**identical** 36 references, which is what isolated the real site in
+`functions.rs`. Do not assume the two fall-throughs are interchangeable.
+
+The last-resort table deliberately excludes generic leaves (`to_text`, `get`,
+`len`, `push`, `lock`, `is_terminal`) that user types commonly define: rescuing
+those would trade a loud failure for a silent miscompile, which is the exact
+mistake this bug is about. Two `#[cfg(test)]` regressions in
+`codegen/llvm/mod.rs` pin both directions.
+
+Both branches of the fall-through now emit a level-gated diagnostic naming the
+symbol (`SIMPLE_LLVM_CALL_TARGET_DEBUG=1`), so the next occurrence is
+diagnosable from the build log instead of only from `ld`.
+
+### Still open after this fix (as of the earlier `5df72fefb49` run — both now closed on `9bb19d8c913`)
+
+- `TaskState.is_terminal` — a real Simple enum method whose **body is never
+  emitted**. A resolution/emission gap, not an intrinsic gap. Correctly still
+  fails the link.
+- `spl_mutex_lock` / `spl_mutex_unlock` — **root cause now known**, and it is a
+  build-composition gap, not a codegen gap. `spl_mutex_lock` is at
+  `src/runtime/runtime_thread.c:1161` at preprocessor depth 0 (no `#if` encloses
+  it — verified by nesting scan), so it is unconditionally compiled *if the file
+  is compiled*. It is not: `src/compiler_rust/runtime/build.rs` — the crate that
+  produces the `libsimple_runtime.a` the Stage-2 link consumes — lists
+  **`runtime_pool.c`** and never `runtime_thread.c` (`grep -c runtime_thread.c
+  build.rs` = 0), while `pipeline/native_project/tools.rs` lists
+  `runtime_thread.c` and explicitly documents it as *"the canonical OS-thread
+  and closure-pool provider … compiling runtime_pool.c beside it would create
+  duplicate pool definitions."* The two lanes disagree, and only the
+  `runtime_pool.c` lane feeds Stage 2 — and `runtime_pool.c` has no
+  `spl_mutex_*` family at all (`nm` on the archive: zero `spl_mutex` symbols,
+  defined or undefined).
+
+  Beware the obvious probe: `spl_thread_cpu_count` IS in the archive and looks
+  like proof that `runtime_thread.c` was compiled. It is not — that symbol is
+  also defined in `runtime_legacy_core.c`
+  (`scripts/check/runtime_bundle_duplicate_symbols_baseline.txt:126`). Probe with
+  a symbol unique to `runtime_thread.c`, e.g. `spl_mutex_create`.
+
+  This is the **third** instance of the same shape in this file's history:
+  `runtime_contracts.c` was silently dropped from a source list by a `chore:
+  sync` commit and broke the Stage-4 link on 2026-07-30 (see the comment at
+  `tools.rs:290`), and the `rt_opengl_*` / `rt_sdl2_*` lanes before it. Not
+  fixed here: reconciling the two lists is a runtime-lane change that must be
+  landed against `scripts/check/check-runtime-symbol-lane-divergence.shs` and the
+  duplicate-symbol baseline, not bolted onto a codegen fix.
+
+Neither belongs in the last-resort table. Both keep failing loudly, which is the
+intended state until each is fixed on its own terms.
+
+## Suggested fix direction (original, superseded)
 
 Not fixed here (the defect is in the Rust seed's LLVM backend, and a blind
 re-revert would discard whatever real bug `36673b6b6a3` was fixing). The right
