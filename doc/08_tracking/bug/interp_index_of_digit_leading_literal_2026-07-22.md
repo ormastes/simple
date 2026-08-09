@@ -208,3 +208,44 @@ than only from behavioral probing. The new tag-disjointness evidence from the
 runtime's boxed-value scheme is real but inapplicable — it describes a
 different, already-tagged representation that this lane never uses. No code
 changed, per the standing senior deferral against a narrow spot-fix.
+
+## Re-verification 2026-08-09 — STILL OPEN; no code change (standing deferral honored)
+
+Re-ran the full `==nil`/`??`/`if val` triage on `origin/main`'s deployed seed
+JIT (`bin/simple run`, banner-confirmed seed engine) plus a wider single-value
+sweep than the prior sessions covered, to rule out the collision having moved
+to a different sentinel:
+
+| value | `a == nil` | note |
+|---|---|---|
+| -1 | false (correct) | |
+| 0 | false (correct) | |
+| 1 | false (correct) | |
+| 2 | false (correct) | |
+| **3** | **true — WRONG** | payload lost, same as all prior sessions |
+| 4 | false (correct) | |
+| 5 | false (correct) | |
+| 11 | false (correct) | |
+| 100 | false (correct) | |
+| nil | true (correct) | |
+
+Also re-confirmed the `??`/`if val` forms on payload 3 specifically
+(`a ?? -1` → `<value:0xffffffffffffffff>`, default branch taken; `if val x = a`
+→ `IFVAL_NONE`, unwrap skipped) — identical to the 2026-08-08 matrix. Only the
+single value 3 collides across the swept range; no other value (including the
+prior sentinel candidate 0, and 11 which is `3 mod 8` — a plausible tag-bit
+alias) reproduces it, confirming the collision is exactly and only the bare
+constant 3 emitted by `lower_nil_expr` (`lowering_expr_literal.rs:50`), not a
+wider tag-class collision.
+
+**No code change made.** Per the standing senior deferral recorded above, a
+narrow spot-patch to the flat `i64?` lane was designed and **proven wrong
+twice** (boundary-boxing doesn't unshift `??`); the real fix is the deferred
+7-site-group/6+-file retag (Return type-context threading, if-val, `??`,
+call-arg, Let/Assign, struct-field coercion), which also inherits the 61-bit
+BoxInt truncation caveat and touches the hottest lowering paths shared by the
+bootstrap pipeline. Re-attempting a narrow fix here — especially while several
+other agents are concurrently editing compiler lowering files this session —
+would repeat the already-rejected approach and risks regressing `print`/`??`
+for all values, per the explicit prior-session finding. This entry is a
+status re-confirmation only, landed as a doc-only change.
