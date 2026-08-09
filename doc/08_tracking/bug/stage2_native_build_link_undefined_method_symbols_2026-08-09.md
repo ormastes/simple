@@ -1,11 +1,10 @@
 # Stage-2 native-build fails at LINK: 9 undefined symbols (unmangled Simple methods)
 
 Date: 2026-08-09
-Status: **FIXED 2026-08-09 — Stage 2 links clean (0 undefined refs) on
-`origin/main` `9bb19d8c913` + the last-resort intrinsic hardening. Root cause was
-RE-DIAGNOSED first: `36673b6b6a3` is NOT the defect; it is the fix that made a
-pre-existing SILENT miscompile fail loudly. See "Corrected root cause" below.
-Do NOT revert `36673b6b6a3`, wholly or partially.**
+Status: **OPEN — the untyped last-resort intrinsic routing was reverted because
+a leaf name does not prove a text receiver and can hijack unresolved custom
+methods. The typed HIR/MIR repair covers the reproduced text calls; a clean
+Stage-2 link remains the acceptance gate. Do NOT revert `36673b6b6a3`.**
 Area: bootstrap / stage-2 native-build / Rust seed LLVM codegen (method dispatch symbol emission)
 
 ## Symptom
@@ -121,16 +120,17 @@ module.add_function(&resolved_dotted, fn_type, None)
 garbage by construction — the guard merely determines whether the garbage is
 caught at link time or at runtime.
 
-### Fix landed
+### Rejected fix: untyped terminal routing
 
-At that terminal fall-through only — where every resolution strategy has already
-failed and the alternative is provably a bad symbol — route the six `text` leaves
-to the C-runtime intrinsic that actually implements them
-(`last_resort_runtime_method` in `codegen/llvm/mod.rs`), arity-checked against
-`qualified_runtime_arity`. `36673b6b6a3`'s guard on the *shortcut* paths is
-untouched, because those paths run while a real user symbol may still resolve.
+Routing a terminal unresolved call by its leaf alone is unsafe: resolution
+failure does not establish that the receiver is text. `UserText.replace`, for
+example, must remain unresolved rather than silently becoming
+`rt_string_replace`. Padding `substring(start)` to `rt_slice` is also wrong
+without evaluating the receiver length. The rejected fallback and padding were
+removed; canonical text calls must instead be selected while receiver type
+information is still available in HIR/MIR.
 
-### Re-measured on current `origin/main` `9bb19d8c913` (2026-08-09, after the parallel-lane fixes)
+### Historical measurement of the rejected fallback
 
 Two commits from a parallel session landed on the same two files while this fix
 was building — `3dfd2445d78` "harden text and mutex projections" (tightened
@@ -185,15 +185,12 @@ Note the emission site was NOT the terminal fall-through in
 **identical** 36 references, which is what isolated the real site in
 `functions.rs`. Do not assume the two fall-throughs are interchangeable.
 
-The last-resort table deliberately excludes generic leaves (`to_text`, `get`,
-`len`, `push`, `lock`, `is_terminal`) that user types commonly define: rescuing
-those would trade a loud failure for a silent miscompile, which is the exact
-mistake this bug is about. Two `#[cfg(test)]` regressions in
-`codegen/llvm/mod.rs` pin both directions.
+The last-resort table excluded some generic leaves but still admitted colliding
+leaves such as `replace`, `split`, and `substring`; that is the same silent
+miscompile class. Typed receiver-gated regressions now pin both directions.
 
-Both branches of the fall-through now emit a level-gated diagnostic naming the
-symbol (`SIMPLE_LLVM_CALL_TARGET_DEBUG=1`), so the next occurrence is
-diagnosable from the build log instead of only from `ld`.
+The unsafe fallback-specific diagnostic was removed with the fallback; the
+linker's undefined-symbol report remains the fail-closed evidence.
 
 ### Still open after this fix (as of the earlier `5df72fefb49` run — both now closed on `9bb19d8c913`)
 
@@ -229,8 +226,8 @@ diagnosable from the build log instead of only from `ld`.
   landed against `scripts/check/check-runtime-symbol-lane-divergence.shs` and the
   duplicate-symbol baseline, not bolted onto a codegen fix.
 
-Neither belongs in the last-resort table. Both keep failing loudly, which is the
-intended state until each is fixed on its own terms.
+Neither belongs in an untyped last-resort table. Each needs its own typed or
+build-composition repair.
 
 ## Suggested fix direction (original, superseded)
 
