@@ -433,8 +433,47 @@ class Engine2dWmFrameExecutor:
             serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={skipped_count} rendered={rendered_count} fallback_required={fallback_required} reason={fallback_reason}")
             return 0
         if self.emit_repeated_evidence:
+            # Freeze the accepted final parent pixels for immutable FPS
+            # replay. Web surfaces intentionally carry translucent pixels;
+            # re-blending them on every unchanged sample is redundant. The
+            # captured rectangles are already composited against the exact
+            # prepared visual epoch and replay through the same Draw IR image
+            # commands as opaque packed rows.
+            var replay_images: [Engine2dResolvedDrawIrImage] = []
+            var replay_image_index: i32 = 0
+            for replay_image in images:
+                var replay_x: i64 = 0
+                var replay_y: i64 = 0
+                if replay_image_index == 0:
+                    replay_x = self.prepared_image_x0
+                    replay_y = self.prepared_image_y0
+                elif replay_image_index == 1:
+                    replay_x = self.prepared_image_x1
+                    replay_y = self.prepared_image_y1
+                elif replay_image_index == 2:
+                    replay_x = self.prepared_image_x2
+                    replay_y = self.prepared_image_y2
+                var captured = false
+                if replay_image_index < 3 and replay_x >= 0 and replay_y >= 0:
+                    val replay_pixel_count = (
+                        replay_image.width.to_i64() *
+                        replay_image.height.to_i64())
+                    if replay_pixel_count > 0:
+                        var replay_pixels: [u32] = [0u32; replay_pixel_count]
+                        val capture_status = self.engine.copy_pixels_region_into(
+                            replay_x.to_i32(), replay_y.to_i32(),
+                            replay_image.width, replay_image.height,
+                            replay_pixels)
+                        if capture_status > 0:
+                            replay_images.push(engine2d_resolved_draw_ir_image(
+                                replay_image.image_uri, replay_image.width,
+                                replay_image.height, replay_pixels))
+                            captured = true
+                if not captured:
+                    replay_images.push(replay_image)
+                replay_image_index = replay_image_index + 1
             self.prepared_composition = local_composition
-            self.prepared_images = images
+            self.prepared_images = replay_images
             self.prepared_image_xy = image_xy
             self.prepared_scene_revision = scene_revision
             self.prepared_taskbar_revision = taskbar_revision
