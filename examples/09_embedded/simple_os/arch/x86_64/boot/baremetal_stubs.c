@@ -10068,6 +10068,59 @@ RuntimeValue rt_find(RuntimeValue recv, RuntimeValue needle)
     return rt_string_find(recv, needle);
 }
 
+/* rt_index_of: the bare/erased-receiver form of `.index_of(needle)`.
+ *
+ * EXACTLY the same defect class as rt_find above, and it shipped for real.
+ * Cranelift's `is_bare_builtin_collection_method` allowlist routes a bare
+ * (erased-receiver) `.index_of(x)` to `rt_index_of` -- verified by a reloc
+ * census on a freestanding probe archive: `trim().index_of(":")` emits ONE
+ * `rt_index_of` reloc and the typed `Str.index_of` call keeps its own
+ * `probe__Str_dot_index_of`, so the routing is correct. But this file never
+ * defined `rt_index_of`, so the link fell through to auto_stubs.c's WEAK
+ * fabricated definition, whose whole body is `xor %eax,%eax; ret` --
+ * disassembled at 0x08699910 in
+ * build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf,
+ * where `nm` reports it `W` while every other member of this family
+ * (rt_contains/rt_slice/rt_index_get/rt_push/rt_array_pop/rt_string_rfind/
+ * rt_string_starts_with/rt_string_ends_with/rt_to_string) is `T`.
+ *
+ * Constant 0 reads as "match at byte 0", and every caller guards with
+ * `if idx > 0:`, so it reads as NOT FOUND and the data is silently dropped.
+ * Measured in the SimpleOS WM guest on 2026-08-09, both values taken on the
+ * SAME receiver in the same run:
+ *
+ *     raw_len=15 line_len=15 colon_index_of=0 colon_find_from=11
+ *
+ * That single wrong 0 dropped all 45 `:root` CSS custom properties
+ * (prop_count 0). Commit 2c782cbfb76 routed that ONE call site to a
+ * pure-Simple `find_from`; this is the underlying fix that retires the whole
+ * family. Do NOT delete this and re-rely on the weak stub.
+ *
+ * Contract (hosted reference: src/runtime/runtime_native.c rt_index_of, and
+ * the Rust runtime's collections.rs rt_index_of): array receiver first, then
+ * text, and BOTH branches return a RAW index -- never ENCODE_INT. That is why
+ * this does not call the neighbouring `rt_array_index_of`, which returns a
+ * TAGGED ENCODE_INT(i) and would hand callers a boxed value where they expect
+ * a plain byte offset. -1 means not found on both branches. */
+RuntimeValue rt_index_of(RuntimeValue recv, RuntimeValue needle)
+{
+    if (IS_HEAP(recv)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(recv);
+        if (h && h->type == HEAP_ARRAY) {
+            RuntimeArray *a = (RuntimeArray *)h;
+            for (uint64_t i = 0; i < a->len; i++) {
+                if (rt_native_eq(a->items[i], needle)) return (RuntimeValue)i;
+            }
+            return (RuntimeValue)(-1);
+        }
+    }
+    /* Text receiver (and the not-a-collection fallback): byte-offset search.
+     * rt_string_find already fails CLOSED with -1 when either operand is not a
+     * decodable string handle, so a non-collection receiver can never come
+     * back as a plausible 0. */
+    return rt_string_find(recv, needle);
+}
+
 static int is_whitespace(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';

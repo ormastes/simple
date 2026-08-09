@@ -165,3 +165,120 @@ divergence receipt itself
 (`simple_web_html_layout_renderer_foundation.spl:773`) is diagnostic-only and
 the HTML scan loop uses the portable `find_from`, so no rendering behaviour
 depends on this today.
+
+---
+
+## UPDATE 2026-08-09 — step (3) went live and FIXED; the retraction is superseded
+
+**Status: FIXED** for the erased-receiver route. The 2026-07-28 retraction above
+("implementing `rt_index_of` would be dead code") was correct *on that day* and
+is now **superseded by a change that landed after it**, not wrong in hindsight.
+
+### What changed between the two readings
+
+`("index_of", 1)` was added to cranelift's
+`is_bare_builtin_collection_method` allowlist on 2026-08-01
+(`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:204`) to stop
+a bare, erased-receiver `.index_of()` being STOLEN by a same-named user method
+(census: 8 binds, all landing on `dbfs_engine.txn.TxnStepSequence.index_of` —
+see `codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`).
+That mitigation routes those calls to `rt_index_of`. It is exactly step (2) of
+"Suggested next steps" above, and it made step (3) load-bearing — but step (3)
+was never done, so on x86_64 the newly-live reference resolved to
+`boot/auto_stubs.c`'s WEAK fabricated definition instead of failing to link.
+
+### Measured evidence (guest kernel ELF, this repo)
+
+`build/simpleos_wm_fullscreen_evidence/simpleos_wm_production_desktop.elf`:
+
+```
+$ nm  ... | grep rt_index_of
+08699910 W rt_index_of                 # W, not T — fabricated
+
+$ objdump -d --start-address=0x08699910 ...
+08699910 <rt_index_of>:
+  push %rbp ; mov %rsp,%rbp ; xor %eax,%eax ; pop %rbp ; ret
+```
+
+The entire body is `xor %eax,%eax; ret` — **constant 0**. `nm` reports every
+other member of the erased-receiver builtin family as `T` (`rt_contains`,
+`rt_slice`, `rt_index_get`, `rt_push`, `rt_array_pop`, `rt_string_rfind`,
+`rt_string_starts_with`, `rt_string_ends_with`, `rt_to_string`); the rest of the
+family (`rt_find`, `rt_len`, `rt_at`, `rt_map`, `rt_take`, `rt_drop`,
+`rt_reverse`, `rt_collection_remove`, `rt_string_find`) is ABSENT, i.e. never
+referenced. Of the 62 weak `rt_*` stubs in this kernel, `rt_index_of` is the
+**only** one with text/collection semantics — every other is a GPU/DMA/virtio
+"backend unavailable" stub where nil is the intended answer. **The family is
+enumerated and closed: one victim, now fixed.**
+
+Constant 0 reads as "match at byte offset 0". Callers guard with `if idx > 0:`,
+so it reads as NOT FOUND. Guest receipt, both values on the SAME receiver in the
+same run:
+
+```
+raw_len=15 line_len=15 colon_index_of=0 colon_find_from=11
+```
+
+That single wrong 0 dropped all 45 `:root` CSS custom properties (`prop_count`
+0 -> 45 once the call site was routed to `find_from` by `2c782cbfb76`).
+
+### The routing itself is NOT at fault
+
+Reloc census on a freestanding probe archive (`native-build --entry-closure
+--emit-archive --target x86_64-unknown-none --backend cranelift`) carrying
+`props.trim().index_of(":")` next to a typed `Str.index_of`:
+
+```
+1 probe__Str_dot_index_of
+1 rt_index_of
+1 rt_string_trim
+```
+
+One reloc each — the erased call goes to the builtin and the typed call keeps
+its own method. No theft. The host JIT oracle for the same probe prints `v=8`,
+the correct index. **The defect was purely the missing definition.**
+
+### Fix
+
+`rt_index_of` implemented in
+`examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`, modelled on
+the sibling `rt_find` directly above it (which carries the identical rationale,
+verbatim: *"a weak 0-returning stub would have reported 'match at index 0' for
+every call"*). Array receiver first, then text, **both branches returning a RAW
+index** — deliberately NOT delegating to the neighbouring `rt_array_index_of`,
+which returns a tagged `ENCODE_INT(i)`.
+
+Only x86_64 needed it: no other arch's `baremetal_stubs.c` defines `rt_find` or
+`rt_string_find` either, and only the x86_64 link pulls `auto_stubs.c`, so on
+every other arch this fails CLOSED at link rather than fabricating a 0.
+
+Regression guard:
+`test/01_unit/os/kernel/boot/baremetal_rt_index_of_not_fabricated_spec.spl`
+(3/3 green; sabotage-checked — renaming the C function turns 2 of 3 red).
+Link-level sabotage also confirmed: linking only the weak stub reproduces
+`xor %eax,%eax; ret`, while linking the real definition yields a strong `T`
+that tail-jumps into `rt_string_find`.
+
+### The guard that should have caught this, and did not
+
+`config/simpleos_fabricated_rt_baseline.sdn` + the refusal in
+`src/compiler/70.backend/backend/llvm_native_link.spl` are supposed to block
+newly-fabricated `rt_*` symbols. `rt_index_of` is **not in that baseline** and
+shipped anyway: the check compares the fabricated set against the baseline and
+only fires on a *baselined* entry, so an entry that is fabricated but
+UNBASELINED fails OPEN. That is a separate, still-OPEN defect and is the reason
+this reached a guest at all. **Follow-up (not done here): make the fabricated-set
+check fail closed on any `rt_*` fabrication that is absent from the baseline,
+which is the strictly-stronger reading the "baseline is shrink-only" comment
+already implies.**
+
+### Helper form is NOT affected
+
+`text_index_of(h, n)`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:431`)
+is `find_from(h, n, 0)` — a pure-Simple byte scan over `.bytes()`, calling no
+runtime search symbol. All 75 repo-wide `text_index_of(` sites (55 `src/lib`,
+16 `src/compiler`, 4 `test`) were always safe, including the ~10 in
+`simple_web_html_layout_renderer_core.spl`. Only the method form
+`<receiver>.index_of(...)` was ever exposed, and only where the receiver type
+was erased.
