@@ -179,6 +179,11 @@ engine_claiming_specs_guard="$repo_root/scripts/check/check-engine-claiming-spec
 engine_differential_guard="$repo_root/scripts/check/check-engine-differential.shs"
 lint_cached_guard="$repo_root/scripts/check/lint-cached.shs"
 
+# 2026-08-09 batch-5: native-build omitted-trailing-default-parameter regression
+# gate, found unwired by check-guard-wiring.shs. See run_guard call near the
+# other native-build probe guards below for verification detail.
+native_trailing_default_param_guard="$repo_root/scripts/check/check-native-trailing-default-param.shs"
+
 for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$try_op_guard" "$list_shift_guard" \
          "$cuda_ntt_guard" "$vulkan_ntt_guard" \
@@ -205,7 +210,8 @@ for g in "$tree_guard" "$markers_guard" "$size_guard" "$jit_guard" \
          "$native_inprocess_positional_guard" "$predicate_parser_native_build_guard" \
          "$gui_web_2d_completion_criteria_guard" "$gui_web_2d_parallel_review_guard" \
          "$class_identity_seed_matrix_guard" "$engine_claiming_specs_guard" \
-         "$engine_differential_guard" "$lint_cached_guard"; do
+         "$engine_differential_guard" "$lint_cached_guard" \
+         "$native_trailing_default_param_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -711,5 +717,20 @@ run_guard "$engine_claiming_specs_guard" "engine-claiming-spec-without-probe rat
 # i64_boundary_values divergence and baseline it (or fix it) to turn this
 # green; do not weaken the guard.
 DIFF_LANES=interpret,jit run_guard "$engine_differential_guard" "interpret-vs-jit engine differential probe (full scan, not range-bound)"
+
+# check-native-trailing-default-param.shs: native-build (AOT) regression gate
+# for omitted TRAILING default parameters
+# (doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md).
+# `bin/simple test` hard-defaults to the tree-walk interpreter, which binds
+# defaults correctly from HirFunction.params directly, so no *_spec.spl can
+# ever observe this lane -- only a script that actually drives native-build
+# can fence it. Covers every call shape the predecessor fix missed: same-
+# module free function (2 arities), cross-module free function with a
+# CALL-expression default and a CONST-expression default, instance method
+# (receiver + synthetic self alignment), and static method. Verified
+# standalone 2026-08-09: PASS in ~2m56s. Drives a real native-build compile
+# rather than inspecting the outgoing diff, so like the other native-build
+# probe guards above it is not range-bound -- full scan, once per push.
+run_guard "$native_trailing_default_param_guard" "native-build trailing-default-parameter probe (full scan, not range-bound)"
 
 exit $status
