@@ -357,6 +357,42 @@ impl RenderBackend for BaremetalBackend:
         val opaque_runs_enabled = self.mask_w <= 0 or self.mask_h <= 0
         var row = 0
         while row < h:
+            # The MMIO surface owns a packed row blit that crosses the runtime
+            # boundary once per visible row instead of once per pixel. Keep
+            # clipping in Pure Simple and masks in the canonical scalar path.
+            if opaque_runs_enabled:
+                val py = y + row
+                var dst_x0 = x
+                var dst_x1 = x + w
+                if self.clip_enabled:
+                    if dst_x0 < self.clip_x:
+                        dst_x0 = self.clip_x
+                    val clip_x1 = self.clip_x + self.clip_w
+                    if dst_x1 > clip_x1:
+                        dst_x1 = clip_x1
+                if dst_x0 < 0:
+                    dst_x0 = 0
+                if dst_x1 > self.w:
+                    dst_x1 = self.w
+                var row_visible = false
+                if py >= 0:
+                    if py < self.h:
+                        row_visible = true
+                if self.clip_enabled:
+                    if py < self.clip_y or py >= self.clip_y + self.clip_h:
+                        row_visible = false
+                if row_visible and dst_x1 > dst_x0:
+                    val src_offset = row * w + (dst_x0 - x)
+                    val available = pixel_count - src_offset
+                    var count = dst_x1 - dst_x0
+                    if count.to_i64() > available:
+                        count = available.to_i32()
+                    if count > 0:
+                        if self.fb.framebuffer_blit_row_argb(
+                            pixels, src_offset.to_i64(), dst_x0.to_u32(), py.to_u32(), count.to_u32()
+                        ):
+                            row = row + 1
+                            continue
             var col = 0
             while col < w:
                 val src_idx = row * w + col

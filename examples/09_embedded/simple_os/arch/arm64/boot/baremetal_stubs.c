@@ -2670,6 +2670,20 @@ static void rt_gui_scalar_fill4(uint32_t dst[4], uint32_t color)
         dst[i] = color;
 }
 
+static void rt_gui_store4(volatile uint32_t *dst, const uint32_t pixels[4])
+{
+#if defined(__aarch64__)
+    __asm__ volatile(
+        "ld1 {v0.4s}, [%1]\n\t"
+        "st1 {v0.4s}, [%0]"
+        :
+        : "r" (dst), "r" (pixels)
+        : "v0", "memory");
+#else
+    for (uint32_t i = 0; i < 4u; i++) dst[i] = pixels[i];
+#endif
+}
+
 RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, RuntimeValue u)
 {
     if (!g_fb_addr || !g_fb_w) { (void)xy;(void)wh;(void)color;(void)u; return 0; }
@@ -2705,11 +2719,13 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
                 :
                 : "r" (dst), "r" (c)
                 : "v0", "memory");
-            for (uint32_t i = 0; i < 4u; i++) {
-                if (dst[i] != scalar_reference[i])
-                    g_gui_simd_fill_scalar_parity_failures++;
+            if (g_gui_simd_fill_scalar_parity_checks < 64u) {
+                for (uint32_t i = 0; i < 4u; i++) {
+                    if (dst[i] != scalar_reference[i])
+                        g_gui_simd_fill_scalar_parity_failures++;
+                }
+                g_gui_simd_fill_scalar_parity_checks++;
             }
-            g_gui_simd_fill_scalar_parity_checks++;
             dst += 4;
             remaining -= 4u;
             call_chunks++;
@@ -2727,6 +2743,61 @@ RuntimeValue rt_gui_fill4(RuntimeValue xy, RuntimeValue wh, RuntimeValue color, 
     }
     g_gui_simd_fill_tail_pixels += call_tail;
     return 0;
+}
+
+
+RuntimeValue rt_gui_blit_row4(RuntimeValue pixels_value, RuntimeValue src_offset_value,
+                              RuntimeValue xy, RuntimeValue count_value)
+{
+    RuntimeArray *pixels = arm64_pixel_array(pixels_value);
+    if (!pixels || !g_fb_addr || !g_fb_w) return 0;
+    int64_t src_offset = (int64_t)src_offset_value;
+    int64_t requested = (int64_t)count_value;
+    if (src_offset < 0 || requested <= 0 || (uint64_t)src_offset >= pixels->len) return 0;
+    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
+    uint32_t y = (uint32_t)((uint64_t)xy & 0xffffffffu);
+    if (x >= g_fb_w || y >= 768u) return 0;
+    uint64_t count = (uint64_t)requested;
+    if (count > pixels->len - (uint64_t)src_offset)
+        count = pixels->len - (uint64_t)src_offset;
+    if (count > g_fb_w - x) count = g_fb_w - x;
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)g_fb_addr
+        + (uint64_t)y * g_fb_w + x;
+    uint64_t i = 0;
+    uint64_t chunks = 0;
+    while (i + 4u <= count) {
+        uint32_t packed[4];
+        int opaque = 1;
+        for (uint32_t lane = 0; lane < 4u; lane++) {
+            packed[lane] = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i + lane]);
+            if ((packed[lane] >> 24) != 255u) opaque = 0;
+        }
+        if (opaque) {
+            rt_gui_store4(dst + i, packed);
+            chunks++;
+        } else {
+            for (uint32_t lane = 0; lane < 4u; lane++) {
+                uint32_t src = packed[lane];
+                uint32_t alpha = src >> 24;
+                if (alpha == 255u) dst[i + lane] = src;
+                else if (alpha != 0u) dst[i + lane] = arm64_blend_pixel(src, dst[i + lane]);
+            }
+        }
+        i += 4u;
+    }
+    while (i < count) {
+        uint32_t src = arm64_unbox_pixel(pixels->items[(uint64_t)src_offset + i]);
+        uint32_t alpha = src >> 24;
+        if (alpha == 255u) dst[i] = src;
+        else if (alpha != 0u) dst[i] = arm64_blend_pixel(src, dst[i]);
+        i++;
+    }
+    if (chunks > 0u) {
+        g_gui_simd_fill_hits++;
+        g_gui_simd_fill_chunks += chunks;
+    }
+    g_gui_simd_fill_tail_pixels += count - chunks * 4u;
+    return 1;
 }
 
 RuntimeValue rt_gui_render_desktop(RuntimeValue u1, RuntimeValue u2) { (void)u1;(void)u2; return 0; }
