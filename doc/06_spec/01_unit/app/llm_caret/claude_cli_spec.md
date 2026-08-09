@@ -2,11 +2,11 @@
 
 > Source-synchronized unit manual. The current self-hosted SSpec runner is
 > blocked before trustworthy scenario execution, so this document records
-> 80 active scenarios and 0 executed scenarios.
+> 83 active scenarios and 0 executed scenarios.
 
 | Tests | Active | Skipped | Pending | Executed |
 |------:|-------:|--------:|--------:|---------:|
-| 80 | 80 | 0 | 0 | 0 |
+| 83 | 83 | 0 | 0 | 0 |
 
 **Executable source:** `test/01_unit/app/llm_caret/claude_cli_spec.spl`
 
@@ -1345,6 +1345,35 @@ expect(events[2].output_tokens).to_equal(3)
 
 </details>
 
+## should return one redacted terminal error for a failed subprocess
+
+**Group:** claude_cli_stream - local fixture
+
+**Step:** Run the deterministic Claude fixture with `fixture-error`, which
+exits nonzero and writes a secret-bearing diagnostic.
+
+**Expected:** The stream wrapper returns exactly one `error` terminal event
+with stop reason `error`, identifies exit code 7, redacts the diagnostic, and
+never exposes the fixture secret.
+
+## should return a redacted terminal error result from the stream fixture
+
+**Group:** claude_cli_stream - local fixture
+
+**Step:** Read the deterministic terminal `result` error envelope.
+
+**Expected:** The wrapper returns exactly one `result` event with error stop
+reason and redacted content, without exposing the fixture secret.
+
+## should return a redacted terminal provider error from the stream fixture
+
+**Group:** claude_cli_stream - local fixture
+
+**Step:** Read the deterministic typed provider error envelope.
+
+**Expected:** The wrapper returns exactly one `error` terminal event with error
+stop reason and redacted content, without exposing the fixture secret.
+
 ## should reject malformed and duplicate terminal streams
 
 **Group:** claude_cli_stream - local fixture
@@ -1410,8 +1439,8 @@ expect(completed[1].content).to_equal("complete")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 80 |
-| Active scenarios | 80 |
+| Total scenarios | 83 |
+| Active scenarios | 83 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 | Executed scenarios | 0 |

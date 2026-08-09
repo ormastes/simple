@@ -538,7 +538,7 @@ refresh visible status; `/new` obtains a fresh session ID instead of reusing
 and overwriting the prior persisted conversation.
 
 Focused system manuals are mirrored under `doc/06_spec/03_system/...`.
-Source-synchronized unit manuals now mirror 80 Claude CLI, 36 provider, 15
+Source-synchronized unit manuals now mirror 83 Claude CLI, 36 provider, 15
 OpenCode CLI, nine local-Torch, 24 production-chat, 62 TUI, 22 raw-input, 22
 injected-runtime, 63 main-entry, 16 production-config, 13 Claude API, 14 OpenAI
 API, 37 production-tools, and 14 production-types scenarios.
