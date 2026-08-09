@@ -1,0 +1,30 @@
+use std.io_runtime.{file_read}
+
+describe "Simple-core transient heap compatibility":
+    it "exports the complete transient ABI from the memory owner":
+        val source = file_read("src/runtime/simple_core/core_memory.spl")
+        expect(source).to_contain("pub fn rt_transient_array_scope_begin() -> i8:")
+        expect(source).to_contain("pub fn rt_transient_array_scope_pause() -> i8:")
+        expect(source).to_contain("pub fn rt_transient_array_scope_end() -> i8:")
+        expect(source).to_contain("pub fn rt_transient_heap_promote(value: i64) -> i8:")
+
+    it "reports success without fabricating transient arena state":
+        val source = file_read("src/runtime/simple_core/core_memory.spl")
+        val alloc = source.find("pub fn rt_alloc(size: i64) -> i64:")
+        val begin = source.find("pub fn rt_transient_array_scope_begin() -> i8:")
+        val pause = source.find("pub fn rt_transient_array_scope_pause() -> i8:")
+        val end = source.find("pub fn rt_transient_array_scope_end() -> i8:")
+        val promote = source.find("pub fn rt_transient_heap_promote(value: i64) -> i8:")
+        val after_promote = source.find("pub fn rt_ptr_read_i64", promote)
+        expect(source.substring(alloc, begin)).to_contain("return malloc(size)")
+        expect(source.substring(begin, pause)).to_contain("return 1")
+        expect(source.substring(pause, end)).to_contain("return 1")
+        expect(source.substring(end, promote)).to_contain("return 1")
+        expect(source.substring(promote, after_promote)).to_contain("return 1")
+        expect(source.substring(begin, after_promote)).to_not_contain("free(")
+        expect(source.substring(begin, after_promote)).to_not_contain("malloc(")
+        expect(source).to_contain("has no transient")
+        expect(source).to_contain("scope end does not reclaim allocations")
+        expect(source).to_contain("until an explicit `rt_free` call")
+        expect(source).to_not_contain("transient_scope_depth")
+        expect(source).to_not_contain("transient_arena")
