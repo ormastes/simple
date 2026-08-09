@@ -26,6 +26,125 @@ spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
     return (spl_i64)a0;
 }
 
+#define RV64_CSR_READ_CASE(number, name) \
+    case number: __asm__ volatile("csrr %0, " #name : "=r"(value)); break
+
+spl_u64 rt_riscv64_csr_read(spl_u32 csr)
+{
+    spl_u64 value = 0;
+    switch (csr) {
+    RV64_CSR_READ_CASE(0x100U, sstatus);
+    RV64_CSR_READ_CASE(0x104U, sie);
+    RV64_CSR_READ_CASE(0x105U, stvec);
+    RV64_CSR_READ_CASE(0x140U, sscratch);
+    RV64_CSR_READ_CASE(0x141U, sepc);
+    RV64_CSR_READ_CASE(0x142U, scause);
+    RV64_CSR_READ_CASE(0x143U, stval);
+    RV64_CSR_READ_CASE(0x144U, sip);
+    RV64_CSR_READ_CASE(0x180U, satp);
+    RV64_CSR_READ_CASE(0xC00U, cycle);
+    RV64_CSR_READ_CASE(0xC01U, time);
+    RV64_CSR_READ_CASE(0xC02U, instret);
+    default: break;
+    }
+    return value;
+}
+
+void rt_riscv64_csr_write(spl_u32 csr, spl_u64 value)
+{
+    switch (csr) {
+    case 0x100U: __asm__ volatile("csrw sstatus, %0" :: "r"(value) : "memory"); break;
+    case 0x104U: __asm__ volatile("csrw sie, %0" :: "r"(value) : "memory"); break;
+    case 0x105U: __asm__ volatile("csrw stvec, %0" :: "r"(value) : "memory"); break;
+    case 0x140U: __asm__ volatile("csrw sscratch, %0" :: "r"(value) : "memory"); break;
+    case 0x141U: __asm__ volatile("csrw sepc, %0" :: "r"(value) : "memory"); break;
+    case 0x180U: __asm__ volatile("csrw satp, %0" :: "r"(value) : "memory"); break;
+    default: break;
+    }
+}
+
+void rt_riscv64_csr_set(spl_u32 csr, spl_u64 bits)
+{
+    switch (csr) {
+    case 0x100U: __asm__ volatile("csrs sstatus, %0" :: "r"(bits) : "memory"); break;
+    case 0x104U: __asm__ volatile("csrs sie, %0" :: "r"(bits) : "memory"); break;
+    default: break;
+    }
+}
+
+void rt_riscv64_csr_clear(spl_u32 csr, spl_u64 bits)
+{
+    switch (csr) {
+    case 0x100U: __asm__ volatile("csrc sstatus, %0" :: "r"(bits) : "memory"); break;
+    case 0x104U: __asm__ volatile("csrc sie, %0" :: "r"(bits) : "memory"); break;
+    default: break;
+    }
+}
+
+void rt_riscv64_sfence_vma_addr(spl_u64 vaddr)
+{
+    __asm__ volatile("sfence.vma %0, zero" :: "r"(vaddr) : "memory");
+}
+
+void rt_riscv64_sfence_vma_asid(spl_u64 asid)
+{
+    __asm__ volatile("sfence.vma zero, %0" :: "r"(asid) : "memory");
+}
+
+spl_u64 rt_riscv64_read_tp(void)
+{
+    spl_u64 value;
+    __asm__ volatile("mv %0, tp" : "=r"(value));
+    return value;
+}
+
+void rt_riscv64_write_tp(spl_u64 value)
+{
+    __asm__ volatile("mv tp, %0" :: "r"(value) : "memory");
+}
+
+spl_u64 rt_riscv64_read_sp(void)
+{
+    spl_u64 value;
+    __asm__ volatile("mv %0, sp" : "=r"(value));
+    return value;
+}
+
+spl_u64 rt_riscv64_read_gp(void)
+{
+    spl_u64 value;
+    __asm__ volatile("mv %0, gp" : "=r"(value));
+    return value;
+}
+
+typedef struct RtRiscv64SbiRet {
+    spl_i64 error;
+    spl_i64 value;
+} RtRiscv64SbiRet;
+
+RtRiscv64SbiRet rt_riscv64_sbi_call(spl_u64 ext, spl_u64 fid,
+                                     spl_u64 arg0, spl_u64 arg1,
+                                     spl_u64 arg2, spl_u64 arg3,
+                                     spl_u64 arg4, spl_u64 arg5)
+{
+    register spl_u64 a0 __asm__("a0") = arg0;
+    register spl_u64 a1 __asm__("a1") = arg1;
+    register spl_u64 a2 __asm__("a2") = arg2;
+    register spl_u64 a3 __asm__("a3") = arg3;
+    register spl_u64 a4 __asm__("a4") = arg4;
+    register spl_u64 a5 __asm__("a5") = arg5;
+    register spl_u64 a6 __asm__("a6") = fid;
+    register spl_u64 a7 __asm__("a7") = ext;
+    __asm__ volatile("ecall"
+                     : "+r"(a0), "+r"(a1)
+                     : "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(a6), "r"(a7)
+                     : "memory");
+    RtRiscv64SbiRet result = {(spl_i64)a0, (spl_i64)a1};
+    return result;
+}
+
+#undef RV64_CSR_READ_CASE
+
 #define RT_VALUE_TAG_MASK 0x7ULL
 #define RT_VALUE_TAG_INT 0x0ULL
 #define RT_VALUE_TAG_HEAP 0x1ULL

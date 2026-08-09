@@ -14,3 +14,29 @@ describe "RISC-V64 raw syscall ABI contract":
 
         val linker = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
         expect(linker).to_contain("int64_t rt_riscv64_syscall")
+
+    it "routes CSR operands through immediate architecture runtime cases":
+        val cpu = file_read("src/os/kernel/arch/riscv64/cpu.spl")
+        expect(cpu).to_contain("extern fn rt_riscv64_csr_read")
+        expect(cpu).to_contain("rt_riscv64_csr_read(0x100u32)")
+        expect(cpu.contains("Identifier(\"out\")")).to_equal(false)
+        expect(cpu.contains("in(reg)")).to_equal(false)
+        expect(cpu.contains("out(reg)")).to_equal(false)
+
+        val runtime = file_read("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+        expect(runtime).to_contain("RV64_CSR_READ_CASE(0x100U, sstatus)")
+        expect(runtime).to_contain("csrw satp, %0")
+
+    it "routes SBI register operands through the architecture runtime":
+        val sbi = file_read("src/os/kernel/arch/riscv64/sbi.spl")
+        expect(sbi).to_contain("extern fn rt_riscv64_sbi_call")
+        expect(sbi).to_contain("rt_riscv64_sbi_call(ext, fid, arg0, arg1, arg2, arg3, arg4, arg5)")
+        expect(sbi.contains("Identifier(\"arg0\")")).to_equal(false)
+        expect(sbi.contains("inout(\"a0\")")).to_equal(false)
+
+        val runtime = file_read("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c")
+        expect(runtime).to_contain("RtRiscv64SbiRet rt_riscv64_sbi_call")
+        expect(runtime).to_contain("register spl_u64 a7 __asm__(\"a7\") = ext")
+
+        val linker = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
+        expect(linker).to_contain("RtRiscv64SbiRet rt_riscv64_sbi_call")
