@@ -9,6 +9,10 @@ val ENTRY = "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_q
 val EXECUTOR = "src/os/compositor/engine2d_wm_frame_executor.spl"
 val VALIDATOR = "scripts/check/validate-simpleos-arm64-unified-live-receipt.spl"
 val INPUT_INJECTOR = "scripts/check/qmp-send-virtio-input.py"
+val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
+val BRIDGE = "src/os/lib/gpu_bridge/host_gpu_ivshmem.spl"
+val HOST = "src/app/simpleos_gpu_host/daemon_runner.spl"
+val CPU_ORACLE_FIXTURE = "test/01_unit/os/compositor/simpleos_qemu_drawir_cpu_oracle_fixture_spec.spl"
 
 describe "ARM64 unified SimpleOS primitive adapter":
     it "launches all primitive devices in one QEMU process":
@@ -19,6 +23,9 @@ describe "ARM64 unified SimpleOS primitive adapter":
         expect(source).to_contain("-device virtio-mouse-device")
         expect(source).to_contain("-device virtio-sound-device,audiodev=audio0")
         expect(source).to_contain("--processing-backend=vulkan")
+        expect(source).to_contain("-device virtio-blk-device,drive=fontdisk")
+        expect(source).to_contain("readonly=on")
+        expect(source).to_contain("disk_sha256=")
 
     it "uses the canonical audio probe before the canonical desktop":
         val source = file_read(ENTRY)
@@ -49,6 +56,31 @@ describe "ARM64 unified SimpleOS primitive adapter":
         expect(evidence > validation).to_be(true)
         expect(source).to_contain("readback=device")
         expect(source).to_contain("identity={" + "receipt.device_identity}")
+        expect(source).to_contain("submit_id={" + "receipt.submit_id}")
+        expect(source).to_contain("fence_completed={" + "receipt.fence_signaled}")
+        expect(source).to_contain("device_frame_id={" + "receipt.device_frame_id}")
+
+    it "carries submit, fence completion, and device frame identity on the wire":
+        val protocol = file_read(PROTOCOL)
+        val bridge = file_read(BRIDGE)
+        val host = file_read(HOST)
+        expect(protocol).to_contain("SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_SIGNALED")
+        expect(protocol).to_contain("simpleos_host_gpu_submission_correlation_valid")
+        expect(bridge).to_contain("receipt.submit_id == expected_generation")
+        expect(bridge).to_contain("receipt.device_frame_id == expected_frame_id")
+        expect(host).to_contain("fence_completed=true")
+
+    it "enforces the primitive performance and memory budgets":
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("test \"$p95_us\" -le 16700")
+        expect(source).to_contain("test \"$max_rss_kib\" -le 262144")
+        expect(source).to_contain("showcase-submit-fence-device-frame-correlation")
+
+    it "keeps an exact primitive pixel fixture against the canonical CPU oracle":
+        val source = file_read(CPU_ORACLE_FIXTURE)
+        expect(source).to_contain("oracle_src_over")
+        expect(source).to_contain("expect(core.buf[5]).to_equal(expected)")
+        expect(source).to_contain("expect(core.buf[0]).to_equal(0xFF102030u32)")
 
     it "delegates final promotion to both environment profile admissions":
         val source = file_read(VALIDATOR)

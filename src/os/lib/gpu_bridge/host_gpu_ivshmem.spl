@@ -36,6 +36,10 @@ struct HostGpuIvshmemReceipt:
     run_id_hash: i64
     frame_id: i64
     backend_code: i64
+    submit_id: i64
+    fence_id: i64
+    fence_signaled: bool
+    device_frame_id: i64
 
 struct HostGpuIvshmemHelloReceipt:
     published: bool
@@ -61,7 +65,7 @@ struct HostGpuIvshmemDrawIrResult:
     sent_resources: [SimpleOsHostGpuImageResourceRevision]
 
 fn _host_gpu_error_receipt(status: i64, reason: i64, generation: i64) -> HostGpuIvshmemReceipt:
-    HostGpuIvshmemReceipt(completed: false, status: status, reason: reason, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, readback_source: 0, device_identity: 0, run_id_hash: 0, frame_id: 0, backend_code: 0)
+    HostGpuIvshmemReceipt(completed: false, status: status, reason: reason, generation: generation, native_handle: 0, output_addr: 0u64, output_bytes: 0, output_checksum: 0, elapsed_us: 0, readback_source: 0, device_identity: 0, run_id_hash: 0, frame_id: 0, backend_code: 0, submit_id: 0, fence_id: 0, fence_signaled: false, device_frame_id: 0)
 
 fn host_gpu_ivshmem_device_receipt_valid(receipt: HostGpuIvshmemReceipt, expected_generation: i64, expected_run_id_hash: i64, expected_frame_id: i64, expected_backend: i64, expected_bytes: i64) -> bool:
     simpleos_host_gpu_wire_correlation_valid(expected_run_id_hash, expected_frame_id) and
@@ -71,7 +75,10 @@ fn host_gpu_ivshmem_device_receipt_valid(receipt: HostGpuIvshmemReceipt, expecte
         receipt.output_bytes == expected_bytes and receipt.output_checksum > 0 and receipt.elapsed_us > 0 and
         receipt.readback_source == SIMPLEOS_HOST_GPU_READBACK_DEVICE and
         receipt.run_id_hash == expected_run_id_hash and receipt.frame_id == expected_frame_id and
-        receipt.backend_code == expected_backend
+        receipt.backend_code == expected_backend and
+        simpleos_host_gpu_submission_correlation_valid(receipt.submit_id, receipt.fence_id, receipt.device_frame_id) and
+        receipt.submit_id == expected_generation and receipt.fence_id == expected_generation and
+        receipt.device_frame_id == expected_frame_id and receipt.fence_signaled
 
 fn host_gpu_ivshmem_fallback_receipt_valid(receipt: HostGpuIvshmemReceipt, expected_generation: i64, expected_run_id_hash: i64, expected_frame_id: i64, expected_backend: i64, expected_bytes: i64) -> bool:
     simpleos_host_gpu_wire_correlation_valid(expected_run_id_hash, expected_frame_id) and
@@ -81,7 +88,8 @@ fn host_gpu_ivshmem_fallback_receipt_valid(receipt: HostGpuIvshmemReceipt, expec
         receipt.output_bytes == expected_bytes and receipt.output_checksum > 0 and receipt.elapsed_us > 0 and
         receipt.readback_source == SIMPLEOS_HOST_GPU_READBACK_CPU and
         receipt.run_id_hash == expected_run_id_hash and receipt.frame_id == expected_frame_id and
-        receipt.backend_code == expected_backend
+        receipt.backend_code == expected_backend and receipt.submit_id == 0 and
+        receipt.fence_id == 0 and not receipt.fence_signaled and receipt.device_frame_id == 0
 
 fn _host_gpu_write(base: u64, offset: i64, value: i64):
     mmio_write64(base + (offset as u64), value as u64)
@@ -101,7 +109,7 @@ fn _host_gpu_read_completion(base: u64) -> i64:
 
 fn _host_gpu_refresh_response(base: u64):
     if base == 0x5F800000u64:
-        mmio_shared_invalidate_range(base, 320u64)
+        mmio_shared_invalidate_range(base, 344u64)
 
 fn _host_gpu_slot_is_idle(base: u64, completion: i64) -> bool:
     _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION) == completion
@@ -158,6 +166,8 @@ fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_BYTES, payload_bytes)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_CHECKSUM, checksum)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_FRAME_ID, frame_id)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_SUBMIT_ID, generation)
+    _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_FENCE_ID, generation)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_RUN_ID_HASH, run_id_hash)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_STATUS, SIMPLEOS_HOST_GPU_STATUS_IDLE)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_IMAGE_RESOURCE_COUNT, image_resource_count)
@@ -194,7 +204,11 @@ fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id
         device_identity: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY),
         run_id_hash: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_RUN_ID_HASH),
         frame_id: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FRAME_ID),
-        backend_code: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_BACKEND)
+        backend_code: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_BACKEND),
+        submit_id: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_SUBMIT_ID),
+        fence_id: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_ID),
+        fence_signaled: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_SIGNALED) == 1,
+        device_frame_id: _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_FRAME_ID)
     )
     if receipt.run_id_hash != run_id_hash or receipt.frame_id != frame_id or receipt.backend_code != backend_code:
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CORRELATION_MISMATCH, generation)

@@ -25,6 +25,11 @@ case "${1:-}" in
         grep -Fq 'showcase-animation-static' "$0"
         grep -Fq 'source=guest-monotonic tick=20' "$0"
         grep -Fq 'showcase_max_rss_kib' "$0"
+        grep -Fq 'showcase-device-p95-budget-exceeded' "$0"
+        grep -Fq 'showcase-combined-rss-budget-exceeded' "$0"
+        grep -Fq -- '-device virtio-blk-device,drive=fontdisk' "$0"
+        grep -Fq 'font_disk_sha256' "$0"
+        grep -Fq 'fence_completed=true' "$0"
         grep -Fq 'validate-simpleos-arm64-unified-live-receipt.spl' "$0"
         echo simpleos_arm64_unified_live_self_test=pass
         exit 0
@@ -47,6 +52,8 @@ receipt=$out_dir/evidence.env
 capture=$out_dir/showcase-device-frame.ppm
 validator=scripts/check/validate-simpleos-arm64-unified-live-receipt.spl
 entry=examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop_linux_qemu_unified.spl
+font_disk=${SIMPLEOS_ARM64_FONT_DISK:-build/os/fat32-arm64-desktop.img}
+font_manifest=${SIMPLEOS_ARM64_FONT_DISK_MANIFEST:-$out_dir/font-disk.manifest.env}
 mkdir -p "$out_dir" build/os/generated/generated
 
 qemu_pid=
@@ -78,6 +85,7 @@ command -v qemu-system-aarch64 >/dev/null 2>&1 || fail qemu-system-aarch64-missi
 command -v sha256sum >/dev/null 2>&1 || fail sha256sum-missing
 command -v truncate >/dev/null 2>&1 || fail truncate-missing
 command -v python3 >/dev/null 2>&1 || fail python3-missing
+command -v perl >/dev/null 2>&1 || fail perl-missing
 test -x "$simple" || fail pure-simple-compiler-missing
 version=$($simple --version 2>&1 || true)
 case "$version" in
@@ -93,6 +101,20 @@ case "$version" in
 esac
 
 if test "$build" = yes; then
+    /bin/sh scripts/os/make_os_disk.shs 128 "$font_disk" "" arm64 desktop-fonts \
+        >"$out_dir/font-disk-build.log" 2>&1 || fail deterministic-font-disk-build-failed
+    font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
+    font_bundle_sha=$(sha256sum scripts/os/simpleos_font_bundle_companion.sha256 | awk '{print $1}')
+    font_manifest_tmp=${font_manifest}.tmp.$$
+    {
+        echo schema=simpleos-arm64-unified-font-disk-v1
+        echo status=pass
+        echo disk_path="$font_disk"
+        echo disk_sha256="$font_disk_sha"
+        echo font_bundle_companion_sha256="$font_bundle_sha"
+        echo readonly=true
+    } >"$font_manifest_tmp"
+    mv "$font_manifest_tmp" "$font_manifest"
     cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
     SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on SIMPLE_NO_STUB_FALLBACK=1 \
         "$simple" native-build \
@@ -105,6 +127,12 @@ if test "$build" = yes; then
 fi
 test -s "$kernel" || fail unified-kernel-missing
 test -x "$daemon" || fail canonical-gpu-host-daemon-missing
+test -f "$font_disk" && test ! -L "$font_disk" && test -s "$font_disk" || fail deterministic-font-disk-missing
+test -f "$font_manifest" && test ! -L "$font_manifest" && test -s "$font_manifest" || fail deterministic-font-manifest-missing
+font_disk_sha=$(sha256sum "$font_disk" | awk '{print $1}')
+manifest_disk_sha=$(sed -n 's/^disk_sha256=//p' "$font_manifest")
+test "$(grep -c '^disk_sha256=' "$font_manifest")" -eq 1 || fail deterministic-font-manifest-invalid
+test "$font_disk_sha" = "$manifest_disk_sha" || fail deterministic-font-disk-sha-mismatch
 
 rm -f "$serial" "$daemon_log" "$qemu_log" "$qmp" "$receipt" "$shm" "$capture"
 truncate -s 8M "$shm"
@@ -124,6 +152,8 @@ grep -Fq 'HOST_GPU_DAEMON_FALLBACK processing_fallback=false' "$daemon_log" || f
 set -- -no-user-config -machine virt -accel tcg -cpu cortex-a72 -m 512M \
     -serial "file:$serial" -display none -monitor none -net none -no-reboot \
     -kernel "$kernel" -device ramfb \
+    -drive "file=$font_disk,if=none,id=fontdisk,format=raw,readonly=on" \
+    -device virtio-blk-device,drive=fontdisk \
     -object "memory-backend-file,id=hostgpu,share=on,mem-path=$shm,size=8M" \
     -device ivshmem-plain,memdev=hostgpu \
     -global virtio-mmio.force-legacy=false \
@@ -193,6 +223,32 @@ device_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^identity=//p
 frame_id=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^frame=//p')
 printf '%s\n' "$device_id" | grep -Eq '^[1-9][0-9]*$' || fail device-identity-missing
 printf '%s\n' "$frame_id" | grep -Eq '^[1-9][0-9]*$' || fail frame-identity-missing
+device_checksum=$(printf '%s\n' "$device_line" | tr ' ' '\n' | sed -n 's/^checksum=//p')
+capture_probe=$(perl -e '
+    use strict;
+    my ($path) = @ARGV;
+    open my $file, "<:raw", $path or exit 1;
+    local $/; my $data = <$file>;
+    $data =~ /\AP6\r?\n(\d+) (\d+)\r?\n255\r?\n/s or exit 2;
+    my ($w, $h) = ($1, $2); my $pixels = substr($data, $+[0]);
+    ($w == 1024 && $h == 768 && length($pixels) == $w*$h*3) or exit 3;
+    my ($sum, %semantic, %font) = (0);
+    for (my $y=0; $y<$h; $y++) { for (my $x=0; $x<$w; $x++) {
+        my $o=($y*$w+$x)*3; my ($r,$g,$b)=unpack("C3",substr($pixels,$o,3));
+        my $argb=0xFF000000|($r<<16)|($g<<8)|$b;
+        $sum=($sum+($argb & 0x7FFFFFFF))%2147483647;
+        $semantic{substr($pixels,$o,3)}=1 if $x>=240 && $x<520 && $y>=180 && $y<520;
+        $font{substr($pixels,$o,3)}=1 if $x>=0 && $x<640 && $y>=0 && $y<120;
+    }}
+    scalar(keys %semantic)>=8 or exit 4;
+    scalar(keys %font)>=8 or exit 5;
+    $sum=1 if $sum==0;
+    print "$sum ".scalar(keys %semantic)." ".scalar(keys %font)."\n";
+' "$capture") || fail showcase-capture-region-oracle-failed
+capture_device_checksum=$(printf '%s\n' "$capture_probe" | awk '{print $1}')
+capture_semantic_colors=$(printf '%s\n' "$capture_probe" | awk '{print $2}')
+capture_font_colors=$(printf '%s\n' "$capture_probe" | awk '{print $3}')
+test "$capture_device_checksum" = "$device_checksum" || fail showcase-capture-device-checksum-mismatch
 
 # Use the last twenty completed device frames. The 95th percentile is the
 # 19th sorted sample for N=20 (nearest-rank), never a single best-case frame.
@@ -207,7 +263,7 @@ animation_revisions=$(tr ' ' '\n' <"$animation_receipts" | sed -n 's/^scene_revi
 test "$(printf '%s\n' "$animation_revisions" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-animation-revisions-not-distinct
 : >"$sample_receipts"
 printf '%s\n' "$animation_revisions" | while IFS= read -r animation_revision; do
-    grep -E "^\[wm-frame\] host-gpu-device-evidence backend=vulkan .* scene_revision=$animation_revision .* readback=device .* elapsed_us=[1-9][0-9]*$" "$serial" | tail -n 1 >>"$sample_receipts"
+    grep -E "^\[wm-frame\] host-gpu-device-evidence backend=vulkan .* frame=[1-9][0-9]* submit_id=[1-9][0-9]* fence_id=[1-9][0-9]* fence_completed=true device_frame_id=[1-9][0-9]* scene_revision=$animation_revision .* readback=device .* elapsed_us=[1-9][0-9]*$" "$serial" | tail -n 1 >>"$sample_receipts"
 done
 test "$(wc -l <"$sample_receipts" | tr -d ' ')" -eq 20 || fail showcase-animation-device-correlation
 tr ' ' '\n' <"$sample_receipts" | sed -n 's/^elapsed_us=//p' >"$samples"
@@ -218,9 +274,22 @@ if grep -Ev '^[1-9][0-9]*$' "$samples" | grep -q .; then
 fi
 p95_us=$(sort -n "$samples" | sed -n '19p')
 test "$p95_us" -gt 0 || fail showcase-device-p95-invalid
+test "$p95_us" -le 16700 || fail showcase-device-p95-budget-exceeded
 sample_frames=$(tr ' ' '\n' <"$sample_receipts" | sed -n 's/^frame=//p')
 test "$(printf '%s\n' "$sample_frames" | wc -l | tr -d ' ')" -eq 20 || fail showcase-frame-identity-count
 test "$(printf '%s\n' "$sample_frames" | sort -n -u | wc -l | tr -d ' ')" -eq 20 || fail showcase-frame-identities-not-distinct
+sample_submit_ids=$out_dir/showcase-submit-ids.txt
+sample_fence_ids=$out_dir/showcase-fence-ids.txt
+sample_device_frames=$out_dir/showcase-device-frame-ids.txt
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^submit_id=//p' >"$sample_submit_ids"
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^fence_id=//p' >"$sample_fence_ids"
+tr ' ' '\n' <"$sample_receipts" | sed -n 's/^device_frame_id=//p' >"$sample_device_frames"
+test "$(sort -n -u "$sample_submit_ids" | wc -l | tr -d ' ')" -eq 20 || fail showcase-submit-identities-not-distinct
+test "$(sort -n -u "$sample_fence_ids" | wc -l | tr -d ' ')" -eq 20 || fail showcase-fence-identities-not-distinct
+test "$(sort -n -u "$sample_device_frames" | wc -l | tr -d ' ')" -eq 20 || fail showcase-device-frame-identities-not-distinct
+printf '%s\n' "$sample_frames" >"$out_dir/showcase-frame-ids.txt"
+paste "$out_dir/showcase-frame-ids.txt" "$sample_submit_ids" "$sample_fence_ids" "$sample_device_frames" |
+    awk '{ if ($1 != $2 || $1 != $3 || $1 != $4) exit 1 }' || fail showcase-submit-fence-device-frame-correlation
 printf '%s\n' "$sample_frames" | grep -Fxq "$font_frame" || fail transient-font-frame-not-sampled
 distinct_checksums=$(tr ' ' '\n' <"$sample_receipts" | sed -n 's/^checksum=//p' | sort -u | wc -l | tr -d ' ')
 test "$distinct_checksums" -ge 2 || fail showcase-animation-static
@@ -230,6 +299,7 @@ daemon_rss_kib=$(sed -n 's/^VmHWM:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/
 printf '%s\n' "$qemu_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-qemu-rss-unavailable
 printf '%s\n' "$daemon_rss_kib" | grep -Eq '^[1-9][0-9]*$' || fail showcase-daemon-rss-unavailable
 max_rss_kib=$((qemu_rss_kib + daemon_rss_kib))
+test "$max_rss_kib" -le 262144 || fail showcase-combined-rss-budget-exceeded
 
 set +e
 admission=$($simple run "$validator" 1 1 1 1 1 0 1 1 1 1 "$device_id" "$frame_id" 2>&1)
@@ -263,6 +333,13 @@ printf '%s\n' "$admission" | grep -Fq 'simpleos_arm64_unified_environment_admiss
     echo showcase_transient_font=pass
     echo showcase_capture_path="$capture"
     echo showcase_capture_sha256="$capture_sha"
+    echo showcase_capture_device_frame_id="$frame_id"
+    echo showcase_capture_device_checksum="$capture_device_checksum"
+    echo showcase_capture_semantic_marker=showcase-animation-frame
+    echo showcase_capture_semantic_region_distinct_colors="$capture_semantic_colors"
+    echo showcase_capture_font_region_source=virtio-fat32
+    echo showcase_capture_font_region_distinct_colors="$capture_font_colors"
+    echo font_disk_sha256="$font_disk_sha"
     echo showcase_device_samples=20
     echo showcase_device_p95_us="$p95_us"
     echo showcase_qemu_rss_kib="$qemu_rss_kib"

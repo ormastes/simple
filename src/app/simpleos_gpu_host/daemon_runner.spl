@@ -94,6 +94,14 @@ fn _finish(base: i64, generation: i64, status: i64, reason: i64, handle: i64, ou
     _write(base, SIMPLEOS_HOST_GPU_WIRE_ELAPSED_US, elapsed_us)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_READBACK_SOURCE, source)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_IDENTITY, identity)
+    val submit_id = _read(base, SIMPLEOS_HOST_GPU_WIRE_SUBMIT_ID)
+    val fence_id = _read(base, SIMPLEOS_HOST_GPU_WIRE_FENCE_ID)
+    val device_completion = status == SIMPLEOS_HOST_GPU_STATUS_PASS and
+        source == SIMPLEOS_HOST_GPU_READBACK_DEVICE and submit_id > 0 and fence_id > 0
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_SUBMIT_ID, if device_completion: submit_id else: 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_ID, if device_completion: fence_id else: 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_FENCE_SIGNALED, if device_completion: 1 else: 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_DEVICE_FRAME_ID, if device_completion: _read(base, SIMPLEOS_HOST_GPU_WIRE_FRAME_ID) else: 0)
     memory_barrier_required()
     _write(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION, generation)
 
@@ -209,6 +217,8 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
     val payload_bytes = _read(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_BYTES)
     val expected_checksum = _read(base, SIMPLEOS_HOST_GPU_WIRE_PAYLOAD_CHECKSUM)
     val frame_id = _read(base, SIMPLEOS_HOST_GPU_WIRE_FRAME_ID)
+    val submit_id = _read(base, SIMPLEOS_HOST_GPU_WIRE_SUBMIT_ID)
+    val fence_id = _read(base, SIMPLEOS_HOST_GPU_WIRE_FENCE_ID)
     val run_id_hash = _read(base, SIMPLEOS_HOST_GPU_WIRE_RUN_ID_HASH)
     val guest_isa_code = _read(base, SIMPLEOS_HOST_GPU_WIRE_GUEST_ISA)
     val requested_render_mask = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_RENDER_MASK)
@@ -244,6 +254,9 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
         return _loop_state(_process_hello(platform, base, generation, request_version, guest_isa_code, requested_render_mask, requested_processing_mask, backend_code, processing_selector, requested_capability_mask), [])
     if not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
+        return _loop_state(1, retained)
+    if kind != SIMPLEOS_HOST_GPU_KIND_HELLO and (submit_id != generation or fence_id != generation):
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CORRELATION_MISMATCH, 0, 0, 0, 1, 0, 0)
         return _loop_state(1, retained)
     if _read(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION) != SIMPLEOS_HOST_GPU_PROTOCOL_VERSION:
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED, 0, 0, 0, 1, 0, 0)
@@ -397,7 +410,7 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
                 val device_identity = if backend == "directx": result.device_identity else: platform.render_device_identity(backend)
                 val device_backed = result.selected_backend == "gpu" and not result.fallback_required and result.skipped_command_count == 0 and result.rendered_command_count.to_i64() == element_count and result.readback_source == "device_readback" and result.backend_handle > 0 and result.readback_checksum > 0 and device_identity > 0 and result.pixels.len().to_i64() >= output_count
                 if device_backed:
-                    print("HOST_GPU_DAEMON_DRAWIR backend={backend} frame={frame_id} rendered={result.rendered_command_count} skipped={result.skipped_command_count} readback={result.readback_source} font_target={result.font_execution_target} font_batch={result.font_batch_identity} font_readback={result.font_readback_source} font_device_executed={result.font_device_executed} font_promotion_ready={result.font_promotion_ready} font_atlas_upload_bytes={result.font_atlas_upload_bytes}\n")
+                    print("HOST_GPU_DAEMON_DRAWIR backend={backend} frame={frame_id} submit_id={submit_id} fence_id={fence_id} fence_completed=true device_frame_id={frame_id} rendered={result.rendered_command_count} skipped={result.skipped_command_count} readback={result.readback_source} font_target={result.font_execution_target} font_batch={result.font_batch_identity} font_readback={result.font_readback_source} font_device_executed={result.font_device_executed} font_promotion_ready={result.font_promotion_ready} font_atlas_upload_bytes={result.font_atlas_upload_bytes}\n")
                 draw_engine.shutdown()
                 if not device_backed:
                     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
