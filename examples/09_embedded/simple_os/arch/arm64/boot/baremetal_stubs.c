@@ -5012,7 +5012,15 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 {
     uintptr_t ptr = (uintptr_t)data;
     uint32_t len = len_val > (RuntimeValue)UINT32_MAX ? UINT32_MAX : (uint32_t)len_val;
-    uintptr_t mixed = (ptr >> 3) ^ (ptr >> 17) ^ ((uintptr_t)len * 2654435761U);
+    /* Codegen literals are densely aligned, so shifted-xor hashing formed
+     * >128-entry primary clusters even below 50% load. Use a full 64-bit
+     * avalanche before masking; identical (address,length) keys remain exact. */
+    uint64_t mixed = (uint64_t)ptr ^ ((uint64_t)len << 32);
+    mixed ^= mixed >> 33;
+    mixed *= UINT64_C(0xff51afd7ed558ccd);
+    mixed ^= mixed >> 33;
+    mixed *= UINT64_C(0xc4ceb9fe1a85ec53);
+    mixed ^= mixed >> 33;
     uint32_t slot = (uint32_t)mixed & (ARM64_LITERAL_CACHE_CAPACITY - 1U);
     for (uint32_t probe = 0; probe < ARM64_LITERAL_CACHE_MAX_PROBES; probe++) {
         Arm64LiteralCacheEntry *entry = &_arm64_literal_cache[slot];
