@@ -28,6 +28,7 @@ use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
+use compiler.semantics.aspect_weave.{weave_forward_advice}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -92,8 +93,17 @@ fn _driver_validate_value_struct_layouts(ctx: CompileContext):
     # above rather than a new one -- this tree's two existing AOP weavers both
     # target PHYSICAL functions, so before this call a logical join point could
     # not be named at all, let alone fail a build.
-    for aspect_error in validate_aspect_contracts(ctx.hir_modules):
+    val aspect_errors = validate_aspect_contracts(ctx.hir_modules)
+    for aspect_error in aspect_errors:
         ctx.add_error(aspect_error)
+    # Static-weave codegen (M5 remainder): only once EVERY advice in this
+    # compilation is proven, never on a partially-valid set. Weaving ahead of
+    # a validation error would let a malformed advice (unknown kind, missing
+    # obligation, unmatched selector on the other six kinds) still execute
+    # its call, which is a correctness bug the C1/C4 siblings do not have to
+    # guard against because they have no codegen step of their own here.
+    if aspect_errors.len() == 0:
+        val _woven = weave_forward_advice(ctx.hir_modules)
 
 impl CompilerDriver:
     me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile) -> Result<HirModule, text>:
