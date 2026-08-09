@@ -6,7 +6,7 @@
 
 use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
     HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
-    html_tokenizer_new, html_tokenizer_tokenize_with_limits_into,
+    html_tokenizer_new, html_tokenizer_tokenize_with_limits_flat_into,
     html_max_tokens, html_max_attributes
 }
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
@@ -300,28 +300,40 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
     else:
         requested_node_limit
     val tokenizer = html_tokenizer_new(html_text)
-    var tokens: [HtmlToken] = []
+    var token_kind_ids: [i32] = []
+    var token_tags: [text] = []
+    var token_data: [text] = []
+    var token_self_closing_ids: [i32] = []
+    var token_attr_offsets: [i32] = []
+    var token_attr_names: [text] = []
+    var token_attr_values: [text] = []
     var token_status: [i32] = [0]
-    html_tokenizer_tokenize_with_limits_into(
+    html_tokenizer_tokenize_with_limits_flat_into(
         tokenizer, requested_token_limit, requested_attr_limit,
-        tokens, token_status
+        token_kind_ids, token_tags, token_data, token_self_closing_ids,
+        token_attr_offsets, token_attr_names, token_attr_values, token_status
     )
-    val ntok = tokens.len()
+    val ntok = token_kind_ids.len()
     var delivered_start = 0
     var delivered_end = 0
     var delivered_character = 0
     var delivered_named = 0
     var delivered_attrs = 0
-    for delivered in tokens:
-        if delivered.token_kind == HtmlTokenKind.StartTag:
+    var delivered_i = 0
+    while delivered_i < ntok:
+        val delivered_kind = token_kind_ids[delivered_i]
+        if delivered_kind == 1:
             delivered_start = delivered_start + 1
-        elif delivered.token_kind == HtmlTokenKind.EndTag:
+        elif delivered_kind == 2:
             delivered_end = delivered_end + 1
-        elif delivered.token_kind == HtmlTokenKind.Character:
+        elif delivered_kind == 3:
             delivered_character = delivered_character + 1
-        if delivered.tag_name != "":
+        if token_tags[delivered_i] != "":
             delivered_named = delivered_named + 1
-        delivered_attrs = delivered_attrs + delivered.attrs.len()
+        delivered_attrs = delivered_attrs + (
+            token_attr_offsets[delivered_i + 1] -
+            token_attr_offsets[delivered_i])
+        delivered_i = delivered_i + 1
     print "[html-token-delivery] total={ntok} start={delivered_start} end={delivered_end} character={delivered_character} named={delivered_named} attrs={delivered_attrs}"
 
     # Collected script content
@@ -360,7 +372,35 @@ fn _html_tree_builder_build_with_parse_limits_and_projection(
 
     var ti = 0
     while ti < ntok:
-        val tok = tokens[ti]
+        val flat_kind = token_kind_ids[ti]
+        val token_kind = if flat_kind == 0:
+            HtmlTokenKind.Doctype
+        elif flat_kind == 1:
+            HtmlTokenKind.StartTag
+        elif flat_kind == 2:
+            HtmlTokenKind.EndTag
+        elif flat_kind == 3:
+            HtmlTokenKind.Character
+        elif flat_kind == 4:
+            HtmlTokenKind.Comment
+        else:
+            HtmlTokenKind.Eof
+        var reconstructed_attrs: [HtmlAttr] = []
+        var attr_i = token_attr_offsets[ti]
+        val attr_end = token_attr_offsets[ti + 1]
+        while attr_i < attr_end:
+            reconstructed_attrs.push(HtmlAttr(
+                name: token_attr_names[attr_i],
+                value: token_attr_values[attr_i]
+            ))
+            attr_i = attr_i + 1
+        val tok = HtmlToken(
+            token_kind: token_kind,
+            tag_name: token_tags[ti],
+            attrs: reconstructed_attrs,
+            self_closing: token_self_closing_ids[ti] == 1,
+            data: token_data[ti]
+        )
         if (next_node_id > node_limit and _token_would_create_node(
             tok, in_body, in_script, skipped_raw_text_tag
         )):
