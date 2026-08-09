@@ -348,6 +348,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mem_attr_report", memory::rt_mem_attr_report);
     insert_simple!("rt_mem_attr_report_print", memory::rt_mem_attr_report_print);
     insert_simple!("rt_mem_harden_check", memory::rt_mem_harden_check);
+    // Same capability under the C-runtime spelling. `runtime_memory.c:240`
+    // exports `rt_mem_harden_check_native`, and Simple sources written against
+    // a native/AOT lane use that name. Both the interpreter and the Cranelift
+    // JIT resolve externs through THIS table (the JIT emits a call to the
+    // `rt_interp_call` trampoline, it does not dlsym the process), so without
+    // this entry a `_native`-spelled probe hit "unknown extern function" and
+    // the call silently yielded 0 — bit-identical to "quarantine is off",
+    // which made the sabotage control of
+    // test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl vacuous.
+    // Resolves doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md.
+    insert_simple!("rt_mem_harden_check_native", memory::rt_mem_harden_check);
     insert_simple!("rt_mem_guard_stats", memory::rt_mem_guard_stats);
     insert_simple!(
         "rt_transient_array_scope_begin",

@@ -38,10 +38,33 @@ guard being switched on, not by the fixture being inherently fatal. A spec that
 only ran the guard-on case would pass just as happily against a probe that
 segfaulted for unrelated reasons.
 
+## What the JIT arm actually measures (CORRECTED 2026-08-09)
+
+An earlier version of this spec ran the probe under `SIMPLE_EXECUTION_MODE=jit`
+and asserted the UAF **survives**, on the premise that "cranelift resolves
+`rt_alloc` to the C runtime". That premise is false for this lane and the
+assertion was measurably wrong — the child dies on SIGSEGV at
+`SIMPLE_MEM_GUARD_RATE=1`.
+
+Reason: `bin/simple run` under `SIMPLE_EXECUTION_MODE=jit` does **not** link the
+C runtime for externs. The JIT emits a call to the `rt_interp_call` trampoline,
+which resolves every extern through the same Rust dispatch table the
+tree-walk interpreter uses (`interpreter_extern/mod.rs`). So `rt_alloc`/`rt_free`
+in the in-process JIT lane are `mem_guard.rs` — guard pages included. The JIT
+arm therefore measures the **in-process JIT lane**, which shares the
+interpreter's allocator; it does not and cannot measure the cranelift *backend*
+allocator of a finished native artifact.
+
+That is still a worthwhile assertion — it pins the allocator the JIT lane
+actually binds — but it is NOT evidence about the matrix's `cranelift` row.
+
 ## Backend coverage
 
-`interpreter` and `cranelift` are exercised here directly. `llvm` is not run in
-this spec because it needs a full `native-build` (minutes, not seconds); it was
+The `interpreter` and in-process `jit` lanes are exercised here directly.
+
+**Scoped out (no automated coverage):** the true cranelift/llvm *native-linked*
+allocator. Reaching it requires a full `native-build` (minutes, not seconds),
+which is why both native rows are asserted here only statically. `llvm` was
 measured by hand on 2026-08-02 and is recorded in
 `doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md`
 — the native binary survived the UAF at `SIMPLE_MEM_GUARD_RATE=1`, and `nm`
@@ -112,15 +135,21 @@ describe "guard capability-matrix row matches observed guard-page behaviour":
         step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive - the guard page traps it")
         assert_equal(survived_uaf("interpreter", true), false)
 
-    it "does NOT trap a use-after-free on cranelift, which claims guard: false":
-        step("Confirm the matrix does not claim guard support on cranelift")
-        assert_equal(mem_infra_row_supported("guard", "cranelift"), false)
-
-        step("Sabotage control: with the guard knob unset the UAF survives")
+    it "traps a use-after-free on the in-process JIT lane, which shares the interpreter allocator":
+        # See "What the JIT arm actually measures" above. This arm pins the
+        # allocator the JIT lane really binds (mem_guard.rs, via the
+        # rt_interp_call trampoline) - it is NOT evidence about the cranelift
+        # matrix row, which describes a natively-linked artifact.
+        step("Sabotage control: with the guard knob unset the same UAF survives")
         assert_equal(survived_uaf("jit", false), true)
 
-        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF still survives - the knob is inert here")
-        assert_equal(survived_uaf("jit", true), true)
+        step("With SIMPLE_MEM_GUARD_RATE=1 the UAF must NOT survive on the JIT lane either")
+        assert_equal(survived_uaf("jit", true), false)
+
+        step("The matrix row for the natively-linked cranelift backend is still guard: false")
+        # Not measured by the arm above; hand-measured native-build evidence is
+        # in doc/08_tracking/bug/mem_infra_guard_row_false_on_native_backends_2026-07-31.md.
+        assert_equal(mem_infra_row_supported("guard", "cranelift"), false)
 
     it "claims guard: false on llvm, which links the same no-guard C rt_alloc as cranelift":
         step("Confirm the matrix does not claim guard support on llvm")

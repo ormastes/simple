@@ -1,7 +1,15 @@
 # `rt_mem_harden_check` silently returns 0 under cranelift — the check symbol diverges per backend
 
 - **Filed:** 2026-08-02
-- **Status:** OPEN
+- **Status:** MOSTLY RESOLVED 2026-08-09 — `rt_mem_harden_check_native` is now
+  registered as an alias of `rt_mem_harden_check` in
+  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`, so both spellings
+  resolve on the JIT lane and neither silently returns 0. The premise that the
+  divergence was interpreter-vs-C-linkage was also wrong: the JIT resolves
+  externs through the same Rust table, so this was a registration omission.
+  One residual remains — the `_native` spelling is still rejected under
+  `SIMPLE_EXECUTION_MODE=interpreter`. Both are written up in
+  `mem_infra_parity_specs_cranelift_arm_demotes_to_interpreter_2026-08-09.md`.
 - **Severity:** high (silent false-negative in a safety-detection API)
 - **Evidence tier:** Rust seed (`bin/simple`; bootstrap-identity probe = 0). Anything
   only the self-hosted binary can settle is DEFERRED.

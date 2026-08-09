@@ -1,3 +1,139 @@
+<!-- RESOLUTION APPENDED 2026-08-09; original report retained below. -->
+# mem_infra parity specs: the "cranelift" arm never measured cranelift
+
+- **Filed:** 2026-08-09
+- **Status:** PARTIALLY FIXED — the registration defect is fixed and both specs
+  are GREEN for real reasons; the natively-linked-backend coverage gap is
+  SCOPED OUT and recorded below.
+- **Files:**
+  - `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl` (was 4/5 RED, now 5/5 GREEN)
+  - `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl` (was 3/4 RED, now 4/4 GREEN)
+  - `test/fixture/mem_infra/harden_tamper_probe.spl`
+  - `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:351`
+  - `src/lib/common/mem_infra/config.spl:66-89`
+
+## Summary
+
+Both specs spawn an out-of-process fixture under `SIMPLE_EXECUTION_MODE=jit` and
+label that arm "cranelift". Two independent defects made that arm dishonest.
+
+### Defect A — unregistered extern silently yields 0 (FIXED)
+
+`test/fixture/mem_infra/harden_tamper_probe.spl` declares
+`extern fn rt_mem_harden_check_native() -> i64`. That symbol exists in
+`src/runtime/runtime_memory.c:240`, but the SFFI dispatch table in
+`interpreter_extern/mod.rs` registered only `rt_mem_harden_check`.
+
+Measured before the fix (`bin/simple run`, `SIMPLE_MEM_HARDEN=1`, jit):
+
+```
+ERROR simple_compiler::interpreter_sffi: rt_interp_call error:
+  "unknown extern function: rt_mem_harden_check_native" (E1002)
+harden_tamper_probe: t0=0
+harden_tamper_probe: t1=0
+harden_tamper_probe: t2=0
+harden_tamper_probe: t3=0
+```
+
+The call is logged and then yields 0 without aborting. `0,0,0,0` is
+**bit-identical** to the spec's own knob-off sabotage control, so that control
+was vacuous exactly when it mattered: a completely dead check passed it.
+
+**Root cause was NOT a silent de-JIT demotion.** The module is JIT-compiled; the
+error arrives from the `rt_interp_call` trampoline, i.e. from compiled code. The
+JIT resolves externs through the same Rust table the tree-walk interpreter uses
+— it does not dlsym the process — so this was a plain registration-list
+omission, not a codegen gap.
+
+**Fix:** register the C spelling as an alias of the same handler
+(`interpreter_extern/mod.rs`, one `insert_simple!` line + rationale comment).
+This also resolves
+`mem_infra_harden_check_symbol_divergence_2026-08-02.md` for every lane that
+consults that table.
+
+Measured after the fix (rebuilt seed, `cargo build --release`):
+
+| lane | `SIMPLE_MEM_HARDEN=1` | knob unset |
+|------|----------------------|------------|
+| jit  | `t0=0 t1=1 t2=2 t3=3` | `t0=0 t1=0 t2=0 t3=0` |
+
+The two directions are now distinguishable, so the sabotage control is real.
+
+### Defect B — the JIT arm was asserting a false premise (FIXED, by correcting the oracle)
+
+The guard spec asserted `survived_uaf("jit", true) == true` ("the guard knob is
+inert on cranelift"). Measured: the child dies on **SIGSEGV** (exit 139) — the
+guard page is present. This was not a weak oracle, it was a *wrong* one, derived
+from the same false premise as Defect A: that a jit-mode `bin/simple run`
+resolves `rt_alloc` to the C runtime. It does not; it binds
+`interpreter_extern/mem_guard.rs`, guard pages included.
+
+Both specs' docstrings, the fixture header, and the `config.spl` matrix comment
+asserted that false premise in prose. All four are corrected in place. The guard
+spec's JIT arm now asserts what is true and says what it covers: it pins the
+allocator the in-process JIT lane genuinely binds (knob-off survives, knob-on
+traps — sabotage control intact), and explicitly disclaims being evidence about
+the `cranelift` matrix row. That row is retained as a static assertion.
+
+## Scoped out: no automated coverage of the natively-LINKED backends
+
+Neither spec can reach the lane the `cranelift`/`llvm` matrix rows actually
+describe — a finished `native-build` artifact, whose `rt_alloc` comes from
+`runtime_native.c` (plain `malloc`, no quarantine, no guard pages) and which
+does not link `runtime_memory.o` at all.
+
+- **Why out of scope here:** it needs a full `native-build` per arm (minutes,
+  not seconds) plus a link-failure oracle (`undefined symbol:
+  rt_mem_harden_check_native`) distinct from the runtime oracles these specs
+  use. Both rows were measured by hand on 2026-08-02 and recorded in
+  `mem_infra_guard_row_false_on_native_backends_2026-07-31.md`; the matrix rows
+  themselves are correct.
+- **Unblock condition:** a slow-lane spec (`--only-slow`) that drives
+  `native-build` for each backend and asserts (a) the UAF probe survives at
+  `SIMPLE_MEM_GUARD_RATE=1`, and (b) the harden probe fails to LINK. Until then
+  the native rows rest on a hand transcript, and a regression in the native
+  allocator lane would not turn any spec red.
+
+## Residual defect (open, unrelated to both specs)
+
+With the alias registered, `rt_mem_harden_check_native` resolves under
+`SIMPLE_EXECUTION_MODE=jit` but still fails under
+`SIMPLE_EXECUTION_MODE=interpreter`:
+
+```
+a=0                                                   # rt_mem_harden_check     - resolves
+error: semantic: unknown extern function: rt_mem_harden_check_native
+```
+
+Both spellings are in the one `EXTERN_DISPATCH` map and the map is consulted
+first in `interpreter_extern/mod.rs:2637`, so the tree-walk interpreter must be
+resolving externs through a *different* path than `rt_interp_call`. That path
+was not located. It does not affect either parity spec (the interpreter arms use
+`harden_poison_workload.spl`, which uses the registered `rt_mem_harden_check`
+spelling), so it is filed here rather than fixed. Next step: instrument the
+interpreter's extern call site and find which resolver rejects a name the shared
+map contains.
+
+## Evidence
+
+Verified with a freshly built seed (`src/compiler_rust/target/release/simple`,
+passed via `SIMPLE_TEST_BINARY`; `bin/release/**` deliberately not clobbered —
+it is shared with concurrent sessions and is a seed, per
+`.claude/rules/bootstrap.md`):
+
+```
+SPEC FILE VERDICT: harden_backend_parity_spec.spl declared>=5 executed=5 passed=5 failed=0 dropped=0
+SPEC FILE VERDICT: guard_backend_parity_spec.spl  declared>=4 executed=4 passed=4 failed=0 dropped=0
+```
+
+Against the pre-existing deployed binary both are RED (4/5 and 3/4), so the
+green depends on the registration fix, not on the assertion edits alone.
+
+
+---
+
+# Original report (retained verbatim)
+
 # mem_infra guard/harden parity specs: the "cranelift" arm silently runs on the INTERPRETER
 
 - **Status:** OPEN
