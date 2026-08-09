@@ -3,7 +3,12 @@
 Status: FIXED (2026-06-11)
 
 **Date:** 2026-06-11
-**Status:** OPEN
+**Status:** FIXED — re-verified 2026-08-09: `SIMPLE_ALLOW_STUB_FALLBACK` /
+default-hard-error gate confirmed present in
+`src/compiler_rust/compiler/src/codegen/common_backend.rs` (lines ~2092-2127).
+The stale `Status: OPEN` line below was leftover metadata from before the fix
+landed; corrected to match the `Status: FIXED` in the title block and the
+"Fix" section, which already documented the change and its tests.
 **Severity:** High (silent miscompile)
 **Found by:** memory_audit_gc_nogc nogc verification (.spipe/memory_audit_gc_nogc/research_nogc_verify.md §7 B3)
 
