@@ -1,7 +1,31 @@
 # BUG: `RamFsDriver.name` — two hand-written spec suites assert contradictory values for the same field
 
-**Status:** OPEN
+**Status:** FIXED (2026-08-09)
 **Found:** 2026-08-04
+
+## Resolution (2026-08-09)
+
+Adopted the `"ramfs"` (mount-type identifier) contract, per the doc's own
+"Suggested resolution": `src/lib/nogc_async_mut/fs_driver/ramfs.spl:104`
+`name:` changed from `"RamFsDriver"` to `"ramfs"`, and all dependent
+assertions updated to match in the same change:
+`test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl`
+(3 assertions), `test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl`
+(1 assertion), plus their generated `.spipe_matchers_*` mirrors under
+`test/01_unit/dbfs/` and `test/02_integration/storage/dbfs/`, and the legacy
+`test/integration/storage/dbfs/` duplicates — 5 files total besides the
+driver source.
+
+Verified fresh: `test/01_unit/fs_driver/instance_test.spl` now 5/5 passing
+(previously 3 failing). `test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl`
+4/4 passing. `test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl`
+6/8 passing — the remaining 2 failures are a pre-existing, unrelated semantic
+error (`method \`len\` not found on type \`MountEntry\`` in the
+"unmount /data" examples), not caused by this change.
+
+`Fat32Driver` was left as `"Fat32Driver"` (out of scope for this bug; no
+contradictory assertions exist for it today) — a future pass could rename it
+to `"fat32"` for full consistency but that is a separate decision.
 **Severity:** medium — 3 assertions are red today, and the obvious fix turns
 4 currently-green assertions in another suite red. No design doc settles it.
 
