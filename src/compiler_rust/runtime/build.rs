@@ -15,7 +15,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
     println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_socket_nonblock.c");
-    println!("cargo:rerun-if-changed=../../runtime/counterpart_abi_runtime.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
@@ -25,9 +24,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_packed_span.c");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_packed_span.h");
-    println!("cargo:rerun-if-changed=../../runtime/runtime_native_gpu_stub.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -138,10 +134,6 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
-        // SimplePackedSpanV1 C resolve (F2). Self-contained: its bytes-basis
-        // accessors are weak, so in this list (which has no runtime_native.c)
-        // it links and fails CLOSED with NO_BASE instead of fabricating a base.
-        "runtime_packed_span.c",
         "runtime_simd_dispatch.c",
         // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
         // lane R2): both families were entirely absent from this list, so the
@@ -192,12 +184,6 @@ fn compile_c_runtime_sources() {
         "runtime_image.c",
         "startup/common/runtime_log_hosted.c",
         "runtime_socket_nonblock.c",
-        // Counterpart Conformance ABI shim. Its only external needs are
-        // rt_string_new / rt_interp_cstr, both already exported here, and
-        // dlopen needs no -ldl on glibc >= 2.34. This is the list that governs
-        // the DEPLOYED binary — the native-build lane's list in
-        // src/compiler/70.backend/backend/runtime_compiler.spl is separate.
-        "counterpart_abi_runtime.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -211,6 +197,22 @@ fn compile_c_runtime_sources() {
     build.define("SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
+    } else {
+        // MSVC's default C mode predates C11 <stdatomic.h> support (used by
+        // runtime_simd_dispatch.c). `-std=gnu11` above is a GCC/Clang-only
+        // flag `cl.exe` doesn't recognize, so `flag_if_supported` silently
+        // dropped it here, leaving MSVC on a C mode without atomics and
+        // failing with "C atomics require C11 or later" (cl.exe's own
+        // vcruntime_c11_stdatomic.h #error). `/std:c11` is cl.exe's
+        // equivalent, supported unconditionally on the VS 2022 17.x toolsets
+        // this repo targets (verified against MSVC 14.44.35207) — but on
+        // THIS toolset `/std:c11` alone still left <stdatomic.h> refusing
+        // with "C atomic support is not enabled" (a second, more specific
+        // #error a level deeper than the first): MSVC 14.44 still gates the
+        // real C11 atomics implementation behind the separate
+        // `/experimental:c11atomics` switch even when `/std:c11` is set.
+        build.flag_if_supported("/std:c11");
+        build.flag_if_supported("/experimental:c11atomics");
     }
     for source in &c_sources {
         let src_path = runtime_c_dir.join(source);
@@ -318,13 +320,8 @@ fn collect_c_runtime_exports(
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
-        // SimplePackedSpanV1 C resolve (F2). Self-contained: its bytes-basis
-        // accessors are weak, so in this list (which has no runtime_native.c)
-        // it links and fails CLOSED with NO_BASE instead of fabricating a base.
-        "runtime_packed_span.c",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
-        "runtime_native_gpu_stub.c",
     ];
     for source in LINKED_C_SOURCES {
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {

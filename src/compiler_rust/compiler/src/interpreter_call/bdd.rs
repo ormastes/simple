@@ -1602,9 +1602,15 @@ pub(super) fn eval_bdd_builtin(
             }
             Ok(Some(Value::Nil))
         }
-        // `fail` is the spec-author-facing alias (use std.spec.*); both report
-        // through the same failing-assertion path.
-        "fail" | "fail_assertion" => {
+        // `fail` and `fail_test` are spec-author-facing aliases (use
+        // std.spec.*); all three report through the same failing-assertion
+        // path. `fail_test` (src/lib/nogc_sync_mut/spec.spl) is a plain
+        // wrapper calling `fail_assertion` — it was missing from this
+        // interpreter-builtin whitelist even though it's `pub fn` and
+        // explicitly imported, so normal function resolution was reached
+        // and failed with "function `fail_test` not found" instead of
+        // ever running the wrapper body.
+        "fail" | "fail_assertion" | "fail_test" => {
             let msg = eval_arg(
                 args,
                 0,

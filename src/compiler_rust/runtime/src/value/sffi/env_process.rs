@@ -41,6 +41,44 @@ fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
 
+/// Resolve a POSIX absolute interpreter path (`/bin/sh`, `/bin/bash`,
+/// `/usr/bin/env`, ...) to something `std::process::Command` can actually
+/// spawn on Windows.
+///
+/// PROVED 2026-08-09: `process_run("/bin/sh", ["-c", "echo hi"])` returns
+/// exit code -1 (spawn failure) on Windows even when a real `sh.exe` is on
+/// PATH (git-bash / MSYS2) — `Command::new("/bin/sh")` on Windows treats the
+/// leading `/` as "root of the current drive" (`C:\bin\sh`), which does not
+/// exist, and Windows `CreateProcess` does NOT fall back to a PATH search
+/// once a path separator is present in the given string. `process_run("sh",
+/// ...)` (bare name, no separator) DOES fall back to PATH search and
+/// resolves correctly. Dozens of `test/**/*_spec.spl` files across this repo
+/// call `process_run("/bin/sh", ...)`, written against Linux/macOS where
+/// `/bin/sh` is a real path — this makes that portable instead of requiring
+/// every caller to special-case Windows.
+///
+/// Only rewrites well-known POSIX interpreter paths, and only on Windows,
+/// and only when the literal path does not already exist on disk (so an
+/// actual `/bin/sh` — e.g. under WSL invoked some other way, or a future
+/// Windows with a real POSIX subsystem path — is never second-guessed).
+/// Every other command string (including relative and Windows-native paths)
+/// passes through completely unchanged.
+fn resolve_command_path(cmd: &str) -> &str {
+    #[cfg(windows)]
+    {
+        if std::path::Path::new(cmd).exists() {
+            return cmd;
+        }
+        match cmd {
+            "/bin/sh" | "/usr/bin/sh" => return "sh",
+            "/bin/bash" | "/usr/bin/bash" => return "bash",
+            "/bin/env" | "/usr/bin/env" => return "env",
+            _ => {}
+        }
+    }
+    cmd
+}
+
 #[cfg(unix)]
 fn configure_timeout_child_process_group(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -572,7 +610,7 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
     };
 
     // Build command with arguments
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
 
@@ -631,7 +669,7 @@ pub unsafe extern "C" fn rt_process_run_inherit(cmd_ptr: *const u8, cmd_len: u64
         Ok(value) => value,
         Err(_) => return -1,
     };
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
     for i in 0..rt_array_len(args) {
         if let Some(arg) = extract_string(rt_array_get(args, i)) {
@@ -665,7 +703,7 @@ pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args
     };
 
     // Build command with arguments
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
 
@@ -716,7 +754,7 @@ pub unsafe extern "C" fn rt_process_spawn_async(cmd_ptr: *const u8, cmd_len: u64
         Err(_) => return -1,
     };
 
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
@@ -771,7 +809,7 @@ pub unsafe extern "C" fn rt_process_spawn_guarded(cmd_ptr: *const u8, cmd_len: u
         shell
     };
     #[cfg(not(target_os = "linux"))]
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
     let args_len = rt_array_len(args);
     for i in 0..args_len {
@@ -1028,7 +1066,7 @@ pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, ar
     };
 
     // Build command with arguments
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List[String]
@@ -1087,7 +1125,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
         }
     };
 
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
 
     let args_len = rt_array_len(args);
@@ -1182,7 +1220,7 @@ pub unsafe extern "C" fn rt_process_run_bounded(
         return make_tuple(b"", b"", -1);
     };
 
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
     configure_timeout_child_process_group(&mut command);
     for index in 0..rt_array_len(args) {
@@ -1260,7 +1298,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
         Err(_) => return make_error_tuple(),
     };
 
-    let mut command = Command::new(cmd_str);
+    let mut command = Command::new(resolve_command_path(cmd_str));
     clear_simple_child_stack_env(&mut command);
 
     // Extract args from List<String>
