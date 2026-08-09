@@ -1637,6 +1637,96 @@ RuntimeValue rt_array_index_of(RuntimeValue arr, RuntimeValue val) {
     for (uint32_t i = 0; i < a->len; i++) { if (rt_native_eq(a->items[i], val)) return ENCODE_INT(i); } return ENCODE_INT(-1);
 }
 
+RuntimeValue rt_index_of(RuntimeValue haystack, RuntimeValue needle) {
+    if (!IS_HEAP(haystack)) return ENCODE_INT(-1);
+    HeapHeader *header = (HeapHeader *)DECODE_PTR(haystack);
+    if (!header) return ENCODE_INT(-1);
+    if (header->type == HEAP_ARRAY) return rt_array_index_of(haystack, needle);
+    if (header->type == HEAP_STRING) return rt_string_index_of(haystack, needle);
+    return ENCODE_INT(-1);
+}
+
+RuntimeValue rt_simd_has_sse(void) { return 0; }
+RuntimeValue rt_simd_has_avx2(void) { return 0; }
+RuntimeValue rt_simd_has_neon(void) { return 1; }
+RuntimeValue rt_simd_has_rvv(void) { return 0; }
+
+static RuntimeArray *arm64_pixel_array(RuntimeValue value) {
+    if (!IS_HEAP(value)) return NULL;
+    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(value);
+    if (!array || array->hdr.type != HEAP_ARRAY) return NULL;
+    return array;
+}
+
+static RuntimeValue arm64_box_pixel(uint32_t pixel) {
+    return ENCODE_INT((int64_t)(uint64_t)pixel);
+}
+
+static uint32_t arm64_unbox_pixel(RuntimeValue value) {
+    return (uint32_t)(uint64_t)DECODE_INT(value);
+}
+
+RuntimeValue rt_engine2d_simd_fill_span_u32(RuntimeValue dst, int64_t offset,
+                                             int64_t count, int64_t color) {
+    RuntimeArray *array = arm64_pixel_array(dst);
+    if (!array || offset < 0 || count <= 0 || (uint64_t)offset >= array->len) return dst;
+    if ((uint64_t)count > array->len - (uint64_t)offset)
+        count = (int64_t)(array->len - (uint64_t)offset);
+    RuntimeValue word = arm64_box_pixel((uint32_t)(uint64_t)color);
+    for (int64_t i = 0; i < count; i++) array->items[offset + i] = word;
+    return dst;
+}
+
+RuntimeValue rt_engine2d_simd_copy_span_u32(RuntimeValue dst, int64_t dst_offset,
+                                             RuntimeValue src, int64_t src_offset,
+                                             int64_t count) {
+    RuntimeArray *d = arm64_pixel_array(dst);
+    RuntimeArray *s = arm64_pixel_array(src);
+    if (!d || !s || dst_offset < 0 || src_offset < 0 || count <= 0) return dst;
+    if ((uint64_t)dst_offset >= d->len || (uint64_t)src_offset >= s->len) return dst;
+    uint64_t available_d = d->len - (uint64_t)dst_offset;
+    uint64_t available_s = s->len - (uint64_t)src_offset;
+    uint64_t n = (uint64_t)count;
+    if (n > available_d) n = available_d;
+    if (n > available_s) n = available_s;
+    if (d == s && dst_offset > src_offset) {
+        for (uint64_t i = n; i > 0; i--)
+            d->items[(uint64_t)dst_offset + i - 1] = s->items[(uint64_t)src_offset + i - 1];
+    } else {
+        for (uint64_t i = 0; i < n; i++)
+            d->items[(uint64_t)dst_offset + i] = s->items[(uint64_t)src_offset + i];
+    }
+    return dst;
+}
+
+static uint32_t arm64_blend_pixel(uint32_t src, uint32_t dst) {
+    uint32_t sa = (src >> 24) & 0xffu;
+    if (sa == 255u) return src;
+    if (sa == 0u) return dst;
+    uint32_t da = (dst >> 24) & 0xffu;
+    uint32_t dst_weight = (da * (255u - sa)) / 255u;
+    uint32_t out_a = sa + dst_weight;
+    uint32_t r = ((((src >> 16) & 0xffu) * sa) + (((dst >> 16) & 0xffu) * dst_weight)) / out_a;
+    uint32_t g = ((((src >> 8) & 0xffu) * sa) + (((dst >> 8) & 0xffu) * dst_weight)) / out_a;
+    uint32_t b = (((src & 0xffu) * sa) + ((dst & 0xffu) * dst_weight)) / out_a;
+    return (out_a << 24) | (r << 16) | (g << 8) | b;
+}
+
+RuntimeValue rt_engine2d_simd_blend_row_u32(RuntimeValue dst, RuntimeValue src) {
+    RuntimeArray *d = arm64_pixel_array(dst);
+    RuntimeArray *s = arm64_pixel_array(src);
+    uint64_t n = (!d || !s) ? 0 : (d->len < s->len ? d->len : s->len);
+    RuntimeValue out = rt_array_new_with_cap(ENCODE_INT((int64_t)n));
+    RuntimeArray *o = arm64_pixel_array(out);
+    if (!o) return out;
+    for (uint64_t i = 0; i < n; i++) {
+        uint32_t pixel = arm64_blend_pixel(
+            arm64_unbox_pixel(s->items[i]), arm64_unbox_pixel(d->items[i]));
+        rt_array_push(out, arm64_box_pixel(pixel));
+    }
+    return out;
+}
+
 RuntimeValue rt_array_last_index_of(RuntimeValue arr, RuntimeValue val) {
     if (!IS_HEAP(arr)) return ENCODE_INT(-1); RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(-1);
