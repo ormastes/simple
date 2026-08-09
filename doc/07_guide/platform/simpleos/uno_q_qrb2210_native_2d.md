@@ -28,7 +28,10 @@ DrawIR work, font glyph work, exact raw-capture byte count/hash, and matching
 run/ADB/boot/frame identities. The boot ID is read independently before and
 after provider execution, the readback byte count must equal the acquired
 capture, and admission runs only through a canonical Stage4 provenance-verified
-pure-Simple CLI. A Debian/Android board run is readiness
+pure-Simple CLI. The exact invoked board-provider artifact is also acquired,
+hashed, retained, and matched to the receipt's `provider_sha256`; the receipt
+itself is retained with its hash. Pre/post provider hashes must also match, so
+an artifact replacement during the run fails. A Debian/Android board run is readiness
 only.
 
 Today the canonical `uno_q_desktop_contract` reports the QRB2210 SimpleOS
