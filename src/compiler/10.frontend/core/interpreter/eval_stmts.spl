@@ -190,6 +190,10 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         if eval_had_error: return -1
     if stmt_is_if_val_decl(sid):
         init_val = eval_option_binding_value(init_val)
+    # S1 copy-site 3 (struct local binding): `val b = a` on a value-type struct
+    # binds a SNAPSHOT, so later writes through `a` cannot be observed via `b`.
+    # Class initialisers fall through the gate unchanged (case A/C/D/E stay REF).
+    init_val = val_copy_if_value_struct(init_val)
     if name.starts_with("("):
         return eval_tuple_destructure(name, init_val)
     env_define(name, init_val)
@@ -223,6 +227,9 @@ fn eval_stmt_var_decl(sid: i64) -> i64:
     if init_eid >= 0:
         init_val = eval_expr(init_eid)
         if eval_had_error: return -1
+    # S1 copy-site 3 (struct local binding), `var` form — same gate and same
+    # reasoning as eval_stmt_val_decl above.
+    init_val = val_copy_if_value_struct(init_val)
     if name.starts_with("("):
         return eval_tuple_destructure(name, init_val)
     env_define(name, init_val)
@@ -266,19 +273,24 @@ fn eval_stmt_assign(sid: i64) -> i64:
         val base_val = eval_expr(base_eid)
         if eval_had_error: return -1
         if val_is_struct(base_val):
+            # S1 copy-site 4 (struct field store): storing a value-type struct
+            # into an already-constructed field stores a SNAPSHOT, so later
+            # writes through the source binding cannot reach the field. Class
+            # values fall through the gate unchanged and stay aliased.
+            val store_val = val_copy_if_value_struct(new_val)
             # Fast path: cached field index
             val cached_idx2 = expr_i_val[target_eid]
             if cached_idx2 >= 0:
                 val ok2 = val_struct_check_field_idx(base_val, cached_idx2, field_name)
                 if ok2:
-                    val_struct_set_field_idx(base_val, cached_idx2, new_val)
-                    return new_val
+                    val_struct_set_field_idx(base_val, cached_idx2, store_val)
+                    return store_val
             # Slow path: find + set + cache
             val fi2 = val_struct_find_field_idx(base_val, field_name)
             if fi2 >= 0:
-                val_struct_set_field_idx(base_val, fi2, new_val)
+                val_struct_set_field_idx(base_val, fi2, store_val)
                 expr_i_val[target_eid] = fi2
-                return new_val
+                return store_val
             eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
             return new_val
 

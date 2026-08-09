@@ -385,6 +385,14 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
         if had_explicit_return == false:
             last_val = val_make_array(yielded)
 
+    # S1 copy-site 5 (struct return). Covers BOTH return forms: the explicit
+    # `return e` handled above and a tail-expression body (`fn f() -> S: b.cell`),
+    # which never goes through eval_stmt_return at all. Returning a value-type
+    # struct hands the caller a SNAPSHOT, so writing through the caller's binding
+    # cannot reach the place the callee read it from. Class returns fall through
+    # the gate unchanged — that is what keeps case E (class returned) REF.
+    last_val = val_copy_if_value_struct(last_val)
+
     env_pop_scope()
     if local_count > 0:
         env_pop_frame()
@@ -424,6 +432,37 @@ fn val_struct_deep_copy(vid: i64) -> i64:
         else:
             new_values.push(fv)
     val_make_struct(name, fields, new_values)
+
+fn val_copy_if_value_struct(vid: i64) -> i64:
+    """The shared value-type copy gate for every identity-contract copy site
+    (F1 step S1). Returns a deep copy when `vid` is a confirmed user `struct`
+    (value type) and returns `vid` UNCHANGED for everything else — classes,
+    actors, builtin pseudo structs, and all non-struct value kinds. Because the
+    gate is `interp_struct_is_value_type`, which is false for every class-origin
+    decl, no reference value can ever be copied through here: class identity is
+    structurally out of reach of this function.
+
+    Copy sites using this gate (see the F1 plan):
+      1. parameter binding      — eval_function_call, above
+      2. struct-literal field init — eval_struct_constructor, below
+      3. local binding (val/var) — eval_stmts.spl eval_stmt_val_decl/var_decl
+      4. struct field store      — eval_assign_expr in eval_access.spl. That
+         file is the LIVE one, measured by sabotage: `obj.f = s` in a function
+         body parses as an assignment EXPRESSION, so it never reaches
+         eval_stmts.spl's STMT_ASSIGN handler, AND eval_ops.spl's
+         `export use ..._EvalOps.access_literal_assign_eval.*` does NOT win --
+         disabling the copy in _EvalOps left case H correct, disabling it in
+         eval_access.spl alone broke it. Three near-identical copies of this
+         branch exist (eval_access.spl, _EvalOps/access_literal_assign_eval.spl,
+         eval_stmts.spl eval_stmt_assign); all three are gated so they cannot
+         drift apart on the identity contract, but only eval_access.spl is
+         load-bearing today.
+      5. function return         — eval_function_call, above; covers both
+         `return e` and a tail-expression body."""
+    if vid < 0: return vid
+    if val_is_struct(vid) and interp_struct_is_value_type(vid):
+        return val_struct_deep_copy(vid)
+    vid
 
 fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)
@@ -468,7 +507,12 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names:
                     return -1
                 target = next_pos
                 next_pos = next_pos + 1
-            field_values[target] = av
+            # S1 copy-site 2 (struct-literal field init): a value-type struct
+            # written into a field at construction is a SNAPSHOT, so later
+            # writes through the argument's own binding cannot reach the field.
+            # Class-valued arguments fall through the gate unchanged and keep
+            # sharing identity with the constructor's caller.
+            field_values[target] = val_copy_if_value_struct(av)
         arg_index = arg_index + 1
 
     # Fill remaining fields: use base struct then defaults then nil
