@@ -3480,11 +3480,57 @@ RuntimeValue rt_arm64_virtio_input_poll(void)
 uint64_t rt_arm64_virtio_input_poll_packed(void)
 {
     if (rt_arm64_virtio_input_poll() == 0) return 0;
+    static int32_t pointer_x = 512, pointer_y = 384;
+    static int32_t pending_dx = 0, pending_dy = 0;
+    static uint32_t left = 0, previous_left = 0;
+    extern int32_t g_arm64_virtio_input_semantic_x;
+    extern int32_t g_arm64_virtio_input_semantic_y;
+    extern int32_t g_arm64_virtio_input_semantic_dx;
+    extern int32_t g_arm64_virtio_input_semantic_dy;
+    extern uint32_t g_arm64_virtio_input_semantic_left;
+    extern uint32_t g_arm64_virtio_input_semantic_left_pressed;
+    extern uint32_t g_arm64_virtio_input_semantic_left_released;
+    if (g_arm64_virtio_input_device_kind == 2u) {
+        if (g_arm64_virtio_input_type == 2u && g_arm64_virtio_input_code == 0u)
+            pending_dx += (int32_t)g_arm64_virtio_input_value;
+        else if (g_arm64_virtio_input_type == 2u && g_arm64_virtio_input_code == 1u)
+            pending_dy += (int32_t)g_arm64_virtio_input_value;
+        else if (g_arm64_virtio_input_type == 1u && g_arm64_virtio_input_code == 272u)
+            left = g_arm64_virtio_input_value != 0u;
+        else if (g_arm64_virtio_input_type == 0u && g_arm64_virtio_input_code == 0u) {
+            pointer_x += pending_dx; pointer_y += pending_dy;
+            if (pointer_x < 0) pointer_x = 0; else if (pointer_x > 1023) pointer_x = 1023;
+            if (pointer_y < 0) pointer_y = 0; else if (pointer_y > 767) pointer_y = 767;
+            g_arm64_virtio_input_semantic_x = pointer_x;
+            g_arm64_virtio_input_semantic_y = pointer_y;
+            g_arm64_virtio_input_semantic_dx = pending_dx;
+            g_arm64_virtio_input_semantic_dy = pending_dy;
+            g_arm64_virtio_input_semantic_left = left;
+            g_arm64_virtio_input_semantic_left_pressed = left && !previous_left;
+            g_arm64_virtio_input_semantic_left_released = !left && previous_left;
+            previous_left = left; pending_dx = 0; pending_dy = 0;
+        }
+    }
     return ((uint64_t)(g_arm64_virtio_input_device_kind & 0x3u) << 56) |
            ((uint64_t)(g_arm64_virtio_input_type & 0xffu) << 48) |
            ((uint64_t)g_arm64_virtio_input_code << 32) |
            (uint64_t)g_arm64_virtio_input_value;
 }
+
+int32_t g_arm64_virtio_input_semantic_x = 512;
+int32_t g_arm64_virtio_input_semantic_y = 384;
+int32_t g_arm64_virtio_input_semantic_dx = 0;
+int32_t g_arm64_virtio_input_semantic_dy = 0;
+uint32_t g_arm64_virtio_input_semantic_left = 0;
+uint32_t g_arm64_virtio_input_semantic_left_pressed = 0;
+uint32_t g_arm64_virtio_input_semantic_left_released = 0;
+RuntimeValue rt_arm64_virtio_input_semantic_x(void) { return ENCODE_INT(g_arm64_virtio_input_semantic_x); }
+RuntimeValue rt_arm64_virtio_input_semantic_y(void) { return ENCODE_INT(g_arm64_virtio_input_semantic_y); }
+RuntimeValue rt_arm64_virtio_input_semantic_dx(void) { return ENCODE_INT(g_arm64_virtio_input_semantic_dx); }
+RuntimeValue rt_arm64_virtio_input_semantic_dy(void) { return ENCODE_INT(g_arm64_virtio_input_semantic_dy); }
+RuntimeValue rt_arm64_virtio_input_semantic_left(void) { return g_arm64_virtio_input_semantic_left ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_arm64_virtio_input_semantic_left_pressed(void) { return g_arm64_virtio_input_semantic_left_pressed ? TRUE_VALUE : FALSE_VALUE; }
+RuntimeValue rt_arm64_virtio_input_semantic_left_released(void) { return g_arm64_virtio_input_semantic_left_released ? TRUE_VALUE : FALSE_VALUE; }
 
 int64_t rt_arm64_virtio_input_sign_extend_i32(uint64_t raw)
 {
