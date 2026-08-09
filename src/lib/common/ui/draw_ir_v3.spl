@@ -26,7 +26,14 @@
 # Contract changes = new schema version (structural_compute README rule 1).
 pub val DRAW_IR_V3_SCHEMA_VERSION: text = "simple-draw-ir-v3"
 # Numeric mirror of the version, for headers that may not carry text.
-pub val DRAW_IR_V3_SCHEMA_ID: u32 = 3u32
+# Bumped 3 -> 4: `DrawIrV3HitShapeTable` gained `z_indices`/`enableds`/
+# `pointer_policies` columns (event_route_stack_boundary_agreement_spec.spl
+# proved the packed hit-test stack could not express z-order, disabled, or
+# pointer-transparent nodes -- the flat stack always could). Additive only:
+# `DrawIrV3Command` (the frozen command record) is untouched; the new
+# columns live on the hit-shape SIDE TABLE, matching this file's own
+# struct-of-arrays convention for extensibility.
+pub val DRAW_IR_V3_SCHEMA_ID: u32 = 4u32
 
 # Absent / null side-table reference. Ids are 0-based flat indices, so the
 # sentinel is the maximum u32 rather than 0.
@@ -66,6 +73,17 @@ pub val DRAW_IR_V3_RESOURCE_VIDEO: u16 = 3u16
 pub val DRAW_IR_V3_HIT_RECT: u16 = 0u16
 pub val DRAW_IR_V3_HIT_ROUNDED_RECT: u16 = 1u16
 pub val DRAW_IR_V3_HIT_ELLIPSE: u16 = 2u16
+
+# --- hit shape pointer policy (u16) ---------------------------------------
+# Numeric mirror of `std.common.engine.interaction.hit_proxy`'s
+# `POINTER_POLICY_*` (i32 there; u16 here to match this table's other
+# columns). Only AUTO vs NONE is interpreted by the packed hit-test resolver
+# today -- every other flat-stack policy value hit-tests by bounds there too
+# (see hit_proxy.spl's own `hit_tests_by_bounds` note), so a producer that
+# only ever needs "hit-testable" vs "pointer-transparent" can map straight
+# onto these two without losing information the resolver would act on.
+pub val DRAW_IR_V3_POINTER_POLICY_AUTO: u16 = 0u16
+pub val DRAW_IR_V3_POINTER_POLICY_NONE: u16 = 1u16
 
 # --- provenance edge kinds (u16) -----------------------------------------
 # MappingGraph edge kinds bound by the webrender lane plan.
@@ -172,6 +190,16 @@ struct DrawIrV3HitShapeTable:
     shape_kinds: [u16]
     hit_flags: [u16]
     component_ids: [u32]
+    # Additive (schema v4). z_indices: paint-key ordering signal mirroring
+    # `HitProxy2D.z_index` -- the resolver picks the HIGHEST z_index among
+    # overlapping hits, tie-broken by command-array position (matches the
+    # flat stack's z_index-then-insertion_sequence order). enableds: a
+    # false row must never intercept a pointer event (mirrors
+    # `HitProxy2D.enabled`). pointer_policies: `DRAW_IR_V3_POINTER_POLICY_*`;
+    # NONE must never intercept, mirroring `POINTER_POLICY_NONE`.
+    z_indices: [i32]
+    enableds: [bool]
+    pointer_policies: [u16]
 
 # MappingGraph edges (`PaintOf`, `HitRegionOf`) as numeric columns.
 struct DrawIrV3SourceProvenanceTable:
@@ -268,6 +296,9 @@ struct DrawIrV3HitShape:
     shape_kind: u16
     hit_flags: u16
     component_id: u32
+    z_index: i32
+    enabled: bool
+    pointer_policy: u16
 
 struct DrawIrV3Provenance:
     present: bool
@@ -351,7 +382,8 @@ fn draw_ir_v3_empty_transform_table() -> DrawIrV3TransformTable:
 fn draw_ir_v3_empty_hit_shape_table() -> DrawIrV3HitShapeTable:
     DrawIrV3HitShapeTable(
         xs: [], ys: [], widths: [], heights: [],
-        shape_kinds: [], hit_flags: [], component_ids: []
+        shape_kinds: [], hit_flags: [], component_ids: [],
+        z_indices: [], enableds: [], pointer_policies: []
     )
 
 fn draw_ir_v3_empty_provenance_table() -> DrawIrV3SourceProvenanceTable:
@@ -771,9 +803,25 @@ fn draw_ir_v3_transform_at(table: DrawIrV3TransformTable, id: u32) -> DrawIrV3Tr
 fn draw_ir_v3_hit_shape_next_id(table: DrawIrV3HitShapeTable) -> u32:
     _draw_ir_v3_id_of(table.xs.len().to_i64())
 
+# Preserves the pre-v4 call signature. New rows default to z_index=0,
+# enabled=true, pointer_policy=AUTO -- i.e. behaviorally identical to the
+# pre-v4 schema (array-position-only ordering, always hit-testable), so
+# every existing caller keeps its current behavior unchanged. Callers that
+# need to express z-order, disabled, or pointer-transparent nodes use
+# `draw_ir_v3_hit_shape_append_ex`.
 fn draw_ir_v3_hit_shape_append(
     table: DrawIrV3HitShapeTable, x: i32, y: i32, width: i32, height: i32,
     shape_kind: u16, hit_flags: u16, component_id: u32
+) -> DrawIrV3HitShapeTable:
+    draw_ir_v3_hit_shape_append_ex(
+        table, x, y, width, height, shape_kind, hit_flags, component_id,
+        0, true, DRAW_IR_V3_POINTER_POLICY_AUTO
+    )
+
+fn draw_ir_v3_hit_shape_append_ex(
+    table: DrawIrV3HitShapeTable, x: i32, y: i32, width: i32, height: i32,
+    shape_kind: u16, hit_flags: u16, component_id: u32,
+    z_index: i32, enabled: bool, pointer_policy: u16
 ) -> DrawIrV3HitShapeTable:
     var xs = table.xs
     var ys = table.ys
@@ -782,6 +830,9 @@ fn draw_ir_v3_hit_shape_append(
     var kinds = table.shape_kinds
     var flags = table.hit_flags
     var components = table.component_ids
+    var z_indices = table.z_indices
+    var enableds = table.enableds
+    var pointer_policies = table.pointer_policies
     xs.push(x)
     ys.push(y)
     widths.push(width)
@@ -789,9 +840,13 @@ fn draw_ir_v3_hit_shape_append(
     kinds.push(shape_kind)
     flags.push(hit_flags)
     components.push(component_id)
+    z_indices.push(z_index)
+    enableds.push(enabled)
+    pointer_policies.push(pointer_policy)
     DrawIrV3HitShapeTable(
         xs: xs, ys: ys, widths: widths, heights: heights,
-        shape_kinds: kinds, hit_flags: flags, component_ids: components
+        shape_kinds: kinds, hit_flags: flags, component_ids: components,
+        z_indices: z_indices, enableds: enableds, pointer_policies: pointer_policies
     )
 
 fn draw_ir_v3_hit_shape_at(table: DrawIrV3HitShapeTable, id: u32) -> DrawIrV3HitShape:
@@ -799,7 +854,8 @@ fn draw_ir_v3_hit_shape_at(table: DrawIrV3HitShapeTable, id: u32) -> DrawIrV3Hit
     if idx < 0:
         return DrawIrV3HitShape(
             present: false, x: 0, y: 0, width: 0, height: 0,
-            shape_kind: DRAW_IR_V3_HIT_RECT, hit_flags: 0u16, component_id: 0u32
+            shape_kind: DRAW_IR_V3_HIT_RECT, hit_flags: 0u16, component_id: 0u32,
+            z_index: 0, enabled: true, pointer_policy: DRAW_IR_V3_POINTER_POLICY_AUTO
         )
     DrawIrV3HitShape(
         present: true,
@@ -809,7 +865,10 @@ fn draw_ir_v3_hit_shape_at(table: DrawIrV3HitShapeTable, id: u32) -> DrawIrV3Hit
         height: table.heights[idx],
         shape_kind: table.shape_kinds[idx],
         hit_flags: table.hit_flags[idx],
-        component_id: table.component_ids[idx]
+        component_id: table.component_ids[idx],
+        z_index: table.z_indices[idx],
+        enabled: table.enableds[idx],
+        pointer_policy: table.pointer_policies[idx]
     )
 
 fn draw_ir_v3_provenance_next_id(table: DrawIrV3SourceProvenanceTable) -> u32:
@@ -898,5 +957,6 @@ export DRAW_IR_V3_SCHEMA_VERSION, DRAW_IR_V3_SCHEMA_ID, DRAW_IR_V3_NO_ID,
     DRAW_IR_V3_RESOURCE_NONE, DRAW_IR_V3_RESOURCE_IMAGE,
     DRAW_IR_V3_RESOURCE_FONT, DRAW_IR_V3_RESOURCE_VIDEO,
     DRAW_IR_V3_HIT_RECT, DRAW_IR_V3_HIT_ROUNDED_RECT, DRAW_IR_V3_HIT_ELLIPSE,
+    DRAW_IR_V3_POINTER_POLICY_AUTO, DRAW_IR_V3_POINTER_POLICY_NONE,
     DRAW_IR_V3_PROVENANCE_NONE, DRAW_IR_V3_PROVENANCE_PAINT_OF,
     DRAW_IR_V3_PROVENANCE_HIT_REGION_OF

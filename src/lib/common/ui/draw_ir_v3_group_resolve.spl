@@ -50,6 +50,7 @@ use common.ui.draw_ir_v3.{
     DRAW_IR_V3_KIND_GROUP,
     DRAW_IR_V3_KIND_PORT,
     DRAW_IR_V3_NO_ID,
+    DRAW_IR_V3_POINTER_POLICY_NONE,
     DrawIrV3Command,
     DrawIrV3Scene,
     draw_ir_v3_clip_at,
@@ -443,23 +444,40 @@ fn draw_ir_v3_group_resolve(scene: DrawIrV3Scene, ports: DrawIrV3PortSurfaceStat
 
 # Hit test over resolved state: a point hits a shape iff it is inside every
 # effective clip on the chain and inside the shape under the inverse world
-# transform (design §4.1, "one transform truth for paint and hit"). Walks
-# top-most (last-drawn) command first. An invisible command is excluded --
-# both from batching (the resolver already dropped nothing, but callers
-# should skip `not effective_visible` states when batching) and from hit
-# testing, which this function enforces directly.
+# transform (design §4.1, "one transform truth for paint and hit"). An
+# invisible command is excluded -- both from batching (the resolver already
+# dropped nothing, but callers should skip `not effective_visible` states
+# when batching) and from hit testing, which this function enforces
+# directly. Same for a DISABLED hit shape (`shape.enabled == false`) and a
+# POINTER-TRANSPARENT one (`shape.pointer_policy == DRAW_IR_V3_POINTER_POLICY_NONE`):
+# neither may ever intercept a pointer event, mirroring
+# `HitProxy2D.enabled`/`POINTER_POLICY_NONE` on the flat hit-test stack
+# (`std.common.engine.interaction.hit_test.hit_stack`).
+#
+# Ordering: among all geometrically-hit, eligible shapes, the WINNER is the
+# one with the highest `z_index`; ties break toward the higher command-array
+# index (i.e. the later-emitted/topmost command of the tied group). This is
+# the packed-schema analog of the flat stack's full paint key
+# (`hit_proxy.paint_key_less`: ..., z_index, ..., insertion_sequence) --
+# the packed schema has no stacking_context_order/render_layer/tree_order
+# columns, so z_index-then-array-position is the packed equivalent; a
+# producer that always emits in paint order (the common case) gets the same
+# answer either way since z_index is 0 for all such rows.
 fn draw_ir_v3_group_resolve_hit_test(
     scene: DrawIrV3Scene, result: DrawIrV3GroupResolveResult, px: i32, py: i32
 ) -> DrawIrV3GroupHitResult:
     val commands = scene.commands
     val n = commands.len().to_i64()
+    var best_index: i64 = -1
+    var best_component_id: u32 = DRAW_IR_V3_NO_ID
+    var best_z_index: i32 = 0
     var i = n - 1
     while i >= 0:
         val cmd = commands[i]
         val st = result.states[i]
         if cmd.hit_shape_id != DRAW_IR_V3_NO_ID and st.effective_visible:
             val shape = draw_ir_v3_hit_shape_at(scene.hit_shapes, cmd.hit_shape_id)
-            if shape.present:
+            if shape.present and shape.enabled and shape.pointer_policy != DRAW_IR_V3_POINTER_POLICY_NONE:
                 var clip_ok = true
                 if st.clip_present:
                     clip_ok = (
@@ -481,9 +499,14 @@ fn draw_ir_v3_group_resolve_hit_test(
                             local_x >= shape.x.to_i64() and local_x < (shape.x.to_i64() + shape.width.to_i64())
                             and local_y >= shape.y.to_i64() and local_y < (shape.y.to_i64() + shape.height.to_i64())
                         ):
-                            return DrawIrV3GroupHitResult(hit: true, command_index: i, component_id: cmd.component_id)
+                            if best_index < 0 or shape.z_index > best_z_index:
+                                best_index = i
+                                best_component_id = cmd.component_id
+                                best_z_index = shape.z_index
         i = i - 1
-    DrawIrV3GroupHitResult(hit: false, command_index: -1, component_id: DRAW_IR_V3_NO_ID)
+    if best_index < 0:
+        return DrawIrV3GroupHitResult(hit: false, command_index: -1, component_id: DRAW_IR_V3_NO_ID)
+    DrawIrV3GroupHitResult(hit: true, command_index: best_index, component_id: best_component_id)
 
 # Executor-side capability gate for a NEEDS_OFFSCREEN batch (design §4.1
 # "refuse-don't-degrade"): an executor without offscreen support MUST refuse

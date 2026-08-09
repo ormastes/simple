@@ -15,8 +15,14 @@
 #
 # This spec feeds the SAME rectangles and the SAME integer pointer
 # coordinates to both stacks and compares the resolved owner id. It also
-# pins the three input shapes where they PROVABLY disagree (measured, not
-# assumed) so the divergence is a tracked contract, not a latent surprise.
+# pins the three input shapes that used to PROVABLY disagree (measured, not
+# assumed): z_index-contradicts-emission-order, a disabled topmost node, and
+# a pointer-policy-none topmost node. `DrawIrV3HitShapeTable` gained
+# `z_indices`/`enableds`/`pointer_policies` columns (schema v4) and
+# `draw_ir_v3_group_resolve_hit_test` now consults them, so all three cases
+# are asserted CLOSED below via the same shared-fixture `_expect_agree`
+# helper the well-formed-bounds cases use -- not merely "both stacks broke
+# the same way".
 #
 # @cover src/lib/common/engine/interaction/hit_test.spl 60%
 # @tag: unit, ui, events, hit_test, unified_packed_ui_scene, render_perf, u0
@@ -26,17 +32,20 @@ use common.ui.draw_ir_v3.{
     DRAW_IR_V3_NO_ID,
     DRAW_IR_V3_HIT_RECT,
     DRAW_IR_V3_KIND_RECT,
+    DRAW_IR_V3_POINTER_POLICY_NONE as DRAW_IR_V3_HIT_POINTER_POLICY_NONE,
+    DRAW_IR_V3_POINTER_POLICY_AUTO as DRAW_IR_V3_HIT_POINTER_POLICY_AUTO,
     DrawIrV3Scene,
     draw_ir_v3_empty_scene,
     draw_ir_v3_empty_command,
     draw_ir_v3_scene_push_command,
-    draw_ir_v3_hit_shape_append
+    draw_ir_v3_hit_shape_append,
+    draw_ir_v3_hit_shape_append_ex
 }
 use common.ui.draw_ir_v3_group_resolve.{draw_ir_v3_group_resolve, draw_ir_v3_port_surface_state_empty}
 use common.ui.ui_scene_counts.{UI_PRODUCER_GUI}
 use common.ui.ui_scene_owner_table.{UiOwnerRecord, UI_SCENE_EVENT_POLICY_HIT_OPAQUE}
 use common.ui.ui_scene_event_route.{UI_SCENE_ROUTE_REFUSE_NO_HIT, ui_scene_route_event}
-use std.common.engine.interaction.hit_proxy.{HitProxy2D, POINTER_POLICY_NONE}
+use std.common.engine.interaction.hit_proxy.{HitProxy2D, POINTER_POLICY_AUTO, POINTER_POLICY_NONE}
 use std.common.engine.interaction.hit_test.{
     HIT_TEST_ROUTE_OK,
     HIT_TEST_ROUTE_REFUSE_NO_HIT,
@@ -52,12 +61,27 @@ use std.common.engine.interaction.hit_test.{
 # packed stack it is the command-array position. That single shared source is
 # what makes an agreement assertion meaningful -- if each stack were given its
 # own hand-tuned fixture, agreement would prove nothing.
+#
+# `z_index`/`enabled`/`pointer_policy` close the divergence documented below:
+# both the flat proxy (`HitProxy2D`) and the packed hit shape
+# (`DrawIrV3HitShapeTable`, schema v4) now carry these columns, so a single
+# shared rect can drive both stacks to the SAME answer for all three
+# previously-divergent properties, not just well-formed bounds.
 struct _AgreeRect:
     node_id: i64
     left: i32
     top: i32
     right: i32
     bottom: i32
+    z_index: i32
+    enabled: bool
+    pointer_policy: i32
+
+fn _rect(node_id: i64, left: i32, top: i32, right: i32, bottom: i32) -> _AgreeRect:
+    _AgreeRect(
+        node_id: node_id, left: left, top: top, right: right, bottom: bottom,
+        z_index: 0, enabled: true, pointer_policy: POINTER_POLICY_AUTO
+    )
 
 fn _agree_owner(semantic_id: u32, generation: u32) -> UiOwnerRecord:
     UiOwnerRecord(
@@ -73,6 +97,9 @@ fn _agree_proxies(rects: [_AgreeRect]) -> [HitProxy2D]:
         val r = rects[i]
         var p = HitProxy2D.create(r.node_id, r.left, r.top, r.right, r.bottom)
         p.insertion_sequence = i.to_i32()
+        p.z_index = r.z_index
+        p.enabled = r.enabled
+        p.pointer_policy = r.pointer_policy
         out.push(p)
         i = i + 1
     out
@@ -82,9 +109,14 @@ fn _agree_scene(rects: [_AgreeRect]) -> DrawIrV3Scene:
     var i = 0
     while i < rects.len():
         val r = rects[i]
-        scene.hit_shapes = draw_ir_v3_hit_shape_append(
+        val policy = if r.pointer_policy == POINTER_POLICY_NONE:
+            DRAW_IR_V3_HIT_POINTER_POLICY_NONE
+        else:
+            DRAW_IR_V3_HIT_POINTER_POLICY_AUTO
+        scene.hit_shapes = draw_ir_v3_hit_shape_append_ex(
             scene.hit_shapes, r.left, r.top, r.right - r.left, r.bottom - r.top,
-            DRAW_IR_V3_HIT_RECT, 0u16, r.node_id.to_u32()
+            DRAW_IR_V3_HIT_RECT, 0u16, r.node_id.to_u32(),
+            r.z_index, r.enabled, policy
         )
         i = i + 1
     var j = 0
@@ -134,8 +166,8 @@ fn _expect_agree(rects: [_AgreeRect], x: i32, y: i32, expected: i64):
 # Chrome  : [10,60) x [10,60)   Content : [30,50) x [30,50)
 fn _chrome_and_content() -> [_AgreeRect]:
     [
-        _AgreeRect(node_id: 1, left: 10, top: 10, right: 60, bottom: 60),
-        _AgreeRect(node_id: 2, left: 30, top: 30, right: 50, bottom: 50)
+        _rect(1, 10, 10, 60, 60),
+        _rect(2, 30, 30, 50, 50)
     ]
 
 describe "flat and packed hit-test stacks agree on shared boundaries":
@@ -194,97 +226,63 @@ describe "flat and packed hit-test stacks agree on shared boundaries":
         # Catches a forward (composition-order) walk on the packed side or an
         # ascending paint-key sort on the flat side: either would answer 1.
         val siblings = [
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 2, left: 10, top: 10, right: 30, bottom: 30)
+            _rect(1, 0, 0, 20, 20),
+            _rect(2, 10, 10, 30, 30)
         ]
         _expect_agree(siblings, 15, 15, 2)
 
     it "resolves the non-overlapping part of the lower sibling to the lower sibling":
         step("click the part of the first sibling the second does not cover")
         val siblings = [
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 2, left: 10, top: 10, right: 30, bottom: 30)
+            _rect(1, 0, 0, 20, 20),
+            _rect(2, 10, 10, 30, 30)
         ]
         _expect_agree(siblings, 5, 5, 1)
 
-describe "flat and packed stacks diverge on three inputs the packed schema cannot express":
-    """Measured, not assumed. `DrawIrV3Command` (frozen schema,
-    src/lib/common/ui/draw_ir_v3.spl:79-94) carries no z-index, no enabled
-    flag and no pointer-policy field, so the packed stack's only ordering
-    signal is command-array position and its only suppression signal is
-    `hit_shape_id == NO_ID` / `effective_visible`. The flat stack has all
-    three. Each scenario below pins the ACTUAL divergent pair, and then
-    shows the producer-side lowering that restores agreement -- these are
-    the invariants a packed producer must honour, executable rather than
-    prose."""
+describe "flat and packed stacks agree on the three inputs the packed schema used to be unable to express":
+    """FORMERLY divergent, now CLOSED (schema v4, draw_ir_v3.spl). Before
+    this change `DrawIrV3Command` (frozen schema, draw_ir_v3.spl:79-94)
+    carried no z-index, no enabled flag and no pointer-policy field, so the
+    packed stack's only ordering signal was command-array position and its
+    only suppression signal was `hit_shape_id == NO_ID` / `effective_visible`
+    -- the flat stack had all three and the two stacks provably disagreed
+    (measured below in the sabotage regression comment). The fix added
+    `z_indices`/`enableds`/`pointer_policies` columns to
+    `DrawIrV3HitShapeTable` (the hit-shape SIDE TABLE, not the frozen
+    command record) and wired `draw_ir_v3_group_resolve_hit_test` to
+    consult them. Each scenario below drives BOTH stacks from the SAME
+    `_AgreeRect` fixture via `_expect_agree` -- the same one-source
+    discipline the well-formed-bounds describe block above uses -- so
+    agreement here is not two independently-tuned fixtures agreeing by
+    coincidence."""
 
-    it "diverges when a proxy's z_index contradicts its emission order":
+    it "agrees when a node's z_index contradicts its emission order":
         step("give the FIRST-emitted of two coincident nodes the higher z_index")
-        val rects = [
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 2, left: 0, top: 0, right: 20, bottom: 20)
-        ]
-        var parents: Dict<i64, i64> = {}
-        var p1 = HitProxy2D.create(1, 0, 0, 20, 20)
-        p1.insertion_sequence = 0
-        p1.z_index = 5
-        var p2 = HitProxy2D.create(2, 0, 0, 20, 20)
-        p2.insertion_sequence = 1
-        p2.z_index = 0
-        val flat = hit_stack([p1, p2], parents, 10, 10)
-        val packed = _packed_owner_at(rects, 10, 10)
-        # Flat honours z_index (node 1 wins); packed can only honour array
-        # order (node 2 wins). Catches any future claim that the two stacks
-        # are interchangeable without a producer-side paint-order sort.
-        expect(flat.primary).to_equal(1)
-        expect(packed).to_equal(2)
-        step("emit in paint order instead -- agreement is restored")
-        val sorted_rects = [
-            _AgreeRect(node_id: 2, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20)
-        ]
-        expect(_packed_owner_at(sorted_rects, 10, 10)).to_equal(1)
+        # Before the fix: flat honoured z_index (node 1 wins) while packed
+        # could only honour array order (node 2 wins) -- see
+        # `event_route_stack_boundary_agreement_divergence_regression_2026-08-09.md`
+        # for the measured pre-fix numbers this replaced.
+        var r1 = _rect(1, 0, 0, 20, 20)
+        r1.z_index = 5
+        val rects = [r1, _rect(2, 0, 0, 20, 20)]
+        _expect_agree(rects, 10, 10, 1)
 
-    it "diverges when the topmost node is disabled":
+    it "agrees when the topmost node is disabled":
         step("disable the topmost of two coincident nodes")
-        var parents: Dict<i64, i64> = {}
-        var p1 = HitProxy2D.create(1, 0, 0, 20, 20)
-        p1.insertion_sequence = 0
-        var p2 = HitProxy2D.create(2, 0, 0, 20, 20)
-        p2.insertion_sequence = 1
-        p2.enabled = false
-        val flat = hit_stack([p1, p2], parents, 10, 10)
-        val rects = [
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 2, left: 0, top: 0, right: 20, bottom: 20)
-        ]
-        # Flat passes the click through a disabled node; the packed scene has
-        # no `enabled` column, so a producer that still emits a hit shape for
-        # a disabled node makes it EAT the click. Catches exactly the WM bug
-        # where a greyed-out overlay swallows input.
-        expect(flat.primary).to_equal(1)
-        expect(_packed_owner_at(rects, 10, 10)).to_equal(2)
-        step("producer contract: a disabled node must be emitted with NO hit shape")
-        val one_only = [_AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20)]
-        expect(_packed_owner_at(one_only, 10, 10)).to_equal(1)
+        var r2 = _rect(2, 0, 0, 20, 20)
+        r2.enabled = false
+        val rects = [_rect(1, 0, 0, 20, 20), r2]
+        # A disabled node must pass the click through to whatever is
+        # beneath it on BOTH stacks -- exactly the WM bug where a
+        # greyed-out overlay swallowed input on the packed path alone.
+        _expect_agree(rects, 10, 10, 1)
 
-    it "diverges when the topmost node has pointer-policy none":
+    it "agrees when the topmost node has pointer-policy none":
         step("mark the topmost of two coincident nodes as pointer-transparent")
-        var parents: Dict<i64, i64> = {}
-        var p1 = HitProxy2D.create(1, 0, 0, 20, 20)
-        p1.insertion_sequence = 0
-        var p2 = HitProxy2D.create(2, 0, 0, 20, 20)
-        p2.insertion_sequence = 1
-        p2.pointer_policy = POINTER_POLICY_NONE
-        val flat = hit_stack([p1, p2], parents, 10, 10)
-        val rects = [
-            _AgreeRect(node_id: 1, left: 0, top: 0, right: 20, bottom: 20),
-            _AgreeRect(node_id: 2, left: 0, top: 0, right: 20, bottom: 20)
-        ]
-        # Same shape of defect as the disabled case, via the other
-        # suppression channel the packed schema lacks.
-        expect(flat.primary).to_equal(1)
-        expect(_packed_owner_at(rects, 10, 10)).to_equal(2)
+        var r2 = _rect(2, 0, 0, 20, 20)
+        r2.pointer_policy = POINTER_POLICY_NONE
+        val rects = [_rect(1, 0, 0, 20, 20), r2]
+        _expect_agree(rects, 10, 10, 1)
 
 describe "flat stack refuses stale generations the way the packed stack does":
     """Parity for src/lib/common/ui/ui_scene_event_route.spl:117-118
