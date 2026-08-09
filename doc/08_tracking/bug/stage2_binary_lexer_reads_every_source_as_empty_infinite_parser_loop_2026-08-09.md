@@ -1,8 +1,18 @@
 # Stage-2 binary lexes EVERY source file as empty → unbounded parser-error loop
 
 Date: 2026-08-09
-Status: **FIXED in source (interpreter-verified) — awaiting a full bootstrap to
-confirm on a freshly-built Stage-2 binary**
+Status: **REOPENED — NOT FIXED.** The 2026-08-09 fix (bfd9284618a) was verified
+only through the interpreter path. A full bootstrap at that exact commit
+(2026-08-09, 12:34-12:58) rebuilt Stage 2 and the dead lexer **recurred
+immediately**: Stage 3 died on its own entry file with
+`[lexer_fatal] ... next_token() produced kind 0`. The fix's central premise —
+that `next_token()`'s **by-value return** is reliable where the field read-back
+was not — is **empirically false**: the returned value is 0 too. See
+"2026-08-09 run 4" below. Two of the three landed changes DID work and should be
+kept (the fail-closed guard and the forward-progress invariant turned a
+444 MB/32 GB runaway into a 195-byte diagnostic). A third defect was found: the
+strengthened admission gate is **still fail-open**, for a newly-identified
+reason (`--entry`).
 Area: bootstrap / stage-2 native-build / 10.frontend lexer / parser error recovery
 
 ## Summary
@@ -233,6 +243,166 @@ Fixes in `candidate_frontend_admission.shs` + `bootstrap-from-scratch.sh`:
   purely on the runaway-output and dead-lexer signatures.
 - No regressions: `lexer_position_unification_spec.spl` 4/4,
   `lexer_comprehensive_spec.spl` 2/2.
+
+## 2026-08-09 run 4 — full bootstrap AT the fix commit: the bug RECURS
+
+The outstanding step listed below ("no full bootstrap was run after the fix")
+was executed. Result: **the fix does not work.**
+
+Setup: `origin/main` == `bfd9284618a6647e1ff34a107e8b819c76561f94` (the fix
+commit itself — verified as an ancestor, and in fact the tip). Fresh 112,239-file
+checkout via `git archive | tar -x` + alternates at
+`/home/ormastes/dev/pub/simple_bootstrap_wt_20260809`. Host at launch: 1.3 T free,
+load 13.95, 94 G RAM available. Command exactly as specified in §Reproduction,
+output to `/home/ormastes/dev/pub/bootstrap_out_20260809`.
+
+### What succeeded
+
+- Rust seed, native-all, runtime-nolto, compiler-backfill: all built clean.
+- **Stage 2 built clean: `Build complete: 808 compiled, 0 cached, 0 failed`**,
+  linked 126,202 KB in 205.0 s. (Compare the broken run: 806/0/126,193 KB. The
+  numbers are nearly identical — a green Stage 2 has now been shown **twice** to
+  carry no information about whether the frontend works.)
+- The sanity gate **passed** and admitted the binary to Stage 3.
+
+### What failed — the dead lexer, verbatim
+
+`logs/x86_64-unknown-linux-gnu/stage3-native-build.log`, in full (195 bytes):
+
+```
+[lexer_fatal] dead lexer: next_token() produced kind 0 (never a valid token kind)
+for path 'src/app/cli/bootstrap_main.spl' at line 1 col 1; source length 21918.
+Terminating token stream at EOF.
+```
+
+This is the fix's **own** fail-closed diagnostic firing. It proves the negative
+directly: `_scan_kind = loaded.next_token()` returned **0**. The correction the
+commit made — stop reading `loaded.cur_kind` back, use the return value — does
+not help, because the return value is equally dead.
+
+Independent reproduction of §Evidence 2 against the freshly-built binary
+(sha256 `60cf9723…`, 129,231,128 bytes, `--version` → `simple-bootstrap
+1.0.0-beta` rc=0), on the same hand-written two-line file:
+
+```
+$ printf 'fn main():\n    print("hi")\n' > probe_tiny.spl
+$ .../stage2/x86_64-unknown-linux-gnu/simple native-build \
+    --target x86_64-unknown-linux-gnu --backend llvm -o ./tiny probe_tiny.spl
+[lexer_fatal] dead lexer: ... for path 'probe_tiny.spl' at line 1 col 1;
+source length 27. Terminating token stream at EOF.
+Segmentation fault (rc=139)
+```
+
+`source length 27` and `source length 21918` both **match the real file sizes**,
+so file reading is fine — as the previous analysis correctly concluded. Only the
+lexer's own state is lost.
+
+### Revised root-cause hypothesis (NOT yet proven — do not treat as settled)
+
+`line 1 col 1`, `cur_kind 0`, `cur_text ""` and `pos 0` are **exactly and
+entirely** the `make_core_lexer` constructor defaults (`lexer_struct.spl:167-180`:
+`pos: 0, line: 1, col: 1, cur_kind: 0, cur_text: ""`). That the *return value* of
+`next_token()` is also 0 points away from "the mutation is not visible to the
+caller" and toward a stronger claim:
+
+> **`var loaded = current_core_lexer_slot[0]` — reading a value-type struct out
+> of a module-level array slot under Stage-2 native codegen — yields a
+> DEFAULT/zeroed `CoreLexer`, not the stored one.**
+
+`next_token()` would then be scanning a lexer with `source == ""` and correctly
+returning "nothing here" for a file whose bytes are present elsewhere. This
+reframes the defect as a **native-codegen struct-in-module-array read bug**, not
+a lexer bug — which is consistent with the known family
+(`reference_native_list_rebind_and_spill_miscompiles`,
+`reference_native_dict_get_struct_corrupt_len_minus_one`). Deliberately not
+fixed here: confirming it needs a minimal codegen repro (store a struct in a
+module-level `[T]`, mutate via a `me` method, read it back in another function),
+and guessing at a compiler-codegen fix is exactly the wrong move.
+
+### Sibling audit (the item listed as "not done" below) — DONE, and it found more
+
+Swept `src/compiler/**` + `src/lib/**`: 4278 `struct` vs 3179 `class` decls,
+~71 k candidate call sites, 68 read-back sites (49 unique) within 5 lines of a
+mutating method call. **All 49 resolve to `class` receivers** (reference
+semantics — not the defect). The **only** struct-receiver instances are in
+`lex_next()` itself, i.e. the very function that was patched, on the fields the
+patch did *not* touch:
+
+- `lexer.spl:608` `loaded.cur_start`, `609/613` `loaded.pos`,
+  `610` `loaded.cur_no_interp`, `615/619` `loaded.cur_text`.
+
+Corroboration that these reads are already known-unreliable: the same function
+deliberately avoids `loaded.cur_line`/`cur_col`/suffix, using the module-global
+mirrors `core_lexer_last_line_get()` / `_col_get()` / `_suffix_get()` instead
+(lines 616-621). `core_lexer_last_text_get()` exists and is exported
+(`lexer_struct.spl:113, 1689`) yet line 615/619 still read `loaded.cur_text` —
+an inconsistency, not a design choice. `cur_start`/`pos`/`cur_no_interp` have no
+mirror at all. Under the revised hypothesis these are all moot until the struct
+read itself is fixed, but they must not be left as-is.
+
+### THIRD defect: the strengthened gate is STILL fail-open — root cause found
+
+The gate passed a binary that cannot compile a two-line file. Evidence file
+`stage3/x86_64-unknown-linux-gnu/stage2-sanity.env`:
+
+```
+status=pass
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0        # the NEW both-modes check
+frontend_smoke_output_sha256=e3b0c442…852b855  # sha256 of the EMPTY string
+```
+
+Both `SIMPLE_BOOTSTRAP` modes ran and both produced **zero bytes** of output —
+so the `[lexer_fatal]` / `Unknown(0) ''` rejection at
+`candidate_frontend_admission.shs:77-79` had nothing to match, and the 4 MiB cap
+was never approached. The checks are correctly written; they are never reached.
+
+Cause: `candidate_frontend_admission.shs:61` invokes the candidate as
+`native-build --entry <fixture>`. **`--entry` delegates to the Rust runtime**
+(known trap: `reference_entry_flag_delegates_to_rust_runtime`,
+`reference_entry_flag_stage3_selfhost_regression`), so the candidate's **own
+pure-Simple frontend is never exercised**. Stage 3, by contrast, passes the
+source positionally.
+
+Proved on the same binary, same fixture, A/B:
+
+```
+A (gate's form):  simple native-build ... --entry p2_add.spl
+   -> rc=0, "Build complete: 1 compiled, 0 cached, 0 failed", ./a_entry prints 5
+B (Stage 3 form): simple native-build ... p2_add.spl
+   -> rc=124 (TIMEOUT at 90 s), 0 bytes of output
+```
+
+A green gate and a hung compiler, from one binary, separated only by `--entry`.
+**Fix: the smoke must invoke the candidate the way Stage 3 does — positionally,
+without `--entry` — and must enforce a wall-clock timeout** (case B produced *no*
+output at all, so an output-pattern check cannot catch it; only a timeout can).
+This is the same fail-open class as the original gate defect and is arguably the
+most important finding of the run: without it, every future dead-frontend
+regression is admitted to Stage 3 again.
+
+### Runaway safety — the landed mitigations WORKED, and were still not enough
+
+The forward-progress invariant + fail-closed guard did what they were built to
+do: `stage3-native-build.log` was **195 bytes / 1 line**, versus
+**444,103,752 bytes / 6,299,344 lines** before. No disk risk. Keep both changes.
+
+**However, memory still ran away with the log bounded.** The Stage-3 process
+(`stage2-admitted/simple native-build … bootstrap_main.spl`) climbed
+27.8 GB → 33.8 GB → 40.8 GB → **44.3 GB RSS in under 4 minutes** while emitting
+nothing further. It was killed deliberately at 12:57-12:58 (host recovered to
+96 G available, 1.3 T free). So a log-size gate is **not** a sufficient runaway
+detector for this failure — RSS must be watched too. Watchdog used:
+`/home/ormastes/dev/pub/bootstrap_out_20260809/wd2.sh` (30 s sampling; kills on
+>200 KB/s log growth, >2 GB logs, >48 GB single-process RSS, <8 G RAM, <50 G disk).
+
+### Consequence for the nil-receiver SIGILL bug — still blocked, unchanged
+
+Blocker 12 is **not** cleared. Stage 3 again never got past lexing its entry
+file. Over the whole run: `[mir-stmt-caller]` = 0, `garbage-expr` = 0,
+`field access on nil receiver` = 0, `SIGILL`/exit 132 = 0 — both probes were
+enabled and both produced nothing, because the fault site never executed. The
+2026-08-05 bug remains **UNVERIFIED**, neither confirmed nor refuted.
 
 ## Not yet done
 

@@ -30,6 +30,38 @@ executed** and the Rank-1..5 shortlist is neither confirmed nor refuted. See the
 2026-08-09 section below.
 Area: bootstrap / stage-3 self-host / 50.mir lowering
 
+## 2026-08-09 (run 4, FOURTH campaign) — STILL UNVERIFIED; blocker 12 NOT cleared
+
+A full instrumented bootstrap was run at `bfd9284618a` — the commit that claimed
+to fix blocker 12 (the dead Stage-2 lexer) — specifically to clear it and finally
+reach this fault site. **It did not.** Stage 2 rebuilt clean (**808 compiled, 0
+cached, 0 failed**, 126,202 KB) and was admitted by the sanity gate, but Stage 3
+died on its own entry file with the *same* dead-lexer signature. Blocker 12 is
+**REOPENED, not fixed**:
+
+```
+[lexer_fatal] dead lexer: next_token() produced kind 0 (never a valid token kind)
+for path 'src/app/cli/bootstrap_main.spl' at line 1 col 1; source length 21918.
+```
+
+Both probes were enabled (`SIMPLE_MIR_STMT_CALLER_DEBUG=1`,
+`SIMPLE_MIR_GARBAGE_EXPR_DEBUG=1`) and across the entire run produced
+**`[mir-stmt-caller]` = 0, `garbage-expr` = 0, `field access on nil receiver` =
+0, `SIGILL`/exit 132 = 0** — because Stage 3 never reached HIR or MIR lowering.
+
+This run therefore adds **no** evidence for or against this bug. The earlier
+"weak evidence it may already be gone" is neither strengthened nor weakened, the
+fault site has **still never executed**, and Rank 1-5 remain unconfirmed and
+unrefuted. Note this is now the fourth campaign to be stopped short of the fault
+site by a *different* blocker.
+
+Detail, including the revised root-cause hypothesis (a native-codegen
+struct-in-module-array read, not a lexer defect) and a newly-found third defect
+(the Stage-2 admission gate is **still fail-open**, because it invokes the
+candidate with `--entry`, which delegates to the Rust runtime and never exercises
+the candidate's own frontend):
+`doc/08_tracking/bug/stage2_binary_lexer_reads_every_source_as_empty_infinite_parser_loop_2026-08-09.md`
+
 ## 2026-08-09 — closest approach yet; Stage 2 clean, Stage 3 reached, verdict still open
 
 Assigned action: one clean, instrumented full bootstrap
