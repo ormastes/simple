@@ -7,6 +7,21 @@
   MEASURED fix recipe (see "Defect B fix recipe" below) that reached
   0 `unresolved method call` on the native-min repro but was lost to a
   concurrent-session working-copy clobber before it could be landed.
+  2026-08-09: a registration-key fix for Defect B's two gaps (legacy-map
+  registration + resolver fall-through) is applied in `.spl` source (see
+  "Edit 1 + registration-gap fix LANDED, 2026-08-09" below) but is
+  **UNVERIFIED BY EXECUTION** — the same vacuity blocker documented under
+  "Verification loop is VACUOUS" recurs: the deployed `bin/simple` is the
+  Rust seed and does not execute edited `src/compiler/**/*.spl` source at
+  all (confirmed fresh with a liveness-marker eprint, 0 hits, both via
+  `bin/simple test` and `SIMPLE_EXECUTION_MODE=interpret bin/simple run`).
+  Observing this class of fix requires a bootstrap rebuild, which this
+  lane was instructed not to run. Defect A remains unfixed and out of
+  scope (`src/compiler_rust/**` is off-limits to this lane). Not one
+  unified fix: Defect A (seed) and Defect B (pure-Simple resolver) are two
+  independent code bases with independent root causes that merely share
+  the same *shape* ("primitives carry no symbol, so anything keyed on
+  symbol treats them as impl-less").
 - **Date:** 2026-08-07
 - **Spec (RED by design, locks in the interpret column):**
   `test/01_unit/language/primitive_receiver_trait_impl_dispatch_spec.spl` —
