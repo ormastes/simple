@@ -1,0 +1,104 @@
+# The ONE debug interface shared by host (CPU) and every GPU lane
+# (design §2). The DAP server, Lab endpoints, capability doctor and any
+# tool drive a `DebugTarget` without knowing whether the thing underneath
+# is an interpreter, a CUDA lane, a Vulkan lane, Metal, or the host SVM-G
+# reference VM.
+#
+# The single unit-of-location subtlety is `pc`: on the host it is a SOURCE
+# LINE, on a GPU lane it is an SVM-G bytecode program counter. Rather than
+# two interfaces, `DebugState` carries `pc_kind` naming the unit, and
+# `set_breakpoint(loc)` takes `loc` in exactly those units. A tool that
+# renders locations MUST read `pc_kind`; a tool that only round-trips them
+# (set a breakpoint where we stopped) can ignore it safely.
+
+use std.common.debug.capability.{CapLevel}
+
+pub val PC_KIND_LINE: text = "line"
+pub val PC_KIND_SVMG: text = "svmg_pc"
+
+pub val STOP_BREAKPOINT: text = "breakpoint"
+pub val STOP_STEP: text = "step"
+pub val STOP_HALT: text = "halt"
+pub val STOP_TRAP: text = "trap"
+pub val STOP_TIMEOUT: text = "timeout"
+pub val STOP_RUNNING: text = "running"
+
+pub struct DebugState:
+    """A complete stop-point snapshot. Every field is always populated --
+    there is no partial state -- so a consumer never has to guess whether
+    an absent value means "zero" or "not measured"."""
+    pc: i64
+    pc_kind: text
+    sp: i64
+    stack: [i64]
+    call_stack: [i64]
+    stop_reason: text
+
+pub fn debug_state_new(pc: i64, pc_kind: text, sp: i64, stack: [i64], call_stack: [i64], stop_reason: text) -> DebugState:
+    DebugState(
+        pc: pc,
+        pc_kind: pc_kind,
+        sp: sp,
+        stack: stack,
+        call_stack: call_stack,
+        stop_reason: stop_reason,
+    )
+
+pub fn debug_state_is_stopped_alive(state: DebugState) -> bool:
+    """True when execution stopped somewhere it can be RESUMED from
+    (a breakpoint or a single step), false when the program is finished
+    for any reason (halt/trap/timeout) or still running."""
+    state.stop_reason == STOP_BREAKPOINT or state.stop_reason == STOP_STEP
+
+pub fn debug_state_is_terminal(state: DebugState) -> bool:
+    """True when no further progress is possible: the program halted,
+    trapped, or exhausted its step budget."""
+    state.stop_reason == STOP_HALT or state.stop_reason == STOP_TRAP or state.stop_reason == STOP_TIMEOUT
+
+# ============================================================================
+# The trait
+# ============================================================================
+#
+# Contract every implementation owes (this is what the ref spec pins, and
+# what every later backend spec is diffed against):
+#
+#  * `kind()`            "host" | "cuda" | "vulkan" | "metal" | "ref"
+#  * `debug_level()`     Native/Emulated/Unavailable. An `Unavailable`
+#                        target must still answer every method (with a
+#                        terminal state / empty reads), never panic.
+#  * `set_breakpoint`    true if newly added, FALSE if already present
+#                        (idempotent, and the bool distinguishes the two).
+#  * `clear_breakpoint`  true if one was removed, false if there was none.
+#  * `breakpoints()`     ascending, no duplicates, in `pc_kind` units.
+#  * `step()`            advances exactly one instruction/line, even when
+#                        the current location carries a breakpoint (a
+#                        breakpoint must never wedge `step`).
+#  * `resume()`          runs until the next breakpoint, halt, trap, or
+#                        budget exhaustion. Resuming FROM a breakpointed
+#                        location must make progress (it does not re-report
+#                        the location it is standing on).
+#  * `state()`           pure read; calling it repeatedly does not advance
+#                        execution and returns an equal snapshot.
+#  * `read_mem`          host: variable slab; GPU: DATA region. An
+#                        out-of-range or negative request returns an EMPTY
+#                        array, never a panic and never a short-but-nonempty
+#                        buffer.
+#  * `detach()`          "" on clean detach, otherwise a diagnostic. Safe to
+#                        call twice; the second call is a no-op returning "".
+#
+# `me` vs `fn` is LOAD-BEARING here, not decoration: a `fn` trait method
+# receives a COPY of the receiver in this language, so a mutating method
+# declared `fn` silently discards its mutation. Every method below that
+# advances or reconfigures the target is `me`; only the two pure identity
+# queries are `fn`.
+trait DebugTarget:
+    fn kind() -> text
+    fn debug_level() -> CapLevel
+    me set_breakpoint(loc: i64) -> bool
+    me clear_breakpoint(loc: i64) -> bool
+    me breakpoints() -> [i64]
+    me step() -> DebugState
+    me resume() -> DebugState
+    me state() -> DebugState
+    me read_mem(offset: i64, len: i64) -> [u8]
+    me detach() -> text
