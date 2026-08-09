@@ -2,11 +2,10 @@
 
 - **Date:** 2026-08-07
 - **Status:** OPEN (two members fixed; `runtime_args` and `kind_to_text`
-  confirmed non-bugs/stale in current source; `run_check` static analysis
-  clean, live repro attempted 2026-08-09 but did not complete (host resource
-  contention, not a defect signal — see updated bullet below); rest
-  classified as out-of-scope or non-code
-  build-config issues).
+  confirmed non-bugs/stale in current source; **`run_check` REPRODUCED and
+  root-caused 2026-08-09 — mechanism C, a hardcoded `*check.spl` exclusion in
+  the Rust seed's source collector, §2b; not fixed here per "fix .spl not
+  Rust"**; rest classified as out-of-scope or non-code build-config issues).
   - **FIXED** `d328200332e` — `target_is_float` (mechanism B,
     `src/compiler/35.semantics/semantics/cast_rules.spl`).
   - **FIXED** (this pass) — `kind_can_follow` (mechanism B,
@@ -119,6 +118,11 @@
     documented non-completing repro attempt. A future pass should retry the
     repro on a quieter host, or independently under `run_check`'s own
     stage-3 log-line context to shortcut the full-tree build.
+  - **2026-08-09 RESOLVED (root cause) — `run_check` REPRODUCED; cause is
+    mechanism C, a hardcoded `check.spl` filename exclusion.** See §2b. The
+    full-tree repro is *not needed*: a **3-file minimal probe** reproduces the
+    exact 2026-08-06 log line in ~60s. The "non-unique bare name" lead recorded
+    above is **REFUTED** — see §2b for both.
   - The §1 finding (diagnostic is a partial sample) and §5 recommendation
     (promote to error once coverage is fixed) both still hold; not addressed
     here.
@@ -129,6 +133,14 @@
   (stage2 = `simple-s3clean/build/clean/stage2-simple`, `SIMPLE_BOOTSTRAP=1`).
   Baselines: `simple-s3red/build/red/stage3.log`,
   `simple-s3family/build/green/stage3.log` (identical, 28 lines, rc=1).
+  **Stale as of 2026-08-09:** both paths `run_stage3.shs` hardcodes are gone
+  (`simple-s3clean/build/clean/stage2-simple` and the
+  `simple-t3-final-20260806/...stage2-runtime-authority` runtime), so the script
+  fails at `exit 90` / missing-binary. Substitute a current stage2 (e.g.
+  `pub/simple-wt-base/.s2build/stage2-simple`) and runtime (e.g.
+  `pub/simple/build/bootstrap-mlkem-stage2-20260808b/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority`).
+  **Prefer the 3-file minimal repro in §2b** — ~60s instead of >1h25m, and it
+  isolates the cause instead of merely observing the warning.
 
 ## 1. The warning list is a PARTIAL SAMPLE, not an enumeration
 
@@ -205,6 +217,116 @@ resolver, which can bind a call to the wrong class. Loosening a fuzzy global
 resolver on the bootstrap critical path needs its own change with its own
 verification, not a drive-by.
 
+## 2b. Mechanism C — `collect_spl_files_recursive` silently SKIPS every `*check.spl`
+
+**Confirmed 2026-08-09 by live repro.** Applies to: `run_check`.
+
+`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:1632-1637`, in
+`collect_spl_files_recursive` (the function that gathers the `--source` set):
+
+```rust
+} else if path.extension().is_some_and(|e| e == "spl") {
+    if let Some(p) = path.to_str() {
+        if p.contains("check.spl") {
+            continue;                 // <-- unconditional, uncommented, substring match
+        }
+    }
+    if path.is_file() {
+        out.push(path);
+    }
+}
+```
+
+`src/app/cli/check.spl` is therefore **never compiled**, so `run_check` has no
+definition in the closure and every caller warns. There is no defect in the
+`.spl` sources at all — both call sites and the definition are correct, exactly
+as the earlier static analysis found. The static analysis was right about the
+code and simply could not see the build-system exclusion.
+
+Three properties make this worse than a plain exclusion:
+
+1. **Substring, not filename.** `p.contains("check.spl")` matches any path
+   *ending* in `check.spl`, so it also drops `arch_check.spl`,
+   `bootstrap_check.spl`, `simd_check.spl`, `health_check.spl`, … — **14 files
+   in the `--source src/compiler --source src/lib --source src/app` set**
+   (15 repo-wide under `src/`): `src/compiler/30.types/variance_tests_check.spl`,
+   `src/compiler/35.semantics/{simd_check,gc_boundary_check}.spl`,
+   `src/compiler/90.tools/coupling/layer_check.spl`,
+   `src/lib/nogc_async_mut/mcp/health_check.spl`,
+   `src/app/check/wm_lane_boundary_check.spl`,
+   `src/app/cli/{arch_check,bootstrap_check,check,query_check}.spl`,
+   `src/app/grammar_doc/tier_check.spl`,
+   `src/app/gui_perf/macos_smf_dynlib_transcript_check.spl`,
+   `src/app/startup/launch_meta_check.spl`,
+   `src/app/vscode_extension/manifest_check.spl`.
+2. **The symlink branch does not apply the filter** (line 1628-1631 pushes any
+   `.spl` symlink unconditionally), so the same file is included or excluded
+   depending only on whether it is a symlink — an inconsistency, not a policy.
+3. **A unit test appears to cover this and does not.**
+   `native_project/tests.rs:3998 test_build_use_map_keeps_production_check_modules`
+   builds a `cli/check.spl` and asserts `use_map["run_check"]` resolves — and it
+   **passes**, because it calls `build_import_map` / `build_use_map_from_ast`
+   directly on a hand-supplied `file_sources` vec. It never goes through
+   `collect_spl_files_recursive`, which is where the file is dropped. A green
+   test named for exactly this production case is why the bug survived.
+
+### Repro (replaces the hour-long full-tree run)
+
+Three files, `--source src`, entry `src/app/cli/bootstrap_main.spl`:
+
+- `src/app/cli/check.spl`: `fn run_check(args: [text]) -> i64:` / `return 7`
+- `src/app/build/cli_entry.spl`: `use app.cli.check.{run_check}` +
+  `fn handle_build(a) -> i64: return run_check(a[1:])`
+- `src/app/cli/bootstrap_main.spl`: calls `handle_build`
+
+Emits, in ~60s, byte-identical to the 2026-08-06 stage-3 log line:
+
+```
+warning: unresolved call `run_check` in function `app__build__cli_entry__handle_build` (module: app__build__cli_entry)
+```
+
+### Controlled variant matrix (each an independent build)
+
+| variant | result |
+|---|---|
+| `fn run_check` in `cli/check.spl` | rc=1, **1 unresolved** |
+| `pub fn run_check` in `cli/check.spl` | rc=1, **1 unresolved** — `pub` is irrelevant |
+| `fn run_check` in `cli/`**`verify.spl`** | **rc=0, 0 unresolved** — module rename fixes it |
+| `fn do_verify` in `cli/check.spl` | rc=1, **1 unresolved** — function rename does NOT fix it |
+
+The trigger is the **module filename**, not the function name, not visibility.
+
+### The "non-unique bare name" lead is REFUTED
+
+Two independent disproofs:
+
+1. The minimal probe above contains **exactly one** `run_check` definition and
+   still warns. Ambiguity cannot be the cause.
+2. The three "competing definitions" recorded in the 2026-08-09 entry do not
+   exist. An **unanchored** grep matched *prefixes*: the real names are
+   `run_check_dbs` (`check_dbs.spl:134`), `run_check_tier`
+   (`check_tier.spl:557`) and `run_check`**`ed`** (`initramfs_pack.spl:185`) —
+   all distinct symbols. Anchored, `^\s*(pub )?fn run_check\b` has exactly
+   **one** `.spl` definition tree-wide: `src/app/cli/check.spl:297`.
+   (Cf. the standing "anchor greps when counting symbol classes" rule.)
+
+This also means `run_check` is **not** an instance of mechanism A: it is not a
+suffix-heuristic method call and has nothing to do with the `mangle.rs` /
+`imports.rs` uppercase guard.
+
+### Fix — out of scope here, but unlike mechanism A it is not risky
+
+The defect is in the **Rust seed** (`src/compiler_rust/...`), so per CLAUDE.md
+("fix .spl not Rust") it is not fixed in this `.spl` pass. Recording the shape
+because, unlike mechanism A, there is no fuzzy-resolver hazard: the exclusion is
+an unconditional, uncommented, unjustified `continue` with no test asserting the
+skip. The likely intent was to skip *test/check-harness* inputs, but the
+implementation catches production modules by substring. Recommended change:
+delete the branch, or narrow it to an explicit opt-out that cannot match
+production paths — and add a test that drives `collect_spl_files_recursive`
+itself, since the existing `tests.rs` test bypasses it. Blast radius is the 14
+files listed above, several of which are compiler internals.
+
 ## 3. Mechanism B — the `impl X:` → free-function refactor dropped bodies
 
 76 files carry the marker `# ... Methods (was: impl X:)`. The conversion
@@ -238,7 +360,7 @@ undefined names. Line 168 of `template.spl` uses the correct form
 | `rsa_sig_valid` (`src/os/crypto/rsa.spl`), `handle_os` (`src/os/cli.spl`) | definitions exist but `src/os` is **not in the `--source` set** (`--source src/compiler src/lib src/app`). Build-config/source-set question, not a code bug. |
 | `t32_cli_main` | defined `pub fn` at `src/app/t32_cli/mod.spl:25`, but `src/app/t32_cli` is a **symlink out of the tree** (`../../examples/10_tooling/trace32_tools/t32_cli`). Signature is `-> i32` while the caller returns it as `i64`. |
 | `parse_hostcomm_config` | `use std.nogc_sync_mut.baremetal.config...` names a module that **does not exist** (`src/lib/nogc_sync_mut/baremetal/` has no `config.spl`), and the function is defined nowhere. Only `default_hostcomm_config()` exists, in `types.spl`. |
-| `run_check` | defined `src/app/cli/check.spl:297`, imports/callers all resolve in current source; unconfirmed whether the warning still reproduces live (repro started, didn't finish in-pass) — see 2026-08-09 update above. |
+| `run_check` | **REPRODUCED + root-caused 2026-08-09 — mechanism C (§2b).** `.spl` sources are correct; `src/app/cli/check.spl` is never compiled because `collect_spl_files_recursive` (`native_project/mod.rs:1634`) skips any path containing `check.spl`. Rust-seed defect, not fixed here. Also silently drops 13 other production modules. |
 | `runtime_args` | **stale/non-bug (2026-08-09):** no remaining call site; `src/app/cli/api_surface_snapshot.spl` already calls `get_args()` from `src/app/io/args_ops.spl:6`. |
 
 `macro_check/` is dead but **must not be blind-deleted**: `MacroDef`,
