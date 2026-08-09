@@ -1,7 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_timed_ns, vulkan_font_frame_batch_contract}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_elapsed_ns, vulkan_font_gpu_resource_bytes, vulkan_font_gpu_resource_bytes_for_params, vulkan_font_timed_ns, vulkan_font_frame_batch_contract}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 fn _perf_batch() -> FontRenderBatch:
@@ -18,6 +18,11 @@ describe "Vulkan font performance evidence counters":
         expect(vulkan_font_frame_batch_contract(64, 64, 64, 64)).to_be(false)
         expect(vulkan_font_frame_batch_contract(0, 1, 1, 1)).to_be(false)
 
+    it "bounds and accounts retained per-glyph parameter buffers":
+        expect(VULKAN_FONT_FRAME_GLYPH_CAP).to_equal(4096)
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, 4)).to_equal(3280)
+        expect(vulkan_font_gpu_resource_bytes_for_params(1024, 2048, -1)).to_equal(0)
+
     it "queues glyphs into the shared frame command without hot-path evidence work":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
@@ -26,6 +31,8 @@ describe "Vulkan font performance evidence counters":
         expect(source).to_contain("self.pending_compute_command = command")
         expect(source).to_contain("self.pending_font_descriptors.push(descriptor)")
         expect(source).to_contain("self.pending_font_params.push(params)")
+        expect(source).to_contain("font-frame-glyph-cap-exceeded")
+        expect(source).to_contain("if self.pending_font_descriptors.len() == 0")
         expect(source).to_contain("if self.frame_batching_enabled and not self.font_oracle_mode")
         expect(source).to_contain("recorded.command_buffer_count = 1")
         expect(source).to_contain("recorded.submission_count = 0")
@@ -44,6 +51,7 @@ describe "Vulkan font performance evidence counters":
         expect(source).to_contain("if self.font_oracle_mode:\n            val present_readback_started")
         expect(backend).to_contain("font_oracle_mode: false")
         expect(source).to_contain("oracle_mode = self.font_oracle_mode")
+        expect(source.contains("font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,\n                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total")).to_equal(false)
 
     it "initializes through retained ownership with the canonical shader set":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
