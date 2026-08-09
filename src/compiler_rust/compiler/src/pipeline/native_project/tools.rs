@@ -1497,6 +1497,28 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
     )
 }
 
+/// Project the canonical mutex ABI needed by `bootstrap_main` from core-C.
+///
+/// `libsimple_native_all` remains the compiler/native-build owner. Localizing
+/// every non-mutex core-C definition makes the supplement disjoint instead of
+/// relying on the linker's multiple-definition tolerance.
+pub(crate) fn build_bootstrap_mutex_runtime_capsule_archive(
+    core_archive: &Path,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    let requested = [
+        "spl_mutex_create",
+        "spl_mutex_lock",
+        "spl_mutex_try_lock",
+        "spl_mutex_unlock",
+        "spl_mutex_destroy",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    project_stage4_archive_closure(&[core_archive], &requested, &[], temp_dir, "bootstrap_mutex_runtime")
+}
+
 fn project_stage4_archive_closure(
     inputs: &[&Path],
     requested_symbols: &[String],

@@ -3633,7 +3633,11 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
-    std::fs::write(&native_all, b"all").unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_native_build(long args) { return args; }\n"],
+    );
 
     let mut config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
@@ -3645,10 +3649,45 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
 
     let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert_eq!(selected, (native_all, true));
+    let symbols = archive_defined_symbols(&selected.0).unwrap();
+    assert!(symbols.contains("rt_native_build"));
     match old_bootstrap {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
         None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
+    let capsule =
+        super::tools::build_bootstrap_mutex_runtime_capsule_archive(&core, &temp.path().join("mutex-capsule")).unwrap();
+    let (defined, undefined) = super::tools::archive_global_symbols(&capsule).unwrap();
+    let expected = [
+        "spl_mutex_create",
+        "spl_mutex_lock",
+        "spl_mutex_try_lock",
+        "spl_mutex_unlock",
+        "spl_mutex_destroy",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<std::collections::BTreeSet<_>>();
+    let actual = defined
+        .keys()
+        .map(|symbol| symbol.trim_start_matches('_').to_string())
+        .filter(|symbol| symbol != "rust_eh_personality")
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    assert!(!defined.contains_key("rt_native_build"));
+    assert!(!defined.contains_key("rt_thread_spawn_isolated"));
+    assert!(undefined
+        .iter()
+        .all(|symbol| !symbol.trim_start_matches('_').starts_with("rt_")
+            && !symbol.trim_start_matches('_').starts_with("spl_")));
 }
 
 #[cfg(target_os = "linux")]

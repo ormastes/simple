@@ -66,7 +66,7 @@ fn is_compiler_like_entry(path: &Path) -> bool {
         || p.ends_with("/src/app/cli")
 }
 
-fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
+pub(super) fn is_bootstrap_main_entry(path: &Option<PathBuf>) -> bool {
     std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")
         && path.as_ref().and_then(|p| p.file_name()).and_then(|name| name.to_str()) == Some("bootstrap_main.spl")
 }

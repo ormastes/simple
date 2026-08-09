@@ -9,11 +9,11 @@ use simple_common::target::LinkerFlavor;
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
-    archive_create_command, build_compiler_backfill_archive, build_core_c_runtime_library,
-    build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives, build_stage4_runtime_capsule_archive,
-    build_stage4_rust_runtime_projection_archive, find_archive_tool, find_c_compiler, find_compiler_rt_builtins,
-    find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool, is_system_symbol, nm_command,
-    strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
+    build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
+    build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
+    find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib, find_objcopy_tool,
+    is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
 
@@ -1027,6 +1027,20 @@ int main(int argc, char** argv) {
         let extra_link_objects = configured_extra_link_objects()?;
         let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        let bootstrap_mutex_runtime = if super::config::is_bootstrap_main_entry(&self.entry_file)
+            && selected_runtime
+                .as_ref()
+                .is_some_and(|(_, is_native_all)| *is_native_all)
+        {
+            let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
+                .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;
+            Some(build_bootstrap_mutex_runtime_capsule_archive(
+                &core,
+                &temp_dir.join("bootstrap_mutex_runtime_capsule"),
+            )?)
+        } else {
+            None
+        };
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
         let host_gpu_core_runtime = if host_gpu_lane {
             Some(
@@ -1455,6 +1469,9 @@ int main(int argc, char** argv) {
             }
             if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                 cmd.arg(core_runtime);
+            }
+            if let Some(mutex_runtime) = bootstrap_mutex_runtime.as_ref() {
+                cmd.arg(mutex_runtime);
             }
         }
 
