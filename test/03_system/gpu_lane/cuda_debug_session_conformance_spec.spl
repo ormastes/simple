@@ -35,6 +35,7 @@ use std.common.svmg.ref_vm.{
 use std.gc_async_mut.gpu_lane.cuda_debug_session.{CudaDebugSession, CudaDebugOutcome}
 use std.gc_async_mut.gpu_lane.cuda_lane_session.{CudaLaneSession}
 use std.sffi.io.{file_read_bytes}
+use std.common.test_env_gate.{test_env_available}
 use test.fixtures.svmg.debug_conformance_vectors.{DebugVector, DebugLaunch, all_debug_vectors}
 
 val _KERNEL_PTX: text = "src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx"
@@ -46,6 +47,18 @@ val _BUDGET_EXPIRY_VECTOR: text = "budget_expiry_while_debugging"
 fn _probe() -> text:
     var session = CudaLaneSession.create()
     session.probe()
+
+# Opt-in strictness switch. Default (unset/"0") keeps this spec host-aware
+# skip-clean so it stays green on machines with no GPU. Setting
+# SIMPLE_REQUIRE_GPU=1 turns a skip into a FAILURE, so CI or a human can
+# DEMAND real device evidence rather than accepting an ambiguous green.
+fn _require_gpu() -> bool:
+    test_env_available("SIMPLE_REQUIRE_GPU")
+
+# Positive device proof: on a skipping host the device launch count is 0, so
+# this floor CANNOT be satisfied by the skip branch. Asserting a floor (rather
+# than merely `> 0`) makes the count itself load-bearing evidence.
+val _MIN_DEVICE_LAUNCHES: i64 = 20
 
 # --- host reference: replay one launch through ref_vm on `arena_in` -------
 struct RefLaunchResult:
@@ -163,11 +176,21 @@ describe "CudaDebugSession -- DBG-1/PROF-1 debug vectors on a live device":
     it "should skip cleanly, or match ref_vm on every debug vector field":
         step("Probe for a Cuda-capable device")
         val probe_result = _probe()
-
+        # SELF-DESCRIBING EVIDENCE -- see `_REQUIRE_GPU_ENV` note above.
+        # A green on this spec used to be ambiguous: it proved either that a
+        # device ran clean OR that no device existed. Both branches now EMIT
+        # which one they took, so the verdict names its own evidence.
         if probe_result.starts_with("skip:"):
-            step("No usable Cuda device/ICD on this host: " + probe_result)
+            step("SKIPPED: no usable Cuda device/ICD on this host: " + probe_result)
+            # Opt-in strictness: a CI lane or a human demanding real device
+            # evidence sets SIMPLE_REQUIRE_GPU=1 and a skip becomes a FAILURE.
+            # Default stays host-aware skip-clean.
+            if _require_gpu():
+                step("SIMPLE_REQUIRE_GPU=1 -- a skip is a FAILURE in this lane")
+                assert_equal("SKIPPED: " + probe_result, "DEVICE-RAN: cuda")
             assert_true(probe_result.starts_with("skip:"))
         else:
+            step("DEVICE-RAN: cuda -- probe() returned no skip reason; the live-device branch is executing")
             step("Load the checked-in svmg_cuda_kernel.ptx artifact")
             val kernel_bytes = file_read_bytes(_KERNEL_PTX)
             expect(kernel_bytes.len()).to_be_greater_than(0)
@@ -233,5 +256,7 @@ describe "CudaDebugSession -- DBG-1/PROF-1 debug vectors on a live device":
                 val shut = sess.shutdown()
                 assert_equal(shut, "")
 
-            step("Total launches diffed device-vs-ref: {checked}")
+            step("DEVICE-RAN: cuda -- total launches diffed device-vs-ref: {checked}")
             expect(checked).to_be_greater_than(0)
+            # Launch-count floor -- unreachable from the skip branch (count 0).
+            expect(checked).to_be_greater_than(_MIN_DEVICE_LAUNCHES - 1)

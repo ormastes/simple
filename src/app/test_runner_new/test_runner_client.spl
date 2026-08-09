@@ -423,6 +423,21 @@ fn main() -> i64:
     # run directly so the child inherits SIMPLE_COVERAGE=1.
     val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
     val cov_bypass = cov_env != "" and cov_env != "0"
+    # SIMPLE_REQUIRE_GPU: same frozen-environment defect class again, and it
+    # fails OPEN, which is the worst variant. The GPU conformance specs
+    # (test/03_system/gpu_lane/*_debug_session_conformance_spec.spl) are
+    # host-aware skip-clean by default; SIMPLE_REQUIRE_GPU=1 is the opt-in
+    # switch that turns "no device" into a FAILURE so CI can demand real
+    # device evidence. Served by the daemon, the spec body reads the DAEMON's
+    # environment, observes the variable as UNSET, and silently takes the
+    # permissive branch -- so a lane that asked for a hard device requirement
+    # gets a green that proves nothing, which is exactly what the switch
+    # exists to prevent. Measured 2026-08-09: `SIMPLE_REQUIRE_GPU=1
+    # bin/simple test <cuda spec>` had the spec body observe the var as unset
+    # (nil via env_get, false via test_env_available) while the caller had it
+    # set to "1". Bypass the daemon so the value reaches the spec.
+    val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
+    val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
     # Same defect class as SIMPLE_COVERAGE, one step worse because it fails
     # SILENTLY instead of just under-reporting.
     #
@@ -460,11 +475,13 @@ fn main() -> i64:
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass: false else: ensure_daemon()
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
+        elif require_gpu_bypass:
+            print "require-gpu: SIMPLE_REQUIRE_GPU set; bypassing test daemon so the requirement reaches the spec"
         elif invoker_bypass:
             print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
         elif binary_override_bypass:
