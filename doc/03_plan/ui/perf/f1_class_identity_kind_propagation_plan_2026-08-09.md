@@ -93,11 +93,12 @@ every class decl and for every unregistered/builtin pseudo-struct, so adding
 copies can only move struct behaviour toward the contract and **cannot** convert
 the defect into the class-sibling. Smallest useful step in the whole lane.
 
-**S2 — corpus reachability.** The corpus spec and probe today only reach the
-seed (`bin/simple run` = seed JIT; `SIMPLE_EXECUTION_MODE=interpret` = seed
-tree-walk). Add a pure-Simple engine lane so S1 is measurable — this needs
-either a pure-Simple deploy or a `run`-script driver over the frontend
-interpreter (a spec will trip the module cap during module load).
+**S2 — corpus reachability. DONE 2026-08-09 — see §6 for the driver, the proof
+it is a different engine, and the measured baseline.** The corpus spec and probe
+only reached the seed (`bin/simple run` = seed JIT;
+`SIMPLE_EXECUTION_MODE=interpret` = seed tree-walk). The pure-Simple engine lane
+is now a `run`-script driver over the frontend interpreter, as anticipated here.
+S1 is unblocked.
 
 **S3 — seed HIR carries the kind.** Stop hardcoding at
 `module_pass.rs:548` and `node_exec.rs:438`; propagate
@@ -157,3 +158,97 @@ defect into its sibling — that is the trap this lane exists to avoid.
 - repro: `test/fixtures/repro/compiler/class_identity/class_field_reference_semantics_repro.spl`
 - bugs: `doc/08_tracking/bug/struct_field_aliases_under_jit_2026-08-08.md`,
   `doc/08_tracking/bug/class_field_reference_semantics_diverge_2026-08-06.md`
+
+## 6. S2 result — pure-Simple engine lane (measured 2026-08-09)
+
+### 6a. The driver, and its entry point
+
+`scripts/check/class_identity_pure_simple_driver.spl`, run via
+`scripts/check/check-class-identity-engine-matrix.shs`.
+
+Entry point: **`core_jit_interpret(source, path, 999999)`**
+(`10.frontend/core/interpreter/mod.spl:248`). It runs the pure-Simple pipeline
+lex → parse → `eval_module` over the case source; the 999999 threshold means the
+JIT never fires, so every answer comes from the pure-Simple **tree-walk**
+evaluator (`eval_stmts.spl` / `eval_calls.spl` / `_EvalOps`). The seed still
+hosts the driver process — it cannot not — but it does not decide the answers.
+
+Two things had to be discovered empirically rather than assumed:
+
+1. **The interpreter package's `__init__.spl` exports a hand-maintained SUBSET
+   of its own symbols**, so a driver importing only the barrel dies with `E1002`
+   on the first unexported internal (`jit_init_with_backend`, then
+   `_core_run_pipeline`, then `eval_init`, then `mono_cache_init`, …). The fix
+   is to import every module of `10.frontend/core/**` by path. The same trap is
+   already documented in `__init__.spl` for `eval_int_method`.
+2. **The entry file must live OUTSIDE the repo tree.** Byte-identical driver,
+   same env, same binary: from `scripts/check/` it dies with
+   `error: semantic: variable 'cache_initialized' not found` — a module-level
+   `var` in `10.frontend/core/interpreter/value.spl`, i.e. the imported
+   package's globals were never initialised — and from `/tmp` it runs all ten
+   cases to completion. **The entry file's location decides whether imported
+   modules' globals get initialised.** That is a real defect, not a quirk; the
+   `.shs` copies the driver out as a workaround and says so.
+
+### 6b. Proof it is NOT the seed (positive discriminator)
+
+Case A (class in a trait-typed field) reads **REF** on this lane and
+**COPY(n=100)** under `SIMPLE_EXECUTION_MODE=interpret` on the same fixture —
+the seed interpreter's documented failure. Case B is *answered* (rc=-1, no
+verdict) where the seed JIT *kills the process*. So the pure lane matches
+neither seed column, and a silent fallback to either would be visible in the
+output. `check-class-identity-engine-matrix.shs` fails with exit 1 if the pure
+column ever equals the seed-interpreter column on every case.
+
+### 6c. Measured baseline — three engines, one corpus
+
+Fixtures: `test/fixtures/repro/compiler/class_identity/cases/*.spl`, one case per
+file so a failure cannot hide the cases after it (the single-file probe stops at
+the first error, which is how the earlier run mis-read case C).
+
+| case | site | contract | seed JIT | seed interp | **pure-Simple frontend** |
+|---|---|---|---|---|---|
+| A class in trait field | field init | REF | REF | COPY(100) | **REF** ✅ |
+| B class in optional field | field init | REF | *process dies* | COPY(110) | **rc=-1, silent** ⚠️ |
+| C class in array elem[1] | array slot | REF | REF | COPY(130) | **REF** ✅ |
+| D class param → field | field store | REF | REF | COPY(140) | **REF** ✅ |
+| E class returned | return | REF | REF | COPY(90) | **REF** ✅ |
+| F struct literal field init | S1 site 2 | VAL | ALIAS(151) | VAL | **ALIAS** ❌ |
+| G struct local binding | S1 site 1 | VAL | ALIAS(11) | VAL | **ALIAS** ❌ |
+| H struct field store | S1 site 3 | VAL | ALIAS(21) | VAL | **ALIAS** ❌ |
+| I struct returned | S1 site 4 | VAL | ALIAS(31) | VAL | **ALIAS** ❌ |
+| J struct param binding | *existing copy site* | VAL | ALIAS(99) | VAL | **VAL** ✅ |
+
+### 6d. Reality vs the plan's prediction
+
+**Matched, on every case §1c predicted.** Class semantics are correct on all
+four measurable class cases (A, C, D, E); struct semantics are wrong on exactly
+the four sites named in §1c (F, G, H, I); and J — the one site that already
+calls `val_struct_deep_copy` (`eval_calls.spl:343`) — is correct, which is the
+positive control proving the `is_value_type` gate is live rather than dead. The
+mirror-image characterisation of the two pipelines is confirmed by measurement,
+not just by reading.
+
+Three things the prediction did not cover:
+
+- **B fails silently on the pure-Simple engine.** `core_jit_interpret` returns
+  -1 and no verdict and no error text is emitted, so an optional class field is
+  neither answered nor diagnosed. Every engine now mishandles B in a different
+  way (seed JIT: fatal; seed interp: wrong answer; pure-Simple: silent failure).
+  B is therefore NOT covered by S1 and needs its own diagnosis.
+- **Seed JIT gets J wrong too** — `ALIAS(99)`, i.e. even parameter binding
+  aliases a struct there. S5 must cover parameter binding, not only field
+  stores.
+- **The ALIAS branch prints `ALIAS(n={got})` literally** on the pure-Simple
+  engine: text interpolation is not expanded in that arm. Cosmetic here (the
+  VAL/ALIAS verdict is still unambiguous) but it is a second interpreter defect
+  found in passing, and it means output from this engine must not be parsed for
+  interpolated values.
+
+### 6e. What this does and does not license
+
+S1 is now measurable: it must flip F, G, H, I from ALIAS to VAL on the
+pure-Simple column while leaving A, C, D, E at REF and J at VAL. Nothing here
+justifies touching a `TODO(class-identity-contract)` marker — those pin SEED
+behaviour and no seed behaviour changed in this pass. This lane delivered a
+measurement capability and a baseline; it changed no compiler semantics.
