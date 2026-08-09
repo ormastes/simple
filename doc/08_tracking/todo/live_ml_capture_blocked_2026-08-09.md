@@ -14,20 +14,31 @@ metrics from an actual inference/training run under the spec/test runtime.
 The only ML/tensor facade is `src/lib/gc_async_mut/torch/{mod,torch_training,
 backend,optim}.spl`, which is a real libtorch FFI binding (backed by
 `src/runtime/torch_sffi.cpp` / `torch_sffi.h`), not a synthetic stub — but it
-requires the native `rt_torch_*` extern surface to be linked and initialized,
-and that extern surface is NOT resolvable from the interpreter runtime specs
-run under (`bin/simple test`).
+requires a real libtorch to be present at runtime.
 
-Evidence — the existing torch unit spec is already marked skipped for exactly
-this reason:
+## CORRECTION 2026-08-09 — the originally recorded root cause was WRONG
+
+This doc first stated the blocker was that `rt_torch_*` is "NOT resolvable from
+the interpreter runtime". **That was never probed; it was copied from a stale
+`pending_reason` string inside `test/01_unit/lib/torch_spec.spl`.** That spec
+only stores the sentence in a variable — it never calls the extern — so it could
+not have been evidence of anything.
+
+Directly measured 2026-08-09 (probe: `extern fn rt_torch_available() -> bool`
+called from a one-example spec and from a `run` script):
 
 ```
-test/01_unit/lib/torch_spec.spl:1-4
-describe "Torch":
-    it "skipped":
-        val pending_reason = "interpreter runtime issue: semantic: unknown extern function: rt_torch_available"
-        expect(pending_reason.len()).to_be_greater_than(0)
+$ bin/simple run  <probe.spl>   -> TORCH_AVAILABLE=false      (exit 0)
+$ bin/simple test <probe_spec>  -> PROBE_TORCH_AVAILABLE=false, 1 passed
 ```
+
+So the extern **does resolve** under both `run` and `test`. The real blocker is
+narrower and more tractable: **libtorch itself is absent in this environment**,
+so the capability probe honestly answers `false` and no real forward pass can be
+made. Installing/linking libtorch is the unblock, NOT fixing extern resolution.
+
+`test/01_unit/lib/torch_spec.spl`'s skip reason is itself stale and should be
+corrected or replaced when this lane is picked up.
 
 Searches run (bounded, ~15 min):
 
@@ -50,7 +61,12 @@ approach). No other real, reachable ML-run source was found.
 
 ## What would unblock it
 
-1. Resolve `rt_torch_available` (and the rest of `rt_torch_*`) under the
+1. ~~Resolve `rt_torch_available` under the interpreter~~ — SUPERSEDED by the
+   correction above; the extern already resolves. Instead: make a real libtorch
+   available so `rt_torch_available()` returns true. Watched automatically by
+   `test/03_system/tools/spipe/examples/live_capture_blocker_sentinels_spec.spl`,
+   which goes RED the moment that flips.
+1. (original, retained for history) Resolve `rt_torch_available` under the
    interpreter runtime that `bin/simple test` uses for specs — either wire
    the extern resolution for the interpreter path, or run this spec class
    under a runtime mode where native externs link (e.g. native/JIT build with
