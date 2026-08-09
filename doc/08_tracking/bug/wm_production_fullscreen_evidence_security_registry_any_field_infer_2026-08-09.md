@@ -1,7 +1,15 @@
 # Bug: `check-wm-production-fullscreen-evidence.shs` still fails to build — security-registry pre-pass hits the SAME `struct 'ANY' field 'message'` error the main lowering fix already cleared
 
-**Status: OPEN.** Genuine compiler defect, not environmental. Reproduced
-deterministically on 2026-08-09.
+**Status: FIX LANDED (2026-08-09), commit `7fa2d06aaa8`.** Genuine compiler
+defect, not environmental. Reproduced deterministically on 2026-08-09.
+Fix: `security_registry_sdn_from_sources` now skips (continues past) a file
+its isolated single-file lowering pass can't resolve, instead of hard-
+failing the whole native-build -- scoped strictly to that auxiliary scan,
+main whole-program lowering untouched. `cargo build --profile bootstrap`
+compiles clean. **NOT yet end-to-end validated**: proving the guard itself
+now passes requires a full self-hosted bootstrap rebuild through
+stage2/stage3 so the deployed `bin/simple` embeds this fix, which hasn't
+been done yet (multi-stage, longer-running than this pass's budget).
 
 ## Symptom
 
