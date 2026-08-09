@@ -661,6 +661,42 @@ _fault_handler:
     mov     w0, #'\n'
     str     w0, [x1]
 
+    /* Print the fault address to distinguish a malformed tagged value from
+     * a valid heap object whose contents were corrupted. */
+    mov     w0, #'F'
+    str     w0, [x1]
+    mov     w0, #'A'
+    str     w0, [x1]
+    mov     w0, #'R'
+    str     w0, [x1]
+    mov     w0, #'='
+    str     w0, [x1]
+    mov     w0, #'0'
+    str     w0, [x1]
+    mov     w0, #'x'
+    str     w0, [x1]
+
+    mrs     x2, far_el1
+    mov     x3, #60
+.Lfar_loop:
+    lsr     x4, x2, x3
+    and     x4, x4, #0xF
+    cmp     x4, #10
+    b.lt    .Lfar_digit
+    add     w4, w4, #('a' - 10)
+    b       .Lfar_emit
+.Lfar_digit:
+    add     w4, w4, #'0'
+.Lfar_emit:
+    str     w4, [x1]
+    subs    x3, x3, #4
+    b.ge    .Lfar_loop
+
+    mov     w0, #'\r'
+    str     w0, [x1]
+    mov     w0, #'\n'
+    str     w0, [x1]
+
 .Lfault_halt:
     wfe
     b       .Lfault_halt
