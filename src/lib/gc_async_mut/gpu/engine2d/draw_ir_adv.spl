@@ -486,12 +486,28 @@ fn _engine2d_draw_ir_render_glass_material(
             engine: eng, composited: false, execution: unavailable)
     val framebuffer_width = eng.width()
     val framebuffer_height = eng.height()
-    if (x < 0 or y < 0 or w <= 0 or h <= 0 or
-        x.to_i64() + w.to_i64() > framebuffer_width.to_i64() or
-        y.to_i64() + h.to_i64() > framebuffer_height.to_i64()):
+    val material_x = if x < 0: 0 else: x
+    val material_y = if y < 0: 0 else: y
+    val right_i64 = x.to_i64() + w.to_i64()
+    val bottom_i64 = y.to_i64() + h.to_i64()
+    val material_right = if right_i64 > framebuffer_width.to_i64():
+        framebuffer_width
+    else:
+        right_i64 as i32
+    val material_bottom = if bottom_i64 > framebuffer_height.to_i64():
+        framebuffer_height
+    else:
+        bottom_i64 as i32
+    val material_width = material_right - material_x
+    val material_height = material_bottom - material_y
+    if (w <= 0 or h <= 0 or material_width <= 0 or material_height <= 0):
         print "[engine2d-material-exec] rejected=bounds capability={capability} rect={x},{y},{w},{h} framebuffer={framebuffer_width},{framebuffer_height}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
+    val material_radius = if (
+        material_x != x or material_y != y or
+        material_width != w or material_height != h
+    ): 0 else: radius
     val backdrop = _engine2d_draw_ir_style_value(style, "backdrop-filter")
     val requested_blur = _engine2d_draw_ir_nth_int(backdrop, 0, 0)
     val realized_blur_text = _engine2d_draw_ir_style_value(
@@ -544,11 +560,11 @@ fn _engine2d_draw_ir_render_glass_material(
     val config = Engine2dGlassMaterialConfig(
         framebuffer_width: framebuffer_width,
         framebuffer_height: framebuffer_height,
-        x: x,
-        y: y,
-        width: w,
-        height: h,
-        radius: radius,
+        x: material_x,
+        y: material_y,
+        width: material_width,
+        height: material_height,
+        radius: material_radius,
         blur_radius: realized_blur,
         saturation_milli: realized_saturation_milli,
         surface_alpha_milli: surface_alpha_milli,
@@ -572,11 +588,12 @@ fn _engine2d_draw_ir_render_glass_material(
             engine: eng, composited: false, execution: device_execution)
     val pixels = engine2d_draw_ir_glass_material_pixels(
         eng.read_pixels(), config)
-    if pixels.len() != w.to_i64() * h.to_i64():
-        print "[engine2d-material-exec] rejected=cpu-pixel-span capability={capability} pixels={pixels.len()} expected={w.to_i64() * h.to_i64()} device_reason={device_execution.failure_reason}"
+    if pixels.len() != material_width.to_i64() * material_height.to_i64():
+        print "[engine2d-material-exec] rejected=cpu-pixel-span capability={capability} pixels={pixels.len()} expected={material_width.to_i64() * material_height.to_i64()} device_reason={device_execution.failure_reason}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
-    eng.draw_image(x, y, w, h, pixels)
+    eng.draw_image(
+        material_x, material_y, material_width, material_height, pixels)
     execution_evidence.composited = true
     execution_evidence.execution_target = "cpu-scalar-glass-v1"
     execution_evidence.backend_handle = 0
