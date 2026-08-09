@@ -166,10 +166,12 @@ impl WebRenderPixelArtifactCache:
             return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
         if web_render_dynamic_region_count(req) > 0:
             return web_render_html_request_to_pixel_artifact_with_backend(req, full_html, self.backend_name)
-        val result = self.pixel_cache.result_for_html(
+        var pixel_cache = self.pixel_cache
+        val result = pixel_cache.result_for_html(
             full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_UNTIMED_STATIC,
             content_revision
         )
+        self.pixel_cache = pixel_cache
         val rendered_pixels = result.readback.pixels
         self._record_wm_receipt(
             wm_receipt, "engine2d_rendered", self.resolved_backend_name,
@@ -205,6 +207,7 @@ impl WebRenderPixelArtifactCache:
         wm_receipt: [text]
     ) -> WebRenderArtifact:
         val full_html = web_render_full_html(req)
+        var pixel_cache = self.pixel_cache
         if self.animation_revision != content_revision:
             self.animation_revision = content_revision
             self.animation_epoch_ms = now_ms
@@ -212,7 +215,8 @@ impl WebRenderPixelArtifactCache:
                 full_html, req.viewport_w
             )
             if self.animation_end_ms != -1:
-                self.pixel_cache.invalidate()
+                pixel_cache.invalidate()
+                self.pixel_cache = pixel_cache
         if self.animation_end_ms == -1:
             self.animation_next_frame_ms = -1
             return self._html_request_to_pixel_artifact_with_revision(
@@ -232,10 +236,11 @@ impl WebRenderPixelArtifactCache:
             web_render_dynamic_region_count(req) == 0
         )
         if terminal_cacheable:
-            if val Some(cached) = self.pixel_cache.cached_result_for_html(
+            if val Some(cached) = pixel_cache.cached_result_for_html(
                 full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_TERMINAL,
                 content_revision
             ):
+                self.pixel_cache = pixel_cache
                 self.animation_next_frame_ms = -1
                 self._record_wm_receipt(
                     wm_receipt, "engine2d_rendered",
@@ -276,7 +281,7 @@ impl WebRenderPixelArtifactCache:
         # Preserve the direct array handle before any large WebRenderArtifact
         # reconstruction. Nonterminal animation frames are not normal cache
         # entries, but the compositor still needs this exact rendered frame.
-        self.pixel_cache.retain_delivered_pixels(result.readback.pixels)
+        pixel_cache.retain_delivered_pixels(result.readback.pixels)
         if self.animation_end_ms == -2:
             self.animation_next_frame_ms = now_ms + 16
         elif elapsed >= self.animation_end_ms:
@@ -289,10 +294,11 @@ impl WebRenderPixelArtifactCache:
             else:
                 final_frame_ms
         if terminal_cacheable:
-            self.pixel_cache.retain_result_for_html(
+            pixel_cache.retain_result_for_html(
                 full_html, SIMPLE_WEB_PIXEL_CACHE_MODE_TERMINAL,
                 content_revision, result
             )
+        self.pixel_cache = pixel_cache
         val artifact = web_render_artifact_with_backend_readback_source_evidence(
             web_render_engine2d_rendered_artifact(
                 web_render_pixel_artifact(
