@@ -101,6 +101,17 @@ not exercise an `extern fn` name loaded as a value — the fixtures in
 (f01-f09, f06 for Defect 2 itself). No spec in the repo currently asserts
 behavior for `extern fn` names taken as first-class values under JIT.
 
+**Update 2026-08-09:** a fixture now exists —
+`test/fixtures/repro/compiler/jit_closure/f10_extern_fn_as_value.spl`
+(`apply0(rt_getpid)`), added as a regression pin (not a `bin/simple test`
+spec, since `bin/simple test` is interpreter-only per `.claude/rules/testing.md`
+and this defect is JIT-only). Re-verified against the currently deployed seed
+binary: `SIMPLE_EXECUTION_MODE=jit` still produces the loud
+`... loads a named function as a callable value ...` fallback line (not a
+crash or a garbage `i64`), confirming the fix described above is still live.
+Both engines then hit the separate, pre-existing `variable 'rt_getpid' not
+found` gap noted above — unchanged, still out of scope here.
+
 ## Relationship to the guard this doc references
 
 This is not a new defect class — it is the same closure-ABI miscompile
