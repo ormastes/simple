@@ -31,6 +31,7 @@ use compiler.core.ast_expr.{
     expr_match_expr
 }
 use compiler.frontend.core._AstExpr.accessors.{expr_interpolated_string}
+use compiler.core.ast.{expr_count, expr_get_arg_names, expr_call_args_set}
 
 # ===== Placeholder Counter (module-level for mutation in recursive walk) =====
 
@@ -715,3 +716,58 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
 
     # For any other expression type, return as-is
     eid
+
+# ===== Second pass: interpolated-string call arguments =====
+#
+# Bug (2026-08-09, Stage-3 self-host blocker 9): a string-template argument such
+# as `params.map("({_.0} : {_.1})")` reaches parse_call_arg() as a still-opaque
+# EXPR_STRING_LIT. Interpolation regions are only sub-parsed AFTER the whole
+# module parse, in string_interpolation_expand.expand_string_interpolations(),
+# which promotes the literal to EXPR_INTERPOLATED_STRING. So the first-pass
+# transform in parse_call_arg() sees no `_` at all and emits no lambda, and the
+# `_` / `_1` identifiers minted by the later sub-parse leak into HIR as
+# "unresolved name: _". The Rust seed does not hit this because its parser
+# builds the FString parts inline, before its own transform runs.
+#
+# This second pass restores parity: run immediately after interpolation
+# expansion and transform exactly those call/method-call arguments that are
+# EXPR_INTERPOLATED_STRING and do contain placeholders. Arguments of calls
+# nested INSIDE an interpolation region (e.g. `self.map_type(_1.1)`) are not
+# interpolated strings, so they are left alone -- preserving the deliberate
+# suppression documented at the top of this file.
+
+fn transform_interpolated_placeholder_args(start_expr: i64):
+    """Apply the placeholder-lambda transform to interpolated-string call args.
+
+    Must run after expand_string_interpolations(), which is the only point at
+    which such an argument stops being an opaque string literal.
+    """
+    val prev = set_placeholder_transform_suppressed(false)
+    val limit = expr_count()
+    var idx = start_expr
+    while idx < limit:
+        val tag = expr_tag[idx]
+        if (tag == EXPR_CALL or tag == EXPR_METHOD_CALL):
+            val args = expr_args[idx]
+            var new_args: [i64] = []
+            var changed = false
+            var i = 0
+            while i < args.len():
+                val a = args[i]
+                var out = a
+                if (a >= 0 and a < expr_tag.len() and
+                        expr_tag[a] == EXPR_INTERPOLATED_STRING):
+                    _ph_has_unnumbered = false
+                    _ph_has_numbered = false
+                    _ph_max_number = 0
+                    detect_placeholder_mode(a)
+                    if (_ph_has_unnumbered or _ph_has_numbered):
+                        out = transform_placeholder_lambda(a)
+                        if out != a:
+                            changed = true
+                new_args.push(out)
+                i = i + 1
+            if changed:
+                expr_call_args_set(idx, new_args, expr_get_arg_names(idx))
+        idx = idx + 1
+    set_placeholder_transform_suppressed(prev)

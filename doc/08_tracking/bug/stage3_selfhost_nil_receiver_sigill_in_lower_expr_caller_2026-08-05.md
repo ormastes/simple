@@ -121,6 +121,24 @@ parameters at these 6 sites; it was **not** fixed here because it is a language
 feature gap rather than a one-line defect, and blind-patching the call sites
 would hide the gap rather than close it. It deserves its own bug entry.
 
+#### Blocker 9 — RESOLVED 2026-08-09
+
+Diagnosed and fixed. It was **not** "placeholders unsupported in pure-Simple":
+the desugar pass `src/compiler/10.frontend/desugar/placeholder_lambda.spl` has
+existed and been wired in since 2026-02-25. The real defect was a narrow
+ordering edge case — placeholders inside a **string-template** argument were
+invisible to the transform, because interpolation regions are sub-parsed only
+*after* the module parse. `params.map(_.0)` always worked; only
+`params.map("({_.0} : {_.1})")` leaked. Fixed with a second pass,
+`transform_interpolated_placeholder_args()`, run from `core_frontend_parse()`
+right after `expand_string_interpolations()`. Regression:
+`test/01_unit/compiler/frontend/placeholder_lambda_interpolated_arg_spec.spl`
+(4 RED → 0 RED). Full write-up:
+`placeholder_lambda_missed_in_interpolated_string_call_arg_2026-08-09.md`.
+
+Stage 3 has **not** yet been re-run past this point, so this SIGILL bug remains
+UNVERIFIED; the next run is now unblocked from phase 3.
+
 ### Consequence for THIS bug
 
 Nine blockers have now been logged in front of this SIGILL, and the fault site
