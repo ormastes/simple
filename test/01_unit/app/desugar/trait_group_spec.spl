@@ -1,0 +1,150 @@
+# Trait Group Desugar Tests
+#
+# Covers `trait G with A, B:` -- the group form of the trait header, which
+# reuses the EXISTING `with` clause (zero new tokens).
+#
+# Requirement: doc/02_requirements/language/trait_group_with_clause.md
+# Design:      doc/05_design/app/tools/
+#              unified_debug_profile_capability_architecture_2026-08-09.md §3
+
+use app.desugar.trait_scanner (scan_traits, find_trait, ScannedTrait, TraitMethod, parse_trait_header, parse_trait_group_members, extract_ret_type)
+use app.desugar.trait_desugar (desugar_traits)
+
+fn group_fixture() -> text:
+    var src = "trait DebugTarget:" + "\n"
+    src = src + "    fn set_breakpoint(pc: i64) -> bool" + "\n"
+    src = src + "    fn resume() -> bool" + "\n"
+    src = src + "\n"
+    src = src + "trait ProfileTarget:" + "\n"
+    src = src + "    fn profile_begin() -> bool" + "\n"
+    src = src + "\n"
+    src = src + "trait SessionCore:" + "\n"
+    src = src + "    fn debug() -> Option<DebugTarget>" + "\n"
+    src = src + "    fn profile() -> Option<ProfileTarget>" + "\n"
+    src = src + "\n"
+    src = src + "trait DebugProfiler with DebugTarget, ProfileTarget:" + "\n"
+    src = src + "    pass_dn" + "\n"
+    src
+
+describe "trait group header parsing":
+
+    context "AC1 -- the group form parses":
+        it "reads the group name without the with-clause":
+            expect(parse_trait_header("trait DebugProfiler with DebugTarget, ProfileTarget:")).to_equal("DebugProfiler")
+
+        it "extracts every group member in order":
+            val ms = parse_trait_group_members("trait DebugProfiler with DebugTarget, ProfileTarget:")
+            expect(ms.len()).to_equal(2)
+            expect(ms[0]).to_equal("DebugTarget")
+            expect(ms[1]).to_equal("ProfileTarget")
+
+        it "records the members on the scanned trait":
+            val traits = scan_traits(group_fixture())
+            val g = find_trait("DebugProfiler", traits)
+            expect(g.name).to_equal("DebugProfiler")
+            expect(g.group_members.len()).to_equal(2)
+
+    context "AC7 -- existing forms are untouched":
+        it "a plain trait header still yields its name":
+            expect(parse_trait_header("trait Printable:")).to_equal("Printable")
+
+        it "a plain trait has no group members":
+            val ms = parse_trait_group_members("trait Printable:")
+            expect(ms.len()).to_equal(0)
+
+        it "the supertrait form still yields only the trait name":
+            expect(parse_trait_header("trait Copy: Clone:")).to_equal("Copy")
+
+        it "the supertrait form is not treated as a group":
+            val ms = parse_trait_group_members("trait Copy: Clone:")
+            expect(ms.len()).to_equal(0)
+
+describe "return type capture":
+
+    context "accessor matching needs the declared return type":
+        it "captures a generic Option return type":
+            expect(extract_ret_type("debug() -> Option<DebugTarget>")).to_equal("Option<DebugTarget>")
+
+        it "stops at the body colon":
+            expect(extract_ret_type("size() -> i64: self.n")).to_equal("i64")
+
+        it "is empty when no return type is declared":
+            expect(extract_ret_type("reset()")).to_equal("")
+
+        it "records ret_type on scanned trait methods":
+            val traits = scan_traits(group_fixture())
+            val core = find_trait("SessionCore", traits)
+            expect(core.methods.len()).to_equal(2)
+            expect(core.methods[0].ret_type).to_equal("Option<DebugTarget>")
+            expect(core.methods[1].ret_type).to_equal("Option<ProfileTarget>")
+
+describe "group desugar":
+
+    context "AC3 -- members concatenate into the group struct":
+        it "emits the group as a struct":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("struct DebugProfiler:")).to_equal(true)
+
+        it "carries the first member's fn-fields":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("set_breakpoint_fn:")).to_equal(true)
+            expect(out.contains("resume_fn:")).to_equal(true)
+
+        it "carries the second member's fn-fields":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("profile_begin_fn:")).to_equal(true)
+
+        it "does not leave the with-clause in the emitted struct header":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("struct DebugProfiler with")).to_equal(false)
+
+    context "AC5 -- generated .from() acquisition":
+        it "generates the static under the TypeName__method convention":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("fn DebugProfiler__from(src: SessionCore) -> Option<DebugProfiler>:")).to_equal(true)
+
+        it "acquires through the accessor matched by Option<Member> return type":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("src.debug()")).to_equal(true)
+            expect(out.contains("src.profile()")).to_equal(true)
+
+        it "returns None when any member fails to acquire":
+            # The generated body falls through to a bare `nil` after the nested
+            # `if val` chain, so a None from ANY accessor yields None.
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("    nil")).to_equal(true)
+
+        it "bundles every member field into the constructed group":
+            val out = desugar_traits(group_fixture())
+            expect(out.contains("set_breakpoint_fn: __m0.set_breakpoint_fn")).to_equal(true)
+            expect(out.contains("profile_begin_fn: __m1.profile_begin_fn")).to_equal(true)
+
+    context "AC6 -- a missing accessor blocks generation":
+        it "does not generate .from() when no Option<Member> accessor exists":
+            var src = "trait DebugTarget:" + "\n"
+            src = src + "    fn resume() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait ProfileTarget:" + "\n"
+            src = src + "    fn profile_begin() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait SessionCore:" + "\n"
+            src = src + "    fn debug() -> Option<DebugTarget>" + "\n"
+            src = src + "\n"
+            src = src + "trait DebugProfiler with DebugTarget, ProfileTarget:" + "\n"
+            src = src + "    pass_dn" + "\n"
+            val out = desugar_traits(src)
+            expect(out.contains("fn DebugProfiler__from")).to_equal(false)
+
+        it "still emits the group struct with the concatenated fields":
+            var src = "trait DebugTarget:" + "\n"
+            src = src + "    fn resume() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait ProfileTarget:" + "\n"
+            src = src + "    fn profile_begin() -> bool" + "\n"
+            src = src + "\n"
+            src = src + "trait DebugProfiler with DebugTarget, ProfileTarget:" + "\n"
+            src = src + "    pass_dn" + "\n"
+            val out = desugar_traits(src)
+            expect(out.contains("struct DebugProfiler:")).to_equal(true)
+            expect(out.contains("resume_fn:")).to_equal(true)
+            expect(out.contains("profile_begin_fn:")).to_equal(true)

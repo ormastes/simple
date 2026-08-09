@@ -31,6 +31,7 @@
 
 
 export scan_traits, find_trait, ScannedTrait, TraitMethod
+export parse_trait_header, parse_trait_group_members, extract_ret_type
 
 # ================================================================
 # Output Structs
@@ -41,11 +42,15 @@ struct TraitMethod:
     is_me: bool
     param_names: [text]
     has_default: bool  # true = has body, no forwarding needed
+    ret_type: text     # declared return type text, "" when none. Needed so a
+                       # group's generated `.from()` can match an accessor by
+                       # its `Option<Member>` return type.
 
 struct ScannedTrait:
     name: text
     methods: [TraitMethod]
     is_interface: bool
+    group_members: [text]  # non-empty for `trait G with A, B:` group traits
 
 # ================================================================
 # Main API
@@ -113,7 +118,11 @@ fn scan_traits(source: text) -> [ScannedTrait]:
                         print "error: interface methods cannot have default implementations"
                     mi = mi + 1
 
-            traits.push(ScannedTrait(name: detected_name, methods: methods, is_interface: is_iface))
+            var members: [text] = []
+            if not is_iface:
+                members = parse_trait_group_members(trimmed)
+
+            traits.push(ScannedTrait(name: detected_name, methods: methods, is_interface: is_iface, group_members: members))
             i = j
         else:
             i = i + 1
@@ -157,7 +166,18 @@ fn parse_trait_header(trimmed: text) -> text:
     # Extract name between "trait " and ":"
     val tlen = trimmed.len()
     val name_part = trimmed[6:tlen - 1]
-    val name = name_part.trim()
+    var name = name_part.trim()
+
+    # Group form: `trait G with A, B:` -- the name is only the part before
+    # `with`. Without this the whole clause was read as one trait name.
+    val wpos = find_with_clause(name)
+    if wpos >= 0:
+        name = name[0:wpos].trim()
+
+    # Supertrait form: `trait G: A + B` -- name is the part before the colon.
+    val cpos = index_of_char(name, ":")
+    if cpos >= 0:
+        name = name[0:cpos].trim()
 
     # Validate: name must be non-empty and start with uppercase
     if name == "":
@@ -167,6 +187,87 @@ fn parse_trait_header(trimmed: text) -> text:
         return ""
 
     name
+
+# Locate a top-level ` with ` clause inside a trait-header remainder.
+# Returns the index where the name ends, or -1 when there is no group clause.
+fn find_with_clause(s: text) -> i64:
+    val n = s.len()
+    var i = 0
+    while i + 6 <= n:
+        if s[i:i + 6] == " with ":
+            return i
+        i = i + 1
+    -1
+
+# Index of the first occurrence of a single character, or -1.
+fn index_of_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s[i:i + 1] == ch:
+            return i
+        i = i + 1
+    -1
+
+# Parse the group member list from a trait header line.
+# `trait G with A, B:` -> ["A", "B"];  a non-group header -> [].
+fn parse_trait_group_members(trimmed: text) -> [text]:
+    var out: [text] = []
+    if not trimmed.starts_with("trait "):
+        return out
+    if not trimmed.ends_with(":"):
+        return out
+
+    val tlen = trimmed.len()
+    val rest = trimmed[6:tlen - 1]
+    val wpos = find_with_clause(rest)
+    if wpos < 0:
+        return out
+
+    val clause = rest[wpos + 6:rest.len()]
+    val parts = clause.split(",")
+    var i = 0
+    while i < parts.len():
+        val m = parts[i].trim()
+        if m != "":
+            out.push(m)
+        i = i + 1
+    out
+
+# Extract the declared return type from a method signature remainder
+# (the text after the leading `fn `/`me `). Returns "" when none is declared.
+#
+#   "debug() -> Option<DebugTarget>:"  -> "Option<DebugTarget>"
+#   "size() -> i64: self.n"            -> "i64"
+#   "reset()"                          -> ""
+fn extract_ret_type(sig_rest: text) -> text:
+    val n = sig_rest.len()
+    var arrow = -1
+    var i = 0
+    while i + 2 <= n:
+        if sig_rest[i:i + 2] == "->":
+            arrow = i
+            break
+        i = i + 1
+    if arrow < 0:
+        return ""
+
+    val tail = sig_rest[arrow + 2:n]
+    # Cut at the first depth-0 ':' -- that colon starts the body, and a return
+    # type never contains a top-level colon.
+    var depth = 0
+    var j = 0
+    var end = tail.len()
+    while j < tail.len():
+        val ch = tail[j:j + 1]
+        if ch == "<" or ch == "[" or ch == "(":
+            depth = depth + 1
+        elif ch == ">" or ch == "]" or ch == ")":
+            depth = depth - 1
+        elif ch == ":" and depth == 0:
+            end = j
+            break
+        j = j + 1
+    tail[0:end].trim()
 
 # Parse a trimmed line as an interface header. Returns the interface name if the
 # line matches "interface NAME:", or empty text if it does not.
@@ -278,7 +379,8 @@ fn parse_trait_body(body_lines: [text], body_indent: i64) -> [TraitMethod]:
             name: method_name,
             is_me: is_me,
             param_names: param_names,
-            has_default: has_default))
+            has_default: has_default,
+            ret_type: extract_ret_type(sig_rest)))
 
         # Skip past any body lines of this method
         if has_default:

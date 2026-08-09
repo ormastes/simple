@@ -38,7 +38,22 @@ impl<'a> Parser<'a> {
         //   trait Copy:        (no super traits, : starts body)
         //   trait Copy: Clone: (has super trait Clone, second : starts body)
         let mut super_traits = Vec::new();
-        if self.check(&TokenKind::Colon) {
+
+        // Trait group form (zero new tokens - reuses the existing `with` clause
+        // already parsed on struct/class headers):
+        //   trait DebugProfiler with DebugTarget, ProfileTarget:
+        // `with A, B` is exactly sugar for `trait G: A + B:`, so the members are
+        // recorded in the SAME super_traits field and the trait solver's existing
+        // supertrait rule gives blanket satisfaction for free.
+        if self.check(&TokenKind::With) {
+            self.advance(); // consume 'with'
+            super_traits.push(self.parse_type()?);
+            while self.check(&TokenKind::Comma) {
+                self.advance(); // consume ','
+                super_traits.push(self.parse_type()?);
+            }
+            // Falls through to the `:` body parser below.
+        } else if self.check(&TokenKind::Colon) {
             // Peek ahead: if the token after : is an identifier, it's super trait syntax
             // Otherwise, the : starts the trait body
             let colon_span = self.current.span;

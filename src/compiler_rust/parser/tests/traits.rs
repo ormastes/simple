@@ -358,3 +358,53 @@ fn parse_type_mixed_generic_and_binding() {
         panic!("Expected Let statement");
     }
 }
+
+// Trait group tests: `trait G with A, B:` -- the group form reuses the EXISTING
+// `with` clause (already parsed on struct/class headers), so this adds ZERO new
+// tokens. Members land in the SAME super_traits field, because `with A, B` is
+// exactly sugar for `trait G: A + B:`.
+// Requirement: doc/02_requirements/language/trait_group_with_clause.md
+#[test]
+fn parse_trait_group_with_clause() {
+    use simple_parser::ast::Type;
+    let items = parse("trait DebugProfiler with DebugTarget, ProfileTarget:\n    fn noop(self)");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "DebugProfiler");
+        assert_eq!(t.super_traits.len(), 2);
+        assert_eq!(t.super_traits[0], Type::Simple("DebugTarget".to_string()));
+        assert_eq!(t.super_traits[1], Type::Simple("ProfileTarget".to_string()));
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_group_single_member() {
+    use simple_parser::ast::Type;
+    let items = parse("trait OnlyDebug with DebugTarget:\n    fn noop(self)");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.super_traits.len(), 1);
+        assert_eq!(t.super_traits[0], Type::Simple("DebugTarget".to_string()));
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_group_generic_member() {
+    use simple_parser::ast::Type;
+    let items = parse("trait Bundle with Reader<T>, Writer:\n    fn noop(self)");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.super_traits.len(), 2);
+        match &t.super_traits[0] {
+            Type::Generic { name, args } => {
+                assert_eq!(name, "Reader");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("Expected generic group member, got {:?}", other),
+        }
+        assert_eq!(t.super_traits[1], Type::Simple("Writer".to_string()));
+    } else {
+        panic!("Expected trait");
+    }
+}
