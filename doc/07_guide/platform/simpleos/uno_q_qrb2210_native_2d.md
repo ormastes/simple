@@ -67,6 +67,12 @@ The outstanding physical driver binding is tracked in
 Until those SimpleOS device nodes mint the typed handles and hardware receipts,
 all six canonical capabilities remain unavailable.
 
+The Vulkan adapter uses the same physical-device identity discipline. Its GPU
+submit, fence, and readback ports expose one QRB2210 boot/device/generation
+handle, and each kernel receipt must correlate the exact Vulkan device, queue,
+fence or readback handle plus submission/frame identity. A boolean fence result
+or a caller-selected submission ID cannot promote completion.
+
 The QRB2210 boot target is
 `examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. At present
 it intentionally terminates with `UNO_Q_QRB2210_DESKTOP_BLOCKED` after querying

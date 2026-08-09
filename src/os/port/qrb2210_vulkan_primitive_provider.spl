@@ -17,7 +17,10 @@ use os.port.qrb2210_native_2d_ports.{
     Qrb2210GpuFenceReceipt,
     Qrb2210GpuFencePort,
     Qrb2210DeviceReadbackReceipt,
-    Qrb2210DeviceReadbackPort
+    Qrb2210DeviceReadbackPort,
+    Qrb2210BoardDeviceHandle,
+    QRB2210_DEVICE_GPU,
+    qrb2210_board_device_handle_ready
 }
 
 val QRB2210_QUALCOMM_VENDOR_ID: i64 = 0x5143
@@ -26,7 +29,7 @@ val QRB2210_DEVICE_READBACK_SOURCE: text = "qrb2210-vulkan-device-memory"
 val QRB2210_FENCE_TIMEOUT_NS: u64 = 1000000000u64
 
 class Qrb2210VulkanPhysicalBinding:
-    board_id: text
+    device: Qrb2210BoardDeviceHandle
     physical_device_handle: u64
     logical_device_handle: u64
     queue_handle: u64
@@ -35,21 +38,41 @@ class Qrb2210VulkanPhysicalBinding:
 
 class Qrb2210VulkanKernelIdentity:
     board_id: text
+    boot_id: text
+    driver_generation: i64
     vendor_id: i64
     device_name: text
     driver_name: text
     physical_device_handle: u64
     logical_device_handle: u64
     queue_handle: u64
+    fence_handle: u64
+    readback_handle: u64
     physical_device: bool
 
 class Qrb2210VulkanKernelSubmitReceipt:
     submission_id: i64
+    command_buffer_handle: u64
+    logical_device_handle: u64
+    queue_handle: u64
     fence_handle: u64
+    driver_generation: i64
     accepted: bool
+
+class Qrb2210VulkanKernelFenceReceipt:
+    submission_id: i64
+    logical_device_handle: u64
+    queue_handle: u64
+    fence_handle: u64
+    driver_generation: i64
+    completed: bool
 
 class Qrb2210VulkanKernelReadbackReceipt:
     submission_id: i64
+    frame_id: i64
+    logical_device_handle: u64
+    readback_handle: u64
+    driver_generation: i64
     width: i32
     height: i32
     pixels: [u32]
@@ -63,16 +86,21 @@ trait Qrb2210VulkanKernelPort:
         binding: Qrb2210VulkanPhysicalBinding,
         command_buffer_handle: u64
     ) -> Qrb2210VulkanKernelSubmitReceipt
-    me fence_wait(binding: Qrb2210VulkanPhysicalBinding, timeout_ns: u64) -> bool
+    me fence_wait(
+        binding: Qrb2210VulkanPhysicalBinding,
+        submission_id: i64,
+        timeout_ns: u64
+    ) -> Qrb2210VulkanKernelFenceReceipt
     me device_readback(
         binding: Qrb2210VulkanPhysicalBinding,
         submission_id: i64,
+        frame_id: i64,
         width: i32,
         height: i32
     ) -> Qrb2210VulkanKernelReadbackReceipt
 
 fn qrb2210_vulkan_binding_has_kernel_handles(binding: Qrb2210VulkanPhysicalBinding) -> bool:
-    binding.board_id == UNO_Q_QRB2210_BOARD_ID and
+    qrb2210_board_device_handle_ready(binding.device, QRB2210_DEVICE_GPU) and
         binding.physical_device_handle > 0u64 and
         binding.logical_device_handle > 0u64 and
         binding.queue_handle > 0u64 and
@@ -86,12 +114,16 @@ fn qrb2210_vulkan_identity_matches_binding(
     qrb2210_vulkan_binding_has_kernel_handles(binding) and
         identity.physical_device and
         identity.board_id == UNO_Q_QRB2210_BOARD_ID and
+        identity.boot_id == binding.device.boot_id and
+        identity.driver_generation == binding.device.driver_generation and
         identity.vendor_id == QRB2210_QUALCOMM_VENDOR_ID and
         identity.device_name.lower().contains("adreno") and
         identity.driver_name != "" and
         identity.physical_device_handle == binding.physical_device_handle and
         identity.logical_device_handle == binding.logical_device_handle and
-        identity.queue_handle == binding.queue_handle
+        identity.queue_handle == binding.queue_handle and
+        identity.fence_handle == binding.fence_handle and
+        identity.readback_handle == binding.readback_handle
 
 fn _qrb2210_vulkan_provider_ready(
     kernel: Qrb2210VulkanKernelPort,
@@ -121,6 +153,9 @@ impl Qrb2210GpuSubmitPort for Qrb2210VulkanGpuSubmitProvider:
     fn backend_name() -> text:
         QRB2210_VULKAN_BACKEND
 
+    fn device_handle() -> Qrb2210BoardDeviceHandle:
+        self.binding.device
+
     fn vendor_id() -> i64:
         QRB2210_QUALCOMM_VENDOR_ID
 
@@ -134,7 +169,11 @@ impl Qrb2210GpuSubmitPort for Qrb2210VulkanGpuSubmitProvider:
         val identity = self.kernel.physical_identity(self.binding)
         val receipt = self.kernel.queue_submit(self.binding, batch.command_buffer_handle)
         val accepted = receipt.accepted and receipt.submission_id > 0 and
-            receipt.fence_handle == self.binding.fence_handle
+            receipt.command_buffer_handle == batch.command_buffer_handle and
+            receipt.logical_device_handle == self.binding.logical_device_handle and
+            receipt.queue_handle == self.binding.queue_handle and
+            receipt.fence_handle == self.binding.fence_handle and
+            receipt.driver_generation == self.binding.device.driver_generation
         Qrb2210GpuSubmitReceipt(
             submission_id: if accepted: receipt.submission_id else: 0,
             frame_id: batch.frame_id,
@@ -152,10 +191,19 @@ impl Qrb2210GpuFencePort for Qrb2210VulkanGpuFenceProvider:
             return UNO_Q_DESKTOP_STATUS_OK
         UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE
 
+    fn device_handle() -> Qrb2210BoardDeviceHandle:
+        self.binding.device
+
     me wait_submission(submission_id: i64) -> Qrb2210GpuFenceReceipt:
         if submission_id <= 0 or not _qrb2210_vulkan_provider_ready(self.kernel, self.binding):
             return Qrb2210GpuFenceReceipt(submission_id: submission_id, fence_id: 0, completed: false)
-        val completed = self.kernel.fence_wait(self.binding, QRB2210_FENCE_TIMEOUT_NS)
+        val receipt = self.kernel.fence_wait(
+            self.binding, submission_id, QRB2210_FENCE_TIMEOUT_NS)
+        val completed = receipt.completed and receipt.submission_id == submission_id and
+            receipt.logical_device_handle == self.binding.logical_device_handle and
+            receipt.queue_handle == self.binding.queue_handle and
+            receipt.fence_handle == self.binding.fence_handle and
+            receipt.driver_generation == self.binding.device.driver_generation
         Qrb2210GpuFenceReceipt(
             submission_id: submission_id,
             fence_id: if completed: self.binding.fence_handle.to_i64() else: 0,
@@ -171,6 +219,9 @@ impl Qrb2210DeviceReadbackPort for Qrb2210VulkanDeviceReadbackProvider:
             return UNO_Q_DESKTOP_STATUS_OK
         UNO_Q_DESKTOP_STATUS_PORT_UNAVAILABLE
 
+    fn device_handle() -> Qrb2210BoardDeviceHandle:
+        self.binding.device
+
     me readback_device(
         submission_id: i64,
         frame_id: i64,
@@ -182,9 +233,14 @@ impl Qrb2210DeviceReadbackPort for Qrb2210VulkanDeviceReadbackProvider:
             return Qrb2210DeviceReadbackReceipt(
                 submission_id: submission_id, frame_id: frame_id,
                 width: 0, height: 0, pixels: [], checksum: 0, source: "")
-        val receipt = self.kernel.device_readback(self.binding, submission_id, width, height)
+        val receipt = self.kernel.device_readback(
+            self.binding, submission_id, frame_id, width, height)
         val expected_pixels = width.to_i64() * height.to_i64()
         val valid = receipt.completed and receipt.submission_id == submission_id and
+            receipt.frame_id == frame_id and
+            receipt.logical_device_handle == self.binding.logical_device_handle and
+            receipt.readback_handle == self.binding.readback_handle and
+            receipt.driver_generation == self.binding.device.driver_generation and
             receipt.width == width and receipt.height == height and
             receipt.pixels.len().to_i64() == expected_pixels and
             receipt.source == QRB2210_DEVICE_READBACK_SOURCE
@@ -201,7 +257,8 @@ impl Qrb2210DeviceReadbackPort for Qrb2210VulkanDeviceReadbackProvider:
 export QRB2210_QUALCOMM_VENDOR_ID, QRB2210_VULKAN_BACKEND
 export QRB2210_DEVICE_READBACK_SOURCE, QRB2210_FENCE_TIMEOUT_NS
 export Qrb2210VulkanPhysicalBinding, Qrb2210VulkanKernelIdentity
-export Qrb2210VulkanKernelSubmitReceipt, Qrb2210VulkanKernelReadbackReceipt
+export Qrb2210VulkanKernelSubmitReceipt, Qrb2210VulkanKernelFenceReceipt
+export Qrb2210VulkanKernelReadbackReceipt
 export Qrb2210VulkanKernelPort
 export Qrb2210VulkanGpuSubmitProvider, Qrb2210VulkanGpuFenceProvider
 export Qrb2210VulkanDeviceReadbackProvider

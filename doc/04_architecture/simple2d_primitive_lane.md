@@ -92,12 +92,14 @@ receipts.
 
 The first physical provider slice now adapts kernel-owned QRB2210 Vulkan
 resources to the GPU submit, fence, and device-readback ports. The adapter
-requires a physical identity receipt for board `qrb2210-uno-q`, Qualcomm vendor
-`0x5143`, an Adreno device name, a non-empty driver identity, and matching
-nonzero physical-device, logical-device, queue, fence, and readback handles.
-Submission is accepted only when the kernel returns a positive submission ID
-and the bound fence; readback is accepted only after exact dimensions, pixel
-count, submission correlation, and source `qrb2210-vulkan-device-memory`.
+requires a GPU device handle minted for the current QRB2210 boot and driver
+generation, Qualcomm vendor `0x5143`, an Adreno device name, a non-empty driver
+identity, and matching nonzero physical-device, logical-device, queue, fence,
+and readback handles. Submission is accepted only when the kernel receipt
+matches the command buffer, logical device, queue, fence, and generation.
+Fence completion must match that submission and the same device/queue/fence;
+readback must additionally match the frame, readback handle, dimensions, pixel
+count, generation, and source `qrb2210-vulkan-device-memory`.
 
 The kernel transport itself and the display, input, and audio providers remain
 unavailable, so canonical capability status stays `port-unavailable` and the

@@ -16,7 +16,15 @@ use os.port.uno_q_desktop_contract.{
     uno_q_desktop_backend_status,
     uno_q_desktop_backend_reason
 }
-use os.port.qrb2210_native_2d_ports.{Qrb2210Native2dPlatformPorts}
+use os.port.qrb2210_native_2d_ports.{
+    Qrb2210Native2dPlatformPorts,
+    Qrb2210BoardDeviceHandle,
+    QRB2210_DEVICE_DISPLAY,
+    QRB2210_DEVICE_INPUT,
+    QRB2210_DEVICE_AUDIO,
+    QRB2210_DEVICE_GPU,
+    qrb2210_board_device_handle_ready
+}
 
 val QRB2210_NATIVE_2D_ROUTE: text = "shared-wm-drawir-engine2d-qualcomm-vulkan"
 
@@ -65,6 +73,29 @@ fn qrb2210_native_2d_composition_admission() -> Qrb2210Native2dCompositionAdmiss
     Qrb2210Native2dCompositionAdmission(
         admitted: true, missing_owner: "", reason: "", route: QRB2210_NATIVE_2D_ROUTE)
 
+fn _qrb2210_same_boot(left: Qrb2210BoardDeviceHandle, right: Qrb2210BoardDeviceHandle) -> bool:
+    left.board_id == right.board_id and left.boot_id == right.boot_id
+
+fn _qrb2210_physical_handles_correlate(ports: Qrb2210Native2dPlatformPorts) -> bool:
+    val display = ports.display.device_handle()
+    val input = ports.input.device_handle()
+    val audio = ports.audio.device_handle()
+    val submit = ports.gpu_submit.device_handle()
+    val fence = ports.gpu_fence.device_handle()
+    val readback = ports.device_readback.device_handle()
+    (qrb2210_board_device_handle_ready(display, QRB2210_DEVICE_DISPLAY) and
+        qrb2210_board_device_handle_ready(input, QRB2210_DEVICE_INPUT) and
+        qrb2210_board_device_handle_ready(audio, QRB2210_DEVICE_AUDIO) and
+        qrb2210_board_device_handle_ready(submit, QRB2210_DEVICE_GPU) and
+        qrb2210_board_device_handle_ready(fence, QRB2210_DEVICE_GPU) and
+        qrb2210_board_device_handle_ready(readback, QRB2210_DEVICE_GPU) and
+        _qrb2210_same_boot(display, input) and _qrb2210_same_boot(display, audio) and
+        _qrb2210_same_boot(display, submit) and
+        submit.native_handle == fence.native_handle and
+        submit.native_handle == readback.native_handle and
+        submit.driver_generation == fence.driver_generation and
+        submit.driver_generation == readback.driver_generation)
+
 fn qrb2210_native_2d_bind_root(
     engine: Engine2D,
     ports: Qrb2210Native2dPlatformPorts
@@ -89,6 +120,8 @@ fn qrb2210_native_2d_bind_root(
     if (ports.gpu_submit.backend_name() != "qualcomm-vulkan" or
         ports.gpu_submit.vendor_id() != 0x5143):
         return Err("physical-adreno-vulkan-provider-not-proven")
+    if not _qrb2210_physical_handles_correlate(ports):
+        return Err("physical-provider-identity-not-correlated")
     Ok(Qrb2210Native2dCompositionRoot(
         engine: engine, ports: ports, route: QRB2210_NATIVE_2D_ROUTE))
 

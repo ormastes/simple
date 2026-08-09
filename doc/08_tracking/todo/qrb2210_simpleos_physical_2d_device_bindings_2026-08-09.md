@@ -12,6 +12,8 @@ Implemented source boundary:
 - PCM submit/completion correlation by physical buffer and exact sample count;
 - display present/capture correlation by physical handle, frame, present ID,
   byte count, and device-readback checksum.
+- Vulkan submit/fence/readback correlation by one GPU boot/device/generation,
+  exact command-buffer/device/queue/fence/readback handles, and frame identity.
 
 Remaining physical work:
 
