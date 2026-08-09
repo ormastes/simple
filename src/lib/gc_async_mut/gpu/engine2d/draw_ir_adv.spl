@@ -1241,7 +1241,9 @@ var _engine2d_embed_pool_w: i32 = 0
 var _engine2d_embed_pool_h: i32 = 0
 var _engine2d_embed_pool_backend: text = ""
 
-fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<Engine2D, text>:
+fn _engine2d_embed_offscreen_acquire(
+    owner: Engine2D, w: i32, h: i32, failure_reason: [text]
+) -> Engine2D:
     # Reuse the cached surface only on an exact size match. The (w, h) sentinel
     # (initial 0x0 never matches a real embedding, which is guarded > 0) makes
     # the first call allocate. Robust to any Option/nil miscodegen on the
@@ -1255,17 +1257,19 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
             cached.clear(0x00000000u32)
             cached.clear_clip()
             cached.clear_mask()
-            return Ok(cached)
+            return cached
     val created = owner.draw_ir_create_offscreen_engine(w, h)
     match created:
         Err(reason):
-            Err(reason)
+            if failure_reason.len() > 0:
+                failure_reason[0] = reason
+            owner
         Ok(fresh):
             _engine2d_embed_pool = Some(fresh)
             _engine2d_embed_pool_w = w
             _engine2d_embed_pool_h = h
             _engine2d_embed_pool_backend = owner.backend_name()
-            Ok(fresh)
+            fresh
 
 # Render one batch's flat command list onto `engine`, with every command's
 # local (x, y) shifted by (offset_x, offset_y). Shared by the direct
@@ -1835,16 +1839,15 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         # to the non-reclaiming bump heap per translucent window. Nested embeds
         # (depth > 0, currently unreachable but kept correct) use a fresh
         # surface so an in-flight parent buffer is never clobbered.
+        var pool_failure: [text] = [""]
         val pooled = _engine2d_embed_offscreen_acquire(
-            eng, embedding.width, embedding.height)
-        match pooled:
-            Err(reason):
-                return _engine2d_draw_ir_render_outcome(
-                    eng, 0, commands.len().to_i32(), reason, 0)
-            Ok(created):
-                offscreen = created
-                offscreen_created = true
-                offscreen_pooled = true
+            eng, embedding.width, embedding.height, pool_failure)
+        if pool_failure[0] != "":
+            return _engine2d_draw_ir_render_outcome(
+                eng, 0, commands.len().to_i32(), pool_failure[0], 0)
+        offscreen = pooled
+        offscreen_created = true
+        offscreen_pooled = true
     else:
         val created = eng.draw_ir_create_offscreen_engine(
             embedding.width, embedding.height)
