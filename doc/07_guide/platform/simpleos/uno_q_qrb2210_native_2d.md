@@ -32,14 +32,24 @@ pure-Simple CLI. A Debian/Android board run is readiness
 only.
 
 Today the canonical `uno_q_desktop_contract` reports the QRB2210 SimpleOS
-display/input/audio port unavailable, so even a semantically complete offline
+display/input/audio/GPU-submit/fence/device-readback ports unavailable, so even a semantically complete offline
 receipt is blocked before readiness promotion. Do not change the admission to
 bypass that owner; the port implementation must update the canonical contract.
+
+The next real source boundary is split between
+`os.port.qrb2210_native_2d_ports` and
+`os.port.qrb2210_native_2d_composition_root`. The former types the six physical
+providers without supplying emulators. The latter admits only the canonical
+Shared WM -> DrawIR -> Engine2D `qualcomm` backend -> Qualcomm Vulkan route and
+requires Adreno vendor `0x5143`. It checks canonical status before touching a
+provider, so a test object or offline transcript cannot bypass unavailable
+hardware.
 
 The QRB2210 boot target is
 `examples/09_embedded/simple_os/arch/qrb2210/gui_entry_desktop.spl`. At present
 it intentionally terminates with `UNO_Q_QRB2210_DESKTOP_BLOCKED` after querying
-the canonical display, window-event, and audio capabilities. It must not be
+the canonical display, window-event, audio, GPU-submit, fence, and
+device-readback capabilities. It must not be
 replaced with the ARM QEMU desktop entry: RAMFB, virtio-input, ivshmem host GPU,
 and virtio-snd are QEMU transports, not Uno Q hardware. The entry also refuses
 to manufacture an `UnoQNative2dEvidence` record; PASS evidence must originate

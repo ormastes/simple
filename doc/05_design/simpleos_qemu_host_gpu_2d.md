@@ -448,7 +448,12 @@ offset, expected/actual byte, pixel coordinate, channel, and total
 - Windows QEMU: use the existing DirectX host-offload direction. WHPX is CPU
   acceleration and has no bearing on GPU admission.
 - UNO Q: first validate the artifact with the shipped Debian Adreno stack, then
-  implement a SimpleOS-native adapter. Debian results remain readiness only.
+  implement the six typed SimpleOS-native providers declared by
+  `qrb2210_native_2d_ports` (display, input, audio, GPU submit, fence, and
+  device readback). Bind them only through
+  `qrb2210_native_2d_composition_root`, preserving
+  Shared WM -> DrawIrComposition -> Engine2D -> Qualcomm Vulkan. Debian
+  results remain readiness only and cannot change canonical provider status.
 - VisionFive 2: preserve a vendor-driver experiment separately; do not begin
   native promotion until the exact BXE BVNC, firmware, kernel, and Mesa support
   are proven. Current upstream Mesa classification is unsupported.
@@ -481,7 +486,8 @@ Before merging any adapter:
    Metal-only daemon native build without changing public Simple 2D interfaces.
 4. Complete native macOS Metal and Windows DirectX host rows on prepared hosts.
 5. Add one shared native-board wrapper and capability schema.
-6. Add UNO Q Debian readiness, then SimpleOS-native Adreno bring-up.
+6. Add UNO Q Debian readiness, then implement the QRB2210 physical providers
+   and promote each canonical capability only with its real driver.
 7. Add UP Squared Linux/Windows readiness, then SimpleOS-native Intel bring-up.
 8. Add VisionFive 2 vendor readiness; start native BXE work only after the
    upstream/vendor driver and firmware contract is explicit.

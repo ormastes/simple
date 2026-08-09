@@ -28,3 +28,11 @@ while any owner is unavailable. It deliberately does not import the ARM QEMU
 RAMFB, virtio, ivshmem, or audio adapters. When physical drivers and a board
 composition root are implemented, that root must reuse WM → DrawIR → Engine2D
 → Qualcomm Vulkan and feed live correlated receipts to the existing admission.
+
+The next source slice types that lower boundary in
+`os.port.qrb2210_native_2d_ports`: display, canonical `HostInputEvent`, PCM
+audio, Engine2D command-batch submit, fence completion, and device-origin
+readback remain distinct provider responsibilities. The matching
+`qrb2210_native_2d_composition_root` admits only the shared WM -> DrawIR ->
+Engine2D -> Qualcomm Vulkan route. No provider implementation was found or
+added, and all six QRB2210 capability statuses remain `port-unavailable`.

@@ -76,7 +76,10 @@ All four lanes must use the same evidence fields and helper names:
     - draw/text/image path through DrawIR-linked contracts
     - pointer, keyboard, `ctrl` and `alt` modifier routing on shared shortcut contracts
     - audio/PCM transport and render path
-    - board fail-closed reason matrix
+  - board fail-closed reason matrix
+  - typed physical provider boundary and composition-root admission are now in
+    source; display/input/audio/submit/fence/readback implementations remain
+    missing and all six canonical capabilities remain `port-unavailable`.
 - Commands:
   - `sh scripts/check/check-simpleos-native-board-gpu-2d.shs --board uno-q --strict`
   - `sh scripts/check/check-simpleos-native-board-gpu-2d.shs --self-test`
@@ -97,7 +100,7 @@ All four lanes must use the same evidence fields and helper names:
 | Linux/QEMU Vulkan | ✅ parser/self-test + contract reuse | ⏸️ no fresh native PASS (compiler/runtime admission) |
 | ARM64 QEMU + input/audio/font contracts | ✅ parser/self-test + shared source wiring | ⏸️ no fresh native PASS (compiler/runtime admission) |
 | macOS HVF | ✅ parser/test harness exists | ⏸️ emulation-only here; no live native PASS |
-| UNO Q board + showcase | ✅ board reason matrix + showcase spec/manual | ⏸️ no physical board runner or attached UNO Q |
+| UNO Q board + showcase | ✅ board reason matrix, typed six-provider boundary, shared-route admission, showcase spec/manual | ⏸️ no QRB2210 physical providers, board runner, or attached UNO Q |
 
 ## Required acceptance additions before sprint complete
 - Replace all placeholder status in `doc/06_spec/03_system/.../simpleos_qemu_host_gpu_2d_spec.md` and any generated manuals with live evidence rows.

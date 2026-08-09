@@ -78,6 +78,23 @@ TODO-gated emulation row. UNO Q is postponed until board enumeration and the
 SimpleOS Adreno lifecycle (firmware, MMU/cache, queue, fence, readback, display)
 exist. These deferrals are explicit classifications, not fallback passes.
 
+### QRB2210 physical composition boundary
+
+The UNO Q lane now has a typed next-layer boundary in
+`os.port.qrb2210_native_2d_ports`: display/present, normalized `HostInputEvent`,
+PCM audio, Vulkan submit, fence completion, and device-origin readback are six
+separate physical provider ports. `qrb2210_native_2d_composition_root` is the
+only board admission point and names the route
+`shared-wm-drawir-engine2d-qualcomm-vulkan`. It rejects any Engine2D backend
+other than `qualcomm` and any GPU provider not identifying Qualcomm Vulkan
+vendor `0x5143`. The port definitions do not implement hardware or generate
+receipts.
+
+Every one of those capabilities still returns canonical `port-unavailable`.
+Consequently the QRB2210 entry fails before binding the composition root, and
+no source contract, Debian run, QEMU adapter, or caller-supplied object can
+promote the physical-board row.
+
 ## Migration sequence
 
 1. Complete and verify each primitive on the Linux host surface.

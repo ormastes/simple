@@ -1,0 +1,109 @@
+# codex-impl
+# Admission boundary for the one permitted physical UNO Q rendering route:
+# Shared WM -> DrawIrComposition -> Engine2D -> Qualcomm Vulkan.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use common.ui.draw_ir.{DrawIrComposition}
+use os.port.uno_q_desktop_contract.{
+    UNO_Q_QRB2210_BOARD_ID,
+    UNO_Q_DESKTOP_CAP_DISPLAY,
+    UNO_Q_DESKTOP_CAP_WINDOW_EVENT,
+    UNO_Q_DESKTOP_CAP_AUDIO,
+    UNO_Q_DESKTOP_CAP_GPU_SUBMIT,
+    UNO_Q_DESKTOP_CAP_GPU_FENCE,
+    UNO_Q_DESKTOP_CAP_DEVICE_READBACK,
+    UNO_Q_DESKTOP_STATUS_OK,
+    uno_q_desktop_backend_status,
+    uno_q_desktop_backend_reason
+}
+use os.port.qrb2210_native_2d_ports.{Qrb2210Native2dPlatformPorts}
+
+val QRB2210_NATIVE_2D_ROUTE: text = "shared-wm-drawir-engine2d-qualcomm-vulkan"
+
+class Qrb2210Native2dCompositionAdmission:
+    admitted: bool
+    missing_owner: text
+    reason: text
+    route: text
+
+class Qrb2210Native2dCompositionRoot:
+    engine: Engine2D
+    ports: Qrb2210Native2dPlatformPorts
+    route: text
+
+class Qrb2210Native2dSharedFrame:
+    frame_id: i64
+    composition: DrawIrComposition
+
+fn _qrb2210_owner_admission(capability: i64, owner: text) -> Qrb2210Native2dCompositionAdmission:
+    val status = uno_q_desktop_backend_status(UNO_Q_QRB2210_BOARD_ID, capability)
+    if status != UNO_Q_DESKTOP_STATUS_OK:
+        return Qrb2210Native2dCompositionAdmission(
+            admitted: false,
+            missing_owner: owner,
+            reason: uno_q_desktop_backend_reason(UNO_Q_QRB2210_BOARD_ID, capability),
+            route: QRB2210_NATIVE_2D_ROUTE
+        )
+    Qrb2210Native2dCompositionAdmission(
+        admitted: true, missing_owner: "", reason: "", route: QRB2210_NATIVE_2D_ROUTE)
+
+fn qrb2210_native_2d_composition_admission() -> Qrb2210Native2dCompositionAdmission:
+    """Require every physical owner before constructing the shared root."""
+    val capabilities = [
+        UNO_Q_DESKTOP_CAP_DISPLAY,
+        UNO_Q_DESKTOP_CAP_WINDOW_EVENT,
+        UNO_Q_DESKTOP_CAP_AUDIO,
+        UNO_Q_DESKTOP_CAP_GPU_SUBMIT,
+        UNO_Q_DESKTOP_CAP_GPU_FENCE,
+        UNO_Q_DESKTOP_CAP_DEVICE_READBACK
+    ]
+    val owners = ["display", "input", "audio", "gpu-submit", "gpu-fence", "device-readback"]
+    for index in 0..capabilities.len():
+        val admission = _qrb2210_owner_admission(capabilities[index], owners[index])
+        if not admission.admitted:
+            return admission
+    Qrb2210Native2dCompositionAdmission(
+        admitted: true, missing_owner: "", reason: "", route: QRB2210_NATIVE_2D_ROUTE)
+
+fn qrb2210_native_2d_bind_root(
+    engine: Engine2D,
+    ports: Qrb2210Native2dPlatformPorts
+) -> Result<Qrb2210Native2dCompositionRoot, text>:
+    """Bind only a real Qualcomm/Adreno Vulkan Engine2D root.
+
+    Canonical board status is checked before provider methods. Therefore the
+    current source cannot be promoted by synthetic objects or offline files.
+    """
+    val admission = qrb2210_native_2d_composition_admission()
+    if not admission.admitted:
+        return Err("{admission.missing_owner}:{admission.reason}")
+    if engine.selected_backend_name != "qualcomm":
+        return Err("engine2d-backend-is-not-qualcomm")
+    if (ports.display.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
+        ports.input.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
+        ports.audio.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
+        ports.gpu_submit.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
+        ports.gpu_fence.readiness_status() != UNO_Q_DESKTOP_STATUS_OK or
+        ports.device_readback.readiness_status() != UNO_Q_DESKTOP_STATUS_OK):
+        return Err("physical-provider-not-ready")
+    if (ports.gpu_submit.backend_name() != "qualcomm-vulkan" or
+        ports.gpu_submit.vendor_id() != 0x5143):
+        return Err("physical-adreno-vulkan-provider-not-proven")
+    Ok(Qrb2210Native2dCompositionRoot(
+        engine: engine, ports: ports, route: QRB2210_NATIVE_2D_ROUTE))
+
+fn qrb2210_native_2d_shared_frame(
+    root: Qrb2210Native2dCompositionRoot,
+    composition: DrawIrComposition,
+    frame_id: i64
+) -> Result<Qrb2210Native2dSharedFrame, text>:
+    """Accept a canonical producer composition; execution remains Engine2D-owned."""
+    if root.route != QRB2210_NATIVE_2D_ROUTE or frame_id <= 0:
+        return Err("invalid-qrb2210-shared-frame")
+    Ok(Qrb2210Native2dSharedFrame(frame_id: frame_id, composition: composition))
+
+export QRB2210_NATIVE_2D_ROUTE
+export Qrb2210Native2dCompositionAdmission, Qrb2210Native2dCompositionRoot
+export Qrb2210Native2dSharedFrame
+export qrb2210_native_2d_composition_admission, qrb2210_native_2d_bind_root
+export qrb2210_native_2d_shared_frame

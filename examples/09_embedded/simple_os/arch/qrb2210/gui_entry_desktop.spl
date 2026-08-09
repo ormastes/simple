@@ -10,14 +10,8 @@
 # Vulkan submit/fence/readback, and frame-capture receipts belong to the future
 # physical composition root; this entry never fabricates them.
 
-use os.port.uno_q_desktop_contract.{
-    UNO_Q_QRB2210_BOARD_ID,
-    UNO_Q_DESKTOP_CAP_DISPLAY,
-    UNO_Q_DESKTOP_CAP_WINDOW_EVENT,
-    UNO_Q_DESKTOP_CAP_AUDIO,
-    UNO_Q_DESKTOP_STATUS_OK,
-    uno_q_desktop_backend_status,
-    uno_q_desktop_backend_reason
+use os.port.qrb2210_native_2d_composition_root.{
+    qrb2210_native_2d_composition_admission
 }
 
 class Qrb2210DesktopEntryAdmission:
@@ -25,32 +19,18 @@ class Qrb2210DesktopEntryAdmission:
     capability: text
     reason: text
 
-fn _qrb2210_capability_admission(capability: i64, name: text) -> Qrb2210DesktopEntryAdmission:
-    val status = uno_q_desktop_backend_status(UNO_Q_QRB2210_BOARD_ID, capability)
-    if status != UNO_Q_DESKTOP_STATUS_OK:
-        return Qrb2210DesktopEntryAdmission(
-            admitted: false,
-            capability: name,
-            reason: uno_q_desktop_backend_reason(UNO_Q_QRB2210_BOARD_ID, capability)
-        )
-    Qrb2210DesktopEntryAdmission(admitted: true, capability: name, reason: "")
-
 fn qrb2210_desktop_entry_admission() -> Qrb2210DesktopEntryAdmission:
     """Require every physical owner before the shared desktop may start.
 
     This function consumes only canonical port status.  It never accepts
     caller-supplied receipts, vendor-OS readiness, or synthetic hardware.
     """
-    val display = _qrb2210_capability_admission(UNO_Q_DESKTOP_CAP_DISPLAY, "display")
-    if not display.admitted:
-        return display
-    val window_event = _qrb2210_capability_admission(
-        UNO_Q_DESKTOP_CAP_WINDOW_EVENT,
-        "window-event"
+    val admission = qrb2210_native_2d_composition_admission()
+    Qrb2210DesktopEntryAdmission(
+        admitted: admission.admitted,
+        capability: admission.missing_owner,
+        reason: admission.reason
     )
-    if not window_event.admitted:
-        return window_event
-    _qrb2210_capability_admission(UNO_Q_DESKTOP_CAP_AUDIO, "audio")
 
 fn spl_start():
     val admission = qrb2210_desktop_entry_admission()
@@ -59,9 +39,9 @@ fn spl_start():
             "UNO_Q_QRB2210_DESKTOP_BLOCKED capability={admission.capability} " +
             "reason={admission.reason}"
         )
-    # Reaching this branch means the canonical contract was promoted without
-    # installing the physical board composition root.  Fail closed rather than
-    # substituting QEMU or constructing an uncorrelated PASS receipt.
-    panic("UNO_Q_QRB2210_DESKTOP_BLOCKED reason=physical-composition-root-missing")
+    # The physical boot loop must bind Qrb2210Native2dCompositionRoot with all
+    # six providers. This entry remains fail-closed until that final board
+    # owner calls the shared WM loop with the admitted root.
+    panic("UNO_Q_QRB2210_DESKTOP_BLOCKED reason=physical-composition-root-not-bound")
 
 export Qrb2210DesktopEntryAdmission, qrb2210_desktop_entry_admission
