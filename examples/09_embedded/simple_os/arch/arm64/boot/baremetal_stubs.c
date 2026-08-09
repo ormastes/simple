@@ -347,6 +347,13 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     int64_t len = len_val;
     if (len < 0 || len > 0x100000) return NIL_VALUE;
     _heap_string_new_count++;
+    if ((_heap_string_new_count % 250000U) == 0U) {
+        serial_puts("[heap-string-progress] count=");
+        serial_put_dec((int64_t)_heap_string_new_count);
+        serial_puts(" caller=");
+        serial_put_hex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -4896,6 +4903,7 @@ typedef struct {
     RuntimeValue value;
 } Arm64LiteralCacheEntry;
 static Arm64LiteralCacheEntry _arm64_literal_cache[ARM64_LITERAL_CACHE_CAPACITY];
+static uint64_t _arm64_literal_cache_fallbacks;
 
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
@@ -4917,6 +4925,13 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
             return value;
         }
         slot = (slot + 1U) & (ARM64_LITERAL_CACHE_CAPACITY - 1U);
+    }
+    _arm64_literal_cache_fallbacks++;
+    if (_arm64_literal_cache_fallbacks == 1U ||
+        (_arm64_literal_cache_fallbacks % 1000U) == 0U) {
+        serial_puts("[literal-cache-fallback] count=");
+        serial_put_dec((int64_t)_arm64_literal_cache_fallbacks);
+        serial_puts("\r\n");
     }
     return rt_string_new(data, len_val);
 }
