@@ -14,15 +14,21 @@ The live runner is
 output-directory, and timeout selection; transcript, receipt, capture, replay,
 and offline inputs are rejected. It selects an authorized ADB device, verifies
 QRB2210/UNO Q identity, invokes `/usr/bin/simpleos-unoq-2d-evidence` on the
-board, and acquires both the serial receipt and raw RGBA capture itself. Missing
+board, first clears the fixed remote evidence paths, and acquires both the
+serial receipt and raw RGBA capture into a fresh private run directory. Missing
 hardware or a missing/failing production provider remains `blocked`; an
 offline preflight can never be promoted to PASS. The admission contract requires correlated
 Adreno Vulkan submission, fence and device readback, exact checksum, no CPU
 fallback, left/right Ctrl and Alt, pointer move/down/drag/up/wheel, and completed
-non-silent audio. The live runner strengthens this to at least 20 animation and
-warm performance frames, a bounded nonzero warm p95, bounded nonzero peak RSS,
+non-silent audio. The live runner strengthens this to exactly 20 animation and
+20 warm performance frames, a nonzero warm p95 no
+greater than the host-owned 16,700 us budget, a nonzero peak RSS no greater
+than the host-owned 256 MiB budget,
 DrawIR work, font glyph work, exact raw-capture byte count/hash, and matching
-run/ADB/boot/frame identities. A Debian/Android board run is readiness
+run/ADB/boot/frame identities. The boot ID is read independently before and
+after provider execution, the readback byte count must equal the acquired
+capture, and admission runs only through a canonical Stage4 provenance-verified
+pure-Simple CLI. A Debian/Android board run is readiness
 only.
 
 Today the canonical `uno_q_desktop_contract` reports the QRB2210 SimpleOS
