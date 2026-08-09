@@ -112,6 +112,73 @@ not help). That points at an additional, broader defect specific to state
 crossing a real `TcpListener.accept()` boundary in a spawned server
 subprocess, which this narrower in-process repro does not reproduce.
 
+## Further investigation (2026-08-09, second pass) — confirmed real, found BROADER and more erratic than filed; no fix attempted
+
+Reproduced the doc's exact minimal repro verbatim against
+`bin/release/x86_64-unknown-linux-gnu/simple` (still the only binary available
+on this host; `bin/simple` still resolves to this same seed) with
+`SIMPLE_EXECUTION_MODE=interpreter`: confirmed `events_len=1`, matching the
+filed symptom exactly.
+
+However, probing the "Isolation" section's specific claims with small
+variants turned up behavior that **contradicts** that section and shows the
+defect is not narrowly scoped to "two mutating calls in one dispatched
+invocation":
+
+- The doc claims *"A single `push_event` call inside `route_execute` ...
+  persists correctly"*. Reproduced verbatim (`route_execute_one` calling
+  `push_event` once) — confirmed, `events_len=1`, write persists.
+- But a structurally similar single-call, single-dispatch case for
+  **`add_item`** alone (`dispatch(route_create)` calling
+  `S.add_item("x")` once, nothing else) **does not persist**: `S.items.len()`
+  reads back as `0`, not `1`, immediately after the dispatch returns.
+- Same total loss for a plain scalar field mutated once through dispatch
+  (`me inc(): self.n = self.n + 1`, single `dispatch(route_execute)` call,
+  no arrays at all): `S.n` reads back as `0`, not `1`.
+- Same total loss for a bare `self.items.push(x)` on a `[text]` field (no
+  nested struct, no read-modify-writeback via index assignment), single
+  dispatch call: `S.items.len()` reads back as `0`.
+- Yet in the full original repro, `add_item`'s write (called first, via its
+  own `dispatch()`) **does** end up visible by the time the final
+  `direct_events_check()` runs — otherwise `events_len` couldn't read `1`
+  (indexing `S.items[0]` would panic/fail on an empty list).
+
+Put together: whether a given dispatched mutating call's write is visible
+depends on more than "how many mutating calls happened inside one dispatched
+invocation" — it also seems to depend on what runs *after* it (a later
+dispatch call, a later direct top-level statement/function call that reads
+the same variable), on the field's static type (struct list vs. scalar vs.
+primitive list), and on whether the read-back happens through a nested
+index expression or a direct field read. This is consistent with the bug
+doc's own theory (a stale environment snapshot for `self`/module globals,
+captured at some point and clobbering real state on writeback) but the
+snapshot/flush point is evidently not simply "per dispatched call" — it
+looks tied to some other, still-unidentified trigger (possibly a lazy
+env-flush that only happens on certain subsequent variable reads or scope
+exits). Repro files used for this pass (`scratch_repro2.spl` through
+`scratch_repro8.spl`) were ephemeral, written under the worktree used for
+this investigation and not checked in; each is a 15-20 line variant of the
+snippet above and can be reconstructed trivially from the bullets.
+
+**Conclusion: no fix attempted.** The interpreter's module-global /
+`self`-writeback visibility around first-class-function dispatch is
+evidently a broad, poorly-understood area — the actual trigger condition is
+not what the original isolation described, small structural changes flip
+the outcome unpredictably, and I could not pin a specific flush/snapshot
+function or file:line as the root cause in the time available. Per this
+repo's standing guidance (interpreter is fragile, has caused repeated
+regressions, "fix .spl not Rust" bias, and this task's own instruction to
+not attempt a fix without high confidence in a narrow root cause), this is
+left open rather than risking a partial/wrong Rust interpreter change. A
+real fix will need dedicated tracing of the interpreter's environment
+snapshot/writeback machinery for module-level `var` bindings referenced by
+`me` methods invoked through a first-class function value — start by
+instrumenting `place.rs` / `node_exec.rs` for wherever module-global
+variable slots are read and re-written around a call to a value held in a
+function/closure binding, and check whether that env is a snapshot copy
+(cloned) vs. a shared handle (`Rc<RefCell<..>>`), and at what point (if any)
+a cloned copy gets written back to the shared slot.
+
 ## Suggested next step
 
 1. Reproduce this file's minimal repro directly (no HTTP/sockets needed) to
