@@ -1,0 +1,121 @@
+#![allow(primitive_api)]
+# Counterpart SSpec extension payload (Lane F7/F8, additive-only).
+#
+# primitive_api is allowed here: the validation predicates return the bare
+# bool/text the frozen extension envelope already speaks.
+#
+# `simple.sspec.evidence.v1` (src/lib/common/spec/evidence/model.spl,
+# EVIDENCE_MANIFEST_SCHEMA) is NOT touched by this module and stays the
+# authoritative receipt for a generated manual. This is a second, distinct
+# namespace — `simple.sspec.counterpart.v1`, the constant already frozen as
+# COUNTERPART_EXTENSION_SCHEMA in the Wave-0 model — carrying an OPAQUE payload
+# that the core evidence pipeline transports without interpreting.
+#
+# Everything in the payload is a REFERENCE, never inline content: a plan ref,
+# provider-manifest refs, conversion-receipt refs, a comparison-matrix ref, and
+# execution-receipt refs. The referenced bytes live in the content-addressed
+# artifact store, so the sidecar stays small and a stale sidecar can be told
+# apart from a current one by hash rather than by eyeballing embedded text.
+#
+# Shape deliberately mirrors src/lib/common/spec/evidence/spipe_extension.spl
+# (self-describing namespace + version inside the envelope, deterministic
+# `*_lines` serialization, and a `*_reason` validator preferred over the bare
+# bool at call sites).
+
+use std.common.spec.evidence.counterpart.model.{COUNTERPART_EXTENSION_SCHEMA}
+
+# The namespace and version are carried INSIDE the envelope, not only in the
+# outer field key, so a payload copied or diffed out of its original field is
+# still self-describing.
+#
+# NOTE ON ORDERING: the file-header `@allow(...)` attribute must be followed by
+# a fn/struct/enum, never by a `pub val` — the engine's parser rejects
+# "pub with attributes ... found Val". Hence the struct precedes the constants.
+pub struct CounterpartExtension:
+    namespace_id: text
+    version: text
+    plan_ref: text
+    provider_manifest_refs: [text]
+    conversion_receipt_refs: [text]
+    comparison_matrix_ref: text
+    execution_receipt_refs: [text]
+
+pub val COUNTERPART_EXTENSION_NAMESPACE: text = COUNTERPART_EXTENSION_SCHEMA
+pub val COUNTERPART_EXTENSION_VERSION: text = "1"
+
+pub fn counterpart_extension(
+    plan_ref: text,
+    provider_manifest_refs: [text],
+    conversion_receipt_refs: [text],
+    comparison_matrix_ref: text,
+    execution_receipt_refs: [text]
+) -> CounterpartExtension:
+    CounterpartExtension(
+        namespace_id: COUNTERPART_EXTENSION_NAMESPACE,
+        version: COUNTERPART_EXTENSION_VERSION,
+        plan_ref: plan_ref,
+        provider_manifest_refs: provider_manifest_refs,
+        conversion_receipt_refs: conversion_receipt_refs,
+        comparison_matrix_ref: comparison_matrix_ref,
+        execution_receipt_refs: execution_receipt_refs
+    )
+
+# Fixed field order, and list members emitted in caller order (callers
+# stable-order their lists, matching the core rule). Two runs over an unchanged
+# payload must produce byte-identical lines or a diff stops meaning "changed".
+pub fn counterpart_extension_lines(extension: CounterpartExtension) -> [text]:
+    var lines: [text] = [
+        "namespace_id: " + extension.namespace_id,
+        "version: " + extension.version,
+        "plan_ref: " + extension.plan_ref,
+        "comparison_matrix_ref: " + extension.comparison_matrix_ref,
+        "provider_manifest_ref_count: " + "{extension.provider_manifest_refs.len()}"
+    ]
+    for reference in extension.provider_manifest_refs:
+        lines.push("provider_manifest_ref: " + reference)
+    lines.push("conversion_receipt_ref_count: " + "{extension.conversion_receipt_refs.len()}")
+    for reference in extension.conversion_receipt_refs:
+        lines.push("conversion_receipt_ref: " + reference)
+    lines.push("execution_receipt_ref_count: " + "{extension.execution_receipt_refs.len()}")
+    for reference in extension.execution_receipt_refs:
+        lines.push("execution_receipt_ref: " + reference)
+    lines
+
+# Fails closed on the defects that would make the payload untrustworthy:
+#
+# - wrong namespace: a consumer trusting the inner `namespace_id` would
+#   misattribute the payload to this extension.
+# - missing plan or matrix ref: the payload would claim a counterpart run
+#   while pointing at nothing that could be re-derived, which is the exact
+#   "receipt that identifies nothing" failure the store exists to prevent.
+# - no provider manifest refs: a counterpart run by definition has at least
+#   two providers; zero refs means the payload documents no comparison.
+# - an empty ref string inside any list: it silently reads as "one artifact"
+#   in a count while resolving to nothing.
+pub fn counterpart_extension_reason(extension: CounterpartExtension) -> text:
+    if extension.namespace_id != COUNTERPART_EXTENSION_NAMESPACE:
+        return "wrong namespace: " + extension.namespace_id
+    if extension.version != COUNTERPART_EXTENSION_VERSION:
+        return "wrong version: " + extension.version
+    if extension.plan_ref == "":
+        return "plan_ref is empty"
+    if extension.comparison_matrix_ref == "":
+        return "comparison_matrix_ref is empty"
+    if extension.provider_manifest_refs.len() < 2:
+        return "fewer than two provider manifest refs: nothing was differentially compared"
+    for reference in extension.provider_manifest_refs:
+        if reference == "":
+            return "empty provider_manifest_ref"
+    for reference in extension.conversion_receipt_refs:
+        if reference == "":
+            return "empty conversion_receipt_ref"
+    for reference in extension.execution_receipt_refs:
+        if reference == "":
+            return "empty execution_receipt_ref"
+    ""
+
+# There is deliberately NO bool-returning `is_wellformed` wrapper here. The
+# sibling evidence extension documents that its bool variant misreports as
+# `nil` at some call sites under the bootstrap engine and tells callers to use
+# the reason string instead; shipping a second such wrapper would only add a
+# form nobody should call. Use `counterpart_extension_reason(ext) == ""`.
