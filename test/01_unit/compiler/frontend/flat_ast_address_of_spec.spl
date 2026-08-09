@@ -1,6 +1,8 @@
 # Prefix address-of must survive the bootstrap flat-AST path.
 
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.frontend.{preprocess_conditionals}
+use compiler.core.parser.{parser_has_errors}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir.*
@@ -22,6 +24,24 @@ fn contains_shared_ref(expr: Expr) -> bool:
             false
 
 describe "flat AST address-of parsing", tag: ["only-compiled"]:
+    it "preserves a terminal close paren after conditional reconstruction":
+        val src = "@cfg(true)\n" +
+            "fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64:\n" +
+            "    syscall(69 as u64, fd as u64, cmd as u64, arg, 0 as u64, 0 as u64)"
+        val out = preprocess_conditionals(src)
+        val module = parse_and_build_module(out, "flat_ast_terminal_call_probe.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val probe = module.functions["sys_fcntl"] ?? panic("missing sys_fcntl function")
+        match probe.body.stmts[0].kind:
+            case StmtKind.Expr(expr):
+                match expr.kind:
+                    case ExprKind.Call(_, args):
+                        expect(args.len()).to_equal(6)
+                    case _:
+                        fail("terminal expression was not a call")
+            case _:
+                fail("terminal statement was not an expression")
+
     it "preserves shared and mutable references plus binary bitwise-and":
         val src = "fn probe(buf: i64, left: u64, right: u64) -> i64:\n" +
             "    val result = syscall(80, 1, 0, &buf as u64, left & right, &mut buf, 0)\n" +

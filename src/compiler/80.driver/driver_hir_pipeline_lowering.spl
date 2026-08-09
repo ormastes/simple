@@ -7,7 +7,7 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules, module_surfaces_from_indexed_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
@@ -169,6 +169,9 @@ impl CompilerDriver:
             return (phase_ctx, false)
         ast_reset()
         phase_ctx.modules = {}
+        phase_ctx.parser_modules = []
+        phase_ctx.parser_module_index = {}
+        phase_ctx.parser_module_source_indices = []
         lexer_release_parse_source_globals()
         val reclaimed_sources = phase_ctx.reclaim_source_contents()
         log_phase("phase3:streaming_source_reclaim:done reclaimed={reclaimed_sources}")
@@ -191,7 +194,7 @@ impl CompilerDriver:
             map_src_idx = map_src_idx + 1
 
         log_debug("lowering modules to HIR")
-        dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.keys().len()}")
+        dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.parser_module_names().len()}")
         # Shared trait registry (task #55): each module gets a FRESH HirLowering
         # instance, but lowered_traits must survive across modules so an impl
         # module lowered AFTER its trait's defining module can still see the
@@ -207,7 +210,11 @@ impl CompilerDriver:
         var shared_lowering_diagnostic_messages: [text] = []
         var shared_lowering_diagnostic_recovered: [bool] = []
         val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.sources.len() > 0:
-            match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
+            val surface_result = if self.ctx.parser_module_source_indices.len() > 0:
+                module_surfaces_from_indexed_modules(self.ctx.parser_modules, self.ctx.parser_module_source_indices, self.ctx.sources)
+            else:
+                module_surfaces_from_modules(self.ctx.modules, self.ctx.sources)
+            match surface_result:
                 case Ok(value): value
                 case Err(error):
                     self.ctx.add_error("Module surface extraction error: {error}")
@@ -218,7 +225,8 @@ impl CompilerDriver:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             var bootstrap_hir_modules: Dict<text, HirModule> = {}
             val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
-            for module in self.ctx.modules.values():
+            for module_name in self.ctx.parser_module_names():
+                val module = self.ctx.parser_module_for(module_name)
                 val name = module.name
                 log_trace("processing module")
                 if module == nil:
@@ -280,18 +288,18 @@ impl CompilerDriver:
             dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module: HirModule = if is_bootstrap_entry:
                 dtrace("[DRV] branch=bootstrap_entry")
-                val entry_module_for_hir = self.ctx.modules[name]
-                if entry_module_for_hir != nil:
+                if self.ctx.has_parser_module(name):
+                    val entry_module_for_hir = self.ctx.parser_module_for(name)
                     lowering.lower_parser_module_unstub(entry_module_for_hir)
                 else:
                     val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
                     lowering.lower_parser_module_unstub(reparsed_entry_module)
-            elif unstub_hir and (self.ctx.modules[name] != nil):
+            elif unstub_hir and self.ctx.has_parser_module(name):
                 # Reuse phase 2's parsed closure module. Re-parsing every source
                 # makes entry-closure HIR lowering superlinear and bypasses the
                 # object cache before code generation starts.
                 dtrace("[DRV] branch=unstub_cached")
-                lowering.lower_parser_module_unstub(self.ctx.modules[name])
+                lowering.lower_parser_module_unstub(self.ctx.parser_module_for(name))
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
                 # MUST call the uniquely-named lower_parser_module_unstub: a plain
@@ -453,7 +461,11 @@ impl CompilerDriver:
 
     fn lower_to_hir_impl() -> (CompileContext, bool):
         var ctx = self.ctx
-        val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(ctx.modules, ctx.sources):
+        val surface_result = if ctx.parser_module_source_indices.len() > 0:
+            module_surfaces_from_indexed_modules(ctx.parser_modules, ctx.parser_module_source_indices, ctx.sources)
+        else:
+            module_surfaces_from_modules(ctx.modules, ctx.sources)
+        val retained_module_surfaces: ModuleSurfacesByName = match surface_result:
             case Ok(value): value
             case Err(error):
                 ctx.add_error("Module surface extraction error: {error}")
@@ -466,7 +478,7 @@ impl CompilerDriver:
 
         for src2 in ctx.sources:
             val name = src2.module_name
-            val module = ctx.modules[name]
+            val module = ctx.parser_module_for(name)
             val src_path2 = source_path_map2[name]
             var lowering: HirLowering = hirlowering_for_module(src_path2 ?? "", retained_module_surfaces)
             if src_path2 != nil:

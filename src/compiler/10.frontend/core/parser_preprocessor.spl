@@ -259,9 +259,11 @@ fn _pp_split_lines(source: text) -> [text]:
     var lines: [text] = []
     var line_chars: [text] = []
     var i: i64 = 0
-    for _ in source:
-        if i >= source.len():
-            break
+    # Do not use text iteration here. The staged AOT iterator can terminate
+    # before the final code unit, dropping a terminal token such as `)` plus
+    # its newline when conditional source is reconstructed. Indexing gives the
+    # line splitter an explicit, byte-for-byte completion condition.
+    while i < source.len():
         val ch = source[i]
         if ch == "\n":
             # Empty-array join is not a portable empty-text constructor in a
@@ -281,6 +283,24 @@ fn _pp_split_lines(source: text) -> [text]:
     else:
         lines.push(line_chars.join(""))
     lines
+
+fn _pp_join_lines_without_empty_elements(lines: [text]) -> text:
+    # A staged AOT array can represent `""` as a nil-backed text slot. Passing
+    # those slots to Array.join stringifies them as `nil`, producing synthetic
+    # identifiers such as `nilnil` between blanked @cfg lines. Build a parts
+    # array containing only real source text and non-empty newline separators.
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < lines.len():
+        if i > 0:
+            parts.push("\n")
+        val line = lines[i]
+        if line.len() > 0:
+            parts.push(line)
+        i = i + 1
+    if parts.len() == 0:
+        return ""
+    parts.join("")
 
 fn _pp_may_have_conditionals(source: text) -> bool:
     (source.contains("@when(") or source.contains("@elif(") or
@@ -527,7 +547,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
         final_lines.push(ol)
         i = i + 1
 
-    final_lines.join("\n")
+    _pp_join_lines_without_empty_elements(final_lines)
 
 # ===== Public API =====
 

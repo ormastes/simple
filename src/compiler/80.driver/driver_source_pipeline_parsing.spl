@@ -73,6 +73,9 @@ impl CompilerDriver:
 
     me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
         self.ctx.modules = {}
+        self.ctx.parser_modules = []
+        self.ctx.parser_module_index = {}
+        self.ctx.parser_module_source_indices = []
         self.ctx.module_surfaces = nil
         var builder = ModuleSurfaceBuilder.new()
         var source_index = 0
@@ -100,19 +103,27 @@ impl CompilerDriver:
         var streaming_ctx = self.ctx
         streaming_ctx.module_surfaces = Some(builder.finish())
         streaming_ctx.modules = {}
+        streaming_ctx.parser_modules = []
+        streaming_ctx.parser_module_index = {}
+        streaming_ctx.parser_module_source_indices = []
         (streaming_ctx, streaming_ctx.errors.len() == 0)
 
     me parse_all_impl() -> (CompileContext, bool):
         if driver_streaming_surface_enabled(self.ctx):
             return self.parse_all_streaming_surfaces_impl()
+        self.ctx.parser_modules = []
+        self.ctx.parser_module_index = {}
+        self.ctx.parser_module_source_indices = []
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
-        val native_entry_closure = (
+        val native_entry_closure = self.ctx.options.entry_closure or (
             rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         if native_entry_closure or native_entry != "":
-            var entry_modules: Dict<text, ParserModule> = self.ctx.modules
+            # Entry closure is reparsed from the retained physical graph. Do
+            # not mutate the pre-phase map: it can contain stale aliases/stubs
+            # whose native Dict slots reject a later struct-valued overwrite.
             var entry_sources: [SourceFile] = []
             var entry_idx = 0
             while entry_idx < sources.len():
@@ -142,7 +153,8 @@ impl CompilerDriver:
             # compares on a whole-tree closure). Value type is deliberately
             # `i64` — see doc/07_guide/language/dict_native_pitfalls.md; a
             # struct-valued dict would corrupt under native `.get()`.
-            var parsed_entry_index: Dict<text, i64> = {}
+            var physical_entry_index: Dict<text, i64> = {}
+            var parsed_entry_source_indices: [i64] = []
             var parsed_entry_modules: [ParserModule] = []
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
@@ -169,13 +181,13 @@ impl CompilerDriver:
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
                 # Bracket assignment only — `.set()` silently fails on builtin
                 # Dicts under native codegen (see the NOTE below).
-                parsed_entry_index[physical_key] = parsed_entry_modules.len()
+                physical_entry_index[physical_key] = parsed_entry_modules.len()
                 parsed_entry_modules = parsed_entry_modules.push(entry_module)
             for source in entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 var parsed_idx: i64 = -1
-                if parsed_entry_index.contains_key(physical_key):
-                    parsed_idx = parsed_entry_index[physical_key]
+                if physical_entry_index.contains_key(physical_key):
+                    parsed_idx = physical_entry_index[physical_key]
                 if parsed_idx < 0:
                     self.ctx.errors.push(
                         "internal entry-closure parse cache miss for {source.path}")
@@ -188,10 +200,13 @@ impl CompilerDriver:
                 # site (e.g. module_surfaces_add_name, the SIMPLE_BOOTSTRAP
                 # branch just below) uses bracket assignment, which works.
                 # See doc/07_guide/language/dict_native_pitfalls.md.
-                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+                parsed_entry_source_indices = parsed_entry_source_indices.push(parsed_idx)
             var entry_ctx: CompileContext = self.ctx
-            entry_ctx.modules = entry_modules
-            entry_ctx.sources = unique_entry_sources
+            entry_ctx.modules = {}
+            entry_ctx.parser_modules = parsed_entry_modules
+            entry_ctx.parser_module_index = {}
+            entry_ctx.parser_module_source_indices = parsed_entry_source_indices
+            entry_ctx.sources = entry_sources
             if entry_sources.len() == 0:
                 entry_ctx.errors.push(
                     "native entry source not found: {native_entry}")

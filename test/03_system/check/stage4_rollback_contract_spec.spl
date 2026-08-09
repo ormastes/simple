@@ -1,0 +1,233 @@
+"""
+# Stage4 rollback contract
+
+Exercises the POSIX rollback helper in isolated directories. The helper must
+admit an exact deployment receipt, use a same-directory lock and namespace-
+atomic rename, verify mutable inputs before commit, and never delete the only
+safeguard when verified recovery fails. The contract deliberately does not
+claim crash durability because no portable fsync owner exists.
+"""
+
+use std.spec.*
+use std.io_runtime.process_run
+
+fn run_contract() -> (text, text, i64):
+    val command = """
+set -eu
+script='scripts/bootstrap/rollback-bootstrap-deploy.shs'
+deploy_script='scripts/bootstrap/bootstrap-from-scratch.sh'
+root=$(mktemp -d "${TMPDIR:-/tmp}/stage4_rollback_contract.XXXXXX")
+cleanup_contract() {
+    rm -rf "$root"
+}
+trap cleanup_contract 0
+trap 'exit 129' 1
+trap 'exit 130' 2
+trap 'exit 131' 3
+trap 'exit 143' 15
+
+# The schema is closed within v1 and both mutation owners share one lock.
+grep -q 'field requires a schema version bump' "$script"
+grep -q 'stage4-state.lock' "$script"
+grep -q 'deploy_lock="${deployed_bin}.stage4-state.lock"' "$deploy_script"
+grep -q 'schema=stage4-deploy-v1' "$deploy_script"
+grep -q 'mv "${deploy_receipt_tmp}" "${deploy_receipt}"' "$deploy_script"
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+mode_file() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+write_case() {
+    name=$1
+    deployed="$root/$name.deployed"
+    backup="$root/$name.backup"
+    receipt="$root/$name.receipt"
+    printf 'new-%s' "$name" > "$deployed"
+    printf 'old-%s' "$name" > "$backup"
+    chmod 711 "$backup"
+    deployed_path=$(CDPATH= cd "$root" && pwd -P)/$name.deployed
+    backup_path=$(CDPATH= cd "$root" && pwd -P)/$name.backup
+    printf '%s\n' \
+        'schema=stage4-deploy-v1' \
+        'status=deployed' \
+        "deployed_path=$deployed_path" \
+        "backup_path=$backup_path" \
+        "deployed_sha256=$(hash_file "$deployed")" \
+        "backup_sha256=$(hash_file "$backup")" > "$receipt"
+}
+
+assert_new() {
+    name=$1
+    test "$(cat "$root/$name.deployed")" = "new-$name"
+}
+
+write_case success
+sh "$script" --deployed "$root/success.deployed" --backup "$root/success.backup" --receipt "$root/success.receipt"
+test "$(cat "$root/success.deployed")" = 'old-success'
+test "$(hash_file "$root/success.deployed")" = "$(hash_file "$root/success.backup")"
+test "$(mode_file "$root/success.deployed")" = '711'
+grep -q '^status=success$' "$root/success.receipt"
+grep -q '^prior_receipt_sha256=' "$root/success.receipt"
+success_receipt_hash=$(hash_file "$root/success.receipt")
+sh "$script" --deployed "$root/success.deployed" --backup "$root/success.backup" --receipt "$root/success.receipt"
+test "$(hash_file "$root/success.receipt")" = "$success_receipt_hash"
+
+write_case stale-timestamp
+sh "$script" --deployed "$root/stale-timestamp.deployed" --backup "$root/stale-timestamp.backup" --receipt "$root/stale-timestamp.receipt"
+sed 's/^timestamp_utc=.*/timestamp_utc=2025-02-30T25:61:61Z/' "$root/stale-timestamp.receipt" > "$root/stale-timestamp.receipt.tmp"
+mv "$root/stale-timestamp.receipt.tmp" "$root/stale-timestamp.receipt"
+if sh "$script" --deployed "$root/stale-timestamp.deployed" --backup "$root/stale-timestamp.backup" --receipt "$root/stale-timestamp.receipt"; then exit 1; fi
+
+write_case inconsistent-restored
+sh "$script" --deployed "$root/inconsistent-restored.deployed" --backup "$root/inconsistent-restored.backup" --receipt "$root/inconsistent-restored.receipt"
+sed 's/^restored_sha256=.*/restored_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$root/inconsistent-restored.receipt" > "$root/inconsistent-restored.receipt.tmp"
+mv "$root/inconsistent-restored.receipt.tmp" "$root/inconsistent-restored.receipt"
+if sh "$script" --deployed "$root/inconsistent-restored.deployed" --backup "$root/inconsistent-restored.backup" --receipt "$root/inconsistent-restored.receipt"; then exit 1; fi
+
+write_case missing-backup
+rm "$root/missing-backup.backup"
+if sh "$script" --deployed "$root/missing-backup.deployed" --backup "$root/missing-backup.backup" --receipt "$root/missing-backup.receipt"; then exit 1; fi
+assert_new missing-backup
+
+write_case missing-receipt
+rm "$root/missing-receipt.receipt"
+if sh "$script" --deployed "$root/missing-receipt.deployed" --backup "$root/missing-receipt.backup" --receipt "$root/missing-receipt.receipt"; then exit 1; fi
+assert_new missing-receipt
+
+write_case mismatched-hash
+sed 's/^backup_sha256=.*/backup_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$root/mismatched-hash.receipt" > "$root/mismatched-hash.receipt.tmp"
+mv "$root/mismatched-hash.receipt.tmp" "$root/mismatched-hash.receipt"
+if sh "$script" --deployed "$root/mismatched-hash.deployed" --backup "$root/mismatched-hash.backup" --receipt "$root/mismatched-hash.receipt"; then exit 1; fi
+assert_new mismatched-hash
+
+write_case unknown-field
+printf '%s\n' 'unexpected=value' >> "$root/unknown-field.receipt"
+if sh "$script" --deployed "$root/unknown-field.deployed" --backup "$root/unknown-field.backup" --receipt "$root/unknown-field.receipt"; then exit 1; fi
+assert_new unknown-field
+
+write_case distinct-path
+if sh "$script" --deployed "$root/distinct-path.deployed" --backup "$root/distinct-path.deployed" --receipt "$root/distinct-path.receipt"; then exit 1; fi
+assert_new distinct-path
+
+write_case symlink-path
+mv "$root/symlink-path.deployed" "$root/symlink-path.target"
+ln -s "$root/symlink-path.target" "$root/symlink-path.deployed"
+if sh "$script" --deployed "$root/symlink-path.deployed" --backup "$root/symlink-path.backup" --receipt "$root/symlink-path.receipt"; then exit 1; fi
+
+write_case receipt-failure
+cat > "$root/fail-receipt-mv" <<'EOF'
+#!/bin/sh
+last=
+for arg do case "$arg" in -*) ;; *) last=$arg ;; esac; done
+case "$last" in *.receipt) exit 42 ;; esac
+exec mv "$@"
+EOF
+chmod 755 "$root/fail-receipt-mv"
+if SIMPLE_ROLLBACK_MV="$root/fail-receipt-mv" sh "$script" --deployed "$root/receipt-failure.deployed" --backup "$root/receipt-failure.backup" --receipt "$root/receipt-failure.receipt"; then exit 1; fi
+assert_new receipt-failure
+test "$(find "$root" -name 'receipt-failure.deployed.rollback.*' -type f | wc -l)" = 0
+
+write_case recovery-failure
+cat > "$root/fail-recovery-mv" <<'EOF'
+#!/bin/sh
+state=${SIMPLE_ROLLBACK_MV_STATE:?}
+last=
+for arg do case "$arg" in -*) ;; *) last=$arg ;; esac; done
+case "$last" in
+  *.receipt) exit 42 ;;
+  *.deployed)
+    count=$(cat "$state" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "$state"
+    [ "$count" -gt 1 ] && exit 43
+    ;;
+esac
+exec mv "$@"
+EOF
+chmod 755 "$root/fail-recovery-mv"
+: > "$root/recovery-failure.state"
+if SIMPLE_ROLLBACK_MV="$root/fail-recovery-mv" SIMPLE_ROLLBACK_MV_STATE="$root/recovery-failure.state" sh "$script" --deployed "$root/recovery-failure.deployed" --backup "$root/recovery-failure.backup" --receipt "$root/recovery-failure.receipt"; then exit 1; fi
+test "$(find "$root" -name 'recovery-failure.deployed.rollback.*' -type f | wc -l)" = 1
+test "$(find "$root" -name 'recovery-failure.deployed.rollback.*' -type f -exec cat {} \;)" = 'new-recovery-failure'
+
+write_case signal
+cat > "$root/signal-mv" <<'EOF'
+#!/bin/sh
+state=${SIMPLE_ROLLBACK_MV_STATE:?}
+last=
+for arg do case "$arg" in -*) ;; *) last=$arg ;; esac; done
+case "$last" in
+  *.deployed)
+    count=$(cat "$state" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "$state"
+    exec mv "$@" &
+    child=$!
+    wait "$child"
+    [ "$count" -gt 1 ] || kill -TERM "$PPID"
+    exit 0
+    ;;
+esac
+exec mv "$@"
+EOF
+chmod 755 "$root/signal-mv"
+: > "$root/signal.state"
+if SIMPLE_ROLLBACK_MV="$root/signal-mv" SIMPLE_ROLLBACK_MV_STATE="$root/signal.state" sh "$script" --deployed "$root/signal.deployed" --backup "$root/signal.backup" --receipt "$root/signal.receipt"; then exit 1; fi
+test "$(cat "$root/signal.deployed")" = 'new-signal'
+test "$(find "$root" -name 'signal.deployed.rollback.*' -type f | wc -l)" = 0
+
+write_case lock
+mkdir "$root/lock.deployed.stage4-state.lock"
+if sh "$script" --deployed "$root/lock.deployed" --backup "$root/lock.backup" --receipt "$root/lock.receipt"; then exit 1; fi
+assert_new lock
+rmdir "$root/lock.deployed.stage4-state.lock"
+
+write_case commit-signal
+cat > "$root/commit-signal-mv" <<'EOF'
+#!/bin/sh
+last=
+for arg do case "$arg" in -*) ;; *) last=$arg ;; esac; done
+case "$last" in
+  *.receipt)
+    mv "$@"
+    kill -TERM "$PPID"
+    exit 0
+    ;;
+esac
+exec mv "$@"
+EOF
+chmod 755 "$root/commit-signal-mv"
+if SIMPLE_ROLLBACK_MV="$root/commit-signal-mv" sh "$script" --deployed "$root/commit-signal.deployed" --backup "$root/commit-signal.backup" --receipt "$root/commit-signal.receipt"; then exit 1; fi
+test "$(cat "$root/commit-signal.deployed")" = 'old-commit-signal'
+grep -q '^schema=stage4-rollback-v1$' "$root/commit-signal.receipt"
+grep -q '^status=success$' "$root/commit-signal.receipt"
+sh "$script" --deployed "$root/commit-signal.deployed" --backup "$root/commit-signal.backup" --receipt "$root/commit-signal.receipt"
+
+write_case cleanup-failure
+cat > "$root/fail-cleanup-rm" <<'EOF'
+#!/bin/sh
+for arg do case "$arg" in *.rollback.*) exit 44 ;; esac; done
+exec rm "$@"
+EOF
+chmod 755 "$root/fail-cleanup-rm"
+SIMPLE_ROLLBACK_RM="$root/fail-cleanup-rm" sh "$script" --deployed "$root/cleanup-failure.deployed" --backup "$root/cleanup-failure.backup" --receipt "$root/cleanup-failure.receipt"
+test "$(cat "$root/cleanup-failure.deployed")" = 'old-cleanup-failure'
+test "$(find "$root" -name 'cleanup-failure.deployed.rollback.*' -type f | wc -l)" = 1
+
+printf '%s\n' 'stage4 rollback contract cases passed'
+"""
+    process_run("/bin/sh", ["-c", command])
+
+describe "Stage4 atomic rollback helper":
+    it "restores admitted state and preserves transaction safety at every commit boundary":
+        val (out, _err, code) = run_contract()
+        assert_equal(code, 0)
+        expect(out).to_contain("stage4 rollback contract cases passed")

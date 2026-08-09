@@ -165,7 +165,9 @@ impl CompilerDriver:
         # tree before entry-closure pruning can happen.
         val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if nb_entry_env != "" and not nb_entry_closure_pre:
+        val entry_closure_requested = self.ctx.options.entry_closure or nb_entry_env != ""
+        var entry_closure_loaded = false
+        if entry_closure_requested and not nb_entry_closure_pre:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
@@ -196,13 +198,14 @@ impl CompilerDriver:
                     continue
                 closure_scanned_paths = _driver_text_bucket_set_add(closure_scanned_paths, closure_physical_key)
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val closure_imports = if (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1":
+                val closure_imports: [text] = if (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1":
                     _driver_stage4_entry_import_module_paths(closure_src.content)
                 else:
                     _driver_entry_import_module_paths(closure_src.content)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
-                for closure_mp in closure_imports:
+                for closure_import_value in closure_imports:
+                    val closure_mp: text = closure_import_value
                     if _driver_text_bucket_set_has(closure_seen_mods, closure_mp):
                         continue
                     closure_seen_mods = _driver_text_bucket_set_add(closure_seen_mods, closure_mp)
@@ -255,12 +258,14 @@ impl CompilerDriver:
             # An explicit-entry walk is a closure even when import resolution
             # reports an error. Keep that error bounded to the requested graph
             # instead of hiding it behind an unrelated whole-workspace failure.
-            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+            entry_closure_loaded = true
+            if nb_entry_env != "":
+                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
         # so a small userland entry doesn't compile all of src/{app,lib,compiler,runtime}.
-        val nb_entry_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val nb_entry_closure = entry_closure_loaded or (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)

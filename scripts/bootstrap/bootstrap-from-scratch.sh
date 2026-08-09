@@ -1803,7 +1803,30 @@ if [ "${deploy}" -eq 1 ]; then
 
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
   prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
-  [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
+  deploy_receipt="${deployed_bin}.deploy.receipt"
+  deploy_lock="${deployed_bin}.stage4-state.lock"
+  if ! mkdir "${deploy_lock}" 2>/dev/null; then
+    echo "ERROR: deployment-state lock is already held: ${deploy_lock}" >&2
+    exit 1
+  fi
+  deploy_lock_held=1
+  release_deploy_lock() {
+    if [ "${deploy_lock_held:-0}" -eq 1 ]; then
+      rmdir "${deploy_lock}" 2>/dev/null || :
+      deploy_lock_held=0
+    fi
+  }
+  trap 'release_deploy_lock; exit 129' HUP
+  trap 'release_deploy_lock; exit 130' INT
+  trap 'release_deploy_lock; exit 143' TERM
+  if [ ! -x "${deployed_bin}" ]; then
+    release_deploy_lock
+    echo "ERROR: deploy refused because no executable rollback source exists: ${deployed_bin}." >&2
+    exit 1
+  fi
+  cp "${deployed_bin}" "${prev_bin}"
+  chmod 755 "${prev_bin}"
+  backup_hash="$(hash_file "${prev_bin}")"
   install -m755 "${full_bin}" "${deployed_bin}"
   echo "Deployed full CLI binary to ${deployed_bin}"
 
@@ -1815,9 +1838,28 @@ if [ "${deploy}" -eq 1 ]; then
       mv "${prev_bin}" "${deployed_bin}"
       echo "Restored previous binary to ${deployed_bin}" >&2
     fi
+    release_deploy_lock
     exit 1
   fi
-  rm -f "${prev_bin}"
+  deployed_hash="$(hash_file "${deployed_bin}")"
+  deploy_receipt_tmp="${deploy_receipt}.tmp.$$"
+  if ! printf '%s\n' \
+      'schema=stage4-deploy-v1' \
+      'status=deployed' \
+      "deployed_path=${deployed_bin}" \
+      "backup_path=${prev_bin}" \
+      "deployed_sha256=${deployed_hash}" \
+      "backup_sha256=${backup_hash}" > "${deploy_receipt_tmp}" ||
+     ! chmod 644 "${deploy_receipt_tmp}" ||
+     ! mv "${deploy_receipt_tmp}" "${deploy_receipt}"; then
+    rm -f "${deploy_receipt_tmp}"
+    mv "${prev_bin}" "${deployed_bin}" 2>/dev/null || :
+    release_deploy_lock
+    echo "ERROR: deployment receipt commit failed; previous binary restored." >&2
+    exit 1
+  fi
+  release_deploy_lock
+  trap - HUP INT TERM
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
   echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 

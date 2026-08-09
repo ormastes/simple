@@ -9,7 +9,7 @@
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.backend.env.{EvalContext, Environment}
+use compiler.backend.backend.env.{EvalContext, Environment, ResolvedCallable, symbol_names_for_module}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl, itrace}
 use compiler.backend.backend.interpreter_aop_weave.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -121,9 +121,37 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
     BuiltinTag.Unknown
 
 impl InterpreterBackendImpl:
-    fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
-        if ctx.fn_by_name.has(name):
-            return Some(ctx.fn_by_name[name])
+    fn resolve_callable_by_identity(identity: text, ctx: EvalContext) -> ResolvedCallable?:
+        if ctx.fn_by_name.has(identity) and ctx.module_by_function.has(identity):
+            val fn_: HirFunction = ctx.fn_by_name[identity]
+            val owner: HirModule = ctx.module_by_function[identity]
+            return Some(ResolvedCallable(function: fn_, owner: owner, names: symbol_names_for_module(owner)))
+        nil
+
+    fn resolve_callable(symbol: SymbolId, name: text, ctx: EvalContext) -> ResolvedCallable?:
+        # Resolve a local/bare call relative to the caller module. Imported
+        # symbols carry their defining module, while qualified display names
+        # are already canonical or can be normalized directly.
+        for symbol_ in ctx.module.symbols.symbols.values():
+            val candidate: Symbol = symbol_
+            if candidate.id.id == symbol.id:
+                val owner_name = candidate.defining_module ?? ctx.module.name
+                val by_symbol = self.resolve_callable_by_identity(
+                    canonical_callable_name(owner_name, candidate.name), ctx)
+                if by_symbol.?:
+                    return by_symbol
+                break
+        val local = self.resolve_callable_by_identity(
+            canonical_callable_name(ctx.module.name, name), ctx)
+        if local.?:
+            return local
+        if name.contains("::"):
+            return self.resolve_callable_by_identity(name, ctx)
+        if name.contains("."):
+            if ctx.ambiguous_dotted_fn_alias.has(name):
+                return nil
+            if ctx.dotted_fn_alias.has(name):
+                return self.resolve_callable_by_identity(ctx.dotted_fn_alias[name], ctx)
         if ctx.has_fn_index:
             return nil
         val candidates = ctx.module.functions.values()
@@ -135,7 +163,8 @@ impl InterpreterBackendImpl:
                 found_index = i
             i = i + 1
         if found_index >= 0:
-            Some(candidates[found_index])
+            val fallback_fn: HirFunction = candidates[found_index]
+            Some(ResolvedCallable(function: fallback_fn, owner: ctx.module, names: ctx.names))
         else:
             nil
 
@@ -164,7 +193,7 @@ impl InterpreterBackendImpl:
                 # O(1) resolve via the prebuilt name index (perf); fall back to
                 # the linear scan only when the index is absent (non-process_module
                 # entry points). Last-writer-wins matches the old no-break loop.
-                val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)
+                val cf_target_hit = self.resolve_callable(f_t.symbol, f_t.name, ctx)
                 if cf_target_hit.?:
                     self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
                 else:
@@ -179,11 +208,16 @@ impl InterpreterBackendImpl:
                 itrace("[CF] default arm (not callable)")
                 Err(BackendError.type_error("value is not callable", Some(span)))
 
-    fn call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+    fn call_hir_function(resolved: ResolvedCallable, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        # Imported functions execute against their owning module while sharing
+        # the program-wide environment and indexes. This preserves module-local
+        # type/AOP metadata without flattening SymbolId-keyed HIR dictionaries.
+        val fn_: HirFunction = resolved.function
+        val fn_ctx = EvalContext(env: ctx.env, module: resolved.owner, backend: ctx.backend, names: resolved.names, fn_by_name: ctx.fn_by_name, module_by_function: ctx.module_by_function, dotted_fn_alias: ctx.dotted_fn_alias, ambiguous_dotted_fn_alias: ctx.ambiguous_dotted_fn_alias, ambiguous_fn_names: {}, has_fn_index: ctx.has_fn_index, has_module_index: ctx.has_module_index, strict_mem: ctx.strict_mem)
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
-        self.interp_aop_run_before(fn_, ctx)
-        ctx.env.push_scope()
+        self.interp_aop_run_before(fn_, fn_ctx)
+        fn_ctx.env.push_scope()
 
         # Bind parameters
         for i in 0..fn_.params.len():
@@ -191,20 +225,35 @@ impl InterpreterBackendImpl:
             val value = if i < args.len():
                 args[i]
             elif param.has_default:
-                self.eval_expr(param.default, ctx)?
+                val default_result = self.eval_expr(param.default, fn_ctx)
+                if default_result.is_err():
+                    val default_error = default_result.unwrap_err()
+                    fn_ctx.env.pop_scope()
+                    self.interp_aop_run_after(fn_, fn_ctx, true)
+                    return Err(default_error)
+                default_result.unwrap()
             else:
-                return Err(BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span)))
+                val missing_error = BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span))
+                fn_ctx.env.pop_scope()
+                self.interp_aop_run_after(fn_, fn_ctx, true)
+                return Err(missing_error)
 
             # Env is name-keyed (iteration 21, target (a)); HirParam.name is
             # reliable while param.symbol is a corrupt looked-up handle.
-            ctx.env.define(param.name, value)
+            fn_ctx.env.define(param.name, value)
 
         # Execute body
-        val result = self.eval_block(fn_.body, ctx)?
-
-        ctx.env.pop_scope()
-        # AOP hook (task #31): weave after_success/after_error advice.
-        self.interp_aop_run_after(fn_, ctx, result)
+        val body_result = self.eval_block(fn_.body, fn_ctx)
+        fn_ctx.env.pop_scope()
+        if body_result.is_err():
+            val body_error = body_result.unwrap_err()
+            self.interp_aop_run_after(fn_, fn_ctx, true)
+            return Err(body_error)
+        val result = body_result.unwrap()
+        val returned_error = match result:
+            case Value.Result(_ok, err): err.?
+            case _: false
+        self.interp_aop_run_after(fn_, fn_ctx, returned_error)
         Ok(result)
 
     fn call_function_by_id(method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
@@ -214,7 +263,17 @@ impl InterpreterBackendImpl:
             return Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
 
         val fn_ = ctx.module.functions[method_id]
-        self.call_hir_function(fn_, args, ctx)
+        val resolved = ResolvedCallable(function: fn_, owner: ctx.module, names: ctx.names)
+        self.call_hir_function(resolved, args, ctx)
+
+    fn call_function_by_identity(identity: CallableIdentity, method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        val resolved = self.resolve_callable_by_identity(identity.canonical_name, ctx)
+        if resolved.?:
+            return self.call_hir_function(resolved.unwrap(), args, ctx)
+        if ctx.has_module_index:
+            return Err(BackendError.runtime_error(
+                "function not found by canonical identity: {identity.canonical_name}", Some(span)))
+        self.call_function_by_id(method_id, args, ctx, span)
 
     fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
         ctx.env.push_scope()

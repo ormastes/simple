@@ -41,6 +41,9 @@ class CompileContext:
     sources: [SourceFile]
     native_sources_fingerprint: text
     modules: Dict<text, ParserModule>
+    parser_modules: [ParserModule]
+    parser_module_index: Dict<text, i64>
+    parser_module_source_indices: [i64]
     module_surfaces: ModuleSurfacesByName?
     hir_modules: Dict<text, HirModule>
     bootstrap_entry_hir: HirModule?
@@ -134,6 +137,9 @@ class CompileContext:
             sources: [],
             native_sources_fingerprint: "",
             modules: {},
+            parser_modules: [],
+            parser_module_index: {},
+            parser_module_source_indices: [],
             module_surfaces: nil,
             hir_modules: {},
             bootstrap_entry_hir: nil,
@@ -198,6 +204,45 @@ class CompileContext:
     # After HIR lowering, AST modules are no longer needed.
     me evict_ast():
         self.modules = {}
+        self.parser_modules = []
+        self.parser_module_index = {}
+        self.parser_module_source_indices = []
+
+    fn has_parser_module(name: text) -> bool:
+        var source_index = 0
+        while source_index < self.sources.len() and source_index < self.parser_module_source_indices.len():
+            if self.sources[source_index].module_name == name:
+                val module_index = self.parser_module_source_indices[source_index]
+                return module_index >= 0 and module_index < self.parser_modules.len()
+            source_index = source_index + 1
+        if self.parser_module_index.contains_key(name):
+            val index = self.parser_module_index[name]
+            return index >= 0 and index < self.parser_modules.len()
+        self.modules.contains_key(name)
+
+    fn parser_module_for(name: text) -> ParserModule:
+        var source_index = 0
+        while source_index < self.sources.len() and source_index < self.parser_module_source_indices.len():
+            if self.sources[source_index].module_name == name:
+                val module_index = self.parser_module_source_indices[source_index]
+                if module_index >= 0 and module_index < self.parser_modules.len():
+                    return self.parser_modules[module_index]
+            source_index = source_index + 1
+        if self.parser_module_index.contains_key(name):
+            val index = self.parser_module_index[name]
+            if index >= 0 and index < self.parser_modules.len():
+                return self.parser_modules[index]
+        self.modules[name]
+
+    fn parser_module_names() -> [text]:
+        if self.parser_module_source_indices.len() > 0:
+            var names: [text] = []
+            for source in self.sources:
+                names = names.push(source.module_name)
+            return names
+        if self.parser_module_index.keys().len() > 0:
+            return self.parser_module_index.keys()
+        self.modules.keys()
 
     # After MIR lowering, HIR modules are no longer needed.
     me evict_hir():

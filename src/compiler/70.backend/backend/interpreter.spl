@@ -8,7 +8,7 @@
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.backend.env.{EvalContext, Environment}
+use compiler.backend.backend.env.{EvalContext, Environment, ResolvedCallable, callable_identities_for_module, function_callable_identity, symbol_names_for_module}
 use compiler.backend.backend.interpreter_calls.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
@@ -83,6 +83,20 @@ fn interp_hir_expr_unsigned(e: HirExpr) -> bool:
 struct InterpreterBackendImpl:
     """Tree-walking interpreter backend (optimized mode only)."""
 
+struct InterpreterProgram:
+    """Registered HIR modules for one interpreter invocation."""
+    modules: [HirModule]
+
+impl InterpreterProgram:
+    static fn new() -> InterpreterProgram:
+        InterpreterProgram(modules: [])
+
+    me register_hir_module(module: HirModule):
+        self.modules = self.modules.push(module)
+
+    fn interpret_registered_entry(backend: InterpreterBackendImpl, entry_module: HirModule) -> Result<BackendResult, BackendError>:
+        backend.interpret_registered_modules(self.modules, entry_module)
+
 impl InterpreterBackendImpl:
     static fn new() -> InterpreterBackendImpl:
         InterpreterBackendImpl()
@@ -112,31 +126,44 @@ impl InterpreterBackendImpl:
         self.process_module(module)
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        self.interpret_registered_modules([module], module)
+
+    fn interpret_registered_modules(modules: [HirModule], module: HirModule) -> Result<BackendResult, BackendError>:
         # Create evaluation context
         val env = Environment.new()
-        # Build the id -> name map (bug doc iteration 21, target (a)). The
-        # environment is keyed by variable NAME; a `Let`/`Var`'s SymbolId is
-        # resolved to its name through this map. `module.symbols.symbols` is a
-        # Dict<i64, Symbol>; iterate .values() bound to `val s: Symbol` (ANY-
-        # erasure cure) and read the proven-readable `s.id.id` / `s.name`.
-        var names_map: Dict<i64, text> = {}
-        for nsym_ in module.symbols.symbols.values():
-            val ns: Symbol = nsym_
-            val ns_id: i64 = ns.id.id
-            names_map[ns_id] = ns.name
-        # Build the name -> HirFunction index ONCE (perf). Both the Call
+        # SymbolId values are module-local; never flatten imported symbol
+        # tables into one registry-wide map.
+        val names_map = symbol_names_for_module(module)
+        # Build canonical callable -> function/owner indexes ONCE. SymbolId is
+        # module-local and bare names can legitimately repeat across modules.
         # fast-path in eval_expr and call_function used to linear-scan
         # module.functions.values() with NO early break on every named call;
         # for a self-host build (~5.8k fns) that is an O(calls * fns) blowup.
-        # Last-writer-wins here mirrors the old no-break loop exactly. Iterate
-        # .values() bound to a typed local (ANY-erasure cure, same idiom as
-        # names_map) and key by the proven-readable HirFunction.name text.
         var fn_index: Dict<text, HirFunction> = {}
-        for fidx_fn_ in module.functions.values():
-            val fidx_f: HirFunction = fidx_fn_
-            fn_index[fidx_f.name] = fidx_f
+        var module_index: Dict<text, HirModule> = {}
+        var dotted_index: Dict<text, text> = {}
+        var ambiguous_dotted: Dict<text, bool> = {}
+        for indexed_module_ in modules:
+            val indexed_module: HirModule = indexed_module_
+            val identity_by_symbol = callable_identities_for_module(indexed_module)
+            for fidx_fn_ in indexed_module.functions.values():
+                val fidx_f: HirFunction = fidx_fn_
+                val callable_key = if identity_by_symbol.has(fidx_f.symbol.id):
+                    identity_by_symbol[fidx_f.symbol.id]
+                else:
+                    canonical_callable_name(indexed_module.name, fidx_f.name)
+                if fn_index.has(callable_key):
+                    return Err(BackendError.runtime_error(
+                        "duplicate canonical callable identity: {callable_key}", nil))
+                fn_index[callable_key] = fidx_f
+                module_index[callable_key] = indexed_module
+                val dotted_key = callable_key.replace("::", ".")
+                if dotted_index.has(dotted_key) and dotted_index[dotted_key] != callable_key:
+                    ambiguous_dotted[dotted_key] = true
+                else:
+                    dotted_index[dotted_key] = callable_key
         val strict_mem_on = interp_strict_mem_enabled()
-        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, strict_mem: strict_mem_on)
+        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, module_by_function: module_index, dotted_fn_alias: dotted_index, ambiguous_dotted_fn_alias: ambiguous_dotted, ambiguous_fn_names: {}, has_fn_index: true, has_module_index: true, strict_mem: strict_mem_on)
 
         # Locate `main` by symbol name via the symbol table. The cranelift seed
         # miscompiles two things on the single-file / synthetic-main HIR module:
@@ -166,23 +193,26 @@ impl InterpreterBackendImpl:
         # index -> a nil slot -> "field access on nil receiver" trap (iteration
         # 10). The typed binding restores the real Symbol type so field indices
         # resolve correctly (same idiom as the functions.values() loop below).
-        for sym_ in module.symbols.symbols.values():
-            val sym: Symbol = sym_
-            val g_fv: FunctionValue = FunctionValue(symbol: sym.id, name: sym.name)
-            ctx.env.define_global(sym.name, Value.Function(g_fv))
-
-        for fn_ in module.functions.values():
-            val f: HirFunction = fn_
-            val fsym = f.symbol
-            val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: f.name)
-            ctx.env.define_global(f.name, Value.Function(g_fv2))
+        for global_module_ in modules:
+            val global_module: HirModule = global_module_
+            val global_identity_by_symbol = callable_identities_for_module(global_module)
+            for fn_ in global_module.functions.values():
+                val f: HirFunction = fn_
+                val fsym = f.symbol
+                val callable_key = if global_identity_by_symbol.has(fsym.id):
+                    global_identity_by_symbol[fsym.id]
+                else:
+                    canonical_callable_name(global_module.name, f.name)
+                val g_fv2: FunctionValue = FunctionValue(symbol: fsym, name: callable_key)
+                ctx.env.define_global(callable_key, Value.Function(g_fv2))
 
         for fn_ in module.functions.values():
             val f: HirFunction = fn_
             # Match main by the function's own name. Requiring a duplicate symbol
             # table entry silently skipped valid single-file modules.
             if f.name == "main":
-                val result = self.call_hir_function(f, [], ctx)?
+                val resolved_main = ResolvedCallable(function: f, owner: module, names: names_map)
+                val result = self.call_hir_function(resolved_main, [], ctx)?
                 return Ok(BackendResult.Value(result))
         Err(BackendError.runtime_error("module has no main function", nil))
 
@@ -530,7 +560,7 @@ impl InterpreterBackendImpl:
                         # EvalContext entry points) fall back to the linear scan
                         # so behavior is unchanged. Last-writer-wins in the index
                         # matches the old no-break loop.
-                        val cf_named_hit = self.resolve_function_by_name(cname_t, ctx)
+                        val cf_named_hit = self.resolve_callable(_cs, cname_t, ctx)
                         if cf_named_hit.?:
                             itrace("[EE] Call user-fn fast-path name={cname_t}")
                             return self.call_hir_function(cf_named_hit.unwrap(), arg_values, ctx)
@@ -554,7 +584,7 @@ impl InterpreterBackendImpl:
             # Block/Expr arms below.
             case HirExprKind.MethodCall(receiver, method_name, args, resolution):
                 match resolution:
-                    case MethodResolution.StaticMethod(_, method_id, _):
+                    case MethodResolution.StaticMethod(_, method_id, identity):
                         # Static method: ClassName.method(args) - no receiver needed
                         var arg_values: [Value] = []
                         for arg in args:
@@ -562,9 +592,9 @@ impl InterpreterBackendImpl:
                             arg_values = arg_values.push(v)
 
                         # Look up method by symbol ID
-                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+                        self.call_function_by_identity(identity, method_id, arg_values, ctx, expr.span)
 
-                    case MethodResolution.InstanceMethod(_, method_id, _):
+                    case MethodResolution.InstanceMethod(_, method_id, identity):
                         # Instance method: receiver.method(args)
                         val receiver_val = self.eval_expr(receiver, ctx)?
 
@@ -574,9 +604,9 @@ impl InterpreterBackendImpl:
                             val v = self.eval_expr(arg.value, ctx)?
                             arg_values = arg_values.push(v)
 
-                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+                        self.call_function_by_identity(identity, method_id, arg_values, ctx, expr.span)
 
-                    case MethodResolution.FreeFunction(func_id):
+                    case MethodResolution.FreeFunction(func_id, identity):
                         # UFCS: receiver.func(args) → func(receiver, args)
                         val receiver_val = self.eval_expr(receiver, ctx)?
 
@@ -586,7 +616,7 @@ impl InterpreterBackendImpl:
                             val v = self.eval_expr(arg.value, ctx)?
                             arg_values = arg_values.push(v)
 
-                        self.call_function_by_id(func_id, arg_values, ctx, expr.span)
+                        self.call_function_by_identity(identity, func_id, arg_values, ctx, expr.span)
 
                     case MethodResolution.TraitMethod(_, _, _):
                         # Trait method - requires dynamic dispatch (not implemented yet)
@@ -598,13 +628,13 @@ impl InterpreterBackendImpl:
             case HirExprKind.StaticCall(type_, method_name, args, resolution):
                 # Static call: Type.method(args) - similar to StaticMethod variant
                 match resolution:
-                    case MethodResolution.StaticMethod(_, method_id, _):
+                    case MethodResolution.StaticMethod(_, method_id, identity):
                         var arg_values: [Value] = []
                         for arg in args:
                             val v = self.eval_expr(arg.value, ctx)?
                             arg_values = arg_values.push(v)
 
-                        self.call_function_by_id(method_id, arg_values, ctx, expr.span)
+                        self.call_function_by_identity(identity, method_id, arg_values, ctx, expr.span)
 
                     case _:
                         Err(BackendError.runtime_error("invalid static call resolution", Some(expr.span)))

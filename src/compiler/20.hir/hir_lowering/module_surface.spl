@@ -1019,5 +1019,36 @@ fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [Sou
         return Err(origin_result.unwrap_err())
     Ok(builder.finish())
 
+fn module_surfaces_from_indexed_modules(modules: [ParserModule], source_indices: [i64], sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+    var builder = ModuleSurfaceBuilder.new()
+    if source_indices.len() != sources.len():
+        return Err("parsed module source index count mismatch")
+    var source_index = 0
+    while source_index < sources.len():
+        val source = sources[source_index]
+        val module_index = source_indices[source_index]
+        if module_index < 0 or module_index >= modules.len():
+            return Err("invalid parsed module index for source: {source.module_name}")
+        val module = modules[module_index]
+        if builder.has_path(source.path):
+            val canonical_path = module_surface_canonical_path(source.path)
+            val surface = builder.surfaces[builder.index_by_path[canonical_path]]
+            if not module_surface_declaration_matches(surface, module):
+                return Err("conflicting declaration metadata for physical source: {canonical_path}")
+            val alias_result = builder.add_alias(source)
+            if alias_result.is_err():
+                return Err(alias_result.unwrap_err())
+        else:
+            val add_result = builder.add_parsed(module, source, source_index)
+            if add_result.is_err():
+                return Err(add_result.unwrap_err())
+        source_index = source_index + 1
+    val origin_result = builder.resolve_export_origins()
+    if origin_result.is_err():
+        return Err(origin_result.unwrap_err())
+    Ok(builder.finish())
+
 fn module_surface_promote(surface: ModuleSurface) -> bool:
     rt_transient_heap_promote(surface)
+
+export module_surfaces_from_indexed_modules

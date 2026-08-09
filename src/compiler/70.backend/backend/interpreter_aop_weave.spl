@@ -37,7 +37,7 @@
 #     implemented; advice return values are discarded.
 
 use compiler.hir.hir.{HirFunction, HirAopAdvice}
-use compiler.backend.backend.env.{EvalContext}
+use compiler.backend.backend.env.{EvalContext, ResolvedCallable}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend_types.{Value}
 
@@ -210,7 +210,9 @@ impl InterpreterBackendImpl:
         if target_index >= 0:
             val target = candidates[target_index]
             _interp_aop_running = true
-            match self.call_hir_function(target, [], ctx):
+            val resolved = ResolvedCallable(
+                function: target, owner: ctx.module, names: ctx.names)
+            match self.call_hir_function(resolved, [], ctx):
                 case Ok(_): pass_do_nothing
                 case Err(_): pass_do_nothing
             _interp_aop_running = false
@@ -225,13 +227,10 @@ impl InterpreterBackendImpl:
         for adv in ordered:
             self.interp_aop_invoke(adv.advice_function, ctx)
 
-    fn interp_aop_run_after(fn_: HirFunction, ctx: EvalContext, result: Value):
+    fn interp_aop_run_after(fn_: HirFunction, ctx: EvalContext, failed: bool):
         if _interp_aop_running or ctx.module.aop_advices.len() == 0:
             return
-        val is_err = match result:
-            case Value.Result(ok, err): err.?
-            case _: false
-        val form = if is_err: "after_error" else: "after_success"
+        val form = if failed: "after_error" else: "after_success"
         val matched = interp_aop_collect(ctx.module.aop_advices, form, fn_.name)
         if matched.len() == 0:
             return

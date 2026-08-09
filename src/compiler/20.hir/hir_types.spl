@@ -133,6 +133,7 @@ enum CallableDispatchKind:
     Instance
     Trait
     Static
+    FreeFunction
 
 """Module-stable identity for a resolved callable.
 
@@ -144,15 +145,23 @@ struct CallableIdentity:
     canonical_name: text
     dispatch_kind: CallableDispatchKind
 
+fn canonical_callable_name(module_name: text, name: text) -> text:
+    """Emit the single module::relative-name identity used across HIR/backends."""
+    if module_name == "":
+        return name
+    val dotted_prefix = module_name + "."
+    val scoped_prefix = module_name + "::"
+    val relative_name = if name.starts_with(dotted_prefix):
+        name.slice(dotted_prefix.len(), name.len())
+    else if name.starts_with(scoped_prefix):
+        name.slice(scoped_prefix.len(), name.len())
+    else:
+        name
+    module_name + "::" + relative_name
+
 fn callable_identity_from_symbol(symbol: Symbol, dispatch_kind: CallableDispatchKind) -> CallableIdentity:
     val defining_module = _hir_symbol_owner_module(symbol.defining_module ?? "")
-    val name_is_module_qualified = (
-        defining_module != "" and
-        (symbol.name == defining_module or
-         symbol.name.starts_with("{defining_module}.") or
-         symbol.name.starts_with("{defining_module}::"))
-    )
-    val canonical_name = if defining_module == "" or name_is_module_qualified: symbol.name else: "{defining_module}::{symbol.name}"
+    val canonical_name = canonical_callable_name(defining_module, symbol.name)
     CallableIdentity(canonical_name: canonical_name, dispatch_kind: dispatch_kind)
 
 enum MethodResolution:
@@ -164,7 +173,7 @@ enum MethodResolution:
 
     # UFCS: Free function where receiver becomes first argument
     # x.method(a, b) -> method(x, a, b)
-    FreeFunction(func_id: SymbolId)
+    FreeFunction(func_id: SymbolId, identity: CallableIdentity)
 
     # Static method on a type (no receiver)
     # Type.method(a, b) - no self parameter
@@ -183,7 +192,7 @@ impl MethodResolution:
     fn is_ufcs() -> bool:
         """Check if this is a UFCS resolution (free function)."""
         match self:
-            case FreeFunction(_): true
+            case FreeFunction(_, _): true
             case _: false
 
     fn get_symbol_id() -> SymbolId?:
@@ -195,7 +204,7 @@ impl MethodResolution:
         match self:
             case InstanceMethod(_, method_id, _): method_id
             case TraitMethod(_, method_id, _): method_id
-            case FreeFunction(func_id): func_id
+            case FreeFunction(func_id, _): func_id
             case StaticMethod(_, method_id, _): method_id
             case Unresolved: nil
 
@@ -871,7 +880,7 @@ enum EffectKind:
 # ============================================================================
 
 export HirModule, HirImport, HirImportItem, HirDomainBlock
-export SymbolId, HirSymbol, Symbol, SymbolKind, CallableDispatchKind, CallableIdentity, callable_identity_from_symbol, MethodResolution
+export SymbolId, HirSymbol, Symbol, SymbolKind, CallableDispatchKind, CallableIdentity, canonical_callable_name, callable_identity_from_symbol, MethodResolution
 export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
 export DimExpr, DimExprKind

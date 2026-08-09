@@ -17,9 +17,10 @@ pub use compiler.driver.driver_public_compile.{
     aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf
 }
 
-use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl, InterpreterProgram}
 use lazy compiler.backend.backend_types.{BackendResult}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_source_loading.{_driver_module_name_from_path, _driver_physical_source_key}
 pub use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_aot_output.*
 # driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
@@ -90,7 +91,33 @@ impl CompilerDriver:
         # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 13/14).
         val interp = InterpreterBackendImpl.new()
 
+        var program = InterpreterProgram.new()
+        val requested_entry = if self.ctx.options.input_files.len() > 0:
+            self.ctx.options.input_files[0]
+        else:
+            ""
+        val requested_entry_key = _driver_physical_source_key(requested_entry)
+        val requested_entry_module = _driver_module_name_from_path(requested_entry)
+        var entry_module: HirModule? = nil
         var src_idx = 0
+        while src_idx < self.ctx.sources.len():
+            val source = self.ctx.sources[src_idx]
+            if (_driver_physical_source_key(source.path) == requested_entry_key and
+                source.module_name == requested_entry_module):
+                val requested_hir = self.ctx.hir_modules[source.module_name]
+                if requested_hir != nil:
+                    entry_module = Some(requested_hir)
+                    break
+            src_idx = src_idx + 1
+        if not entry_module.?:
+            return CompileResult.RuntimeError("Interpret error: requested entry module not found: {requested_entry}")
+
+        # Register the authoritative entry first, then one HIR module per
+        # logical module identity. Alias encounter order cannot replace it.
+        program.register_hir_module(entry_module.unwrap())
+        var registered_modules: Dict<text, bool> = {}
+        registered_modules[entry_module.unwrap().name] = true
+        src_idx = 0
         while src_idx < self.ctx.sources.len():
             val source = self.ctx.sources[src_idx]
             val name = source.module_name
@@ -98,14 +125,18 @@ impl CompilerDriver:
             if hir_module == nil:
                 src_idx = src_idx + 1
                 continue
+            if not registered_modules.has(hir_module.name):
+                registered_modules[hir_module.name] = true
+                program.register_hir_module(hir_module)
+            src_idx = src_idx + 1
 
-            match interp.interpret_hir_module(hir_module):
+        if entry_module.?:
+            match program.interpret_registered_entry(interp, entry_module.unwrap()):
                 case Ok(value):
                     last_result = value
                     has_result = true
                 case Err(e):
-                    return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
-            src_idx = src_idx + 1
+                    return CompileResult.RuntimeError("Interpret error: {e.message}")
 
         if has_result:
             return CompileResult.Success(last_result)
