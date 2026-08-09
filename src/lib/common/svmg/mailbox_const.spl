@@ -82,3 +82,97 @@ pub val TRAP_DIV0: i64 = 2
 # CMD_EXIT code used for all VM-trap paths (design §4.1 names it for OOB;
 # reused for TRAP_DIV0 above for consistency).
 pub val TRAP_OOB_EXIT_CODE: i64 = 0x7F
+
+# ============================================================================
+# DBG-1 debug/profile block (design:
+# doc/05_design/app/tools/gpu_debugger_common_interface_architecture_2026-08-09.md §3,
+# carried forward by
+# doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md §6/§7)
+# ============================================================================
+#
+# Why this block has to exist at all: the VM's execution state (pc, sp, csp,
+# operand stack, call stack -- `SvmgVm`'s fields in ref_vm.spl) is
+# kernel-local and LOST between launches. The REG block above is only the
+# GMB-1 mailbox command block; it carries no VM state. So "break, inspect,
+# resume" is impossible without a place in the ARENA (the one thing that
+# survives a launch on every backend) to park that state. DBG-1 is that
+# place.
+#
+# WHY THIS OFFSET IS FREE -- the arena's occupied regions, in order:
+#   DATA           0x00000 .. 0x10000  (ARENA_DATA_SIZE; SGP blob + program data)
+#   REG            0x10000 .. 0x10020  (REG_BASE_OFFSET + REG_BLOCK_SIZE)
+#   LOG ring       0x10020 .. 0x10028 + log_cap
+#                                      (header 8 bytes, then log_cap bytes)
+#   RECORD ring    record_ring_base_offset(log_cap) .. grows upward, 12 B/record
+#   >>> DBG-1      0x1F000 .. 0x20000  (this block; ends exactly at ARENA_TOTAL_SIZE)
+#
+# The RECORD ring is the only region that grows, and it grows upward from
+# LOG_DATA_OFFSET + log_cap. Placing DBG-1 flush against the TOP of the
+# arena therefore maximises the room the RECORD ring has before it could
+# reach us, and turns "how many records fit" from an unstated assumption
+# into the named, checkable bound `max_record_count(log_cap)` below.
+# `test/01_unit/lib/svmg/dbg1_block_spec.spl` asserts the non-overlap with
+# REG, the LOG ring, and the RECORD ring's bound mechanically, so a future
+# change to any of those offsets fails a test rather than silently
+# corrupting saved debug state.
+
+pub val DBG_BASE_OFFSET: i64 = 0x1F000
+pub val DBG_BLOCK_SIZE: i64 = 0x1000            # 4 KiB reserved; 1240 B used today
+
+# Breakpoint table capacity (design §3: "cap: 16").
+pub val DBG_MAX_BREAKPOINTS: i64 = 16
+
+# Field offsets. Sizes: u32 unless noted.
+pub val DBG_FLAGS_OFFSET: i64 = DBG_BASE_OFFSET + 0x000
+pub val DBG_BREAK_COUNT_OFFSET: i64 = DBG_BASE_OFFSET + 0x004
+pub val DBG_BREAK_PCS_OFFSET: i64 = DBG_BASE_OFFSET + 0x008        # u32[16] -> +0x048
+pub val DBG_SAVED_PC_OFFSET: i64 = DBG_BASE_OFFSET + 0x048
+pub val DBG_SAVED_SP_OFFSET: i64 = DBG_BASE_OFFSET + 0x04C
+pub val DBG_SAVED_CSP_OFFSET: i64 = DBG_BASE_OFFSET + 0x050
+# PROF-1 (pulled forward from the profile stream so the four kernels change
+# once, not twice): a monotonically increasing count of instructions retired
+# while debugging is enabled. It is NOT `steps_used` -- steps_used resets per
+# launch, DBG_STEP_COUNT accumulates ACROSS resumes, which is exactly what an
+# emulated `ProfileTarget` needs to report total work for a broken-and-resumed
+# program.
+pub val DBG_STEP_COUNT_OFFSET: i64 = DBG_BASE_OFFSET + 0x054
+pub val DBG_SAVED_STACK_OFFSET: i64 = DBG_BASE_OFFSET + 0x058      # u32[256] -> +0x458
+pub val DBG_SAVED_CALLS_OFFSET: i64 = DBG_BASE_OFFSET + 0x458      # u32[32]  -> +0x4D8
+# DELIBERATE ADDITION beyond the design's §3 field list, documented here
+# rather than left as a silent surprise for the device kernels: GMB-1 has no
+# record-ring counter register (see `read_records` in ref_vm.spl -- callers
+# get the count out-of-band from VmRunResult). Without persisting it, a
+# RESUMED launch would restart the RECORD ring at index 0 and OVERWRITE the
+# records written before the breakpoint -- i.e. debugging would silently
+# corrupt the program's own output, which is the one thing a debugger must
+# never do. `seq` is persisted for the same reason (it numbers log bytes and
+# records across the whole run, not per launch). The CUDA/Vulkan/Metal
+# kernels must save/restore these two exactly like the rest of the block.
+pub val DBG_SAVED_SEQ_OFFSET: i64 = DBG_BASE_OFFSET + 0x4D8
+pub val DBG_SAVED_RECORD_COUNT_OFFSET: i64 = DBG_BASE_OFFSET + 0x4DC
+pub val DBG_USED_SIZE: i64 = 0x4E0              # 1248 bytes actually used
+
+# DBG_FLAGS bits (design §3).
+pub val DBG_FLAG_ENABLED: i64 = 0x1             # bit0: debug enabled
+pub val DBG_FLAG_RESUME: i64 = 0x2              # bit1: resume from saved state
+pub val DBG_FLAG_SINGLE_STEP: i64 = 0x4         # bit2: break after one instruction
+
+# Halt sentinel written when the VM stops for a DEBUG reason (breakpoint hit
+# or single-step completion), as opposed to HALT/TRAP/budget. Design §3 pins
+# this to the `0xCAFE00Dx` family; 0xDB ("debug break") is the chosen low
+# byte. NOTE the deliberate consequence: because SENTINEL_EXIT_MASK ORs a
+# 16-bit exit code, a program that exits with code 0xDB would produce the
+# same u32. Exit code 0xDB is therefore RESERVED and must not be used by
+# conformance programs. `VmRunResult.debug_break` is the unambiguous signal;
+# the sentinel is the wire-visible one for host code reading a device arena.
+pub val SENTINEL_DEBUG_BREAK: i64 = 0xCAFE00DB
+pub val DEBUG_BREAK_EXIT_CODE: i64 = 0xDB
+
+fn max_record_count(log_cap: i64) -> i64:
+    """How many RECORD-ring entries fit before the ring would reach DBG-1.
+
+    Named so the DBG-1 non-overlap is a checkable bound rather than an
+    unstated assumption (see the layout comment above). With the default
+    1 KiB log_cap this is 5,053 records -- far beyond any conformance
+    program's step budget, but now it is a NUMBER a test can assert on."""
+    (DBG_BASE_OFFSET - record_ring_base_offset(log_cap)) / RECORD_SIZE

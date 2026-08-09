@@ -1,0 +1,158 @@
+# DBG-1 arena block: layout, non-overlap, and encode/decode round-trip
+# (stream P5).
+#
+# The layout half of this spec is deliberately mechanical: it recomputes the
+# arena's occupied regions from the SAME constants the VM uses and asserts
+# DBG-1 lands outside all of them. That makes a future move of the REG
+# block, a bigger LOG ring, or a longer RECORD ring fail HERE — loudly and
+# with a name — instead of silently overwriting saved debug state on a
+# device, which is the kind of bug that presents as "the debugger sometimes
+# resumes to a nonsense pc".
+#
+# Arithmetic alone would be a weak proof, though: it only says the numbers
+# don't overlap, not that the WRITES don't. So the last describe block
+# actually writes the DBG-1 block into a real arena and asserts the REG
+# block, the LOG ring header, and the RECORD ring bytes are byte-identical
+# afterwards.
+
+use std.spipe.*
+use std.common.svmg.mailbox_const.*
+use std.common.svmg.ref_vm.{
+    build_arena, dbg_set_flags, dbg_read_flags, dbg_set_breakpoints,
+    dbg_read_break_count, dbg_read_breakpoint,
+    OPERAND_STACK_SIZE, CALL_STACK_SIZE,
+}
+
+fn _fresh_arena() -> [u8]:
+    build_arena([0x01, 0x00], [], 100, 0, DEFAULT_LOG_CAP)
+
+fn _u32_at(arena: [u8], idx: i64) -> i64:
+    (arena[idx] as i64) | ((arena[idx + 1] as i64) << 8) | ((arena[idx + 2] as i64) << 16) | ((arena[idx + 3] as i64) << 24)
+
+describe "DBG-1 block placement — non-overlap with every other arena region":
+
+    it "starts above the DATA region, so no program STORE can reach it":
+        # bounds_ok() in ref_vm limits LOAD/STORE to offset+width <=
+        # ARENA_DATA_SIZE, so this inequality is what makes the debug block
+        # unreachable from bytecode — a program cannot forge its own
+        # breakpoints or corrupt its saved state.
+        assert_true(DBG_BASE_OFFSET >= ARENA_DATA_SIZE)
+
+    it "starts above the REG mailbox command block":
+        assert_true(DBG_BASE_OFFSET >= REG_BASE_OFFSET + REG_BLOCK_SIZE)
+
+    it "starts above the LOG ring's last byte at the default capacity":
+        assert_true(DBG_BASE_OFFSET >= LOG_DATA_OFFSET + DEFAULT_LOG_CAP)
+
+    it "starts above the RECORD ring's base at the default capacity":
+        assert_true(DBG_BASE_OFFSET >= record_ring_base_offset(DEFAULT_LOG_CAP))
+
+    it "ends exactly at the top of the arena, never past it":
+        assert_equal(DBG_BASE_OFFSET + DBG_BLOCK_SIZE, ARENA_TOTAL_SIZE)
+
+    it "uses no more than the space it reserves":
+        assert_true(DBG_USED_SIZE <= DBG_BLOCK_SIZE)
+
+    it "leaves the RECORD ring a positive, stated capacity before it would collide":
+        val cap = max_record_count(DEFAULT_LOG_CAP)
+        assert_true(cap > 0)
+        # The bound must be tight in the right direction: the last record
+        # that fits must END at or below the DBG block, and one more must not.
+        val base = record_ring_base_offset(DEFAULT_LOG_CAP)
+        assert_true(base + cap * RECORD_SIZE <= DBG_BASE_OFFSET)
+        assert_true(base + (cap + 1) * RECORD_SIZE > DBG_BASE_OFFSET)
+
+describe "DBG-1 block placement — internal field layout":
+
+    it "lays the fields out in ascending order with no field overlapping the next":
+        assert_equal(DBG_FLAGS_OFFSET + 4, DBG_BREAK_COUNT_OFFSET)
+        assert_equal(DBG_BREAK_COUNT_OFFSET + 4, DBG_BREAK_PCS_OFFSET)
+        assert_equal(DBG_BREAK_PCS_OFFSET + DBG_MAX_BREAKPOINTS * 4, DBG_SAVED_PC_OFFSET)
+        assert_equal(DBG_SAVED_PC_OFFSET + 4, DBG_SAVED_SP_OFFSET)
+        assert_equal(DBG_SAVED_SP_OFFSET + 4, DBG_SAVED_CSP_OFFSET)
+        assert_equal(DBG_SAVED_CSP_OFFSET + 4, DBG_STEP_COUNT_OFFSET)
+        assert_equal(DBG_STEP_COUNT_OFFSET + 4, DBG_SAVED_STACK_OFFSET)
+        assert_equal(DBG_SAVED_STACK_OFFSET + 256 * 4, DBG_SAVED_CALLS_OFFSET)
+        assert_equal(DBG_SAVED_CALLS_OFFSET + 32 * 4, DBG_SAVED_SEQ_OFFSET)
+        assert_equal(DBG_SAVED_SEQ_OFFSET + 4, DBG_SAVED_RECORD_COUNT_OFFSET)
+        assert_equal(DBG_SAVED_RECORD_COUNT_OFFSET + 4, DBG_BASE_OFFSET + DBG_USED_SIZE)
+
+    it "sizes the saved stacks to match the VM's actual stack capacities":
+        # If OPERAND_STACK_SIZE or CALL_STACK_SIZE ever grows, the saved
+        # region must grow with it or save_debug_state would write past its
+        # own field. Asserted against the VM's own constants, not literals.
+        assert_equal(DBG_SAVED_CALLS_OFFSET - DBG_SAVED_STACK_OFFSET, OPERAND_STACK_SIZE * 4)
+        assert_equal(DBG_SAVED_SEQ_OFFSET - DBG_SAVED_CALLS_OFFSET, CALL_STACK_SIZE * 4)
+
+    it "gives the debug-break sentinel a value distinct from the timeout sentinel":
+        assert_true(SENTINEL_DEBUG_BREAK != SENTINEL_TIMEOUT)
+        # It is in the 0xCAFE00Dx family the design pins it to, which means
+        # it aliases exit code 0xDB — documented and reserved, and asserted
+        # here so the aliasing can never be forgotten.
+        assert_equal(SENTINEL_DEBUG_BREAK, SENTINEL_EXIT_MASK | DEBUG_BREAK_EXIT_CODE)
+
+describe "DBG-1 block encode/decode":
+
+    it "round-trips DBG_FLAGS":
+        val arena = dbg_set_flags(_fresh_arena(), DBG_FLAG_ENABLED | DBG_FLAG_SINGLE_STEP)
+        assert_equal(dbg_read_flags(arena), DBG_FLAG_ENABLED | DBG_FLAG_SINGLE_STEP)
+
+    it "reads DBG_FLAGS as zero on an arena that was never debugged":
+        assert_equal(dbg_read_flags(_fresh_arena()), 0)
+
+    it "round-trips a full breakpoint table without dropping the last entry":
+        var pcs: [i64] = []
+        var i = 0
+        while i < DBG_MAX_BREAKPOINTS:
+            pcs.push(1000 + i * 7)
+            i = i + 1
+        val arena = dbg_set_breakpoints(_fresh_arena(), pcs)
+        assert_equal(dbg_read_break_count(arena), DBG_MAX_BREAKPOINTS)
+        i = 0
+        while i < DBG_MAX_BREAKPOINTS:
+            assert_equal(dbg_read_breakpoint(arena, i), 1000 + i * 7)
+            i = i + 1
+
+    it "round-trips an empty breakpoint table as a count of zero":
+        val arena = dbg_set_breakpoints(_fresh_arena(), [])
+        assert_equal(dbg_read_break_count(arena), 0)
+
+describe "DBG-1 writes do not disturb any other arena region":
+
+    it "leaves the REG block, LOG ring and RECORD ring byte-identical":
+        val before = _fresh_arena()
+        var pcs: [i64] = []
+        var i = 0
+        while i < DBG_MAX_BREAKPOINTS:
+            pcs.push(0xFFFFFF)
+            i = i + 1
+        var after = dbg_set_breakpoints(before, pcs)
+        after = dbg_set_flags(after, 0xFFFFFFFF)
+
+        # Every byte from the start of the REG block through the end of the
+        # RECORD ring's reserved span must be untouched. This is the check
+        # that arithmetic non-overlap cannot give you.
+        var idx = REG_BASE_OFFSET
+        var differing = 0
+        while idx < DBG_BASE_OFFSET:
+            if before[idx] != after[idx]:
+                differing = differing + 1
+            idx = idx + 1
+        assert_equal(differing, 0)
+
+        # And the DATA region (the SGP blob) is likewise untouched.
+        idx = 0
+        differing = 0
+        while idx < ARENA_DATA_SIZE:
+            if before[idx] != after[idx]:
+                differing = differing + 1
+            idx = idx + 1
+        assert_equal(differing, 0)
+
+    it "actually wrote something, so the previous check is not vacuous":
+        # A non-overlap test that passes because nothing was written at all
+        # is worthless; prove the DBG region really did change.
+        val before = _fresh_arena()
+        val after = dbg_set_flags(before, DBG_FLAG_ENABLED)
+        assert_equal(_u32_at(before, DBG_FLAGS_OFFSET), 0)
+        assert_equal(_u32_at(after, DBG_FLAGS_OFFSET), DBG_FLAG_ENABLED)

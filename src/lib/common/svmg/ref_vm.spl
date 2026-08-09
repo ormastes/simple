@@ -60,6 +60,14 @@ pub struct VmRunResult:
     timed_out: bool
     steps_used: i64
     record_count: i64
+    # DBG-1: true when this launch stopped because of a DEBUG reason
+    # (breakpoint hit or single-step completion) rather than HALT/TRAP/budget.
+    # Always false when DBG_FLAGS == 0.
+    debug_break: bool
+    # PROF-1: instructions retired, ACCUMULATED across resumes (see
+    # DBG_STEP_COUNT_OFFSET in mailbox_const.spl). Always 0 when
+    # DBG_FLAGS == 0 -- use `steps_used` for the per-launch count.
+    step_count: i64
 
 # ============================================================================
 # Little-endian byte helpers (plain arrays).
@@ -93,6 +101,27 @@ fn _write_u32_le(arena: [u8], idx: i64, v: i64) -> [u8]:
 
 fn _read_u32_arena(arena: [u8], idx: i64) -> i64:
     _u32_le_at(arena, idx)
+
+fn _write_u32_le_many(arena: [u8], base: i64, vals: [i64], count: i64) -> [u8]:
+    """Write `count` u32s starting at ABSOLUTE arena offset `base`.
+
+    Exists purely so a bulk save (the 256-slot operand stack, the 32-frame
+    call stack) costs ONE array clone instead of `count` of them: arrays are
+    value types here, so `_write_u32_le` in a loop would copy the whole
+    128 KiB arena per field. `base` is absolute, like every other offset in
+    this file -- SVM-G STORE/LOAD and the DBG-1 block all address the arena
+    by absolute byte offset, never relative to a data offset."""
+    var out = arena
+    var i = 0
+    while i < count:
+        val v = vals[i] & 0xFFFFFFFF
+        val idx = base + i * 4
+        out[idx] = (v & 0xFF) as u8
+        out[idx + 1] = ((v >> 8) & 0xFF) as u8
+        out[idx + 2] = ((v >> 16) & 0xFF) as u8
+        out[idx + 3] = ((v >> 24) & 0xFF) as u8
+        i = i + 1
+    out
 
 # ============================================================================
 # i32 wraparound helpers
@@ -195,6 +224,62 @@ fn read_records(arena: [u8], log_cap: i64, count: i64) -> [ResultRecord]:
     out
 
 # ============================================================================
+# DBG-1 block accessors (host side).
+#
+# These are the ONLY sanctioned way to poke the debug block: a host debugger
+# (and, later, the CUDA/Vulkan/Metal wrappers) writes flags + breakpoints
+# into the arena, launches, then reads the saved state back out. All offsets
+# are ABSOLUTE arena byte offsets -- see mailbox_const.spl's layout comment.
+# ============================================================================
+
+fn dbg_set_flags(arena: [u8], flags: i64) -> [u8]:
+    """Set DBG_FLAGS (see DBG_FLAG_* in mailbox_const.spl)."""
+    _write_u32_le(arena, DBG_FLAGS_OFFSET, flags)
+
+fn dbg_read_flags(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_FLAGS_OFFSET)
+
+fn dbg_set_breakpoints(arena: [u8], pcs: [i64]) -> [u8]:
+    """Install the breakpoint table. Panics rather than silently truncating
+    when more than DBG_MAX_BREAKPOINTS are supplied -- a dropped breakpoint
+    is a debugger that lies about where it stopped. The 'table full' case is
+    a conformance vector precisely because the failure mode must be loud."""
+    if pcs.len() > DBG_MAX_BREAKPOINTS:
+        panic("svmg dbg1: {pcs.len()} breakpoints exceeds DBG_MAX_BREAKPOINTS ({DBG_MAX_BREAKPOINTS})")
+    var out = _write_u32_le(arena, DBG_BREAK_COUNT_OFFSET, pcs.len())
+    out = _write_u32_le_many(out, DBG_BREAK_PCS_OFFSET, pcs, pcs.len())
+    out
+
+fn dbg_read_break_count(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_BREAK_COUNT_OFFSET)
+
+fn dbg_read_breakpoint(arena: [u8], idx: i64) -> i64:
+    _read_u32_arena(arena, DBG_BREAK_PCS_OFFSET + idx * 4)
+
+fn dbg_read_saved_pc(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_SAVED_PC_OFFSET)
+
+fn dbg_read_saved_sp(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_SAVED_SP_OFFSET)
+
+fn dbg_read_saved_csp(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_SAVED_CSP_OFFSET)
+
+fn dbg_read_step_count(arena: [u8]) -> i64:
+    _read_u32_arena(arena, DBG_STEP_COUNT_OFFSET)
+
+fn dbg_read_saved_stack_slot(arena: [u8], idx: i64) -> i64:
+    """Saved operand-stack slot `idx`, decoded as a SIGNED i32 -- the operand
+    stack carries signed i32 values (see the module docstring), so an
+    unsigned readback would misreport every negative operand."""
+    val raw = _read_u32_arena(arena, DBG_SAVED_STACK_OFFSET + idx * 4)
+    if raw >= 0x80000000: raw - 0x100000000 else: raw
+
+fn dbg_read_saved_call_slot(arena: [u8], idx: i64) -> i64:
+    """Saved call-stack frame `idx` (a return pc -- always non-negative)."""
+    _read_u32_arena(arena, DBG_SAVED_CALLS_OFFSET + idx * 4)
+
+# ============================================================================
 # Interpreter
 # ============================================================================
 
@@ -214,6 +299,13 @@ class SvmgVm:
     timed_out: bool
     seq: i64
     record_count: i64
+    # --- DBG-1 / PROF-1 state. All inert when dbg_flags == 0. ---
+    dbg_flags: i64
+    dbg_breaks: [i64]
+    dbg_break_count: i64
+    resumed: bool
+    debug_break: bool
+    step_count: i64
 
     static fn new(header: SgpHeader, code: [u8], arena_in: [u8]) -> SvmgVm:
         var stack: [i64] = []
@@ -226,22 +318,71 @@ class SvmgVm:
         while i < CALL_STACK_SIZE:
             callstack.push(0)
             i = i + 1
+
+        # DBG-1 launch-time restore (design §3, kernel change 1). When
+        # DBG_FLAGS is 0 -- the only state any pre-DBG-1 arena can be in,
+        # since build_arena zeroes the whole REG/LOG/RECORD region -- every
+        # branch below is skipped and the VM starts exactly as it always
+        # did: pc = entry_pc, empty stacks, step_count 0.
+        val dbg_flags = _read_u32_arena(arena_in, DBG_FLAGS_OFFSET)
+        val dbg_on = (dbg_flags & DBG_FLAG_ENABLED) != 0
+        var dbg_breaks: [i64] = []
+        var dbg_break_count = 0
+        var start_pc = header.entry_pc
+        var start_sp = 0
+        var start_csp = 0
+        var resumed = false
+        var step_count = 0
+        var start_seq = 0
+        var start_record_count = 0
+        if dbg_on:
+            dbg_break_count = _read_u32_arena(arena_in, DBG_BREAK_COUNT_OFFSET)
+            if dbg_break_count > DBG_MAX_BREAKPOINTS:
+                panic("svmg dbg1: DBG_BREAK_COUNT {dbg_break_count} exceeds DBG_MAX_BREAKPOINTS ({DBG_MAX_BREAKPOINTS})")
+            i = 0
+            while i < dbg_break_count:
+                dbg_breaks.push(_read_u32_arena(arena_in, DBG_BREAK_PCS_OFFSET + i * 4))
+                i = i + 1
+            step_count = _read_u32_arena(arena_in, DBG_STEP_COUNT_OFFSET)
+            if (dbg_flags & DBG_FLAG_RESUME) != 0:
+                resumed = true
+                start_seq = _read_u32_arena(arena_in, DBG_SAVED_SEQ_OFFSET)
+                start_record_count = _read_u32_arena(arena_in, DBG_SAVED_RECORD_COUNT_OFFSET)
+                start_pc = _read_u32_arena(arena_in, DBG_SAVED_PC_OFFSET)
+                start_sp = _read_u32_arena(arena_in, DBG_SAVED_SP_OFFSET)
+                start_csp = _read_u32_arena(arena_in, DBG_SAVED_CSP_OFFSET)
+                i = 0
+                while i < OPERAND_STACK_SIZE:
+                    val raw = _read_u32_arena(arena_in, DBG_SAVED_STACK_OFFSET + i * 4)
+                    stack[i] = if raw >= 0x80000000: raw - 0x100000000 else: raw
+                    i = i + 1
+                i = 0
+                while i < CALL_STACK_SIZE:
+                    callstack[i] = _read_u32_arena(arena_in, DBG_SAVED_CALLS_OFFSET + i * 4)
+                    i = i + 1
+
         SvmgVm(
             arena: arena_in,
             code: code,
             stack: stack,
-            sp: 0,
+            sp: start_sp,
             callstack: callstack,
-            csp: 0,
-            pc: header.entry_pc,
+            csp: start_csp,
+            pc: start_pc,
             steps_remaining: header.step_budget,
             initial_step_budget: header.step_budget,
             log_cap: _read_u32_arena(arena_in, LOG_CAP_OFFSET),
             halted: false,
             trapped: false,
             timed_out: false,
-            seq: 0,
-            record_count: 0,
+            seq: start_seq,
+            record_count: start_record_count,
+            dbg_flags: dbg_flags,
+            dbg_breaks: dbg_breaks,
+            dbg_break_count: dbg_break_count,
+            resumed: resumed,
+            debug_break: false,
+            step_count: step_count,
         )
 
     me pop() -> i64:
@@ -559,7 +700,41 @@ class SvmgVm:
         else:
             panic("svmg: unimplemented opcode 0x{opcode}")
 
+    me is_breakpoint(pc_val: i64) -> bool:
+        var i = 0
+        while i < self.dbg_break_count:
+            if self.dbg_breaks[i] == pc_val:
+                return true
+            i = i + 1
+        false
+
+    me save_debug_state():
+        """Design §3, kernel change 3: on EVERY halt with bit0 set, park the
+        full execution state in the DBG-1 block so "why did it stop" is
+        always inspectable and so the next launch can resume from here."""
+        self.arena = _write_u32_le(self.arena, DBG_SAVED_PC_OFFSET, self.pc)
+        self.arena = _write_u32_le(self.arena, DBG_SAVED_SP_OFFSET, self.sp)
+        self.arena = _write_u32_le(self.arena, DBG_SAVED_CSP_OFFSET, self.csp)
+        self.arena = _write_u32_le(self.arena, DBG_STEP_COUNT_OFFSET, self.step_count)
+        self.arena = _write_u32_le(self.arena, DBG_SAVED_SEQ_OFFSET, self.seq)
+        self.arena = _write_u32_le(self.arena, DBG_SAVED_RECORD_COUNT_OFFSET, self.record_count)
+        self.arena = _write_u32_le_many(self.arena, DBG_SAVED_STACK_OFFSET, self.stack, OPERAND_STACK_SIZE)
+        self.arena = _write_u32_le_many(self.arena, DBG_SAVED_CALLS_OFFSET, self.callstack, CALL_STACK_SIZE)
+
+    me halt_debug_break():
+        self.arena = _write_u32_le(self.arena, RAM_SENTINEL_OFFSET, SENTINEL_DEBUG_BREAK)
+        self.debug_break = true
+        self.halted = true
+
     me run() -> VmRunResult:
+        # Single hoisted bool: when DBG_FLAGS == 0 the loop below is the
+        # pre-DBG-1 loop plus one already-computed boolean test per
+        # iteration, and NOTHING else -- no arena reads, no table scan, no
+        # extra writes, and the debug fields are never touched.
+        val dbg_on = (self.dbg_flags & DBG_FLAG_ENABLED) != 0
+        val single_step = dbg_on and (self.dbg_flags & DBG_FLAG_SINGLE_STEP) != 0
+        var first_instruction = true
+
         while not self.halted:
             if self.steps_remaining <= 0:
                 self.arena = _write_u32_le(self.arena, RAM_SENTINEL_OFFSET, SENTINEL_TIMEOUT)
@@ -569,8 +744,32 @@ class SvmgVm:
             if self.pc >= self.code.len():
                 self.exit_clean(0)
                 break
+            if dbg_on:
+                # Breakpoint check BEFORE executing, so a break leaves pc ON
+                # the breakpoint and resuming re-executes that instruction
+                # exactly once. The `first_instruction and self.resumed`
+                # suppression is what makes that true: without it, resuming
+                # from a breakpoint would immediately re-break on the very
+                # same pc and the debugger could never make progress.
+                if not (first_instruction and self.resumed) and self.is_breakpoint(self.pc):
+                    self.halt_debug_break()
+                    break
             self.steps_remaining = self.steps_remaining - 1
             self.step()
+            if dbg_on:
+                self.step_count = self.step_count + 1
+                # Single-step stops AFTER one instruction -- but only if that
+                # instruction did not already halt the VM itself (HALT, TRAP,
+                # SYS_EXIT). A program that ended is not "stopped at a
+                # breakpoint", and reporting it as one would make
+                # resume-to-completion loop forever.
+                if single_step and not self.halted:
+                    self.halt_debug_break()
+                    break
+            first_instruction = false
+
+        if dbg_on:
+            self.save_debug_state()
 
         VmRunResult(
             arena: self.arena,
@@ -581,6 +780,8 @@ class SvmgVm:
             timed_out: self.timed_out,
             steps_used: self.initial_step_budget - self.steps_remaining,
             record_count: self.record_count,
+            debug_break: self.debug_break,
+            step_count: self.step_count,
         )
 
 pub fn run(header: SgpHeader, code: [u8], arena_in: [u8]) -> VmRunResult:
@@ -592,6 +793,17 @@ pub fn run(header: SgpHeader, code: [u8], arena_in: [u8]) -> VmRunResult:
     """
     val vm = SvmgVm.new(header, code, arena_in)
     vm.run()
+
+fn run_arena(code: [u8], arena_in: [u8]) -> VmRunResult:
+    """Launch against an EXISTING arena, re-decoding the SGP header from it.
+
+    This is the resume entry point: hand back the arena a previous launch
+    returned (with DBG_FLAG_RESUME set) and execution continues from the
+    saved state, with the LOG ring, RECORD ring and DATA region exactly as
+    the earlier launch left them -- the same "persisted arena" continuity the
+    device wrappers get for free, because the arena IS the device buffer."""
+    val header = decode_sgp_header(arena_in)
+    run(header, code, arena_in)
 
 fn assemble_and_run(code: [u8], step_budget: i64, entry_pc: i64) -> VmRunResult:
     """Convenience entry point: build a default-sized arena around `code`
