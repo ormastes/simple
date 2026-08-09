@@ -249,6 +249,19 @@ fn test_enum_invalid_value() {
 }
 
 #[test]
+fn test_unwrap_or_self_only_unwraps_canonical_option() {
+    let option_some = rt_enum_new(
+        super::OPTION_ENUM_ID,
+        0,
+        RuntimeValue::from_int(42),
+    );
+    assert_eq!(super::rt_unwrap_or_self(option_some).as_int(), 42);
+
+    let user_enum = rt_enum_new(77, 0, RuntimeValue::from_int(42));
+    assert_eq!(super::rt_unwrap_or_self(user_enum), user_enum);
+}
+
+#[test]
 fn test_enum_large_discriminant() {
     let enum_id = 5;
     let discriminant = 999;

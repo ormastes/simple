@@ -311,7 +311,15 @@ pub extern "C" fn rt_enum_check_discriminant(value: RuntimeValue, expected: i64)
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
     if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
-        unsafe { (*p).payload }
+        // Only the canonical Option enum uses this compatibility helper.
+        // User enums may also be boxed RuntimeEnum values; unwrapping those
+        // would turn `K? ?? fallback` into K's payload and corrupt a later
+        // match in a natively compiled compiler.
+        if unsafe { (*p).enum_id } == OPTION_ENUM_ID {
+            unsafe { (*p).payload }
+        } else {
+            value
+        }
     } else {
         // Not an enum — return the value itself (could be a raw string, int, etc.)
         value
