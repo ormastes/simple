@@ -7,42 +7,64 @@
 # profile". Every cell is produced by REALLY constructing the thing and
 # calling it — never by a hardcoded table:
 #
+#   ref      a real RefDebugSession is constructed, attached, and its group
+#            acquired through the SINGLE accessor `ref_debug_profiler(s)`;
+#            the levels printed are what `debug_level()`/`profile_level()`
+#            answer, and the profile cell is a real `dp_trace_run` report.
 #   attach   cuda/vulkan/metal: a real *LaneSession.probe() on this machine,
 #            reason string passed through verbatim.
 #            host: a real readability check of the program under inspection.
-#   profile  host: a real elapsed-time measurement taken here and now with
-#            rt_time_now_unix_micros(); the level is Native only if the clock
-#            actually advanced.
-#   debug    read from the capability registry below. A target with no
-#            registered DebugTarget reports Unavailable AND SAYS WHY. That is
-#            a truthful runtime absence, which is exactly what the design
-#            asks for ("a None is a truthful runtime absence, never an
-#            unimplemented hole") — the doctor must never claim a capability
-#            that nothing implements.
+#   profile  host: a real elapsed measurement taken here and now with
+#            rt_time_now_unix_micros(). Quantities that are NOT measured are
+#            PROFILE_ABSENT (-1), never 0 — `profile_report_summary` prints
+#            them as `-` so a glance cannot mistake an absence for a zero.
+#   debug    from the capability registry for targets whose DebugTarget has
+#            not landed yet. A target with no registered capability reports
+#            `Unavailable` AND SAYS WHY. That is a truthful runtime absence,
+#            exactly what the design asks for — the doctor must never claim
+#            a capability that nothing implements.
 #
-# Levels are carried as plain text ("Native" / "Emulated" / "Unavailable")
-# rather than a local enum, so that when P2's
-# `src/lib/common/debug/capability.spl` lands, `CapLevel.to_text()` feeds
-# straight into these fields with no duplicate enum to reconcile.
+# Fail-closed: registry levels are decoded with `cap_level_from_name`, whose
+# unknown-name direction is `Unavailable`. An unrecognised tier, a typo, or a
+# newer backend's unknown spelling can therefore never be mistaken here for a
+# working capability.
 
+use std.common.debug.capability.{
+    CapLevel, cap_level_name, cap_level_from_name, cap_level_is_usable
+}
+use std.common.debug.profile_target.{
+    ProfileReport, PROFILE_ABSENT, profile_report_new, profile_report_unavailable,
+    profile_report_summary, profile_has_steps
+}
+use std.common.debug.session_core.{
+    AttachOpts, attach_opts_default, attach_is_ok, attach_is_skip
+}
+use std.common.debug.debug_profiler.{DebugProfiler, dp_trace_run}
+use std.common.debug.ref_debug_session.{RefDebugSession, ref_debug_profiler}
 use std.notebook.gpu_mode_resolver.{GpuBackendProbe, GPU_AUTO_PROBE_ORDER}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_exists(path: text) -> bool
 
+# A minimal, terminating SVM-G program for the `ref` row: push two operands,
+# add, publish the result, halt. Same dialect and shape as P2's own
+# conformance fixture (test/01_unit/lib/debug/debug_target_ref_spec.spl
+# ADD_PROGRAM), so the doctor exercises the ref lane the way its spec does.
+val DOCTOR_REF_PROGRAM: text = "PUSHI 1\nPUSHI 3\nPUSHI 4\nADD\nSYS_RESULT\nHALT 0"
+
 # ============================================================================
 # Registry — how a landed DebugTarget/ProfileTarget makes itself visible to
-# the doctor.
+# the doctor before it has a constructible session here.
 #
-# P3 (host adapter), P6 (cuda/vulkan wrappers) and P8 (metal) each register
-# their target here; until they do, the doctor reports their absence with the
+# P3 (host adapter), P6 (cuda/vulkan wrappers) and P8 (metal) register their
+# target here; until they do, the doctor reports their absence with the
 # stream and file that will provide it. Nothing else in this module knows the
 # names of those implementations.
 # ============================================================================
 
 struct RegisteredCapability:
-    target: text        # "host" | "cuda" | "vulkan" | "metal" | "ref"
-    debug_level: text   # "Native" | "Emulated"
+    target: text        # "host" | "cuda" | "vulkan" | "metal"
+    debug_level: text   # decoded fail-closed via cap_level_from_name
     debug_detail: text  # e.g. "line" | "svmg_pc"
     profile_level: text
     profile_detail: text
@@ -57,33 +79,53 @@ impl CapabilityRegistry:
     me register(entry: RegisteredCapability):
         self.entries.push(entry)
 
-    fn debug_of(target: text) -> text:
-        for entry in self.entries:
-            if entry.target == target:
-                return "{entry.debug_level} ({entry.debug_detail})"
-        ""
-
-    fn profile_of(target: text) -> text:
-        for entry in self.entries:
-            if entry.target == target:
-                return "{entry.profile_level} ({entry.profile_detail})"
-        ""
-
     fn has(target: text) -> bool:
         for entry in self.entries:
             if entry.target == target:
                 return true
         false
 
+    fn entry_of(target: text) -> Option<RegisteredCapability>:
+        for entry in self.entries:
+            if entry.target == target:
+                return Some(entry)
+        nil
+
+    fn debug_level_of(target: text) -> CapLevel:
+        """Unregistered, or registered with an unrecognised tier name, both
+        decode to Unavailable — the fail-closed direction."""
+        for entry in self.entries:
+            if entry.target == target:
+                return cap_level_from_name(entry.debug_level)
+        CapLevel.Unavailable
+
+    fn debug_detail_of(target: text) -> text:
+        for entry in self.entries:
+            if entry.target == target:
+                return entry.debug_detail
+        ""
+
+    fn profile_level_of(target: text) -> CapLevel:
+        for entry in self.entries:
+            if entry.target == target:
+                return cap_level_from_name(entry.profile_level)
+        CapLevel.Unavailable
+
+    fn profile_detail_of(target: text) -> text:
+        for entry in self.entries:
+            if entry.target == target:
+                return entry.profile_detail
+        ""
+
 # The pending-stream note a target reports when nothing has registered it.
 fn pending_note(target: text) -> text:
     if target == "host":
-        return "Unavailable (no DebugTarget registered for 'host' — pending P3 src/app/dap/host_debug_target.spl)"
+        return "no DebugTarget registered for 'host' — pending P3 src/app/dap/host_debug_target.spl"
     if target == "cuda" or target == "vulkan":
-        return "Unavailable (no DebugTarget registered for '{target}' — pending P6 {target}_debug_session.spl)"
+        return "no DebugTarget registered for '{target}' — pending P6 {target}_debug_session.spl"
     if target == "metal":
-        return "Unavailable (no DebugTarget registered for 'metal' — pending P8 metal_debug_session.spl)"
-    "Unavailable (no DebugTarget registered for '{target}')"
+        return "no DebugTarget registered for 'metal' — pending P8 metal_debug_session.spl"
+    "no DebugTarget registered for '{target}'"
 
 # ============================================================================
 # Rows
@@ -91,12 +133,63 @@ fn pending_note(target: text) -> text:
 
 struct DoctorRow:
     target: text
-    attach: text     # "ok" | "skip:<reason>" | "blocked:<reason>"
-    debug: text
-    profile: text
+    attach: text          # "" ok | "skip:<reason>" | error text, per session_core
+    debug_level: CapLevel
+    debug_detail: text
+    profile: ProfileReport
 
 fn row_is_attachable(row: DoctorRow) -> bool:
-    row.attach == "ok"
+    attach_is_ok(row.attach)
+
+fn row_can_debug(row: DoctorRow) -> bool:
+    cap_level_is_usable(row.debug_level)
+
+fn row_debug_cell(row: DoctorRow) -> text:
+    if row.debug_detail == "":
+        return cap_level_name(row.debug_level)
+    "{cap_level_name(row.debug_level)} ({row.debug_detail})"
+
+fn row_attach_cell(row: DoctorRow) -> text:
+    if attach_is_ok(row.attach):
+        return "ok"
+    row.attach
+
+# ============================================================================
+# ref row — really constructs a session and calls the single group accessor.
+# ============================================================================
+
+pub fn ref_row() -> DoctorRow:
+    """Construct a RefDebugSession, attach, acquire the DebugProfiler group
+    through the SINGLE accessor, and report what the accessors answer.
+
+    Group acquisition deliberately uses `ref_debug_profiler(session)` rather
+    than pairing `session.debug()` with `session.profile()`: classes are
+    VALUE types here, so two accessor calls yield two diverging copies (see
+    debug_profiler.spl's language-constraint note). One trait over one value
+    is the corrected shape."""
+    var session = RefDebugSession.new()
+    val attach = session.attach(DOCTOR_REF_PROGRAM, attach_opts_default())
+    if not attach_is_ok(attach):
+        return DoctorRow(
+            target: "ref", attach: attach,
+            debug_level: CapLevel.Unavailable, debug_detail: "",
+            profile: profile_report_unavailable("ref attach failed: {attach}"))
+
+    val acquired = ref_debug_profiler(session)
+    if acquired == nil:
+        # Attached but the group did not acquire: a truthful absence.
+        return DoctorRow(
+            target: "ref", attach: attach,
+            debug_level: CapLevel.Unavailable, debug_detail: "",
+            profile: profile_report_unavailable("ref DebugProfiler did not acquire after a successful attach"))
+
+    var dp = acquired!
+    # A real run through the group: the report below is measured, not stated.
+    val report = dp_trace_run(dp)
+    DoctorRow(
+        target: "ref", attach: attach,
+        debug_level: dp.debug_level(), debug_detail: "svmg_pc",
+        profile: report)
 
 # ============================================================================
 # Host row — measured, not asserted.
@@ -105,13 +198,13 @@ fn row_is_attachable(row: DoctorRow) -> bool:
 pub fn measure_host_wall_ns() -> i64:
     """Really measure an elapsed interval with the host clock.
 
-    Returns nanoseconds. A clock that does not advance across a real unit of
-    work returns 0, and the host profile row then honestly reports
-    Unavailable rather than claiming Native (wall)."""
+    Returns nanoseconds, or PROFILE_ABSENT when the clock did not advance
+    across real work — in which case the host profile row honestly reports
+    Unavailable instead of claiming Native (wall)."""
     val started_us = rt_time_now_unix_micros()
     # A small but genuine unit of work, so a working microsecond clock has
     # something to observe. Nothing here is a sleep: the doctor must stay
-    # fast enough to run in a spec.
+    # fast enough to run inside a spec.
     var acc: i64 = 0
     var i = 0
     while i < 200000:
@@ -119,38 +212,58 @@ pub fn measure_host_wall_ns() -> i64:
         i = i + 1
     val finished_us = rt_time_now_unix_micros()
     if acc < 0:
-        return 0
+        return PROFILE_ABSENT
     val delta_us = finished_us - started_us
-    if delta_us < 0:
-        return 0
+    if delta_us <= 0:
+        return PROFILE_ABSENT
     delta_us * 1000
 
 pub fn host_row(registry: CapabilityRegistry, program: text) -> DoctorRow:
     """Build the host row by actually exercising the host.
 
-    `program` is the source under inspection; attach is `ok` only when it is
-    really readable (empty program = the doctor's own self-check, which
-    always attaches since the host lane needs nothing else)."""
-    var attach = "ok"
+    `program` is the source under inspection; attach is ok only when it is
+    really readable (empty program = the doctor's own self-check, for which
+    the host lane needs nothing else)."""
+    var attach = ""
     if program != "" and not rt_file_exists(program):
         attach = "skip:host-program-not-found: {program}"
 
-    val registered_debug = registry.debug_of("host")
-    val debug = if registered_debug != "": registered_debug else: pending_note("host")
+    val registered_debug = registry.debug_level_of("host")
+    var debug_detail = registry.debug_detail_of("host")
+    if not cap_level_is_usable(registered_debug):
+        debug_detail = pending_note("host")
 
-    var profile = registry.profile_of("host")
-    if profile == "":
-        # No ProfileTarget registered yet (P4), but wall-clock profiling is
-        # genuinely available on the host TODAY and the doctor proves it by
-        # measuring. `steps` needs P4's interpreter counter, and its absence
-        # is stated rather than implied.
-        val wall_ns = measure_host_wall_ns()
-        if wall_ns > 0:
-            profile = "Native (wall) — measured {wall_ns}ns; steps pending P4 host_profile_target.spl"
-        else:
-            profile = "Unavailable (host clock did not advance across a measured interval)"
+    if not attach_is_ok(attach):
+        return DoctorRow(
+            target: "host", attach: attach,
+            debug_level: registered_debug, debug_detail: debug_detail,
+            profile: profile_report_unavailable("host program not attachable"))
 
-    DoctorRow(target: "host", attach: attach, debug: debug, profile: profile)
+    if registry.has("host") and cap_level_is_usable(registry.profile_level_of("host")):
+        # A landed host ProfileTarget (P4) owns the cell.
+        return DoctorRow(
+            target: "host", attach: attach,
+            debug_level: registered_debug, debug_detail: debug_detail,
+            profile: profile_report_new(
+                registry.profile_level_of("host"), measure_host_wall_ns(),
+                PROFILE_ABSENT, PROFILE_ABSENT, registry.profile_detail_of("host")))
+
+    # No ProfileTarget registered yet (P4), but wall-clock profiling is
+    # genuinely available on the host TODAY and the doctor proves it by
+    # measuring. `device_ns` and `steps` stay PROFILE_ABSENT rather than 0:
+    # a host has no device timer, and `steps` needs P4's interpreter counter.
+    val wall_ns = measure_host_wall_ns()
+    var profile = profile_report_unavailable(
+        "host clock did not advance across a measured interval")
+    if wall_ns > 0:
+        profile = profile_report_new(
+            CapLevel.Native, wall_ns, PROFILE_ABSENT, PROFILE_ABSENT,
+            "wall measured; device timer n/a on host; steps pending P4 host_profile_target.spl")
+
+    DoctorRow(
+        target: "host", attach: attach,
+        debug_level: registered_debug, debug_detail: debug_detail,
+        profile: profile)
 
 # ============================================================================
 # GPU rows — a real probe per backend.
@@ -160,32 +273,42 @@ pub fn gpu_row(registry: CapabilityRegistry, target: text, probe: GpuBackendProb
     """Build one GPU row by really probing the backend on this machine.
 
     The probe reason is passed through untouched. On a Linux host Metal
-    answers "skip:metal-unavailable-not-macos" and that is a CORRECT row, not
-    a failure — the doctor prints it as the skip it is."""
+    answers "skip:metal-unavailable-not-macos" and that is a CORRECT row,
+    not a failure — the doctor prints it as the skip it is."""
     val probe_result = probe.probe_backend(target)
     if probe_result != "":
-        var attach = probe_result
-        if not probe_result.starts_with("skip:") and not probe_result.starts_with("blocked:"):
-            attach = "blocked:{probe_result}"
-        # An unattachable target reports no capabilities — printing a debug
-        # or profile level for hardware that is not here would be fabrication.
-        return DoctorRow(target: target, attach: attach, debug: "-", profile: "-")
+        # An unattachable target reports no capabilities — printing a level
+        # for hardware that is not here would be fabrication. Fail-closed.
+        return DoctorRow(
+            target: target, attach: probe_result,
+            debug_level: CapLevel.Unavailable, debug_detail: "",
+            profile: profile_report_unavailable(probe_result))
 
-    val registered_debug = registry.debug_of(target)
-    val debug = if registered_debug != "": registered_debug else: pending_note(target)
-    val registered_profile = registry.profile_of(target)
-    var profile = registered_profile
-    if profile == "":
-        profile = "Unavailable (no ProfileTarget registered for '{target}' — pending P6/P7 PROF-1 readback)"
-    DoctorRow(target: target, attach: "ok", debug: debug, profile: profile)
+    val registered_debug = registry.debug_level_of(target)
+    var debug_detail = registry.debug_detail_of(target)
+    if not cap_level_is_usable(registered_debug):
+        debug_detail = pending_note(target)
+
+    val registered_profile = registry.profile_level_of(target)
+    var profile = profile_report_unavailable(
+        "no ProfileTarget registered for '{target}' — pending P6/P7 PROF-1 readback")
+    if cap_level_is_usable(registered_profile):
+        profile = profile_report_new(
+            registered_profile, PROFILE_ABSENT, PROFILE_ABSENT, PROFILE_ABSENT,
+            registry.profile_detail_of(target))
+
+    DoctorRow(
+        target: target, attach: "",
+        debug_level: registered_debug, debug_detail: debug_detail,
+        profile: profile)
 
 # ============================================================================
 # Full matrix
 # ============================================================================
 
 pub fn doctor_rows(registry: CapabilityRegistry, probe: GpuBackendProbe, program: text) -> [DoctorRow]:
-    """host + one row per GPU backend, in the design's fixed order."""
-    var rows: [DoctorRow] = [host_row(registry, program)]
+    """host + ref + one row per GPU backend, in the design's fixed order."""
+    var rows: [DoctorRow] = [host_row(registry, program), ref_row()]
     for backend in GPU_AUTO_PROBE_ORDER:
         rows.push(gpu_row(registry, backend, probe))
     rows
@@ -197,21 +320,34 @@ fn _pad(value: text, width: i64) -> text:
     out
 
 pub fn render_doctor_matrix(rows: [DoctorRow]) -> text:
-    """Render the §5 matrix. Column widths are computed from the real data so
-    long, honest skip reasons are never truncated into a misleading cell."""
+    """Render the §5 matrix. Column widths come from the real data, so long
+    honest skip reasons are never truncated into a misleading cell."""
     var target_w = 6
     var attach_w = 6
     var debug_w = 5
     for row in rows:
         if row.target.len() > target_w: target_w = row.target.len()
-        if row.attach.len() > attach_w: attach_w = row.attach.len()
-        if row.debug.len() > debug_w: debug_w = row.debug.len()
+        val attach_cell = row_attach_cell(row)
+        if attach_cell.len() > attach_w: attach_w = attach_cell.len()
+        val debug_cell = row_debug_cell(row)
+        if debug_cell.len() > debug_w: debug_w = debug_cell.len()
     var lines: [text] = []
     lines.push("{_pad("target", target_w)}  {_pad("attach", attach_w)}  {_pad("debug", debug_w)}  profile")
     for row in rows:
-        lines.push("{_pad(row.target, target_w)}  {_pad(row.attach, attach_w)}  {_pad(row.debug, debug_w)}  {row.profile}")
+        lines.push("{_pad(row.target, target_w)}  {_pad(row_attach_cell(row), attach_w)}  {_pad(row_debug_cell(row), debug_w)}  {profile_report_summary(row.profile)}")
+    lines.join("\n")
+
+pub fn doctor_detail_lines(rows: [DoctorRow]) -> text:
+    """The `detail` payloads, printed under the matrix so the reasons behind
+    every Unavailable cell are visible rather than implied."""
+    var lines: [text] = []
+    for row in rows:
+        if row.profile.detail != "":
+            lines.push("  {row.target} profile: {row.profile.detail}")
     lines.join("\n")
 
 export RegisteredCapability, CapabilityRegistry, DoctorRow
-export doctor_rows, host_row, gpu_row, render_doctor_matrix
-export measure_host_wall_ns, pending_note, row_is_attachable
+export doctor_rows, host_row, gpu_row, ref_row, render_doctor_matrix
+export doctor_detail_lines, measure_host_wall_ns, pending_note
+export row_is_attachable, row_can_debug, row_debug_cell, row_attach_cell
+export DOCTOR_REF_PROGRAM
