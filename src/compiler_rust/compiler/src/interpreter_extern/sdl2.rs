@@ -185,11 +185,7 @@ fn library_handle() -> Result<usize, CompileError> {
 
     let mut tried = Vec::new();
     for path in candidate_paths() {
-        let Ok(c_path) = CString::new(path.clone()) else {
-            continue;
-        };
-        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-        if !handle.is_null() {
+        if let Some(handle) = super::dl_compat::dlopen_compat(&path) {
             HANDLE.store(handle as usize, Ordering::Relaxed);
             return Ok(handle as usize);
         }
@@ -212,14 +208,12 @@ fn library_handle() -> Result<usize, CompileError> {
 /// Resolve a symbol address in the satellite library.
 fn symbol(name: &str) -> Result<usize, CompileError> {
     let handle = library_handle()?;
-    let c_name = CString::new(name).map_err(|_| CompileError::runtime(format!("bad symbol name: {name}")))?;
-    let addr = unsafe { libc::dlsym(handle as *mut libc::c_void, c_name.as_ptr()) };
-    if addr.is_null() {
-        return Err(CompileError::runtime(format!(
+    match super::dl_compat::dlsym_compat(handle as *mut std::ffi::c_void, name) {
+        Some(addr) => Ok(addr as usize),
+        None => Err(CompileError::runtime(format!(
             "SDL2 runtime library does not export '{name}'"
-        )));
+        ))),
     }
-    Ok(addr as usize)
 }
 
 fn arg_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> {
@@ -246,7 +240,7 @@ fn arg_text(args: &[Value], idx: usize, name: &str) -> Result<String, CompileErr
 /// A NULL return becomes empty text rather than nil, matching how the C
 /// wrappers treat "no value" (`rt_sdl2_last_error` returns `""` when SDL has
 /// no pending error).
-unsafe fn text_from_ptr(ptr: *const libc::c_char) -> Value {
+unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
     if ptr.is_null() {
         return Value::Str(std::sync::Arc::new(String::new()));
     }
@@ -347,11 +341,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 Value::Nil
             }
             (Ret::T, 0) => {
-                let f: extern "C" fn() -> *const libc::c_char = std::mem::transmute(fptr);
+                let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                 text_from_ptr(f())
             }
             (Ret::T, 1) => {
-                let f: extern "C" fn(i64) -> *const libc::c_char = std::mem::transmute(fptr);
+                let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                 text_from_ptr(f(raw[0]))
             }
             (Ret::D, 1) => {

@@ -174,16 +174,13 @@ pub fn signature_of(name: &str) -> Option<(Ret, &'static str)> {
 /// which is a build error rather than a missing Vulkan installation — the
 /// message says so instead of blaming the driver.
 fn symbol(name: &str) -> Result<usize, CompileError> {
-    let c_name =
-        CString::new(name).map_err(|_| CompileError::runtime(format!("bad symbol name: {name}")))?;
-    let addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr()) };
-    if addr.is_null() {
-        return Err(CompileError::runtime(format!(
+    match super::dl_compat::dlsym_self_compat(name) {
+        Some(addr) => Ok(addr as usize),
+        None => Err(CompileError::runtime(format!(
             "Vulkan runtime entry point '{name}' is not linked into this binary \
              (expected it from src/compiler_rust/runtime/src/vulkan_graphics_runtime*.rs)"
-        )));
+        ))),
     }
-    Ok(addr as usize)
 }
 
 /// One marshalled argument, kept distinct because `f64` and `i64` do not share
@@ -220,7 +217,7 @@ fn arg_f64(args: &[Value], idx: usize, name: &str) -> Result<f64, CompileError> 
 /// A NULL return becomes empty text, matching what the runtime returns when it
 /// has no name to report. This is the case the old registration got wrong: it
 /// returned `Value::Int(0)`, which callers rendered as the device name `"0"`.
-unsafe fn text_from_ptr(ptr: *const libc::c_char) -> Value {
+unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
     if ptr.is_null() {
         return Value::Str(std::sync::Arc::new(String::new()));
     }
@@ -333,11 +330,11 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     Value::Int(f(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]))
                 }
                 (Ret::T, 0) => {
-                    let f: extern "C" fn() -> *const libc::c_char = std::mem::transmute(fptr);
+                    let f: extern "C" fn() -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                     text_from_ptr(f())
                 }
                 (Ret::T, 1) => {
-                    let f: extern "C" fn(i64) -> *const libc::c_char = std::mem::transmute(fptr);
+                    let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                     text_from_ptr(f(v[0]))
                 }
                 (kind, arity) => {

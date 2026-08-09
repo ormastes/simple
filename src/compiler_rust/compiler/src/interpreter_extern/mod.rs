@@ -54,7 +54,7 @@ static EXTERN_DISPATCH: LazyLock<HashMap<&'static str, ExternHandler>> = LazyLoc
 // Module declarations
 pub mod common;
 pub mod conversion;
-pub mod counterpart;
+pub mod dl_compat;
 pub mod process;
 pub mod pty;
 pub mod time;
@@ -77,7 +77,6 @@ pub mod tui;
 pub mod repl;
 pub mod gpu;
 pub mod gpu_rocm;
-pub mod packed_span;
 pub mod simd;
 pub mod diagram;
 pub mod mem_guard;
@@ -1927,23 +1926,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
-    // SimplePackedSpanV1 C resolve (F2). Registered here as well as in the
-    // runtime C source lists: an unresolved extern is only a WARNING in this
-    // repo, so a missing registration fails OPEN and reads as a silent zero
-    // base. Positive registration is the mitigation; the specs assert a
-    // typed verdict, never merely "no crash".
-    insert_simple!("rt_packed_span_v1_resolve_base", packed_span::rt_packed_span_v1_resolve_base_fn);
-    insert_simple!("rt_packed_span_v1_probe_verdict", packed_span::rt_packed_span_v1_probe_verdict_fn);
-    insert_simple!("rt_packed_span_v1_flags_bits", packed_span::rt_packed_span_v1_flags_bits_fn);
-    insert_simple!("rt_packed_span_v1_last_verdict", packed_span::rt_packed_span_v1_last_verdict_fn);
-    insert_simple!("rt_packed_span_v1_last_rejection", packed_span::rt_packed_span_v1_last_rejection_fn);
-    insert_simple!("rt_packed_span_v1_rejected_count", packed_span::rt_packed_span_v1_rejected_count_fn);
-    insert_simple!("rt_packed_span_v1_resolve_count", packed_span::rt_packed_span_v1_resolve_count_fn);
-    insert_simple!(
-        "rt_packed_span_v1_admitted_element_count",
-        packed_span::rt_packed_span_v1_admitted_element_count_fn
-    );
-    insert_simple!("rt_packed_span_v1_struct_size", packed_span::rt_packed_span_v1_struct_size_fn);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_typed_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_typed_bytes_u64_le_unchecked", sffi_array::rt_bytes_u64_le_at_fn);
@@ -2635,15 +2617,6 @@ pub(crate) fn call_extern_function_with_values(
 
     if name.starts_with("rt_rapier2d_") {
         return rapier2d_sffi::dispatch(name, &evaluated);
-    }
-
-    // Counterpart Conformance ABI shim (src/runtime/counterpart_abi_runtime.c).
-    // The C file is compiled into this binary via the runtime crate's build.rs,
-    // but externs still need an interpreter dispatch entry or every call dies
-    // with "unknown extern function". See
-    // doc/08_tracking/bug/counterpart_abi_shim_not_linked_into_runtime_2026-08-09.md
-    if name.starts_with("rt_counterpart_") {
-        return counterpart::dispatch(name, &evaluated);
     }
 
     // The rt_sdl2_* family is implemented in C (src/runtime/runtime_sdl2.c) and
