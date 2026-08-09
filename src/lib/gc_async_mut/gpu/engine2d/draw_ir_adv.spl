@@ -1302,20 +1302,25 @@ var _engine2d_embed_pool_w: i32 = 0
 var _engine2d_embed_pool_h: i32 = 0
 var _engine2d_embed_pool_backend: text = ""
 
-# Two-entry retained parent-material cache. Current WM composition has at most
-# two inactive glass windows; a larger scene remains correct and simply
+# Three-entry retained parent-material cache. Current WM composition has three
+# glass windows; a larger scene remains correct and simply
 # thrashes this bounded cache. Entries are admitted by exact parent pixels plus
 # the producer's style revision and full embedding contract.
 var _engine2d_parent_material_key_a: text = ""
 var _engine2d_parent_material_key_b: text = ""
+var _engine2d_parent_material_key_c: text = ""
 var _engine2d_parent_material_pixels_a: [u32] = []
 var _engine2d_parent_material_pixels_b: [u32] = []
+var _engine2d_parent_material_pixels_c: [u32] = []
 var _engine2d_parent_material_rendered_a: i32 = 0
 var _engine2d_parent_material_rendered_b: i32 = 0
+var _engine2d_parent_material_rendered_c: i32 = 0
 var _engine2d_parent_material_cpu_a: i32 = 0
 var _engine2d_parent_material_cpu_b: i32 = 0
+var _engine2d_parent_material_cpu_c: i32 = 0
 var _engine2d_parent_material_css_a: i64 = 0
 var _engine2d_parent_material_css_b: i64 = 0
+var _engine2d_parent_material_css_c: i64 = 0
 var _engine2d_parent_material_next: i32 = 0
 
 fn _engine2d_parent_material_pixels_checksum(pixels: [u32]) -> u64:
@@ -1339,26 +1344,32 @@ fn _engine2d_parent_material_cache_slot(key: text) -> i32:
         return 0
     if key != "" and key == _engine2d_parent_material_key_b:
         return 1
+    if key != "" and key == _engine2d_parent_material_key_c:
+        return 2
     -1
 
 fn _engine2d_parent_material_cache_pixels(slot: i32) -> [u32]:
     if slot == 0: return _engine2d_parent_material_pixels_a
     if slot == 1: return _engine2d_parent_material_pixels_b
+    if slot == 2: return _engine2d_parent_material_pixels_c
     []
 
 fn _engine2d_parent_material_cache_rendered(slot: i32) -> i32:
     if slot == 0: return _engine2d_parent_material_rendered_a
     if slot == 1: return _engine2d_parent_material_rendered_b
+    if slot == 2: return _engine2d_parent_material_rendered_c
     0
 
 fn _engine2d_parent_material_cache_cpu(slot: i32) -> i32:
     if slot == 0: return _engine2d_parent_material_cpu_a
     if slot == 1: return _engine2d_parent_material_cpu_b
+    if slot == 2: return _engine2d_parent_material_cpu_c
     0
 
 fn _engine2d_parent_material_cache_css(slot: i32) -> i64:
     if slot == 0: return _engine2d_parent_material_css_a
     if slot == 1: return _engine2d_parent_material_css_b
+    if slot == 2: return _engine2d_parent_material_css_c
     0
 
 fn _engine2d_parent_material_cache_store(
@@ -1371,12 +1382,19 @@ fn _engine2d_parent_material_cache_store(
         _engine2d_parent_material_cpu_a = cpu
         _engine2d_parent_material_css_a = css_remaining
         _engine2d_parent_material_next = 1
-    else:
+    elif _engine2d_parent_material_next == 1:
         _engine2d_parent_material_key_b = key
         _engine2d_parent_material_pixels_b = pixels
         _engine2d_parent_material_rendered_b = rendered
         _engine2d_parent_material_cpu_b = cpu
         _engine2d_parent_material_css_b = css_remaining
+        _engine2d_parent_material_next = 2
+    else:
+        _engine2d_parent_material_key_c = key
+        _engine2d_parent_material_pixels_c = pixels
+        _engine2d_parent_material_rendered_c = rendered
+        _engine2d_parent_material_cpu_c = cpu
+        _engine2d_parent_material_css_c = css_remaining
         _engine2d_parent_material_next = 0
 
 fn _engine2d_embed_offscreen_acquire(
@@ -1889,14 +1907,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
     val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
     val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and not samples_parent and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
-    # A translucent parent-sampling batch needs both facts at once: the source
-    # image must be the already-painted parent framebuffer, while its final
-    # contribution must still respect embedding.opacity_milli. Seed an
-    # offscreen delta with the exact parent region, render material in the
-    # batch's local coordinates, then blend that delta back at the embedding
-    # opacity. Direct parent execution gets sampling right but silently drops
-    # 500/930 alpha; a transparent child gets alpha right but samples wrong.
-    if samples_parent and embedding_opacity < 1000:
+    # Every parent-sampling batch uses one seeded delta owner. Translucent
+    # batches require it for opacity correctness; opaque batches use the same
+    # route so an unchanged, checksum-proven material raster can be retained.
+    # The final composite always honors embedding.opacity_milli.
+    if samples_parent:
         # Metal's device glass helper rejects non-gpu-only targets.  Do not
         # manufacture a mirror-backed child merely to make this branch appear
         # to work: that would turn an inactive (930) surface into a CPU
