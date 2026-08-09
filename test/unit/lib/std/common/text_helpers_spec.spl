@@ -363,3 +363,87 @@ describe "expandtabs":
 
     it "handles no tabs":
         expect(expandtabs("hello", 4)).to_equal("hello")
+
+# ============================================================================
+# Search-result contract: raw i64, -1 for not-found, and the index-3 collision
+# ============================================================================
+#
+# index_of / find / find_str / rfind / last_index_of all return a RAW i64 and
+# use -1 for not-found — they never return nil. A `?? default` coalesce on them
+# is therefore dead on the not-found path, and actively wrong on a hit, because
+# the nil sentinel is the integer 3 (TAG_SPECIAL = 0b011): a genuine answer of 3
+# gets replaced by the default. These cases are the ones that never worked.
+
+# Mirrors the fixed guard in src/app/portal/server.spl, simple_portal/server.spl
+# and llm_dashboard/login_only_server.spl.
+fn _strip_query(path: text) -> text:
+    val qidx = path.index_of("?")
+    if qidx < 0:
+        return path
+    path[0:qidx]
+
+# Mirrors the fixed guard in src/app/dashboard/dashboard_collectors.spl.
+fn _strip_ext(name: text) -> text:
+    val dot = name.last_index_of(".")
+    if dot < 0:
+        return name
+    name[0:dot]
+
+# Mirrors the fixed fallback chain in
+# src/lib/{nogc_sync_mut,nogc_async_mut}/debug/remote/protocol/gdb_mi_nonstop.spl.
+fn _id_field(part: text) -> text:
+    var id_end = part.find(",")
+    if id_end < 0:
+        id_end = part.find("}")
+    if id_end < 0:
+        id_end = part.len()
+    part[0:id_end]
+
+describe "search results use -1 for not-found, never nil":
+    it "returns -1 when the needle is absent":
+        expect("hello".index_of("z")).to_equal(-1)
+        expect("hello".find("z")).to_equal(-1)
+        expect("hello".last_index_of("z")).to_equal(-1)
+        expect("hello".rfind("z")).to_equal(-1)
+
+    it "returns a genuine index of 3 rather than the nil sentinel":
+        expect("abcd".index_of("d")).to_equal(3)
+        expect("abcd".find("d")).to_equal(3)
+        expect("abcd".last_index_of("d")).to_equal(3)
+        expect("abcd".rfind("d")).to_equal(3)
+
+describe "query stripping handles the absent and index-3 cases":
+    it "returns the path unchanged when there is no query":
+        expect(_strip_query("/status")).to_equal("/status")
+
+    it "strips a query whose '?' sits at index 3":
+        expect(_strip_query("/ab?x=1")).to_equal("/ab")
+
+    it "strips a query at a non-colliding offset":
+        expect(_strip_query("/abcdef?x=1")).to_equal("/abcdef")
+
+describe "extension stripping handles the absent and index-3 cases":
+    it "returns the name unchanged when there is no dot":
+        expect(_strip_ext("README")).to_equal("README")
+
+    it "strips an extension whose '.' sits at index 3":
+        expect(_strip_ext("abc.txt")).to_equal("abc")
+
+    it "strips an extension at a non-colliding offset":
+        expect(_strip_ext("report.csv")).to_equal("report")
+
+describe "gdb-mi id field falls through its delimiter chain":
+    it "cuts at the comma when one is present":
+        expect(_id_field("12,state=\"running\"")).to_equal("12")
+
+    it "falls back to the closing brace when there is no comma":
+        expect(_id_field("124}")).to_equal("124")
+
+    it "takes the whole record when neither delimiter is present":
+        expect(_id_field("1247")).to_equal("1247")
+
+    it "cuts at a comma sitting at index 3":
+        expect(_id_field("124,state=\"running\"")).to_equal("124")
+
+    it "falls back to a brace sitting at index 3":
+        expect(_id_field("124}rest")).to_equal("124")
