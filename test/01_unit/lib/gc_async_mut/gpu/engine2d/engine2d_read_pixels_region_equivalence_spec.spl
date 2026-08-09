@@ -11,10 +11,10 @@ calls out the per-glass-rect FULL-FRAME `read_pixels_with_source()` in
 embedding_opacity < 1000` branch): with N translucent/backdrop-sampling
 batches per frame that is N whole-framebuffer reads, when only one small rect
 is ever needed. The fix routes that call site through a new seam,
-`_engine2d_read_pixels_region`, which today is the DEFAULT implementation
-(read the whole frame once, crop on the host) but establishes the API a
-future backend-specific device-side region read can drop in behind without
-touching call sites again.
+`_engine2d_read_pixels_region`. The Draw IR pixel-only parent-sampling path
+uses `Engine2D.copy_pixels_region_into`, so concrete baremetal/software
+backends copy only the requested clipped region and never allocate a full
+framebuffer snapshot.
 
 This spec is the correctness argument for making that swap: it proves
 `_engine2d_read_pixels_region(engine, x, y, w, h)` returns pixels IDENTICAL
@@ -76,6 +76,20 @@ describe "Engine2D region-limited readback (_engine2d_read_pixels_region)":
         val region = _engine2d_read_pixels_region(engine, -1, 2, 3, 2)
 
         expect(region.pixels).to_equal([
+            0u32, RED, RED,
+            0u32, 0u32, 0u32
+        ])
+        engine.shutdown()
+
+    it "copies a clipped region into caller-owned storage with exact edge zeros":
+        var engine = Engine2D.create_with_backend(3, 3, "cpu")
+        engine.clear(RED)
+        var destination: [u32] = [YELLOW; 6]
+
+        val copied = engine.copy_pixels_region_into(-1, 2, 3, 2, destination)
+
+        expect(copied).to_equal(6)
+        expect(destination).to_equal([
             0u32, RED, RED,
             0u32, 0u32, 0u32
         ])
