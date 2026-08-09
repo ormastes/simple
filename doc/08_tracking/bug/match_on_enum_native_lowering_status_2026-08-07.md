@@ -74,3 +74,32 @@ match, all arms + wildcard, run under default engine and
 `SIMPLE_EXECUTION_MODE=interpret`; documents the interpreter-lane caveat and
 does not attempt `--native` (out of scope for the in-process spec harness;
 covered by the manual probe above instead).
+
+## Re-verified 2026-08-09 — status UNCHANGED
+
+Re-ran the exact probe from this doc against `origin/main` HEAD
+`43be088053b2ae22f8f5d900bbd1322927840ea7`:
+
+- `bin/simple compile enum_match_probe.spl --native -o out` (payload-bearing
+  `describe_shape`): still refused, byte-identical message: `error: semantic:
+  cannot compile to standalone native binary: 1 function(s) contain
+  constructs that require the interpreter:\n  - describe_shape:
+  [PatternMatch]`.
+- Payload-free-only variant (`describe_kind` alone, no `Shape` in the closure):
+  still compiles and runs correctly (`kind-A`/`kind-B`/`kind-C`).
+- `bin/simple test test/01_unit/language/enum_match_dispatch_spec.spl`:
+  `Results: 8 total, 8 passed, 0 failed`, rc=0 — no regression.
+
+Today's session landed an extensive enum/match-lowering chain in
+`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (rt_io
+investigation layers 1-6: `f33ed64bddba`, `4b6aa5d24c57`, `51bf67bece57`,
+`693750d48caf`, `63ee79be7eee`, plus earlier `663fce69eb35` and
+`6414cd6ea0e4` on 2026-08-08). **None of these touch this gap**: they are all
+in the pure-Simple `src/compiler/50.mir` MIR-lowering path that feeds the
+self-hosted `native-build` pipeline, whereas the refusal reproduced above is
+raised by the Rust seed's LLVM AOT pipeline
+(`src/compiler_rust/compiler/src/pipeline/execution.rs:286`), a separate
+code path entirely (confirmed unchanged since `cfe0506e336b`, 2026-08-05, by
+`git log` on that file). The "Root cause" section below remains accurate
+verbatim. Treat this doc as still current; the payload-bearing `--native`
+gap remains open and out of `.spl`-only scope.
