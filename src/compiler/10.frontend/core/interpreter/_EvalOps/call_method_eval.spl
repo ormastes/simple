@@ -404,6 +404,12 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
         if had_explicit_return == false:
             last_val = val_make_array(yielded)
 
+    # Same gate as eval_calls.spl copy-site 5. This `eval_function_call` is a
+    # near-identical DUPLICATE of the one in eval_calls.spl; sabotage-probing
+    # both (2026-08-09) showed eval_calls.spl's copy is the live one and this
+    # one never executes. It is gated anyway so the two copies cannot drift.
+    last_val = val_copy_if_value_struct(last_val)
+
     var write_back_names: [text] = []
     var write_back_field_bases: [i64] = []
     var write_back_field_names: [text] = []
@@ -535,7 +541,10 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names:
                     return -1
                 target = next_pos
                 next_pos = next_pos + 1
-            field_values[target] = av
+            # Same gate as eval_calls.spl copy-site 2 (struct-literal field
+            # init). Duplicate of the live copy in eval_calls.spl; gated so the
+            # two cannot drift.
+            field_values[target] = val_copy_if_value_struct(av)
         arg_index = arg_index + 1
 
     # Fill remaining fields: use base struct then defaults then nil
@@ -781,6 +790,16 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_n
         last_val = eval_return_value
         eval_returning = false
         eval_return_value = -1
+
+    # S2 copy-site (struct returned FROM A METHOD). `obj.m()` runs this body
+    # executor, not eval_function_call in eval_calls.spl, so S1's return gate
+    # never reached it: `func()` returning a value-type struct copied while
+    # `obj.m()` returning one still aliased. Same shared gate, same reasoning as
+    # eval_calls.spl copy-site 5, and it covers BOTH return forms (explicit
+    # `return e` handled just above, and a tail-expression method body). The
+    # gate is `interp_struct_is_value_type`, false for every class-origin decl,
+    # so a class return still hands back the same box (cases A/C/D/E stay REF).
+    last_val = val_copy_if_value_struct(last_val)
 
     var arg_i: i64 = 0
     while arg_i < bound_eids.len():
