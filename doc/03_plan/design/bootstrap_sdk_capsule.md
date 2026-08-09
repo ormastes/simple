@@ -294,3 +294,7 @@ Stage4 now reaches `src/lib/common/ui/glass/theme.spl` and stops on unresolved
 not admit an x86 candidate or advance any capsule, QEMU WM, ARM/macOS, or Uno-Q
 row. A separate bounded lexer token-iteration fixture hung before EOF and must
 remain tracked independently from the slot-initialization fix.
+
+## 2026-08-09 Recovery status
+
+The x86 Stage4 closure now passes the previously failing glass-token and daemon atomic-rename frontiers. MCP T32 leaf I/O was normalized to facade-owned file/environment/process operations and covered by a native fixture that performs real write/read/delete behavior. The third canonical Stage4 attempt exposed `file_write_text` as the next phase-4 unresolved symbol; that import was corrected to exported `app.io.mod.file_write` and focused evidence passes. The canonical Stage4 build was not rerun because the session reached its mandatory three-attempt cap. Therefore no candidate, release installation, SimpleOS ARM64 attestation, or QMP primitive-WM receipt may be claimed yet.

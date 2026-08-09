@@ -80,3 +80,13 @@
 - Logs: `stage4-hirsymbol-boundary-retry.log`, `stage4-lint-primitives-retry.log`, and `stage4-lint-checks-retry.log` under `build/bootstrap-recovery/`. No Stage4 candidate exists; do not run a fourth unchanged build this session.
 - Fresh-session next action: convert every annotation-level `Bool`/`Int` in `traceability_and_assertions.spl` to `bool`/`i64`, remove any reverse facade import in favor of concrete owners, add a focused native fixture and prevention contract, then resume the preserved Stage4 cache once.
 - x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
+
+## 2026-08-09 Stage4 phase-4 frontier cycle
+
+- Pushed `04922b88325`: keep `aetheric_dark` static glass tokens in the common layer; native token fixture passes.
+- Pushed `859a357ed23`: bind daemon protocol atomic rename at module scope; native write/rename fixture passes.
+- Pushed `9de0d60a3a1` and `a9240418e9f`: route MCP T32 environment/process/file calls through facades and strengthen native read/write coverage.
+- Focused evidence: glass fixture PASS (1.95s), daemon rename fixture PASS (1.52s), MCP T32 facade fixture PASS (5.93s).
+- Stage4 retry 1 advanced to `daemon_sdk/protocol.spl: rt_file_rename`; retry 2 advanced to `mcp_t32/gap_tools.spl: rt_file_read_text`; retry 3 advanced to `mcp_t32/json_helpers.spl: file_write_text`.
+- The retry-3 frontier is fixed and pushed, but the three-retry cap is reached. Start the next preserved-cache Stage4 attempt only in a fresh cycle.
+- No Stage4 candidate exists yet. Candidate smoke, ARM64 attestation, QMP evidence, macOS, and Uno-Q remain pending. Primitive QEMU WM is not verified.
