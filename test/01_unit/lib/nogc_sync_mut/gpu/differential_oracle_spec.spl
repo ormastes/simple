@@ -65,26 +65,46 @@ fn macos_emulator_trace() -> NormalizedTrace:
         schema_version: 1, run_id: "macos-emulator-fixture",
         environment_profile_id: "macos-emulator-vulkan-drawir",
         ui_environment_profile_id: "macos-host-aarch64-emulated", arch: "aarch64",
-        transport: "hvf-moltenvk",
+        transport: "shared-vulkan-emulator",
         enabled_features: [
-            "draw-ir", "animation", "pointer-keyboard-modifiers", "font",
-            "audio", "device-readback", "no-fallback", "perf-receipt"
+            "draw-ir", "animation", "pointer", "keyboard-modifiers", "font",
+            "audio", "capture", "device-readback", "no-fallback", "perf-receipt"
         ],
-        venus_version: "n/a", device_identity: "moltenvk-device",
-        oracle_identity: "macos-vulkan-dynload-oracle", device_origin_readback: true,
+        venus_version: "n/a", device_identity: "emulated-vulkan-device",
+        oracle_identity: "shared-vulkan-dynload-oracle", device_origin_readback: true,
         fallback_used: false, dropped_events: 0, complete: true,
         events: [
             macos_event(0, "draw_ir", "compose"),
-            macos_event(1, "draw_ir", "animation_frame"),
-            macos_event(2, "draw_ir", "input_ctrl_alt"),
-            macos_event(3, "draw_ir", "font"),
-            macos_event(4, "draw_ir", "audio"),
-            macos_event(5, "vulkan_api", "submit"),
-            macos_event(6, "vulkan_api", "fence"),
-            macos_event(7, "vulkan_api", "device_readback"),
-            macos_event(8, "vulkan_api", "perf_receipt"),
+            macos_event(1, "draw_ir", "animation_frame_20"),
+            macos_event(2, "input", "pointer_move"),
+            macos_event(3, "input", "pointer_down"),
+            macos_event(4, "input", "pointer_drag"),
+            macos_event(5, "input", "pointer_up"),
+            macos_event(6, "input", "pointer_wheel"),
+            macos_event(7, "input", "key_down"),
+            macos_event(8, "input", "key_up"),
+            macos_event(9, "input", "ctrl_left"),
+            macos_event(10, "input", "ctrl_right"),
+            macos_event(11, "input", "alt_left"),
+            macos_event(12, "input", "alt_right"),
+            macos_event(13, "font", "batch"),
+            macos_event(14, "font", "atlas_upload"),
+            macos_event(15, "audio", "submit"),
+            macos_event(16, "audio", "completion"),
+            macos_event(17, "capture", "frame"),
+            macos_event(18, "vulkan_api", "submit"),
+            macos_event(19, "vulkan_api", "fence"),
+            macos_event(20, "vulkan_api", "device_readback"),
+            macos_event(21, "perf", "p95_receipt"),
+            macos_event(22, "perf", "rss_receipt"),
         ],
     )
+
+fn profile_has_operation(profile: GpuEnvironmentProfile, required: text) -> bool:
+    for operation in profile.required_operations:
+        if operation == required:
+            return true
+    false
 
 describe "normalized GPU/web differential oracle":
     it "exports unique concrete SimpleOS QEMU GPU expectation profiles":
@@ -106,24 +126,41 @@ describe "normalized GPU/web differential oracle":
         val profile = macos_emulator_vulkan_draw_ir_environment_profile()
         expect(profile.id).to_equal("macos-emulator-vulkan-drawir")
         expect(profile.ui_environment_profile_id).to_equal("macos-host-aarch64-emulated")
-        expect(profile.expected_transport).to_equal("hvf-moltenvk")
+        expect(profile.expected_transport).to_equal("shared-vulkan-emulator")
         expect(profile.max_elapsed_ns).to_equal(0)
         expect(profile.requires_device_origin_readback).to_equal(true)
         expect(profile.requires_no_fallback).to_equal(true)
+        expect(profile.required_operations.len()).to_equal(23)
+        for operation in [
+            "draw_ir:compose", "draw_ir:animation_frame_20",
+            "input:pointer_move", "input:pointer_down", "input:pointer_drag",
+            "input:pointer_up", "input:pointer_wheel", "input:key_down",
+            "input:key_up", "input:ctrl_left", "input:ctrl_right",
+            "input:alt_left", "input:alt_right", "font:batch",
+            "font:atlas_upload", "audio:submit", "audio:completion",
+            "capture:frame", "vulkan_api:submit", "vulkan_api:fence",
+            "vulkan_api:device_readback", "perf:p95_receipt", "perf:rss_receipt",
+        ]:
+            expect(profile_has_operation(profile, operation)).to_equal(true)
         val complete = macos_emulator_trace()
         expect(trace_satisfies_environment_profile(complete, profile).matched).to_equal(true)
         var missing_audio = macos_emulator_trace()
         missing_audio.events = [
             missing_audio.events[0], missing_audio.events[1], missing_audio.events[2],
-            missing_audio.events[3], missing_audio.events[5], missing_audio.events[6],
-            missing_audio.events[7], missing_audio.events[8],
+            missing_audio.events[3], missing_audio.events[4], missing_audio.events[5],
+            missing_audio.events[6], missing_audio.events[7], missing_audio.events[8],
+            missing_audio.events[9], missing_audio.events[10], missing_audio.events[11],
+            missing_audio.events[12], missing_audio.events[13], missing_audio.events[14],
+            missing_audio.events[16], missing_audio.events[17], missing_audio.events[18],
+            missing_audio.events[19], missing_audio.events[20], missing_audio.events[21],
+            missing_audio.events[22],
         ]
         expect(trace_satisfies_environment_profile(missing_audio, profile).reason).to_equal("required-operation-missing")
         var fallback = macos_emulator_trace()
         fallback.fallback_used = true
         expect(trace_satisfies_environment_profile(fallback, profile).reason).to_equal("fallback-forbidden")
         val adapter = ReferenceOracleAdapter(
-            name: "macos-vulkan-dynload-oracle", library_name: "libvulkan.1.dylib",
+            name: "shared-vulkan-dynload-oracle", library_name: "libvulkan.1.dylib",
             abi_version: 1, required_symbols: ["vkGetInstanceProcAddr"], test_only: true,
         )
         expect(reference_oracle_adapter_valid(adapter)).to_equal(true)
