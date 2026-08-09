@@ -24,6 +24,20 @@
   assessment") is preserved as-is per this repo's append-don't-rewrite
   convention; treat the fourth-pass section as the current state.
 
+## 2026-08-08 ML-KEM coverage retry
+
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<fresh /tmp path> bin/simple test
+test/01_unit/os/crypto/x25519mlkem768_absolute_spec.spl --coverage --no-cache`
+reached the runner's `coverage: SIMPLE_COVERAGE set; bypassing test daemon`
+marker but produced neither a spec verdict nor the requested artifact. The
+first attempt exposed and then fixed a missing pure-Simple `os.crypto.entropy`
+facade; the next two attempts still ended at the coverage bypass, including
+after the generated epilogue was changed to use the canonical named-dump
+function form. This is therefore a runner execution/export failure, not
+evidence of zero ML-KEM outcomes. The three-cycle limit was reached; retain
+the raw logs under `/tmp/x25519mlkem768_absolute_coverage*.log` for diagnosis
+and do not claim a measured receipt from them.
+
 ## Correction 2026-08-07 (later pass, after `ae97a34cd365`)
 
 Two claims in this doc, as originally written, no longer hold and are
@@ -100,6 +114,32 @@ as a subcommand, and the CLI half of the plan's cited evidence is simply
 false.
 
 ## Empirical repro 2: line coverage does not export an artifact via the runner path
+
+### 2026-08-08 incremental-redeploy diagnostic
+
+The source-side coverage epilogue repair (`f9e45226dd5`) was newer than the
+deployed `bin/simple`: the deployed CLI timestamp was 2026-08-08 12:14 UTC,
+while the repair landed at 15:19 UTC. Therefore the no-SDN/no-verdict ML-KEM
+attempt executed an old runner that injected raw top-level prints rather than
+the callable dump function. An isolated incremental Stage-2 native-build
+attempt also exited zero without producing its requested output artifact, so it
+cannot redeploy the repair. This is an explicit compiler/build defect, not
+coverage evidence. Current source now fails closed when a coverage child lacks
+dump sentinels; a fresh provenance-qualified self-hosted redeploy is still
+required before retrying measured ML-KEM coverage.
+
+### 2026-08-08 direct-source runner attempt
+
+To eliminate the stale deployed single-runner as the only explanation, the
+current `src/app/test_runner_new/test_runner_single.spl` was run directly with
+`SIMPLE_COVERAGE=1`, a fresh `SIMPLE_COVERAGE_OUTPUT` path, and
+`x25519mlkem768_absolute_spec.spl`. It printed the selected child binary but
+then produced neither a spec verdict nor an SDN artifact. The output also
+reported `rt_file_is_char_device` as an unresolved JIT external and fell back
+to the interpreter. This route did not reach the source fail-closed sentinel
+check, so it is a lower child-execution failure. It is not coverage evidence;
+do not rerun the same command until the child runner emits a bounded diagnostic
+or self-hosted artifact execution is restored.
 
 ```
 $ SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=/tmp/cov.sdn \

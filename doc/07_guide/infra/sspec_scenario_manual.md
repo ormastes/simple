@@ -416,7 +416,7 @@ MCP manual should show:
 6. Protocol/API/exec/log evidence appears under each step.
 
 Fold schema inventories, gap matrices, stress loops, and large JSON payloads by
-default. Use `doc/03_plan/sys_test/mcp_scenario_manual_quality.md` as the target
+default. Use `doc/03_plan/app/mcp/mcp_scenario_manual_quality.md` as the target
 review plan.
 
 ## Manual Visibility

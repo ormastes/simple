@@ -52,8 +52,8 @@ Examples:
 test/03_system/feature/usage/math_blocks_spec.spl
 doc/06_spec/03_system/feature/usage/math_blocks_spec.md
 
-test/03_system/qemu/qmp_screendump_spec.spl
-doc/06_spec/03_system/qemu/qmp_screendump_spec.md
+test/03_system/os/qemu/qmp_screendump_spec.spl
+doc/06_spec/03_system/os/qemu/qmp_screendump_spec.md
 
 test/00_formal_verification/compiler/lean_basic_spec.spl
 doc/06_spec/00_formal_verification/compiler/lean_basic_spec.md
@@ -141,5 +141,5 @@ test/unit
 
 The detailed batch map is maintained in:
 
-- `doc/03_plan/sspec_traceability_migration_map.md`
-- `doc/03_plan/sspec_traceability_reorg_plan.md`
+- `doc/03_plan/app/spipe/sspec_traceability_migration_map.md`
+- `doc/03_plan/app/spipe/sspec_traceability_reorg_plan.md`

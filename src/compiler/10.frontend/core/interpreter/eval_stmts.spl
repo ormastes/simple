@@ -349,16 +349,28 @@ fn eval_stmt_return(sid: i64) -> i64:
     eval_return_value = ret_val
     ret_val
 
+fn record_stmt_control_decision(sid: i64, taken: bool):
+    val span_id = stmt_get(sid).span_id
+    var source_line = 0
+    var source_column = 0
+    if span_is_valid(span_id):
+        source_line = span_line(span_id)
+        source_column = span_col(span_id)
+    record_control_decision(
+        coverage_owner_file(), source_line, source_column, sid, taken)
+
 fn eval_stmt_if(sid: i64) -> i64:
     val elif_idx = stmt_get(sid).type_tag
     val cond_eid = elif_get_cond(elif_idx)
     val then_stmts = elif_get_body(elif_idx)
     val else_stmts = elif_get_else(elif_idx)
 
-    val cond_val = eval_expr(cond_eid)
+    val cond_val = eval_control_condition(cond_eid, sid)
     if eval_had_error: return -1
 
-    if val_is_truthy(cond_val):
+    val taken = val_is_truthy(cond_val)
+    record_stmt_control_decision(sid, taken)
+    if taken:
         env_push_scope()
         var last_val = val_make_nil()
         for sid2 in then_stmts:
@@ -575,9 +587,11 @@ fn eval_stmt_while(sid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_expr(cond_eid)
+        val cond_val = eval_control_condition(cond_eid, sid)
         if eval_had_error: break
-        if val_is_truthy(cond_val) == false: break
+        val taken = val_is_truthy(cond_val)
+        record_stmt_control_decision(sid, taken)
+        if taken == false: break
         eval_continuing = false
         eval_continue_label = ""
         env_push_scope()
@@ -623,11 +637,21 @@ fn eval_stmt_match(sid: i64) -> i64:
         val matched = match_pattern(scrutinee, pattern_eid)
         if matched:
             if guard_eid >= 0:
-                val guard_val = eval_expr(guard_eid)
+                val guard_val = eval_control_condition(guard_eid, arm_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
-                if val_is_truthy(guard_val) == false:
+                val guard_taken = val_is_truthy(guard_val)
+                val guard_span = expr_get(guard_eid).span_id
+                var guard_line: i64 = 0
+                var guard_column: i64 = 0
+                if span_is_valid(guard_span):
+                    guard_line = span_line(guard_span)
+                    guard_column = span_col(guard_span)
+                record_control_decision(
+                    coverage_owner_file(), guard_line, guard_column,
+                    arm_id, guard_taken)
+                if guard_taken == false:
                     env_pop_scope()
                     continue
             # BUG-2026-08-01-match-fallthrough follow-up: a wildcard/bare-binder

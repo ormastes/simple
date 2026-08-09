@@ -1,5 +1,8 @@
 # Bug: ML-KEM NTT AVX2 SIMD lane mismatches the scalar reference
 
+**Status:** FIXED (2026-08-08) — current-source C lane passed 768 forward and
+inverse coefficients plus noncanonical canonicalization at 30 samples.
+
 **Found**: 2026-08-08, via `scripts/check/build-mlkem-simd-c-lane.shs` (unwired
 guard under triage in the guard-wiring campaign; its own `set -e` bug was
 masking this finding entirely — see the same-day fix to that script).
@@ -38,3 +41,11 @@ as a default-selected optimization until this is fixed. Once fixed, wire
 `build-mlkem-simd-c-lane.shs` into pre-push (already fast enough) — it is
 committed-sources-only and needs no external image/hardware beyond the AVX2
 capable host it already gates on via `mlkem_ntt_simd_backend`.
+
+## Resolution
+
+`mlkem_ntt_one` performed a scalar butterfly after each AVX2/NEON vector loop
+had already consumed an entire group. At `j == end`, that extra scalar write
+corrupted the next group. The dispatcher now continues when vector work reaches
+the group boundary. The restored AVX2 C lane passed the pinned scalar comparison
+with 240 forward and 480 total observed chunks across three polynomials.

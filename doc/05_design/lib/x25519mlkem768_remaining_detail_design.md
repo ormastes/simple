@@ -87,11 +87,14 @@ Rules for this design:
 
 Even with Design A complete, two lanes stay red for unrelated reasons, and
 neither is fixed by the session layer:
-- **Vulkan**: optimised and unoptimised SPIR-V produce the SAME coefficient
-  mismatch on both physical NVIDIA devices (first mismatch index 2, expected
-  1970, actual 3323). Three-cycle cap reached.
-- **Metal**: pure-Simple stage3 compiler crashes with exit 139 before emitting
-  the module.
+- **Vulkan**: the source-bound physical NTT probe remains a required row, but
+  this Linux host lacks the pinned `glslangValidator` compiler.  `spirv-val`
+  alone is not a substitute; the resume command must run on a host with the
+  pinned compiler and a Vulkan 1.1 device.
+- **Metal**: `ml_kem_ntt.metal` and its exact-metallib/readback runner are now
+  present, but this is not a macOS host.  The row remains blocked until Xcode
+  compiles that source, a real `MTLDevice` executes both kernels, and the
+  device readback matches the canonical scalar oracle.
 
 So AC-5 cannot reach full PASS on this host regardless. The reachable outcome
 is: CUDA possibly green, Vulkan and Metal as honest blocked rows with resume
@@ -103,11 +106,10 @@ commands. Design accordingly and do not plan for three greens.
 
 ### Problem
 
-`x25519mlkem768_coverage_contract.spl` (37 paths) and
-`x25519mlkem768_critical_inventory.spl` (24 paths) each list 3 paths that do
-not exist, and neither checks. Coverage computed over a manifest containing
-phantom entries is untrustworthy in both directions — it can overstate (files
-counted as covered) and understate (real gaps masked by noise).
+`x25519mlkem768_coverage_contract.spl` now has the canonical 30-owner / 18-spec
+inventory and an existence gate.  The remaining problem is not phantom paths:
+it is the absence of an admitted instrumented native receipt for all 346
+critical outcomes.  A static or synthetic row is never coverage evidence.
 
 ### Design
 

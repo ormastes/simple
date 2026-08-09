@@ -1,0 +1,142 @@
+# @tag: unit, crypto, x25519mlkem768, gpu, provenance
+# @req REQ-013 NFR-011
+
+use std.spipe.*
+use lib.common.crypto.x25519_mlkem768.evidence_contract.{
+    X25519MlKem768EvidenceBackend}
+use lib.common.crypto.x25519_mlkem768.runner_artifact_provenance.{
+    X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA,
+    x25519_mlkem768_parse_runner_artifact_provenance,
+    x25519_mlkem768_runner_artifact_provenance_reason}
+
+val _SHA_A = "a" * 64
+val _SHA_B = "b" * 64
+val _SHA_C = "c" * 64
+val _SHA_D = "d" * 64
+val _SHA_E = "e" * 64
+
+fn _encoded(backend: text) -> text:
+    "schema=" + X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA + "\n" +
+    "status=pass\nbackend=" + backend + "\n" +
+    "artifact_path=build/evidence/x25519mlkem768/runner\n" +
+    "artifact_sha256=" + _SHA_A + "\n" +
+    "source_path=src/app/test/x25519mlkem768_evidence.spl\n" +
+    "source_sha256=" + _SHA_B + "\n" +
+    "compiler_artifact_sha256=" + _SHA_C + "\n" +
+    "compiler_provenance_sha256=" + _SHA_D + "\n" +
+    "build_command_sha256=" + _SHA_E + "\n" +
+    "completed_gate=native-runner-build\n"
+
+fn _parsed(encoded: text):
+    match x25519_mlkem768_parse_runner_artifact_provenance(encoded):
+        case Ok(value): value
+        case Err(reason): fail(reason)
+
+describe "X25519MLKEM768 runner artifact provenance":
+    it "should parse an exact CUDA provenance envelope":
+        step("Parse all fixed fields without allowing implicit defaults")
+        val provenance = _parsed(_encoded("cuda"))
+        expect(provenance.artifact_sha256).to_equal(_SHA_A)
+        expect(provenance.source_path).to_equal(
+            "src/app/test/x25519mlkem768_evidence.spl")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Cuda,
+            "build/evidence/x25519mlkem768/runner", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_C, _SHA_D)).to_equal("")
+
+    it "should reject duplicate, unknown, and non-pass envelopes":
+        step("Reject ambiguity and incomplete build completion")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("vulkan") + "backend=vulkan\n"):
+            case Ok(_): fail("duplicate backend accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-duplicate-backend")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("vulkan").replace("status=pass", "status=fail")):
+            case Ok(_): fail("failed build accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-status-not-pass")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("metal") + "unknown=value\n"):
+            case Ok(_): fail("unknown field accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-field-unknown-unknown")
+
+    it "should reject every malformed required field class":
+        step("Reject termination schema gate backend paths and hashes")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("cuda").trim()):
+            case Ok(_): fail("unterminated envelope accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-termination-invalid")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("cuda").replace(
+                    X25519_MLKEM768_RUNNER_ARTIFACT_PROVENANCE_SCHEMA,
+                    "other-schema")):
+            case Ok(_): fail("wrong schema accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-schema-invalid")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("cuda").replace(
+                    "completed_gate=native-runner-build", "completed_gate=other")):
+            case Ok(_): fail("wrong gate accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-completed-gate-invalid")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("other")):
+            case Ok(_): fail("unknown backend accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-backend-invalid")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("cuda").replace(
+                    "artifact_path=build/evidence/x25519mlkem768/runner",
+                    "artifact_path=/absolute")):
+            case Ok(_): fail("absolute path accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-path-invalid")
+        match x25519_mlkem768_parse_runner_artifact_provenance(
+                _encoded("cuda").replace("artifact_sha256=" + _SHA_A,
+                    "artifact_sha256=" + "A" * 64)):
+            case Ok(_): fail("uppercase hash accepted")
+            case Err(reason): expect(reason).to_equal(
+                "runner-provenance-sha256-invalid")
+
+    it "should reject every identity mismatch before device admission":
+        step("Compare backend paths and all cryptographic identities")
+        val provenance = _parsed(_encoded("metal"))
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Cuda,
+            "build/evidence/x25519mlkem768/runner", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_C, _SHA_D)).to_equal("runner-provenance-backend-mismatch")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Metal,
+            "build/evidence/x25519mlkem768/other", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_C, _SHA_D)).to_equal(
+                "runner-provenance-artifact-path-mismatch")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Metal,
+            "build/evidence/x25519mlkem768/runner", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_E,
+            _SHA_C, _SHA_D)).to_equal(
+                "runner-provenance-source-sha256-mismatch")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Metal,
+            "build/evidence/x25519mlkem768/runner", _SHA_B,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_C, _SHA_D)).to_equal(
+                "runner-provenance-artifact-sha256-mismatch")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Metal,
+            "build/evidence/x25519mlkem768/runner", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_E, _SHA_D)).to_equal(
+                "runner-provenance-compiler-artifact-mismatch")
+        expect(x25519_mlkem768_runner_artifact_provenance_reason(
+            provenance, X25519MlKem768EvidenceBackend.Metal,
+            "build/evidence/x25519mlkem768/runner", _SHA_A,
+            "src/app/test/x25519mlkem768_evidence.spl", _SHA_B,
+            _SHA_C, _SHA_E)).to_equal(
+                "runner-provenance-compiler-provenance-mismatch")

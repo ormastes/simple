@@ -647,7 +647,6 @@ For RenderDoc evidence, use the shared helper interface instead of spelling
   Chrome HTML/CSS capture.
 - `scripts/tool/renderdoc-evidence.shs capture-electron-html` for bundled
   Electron Chromium HTML/CSS capture.
-- `test/helpers/renderdoc_capture_helper.shs` for test-facing shell helpers.
 
 Record `.rdc` path, `RDOC` magic validation, capture log path, and any
 host-unavailable reason as artifact captures. Screenshot-only evidence is not
@@ -828,17 +827,18 @@ reusing old code. Keep the spec close to the cache owner and mirror it into
 
 ### Native HTTPServer benchmark evidence
 
-For native HTTPServer/static-file performance work, use
-`scripts/check/check-native-pure-simple-goal-status.shs` as the aggregate gate.
-The focused peer wrappers are `check-web-server-nginx-live-compare.shs`,
+For native HTTPServer/static-file performance work, an aggregate gate script
+(`scripts/check/check-native-pure-simple-goal-status.shs`) and focused peer
+wrappers (`check-web-server-nginx-live-compare.shs`,
 `check-web-server-static-external-live-compare.shs --require-simple-ge-all`,
 `check-web-server-go-erlang-static-compare.shs --require-simple-ge`,
-`check-httpserver-live-static.shs`, and
-`check-httpserver-static-profile-counters.shs --broad --require-retained`.
-Keep `doc/07_guide/infra/testing/benchmarking.md`,
-`doc/10_metrics/perf/web_server_nginx_compare.md`, and
-`doc/09_report/perf/web_server_nginx_compare_2026-06-17.md` aligned when rows
-or wrappers change. Current retained nginx rows are 1KB Simple `15503.65` RPS
+`check-httpserver-live-static.shs`,
+`check-httpserver-static-profile-counters.shs --broad --require-retained`) are
+planned but not yet built. The real retained data lives in
+`doc/10_metrics/webserver/nginx_baseline_2026-05-27.md` and
+`doc/10_metrics/webserver/nginx_compare_baseline.sdn` — keep
+`doc/07_guide/infra/testing/benchmarking.md` aligned with those when rows
+change. Current retained nginx rows are 1KB Simple `15503.65` RPS
 vs nginx `15115.00`, and 1MB Simple `1884.42` RPS vs nginx `1376.25`; the
 retained Vulkan offscreen 8K row is `3527` FPS.
 
@@ -1755,7 +1755,7 @@ cp .claude/templates/spipe_template.spl test/my_spec.spl
 
 SPipe verify runs `sh scripts/check-workspace-root-guard.shs audit --strict`.
 Default: diagnose and report. Auto-fix: trace origin and fix creating code.
-See [`doc/07_guide/infra/workspace/file_manifest_tldr.md`](../../doc/07_guide/infra/workspace/file_manifest_tldr.md).
+See [`doc/07_guide/infra/file_manifest/file_manifest_tldr.md`](../../doc/07_guide/infra/file_manifest/file_manifest_tldr.md).
 
 ## Code Quality Checks
 
@@ -1793,8 +1793,8 @@ When a feature ships a runnable module, package it as a **Simple Feature Module*
 privileged layers must be gated). Consume it via `std.sfm`: `sfm_load` parses the
 container, `sfm_resolve` resolves a manifest layer (DI wires layers from the
 manifest; an AOP authz aspect enforces the security level). See
-[`doc/04_architecture/infra/sfm/simple_feature_module.md`](../../doc/04_architecture/infra/sfm/simple_feature_module.md)
-and [`doc/05_design/infra/sfm/simple_feature_module.md`](../../doc/05_design/infra/sfm/simple_feature_module.md).
+[`doc/04_architecture/language/simple_feature_module.md`](../../doc/04_architecture/language/simple_feature_module.md)
+and [`doc/05_design/simple_feature_module.md`](../../doc/05_design/simple_feature_module.md).
 
 ## Performance Checking & Cross-Language Comparison
 
@@ -1849,7 +1849,9 @@ filesystem/cert/key access, and process execution. `release` mode is the
 production Simple protocol path. `alpha` and `beta` may use native/SFFI protocol
 wrappers only as explicit comparison paths. Do not let `rt_ssh_*` or
 `rt_tls_server_*` silently replace Simple protocol behavior in release mode.
-See `doc/07_guide/lib/networking/pure_simple_servers.md`.
+A dedicated `pure_simple_servers.md` guide is planned but not yet written; see
+`doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md` for the related
+typed-layer conventions in the meantime.
 
 Optimization must stay **pure Simple** (`.spl`) — do not modify Rust seed or C runtime.
 Exception: safety-critical guards in process/signal paths (e.g. `pid <= 0` checks
@@ -2017,8 +2019,8 @@ reimplement an existing algorithm:
 - **Conventions:** integer `val` constant dispatch (not payload enums); wire
   codecs on `ByteReader`/`ByteWriter`; parse loops offset-based/inline (never a
   free fn taking a reader by value); cross-module array helpers must return.
-- Full guides: [`doc/07_guide/lib/networking/typed_network_and_algorithms.md`](../../doc/07_guide/lib/networking/typed_network_and_algorithms.md)
-  (tldr alongside) and, for the search/crypto/compress custom-typed layers,
+- A combined `typed_network_and_algorithms.md` guide is planned but not yet
+  written; for the search/crypto/compress custom-typed layers, see
   [`doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md`](../../doc/07_guide/lib/algorithms/typed_alpha_algorithm_layers.md).
 - **JIT tuple-return gotcha:** network externs that return a tuple (e.g.
   `rt_http_request → (status, body)`) read as garbage in default JIT on builds
@@ -2116,7 +2118,7 @@ instead of hand-tracing resolution.
 
 SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen 
 landmine catalog (doc/08_tracking/bug/). Canonical reference: 
-doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent 
+doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md (in progress). Recent 
 fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure, 
 NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
@@ -2247,8 +2249,10 @@ and unavailable hosts are not PASS.
 
 The exact sequence is Gate 1 Stage 3 admission, Gate 2 x86_64 Linux Stage 4,
 Gate 3 candidate sanity/hash, Gate 4 all four essential-tool markers, Gate 5
-deployment plus
-`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`,
+deployment plus a manual rollback procedure (redeploy the prior
+`bin/release/<canonical-triple>/simple` receipt and re-verify the
+pre/post/restored hashes and arithmetic smoke output; no
+`rollback-bootstrap-deploy.shs` script exists yet),
 and Gate 6 native/QEMU/target acceptance. Rollback evidence must include the
 reviewed command, exit status, receipt path, pre/post/restored hashes, and
 arithmetic smoke output.

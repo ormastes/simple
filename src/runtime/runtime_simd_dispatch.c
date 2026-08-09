@@ -998,6 +998,10 @@ static uint64_t mlkem_ntt_one(int32_t* f, bool inverse, int64_t backend) {
                     continue;
                 }
 #endif
+                /* AVX2/NEON may consume the whole butterfly group above.
+                 * Do not execute a scalar butterfly at j == end: that would
+                 * overwrite the first lane of the next group. */
+                if (j >= end) continue;
                 int32_t lo = f[j];
                 int32_t hi = f[j + len];
                 if (inverse) {

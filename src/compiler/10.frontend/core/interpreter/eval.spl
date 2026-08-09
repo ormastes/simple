@@ -16,13 +16,76 @@
 
 # ===== Coverage Instrumentation =====
 extern fn rt_coverage_enabled() -> bool
-extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
-var coverage_counter: i64 = 0
+extern fn rt_coverage_decision_probe(decision_id: i64, result: bool,
+    file: text, line: i64, column: i64)
+extern fn rt_coverage_condition_probe(decision_id: i64, condition_id: i64,
+    result: bool, file: text, line: i64, column: i64)
 
-fn record_decision(file: text, line: i64, taken: bool):
+# The runtime SFFI ABI is decision-id/result/file/line/column.  Keep the
+# compiler-owned ID stable for one parsed AST: an execution counter produces a
+# different ID each time a loop reaches the same branch and cannot truthfully
+# represent a source decision.  The condition probe records the evaluated
+# `if` predicate as condition 0 of that decision.
+fn record_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
     if rt_coverage_enabled():
-        coverage_counter = coverage_counter + 1
-        rt_coverage_decision_probe(file, line, coverage_counter, taken)
+        rt_coverage_decision_probe(decision_id, taken, file, line, column)
+        rt_coverage_condition_probe(decision_id, 0, taken, file, line, column)
+
+# Control predicates need a decision probe plus one condition probe for each
+# *evaluated* atomic operand.  Do not assign an execution-order counter here:
+# loop iteration and short-circuiting would make a counter non-repeatable.  An
+# AST node's source span start is stable for the parsed source; the expression
+# id is only a fallback for synthetic/no-span ASTs used by interpreter tests.
+fn coverage_condition_id(condition_eid: i64) -> i64:
+    val condition_span = expr_get(condition_eid).span_id
+    if span_is_valid(condition_span):
+        return span_start(condition_span) + 1
+    condition_eid + 1
+
+fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
+    if rt_coverage_enabled():
+        rt_coverage_decision_probe(decision_id, taken, file, line, column)
+
+fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
+    if rt_coverage_enabled():
+        val condition_node = expr_get(condition_eid)
+        val condition_span = condition_node.span_id
+        var condition_line: i64 = 0
+        var condition_column: i64 = 0
+        if span_is_valid(condition_span):
+            condition_line = span_line(condition_span)
+            condition_column = span_col(condition_span)
+        rt_coverage_condition_probe(
+            decision_id, coverage_condition_id(condition_eid), taken,
+            coverage_owner_file(), condition_line, condition_column
+        )
+
+# Evaluates a control predicate while preserving language short-circuit
+# semantics.  Only leaf operands are conditions: the enclosing `and`/`or`
+# expression is a decision composition, not an independently evaluated input.
+fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
+    val condition_node = expr_get(condition_eid)
+    if condition_node.tag == EXPR_BINARY and condition_node.i_val == 55:
+        val left_value = eval_control_condition(condition_node.left, decision_id)
+        if eval_had_error: return -1
+        if val_is_truthy(left_value) == false:
+            return val_make_bool(false)
+        val right_value = eval_control_condition(condition_node.right, decision_id)
+        if eval_had_error: return -1
+        return val_make_bool(val_is_truthy(right_value))
+    if condition_node.tag == EXPR_BINARY and condition_node.i_val == 56:
+        val left_value = eval_control_condition(condition_node.left, decision_id)
+        if eval_had_error: return -1
+        if val_is_truthy(left_value):
+            return val_make_bool(true)
+        val right_value = eval_control_condition(condition_node.right, decision_id)
+        if eval_had_error: return -1
+        return val_make_bool(val_is_truthy(right_value))
+    val condition_value = eval_expr(condition_eid)
+    if eval_had_error: return -1
+    val taken = val_is_truthy(condition_value)
+    record_control_condition(decision_id, condition_eid, taken)
+    condition_value
 
 # Resolve the file that should own a coverage decision/line probe fired RIGHT
 # NOW — the pure-Simple counterpart of the seed's RC1 (impl-method owner
@@ -506,11 +569,17 @@ fn eval_if_expr(eid: i64) -> i64:
     val then_id = e_node.right
     val else_id = e_node.extra
 
-    val cond_val = eval_expr(cond_id)
+    val cond_val = eval_control_condition(cond_id, eid)
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    record_decision(coverage_owner_file(), eid, taken)
+    val span_id = e_node.span_id
+    var source_line = 0
+    var source_column = 0
+    if span_is_valid(span_id):
+        source_line = span_line(span_id)
+        source_column = span_col(span_id)
+    record_control_decision(coverage_owner_file(), source_line, source_column, eid, taken)
 
     if taken:
         return eval_expr(then_id)
@@ -721,9 +790,17 @@ fn eval_while_expr(eid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_expr(cond_eid)
+        val cond_val = eval_control_condition(cond_eid, eid)
         if eval_had_error: break
-        if val_is_truthy(cond_val) == false: break
+        val taken = val_is_truthy(cond_val)
+        val span_id = e_node.span_id
+        var source_line: i64 = 0
+        var source_column: i64 = 0
+        if span_is_valid(span_id):
+            source_line = span_line(span_id)
+            source_column = span_col(span_id)
+        record_control_decision(coverage_owner_file(), source_line, source_column, eid, taken)
+        if taken == false: break
         eval_continuing = false
         env_push_scope()
         for sid in body_stmts:
@@ -767,11 +844,21 @@ fn eval_match_expr(eid: i64) -> i64:
         if matched:
             # Check guard
             if guard_eid >= 0:
-                val guard_val = eval_expr(guard_eid)
+                val guard_val = eval_control_condition(guard_eid, arm_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
-                if val_is_truthy(guard_val) == false:
+                val guard_taken = val_is_truthy(guard_val)
+                val guard_span = expr_get(guard_eid).span_id
+                var guard_line: i64 = 0
+                var guard_column: i64 = 0
+                if span_is_valid(guard_span):
+                    guard_line = span_line(guard_span)
+                    guard_column = span_col(guard_span)
+                record_control_decision(
+                    coverage_owner_file(), guard_line, guard_column, arm_id, guard_taken
+                )
+                if guard_taken == false:
                     env_pop_scope()
                     continue
             # BUG-2026-08-01-match-fallthrough follow-up: a wildcard/bare-binder

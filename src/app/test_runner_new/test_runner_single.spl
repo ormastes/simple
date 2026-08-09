@@ -133,11 +133,11 @@ fn parse_child_run(args: [text]) -> ChildRun:
     while i < args.len():
         val arg = args[i]
         if arg == "--timeout" and i + 1 < args.len():
-            timeout_secs = to_int(args[i + 1])
+            timeout_secs = args[i + 1].to_i64() ?? 0
             i = i + 2
             continue
         if arg.starts_with("--timeout="):
-            timeout_secs = to_int(arg[10:])
+            timeout_secs = arg[10:].to_i64() ?? 0
             i = i + 1
             continue
         if arg == "--list":
@@ -278,7 +278,7 @@ fn extract_number_before(s: text, keyword: text) -> i64:
         last = current
     if last == "":
         return -1
-    to_int(last)
+    last.to_i64() ?? -1
 
 fn extract_number_after(s: text, keyword: text) -> i64:
     """Digits immediately following `keyword` (-1 when absent/no digits).
@@ -415,8 +415,8 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
     val failed_text = parts[2].trim()
     if passed_text == "" or failed_text == "":
         return (0, 0, 0)
-    val passed = to_int(passed_text)
-    val failed = to_int(failed_text)
+    val passed = passed_text.to_i64() ?? -1
+    val failed = failed_text.to_i64() ?? -1
     if passed < 0 or failed < 0 or passed.to_text() != passed_text or failed.to_text() != failed_text:
         return (0, 0, 0)
     if content != "simple-bdd-v1\n{passed_text}\n{failed_text}\n":
@@ -518,9 +518,11 @@ fn _cov_instrument_for_coverage(current: text, original: text) -> text:
         return current
     var epilogue = "\n\n# --- coverage epilogue injected by test_runner_single (SIMPLE_COVERAGE) ---\n"
     epilogue = epilogue + "extern fn rt_coverage_dump_sdn() -> text\n"
-    epilogue = epilogue + "print \"__SIMPLE_COV_SDN_BEGIN__\"\n"
-    epilogue = epilogue + "print rt_coverage_dump_sdn()\n"
-    epilogue = epilogue + "print \"__SIMPLE_COV_SDN_END__\"\n"
+    epilogue = epilogue + "fn __simple_cov_dump():\n"
+    epilogue = epilogue + "    print \"__SIMPLE_COV_SDN_BEGIN__\"\n"
+    epilogue = epilogue + "    print rt_coverage_dump_sdn()\n"
+    epilogue = epilogue + "    print \"__SIMPLE_COV_SDN_END__\"\n"
+    epilogue = epilogue + "__simple_cov_dump()\n"
     if current != original:
         val _ = rt_file_write_text(current, content + epilogue)
         return current
@@ -808,13 +810,13 @@ fn main() -> i64:
     rt_env_set("SIMPLE_RUNTIME_MODE", "interpreter")
     rt_env_set("SIMPLE_EXECUTION_MODE", "interpret")
     val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
-    # to_int("") throws and the interpreter evaluates both sides of `and`;
+    # Converting an empty string must not become a valid timeout value.
     # split the unset case out before any to_int call (this condition broke
     # every `simple test` run while the var was unset).
     if monitor_timeout == "":
         rt_env_set("SIMPLE_TIMEOUT_SECONDS", "{run.timeout_secs}")
     elif monitor_timeout != "0":
-        if to_int(monitor_timeout) < run.timeout_secs:
+        if (monitor_timeout.to_i64() ?? 0) < run.timeout_secs:
             rt_env_set("SIMPLE_TIMEOUT_SECONDS", "{run.timeout_secs}")
     # `# @exec_limit <N>` spec-header directive: the driver reads
     # SIMPLE_EXECUTION_LIMIT once at startup (driver/src/cli/init.rs), so a
@@ -823,7 +825,7 @@ fn main() -> i64:
     val exec_limit = spec_exec_limit_directive(run.path)
     if exec_limit > 0:
         val cur = env_get("SIMPLE_EXECUTION_LIMIT") ?? ""
-        if cur == "" or to_int(cur) < exec_limit:
+        if cur == "" or (cur.to_i64() ?? 0) < exec_limit:
             rt_env_set("SIMPLE_EXECUTION_LIMIT", "{exec_limit}")
     val is_system = run.path.contains("/system/") or run.path.contains("/feature/")
     if is_system:
@@ -905,6 +907,14 @@ fn main() -> i64:
         val (cov_clean, cov_extracted) = _cov_split_output(stdout)
         child_stdout = cov_clean
         cov_sdn = cov_extracted
+        if cov_sdn.trim() == "":
+            # A coverage request without the injected dump is never a valid
+            # test result.  Previously this silently printed a normal PASS and
+            # omitted SIMPLE_COVERAGE_OUTPUT, allowing a stale runner binary
+            # to masquerade as a measured ML-KEM coverage run.
+            print "error: coverage dump sentinels absent from child output"
+            if stderr != "": print stderr
+            return 1
         val cov_output_path = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
         if cov_output_path != "" and cov_sdn != "":
             # Multi-spec invocations: each spec's child inherits the SAME

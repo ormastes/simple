@@ -158,7 +158,7 @@ static void coverage_append(char *out, size_t capacity, size_t *offset, const ch
 }
 
 char *rt_coverage_dump_sdn(void) {
-    static const char decision_header[] = "# Coverage Report\nversion: 1.0\n\ndecisions |id, file, line, column, true_count, false_count|\n";
+    static const char decision_header[] = "# Coverage Report\nversion: 1.0\ncoverage_extension: decision-condition-v1\n\ndecisions |id, file, line, column, true_count, false_count|\n";
     static const char condition_header[] = "\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|\n";
     coverage_lock();
     size_t capacity = sizeof(decision_header) - 1;

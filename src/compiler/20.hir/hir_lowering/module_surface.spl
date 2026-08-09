@@ -1014,13 +1014,27 @@ fn module_surface_declaration_matches(surface: ModuleSurface, module: ParserModu
     true
 
 fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+    if modules == nil:
+        return Err("missing parsed module dictionary")
     var builder = ModuleSurfaceBuilder.new()
+    if builder == nil:
+        return Err("unable to allocate module surface builder")
     var source_index = 0
     while source_index < sources.len():
         val source = sources[source_index]
+        # Source-map entries cross the parser/driver ownership boundary.  A
+        # native nil must be reported with its stable position, never consumed
+        # by the first `source.module_name` field access below.
+        if source == nil:
+            return Err("invalid source entry at index: {source_index}")
         if not modules.contains_key(source.module_name):
             return Err("missing parsed module for source: {source.module_name}")
         val module = modules[source.module_name]
+        # A parser-map entry is transport data at this boundary.  Never let an
+        # invalid entry become an anonymous native nil-receiver trap during a
+        # self-hosted build: preserve the source identity for the driver error.
+        if module == nil:
+            return Err("invalid parsed module for source: {source.module_name}")
         val canonical_path = module_surface_canonical_path(source.path)
         if builder.has_canonical_path(canonical_path):
             val surface = builder.surfaces[builder.index_by_path[canonical_path]]
@@ -1039,6 +1053,8 @@ fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [Sou
         if builder.index_by_name.contains_key(alias):
             continue
         val module = modules[alias]
+        if module == nil:
+            return Err("invalid parsed module alias: {alias}")
         # Parsed aliases retain the physical source path in ParserModule.name.
         # Resolve that identity before declaration-shape matching: unrelated
         # physical modules may expose the same API.

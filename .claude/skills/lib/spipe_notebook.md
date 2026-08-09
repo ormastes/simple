@@ -67,7 +67,9 @@ design and magics list. User-facing documentation: `doc/07_guide/app/tools/jupyt
 
 ### Quick References
 
-- **Probe pattern:** `if probe_notebook_available(): ... else: skip()`
+- **Probe pattern (planned, not yet implemented):** `if probe_notebook_available(): ... else: skip()` —
+  no such symbol exists in source yet; use the lane's own availability check
+  (skip:/blocked: wording) until this helper lands.
 - **Lane-gated helpers:** `start_jupyter_session()`, `execute_cell(code)`,
   `interrupt_session()`, `reset_session()`, `shutdown_session()`
 - **Forbidden assertions:** Do NOT assert cross-lane state in `%%mode` cells.

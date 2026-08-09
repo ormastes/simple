@@ -22,6 +22,7 @@ int main(void) {
     char *first = rt_coverage_dump_sdn();
     char *second = rt_coverage_dump_sdn();
     assert(first && second && strcmp(first, second) == 0);
+    assert(strstr(first, "coverage_extension: decision-condition-v1\n"));
     assert(strstr(first, "    2, a%2Cspl, 1, 2, 0, 1\n"));
     assert(strstr(first, "    2, a%252Cspl, 1, 2, 1, 0\n"));
     assert(strstr(first, "    9, z.spl, 3, 4, 1, 0\n"));

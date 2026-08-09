@@ -5,6 +5,18 @@
 built `2026-07-27 22:06`, prints the *"Rust-built Simple binary is a bootstrap
 seed only"* banner. Both `run` and `test` are the SAME binary — the divergence
 is entirely internal.
+
+## 2026-08-08 PQC verification impact
+
+The currently deployed self-hosted binary exits `0` with no receipt line for
+`test/fixtures/crypto/x25519mlkem768/pure_simple_oracle_probe.spl`, both under
+the default run mode and with `SIMPLE_EXECUTION_MODE=interpreter`. Its cached
+`native-build --entry-closure` command likewise exits `0` without creating the
+requested output executable. Therefore neither outcome may be used as ML-KEM
+oracle, branch-coverage, or acceleration evidence. The independent offline
+CIRCL oracle and the committed C SIMD lane remain usable evidence; the
+Pure-Simple executable path needs a produced artifact and its mandatory
+`x25519mlkem768_probe=pass` receipt before it can close the PQC gate.
 **Probe files:** `build/probe_divergence/` (`cases.txt`, `fast_driver.shs`,
 `probe_driver.shs`, per-case `f_*.spl` / `p_*.spl` / `s_*.spl` + logs).
 

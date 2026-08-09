@@ -190,7 +190,13 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   src/app/cli/bootstrap_main.spl
 status=$?
 set -e
-[ "$status" -eq 0 ] && [ -x "$candidate" ] || exit "$status"
+if [ "$status" -ne 0 ]; then
+  exit "$status"
+fi
+[ -x "$candidate" ] || {
+  echo "error: Stage 3 compiler exited successfully without an executable candidate" >&2
+  exit 1
+}
 ! grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' "$stage3_log" || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 runtime_check="$archive/runtime-after.$$"

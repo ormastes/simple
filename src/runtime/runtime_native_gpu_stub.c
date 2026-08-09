@@ -21,6 +21,11 @@
  * doc/03_plan/runtime/native_binding/interpreter_extern_registration_lanes.md
  * lane R2.
  *
+ * `rt_file_is_char_device` is also copied here because the Rust seed/JIT
+ * runtime deliberately does not link runtime.c or runtime_native.c.  Its
+ * caller uses this no-shell stat(2) probe to decide whether a DRM path is a
+ * device; a missing definition drops an entire JIT module to the interpreter.
+ *
  * Both families are fixed-value capability stubs (no real GL or oneAPI/SYCL
  * binding exists anywhere in this tree), so there is no live logic here to
  * drift out of sync -- if runtime_native.c's bodies ever change, this file
@@ -29,6 +34,19 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/stat.h>
+
+/* Mirrors runtime.c and runtime_native.c.  stat follows a DRM-node symlink;
+ * that is intentional because callers need the resolved node's kind. */
+int rt_file_is_char_device(const char* path) {
+#if defined(_WIN32)
+    (void)path;
+    return 0;
+#else
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+#endif
+}
 
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }

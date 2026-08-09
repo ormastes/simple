@@ -189,13 +189,13 @@ intrinsic wrapper.
 | AVX2 x86_64 | focused native NTT correctness PASS | full hybrid native receipt and >=1.5x |
 | AArch64 NEON | QEMU correctness only | prepared ARM64 native host command/artifacts |
 | RISC-V RVV | QEMU VLEN correctness only | prepared RVV native host command/artifacts |
-| CUDA | two NVIDIA GPUs | physical compile/submit/sync/readback and break-even |
-| Vulkan | two NVIDIA GPUs plus llvmpipe | physical NVIDIA SPIR-V validation/readback and break-even |
-| Metal | unavailable on Linux | macOS Metal device/pipeline/readback and break-even |
+| CUDA | two NVIDIA GPUs: exact 768-coefficient NTT parity and 33-sample narrow break-even PASS | full pure-Simple hybrid operation receipt and retained qualified executor evidence |
+| Vulkan | two NVIDIA GPUs: pinned `glslangValidator` SPIR-V forward/inverse readback parity PASS | full pure-Simple hybrid operation receipt and retained qualified executor evidence |
+| Metal | source-bound MSL/metallib/readback runner prepared; unavailable on Linux | macOS Metal device/pipeline/readback and full-operation break-even |
 
 Canonical runner:
 
-`SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 bin/simple run src/app/test/x25519mlkem768_evidence.spl --fixture-manifest test/fixtures/crypto/x25519mlkem768/manifest.sdn --fixture-source test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl --runner-source src/app/test/x25519mlkem768_evidence.spl --backend <backend> --mode <native|qemu-correctness> --scope <correctness|performance|full-operation> --batch <positive-count>`
+`SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 bin/simple run src/app/test/x25519mlkem768_evidence.spl --fixture-manifest test/fixtures/crypto/x25519mlkem768/manifest.sdn --fixture-source test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl --runner-source src/app/test/x25519mlkem768_evidence.spl --backend <backend> --mode <native|qemu-correctness> --scope <correctness|full-operation> --batch <positive-count>`
 
 Native rows use `--mode native`; QEMU NEON and RVV 128/256 rows use
 `--mode qemu-correctness`. Specialized rows additionally require
@@ -218,6 +218,68 @@ CUDA/Vulkan timing must recreate that admission through the initialized
 executor-owned observer, verify the full executor identity and cache key, and
 retain the same executor for every ABBA lifecycle snapshot. The app-produced
 binding file alone is not live-executor proof.
+
+### GPU full-operation admission (current host)
+
+The physical CUDA and Vulkan wrappers above prove only the NTT modules.  The
+Pure-Simple runner already has a stricter `full-operation` path: it keeps one
+CUDA or Vulkan executor alive while key generation, encapsulation, and
+decapsulation each use that provider, checks scalar and absolute-oracle
+results, and emits lifecycle/readback and public-output digests.  It must not
+be promoted from the C probes.
+
+This host currently lacks the two Stage-4 artifacts required to invoke that
+path: a self-hosted `simple` compiler with adjacent `.provenance.env`, and a
+native artifact compiled from `src/app/test/x25519mlkem768_evidence.spl`.
+The deployed `bin/simple` identifies itself as the Rust bootstrap seed and has
+no adjacent provenance receipt, so it is intentionally not substituted.
+
+`scripts/check/build-x25519mlkem768-gpu-evidence-runner.shs` is the only
+admitted producer for the future full-operation runner. It accepts an admitted
+Stage-4 CLI and one backend, builds into a temporary path, and atomically emits
+the required adjacent runner artifact/source provenance envelope. The NTT-only
+C probes must never use this envelope.
+
+Once a Stage-4 artifact is available, the current-host CUDA resume sequence is:
+
+```sh
+SIMPLE_LIB=src "$STAGE4_SIMPLE" native-build --source src/app --source src/lib \
+  --entry-closure --entry src/app/test/x25519mlkem768_evidence.spl \
+  --runtime-bundle core-c-bootstrap \
+  --output build/evidence/x25519mlkem768/cuda/x25519mlkem768_evidence_runner
+SIMPLE_LIB=src "$STAGE4_SIMPLE" run src/app/test/x25519mlkem768_gpu_binding.spl \
+  --backend cuda --fixture-manifest test/fixtures/crypto/x25519mlkem768/manifest.sdn \
+  --compiler-artifact "$STAGE4_SIMPLE" --compiler-provenance "$STAGE4_SIMPLE.provenance.env" \
+  --runner-artifact build/evidence/x25519mlkem768/cuda/x25519mlkem768_evidence_runner \
+  --accelerator-source src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx \
+  --accelerator-binary build/evidence/x25519mlkem768/cuda/sm_86.cubin \
+  --build-toolchain "CUDA ptxas 13.0 V13.0.88" --device-capability 8.6 \
+  --device-name "NVIDIA RTX A6000" \
+  --output build/evidence/x25519mlkem768/cuda/runner_gpu_binding.env
+```
+
+The final invocation must execute the compiled artifact itself, rather than
+`bin/simple run`, and uses those same paths plus the full-operation request:
+
+```sh
+build/evidence/x25519mlkem768/cuda/x25519mlkem768_evidence_runner \
+  --fixture-manifest test/fixtures/crypto/x25519mlkem768/manifest.sdn \
+  --fixture-source test/fixtures/crypto/x25519mlkem768/canonical_fixture.spl \
+  --runner-source src/app/test/x25519mlkem768_evidence.spl --backend cuda \
+  --mode native --scope full-operation --batch 1 \
+  --compiler-artifact "$STAGE4_SIMPLE" --compiler-provenance "$STAGE4_SIMPLE.provenance.env" \
+  --runner-artifact build/evidence/x25519mlkem768/cuda/x25519mlkem768_evidence_runner \
+  --accelerator-binding build/evidence/x25519mlkem768/cuda/runner_gpu_binding.env \
+  --accelerator-source src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx \
+  --accelerator-binary build/evidence/x25519mlkem768/cuda/sm_86.cubin
+```
+
+Vulkan uses its two pinned SPIR-V paths and the equivalent Vulkan binding. The
+owner is the GPU full-operation evidence operator; the final reviewer is root
+Codex. A compiled runner artifact is currently only hash-bound to the binding,
+not provenance-bound to its declared runner source; therefore even a successful
+run remains development correctness evidence until that artifact-to-source
+provenance boundary is implemented.
 
 ## Fixture and oracle manifest
 

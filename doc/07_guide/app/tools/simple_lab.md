@@ -130,7 +130,7 @@ SimpleLabApp (src/app/simple_lab/main.spl)   -- L2, in-process widget layer
 KernelSessionManager (std.notebook.session_manager)  -- K1, shared with Jupyter
     |
     v  NotebookExecutor trait
-LabLocalExec (src/app/simple_lab/lab_executor.spl)   -- see note below
+LocalExec (std.notebook.local_exec)   -- K2, shared with the Jupyter kernel
     |
     v  subprocess: bin/simple run <accumulated cell source>
 Simple runtime
@@ -153,16 +153,15 @@ socket after each response, which can't support a WebSocket upgrade. See the
 rationale and the other in-repo servers that use the same pattern
 (`app.ui.web.server.WebServer`, `web_dashboard.terminal_ws`).
 
-### Execution stand-in: `lab_executor.spl`
+### Execution: K2's shared `LocalExec`
 
-`src/app/simple_lab/lab_executor.spl` (`LabLocalExec`/`LabLocalExecFactory`)
-is a Lab-scoped, real (non-stub) local-lane executor: per-instance
-accumulated cell source, replayed through a real `bin/simple run`
-subprocess. It predates K2's shared `local_exec.spl`
-(`src/lib/nogc_sync_mut/notebook/local_exec.spl`), which has since landed but
-is not yet wired into Simple Lab — both `main.spl` and `lab_server.spl` still
-construct `LabLocalExecFactory`. Retiring `lab_executor.spl` in favor of the
-shared `LocalExec` is tracked, not yet done; don't assume it has been deleted.
+Both `main.spl` and `lab_server.spl` construct K2's shared local-lane
+executor directly — there is no Lab-specific executor file. `main.spl`
+imports `LocalExecFactory` from `std.notebook.local_exec`; `lab_server.spl`
+imports the same class from
+`std.nogc_sync_mut.notebook.local_exec` (`src/lib/nogc_sync_mut/notebook/local_exec.spl`).
+`LocalExec` accumulates cell source per session and replays it through a real
+`bin/simple run` subprocess — the same executor the Jupyter kernel uses.
 
 ### SDoctest export
 
@@ -203,11 +202,10 @@ protocol.
 | File | Purpose |
 |------|---------|
 | `src/app/simple_lab/main.spl` | `SimpleLabApp` — widget-tree UI (toolbar + per-cell panels), L2 |
-| `src/app/simple_lab/lab_executor.spl` | `LabLocalExec`/`LabLocalExecFactory` — temporary real local-lane stand-in (see note above) |
 | `src/app/simple_lab/lab_server.spl` | `LabServer` — HTTP/WS API + accept loop, L3 |
 | `src/app/simple_lab/export_sdoctest.spl` | Notebook -> sdoctest markdown exporter, L1 |
 | `src/lib/nogc_sync_mut/notebook/session_manager.spl` | `KernelSessionManager` — shared execution core, K1 |
-| `src/lib/nogc_sync_mut/notebook/local_exec.spl` | `LocalExec`/`LocalExecFactory` — shared local-lane executor, K2 (not yet wired into Simple Lab) |
+| `src/lib/nogc_sync_mut/notebook/local_exec.spl` | `LocalExec`/`LocalExecFactory` — shared local-lane executor, K2, directly constructed by both `main.spl` and `lab_server.spl` |
 | `src/lib/nogc_sync_mut/notebook/{ipynb,snb_sdn}.spl` | Notebook document models, L1 |
 | `test/01_unit/app/simple_lab/lab_ui_semantic_spec.spl` | UI widget layer spec, L2 |
 | `test/01_unit/app/simple_lab/export_sdoctest_spec.spl` | Exporter spec, L1 |
@@ -227,8 +225,8 @@ protocol.
   has a passing system spec, but the "reach S4" contract-verification pass
   that the plan gates further work behind has not landed. Treat the wire
   format as pre-1.0.
-- **`lab_executor.spl` is still the active executor**, not K2's shared
-  `local_exec.spl` — see § How It Works above.
+- **Execution uses K2's shared `LocalExec`**, constructed directly by both
+  `main.spl` and `lab_server.spl` — see § How It Works above.
 - **No JupyterLab-style rich display / widgets** — output is plain
   stdout-delta or error text.
 

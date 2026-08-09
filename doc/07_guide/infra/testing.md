@@ -902,7 +902,7 @@ client.wait_for("modal_dialog", 3000)?             # Wait for element
 ### Writing UI System Tests
 
 ```simple
-# test/03_system/ui/my_app_spec.spl
+# test/03_system/gui/ui/my_app_spec.spl
 # tag: slow, system
 
 use std.ui_test.client.{UITestClient}
@@ -929,7 +929,7 @@ describe "My App UI":
 
 ### Test Helpers
 
-Shared helpers in `test/03_system/ui/helpers/ui_test_helpers.spl`:
+Shared helpers in `test/03_system/gui/ui/helpers/ui_test_helpers.spl`:
 
 ```simple
 # Start/stop server with cleanup
@@ -950,12 +950,12 @@ stop_ui_server(pid)
 | `src/lib/nogc_sync_mut/ui_test/client.spl` | UITestClient library |
 | `src/lib/nogc_sync_mut/ui_test/types.spl` | ElementInfo, UIStateInfo types |
 | `src/lib/nogc_sync_mut/ui_test/parse.spl` | JSON response parsing |
-| `test/03_system/ui/helpers/ui_test_helpers.spl` | Server start/stop helpers |
-| `test/03_system/ui/shared_ui_contract_spec.spl` | Cross-surface contract test suite |
+| `test/03_system/gui/ui/helpers/ui_test_helpers.spl` | Server start/stop helpers |
+| `test/03_system/gui/ui/shared_ui_contract_spec.spl` | Cross-surface contract test suite |
 
 ### Contract Test Suite
 
-The authoritative cross-surface proof suite is `test/03_system/ui/shared_ui_contract_spec.spl`. It starts BOTH web and tui_web backends against the same fixture and verifies identical behavior across 7 categories:
+The authoritative cross-surface proof suite is `test/03_system/gui/ui/shared_ui_contract_spec.spl`. It starts BOTH web and tui_web backends against the same fixture and verifies identical behavior across 7 categories:
 
 1. **Protocol** — ready endpoint, protocol version, structured errors
 2. **Tree/Read** — elements, element IDs, kind consistency, screenshots
@@ -967,7 +967,7 @@ The authoritative cross-surface proof suite is `test/03_system/ui/shared_ui_cont
 
 Run with:
 ```bash
-bin/simple test test/03_system/ui/shared_ui_contract_spec.spl --tag slow
+bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 ```
 
 ### Security

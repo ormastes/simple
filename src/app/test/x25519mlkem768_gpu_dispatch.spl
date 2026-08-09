@@ -36,6 +36,9 @@ use app.test.x25519mlkem768_gpu_binding.{
     X25519_MLKEM768_GPU_BINDING_SCHEMA,
     X25519MlKem768GpuCanonicalTuple,
     x25519_mlkem768_gpu_canonical_tuple_reason}
+use lib.common.crypto.x25519_mlkem768.runner_artifact_provenance.{
+    x25519_mlkem768_parse_runner_artifact_provenance,
+    x25519_mlkem768_runner_artifact_provenance_reason}
 use os.crypto.x25519_mlkem768.cuda_ntt_provider.{
     X25519MlKem768CudaNttExecutor}
 use os.crypto.x25519_mlkem768.vulkan_ntt_provider.{
@@ -49,6 +52,8 @@ struct X25519MlKem768GpuDispatchRequest:
     compiler_artifact: text
     compiler_provenance: text
     runner_artifact: text
+    runner_source: text
+    runner_provenance: text
     accelerator_binding: text
     accelerator_source: text
     accelerator_source_aux: text
@@ -124,11 +129,15 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     if request.compiler_artifact == "": return Err("missing-compiler-artifact")
     if request.compiler_provenance == "": return Err("missing-compiler-provenance")
     if request.runner_artifact == "": return Err("missing-runner-artifact")
+    if request.runner_source == "": return Err("missing-runner-source")
+    if request.runner_provenance == "": return Err("missing-runner-provenance")
     if request.accelerator_binding == "": return Err("missing-accelerator-binding")
     if request.accelerator_source == "": return Err("missing-accelerator-source")
     if request.accelerator_binary == "": return Err("missing-accelerator-binary")
     if request.compiler_provenance != request.compiler_artifact + ".provenance.env":
         return Err("compiler-provenance-not-adjacent")
+    if request.runner_provenance != request.runner_artifact + ".provenance.env":
+        return Err("runner-provenance-not-adjacent")
     val vulkan = request.evidence.backend == X25519MlKem768EvidenceBackend.Vulkan
     if vulkan and request.accelerator_source_aux == "":
         return Err("missing-vulkan-inverse-source")
@@ -141,6 +150,8 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     if (not file_is_regular_no_follow(request.compiler_artifact) or
             not file_is_regular_no_follow(request.compiler_provenance) or
             not file_is_regular_no_follow(request.runner_artifact) or
+            not file_is_regular_no_follow(request.runner_source) or
+            not file_is_regular_no_follow(request.runner_provenance) or
             not file_is_regular_no_follow(request.accelerator_binding) or
             not file_is_regular_no_follow(request.accelerator_source) or
             not file_is_regular_no_follow(request.accelerator_binary)):
@@ -152,6 +163,8 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     val compiler_sha256 = file_hash_sha256(request.compiler_artifact)
     val provenance_sha256 = file_hash_sha256(request.compiler_provenance)
     val runner_sha256 = file_hash_sha256(request.runner_artifact)
+    val runner_source_sha256 = file_hash_sha256(request.runner_source)
+    val runner_provenance_sha256 = file_hash_sha256(request.runner_provenance)
     val binding_sha256 = file_hash_sha256(request.accelerator_binding)
     val source_sha256 = file_hash_sha256(request.accelerator_source)
     val binary_sha256 = file_hash_sha256(request.accelerator_binary)
@@ -164,16 +177,20 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     else:
         ""
     if (compiler_sha256.len() != 64 or provenance_sha256.len() != 64 or
-            runner_sha256.len() != 64 or binding_sha256.len() != 64 or
+            runner_sha256.len() != 64 or runner_source_sha256.len() != 64 or
+            runner_provenance_sha256.len() != 64 or binding_sha256.len() != 64 or
             source_sha256.len() != 64 or binary_sha256.len() != 64 or
             (vulkan and
              (source_aux_sha256.len() != 64 or binary_aux_sha256.len() != 64))):
         return Err("gpu-admission-sha256-unavailable")
     val provenance_text = file_read(request.compiler_provenance)
+    val runner_provenance_text = file_read(request.runner_provenance)
     val binding_text = file_read(request.accelerator_binding)
     if (compiler_sha256 != file_hash_sha256(request.compiler_artifact) or
             provenance_sha256 != file_hash_sha256(request.compiler_provenance) or
             runner_sha256 != file_hash_sha256(request.runner_artifact) or
+            runner_source_sha256 != file_hash_sha256(request.runner_source) or
+            runner_provenance_sha256 != file_hash_sha256(request.runner_provenance) or
             binding_sha256 != file_hash_sha256(request.accelerator_binding) or
             source_sha256 != file_hash_sha256(request.accelerator_source) or
             binary_sha256 != file_hash_sha256(request.accelerator_binary) or
@@ -185,6 +202,13 @@ fn _gpu_admission(request: X25519MlKem768GpuDispatchRequest
     if stage4_compiler_provenance_reason(
             provenance, compiler_sha256, provenance_sha256) != "ready":
         return Err("gpu-compiler-stage4-provenance-invalid")
+    val runner_provenance = x25519_mlkem768_parse_runner_artifact_provenance(
+        runner_provenance_text)?
+    val runner_reason = x25519_mlkem768_runner_artifact_provenance_reason(
+        runner_provenance, request.evidence.backend, request.runner_artifact,
+        runner_sha256, request.runner_source, runner_source_sha256,
+        compiler_sha256, provenance_sha256)
+    if runner_reason != "": return Err(runner_reason)
     val expected_fields: i64 = if vulkan: 12 else: 10
     if binding_text.trim().split("\n").len() != expected_fields:
         return Err("gpu-build-binding-field-count-invalid")

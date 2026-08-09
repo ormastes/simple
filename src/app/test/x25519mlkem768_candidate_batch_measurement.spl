@@ -510,21 +510,9 @@ fn x25519_mlkem768_measure_simd_paired_timing(
     val qualification_reason = x25519_mlkem768_qualified_simd_measurement_reason(
         qualification, config, admission)
     if qualification_reason != "": return Err(qualification_reason)
-    val oracle = _qualify_oracle(
-        qualification, config, admission, client_private, d, z,
-        server_private, m)?
-    defer x25519_mlkem768_wipe_owned(oracle.shared_secret)
-    # Differential qualification ran one exchange per role. Scalar needs one
-    # additional warm-up; candidate needs two, matching the retained receipt.
-    _fresh_exchange(qualification, config, admission, oracle, false,
-        client_private, d, z, server_private, m, false)?
-    _fresh_exchange(qualification, config, admission, oracle, true,
-        client_private, d, z, server_private, m, false)?
-    _fresh_exchange(qualification, config, admission, oracle, true,
-        client_private, d, z, server_private, m, false)?
-    val samples = _collect_paired_samples(
-        qualification, config, admission, oracle,
-        client_private, d, z, server_private, m, pair_count)?
+    # Bind a single observed session before any oracle, warm-up, or timed
+    # operation.  Receipts must attest the qualification that actually ran the
+    # samples, not a post-hoc process observation with a new session nonce.
     val refreshed_observation =
         platform_measurement_refresh_process_rss(
             qualification.platform_observation)?
@@ -538,6 +526,24 @@ fn x25519_mlkem768_measure_simd_paired_timing(
     if not x25519_mlkem768_measurement_qualification_valid(
             final_qualification):
         return Err("X25519MLKEM768 refreshed measurement qualification is invalid")
+    val oracle = _qualify_oracle(
+        final_qualification, config, admission, client_private, d, z,
+        server_private, m)?
+    defer x25519_mlkem768_wipe_owned(oracle.shared_secret)
+    # Differential qualification ran one exchange per role. Scalar needs one
+    # additional warm-up; candidate needs two, matching the retained receipt.
+    _fresh_exchange(final_qualification, config, admission, oracle, false,
+        client_private, d, z, server_private, m, false)?
+    _fresh_exchange(final_qualification, config, admission, oracle, true,
+        client_private, d, z, server_private, m, false)?
+    _fresh_exchange(final_qualification, config, admission, oracle, true,
+        client_private, d, z, server_private, m, false)?
+    val samples = _collect_paired_samples(
+        final_qualification, config, admission, oracle,
+        client_private, d, z, server_private, m, pair_count)?
+    # This is an honest pre-measurement RSS observation.  It is deliberately
+    # not refreshed after collection because that would mint a different
+    # session identity for receipts whose samples already completed.
     val max_rss_kb = refreshed_observation.peak_memory_kib
     val scalar_warm = _warm_receipt(
         final_qualification, X25519MlKem768TimingRole.ScalarReference)

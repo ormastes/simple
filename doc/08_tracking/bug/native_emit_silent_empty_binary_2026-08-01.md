@@ -75,6 +75,20 @@ artifact is consistent with the pure-Simple lane below, not the seed.
 
 ## What DOES reproduce — the pure-Simple CLI lane
 
+### 2026-08-08 ML-KEM incremental-rebuild follow-up
+
+An isolated Stage-3 candidate (`build/bootstrap-agent-mirtype-20260805/.../simple`)
+was used to native-build the current
+`src/app/test_runner_new/test_runner_single.spl` with
+`SIMPLE_NO_STUB_FALLBACK=1`. The first error was an application-side unresolved
+global `to_int`; replacing it with `text.to_i64()` moved the same build forward.
+The next error was `src/app/io/cli_ops.spl: unresolved name: __p-1`. Replacing
+all tuple-index accesses in that owner with explicit tuple destructuring did
+not change the error. This is therefore a remaining Stage-3 HIR lowering defect
+that synthesizes an invalid parameter name, not a valid runner build or ML-KEM
+coverage receipt. The bounded three-cycle retry limit was consumed; do not
+retry this candidate until the lowering owner is fixed.
+
 `bin/simple` (deployed pure-Simple, `bootstrap_main.spl`) genuinely cannot emit
 native at HEAD, but today it fails **loudly**, so it is no longer a false-green:
 
@@ -86,6 +100,23 @@ native at HEAD, but today it fails **loudly**, so it is no longer a false-green:
 
 The last two are separate live defects in the deployed pure-Simple CLI and are
 **not** fixed by this change. They are loud, so they cannot fabricate evidence.
+
+### 2026-08-08 admitted Stage-2 silent-emission follow-up
+
+The complete admitted bundle at
+`build/bootstrap-t3-redeploy-retry-20260806-cycle3` was recovered through the
+one-thread Stage-3 wrapper. Its admitted compiler advertised `native-build`,
+but a verbose isolated build of `src/app/cli/bootstrap_main.spl` stayed CPU
+active for more than two minutes while producing zero log bytes and no output
+candidate. The run was terminated at that bounded diagnostic limit. It is not
+an admissible Stage-3 producer and cannot support ML-KEM coverage or GPU-runner
+evidence.
+
+The recovery wrapper had also masked this condition: `status == 0` together
+with a missing candidate executed `exit "$status"`, returning success. Commit
+`8a050f6977a` makes a missing executable a distinct nonzero failure. This
+hardening does not make the old admitted compiler trustworthy; it prevents a
+false-green recovery receipt while a fresh Stage-2 admission is required.
 
 ## Root cause
 

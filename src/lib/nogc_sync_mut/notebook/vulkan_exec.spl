@@ -13,30 +13,23 @@
 #   - session (device/pipeline/arena, created once): `VulkanLaneSession.init`
 #     with the checked-in `svmg_vulkan_kernel.spv` artifact — identical to
 #     what `VulkanVmExecutor.init` does internally.
-#   - per-cell dispatch: `VulkanVmExecutor.run_source_persisting_data`
-#     (added to `vulkan_vm_executor.spl` to fix, at the root,
-#     doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md
+#   - per-cell dispatch: builds this cell's arena via
+#     `vulkan_vm_executor.build_svmg_arena_persisting_data` (added to fix, at
+#     the root, doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md
 #     -- `run_source`'s own fresh-every-call `build_svmg_arena` is unchanged
 #     and remains correct for its stateless one-shot conformance-vector
-#     contract). This file keeps its own `last_arena: [u8]` copy across
-#     `execute_cell()` calls and passes it as `prior_arena` on each call; the
-#     executor overlays the freshly assembled header+code onto a COPY of that
-#     prior readback (not a freshly zeroed buffer) -- same self-modifying-
-#     code semantics `build_svmg_arena` already has for header/code, but the
-#     DATA region beyond `data_off` (and anything the previous run wrote via
-#     STORE8/STORE32) survives into the next dispatch. The executor also
-#     resets the transient, per-run output channels (RAM sentinel word, REG
-#     block, LOG head/cap, RECORD ring) before each dispatch, so a cell's
-#     `CellResult` reflects only that cell's own dispatch, not a cumulative
-#     log across the whole session. The REG block (CMD/ARG0/ARG1/STATUS/
-#     RESULT/SEQ_ID/TRIGGER) reset is defensive hygiene for the *separate* A2
-#     interactive-mailbox register file this "buffered mailbox only" design
-#     does not use (confirmed: `src/lib/common/svmg/ref_vm.spl`'s per-record
-#     `seq` field is a plain VM-instance counter that starts at 0 and is
-#     never read from or written to that arena region at all) -- it does not
-#     affect `record.seq` semantics one way or the other. This file no longer
-#     reimplements the header/code overlay or the transient-channel reset
-#     itself.
+#     contract), then continues with this file's own upload/dispatch/
+#     readback via `VulkanLaneSession` (the executor exposes only the arena
+#     builder, not a full run-and-persist entry point). This file keeps its
+#     own `last_arena: [u8]` copy across `execute_cell()` calls and passes it
+#     as `prior_arena` on each call; the helper overlays the freshly
+#     assembled header+code onto a COPY of that prior readback (not a
+#     freshly zeroed buffer) -- same self-modifying-code semantics
+#     `build_svmg_arena` already has for header/code, but the DATA region
+#     beyond `data_off` (and anything the previous run wrote via
+#     STORE8/STORE32) survives into the next dispatch. This file no longer
+#     reimplements the header/code overlay itself -- it delegates to the
+#     shared helper.
 #
 # Interrupt / DEVICE_LOST (design §4.5): `VulkanLaneSession.dispatch_once`
 # already folds both a plain fence timeout and an unrecoverable
@@ -62,7 +55,7 @@ use std.common.svmg.sgp.{SGP_HEADER_SIZE}
 use std.common.svmg.mailbox_const.{ARENA_DATA_SIZE, ARENA_TOTAL_SIZE, SENTINEL_EXIT_MASK}
 use std.gc_async_mut.gpu_lane.vulkan_lane_session.{VulkanLaneSession}
 use std.gc_async_mut.gpu_lane.vulkan_vm_executor.{
-    SVMG_ENTRY, DEFAULT_STEP_BUDGET, build_svmg_arena,
+    SVMG_ENTRY, DEFAULT_STEP_BUDGET, build_svmg_arena, build_svmg_arena_persisting_data,
     read_sentinel, read_log, read_records}
 use std.sffi.io.{file_read_bytes}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -185,26 +178,21 @@ impl NotebookExecutor for VulkanExec:
             return cell_result_error(
                 "cell SGP blob ({data_off} bytes) exceeds DATA region ({ARENA_DATA_SIZE} bytes)", 0)
 
-        # Workaround for
-        # doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md:
-        # `build_svmg_arena` always builds a fresh, zeroed arena, so overlay
-        # this cell's header+code onto a COPY of `self.last_arena` here at
-        # the call site (not inside vulkan_vm_executor.spl, which is shared
-        # with the GPU-remote-lanes test-runner feature and must keep its
-        # own fresh-every-call contract for that caller). SVM-G STORE/LOAD
-        # addresses are ABSOLUTE arena offsets, not relative to `data_off` --
-        # so the persisted region is copied verbatim at the same absolute
-        # offsets in both arenas, never shifted. `self.last_data_off` is the
-        # PREVIOUS cell's own data_off (where its persisted globals actually
-        # live in `self.last_arena`); `copy_start` picks whichever cell's
-        # header+code reaches furthest so neither is clobbered.
-        var arena = build_svmg_arena(code_bytes, self.step_budget, 0)
-        if self.last_arena.len() == ARENA_TOTAL_SIZE:
-            val copy_start = if data_off > self.last_data_off: data_off else: self.last_data_off
-            var k = copy_start
-            while k < ARENA_TOTAL_SIZE:
-                arena[k] = self.last_arena[k]
-                k = k + 1
+        # Root-cause fix for
+        # doc/08_tracking/bug/vulkan_vm_executor_run_source_clobbers_arena_data_each_call_2026-08-08.md,
+        # now delegated to vulkan_vm_executor.spl's
+        # `build_svmg_arena_persisting_data` (this call site used to keep its
+        # own duplicate splice loop; that loop was byte-for-byte equivalent
+        # to the executor's, so it now just calls through instead of
+        # re-deriving it). `self.last_data_off` is the PREVIOUS cell's own
+        # data_off (where its persisted globals actually live in
+        # `self.last_arena`); the helper picks whichever cell's header+code
+        # reaches furthest as the copy start so neither is clobbered. SVM-G
+        # STORE/LOAD addresses are ABSOLUTE arena offsets, not relative to
+        # `data_off` -- the persisted region is copied verbatim at the same
+        # absolute offsets in both arenas, never shifted.
+        val arena = build_svmg_arena_persisting_data(
+            code_bytes, self.step_budget, 0, self.last_arena, self.last_data_off)
 
         if not self.session.arena_write(arena):
             self.blocked_reason = "vulkan arena write failed"

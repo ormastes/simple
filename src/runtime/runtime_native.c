@@ -2964,12 +2964,28 @@ int64_t rt_value_to_string(int64_t value) {
  * runtime_simd_dispatch.c, which is in this same archive; defining stubs
  * for them here made the stage4 archive core define each twice (link error
  * "Stage4 archive core defines `rt_simd_has_avx` 2 times").
- * ponytail: conservative scalar-tier answers for these two; upgrade path =
- * route detect_profile through runtime_simd_dispatch.c's real detection
- * (tier codes 0=scalar..8=wasm128 per runtime/src/value/simd.rs). */
-int64_t rt_simd_detect_profile(void) { return 0; }
+ * The profile must agree with those predicates.  A scalar profile on an AVX2,
+ * NEON, or RVV host silently disables safe dispatched backends and makes
+ * capability/evidence receipts contradict one another.  Tier codes follow
+ * std.simd: 0=scalar, 1=x86 SSE2, 2=x86 AVX2, 4=AArch64 NEON, 7=RVV. */
+int64_t rt_simd_detect_profile(void) {
+    if (rt_simd_has_avx2()) return 2;
+    if (rt_simd_has_sse()) return 1;
+    if (rt_simd_has_neon()) return 4;
+    if (rt_simd_has_rvv()) return 7;
+    return 0;
+}
 int64_t rt_simd_profile_name(void) {
+    int64_t profile = rt_simd_detect_profile();
+    static const uint8_t avx2_name[] = "x86_64_avx2";
+    static const uint8_t sse2_name[] = "x86_64_sse2";
+    static const uint8_t neon_name[] = "aarch64_neon";
+    static const uint8_t rvv_name[] = "riscv64_rvv";
     static const uint8_t scalar_name[] = "scalar";
+    if (profile == 2) return rt_string_new(avx2_name, 11);
+    if (profile == 1) return rt_string_new(sse2_name, 11);
+    if (profile == 4) return rt_string_new(neon_name, 12);
+    if (profile == 7) return rt_string_new(rvv_name, 11);
     return rt_string_new(scalar_name, 6);
 }
 

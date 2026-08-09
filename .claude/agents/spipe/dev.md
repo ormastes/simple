@@ -134,9 +134,11 @@ and the helper step `step_bootstrap_platform_handoff_readiness`.
 
 Acceptance criteria must require the exact Gate 1-6 order: Stage 3 admission,
 x86_64 Linux Stage 4, candidate sanity/hash, four essential-tool markers,
-deployment plus
-`sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>` and
-its command/exit/hash/arithmetic receipts, then platform acceptance. They must
+deployment plus a manual rollback procedure (no
+`rollback-bootstrap-deploy.shs` script exists yet; redeploy the retained
+`bin/release/<canonical-triple>/simple.pre_deploy` and re-run the same
+arithmetic smoke) and its command/exit/hash/arithmetic receipts, then platform
+acceptance. They must
 state that another agent may own Stage 3 and that independent Stage 4 or
 external-host preparation cannot waive the Stage 3 receipt or publish PASS.
 

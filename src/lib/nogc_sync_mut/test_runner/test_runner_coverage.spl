@@ -35,6 +35,24 @@ struct CoverageData:
     decision_pct: i64
     condition_pct: i64
 
+# Outcome-level summaries are intentionally derived from the in-memory
+# decision/condition counters above.  Feature receipts must not infer coverage
+# from authored specs or a symbolic inventory.
+struct CoverageOwnerOutcomeSummary:
+    owner_id: text
+    path: text
+    decision_site_total: i64
+    condition_site_total: i64
+    branch_outcome_total: i64
+    branch_outcome_covered: i64
+    zero_outcome_rows: [text]
+
+struct CriticalBranchOutcomeCheck:
+    valid_inventory: bool
+    required_outcome_total: i64
+    covered_outcome_total: i64
+    missing_outcome_rows: [text]
+
 # =========================================================================
 # In-Memory Aggregation (cross-process)
 # =========================================================================
@@ -411,6 +429,7 @@ fn render_coverage_sdn() -> text:
     var lines: [text] = []
     lines.push("# Coverage Report")
     lines.push("version: 1.0")
+    lines.push("coverage_extension: decision-condition-v1")
     lines.push("")
     lines.push("decisions |id, file, line, column, true_count, false_count|")
     for key in decision_keys:
@@ -672,5 +691,100 @@ fn print_coverage_delta(data: CoverageData):
     save_coverage_baseline(data)
 
 # =========================================================================
+# Outcome-Level Receipt Aggregation
+# =========================================================================
+
+fn _coverage_counter_key_parts(key: text) -> [text]:
+    key.split("|")
+
+fn coverage_owner_outcome_summary(
+        owner_id: text, path: text) -> CoverageOwnerOutcomeSummary:
+    var decision_site_total: i64 = 0
+    var condition_site_total: i64 = 0
+    var branch_outcome_covered: i64 = 0
+    var zero_outcome_rows: [text] = []
+    for key in decision_keys:
+        val parts = _coverage_counter_key_parts(key)
+        if parts.len() == 4 and parts[0] == path:
+            decision_site_total = decision_site_total + 1
+    for key in condition_keys:
+        val parts = _coverage_counter_key_parts(key)
+        if parts.len() != 5 or parts[0] != path:
+            continue
+        condition_site_total = condition_site_total + 1
+        val true_count = condition_true[key] ?? 0
+        val false_count = condition_false[key] ?? 0
+        if true_count > 0:
+            branch_outcome_covered = branch_outcome_covered + 1
+        else:
+            zero_outcome_rows.push(owner_id + "|" + path + "|" + parts[1] +
+                "|" + parts[3] + "|" + parts[4] + "|true")
+        if false_count > 0:
+            branch_outcome_covered = branch_outcome_covered + 1
+        else:
+            zero_outcome_rows.push(owner_id + "|" + path + "|" + parts[1] +
+                "|" + parts[3] + "|" + parts[4] + "|false")
+    CoverageOwnerOutcomeSummary(
+        owner_id: owner_id, path: path,
+        decision_site_total: decision_site_total,
+        condition_site_total: condition_site_total,
+        branch_outcome_total: condition_site_total * 2,
+        branch_outcome_covered: branch_outcome_covered,
+        zero_outcome_rows: zero_outcome_rows)
+
+fn _critical_outcome_covered(
+        path: text, line: text, decision_id: text,
+        condition_id: text, outcome: text) -> bool:
+    for key in condition_keys:
+        val parts = _coverage_counter_key_parts(key)
+        # Column is deliberately not part of the symbolic critical inventory:
+        # compiler instrumentation may move columns without changing the
+        # source-level branch identity.  The condition key remains exact on
+        # file, line, decision, and condition id.
+        if (parts.len() == 5 and parts[0] == path and parts[1] == line and
+                parts[3] == decision_id and parts[4] == condition_id):
+            val count = if outcome == "true": condition_true[key] ?? 0
+                else: condition_false[key] ?? 0
+            if count > 0: return true
+    false
+
+fn check_critical_branch_outcomes(rows: [text]) -> CriticalBranchOutcomeCheck:
+    var missing: [text] = []
+    var seen: Dict<text, bool> = {}
+    var covered: i64 = 0
+    var valid = rows.len() > 0
+    for row in rows:
+        val parts = row.split("|")
+        if (parts.len() != 6 or parts[0] == "" or parts[1] == "" or
+                parts[2] == "" or parts[3] == "" or parts[4] == "" or
+                (parts[5] != "true" and parts[5] != "false") or seen.has(row)):
+            valid = false
+            continue
+        seen[row] = true
+        if _critical_outcome_covered(
+                parts[1], parts[2], parts[3], parts[4], parts[5]):
+            covered = covered + 1
+        else:
+            missing.push(row)
+    CriticalBranchOutcomeCheck(
+        valid_inventory: valid,
+        required_outcome_total: rows.len(),
+        covered_outcome_total: covered,
+        missing_outcome_rows: missing)
+
+# =========================================================================
 # Exports
 # =========================================================================
+
+export FileCoverage, CoverageData, CoverageOwnerOutcomeSummary
+export CriticalBranchOutcomeCheck, reset_coverage_state
+export decision_key, condition_key, merge_counts, merge_decision_count
+export merge_condition_count, parse_i64_safe, setup_coverage, collect_coverage
+export parse_coverage_sdn, record_coverage_sdn, record_compiler_decision_manifest_sdn
+export accumulate_coverage_sdn, build_coverage_data_from_state, render_coverage_sdn
+export find_or_add_file, print_coverage_summary, generate_coverage_reports
+export sort_files_by_coverage, check_coverage_threshold, get_coverage_threshold
+export save_coverage_baseline, load_coverage_baseline, print_coverage_delta
+export extract_cover_annotations_for_coverage, check_cover_annotation_threshold
+export check_cover_annotation_thresholds
+export coverage_owner_outcome_summary, check_critical_branch_outcomes

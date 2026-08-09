@@ -192,13 +192,15 @@ Failed cells are rolled back — accumulated state is preserved.
 ### Run E2E Tests Locally
 
 ```bash
-# Full server E2E (starts real Jupyter server, HTTP + ZMQ)
-python3 test/03_system/tools/jupyter/helpers/run_server_check.py
-
-# Execute notebook via nbconvert
-python3 test/03_system/tools/jupyter/helpers/run_notebook_server_test.py \
-    --notebook test/03_system/tools/jupyter/fixtures/hello.ipynb --skip-server
+# Live round-trip check for the kernel wrapper (real ZMQ sockets via
+# jupyter_client): completion, inspect, interrupt, and comm_open/comm_msg.
+python3 test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py
 ```
+
+A full-server E2E helper (`run_server_check.py`) and an nbconvert-based
+notebook-execution helper (`run_notebook_server_test.py`) are planned but not
+yet built — `wrapper_transport_roundtrip.py` above is the only E2E helper
+that currently exists in this directory.
 
 ### Run E2E Tests in Docker
 

@@ -50,10 +50,11 @@ candidate between gates.
    and retain all four markers: test runner, lint, duplicate checker, and
    aggregate bootstrap smoke.
 5. **Gate 5, deployment and rollback:** deploy only that candidate, retain the
-   pre/post identities, then run
-   `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`.
-   Retain the rollback command, exit status, receipt path, restored hash, and
-   post-rollback arithmetic smoke.
+   pre/post identities, then run the manual rollback procedure (no
+   `rollback-bootstrap-deploy.shs` script exists yet: redeploy the retained
+   `bin/release/<canonical-triple>/simple.pre_deploy` over the newly-deployed
+   binary). Retain the rollback command, exit status, receipt path, restored
+   hash, and post-rollback arithmetic smoke.
 6. **Gate 6, platform acceptance/handoff:** the platform owner runs the exact
    native, QEMU, target, or scoped matrix command for the selected row and
    returns host identity, toolchain, source/compiler hashes, artifact hashes,
