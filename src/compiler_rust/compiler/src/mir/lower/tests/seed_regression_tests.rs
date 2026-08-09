@@ -59,6 +59,16 @@ fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
             "{function_name} must retain custom bytes dispatch"
         );
     }
+
+    let array_len = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "array_len")
+        .expect("array_len");
+    assert!(
+        !has_call(array_len, "ArrayOwner__len"),
+        "typed array.len must not bind the same-leaf custom owner"
+    );
 }
 
 // =============================================================================
