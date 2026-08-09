@@ -1811,10 +1811,19 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
 
-            // Coverage instrumentation (not yet implemented)
-            MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } | MirInst::PathProbe { .. } => {
-                // Coverage instrumentation not yet implemented
+            // Decision and condition coverage use the shared source-aware LLVM
+            // emitter.  Do not duplicate the ABI here: it must stay aligned
+            // with the core-C receipt runtime (`rt_coverage_*` with file/span).
+            MirInst::DecisionProbe { .. } | MirInst::ConditionProbe { .. } => {
+                self.compile_emitter_simd_instruction(
+                    inst, vreg_map, local_allocas, builder, module)?;
             }
+
+            // Path probes have no source-location ABI in the current core-C
+            // bundle and are not an admitted ML-KEM receipt input. Preserve the
+            // prior no-op behavior rather than emitting the legacy fileless
+            // `rt_path_probe` helper.
+            MirInst::PathProbe { .. } => {}
 
             MirInst::UnitBoundCheck { .. } => {}
             MirInst::UnitWiden { dest, value, .. } => {
@@ -3268,6 +3277,52 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn decision_and_condition_probes_reach_source_aware_core_c_calls() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("coverage_probe_lowering").unwrap();
+
+        let mut function = MirFunction::new(
+            "coverage_probe_lowering".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        function.blocks[0].instructions.push(MirInst::ConstBool {
+            dest: VReg(0),
+            value: true,
+        });
+        function.blocks[0].instructions.push(MirInst::DecisionProbe {
+            decision_id: 41,
+            result: VReg(0),
+            file: "test/coverage/owner.spl".to_string(),
+            line: 17,
+            column: 5,
+        });
+        function.blocks[0].instructions.push(MirInst::ConditionProbe {
+            decision_id: 41,
+            condition_id: 2,
+            result: VReg(0),
+            file: "test/coverage/owner.spl".to_string(),
+            line: 17,
+            column: 5,
+        });
+        function.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 0,
+        });
+        function.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&function).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("rt_coverage_decision_probe"), "{ir}");
+        assert!(ir.contains("rt_coverage_condition_probe"), "{ir}");
+        assert!(ir.contains("test/coverage/owner.spl"), "{ir}");
+        assert!(!ir.contains("@rt_decision_probe"), "{ir}");
+        assert!(!ir.contains("@rt_condition_probe"), "{ir}");
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
