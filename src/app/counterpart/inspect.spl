@@ -1,0 +1,70 @@
+@allow(primitive_api)
+# `simple counterpart inspect` and `list-components`.
+#
+# Read-only. Prints, for each descriptor under config/counterpart/providers/,
+# the resolved status and the reason it is not usable. Nothing here builds,
+# downloads or loads an adapter, so it is safe to run on a machine with no
+# counterpart cache at all — and it is the command that tells you why a
+# conformance run reported a provider UNAVAILABLE.
+
+use std.nogc_sync_mut.spec.evidence.counterpart.package_registry.{
+    COUNTERPART_LOCK_PATH,
+    COUNTERPART_PROVIDER_DIR,
+    ProviderDescriptor,
+    load_lock_file,
+    load_provider_descriptor,
+    load_provider_descriptors,
+    provider_needs_fetch,
+    resolve_provider_from_disk,
+    resolved_provider_summary
+}
+
+pub fn descriptor_path_for(provider_id: text) -> text:
+    COUNTERPART_PROVIDER_DIR + "/" + provider_id + ".sdn"
+
+pub fn descriptors_for(provider_id: text) -> [ProviderDescriptor]:
+    if provider_id == "":
+        return load_provider_descriptors(COUNTERPART_PROVIDER_DIR)
+    var found: [ProviderDescriptor] = []
+    if val descriptor = load_provider_descriptor(descriptor_path_for(provider_id)):
+        found.push(descriptor)
+    found
+
+pub fn run_inspect(provider_id: text) -> i64:
+    val descriptors = descriptors_for(provider_id)
+    if descriptors.len() == 0:
+        print "counterpart inspect: no provider descriptor found under {COUNTERPART_PROVIDER_DIR}"
+        return 1
+    val records = load_lock_file(COUNTERPART_LOCK_PATH)
+    var unusable: i64 = 0
+    for descriptor in descriptors:
+        val resolved = resolve_provider_from_disk(descriptor, records)
+        print resolved_provider_summary(resolved)
+        print "  kind={descriptor.provider_kind} group={descriptor.independence_group} abi={descriptor.abi_version} spdx={descriptor.license_spdx}"
+        print "  needs_fetch={provider_needs_fetch(descriptor)} adapter={descriptor.adapter_source}"
+        print "  cache_dir={resolved.cache_dir}"
+        for reason in resolved.reasons:
+            print "  reason: {reason}"
+        if resolved.reasons.len() > 0:
+            unusable = unusable + 1
+    # Reporting an unusable provider is the point of this command, so it exits
+    # non-zero: a script that inspects and ignores the code would otherwise
+    # treat "nothing is verified" as success.
+    if unusable > 0:
+        return 1
+    0
+
+pub fn run_list_components(provider_id: text) -> i64:
+    val descriptors = descriptors_for(provider_id)
+    if descriptors.len() == 0:
+        print "counterpart list-components: no provider descriptor found"
+        return 1
+    var total: i64 = 0
+    for descriptor in descriptors:
+        for component in descriptor.components:
+            print "{descriptor.provider_id}\t{component.component_id}\t{component.counterpart_boundary_id}\t{component.deterministic_claim}"
+            total = total + 1
+    if total == 0:
+        print "counterpart list-components: descriptors declare zero components"
+        return 1
+    0

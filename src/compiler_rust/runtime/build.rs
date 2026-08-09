@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
     println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_socket_nonblock.c");
+    println!("cargo:rerun-if-changed=../../runtime/counterpart_abi_runtime.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_directx_core.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_rocm.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_signal.c");
@@ -191,6 +192,12 @@ fn compile_c_runtime_sources() {
         "runtime_image.c",
         "startup/common/runtime_log_hosted.c",
         "runtime_socket_nonblock.c",
+        // Counterpart Conformance ABI shim. Its only external needs are
+        // rt_string_new / rt_interp_cstr, both already exported here, and
+        // dlopen needs no -ldl on glibc >= 2.34. This is the list that governs
+        // the DEPLOYED binary — the native-build lane's list in
+        // src/compiler/70.backend/backend/runtime_compiler.spl is separate.
+        "counterpart_abi_runtime.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");

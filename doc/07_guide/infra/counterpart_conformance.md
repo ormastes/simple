@@ -26,19 +26,47 @@ this one.
 
 ## What works today
 
+All numbers below were measured with `bin/simple run` on 2026-08-09.
+
 | Capability | State | Evidence |
 |---|---|---|
-| Frozen contracts (plans, receipts, relations, gates) | **Working** | `bin/simple run test/01_unit/infra/counterpart/contract_model_spec.spl` → 18 examples, 0 failures, exit 0; two sabotage probes confirmed RED→GREEN |
-| Adapter C ABI + mock adapter | **C layer working, unreachable from Simple** | Verified through a C driver; the Simple-side externs are unresolved — see the blocker below |
-| Converter graph, relation engine, evidence projection | In flight | — |
-| Package/build resolver (F2) | Not written | Lockfile records are declarations, not enforced |
-| Isolated worker (F3), provider registry (F4) | Not written | — |
-| Any real upstream provider (zlib, HarfBuzz, OpenSSL, Chrome, Venus) | Not started | — |
+| Frozen contracts (plans, receipts, relations, gates) | **Working** | contract_model_spec 18/18, exit 0 |
+| Converter graph + N-way relation engine | **Working** | converter_graph_spec 19/19, relation_matrix_spec 19/19, exit 0 |
+| Evidence + manual projection, artifact store | **Working** | evidence_projection_spec 6/6, exit 0 |
+| Adapter C ABI + mock adapter, reachable from Simple | **Working (interpreter path only)** | counterpart_abi_spec 8/8, exit 0; sabotage (adapter reports `abi_version=2`) → 2/8, exit 1 |
+| Provider registry / runner / process bridge | **Working, native bridge unexercised** | provider_registry_spec 19/19, exit 0 |
+| Package/build resolver + `counterpart` CLI | **Working** | package_registry_spec 19/19, exit 0 |
+| Adversarial red-team over the acceptance gates | **Working** | foundation_redteam_spec 21/21 |
+| Isolated worker (F3) | In flight | — |
+| Any real upstream provider (zlib, HarfBuzz, OpenSSL, Chrome, Venus) | Not started | Wave 2+ |
 
-**Blocker:** `rt_counterpart_*` is not linked into the runtime, so
-`src/lib/nogc_sync_mut/sffi/counterpart_abi.spl` cannot be called from Simple.
-Details and the unblock steps:
-`doc/08_tracking/bug/counterpart_abi_shim_not_linked_into_runtime_2026-08-09.md`.
+Caveats that matter more than the table:
+
+- **The ABI works on the interpreter path only.** `bin/simple` is a Rust seed, so
+  `bin/simple run` evaluates specs in the Rust interpreter. The native-build
+  wiring in `src/compiler/70.backend/backend/runtime_compiler.spl` is **unverified** —
+  proving it needs a native build of an `rt_counterpart_*` caller, which the
+  Stage-3 self-host blocker prevents.
+- **SBOM emission is not implemented.** `sbom_sha256` is parsed and
+  placeholder-checked, but nothing writes `sbom.spdx.json` yet.
+- **The mock lock record is still all `pending`**, so `inspect`/`verify`/`run`
+  correctly report UNVERIFIED and exit 1.
+
+## The `counterpart` CLI
+
+```bash
+# Works today:
+bin/simple run src/app/counterpart/main.spl inspect mock
+
+# Does NOT work yet — prints generic help, exit 1:
+bin/simple counterpart inspect mock
+```
+
+The dispatch branch is wired in `src/app/cli/_CliMain/main_and_help.spl`, but
+`bin/simple` is currently the **Rust seed**, whose CLI predates the branch. The
+subcommand becomes reachable only once the self-hosted binary is built and
+deployed, which the Stage-3 self-host blocker prevents. Same trap that makes the
+seed reject `sspec-maintain`.
 
 ## Declaring a plan
 

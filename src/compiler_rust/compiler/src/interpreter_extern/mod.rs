@@ -54,6 +54,7 @@ static EXTERN_DISPATCH: LazyLock<HashMap<&'static str, ExternHandler>> = LazyLoc
 // Module declarations
 pub mod common;
 pub mod conversion;
+pub mod counterpart;
 pub mod process;
 pub mod pty;
 pub mod time;
@@ -2634,6 +2635,15 @@ pub(crate) fn call_extern_function_with_values(
 
     if name.starts_with("rt_rapier2d_") {
         return rapier2d_sffi::dispatch(name, &evaluated);
+    }
+
+    // Counterpart Conformance ABI shim (src/runtime/counterpart_abi_runtime.c).
+    // The C file is compiled into this binary via the runtime crate's build.rs,
+    // but externs still need an interpreter dispatch entry or every call dies
+    // with "unknown extern function". See
+    // doc/08_tracking/bug/counterpart_abi_shim_not_linked_into_runtime_2026-08-09.md
+    if name.starts_with("rt_counterpart_") {
+        return counterpart::dispatch(name, &evaluated);
     }
 
     // The rt_sdl2_* family is implemented in C (src/runtime/runtime_sdl2.c) and
