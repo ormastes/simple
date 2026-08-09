@@ -84,3 +84,31 @@ the risk is low, but it was not fully gated and should not be described as such.
 C6 (`7a7e9f67adc`, generated Lean model + fail-closed formal gate) is committed
 locally, independently verified (selftest 8/8, lake build OK), and **held
 unpushed** pending a bootstrap-capable environment.
+
+## Re-confirmed 2026-08-09 (fresh session)
+
+Reproduced with no changes to source:
+
+```
+$ readlink -f bin/simple
+/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple
+$ bin/simple --version
+WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+Build and use the pure-Simple bin/simple instead.
+Simple Language v1.0.0-beta
+$ sh scripts/check/check-bootstrap-essential-tools-smoke.shs
+essential_tools_identity_rc=0
+error=rust_seed_binary
+$ sh scripts/check/check-cache-v2-stage-gate.shs
+ERROR — nothing was checked: check-no-conflict-tree-push could not check anything ...
+```
+
+Still an environment blocker, not a source defect: `bin/simple` is still the
+Rust seed. The only real fix is `scripts/setup/setup.shs && bin/simple build
+bootstrap` to deploy a fresh self-hosted binary, which this task's instructions
+explicitly forbid running in this session (risk of a long/contended bootstrap
+under a shared, possibly loaded machine). No .spl/.shs source change is
+warranted here — the gate is already correctly classifying this as `ERROR —
+nothing was checked` rather than blaming a commit, per the "Gate correction"
+section above. Leaving OPEN; someone with a drained, bootstrap-capable
+environment still needs to run the fix command and re-deploy.
