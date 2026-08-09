@@ -79,3 +79,21 @@ under a native build and compare magnitudes: a divergence shows up immediately a
 ~1e13 vs ~1.7e18. A regression spec should assert the two engines agree to within
 a small tolerance, not merely that each is monotonic — a monotonicity-only oracle
 passes on both epochs and is exactly why this survived.
+
+## Re-verification (2026-08-09, parallel bug-list pass)
+
+Confirmed PRIMARY over
+`doc/08_tracking/bug/rt_time_now_nanos_has_two_different_epochs_2026-08-09.md`
+(that doc is DUPLICATE-of-this-one — same root cause, filed the same day,
+narrower implementation inventory, no ownership-note context). Re-read the
+in-tree blocking note at `runtime_native.c:9124` (still present, unchanged)
+and confirmed via grep that `rt_time_now_nanos`/`rt_time_now_micros` are
+still baselined in
+`scripts/check/runtime_symbol_lane_divergence_baseline.txt` — the explicit
+"owned by another lane, do not fix as a side effect" condition still holds.
+**Deliberately left unfixed**, consistent with the doc's own "Why this is
+filed, not fixed" section: the correct fix is a semantic name-split
+(`rt_time_monotonic_nanos` / `rt_time_unix_nanos`) across four
+implementation sites including forbidden `src/compiler_rust/**`, not a
+same-epoch patch to one side, and is owned by the lane-divergence baseline's
+maintainer. No code changed in this pass.

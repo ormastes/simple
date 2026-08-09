@@ -42,6 +42,39 @@ Use coreutils `truncate` (e.g. `truncate -s 32M image.img`) to pre-size
 large images instead of `rt_file_truncate` until the interpreter
 marshalling cap is fixed.
 
+## Re-verification (2026-08-09, parallel bug-list pass)
+
+Read current `rt_file_truncate` at
+`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:1047-1076`: it
+takes the size arg as `u64` (handling both `Value::Int` and `Value::UInt`,
+per an in-tree comment referencing a *different*, already-fixed bug —
+`doc/08_tracking/bug/disk_image_fat32_builder_defects.md` #2) and calls
+`file.set_len(size)` with the full 64-bit value — **no 4 MiB clamp is present
+in the source today.**
+
+Attempted a fresh `.spl` repro via the deployed binary
+(`bin/simple`, currently the Rust seed per `--version`) calling
+`rt_file_truncate` through a local `extern fn` declaration. The repro did not
+reach the truncate cap question at all: every extern file-I/O call in this
+environment (including plain `rt_file_write_bytes`) failed with
+`file_io: argument 0 must be a string path` from
+`interpreter_extern/file_io.rs`'s `extract_path`, which pattern-matches only
+`Value::Str` — an apparently unrelated `text` vs `Value::Str` marshalling
+mismatch for top-level extern calls in this build/environment, not a
+truncate-specific defect. This blocks confirming the cap is actually gone
+end-to-end.
+
+**Status kept OPEN**, but re-scoped: (1) the fix location is
+`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs`, which is
+out of bounds for this pass (`src/compiler_rust/**` must never be edited
+here); (2) the specific 4 MiB clamp described above is not visible in
+current source, so this may already be fixed or may have been masked by the
+separately-observed `argument 0 must be a string path` extern-marshalling
+issue that blocks any repro in this environment. Needs a session with
+`src/compiler_rust` edit scope to (a) fix/diagnose the `extract_path`
+`Value::Str`-only match generally, then (b) re-run the original 32 MiB
+truncate repro end-to-end to confirm the cap is gone.
+
 ## Next Check
 
 Trace the `rt_file_truncate` extern signature/marshalling in the

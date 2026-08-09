@@ -49,3 +49,20 @@ SEPARATE, differently-named extern rather than an epoch that varies by lane.
 A spec asserting that the value is monotone AND within a plausible band for the
 chosen epoch would pin this. Today no spec covers it, which is why the split
 persisted.
+
+## Duplicate note (2026-08-09, parallel bug-list pass)
+
+This item is the same underlying defect as
+`doc/08_tracking/bug/rt_time_now_nanos_interpreter_uses_wall_clock_epoch_2026-08-09.md`,
+filed the same day from a different angle (this doc covers `runtime_time.c`
+vs `time.rs`; the other enumerates all four implementations, including the
+pure-Simple `core_process.spl`, and additionally documents an explicit
+in-tree ownership note at `runtime_native.c:9124` blocking a piecemeal fix —
+the symbol is baselined in
+`scripts/check/runtime_symbol_lane_divergence_baseline.txt` and owned by
+another lane). Treating **that** doc as primary since it has the fuller
+implementation inventory and the explicit non-fix rationale; this doc is
+DUPLICATE-of that one. Confirmed still OPEN in this pass — no code changed,
+per the explicit "owned by another lane, do not fix as a side effect"
+in-tree note. See the primary doc for the suggested fix (name split into
+`rt_time_monotonic_nanos` / `rt_time_unix_nanos`).

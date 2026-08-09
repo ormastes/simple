@@ -61,6 +61,25 @@ outcome); the measured actual is 0, so it fails exactly as expected. Left RED
 per this session's standing practice — the assertion states the DESIRED
 behaviour, not a weakened match to the current gap.
 
+## Re-verification (2026-08-09, parallel bug-list pass)
+
+Re-checked against the standing "borrow checker is architecturally limited"
+pattern noted elsewhere in this repo (borrow_check today runs only in the
+AOT/JIT/VHDL pipelines, not universally — see
+`doc/08_tracking/bug/stage3_selfhost_nil_receiver_sigill_in_lower_expr_caller_2026-08-05.md`
+and related notes on `borrow_check` pipeline coverage). This item is a
+**distinct but related** architectural gap: even where `borrow_check` DOES
+run, it has no borrow-liveness/region infrastructure and no foreign-call
+marker, so invariant 3 cannot be enforced by any local fix to `record_move`.
+Building region/lifetime tracking plus a foreign-call-boundary marker is a
+genuine subsystem addition (est. multi-week), not a bug-fix-sized change, and
+is explicitly out of scope for a single-item pass per the standing guidance
+not to attempt a half-built version of a borrow-checker rewrite.
+
+**Confirmed: still OPEN, still architectural.** No code changed in
+`55.borrow/` or `50.mir/` in this pass. Left as-is per the doc's own
+"Unblock condition" below.
+
 ## Unblock condition
 
 A borrow-liveness/region pass (item 1 above) plus a foreign/SFFI call marker
