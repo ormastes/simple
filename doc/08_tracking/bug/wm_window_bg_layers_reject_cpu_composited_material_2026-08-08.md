@@ -1,7 +1,22 @@
 # WM lane rung (d) blocked: `.wm-window` gradient layer fails the cpu-composited-material admission contract
 
 - **ID:** wm_window_bg_layers_reject_cpu_composited_material_2026-08-08
-- **Status:** OPEN
+- **Status:** SUPERSEDED — root cause below is WRONG. See
+  `doc/08_tracking/bug/wm_guest_css_var_unresolved_blocks_material_admission_2026-08-09.md`
+
+> **Correction (2026-08-09).** The claim that `mat_layers == ""` is the
+> *single* failing term is refuted by measurement. `backdrop_len=21` is
+> `blur() saturate(170%)`, which `simple_web_backdrop_admission` **rejects**
+> (the blur term must end in `px)`) — scored "pass" below from its length
+> alone, never evaluated. `bg=352321535` (`0x14FFFFFF`) is the gradient's
+> first stop, not the theme surface (`rgba(31,31,33,0.80)`). All three
+> numbers — `bg=352321535`, `layers_len=73`, `backdrop_len=21` — reproduce
+> exactly and only when the sheet's `var(--…)` references do not resolve.
+> `layers_len=73` is the gradient plus a **bare trailing comma**, not the
+> two-layer background (which measures 93 when `--app-surface` resolves).
+> Both fixes proposed below ("composite the layer", "drop the gradient from
+> the theme") would have left the backdrop term failing and would not have
+> unblocked the lane; the theme is not at fault.
 - **Severity:** high (sole blocker for SimpleOS x86_64 WM lane rung (d) — an
   in-guest rendered WM frame accepted as evidence)
 - **Found by:** SimpleOS x86_64 WM fullscreen evidence lane, 2026-08-08
