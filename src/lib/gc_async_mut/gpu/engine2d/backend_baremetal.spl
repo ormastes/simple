@@ -351,6 +351,10 @@ impl RenderBackend for BaremetalBackend:
         if w <= 0 or h <= 0 or w > BM_MAX_DRAW_DIM or h > BM_MAX_DRAW_DIM:
             return
         val pixel_count = pixels.len()
+        # Flat opaque web/UI regions are common and must use the same bounded
+        # SIMD fill owner as rectangles.  Masks still require per-pixel tests,
+        # and translucent pixels still require destination reads/blending.
+        val opaque_runs_enabled = self.mask_w <= 0 or self.mask_h <= 0
         var row = 0
         while row < h:
             var col = 0
@@ -370,7 +374,20 @@ impl RenderBackend for BaremetalBackend:
                             allowed = false
                         if allowed:
                             if color_a(c) == 255:
-                                self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), c)
+                                var run_len = 1
+                                if opaque_runs_enabled:
+                                    while col + run_len < w:
+                                        val next_idx = src_idx + run_len
+                                        if next_idx >= pixel_count or pixels[next_idx] != c:
+                                            break
+                                        run_len = run_len + 1
+                                # Four pixels is the first NEON chunk and
+                                # amortizes the bounded fill call/parity proof.
+                                if run_len >= 4:
+                                    self.draw_rect_filled(px, py, run_len, 1, c)
+                                    col = col + run_len - 1
+                                else:
+                                    self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), c)
                             else if color_a(c) > 0:
                                 val dst = self.fb.framebuffer_read_pixel_argb(px.to_u32(), py.to_u32())
                                 self.fb.framebuffer_put_pixel_argb(px.to_u32(), py.to_u32(), blend(c, dst))
