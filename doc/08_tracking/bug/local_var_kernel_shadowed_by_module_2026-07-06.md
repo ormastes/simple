@@ -1,7 +1,7 @@
 # Bug: local variable named `kernel` shadowed by module name — HIR lowering + interp hard-fail
 
 - **Date:** 2026-07-06
-- **Status:** open (workaround applied at call sites)
+- **Status:** FIXED — verified 2026-08-09 (see "Re-verification" at bottom); workaround renames left in place
 - **Area:** compiler name resolution (HIR lowering + interpreter semantic pass)
 
 ## Symptom
@@ -148,3 +148,28 @@ defect in that codebase.
 The workaround renames (`release_pipeline.spl`, `image_builder.spl`) are safe
 to keep or revert once the seed is rebuilt with this fix; not reverted in this
 patch (source-only fix, no bootstrap performed in this lane).
+
+## Re-verification (2026-08-09)
+
+`src/compiler_rust/parser/src/parser_patterns.rs:206` still reads
+`Ok(Pattern::Identifier(name.to_lowercase()))` — the fix described above is
+present in the currently checked-out seed source, and the deployed
+`bin/simple` (a Rust-seed build) now carries it. Re-ran this doc's exact
+minimal repro directly against the deployed binary:
+
+```bash
+bin/simple run kshadow.spl   # same body as the "Minimal repro" section above
+```
+
+Output:
+```
+kernel=
+```
+
+No `HIR lowering error: Unknown variable: kernel` and no `semantic: variable
+'kernel' not found` — the prior hard-fail is gone; the function runs and
+prints the expected (empty, since `args = ["packages"]` never matches
+`--kernel=`) value. Status corrected from "open" to FIXED. The workaround
+renames in `release_pipeline.spl` / `image_builder.spl` were left in place
+(not reverted) since they are harmless and reverting them is out of scope for
+this verification pass.
