@@ -1321,7 +1321,7 @@ fn _engine2d_embed_offscreen_acquire(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, reset_surface: bool = false) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, material_execution_counts: [i64], reset_surface: bool = false) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     if reset_surface:
         # Reset after the function's own Engine2D projection so every reset and
@@ -1550,6 +1550,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                 )
             else:
                 eng.clear_clip()
+    if material_execution_counts.len() > 0:
+        material_execution_counts[0] = cpu_composited_material_count.to_i64()
     _engine2d_draw_ir_render_outcome(
         eng,
         rendered,
@@ -1814,10 +1816,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             Ok(child):
                 var delta = child
                 delta.draw_image(0, 0, delta_width, delta_height, seed)
+                var inner_material_counts: [i64] = [0]
                 val inner = _engine2d_draw_ir_render_commands(
                     delta, batch.commands, parent_padding, parent_padding, images, true,
                     batch.backend_target == "metal", draw_ir_no_rect(),
-                    css_background_pixel_work_budget, false)
+                    css_background_pixel_work_budget, inner_material_counts, false)
                 val child_readback = delta.read_pixels_with_source()
                 val child_core = _engine2d_draw_ir_parent_region_pixels(
                     child_readback, delta_width, delta_height,
@@ -1840,7 +1843,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 return _engine2d_draw_ir_render_outcome(
                     eng, inner.rendered, inner.skipped,
                     inner.unsupported_kinds,
-                    inner.cpu_composited_material_count,
+                    inner_material_counts[0].to_i32(),
                     inner.metal_device_glass_material_count,
                     inner.metal_device_glass_requested_count,
                     inner.metal_device_glass_unfulfilled_count,
@@ -1854,6 +1857,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         if apply_clip:
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
         val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
+        var direct_material_counts: [i64] = [0]
         val direct = _engine2d_draw_ir_render_commands(
             eng, commands, embedding.x, embedding.y, images,
             blend_images, batch.backend_target == "metal",
@@ -1863,7 +1867,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 )
             else:
                 draw_ir_no_rect(),
-            css_background_pixel_work_budget, false)
+            css_background_pixel_work_budget, direct_material_counts, false)
         if apply_clip:
             eng.clear_clip()
         return _engine2d_draw_ir_render_outcome(
@@ -1871,7 +1875,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             direct.rendered,
             direct.skipped,
             direct.unsupported_kinds,
-            direct.cpu_composited_material_count,
+            direct_material_counts[0].to_i32(),
             direct.metal_device_glass_material_count,
             direct.metal_device_glass_requested_count,
             direct.metal_device_glass_unfulfilled_count,
@@ -1928,10 +1932,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             "embedded-offscreen-not-created",
             0
         )
+    var inner_material_counts: [i64] = [0]
     val inner = _engine2d_draw_ir_render_commands(
         offscreen, commands, 0, 0, images, true,
         batch.backend_target == "metal", draw_ir_no_rect(),
-        css_background_pixel_work_budget, true)
+        css_background_pixel_work_budget, inner_material_counts, true)
     val child = offscreen.read_pixels_with_source()
     val composited = eng.draw_ir_composite_readback(
         embedding.x,
