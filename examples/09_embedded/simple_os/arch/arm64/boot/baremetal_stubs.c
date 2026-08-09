@@ -161,6 +161,10 @@ void rt_print_value(RuntimeValue val);
 
 static char   _heap[160 * 1024 * 1024] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
+static uint64_t _heap_alloc_count = 0;
+static uint64_t _heap_string_new_count = 0;
+static uint64_t _heap_string_concat_count = 0;
+static uint64_t _heap_array_new_count = 0;
 
 static void *_heap_alloc(size_t sz, uintptr_t caller)
 {
@@ -174,11 +178,20 @@ static void *_heap_alloc(size_t sz, uintptr_t caller)
         serial_put_dec((int64_t)sizeof(_heap));
         serial_puts(" caller=");
         serial_put_hex((uint64_t)caller);
+        serial_puts(" alloc_count=");
+        serial_put_dec((int64_t)_heap_alloc_count);
+        serial_puts(" string_new=");
+        serial_put_dec((int64_t)_heap_string_new_count);
+        serial_puts(" string_concat=");
+        serial_put_dec((int64_t)_heap_string_concat_count);
+        serial_puts(" array_new=");
+        serial_put_dec((int64_t)_heap_array_new_count);
         serial_puts("\r\n");
         for(;;) __asm__ volatile("wfe");
     }
     void *p = &_heap[_heap_off];
     _heap_off += sz;
+    _heap_alloc_count++;
     return p;
 }
 
@@ -333,6 +346,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
     int64_t len = len_val;
     if (len < 0 || len > 0x100000) return NIL_VALUE;
+    _heap_string_new_count++;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -425,6 +439,7 @@ RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
     uint32_t la = sa ? sa->len : 0;
     uint32_t lb = sb ? sb->len : 0;
     uint32_t total = la + lb;
+    _heap_string_concat_count++;
     RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + total + 1);
     if (!r) return NIL_VALUE;
     r->hdr.type = HEAP_STRING;
@@ -1583,6 +1598,7 @@ RuntimeValue rt_array_new(RuntimeValue cap_val) {
     if (cap < 16) cap = 16;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    _heap_array_new_count++;
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE; a->hdr.type = HEAP_ARRAY; a->hdr.size = (uint32_t)alloc_size; a->len = 0; a->cap = (uint64_t)cap; a->items = (RuntimeValue *)(a + 1);
     for (int64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
@@ -1619,6 +1635,7 @@ RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val) {
     if (cap <= 0) cap = 1;
     if (cap > 0x100000) cap = 0x100000;
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
+    _heap_array_new_count++;
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
