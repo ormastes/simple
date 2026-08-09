@@ -52,3 +52,12 @@
 - Cycle 1 (`stage4-symbol-import-retry.log`) reached phase 4 after about ten minutes and reproduced seven unresolved `Symbol` payloads. Cycle 2 (`stage4-public-symbol-retry.log`) reused the cache and proved `pub type` is invalid grammar. Cycle 3 (`stage4-explicit-symbol-export-retry.log`) parsed and reached phase 4, but explicit `export Symbol` still did not bind the alias during HIR lowering. No Stage4 candidate exists.
 - Do not rerun the unchanged command in this session. Fresh-session next action: replace cross-module trait-error `Symbol` payload annotations with the public concrete `HirSymbol` type and update the focused formatter fixture, or implement the reviewed `SymbolId` model atomically with all caller conversions. Then resume the same Stage4 cache once.
 - x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.
+
+## Active handoff update (2026-08-09, lint primitive sweep)
+
+- Pushed `bda3617b78c` (replace exported trait-error `Symbol` aliases with public `HirSymbol`), `c278a9aea4d` (concrete lint config primitives and facade-cycle removal), and `ae0e1b09d72` (concrete lint-check primitives, EasyFix owner imports, and facade-cycle removal).
+- Focused pure-Simple native evidence passes: `native_driver_source_loading_symbol` prints formatter resolution `true:true`; `native_lint_config_model_types` prints `lint config model resolved: true`; `native_lint_checks_types` prints `lint checks resolved: true`.
+- Stage4 cycle 1 removed all seven `Symbol` errors and exposed `Bool`/`Int` in `config_and_model.spl`. Cycle 2 removed that owner and exposed `lint_checks.spl` plus missing `easyfix_*` imports. Cycle 3 removed both and advanced to `traceability_and_assertions.spl`, which now reports only `Bool`/`Int` annotation failures.
+- Logs: `stage4-hirsymbol-boundary-retry.log`, `stage4-lint-primitives-retry.log`, and `stage4-lint-checks-retry.log` under `build/bootstrap-recovery/`. No Stage4 candidate exists; do not run a fourth unchanged build this session.
+- Fresh-session next action: convert every annotation-level `Bool`/`Int` in `traceability_and_assertions.spl` to `bool`/`i64`, remove any reverse facade import in favor of concrete owners, add a focused native fixture and prevention contract, then resume the preserved Stage4 cache once.
+- x86 Stage4, essential-tools smoke, ARM64 attestation/QMP primitive WM, native ARM/macOS, and Uno-Q remain OPEN.

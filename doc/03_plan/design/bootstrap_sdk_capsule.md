@@ -255,3 +255,15 @@ The next implementation must use public `HirSymbol` at that boundary or land
 the complete reviewed `SymbolId` identity conversion; an annotation-only
 partial migration is prohibited. No candidate, capsule admission, QEMU WM,
 ARM/macOS, or Uno-Q status advances from this evidence.
+
+## 2026-08-09 Lint closure progression
+
+The public `HirSymbol` trait-error boundary and two lint facade-cycle repairs
+now pass focused pure-Simple native fixtures. Three canonical cached Stage4
+runs advanced monotonically from `driver_source_loading` to
+`config_and_model`, then `lint_checks`, and finally
+`traceability_and_assertions`. The remaining diagnostics are annotation-level
+`Bool`/`Int` uses; the concrete native spellings are `bool`/`i64`.
+
+This progression is compiler-frontier evidence only. It does not admit an x86
+candidate or advance the capsule, QEMU WM, ARM/macOS, or Uno-Q matrix rows.
