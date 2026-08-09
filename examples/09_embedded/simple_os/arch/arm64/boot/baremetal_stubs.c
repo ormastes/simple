@@ -3477,14 +3477,18 @@ RuntimeValue rt_arm64_virtio_input_poll(void)
     return 0;
 }
 
-RuntimeValue rt_arm64_virtio_input_poll_packed(void)
+uint64_t rt_arm64_virtio_input_poll_packed(void)
 {
-    if (rt_arm64_virtio_input_poll() == 0) return ENCODE_INT(-1);
-    uint64_t packed = ((uint64_t)(g_arm64_virtio_input_device_kind & 0x3u) << 56) |
+    if (rt_arm64_virtio_input_poll() == 0) return 0;
+    return ((uint64_t)(g_arm64_virtio_input_device_kind & 0x3u) << 56) |
            ((uint64_t)(g_arm64_virtio_input_type & 0xffu) << 48) |
            ((uint64_t)g_arm64_virtio_input_code << 32) |
            (uint64_t)g_arm64_virtio_input_value;
-    return ENCODE_INT((int64_t)packed);
+}
+
+RuntimeValue rt_arm64_virtio_input_box_scalar(uint64_t raw)
+{
+    return ENCODE_INT((int64_t)raw);
 }
 
 RuntimeValue rt_arm64_virtio_input_event_type(void) { return (RuntimeValue)g_arm64_virtio_input_type; }
