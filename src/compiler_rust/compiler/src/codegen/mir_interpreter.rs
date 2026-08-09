@@ -116,6 +116,13 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, self.get(src));
         Ok(())
     }
+    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, _byte_size: u32) -> Result<(), Self::Error> {
+        // The MIR interpreter models registers as plain i64 with no heap, so
+        // there is no storage to duplicate. Aliasing here is the ONLY
+        // faithful answer available; it is not a claim that the copy happened.
+        self.set(dest, self.get(src));
+        Ok(())
+    }
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), Self::Error> {
         let l = self.get(left);
         let r = self.get(right);

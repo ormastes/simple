@@ -137,6 +137,17 @@ impl<'a> MirLowerer<'a> {
             (field_types, field_offsets, (n * 8) as u32)
         };
 
+        // F1/S5 site F — a DECLARED VALUE TYPE passed as a struct-literal
+        // field initialiser must be snapshotted. `field_types` here is the
+        // DECLARED field type list, so the kind decision is made on the
+        // declaration, not on whatever happened to flow in.
+        let mut field_regs = field_regs;
+        for (i, field_ty) in field_types.iter().enumerate() {
+            if i < field_regs.len() {
+                field_regs[i] = self.copy_if_value_type(field_regs[i], *field_ty)?;
+            }
+        }
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();

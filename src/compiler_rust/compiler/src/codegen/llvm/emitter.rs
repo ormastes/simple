@@ -405,6 +405,12 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
+    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32) -> Result<(), String> {
+        self.backend
+            .compile_aggregate_copy(dest, src, byte_size, self.vreg_map, self.builder)
+            .map_err(|e| e.to_string())
+    }
+
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), String> {
         let lhs = self.get(left)?;
         let rhs = self.get(right)?;

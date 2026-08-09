@@ -112,3 +112,130 @@ actor Counter:
     );
     assert_eq!(hir.type_is_value_kind("Counter"), Some(false));
 }
+
+// =============================================================================
+// F1/S5 — the copy PRIMITIVE, and the kind-gated decision to emit it
+// =============================================================================
+//
+// S3 (above) proved the kind reaches MIR. It changed no behaviour, because MIR
+// had nothing to branch INTO: a sweep of the seed for struct_copy / copy_struct
+// / deep_copy / StructCopy found only `runtime/src/value/core.rs` `deep_copy`,
+// used by the parallel executor, and nothing in `mir/` or `codegen/` at all.
+// There was no aggregate-copy operation in the seed's MIR.
+//
+// S5 introduces one — `MirInst::AggregateCopy` — with lowerings in BOTH the
+// cranelift JIT (`codegen/instr/closures_structs.rs::compile_aggregate_copy`)
+// and LLVM (`codegen/llvm/functions/objects.rs::compile_aggregate_copy`), over
+// the tagged-heap-pointer struct ABI both backends already share.
+//
+// These tests assert the DECISION, not the machine code: that the instruction
+// is emitted for a declared `struct` and NOT for a declared `class`. That is
+// the half a wrong answer would silently invert, and it is the half the A–K
+// corpus cannot localise (the corpus sees an end-to-end verdict, so it cannot
+// say whether a regression came from the gate or the lowering).
+//
+// SABOTAGE CHECK: making `copy_if_value_type` (mir/lower/lowering_core.rs)
+// return `src` unconditionally makes `value_type_binding_emits_aggregate_copy`
+// fail; making it ignore `type_value_kinds` makes
+// `identity_type_binding_never_emits_aggregate_copy` fail. If neither fails,
+// this file is not measuring anything.
+
+/// Same shape, same statements, only the declaration keyword differs — so the
+/// keyword is the only thing that can explain a difference in emitted MIR.
+const COPY_SITE_SOURCE: &str = r#"
+struct SCell:
+    n: i64
+
+class BCell:
+    n: i64
+
+fn bind_struct() -> i64:
+    val a = SCell(n: 1)
+    val b = a
+    return b.n
+
+fn bind_class() -> i64:
+    val a = BCell(n: 1)
+    val b = a
+    return b.n
+"#;
+
+fn aggregate_copies_in(mir: &simple_compiler::mir::MirModule, func_name: &str) -> Vec<Option<String>> {
+    mir.functions
+        .iter()
+        .filter(|f| f.name == func_name || f.name.ends_with(&format!("__{}", func_name)))
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| match i {
+            simple_compiler::mir::MirInst::AggregateCopy { type_name, .. } => Some(type_name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn value_type_binding_emits_aggregate_copy() {
+    let hir = parse_and_lower(COPY_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let copies = aggregate_copies_in(&mir, "bind_struct");
+    assert!(
+        copies.iter().any(|n| n.as_deref() == Some("SCell")),
+        "binding a declared `struct` must emit an AggregateCopy of that struct \
+         — without one, `val b = a` stores the same tagged heap pointer and the \
+         two names alias (corpus case G). Emitted copies: {:?}",
+        copies
+    );
+}
+
+#[test]
+fn identity_type_binding_never_emits_aggregate_copy() {
+    let hir = parse_and_lower(COPY_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let copies = aggregate_copies_in(&mir, "bind_class");
+    assert!(
+        copies.is_empty(),
+        "binding a declared `class` must NOT be copied — copying an identity \
+         type converts the class defect into its struct sibling, which is the \
+         exact trap lane F1 exists to avoid. Emitted copies: {:?}",
+        copies
+    );
+}
+
+#[test]
+fn the_two_declarations_diverge_in_emitted_mir() {
+    // Stated as a RELATION, so a future change that made both sides copy (or
+    // both alias) cannot pass by satisfying the two tests above in isolation.
+    let hir = parse_and_lower(COPY_SITE_SOURCE);
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+
+    let struct_copies = aggregate_copies_in(&mir, "bind_struct").len();
+    let class_copies = aggregate_copies_in(&mir, "bind_class").len();
+    assert!(
+        struct_copies > class_copies,
+        "struct and class must not lower identically: struct emitted {} \
+         AggregateCopy, class emitted {}",
+        struct_copies,
+        class_copies
+    );
+}
+
+#[test]
+fn unknown_types_are_not_copied() {
+    // No declaration at all for the aggregate: `type_value_kinds` has no entry,
+    // which means UNKNOWN. The gate must fail closed.
+    let hir = parse_and_lower(
+        r#"
+fn bind_builtin() -> i64:
+    val a = 7
+    val b = a
+    return b
+"#,
+    );
+    let mir = lower_to_mir(&hir, None).expect("MIR lowering failed");
+    assert!(
+        aggregate_copies_in(&mir, "bind_builtin").is_empty(),
+        "an UNKNOWN type must never be copied — absence is not value-semantics"
+    );
+}

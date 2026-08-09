@@ -28,6 +28,7 @@ impl MirInst {
             | MirInst::ConstString { dest, .. }
             | MirInst::ConstSymbol { dest, .. }
             | MirInst::Copy { dest, .. }
+            | MirInst::AggregateCopy { dest, .. }
             | MirInst::BinOp { dest, .. }
             | MirInst::UnaryOp { dest, .. }
             | MirInst::Cast { dest, .. }
@@ -143,6 +144,7 @@ impl MirInst {
             | MirInst::GcAlloc { .. }
             | MirInst::InlineAsm { .. } => vec![],
             MirInst::Copy { src, .. } => vec![*src],
+            MirInst::AggregateCopy { src, .. } => vec![*src],
             MirInst::BinOp { left, right, .. } => vec![*left, *right],
             MirInst::UnaryOp { operand, .. } => vec![*operand],
             MirInst::Cast { source, .. } => vec![*source],

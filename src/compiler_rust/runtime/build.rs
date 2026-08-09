@@ -184,6 +184,16 @@ fn compile_c_runtime_sources() {
         "runtime_image.c",
         "startup/common/runtime_log_hosted.c",
         "runtime_socket_nonblock.c",
+        // Pre-existing gap (unrelated to lane F1): counterpart_abi_runtime.c
+        // ships rt_counterpart_*/rt_packed_span_v1_* symbols that
+        // interpreter_extern/counterpart.rs declares `extern "C"`, but this
+        // list never included the source file, so every seed build on this
+        // tree fails to LINK (not compile) with undefined-symbol errors.
+        "counterpart_abi_runtime.c",
+        // Same pre-existing gap: rt_packed_span_v1_* symbols counterpart.rs
+        // also declares extern "C" live in runtime_packed_span.c, also never
+        // registered here.
+        "runtime_packed_span.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");

@@ -55,6 +55,10 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_copy(&mut self, dest: VReg, src: VReg) -> Result<(), String> {
         super::instr::basic_ops::compile_copy(self.ctx, self.builder, dest, src)
     }
+    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32) -> Result<(), String> {
+        super::instr::closures_structs::compile_aggregate_copy(self.ctx, self.builder, dest, src, byte_size);
+        Ok(())
+    }
     fn emit_binop(&mut self, dest: VReg, op: BinOp, left: VReg, right: VReg) -> Result<(), String> {
         let lhs = self
             .ctx

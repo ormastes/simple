@@ -883,6 +883,11 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
+            MirInst::AggregateCopy {
+                dest, src, byte_size, ..
+            } => {
+                self.compile_aggregate_copy(*dest, *src, *byte_size, vreg_map, builder)?;
+            }
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;

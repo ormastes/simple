@@ -327,6 +327,12 @@ pub fn compile_instruction<M: Module>(
             compile_copy(ctx, builder, *dest, *src)?;
         }
 
+        MirInst::AggregateCopy {
+            dest, src, byte_size, ..
+        } => {
+            closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size);
+        }
+
         MirInst::BinOp { dest, op, left, right } => {
             let lhs = ctx.vreg_values.get(left).copied().unwrap_or_else(|| {
                 // Missing VReg, use default 0

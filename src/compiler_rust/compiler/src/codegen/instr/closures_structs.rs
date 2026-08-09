@@ -1,6 +1,6 @@
 // Closure and struct initialization helpers.
 
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
+use cranelift_codegen::ir::{condcodes::IntCC, types, AbiParam, InstBuilder, MemFlags, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{FuncId, Linkage, Module};
 
@@ -377,6 +377,61 @@ pub(crate) fn compile_struct_init<M: Module>(
     let heap_tag = builder.ins().iconst(types::I64, 1);
     let tagged_ptr = builder.ins().bor(ptr, heap_tag);
     ctx.vreg_values.insert(dest, tagged_ptr);
+}
+
+/// Lane F1 / S5 — duplicate an aggregate's storage (see `MirInst::AggregateCopy`).
+///
+/// The struct ABI here is the one `compile_struct_init` above establishes: a
+/// value is `rt_alloc`'d block pointer with the heap tag in bit 0. A plain
+/// `Copy` of that register aliases the block; this duplicates it.
+///
+/// Memory safety is branch-free by construction. A nil aggregate carries a
+/// null payload pointer, and loading through it would fault, so the load
+/// address is `select(src == 0, fresh, src)` — a nil source degenerates into
+/// a self-copy of the fresh (uninitialised) block rather than a segfault.
+/// That is deliberately not "correct nil handling"; it is the guarantee that
+/// introducing this instruction cannot turn a wrong answer into a crash.
+pub(crate) fn compile_aggregate_copy<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    src: VReg,
+    byte_size: u32,
+) {
+    let Some(&src_tagged) = ctx.vreg_values.get(&src) else {
+        // Undefined source: behave exactly as `Copy` does — define nothing.
+        return;
+    };
+    // Only the I64 tagged-pointer representation is a known aggregate handle.
+    // Anything else is not the ABI this instruction is defined over, so alias
+    // rather than fabricate a copy of something whose layout is unknown.
+    if builder.func.dfg.value_type(src_tagged) != types::I64 {
+        ctx.vreg_values.insert(dest, src_tagged);
+        return;
+    }
+
+    // Round up to whole 8-byte words and never allocate zero.
+    let words = byte_size.div_ceil(8).max(1);
+    let alloc_bytes = i64::from(words) * 8;
+
+    let size_val = builder.ins().iconst(types::I64, alloc_bytes);
+    let new_ptr = call_runtime_1(ctx, builder, "rt_alloc", size_val);
+
+    let untag_mask = builder.ins().iconst(types::I64, !1i64);
+    let src_ptr = builder.ins().band(src_tagged, untag_mask);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let src_is_null = builder.ins().icmp(IntCC::Equal, src_ptr, zero);
+    let load_ptr = builder.ins().select(src_is_null, new_ptr, src_ptr);
+
+    for w in 0..words {
+        let off = (w * 8) as i32;
+        let word = builder.ins().load(types::I64, MemFlags::new(), load_ptr, off);
+        builder.ins().store(MemFlags::new(), word, new_ptr, off);
+    }
+
+    let heap_tag = builder.ins().iconst(types::I64, 1);
+    let tagged = builder.ins().bor(new_ptr, heap_tag);
+    ctx.vreg_values.insert(dest, tagged);
 }
 
 fn widen_struct_field_value(

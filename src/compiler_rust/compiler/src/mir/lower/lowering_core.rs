@@ -263,6 +263,12 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// F1/S5 — declaration kind per type name, carried from HIR by S3.
+    /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
+    /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
+    /// Absence must never be read as "value type": copying an identity type
+    /// converts the class defect into its struct sibling.
+    pub(super) type_value_kinds: HashMap<String, bool>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
     pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// Project-wide trait implementations for cross-module vtable dispatch.
@@ -352,6 +358,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -393,6 +400,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
             di_config: None,
@@ -895,6 +903,52 @@ impl<'a> MirLowerer<'a> {
         self
     }
 
+    /// F1/S5 — if `ty` is a DECLARED VALUE TYPE with a known aggregate layout,
+    /// emit an `AggregateCopy` of `src` and return the fresh register.
+    /// Otherwise return `src` untouched.
+    ///
+    /// The gate is deliberately three-way and fails CLOSED:
+    ///
+    /// * the type must resolve to a NAME in the local type registry,
+    /// * `type_value_kinds[name]` must be `Some(true)` — `Some(false)` (class,
+    ///   actor) and `None` (builtin, imported-but-unlowered, synthesized) both
+    ///   mean "do not copy",
+    /// * the registry must give a concrete `HirType::Struct` field list, so a
+    ///   byte size exists that is not a guess.
+    ///
+    /// Any of those failing leaves the existing aliasing behaviour in place.
+    /// That keeps the change monotone: it can only move `struct` toward value
+    /// semantics, and can never start copying an identity type.
+    pub(super) fn copy_if_value_type(&mut self, src: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        let Some(registry) = self.type_registry else {
+            return Ok(src);
+        };
+        let Some(name) = registry.get_type_name(ty).map(str::to_owned) else {
+            return Ok(src);
+        };
+        if self.type_value_kinds.get(&name) != Some(&true) {
+            return Ok(src);
+        }
+        let Some(crate::hir::HirType::Struct { fields, .. }) = registry.get(ty) else {
+            return Ok(src);
+        };
+        let byte_size = (fields.len() as u32) * 8;
+        if byte_size == 0 {
+            return Ok(src);
+        }
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::AggregateCopy {
+                dest,
+                src,
+                byte_size,
+                type_name: Some(name),
+            });
+            dest
+        })
+    }
+
     /// Set type registry reference for looking up unit type constraints
     pub fn with_type_registry(mut self, registry: &'a crate::hir::TypeRegistry) -> Self {
         self.type_registry = Some(registry);
@@ -1254,6 +1308,9 @@ impl<'a> MirLowerer<'a> {
 
         // Store reference to type registry for unit type bound checks
         self.type_registry = Some(&hir.types);
+        // F1/S5 — the declaration kind must be available DURING function
+        // lowering, not merely copied onto the finished module afterwards.
+        self.type_value_kinds = hir.type_value_kinds.clone();
         // Store reference to trait_infos for vtable slot resolution and vtable_impls construction
         if !hir.trait_infos.is_empty() {
             self.trait_infos = Some(&hir.trait_infos);

@@ -107,6 +107,108 @@ impl LlvmBackend {
         Ok(())
     }
 
+    /// Lane F1 / S5 — duplicate an aggregate's storage (see
+    /// `MirInst::AggregateCopy`). Mirrors the Cranelift lowering in
+    /// `codegen/instr/closures_structs.rs`, over the same tagged-pointer ABI
+    /// that `compile_struct_init` above produces, including the branch-free
+    /// null guard.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn compile_aggregate_copy(
+        &self,
+        dest: crate::mir::VReg,
+        src: crate::mir::VReg,
+        byte_size: u32,
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let src_val = self.get_vreg(&src, vreg_map)?;
+        let inkwell::values::BasicValueEnum::IntValue(src_tagged) = src_val else {
+            // Not the tagged-i64 aggregate ABI: alias rather than fabricate a
+            // copy of an unknown layout.
+            vreg_map.insert(dest, src_val);
+            return Ok(());
+        };
+
+        let i8_type = self.context_ref().i8_type();
+        let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+        let i64_type = self.runtime_int_type();
+
+        let words = byte_size.div_ceil(8).max(1);
+        let alloc_bytes = u64::from(words) * 8;
+
+        let module_ref = self.module.borrow();
+        let module = module_ref.as_ref().unwrap();
+        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+        let alloc_fn = module
+            .get_function("rt_alloc")
+            .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
+        let size_val = i64_type.const_int(alloc_bytes, false);
+        let alloc_call = builder
+            .build_call(alloc_fn, &[size_val.into()], "aggcopy_alloc")
+            .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
+        let alloc_value = alloc_call.try_as_basic_value().left().ok_or_else(|| {
+            crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value")
+        })?;
+        let new_ptr = match alloc_value {
+            inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
+                .build_pointer_cast(ptr, i8_ptr_type, "aggcopy_ptr")
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast alloc ptr", &e))?,
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_int_to_ptr(iv, i8_ptr_type, "aggcopy_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?,
+            _ => {
+                return Err(crate::error::factory::llvm_build_failed(
+                    "rt_alloc result",
+                    &"unsupported return value kind",
+                ))
+            }
+        };
+        let new_i64 = builder
+            .build_ptr_to_int(new_ptr, i64_type, "aggcopy_new_i64")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+
+        // Untag, then branch-free null guard: a nil aggregate would fault.
+        let untag_mask = i64_type.const_int(u64::MAX - 1, false);
+        let src_ptr_i64 = builder
+            .build_and(src_tagged, untag_mask, "aggcopy_src_untag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("and untag", &e))?;
+        let is_null = builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                src_ptr_i64,
+                i64_type.const_zero(),
+                "aggcopy_src_null",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("icmp null", &e))?;
+        let load_i64 = builder
+            .build_select(is_null, new_i64, src_ptr_i64, "aggcopy_load_src")
+            .map_err(|e| crate::error::factory::llvm_build_failed("select", &e))?
+            .into_int_value();
+        let load_ptr = builder
+            .build_int_to_ptr(load_i64, i8_ptr_type, "aggcopy_load_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr src", &e))?;
+
+        for w in 0..words {
+            let off = self.context_ref().i32_type().const_int(u64::from(w) * 8, false);
+            let from = unsafe { builder.build_gep(i8_type, load_ptr, &[off], "aggcopy_from") }
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep src", &e))?;
+            let to = unsafe { builder.build_gep(i8_type, new_ptr, &[off], "aggcopy_to") }
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep dst", &e))?;
+            let word = builder
+                .build_load(i64_type, from, "aggcopy_word")
+                .map_err(|e| crate::error::factory::llvm_build_failed("load word", &e))?;
+            builder
+                .build_store(to, word)
+                .map_err(|e| crate::error::factory::llvm_build_failed("store word", &e))?;
+        }
+
+        let tagged = builder
+            .build_or(new_i64, i64_type.const_int(1, false), "aggcopy_tagged")
+            .map_err(|e| crate::error::factory::llvm_build_failed("or tag", &e))?;
+        vreg_map.insert(dest, tagged.into());
+        Ok(())
+    }
+
     #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn compile_field_get(
         &self,

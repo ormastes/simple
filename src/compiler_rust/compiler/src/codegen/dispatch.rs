@@ -26,6 +26,9 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         // Basic operations
         // =====================================================================
         MirInst::Copy { dest, src } => emitter.emit_copy(*dest, *src),
+        MirInst::AggregateCopy {
+            dest, src, byte_size, ..
+        } => emitter.emit_aggregate_copy(*dest, *src, *byte_size),
         MirInst::BinOp { dest, op, left, right } => emitter.emit_binop(*dest, *op, *left, *right),
         MirInst::UnaryOp { dest, op, operand } => emitter.emit_unary_op(*dest, *op, *operand),
         MirInst::Cast {

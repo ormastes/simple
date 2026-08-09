@@ -17,6 +17,7 @@ impl HasEffects for MirInst {
             | MirInst::ConstString { .. }
             | MirInst::ConstSymbol { .. }
             | MirInst::Copy { .. }
+            | MirInst::AggregateCopy { .. }
             | MirInst::BinOp { .. }
             | MirInst::UnaryOp { .. }
             | MirInst::Cast { .. }

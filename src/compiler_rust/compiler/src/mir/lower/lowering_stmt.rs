@@ -303,6 +303,12 @@ impl<'a> MirLowerer<'a> {
                         self.tagged_locals.remove(&local_idx);
                     }
 
+                    // F1/S5 site G — binding a DECLARED VALUE TYPE is a copy
+                    // site. Without this the tagged heap pointer is stored
+                    // as-is and `val b = a` aliases `a`. No-op for classes,
+                    // actors and every unknown type.
+                    let vreg = self.copy_if_value_type(vreg, effective_declared_ty)?;
+
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -462,6 +468,10 @@ impl<'a> MirLowerer<'a> {
                             // Native-project lowering replaces this with an
                             // authoritative module-qualified layout decision.
                             let owner_has_vtable = None;
+
+                            // F1/S5 site H — storing a DECLARED VALUE TYPE
+                            // into a field must snapshot it, not alias it.
+                            let val_reg = self.copy_if_value_type(val_reg, ty)?;
 
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();

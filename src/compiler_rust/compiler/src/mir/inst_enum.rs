@@ -19,6 +19,37 @@ pub enum MirInst {
     /// Copy value from one register to another
     Copy { dest: VReg, src: VReg },
 
+    /// Duplicate the STORAGE behind an aggregate value (lane F1 / S5).
+    ///
+    /// `Copy` duplicates the *register*, which for a struct means duplicating
+    /// the tagged heap pointer — i.e. it ALIASES. This instruction duplicates
+    /// the pointed-to bytes and yields a pointer to the fresh copy, which is
+    /// what `struct` (value semantics) requires and what `class`
+    /// (identity semantics) must NOT get.
+    ///
+    /// Emitted ONLY where MIR lowering has positively established that the
+    /// operand's declared type is a value type
+    /// (`MirModule::type_is_value_kind(name) == Some(true)`). `None` means
+    /// UNKNOWN — builtins, imported-but-unlowered aggregates, synthesized
+    /// pseudo-structs — and must never be treated as a value type, because
+    /// copying an identity type converts the class defect into its struct
+    /// sibling. See
+    /// `doc/03_plan/ui/perf/f1_class_identity_kind_propagation_plan_2026-08-09.md` §4.
+    ///
+    /// Shallow by design: it duplicates `byte_size` bytes of the aggregate's
+    /// own storage. Nested aggregates reached through a field are separate
+    /// copy sites and get their own instruction.
+    AggregateCopy {
+        dest: VReg,
+        src: VReg,
+        /// Total byte size of the aggregate's own storage, as computed for
+        /// `StructInit::struct_size` at the declaration site.
+        byte_size: u32,
+        /// Declared type name the kind decision was made on. Diagnostic only —
+        /// the decision is already taken by the time this exists.
+        type_name: Option<String>,
+    },
+
     /// Binary operation
     BinOp {
         dest: VReg,
