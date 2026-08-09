@@ -2,7 +2,13 @@
 
 - **Date:** 2026-07-17
 - **Severity:** P2 (silent wrong result in compiled/JIT code; correct in interpreter)
-- **Status:** FIXED (lane S29, 2026-07-17). Root cause was NOT in codegen
+- **Status:** FIXED (lane S29, 2026-07-17); re-verified 2026-08-09 against the
+  currently-deployed seed binary (built 2026-08-09) via `bin/simple run` on the
+  exact var-reassigned-in-a-while-loop repro from this doc — output `1, 1, 1`
+  on every iteration, matching the interpreter. Regression coverage:
+  `test/01_unit/compiler/jit_string_method_receiver_spec.spl` (non-gating under
+  `bin/simple test`'s interpreter lane; re-run through `bin/simple run` /
+  `--native` to exercise the fix). Root cause was NOT in codegen
   dispatch (that part was already correct and identical for `len`/`length`
   everywhere) — it was a missing alias in HIR return-type inference. See Root
   Cause / Resolution below.

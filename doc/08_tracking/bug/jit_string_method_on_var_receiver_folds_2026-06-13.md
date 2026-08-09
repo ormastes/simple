@@ -2,13 +2,21 @@
 
 - **Date:** 2026-06-13
 - **Severity:** P1 (silent wrong result in compiled/JIT code; correct in interpreter)
-- **Status:** FIXED AT SOURCE TIP, PENDING REDEPLOY (2026-07-17) — root cause is a
-  Rust-seed **parser** heuristic (not MIR lowering/type inference as originally
-  suspected); already removed by commit `4802c92768c` (2026-07-13,
-  "fix(native-build): preserve primitive method dispatch"), which is an ancestor
-  of current tip. The bug still reproduces against the currently-deployed seed
-  binary (`bin/release/x86_64-unknown-linux-gnu/simple`) only because that
-  binary predates the fix. See "Fix-lane verification" section below.
+- **Status:** FIXED AND REDEPLOYED — re-verified 2026-08-09 against the
+  currently-deployed seed binary (`bin/release/x86_64-unknown-linux-gnu/simple`,
+  built 2026-08-09). Root cause was a Rust-seed **parser** heuristic (not MIR
+  lowering/type inference as originally suspected); removed by commit
+  `4802c92768c` (2026-07-13, "fix(native-build): preserve primitive method
+  dispatch"). The 2026-07-17 note below ("pending redeploy") is now stale — the
+  fix is live on both the default lane (`bin/simple run`, Cranelift JIT) and
+  native (`bin/simple compile --native`): `val T = "ABCDEF"; T.char_at(0)` →
+  `A`, `T.length()` → `6`, and the module-level `val TABLE: text` variant
+  likewise. Regression coverage:
+  `test/01_unit/compiler/jit_string_method_receiver_spec.spl` (non-gating under
+  `bin/simple test`'s interpreter lane — re-run through `bin/simple run` /
+  `--native` to actually exercise the fix). See "Fix-lane verification" section
+  below for the earlier (2026-07-17) confirmation that the source-level fix was
+  already an ancestor of tip.
 - **Area:** parser postfix-call disambiguation (`src/compiler_rust/parser/src/expressions/postfix.rs`)
   — NOT mir/lower as originally suspected; see corrected root cause below.
 
