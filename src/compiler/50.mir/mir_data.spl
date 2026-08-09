@@ -14,6 +14,7 @@
 # - mir_data.spl: MirBuilder API + re-exports (this file)
 
 use compiler.hir.hir_types.{SymbolId, HirType}
+use compiler.hir.hir_definitions.{HirParam}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.mir.mir_types.*
@@ -802,6 +803,67 @@ fn bootstrap_fn_param_hir_types_lookup(name: text) -> [HirType]?:
         return Some(_bootstrap_fn_param_hir_types[name])
     nil
 
+# Per-parameter DEFAULT-expression registry.
+#
+# `35.semantics/resolve.spl:fill_call_defaults` is the only other default-fill
+# machinery and it is NOT on the AOT lane at all (proven by instrumentation:
+# `dbg-fill: 0` under `native-build`), so an omitted trailing defaulted
+# argument reached the callee as an UNINITIALIZED register/stack slot -- the
+# callee read garbage, not the declared default
+# (doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md).
+# The pad now happens in MIR call lowering, which every call kind (same-module
+# free function, cross-module callee, instance/static method) passes through.
+#
+# Whole `HirParam`s are stored, not just the default expressions, because the
+# pad must know per-index `has_default` as well as the declared arity. For
+# INSTANCE methods `HirFunction.params[0]` is the implicit `self`
+# (20.hir/hir_lowering/_Items/declaration_lowering.spl:317) and the lowered MIR
+# call likewise carries the receiver as arg 0, so index alignment holds for
+# free functions, static methods and instance methods alike.
+#
+# Ambiguity policy is STRICTER than the sibling registries above: padding the
+# wrong callee would inject a bogus argument, so any name that two definitions
+# disagree on (different arity, or a different has_default pattern) is dropped
+# and never answered. Same-shape duplicates are harmless and keep the first.
+var _bootstrap_fn_param_defaults: Dict<text, [HirParam]> = {}
+var _bootstrap_fn_param_defaults_ambig: Dict<text, bool> = {}
+
+fn _fn_param_defaults_shape(params: [HirParam]) -> text:
+    var shape = ""
+    for p in params:
+        shape = shape + (if p.has_default: "D" else: "-")
+    shape
+
+fn bootstrap_fn_param_defaults_register(name: text, params: [HirParam]):
+    if name == "" or _bootstrap_fn_param_defaults_ambig.contains_key(name):
+        return
+    var any_default = false
+    for p in params:
+        if p.has_default:
+            any_default = true
+    if not any_default:
+        # Nothing to pad. Still record the arity shape so a LATER same-name
+        # definition that DOES have defaults is recognised as ambiguous
+        # rather than silently winning.
+        if _bootstrap_fn_param_defaults.contains_key(name):
+            if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
+                _bootstrap_fn_param_defaults_ambig[name] = true
+                _bootstrap_fn_param_defaults = _bootstrap_fn_param_defaults.remove(name)
+        return
+    if _bootstrap_fn_param_defaults.contains_key(name):
+        if _fn_param_defaults_shape(_bootstrap_fn_param_defaults[name]) != _fn_param_defaults_shape(params):
+            _bootstrap_fn_param_defaults_ambig[name] = true
+            _bootstrap_fn_param_defaults = _bootstrap_fn_param_defaults.remove(name)
+        return
+    _bootstrap_fn_param_defaults[name] = params
+
+fn bootstrap_fn_param_defaults_lookup(name: text) -> [HirParam]?:
+    if _bootstrap_fn_param_defaults_ambig.contains_key(name):
+        return nil
+    if _bootstrap_fn_param_defaults.contains_key(name):
+        return Some(_bootstrap_fn_param_defaults[name])
+    nil
+
 export BlockId, MirBlock, MirInst, MirInstKind
 export MirFunction, MirModule
 export MirOperand, MirOperandKind, MirTerminator
@@ -812,3 +874,4 @@ export bootstrap_fn_ret_type_register, bootstrap_fn_ret_type_lookup
 export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
 export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
 export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup
+export bootstrap_fn_param_defaults_register, bootstrap_fn_param_defaults_lookup

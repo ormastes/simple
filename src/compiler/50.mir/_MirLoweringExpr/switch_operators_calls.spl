@@ -21,6 +21,10 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, boxed_text_arg_indices}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_requires_hard_error}
+# Explicit import, not an ambient builtin: the Rust seed resolves `eprint`
+# ambiently but the self-hosted HIR resolver does not, so a Stage-3 build fails
+# with "unresolved name: eprint" without this (same fix as mir_data.spl:27).
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -637,7 +641,54 @@ impl MirLowering:
             case _: ()
         func
 
-    me emit_resolved_direct_call(func: MirOperand, args_in: [MirOperand], return_type: MirType) -> LocalId:
+    me pad_trailing_default_args(func: MirOperand, args_in: [MirOperand]) -> [MirOperand]:
+        """Append the declared default for every omitted TRAILING parameter.
+
+        Without this the short call was emitted as-is and the callee read an
+        uninitialized register/stack slot -- garbage, not the declared default
+        (doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md).
+        `_MirToLlvm/core_codegen.spl:1681` merely *reconciles the signature* on
+        an arity mismatch; it does not supply the missing value.
+
+        This sits in `emit_resolved_direct_call`, the single choke point every
+        resolved direct call reaches -- same-module free functions, CROSS-MODULE
+        callees, and instance/static METHODS (method_calls_literals.spl:2424 /
+        :2493) alike. The predecessor fix in `35.semantics/resolve.spl` covered
+        only same-module free functions and is not even on this lane.
+
+        Defaults are lowered as EXPRESSIONS via `lower_expr`, so a default that
+        is a call, a const reference or any other expression works, not just a
+        literal. The pad is all-or-nothing: if any omitted slot lacks a
+        declared default the arg list is returned untouched, so a genuinely
+        under-supplied call still fails the way it did before rather than being
+        silently completed with a wrong value."""
+        val callee_name = self.direct_call_extern_name(func)
+        if callee_name == "":
+            return args_in
+        val maybe_params = bootstrap_fn_param_defaults_lookup(callee_name)
+        if not maybe_params.?:
+            return args_in
+        val params = maybe_params ?? []
+        if args_in.len() >= params.len():
+            return args_in
+        var probe = args_in.len()
+        while probe < params.len():
+            if not params[probe].has_default:
+                return args_in
+            probe = probe + 1
+        var result = args_in
+        var i = args_in.len()
+        while i < params.len():
+            val default_expr = params[i].default
+            val default_local = self.lower_expr(default_expr)
+            result = result.push(mir_operand_copy(default_local))
+            i = i + 1
+        if (rt_env_get("SIMPLE_MIR_DEFAULT_PAD_TRACE") ?? "") == "1":
+            eprint("[mir-default-pad] callee={callee_name} given={args_in.len()} arity={params.len()}\n")
+        result
+
+    me emit_resolved_direct_call(func: MirOperand, args_in_raw: [MirOperand], return_type: MirType) -> LocalId:
+        val args_in = self.pad_trailing_default_args(func, args_in_raw)
         val boxed_args = self.box_text_abi_args(func, args_in)
         val args = self.expand_text_abi_args(func, boxed_args)
         val effective_return_type = self.repair_direct_struct_return_type(func, return_type)
@@ -788,6 +839,7 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
+                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:
@@ -921,6 +973,7 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
+                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:
@@ -1648,9 +1701,14 @@ impl MirLowering:
                     case Var(recv_sym): Some(recv_sym)
                     case NamedVar(recv_sym, _): Some(recv_sym)
                     case _: nil
+                eprint("[L6DBG] enum_match_expr_type static-fallback method={method} has_recv_sym={static_recv_sym != nil}\n")
                 if val recv_type_sym = static_recv_sym:
-                    if val fallback_method_id = self.symbols.lookup_method_in_type(recv_type_sym, method):
-                        return self.resolved_call_hir_return_type(fallback_method_id)
+                    val fb = self.symbols.lookup_method_in_type(recv_type_sym, method)
+                    eprint("[L6DBG] lookup_method_in_type(recv={recv_type_sym.id}, method={method}) found={fb != nil}\n")
+                    if val fallback_method_id = fb:
+                        val rt = self.resolved_call_hir_return_type(fallback_method_id)
+                        eprint("[L6DBG] resolved_call_hir_return_type found={rt != nil}\n")
+                        return rt
             case _: ()
         nil
 
@@ -1694,15 +1752,26 @@ impl MirLowering:
     me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
         """Recover the selected payload from an instantiated Result type."""
         val scrutinee_type = self.enum_match_expr_type(scrutinee)
+        eprint("[L6DBG] result_variant_payload_type scrutinee_type_present={scrutinee_type != nil}\n")
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
             match found_type.kind:
                 case HirTypeKind.Result(ok_type, err_type):
+                    eprint("[L6DBG] result_variant_payload_type kind=Result\n")
                     if variant == "Ok":
                         return Some(ok_type)
                     if variant == "Err":
                         return Some(err_type)
-                case _: ()
+                case HirTypeKind.Generic(gname, gargs):
+                    eprint("[L6DBG] result_variant_payload_type kind=Generic name={gname} argc={gargs.len()}\n")
+                case HirTypeKind.Named(nsym, _):
+                    eprint("[L6DBG] result_variant_payload_type kind=Named symid={nsym.id}\n")
+                case HirTypeKind.Error:
+                    eprint("[L6DBG] result_variant_payload_type kind=Error\n")
+                case HirTypeKind.Infer(_, _):
+                    eprint("[L6DBG] result_variant_payload_type kind=Infer\n")
+                case _:
+                    eprint("[L6DBG] result_variant_payload_type kind=other\n")
         nil
 
     me resolve_enum_pattern_owner(etype: HirType, variant: text, span: Span) -> text:
@@ -2331,11 +2400,22 @@ impl MirLowering:
                         match known_rpt.kind:
                             case HirTypeKind.Named(rpt_sym, _):
                                 if val rpt_symbol = self.symbols.get_symbol_raw(rpt_sym.id):
+                                    val l6dbg_kind_txt = match rpt_symbol.kind:
+                                        case Class: "Class"
+                                        case Struct: "Struct"
+                                        case Function: "Function"
+                                        case Method: "Method"
+                                        case Enum: "Enum"
+                                        case _: "other"
+                                    eprint("[L6DBG] ok_type Named symid={rpt_sym.id} symname={rpt_symbol.name} symkind={l6dbg_kind_txt}\n")
                                     match rpt_symbol.kind:
                                         case Class | Struct:
                                             scrutinee_payload_struct = rpt_symbol.name
                                         case _: ()
-                            case _: ()
+                                else:
+                                    eprint("[L6DBG] ok_type Named symid={rpt_sym.id} get_symbol_raw=NONE\n")
+                            case _:
+                                eprint("[L6DBG] ok_type not-Named\n")
                     val payload_hir_type: HirType? = match result_payload_type:
                         case Some(known_payload_type): known_payload_type
                         case _:
@@ -2400,9 +2480,13 @@ impl MirLowering:
                     elif scrutinee_payload_struct != "":
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
+                        eprint("[L6DBG] bind-payload-struct via scrutinee id={bound_payload.id} name={scrutinee_payload_struct}\n")
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
                     elif payload_struct != nil and payload_struct != "":
+                        eprint("[L6DBG] bind-payload-struct via global-map id={bound_payload.id} name={payload_struct ?? \"\"}\n")
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
+                    else:
+                        eprint("[L6DBG] bind-payload-struct NONE id={bound_payload.id} scrutinee_payload_struct={scrutinee_payload_struct} payload_struct={payload_struct ?? \"<nil>\"}\n")
             elif bind_syms.len() >= 1:
                 # #164 multi-field payload: the scalar payload slot holds a
                 # boxed rt_tuple (see box_tuple_payload); unbox each field by
@@ -2483,6 +2567,7 @@ impl MirLowering:
                     # name to look up ("unresolved method call"). Propagate it
                     # forward, mirroring the binop/unwrap propagation sites
                     # elsewhere in this file.
+                    eprint("[L6DBG] arm-merge arm={arm_result_local.id} result={result.id} has={self.struct_value_syms.contains(arm_result_local.id)}\n")
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
                     if not inferred_known:

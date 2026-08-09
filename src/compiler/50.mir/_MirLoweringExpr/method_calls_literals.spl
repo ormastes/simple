@@ -2355,8 +2355,22 @@ impl MirLowering:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
+                # Pad omitted trailing defaulted params -- this arm calls
+                # `b.emit_call` directly (not `emit_resolved_direct_call`), so
+                # without this it bypassed the pad entirely: `w.bump(1)` read
+                # uninitialized garbage for `extra` instead of the declared
+                # default 99
+                # (doc/08_tracking/bug/native_trailing_default_param_reads_uninitialized_2026-08-09.md).
+                # `arg_operands[0]` is the receiver, and the registered
+                # `HirFunction.params[0]` is the synthetic `self`
+                # (20.hir/hir_lowering/_Items/declaration_lowering.spl:317) --
+                # the two already align 1:1, so pad the FULL array, receiver
+                # included. (An earlier version of this fix stripped the
+                # receiver first, which shifted every index by one and both
+                # broke the arity check and duplicated an already-supplied arg.)
+                val final_instance_args = self.pad_trailing_default_args(method_operand, arg_operands)
                 var b = self.builder
-                val result = b.emit_call(method_operand, arg_operands, return_type)
+                val result = b.emit_call(method_operand, final_instance_args, return_type)
                 self.builder = b
                 var wb_value = wb_receiver
                 if val result_local = result:
@@ -2384,8 +2398,11 @@ impl MirLowering:
                     self.lower_receiver_and_args(receiver, args)
                 val method_operand = self.symbol_to_operand(method_id)
                 val return_type = self.resolved_call_return_type(method_id)
+                # Same receiver/self index-0 alignment as the InstanceMethod
+                # arm above -- pad the FULL array, receiver included.
+                val final_trait_args = self.pad_trailing_default_args(method_operand, arg_operands)
                 var b = self.builder
-                val result = b.emit_call(method_operand, arg_operands, return_type)
+                val result = b.emit_call(method_operand, final_trait_args, return_type)
                 self.builder = b
                 var wb_value = wb_receiver
                 if val result_local = result:
@@ -2420,8 +2437,14 @@ impl MirLowering:
                         selected_func_id = self.struct_method_syms[owner_method_key]
                 val func_operand = self.symbol_to_operand(selected_func_id)
                 val return_type = self.resolved_call_return_type(selected_func_id)
+                # Same receiver/self index-0 alignment as the InstanceMethod
+                # arm above (UFCS: `x.free_fn(a)` calls `free_fn(x, a)`, and
+                # the custom-owner override branch above can also swap
+                # `selected_func_id` to a real method whose params[0] is the
+                # synthetic `self` -- both cases align 1:1 with arg_operands).
+                val final_free_args = self.pad_trailing_default_args(func_operand, arg_operands)
                 var b = self.builder
-                val result = b.emit_call(func_operand, arg_operands, return_type)
+                val result = b.emit_call(func_operand, final_free_args, return_type)
                 self.builder = b
                 var wb_value = wb_receiver
                 if val result_local = result:
@@ -2585,8 +2608,13 @@ impl MirLowering:
                             im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
                         val im_method_operand = self.symbol_to_operand(resolved_method_id)
                         val im_return_type = self.resolved_call_return_type(resolved_method_id)
+                        # Full-array pad, receiver included -- same alignment
+                        # rationale as the InstanceMethod arm above:
+                        # `im_arg_operands[0]` is the receiver and registered
+                        # `params[0]` is the synthetic `self`, 1:1.
+                        val im_final_args = self.pad_trailing_default_args(im_method_operand, im_arg_operands)
                         var im_b = self.builder
-                        val im_result = im_b.emit_call(im_method_operand, im_arg_operands, im_return_type)
+                        val im_result = im_b.emit_call(im_method_operand, im_final_args, im_return_type)
                         self.builder = im_b
                         var im_wb_value = wb_receiver
                         if val im_result_local = im_result:
