@@ -74,7 +74,40 @@ Adding an explicit write-back would be harmless and more honest, but is a
 behaviour-neutral change on the only lane we can currently measure, so it is
 recorded here rather than made blind.
 
-### OPEN / needs a reference-vs-value ruling — pure_database
+### RESOLVED 2026-08-09 — pure_database: NOT a defect, the write-back exists
+
+The audit excerpt below was **truncated** and the finding was wrong. `tbl` in
+`_do_update` *does* have its write-back — `self._tbl_data[ti] = tbl` sits after
+BOTH the typed and untyped loops, at
+`src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:2888`
+(the excerpt stopped before it). The PK fast path has its own,
+`self._tbl_data[ti] = tbl_f` at :2822. There is nothing to add; adding a second
+write-back would be the noise this audit warned about.
+
+The unblock condition below was met rather than assumed. Coverage:
+`test/02_integration/storage/dbfs/pure_db_update_readback_spec.spl` — 3 examples
+covering the PK fast path, the general non-PK path, and persistence across
+close/reopen. Each asserts the NEW value (777 / 555 / 999) and that the OLD
+value (10) is gone, so a lost write is visibly different from a kept one; an
+equal-value case could not discriminate.
+
+Verdicts (Rust bootstrap seed / interpreter lane, where `src/lib` `.spl` is read
+as source on every process start — the lane these edits are live on; native/JIT
+container semantics NOT probed):
+
+```
+baseline           executed=3 passed=3 failed=0   PASS
+remove :2888 (general path write-back)   passed=2 failed=1   FAIL
+remove :2822 (PK fast-path write-back)   passed=1 failed=2   FAIL
+```
+
+Both write-backs are load-bearing and the spec discriminates each independently.
+Sabotages restored; `git diff` on the source file is empty. `typed2`'s write-back
+is likewise not cargo-culted: `_tbl_typed` elements are `[[DbValue]]` — array of
+arrays — the exact shape whose copy-out LOSES writes per the table above, so its
+explicit write-back is required for the same reason `tbl`'s is.
+
+### Original (superseded) finding — pure_database
 
 `src/lib/nogc_sync_mut/database/pure_sql/_PureDatabase/pure_database.spl:2839`:
 
