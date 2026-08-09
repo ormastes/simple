@@ -484,8 +484,11 @@ RuntimeValue rt_string_slice(RuntimeValue str, RuntimeValue start, RuntimeValue 
     if (!IS_HEAP(str)) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
     if (!s) return NIL_VALUE;
-    int64_t a = DECODE_INT(start);
-    int64_t b = DECODE_INT(end);
+    /* Freestanding extern integer arguments are raw, matching
+     * rt_string_char_at/rt_alloc/MMIO. Decoding them as tagged integers
+     * divided every Simple `text.slice(a,b)` index by eight. */
+    int64_t a = (int64_t)start;
+    int64_t b = (int64_t)end;
     if (a < 0) a = 0;
     if (b > (int64_t)s->len) b = (int64_t)s->len;
     if (a >= b) {
@@ -1415,9 +1418,9 @@ RuntimeValue rt_string_last_index_of(RuntimeValue str, RuntimeValue needle) {
 
 RuntimeValue rt_string_substr(RuntimeValue str, RuntimeValue start) {
     RuntimeString *s = decode_string(str); if (!s) return NIL_VALUE;
-    int64_t a = DECODE_INT(start); if (a < 0) a = 0;
+    int64_t a = (int64_t)start; if (a < 0) a = 0;
     if ((uint32_t)a >= s->len) return rt_string_from_cstr("");
-    return rt_string_slice(str, start, ENCODE_INT(s->len));
+    return rt_string_slice(str, start, (RuntimeValue)s->len);
 }
 
 RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
@@ -1437,11 +1440,11 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim) {
     for (uint32_t i = 0; i <= s->len - d->len; ) {
         uint32_t j; for (j = 0; j < d->len; j++) { if (s->data[i+j] != d->data[j]) break; }
         if (j == d->len) {
-            RuntimeValue part = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(i));
+            RuntimeValue part = rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)i);
             arr = rt_array_push_handle(arr, part); i += d->len; start = i;
         } else { i++; }
     }
-    RuntimeValue rest = rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+    RuntimeValue rest = rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)s->len);
     arr = rt_array_push_handle(arr, rest); return arr;
 }
 
@@ -1451,17 +1454,17 @@ RuntimeValue rt_string_trim(RuntimeValue str) {
     RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
     uint32_t start = 0; while (start < s->len && is_whitespace(s->data[start])) start++;
     uint32_t end = s->len; while (end > start && is_whitespace(s->data[end-1])) end--;
-    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(end));
+    return rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)end);
 }
 RuntimeValue rt_string_trim_start(RuntimeValue str) {
     RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
     uint32_t start = 0; while (start < s->len && is_whitespace(s->data[start])) start++;
-    return rt_string_slice(str, ENCODE_INT(start), ENCODE_INT(s->len));
+    return rt_string_slice(str, (RuntimeValue)start, (RuntimeValue)s->len);
 }
 RuntimeValue rt_string_trim_end(RuntimeValue str) {
     RuntimeString *s = decode_string(str); if (!s || s->len == 0) return str;
     uint32_t end = s->len; while (end > 0 && is_whitespace(s->data[end-1])) end--;
-    return rt_string_slice(str, ENCODE_INT(0), ENCODE_INT(end));
+    return rt_string_slice(str, 0, (RuntimeValue)end);
 }
 
 RuntimeValue rt_string_to_upper(RuntimeValue str) {
