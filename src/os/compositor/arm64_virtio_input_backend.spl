@@ -30,10 +30,19 @@ use os.drivers.virtio.virtio_input_ops.{
     VirtioMouseAccum,
     virtio_input_key_event
 }
-use os.kernel.arch.arm64.virtio_input.{arm64_virtio_input_poll}
+use os.kernel.arch.arm64.virtio_input.{
+    arm64_virtio_input_poll,
+    arm64_virtio_input_poll_scalar,
+    arm64_virtio_input_device_kind_scalar,
+    arm64_virtio_input_type_scalar,
+    arm64_virtio_input_code_scalar,
+    arm64_virtio_input_value_scalar,
+    arm64_virtio_input_irq_status_scalar
+}
 
 class Arm64VirtioInputBackend:
     poll_event: fn() -> VirtioInputEvent?
+    direct_scalar_poll: bool
     mouse: VirtioMouseAccum
     pending_key: KeyEvent?
     pending_mouse: MouseEvent?
@@ -91,16 +100,19 @@ impl Arm64VirtioInputBackend:
         Arm64VirtioInputBackend.create_with_poller(
             screen_width,
             screen_height,
-            arm64_virtio_input_poll
+            arm64_virtio_input_poll,
+            true
         )
 
     static fn create_with_poller(
         screen_width: i64,
         screen_height: i64,
-        poll_event: fn() -> VirtioInputEvent?
+        poll_event: fn() -> VirtioInputEvent?,
+        direct_scalar_poll: bool = false
     ) -> Arm64VirtioInputBackend:
         Arm64VirtioInputBackend(
             poll_event: poll_event,
+            direct_scalar_poll: direct_scalar_poll,
             mouse: VirtioMouseAccum.create(screen_width, screen_height),
             pending_key: nil,
             pending_mouse: nil,
@@ -241,6 +253,16 @@ impl Arm64VirtioInputBackend:
         true
 
     me _pump_one() -> bool:
+        if self.direct_scalar_poll:
+            if arm64_virtio_input_poll_scalar() == 0:
+                return false
+            val device_kind: u32 = arm64_virtio_input_device_kind_scalar()
+            val event_type: u16 = arm64_virtio_input_type_scalar()
+            val event_code: u16 = arm64_virtio_input_code_scalar()
+            val event_value: u32 = arm64_virtio_input_value_scalar()
+            val irq_status: u32 = arm64_virtio_input_irq_status_scalar()
+            return self.feed_raw_event(
+                device_kind, event_type, event_code, event_value, irq_status)
         val raw_event = self.poll_event()
         if val event = raw_event:
             return self.feed_raw_event(
